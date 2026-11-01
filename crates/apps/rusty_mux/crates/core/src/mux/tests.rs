@@ -141,6 +141,24 @@ fn release_frees_the_lease_for_another_client() {
     assert_eq!(mux.block(block).unwrap().lease(), Some(b));
 }
 
+/// A client giving back a lease it no longer holds is refused, and the
+/// holder keeps it: a TUI releasing after a takeover cannot disturb it.
+#[test]
+fn releasing_a_lease_held_by_another_client_leaves_it() {
+    let (mut mux, _, _, block) = fixture();
+    let a = mux.connect();
+    mux.attach(a, block).unwrap();
+    let b = leased_client(&mut mux, block);
+    mux.take_events();
+
+    assert_eq!(
+        mux.release_lease(a, block),
+        Err(Error::NoLease { client: a, block })
+    );
+    assert_eq!(mux.block(block).unwrap().lease(), Some(b));
+    assert!(mux.take_events().is_empty());
+}
+
 #[test]
 fn reattach_to_another_block_drops_the_old_lease() {
     let (mut mux, _, window, first) = fixture();

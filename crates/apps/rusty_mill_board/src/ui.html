@@ -20,14 +20,26 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .col h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:2px 4px 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:8px;cursor:grab}
 .card b{display:block}
+.num{float:right;margin-left:6px;color:var(--mute);font-size:12px}
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
-#view[aria-pressed=true]{background:var(--acc);color:#fff}
+.tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
+#view[aria-pressed=true],#metrics[aria-pressed=true]{background:var(--acc);color:#fff}
 main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
 .roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
 @media (max-width:640px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
 .roadmap .card{cursor:pointer}
+main.metrics{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-content:start}
+.metrics h3,.kpis{grid-column:1/-1;margin:0;font-size:15px}
+.kpis{display:flex;flex-wrap:wrap;gap:10px}
+.kpi{background:var(--panel);border-radius:8px;padding:8px 12px;min-width:120px;color:var(--mute);font-size:12px}
+.kpi b{display:block;color:var(--ink);font-size:22px;font-variant-numeric:tabular-nums}
+.bar{display:grid;grid-template-columns:minmax(0,8em) 1fr 2.5em;gap:6px;align-items:center;margin:4px}
+.bar>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar>span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.bar i{display:block;height:10px;min-width:1px;border-radius:3px;background:var(--fill,var(--acc))}
+.metrics .card{cursor:pointer}
 :root{--al:40%}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--al:66%}}
 .card.claimed{border-left:4px solid var(--ag);background:color-mix(in srgb,var(--ag) 9%,var(--card))}
@@ -81,6 +93,7 @@ dialog form{display:grid;gap:8px}
   <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
   <h1>Mill Board</h1>
   <button id="view" aria-pressed="false" title="Show the chosen project's roadmap">Roadmap</button>
+  <button id="metrics" aria-pressed="false" title="Show metrics for the chosen repository or project, or the whole board">Metrics</button>
   <input id="actor" placeholder="your name" size="12" aria-label="actor name">
   <select id="role" aria-label="role"></select>
   <input id="title" placeholder="New card title" size="26" aria-label="new card title">
@@ -106,6 +119,8 @@ let tok=null;
 const $=id=>document.getElementById(id);
 let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:"",agent:""};
 const projects=()=>Object.values(repos).flat();
+/* `default` is the Inbox: where a card that names no project lands (rusty_tick's Inbox list). Shown by that name only. */
+const INBOX="default",label=p=>p===INBOX?"Inbox":p;
 const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
@@ -168,26 +183,33 @@ async function act(op,args){
   catch(e){toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
 }
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
+// A card's heading: its board number in the corner, if it has one, then its title.
+const heading=k=>[...(k.number?[el("span","#"+k.number,"num")]:[]),el("b",k.title)];
+// rusty_tick's priority scale; 0 (none) shows no badge.
+const PRIORITY={5:"High",3:"Medium",1:"Low",0:"None"};
+const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priority)]:[];
 
 function render(){
   if(view==="roadmap"){renderRoadmap();return}
-  mapSeq++;   // drop any roadmap still loading
-  const b=$("board");b.classList.remove("roadmap");b.replaceChildren();
+  if(view==="metrics"){renderMetrics();return}
+  mapSeq++;   // drop any roadmap or metrics still loading
+  const b=$("board");b.classList.remove("roadmap","metrics");b.replaceChildren();
   for(const c of COLS){
     const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",c));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
     col.ondragleave=()=>col.classList.remove("over");
     col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
     for(const k of cards.filter(k=>k.column===c&&shown(k))){
-      const d=el("div",null,"card");d.draggable=true;d.append(el("b",k.title));
+      const d=el("div",null,"card");d.draggable=true;d.append(...heading(k));
       const m=el("div",null,"meta");
-      if(projects().length>1&&!sel.project){const t=el("span",k.project,"tag proj");t.title=repoOf(k.project);m.append(t)}
+      if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
+      m.append(...priorityTag(k));
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim){
         d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
         const t=el("span",null,"tag agent"+(RUNNING.includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
       }
-      if(k.issue)m.append(el("span","#"+k.issue));
+      if(k.issue)m.append(el("span","issue #"+k.issue));
       if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
       d.append(m);
       d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
@@ -201,9 +223,10 @@ function render(){
 
 /* The roadmap: the chosen project's cards in lanes (now, next, later, blocked, shipped), laid out
    by the server's board_roadmap so the rules live in one place. Re-read whenever the board is. */
-let view=pref("view")==="roadmap"?"roadmap":"board",mapSeq=0;
+let view=["roadmap","metrics"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
 const LANE_HINT={now:"building, qa, review",next:"ready",later:"backlog",blocked:"blocked",shipped:"done, last 30 days"};
-function setView(v){view=v;pref("view",v);$("view").setAttribute("aria-pressed",v==="roadmap");render()}
+const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics")};
+function setView(v){view=v;pref("view",v);pressed();render()}
 // The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
 const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
 async function renderRoadmap(){
@@ -213,16 +236,17 @@ async function renderRoadmap(){
   try{
     if(!project)throw new Error("No project to show a roadmap for.");
     map=await api("board_roadmap",{project});
-  }catch(e){if(!stale()){b.classList.remove("roadmap");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+map.project));
+  b.classList.remove("metrics");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
     const h=el("h2",l.lane+" · "+l.cards.length);h.title=LANE_HINT[l.lane];col.append(h);
     for(const k of l.cards){
-      const d=el("div",null,"card");d.append(el("b",k.title));
+      const d=el("div",null,"card");d.append(...heading(k));
       const m=el("div",null,"meta");
       if(l.lane==="now")m.append(el("span",k.column,"tag"));
+      m.append(...priorityTag(k));
       k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim)m.append(el("span",k.claim,"tag"));
       if(k.waits_on.length)m.append(el("span","waits on "+k.waits_on.length));
@@ -234,11 +258,60 @@ async function renderRoadmap(){
   renderSide();syncDialog();
 }
 
+/* Metrics: counts, flow and lead time for the chosen project, else the chosen repository, else everything
+   this credential may see, computed by the server's board_metrics. Re-read whenever the board is. */
+const DAY=864e5,dur=ms=>ms==null?"–":ms<DAY?Math.round(ms/36e5)+"h":(ms/DAY).toFixed(ms<10*DAY?1:0)+"d";
+const day=ms=>new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"});
+// A panel of labelled bars: rows are {label, n, title?, fill?}; `max` lets two panels share a scale.
+function bars(title,rows,hint,max=Math.max(1,...rows.map(r=>r.n))){
+  const s=el("section",null,"col"),h=el("h2",title);if(hint)h.title=hint;s.append(h);
+  for(const r of rows){
+    const row=el("div",null,"bar"),f=el("i"),t=el("span");f.style.width=(r.n/max*100)+"%";
+    if(r.fill)f.style.setProperty("--fill",r.fill);if(r.title)row.title=r.title;
+    t.append(f);row.append(el("span",r.label),t,el("span",String(r.n)));s.append(row);
+  }
+  if(!rows.length)s.append(el("p","None.","meta"));
+  return s;
+}
+async function renderMetrics(){
+  const seq=++mapSeq,b=$("board"),stale=()=>seq!==mapSeq||view!=="metrics";
+  const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
+  let m;
+  try{m=await api("board_metrics",args)}
+  catch(e){if(!stale()){b.classList.remove("roadmap","metrics");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  if(stale())return;
+  const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
+  const kpis=el("div",null,"kpis");
+  for(const [v,l,t] of [[m.open,"open"],[RUNNING.reduce((a,c)=>a+n(c),0),"in progress","building, qa, review"],[n("blocked"),"blocked"],
+    [lt.shipped,"shipped, 30 days"],[dur(lt.median_ms),"median lead time","created to shipped, last 30 days"],[dur(lt.p85_ms),"85% within","created to shipped, last 30 days"]]){
+    const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
+  }
+  const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done]));
+  const idle=el("section",null,"col");idle.append(el("h2","idle longest"));
+  for(const k of m.idle){
+    const d=el("div",null,"card");d.append(...heading(k));
+    d.append(el("div",[k.column,"idle "+dur(k.idle_ms),...(k.claim?[k.claim]:[]),...(sel.project?[]:[label(k.project)])].join(" · "),"meta"));
+    d.onclick=()=>show(k.id);idle.append(d);
+  }
+  if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
+  b.classList.remove("roadmap");b.classList.add("metrics");
+  b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
+    bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
+    bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
+    bars("open by column",m.by_column.map(t=>({label:t.key,n:t.count}))),
+    bars("open by priority",m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count}))),
+    ...(sel.project?[]:[bars("open by project",m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"})))]),
+    bars("in progress by agent",m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)})),"claimed cards in building, qa or review"),
+    idle);
+  renderSide();syncDialog();
+}
+
 /* The side panel: repositories (and the agents holding claims) on the left; the chosen
    repository's projects in a second pane. Everything here only narrows what the board shows. */
 function renderSide(){
-  // An empty repository is listed (you may be about to add its first card); only the unused `default` hides.
-  const names=Object.keys(repos).filter(r=>Object.keys(repos).length===1||r!=="default"||count(k=>repoOf(k.project)===r)>0||r===sel.repo);
+  // Every repository is listed, an empty one too (you may be about to add its first card), except the
+  // `default` repository when the Inbox is all it holds: the Inbox row below is it.
+  const names=Object.keys(repos).filter(r=>r!==INBOX||repos[r].length>1);
   $("shell").classList.toggle("noside",(projects().length<2&&!cards.some(k=>k.claim))||pref("side")==="0");
   const item=(label,n,on,fn,agent)=>{
     const b=el("button",null,"item"+(on?" on":""));b.type="button";
@@ -248,12 +321,15 @@ function renderSide(){
   const n1=$("nav1");n1.replaceChildren();
   if(projects().length>1){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
+    // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
+    // Listed only when this credential may see it, like every other entry here.
+    if(projects().includes(INBOX))n1.append(item("Inbox",count(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
     for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
     // The projects of the chosen repository, or of every repository, so one project's cards are a click
     // away. A repository whose only project is its own is left out: it is the repository, listed above.
     // (A credential limited to some projects may see a repository with one other project: that one stays.)
     const named=Object.entries(repos).filter(([r])=>!sel.repo||r===sel.repo)
-      .flatMap(([r,ps])=>ps.length===1&&ps[0]===r?[]:ps).sort();
+      .flatMap(([r,ps])=>ps.length===1&&ps[0]===r?[]:ps).filter(p=>p!==INBOX).sort();
     if(named.length)n1.append(el("h2","Projects","sep"));
     for(const p of named)n1.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
   }
@@ -277,10 +353,13 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select")};
-  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(p,p)));f.p.append(g)}
+  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select")};
+  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
+  [5,3,1,0].forEach(v=>f.pr.append(new Option("Priority: "+PRIORITY[v],v)));
+  f.pr.setAttribute("aria-label","priority");f.pr.value=k.priority;
+  f.pr.onchange=()=>act("card_plan",{id,priority:+f.pr.value});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   dlg={id,base:snap(k),f};setFields(dlg.base);
   const row=el("div");
@@ -288,7 +367,7 @@ function show(id){
   btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
-  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
+  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -302,10 +381,11 @@ function syncDialog(){
   const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
   if(!k){f.banner.textContent="This card no longer exists.";return}
   // Display-only parts follow the board; the inputs are never rebuilt.
-  f.meta.textContent=k.column+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+k.column+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);
+  if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
   const dirty=!sameText(typed(),dlg.base);
   if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
@@ -324,10 +404,12 @@ $("dlg").onclose=()=>{dlg=null};
 /* Read the cursor first, then the cards: anything committed in between is in the list
    AND comes back from the next poll (a harmless extra refresh); nothing can be skipped.
    Both reads must succeed before either is kept. */
+// Highest priority first in each column, as card_take takes them; stable, so the store's order follows.
+const byPriority=list=>list.sort((a,b)=>b.priority-a.priority);
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
   const list=(await api("board_list")).cards;
-  cursor=at;cards=list;
+  cursor=at;cards=byPriority(list);
 }
 async function refresh(){await snapshot();render()}
 async function poll(){
@@ -335,7 +417,7 @@ async function poll(){
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
       const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
-      cursor=r.cursor;cards=list;render();
+      cursor=r.cursor;cards=byPriority(list);render();
     }
   }catch(e){}
   setTimeout(poll,1500);
@@ -370,7 +452,7 @@ function projectPicker(current){
   const boxes={};
   for(const r of Object.keys(all))for(const p of Object.keys(all[r])){
     const c=field("input",{type:"checkbox",checked:!!current&&current.includes(p),disabled:!current});boxes[p]=c;
-    const l=el("label");l.append(c," "+p+"  ("+r+")");d.append(l)}
+    const l=el("label");l.append(c," "+label(p)+"  ("+r+")");d.append(l)}
   const show=()=>{sum.textContent=none.checked?"all projects":Object.keys(boxes).filter(p=>boxes[p].checked).length+" project(s)"};
   none.onchange=()=>{for(const c of Object.values(boxes))c.disabled=none.checked;show()};
   d.addEventListener("change",show);show();
@@ -553,7 +635,8 @@ async function loadMeta(){
   if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;
-  $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");$("view").setAttribute("aria-pressed",view==="roadmap");
+  $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
+  $("metrics").onclick=()=>setView(view==="metrics"?"board":"metrics");pressed();
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
   // New cards go to the chosen project, else to the chosen repository's own project.

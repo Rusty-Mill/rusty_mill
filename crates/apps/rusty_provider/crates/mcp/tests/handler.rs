@@ -143,12 +143,12 @@ async fn wait_for(client: &McpClient, limit: Duration, done: impl Fn(&[String]) 
         if done(&names(client).await) {
             return true;
         }
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        rusty_tokio::time::sleep(Duration::from_millis(200)).await;
     }
     false
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lists_every_native_tool_with_its_schemas() {
     let (client, stop) = connected(vec![], 5).await;
     let tools = client.list_tools().await.unwrap();
@@ -167,7 +167,7 @@ async fn lists_every_native_tool_with_its_schemas() {
     stop.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn list_models_returns_structured_content() {
     let (client, stop) = connected(vec![], 5).await;
     let r = client
@@ -179,7 +179,7 @@ async fn list_models_returns_structured_content() {
     stop.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bad_native_arguments_are_an_error_not_a_crash() {
     let (client, stop) = connected(vec![], 5).await;
     let err = client
@@ -196,7 +196,7 @@ async fn bad_native_arguments_are_an_error_not_a_crash() {
     stop.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn calling_an_unknown_upstream_prefixed_tool_is_a_protocol_error() {
     let (client, stop) = connected(vec![], 5).await;
     let err = client
@@ -207,7 +207,7 @@ async fn calling_an_unknown_upstream_prefixed_tool_is_a_protocol_error() {
     stop.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_upstreams_tools_are_listed_prefixed_and_callable() {
     let (addr, up_stop) = serve(upstream_server(), "127.0.0.1:0");
     let (client, stop) = connected(vec![upstream_config(addr)], 5).await;
@@ -220,7 +220,7 @@ async fn an_upstreams_tools_are_listed_prefixed_and_callable() {
     up_stop.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hung_upstream_call_times_out_and_the_gateway_stays_usable() {
     let (addr, up_stop) = serve(upstream_server(), "127.0.0.1:0");
     let (client, stop) = connected(vec![upstream_config(addr)], 1).await;
@@ -234,7 +234,7 @@ async fn a_hung_upstream_call_times_out_and_the_gateway_stays_usable() {
     up_stop.shutdown();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_restarted_upstream_is_reconnected_by_the_supervisor() {
     let (addr, up_stop) = serve(classic_upstream(), "127.0.0.1:0");
     let (client, stop) = connected(vec![upstream_config(addr)], 2).await;
@@ -278,7 +278,7 @@ async fn peak_concurrency(connections: usize, calls: usize) -> usize {
     }
     let mut pending = Vec::new();
     for client in clients {
-        pending.push(tokio::spawn(async move {
+        pending.push(rusty_tokio::spawn(async move {
             client.call_tool("up/sleep", None).await.unwrap();
         }));
     }
@@ -349,20 +349,20 @@ fn sleeping_upstream(gauge: Arc<Gauge>) -> Server {
         .unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn calls_to_one_upstream_run_in_parallel_up_to_the_pool_size() {
     assert_eq!(peak_concurrency(3, 3).await, 3);
     assert_eq!(peak_concurrency(1, 3).await, 1);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[rusty_tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn a_hung_call_does_not_block_a_free_connection() {
     let (up, up_stop) = serve(upstream_server(), "127.0.0.1:0");
     let (rp, stop) = serve_rp(vec![upstream_config(up)], 2, 2).await;
     let slow = McpClient::connect("rp", &spec(rp)).await.unwrap();
     let fast = McpClient::connect("rp", &spec(rp)).await.unwrap();
-    let hung = tokio::spawn(async move { slow.call_tool("up/sleep", None).await });
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let hung = rusty_tokio::spawn(async move { slow.call_tool("up/sleep", None).await });
+    rusty_tokio::time::sleep(Duration::from_millis(300)).await;
     let t = Instant::now();
     fast.call_tool("up/echo", None).await.unwrap();
     assert!(

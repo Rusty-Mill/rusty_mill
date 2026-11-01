@@ -20,6 +20,7 @@ struct Conditions<'a> {
     if_match: Option<&'a str>,
     if_none_match: Option<&'a str>,
     if_task_match: Option<&'a str>,
+    actor: Option<&'a str>,
 }
 
 struct Harness {
@@ -84,6 +85,7 @@ impl Harness {
             if_match: when.if_match,
             if_none_match: when.if_none_match,
             if_task_match: when.if_task_match,
+            actor: when.actor,
             body: body.as_bytes(),
         };
         let response = self.backend.handle(&request);
@@ -1170,6 +1172,27 @@ fn a_task_can_be_created_at_an_explicit_position() {
 }
 
 #[test]
+fn a_board_number_is_reserved_once() {
+    let (_d, mut h) = harness();
+    let path = format!("/api/v1/docs/board_number/{}", uuid::Uuid::now_v7());
+    let create = Conditions {
+        if_none_match: Some("*"),
+        ..Conditions::default()
+    };
+    let body = r#"{"v":1,"number":1}"#;
+    let (s, doc) = h.send_conditional(Method::Put, &path, body, Some(TOKEN), create);
+    assert_eq!(s, 200, "{doc:?}");
+    let again = Conditions {
+        if_none_match: Some("*"),
+        ..Conditions::default()
+    };
+    let (s, _) = h.send_conditional(Method::Put, &path, body, Some(TOKEN), again);
+    assert_eq!(s, 412, "a reserved number is not reserved twice");
+    let (s, v) = h.call(Method::Get, "/api/v1/docs/board_number", "");
+    assert_eq!((s, v["docs"].as_array().map(Vec::len)), (200, Some(1)));
+}
+
+#[test]
 fn a_board_document_is_fenced_by_its_task_and_moves_it() {
     let (_d, mut h) = harness();
     let list = h.list("L");
@@ -1464,5 +1487,206 @@ fn a_leaf_delete_refuses_a_task_with_subtasks() {
     assert_eq!(
         status, 400,
         "an unknown leaf value is refused before the task is looked up"
+    );
+}
+
+/// `(from, to, actor)` of each move in a `moves` response.
+fn moves(v: &Value) -> Vec<(Value, Value, String)> {
+    v["moves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["from"].clone(),
+                m["to"].clone(),
+                m["actor"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn every_column_change_is_recorded_with_its_actor_and_time() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let actor = |name| Conditions {
+        actor: Some(name),
+        ..Conditions::default()
+    };
+    let (s, card) = h.send_conditional(
+        Method::Post,
+        "/api/v1/tasks",
+        &format!(r#"{{"listId":"{list}","title":"card","tags":["agent","board:ready"]}}"#),
+        Some(TOKEN),
+        actor("planner"),
+    );
+    assert_eq!(s, 201);
+    let id = card["id"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/tasks/{id}");
+    h.task(&list, r#""title":"not on the board""#);
+
+    h.clock.store(NOW + HOUR, Ordering::SeqCst);
+    let (s, _) = h.send_conditional(
+        Method::Patch,
+        &path,
+        r#"{"tags":["agent","board:building","claim:builder"]}"#,
+        Some(TOKEN),
+        actor("builder"),
+    );
+    assert_eq!(s, 200);
+    // Not a column change: nothing recorded.
+    h.call(Method::Patch, &path, r#"{"title":"renamed"}"#);
+    h.clock.store(NOW + 2 * HOUR, Ordering::SeqCst);
+    // Completing in tick's own UI moves the card to done.
+    h.call(Method::Post, &format!("{path}/complete"), "");
+
+    let (s, all) = h.call(Method::Get, &format!("{path}/moves"), "");
+    assert_eq!(s, 200);
+    let ready = Value::from("ready");
+    let building = Value::from("building");
+    assert_eq!(
+        moves(&all),
+        [
+            (Value::Null, ready.clone(), "planner".to_string()),
+            (ready, building.clone(), "builder".to_string()),
+            (building, Value::from("done"), "tick".to_string()),
+        ]
+    );
+    let at: Vec<i64> = all["moves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["atMs"].as_i64().unwrap())
+        .collect();
+    assert_eq!(at, [NOW, NOW + HOUR, NOW + 2 * HOUR]);
+    assert_eq!(all["moves"][0]["taskId"].as_str(), Some(id.as_str()));
+}
+
+#[test]
+fn moves_page_by_time_and_seq_and_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::open(dir.path());
+    let list = h.list("L");
+    for (hour, column) in [(0, "ready"), (1, "qa"), (2, "review")] {
+        h.clock.store(NOW + hour * HOUR, Ordering::SeqCst);
+        h.task(
+            &list,
+            &format!(r#""title":"c","tags":["agent","board:{column}"]"#),
+        );
+    }
+    drop(h);
+    let mut h = Harness::open(dir.path());
+
+    let since = NOW + HOUR;
+    let (s, page) = h.call(
+        Method::Get,
+        &format!("/api/v1/moves?since={since}&limit=1"),
+        "",
+    );
+    assert_eq!(s, 200);
+    assert_eq!(page["moves"][0]["to"].as_str(), Some("qa"));
+    let next = page["next"].as_u64().unwrap();
+    let (_, rest) = h.call(
+        Method::Get,
+        &format!("/api/v1/moves?since={since}&after={next}&limit=1"),
+        "",
+    );
+    assert_eq!(rest["moves"][0]["to"].as_str(), Some("review"));
+    assert_eq!(rest["next"], Value::Null, "the last page");
+    let (_, everything) = h.call(Method::Get, "/api/v1/moves", "");
+    assert_eq!(everything["moves"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn bad_actors_and_paging_arguments_are_refused() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let (s, _) = h.send_conditional(
+        Method::Post,
+        "/api/v1/tasks",
+        &format!(r#"{{"listId":"{list}","title":"c"}}"#),
+        Some(TOKEN),
+        Conditions {
+            actor: Some("two words"),
+            ..Conditions::default()
+        },
+    );
+    assert_eq!(s, 422);
+    assert_eq!(h.call(Method::Get, "/api/v1/moves?limit=0", "").0, 400);
+    assert_eq!(h.call(Method::Get, "/api/v1/moves?limit=1001", "").0, 400);
+    assert_eq!(h.call(Method::Get, "/api/v1/moves?since=soon", "").0, 400);
+    assert_eq!(
+        h.call(
+            Method::Get,
+            "/api/v1/tasks/00000000-0000-0000-0000-000000000000/moves",
+            ""
+        )
+        .0,
+        404
+    );
+}
+
+#[test]
+fn history_outlives_a_purge_so_a_seq_is_never_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::open(dir.path());
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"c","tags":["agent","board:ready"]"#);
+    let id = t["id"].as_str().unwrap();
+    h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{id}?permanent=true"),
+        "",
+    );
+    drop(h);
+
+    let mut h = Harness::open(dir.path());
+    let (_, kept) = h.call(Method::Get, "/api/v1/moves", "");
+    assert_eq!(kept["moves"][0]["seq"].as_u64(), Some(1));
+    h.task(&list, r#""title":"d","tags":["agent"]"#);
+    let (_, after) = h.call(Method::Get, "/api/v1/moves?after=1", "");
+    assert_eq!(after["moves"][0]["seq"].as_u64(), Some(2));
+    assert_eq!(after["moves"][0]["to"].as_str(), Some("backlog"));
+}
+
+#[test]
+fn tag_renames_carry_the_actor_and_columns_match_the_board() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"c","tags":["agent","board:ready"]"#);
+    let id = t["id"].as_str().unwrap().to_string();
+    let as_owner = || Conditions {
+        actor: Some("owner"),
+        ..Conditions::default()
+    };
+    let (s, _) = h.send_conditional(
+        Method::Post,
+        "/api/v1/tags/board:ready/rename",
+        r#"{"label":"board:review"}"#,
+        Some(TOKEN),
+        as_owner(),
+    );
+    assert_eq!(s, 200);
+    let (s, _) = h.send_conditional(
+        Method::Delete,
+        "/api/v1/tags/board:review",
+        "",
+        Some(TOKEN),
+        as_owner(),
+    );
+    assert_eq!(s, 204);
+
+    let (_, all) = h.call(Method::Get, &format!("/api/v1/tasks/{id}/moves"), "");
+    let ready = Value::from("ready");
+    let review = Value::from("review");
+    assert_eq!(
+        moves(&all),
+        [
+            (Value::Null, ready.clone(), "tick".to_string()),
+            (ready, review.clone(), "owner".to_string()),
+            // An agent card without a column tag is in backlog on the board.
+            (review, Value::from("backlog"), "owner".to_string()),
+        ]
     );
 }

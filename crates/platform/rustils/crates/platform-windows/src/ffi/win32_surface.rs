@@ -104,8 +104,22 @@ pub use windows_sys::Win32::System::Threading::{
 // `AssignProcessToJobObject` (already admitted below) and
 // `TerminateProcess` (already admitted above) each require — no broader
 // access than the two calls this handle is actually used for.
+// `condrv::ClientProcess` (#1259) opens a console client by the pid its
+// CONNECT carries with `PROCESS_TERMINATE | SYNCHRONIZE` (both admitted),
+// to end it after the close grace with `TerminateProcess` unless a
+// zero-timeout `WaitForSingleObject` shows it has already exited.
 pub use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+};
+// `condrv::ClientProcess::open` (#1259, D2 admission proposed on #1286):
+// ConDrv doesn't keep a client waiting on its CONNECT referenced, so its
+// pid can be freed and reused before the host opens it. The CONNECT also
+// carries the client's thread id; `OpenThread` with
+// `THREAD_QUERY_LIMITED_INFORMATION`, the least access
+// `GetProcessIdOfThread` needs, pins that thread and its process while
+// the host checks the thread belongs to the pid, then opens the pid.
+pub use windows_sys::Win32::System::Threading::{
+    GetProcessIdOfThread, OpenThread, THREAD_QUERY_LIMITED_INFORMATION,
 };
 // `Spawner::is_alive` (`docs/decision-request-detach-liveness.md`):
 // `PROCESS_QUERY_LIMITED_INFORMATION` is the least-privileged access
@@ -200,6 +214,12 @@ pub use windows_sys::Win32::System::Console::{
     SHIFT_PRESSED,
 };
 pub use windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
+// `condrv::{is_valid_code_page, decode, encode}`: our console host's
+// code pages (#1222 PR 9). conhost converts the `A` APIs' text with the
+// same three calls, without `MB_ERR_INVALID_CHARS`.
+pub use windows_sys::Win32::Globalization::{
+    IsValidCodePage, MultiByteToWideChar, WideCharToMultiByte,
+};
 
 // Security surface, CSPRNG slice (RFC v2 R5+, D15, first slice) —
 // rusty_rdp's five hand-rolled `/dev/urandom` reads. `BCryptGenRandom`
@@ -299,3 +319,32 @@ pub use windows_sys::Win32::Storage::FileSystem::{
 };
 pub use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 pub use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+// Console host surface (`sys::condrv`, #1222 PR 1; design
+// `docs/projects/term/conhost/design.md` §11.1). Our own host serves the
+// console driver (ConDrv) directly instead of going through ConPTY:
+// - `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_SYSTEM32` and
+//   `GetProcAddress` resolve the undocumented `user32!ConsoleControl` at
+//   runtime, from System32 only, so a build without it degrades to
+//   `ErrorKind::Unsupported` instead of failing to load. It is never
+//   linked statically.
+// - The server handle is asynchronous: every IOCTL on it is overlapped
+//   (`OVERLAPPED`, `GetOverlappedResult`), each with its own event
+//   (`CreateEventW`, `ResetEvent`), and `CancelIoEx` requests
+//   cancellation of the one in-flight READ_IO. `SetEvent` drives the
+//   waker and the input-available event clients wait on.
+// - `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` limits what the attached child
+//   inherits to its three std handles.
+// - The `ERROR_*` and `WAIT_FAILED` constants are those calls' documented
+//   results: a pending overlapped call, a cancelled one, and a driver
+//   that has dropped the server.
+pub use windows_sys::Win32::Foundation::{
+    ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_PIPE_NOT_CONNECTED, FARPROC, WAIT_FAILED,
+};
+pub use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
+pub use windows_sys::Win32::System::Threading::{
+    CreateEventW, ResetEvent, SetEvent, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+};
+pub use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};

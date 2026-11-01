@@ -101,6 +101,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters |
+| libs | rusty_conhost | rusty_conhost | Our own Windows console host: a sans-I/O console engine over ConDrv, with a pty-shaped front end. |
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core |
 | libs | rusty_db | rusty-db-core | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of rusty_db) |
 | libs | rusty_db | rusty-db-derive | #[derive(Mapped)] macro for rusty_db: maps a struct to a table |
@@ -250,6 +251,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_mux | rusty_mux_script | rusty_mux actions and key bindings: named chains of catalog requests read from a JSON config, checked against the catalog. No I/O. |
 | apps | rusty_mux | rusty_mux_server | rusty_mux's server: owns the PTYs, keeps one terminal per block, and tees raw output to attached clients over a Unix socket. |
 | apps | rusty_mux | rusty_mux_status | rusty_mux program status: parses OSC 7501 (Program Status Protocol) reports and keeps a block's records. No I/O. |
+| apps | rusty_mux | rusty_mux_transport | rusty_mux's UDP transport: sealed datagrams carrying reliable ordered streams, with roaming. No I/O. |
 | apps | rusty_mux | rusty_mux_tui | Terminal client for rusty_mux: shows a block's window on the local terminal over a Unix socket, drawing its split layout. |
 | apps | rusty_orch | orch-bbp | TaskHost adapter over the existing BBP CLI and moderator |
 | apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. |
@@ -300,7 +302,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_yirp | sessionmgr-git | Git adapter for sessionmgr: worktree lifecycle, status, and diff, by shelling out to the system git. |
 | apps | rusty_yirp | sessionmgr-proc | Process adapter for sessionmgr: detached spawn, PID-reuse-safe liveness, termination, and stdio-inheritance hardening. |
 | apps | rusty_yirp | sessionmgr-protocol | Wire types shared by the sessionmgr daemon, its workers, and its clients. Serde only, no I/O. |
-| apps | rusty_yirp | sessionmgr-pty | PTY adapter for sessionmgr: hosts a session's process on a real terminal (ConPTY on Windows) via rustils' platform Pty capability. |
+| apps | rusty_yirp | sessionmgr-pty | PTY adapter for sessionmgr: hosts a session's process on a real terminal (ConPTY or our own console host on Windows) via rustils' platform Pty capability. |
 | apps | rusty_yirp | sessionmgr-tui | The sessionmgr TUI: a grid of session panes over the daemon's public socket. Depends on sessionmgr-protocol only -- never sessionmgr-proc or sessionmgr-agents -- so a UI that cannot name a process type cannot accidentally spawn one. |
 | tools | rusty_baseline | rusty_baseline | Per-product baseline: binary size, dependency closure, clean and incremental build, startup, idle and peak RSS |
 | tools | rusty_boot | rusty_boot | A #![no_std] + alloc sovereign bootstrapper demonstrating kernel-to-application execution without Rust std |

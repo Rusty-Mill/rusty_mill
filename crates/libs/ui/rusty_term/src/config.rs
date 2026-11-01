@@ -49,6 +49,17 @@ pub enum ClipboardPolicy {
     ReadWrite,
 }
 
+/// Which console host a Windows shell runs on (`[console] host`). Read at
+/// launch; ignored off Windows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConsoleHost {
+    /// Windows' ConPTY. Default.
+    #[default]
+    ConPty,
+    /// Our own console host, rusty_conhost.
+    Own,
+}
+
 /// One `[profile.<name>]` bundle: everything a "launch this kind of tab"
 /// action needs. Absent keys fall back to the top-level config.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -207,6 +218,9 @@ pub struct Config {
     /// Keybindings for terminal-owned shortcuts (windowed front-end); the
     /// `[keys]` section overrides individual actions on top of the defaults.
     pub keys: Keymap,
+    /// The console host for Windows shells (`[console] host`); other
+    /// platforms ignore it.
+    pub console_host: Option<ConsoleHost>,
 }
 
 impl Config {
@@ -813,6 +827,14 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
             cfg.theme.palette16[n] = expect_color(k, value)?;
         }
         ("", "copy_html") => cfg.copy_html = Some(expect_bool(key, value)?),
+        ("console", "host") => {
+            let name = expect_str(key, value)?;
+            cfg.console_host = Some(match name.to_ascii_lowercase().as_str() {
+                "conpty" => ConsoleHost::ConPty,
+                "own" => ConsoleHost::Own,
+                _ => return Err(format!("unknown console {key} `{name}` (conpty or own)")),
+            });
+        }
         ("", "clipboard") => {
             let name = expect_str(key, value)?;
             cfg.clipboard = Some(match name.to_ascii_lowercase().as_str() {
@@ -1406,6 +1428,22 @@ color15 = "ffffff"
         // Unset by default (the front-end treats absence as enabled).
         let (cfg2, _) = parse("[window]\ncols = 80\n");
         assert_eq!(cfg2.ligatures, None);
+    }
+
+    #[test]
+    fn console_host_parses_and_rejects_other_hosts() {
+        let (cfg, warns) = parse("[console]\nhost = \"own\"\n");
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(cfg.console_host, Some(ConsoleHost::Own));
+        let (cfg, _) = parse("[console]\nhost = \"ConPTY\"\n");
+        assert_eq!(cfg.console_host, Some(ConsoleHost::ConPty));
+        let (cfg, warns) = parse("[console]\nhost = \"openconsole\"\n");
+        assert_eq!(cfg.console_host, None);
+        assert!(
+            warns[0].contains("unknown console host `openconsole`"),
+            "{warns:?}"
+        );
+        assert_eq!(Config::default().console_host, None);
     }
 
     #[test]

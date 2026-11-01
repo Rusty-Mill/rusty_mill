@@ -12,8 +12,10 @@
 //! # What this wraps, and what it does not reimplement
 //!
 //! `rustils`' `platform::pty::Pty` capability, which already has a
-//! ConPTY backend on Windows and an `openpty` backend on Linux. This
-//! crate adds three things that live above it:
+//! ConPTY backend on Windows and an `openpty` backend on Linux. On
+//! Windows a session can run on our own console host, `rusty_conhost`,
+//! instead of ConPTY ([`ConsoleHost`]). This crate adds three things that
+//! live above them:
 //!
 //! 1. **One owner for the master and the child**, so a session is a
 //!    single value with a pid rather than two loose halves.
@@ -39,9 +41,11 @@
 //! thread-hostile, that test stops compiling and this bridge stops being
 //! justified -- which is the point of keeping it.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::sync::Mutex;
+#[cfg(windows)]
+use std::time::Duration;
 
 use platform::process::{Child, Command, Stdio};
 use platform::pty::{Pty, PtyMaster};
@@ -55,6 +59,55 @@ use platform::term::WinSize;
 /// anywhere near this large; it is generous headroom, not a realistic
 /// size.
 const MAX_TERMINAL_DIM: u16 = 500;
+
+/// The environment variable that picks the Windows console host.
+const CONSOLE_HOST_ENV: &str = "RUSTY_CONSOLE_HOST";
+
+/// How long [`PtySession::shut_down`] waits for our own console host:
+/// it ends clients still attached 5 s after hanging up, plus a second.
+#[cfg(windows)]
+const SHUTDOWN: Duration = Duration::from_secs(6);
+
+/// Which console host runs a session's process on Windows.
+///
+/// Elsewhere there is only the platform's own pty, and this is ignored.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConsoleHost {
+    /// Microsoft's ConPTY. The default.
+    #[default]
+    Conpty,
+    /// Our own host, `rusty_conhost`. If this Windows can't run it,
+    /// [`PtySession::spawn`] fails: there is no silent fallback.
+    Own,
+}
+
+impl ConsoleHost {
+    /// Reads `RUSTY_CONSOLE_HOST`: `conpty` or `own`, and [`Conpty`](
+    /// ConsoleHost::Conpty) when unset. Any other value is an
+    /// `InvalidInput` error naming the variable. Off Windows the variable
+    /// is not read at all, so a Windows-only setting can never fail a
+    /// session there.
+    pub fn from_env() -> io::Result<Self> {
+        if !cfg!(windows) {
+            return Ok(ConsoleHost::default());
+        }
+        Self::parse(std::env::var_os(CONSOLE_HOST_ENV).as_deref())
+    }
+
+    fn parse(value: Option<&OsStr>) -> io::Result<Self> {
+        let Some(value) = value else {
+            return Ok(ConsoleHost::Conpty);
+        };
+        match value.to_str() {
+            Some("conpty") => Ok(ConsoleHost::Conpty),
+            Some("own") => Ok(ConsoleHost::Own),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{CONSOLE_HOST_ENV} must be `conpty` or `own`, not {value:?}"),
+            )),
+        }
+    }
+}
 
 /// A terminal size. Mirrors `platform::term::WinSize` so callers do not
 /// need to depend on the platform crate directly.
@@ -89,18 +142,41 @@ impl From<TerminalSize> for WinSize {
 ///
 /// See the module docs for why this is `unsafe impl Send`/`Sync`.
 struct Inner {
-    master: Box<dyn PtyMaster>,
+    master: Master,
     /// Taken by [`PtySession::wait`]. `Child::wait` consumes the box, so
     /// it has to be moved out rather than borrowed -- which is also what
     /// makes double-wait unrepresentable.
     child: Mutex<Option<Box<dyn Child>>>,
 }
 
+/// The terminal side of a session.
+enum Master {
+    /// The platform's pty: `openpty` on Linux, ConPTY on Windows.
+    Platform(Box<dyn PtyMaster>),
+    /// Our own console host. Concrete, because hanging up and shutting
+    /// down are not on the `PtyMaster` trait.
+    #[cfg(windows)]
+    Own(rusty_conhost::OwnPtyMaster),
+}
+
+impl Master {
+    fn get(&self) -> &dyn PtyMaster {
+        match self {
+            Master::Platform(master) => master.as_ref(),
+            #[cfg(windows)]
+            Master::Own(master) => master,
+        }
+    }
+}
+
 // SAFETY: every concrete `PtyMaster`/`Child` this crate can construct is
-// one of `rustils`' own backends, and each owns only handles that are
-// safe to use from any thread: `LinuxPtyMaster` an `OwnedFd`,
-// `WindowsPtyMaster` two `OwnedWinHandle`s plus an `HPCON` and an
-// `Arc<AtomicBool>`. Windows kernel handles and Unix file descriptors are
+// one of `rustils`' own backends or our console host's, and each owns
+// only handles that are safe to use from any thread: `LinuxPtyMaster` an
+// `OwnedFd`, `WindowsPtyMaster` two `OwnedWinHandle`s plus an `HPCON` and
+// an `Arc<AtomicBool>`, `OwnPtyMaster` an `Arc` of engine state behind
+// locks (it is `Send + Sync` without any help; only the boxed trait
+// object of the platform variant needs this bridge), and `WindowsChild`
+// a process handle. Windows kernel handles and Unix file descriptors are
 // process-wide values with no thread affinity, and the trait's own API
 // takes `&self` for read, write, and resize -- so it is designed for
 // concurrent use. The Windows master's read and write sides are two
@@ -131,6 +207,9 @@ pub struct PtyOptions {
     /// somewhere specific.
     pub cwd: OsString,
     pub size: TerminalSize,
+    /// Which Windows console host to run on; ignored elsewhere. Callers
+    /// read it with [`ConsoleHost::from_env`].
+    pub console_host: ConsoleHost,
 }
 
 impl PtySession {
@@ -151,9 +230,7 @@ impl PtySession {
         command.stdout = Stdio::Inherit;
         command.stderr = Stdio::Inherit;
 
-        let (master, child) = backend()
-            .spawn(&command, options.size.into())
-            .map_err(to_io)?;
+        let (master, child) = spawn_on(options.console_host, &command, options.size.into())?;
         let pid = child.id();
         Ok(PtySession {
             inner: Inner {
@@ -176,12 +253,12 @@ impl PtySession {
     /// clean EOF by itself the way a pipe does -- the Windows backend
     /// arranges it explicitly with an exit watcher.
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.master.read(buf).map_err(to_io)
+        self.inner.master.get().read(buf).map_err(to_io)
     }
 
     /// Writes input. **Blocking.**
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.master.write(buf).map_err(to_io)
+        self.inner.master.get().write(buf).map_err(to_io)
     }
 
     /// Writes input until all of it is accepted.
@@ -209,7 +286,11 @@ impl PtySession {
             rows: size.rows.min(MAX_TERMINAL_DIM),
             cols: size.cols.min(MAX_TERMINAL_DIM),
         };
-        self.inner.master.resize(clamped.into()).map_err(to_io)
+        self.inner
+            .master
+            .get()
+            .resize(clamped.into())
+            .map_err(to_io)
     }
 
     /// Waits for the process to exit and returns its exit code.
@@ -249,16 +330,77 @@ impl PtySession {
             _ => None,
         })
     }
+
+    /// Hangs up, then waits for the terminal to finish shutting down.
+    /// **Blocking**, for up to 6 s.
+    ///
+    /// Only our own console host has work here: once hung up, it closes
+    /// the console and, 5 s later, tries to end every client still
+    /// attached, but only while this process runs. So a worker calls this
+    /// before it exits, or those processes are orphaned on a console
+    /// nobody serves.
+    ///
+    /// Returns whether the host finished in time (`OwnPtyMaster::
+    /// wait_shut_down`). `true` means its shutdown, including those end
+    /// attempts, is complete. It does **not** mean every attached process
+    /// has exited: one the host could not open or end, or any after an
+    /// engine error closed the console early, may still run. ConPTY and
+    /// Linux return `true` at once.
+    pub fn shut_down(&self) -> bool {
+        match &self.inner.master {
+            Master::Platform(_) => true,
+            #[cfg(windows)]
+            Master::Own(master) => {
+                master.hang_up();
+                master.wait_shut_down(SHUTDOWN)
+            }
+        }
+    }
 }
 
+/// Spawns `command` on the pty for this platform. `host` only matters on
+/// Windows.
 #[cfg(target_os = "linux")]
-fn backend() -> impl Pty {
-    platform_linux::LinuxPty
+fn spawn_on(
+    _host: ConsoleHost,
+    command: &Command,
+    size: WinSize,
+) -> io::Result<(Master, Box<dyn Child>)> {
+    let (master, child) = platform_linux::LinuxPty
+        .spawn(command, size)
+        .map_err(to_io)?;
+    Ok((Master::Platform(master), child))
 }
 
+/// Spawns `command` on the pty for this platform. `host` only matters on
+/// Windows.
 #[cfg(windows)]
-fn backend() -> impl Pty {
-    platform_windows::WindowsPty
+fn spawn_on(
+    host: ConsoleHost,
+    command: &Command,
+    size: WinSize,
+) -> io::Result<(Master, Box<dyn Child>)> {
+    if host == ConsoleHost::Own {
+        return spawn_own(command, size);
+    }
+    let (master, child) = platform_windows::WindowsPty
+        .spawn(command, size)
+        .map_err(to_io)?;
+    Ok((Master::Platform(master), child))
+}
+
+/// Spawns `command` on our own console host.
+///
+/// When the child exits, the host itself sends CTRL_CLOSE to whatever it
+/// left attached and closes within 2 s, so [`PtySession::read`] ends as
+/// it does on ConPTY. With something still attached that end comes up to
+/// 2 s after the exit, where ConPTY's comes at once.
+#[cfg(windows)]
+fn spawn_own(command: &Command, size: WinSize) -> io::Result<(Master, Box<dyn Child>)> {
+    let (master, child) = rusty_conhost::OwnPty
+        .spawn_concrete(command, size)
+        .map_err(to_io)?;
+    Ok((Master::Own(master), Box::new(child)))
 }
 
 /// No PTY backend on this platform.
@@ -267,12 +409,10 @@ fn backend() -> impl Pty {
 /// that cannot host a terminal cannot host an agent session, and finding
 /// that out at run time would be finding it out from a user.
 #[cfg(not(any(target_os = "linux", windows)))]
-fn backend() -> impl Pty {
-    compile_error!(
-        "sessionmgr-pty supports Windows (ConPTY) and Linux; \
-         macOS/BSD need platform-bsd wiring that has not been done"
-    );
-}
+compile_error!(
+    "sessionmgr-pty supports Windows (ConPTY or our own console host) and Linux; \
+     macOS/BSD need platform-bsd wiring that has not been done"
+);
 
 /// Flattens a platform error into `std::io::Error`, keeping its message.
 fn to_io(error: platform::error::PlatformError) -> io::Error {
@@ -303,6 +443,49 @@ mod tests {
         {
             assert_send::<platform_windows::WindowsPtyMaster>();
             assert_sync::<platform_windows::WindowsPtyMaster>();
+            // Our own host's master is held concretely, but `Inner`'s
+            // bridge covers it too, so its premise is asserted as well.
+            assert_send::<rusty_conhost::OwnPtyMaster>();
+            assert_sync::<rusty_conhost::OwnPtyMaster>();
+            assert_send::<platform_windows::WindowsChild>();
+        }
+    }
+
+    #[test]
+    fn the_console_host_defaults_to_conpty_when_unset() {
+        assert_eq!(
+            ConsoleHost::parse(None).expect("unset"),
+            ConsoleHost::Conpty
+        );
+    }
+
+    #[test]
+    fn the_console_host_accepts_exactly_its_two_names() {
+        let parse = |v: &str| ConsoleHost::parse(Some(OsStr::new(v)));
+        assert_eq!(parse("conpty").expect("conpty"), ConsoleHost::Conpty);
+        assert_eq!(parse("own").expect("own"), ConsoleHost::Own);
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn the_console_host_variable_is_ignored_off_windows() {
+        // Review of ff3a25b3 (Codex P2): a bad value inherited by a Linux
+        // daemon must not fail its sessions. Nothing else in this crate's
+        // tests reads the variable, so setting it here races nothing.
+        std::env::set_var(CONSOLE_HOST_ENV, "not-a-host");
+        let host = ConsoleHost::from_env();
+        std::env::remove_var(CONSOLE_HOST_ENV);
+        assert_eq!(host.expect("ignored off Windows"), ConsoleHost::Conpty);
+    }
+
+    #[test]
+    fn any_other_console_host_is_an_error_naming_the_variable() {
+        // No silent fallback (design §4.4): a typo must not quietly run
+        // the session on the other host.
+        for bad in ["", "Own", "OWN", "conhost", " own"] {
+            let error = ConsoleHost::parse(Some(OsStr::new(bad))).expect_err(bad);
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+            assert!(error.to_string().contains(CONSOLE_HOST_ENV), "{error}");
         }
     }
 
@@ -314,6 +497,78 @@ mod tests {
         assert!(size.rows > 0 && size.cols > 0);
     }
 
+    /// `cmd.exe` with `args` on our own console host.
+    #[cfg(windows)]
+    fn own_cmd(args: &[&str]) -> PtyOptions {
+        PtyOptions {
+            program: "cmd.exe".into(),
+            args: args.iter().map(Into::into).collect(),
+            cwd: std::env::temp_dir().into_os_string(),
+            size: TerminalSize::default(),
+            console_host: ConsoleHost::Own,
+        }
+    }
+
+    /// Reads to end of stream on another thread; `None` if that takes
+    /// longer than 30 s, so a missing end fails rather than hangs.
+    #[cfg(windows)]
+    fn read_within_budget(session: &std::sync::Arc<PtySession>) -> Option<Vec<u8>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let session = std::sync::Arc::clone(session);
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n @ 1..) = session.read(&mut buf) {
+                out.extend_from_slice(&buf[..n]);
+            }
+            let _ = tx.send(out);
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30)).ok()
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn our_own_host_reports_output_and_exit_code() {
+        let session = std::sync::Arc::new(
+            PtySession::spawn(own_cmd(&["/c", "echo", "hello"])).expect("spawn on our host"),
+        );
+        let output = read_within_budget(&session).expect("the stream ends");
+        assert!(String::from_utf8_lossy(&output).contains("hello"));
+        assert_eq!(session.wait().expect("wait"), Some(0));
+        assert!(session.shut_down(), "nothing is left attached");
+
+        let session =
+            std::sync::Arc::new(PtySession::spawn(own_cmd(&["/c", "exit", "7"])).expect("spawn"));
+        read_within_budget(&session).expect("the stream ends");
+        assert_eq!(session.wait().expect("wait"), Some(7));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn our_own_host_ends_the_stream_when_the_process_exits() {
+        // `start /b` leaves ping attached to the console after cmd exits.
+        // ConPTY's backend ends the stream on the child's exit; ours must
+        // too, or a worker waits on the left-behind process for a minute.
+        let session = std::sync::Arc::new(
+            PtySession::spawn(own_cmd(&[
+                "/c",
+                "start",
+                "/b",
+                "ping",
+                "-n",
+                "60",
+                "127.0.0.1",
+            ]))
+            .expect("spawn on our host"),
+        );
+        assert!(
+            read_within_budget(&session).is_some(),
+            "the stream must end once cmd exits, not when ping does"
+        );
+        assert_eq!(session.wait().expect("wait"), Some(0));
+        assert!(session.shut_down(), "the host ends ping within its grace");
+    }
+
     #[cfg(unix)]
     fn sh(script: &str) -> PtyOptions {
         PtyOptions {
@@ -321,6 +576,7 @@ mod tests {
             args: vec!["-c".into(), script.into()],
             cwd: std::env::temp_dir().into_os_string(),
             size: TerminalSize::default(),
+            console_host: ConsoleHost::default(),
         }
     }
 
@@ -402,6 +658,7 @@ mod tests {
                 rows: 40,
                 cols: 132,
             },
+            console_host: ConsoleHost::default(),
         })
         .expect("spawn");
         let output = String::from_utf8_lossy(&read_to_end(&session, 4096)).into_owned();

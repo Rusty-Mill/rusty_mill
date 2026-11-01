@@ -21,7 +21,7 @@ pub(crate) struct SearchResult {
 }
 
 pub(crate) struct WebSearchClient {
-    client: reqwest::Client,
+    client: rusty_request::Client,
     base_url: String,
     api_key: String,
     max_results: u32,
@@ -50,10 +50,7 @@ struct BraveResult {
 impl WebSearchClient {
     pub(crate) fn new(config: &WebSearchConfig, api_key: String) -> Self {
         Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(config.timeout_secs))
-                .build()
-                .expect("reqwest client should build with a timeout configured"),
+            client: crate::http::client(Duration::from_secs(config.timeout_secs)),
             base_url: config.base_url.clone(),
             api_key,
             max_results: config.max_results,
@@ -69,9 +66,10 @@ impl WebSearchClient {
         let resp = self
             .client
             .get(&self.base_url)
-            .header("X-Subscription-Token", &self.api_key)
-            .header("Accept", "application/json")
-            .query(&[("q", query), ("count", &self.max_results.to_string())])
+            .and_then(|r| r.header("X-Subscription-Token", &self.api_key))
+            .and_then(|r| r.header("Accept", "application/json"))
+            .map_err(|e| e.to_string())?
+            .query([("q", query), ("count", &self.max_results.to_string())])
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -80,7 +78,7 @@ impl WebSearchClient {
             return Err(format!("web search endpoint returned {}", resp.status()));
         }
 
-        let body: BraveSearchResponse = resp.json().await.map_err(|e| e.to_string())?;
+        let body: BraveSearchResponse = crate::http::json(&resp)?;
 
         Ok(body
             .web
@@ -297,6 +295,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_parses_brave_style_results() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(header("X-Subscription-Token", "test-key"))
@@ -321,6 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_returns_an_empty_vec_when_the_backend_reports_no_web_results() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
@@ -334,6 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_fails_on_a_non_success_status() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(500))
@@ -346,6 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_fails_when_the_endpoint_is_unreachable() {
+        crate::http::install_fallback_for_test();
         // Port 0 never accepts connections -- a real network-level
         // failure, not just a non-2xx response.
         let client = WebSearchClient::new(&config("http://127.0.0.1:0"), "test-key".to_string());
@@ -354,6 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_fails_when_the_backend_outlasts_timeout_secs() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(

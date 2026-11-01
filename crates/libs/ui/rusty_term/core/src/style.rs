@@ -19,8 +19,8 @@ use std::collections::{HashMap, TryReserveError};
 use std::hash::{Hash, Hasher};
 
 use crate::cell::{
-    ATTR_BG_DEFAULT, ATTR_FG_DEFAULT, ATTR_PROTECTED, Cell, DEFAULT_BG, DEFAULT_FG, PackedCell,
-    Pen, Source, WIDE_TRAILER,
+    ATTR_BG_DEFAULT, ATTR_FG_DEFAULT, ATTR_PROTECTED, Cell, CellColors, DEFAULT_BG, DEFAULT_FG,
+    PackedCell, Pen, Source, WIDE_TRAILER,
 };
 
 /// Everything a [`Cell`] holds except its character and the two layout bits
@@ -100,6 +100,11 @@ impl CellStyle {
             self.bg = 0;
         }
         self
+    }
+
+    /// The style's colours and attributes as a host reads them.
+    pub(crate) fn colors(&self) -> CellColors {
+        CellColors::new(self.fg, self.fg_index, self.bg, self.bg_index, self.attrs)
     }
 
     /// This style with its default colours filled in from `defaults`.

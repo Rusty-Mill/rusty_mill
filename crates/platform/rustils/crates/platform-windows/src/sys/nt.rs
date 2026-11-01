@@ -27,8 +27,29 @@ pub fn open_relative(
     options: u32,
 ) -> Result<OwnedWinHandle> {
     open_relative_attrs(
-        root,
+        Some(root),
         rel,
+        access,
+        disposition,
+        options,
+        nt::OBJ_CASE_INSENSITIVE as u32,
+    )
+}
+
+/// Open the NT object `name` by its full namespace path, with no root
+/// handle. Used only for `\Device\ConDrv\Server` (`sys::condrv`): Win32
+/// can't open a device object relative to a handle, and ConDrv's client
+/// objects exist only relative to the server handle this returns. Same
+/// admitted `NtCreateFile` as the relative opens; see `ffi::nt_surface`.
+pub fn open_absolute(
+    name: &OsStr,
+    access: u32,
+    disposition: u32,
+    options: u32,
+) -> Result<OwnedWinHandle> {
+    open_relative_attrs(
+        None,
+        name,
         access,
         disposition,
         options,
@@ -53,7 +74,7 @@ pub fn open_relative_r2(
     options: u32,
 ) -> Result<OwnedWinHandle> {
     open_relative_attrs(
-        root,
+        Some(root),
         rel,
         access,
         disposition,
@@ -63,7 +84,7 @@ pub fn open_relative_r2(
 }
 
 fn open_relative_attrs(
-    root: &OwnedWinHandle,
+    root: Option<&OwnedWinHandle>,
     rel: &OsStr,
     access: u32,
     disposition: u32,
@@ -85,7 +106,7 @@ fn open_relative_attrs(
     };
     let attrs = nt::OBJECT_ATTRIBUTES {
         Length: std::mem::size_of::<nt::OBJECT_ATTRIBUTES>() as u32,
-        RootDirectory: root.as_raw(),
+        RootDirectory: root.map_or(std::ptr::null_mut(), OwnedWinHandle::as_raw),
         ObjectName: &name,
         // Match Win32's (and every consumer's) expectation on NTFS: name
         // lookup is case-insensitive. Case-sensitivity policy questions
@@ -105,7 +126,8 @@ fn open_relative_attrs(
     // SAFETY: `handle`/`iosb` are valid out-pointers; `attrs` points at a
     // fully initialized OBJECT_ATTRIBUTES whose `ObjectName` references
     // `name`, whose `Buffer` references `wide` — all three outlive the
-    // call; `root` holds a valid directory handle for RootDirectory; the
+    // call; `root` holds a valid directory handle for RootDirectory, or is
+    // absent and `name` is a full namespace path; the
     // null allocation-size and EA pointers are documented-valid.
     let status = unsafe {
         nt::NtCreateFile(

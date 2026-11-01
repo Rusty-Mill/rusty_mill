@@ -2,7 +2,7 @@
 //! rusty_tick tasks tagged `agent`, so there is one task store.
 //!
 //! **Mapping.** A card is a task: title, notes (body), priority, sort order, and
-//! tags carrying the board's state (`board:<column>`, `claim:<actor>`) beside
+//! tags carrying the board's state (`board:<column>`, `claim:<actor>`, `number:<n>`) beside
 //! the card's own tags, which rusty_tick keeps lowercase. Its project is the
 //! task's list, named like the project; the Inbox is the `default` project. A
 //! closed task (done or won't do) is Done. The
@@ -55,6 +55,20 @@ const TICK_ACTOR: &str = "tick";
 
 /// Reads of one card before giving up on a task that keeps moving under it.
 const READ_ATTEMPTS: usize = 8;
+
+/// Document kind of a card-number reservation (one per number, id from [`number_doc`]).
+const NUMBER_KIND: &str = "board_number";
+
+/// Numbers tried past the highest reservation seen before giving up; each miss is another
+/// board reserving at the same moment.
+const RESERVE_ATTEMPTS: u64 = 64;
+
+/// The id of number `n`'s reservation: the same on every board, so `If-None-Match: *` lets
+/// exactly one reserve it.
+fn number_doc(n: u64) -> Uuid {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x6d69_6c6c_2d62_6f61_7264_2d6e_756d_6265);
+    Uuid::new_v5(&NAMESPACE, &n.to_be_bytes())
+}
 
 /// The rusty_tick HTTP API, as this adapter needs it: one request under
 /// `/api/v1` (or `/health`), answered with its status and JSON body
@@ -276,6 +290,7 @@ fn task_tags(card: &Card) -> Vec<String> {
         .unwrap_or_default();
     let mut tags = vec![AGENT_TAG.to_owned(), format!("board:{column}")];
     tags.extend(card.claim.iter().map(|c| format!("claim:{c}")));
+    tags.extend(card.number.iter().map(|n| format!("number:{n}")));
     tags.extend(card.tags.iter().cloned());
     tags
 }
@@ -302,6 +317,11 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .iter()
         .find_map(|t| t.strip_prefix("claim:"))
         .map(str::to_owned);
+    let number = task
+        .tags
+        .iter()
+        .find_map(|t| t.strip_prefix("number:"))
+        .and_then(|n| n.parse().ok());
     let tags = task
         .tags
         .iter()
@@ -311,6 +331,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
     let doc = doc.unwrap_or_default();
     Ok(Card {
         id: task.id,
+        number,
         rev,
         title: task.title,
         body: task.notes,
@@ -337,6 +358,11 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
 struct Events {
     log: Vec<Event>,
     seen: BTreeMap<Uuid, u64>,
+    /// Cards whose rusty_tick write has started but is not yet in `log`.
+    /// Observation shares this lock, so it cannot mistake that intermediate
+    /// state for an outside write.
+    writing: BTreeMap<Uuid, usize>,
+    write_epoch: u64,
     primed: bool,
 }
 
@@ -572,22 +598,63 @@ impl<T: TickApi> TickStore<T> {
 
     /// Note the board's own write, which left the task at `version`; returns the
     /// card revision committed (`version - 1`).
-    fn record(&self, mut event: Event, version: u64) -> Result<u64, BoardError> {
+    fn finish_write(
+        &self,
+        mut event: Event,
+        result: Result<u64, BoardError>,
+    ) -> Result<u64, BoardError> {
+        let mut events = self.events.lock().map_err(poisoned)?;
+        let count = events
+            .writing
+            .get_mut(&event.card)
+            .expect("a finished write was marked");
+        *count -= 1;
+        if *count == 0 {
+            events.writing.remove(&event.card);
+        }
+        events.write_epoch = events.write_epoch.wrapping_add(1);
+        let version = result?;
         let rev = version.saturating_sub(1);
         event.rev = rev;
-        let mut events = self.events.lock().map_err(poisoned)?;
-        events.seen.insert(event.card, version);
+        // Same-card mutations are serialized by rusty_tick, but their callers can
+        // return here in reverse order. Never forget the newer mutation in that case.
+        events
+            .seen
+            .entry(event.card)
+            .and_modify(|seen| *seen = (*seen).max(version))
+            .or_insert(version);
         events.push(event);
         Ok(rev)
     }
 
+    /// Mark a write before its first task mutation. The mark is removed by
+    /// `finish_write`, including when rusty_tick refuses or fails the write.
+    fn start_write(&self, card: Uuid) -> Result<(), BoardError> {
+        let mut events = self.events.lock().map_err(poisoned)?;
+        *events.writing.entry(card).or_default() += 1;
+        events.write_epoch = events.write_epoch.wrapping_add(1);
+        Ok(())
+    }
+
     /// Note tasks changed or newly tagged in rusty_tick since they were last seen.
     fn observe(&self) -> Result<(), BoardError> {
-        let tasks = self.tagged()?;
-        let mut events = self.events.lock().map_err(poisoned)?;
+        // If a write starts or finishes while the task snapshot is fetched,
+        // fetch it again. Holding this lock across I/O would let a busy
+        // observer starve writers that need it to commit their event.
+        let (tasks, mut events) = loop {
+            let epoch = self.events.lock().map_err(poisoned)?.write_epoch;
+            let tasks = self.tagged()?;
+            let events = self.events.lock().map_err(poisoned)?;
+            if events.write_epoch == epoch {
+                break (tasks, events);
+            }
+        };
         let primed = std::mem::replace(&mut events.primed, true);
         for task in tasks {
             let version = task.version()?;
+            if events.writing.contains_key(&task.id) {
+                continue;
+            }
             let before = events.seen.insert(task.id, version);
             if !primed || before == Some(version) {
                 continue;
@@ -662,26 +729,28 @@ impl<T: TickApi> Store for TickStore<T> {
         if card.column == Column::Done {
             body["status"] = json!("done");
         }
-        let (status, _) = self
-            .tick
-            .send(&TickRequest::new("POST", "/tasks").body(body))?;
-        match status {
-            201 => {}
-            409 => return Err(BoardError::Conflict),
-            _ => {
-                return Err(BoardError::Storage(format!(
-                    "rusty_tick answered {status} creating a task"
-                )));
+        self.start_write(card.id)?;
+        let result = (|| {
+            let (status, _) = self
+                .tick
+                .send(&TickRequest::new("POST", "/tasks").body(body))?;
+            match status {
+                201 => {}
+                409 => return Err(BoardError::Conflict),
+                _ => {
+                    return Err(BoardError::Storage(format!(
+                        "rusty_tick answered {status} creating a task"
+                    )));
+                }
             }
-        }
-        // A second request: a crash before it leaves the task without its document. Only
-        // an import has one at insert, and its id names its issue, so the sync relinks it.
-        let version = if BoardDoc::of(card) == BoardDoc::default() {
-            1
-        } else {
-            self.put_doc(card, 1)?
-        };
-        self.record(event, version)
+            // A second request: a crash before it leaves the task without its document. Only
+            // an import has one at insert, and its id names its issue, so the sync relinks it.
+            match BoardDoc::of(card) == BoardDoc::default() {
+                true => Ok(1),
+                false => self.put_doc(card, 1),
+            }
+        })();
+        self.finish_write(event, result)
     }
 
     fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
@@ -699,32 +768,34 @@ impl<T: TickApi> Store for TickStore<T> {
         if current.rev + 1 != read {
             return Err(BoardError::Conflict);
         }
-        let version = if event.kind == EventKind::Commented {
-            // An explicit append: comments others add meanwhile do not move the version
-            // and are kept.
-            let comment = card
-                .comments
-                .last()
-                .ok_or_else(|| BoardError::Storage("a comment event carries no comment".into()))?;
-            self.put_comment(card, comment, read)?
-        } else {
-            let patch = self.task_patch(&current, card)?;
-            let task_changed = patch.as_object().is_some_and(|p| !p.is_empty());
-            let doc_changed = BoardDoc::of(card) != BoardDoc::of(&current);
-            let mut version = read;
-            // An empty patch still moves the version, so every write is a compare-and-swap.
-            if task_changed || !doc_changed {
-                version = self.patch_task(card.id, patch, version)?;
+        self.start_write(card.id)?;
+        let result = (|| {
+            if event.kind == EventKind::Commented {
+                // An explicit append: comments others add meanwhile do not move the version
+                // and are kept.
+                let comment = card.comments.last().ok_or_else(|| {
+                    BoardError::Storage("a comment event carries no comment".into())
+                })?;
+                self.put_comment(card, comment, read)
+            } else {
+                let patch = self.task_patch(&current, card)?;
+                let task_changed = patch.as_object().is_some_and(|p| !p.is_empty());
+                let doc_changed = BoardDoc::of(card) != BoardDoc::of(&current);
+                let mut version = read;
+                // An empty patch still moves the version, so every write is a compare-and-swap.
+                if task_changed || !doc_changed {
+                    version = self.patch_task(card.id, patch, version)?;
+                }
+                // Both change only for `card_plan` with priority and dependencies: two fenced
+                // requests. A failure between them reports an error with the priority applied;
+                // the same plan again completes it.
+                if doc_changed {
+                    version = self.put_doc(card, version)?;
+                }
+                Ok(version)
             }
-            // Both change only for `card_plan` with priority and dependencies: two fenced
-            // requests. A failure between them reports an error with the priority applied;
-            // the same plan again completes it.
-            if doc_changed {
-                version = self.put_doc(card, version)?;
-            }
-            version
-        };
-        self.record(event, version)
+        })();
+        self.finish_write(event, result)
     }
 
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
@@ -743,6 +814,37 @@ impl<T: TickApi> Store for TickStore<T> {
             .log
             .last()
             .map(|e| e.id))
+    }
+
+    /// Reservations are `board_number` documents, created with `If-None-Match: *` and kept
+    /// whatever happens to the task, so a number never comes back.
+    fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        let docs: Vec<Doc> = Self::decode(
+            self.call(TickRequest::new("GET", format!("/docs/{NUMBER_KIND}")), 200)?,
+            "docs",
+        )?;
+        let reserved = docs
+            .iter()
+            .filter_map(|d| d.body["number"].as_u64())
+            .max()
+            .unwrap_or(0);
+        let first = reserved.max(floor) + 1;
+        for n in first..first + RESERVE_ATTEMPTS {
+            let mut request =
+                TickRequest::new("PUT", format!("/docs/{NUMBER_KIND}/{}", number_doc(n)))
+                    .body(json!({ "v": 1, "number": n, "taskId": card }));
+            request.if_absent = true;
+            match self.tick.send(&request)?.0 {
+                200 => return Ok(n),
+                412 => continue,
+                status => {
+                    return Err(BoardError::Storage(format!(
+                        "rusty_tick answered {status} reserving card number {n}"
+                    )));
+                }
+            }
+        }
+        Err(BoardError::Conflict)
     }
 
     fn health(&self) -> Result<(), BoardError> {

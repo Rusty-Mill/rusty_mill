@@ -2,7 +2,7 @@
 name = "rusty_mux_server"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.98.1"
 license = "MIT"
 description = "rusty_mux's server: owns the PTYs, keeps one terminal per block, and tees raw output to attached clients over a Unix socket."
 repository = "https://github.com/Rusty-Mill/rusty_mill"
@@ -19,6 +19,9 @@ path = "src/main.rs"
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
 rusty_mux_status = { workspace = true }
+# The UDP association behind `--udp`; its keys come from the OS CSPRNG.
+rusty_mux_transport = { workspace = true }
+rusty_rand = { workspace = true }
 # Headless engine only: no `gui` or `l13`, so no tokio reaches this binary.
 rusty_term_core = { workspace = true }
 rusty_tokio = { workspace = true }
@@ -27,10 +30,14 @@ rusty_uuid = { workspace = true }
 rusty_crypto_key = { workspace = true }
 platform = { workspace = true }
 
-# Linux and Windows (ConPTY over AF_UNIX); other targets build a stub.
+# Linux and Windows (ConPTY or rusty_conhost, over AF_UNIX); other targets
+# build a stub.
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { workspace = true }
 rusty_libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 platform-windows = { workspace = true }
+# `RUSTY_CONSOLE_HOST=own`: our own console host instead of ConPTY. Links
+# rusty_term_core without `l13`, as the line above for the server's grids.
+rusty_conhost = { workspace = true }

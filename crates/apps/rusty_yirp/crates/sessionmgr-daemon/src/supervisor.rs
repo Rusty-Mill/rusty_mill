@@ -65,6 +65,13 @@ const DEPENDENT_POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// for every case.
 const TERMINATE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long [`Supervisor::stop_worker`] lets a worker that acknowledged
+/// `WorkerShutdown` exit by itself before forcing it. A worker on our own
+/// Windows console host waits up to 6 s for the host to end what the
+/// session left attached (`PtySession::shut_down`), and the host dies
+/// with the worker, so forcing it sooner orphans those processes.
+const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(7);
+
 /// How often [`Supervisor::stop_worker`] re-checks a terminated pid.
 const TERMINATE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -1165,7 +1172,12 @@ impl Supervisor {
             Ok::<_, Error>(response)
         })
         .await;
-        if !matches!(graceful, Ok(Ok(Response::Ok))) {
+        if matches!(graceful, Ok(Ok(Response::Ok))) {
+            // Acked: let it finish its own shutdown before forcing.
+            if let Some(worker) = &session.worker {
+                wait_for_exit(worker, WORKER_EXIT_TIMEOUT).await;
+            }
+        } else {
             // Not an error worth failing over -- a worker that already
             // exited, or is wedged, is exactly why the forced path below
             // exists.
@@ -1356,6 +1368,18 @@ async fn wait_for_targets_dead(targets: &[WorkerRef], timeout: Duration) -> Vec<
                 signal_if_ours(target);
             }
         }
+        rusty_tokio::time::sleep(TERMINATE_POLL_INTERVAL).await;
+    }
+}
+
+/// Waits up to `timeout` for `target` to exit, sending it nothing.
+/// Returns at once once it has, or once its identity no longer matches.
+async fn wait_for_exit(target: &WorkerRef, timeout: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < timeout
+        && sessionmgr_proc::is_same_process(target.pid, target.start_fingerprint.as_deref())
+            .unwrap_or(true)
+    {
         rusty_tokio::time::sleep(TERMINATE_POLL_INTERVAL).await;
     }
 }

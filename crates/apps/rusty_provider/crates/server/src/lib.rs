@@ -108,7 +108,7 @@ fn mount_mcp(router: Router<AppState>, state: &AppState) -> Router<AppState> {
 }
 
 /// Builds the full app (routes + middleware) over the given state. `tokio`
-/// is the runtime the handlers' tokio libraries (reqwest, `tokio::sync`)
+/// is the runtime the handlers' tokio libraries (reqwest's JWKS fetch, `tokio::sync`)
 /// run on: the router's outermost layer enters it on every poll.
 pub fn build_app(state: AppState, tokio: tokio::runtime::Handle) -> Router {
     let cors = build_cors(&state.cors_allowed_origins);

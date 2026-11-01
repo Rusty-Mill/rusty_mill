@@ -148,7 +148,7 @@ struct Nothing {}
 struct TakeArgs {
     #[serde(flatten)]
     who: Who,
-    /// Take this card instead of the next one for your role.
+    /// Take this card (id or number) instead of the next one for your role.
     id: Option<String>,
     /// Only cards of this project (see `board_projects`).
     project: Option<String>,
@@ -169,6 +169,14 @@ struct RoadmapArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct MetricsArgs {
+    /// Only this project (see `board_projects`).
+    project: Option<String>,
+    /// Only this repository's projects.
+    repo: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct OwnsArgs {
     /// The project (see `board_projects`).
     project: String,
@@ -180,7 +188,7 @@ struct OwnsArgs {
 struct AssignArgs {
     #[serde(flatten)]
     who: Who,
-    /// Card id.
+    /// Card id, or its number (`#42` or `42`).
     id: String,
     /// The project to move it to (see `board_projects`).
     project: String,
@@ -203,17 +211,17 @@ struct ProjectAddArgs {
 struct PlanArgs {
     #[serde(flatten)]
     who: Who,
-    /// Card id.
+    /// Card id, or its number (`#42` or `42`).
     id: String,
     /// 0 (none), 1 (low), 3 (medium) or 5 (high); higher is taken first.
     priority: Option<u8>,
-    /// Ids of the cards that must be Done before this one is taken; replaces the list.
+    /// Ids or numbers of the cards that must be Done before this one is taken; replaces the list.
     deps: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
 struct GetArgs {
-    /// Card id.
+    /// Card id, or its number (`#42` or `42`).
     id: String,
 }
 
@@ -237,7 +245,7 @@ struct AddArgs {
 struct MoveArgs {
     #[serde(flatten)]
     who: Who,
-    /// Card id.
+    /// Card id, or its number (`#42` or `42`).
     id: String,
     /// Destination column.
     to: Column,
@@ -247,7 +255,7 @@ struct MoveArgs {
 struct IdArgs {
     #[serde(flatten)]
     who: Who,
-    /// Card id.
+    /// Card id, or its number (`#42` or `42`).
     id: String,
 }
 
@@ -255,7 +263,7 @@ struct IdArgs {
 struct UpdateArgs {
     #[serde(flatten)]
     who: Who,
-    /// Card id.
+    /// Card id, or its number (`#42` or `42`).
     id: String,
     /// New title.
     title: Option<String>,
@@ -272,7 +280,7 @@ struct UpdateArgs {
 struct CommentArgs {
     #[serde(flatten)]
     who: Who,
-    /// Card id.
+    /// Card id, or its number (`#42` or `42`).
     id: String,
     /// Comment text.
     text: String,
@@ -282,7 +290,7 @@ struct CommentArgs {
 struct BindExecutionArgs {
     #[serde(flatten)]
     who: Who,
-    /// Card id.
+    /// Card id, or its number (`#42` or `42`).
     id: String,
     /// Stable logical execution id; repeat it to adopt after a restart.
     execution: String,
@@ -334,6 +342,16 @@ struct EventsArgs {
 
 fn id(raw: &str) -> Result<Uuid, BoardError> {
     Uuid::parse_str(raw).map_err(|_| BoardError::Invalid("id is not a UUID"))
+}
+
+/// A card named by its id, or by its number (`#42` or `42`).
+fn card_ref(b: &Shared, raw: &str) -> Result<Uuid, BoardError> {
+    let raw = raw.trim();
+    let Ok(number) = raw.strip_prefix('#').unwrap_or(raw).parse::<u64>() else {
+        return Uuid::parse_str(raw)
+            .map_err(|_| BoardError::Invalid("id is neither a UUID nor a card number"));
+    };
+    Ok(b.get_number(number)?.id)
 }
 
 /// The projects a credential is limited to; `None` when unrestricted or unauthenticated.
@@ -416,6 +434,26 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "board_metrics",
+            "Board metrics over the cards the caller may see, optionally one project or one repository's projects: open cards by column, project (with shipped in the last 30 days), priority and claimant (building, qa, review); cards added and shipped per week for 8 weeks, oldest first; created-to-shipped lead time (median, p85, ms) over the last 30 days; and the 5 open cards past backlog idle longest. {open, by_column, by_project, by_priority, by_claim, weeks, lead_time, idle}.",
+            |b, i, a: MetricsArgs| {
+                checked_project(b, scope(i), a.project.as_deref())?;
+                let projects = b.projects();
+                if let Some(r) = a.repo.as_deref()
+                    && !projects.repos().any(|(name, _)| name == r)
+                {
+                    return Err(BoardError::Invalid("unknown repository"));
+                }
+                to_json(b.metrics(|c| {
+                    in_scope(scope(i), &c.project)
+                        && a.project.as_deref().is_none_or(|p| c.project == p)
+                        && a.repo
+                            .as_deref()
+                            .is_none_or(|r| projects.repo_of(&c.project) == Some(r))
+                })?)
+            },
+        ),
+        op(
             "board_owns",
             "Which of `files` (repository paths, `/`-separated) the project does NOT own: those belonging to another project of its repository. Answers from the whole registry, so a runner limited to one project can still tell when work strays into a sibling's paths: {foreign: [paths]}.",
             |b, i, a: OwnsArgs| {
@@ -465,7 +503,7 @@ pub fn ops() -> Vec<Op> {
             "Pull your next piece of work: the card nearest Done that your role can act on. A card in Ready is moved to Building, and the card is claimed for you. Returns {card: null} when nothing is waiting. Then do the work, comment with what you did, and card_move it on.",
             |b, i, a: TakeArgs| {
                 let who = acting(b, i, &a.who)?;
-                let id = a.id.as_deref().map(id).transpose()?;
+                let id = a.id.as_deref().map(|r| card_ref(b, r)).transpose()?;
                 to_json(json!({ "card": b.take_in(&who, id, a.project.as_deref())? }))
             },
         ),
@@ -473,7 +511,7 @@ pub fn ops() -> Vec<Op> {
             "card_get",
             "Fetch one card with its comments.",
             |b, i, a: GetArgs| {
-                let c = b.get(id(&a.id)?)?;
+                let c = b.get(card_ref(b, &a.id)?)?;
                 if !in_scope(scope(i), &c.project) {
                     return Err(BoardError::OutOfScope(c.project));
                 }
@@ -506,7 +544,7 @@ pub fn ops() -> Vec<Op> {
             |b, i, a: BindExecutionArgs| {
                 let (who, card_id, link) = a.link();
                 let who = acting(b, i, &who)?;
-                card(b.bind_execution(id(&card_id)?, link, &who)?)
+                card(b.bind_execution(card_ref(b, &card_id)?, link, &who)?)
             },
         ),
         op(
@@ -516,7 +554,7 @@ pub fn ops() -> Vec<Op> {
                 let expected = a.expected_generation;
                 let (who, card_id, link) = a.link.link();
                 let who = acting(b, i, &who)?;
-                card(b.recover_execution(id(&card_id)?, expected, link, &who)?)
+                card(b.recover_execution(card_ref(b, &card_id)?, expected, link, &who)?)
             },
         ),
         op(
@@ -533,7 +571,7 @@ pub fn ops() -> Vec<Op> {
             "Move a card to another project (needs `triage`, or `project` for a card nobody else has claimed; a Done card needs `triage` or `close` and stays Done). Drops any claim.",
             |b, i, a: AssignArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.assign(id(&a.id)?, &a.project, &who)?)
+                card(b.assign(card_ref(b, &a.id)?, &a.project, &who)?)
             },
         ),
         op(
@@ -541,7 +579,7 @@ pub fn ops() -> Vec<Op> {
             "Move a card. Needs the capability for that transition; leaving building/qa/review needs your claim. While an admin has turned movement rules off, any move but out of Done is allowed.",
             |b, i, a: MoveArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.move_card(id(&a.id)?, a.to, &who)?)
+                card(b.move_card(card_ref(b, &a.id)?, a.to, &who)?)
             },
         ),
         op(
@@ -549,7 +587,7 @@ pub fn ops() -> Vec<Op> {
             "Claim a card so only you move it. Fails if someone else holds it.",
             |b, i, a: IdArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.claim(id(&a.id)?, &who)?)
+                card(b.claim(card_ref(b, &a.id)?, &who)?)
             },
         ),
         op(
@@ -557,7 +595,7 @@ pub fn ops() -> Vec<Op> {
             "Release your claim on a card.",
             |b, i, a: IdArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.release(id(&a.id)?, &who)?)
+                card(b.release(card_ref(b, &a.id)?, &who)?)
             },
         ),
         op(
@@ -566,7 +604,7 @@ pub fn ops() -> Vec<Op> {
             |b, i, a: UpdateArgs| {
                 let who = acting(b, i, &a.who)?;
                 card(b.edit_at(
-                    id(&a.id)?,
+                    card_ref(b, &a.id)?,
                     &who,
                     a.rev,
                     a.title.as_deref(),
@@ -584,12 +622,11 @@ pub fn ops() -> Vec<Op> {
                     .deps
                     .map(|d| {
                         d.iter()
-                            .map(String::as_str)
-                            .map(id)
+                            .map(|r| card_ref(b, r))
                             .collect::<Result<Vec<_>, _>>()
                     })
                     .transpose()?;
-                card(b.plan(id(&a.id)?, &who, a.priority, deps)?)
+                card(b.plan(card_ref(b, &a.id)?, &who, a.priority, deps)?)
             },
         ),
         op(
@@ -597,7 +634,7 @@ pub fn ops() -> Vec<Op> {
             "Add a comment to a card.",
             |b, i, a: CommentArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.comment(id(&a.id)?, &who, &a.text)?)
+                card(b.comment(card_ref(b, &a.id)?, &who, &a.text)?)
             },
         ),
     ]
@@ -639,6 +676,29 @@ mod tests {
             .expect("add");
         assert!(add.schema["properties"]["actor"].is_object());
         assert!(add.schema["properties"]["title"].is_object());
+    }
+
+    #[test]
+    fn a_card_is_named_by_id_or_by_number() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let add = json!({"actor": "nano", "role": "human", "title": "t"});
+        let first = call_as(&board, None, "card_add", add.clone()).expect("add");
+        call_as(&board, None, "card_add", add).expect("add");
+        assert_eq!(first["card"]["number"], 1);
+        for name in [first["card"]["id"].clone(), json!("#1"), json!(" 1 ")] {
+            let got = call_as(&board, None, "card_get", json!({"id": name})).expect("get");
+            assert_eq!(got["card"]["id"], first["card"]["id"]);
+        }
+        assert!(matches!(
+            call_as(&board, None, "card_get", json!({"id": "#9"})),
+            Err(CallError::Board(BoardError::Invalid(
+                "no card has that number"
+            )))
+        ));
+        assert!(matches!(
+            call_as(&board, None, "card_get", json!({"id": "#x"})),
+            Err(CallError::Board(BoardError::Invalid(_)))
+        ));
     }
 
     #[test]
@@ -1059,6 +1119,59 @@ mod tests {
                 json!({"project": "rl"})
             ),
             Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
+    }
+    #[test]
+    fn metrics_narrow_to_scope_project_and_repo() {
+        use crate::projects::Projects;
+        let projects =
+            Projects::parse(r#"{"repos": {"games": {"rl": ["a"]}, "tools": {"orch": ["b"]}}}"#)
+                .expect("projects");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        let human = ident("nano", "human");
+        for project in ["rl", "rl", "orch"] {
+            call_as(
+                &board,
+                Some(&human),
+                "card_add",
+                json!({"title": "c", "project": project}),
+            )
+            .expect("add");
+        }
+        let open = |who: &Identity, args: Value| {
+            call_as(&board, Some(who), "board_metrics", args).expect("metrics")["open"].clone()
+        };
+        assert_eq!(open(&human, json!({})), 3);
+        assert_eq!(open(&human, json!({"project": "rl"})), 2);
+        assert_eq!(open(&human, json!({"repo": "games"})), 2);
+        let mut dev = ident("claude", "builder");
+        dev.projects = Some(vec!["orch".into()]);
+        assert_eq!(
+            open(&dev, json!({})),
+            1,
+            "out-of-scope cards are not counted"
+        );
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&dev),
+                "board_metrics",
+                json!({"project": "rl"})
+            ),
+            Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&human),
+                "board_metrics",
+                json!({"repo": "nope"})
+            ),
+            Err(CallError::Board(BoardError::Invalid("unknown repository")))
         ));
     }
 }

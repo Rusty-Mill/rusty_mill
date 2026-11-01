@@ -52,6 +52,7 @@ impl LinuxPty {
             ));
         }
 
+        crate::process::refuse_raw_args(cmd, "Pty::spawn: raw_args is Windows only")?;
         let resolved = crate::LinuxSpawner.resolve(&cmd.program)?;
         let (master, slave_path) = syspty::open_pty_pair()?;
         // Sized before the child exists, not after: `spawn_attached`'s

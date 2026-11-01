@@ -74,6 +74,7 @@ the next datagram.
 Transport-independent, and **only a heuristic**: no ack proves that some output reflects
 some input. This section records the open problem; step 3 must design exact causality,
 epochs and suppression, and have them reviewed, before any implementation.
+The proposed design is [PREDICTIVE-ECHO.md](PREDICTIVE-ECHO.md).
 
 - **Ack, as mosh has it.** With a feature bit, the server stamps output with `echo_ack`:
   the newest `Input` `req` written to the PTY at least a grace period (mosh uses 50 ms)

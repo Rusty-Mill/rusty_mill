@@ -108,7 +108,10 @@ pub enum GroupSpec {
 /// Built with [`Command`], executed by a [`Spawner`]. `argv` is a list of
 /// discrete arguments end to end; any joining or quoting an OS requires is
 /// backend-internal and never caller-visible (the Windows backend's quoting
-/// module is the security boundary here — RFC v2 §5.4).
+/// module is the security boundary here — RFC v2 §5.4). The one exception
+/// is [`Command::raw_args`], whose text passes that boundary unescaped:
+/// set it only to a command line the caller means the program to read,
+/// never one with untrusted input spliced in.
 ///
 /// Not `Clone`, unlike most builder types: a [`Stdio::File`] slot owns an
 /// open OS handle with no honest "clone for a log/re-spawn" meaning (see
@@ -119,6 +122,8 @@ pub enum GroupSpec {
 pub struct Command {
     pub program: OsString,
     pub argv: Vec<OsString>,
+    /// Set by [`Command::raw_args`]. See that method's doc comment.
+    pub raw_args: Option<OsString>,
     /// Working directory for the child. Always explicit — there is no
     /// "inherit ambient cwd" variant, by design: consumers own their cwd
     /// policy (rush virtualizes it; RFC v2 §5.3 rationale).
@@ -138,6 +143,7 @@ impl Command {
         Self {
             program: program.into(),
             argv: Vec::new(),
+            raw_args: None,
             cwd: cwd.into(),
             env: EnvSpec::default(),
             stdin: Stdio::default(),
@@ -161,6 +167,23 @@ impl Command {
         S: Into<OsString>,
     {
         self.argv.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// Windows only: text placed on the command line verbatim, after the
+    /// quoted program and a space and before `argv`'s quoted arguments,
+    /// like std's `CommandExt::raw_arg`. For a program that reads its
+    /// command line itself instead of through the C runtime, `cmd.exe`
+    /// above all, where requoting an argument changes what it runs.
+    ///
+    /// Bypasses the quoting boundary, so the caller owns the text. Refused
+    /// at spawn time with `InvalidInput` when it holds a NUL or the
+    /// program is a batch file (whose arguments `cmd.exe` re-parses), and
+    /// with `Unsupported` on every non-Windows backend, which has no
+    /// command line to put it on (divergence 017).
+    #[must_use]
+    pub fn raw_args(mut self, text: impl Into<OsString>) -> Self {
+        self.raw_args = Some(text.into());
         self
     }
 

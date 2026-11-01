@@ -9,8 +9,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use super::cell::{
-    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, PackedCell, Pen, Source,
-    WIDE_TRAILER, char_width,
+    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, CellColors, PackedCell, Pen,
+    Source, WIDE_TRAILER, char_width,
 };
 use super::style::{CellStyle, Defaults, StyleId, StyleTable};
 use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
@@ -1592,6 +1592,22 @@ impl Grid {
         self.touch(y);
     }
 
+    /// The colours and attributes of the live screen cell at (`col`, `row`),
+    /// row 0 at the top. A wide glyph's trailer reports its lead cell.
+    /// `None` off the screen.
+    pub fn cell_colors(&self, col: usize, row: usize) -> Option<CellColors> {
+        let line = self.screen.get(row).filter(|_| col < self.cols)?;
+        let lead = match line.cell(col) {
+            Some(cell) if cell.is_wide_trailer() && col > 0 => col - 1,
+            _ => col,
+        };
+        let style = line.cell(lead).map_or_else(
+            || CellStyle::of(&self.default_cell()),
+            |cell| self.styles.get(cell.style()),
+        );
+        Some(style.colors())
+    }
+
     /// The cells of live screen row `y` (`cols` of them), collected; empty
     /// past the last row. Per-frame readers use [`Grid::row_cells`].
     pub fn row(&self, y: usize) -> Vec<Cell> {
@@ -1917,6 +1933,30 @@ impl Grid {
     }
 
     /// Move the cursor to column 0 of the current row.
+    /// The cursor as a position report (CPR, DECXCPR) gives it: a pending
+    /// wrap reads as the last column, as in xterm.
+    pub(crate) fn report_cursor(&self) -> (usize, usize) {
+        (
+            self.cursor.0.min(self.cols.saturating_sub(1)),
+            self.cursor.1,
+        )
+    }
+
+    /// The region cursor addressing is relative to while origin mode
+    /// (DECOM) is on, as 0-based inclusive (left, top, right, bottom);
+    /// `None` with origin mode off.
+    pub fn origin_region(&self) -> Option<(usize, usize, usize, usize)> {
+        if !self.origin_mode {
+            return None;
+        }
+        let (left, right) = if self.side_margins_active() {
+            (self.left_margin, self.right_margin)
+        } else {
+            (0, self.cols.saturating_sub(1))
+        };
+        Some((left, self.scroll_top, right, self.scroll_bottom))
+    }
+
     /// Whether DECSLRM margins narrower than the full width are in effect —
     /// the guard on every margin-aware branch, so the common case pays one
     /// boolean test.
@@ -3843,6 +3883,13 @@ impl Grid {
     /// The mode that opened the active alternate screen, if one is.
     pub(crate) fn alt_mode(&self) -> Option<AltMode> {
         self.primary.as_ref().map(|p| p.mode)
+    }
+
+    /// Whether a cursor move with `CUP` lands where its numbers say and text
+    /// written there replaces only the cells it covers: origin mode (DECOM)
+    /// and insert mode (IRM) are off, and no hyperlink (OSC 8) is open.
+    pub fn plain_cursor(&self) -> bool {
+        !self.origin_mode && !self.insert_mode && self.current_link == 0
     }
 
     /// Whether the alternate screen buffer (`?47`/`?1047`/`?1049`) is active.

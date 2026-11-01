@@ -93,6 +93,15 @@ impl Features {
     /// input lease, and its old connection is closed.
     pub const TAKEOVER: Self = Self(1 << 19);
 
+    /// [`Message::EchoAck`] and [`Message::EchoMode`] on a block's
+    /// connection, for a client that predicts the echo of its typing.
+    pub const ECHO_ACK: Self = Self(1 << 20);
+
+    /// [`Message::OpenDatagram`] and its [`Message::Datagram`] reply: a
+    /// server started with a UDP port hands out associations
+    /// (`docs/projects/mux/UDP-TRANSPORT.md`).
+    pub const DATAGRAM: Self = Self(1 << 21);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -124,6 +133,17 @@ pub struct Cursor {
     pub seq: u64,
 }
 
+/// An association's 32-byte key. Its `Debug` never shows the bytes, so a
+/// message logged whole does not leak it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DatagramKey(pub [u8; 32]);
+
+impl std::fmt::Debug for DatagramKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatagramKey(..)")
+    }
+}
+
 /// Proof, in a Hello, that this connection continues `client`: the `token`
 /// the server last gave that client in its Welcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +160,20 @@ pub enum Code {
     NotFound,
     /// The block's type has no method of the requested name.
     MethodNotFound,
+}
+
+/// Who echoes typed characters on a block's terminal, read from its termios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Echo {
+    /// `ICANON` and `ECHO` on: the line discipline echoes.
+    Kernel,
+    /// `ICANON` on, `ECHO` off: nothing echoes, as for a password.
+    Hidden,
+    /// `ICANON` off: the program draws its own echo, if any.
+    Program,
+    /// No termios to read (Windows ConPTY), the read failed, or a mode this
+    /// peer does not know.
+    Unknown,
 }
 
 /// What a new block runs: the server's default program unless `program`
@@ -261,6 +295,12 @@ pub enum Message {
     Sync {
         req: u64,
     },
+    /// Asks for a UDP association for this client process. Answered with
+    /// [`Message::Datagram`], or [`Message::Failed`] when the server has no
+    /// UDP port or no room. Negotiated with [`Features::DATAGRAM`].
+    OpenDatagram {
+        req: u64,
+    },
     /// Every session, window and block, then, with [`Features::LABELS`],
     /// every client. Answered with one [`Message::Entry`] per entity, each
     /// parent before its children, then [`Message::Done`]. Negotiated with [`Features::INSPECT`].
@@ -339,6 +379,15 @@ pub enum Message {
         reason: String,
         code: Option<Code>,
     },
+    /// The reply to [`Message::OpenDatagram`]: the server's UDP `port`,
+    /// the association's `id` and its `key`. Only ever sent over a channel
+    /// already authenticated and encrypted, such as an SSH forward.
+    Datagram {
+        req: u64,
+        port: u16,
+        id: [u8; 8],
+        key: DatagramKey,
+    },
     /// The reply to [`Message::BlockCall`].
     Text {
         req: u64,
@@ -377,7 +426,27 @@ pub enum Message {
         block: BlockId,
         data: Vec<u8>,
     },
+    /// Every byte the block's program wrote by [`ECHO_GRACE`] after `req`,
+    /// this connection's newest [`Message::Input`] it covers, is in the
+    /// Output frames before this. It never says that output is the echo.
+    /// Acks on a connection only increase. Negotiated with
+    /// [`Features::ECHO_ACK`].
+    EchoAck {
+        block: BlockId,
+        req: u64,
+    },
+    /// The block's [`Echo`] changed, or the client just attached; it
+    /// precedes the Output read after the change. Negotiated with
+    /// [`Features::ECHO_ACK`].
+    EchoMode {
+        block: BlockId,
+        mode: Echo,
+    },
 }
+
+/// How long after writing a key the server waits for its echo before
+/// acking it: [`Message::EchoAck`]'s grace.
+pub const ECHO_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
 
 // Field ids share one space across messages, so a field means the same thing everywhere.
 const REQ: u32 = 1;
@@ -423,8 +492,16 @@ const LAYOUT: u32 = 34;
 const ZOOMED: u32 = 35;
 // Hello and Welcome, with `Features::TAKEOVER`.
 const TOKEN: u32 = 36;
-// IDs 1..=TOKEN are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = TOKEN as usize;
+/// An [`Echo`]: 1 kernel, 2 hidden, 3 program, anything else unknown.
+const MODE: u32 = 37;
+/// A UDP port.
+const PORT: u32 = 38;
+/// An association's id, 8 bytes.
+const ASSOCIATION: u32 = 39;
+/// An association's key, 32 bytes.
+const KEY: u32 = 40;
+// IDs 1..=KEY are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = KEY as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -447,6 +524,7 @@ mod ty {
     pub const SPLIT: u8 = 0x12;
     pub const ZOOM: u8 = 0x13;
     pub const UNZOOM: u8 = 0x14;
+    pub const OPEN_DATAGRAM: u8 = 0x15;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -457,6 +535,9 @@ mod ty {
     pub const CHECKPOINT: u8 = 0x88;
     pub const TEXT: u8 = 0x89;
     pub const ENTRY: u8 = 0x8a;
+    pub const ECHO_ACK: u8 = 0x8b;
+    pub const ECHO_MODE: u8 = 0x8c;
+    pub const DATAGRAM: u8 = 0x8d;
 }
 
 impl Message {
@@ -516,6 +597,17 @@ impl Message {
             M::Sync { req } => {
                 out.varint(REQ, *req);
                 ty::SYNC
+            }
+            M::OpenDatagram { req } => {
+                out.varint(REQ, *req);
+                ty::OPEN_DATAGRAM
+            }
+            M::Datagram { req, port, id, key } => {
+                out.varint(REQ, *req)
+                    .varint(PORT, (*port).into())
+                    .bytes(ASSOCIATION, id)
+                    .bytes(KEY, &key.0);
+                ty::DATAGRAM
             }
             M::List { req } => {
                 out.varint(REQ, *req);
@@ -627,6 +719,14 @@ impl Message {
                 out.uuid(BLOCK, block.uuid()).bytes(DATA, data);
                 ty::OUTPUT
             }
+            M::EchoAck { block, req } => {
+                out.uuid(BLOCK, block.uuid()).varint(REQ, *req);
+                ty::ECHO_ACK
+            }
+            M::EchoMode { block, mode } => {
+                out.uuid(BLOCK, block.uuid()).varint(MODE, mode.wire());
+                ty::ECHO_MODE
+            }
         }
     }
 
@@ -681,6 +781,18 @@ impl Message {
             },
             ty::SYNC => M::Sync {
                 req: f.varint(REQ)?,
+            },
+            ty::OPEN_DATAGRAM => M::OpenDatagram {
+                req: f.varint(REQ)?,
+            },
+            ty::DATAGRAM => M::Datagram {
+                req: f.varint(REQ)?,
+                port: f.u16(PORT)?,
+                id: f
+                    .bytes(ASSOCIATION)?
+                    .try_into()
+                    .map_err(|_| f.invalid(ASSOCIATION))?,
+                key: DatagramKey(f.bytes(KEY)?.try_into().map_err(|_| f.invalid(KEY))?),
             },
             ty::CLOSE_BLOCK => M::CloseBlock {
                 req: f.varint(REQ)?,
@@ -761,6 +873,14 @@ impl Message {
             ty::OUTPUT => M::Output {
                 block: block(&f, BLOCK)?,
                 data: f.bytes(DATA)?.to_vec(),
+            },
+            ty::ECHO_ACK => M::EchoAck {
+                block: block(&f, BLOCK)?,
+                req: f.varint(REQ)?,
+            },
+            ty::ECHO_MODE => M::EchoMode {
+                block: block(&f, BLOCK)?,
+                mode: Echo::from_wire(f.varint(MODE)?),
             },
             other => return Err(Error::UnknownType(other)),
         })
@@ -1358,6 +1478,28 @@ impl Code {
             1 => Some(Self::NotFound),
             2 => Some(Self::MethodNotFound),
             _ => None,
+        }
+    }
+}
+
+impl Echo {
+    const fn wire(self) -> u64 {
+        match self {
+            Self::Unknown => 0,
+            Self::Kernel => 1,
+            Self::Hidden => 2,
+            Self::Program => 3,
+        }
+    }
+
+    /// An unknown value is [`Echo::Unknown`], under which a client does not
+    /// predict.
+    const fn from_wire(value: u64) -> Self {
+        match value {
+            1 => Self::Kernel,
+            2 => Self::Hidden,
+            3 => Self::Program,
+            _ => Self::Unknown,
         }
     }
 }

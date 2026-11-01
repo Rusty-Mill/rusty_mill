@@ -144,8 +144,18 @@ fn is_executable_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Refuse [`Command::raw_args`]: a Unix child takes an argument vector and
+/// has no command line to put raw text on (divergence 017).
+pub(crate) fn refuse_raw_args(cmd: &Command, op: &'static str) -> Result<()> {
+    if cmd.raw_args.is_none() {
+        return Ok(());
+    }
+    Err(PlatformError::new(ErrorKind::Unsupported, OsCode::None, op))
+}
+
 impl Spawner for LinuxSpawner {
     fn spawn(&self, cmd: &Command) -> Result<Box<dyn Child>> {
+        refuse_raw_args(cmd, "spawn: raw_args is Windows only")?;
         if cmd.detached && matches!(cmd.group, GroupSpec::JoinGroup(_)) {
             // `Command::detach`'s contract (`docs/decision-request-
             // detach-liveness.md`): `setsid` starting a brand-new
@@ -312,5 +322,27 @@ impl Spawner for LinuxSpawner {
 
     fn is_zombie(&self, pid: u32) -> Result<bool> {
         spawn::is_zombie(pid as c::pid_t)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LinuxSpawner;
+    use crate::LinuxPty;
+    use platform::error::ErrorKind;
+    use platform::process::{Command, Spawner};
+    use platform::term::WinSize;
+
+    #[test]
+    fn raw_args_are_unsupported() {
+        let cmd = Command::new("/bin/true", "/").raw_args("a");
+        let err = LinuxSpawner.spawn(&cmd).err().expect("spawn refused");
+        assert_eq!(err.kind, ErrorKind::Unsupported);
+        let size = WinSize { rows: 24, cols: 80 };
+        let err = LinuxPty
+            .spawn_concrete(&cmd, size)
+            .err()
+            .expect("pty refused");
+        assert_eq!(err.kind, ErrorKind::Unsupported);
     }
 }

@@ -29,4 +29,7 @@ mod varint;
 
 pub use error::Error;
 pub use frame::{MAX_FRAME, decode, encode};
-pub use message::{Code, Cursor, Entry, Features, Launch, Message, Program, Takeover};
+pub use message::{
+    Code, Cursor, DatagramKey, ECHO_GRACE, Echo, Entry, Features, Launch, Message, Program,
+    Takeover,
+};

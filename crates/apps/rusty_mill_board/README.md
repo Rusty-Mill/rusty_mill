@@ -34,8 +34,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `--projects FILE` names the projects and the repository paths each may change
   (`{"rocket_league": ["crates/apps/rocket_league"]}`, or `{"repos": {"rusty_mill": {...}, "other": {...}}}`
   for several repositories; project names are unique across them). Every repository also has a project named
-  like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (old cards to
-  `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed; a Done card stays Done and needs Triage or `close`). A credential in
+  like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (one that names none, and old cards, to
+  `default`, shown in the web UI as the Inbox, first in the side panel; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed; a Done card stays Done and needs Triage or `close`). A credential in
   `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
   `board_list` and `card_take` take a `project` filter. The UI's side panel lists repositories and then every project
@@ -104,6 +104,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 UI: the card dialog is kept in step with the board without touching unsaved text; a change to the text under an
 unsaved edit raises a conflict (keep mine / take theirs), and `card_update` takes the `rev` you last saw and refuses a
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
+Cards show their priority (High 5, Medium 3, Low 1; none shows nothing), sort highest first in each column, and
+the dialog sets it through `card_plan` (`tests/ui/priority.mjs`).
 
 Layout: `domain` (pure) / `store` + `tick` (port and adapters) / `board` (service) /
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +

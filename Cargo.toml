@@ -37,6 +37,7 @@ members = [
     "crates/libs/ui/rusty_term",
     "crates/libs/ui/rusty_term/l13",
     "crates/libs/ui/rusty_term/core",
+    "crates/libs/ui/rusty_conhost",
     "crates/libs/ui/rusty_gpu",
     "crates/libs/ui/rusty_gui",
     "crates/libs/ui/rusty_font",
@@ -111,6 +112,7 @@ members = [
     "crates/apps/rusty_mux/crates/script",
     "crates/apps/rusty_mux/crates/server",
     "crates/apps/rusty_mux/crates/status",
+    "crates/apps/rusty_mux/crates/transport",
     "crates/apps/rusty_mux/crates/tui",
     "crates/apps/rusty_hister/crates/rusty-hister-core",
     "crates/apps/rusty_hister/crates/rusty-hister-model",
@@ -301,10 +303,10 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
-    # Temporary, pinned upstream crypto patches; not first-party members.
-    "vendor/aws-sigv4",
+    # Temporary, pinned upstream crypto patch; not a first-party member.
     "vendor/jsonwebtoken",
     "crates/libs/ui/rusty_term/fuzz",
+    "crates/libs/ui/rusty_conhost/fuzz",
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
     "crates/foundation/rusty_libc/bench",
@@ -411,7 +413,6 @@ ignored = [
     "r2d2_sqlite",
     "regex-lite",
     "rush",
-    "rusty_aead",
     "rusty_bot",
     "rusty_pk",
     "rusty_routine",
@@ -935,8 +936,11 @@ rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }
 rusty_mux_script = { path = "crates/apps/rusty_mux/crates/script" }
 rusty_mux_server = { path = "crates/apps/rusty_mux/crates/server" }
 rusty_mux_status = { path = "crates/apps/rusty_mux/crates/status" }
+rusty_mux_transport = { path = "crates/apps/rusty_mux/crates/transport" }
 # rusty_term's headless engine, for consumers that must not link its tokio front end.
 rusty_term_core = { path = "crates/libs/ui/rusty_term/core" }
+# Our own Windows console host (docs/projects/term/conhost/).
+rusty_conhost = { path = "crates/libs/ui/rusty_conhost" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }
@@ -1027,7 +1031,6 @@ unsafe_code = "warn"
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
 
-# RUSTSEC-2026-0387: pinned source patches, provenance/removal in vendor/README.md.
+# RUSTSEC-2026-0387: pinned source patch, provenance/removal in vendor/README.md.
 [patch.crates-io]
-aws-sigv4 = { path = "vendor/aws-sigv4" }
 jsonwebtoken = { path = "vendor/jsonwebtoken" }

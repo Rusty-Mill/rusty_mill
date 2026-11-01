@@ -9,7 +9,8 @@
 
 use super::cell::{
     ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_OVERLINE, ATTR_PROTECTED,
-    ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Pen, Source, UnderlineStyle,
+    ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, CellColors, Pen, Source,
+    UnderlineStyle,
 };
 use super::charset::Charset;
 use super::color::{Palette, Theme};
@@ -420,11 +421,34 @@ impl AnsiParser {
         }
     }
 
+    /// Whether the next character would be written as after `SGR 0` with
+    /// nothing else set: between sequences, with the reset rendition,
+    /// US-ASCII in GL, unprotected. A client drawing over a passed-through
+    /// screen can then put the rendition back exactly with `SGR 0`, and its
+    /// bytes cannot land inside an unfinished escape or UTF-8 sequence.
+    pub fn plain(&self) -> bool {
+        self.state == ParserState::Ground
+            && self.pen == Pen::default_colors(self.palette.fg, self.palette.bg)
+            && !self.protected
+            && self.charsets[self.gl] == Charset::Ascii
+    }
+
     /// Drain the bytes the parser owes the host in reply to queries (DA1/DA2/
     /// DSR). Returns an empty vector when there is nothing to send. The driver
     /// calls this after `advance` and writes the result to the PTY master.
     pub fn take_responses(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.responses)
+    }
+
+    /// The current SGR pen, the one the next printed character takes.
+    pub fn pen_colors(&self) -> CellColors {
+        self.pen.colors()
+    }
+
+    /// The live 256-entry palette as `0x00RRGGBB`, OSC 4 / 104 and theme
+    /// changes included.
+    pub fn palette(&self) -> &[u32; 256] {
+        self.palette.colors()
     }
 
     /// Live theme switch (config reload). Returns the previous seed theme so
@@ -1079,8 +1103,9 @@ impl AnsiParser {
     /// modes (mouse, focus, bracketed paste, and the Kitty keyboard / xterm
     /// modifyOtherKeys protocols) are *relayed* to the host terminal so it
     /// produces the corresponding input — see [`is_host_input_mode`].
-    /// Everything else (cursor visibility `25`, autowrap `7`, …) is consumed and
-    /// ignored so it never leaks as text.
+    /// Modes the grid keeps (cursor visibility `25`, autowrap `7`, origin `6`,
+    /// …) set grid state; everything else is consumed and ignored so it never
+    /// leaks as text.
     fn handle_private_csi(&mut self, cmd: u8, g: &mut Grid) {
         // DA2 (Secondary Device Attributes): `CSI > c`. Reply with a terminal
         // type (0), a firmware "version", and a ROM cartridge field (0) — the
@@ -1163,7 +1188,7 @@ impl AnsiParser {
             match param {
                 996 => self.responses.extend_from_slice(&g.color_scheme_report()),
                 6 => {
-                    let (cx, cy) = g.cursor;
+                    let (cx, cy) = g.report_cursor();
                     self.responses
                         .extend_from_slice(format!("\x1b[?{};{};1R", cy + 1, cx + 1).as_bytes());
                 }
@@ -1672,7 +1697,7 @@ impl AnsiParser {
                 5 => self.responses.extend_from_slice(b"\x1b[0n"), // terminal OK
                 6 => {
                     // CPR — report the cursor position, 1-based row;col.
-                    let (cx, cy) = g.cursor;
+                    let (cx, cy) = g.report_cursor();
                     self.responses
                         .extend_from_slice(format!("\x1b[{};{}R", cy + 1, cx + 1).as_bytes());
                 }

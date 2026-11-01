@@ -142,11 +142,19 @@ pub fn read_batch(handle: &mut dyn BackendHandle, buf: &mut [u8]) -> Result<usiz
 
 // Each backend only compiles on its own platform — the Unix one leans on
 // platform-specific libc (openpty, termios, …), the Windows one on ConPTY.
+#[cfg(any(windows, test))]
+mod cmdline;
+#[cfg(windows)]
+pub mod own;
+#[cfg(any(windows, test))]
+mod reaper;
 #[cfg(unix)]
 pub mod unix;
 #[cfg(windows)]
 pub mod windows;
 
+#[cfg(windows)]
+pub use own::OwnBackend;
 #[cfg(unix)]
 pub use unix::UnixBackend;
 #[cfg(windows)]

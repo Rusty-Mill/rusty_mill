@@ -1,7 +1,8 @@
 //! `Spawner`/`Child` impls over the sys layer (RFC v2 §5.4; extraction
 //! map step 2, first slice — spawn/wait/resolve; Job-Object groups and
 //! kill-tree follow with suspended spawn). No OS-level code here; the
-//! command line comes exclusively from [`crate::winargv`].
+//! command line comes exclusively from `crate::cmdline`, over
+//! [`crate::winargv`].
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -11,7 +12,6 @@ use platform::process::{Child, Command, ExitStatus, GroupHandle, GroupSpec, Sign
 
 use crate::sys::handle::OwnedWinHandle;
 use crate::sys::proc;
-use crate::winargv;
 
 /// Whether process `pid` runs as the same user as this one (token user
 /// SIDs compared). `Err` if the process is gone or its token cannot be
@@ -276,12 +276,10 @@ impl Spawner for WindowsSpawner {
                 "spawn: detach with GroupSpec::NewGroup",
             ));
         }
-        let resolved = self.resolve(&cmd.program)?;
-        let args: Vec<&OsStr> = cmd.argv.iter().map(OsString::as_os_str).collect();
         // The security boundary: winargv classifies the resolved program
         // (.bat/.cmd get cmd-rules quoting or refusal) and builds the one
         // command line handed to CreateProcessW.
-        let line = winargv::build_command_line(&resolved, &args)?;
+        let line = crate::cmdline::command_line(cmd)?;
         let (process, job, pid, pipes) = proc::spawn(
             &line,
             &cmd.cwd,

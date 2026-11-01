@@ -22,6 +22,10 @@ pub mod checkpoint;
 #[cfg(any(target_os = "linux", windows))]
 mod conn;
 #[cfg(any(target_os = "linux", windows))]
+mod datagram;
+#[cfg(any(target_os = "linux", windows))]
+mod echo;
+#[cfg(any(target_os = "linux", windows))]
 mod history;
 #[cfg(any(target_os = "linux", windows))]
 mod keys;
@@ -37,12 +41,13 @@ pub mod style;
 #[cfg(any(target_os = "linux", windows))]
 mod terminal;
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::time::Duration;
 
-use rusty_tokio::io::UnixListener;
 #[cfg(any(target_os = "linux", windows))]
 use rusty_tokio::io::UnixStream;
+use rusty_tokio::io::{UdpSocket, UnixListener};
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,11 +58,59 @@ pub struct Config {
     pub args: Vec<OsString>,
     /// The working directory of a new block, unless the request names one.
     pub cwd: OsString,
+    /// Which console host runs a block's program on Windows; other
+    /// platforms ignore it.
+    pub console_host: ConsoleHost,
 }
 
-/// Accepts clients on `listener` until accepting fails. Must run inside a
-/// `rusty_tokio` `LocalRuntime`, because connection and PTY tasks are
-/// spawned with `spawn_local`.
+/// The Windows console host behind each block.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConsoleHost {
+    /// Windows' ConPTY.
+    #[default]
+    ConPty,
+    /// Our own host, `rusty_conhost`.
+    Own,
+}
+
+impl ConsoleHost {
+    /// The variable that picks the host: `conpty` (the default when it is
+    /// unset) or `own`.
+    pub const ENV: &str = "RUSTY_CONSOLE_HOST";
+
+    /// The host [`Self::ENV`] names. Any other value is an error, never a
+    /// silent fallback to ConPTY.
+    pub fn from_env() -> Result<Self, String> {
+        Self::parse(std::env::var_os(Self::ENV).as_deref())
+    }
+
+    /// The host `value` names, in any case; `None` is the default.
+    pub fn parse(value: Option<&OsStr>) -> Result<Self, String> {
+        let Some(value) = value else {
+            return Ok(Self::default());
+        };
+        match value.to_str().map(str::to_ascii_lowercase).as_deref() {
+            Some("conpty") => Ok(Self::ConPty),
+            Some("own") => Ok(Self::Own),
+            _ => Err(format!(
+                "{}={}: not a console host (conpty or own)",
+                Self::ENV,
+                value.display()
+            )),
+        }
+    }
+}
+
+/// The server's UDP side (`--udp`): one socket for every association.
+pub struct Udp {
+    pub socket: UdpSocket,
+    /// How long an association, and the clients on it, outlive silence.
+    pub idle: Duration,
+}
+
+/// Accepts clients on `listener` until accepting fails, then stops as
+/// [`serve_until`] does. Must run inside a `rusty_tokio` `LocalRuntime`,
+/// because connection and PTY tasks are spawned with `spawn_local`.
 ///
 /// The server has no authentication, so only peers running as this
 /// process's user are served (the effective uid on Linux, the token's user
@@ -65,7 +118,42 @@ pub struct Config {
 /// whatever the socket file's permissions are.
 #[cfg(any(target_os = "linux", windows))]
 pub async fn serve(listener: UnixListener, config: Config) -> io::Result<()> {
-    serve_for(listener, config, peer_check).await
+    serve_for(listener, config, None, peer_check, std::future::pending()).await
+}
+
+/// [`serve`], and offers clients `DATAGRAM`: each may then move its
+/// connections onto an association on `udp`. Ends when accepting or
+/// receiving fails.
+#[cfg(any(target_os = "linux", windows))]
+pub async fn serve_udp(listener: UnixListener, config: Config, udp: Udp) -> io::Result<()> {
+    serve_for(
+        listener,
+        config,
+        Some(udp),
+        peer_check,
+        std::future::pending(),
+    )
+    .await
+}
+
+/// [`serve`], or [`serve_udp`] when `udp` is given, until `stop` resolves:
+/// a clean stop. Either way it ends, every block's program is ended, and
+/// every console we host ([`ConsoleHost::Own`]) is hung up; the call
+/// returns once each has shut down or 6 s have passed, whichever is first,
+/// logging if one had not. A console that has shut down has closed and
+/// tried to end each client still attached, 5 s after CTRL_CLOSE; one it
+/// could not open or end may still run. Dropping the
+/// future instead stops nothing: the tasks it spawned on the runtime keep
+/// serving connected clients and their blocks until the runtime itself is
+/// dropped, which ends the programs without that wait.
+#[cfg(any(target_os = "linux", windows))]
+pub async fn serve_until(
+    listener: UnixListener,
+    config: Config,
+    udp: Option<Udp>,
+    stop: impl Future<Output = ()>,
+) -> io::Result<()> {
+    serve_for(listener, config, udp, peer_check, stop).await
 }
 
 /// Whether a connection's peer may be served.
@@ -108,7 +196,9 @@ fn peer_check(stream: &UnixStream) -> io::Result<Peer> {
 async fn serve_for(
     listener: UnixListener,
     config: Config,
+    udp: Option<Udp>,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+    stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let socket = listener
         .local_addr()
@@ -117,11 +207,58 @@ async fn serve_for(
         .and_then(Result::ok);
     let state = state::State::shared(config, socket);
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
+    let served = rusty_tokio::select! {
+        result = serve_clients(listener, state.clone(), udp, allowed) => result,
+        () = stop => Ok(()),
+    };
+    let hosts = state.borrow_mut().stop();
+    if !hosts.shut_down(pty::SHUTDOWN).await {
+        eprintln!(
+            "rusty-mux-server: a console was still shutting down after {:?}",
+            pty::SHUTDOWN
+        );
+    }
+    served
+}
+
+/// Serves clients on `listener`, and on `udp` if given, until either fails.
+#[cfg(any(target_os = "linux", windows))]
+async fn serve_clients(
+    listener: UnixListener,
+    state: state::Shared,
+    udp: Option<Udp>,
+    allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+) -> io::Result<()> {
+    let Some(udp) = udp else {
+        return accept(listener, state, allowed).await;
+    };
+    let registry = datagram::Registry::new(udp.socket.local_addr()?.port());
+    let lifetimes = state::Lifetimes {
+        idle: udp.idle,
+        lease: datagram::LEASE_SILENCE,
+    };
+    state
+        .borrow_mut()
+        .offer_datagrams(registry.clone(), lifetimes);
+    let socket = std::rc::Rc::new(udp.socket);
+    rusty_tokio::select! {
+        result = accept(listener, state.clone(), allowed) => result,
+        result = datagram::serve(socket, registry, state, udp.idle, datagram::LEASE_SILENCE) => result,
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+async fn accept(
+    listener: UnixListener,
+    state: state::Shared,
+    allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+) -> io::Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         match allowed(&stream) {
             Ok(Peer::Allowed) => {
-                rusty_tokio::task::spawn_local(conn::run(state.clone(), stream));
+                let (rd, wr) = stream.into_split();
+                rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr, |_, _| {}));
             }
             Ok(Peer::Refused(who)) => eprintln!("rusty-mux-server: refusing a client of {who}"),
             Err(err) => eprintln!("rusty-mux-server: reading a client's credentials: {err}"),
@@ -134,8 +271,28 @@ mod tests;
 
 #[cfg(not(any(target_os = "linux", windows)))]
 pub async fn serve(_listener: UnixListener, _config: Config) -> io::Result<()> {
-    Err(io::Error::new(
+    Err(unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub async fn serve_udp(_listener: UnixListener, _config: Config, _udp: Udp) -> io::Result<()> {
+    Err(unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub async fn serve_until(
+    _listener: UnixListener,
+    _config: Config,
+    _udp: Option<Udp>,
+    _stop: impl Future<Output = ()>,
+) -> io::Result<()> {
+    Err(unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn unsupported() -> io::Error {
+    io::Error::new(
         io::ErrorKind::Unsupported,
         "rusty_mux_server hosts PTYs on Linux and Windows only",
-    ))
+    )
 }

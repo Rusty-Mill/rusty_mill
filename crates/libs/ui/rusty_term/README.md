@@ -140,10 +140,21 @@ theme = "gruvbox-dark"   # preset: default, gruvbox-dark, dracula,
 On Windows, `shell` accepts a bare name resolved through the standard search
 path — `"powershell"`, `"pwsh"`, `"wsl"`, `"cmd"` all work — as well as a full
 path (quoted automatically if it contains spaces) and trailing arguments
-(`"wsl -d Ubuntu"`, `"cmd /K clink inject"`):
+(`"wsl -d Ubuntu"`, `"cmd /K clink inject"`). Arguments after `--` are quoted
+for the program that reads them. When that is cmd.exe or a batch file, cmd's
+rules apply on both hosts, so an argument can't run a command: a plain word
+goes bare, anything else in quotes. An argument with `%` or a line break, and
+one holding `/c`, `/k` or `/r` before cmd has its switch (other than the
+switch itself, as in `-- cmd /c dir`), are refused with an error. Only plain
+words may follow a shell whose own text leaves a quote open, holds a `%`, or
+is written for cmd's quote stripping (`/s`, or a command starting `""`), and
+`!` is refused after `/v:on`:
 
 ```toml
 shell = "pwsh"           # or "wsl", "powershell", "C:\\tools\\nu.exe", ...
+
+[console]                # Windows only
+host = "own"             # conpty (default) | own
 
 [window]                 # windowed (--gui) front-end only
 cols = 120               # initial size in cells; default 80x24
@@ -172,6 +183,16 @@ cursor = "#aeafad"
 color0 = "#282a2e"       # ANSI palette, color0..color15
 color1 = "#cc6666"
 ```
+
+On Windows, `[console] host` chooses who serves the shell's console:
+`"conpty"` (the default) is Windows' ConPTY, and `"own"` is rusty_conhost, our
+own console host. It is read at launch. If `own` can't start (an older
+Windows without a usable ConDrv, for example), the error is shown and the
+terminal does not fall back to ConPTY. With `own`, the program is found in
+`shell` by the rules `CreateProcessW` uses, and the rest of the line reaches
+it as written, as under ConPTY. Only the program token differs: the child
+sees it as a quoted full path, followed by one space (cmd's `%CMDCMDLINE%`
+shows this). A batch file runs through cmd.exe `/c`, as `CreateProcessW` runs it. The web bridge always uses ConPTY.
 
 The `[colors]` theme is what every reset path (`RIS`, `DECSTR`, OSC
 104/110/111/112) restores, so a configured look survives a `reset` exactly

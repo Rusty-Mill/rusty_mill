@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::{Client, block_for, new_block, start_server_with, window_for};
 use rusty_mux_proto::Message;
-use rusty_mux_server::Config;
+use rusty_mux_server::{Config, ConsoleHost};
 
 const BLOCKS: usize = 8;
 
@@ -18,6 +18,7 @@ fn config(program: &str, args: &[&str]) -> Config {
         program: program.into(),
         args: args.iter().map(Into::into).collect(),
         cwd: "/".into(),
+        console_host: ConsoleHost::default(),
     }
 }
 

@@ -8,7 +8,7 @@ use rusty_wire::Writer;
 use super::*;
 use crate::field::Out;
 use crate::schema::Value;
-use crate::{Code, Cursor, Entry, Features, Launch, Program, Takeover};
+use crate::{Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Program, Takeover};
 
 const REQ_ID: u32 = 1;
 
@@ -117,6 +117,13 @@ fn every_message_round_trips() {
         },
         Message::CloseBlock { req: 10, block },
         Message::Sync { req: 14 },
+        Message::OpenDatagram { req: 16 },
+        Message::Datagram {
+            req: 16,
+            port: u16::MAX,
+            id: [9; 8],
+            key: DatagramKey([0xa5; 32]),
+        },
         Message::BlockCall {
             req: 15,
             block,
@@ -289,6 +296,23 @@ fn every_message_round_trips() {
         Message::Output {
             block,
             data: Vec::new(),
+        },
+        Message::EchoAck { block, req: 14 },
+        Message::EchoMode {
+            block,
+            mode: Echo::Kernel,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Hidden,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Program,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Unknown,
         },
     ];
     for message in messages {
@@ -816,6 +840,8 @@ fn feature_bits_are_distinct() {
         Features::CHECKPOINT_V4,
         Features::CHECKPOINT_V5,
         Features::CHECKPOINT_V6,
+        Features::TAKEOVER,
+        Features::ECHO_ACK,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -1090,4 +1116,41 @@ fn a_window_entry_from_an_older_server_has_no_layout() {
             ..
         }
     ));
+}
+
+#[test]
+fn an_unknown_echo_mode_decodes_as_unknown() {
+    let block = Uuid::new_v4();
+    let frame = raw_frame(0x8c, |out| {
+        out.uuid(4, block).varint(37, 9);
+    });
+    assert_eq!(
+        decode(&frame).expect("decode").map(|(m, _)| m),
+        Some(Message::EchoMode {
+            block: BlockId::from_uuid(block),
+            mode: Echo::Unknown,
+        })
+    );
+}
+
+#[test]
+fn a_datagram_key_never_shows_in_debug_and_a_short_one_is_refused() {
+    let message = Message::Datagram {
+        req: 1,
+        port: 60001,
+        id: [1; 8],
+        key: DatagramKey([0xab; 32]),
+    };
+    let shown = format!("{message:?}");
+    assert!(
+        shown.contains("DatagramKey(..)") && !shown.contains("171"),
+        "{shown}"
+    );
+    let short = raw_frame(0x8d, |out| {
+        out.varint(1, 1)
+            .varint(38, 60001)
+            .bytes(39, &[1; 8])
+            .bytes(40, &[0xab; 31]);
+    });
+    assert!(decode(&short).is_err());
 }
