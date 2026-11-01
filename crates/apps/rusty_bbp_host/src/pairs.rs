@@ -69,7 +69,7 @@ pub struct RunFacts {
     /// The run's harnesses cost more than the per-run cap.
     pub over_cap: bool,
     /// The `reads_per_turn` the task was opened with (its `TaskOpened`
-    /// event). A run whose limit was later extended does not load.
+    /// event). A run whose log holds any budget extension does not load.
     pub reads_per_turn: u64,
     /// The models each role's turns used, from the harness output.
     pub role_models: BTreeMap<String, BTreeSet<String>>,
@@ -641,28 +641,40 @@ pub fn check_segments(segments: &[String], build_sha: &str) -> Result<Option<usi
     Ok((segments.len() > 1).then_some(segments.len()))
 }
 
-/// The `reads_per_turn` a run was opened with. The final card is not the
-/// run's limit: a human extension changes it after turns already ran under the
-/// opened one, so the arms of a pair could differ while both cards match the
-/// manifest. A run with any `reads_per_turn` extension, even one back to the
-/// opened value, ran under more than one limit and refuses (#1327).
+/// The `reads_per_turn` a run was opened with. A run whose log holds any
+/// budget extension, in any field and even one back to the opened value, is
+/// void: it ran under more than one budget, so its arms are not comparable
+/// (#1327), and an extended `messages` or `bytes` total would also hide an
+/// earlier overshoot, which is checked against the folded budget. `bbp human
+/// extend` refuses on an evidence task; this catches one logged anyway (owner
+/// decision, 2026-11-01).
 fn opened_reads_per_turn(events: &[Event]) -> Result<u64, String> {
     let Some(Event::TaskOpened { budget, .. }) = events.first() else {
         return Err("the log does not start with TaskOpened".to_owned());
     };
     let extended = events.iter().find_map(|e| match e {
-        Event::BudgetExtended {
-            field: BudgetField::ReadsPerTurn,
-            limit,
-        } => Some(*limit),
+        Event::BudgetExtended { field, limit } => Some((*field, *limit)),
         _ => None,
     });
     match extended {
-        Some(limit) => Err(format!(
-            "reads_per_turn was opened at {} and extended to {limit}: the run ran under more than one limit",
-            budget.reads_per_turn
+        Some((field, limit)) => Err(format!(
+            "{} was opened at {} and extended to {limit}: an evidence run with a budget extension is void",
+            field_name(field),
+            budget.get(field)
         )),
         None => Ok(budget.reads_per_turn),
+    }
+}
+
+/// The name `bbp human extend` takes for `f`.
+fn field_name(f: BudgetField) -> &'static str {
+    match f {
+        BudgetField::Messages => "messages",
+        BudgetField::Bytes => "bytes",
+        BudgetField::Reads => "reads",
+        BudgetField::ReadsPerTurn => "reads_per_turn",
+        BudgetField::Turns => "turns",
+        BudgetField::Iterations => "iterations",
     }
 }
 
