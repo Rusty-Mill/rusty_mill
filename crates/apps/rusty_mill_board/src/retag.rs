@@ -6,9 +6,9 @@
 //! after it, each synced. So a crash or a failed write midway still leaves on disk every
 //! card's origin and which cards the retag touched. Each plan entry carries the card's
 //! revision: [`apply`] retags a card only at that revision, and [`undo`] restores only a card
-//! the record says the retag wrote (or began to write), still in the column it put it in at
-//! the very next revision. A card anyone has changed since, or the retag never reached, is
-//! left alone and reported.
+//! the record says the retag wrote (`done`), still in the column it put it in at the very
+//! next revision. A card anyone has changed since, the retag never reached, or whose write
+//! began but is not recorded as done (its outcome unknown) is left alone and reported.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
