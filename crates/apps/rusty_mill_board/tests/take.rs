@@ -835,3 +835,102 @@ fn a_take_into_a_column_the_actor_does_not_work_leaves_the_card_alone() {
         "not moved, not claimed"
     );
 }
+
+/// A store that, on the first `get` once armed, moves the card to `to` behind the reader's
+/// back (a rival's move between `take`'s read and its commit) and returns what it had.
+struct MoveOnGet {
+    inner: MemStore,
+    to: Column,
+    armed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Store for MoveOnGet {
+    fn get(&self, id: uuid::Uuid) -> Result<Option<Card>, BoardError> {
+        let seen = self.inner.get(id)?;
+        if self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            let card = seen.clone().expect("card");
+            let moved = Card {
+                column: self.to.clone(),
+                rev: card.rev + 1,
+                ..card
+            };
+            self.inner
+                .replace(&moved, Event::of(&moved, EventKind::Moved, "rival"))?;
+        }
+        Ok(seen)
+    }
+    fn list(&self) -> Result<Vec<Card>, BoardError> {
+        self.inner.list()
+    }
+    fn insert(&self, c: &Card, e: Event) -> Result<u64, BoardError> {
+        self.inner.insert(c, e)
+    }
+    fn replace(&self, c: &Card, e: Event) -> Result<u64, BoardError> {
+        self.inner.replace(c, e)
+    }
+    fn events_since(
+        &self,
+        after: Option<uuid::Uuid>,
+        limit: usize,
+    ) -> Result<Vec<Event>, BoardError> {
+        self.inner.events_since(after, limit)
+    }
+    fn last_event_id(&self) -> Result<Option<uuid::Uuid>, BoardError> {
+        self.inner.last_event_id()
+    }
+    fn reserve_number(&self, card: uuid::Uuid, floor: u64) -> Result<u64, BoardError> {
+        self.inner.reserve_number(card, floor)
+    }
+}
+
+#[test]
+fn a_card_moved_to_another_queue_into_the_same_column_is_not_taken() {
+    // q1 (builders take) and q2 (qa takes) both enter w by a Build move. A builder reads the
+    // card in q1; before its commit a rival moves it to q2. The take must not follow it there.
+    let base = Workflow::default();
+    let col = |id: &str, kind: Kind, takers: &[Capability]| ColumnDef {
+        id: Column::new(id).expect("id"),
+        label: id.to_owned(),
+        kind,
+        takers: takers.iter().copied().collect(),
+    };
+    let mut columns = base.columns().to_vec();
+    columns.insert(1, col("q1", Kind::Queue, &[Capability::Build]));
+    columns.insert(2, col("q2", Kind::Queue, &[Capability::Qa]));
+    columns.insert(3, col("w", Kind::Work, &[Capability::Build]));
+    let mv = |from: &str, to: &str, cap: Capability| Transition {
+        from: Column::new(from).expect("from"),
+        to: Column::new(to).expect("to"),
+        cap,
+        gate: false,
+    };
+    let flow = Workflow::new(
+        columns,
+        vec![
+            mv("backlog", "q1", Capability::Triage),
+            mv("q1", "w", Capability::Build),
+            mv("q2", "w", Capability::Build),
+        ],
+    )
+    .expect("valid");
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = MoveOnGet {
+        inner: MemStore::default(),
+        to: Column::new("q2").expect("id"),
+        armed: Arc::clone(&armed),
+    };
+    let b = Board::new(store, Roles::default()).with_workflow(flow);
+    let h = who(&b, "nano", "human");
+    let c = b.add(&h, "a", "", vec![]).expect("add");
+    b.move_card(c.id, &Column::new("q1").expect("id"), &h)
+        .expect("queued");
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    let dev = who(&b, "claude", "builder");
+    assert!(b.take(&dev, None).expect("take").is_none());
+    let after = b.get(c.id).expect("card");
+    assert_eq!(
+        (after.column.as_str(), after.claim),
+        ("q2", None),
+        "left where the rival put it"
+    );
+}

@@ -755,7 +755,9 @@ impl<S: Store> Board<S> {
             )));
         }
         self.apply_in(flow, id, by, EventKind::Moved, |c, now| {
-            if flow.entry_column(&c.column) != Some(enter) {
+            // Still in the queue it was taken from: a card moved meanwhile to another queue
+            // (even one entering the same column) may not be this actor's to take.
+            if c.column != current.column {
                 return Err(BoardError::Conflict);
             }
             self.check_deps_done(c)?;
