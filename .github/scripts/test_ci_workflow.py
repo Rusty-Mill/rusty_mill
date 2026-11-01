@@ -1075,6 +1075,60 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 self.assertIn(f"run: sh {script}", self.workflow)
                 self.assertTrue((WORKFLOW.parents[2] / script).is_file())
 
+    def _crypto_valgrind_step(self) -> str:
+        job = self.workflow.split("  crypto-constant-time:\n", 1)[1]
+        return job.split("      - name: Install valgrind\n", 1)[1].split("      - name:", 1)[0]
+
+    def test_crypto_valgrind_setup_has_blocking_time_and_acquisition_bounds(self) -> None:
+        step = self._crypto_valgrind_step()
+        self.assertIn("        timeout-minutes: 10\n", step)
+        self.assertIn("        shell: bash\n", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertIn("Acquire::Retries=3", step)
+        self.assertIn("Acquire::http::Timeout=30", step)
+        self.assertIn("Acquire::https::Timeout=30", step)
+        self.assertIn("--error-on=any update", step)
+        self.assertIn("install -y --no-install-recommends valgrind", step)
+        self.assertIn("valgrind --version", step)
+        self.assertIn("objdump --version | head -1", step)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is needed to run valgrind setup")
+    def test_crypto_valgrind_setup_propagates_apt_failures(self) -> None:
+        script = textwrap.dedent(self._crypto_valgrind_step().split("        run: |\n", 1)[1])
+        # Execute the real workflow body with shell functions at the sudo/tool
+        # boundary: no root access, network, or package installation is needed.
+        mocks = r'''
+sudo() {
+  printf '%s\n' "$*"
+  case " $* " in
+    *" update "*) return "$UPDATE_STATUS" ;;
+    *" install "*) return "$INSTALL_STATUS" ;;
+    *) return 99 ;;
+  esac
+}
+valgrind() { echo valgrind-diagnostic; }
+objdump() { echo objdump-diagnostic; }
+'''
+        # Include a timeout exit status as well as apt's usual error status.
+        for update_status, install_status in ((0, 0), (100, 0), (0, 100), (124, 0), (0, 124)):
+            with self.subTest(update=update_status, install=install_status):
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", mocks + script],
+                    env={**os.environ, "UPDATE_STATUS": str(update_status), "INSTALL_STATUS": str(install_status)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, update_status or install_status)
+                self.assertEqual(" install " in result.stdout, update_status == 0)
+                self.assertEqual("valgrind-diagnostic" in result.stdout, result.returncode == 0)
+                self.assertEqual("objdump-diagnostic" in result.stdout, result.returncode == 0)
+                for call in result.stdout.splitlines():
+                    if call.startswith("apt-get "):
+                        self.assertIn("-o Acquire::Retries=3", call)
+                        self.assertIn("-o Acquire::http::Timeout=30", call)
+                        self.assertIn("-o Acquire::https::Timeout=30", call)
+                        if " update" in call:
+                            self.assertIn("--error-on=any update", call)
+
 
 if __name__ == "__main__":
     unittest.main()
