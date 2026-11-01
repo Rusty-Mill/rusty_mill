@@ -163,10 +163,13 @@ impl TimerDriver {
 
     fn event_loop(&self) {
         loop {
+            let guard = self.inner.lock().unwrap();
+            // Checked with `inner` held, which `shutdown` takes to set the
+            // flag: either the flag is seen here, or this thread is already
+            // waiting when `shutdown`'s notify comes.
             if self.shutdown.load(Ordering::Acquire) {
                 return;
             }
-            let guard = self.inner.lock().unwrap();
             let now = self.clock.now();
             match guard.heap.peek().copied() {
                 None => {
@@ -258,7 +261,12 @@ impl TimerDriver {
     }
 
     pub(crate) fn shutdown(&self) {
-        self.shutdown.store(true, Ordering::Release);
+        // Set under `inner` so it cannot land between the timer thread's
+        // check and its wait (see `event_loop`).
+        {
+            let _inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            self.shutdown.store(true, Ordering::Release);
+        }
         self.condvar.notify_all();
         if let Some(handle) = self.thread.lock().unwrap().take() {
             let _ = handle.join();
@@ -299,6 +307,33 @@ mod tests {
             "a registration made after the background thread already exited must wake \
              immediately -- nothing is ever coming back to fire it otherwise"
         );
+    }
+
+    /// A shutdown that lands after the timer thread checked the flag but
+    /// before it started waiting still ends the wait (#582). The test
+    /// holds `inner` so the thread stops between the two, then shuts down.
+    #[test]
+    fn shutdown_between_the_flag_check_and_the_wait_is_not_lost() {
+        let driver = Arc::new(TimerDriver::new());
+        let deadline = driver.now() + Duration::from_secs(3600);
+        driver.register(deadline, Waker::noop().clone());
+        let held = driver.inner.lock().unwrap();
+        driver.start();
+        // Let the thread pass its flag check and block on `inner`. Too
+        // short a pause can only make the test pass vacuously, never fail.
+        std::thread::sleep(Duration::from_millis(100));
+        let (done, finished) = std::sync::mpsc::channel();
+        let stopper = driver.clone();
+        std::thread::spawn(move || {
+            stopper.shutdown();
+            let _ = done.send(());
+        });
+        // Give `shutdown` time to publish and notify while nobody waits.
+        std::thread::sleep(Duration::from_millis(100));
+        drop(held);
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .expect("shutdown returns instead of waiting out the hour-long timer");
     }
 
     #[test]
