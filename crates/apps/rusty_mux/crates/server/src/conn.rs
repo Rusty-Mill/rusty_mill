@@ -7,7 +7,7 @@ use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use rusty_mux_core::ClientId;
+use rusty_mux_core::{ClientId, Transport};
 use rusty_mux_proto::{Message, decode};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use rusty_tokio::sync::Notify;
@@ -23,6 +23,7 @@ pub(crate) async fn run<R, W>(
     state: Shared,
     mut rd: R,
     wr: W,
+    transport: Transport,
     on_client: impl FnOnce(ClientId, &Rc<Notify>),
 ) where
     R: AsyncRead + Unpin,
@@ -41,7 +42,9 @@ pub(crate) async fn run<R, W>(
         Err(err) => return eprintln!("rusty-mux-server: handshake: {err}"),
     };
     let (out, inbox, cancel) = outbox();
-    let client = state.borrow_mut().connect(out, features, resume, takeover);
+    let client = state
+        .borrow_mut()
+        .connect(out, transport, features, resume, takeover);
     on_client(client, &cancel);
     // One owning future races both halves and eviction. Dropping the losing
     // futures closes both socket halves and discards the receiver/backlog,
@@ -227,6 +230,7 @@ mod regression {
                     console_host: ConsoleHost::default(),
                 },
                 None,
+                crate::state::test_owner(),
             );
             let (peer, server) = UnixStream::pair().unwrap();
             peer.write_all(
@@ -240,7 +244,13 @@ mod regression {
             .await
             .unwrap();
             let (rd, wr) = server.into_split();
-            let task = rusty_tokio::task::spawn_local(run(state.clone(), rd, wr, |_, _| {}));
+            let task = rusty_tokio::task::spawn_local(run(
+                state.clone(),
+                rd,
+                wr,
+                Transport::Socket,
+                |_, _| {},
+            ));
             rusty_tokio::task::yield_now().await;
             let client = state.borrow().test_client();
             // The peer stops reading. Force the writer into a pending write_all,
@@ -312,14 +322,20 @@ mod tests {
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
             };
-            let state = State::shared(config, None);
+            let state = State::shared(config, None, crate::state::test_owner());
             let (theirs, ours) = UnixStream::pair().expect("pair");
             let (rd, wr) = ours.into_split();
             let served = Rc::new(Cell::new(None));
             let seen = served.clone();
-            let task = rusty_tokio::task::spawn_local(run(state.clone(), rd, wr, move |c, _| {
-                seen.set(Some(c));
-            }));
+            let task = rusty_tokio::task::spawn_local(run(
+                state.clone(),
+                rd,
+                wr,
+                Transport::Socket,
+                move |c, _| {
+                    seen.set(Some(c));
+                },
+            ));
             let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
             let hello = Message::Hello {
                 features,
@@ -344,7 +360,9 @@ mod tests {
             let token = state.borrow().test_token(client);
             let (out, _inbox, _) = outbox();
             let takeover = Some(Takeover { client, token });
-            state.borrow_mut().connect(out, features, None, takeover);
+            state
+                .borrow_mut()
+                .connect(out, Transport::Socket, features, None, takeover);
             rusty_tokio::time::timeout(Duration::from_secs(1), task)
                 .await
                 .expect("the wait outlived the takeover")

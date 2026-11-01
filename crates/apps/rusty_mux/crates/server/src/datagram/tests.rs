@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::future::poll_fn;
 
 use rusty_mux_core::{BlockId, ClientId};
-use rusty_mux_proto::{Features, Message, decode, encode};
+use rusty_mux_proto::{Entry, Features, Message, decode, encode};
 use rusty_tokio::time::timeout;
 use rusty_tokio::{Builder, LocalOptions};
 
@@ -47,7 +47,7 @@ async fn server_with(
     idle: Duration,
     silence: Duration,
 ) -> (Shared, Registry, SocketAddr) {
-    let state = State::shared(program, None);
+    let state = State::shared(program, None, crate::state::test_owner());
     let socket = UdpSocket::bind(bind).await.expect("bind");
     let addr = socket.local_addr().expect("addr");
     let registry = Registry::new(addr.port());
@@ -247,6 +247,37 @@ fn a_stream_is_served_as_a_connection_and_follows_a_roam() {
     });
 }
 
+/// A client over UDP reports that transport, with the server's own
+/// principal, as a socket client does (C25).
+#[test]
+fn a_client_over_udp_says_so_in_whoami() {
+    runtime().block_on(async {
+        let (_state, registry, addr) = server(PATIENCE).await;
+        let mut peer = Peer::new(&registry, addr).await;
+        peer.probe().await;
+        let features = Features::DATAGRAM.union(Features::IDENTITY);
+        let (stream, me) = peer.connect(features).await;
+        peer.send(stream, &Message::Whoami { req: 3 }).await;
+        match peer.reply(stream).await {
+            Message::Entry {
+                entry:
+                    Entry::Client {
+                        client,
+                        principal,
+                        transport,
+                        ..
+                    },
+                ..
+            } => {
+                assert_eq!(client, me);
+                assert_eq!(principal, Some(crate::state::test_owner()));
+                assert_eq!(transport, Some(Transport::Datagram));
+            }
+            other => panic!("expected the caller's entry, got {other:?}"),
+        }
+    });
+}
+
 #[test]
 fn only_an_authentic_datagram_brings_an_offer_alive() {
     runtime().block_on(async {
@@ -356,6 +387,7 @@ async fn bare_link(peer: &mut Peer, server: Rc<UdpSocket>, registry: Registry) -
             console_host: ConsoleHost::default(),
         },
         None,
+        crate::state::test_owner(),
     );
     let timers = Timers {
         idle: PATIENCE,

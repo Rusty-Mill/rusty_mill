@@ -419,6 +419,20 @@ fn client_ids(socket: &Path) -> Vec<String> {
         .collect()
 }
 
+/// `whoami` prints the caller's own client: a fresh one each run, as
+/// `list` would show it, with the server's user as its principal (C25).
+#[cfg(target_os = "linux")]
+#[test]
+fn whoami_shows_the_callers_principal_and_transport() {
+    let socket = start_server();
+    let me = ok(&socket, &["whoami"]);
+    let uid = rusty_libc::process::geteuid();
+    assert!(me.starts_with("client "), "{me}");
+    assert!(me.contains(&format!("principal=\"uid:{uid}\"")), "{me}");
+    assert!(me.contains("transport=\"socket\""), "{me}");
+    assert_eq!(me.lines().count(), 1, "{me}");
+}
+
 #[test]
 fn rename_then_disconnect_a_client_by_its_name() {
     let socket = start_server();

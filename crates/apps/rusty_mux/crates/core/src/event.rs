@@ -1,6 +1,6 @@
 //! Changes to the model, in the order they happened.
 
-use crate::{BlockId, ClientId, Layout, SessionId, Size, WindowId};
+use crate::{BlockId, ClientId, Layout, Principal, SessionId, Size, Transport, WindowId};
 
 /// One change made by [`Mux`](crate::Mux).
 ///
@@ -33,11 +33,21 @@ pub enum Event {
     BlockClosed {
         block: BlockId,
     },
+    /// A new client, with the principal the server verified; `None` only
+    /// when decoded from a server older than `Features::IDENTITY`.
     ClientConnected {
         client: ClientId,
+        principal: Option<Principal>,
     },
     ClientDisconnected {
         client: ClientId,
+    },
+    /// A new connection took the client over, by `transport`: it keeps its
+    /// id, name, attachment and lease.
+    ClientConnectionChanged {
+        client: ClientId,
+        principal: Principal,
+        transport: Transport,
     },
     Attached {
         client: ClientId,
