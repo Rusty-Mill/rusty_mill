@@ -23,6 +23,25 @@ pub(crate) fn reloader() -> Loader {
     Arc::new(|base| read(base, When::Reload))
 }
 
+/// A loader that reads only on cue, one go per read, then sets `cwd`
+/// to `/tmp`: a filesystem that stalls until the test says.
+#[cfg(test)]
+pub(crate) fn stalled() -> (Loader, std::sync::mpsc::Sender<()>) {
+    let (go, wait) = std::sync::mpsc::channel::<()>();
+    let wait = std::sync::Mutex::new(wait);
+    let loader: Loader = Arc::new(move |base: &Config| {
+        wait.lock()
+            .map_err(|e| e.to_string())?
+            .recv()
+            .map_err(|e| e.to_string())?;
+        Ok(Config {
+            cwd: "/tmp".into(),
+            ..base.clone()
+        })
+    });
+    (loader, go)
+}
+
 /// Runs `loader` on `base` on a thread of its own, never joined: a read
 /// stalled on a hung filesystem holds that thread, not the server's one,
 /// and cannot hold up the server's exit. The receiver gets the result.

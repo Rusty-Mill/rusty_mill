@@ -16,7 +16,7 @@ use rusty_mux_proto::{
 };
 use rusty_mux_status::Records;
 use rusty_term_core::{AnsiParser, Grid};
-use rusty_tokio::sync::Notify;
+use rusty_tokio::sync::{Notify, oneshot};
 use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
 
@@ -84,6 +84,16 @@ pub(crate) struct PtyWrite {
     /// With [`Features::ECHO_ACK`]: the block and `Input` request to
     /// [`State::written`] once the write returns.
     pub(crate) key: Option<(BlockId, u64)>,
+}
+
+/// What a connection must finish before it reads its next request, so
+/// requests on one connection complete in order (`sync` is a fence).
+pub(crate) enum Pending {
+    /// A PTY write.
+    Write(PtyWrite),
+    /// A `reload-config` reading off this thread; resolves once it has been
+    /// applied or refused and answered.
+    Reload(oneshot::Receiver<()>),
 }
 
 struct BlockRt {
@@ -154,7 +164,7 @@ pub(crate) struct State {
     /// Set by [`State::stop`]: no block starts any more.
     stopping: bool,
     /// What `reload-config` reads the file with.
-    loader: crate::settings::Loader,
+    pub(crate) loader: crate::settings::Loader,
     /// A reload is reading the file; one at a time, so a stalled
     /// filesystem holds one thread at most.
     reloading: bool,
@@ -214,8 +224,10 @@ impl State {
     }
 
     /// `reload-config`: reads the file off this thread and answers once
-    /// read ([`Self::reloaded`]). A server started with no file refuses,
-    /// as does a second reload while one is reading.
+    /// read ([`Self::reloaded`]), in a task of its own, so the read lands
+    /// even if the connection goes. The connection waits for it before its
+    /// next request. A server started with no file refuses, as does a
+    /// second reload while one is reading.
     fn reload_config(
         &mut self,
         shared: &Shared,
@@ -236,6 +248,7 @@ impl State {
         let read = crate::settings::load_apart(self.loader.clone(), self.base.clone())
             .map_err(|e| format!("reading the config file: {e}"))?;
         self.reloading = true;
+        let (done, finished) = oneshot::channel();
         let weak = Rc::downgrade(shared);
         rusty_tokio::task::spawn_local(async move {
             let result = read
@@ -244,8 +257,10 @@ impl State {
             if let Some(shared) = weak.upgrade() {
                 shared.borrow_mut().reloaded(client, &cancel, req, result);
             }
+            // The connection may have gone; nothing waits then.
+            let _ = done.send(());
         });
-        Ok(Outcome::Later)
+        Ok(Outcome::Later(finished))
     }
 
     /// A reload read `result`: a good config replaces the last and is
@@ -314,6 +329,11 @@ impl State {
             Some(_) => OFFERED.union(Features::DATAGRAM),
             None => OFFERED,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cwd(&self) -> &std::ffi::OsStr {
+        &self.config.cwd
     }
 
     #[cfg(test)]
@@ -652,7 +672,7 @@ impl State {
 
     /// Applies one request. Returns input for the caller to write to a PTY
     /// after releasing the borrow.
-    pub(crate) fn request(shared: &Shared, client: ClientId, message: Message) -> Option<PtyWrite> {
+    pub(crate) fn request(shared: &Shared, client: ClientId, message: Message) -> Option<Pending> {
         let mut this = shared.borrow_mut();
         // A request proves the client got this connection's Welcome, and
         // with it the current token.
@@ -677,8 +697,8 @@ impl State {
                 frames.into_iter().for_each(|f| this.send_frame(client, f));
                 None
             }
-            Ok(Outcome::Write(write)) => Some(write),
-            Ok(Outcome::Later) => None,
+            Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
+            Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
             Err(Refusal { reason, code }) => {
                 this.send(client, &Message::Failed { req, reason, code });
                 None
@@ -1588,8 +1608,9 @@ enum Outcome {
     /// Encoded messages answering the request, in order.
     Reply(Vec<Vec<u8>>),
     Write(PtyWrite),
-    /// Answered later, by the task the request started.
-    Later,
+    /// Answered later, by the task the request started; resolves once it
+    /// has.
+    Later(oneshot::Receiver<()>),
 }
 
 /// `terminal.format`'s options from its arguments, which the catalog
@@ -2158,16 +2179,13 @@ mod regression {
             config_file: Some("/stalled.json".into()),
         };
         let shared = State::shared(base, None);
-        let (go, wait) = std::sync::mpsc::channel::<()>();
-        let wait = std::sync::Mutex::new(wait);
-        shared.borrow_mut().loader = std::sync::Arc::new(move |base: &Config| {
-            // A filesystem that answers only on cue.
-            wait.lock().unwrap().recv().map_err(|e| e.to_string())?;
-            Ok(Config {
-                cwd: "/tmp".into(),
-                ..base.clone()
-            })
-        });
+        let (loader, go) = crate::settings::stalled();
+        shared.borrow_mut().loader = loader;
+        let (client, inbox) = reload_client(&shared);
+        (shared, client, inbox, go)
+    }
+
+    fn reload_client(shared: &Shared) -> (ClientId, Inbox) {
         let (out, inbox, _) = outbox();
         let client = shared.borrow_mut().connect(
             out,
@@ -2177,29 +2195,36 @@ mod regression {
             None,
             None,
         );
-        (shared, client, inbox, go)
+        (client, inbox)
     }
 
-    /// A reload reads off the server's thread: while the file stalls, other
-    /// requests are answered, a second reload is refused rather than queued,
-    /// and the stalled one lands, announced, once the read returns.
+    /// A reload reads off the server's thread: while the file stalls,
+    /// another client is answered, its reload is refused rather than
+    /// queued, and the stalled one lands, announced, once the read returns.
     #[test]
-    fn a_stalled_reload_holds_up_nothing_and_only_one_runs() {
+    fn a_stalled_reload_holds_up_no_other_client_and_only_one_runs() {
         runtime().block_on(async {
             let (shared, client, mut inbox, go) = stalled_reloads();
-            State::request(&shared, client, Message::ReloadConfig { req: 1 });
-            State::request(&shared, client, Message::ReloadConfig { req: 2 });
-            let second = reply_to(&mut inbox, 2).await;
+            let (other, mut others) = reload_client(&shared);
+            let pending = State::request(&shared, client, Message::ReloadConfig { req: 1 });
+            let Some(Pending::Reload(mut done)) = pending else {
+                panic!("the connection must wait for the reload");
+            };
+            State::request(&shared, other, Message::ReloadConfig { req: 2 });
+            let second = reply_to(&mut others, 2).await;
             assert!(
                 matches!(&second, Message::Failed { reason, .. } if reason.contains("still reading")),
                 "{second:?}"
             );
-            State::request(&shared, client, Message::Sync { req: 3 });
-            assert!(matches!(reply_to(&mut inbox, 3).await, Message::Done { .. }));
+            State::request(&shared, other, Message::Sync { req: 3 });
+            assert!(matches!(reply_to(&mut others, 3).await, Message::Done { .. }));
             assert_eq!(shared.borrow().config.cwd, "/");
+            let early = rusty_tokio::time::timeout(Duration::from_millis(50), &mut done).await;
+            assert!(early.is_err(), "the reload finished before its read");
 
             go.send(()).unwrap();
             assert!(matches!(reply_to(&mut inbox, 1).await, Message::Done { .. }));
+            done.await.expect("finished");
             let frame = inbox.next().await.expect("the event");
             assert!(matches!(
                 rusty_mux_proto::decode(&frame).unwrap().unwrap().0,
