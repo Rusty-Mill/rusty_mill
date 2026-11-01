@@ -621,7 +621,7 @@ Effects are applied after each `handle` call, in the order the core returned the
 | Input lane (terminal input) | 64 KiB of pending bytes | `PtyMaster::write` blocks until the engine drains it, as a pty write blocks when the child stops reading |
 | Admitted terminal slice | 16 KiB of bytes, plus one decoded sequence (at most 4,097 raw bytes or a wrapped key's records) | no later slice is taken until this remainder is consumed. Decode incrementally and serve a waiting cooked read between records, before processing a later Ctrl+C. Echo and reply-budget holds retain the remainder instead of overflowing the record queue |
 | Control lane | fixed size: four flags and one `WinSize` | never full: setting a flag that is already set is a no-op |
-| Input records | 4,096 | oldest dropped, logged once (unchanged) |
+| Input records | 4,096 for terminal input | terminal input arriving with 4,096 or more queued drops the oldest record first, whatever its source, logged once: it never grows the queue past 4,096 or its current length, and can displace a client's written records. WriteConsoleInput is never refused or trimmed (Nano, 2026-11-01, #1335), so a client that writes and never reads grows the queue by 20 bytes a record; the total below excludes those |
 | Unfinished input escape sequence | 4,096 bytes | given up as an unknown sequence and dropped |
 | Cooked line | 8,192 UTF-16 units, or the read's initial data if longer. **Reserved** in the parked payload when the read starts waiting, so it is within the 64 KiB per call | further typing is ignored |
 | Rest of finished lines kept per handle for the next read | 512 Ki units (1 MiB) across all handles | the rest of the line that would pass it is dropped, logged once |
@@ -1032,6 +1032,7 @@ Function codes: 1 CONNECT, 2 DISCONNECT, 3 CREATE_OBJECT, 4 CLOSE_OBJECT, 5 RAW_
 | 7 | SetConsoleScreenBufferSize / GetLargestConsoleWindowSize / SetConsoleWindowInfo | 0x02000009 / 0x0200000B / 0x0200000E |
 | 11 | GetConsoleProcessList | 0x03000029 (draft 6 said 0x0300002A, which is GetConsoleHistory in `conmsgl3.h`) |
 | 11 | SetCurrentConsoleFontEx (accepted, ignored; Windows PowerShell 5.1 exits at startup without it) | 0x0300002C |
+| #1335 | WriteConsoleInput (W and A, append or prepend; A in the input code page, keeping a DBCS lead byte for the next write) | 0x02000010 |
 | — | CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer | deferred (V6) |
 
 ## Appendix B. How the review findings were resolved

@@ -85,6 +85,7 @@ pub(crate) mod api {
     pub(crate) const SET_TEXT_ATTRIBUTE: u32 = 0x0200_000D;
     pub(crate) const SET_WINDOW_INFO: u32 = 0x0200_000E;
     pub(crate) const READ_OUTPUT_STRING: u32 = 0x0200_000F;
+    pub(crate) const WRITE_CONSOLE_INPUT: u32 = 0x0200_0010;
     pub(crate) const WRITE_OUTPUT: u32 = 0x0200_0011;
     pub(crate) const WRITE_OUTPUT_STRING: u32 = 0x0200_0012;
     pub(crate) const READ_OUTPUT: u32 = 0x0200_0013;

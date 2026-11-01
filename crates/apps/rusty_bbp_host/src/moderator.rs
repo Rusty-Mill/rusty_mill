@@ -1087,18 +1087,24 @@ fn enforce_cap<S: Store>(
 
 /// A task first started with a cap is an evidence run: every later start or
 /// resume must carry the same cap and the same price file, or it is refused,
-/// so a cap cannot be dropped by restarting.
+/// so a cap cannot be dropped by restarting. Every capped start then records
+/// its segment ([`record_evidence_segment`]) before it acts on the task, so
+/// `bbp pairs` can see a resumed run and count it as failed.
 fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
-    let file = task_dir(&cfg.dir, "evidence", &cfg.task).with_extension("json");
+    let file = evidence_marker_path(&cfg.dir, &cfg.task);
     let recorded = std::fs::read_to_string(&file).ok();
-    match (&cfg.cost_cap, recorded) {
-        (None, None) => Ok(()),
-        (None, Some(_)) => Err(
-            "moderator: refusing to start: this task was started as an evidence run; \
-             resume it with the same --max-usd and --criteria"
-                .into(),
-        ),
-        (Some(cap), None) => {
+    let Some(cap) = &cfg.cost_cap else {
+        return match recorded {
+            None => Ok(()),
+            Some(_) => Err(
+                "moderator: refusing to start: this task was started as an evidence run; \
+                 resume it with the same --max-usd and --criteria"
+                    .into(),
+            ),
+        };
+    };
+    match recorded {
+        None => {
             // Only a task nothing has run on is an evidence run: a segment run
             // without a cap, or without the pre-run checks, would be counted.
             let d = open_driver(&cfg.dir, &cfg.task)?;
@@ -1109,15 +1115,26 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
             {
                 return Err("moderator: refusing to start: this task already ran without a cap, so it is not an evidence run; open a new task for the run".into());
             }
-            write_evidence_marker(&cfg.dir, &cfg.task, cap.usd, &cap.criteria_sha256)
+            write_evidence_marker(&cfg.dir, &cfg.task, cap.usd, &cap.criteria_sha256)?;
         }
-        (Some(cap), Some(text)) if text == marker_text(cap.usd, &cap.criteria_sha256) => Ok(()),
-        (Some(_), Some(_)) => Err(
+        Some(text) if text == marker_text(cap.usd, &cap.criteria_sha256) => {}
+        Some(_) => return Err(
             "moderator: refusing to start: this task was started with a different --max-usd or \
-             price file"
+                 price file, or by a bbp that records evidence differently"
                 .into(),
         ),
     }
+    record_evidence_segment(&cfg.dir, &cfg.task, crate::BUILD_SHA)
+}
+
+/// Where a task's evidence marker lives.
+pub fn evidence_marker_path(dir: &Path, task: &TaskId) -> PathBuf {
+    task_dir(dir, "evidence", task).with_extension("json")
+}
+
+/// One line per capped `bbp mod` invocation of the task, in order.
+pub fn evidence_segments_path(dir: &Path, task: &TaskId) -> PathBuf {
+    task_dir(dir, "evidence", task).with_extension("segments")
 }
 
 /// Record that the task is an evidence run under this cap and price file.
@@ -1127,7 +1144,7 @@ pub fn write_evidence_marker(
     usd: f64,
     criteria_sha256: &str,
 ) -> Result<(), String> {
-    let file = task_dir(dir, "evidence", task).with_extension("json");
+    let file = evidence_marker_path(dir, task);
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -1135,30 +1152,88 @@ pub fn write_evidence_marker(
         .map_err(|e| format!("{}: {e}", file.display()))
 }
 
+/// Schema 2 records segments beside the marker. A schema-1 marker (no
+/// `schema` key) and this one differ as text, so a `bbp` from before segments
+/// refuses to resume or count a run started here, and this one refuses its.
 fn marker_text(usd: f64, criteria_sha256: &str) -> String {
-    format!("{{\"max_usd\":{usd},\"criteria_sha256\":\"{criteria_sha256}\"}}\n")
+    format!("{{\"schema\":2,\"max_usd\":{usd},\"criteria_sha256\":\"{criteria_sha256}\"}}\n")
+}
+
+/// Append one `bbp mod` segment, run by a `bbp` built from `build_sha`, to the
+/// task's evidence record. The moderator calls it under its lock, before it
+/// acts on the task, so a segment that did anything is recorded; the record
+/// (and, on Unix, its directory entry) is synced before it returns, so it
+/// survives a crash of the host as well as of the moderator.
+pub fn record_evidence_segment(dir: &Path, task: &TaskId, build_sha: &str) -> Result<(), String> {
+    use std::io::Write;
+    let file = evidence_segments_path(dir, task);
+    let line = rusty_serde::json::to_string(&Segment {
+        bbp_build_sha: build_sha.to_owned(),
+    })
+    .map_err(|e| e.to_string())?;
+    let at = |e: std::io::Error| format!("{}: {e}", file.display());
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .map_err(at)?;
+    f.write_all(format!("{line}\n").as_bytes()).map_err(at)?;
+    f.sync_all().map_err(at)?;
+    #[cfg(unix)]
+    if let Some(parent) = file.parent() {
+        File::open(parent)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize)]
+struct Segment {
+    bbp_build_sha: String,
 }
 
 /// The run was started as an evidence run under exactly this cap and price
 /// file. A run started without a cap has no marker, so it cannot be counted.
+/// Returns the build of each recorded `bbp mod` segment, in order; a record
+/// that is missing, cut off or unparsable is refused.
 pub fn require_evidence_marker(
     dir: &Path,
     task: &TaskId,
     usd: f64,
     criteria_sha256: &str,
-) -> Result<(), String> {
-    let file = task_dir(dir, "evidence", task).with_extension("json");
-    match std::fs::read_to_string(&file) {
-        Ok(t) if t == marker_text(usd, criteria_sha256) => Ok(()),
-        Ok(_) => Err(format!(
-            "{}: started under a different cap or price file",
-            task.0
-        )),
-        Err(_) => Err(format!(
-            "{}: not started as an evidence run (no cap)",
-            task.0
-        )),
+) -> Result<Vec<String>, String> {
+    match std::fs::read_to_string(evidence_marker_path(dir, task)) {
+        Ok(t) if t == marker_text(usd, criteria_sha256) => {}
+        Ok(_) => {
+            return Err(format!(
+                "{}: started under a different cap or price file, or by a bbp that records evidence differently",
+                task.0
+            ))
+        }
+        Err(_) => {
+            return Err(format!(
+                "{}: not started as an evidence run (no cap)",
+                task.0
+            ))
+        }
     }
+    let file = evidence_segments_path(dir, task);
+    let text = std::fs::read_to_string(&file)
+        .map_err(|e| format!("{}: no bbp mod segment recorded: {e}", task.0))?;
+    if !text.is_empty() && !text.ends_with('\n') {
+        return Err(format!(
+            "{}: its last bbp mod segment record is cut off",
+            task.0
+        ));
+    }
+    text.lines()
+        .map(|l| {
+            rusty_serde::json::from_str::<Segment>(l)
+                .map(|s| s.bbp_build_sha)
+                .map_err(|e| format!("{}: unreadable bbp mod segment record: {e}", task.0))
+        })
+        .collect()
 }
 
 /// `stdout` is the validator slot when admission is configured: the runner

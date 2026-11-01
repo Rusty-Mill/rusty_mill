@@ -975,6 +975,9 @@ where
     /// [`DurabilityError::Io`] if a file can't be written, renamed,
     /// mapped, or removed.
     pub fn compact(&mut self) -> Result<CompactionReport, DurabilityError> {
+        // Sync any deferred entries and drop the handle before anything is
+        // rewritten, so a failure here leaves the store exactly as it was.
+        self.log.close()?;
         let path = self.file.path().to_path_buf();
         let log = insert_log::log_path(&path);
         let log_entries_folded = insert_log::read_entries::<R, R::Id>(&log, R::SCHEMA_TAG)?.len();
@@ -1001,15 +1004,16 @@ where
                 .iter()
                 .map(|record| (record.id(), record.scannable_value())),
         )?;
-        self.log.close();
-        insert_log::clear(&log)?;
-        // Every deferred entry is in the blob now, which the rewrite synced.
-        self.unsynced = false;
+        // The slot file is gapless now: the positions must follow before
+        // any later step can fail, or reads would use the old layout.
         self.position_index = records
             .iter()
             .enumerate()
             .map(|(position, record)| (record.id(), position))
             .collect();
+        insert_log::clear(&log)?;
+        // Every deferred entry is in the blob now, which the rewrite synced.
+        self.unsynced = false;
         Ok(CompactionReport {
             records: records.len(),
             slots_reclaimed: slots_before - records.len(),
@@ -2238,6 +2242,36 @@ mod tests {
     /// slot, and every log entry; the log is gone, the fast scan path is
     /// back, every read is unchanged, a portable reopen serves the same
     /// data without writing, and a second compaction reclaims nothing.
+    /// A failed sync of deferred entries at the start of `compact` leaves
+    /// the slot layout and every read as they were.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_failed_deferred_sync_in_compact_changes_nothing() {
+        use crate::test_support::{arm_fault, Fault};
+        let dir = crate::test_support::fresh_temp_dir("mmap_compact_sync_fail").unwrap();
+        let path = dir.join("orders.mmap");
+        let mut store = OrderCore::create(sample(), &path).unwrap();
+        store.defer_sync();
+        store.insert(order(3)).unwrap();
+        store.delete(uuid::Uuid::from_u128(1)).unwrap();
+        assert!(!store.is_gapless());
+        let before_get: Vec<Option<Order>> = (1..=3)
+            .map(|n| store.get(uuid::Uuid::from_u128(n)))
+            .collect();
+        let mut before_scan = store.scan();
+        before_scan.sort_unstable();
+        arm_fault(Fault::GroupSync);
+        assert!(store.compact().is_err());
+        assert!(!store.is_gapless(), "the slot file was not rewritten");
+        let after_get: Vec<Option<Order>> = (1..=3)
+            .map(|n| store.get(uuid::Uuid::from_u128(n)))
+            .collect();
+        assert_eq!(after_get, before_get);
+        let mut after_scan = store.scan();
+        after_scan.sort_unstable();
+        assert_eq!(after_scan, before_scan);
+    }
+
     #[test]
     fn compact_reclaims_retired_slots_folds_the_log_and_changes_no_read() {
         let dir = crate::test_support::fresh_temp_dir("mmap_compact").unwrap();
