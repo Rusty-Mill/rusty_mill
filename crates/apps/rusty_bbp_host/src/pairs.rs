@@ -62,7 +62,8 @@ pub struct RunFacts {
     pub spec_boundaries: u64,
     /// The run's harnesses cost more than the per-run cap.
     pub over_cap: bool,
-    /// The task's `reads_per_turn`, from its card.
+    /// The `reads_per_turn` the task was opened with (its `TaskOpened`
+    /// event). A run whose limit was later extended does not load.
     pub reads_per_turn: u64,
     /// The models each role's turns used, from the harness output.
     pub role_models: BTreeMap<String, BTreeSet<String>>,
@@ -577,7 +578,7 @@ pub fn facts(
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
-        reads_per_turn: st.budget.reads_per_turn,
+        reads_per_turn: opened_reads_per_turn(&events)?,
         role_models,
         build_sha: build_sha_of(&text)?,
         no_model_turns,
@@ -585,6 +586,31 @@ pub fn facts(
         stopped,
         usd_floor: tok.usd_floor,
     })
+}
+
+/// The `reads_per_turn` a run was opened with. The final card is not the
+/// run's limit: a human extension changes it after turns already ran under the
+/// opened one, so the arms of a pair could differ while both cards match the
+/// manifest. A run with any `reads_per_turn` extension, even one back to the
+/// opened value, ran under more than one limit and refuses (#1327).
+fn opened_reads_per_turn(events: &[Event]) -> Result<u64, String> {
+    let Some(Event::TaskOpened { budget, .. }) = events.first() else {
+        return Err("the log does not start with TaskOpened".to_owned());
+    };
+    let extended = events.iter().find_map(|e| match e {
+        Event::BudgetExtended {
+            field: BudgetField::ReadsPerTurn,
+            limit,
+        } => Some(*limit),
+        _ => None,
+    });
+    match extended {
+        Some(limit) => Err(format!(
+            "reads_per_turn was opened at {} and extended to {limit}: the run ran under more than one limit",
+            budget.reads_per_turn
+        )),
+        None => Ok(budget.reads_per_turn),
+    }
 }
 
 /// Every run must have been produced by a `bbp` built from `head`.
