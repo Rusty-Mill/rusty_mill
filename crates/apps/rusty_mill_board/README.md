@@ -23,15 +23,19 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   workflow lacks reads as backlog. A move may be a **gate** (a human approval): it needs its capability and
   `admin`, even with movement rules off.
 - **Factory workflow:** [`deploy/factory.workflow.json`](deploy/factory.workflow.json) is the software factory's
-  stages: Backlog, Ready, Planning, Architecting, Building, V&Ving, Done, Blocked. Its three gates (Backlog to
-  Ready, Architecting to Building, V&Ving to Done by `merge`) need `admin`; `close` may still record V&Ving to Done
-  for a PR already merged on the forge. Each work column names its `takers`, so `card_take` gives a planner
+  stages: Backlog, Ready, Planning, Architecting, Building, V&Ving, Done, Blocked. Its gates (Backlog to Ready,
+  Architecting to Building, V&Ving to Done by `merge`, and every move out of Blocked, so blocking is no way around
+  an approval) need `admin`; `close` may still record V&Ving to Done for a PR already merged on the forge. With
+  movement rules off, a move that jumps over a gate still needs `admin`, and V&Ving to Done still needs `close`
+  or the gated `merge`. Each work column names its `takers`, so `card_take` gives a planner
   Ready and Planning, an architect Architecting, a tester Planning to V&Ving, a builder Building, and a reviewer
   every work column. A move may list more than one capability (one transition each); holding any one is enough.
   Install it by copying it to `workflow.json`, after re-filing the cards of columns it drops (below).
 - **Re-filing cards:** `rusty_mill_board --tick-url URL --retag-columns qa=v_and_ving,review=v_and_ving` prints
-  the cards it would move as JSON; `--apply` writes them (board stopped) and prints those it moved, keeping
-  claims. Save that output: `--undo-retag FILE` puts each card back if it is still where the retag left it.
+  the plan as JSON (each card's id, revision, from and to). `--apply --retag-record FILE` (board stopped) first
+  saves the plan to FILE, a new file flushed to disk, then retags each card still at its planned revision, keeping
+  claims. `--undo-retag FILE` puts back each card that is in the new column at the very next revision, so a card
+  changed since is left alone and reported; after a failure midway it undoes exactly what was written.
 - **Rules:** each move needs the capability the workflow gives it (by default triage, build, test, review, merge,
   close; `plan` and `architect` serve the factory workflow; `test` was `qa`, which stored roles may still say); any open card may be moved to blocked; leaving a work column needs your claim. `close` moves a card from building or qa straight to done when
   its work already merged on the forge, and lets `card_add` with `done: true` record merged work that never

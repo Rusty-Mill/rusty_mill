@@ -21,10 +21,10 @@
     { "from": "v_and_ving", "to": "done", "cap": "merge", "gate": true },
     { "from": "v_and_ving", "to": "done", "cap": "close" },
     { "from": "building", "to": "done", "cap": "close" },
-    { "from": "blocked", "to": "ready", "cap": "triage" },
-    { "from": "blocked", "to": "planning", "cap": "triage" },
-    { "from": "blocked", "to": "architecting", "cap": "triage" },
-    { "from": "blocked", "to": "building", "cap": "triage" },
-    { "from": "blocked", "to": "v_and_ving", "cap": "triage" }
+    { "from": "blocked", "to": "ready", "cap": "triage", "gate": true },
+    { "from": "blocked", "to": "planning", "cap": "triage", "gate": true },
+    { "from": "blocked", "to": "architecting", "cap": "triage", "gate": true },
+    { "from": "blocked", "to": "building", "cap": "triage", "gate": true },
+    { "from": "blocked", "to": "v_and_ving", "cap": "triage", "gate": true }
   ]
 }

@@ -79,13 +79,18 @@ struct Cli {
     export_projects: bool,
     /// Re-file cards between columns and exit, e.g. `qa=v_and_ving,review=v_and_ving` when
     /// the workflow drops columns. Prints the plan as JSON; nothing is written without
-    /// `--apply`. Save the `--apply` output: it is the record `--undo-retag` restores from.
+    /// `--apply`.
     #[arg(long, value_name = "FROM=TO,...", conflicts_with_all = ["export_projects", "undo_retag"])]
     retag_columns: Option<String>,
-    /// With --retag-columns: write the retags (stop the board first).
-    #[arg(long, requires = "retag_columns")]
+    /// With --retag-columns: write the retags (stop the board first). Needs --retag-record.
+    #[arg(long, requires_all = ["retag_columns", "retag_record"])]
     apply: bool,
-    /// Put back the cards listed in FILE (the JSON a `--retag-columns --apply` printed) and exit.
+    /// With --apply: a new file the plan is saved to before any card is written; it is what
+    /// --undo-retag restores from, even after a failure midway.
+    #[arg(long, value_name = "FILE", requires = "apply")]
+    retag_record: Option<PathBuf>,
+    /// Put back the cards a retag moved, from its --retag-record FILE, and exit. A card
+    /// changed since the retag is left alone and reported.
     #[arg(long, value_name = "FILE", conflicts_with = "export_projects")]
     undo_retag: Option<PathBuf>,
     /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`): its tasks tagged
@@ -264,39 +269,57 @@ fn stop_on_signal(
         .map_err(|e| format!("signal thread: {e}"))
 }
 
-/// `--retag-columns` / `--undo-retag`: plan or write the retags and print them as JSON.
+/// `--retag-columns` / `--undo-retag`: plan, apply or undo retags, printing JSON.
 fn run_retag(cli: &Cli, store: &dyn Store) -> Result<(), String> {
-    let (retags, write) = match (&cli.retag_columns, &cli.undo_retag) {
-        (Some(spec), _) => {
-            let map = retag::parse_map(spec)?;
-            let cards = store.list().map_err(|e| e.to_string())?;
-            (retag::plan(&cards, &map), cli.apply)
-        }
-        (None, Some(path)) => {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("--undo-retag {}: {e}", path.display()))?;
-            let made: Vec<retag::Retag> = serde_json::from_str(&text)
-                .map_err(|e| format!("--undo-retag {}: {e}", path.display()))?;
-            (made.iter().map(retag::Retag::undo).collect(), true)
-        }
-        (None, None) => return Ok(()),
-    };
-    let out = if write {
-        retag::apply(store, &retags, system_ms()).map_err(|e| e.to_string())?
-    } else {
-        retags
-    };
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
-    );
-    if !write {
-        eprintln!(
-            "dry run: {} card(s) would be retagged; add --apply to write",
-            out.len()
-        );
+    if let Some(path) = &cli.undo_retag {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("--undo-retag {}: {e}", path.display()))?;
+        let plan: Vec<retag::Retag> = serde_json::from_str(&text)
+            .map_err(|e| format!("--undo-retag {}: {e}", path.display()))?;
+        let out = retag::undo(store, &plan, system_ms()).map_err(|e| e.to_string())?;
+        println!("{}", json(&out)?);
+        return Ok(());
     }
+    let Some(spec) = &cli.retag_columns else {
+        return Ok(());
+    };
+    let map = retag::parse_map(spec)?;
+    let plan = retag::plan(&store.list().map_err(|e| e.to_string())?, &map);
+    let Some(record) = cli.retag_record.as_deref().filter(|_| cli.apply) else {
+        println!("{}", json(&plan)?);
+        eprintln!(
+            "dry run: {} card(s) would be retagged; add --apply --retag-record FILE to write",
+            plan.len()
+        );
+        return Ok(());
+    };
+    save_record(record, &json(&plan)?)?;
+    let out = retag::apply(store, &plan, system_ms()).map_err(|e| {
+        format!(
+            "{e}; some cards may be retagged: run --undo-retag {} to put them back",
+            record.display()
+        )
+    })?;
+    println!("{}", json(&out)?);
     Ok(())
+}
+
+/// Write the retag plan to a new file and flush it to disk before any card changes.
+fn save_record(path: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let fail = |e: std::io::Error| format!("--retag-record {}: {e}", path.display());
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(fail)?;
+    f.write_all(text.as_bytes()).map_err(fail)?;
+    f.sync_all().map_err(fail)
+}
+
+/// Pretty JSON for the retag output.
+fn json<T: serde::Serialize>(value: &T) -> Result<String, String> {
+    serde_json::to_string_pretty(value).map_err(|e| e.to_string())
 }
 
 fn run(cli: Cli) -> Result<(), String> {

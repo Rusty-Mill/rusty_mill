@@ -661,8 +661,10 @@ impl Card {
     }
 
     /// Move to `to` with the movement rules off: no transition table, capability or claim
-    /// check, only an actor holding some capability, except that a gate transition still
-    /// needs its capability and `Admin`. The claim is cleared on arrival.
+    /// check, only an actor holding some capability, except that gates hold: a listed move
+    /// with a gated alternative needs one of its alternatives, and an unlisted move that
+    /// jumps over a gate ([`Workflow::gates_crossed`]) needs `Admin`. The claim is cleared on
+    /// arrival.
     ///
     /// # Errors
     /// If the card is Done, already in `to`, `to` is not a column, the actor holds no
@@ -689,11 +691,19 @@ impl Card {
         if by.caps.is_empty() {
             return Err(BoardError::Invalid("moving a card needs some capability"));
         }
-        // A move every listed way of making is a gate stays a gate with the rules off.
-        if let Ok(Some(ts)) = flow.transition(&self.column, to)
-            && ts.iter().all(|t| t.gate)
-        {
-            check_any(&ts, by)?;
+        // Gates hold with the rules off. A listed move with a gated way of making it needs one
+        // of its ways (a gated merge, or the `close` beside it); any other move that jumps over
+        // a gate needs `Admin`.
+        match flow.transition(&self.column, to) {
+            Ok(Some(ts)) if ts.iter().any(|t| t.gate) => check_any(&ts, by)?,
+            Ok(Some(_)) => {}
+            _ => {
+                if !flow.gates_crossed(&self.column, to).is_empty()
+                    && !by.caps.contains(&Capability::Admin)
+                {
+                    return Err(BoardError::Forbidden(Capability::Admin));
+                }
+            }
         }
         Ok(self.arrive(to, now_ms))
     }

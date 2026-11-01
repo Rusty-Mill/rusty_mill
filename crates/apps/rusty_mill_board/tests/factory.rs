@@ -200,3 +200,85 @@ fn take_routes_each_role_to_its_stages() {
     );
     assert_eq!(b.take(&tester, None).expect("take").map(|c| c.id), Some(id));
 }
+
+#[test]
+fn open_rules_keep_the_merge_gate_on_a_move_with_a_close_beside_it() {
+    let b = board();
+    b.set_move_rules(MoveRules::Open);
+    let gate_card = |title: &str| {
+        let id = approved(&b, title);
+        place(&b, id, "v_and_ving");
+        id
+    };
+    for role in ["reviewer", "tester"] {
+        let id = gate_card(role);
+        let who = who(&b, "model", role);
+        assert_eq!(
+            b.move_card(id, &Column::DONE, &who).map(drop),
+            Err(BoardError::Forbidden(Capability::Merge)),
+            "{role} holds neither merge nor close"
+        );
+    }
+    let closed = gate_card("closed");
+    b.move_card(closed, &Column::DONE, &who(&b, "claude", "builder"))
+        .expect("close records a forge merge");
+    let merged = gate_card("merged");
+    b.move_card(merged, &Column::DONE, &who(&b, "nano", "human"))
+        .expect("admin and merge");
+}
+
+#[test]
+fn blocked_is_no_way_around_a_gate() {
+    let b = board();
+    let mut roles = Roles::default();
+    roles.0.insert(
+        "lead".into(),
+        [Capability::Triage, Capability::Review]
+            .into_iter()
+            .collect(),
+    );
+    b.set_roles(roles);
+    let lead = who(&b, "model", "lead");
+    let h = who(&b, "nano", "human");
+    let gate = Err(BoardError::Forbidden(Capability::Admin));
+
+    // Backlog -> Blocked -> Ready skips the approval into Ready.
+    let idea = b.add(&h, "idea", "", vec![]).expect("add").id;
+    b.move_card(idea, &Column::BLOCKED, &lead)
+        .expect("anyone blocks");
+    assert_eq!(b.move_card(idea, &col("ready"), &lead).map(drop), gate);
+
+    // Architecting -> Blocked -> Building skips the design approval.
+    let design = approved(&b, "design");
+    place(&b, design, "architecting");
+    b.move_card(design, &Column::BLOCKED, &lead).expect("block");
+    assert_eq!(b.move_card(design, &col("building"), &lead).map(drop), gate);
+    b.move_card(design, &col("architecting"), &h)
+        .expect("the approver unblocks");
+}
+
+#[test]
+fn open_rules_refuse_skipping_over_a_gate() {
+    let b = board();
+    b.set_move_rules(MoveRules::Open);
+    let builder = who(&b, "claude", "builder");
+    let h = who(&b, "nano", "human");
+    let gate = Err(BoardError::Forbidden(Capability::Admin));
+    let idea = b.add(&h, "idea", "", vec![]).expect("add").id;
+    assert_eq!(
+        b.move_card(idea, &col("planning"), &builder).map(drop),
+        gate,
+        "past the approval into Ready"
+    );
+    let planned = approved(&b, "planned");
+    place(&b, planned, "planning");
+    assert_eq!(
+        b.move_card(planned, &col("v_and_ving"), &builder).map(drop),
+        gate,
+        "past the design approval"
+    );
+    b.move_card(planned, &col("architecting"), &builder)
+        .expect("within a stage band, open rules still let anyone move");
+    b.move_card(planned, &col("v_and_ving"), &h)
+        .expect("an admin may skip");
+}

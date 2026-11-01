@@ -235,6 +235,39 @@ impl Workflow {
         Ok(Some(found))
     }
 
+    /// The gates a move `from` -> `to` jumps over without taking: forward gates (`g.from`
+    /// before `g.to` in display order) with `from` at or before `g.from` and `to` at or after
+    /// `g.to`. Blocked has no place in the order, so a card leaving it counts as starting from
+    /// the beginning: it crosses every gate up to `to`. Used with movement rules off, so that
+    /// skipping columns is no way around a human approval.
+    pub fn gates_crossed(&self, from: &Column, to: &Column) -> Vec<&Transition> {
+        let rank = |id: &Column| {
+            self.columns
+                .iter()
+                .filter(|c| c.kind != Kind::Blocked)
+                .position(|c| c.id == *id)
+        };
+        let Some(dest) = rank(to) else {
+            return Vec::new();
+        };
+        let start = if self.kind(from) == Some(Kind::Blocked) {
+            Some(0)
+        } else {
+            rank(from)
+        };
+        let Some(start) = start else {
+            return Vec::new();
+        };
+        self.transitions
+            .iter()
+            .filter(|g| g.gate)
+            .filter(|g| match (rank(&g.from), rank(&g.to)) {
+                (Some(f), Some(t)) => f < t && start <= f && dest >= t,
+                _ => false,
+            })
+            .collect()
+    }
+
     /// Columns where work is picked up (queues and work columns), in the order a worker
     /// should look: nearest Done first, so work in progress is finished before more starts.
     pub fn work_queues(&self) -> Vec<Column> {
