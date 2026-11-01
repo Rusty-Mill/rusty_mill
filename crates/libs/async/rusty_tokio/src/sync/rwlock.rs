@@ -36,10 +36,16 @@
 //! A waker's clone or drop may run executor code that re-enters this
 //! lock, so neither ever happens with `state` held, as in
 //! [`super::Mutex`]: queued wakers sit behind an `Arc` that a release
-//! copies by refcount alone, a waiter's own clone is made before it
-//! locks, and wakers removed from or replaced in the queue are dropped
+//! copies by refcount alone, a waiter clones its own waker with `state`
+//! released, and wakers removed from or replaced in the queue are dropped
 //! after unlocking. Since no code that can panic runs under `state`, a
 //! poisoned `state` still guards consistent state and is used as is.
+//!
+//! A waker's destructor may also panic. A cancelled waiter wakes the
+//! waiters its leaving made eligible before it drops its own waker, and
+//! an acquiring waiter drops its old wakers only once its guard exists,
+//! so such a panic unwinds through the guard and releases the lock
+//! rather than leaving it held, or a waiter unwoken.
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -174,6 +180,15 @@ fn lock_state(state: &StdMutex<State>) -> StdGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The wakers an acquiring waiter no longer needs: the one it dequeued
+/// and a clone it made. Dropped by `read`/`write` only after the guard
+/// exists, so a destructor that panics unwinds through the guard and
+/// releases the lock.
+#[must_use = "drop it after building the guard"]
+struct Leftover {
+    _wakers: [Option<Arc<Waker>>; 2],
+}
+
 /// A waiter's place in the queue, left on drop (a cancelled `read()` or
 /// `write()`), waking whoever that makes eligible.
 struct Place<'a> {
@@ -191,8 +206,9 @@ impl Drop for Place<'_> {
             None => Vec::new(),
         };
         drop(state);
-        drop(removed);
+        // Woken first: if dropping `removed` panics, they are still woken.
         wake_all(woken);
+        drop(removed);
     }
 }
 
@@ -202,12 +218,14 @@ impl Place<'_> {
     /// queues or re-waits with `cx`'s waker. Follows
     /// [`super::Mutex`]'s acquire loop: the waker is cloned only with
     /// `state` released, and a displaced or dequeued one dropped after.
+    /// Once granted, it returns the wakers left over for the caller to
+    /// drop after building its guard (see the module docs).
     fn poll_acquire(
         &mut self,
         mode: Mode,
         cx: &mut std::task::Context<'_>,
         grant: impl Fn(&mut State, Option<u64>) -> bool,
-    ) -> Poll<()> {
+    ) -> Poll<Leftover> {
         // A clone made on a pass through the loop that found the stored
         // waker stale.
         let mut fresh: Option<Arc<Waker>> = None;
@@ -216,8 +234,9 @@ impl Place<'_> {
             if grant(&mut state, self.id) {
                 let removed = self.id.take().and_then(|id| state.dequeue(id));
                 drop(state);
-                drop((removed, fresh));
-                return Poll::Ready(());
+                return Poll::Ready(Leftover {
+                    _wakers: [removed, fresh],
+                });
             }
             if self.id.is_some_and(|id| state.wakes(id, cx.waker())) {
                 drop(state);
@@ -272,7 +291,7 @@ impl<T> RwLock<T> {
 
     /// A new reader waits for any queued writer; a queued one only for a
     /// writer ahead of it.
-    async fn acquire_read(&self) {
+    async fn acquire_read(&self) -> Leftover {
         let mut place = Place {
             state: &self.state,
             id: None,
@@ -290,12 +309,12 @@ impl<T> RwLock<T> {
                 free
             })
         })
-        .await;
+        .await
     }
 
     /// A writer acquires a free lock when no one is queued, or when it is
     /// at the front of the queue.
-    async fn acquire_write(&self) {
+    async fn acquire_write(&self) -> Leftover {
         let mut place = Place {
             state: &self.state,
             id: None,
@@ -313,7 +332,7 @@ impl<T> RwLock<T> {
                 free
             })
         })
-        .await;
+        .await
     }
 
     fn try_acquire_read(&self) -> bool {
@@ -364,13 +383,17 @@ impl<T> RwLock<T> {
     }
 
     pub async fn read(&self) -> RwLockReadGuard<'_, T> {
-        self.acquire_read().await;
-        RwLockReadGuard { lock: self }
+        let leftover = self.acquire_read().await;
+        let guard = RwLockReadGuard { lock: self };
+        drop(leftover);
+        guard
     }
 
     pub async fn write(&self) -> RwLockWriteGuard<'_, T> {
-        self.acquire_write().await;
-        RwLockWriteGuard { lock: self }
+        let leftover = self.acquire_write().await;
+        let guard = RwLockWriteGuard { lock: self };
+        drop(leftover);
+        guard
     }
 
     /// Acquires a read lock without waiting, failing if a writer
@@ -398,14 +421,18 @@ impl<T> RwLock<T> {
     /// outlive the scope holding `self`, e.g. across a spawned task
     /// boundary.
     pub async fn read_owned(self: &Arc<Self>) -> OwnedRwLockReadGuard<T> {
-        self.acquire_read().await;
-        OwnedRwLockReadGuard { lock: self.clone() }
+        let leftover = self.acquire_read().await;
+        let guard = OwnedRwLockReadGuard { lock: self.clone() };
+        drop(leftover);
+        guard
     }
 
     /// `Arc`-owned counterpart of [`write`](Self::write).
     pub async fn write_owned(self: &Arc<Self>) -> OwnedRwLockWriteGuard<T> {
-        self.acquire_write().await;
-        OwnedRwLockWriteGuard { lock: self.clone() }
+        let leftover = self.acquire_write().await;
+        let guard = OwnedRwLockWriteGuard { lock: self.clone() };
+        drop(leftover);
+        guard
     }
 
     /// `Arc`-owned counterpart of [`try_read`](Self::try_read).

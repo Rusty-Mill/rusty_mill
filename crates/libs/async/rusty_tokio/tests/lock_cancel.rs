@@ -473,3 +473,46 @@ fn rwlock_survives_a_panicking_waker_destructor() {
     drop(reader);
     assert!(lock.try_write().is_some(), "and still releases");
 }
+
+/// A reader that acquires while its stored waker's destructor panics
+/// still ends up holding a guard, which releases the lock as the panic
+/// unwinds; the lock is not left held with no guard.
+#[test]
+fn rwlock_acquire_with_a_panicking_waker_destructor_leaves_the_lock_releasable() {
+    let lock = Arc::new(RwLock::new(()));
+    let held = lock.try_write().expect("free");
+    let mut reader = Box::pin(lock.read());
+    assert!(poll(reader.as_mut(), &on_drop(|| panic!("waker drop"))).is_pending());
+    drop(held);
+    let (_, plain) = flag();
+    let acquired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = poll(reader.as_mut(), &plain);
+    }));
+    assert!(
+        acquired.is_err(),
+        "the destructor's panic reaches the poller"
+    );
+    drop(reader);
+    assert!(lock.try_write().is_some(), "nothing still holds the lock");
+}
+
+/// A cancelled waiter whose waker destructor panics still wakes the
+/// waiters its leaving made eligible.
+#[test]
+fn rwlock_cancel_with_a_panicking_waker_destructor_still_passes_the_wake_on() {
+    let lock = Arc::new(RwLock::new(()));
+    let held = lock.try_write().expect("free");
+    let mut writer = Box::pin(lock.write());
+    assert!(poll(writer.as_mut(), &on_drop(|| panic!("waker drop"))).is_pending());
+    let (reader_flag, reader_waker) = flag();
+    let mut reader = Box::pin(lock.read());
+    assert!(poll(reader.as_mut(), &reader_waker).is_pending());
+    drop(held);
+    let cancelled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(writer)));
+    assert!(
+        cancelled.is_err(),
+        "the destructor's panic reaches the dropper"
+    );
+    assert!(reader_flag.woken(), "the reader behind the writer is woken");
+    assert!(poll(reader.as_mut(), &reader_waker).is_ready());
+}
