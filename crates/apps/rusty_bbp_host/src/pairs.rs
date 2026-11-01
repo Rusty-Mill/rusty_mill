@@ -1,8 +1,10 @@
 //! `bbp pairs`: the 2b gate criteria evaluated over a run's pairs. The
 //! evaluation is pure ([`evaluate`] over [`Pair`] facts); [`load`] reads the
-//! facts from each run's log, harness output and saved `bbp mod` output. It
-//! decides nothing the criteria note does not say; see "2b gate criteria" in
-//! `docs/bbp-concurrency-design.md` for the definitions and the thresholds.
+//! facts from each run's log, harness output and saved `bbp mod` output, and
+//! refuses a run whose evidence record shows any segment but that output's
+//! ([`check_segments`]). It decides nothing the criteria note does not say;
+//! see "2b gate criteria" in `docs/bbp-concurrency-design.md` for the
+//! definitions and the thresholds.
 
 use crate::{report, tokens};
 use rusty_bbp::*;
@@ -547,13 +549,16 @@ pub fn facts(
     cap_usd: f64,
 ) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
-    crate::moderator::require_evidence_marker(Path::new(&r.dir), &task, cap_usd, sha)?;
+    let segments =
+        crate::moderator::require_evidence_marker(Path::new(&r.dir), &task, cap_usd, sha)?;
     let rep = report::of(Path::new(&r.dir), &task, None)?;
     let d = crate::open_driver(Path::new(&r.dir), &task)?;
     let events = d.store.events(&task, 0).map_err(|e| format!("{e:?}"))?;
     let text =
         std::fs::read_to_string(&r.mod_output).map_err(|e| format!("{}: {e}", r.mod_output))?;
     let m = mod_facts(&text)?;
+    let build_sha = build_sha_of(&text)?;
+    check_segments(&segments, &build_sha)?;
     let stopped = m.stop.is_some();
     // A run the moderator stopped is a failed run whatever its log holds: a log
     // the tool cannot read (which may be why the cap stopped it) must not drop
@@ -579,12 +584,30 @@ pub fn facts(
         unused_bytes: rep.unused_bytes,
         reads_per_turn: st.budget.reads_per_turn,
         role_models,
-        build_sha: build_sha_of(&text)?,
+        build_sha,
         no_model_turns,
         killed_turns: tok.unknown_turns,
         stopped,
         usd_floor: tok.usd_floor,
     })
+}
+
+/// A run is evidence only if exactly one `bbp mod` produced it, and that is
+/// the invocation whose output was saved: the one whose build it reports. A
+/// resumed run would be judged by its last segment alone, its earlier stops,
+/// builds and state timings lost (#1326), so it is refused rather than folded.
+pub fn check_segments(segments: &[String], build_sha: &str) -> Result<(), String> {
+    match segments {
+        [] => Err("no bbp mod segment recorded: nothing shows what produced the run".into()),
+        [only] if only == build_sha => Ok(()),
+        [only] => Err(format!(
+            "its bbp mod segment was built from {only}, but its saved output reports {build_sha}"
+        )),
+        more => Err(format!(
+            "{} bbp mod segments: a resumed run is not evidence; open a new task for the run",
+            more.len()
+        )),
+    }
 }
 
 /// Every run must have been produced by a `bbp` built from `head`.

@@ -1352,6 +1352,61 @@ fn a_task_started_with_a_cap_cannot_be_resumed_without_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Issue #1326: a capped run the wall stopped, then resumed under the same cap
+/// to a clean end, was judged by its last `bbp mod` output alone, which shows
+/// no stop: the first segment's wall stop and build were lost. Every capped
+/// `bbp mod` now records a segment, and `bbp pairs` refuses a run with more
+/// than one.
+#[test]
+fn a_capped_run_resumed_after_a_wall_stop_is_refused_in_pairs() {
+    let (dir, task, repo) = opened("resume-capped");
+    let mut planner = script(
+        &dir,
+        "planner",
+        "echo '{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}'\nsleep 60",
+    );
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let launchers = Launchers::default().with("planner", planner);
+    let mut first = config(&dir, &task, repo.clone(), launchers.clone(), 2);
+    let cap = sonnet_cap(&dir, 1000.0);
+    first.cost_cap = Some(cap.clone());
+    let s1 = moderator::run_to_stop(&first).expect("first segment");
+    assert_eq!(s1.stop.expect("stopped").kind, moderator::StopKind::Wall);
+    // The resume ends cleanly: the task is cancelled, so its `bbp mod` output
+    // shows no stop.
+    let rev = card(&dir, &task).rev;
+    human::perform(&dir, &task, "cancel", &["stop"], Some(rev)).expect("cancel");
+    let mut second = config(&dir, &task, repo, launchers, 10);
+    second.cost_cap = Some(cap.clone());
+    let s2 = moderator::run_to_stop(&second).expect("the resume runs under its cap");
+    assert!(s2.stop.is_none(), "{:?}", s2.stop);
+    let out = dir.join("mod-2.json");
+    std::fs::write(
+        &out,
+        format!(
+            r#"{{"state":"Cancelled","state_ms":[["Planning",10]],"replay_equals_live":true,"bbp_build_sha":"{}"}}"#,
+            "a".repeat(40)
+        ),
+    )
+    .expect("write mod output");
+    let r = rusty_bbp_host::pairs::facts(
+        &rusty_bbp_host::pairs::RunRef {
+            dir: dir.display().to_string(),
+            task: task.0.clone(),
+            mod_output: out.display().to_string(),
+            rubric_ok: true,
+        },
+        &cap.criteria,
+        &cap.criteria_sha256,
+        1000.0,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    let err = r.expect_err("a resumed evidence run is not evidence");
+    assert!(err.contains("2 bbp mod segments"), "{err}");
+}
+
 #[test]
 fn an_evidence_runs_harness_gets_both_cache_ttl_variables_pinned_to_one_hour() {
     let (dir, task, repo) = opened("ttl-env");

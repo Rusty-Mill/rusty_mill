@@ -78,6 +78,9 @@ fn run(root: &Path, name: &str, mod_output: &str, turn_log: Option<&str>) -> ser
     }
     // As `bbp mod --max-usd 5 --criteria ..` leaves it.
     moderator::write_evidence_marker(&dir, &task, CAP_USD, &criteria_sha(root)).unwrap();
+    // The one segment that `bbp mod` records, by the build its output reports.
+    let build = pairs::build_sha_of(mod_output).unwrap_or_default();
+    moderator::record_evidence_segment(&dir, &task, &build).unwrap();
     let out = root.join(format!("{name}.out.json"));
     std::fs::write(&out, mod_output).unwrap();
     serde_json_like::Run {
@@ -253,6 +256,17 @@ fn stopped_facts(tag: &str, stop: &str) -> pairs::RunFacts {
 }
 
 fn facts_with_log(tag: &str, stop: &str, log: Option<&str>) -> pairs::RunFacts {
+    facts_after(tag, stop, log, |_, _, _| {}).expect("a stopped run loads")
+}
+
+/// [`facts_with_log`], with `edit` applied to the run directory (`dir`, task,
+/// the checkout's HEAD) after the run and its one segment were recorded.
+fn facts_after(
+    tag: &str,
+    stop: &str,
+    log: Option<&str>,
+    edit: impl FnOnce(&Path, &TaskId, &str),
+) -> Result<pairs::RunFacts, String> {
     let root = tempdir(tag);
     let (_repo, head) = checkout(&root);
     let criteria = root.join("criteria.json");
@@ -265,6 +279,7 @@ fn facts_with_log(tag: &str, stop: &str, log: Option<&str>) -> pairs::RunFacts {
         r#"{{"state":"Planning","turns_launched":1,"runs":0,"elapsed_ms":1,"state_ms":[["Planning",10]],"replay_equals_live":true,"stop":"{stop}","stop_reason":"stopped","bbp_build_sha":"{head}"}}"#
     );
     let r = run(&root, "stopped", &out, log);
+    edit(Path::new(&r.dir), &TaskId("T1".into()), &head);
     let (c, sha) = rusty_bbp_host::tokens::read_criteria(&criteria).unwrap();
     let f = pairs::facts(
         &rusty_bbp_host::pairs::RunRef {
@@ -276,8 +291,7 @@ fn facts_with_log(tag: &str, stop: &str, log: Option<&str>) -> pairs::RunFacts {
         &c,
         &sha,
         CAP_USD,
-    )
-    .expect("a stopped run loads");
+    );
     let _ = std::fs::remove_dir_all(&root);
     f
 }
@@ -324,4 +338,84 @@ fn a_run_stopped_over_a_log_the_tool_cannot_read_loads_as_a_failed_run() {
     assert!(f.over_cap);
     assert!(f.stopped);
     assert!(!f.succeeded());
+}
+
+// ---- #1326: a run is judged by every `bbp mod` segment that produced it
+
+#[test]
+fn a_run_with_one_segment_by_the_build_its_output_reports_loads() {
+    let f = facts_after("one-segment", "wall", Some(ASSISTANT), |_, _, _| {});
+    assert!(f.is_ok(), "{f:?}");
+}
+
+#[test]
+fn a_resumed_run_is_refused_whatever_its_segments_were_built_from() {
+    let err = facts_after(
+        "two-segments",
+        "wall",
+        Some(ASSISTANT),
+        |dir, task, head| {
+            moderator::record_evidence_segment(dir, task, head).unwrap();
+        },
+    )
+    .unwrap_err();
+    assert!(err.contains("2 bbp mod segments"), "{err}");
+}
+
+#[test]
+fn a_segment_built_from_another_commit_than_the_output_reports_fails_the_run() {
+    // The saved output reports the pinned HEAD, but the segment that produced
+    // the run was another build: the output is not that run's.
+    let err = facts_after("other-segment", "wall", Some(ASSISTANT), |dir, task, _| {
+        std::fs::write(moderator::evidence_segments_path(dir, task), "").unwrap();
+        moderator::record_evidence_segment(dir, task, OTHER).unwrap();
+    })
+    .unwrap_err();
+    assert!(err.contains(OTHER), "{err}");
+}
+
+#[test]
+fn a_run_with_no_segment_or_a_cut_off_one_is_refused() {
+    let err = facts_after("no-segment", "wall", Some(ASSISTANT), |dir, task, _| {
+        std::fs::remove_file(moderator::evidence_segments_path(dir, task)).unwrap();
+    })
+    .unwrap_err();
+    assert!(err.contains("no bbp mod segment"), "{err}");
+    let err = facts_after("empty-segments", "wall", Some(ASSISTANT), |dir, task, _| {
+        std::fs::write(moderator::evidence_segments_path(dir, task), "").unwrap();
+    })
+    .unwrap_err();
+    assert!(err.contains("no bbp mod segment"), "{err}");
+    let err = facts_after("cut-segment", "wall", Some(ASSISTANT), |dir, task, head| {
+        let path = moderator::evidence_segments_path(dir, task);
+        std::fs::write(&path, format!("{{\"bbp_build_sha\":\"{head}\"")).unwrap();
+    })
+    .unwrap_err();
+    assert!(err.contains("cut off"), "{err}");
+    let err = facts_after("bad-segment", "wall", Some(ASSISTANT), |dir, task, _| {
+        let path = moderator::evidence_segments_path(dir, task);
+        std::fs::write(&path, "{\"build\":1}\n").unwrap();
+    })
+    .unwrap_err();
+    assert!(err.contains("unreadable"), "{err}");
+}
+
+/// A marker in the format before segments were recorded (no `schema`) is
+/// refused: such a run's segments are unknown. The new marker differs from
+/// that format as text, which is what an older `bbp` compares, so an older
+/// `bbp mod` will not resume a run started here, nor an older `bbp pairs`
+/// count one.
+#[test]
+fn a_marker_from_before_segments_is_refused_and_an_older_bbp_refuses_the_new_one() {
+    let mut new_marker = String::new();
+    let err = facts_after("schema-1", "wall", Some(ASSISTANT), |dir, task, _| {
+        let path = moderator::evidence_marker_path(dir, task);
+        new_marker = std::fs::read_to_string(&path).unwrap();
+        let old = new_marker.replace("\"schema\":2,", "");
+        assert_ne!(old, new_marker);
+        std::fs::write(&path, old).unwrap();
+    })
+    .unwrap_err();
+    assert!(err.contains("records evidence differently"), "{err}");
+    assert!(new_marker.starts_with("{\"schema\":2,"), "{new_marker}");
 }
