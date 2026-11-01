@@ -85,8 +85,11 @@ fn catalog_covers_each_request_type_once() {
     let types: Vec<u8> = other.iter().map(|m| ty(m)).collect();
     let unique: BTreeSet<u8> = types.iter().copied().collect();
     assert_eq!(unique.len(), types.len(), "two methods build one type");
-    // 0x0d was Capture; 0x0f is BlockCall, 0x10 Rename.
-    let expected = (0x02..=0x14).filter(|t| ![0x0d, 0x0f, 0x10].contains(t));
+    // 0x0d was Capture; 0x0f is BlockCall, 0x10 Rename. 0x15, OpenDatagram,
+    // is the attach client's own, not an agent's; 0x16 is Whoami.
+    let expected = (0x02..=0x14)
+        .filter(|t| ![0x0d, 0x0f, 0x10].contains(t))
+        .chain([0x16]);
     assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
     assert_eq!(renames.len(), 4);
@@ -173,6 +176,7 @@ fn methods_need_the_features_their_messages_are_gated_by() {
     assert_eq!(needs("sync"), Features::SYNC);
     assert_eq!(needs("terminal.format"), Features::BLOCK_CALL);
     assert_eq!(needs("list"), Features::INSPECT);
+    assert_eq!(needs("whoami"), Features::IDENTITY);
     assert_eq!(needs("create-session"), Features::NONE);
     assert_eq!(needs("create-block"), Features::NONE);
     for name in [

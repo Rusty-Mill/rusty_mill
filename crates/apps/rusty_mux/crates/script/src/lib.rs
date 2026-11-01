@@ -129,7 +129,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("block-created", &["block", "window", "cols", "rows"]),
     ("block-resized", &["block", "cols", "rows"]),
     ("block-closed", &["block"]),
-    ("client-connected", &["client"]),
+    ("client-connected", &["client", "principal", "user"]),
     ("client-disconnected", &["client"]),
     ("attached", &["client", "block"]),
     ("detached", &["client", "block"]),
@@ -147,6 +147,10 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("block-renamed", &["block", "name"]),
     ("client-renamed", &["client", "name"]),
     ("layout-changed", &["window", "layout", "zoomed"]),
+    (
+        "client-connection-changed",
+        &["client", "principal", "user", "transport"],
+    ),
 ];
 
 /// What to run when an event of one kind happens.

@@ -114,3 +114,133 @@ fn installing_twice_returns_the_same_runtime() {
 
     assert_eq!(first.id(), second.id());
 }
+
+/// #1302: a `kill_on_drop` child dropped on a tokio thread is killed *and*
+/// reaped through the fallback, not left a zombie because the thread has no
+/// rusty_tokio runtime of its own.
+#[cfg(unix)]
+#[test]
+fn kill_on_drop_child_dropped_on_a_tokio_thread_is_reaped() {
+    use rusty_tokio::process::{Command, Stdio};
+
+    install_fallback().expect("fallback");
+    let pid = on_tokio(async {
+        let child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as libc::pid_t;
+        drop(child);
+        pid
+    });
+
+    assert_reaped(pid);
+}
+
+/// #1302 review: the same reap when the child is dropped by a thread-local
+/// destructor that runs after this crate's own thread-local is gone, where
+/// a plain `Handle::try_current()` panics and aborts the process. Runs the
+/// probe in a re-executed copy of this test binary, so an abort fails this
+/// test instead of crashing the suite.
+#[cfg(unix)]
+#[test]
+fn kill_on_drop_child_dropped_during_thread_local_teardown_is_reaped() {
+    const PROBE: &str = "RUSTY_TOKIO_TLS_TEARDOWN_REAP_PROBE";
+    const NAME: &str = "kill_on_drop_child_dropped_during_thread_local_teardown_is_reaped";
+    if std::env::var_os(PROBE).is_some() {
+        thread_local_teardown_probe();
+        return;
+    }
+
+    let mut probe = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+        .env(PROBE, "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("re-exec");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while probe.try_wait().expect("try_wait").is_none() {
+        if Instant::now() >= deadline {
+            let _ = probe.kill();
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let output = probe.wait_with_output().expect("probe output");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "probe {}:\n{stdout}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A filter that matched nothing would also exit 0.
+    assert!(stdout.contains("1 passed"), "probe did not run:\n{stdout}");
+}
+
+/// Run in the re-executed process: drops a `kill_on_drop` child from a
+/// thread-local destructor registered before rusty_tokio's own, so it runs
+/// after that one is torn down, and checks the child is reaped.
+#[cfg(unix)]
+fn thread_local_teardown_probe() {
+    use rusty_tokio::process::{Child, Command};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static HELD: RefCell<Option<Child>> = const { RefCell::new(None) };
+    }
+
+    install_fallback().expect("fallback");
+    let pid = std::thread::spawn(|| {
+        let child = Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as libc::pid_t;
+        // Destructors run in reverse order of registration: `HELD` is
+        // registered first, so it is dropped after rusty_tokio's `CURRENT`,
+        // which this first lookup registers.
+        HELD.with(|held| *held.borrow_mut() = Some(child));
+        assert!(rusty_tokio::Handle::try_current().is_none());
+        pid
+    })
+    .join()
+    .expect("probe thread");
+
+    assert_reaped(pid);
+}
+
+/// Waits up to 5 s for `pid`, a child of this process, to be reaped by
+/// someone else, and fails if it was not. It never signals or reaps `pid`.
+#[cfg(unix)]
+fn assert_reaped(pid: libc::pid_t) {
+    // `kill(pid, 0)` still succeeds on a zombie; ESRCH means it was reaped.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reaped = loop {
+        // SAFETY: signal 0 only checks that `pid` exists; nothing is sent.
+        if unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    // Linux shows a zombie as state `Z`; elsewhere this is just `None`.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
+    // No cleanup signal on failure: the fallback reaper may reap the child
+    // after the last check, and a bare `pid` could then name an unrelated
+    // process. `Child`'s `Drop` has already sent its `SIGKILL`.
+
+    assert!(
+        reaped,
+        "dropped kill_on_drop child {pid} was not reaped: {stat:?}"
+    );
+}

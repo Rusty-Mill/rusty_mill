@@ -109,6 +109,7 @@ pub(crate) fn needs(kind: &str) -> Features {
             Features::LABELS
         }
         "layout-changed" => Features::LAYOUT,
+        "client-connection-changed" => Features::IDENTITY,
         _ => Features::NONE,
     }
 }

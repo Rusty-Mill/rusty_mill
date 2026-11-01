@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
-use rusty_mux_core::{BlockId, ClientId, Event, ExitStatus, Mux, Side, Size, WindowId};
+use rusty_mux_core::{
+    BlockId, ClientId, Event, ExitStatus, Mux, Principal, Side, Size, Transport, WindowId,
+};
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::{
     Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Takeover, encode,
@@ -69,7 +71,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::LABELS)
     .union(Features::LAYOUT)
     .union(Features::TAKEOVER)
-    .union(Features::ECHO_ACK);
+    .union(Features::ECHO_ACK)
+    .union(Features::IDENTITY);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -119,6 +122,10 @@ pub(crate) struct State {
     config: Config,
     /// The listening socket's path, given to each block's program.
     socket: Option<PathBuf>,
+    /// Every client's principal. A personal server serves only its own
+    /// user: the socket's peer check refuses anyone else, and a UDP
+    /// association is handed only to a client already connected.
+    owner: Principal,
     mux: Mux,
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
@@ -166,10 +173,11 @@ pub(crate) enum Kept {
 }
 
 impl State {
-    pub(crate) fn shared(config: Config, socket: Option<PathBuf>) -> Shared {
+    pub(crate) fn shared(config: Config, socket: Option<PathBuf>, owner: Principal) -> Shared {
         Rc::new(RefCell::new(Self {
             config,
             socket,
+            owner,
             mux: Mux::new(),
             blocks: HashMap::new(),
             clients: HashMap::new(),
@@ -273,17 +281,26 @@ impl State {
     /// replays the events after `resume` when they are all still held.
     /// With `TAKEOVER` and a valid `takeover`, the connection continues
     /// that client instead: its id, name, attachment and lease stay, and
-    /// replacing its outbox closes the old connection.
+    /// replacing its outbox closes the old connection. Either way the
+    /// client is now reached by `transport`.
     pub(crate) fn connect(
         &mut self,
         outbox: Outbox,
+        transport: Transport,
         theirs: Features,
         resume: Option<Cursor>,
         takeover: Option<Takeover>,
     ) -> ClientId {
         let features = theirs.intersection(self.offered());
         let continued = takeover.and_then(|t| self.takes_over(t, features));
-        let client = continued.unwrap_or_else(|| self.mux.connect());
+        let client = match continued {
+            Some(client) => {
+                let moved = self.mux.reconnect(client, transport);
+                in_step("reconnect", moved);
+                client
+            }
+            None => self.mux.connect(self.owner.clone(), transport),
+        };
         // The new connection numbers its requests afresh.
         self.forget_keys(client);
         // Waiting out an orphan's grace ends at its takeover.
@@ -674,6 +691,11 @@ impl State {
                 self.require(client, Features::INSPECT, "list")
                     .and_then(|()| self.list(client, req)),
             ),
+            M::Whoami { req } => (
+                req,
+                self.require(client, Features::IDENTITY, "whoami")
+                    .and_then(|()| self.whoami(client, req)),
+            ),
             M::Rename { req, target, name } => (
                 req,
                 self.require(client, Features::LABELS, "rename")
@@ -848,11 +870,7 @@ impl State {
             .get(&client)
             .is_some_and(|f| f.contains(Features::LABELS))
         {
-            entries.extend(self.mux.clients().map(|c| Entry::Client {
-                client: c.id(),
-                name: c.name().to_owned(),
-                attached: c.attached(),
-            }));
+            entries.extend(self.mux.clients().map(client_entry));
         }
         let mut messages: Vec<Message> = entries
             .into_iter()
@@ -860,6 +878,22 @@ impl State {
             .collect();
         messages.push(Message::Done { req, created: None });
         reply("list", &messages)
+    }
+
+    /// The caller's own client entry.
+    fn whoami(&self, client: ClientId, req: u64) -> Result<Outcome, Refusal> {
+        let me = self
+            .mux
+            .client(client)
+            .ok_or(rusty_mux_core::Error::UnknownClient(client))?;
+        let messages = [
+            Message::Entry {
+                req,
+                entry: client_entry(me),
+            },
+            Message::Done { req, created: None },
+        ];
+        reply("whoami", &messages)
     }
 
     /// Starts a block beside `target`, sized as its part of `target`.
@@ -1318,9 +1352,28 @@ fn receives(features: Features, event: &Event) -> bool {
         | Event::BlockRenamed { .. }
         | Event::ClientRenamed { .. } => Features::LABELS,
         Event::LayoutChanged { .. } => Features::LAYOUT,
+        Event::ClientConnectionChanged { .. } => Features::IDENTITY,
         _ => Features::NONE,
     };
     features.contains(needs)
+}
+
+/// A principal for tests, which build a state without a peer check.
+#[cfg(test)]
+pub(crate) fn test_owner() -> Principal {
+    Principal::unix(1000, Some("tester".into())).expect("valid")
+}
+
+/// A client's entry in a listing: with its principal and transport, which
+/// a client without [`Features::IDENTITY`] skips.
+fn client_entry(client: &rusty_mux_core::Client) -> Entry {
+    Entry::Client {
+        client: client.id(),
+        name: client.name().to_owned(),
+        attached: client.attached(),
+        principal: Some(client.principal().clone()),
+        transport: Some(client.transport()),
+    }
 }
 
 /// Reports a model call that fails only if the server's state and the
@@ -1576,6 +1629,7 @@ mod regression {
                     console_host: ConsoleHost::default(),
                 },
                 None,
+                crate::state::test_owner(),
             );
             let poll = rusty_tokio::task::spawn_local(watch_processes(Rc::downgrade(&shared)));
             // One pass over an empty state first.
@@ -1598,10 +1652,11 @@ mod regression {
                 console_host: ConsoleHost::default(),
             },
             None,
+            crate::state::test_owner(),
         );
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Features::CHECKPOINT_V6, None, None);
+        let client = state.connect(out, Transport::Socket, Features::CHECKPOINT_V6, None, None);
         let session = state.mux.create_session("s").unwrap();
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
@@ -1630,11 +1685,16 @@ mod regression {
                 .union(Features::TAKEOVER)
                 .union(Features::ECHO_ACK);
             let (out, _old_inbox, old) = outbox();
-            let client = shared.borrow_mut().connect(out, features, None, None);
+            let client = shared
+                .borrow_mut()
+                .connect(out, Transport::Socket, features, None, None);
             let token = shared.borrow().tokens[&client].current;
             let (out, _new_inbox, new) = outbox();
             let takeover = Some(Takeover { client, token });
-            let taken = shared.borrow_mut().connect(out, features, None, takeover);
+            let taken =
+                shared
+                    .borrow_mut()
+                    .connect(out, Transport::Socket, features, None, takeover);
             assert_eq!(taken, client);
 
             let now = Instant::now();
@@ -1655,7 +1715,7 @@ mod regression {
             let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
             let (out, _old_inbox, old) = outbox();
             let mut state = shared.borrow_mut();
-            let client = state.connect(out, features, None, None);
+            let client = state.connect(out, Transport::Socket, features, None, None);
             state.mux.attach(client, block).unwrap();
             state.mux.acquire_lease(client, block).unwrap();
             let token = state.tokens[&client].current;
@@ -1665,7 +1725,10 @@ mod regression {
             state.go_stale(client);
             let (out, _new_inbox, _) = outbox();
             let takeover = Some(Takeover { client, token });
-            assert_eq!(state.connect(out, features, None, takeover), client);
+            assert_eq!(
+                state.connect(out, Transport::Socket, features, None, takeover),
+                client
+            );
             assert_eq!(state.lease_of(block), Some(client));
         });
     }
@@ -1982,10 +2045,11 @@ mod regression {
                     console_host: ConsoleHost::default(),
                 },
                 None,
+                crate::state::test_owner(),
             );
             let mut state = shared.borrow_mut();
             let (out, _inbox, cancel) = outbox();
-            let client = state.connect(out, Features::TAKEOVER, None, None);
+            let client = state.connect(out, Transport::Socket, Features::TAKEOVER, None, None);
             assert_eq!(
                 state.disconnect(client, &cancel),
                 Kept::Orphan,
@@ -2004,7 +2068,7 @@ mod regression {
             );
 
             let (out, _inbox, cancel) = outbox();
-            let plain = state.connect(out, Features::NONE, None, None);
+            let plain = state.connect(out, Transport::Socket, Features::NONE, None, None);
             assert_eq!(
                 state.disconnect(plain, &cancel),
                 Kept::Gone,

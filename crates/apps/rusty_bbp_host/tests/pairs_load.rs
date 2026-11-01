@@ -457,3 +457,65 @@ fn a_marker_from_before_segments_is_refused_and_an_older_bbp_refuses_the_new_one
     assert!(err.contains("records evidence differently"), "{err}");
     assert!(new_marker.starts_with("{\"schema\":2,"), "{new_marker}");
 }
+
+// ---- #1327: reads_per_turn is the opened budget, and an extended one refuses
+
+/// The facts of a run opened at `reads_per_turn` 30 that a human then
+/// extended with `extend <field> <limit>`.
+fn extended_facts(tag: &str, field: &str, limit: &str) -> Result<pairs::RunFacts, String> {
+    let root = tempdir(tag);
+    let (_repo, head) = checkout(&root);
+    let criteria = root.join("criteria.json");
+    std::fs::write(
+        &criteria,
+        r#"{"prices_as_of":"test","models":{"m":{"input":1,"output":1,"cache_creation_5m":1,"cache_creation_1h":1,"cache_read":1}}}"#,
+    )
+    .unwrap();
+    let r = run(&root, "extended", &mod_out(Some(&head)), Some(ASSISTANT));
+    let task = TaskId("T1".into());
+    rusty_bbp_host::human::perform(Path::new(&r.dir), &task, "extend", &[field, limit], None)
+        .expect("extend");
+    let (c, sha) = rusty_bbp_host::tokens::read_criteria(&criteria).unwrap();
+    let f = pairs::facts(
+        &pairs::RunRef {
+            dir: r.dir.clone(),
+            task: "T1".into(),
+            mod_output: r.out.clone(),
+            rubric_ok: true,
+        },
+        &c,
+        &sha,
+        CAP_USD,
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    f
+}
+
+#[test]
+fn a_run_whose_reads_per_turn_was_extended_is_refused() {
+    // Opened at 30 and extended to 60: the final card says 60 and the opened
+    // task 30. Neither may stand for the run, whatever the manifest says.
+    let err = extended_facts("extended-rpt", "reads_per_turn", "60").unwrap_err();
+    assert!(
+        err.contains("reads_per_turn") && err.contains("30") && err.contains("60"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_run_extended_back_to_its_opened_reads_per_turn_is_still_refused() {
+    // Guard: comparing only the final card with the opened task would pass
+    // this run, which ran some turns at another limit before the second
+    // extension restored 30. Here one extension to 30 stands for that history.
+    let err = extended_facts("extended-same", "reads_per_turn", "30").unwrap_err();
+    assert!(
+        err.contains("reads_per_turn") && err.contains("extended"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_run_extended_in_another_field_keeps_its_opened_reads_per_turn() {
+    let f = extended_facts("extended-msgs", "messages", "1000").expect("loads");
+    assert_eq!(f.reads_per_turn, 30);
+}

@@ -160,6 +160,19 @@ fn a_new_untracked_file_makes_the_binary_dirty() {
 }
 
 #[test]
+fn an_untracked_file_is_dirty_even_when_git_config_hides_untracked_files() {
+    // #1328: with `status.showUntrackedFiles=no` (set in the repository's own
+    // config, as a user's global config would), plain `git status --porcelain`
+    // printed nothing for an untracked file and the binary reported clean.
+    let r = Repo::new("untracked-hidden");
+    r.git(&["config", "status.showUntrackedFiles", "no"]);
+    let head = r.head();
+    assert_eq!(r.built_sha(), head);
+    std::fs::write(r.root.join("dep/src/extra.rs"), "// new\n").unwrap();
+    assert_eq!(r.built_sha(), format!("{head}-dirty"));
+}
+
+#[test]
 fn a_new_commit_on_the_same_branch_and_a_moved_ref_are_followed() {
     let r = Repo::new("refs");
     let first = r.head();

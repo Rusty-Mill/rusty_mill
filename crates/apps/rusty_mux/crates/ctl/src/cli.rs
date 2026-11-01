@@ -73,6 +73,10 @@ pub enum Until {
     /// The block's program exits, or the block closes; the target is
     /// resolved like an id flag's.
     Exit { block: String },
+    /// Every block in the window or session has ended: its program exited
+    /// or it closed, including blocks made there during the wait. The
+    /// target is resolved like an id flag's.
+    Ended { scope: Scope, target: String },
     /// An event of `kind`, one of [`rusty_mux_script::EVENTS`], whose
     /// fields have these values. A `session`, `window`, `block` or
     /// `client` value is a target.
@@ -80,6 +84,13 @@ pub enum Until {
         kind: &'static str,
         fields: Vec<(&'static str, String)>,
     },
+}
+
+/// What holds the blocks an [`Until::Ended`] wait follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Window,
+    Session,
 }
 
 /// `run`: a `create-block` request that names a program, then, with
@@ -280,7 +291,7 @@ fn agent(args: &[String]) -> Result<AgentCommand, String> {
     }
 }
 
-const WAIT_USAGE: &str = "usage: wait --block BLOCK [--timeout SECS] | wait --event KIND [--FIELD VALUE]... [--timeout SECS]";
+const WAIT_USAGE: &str = "usage: wait (--block BLOCK | --window WINDOW | --session SESSION) [--timeout SECS] | wait --event KIND [--FIELD VALUE]... [--timeout SECS]";
 
 fn wait(args: &[String]) -> Result<Wait, String> {
     let mut timeout = None;
@@ -299,6 +310,14 @@ fn wait(args: &[String]) -> Result<Wait, String> {
         None => match rest.as_slice() {
             [("block", block)] => Until::Exit {
                 block: (*block).to_owned(),
+            },
+            [("window", window)] => Until::Ended {
+                scope: Scope::Window,
+                target: (*window).to_owned(),
+            },
+            [("session", session)] => Until::Ended {
+                scope: Scope::Session,
+                target: (*session).to_owned(),
             },
             _ => return Err(WAIT_USAGE.into()),
         },
@@ -562,8 +581,10 @@ pub fn usage(method: Option<&Method>) -> String {
                 "  watch            Run the config's rules on events: watch [--after EPOCH:SEQ]\n",
             );
             text.push_str(
-                "  wait             Wait for a block's program to exit, exiting with its status,\n\
-                 \x20                  or for an event whose fields match: wait --block BLOCK |\n\
+                "  wait             Wait for a block's program to exit, exiting with its status;\n\
+                 \x20                  for every block in a window or session to end, exiting with\n\
+                 \x20                  the last failure; or for an event whose fields match:\n\
+                 \x20                  wait --block BLOCK | --window WINDOW | --session SESSION |\n\
                  \x20                  wait --event KIND [--FIELD VALUE]...; [--timeout SECS] exits 124\n",
             );
             text.push_str(

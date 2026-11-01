@@ -225,10 +225,26 @@ fn wait_takes_a_block_or_an_event_filter_and_a_timeout() {
             timeout: None,
         }
     );
+    // A window or a session alone waits for every block in it to end.
+    for (line, scope, target) in [
+        ("wait --window logs", Scope::Window, "logs"),
+        ("wait --session main --timeout 2", Scope::Session, "main"),
+    ] {
+        assert_eq!(
+            wait_of(line).until,
+            Until::Ended {
+                scope,
+                target: target.into()
+            },
+            "{line}"
+        );
+    }
     for (line, want) in [
         ("wait", "usage: wait"),
         ("wait --block a --block b", "usage: wait"),
-        ("wait --session s", "usage: wait"),
+        ("wait --block a --window w", "usage: wait"),
+        ("wait --window w --session s", "usage: wait"),
+        ("wait --client c", "usage: wait"),
         ("wait --event nope", "unknown event `nope`"),
         ("wait --event bell --code 1", "has no field `code`"),
         ("wait --block a --timeout -1", "not a timeout"),

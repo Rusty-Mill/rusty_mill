@@ -527,18 +527,11 @@ jobs:
       # cfg-gated portable shims like rusty_win32 does the other way.
       # rusty_fedora_agent gets the same treatment: it shells out to
       # systemctl/journalctl/dnf, none of which exist on Windows either.
-      # rusty_multimodal_db is a different case -- its own library and every
-      # feature but one are portable, and its standalone repo's own CI never
-      # ran a Windows job at all (single-OS, so this was simply untested,
-      # not previously green). --all-features here is what first exercises
-      # `external-db-bench`, whose optional `duckdb` dependency vendors
-      # DuckDB's own C++ amalgamation ("bundled") -- that native build fails
-      # under windows-latest's current MSVC toolchain (cc-rs exit code 2
-      # compiling ub_src_storage_compression_chimp.cpp), a third-party
-      # native-build issue with no Rust-side fix available here. Whole-crate
-      # exclusion is coarser than the actual problem (one optional feature),
-      # matching this mechanism's existing granularity rather than adding a
-      # new one for a single crate.
+      # rusty_multimodal_db is a different case -- it was excluded because
+      # --all-features built `external-db-bench`'s bundled DuckDB, which
+      # failed under windows-latest's MSVC toolchain. ADR-0138 removed that
+      # feature; the exclusion stays until a run shows the rest of the crate
+      # green on Windows, which its CI has never tested.
       - uses: ./.github/actions/select-packages
         id: scope
         with:
@@ -1892,9 +1885,14 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - name: Install valgrind
+        timeout-minutes: 10
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends valgrind
+          # Retry transient downloads, but bound stalled acquisition and setup.
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          # Partial index refreshes must fail before installation starts.
+          sudo apt-get "${apt_options[@]}" --error-on=any update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends valgrind
           valgrind --version
           objdump --version | head -1
       - name: Harness self-test (planted leaks must be caught)

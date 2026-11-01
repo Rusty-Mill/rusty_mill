@@ -348,3 +348,23 @@ pub use windows_sys::Win32::System::Threading::{
     CreateEventW, ResetEvent, SetEvent, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
 };
 pub use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+
+// Console client calls for the console host's parity probes
+// (`rusty_conhost`'s `conhost_probe` example; design
+// `docs/projects/term/conhost/design.md` §8.1, Phase B in §9.2). A probe
+// is a real console client: it calls each API through kernelbase, as
+// the programs a console serves do, so the same call can be compared
+// under ConPTY and under our host. No backend module calls these; the
+// feature (`Win32_System_Console`) is already enabled.
+pub use windows_sys::Win32::System::Console::{
+    FillConsoleOutputAttribute, FillConsoleOutputCharacterW, FlushConsoleInputBuffer,
+    GenerateConsoleCtrlEvent, GetConsoleCursorInfo, GetConsoleOutputCP, GetConsoleProcessList,
+    GetConsoleScreenBufferInfoEx, GetConsoleTitleW, GetConsoleWindow, GetCurrentConsoleFont,
+    GetLargestConsoleWindowSize, GetNumberOfConsoleInputEvents, ReadConsoleOutputAttribute,
+    ReadConsoleOutputCharacterW, ReadConsoleOutputW, ScrollConsoleScreenBufferW,
+    SetConsoleCursorInfo, SetConsoleCursorPosition, SetConsoleOutputCP, SetConsoleScreenBufferSize,
+    SetConsoleTextAttribute, SetConsoleTitleW, SetConsoleWindowInfo, WriteConsoleA,
+    WriteConsoleOutputAttribute, WriteConsoleOutputCharacterW, WriteConsoleOutputW, WriteConsoleW,
+    CHAR_INFO, CHAR_INFO_0, CONSOLE_CURSOR_INFO, CONSOLE_FONT_INFO, CONSOLE_SCREEN_BUFFER_INFOEX,
+    SMALL_RECT,
+};

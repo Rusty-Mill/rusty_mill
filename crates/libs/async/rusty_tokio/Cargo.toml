@@ -212,8 +212,9 @@ futures-io = "0.3"
 # the `tracing` feature is enabled.
 rusty_log = { workspace = true }
 # Oracle for `tests/fallback.rs`: rusty_tokio I/O and timers polled by a real
-# tokio runtime, the case `runtime::install_fallback` exists for.
-tokio = { version = "1", default-features = false, features = ["rt"] }
+# tokio runtime, the case `runtime::install_fallback` exists for. `sync` is
+# the oracle for `tests/sync.rs`'s `Notify` parity tests (#1303).
+tokio = { version = "1", default-features = false, features = ["rt", "sync"] }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 # `tests/signal_windows.rs` calls `GenerateConsoleCtrlEvent` directly to
