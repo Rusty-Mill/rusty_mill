@@ -242,7 +242,10 @@ pub fn perform_fenced(
     };
     if let Err(detail) = refuse_evidence_extension(dir, task, &action) {
         return match fence {
-            Some(_) => Ok(Response::Rejected(Rejection::new(Code::Forbidden, detail))),
+            Some(_) => Ok(Response::Rejected(Rejection::new(
+                Code::BadHumanInput,
+                detail,
+            ))),
             None => Err(detail),
         };
     }
@@ -325,6 +328,9 @@ mod tests {
         ] {
             let err = perform(&dir, &task, "extend", &[f, "1000"], None).unwrap_err();
             assert!(err.contains("evidence"), "{f}: {err}");
+            let cli = perform_fenced(&dir, &task, "extend", &[f, "1000"], None, "o", None, None)
+                .unwrap_err();
+            assert!(cli.contains("evidence"), "{f}: {cli}");
             let fenced = perform_fenced(
                 &dir,
                 &task,

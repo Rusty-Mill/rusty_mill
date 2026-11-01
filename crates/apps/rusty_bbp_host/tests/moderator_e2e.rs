@@ -1909,6 +1909,37 @@ fn agents_check_as_a_binary_accepts_a_matched_pair_and_refuses_the_rest() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- owner decision 2026-11-01: no budget extensions in evidence runs
+
+#[test]
+fn a_capped_first_start_on_an_extended_task_is_refused_and_leaves_no_marker() {
+    // An extension before the marker is allowed (the task is not an evidence
+    // run yet), but a run started on it would be void in `bbp pairs`, so the
+    // first capped start refuses before anything is spent.
+    let (dir, task, repo) = opened("extended-first-start");
+    rusty_bbp_host::human::perform(&dir, &task, "extend", &["messages", "1000"], None)
+        .expect("extend before the marker");
+    let mut planner = script(&dir, "planner", "sleep 1");
+    planner
+        .args
+        .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
+    let mut cfg = config(
+        &dir,
+        &task,
+        repo,
+        Launchers::default().with("planner", planner),
+        2,
+    );
+    cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
+    let err = moderator::run(&cfg).unwrap_err();
+    assert!(err.contains("extended"), "{err}");
+    assert!(
+        !moderator::evidence_marker_path(&dir, &task).exists(),
+        "a refused first start must not make the task an evidence run"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- review comments on #763 (baileyrd, fa4a8a8a): the marker waits for the lock
 
 #[test]

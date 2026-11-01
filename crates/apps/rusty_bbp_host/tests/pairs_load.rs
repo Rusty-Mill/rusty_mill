@@ -533,7 +533,7 @@ fn a_run_extended_in_any_budget_field_is_refused() {
     for field in ["messages", "bytes", "reads", "turns", "iterations"] {
         let err = extended_facts(&format!("extended-{field}"), field, "100000").unwrap_err();
         assert!(
-            err.contains(field) && err.contains("extended"),
+            err.starts_with(&format!("{field} was opened at ")) && err.contains("100000"),
             "{field}: {err}"
         );
     }

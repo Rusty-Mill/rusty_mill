@@ -611,7 +611,7 @@ pub fn facts(
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
-        reads_per_turn: opened_reads_per_turn(&events)?,
+        reads_per_turn: unextended_reads_per_turn(&events)?,
         role_models,
         build_sha,
         no_model_turns,
@@ -648,7 +648,7 @@ pub fn check_segments(segments: &[String], build_sha: &str) -> Result<Option<usi
 /// earlier overshoot, which is checked against the folded budget. `bbp human
 /// extend` refuses on an evidence task; this catches one logged anyway (owner
 /// decision, 2026-11-01).
-fn opened_reads_per_turn(events: &[Event]) -> Result<u64, String> {
+fn unextended_reads_per_turn(events: &[Event]) -> Result<u64, String> {
     let Some(Event::TaskOpened { budget, .. }) = events.first() else {
         return Err("the log does not start with TaskOpened".to_owned());
     };
