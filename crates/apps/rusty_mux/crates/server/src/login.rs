@@ -274,39 +274,52 @@ fn served_by(stream: UnixStream, account: &Account) -> io::Result<UnixStream> {
     Ok(stream)
 }
 
-/// Creates `dir` if needed, and refuses one that anyone but root or this
-/// user could change or swap: its entries are where the front door looks
-/// for servers, and it creates, gives away and connects by path. `dir`
-/// must be this user's and writable by no one else, and each directory
-/// above it root's or this user's, writable by others only when sticky
-/// (as `/tmp`), where no one else can rename what is in it.
+/// Checks `dir`, then creates it if needed, and refuses one that anyone but
+/// root or this user could change or swap: its entries are where the front
+/// door looks for servers, and it creates, gives away and connects by path.
+/// `dir` must be absolute with no symbolic link in it (each later use would
+/// follow the link again), this user's and writable by no one else; each
+/// directory above it root's or this user's, writable by others only when
+/// sticky (as `/tmp`), where no one else can rename what is in it.
 fn runtime_dir(dir: &Path) -> io::Result<()> {
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o755)
-        .create(dir)?;
     let me = rusty_libc::process::geteuid();
-    let unsafe_dir = |why: &str| {
+    let unsafe_dir = |why: String| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!("{}: the runtime directory {why}", dir.display()),
         )
     };
-    let dir = std::fs::canonicalize(dir)?;
-    let meta = std::fs::symlink_metadata(&dir)?;
-    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
-        return Err(unsafe_dir("must be this user's, writable by no one else"));
+    if !dir.is_absolute() {
+        return Err(unsafe_dir("must be an absolute path".into()));
     }
-    for ancestor in dir.ancestors().skip(1) {
-        let meta = std::fs::symlink_metadata(ancestor)?;
+    // Every part that exists already, before anything is created.
+    for part in dir.ancestors() {
+        let meta = match std::fs::symlink_metadata(part) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let shown = part.display();
+        if !meta.is_dir() {
+            return Err(unsafe_dir(format!("goes through {shown}, not a directory")));
+        }
         let owner_ok = meta.uid() == 0 || meta.uid() == me;
         let sticky = meta.mode() & 0o1000 != 0;
-        if !owner_ok || (meta.mode() & 0o022 != 0 && !sticky) {
-            return Err(unsafe_dir(&format!(
-                "sits in {}, which another user could change",
-                ancestor.display()
+        if !owner_ok || (meta.mode() & 0o022 != 0 && (part == dir || !sticky)) {
+            return Err(unsafe_dir(format!(
+                "goes through {shown}, which another user could change"
             )));
         }
+    }
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o755)
+        .create(dir)?;
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
+        return Err(unsafe_dir(
+            "must be this user's, writable by no one else".into(),
+        ));
     }
     Ok(())
 }

@@ -417,6 +417,38 @@ fn a_runtime_directory_in_a_parent_others_can_write_stops_the_front_door() {
     );
 }
 
+/// A link in the path is followed again on every use, so a link in a
+/// directory another user can write would let them move the runtime.
+#[test]
+fn a_runtime_directory_through_a_link_stops_the_front_door() {
+    let dir = scratch();
+    let _reap = Reap(dir.clone());
+    let (uid, user) = me();
+    write_map(&dir, &format!("uid:{uid} {user}\n"));
+    std::fs::create_dir(dir.join("safe")).expect("safe");
+    std::os::unix::fs::symlink(dir.join("safe"), dir.join("link")).expect("link");
+    let socket = dir.join("login.sock");
+    let login = Login {
+        map: dir.join("accounts"),
+        runtime: dir.join("link").join("run"),
+        server: PathBuf::from(env!("CARGO_BIN_EXE_rusty-mux-server")),
+    };
+    let ended = Builder::new_current_thread()
+        .build_local(&LocalOptions::default())
+        .expect("runtime")
+        .block_on(async move {
+            let listener = UnixListener::bind(&socket).expect("bind");
+            let (_reload, reloads) = mpsc::unbounded_channel();
+            rusty_tokio::time::timeout(PATIENCE, serve_login(listener, login, reloads)).await
+        })
+        .expect("ended before the deadline");
+    assert!(ended.is_err(), "a runtime through a link was used");
+    assert!(
+        !dir.join("safe").join("run").exists(),
+        "created before the check"
+    );
+}
+
 /// An account server trusts a preface only from the forwarder's uid, and
 /// closes a forwarder's connection whose preface is missing or bad.
 #[test]
