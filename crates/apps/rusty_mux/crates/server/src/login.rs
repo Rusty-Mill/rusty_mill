@@ -283,45 +283,57 @@ fn served_by(stream: UnixStream, account: &Account) -> io::Result<UnixStream> {
 /// sticky (as `/tmp`), where no one else can rename what is in it.
 fn runtime_dir(dir: &Path) -> io::Result<()> {
     let me = rusty_libc::process::geteuid();
-    let unsafe_dir = |why: String| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{}: the runtime directory {why}", dir.display()),
-        )
-    };
-    if !dir.is_absolute() {
-        return Err(unsafe_dir("must be an absolute path".into()));
-    }
-    // Every part that exists already, before anything is created.
-    for part in dir.ancestors() {
-        let meta = match std::fs::symlink_metadata(part) {
-            Ok(meta) => meta,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        let shown = part.display();
-        if !meta.is_dir() {
-            return Err(unsafe_dir(format!("goes through {shown}, not a directory")));
-        }
-        let owner_ok = meta.uid() == 0 || meta.uid() == me;
-        let sticky = meta.mode() & 0o1000 != 0;
-        if !owner_ok || (meta.mode() & 0o022 != 0 && (part == dir || !sticky)) {
-            return Err(unsafe_dir(format!(
-                "goes through {shown}, which another user could change"
-            )));
-        }
-    }
+    // Before anything is created, then again after: a part missing at the
+    // first look may have been made by another user in between.
+    check_parts(dir, me, true)?;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o755)
         .create(dir)?;
+    check_parts(dir, me, false)?;
     let meta = std::fs::symlink_metadata(dir)?;
-    if !meta.is_dir() || meta.uid() != me || meta.mode() & 0o022 != 0 {
-        return Err(unsafe_dir(
-            "must be this user's, writable by no one else".into(),
-        ));
+    if meta.uid() != me {
+        return Err(unsafe_dir(dir, "must be this user's".into()));
     }
     Ok(())
+}
+
+/// Checks each part of `dir` as [`runtime_dir`] requires; a part that does
+/// not exist passes only when `allow_missing`.
+fn check_parts(dir: &Path, me: u32, allow_missing: bool) -> io::Result<()> {
+    if !dir.is_absolute() {
+        return Err(unsafe_dir(dir, "must be an absolute path".into()));
+    }
+    for part in dir.ancestors() {
+        let meta = match std::fs::symlink_metadata(part) {
+            Ok(meta) => meta,
+            Err(e) if allow_missing && e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        let shown = part.display();
+        if !meta.is_dir() {
+            return Err(unsafe_dir(
+                dir,
+                format!("goes through {shown}, not a directory"),
+            ));
+        }
+        let owner_ok = meta.uid() == 0 || meta.uid() == me;
+        let sticky = meta.mode() & 0o1000 != 0;
+        if !owner_ok || (meta.mode() & 0o022 != 0 && (part == dir || !sticky)) {
+            return Err(unsafe_dir(
+                dir,
+                format!("goes through {shown}, which another user could change"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn unsafe_dir(dir: &Path, why: String) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!("{}: the runtime directory {why}", dir.display()),
+    )
 }
 
 /// Makes `dir` the account's own: created 0700 and given to the account,
@@ -483,4 +495,49 @@ fn reload(front: &Shared) -> io::Result<()> {
         task.abort();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rusty-mux-parts-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).expect("scratch");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        dir
+    }
+
+    /// The second look, after creating, allows nothing missing: a part
+    /// that was missing at the first look is checked like the rest.
+    #[test]
+    fn a_missing_part_passes_only_the_first_look() {
+        let dir = scratch("missing");
+        let me = rusty_libc::process::geteuid();
+        let run = dir.join("mid").join("run");
+        assert!(check_parts(&run, me, true).is_ok());
+        assert!(check_parts(&run, me, false).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A part made in between that others can write fails the second look.
+    #[test]
+    fn a_part_others_can_write_fails_the_second_look() {
+        let dir = scratch("between");
+        let me = rusty_libc::process::geteuid();
+        let mid = dir.join("mid");
+        let run = mid.join("run");
+        assert!(check_parts(&run, me, true).is_ok());
+        // Someone makes `mid` before the front door does.
+        std::fs::create_dir(&mid).expect("mid");
+        std::fs::set_permissions(&mid, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        std::fs::DirBuilder::new()
+            .mode(0o755)
+            .create(&run)
+            .expect("run");
+        assert!(check_parts(&run, me, false).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
