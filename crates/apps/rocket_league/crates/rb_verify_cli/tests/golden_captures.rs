@@ -176,8 +176,11 @@ const CASES: &[Case] = &[
     // A ball rolling without sliding below the sleep thresholds is frozen 2.0 s in
     // (FR-037, board b19); 80 uu/s rolls on. rest_40 and rest_80 keep a rolling-decay
     // error (the port's rolling ball slows 2.1%/s, the game's 3.0%/s). A ball set at
-    // 6500 uu/s is capped before its first tick moves it; fast_6500's max is the
-    // rebound off the side wall's top seam, not the cap.
+    // 6500 uu/s is capped before its first tick moves it. fast_6500's max is not
+    // the cap or the wall: the port slides 0.2% further along the floor (1.8958
+    // against 1.8999 uu/s a tick of friction), reaches the ramp 0.3 uu ahead and
+    // leaves its top facet a tick early (board #197; see
+    // `from_the_games_state_the_port_rides_the_side_ramp_and_bounces_off_the_wall`).
     Case {
         scenario: "experiments/probe_ball_rest_10.json",
         fixture: "probe_ball_rest_10.jsonl",
@@ -732,5 +735,52 @@ fn every_fixture_has_a_case() -> Result<(), Box<dyn Error>> {
     on_disk.sort();
     listed.sort();
     assert_eq!(on_disk, listed);
+    Ok(())
+}
+
+/// From the game's own state just before the side ramp (`probe_ball_fast_6500`
+/// tick 141), the port rides the ramp and bounces off the side wall the way
+/// the game does: the ball leaves the ramp at about (1500, 3200) uu/s and the
+/// wall returns it at (-210, 2855). So the scenario's remaining ball error (board
+/// #197) is not the ramp, the wall or the seam between them. It is a 0.3 uu lead
+/// built up while the ball slides along the floor (the port's sliding friction
+/// takes 1.8958 uu/s a tick, the game's 1.8999), which decides whether the ball
+/// still touches the ramp's top facet at tick 148. A guard: it passed on its
+/// base. Combining the ball's restitution with the arena's by the smaller value
+/// instead of the larger turns it red at the wall bounce.
+#[test]
+fn from_the_games_state_the_port_rides_the_side_ramp_and_bounces_off_the_wall(
+) -> Result<(), Box<dyn Error>> {
+    const FROM: usize = 141;
+    const TICKS: usize = 20;
+    let frames =
+        CaptureFileSource::new(bot_dir().join("fixtures/probe_ball_fast_6500.jsonl")).frames()?;
+    let window = frames
+        .get(FROM..=FROM + TICKS)
+        .ok_or("the capture is shorter than the window")?;
+    let mut env = rb_env::Env::new();
+    env.reset(&window[0]);
+    let mut worst = (0.0f32, 0.0f32);
+    for pair in window.windows(2) {
+        let (before, recorded) = (&pair[0], &pair[1]);
+        // Compared by time, one tick apart: no hole in this window.
+        let gap = recorded.timestamp_secs - before.timestamp_secs;
+        assert!((gap - rb_env::TICK_SECS).abs() < 1e-4, "gap {gap} s");
+        let inputs: Vec<_> = recorded
+            .cars
+            .iter()
+            .map(|car| car.input.unwrap_or_default())
+            .collect();
+        let predicted = env.step(&inputs);
+        let position = (predicted.ball.position - recorded.ball.position).length();
+        let velocity = (predicted.ball.velocity - recorded.ball.velocity).length();
+        worst = (worst.0.max(position), worst.1.max(velocity));
+    }
+    assert!(
+        worst.0 < 0.5 && worst.1 < 5.0,
+        "worst ball error {:.2} uu, {:.2} uu/s",
+        worst.0,
+        worst.1
+    );
     Ok(())
 }
