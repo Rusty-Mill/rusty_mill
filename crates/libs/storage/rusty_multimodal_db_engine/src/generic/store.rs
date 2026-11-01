@@ -669,8 +669,12 @@ fn log_edge_entry(
     log: &mut insert_log::Appender,
     write: impl FnOnce(&mut insert_log::Appender) -> Result<(), DurabilityError>,
 ) -> Result<(), DurabilityError> {
-    write(log)?;
-    log.close()
+    // Close on every outcome: a rolled-back (clean) failure keeps the
+    // handle open, and compaction later unlinks the log by path.
+    let written = write(log);
+    let closed = log.close();
+    written?;
+    closed
 }
 
 /// Adds one `Neighbors` capability over an inner store — the generic
@@ -3056,6 +3060,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A rolled-back edge append leaves no handle behind: compaction then
+    /// removes the log, and the next link must go to the new log, not to
+    /// the unlinked one through a stale descriptor.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_recovered_edge_append_then_compaction_keeps_the_next_link() {
+        use crate::test_support::{arm_fault, Fault};
+        let (dir, edges_path) = scratch("symmetric_link_recovered");
+        {
+            let mut layer = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+            Link::<Node, Linked>::link(&mut layer, 1, 4).unwrap();
+            arm_fault(Fault::InsertWritePrefix(3));
+            assert!(Link::<Node, Linked>::link(&mut layer, 2, 4).is_err());
+            layer.compact().unwrap();
+            assert_eq!(
+                Link::<Node, Linked>::link(&mut layer, 3, 4).unwrap(),
+                LinkOutcome::Linked
+            );
+        }
+        let reopened = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(
+            Neighbors::<Node, Linked>::neighbors(&reopened, 4),
+            vec![1, 3]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `LNK-FR-002`: a layer built with `new` has no path — it links in
     /// memory only and never touches a file.
     #[test]
@@ -3109,6 +3140,35 @@ mod tests {
         assert_eq!(
             MultiNeighbors::<Node>::neighbors_by_relation(&reopened, "knows", 4),
             Some(vec![1])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// As `a_recovered_edge_append_then_compaction_keeps_the_next_link`,
+    /// per relation.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_recovered_multi_edge_append_then_compaction_keeps_the_next_link() {
+        use super::super::query::MultiNeighbors;
+        use crate::test_support::{arm_fault, Fault};
+        let dir = fresh_temp_dir("multi_link_recovered").unwrap();
+        let base = dir.join("store.mmap");
+        let relations = vec![("knows".to_string(), edges())];
+        {
+            let mut layer = Multi::create(BaseStore::new(nodes()), &relations, &base).unwrap();
+            MultiLink::<Node>::link(&mut layer, "knows", 1, 4).unwrap();
+            arm_fault(Fault::InsertWritePrefix(3));
+            assert!(MultiLink::<Node>::link(&mut layer, "knows", 2, 4).is_err());
+            layer.compact().unwrap();
+            assert_eq!(
+                MultiLink::<Node>::link(&mut layer, "knows", 3, 4).unwrap(),
+                LinkOutcome::Linked
+            );
+        }
+        let reopened = Multi::open_portable(BaseStore::new(nodes()), &base, &["knows"]).unwrap();
+        assert_eq!(
+            MultiNeighbors::<Node>::neighbors_by_relation(&reopened, "knows", 4),
+            Some(vec![1, 3])
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
