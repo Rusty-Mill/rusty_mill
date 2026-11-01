@@ -23,6 +23,7 @@ use rusty_term_core::{
     ATTR_BOLD, ATTR_OVERLINE, ATTR_REVERSE, AnsiParser, CellColors, ColorRef, Grid,
 };
 
+use super::rendition::ResetWatch;
 use super::{OutputQueue, PREAMBLE};
 
 /// `ENABLE_*` output mode bits.
@@ -93,9 +94,9 @@ pub(super) struct Screen {
     /// its final byte decides whether the input modes are reasserted.
     long: bool,
     /// The gridline bits of the last SetConsoleTextAttribute, which no
-    /// SGR sets, and the pen that call left: they hold while the pen is
-    /// unchanged.
-    legacy_meta: Option<(u16, CellColors)>,
+    /// SGR sets; they hold until a rendition reset ([`ResetWatch`]).
+    legacy_meta: u16,
+    resets: ResetWatch,
 }
 
 impl Screen {
@@ -109,7 +110,8 @@ impl Screen {
             after_cr: false,
             c2: false,
             long: false,
-            legacy_meta: None,
+            legacy_meta: 0,
+            resets: ResetWatch::default(),
         };
         // conhost's colour table, which GetConsoleScreenBufferInfoEx
         // reports and legacy attributes are matched against. Only the
@@ -330,6 +332,9 @@ impl Screen {
     /// to its own host (OSC 52, BEL, input modes) is dropped: `vt` itself
     /// already goes to the terminal, so keeping it would only grow.
     fn feed(&mut self, vt: &[u8]) -> Vec<u8> {
+        if self.resets.scan(vt) {
+            self.legacy_meta = 0;
+        }
         self.parser.advance(&mut self.grid, vt);
         self.grid.take_host_out();
         self.parser.take_responses()
@@ -381,18 +386,14 @@ impl Screen {
 
     /// The pen as a legacy attribute (§5.2).
     pub(super) fn attributes(&self) -> u16 {
-        let pen = self.parser.pen_colors();
-        let meta = match self.legacy_meta {
-            Some((meta, set)) if set == pen => meta,
-            _ => 0,
-        };
-        legacy(pen, self.parser.palette()) | meta
+        legacy(self.parser.pen_colors(), self.parser.palette()) | self.legacy_meta
     }
 
     /// SetConsoleTextAttribute's pen, as SGR the host sends.
     pub(super) fn set_attributes(&mut self, attr: u16, out: &mut OutputQueue) {
         self.host(&sgr(attr), out);
-        self.legacy_meta = Some((attr & LVB_GRID, self.parser.pen_colors()));
+        // After the SGR, whose own reset would clear them.
+        self.legacy_meta = attr & LVB_GRID;
     }
 
     /// The first 16 palette entries as `COLORREF`s (`0x00BBGGRR`), in
@@ -1041,16 +1042,44 @@ mod tests {
     }
 
     #[test]
-    fn gridlines_hold_while_the_pen_is_the_one_they_were_set_with() {
+    fn gridlines_hold_until_a_rendition_reset() {
         let mut s = screen();
         let mut out = OutputQueue::default();
         s.set_attributes(0x1E | LVB_UNDERSCORE, &mut out);
         client(&mut s, b"text", VT);
-        assert_eq!(s.attributes(), 0x1E | LVB_UNDERSCORE);
+        client(&mut s, b"\x1b[24;31m", VT);
+        assert_eq!(
+            s.attributes() & LVB_GRID,
+            LVB_UNDERSCORE,
+            "only a reset clears them"
+        );
         client(&mut s, b"\x1b[0m", VT);
         assert_eq!(s.attributes(), 0x07, "SGR 0 resets them");
         client(&mut s, b"\x1b[4m", VT);
         assert_eq!(s.attributes(), 0x07, "and SGR 4 is not one");
+    }
+
+    #[test]
+    fn default_coloured_gridlines_are_cleared_by_sgr_0() {
+        // The pen after 0x0807 is the default one, the same as after
+        // SGR 0: only the reset itself can tell them apart.
+        let mut s = screen();
+        let mut out = OutputQueue::default();
+        s.set_attributes(0x0807, &mut out);
+        assert_eq!(s.attributes(), 0x0807);
+        client(&mut s, b"plain text keeps them", 0x3);
+        assert_eq!(s.attributes(), 0x0807);
+        client(&mut s, b"\x1b[0m", VT);
+        assert_eq!(s.attributes(), 0x07);
+    }
+
+    #[test]
+    fn a_reset_then_the_same_pen_does_not_bring_them_back() {
+        let mut s = screen();
+        let mut out = OutputQueue::default();
+        s.set_attributes(0x1E | 0x1000, &mut out);
+        client(&mut s, b"\x1b[0m\x1b[93;44m", VT);
+        assert_eq!(s.attributes(), 0x1E);
     }
 
     #[test]
