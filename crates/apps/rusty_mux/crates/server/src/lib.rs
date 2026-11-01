@@ -45,6 +45,7 @@ use std::ffi::{OsStr, OsString};
 use std::io;
 use std::time::Duration;
 
+#[cfg(any(target_os = "linux", windows))]
 use rusty_mux_core::{Principal, Transport};
 #[cfg(any(target_os = "linux", windows))]
 use rusty_tokio::io::UnixStream;

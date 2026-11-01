@@ -65,7 +65,8 @@ connection.
 
 - `rusty-mux-ctl list` shows every session, window, block and client; each
   client with the principal (user) the server verified and its transport.
-  `rusty-mux-ctl whoami` shows your own client.
+  `rusty-mux-ctl whoami` shows your principal. Each ctl call is its own
+  client, so the id it prints is gone once the call returns.
 - `rusty-mux-ctl help` lists every command; `help COMMAND` shows its flags.
 - `--json` prints one JSON object per line.
 - Exit codes: 0 ok, 1 refused, 2 bad command line, 3 target missing or
