@@ -149,7 +149,9 @@ queue waits for a check that never starts.
       builds each entry on the latest `main` itself).
 - [ ] **Require merge queue**, with:
   - [ ] Merge method: **Merge commit**.
-  - [ ] Build concurrency: **3** (entries build speculatively in parallel).
+  - [ ] Build concurrency: **2** (entries build speculatively in parallel;
+        3 until 2026-10, cut because a failure ahead discards every build
+        behind it on a saturated runner pool).
         Each speculative build sits on top of the entries queued ahead of it,
         so a later entry's CI also covers the earlier PRs' changes.
   - [ ] Minimum group size: **1**; Maximum group size: **1**. This sets how
@@ -157,8 +159,10 @@ queue waits for a check that never starts.
         isolate what a queue run tests: with build concurrency above 1, a run's changed-file list
         spans everything between its event base and its head.
   - [ ] Wait time to meet minimum group size: leave the default (unused at 1).
-  - [ ] Status check timeout: **120 minutes** (the default 60 is inside the
-        full-sweep Windows runtime).
+  - [ ] Status check timeout: **180 minutes** (the default 60 is inside the
+        full-sweep Windows runtime; 120 dropped an entry that waited for
+        hosted runners for 123 minutes). Jobs carry their own
+        `timeout-minutes`, so a hang fails the job first.
   - [ ] "Only merge non-failing pull requests".
 - [ ] Repository Settings > General > Pull Requests: Allow merge commits
       **on**; squash and rebase **off** (matches CONTRIBUTING).

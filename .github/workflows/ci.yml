@@ -96,10 +96,16 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Every job sets `timeout-minutes` (the default is 360): 60 for the workspace
+# clippy/test and msrv-compile jobs (longest seen ~41 min, Windows test
+# shard 1), 5 for required-gate, 30 for the rest. Time spent waiting for a
+# runner does not count, so a limit fires only on a hang, well inside the
+# merge queue's 180-minute check timeout (ADR-0009).
 jobs:
   fmt:
     name: fmt
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -117,6 +123,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.windows == 'true'
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Synthetic orchestration tests (no game or desktop)
@@ -132,6 +139,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.windows == 'true'
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -172,6 +180,7 @@ jobs:
     # cargo needed), auto-discovered from this one `unittest discover`.
     name: plan script unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
@@ -182,6 +191,7 @@ jobs:
     # needs no cargo and runs for every event.
     name: claude hook unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -I -m unittest discover -s .claude/tests -p 'test_remind_me_*.py' -v
@@ -192,6 +202,7 @@ jobs:
     # tests (`claude plugin test`) need the `claude` CLI and are not run here.
     name: library unit tests
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Unit tests
@@ -205,6 +216,7 @@ jobs:
     # CI-only route and remains useful when an application change also edits CI.
     name: workflow lint
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download verified actionlint
@@ -234,6 +246,7 @@ jobs:
     # a per-crate build/test concern.
     name: dependency policy (workspace sovereignty)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -260,6 +273,7 @@ jobs:
     # deny.toml.
     name: cargo-deny (advisories, licenses, sources)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -277,6 +291,7 @@ jobs:
     # in the root `[workspace.metadata.cargo-shear] ignored` list.
     name: cargo-shear (unused dependencies)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -291,6 +306,7 @@ jobs:
   plan:
     name: plan (affected crates)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       full: ${{ steps.plan.outputs.full }}
       packages: ${{ steps.plan.outputs.packages }}
@@ -514,6 +530,7 @@ jobs:
         os: ${{ fromJSON(needs.plan.outputs.clippy_os) }}
         scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
@@ -565,6 +582,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.plan.outputs.rust_os) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
@@ -586,6 +604,7 @@ jobs:
         shard: ${{ fromJson(needs.plan.outputs.shards) }}
         scope: ${{ fromJson(needs.plan.outputs.components) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
@@ -775,6 +794,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.dashboard == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/apps/rusty_meshed/data-mesh-monitor
@@ -803,6 +823,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.term_web == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/libs/ui/rusty_term/web
@@ -833,6 +854,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.term_bench == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/libs/ui/rusty_term
@@ -882,6 +904,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.tick == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/apps/rusty_tick/web
@@ -913,6 +936,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.tick == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/apps/rusty_tick/web
@@ -959,6 +983,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.agui == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/libs/protocol/rusty_agui/conformance
@@ -1034,6 +1059,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.fair_play == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/apps/rusty_fair_play/web
@@ -1060,6 +1086,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.fair_play == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/apps/rusty_fair_play/web
@@ -1100,6 +1127,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.key_desktop == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/apps/rusty_key/desktop
@@ -1126,6 +1154,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.win32 == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -1160,6 +1189,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.plan.outputs.rand_os) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -1211,6 +1241,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.multimodal_db == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -1261,6 +1292,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.multimodal_db == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       # rust-toolchain.toml would otherwise win over the action's default.
       RUSTUP_TOOLCHAIN: "1.89.0"
@@ -1317,6 +1349,7 @@ jobs:
       matrix:
         os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.plan.outputs.windows == 'true' && '["ubuntu-latest","windows-latest"]' || '["ubuntu-latest"]') }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-build-env
@@ -1354,6 +1387,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.rusty_config_no_std == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -1378,6 +1412,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.tls_engine == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       RUSTFLAGS: --cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto
       RUSTDOCFLAGS: --cfg rusty_tls_handrolled --cfg rusty_tls_native_crypto
@@ -1526,6 +1561,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.tls_engine == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       RUSTFLAGS: --cfg rusty_tls_handrolled
       # rustdoc does not inherit RUSTFLAGS. Without this the module is absent
@@ -1687,6 +1723,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.tls_engine == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       RUSTFLAGS: --cfg rusty_tls_handrolled
       # One dated nightly, used for both the install and the script's `+name`.
@@ -1728,6 +1765,7 @@ jobs:
     name: rusty_conhost fuzz smoke
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       FUZZ_TOOLCHAIN: nightly-2026-10-07
     steps:
@@ -1766,6 +1804,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.rleval_viewer == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -1808,6 +1847,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.rleval_app == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -1834,6 +1874,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.rleval_service == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: crates/apps/rocket_league/rleval/service
@@ -1856,6 +1897,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.rleval_image == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: docker build
@@ -1886,6 +1928,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.crypto_ct == 'true' && needs.plan.outputs.linux == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -1990,6 +2033,7 @@ jobs:
     needs: [plan, dependency-policy, clippy, test]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       actions: write
@@ -2058,6 +2102,7 @@ jobs:
       - rleval-image
       - prune-caches
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Fail if any job failed or was cancelled
         env:
