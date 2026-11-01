@@ -25,7 +25,7 @@ use platform::term::WinSize;
 use rusty_term_core::char_width;
 
 use super::output::reply;
-use super::screen::{CP437_C0, Screen};
+use super::screen::{CP437_C0, Screen, WATCHED_MAX};
 use super::{Console, Effect, Origin, OutputQueue, Packet, Reply, SLICE, Text};
 use crate::codepage::{self, CodePage, Codec};
 use crate::msg::{self, ApiMsg};
@@ -59,11 +59,15 @@ const SCROLL_LEN: usize = 26;
 /// (`ESC [0;7;97;107;53;4m`, 18 bytes) and a glyph of up to three bytes,
 /// twice for a wide control.
 const MAX_CELL_VT: usize = 24;
-/// The most VT one run adds besides its cells: DECSC, origin mode off,
-/// a CUP, origin mode on, DECRC.
-const MAX_RUN_VT: usize = 2 + 5 + 14 + 5 + 2;
-/// Cells painted per emission step. Each could be a run of its own.
-pub(super) const CHUNK: usize = SLICE / (MAX_CELL_VT + MAX_RUN_VT);
+/// The most VT one run adds besides its cells: DECSC, ASCII into G0 and
+/// SI, origin mode off, insert mode off, a CUP, insert mode on, origin
+/// mode on, DECRC.
+const MAX_RUN_VT: usize = 2 + 3 + 1 + 5 + 4 + 14 + 4 + 5 + 2;
+/// Cells painted per emission step. Each could be a run of its own, and
+/// the step's first paint flushes the client bytes the screen holds
+/// (shorter than [`WATCHED_MAX`]) ahead of it.
+pub(super) const CHUNK: usize = (SLICE - WATCHED_MAX) / (MAX_CELL_VT + MAX_RUN_VT);
+const _: () = assert!(WATCHED_MAX + CHUNK * (MAX_CELL_VT + MAX_RUN_VT) <= SLICE);
 
 /// One cell as the classic console API sees it (`CHAR_INFO`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1642,6 +1646,40 @@ mod tests {
             "\u{2500}         ",
             "the client's sets come back"
         );
+    }
+
+    #[test]
+    fn one_step_on_tall_narrow_rows_fits_a_slice() {
+        // One cell a row, each a run of its own with every wrapper: origin
+        // and insert mode on, five-digit rows, the longest SGR, and the
+        // longest client prefix the screen holds flushed ahead of them.
+        let mut h = Host::sized(WinSize {
+            rows: 20_000,
+            cols: 1,
+        });
+        let [_, _, out] = h.connect(1, "");
+        h.write_a(out, b"\x1b[?6h\x1b[4h");
+        let mut held = b"\x1b[?".to_vec();
+        held.resize(WATCHED_MAX - 1, b'1');
+        h.write_a(out, &held);
+        let op = Op::Stream {
+            what: Stream::FillAttr(0xC4FF),
+            len: 20_000,
+            x: 0,
+            y: 10_000,
+            pos: 0,
+        };
+        let mut paint = Paint::new(op, None);
+        let mut vt = OutputQueue::default();
+        let codec = h.c.codec;
+        assert!(!paint.step(&mut h.c.screen, &mut vt, &codec), "more to do");
+        let bytes = vt.take();
+        assert!(bytes.starts_with(&held), "the held prefix goes first");
+        let runs = bytes.windows(2).filter(|w| w == b"\x1b7").count();
+        assert_eq!(runs, CHUNK, "a whole chunk, a run a cell");
+        assert!(bytes.len() <= SLICE, "{} bytes in one step", bytes.len());
+        // 55 bytes a run here, so the old CHUNK of 1,260 made 69,300.
+        assert_eq!(bytes.len(), held.len() + CHUNK * 55, "every wrapper is in");
     }
 
     #[test]
