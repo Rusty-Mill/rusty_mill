@@ -470,10 +470,11 @@ impl Text {
     }
 
     /// Emit up to one slice from `at` through `screen`; returns the new
-    /// position. A slice's VT is at most [`SLICE`] bytes.
+    /// position. A slice's VT is at most [`SLICE`] bytes. `first`: `at`
+    /// is the start of the client's call, not of a streamed slice.
     fn emit(
         &self,
-        at: usize,
+        (at, first): (usize, bool),
         origin: Origin,
         codec: &Codec,
         screen: &mut Screen,
@@ -488,7 +489,7 @@ impl Text {
             }
             Text::Bytes(bytes) => match origin {
                 Origin::Client(mode) => {
-                    at + screen.client(&bytes[at..], mode, SLICE, at == 0, out, replies)
+                    at + screen.client(&bytes[at..], mode, SLICE, first, out, replies)
                 }
                 Origin::Host => {
                     let end = bytes.len().min(at + SLICE);
@@ -496,10 +497,10 @@ impl Text {
                     end
                 }
             },
-            Text::Wide(units) => emit_units(units, at, origin, screen, out, replies),
+            Text::Wide(units) => emit_units(units, at, first, origin, screen, out, replies),
             Text::Coded { bytes, cp, .. } => {
                 let units: Vec<u16> = codepage::decode(codec, *cp, bytes).encode_utf16().collect();
-                emit_units(&units, at, origin, screen, out, replies)
+                emit_units(&units, at, first, origin, screen, out, replies)
             }
         }
     }
@@ -510,6 +511,7 @@ impl Text {
 fn emit_units(
     units: &[u16],
     at: usize,
+    first: bool,
     origin: Origin,
     screen: &mut Screen,
     out: &mut OutputQueue,
@@ -525,7 +527,7 @@ fn emit_units(
     // Each unit emits at most MAX_EXPANSION bytes, so all fit.
     match origin {
         Origin::Client(mode) => {
-            let n = screen.client(text.as_bytes(), mode, SLICE, at == 0, out, replies);
+            let n = screen.client(text.as_bytes(), mode, SLICE, first, out, replies);
             debug_assert_eq!(n, text.len(), "a wide slice fits");
         }
         Origin::Host => screen.host(text.as_bytes(), out),
@@ -553,6 +555,9 @@ struct Write {
     retained: usize,
     /// Input still to fetch, for a write too large to read at once.
     more: Option<More>,
+    /// The text is a later slice of a streamed write: its start is not
+    /// the start of the call.
+    continued: bool,
 }
 
 /// The unread rest of a streamed write's input (§7.4): a WriteConsole or
@@ -1515,6 +1520,7 @@ impl Console {
             at: 0,
             retained,
             more,
+            continued: false,
         });
         self.pump(Some(id), out, fx);
     }
@@ -1551,6 +1557,7 @@ impl Console {
                     self.ansi_text(bytes)
                 };
                 w.at = 0;
+                w.continued = true;
                 w.more = (!last).then_some(more);
             }
             None => {
@@ -1592,9 +1599,15 @@ impl Console {
                     self.writes_cut = out.len() <= CLIENT_BUDGET;
                     return;
                 }
-                w.at = w
-                    .text
-                    .emit(w.at, w.origin, &self.codec, &mut self.screen, out, replies);
+                let first = w.at == 0 && !w.continued;
+                w.at = w.text.emit(
+                    (w.at, first),
+                    w.origin,
+                    &self.codec,
+                    &mut self.screen,
+                    out,
+                    replies,
+                );
             }
             if w.at < w.text.len() {
                 continue;
@@ -1828,11 +1841,12 @@ pub(crate) mod tests {
                 output_size,
                 payload,
             }));
-            // A held call has no reply yet: i32::MIN stands in.
+            // A held call has no reply yet: i32::MIN stands in. A streamed
+            // write can complete within its fetches.
             let reply = fx
                 .iter()
                 .find_map(|e| match e {
-                    Effect::Reply(r) if r.id == id => Some(r.clone()),
+                    Effect::Reply(r) | Effect::Complete(r) if r.id == id => Some(r.clone()),
                     _ => None,
                 })
                 .unwrap_or_else(|| Reply::status(id, i32::MIN));
@@ -2919,6 +2933,14 @@ pub(crate) mod tests {
         s
     }
 
+    /// `r`, or once held, its completion after draining.
+    fn answered(h: &mut Host, r: Reply) -> Reply {
+        if r.status != i32::MIN {
+            return r;
+        }
+        drain_until(h, r.id).0
+    }
+
     /// Drain until `id` is answered; the reply, the drains it took.
     fn drain_until(h: &mut Host, id: [u8; 8]) -> (Reply, usize) {
         for drains in 1..1000 {
@@ -2969,15 +2991,49 @@ pub(crate) mod tests {
         payload.extend([0, 0, 0, 0, 1, 0, 0, 0]);
         payload.extend(&variable);
         let (r, _) = h.packet(msg::USER_DEFINED, 1, output, &payload, 8);
-        let (r, _) = if r.status == i32::MIN {
-            drain_until(&mut h, r.id)
-        } else {
-            (r, 0)
-        };
+        let r = answered(&mut h, r);
         assert_eq!((r.status, r.information), (msg::STATUS_SUCCESS, wide.len()));
         assert_eq!(r.write_back[..4], (wide.len() as u32).to_le_bytes());
         assert!(h.fetches >= 5, "{}", h.fetches);
         assert!(!String::from_utf8_lossy(&h.vt).contains('\u{FFFD}'));
+    }
+
+    /// A CR ending one slice and the LF starting the next: one call, so
+    /// the LF gains no second CR (`first` is of the call, not the slice).
+    #[test]
+    fn a_cr_lf_split_across_slices_stays_one_cr_lf() {
+        let lf_gains_cr = |vt: &[u8]| vt.windows(3).any(|w| w == b"\r\r\n");
+        // Raw: the CR is the packet's last byte.
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        let mut raw = vec![b'a'; PACKET_INPUT_CAP - 1];
+        raw.extend(b"\r\nbb");
+        let (r, _) = h.packet(msg::RAW_WRITE, 1, output, &raw, 0);
+        assert_eq!(answered(&mut h, r).information, raw.len());
+        assert!(h.fetches >= 1);
+        assert!(!lf_gains_cr(&h.vt) && h.vt.windows(3).any(|w| w == b"a\r\n"));
+        // WriteConsoleA and W: the CR ends the first slice's text.
+        for unicode in [false, true] {
+            let mut h = Host::new();
+            let [_, _, output] = h.connect(1, "");
+            let unit = if unicode { 2 } else { 1 };
+            let room = (PACKET_INPUT_CAP - 16) / unit;
+            let text = format!("{}\r\nbb", "a".repeat(room - 1));
+            let variable: Vec<u8> = if unicode {
+                text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+            } else {
+                text.into_bytes()
+            };
+            let mut payload = Vec::new();
+            payload.extend(api::WRITE_CONSOLE.to_le_bytes());
+            payload.extend(8u32.to_le_bytes());
+            payload.extend([0, 0, 0, 0, u8::from(unicode), 0, 0, 0]);
+            payload.extend(&variable);
+            let (r, _) = h.packet(msg::USER_DEFINED, 1, output, &payload, 8);
+            assert_eq!(answered(&mut h, r).information, variable.len());
+            assert!(h.fetches >= 1, "unicode={unicode}");
+            assert!(!lf_gains_cr(&h.vt), "unicode={unicode}");
+        }
     }
 
     #[test]
@@ -3098,6 +3154,23 @@ pub(crate) mod tests {
         }
         assert_eq!(h.c.waiting(), writes);
         h.c
+    }
+
+    /// A console in the middle of a raw write of `input` past the cap,
+    /// its first slice out; the call's id and the fetch it asked for.
+    pub(crate) fn streaming_write(input: &[u8]) -> (Console, [u8; 8], usize, usize) {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.answer_fetches = false;
+        let (r, fx) = h.packet(msg::RAW_WRITE, 1, output, input, 0);
+        let (at, len) = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::Fetch { id, at, len } if *id == r.id => Some((*at, *len)),
+                _ => None,
+            })
+            .expect("the first slice asks for the next");
+        (h.c, r.id, at, len)
     }
 
     /// Fill the queue past the client budget so the next writes park.

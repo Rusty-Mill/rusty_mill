@@ -83,6 +83,8 @@ pub(crate) struct View {
     pub writes_ready: bool,
     /// A streamed write is unfinished: no packet is taken until it is.
     pub streaming: bool,
+    /// A streamed write's next slice is due: the next turn reads it.
+    pub fetch_due: bool,
 }
 
 /// What one turn does, in this order.
@@ -131,6 +133,7 @@ fn read_admitted(v: &View) -> bool {
 pub(crate) fn must_poll(v: &View) -> bool {
     v.reads_ready
         || v.writes_ready
+        || v.fetch_due
         || (v.input > 0 && v.output <= INPUT_PAUSE_ABOVE && !v.input_paused)
         || read_admitted(v)
 }
