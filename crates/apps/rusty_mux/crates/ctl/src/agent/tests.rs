@@ -117,8 +117,8 @@ fn removing_drops_only_ours_and_the_containers_it_empties() {
     assert_eq!(settings::without_hook(alone, None), Ok(json(r#"{"a":1}"#)));
     // A group shared with someone else's hook keeps theirs.
     let shared = json(&format!(
-        r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"echo hi"}},{{"type":"command","command":"{}"}}]}}]}}}}"#,
-        ours()
+        r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"echo hi"}},{{"type":"command","command":{}}}]}}]}}}}"#,
+        Value::from(ours()).to_json_string()
     ));
     assert_eq!(settings::without_hook(shared, None), Ok(mine));
 }
