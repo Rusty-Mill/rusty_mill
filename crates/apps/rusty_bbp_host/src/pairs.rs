@@ -763,6 +763,7 @@ pub fn check_settings(pairs: &[Pair], reads_per_turn: u64) -> Result<(), String>
 /// What one git command answered.
 struct GitOut {
     ok: bool,
+    code: Option<i32>,
     stdout: String,
     stderr: String,
 }
@@ -779,6 +780,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<GitOut, String> {
         .map_err(|e| format!("git: {e}"))?;
     Ok(GitOut {
         ok: out.status.success(),
+        code: out.status.code(),
         stdout: String::from_utf8_lossy(&out.stdout).trim().to_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
     })
@@ -818,14 +820,17 @@ pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<Str
     // Exit 1 is "not an ancestor"; any other failure (an unknown commit)
     // refuses too, with git's reason.
     let contains = git(repo, &["merge-base", "--is-ancestor", min, "HEAD"])?;
-    if !contains.ok {
-        let why = match contains.stderr.as_str() {
-            "" => String::new(),
-            e => format!(": {e}"),
-        };
-        return Err(format!(
-            "HEAD {head} does not contain min_commit {min}{why}"
-        ));
+    match (contains.ok, contains.code) {
+        (true, _) => {}
+        (false, Some(1)) => {
+            return Err(format!("HEAD {head} does not contain min_commit {min}"));
+        }
+        (false, _) => {
+            return Err(format!(
+                "cannot check that HEAD {head} contains min_commit {min}: {}",
+                contains.stderr
+            ));
+        }
     }
     if build_sha != head {
         return Err(format!(
@@ -1189,7 +1194,9 @@ mod tests {
         assert!(pin(&d, Some(&first), &format!("{second}-dirty")).is_err());
         assert!(pin(&d, Some(&first), "unknown").is_err());
         // A commit HEAD does not contain (here: a made-up sha) refuses.
-        assert!(pin(&d, Some(&"0".repeat(40)), &second).is_err());
+        assert!(pin(&d, Some(&"0".repeat(40)), &second)
+            .unwrap_err()
+            .contains("cannot check"));
         // No pin in the criteria refuses.
         assert!(pin(&d, None, &second).unwrap_err().contains("min_commit"));
         // A dirty tree refuses.
@@ -1236,8 +1243,10 @@ mod tests {
         std::fs::write(d.join(".git/index"), "not an index").unwrap();
         let err = pin(&d, Some(&first), &second).unwrap_err();
         assert!(err.contains("git status"), "{err}");
-        // git's own reason reaches the operator.
-        assert!(err.contains("index file"), "{err}");
+        // git's own reason reaches the operator. Its wording is translated,
+        // so only its presence is checked.
+        let reason = err.split("git status failed:").nth(1).unwrap_or("");
+        assert!(!reason.trim().is_empty(), "{err}");
         std::fs::remove_dir_all(d).unwrap();
     }
 
