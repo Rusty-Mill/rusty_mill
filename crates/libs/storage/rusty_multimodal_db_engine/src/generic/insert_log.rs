@@ -281,10 +281,9 @@ fn write_entry(
     let result = try_write_entry(handle, log, tag, kind, payload, when);
     match result {
         Ok(()) => Ok(()),
-        Err(WriteError::BeforeWrite(error)) => {
-            *handle = None;
-            Err(Failure::Clean(error))
-        }
+        // Nothing was written; an open handle is still good, and keeping it
+        // keeps any deferred entries before this one covered by its sync.
+        Err(WriteError::BeforeWrite(error)) => Err(Failure::Clean(error)),
         Err(WriteError::Write(error)) => match roll_back(handle, log) {
             Ok(()) => Err(Failure::Clean(error)),
             Err(rollback) => {
@@ -318,15 +317,28 @@ enum WriteError {
     Sync(DurabilityError),
 }
 
-/// Truncate the file back to its last complete entry. A log this append
-/// created held nothing acknowledged, so it is removed instead: readers
-/// reject an empty log, and the next append recreates it, header included.
+/// Truncate the file back to its last complete entry, and sync the new
+/// length. A log this append created held nothing acknowledged, so it is
+/// removed instead: readers reject an empty log, and the next append
+/// recreates it, header included.
+///
+/// The truncate goes through a second, write-mode handle: on Windows an
+/// append-mode handle lacks `FILE_WRITE_DATA`, which `set_len` needs. The
+/// append handle keeps writing at end of file either way.
 fn roll_back(handle: &mut Option<Handle>, log: &Path) -> io::Result<()> {
-    let Some(open) = handle.as_mut() else {
+    let Some(open) = handle.as_ref() else {
         return Ok(());
     };
+    #[cfg(feature = "test-support")]
+    if crate::test_support::take_fault(|fault| fault == crate::test_support::Fault::InsertRollback)
+        .is_some()
+    {
+        return Err(io::Error::other("injected insert-log rollback failure"));
+    }
     if open.end > 0 {
-        return open.file.set_len(open.end);
+        let file = OpenOptions::new().write(true).open(log)?;
+        file.set_len(open.end)?;
+        return file.sync_data();
     }
     *handle = None;
     match std::fs::remove_file(log) {
@@ -382,11 +394,21 @@ fn try_write_entry(
     image.extend_from_slice(&len.to_le_bytes());
     image.extend_from_slice(payload);
     #[cfg(feature = "test-support")]
-    if let Some(crate::test_support::Fault::InsertWritePrefix(prefix)) =
-        crate::test_support::take_fault(|fault| {
-            matches!(fault, crate::test_support::Fault::InsertWritePrefix(_))
-        })
-    {
+    if let Some(fault) = crate::test_support::take_fault(|fault| {
+        matches!(
+            fault,
+            crate::test_support::Fault::InsertWritePrefix(_)
+                | crate::test_support::Fault::InsertWritePrefixUnrecoverable(_)
+        )
+    }) {
+        let prefix = match fault {
+            crate::test_support::Fault::InsertWritePrefixUnrecoverable(prefix) => {
+                crate::test_support::arm_fault(crate::test_support::Fault::InsertRollback);
+                prefix
+            }
+            crate::test_support::Fault::InsertWritePrefix(prefix) => prefix,
+            _ => 0,
+        };
         open.file
             .write_all(&image[..prefix.min(image.len())])
             .map_err(|e| WriteError::Write(e.into()))?;
@@ -447,11 +469,15 @@ fn open_for_append(log: &Path, tag: &str) -> Result<Handle, DurabilityError> {
 /// appender is *poisoned*: every later append and sync returns an error
 /// until the store is reopened (a new `Appender`). A sync is never retried
 /// on a fresh handle, which on Linux would not see the earlier writeback
-/// error and could report data the kernel dropped as durable.
+/// error and could report data the kernel dropped as durable; so the
+/// handle is only given up once nothing deferred is pending
+/// ([`Self::close`]).
 #[derive(Debug)]
 pub struct Appender {
     path: PathBuf,
     file: Option<Handle>,
+    /// Deferred entries written through `file` and not yet synced.
+    pending: bool,
     poisoned: bool,
 }
 
@@ -462,6 +488,7 @@ impl Appender {
         Self {
             path,
             file: None,
+            pending: false,
             poisoned: false,
         }
     }
@@ -483,6 +510,25 @@ impl Appender {
     {
         let payload = crate::codec::encode(record)?;
         self.append(R::SCHEMA_TAG, KIND_ITEM, &payload, when)
+    }
+
+    /// [`append_item`] through this appender's handle, synced as `when`
+    /// says: an edge log's `(Id, Id)` pair under the record type's `tag`.
+    ///
+    /// # Errors
+    ///
+    /// As [`append_item`], and an error without writing when poisoned.
+    pub fn append_item<T>(
+        &mut self,
+        tag: &str,
+        item: &T,
+        when: LogSync,
+    ) -> Result<(), DurabilityError>
+    where
+        T: Serialize + ?Sized,
+    {
+        let payload = crate::codec::encode(item)?;
+        self.append(tag, KIND_ITEM, &payload, when)
     }
 
     /// [`append_tombstone_as`] through this appender's handle.
@@ -511,15 +557,16 @@ impl Appender {
         when: LogSync,
     ) -> Result<(), DurabilityError> {
         self.refuse_if_poisoned()?;
-        write_entry(&mut self.file, &self.path, tag, kind, payload, when).map_err(|failure| {
-            match failure {
-                Failure::Clean(error) => error,
-                Failure::Poisoned(error) => {
-                    self.poisoned = true;
-                    error
-                }
+        match write_entry(&mut self.file, &self.path, tag, kind, payload, when) {
+            // A synced entry's `sync_data` covered every deferred one
+            // before it on the same handle.
+            Ok(()) => {
+                self.pending = when == LogSync::Deferred;
+                Ok(())
             }
-        })
+            Err(Failure::Clean(error)) => Err(error),
+            Err(Failure::Poisoned(error)) => Err(self.poison(error)),
+        }
     }
 
     /// [`sync`]: every entry appended so far is on disk.
@@ -530,9 +577,10 @@ impl Appender {
     pub fn sync(&mut self) -> Result<(), DurabilityError> {
         self.refuse_if_poisoned()?;
         let Some(open) = &self.file else {
-            // Nothing appended through this handle since it was opened or
-            // closed cleanly: every earlier entry was synced or rolled back.
-            return sync(&self.path);
+            // No handle means nothing deferred is pending through this
+            // appender (`close` syncs first); this covers entries written
+            // to the path by other means. A failure still poisons.
+            return sync(&self.path).map_err(|error| self.poison(error));
         };
         #[cfg(feature = "test-support")]
         let result = if crate::test_support::take_fault(|fault| {
@@ -546,17 +594,33 @@ impl Appender {
         };
         #[cfg(not(feature = "test-support"))]
         let result = open.file.sync_data();
-        result.map_err(|e| {
-            self.file = None;
-            self.poisoned = true;
-            e.into()
-        })
+        result.map_err(|e| self.poison(e.into()))?;
+        self.pending = false;
+        Ok(())
     }
 
-    /// Close the handle; the next entry reopens the file. Does not clear
-    /// poisoning.
-    pub fn close(&mut self) {
+    /// Close the handle; the next entry reopens the file. Deferred entries
+    /// still pending are synced first, through the handle that wrote them,
+    /// so a later sync never has to trust a fresh descriptor for them.
+    /// Does not clear poisoning.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::sync`] when entries are pending: the sync failed (and
+    /// poisoned the appender) or the appender was already poisoned.
+    pub fn close(&mut self) -> Result<(), DurabilityError> {
+        if self.pending {
+            self.sync()?;
+        }
         self.file = None;
+        Ok(())
+    }
+
+    fn poison(&mut self, error: DurabilityError) -> DurabilityError {
+        self.file = None;
+        self.pending = false;
+        self.poisoned = true;
+        error
     }
 
     fn refuse_if_poisoned(&self) -> Result<(), DurabilityError> {
@@ -1000,7 +1064,7 @@ mod tests {
         );
 
         // What `compact` does: close, remove, write again.
-        appender.close();
+        appender.close().unwrap();
         clear(&log).unwrap();
         appender.append_record(&item(3), LogSync::Now).unwrap();
         assert_eq!(
@@ -1196,5 +1260,66 @@ mod tests {
         assert!(appender
             .append_tombstone(Item::SCHEMA_TAG, &1u32, LogSync::Now)
             .is_err());
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn a_failed_rollback_poisons_and_keeps_the_acknowledged_entries() {
+        use crate::test_support::{arm_fault, Fault};
+        let log = log_path(&fresh_temp_dir("insert_log_rollback").unwrap().join("s"));
+        let mut appender = Appender::new(log.clone());
+        appender.append_record(&item(1), LogSync::Now).unwrap();
+        arm_fault(Fault::InsertWritePrefixUnrecoverable(3));
+        assert!(appender.append_record(&item(2), LogSync::Now).is_err());
+        assert!(appender.is_poisoned());
+        assert!(appender.append_record(&item(3), LogSync::Now).is_err());
+        assert!(appender.sync().is_err());
+        assert_eq!(items(&log), vec![LogEntry::Item(item(1))]);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn close_syncs_pending_deferred_entries_and_poisons_on_failure() {
+        use crate::test_support::{arm_fault, Fault};
+        let log = log_path(&fresh_temp_dir("insert_log_close").unwrap().join("s"));
+        let mut appender = Appender::new(log.clone());
+        appender.append_record(&item(1), LogSync::Deferred).unwrap();
+        arm_fault(Fault::GroupSync);
+        assert!(appender.close().is_err(), "the pending entry's sync failed");
+        assert!(appender.is_poisoned());
+        assert!(appender.sync().is_err(), "never retried on a fresh handle");
+        assert!(appender.append_record(&item(2), LogSync::Now).is_err());
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn close_with_nothing_pending_does_not_sync() {
+        use crate::test_support::{arm_fault, take_fault, Fault};
+        let log = log_path(&fresh_temp_dir("insert_log_close_clean").unwrap().join("s"));
+        let mut appender = Appender::new(log.clone());
+        appender.append_record(&item(1), LogSync::Now).unwrap();
+        arm_fault(Fault::GroupSync);
+        appender.close().unwrap();
+        assert!(
+            take_fault(|fault| fault == Fault::GroupSync).is_some(),
+            "not consumed"
+        );
+        assert!(!appender.is_poisoned());
+        appender.append_record(&item(2), LogSync::Now).unwrap();
+        assert_eq!(
+            items(&log),
+            vec![LogEntry::Item(item(1)), LogEntry::Item(item(2))]
+        );
+    }
+
+    #[test]
+    fn a_failed_sync_without_a_handle_poisons() {
+        // A directory can't be opened for appending, so the path-based
+        // sync fails for real.
+        let dir = fresh_temp_dir("insert_log_sync_no_handle").unwrap();
+        let mut appender = Appender::new(dir);
+        assert!(appender.sync().is_err());
+        assert!(appender.is_poisoned());
+        assert!(appender.sync().is_err());
     }
 }

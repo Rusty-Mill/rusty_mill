@@ -659,6 +659,20 @@ macro_rules! forward_scannable_pairs {
     };
 }
 
+/// Write one synced edge-log entry through `log`, then close its handle
+/// again. Compaction removes and recreates edge logs, which an open handle
+/// would block on Windows, so edge logs keep the open-per-entry behaviour of
+/// the path-based functions. The appender outlives the handle, so a failed
+/// rollback or sync stays fenced: every later entry is refused until the
+/// store is reopened, rather than landing after a partial one.
+fn log_edge_entry(
+    log: &mut insert_log::Appender,
+    write: impl FnOnce(&mut insert_log::Appender) -> Result<(), DurabilityError>,
+) -> Result<(), DurabilityError> {
+    write(log)?;
+    log.close()
+}
+
 /// Adds one `Neighbors` capability over an inner store — the generic
 /// analogue of `CanonicalCachedStore`'s `adjacency_index`.
 pub struct Symmetric<S, R, Marker>
@@ -672,6 +686,10 @@ where
     /// runtime [`Link`] is logged beside the blob when there is one, and
     /// stays in memory when there is not.
     edges_path: Option<PathBuf>,
+    /// The edge log's writer, `Some` exactly when `edges_path` is. It
+    /// carries the log's poison fence across appends (see
+    /// [`log_edge_entry`]).
+    edge_log: Option<insert_log::Appender>,
     _marker: PhantomData<Marker>,
 }
 
@@ -689,12 +707,14 @@ where
             inner,
             adjacency,
             edges_path: None,
+            edge_log: None,
             _marker: PhantomData,
         }
     }
 
     fn with_path(mut self, edges_path: &Path) -> Self {
         self.edges_path = Some(edges_path.to_path_buf());
+        self.edge_log = Some(insert_log::Appender::new(insert_log::log_path(edges_path)));
         self
     }
 
@@ -884,8 +904,10 @@ where
         if self.has_edge(a, b) {
             return Ok(LinkOutcome::AlreadyLinked);
         }
-        if let Some(path) = &self.edges_path {
-            insert_log::append_item(&insert_log::log_path(path), R::SCHEMA_TAG, &(a, b))?;
+        if let Some(log) = &mut self.edge_log {
+            log_edge_entry(log, |log| {
+                log.append_item(R::SCHEMA_TAG, &(a, b), insert_log::LogSync::Now)
+            })?;
         }
         self.adjacency.entry(a).or_default().push(b);
         self.adjacency.entry(b).or_default().push(a);
@@ -1038,9 +1060,10 @@ where
     fn delete(&mut self, id: R::Id) -> Result<(), DeleteError<R::Id>> {
         self.inner.delete(id)?;
         if self.adjacency.contains_key(&id) {
-            if let Some(edges_path) = &self.edges_path {
-                let log = insert_log::log_path(edges_path);
-                insert_log::append_tombstone(&log, R::SCHEMA_TAG, &id)?;
+            if let Some(log) = &mut self.edge_log {
+                log_edge_entry(log, |log| {
+                    log.append_tombstone(R::SCHEMA_TAG, &id, insert_log::LogSync::Now)
+                })?;
             }
             drop_edges_of(&mut self.adjacency, id);
         }
@@ -1222,6 +1245,10 @@ pub struct MultiSymmetric<S, R: Record> {
     /// from `create`/`open`/`open_portable`, `None` from `new`
     /// (`LNK-FR-005`).
     base_path: Option<PathBuf>,
+    /// Each relation's edge-log writer, made on its first entry. Each
+    /// carries its log's poison fence across appends (see
+    /// [`log_edge_entry`]).
+    edge_logs: HashMap<String, insert_log::Appender>,
     /// `TBL-FR-007` (ADR-0050): labels whose far endpoint lives in
     /// *another table* — `Memory`'s `mentions`, whose `b` is an `Entity`
     /// id. [`Self::link`] checks only `a` against the inner store for
@@ -1257,6 +1284,17 @@ fn labeled_edges_path(base: &Path, label: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(name)
 }
 
+/// `label`'s edge-log writer under `base`, made on first use.
+fn labeled_edge_log<'a>(
+    logs: &'a mut HashMap<String, insert_log::Appender>,
+    base: &Path,
+    label: &str,
+) -> &'a mut insert_log::Appender {
+    logs.entry(label.to_string()).or_insert_with(|| {
+        insert_log::Appender::new(insert_log::log_path(&labeled_edges_path(base, label)))
+    })
+}
+
 impl<S, R: Record> MultiSymmetric<S, R> {
     /// Build the adjacency maps directly from `relations` — the
     /// `Symmetric::new` analogue, generalized to a labeled list instead
@@ -1276,6 +1314,7 @@ impl<S, R: Record> MultiSymmetric<S, R> {
             inner,
             adjacency,
             base_path: None,
+            edge_logs: HashMap::new(),
             foreign_labels: Vec::new(),
         }
     }
@@ -1438,8 +1477,10 @@ where
             return Ok(LinkOutcome::AlreadyLinked);
         }
         if let Some(base) = &self.base_path {
-            let log = insert_log::log_path(&labeled_edges_path(base, relation));
-            insert_log::append_item(&log, R::SCHEMA_TAG, &(a, b))?;
+            let log = labeled_edge_log(&mut self.edge_logs, base, relation);
+            log_edge_entry(log, |log| {
+                log.append_item(R::SCHEMA_TAG, &(a, b), insert_log::LogSync::Now)
+            })?;
         }
         adjacency.entry(a).or_default().push(b);
         adjacency.entry(b).or_default().push(a);
@@ -1583,8 +1624,10 @@ impl<S, R: Record> MultiSymmetric<S, R> {
             return Ok(0);
         }
         if let Some(base) = &self.base_path {
-            let log = insert_log::log_path(&labeled_edges_path(base, label));
-            insert_log::append_tombstone(&log, R::SCHEMA_TAG, &id)?;
+            let log = labeled_edge_log(&mut self.edge_logs, base, label);
+            log_edge_entry(log, |log| {
+                log.append_tombstone(R::SCHEMA_TAG, &id, insert_log::LogSync::Now)
+            })?;
         }
         Ok(drop_edges_of(adjacency, id))
     }
@@ -2985,6 +3028,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A partial edge-log append whose rollback also fails fences the log:
+    /// a later link is refused rather than landing after the partial entry,
+    /// where reopen would drop it as torn tail after acknowledging it.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn an_unrecoverable_edge_append_refuses_later_links() {
+        use crate::test_support::{arm_fault, Fault};
+        let (dir, edges_path) = scratch("symmetric_link_poison");
+        {
+            let mut layer = Layer::create(BaseStore::new(nodes()), &edges(), &edges_path).unwrap();
+            Link::<Node, Linked>::link(&mut layer, 1, 4).unwrap();
+            arm_fault(Fault::InsertWritePrefixUnrecoverable(3));
+            assert!(Link::<Node, Linked>::link(&mut layer, 2, 4).is_err());
+            assert!(
+                Link::<Node, Linked>::link(&mut layer, 3, 4).is_err(),
+                "refused, not appended after the partial entry"
+            );
+            assert!(
+                Delete::<Node>::delete(&mut layer, 1).is_err(),
+                "tombstones too"
+            );
+            assert_eq!(Neighbors::<Node, Linked>::neighbors(&layer, 4), vec![1]);
+        }
+        let reopened = Layer::open_portable(BaseStore::new(nodes()), &edges_path).unwrap();
+        assert_eq!(Neighbors::<Node, Linked>::neighbors(&reopened, 4), vec![1]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `LNK-FR-002`: a layer built with `new` has no path — it links in
     /// memory only and never touches a file.
     #[test]
@@ -3017,6 +3088,30 @@ mod tests {
     }
 
     type Multi = MultiSymmetric<BaseStore<Node>, Node>;
+
+    /// As `an_unrecoverable_edge_append_refuses_later_links`, per relation.
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn an_unrecoverable_multi_edge_append_refuses_later_links() {
+        use super::super::query::MultiNeighbors;
+        use crate::test_support::{arm_fault, Fault};
+        let dir = fresh_temp_dir("multi_link_poison").unwrap();
+        let base = dir.join("store.mmap");
+        let relations = vec![("knows".to_string(), edges())];
+        {
+            let mut layer = Multi::create(BaseStore::new(nodes()), &relations, &base).unwrap();
+            MultiLink::<Node>::link(&mut layer, "knows", 1, 4).unwrap();
+            arm_fault(Fault::InsertWritePrefixUnrecoverable(3));
+            assert!(MultiLink::<Node>::link(&mut layer, "knows", 2, 4).is_err());
+            assert!(MultiLink::<Node>::link(&mut layer, "knows", 3, 4).is_err());
+        }
+        let reopened = Multi::open_portable(BaseStore::new(nodes()), &base, &["knows"]).unwrap();
+        assert_eq!(
+            MultiNeighbors::<Node>::neighbors_by_relation(&reopened, "knows", 4),
+            Some(vec![1])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// `LNK` acceptance criterion 2 (ADR-0047) on `MultiSymmetric`: a link
     /// under an existing label; a link under a **new** label creates it —

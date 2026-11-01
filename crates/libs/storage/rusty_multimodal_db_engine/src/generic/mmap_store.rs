@@ -1001,7 +1001,7 @@ where
                 .iter()
                 .map(|record| (record.id(), record.scannable_value())),
         )?;
-        self.log.close();
+        self.log.close()?;
         insert_log::clear(&log)?;
         // Every deferred entry is in the blob now, which the rewrite synced.
         self.unsynced = false;
