@@ -694,9 +694,11 @@ fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
     ))
 }
 
-/// The commit a run is pinned to: HEAD of `repo`, which must be clean (no
-/// edited, staged or untracked file, whatever the user's git config hides) and must
-/// contain `min_commit` (the merge of the verdict-binding fix). A criteria file
+/// The commit a run is pinned to: HEAD of `repo`, which must be clean as
+/// `git status --porcelain --untracked-files=normal` sees it (the flag overrides
+/// `status.showUntrackedFiles`; excludes files, index bits such as
+/// assume-unchanged, and submodule ignore settings can still hide a change) and
+/// must contain `min_commit` (the merge of the verdict-binding fix). A criteria file
 /// with no `min_commit` refuses: the pin is part of the criteria.
 pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<String, String> {
     let min =
