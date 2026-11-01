@@ -482,11 +482,6 @@ const GAPS: &[(&[&str], &str, &str)] = &[
     ),
     (&["cooked", "hi\\r"], NO_COOKED, "#1335"),
     (&["cooked", "ab\\bc\\r"], NO_COOKED, "#1335"),
-    (
-        &["print-x", "1", "205"],
-        "print-x mode=ok n=205 cursor=199,0 attr=0x7",
-        "#1336",
-    ),
     (&["print-x", "7", "32768"], NO_BIG_WRITE, "#1337"),
     (&["print-x", "7", "100000"], NO_BIG_WRITE, "#1337"),
 ];

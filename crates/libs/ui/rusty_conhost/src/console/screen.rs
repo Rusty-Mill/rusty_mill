@@ -10,7 +10,9 @@
 //! off win32-input-mode or focus reports, or resetting the terminal, has
 //! them turned back on, as conhost does: the host needs both (§5.5).
 //! Without VT processing, a write that fills the last column wraps at
-//! once with CR LF, as conhost's legacy path does.
+//! once with CR LF, as conhost's legacy path does; with wrap off, the
+//! cursor goes back to the column the run of text started at instead,
+//! and the rest of it overwrites the row from there.
 //!
 //! Behaviour follows microsoft/terminal's conhost (commit 09beddc6,
 //! `src/host/getset.cpp`, `_stream.cpp`, `src/host/VtIo.cpp`,
@@ -20,7 +22,7 @@
 
 use platform::term::WinSize;
 use rusty_term_core::{
-    ATTR_BOLD, ATTR_OVERLINE, ATTR_REVERSE, AnsiParser, CellColors, ColorRef, Grid,
+    ATTR_BOLD, ATTR_OVERLINE, ATTR_REVERSE, AnsiParser, CellColors, ColorRef, Grid, char_width,
 };
 
 use super::{OutputQueue, PREAMBLE};
@@ -66,10 +68,18 @@ enum Action {
 /// stores ([`CSI_PARAM_MAX`]), `ESC [ ?` and the final byte. A longer
 /// DEC private one is forwarded as it comes and decided at its end.
 pub(super) const WATCHED_MAX: usize = CSI_PARAM_MAX + 4;
+/// The longest CHA the host sends: `ESC [ 65535 G`.
+const CHA_MAX: usize = 8;
 /// The most bytes one client byte (or UTF-16 unit) can come to: RIS's
-/// two add the 16 of [`PREAMBLE`]. A legacy glyph is at most 3, and a
-/// wrap adds 2.
-pub(super) const MAX_EXPANSION: usize = (2 + PREAMBLE.len()) / 2;
+/// two add the 16 of [`PREAMBLE`]. A legacy glyph is at most 3; a wrap
+/// adds 2, and without wrap a margin adds a pad and a CHA. Over a run
+/// that is an average: the one glyph that costs more (pad, CHA, glyph,
+/// CHA) follows a narrow one that met no margin.
+pub(super) const MAX_EXPANSION: usize = {
+    let reset = (2 + PREAMBLE.len()) / 2;
+    let margin = 3 + 1 + CHA_MAX;
+    if reset > margin { reset } else { margin }
+};
 
 /// The CP437 glyphs conhost shows for C0 controls it does not act on.
 const CP437_C0: [char; 32] = [
@@ -96,6 +106,11 @@ pub(super) struct Screen {
     /// SGR sets; they hold until the model applies a rendition reset
     /// ([`AnsiParser::take_rendition_reset`]).
     legacy_meta: u16,
+    /// The column the current run of legacy text started at, where the
+    /// cursor goes back to when the run meets the margin with wrap off
+    /// (conhost `_writeCharsLegacyUnprocessed`). A run is a whole write
+    /// without PROCESSED_OUTPUT, else the text between controls.
+    run: Option<usize>,
 }
 
 impl Screen {
@@ -110,6 +125,7 @@ impl Screen {
             c2: false,
             long: false,
             legacy_meta: 0,
+            run: None,
         };
         // conhost's colour table, which GetConsoleScreenBufferInfoEx
         // reports and legacy attributes are matched against. Only the
@@ -154,6 +170,7 @@ impl Screen {
         if first {
             // conhost adds an LF's CR afresh in every write.
             self.after_cr = false;
+            self.run = None;
         }
         if mode & VIRTUAL_TERMINAL_PROCESSING != 0 && mode & PROCESSED_OUTPUT != 0 {
             self.client_vt(text, mode, room, out, replies)
@@ -217,8 +234,9 @@ impl Screen {
         consumed
     }
 
-    /// Legacy client text, forwarded a piece at a time so that the CR LF
-    /// a wrap adds counts against `room` too.
+    /// Legacy client text, forwarded a piece at a time so that what a
+    /// margin adds counts against `room` too: CR LF with wrap, else a CHA
+    /// back to the run's start.
     fn client_legacy(
         &mut self,
         text: &[u8],
@@ -227,22 +245,49 @@ impl Screen {
         out: &mut OutputQueue,
     ) -> usize {
         let wrap = mode & WRAP_AT_EOL_OUTPUT != 0;
-        let reserve = if wrap { 2 } else { 0 };
+        // conhost writes each control on its own, between runs of text.
+        let control = |b: u8| mode & PROCESSED_OUTPUT != 0 && (b < 0x20 || b == 0x7F);
         let held = std::mem::take(&mut self.held);
         self.forward(&held, out);
         let mut emitted = 0;
         let mut consumed = 0;
         while consumed < text.len() {
             let before = consumed;
+            if !wrap {
+                if control(text[consumed]) {
+                    self.run = None;
+                }
+                let last = self.grid.cols.saturating_sub(1);
+                let start = *self.run.get_or_insert(self.grid.cursor.0.min(last));
+                if let Some(len) = self.wide_at_margin(&text[consumed..]) {
+                    if emitted + 1 + CHA_MAX > room {
+                        break;
+                    }
+                    self.forward(b" ", out);
+                    emitted += 1 + self.margin(false, out);
+                    if start == last {
+                        // It can't fit at the run's start either, so
+                        // conhost throws it away.
+                        consumed += len;
+                    }
+                }
+            }
             // Each byte moves the cursor at most two columns, so a piece
-            // this long cannot pass the margin.
-            let piece = if wrap {
-                (self.grid.cols.saturating_sub(self.grid.cursor.0 + 1) / 2).max(1)
-            } else {
-                usize::MAX
+            // this long cannot pass the margin; only a single byte near it
+            // can meet it, and needs room for what the margin adds.
+            let piece = (self.grid.cols.saturating_sub(self.grid.cursor.0 + 1) / 2).max(1);
+            let near = self.grid.cursor.0 + 2 >= self.grid.cols;
+            let reserve = match (near, wrap) {
+                (false, _) => 0,
+                (true, true) => 2,
+                (true, false) => CHA_MAX,
             };
             let mut vt = Vec::new();
+            let mut ends_run = false;
             for &b in &text[consumed..] {
+                if !wrap && control(b) && !vt.is_empty() {
+                    break;
+                }
                 let step = transform(b, mode, self.after_cr, self.c2);
                 let fits = emitted + vt.len() + step.len + reserve <= room;
                 if !fits || (!vt.is_empty() && vt.len() + step.len > piece) {
@@ -252,18 +297,47 @@ impl Screen {
                 self.after_cr = b == b'\r';
                 self.c2 = step.c2;
                 consumed += 1;
+                if !wrap && control(b) {
+                    ends_run = true;
+                    break;
+                }
             }
             if consumed == before {
                 break;
             }
             emitted += vt.len();
             self.forward(&vt, out);
-            if wrap && self.grid.cursor.0 >= self.grid.cols {
-                self.forward(b"\r\n", out);
-                emitted += 2;
+            if self.grid.cursor.0 >= self.grid.cols {
+                emitted += self.margin(wrap, out);
+            }
+            if ends_run {
+                self.run = None;
             }
         }
         consumed
+    }
+
+    /// The cursor met the margin: with wrap, CR LF; without, back to the
+    /// run's start. Returns the bytes sent.
+    fn margin(&mut self, wrap: bool, out: &mut OutputQueue) -> usize {
+        let vt = if wrap {
+            b"\r\n".to_vec()
+        } else {
+            format!("\x1b[{}G", self.run.unwrap_or(0) + 1).into_bytes()
+        };
+        self.forward(&vt, out);
+        vt.len()
+    }
+
+    /// The length of a double-width glyph at `text`'s start when it
+    /// would cross the margin: conhost then pads the last column with a
+    /// space and writes the glyph at the run's start instead.
+    fn wide_at_margin(&self, text: &[u8]) -> Option<usize> {
+        let at_last = self.grid.cursor.0 + 1 == self.grid.cols;
+        if self.c2 || !at_last {
+            return None;
+        }
+        wide_len(text)
     }
 
     /// Forward `vt`, acting on the watched sequences in it.
@@ -521,6 +595,18 @@ fn csi_byte(b: u8) -> CsiByte {
 /// A CSI parameter byte, as the parser stores them.
 fn is_param(b: u8) -> bool {
     matches!(b, b'0'..=b'9' | b';' | b':')
+}
+
+/// The UTF-8 length of a double-width glyph at `text`'s start. Those
+/// start at U+1100, so they take 3 or 4 bytes.
+fn wide_len(text: &[u8]) -> Option<usize> {
+    let n = match text.first()? {
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return None,
+    };
+    let ch = std::str::from_utf8(text.get(..n)?).ok()?.chars().next()?;
+    (char_width(ch) == 2).then_some(n)
 }
 
 /// What one client byte becomes.
@@ -948,11 +1034,100 @@ mod tests {
         let (vt, _) = client(&mut s, "\r漢字漢字漢".as_bytes(), legacy);
         assert_eq!(vt, "\r漢字漢字漢\r\n".as_bytes());
         assert_eq!(s.cursor(), (0, 2));
-        // VT output keeps the delayed wrap, and WRAP off never wraps.
+        // VT output keeps the delayed wrap, and WRAP off goes back to the
+        // run's start.
         let (vt, _) = client(&mut s, b"0123456789", VT);
         assert_eq!((vt.as_slice(), s.cursor()), (&b"0123456789"[..], (9, 2)));
         let (vt, _) = client(&mut s, b"\r0123456789ab", PROCESSED_OUTPUT);
-        assert_eq!(vt, b"\r0123456789ab");
+        assert_eq!(vt, b"\r0123456789\x1b[1Gab");
+        assert_eq!((row(&s, 2), s.cursor()), ("ab23456789".into(), (2, 2)));
+    }
+
+    #[test]
+    fn wrap_off_overwrites_from_the_runs_start() {
+        let mut s = screen();
+        client(&mut s, b"\x1b[?7l\x1b[4G", VT);
+        let (vt, _) = client(&mut s, b"abcdefghij", PROCESSED_OUTPUT);
+        assert_eq!(vt, b"abcdefg\x1b[4Ghij");
+        assert_eq!((row(&s, 0), s.cursor()), ("   hijdefg".into(), (6, 0)));
+        // Text that just fills the row goes back too.
+        let (vt, _) = client(&mut s, b"\r0123456789", PROCESSED_OUTPUT);
+        assert_eq!(
+            (vt.as_slice(), s.cursor()),
+            (&b"\r0123456789\x1b[1G"[..], (0, 0))
+        );
+    }
+
+    #[test]
+    fn wrap_off_runs_end_at_processed_controls() {
+        let mut s = screen();
+        // ab, the glyph, then a run from column 3.
+        client(&mut s, b"ab\x01cdefghijk", PROCESSED_OUTPUT);
+        assert_eq!((row(&s, 0), s.cursor()), ("ab☺jkefghi".into(), (5, 0)));
+        // Unprocessed, the whole write is one run.
+        client(&mut s, b"\x1b[2H", VT);
+        client(&mut s, b"ab\x01cdefghijk", 0);
+        assert_eq!((row(&s, 1), s.cursor()), ("jk☺cdefghi".into(), (2, 1)));
+    }
+
+    #[test]
+    fn wrap_off_moves_a_wide_glyph_at_the_margin_to_the_runs_start() {
+        let mut s = screen();
+        let (vt, _) = client(&mut s, "abcdefghi漢".as_bytes(), PROCESSED_OUTPUT);
+        assert_eq!(vt, "abcdefghi \x1b[1G漢".as_bytes());
+        assert_eq!(s.cursor(), (2, 0));
+        assert_eq!(row(&s, 0).chars().next(), Some('漢'));
+        assert_eq!(s.grid().row(0)[9].ch, ' ', "the last column is padded");
+        // A run starting in the last column can't hold it: it's dropped.
+        let (vt, _) = client(&mut s, "\r\nabcdefghi".as_bytes(), PROCESSED_OUTPUT);
+        assert_eq!(vt, b"\r\nabcdefghi");
+        let (vt, _) = client(&mut s, "漢x".as_bytes(), PROCESSED_OUTPUT);
+        assert_eq!(vt, b" \x1b[10Gx\x1b[10G");
+        assert_eq!((row(&s, 1), s.cursor()), ("abcdefghix".into(), (9, 1)));
+    }
+
+    #[test]
+    fn wrap_off_margin_counts_against_room() {
+        let mut s = Screen::new(WinSize { rows: 4, cols: 2 });
+        let mut out = OutputQueue::default();
+        let mut replies = Vec::new();
+        let n = s.client(b"abc", PROCESSED_OUTPUT, 10, true, &mut out, &mut replies);
+        assert_eq!(n, 2, "b and its CHA would not fit with c");
+        assert_eq!(out.take(), b"ab\x1b[1G");
+    }
+
+    #[test]
+    fn wrap_off_margins_stay_within_max_expansion() {
+        // Five-digit CHAs, the longest; runs from the columns where every
+        // glyph meets the margin.
+        let cols = 20_000;
+        let cases: [(usize, &str); 4] = [
+            (cols - 1, "a"),
+            (cols - 1, "\u{1}"),
+            (cols - 2, "€漢"),
+            (cols - 3, "漢"),
+        ];
+        for ((start, unit), mode) in cases
+            .into_iter()
+            .flat_map(|c| [(c, 0), (c, PROCESSED_OUTPUT)])
+        {
+            let mut s = Screen::new(WinSize {
+                rows: 2,
+                cols: cols as u16,
+            });
+            client(
+                &mut s,
+                format!("\x1b[?7l\x1b[{}G", start + 1).as_bytes(),
+                VT,
+            );
+            let text = unit.repeat(64);
+            let units = text.encode_utf16().count();
+            let room = units * MAX_EXPANSION + PREAMBLE.len();
+            let mut out = OutputQueue::default();
+            let n = s.client(text.as_bytes(), mode, room, true, &mut out, &mut Vec::new());
+            assert_eq!(n, text.len(), "{unit:?} from {start}, mode {mode}");
+            assert!(out.take().len() <= room);
+        }
     }
 
     #[test]
