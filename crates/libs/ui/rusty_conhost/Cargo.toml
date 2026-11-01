@@ -27,3 +27,9 @@ platform-windows.workspace = true
 
 [lints]
 workspace = true
+
+# The Phase B throughput gate (design §9.2). `test = true` runs its
+# report and argument tests on every platform.
+[[example]]
+name = "conhost_bench"
+test = true

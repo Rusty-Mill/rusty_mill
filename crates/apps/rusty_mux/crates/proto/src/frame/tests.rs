@@ -1,6 +1,6 @@
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Progress, SessionId, Side, Size,
-    WindowId,
+    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, SessionId, Side,
+    Size, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
@@ -202,6 +202,8 @@ fn every_message_round_trips() {
                 client,
                 name: "laptop".into(),
                 attached: Some(block),
+                principal: Some(Principal::unix(1000, Some("alice".into())).expect("valid")),
+                transport: Some(Transport::Datagram),
             },
         },
         Message::Entry {
@@ -210,8 +212,21 @@ fn every_message_round_trips() {
                 client,
                 name: String::new(),
                 attached: None,
+                principal: None,
+                transport: None,
             },
         },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Client {
+                client,
+                name: String::new(),
+                attached: None,
+                principal: Some(Principal::new("sid:S-1-5-21-1", "").expect("valid")),
+                transport: Some(Transport::Socket),
+            },
+        },
+        Message::Whoami { req: 18 },
         Message::Rename {
             req: 19,
             target: EntityId::Session(session),
@@ -341,8 +356,25 @@ fn every_event_round_trips() {
             size: size(100, 30),
         },
         Event::BlockClosed { block },
-        Event::ClientConnected { client },
+        Event::ClientConnected {
+            client,
+            principal: None,
+        },
+        Event::ClientConnected {
+            client,
+            principal: Some(Principal::unix(0, Some("root".into())).expect("valid")),
+        },
         Event::ClientDisconnected { client },
+        Event::ClientConnectionChanged {
+            client,
+            principal: Principal::new("sid:S-1-5-21-1", "").expect("valid"),
+            transport: Transport::Socket,
+        },
+        Event::ClientConnectionChanged {
+            client,
+            principal: Principal::unix(1000, None).expect("valid"),
+            transport: Transport::Datagram,
+        },
         Event::Attached { client, block },
         Event::Detached { client, block },
         Event::LeaseChanged {
@@ -482,7 +514,8 @@ const FEATURES_ID: u32 = 10;
 fn decode_state_is_bounded_by_ids_not_by_field_count() {
     // `In` owns nothing to free, so it cannot grow with the frame.
     assert!(!std::mem::needs_drop::<crate::field::In<'static>>());
-    assert!(std::mem::size_of::<crate::field::In<'static>>() <= 1024);
+    // One slot per known id (FIELD_COUNT of them), whatever the frame holds.
+    assert!(std::mem::size_of::<crate::field::In<'static>>() <= 2048);
     // Unknown ids, both below and above the kept range.
     let unknown = raw_frame(0x01, |o| {
         for i in 0..REPEATS {
@@ -842,6 +875,8 @@ fn feature_bits_are_distinct() {
         Features::CHECKPOINT_V6,
         Features::TAKEOVER,
         Features::ECHO_ACK,
+        Features::DATAGRAM,
+        Features::IDENTITY,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -849,6 +884,39 @@ fn feature_bits_are_distinct() {
         assert_eq!(seen & feature.bits(), 0, "{feature:?} reuses a bit");
         seen |= feature.bits();
     }
+}
+
+/// An unknown transport, or a principal without an id, is refused rather
+/// than guessed.
+#[test]
+fn a_bad_transport_or_principal_is_rejected() {
+    let client = Uuid::new_v4();
+    let entry = |transport: u64, principal: &[u8]| {
+        raw_frame(0x8a, |o| {
+            o.varint(REQ_ID, 1)
+                .uuid(5, client)
+                .bytes(6, b"")
+                .varint(13, 4)
+                .varint(41, transport)
+                .bytes(42, principal)
+                .bytes(43, b"");
+        })
+    };
+    assert!(decode(&entry(1, b"uid:1")).is_ok());
+    assert_eq!(
+        decode(&entry(3, b"uid:1")),
+        Err(Error::InvalidField {
+            message: 0x8a,
+            field: 41
+        })
+    );
+    assert_eq!(
+        decode(&entry(1, b"")),
+        Err(Error::InvalidField {
+            message: 0x8a,
+            field: 42
+        })
+    );
 }
 
 #[test]

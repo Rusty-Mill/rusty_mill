@@ -67,6 +67,7 @@ mod tests {
     fn event(n: u8) -> Event {
         Event::ClientConnected {
             client: ClientId::from_uuid(Uuid::from_bytes([n; 16])),
+            principal: None,
         }
     }
 

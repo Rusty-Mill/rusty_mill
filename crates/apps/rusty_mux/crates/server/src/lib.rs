@@ -46,6 +46,8 @@ use std::io;
 use std::time::Duration;
 
 #[cfg(any(target_os = "linux", windows))]
+use rusty_mux_core::{Principal, Transport};
+#[cfg(any(target_os = "linux", windows))]
 use rusty_tokio::io::UnixStream;
 use rusty_tokio::io::{UdpSocket, UnixListener};
 
@@ -156,6 +158,26 @@ pub async fn serve_until(
     serve_for(listener, config, udp, peer_check, stop).await
 }
 
+/// The principal every client of this server has: its own user, the only
+/// peer [`peer_check`] lets in.
+#[cfg(target_os = "linux")]
+fn owner() -> io::Result<Principal> {
+    let uid = rusty_libc::process::geteuid();
+    Principal::unix(uid, platform_linux::user_name(uid))
+        .map_err(|e| io::Error::other(format!("uid {uid}: {e}")))
+}
+
+/// The principal every client of this server has: its own user's SID, the
+/// only peer [`peer_check`] lets in.
+#[cfg(windows)]
+fn owner() -> io::Result<Principal> {
+    let sid = platform_windows::sys::security::UserSid::current()
+        .and_then(|sid| sid.to_sid_string())
+        .map_err(|e| io::Error::other(format!("our own SID: {e:?}")))?;
+    Principal::new(format!("sid:{sid}"), "")
+        .map_err(|e| io::Error::other(format!("SID {sid}: {e}")))
+}
+
 /// Whether a connection's peer may be served.
 #[cfg(any(target_os = "linux", windows))]
 pub(crate) enum Peer {
@@ -205,7 +227,7 @@ async fn serve_for(
         .ok()
         .and_then(|addr| addr.as_pathname().map(std::path::absolute))
         .and_then(Result::ok);
-    let state = state::State::shared(config, socket);
+    let state = state::State::shared(config, socket, owner()?);
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed) => result,
@@ -258,7 +280,13 @@ async fn accept(
         match allowed(&stream) {
             Ok(Peer::Allowed) => {
                 let (rd, wr) = stream.into_split();
-                rusty_tokio::task::spawn_local(conn::run(state.clone(), rd, wr, |_, _| {}));
+                rusty_tokio::task::spawn_local(conn::run(
+                    state.clone(),
+                    rd,
+                    wr,
+                    Transport::Socket,
+                    |_, _| {},
+                ));
             }
             Ok(Peer::Refused(who)) => eprintln!("rusty-mux-server: refusing a client of {who}"),
             Err(err) => eprintln!("rusty-mux-server: reading a client's credentials: {err}"),

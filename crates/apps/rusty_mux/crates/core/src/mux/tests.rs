@@ -4,6 +4,12 @@ fn size(cols: u16, rows: u16) -> Size {
     Size::new(cols, rows).expect("non-zero size")
 }
 
+/// A local client.
+fn connect(mux: &mut Mux) -> ClientId {
+    let me = Principal::unix(1000, Some("me".into())).expect("principal");
+    mux.connect(me, Transport::Socket)
+}
+
 /// A session with one window and one block, events drained.
 fn fixture() -> (Mux, SessionId, WindowId, BlockId) {
     let mut mux = Mux::new();
@@ -15,7 +21,7 @@ fn fixture() -> (Mux, SessionId, WindowId, BlockId) {
 }
 
 fn leased_client(mux: &mut Mux, block: BlockId) -> ClientId {
-    let client = mux.connect();
+    let client = connect(mux);
     mux.attach(client, block).expect("attach");
     mux.acquire_lease(client, block).expect("lease");
     mux.take_events();
@@ -80,7 +86,7 @@ fn unknown_parents_are_rejected_without_events() {
 fn lease_is_single_writer() {
     let (mut mux, _, _, block) = fixture();
     let a = leased_client(&mut mux, block);
-    let b = mux.connect();
+    let b = connect(&mut mux);
     mux.attach(b, block).unwrap();
 
     assert_eq!(
@@ -98,7 +104,7 @@ fn lease_is_single_writer() {
 #[test]
 fn lease_requires_attachment() {
     let (mut mux, _, _, block) = fixture();
-    let client = mux.connect();
+    let client = connect(&mut mux);
     assert_eq!(
         mux.acquire_lease(client, block),
         Err(Error::NotAttached { client, block })
@@ -121,7 +127,7 @@ fn acquiring_own_lease_twice_is_a_no_op() {
 fn release_frees_the_lease_for_another_client() {
     let (mut mux, _, _, block) = fixture();
     let a = leased_client(&mut mux, block);
-    let b = mux.connect();
+    let b = connect(&mut mux);
     mux.attach(b, block).unwrap();
     mux.take_events();
 
@@ -146,7 +152,7 @@ fn release_frees_the_lease_for_another_client() {
 #[test]
 fn releasing_a_lease_held_by_another_client_leaves_it() {
     let (mut mux, _, _, block) = fixture();
-    let a = mux.connect();
+    let a = connect(&mut mux);
     mux.attach(a, block).unwrap();
     let b = leased_client(&mut mux, block);
     mux.take_events();
@@ -234,7 +240,7 @@ fn disconnect_releases_lease_and_forgets_client() {
 #[test]
 fn resize_needs_the_lease_and_skips_same_size() {
     let (mut mux, _, _, block) = fixture();
-    let viewer = mux.connect();
+    let viewer = connect(&mut mux);
     mux.attach(viewer, block).unwrap();
     assert_eq!(
         mux.resize_block(viewer, block, size(100, 30)),
@@ -423,7 +429,7 @@ fn process_notes_emit_their_event() {
 #[test]
 fn rename_names_every_kind_and_emits_once() {
     let (mut mux, session, window, block) = fixture();
-    let client = mux.connect();
+    let client = connect(&mut mux);
     mux.take_events();
     mux.rename(EntityId::Session(session), "work").unwrap();
     mux.rename(EntityId::Window(window), "logs").unwrap();
@@ -462,7 +468,7 @@ fn rename_names_every_kind_and_emits_once() {
 #[test]
 fn new_blocks_and_clients_have_empty_names() {
     let (mut mux, _, _, block) = fixture();
-    let client = mux.connect();
+    let client = connect(&mut mux);
     assert_eq!(mux.block(block).unwrap().name(), "");
     assert_eq!(mux.client(client).unwrap().name(), "");
     assert_eq!(mux.clients().map(Client::id).collect::<Vec<_>>(), [client]);
@@ -471,7 +477,7 @@ fn new_blocks_and_clients_have_empty_names() {
 #[test]
 fn renaming_an_unknown_entity_changes_nothing() {
     let (mut mux, _, window, block) = fixture();
-    let client = mux.connect();
+    let client = connect(&mut mux);
     mux.close_window(window).unwrap();
     mux.disconnect(client).unwrap();
     mux.take_events();
@@ -489,7 +495,7 @@ fn renaming_an_unknown_entity_changes_nothing() {
 #[test]
 fn names_over_the_limit_are_refused_without_a_change() {
     let (mut mux, session, window, block) = fixture();
-    let client = mux.connect();
+    let client = connect(&mut mux);
     mux.rename(EntityId::Block(block), "build").unwrap();
     mux.take_events();
     let at_limit = "a".repeat(MAX_NAME);
@@ -682,4 +688,29 @@ fn zoom_and_unzoom_emit_only_on_a_change() {
     mux.close_window(window).unwrap();
     assert_eq!(mux.unzoom(window), Err(Error::UnknownWindow(window)));
     assert!(mux.block(b).is_none());
+}
+
+#[test]
+fn a_reconnect_records_the_transport_and_says_so() {
+    let mut mux = Mux::new();
+    let client = connect(&mut mux);
+    mux.take_events();
+    mux.reconnect(client, Transport::Datagram).expect("known");
+    let found = mux.client(client).expect("kept");
+    assert_eq!(found.transport(), Transport::Datagram);
+    assert_eq!(found.principal().id(), "uid:1000");
+    assert_eq!(
+        mux.take_events(),
+        [Event::ClientConnectionChanged {
+            client,
+            principal: Principal::unix(1000, Some("me".into())).expect("principal"),
+            transport: Transport::Datagram,
+        }]
+    );
+    let gone = ClientId::random();
+    assert_eq!(
+        mux.reconnect(gone, Transport::Socket),
+        Err(Error::UnknownClient(gone))
+    );
+    assert!(mux.take_events().is_empty(), "a refusal changes nothing");
 }

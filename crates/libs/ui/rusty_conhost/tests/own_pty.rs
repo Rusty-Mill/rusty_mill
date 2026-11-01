@@ -482,8 +482,6 @@ const GAPS: &[(&[&str], &str, &str)] = &[
     ),
     (&["cooked", "hi\\r"], NO_COOKED, "#1335"),
     (&["cooked", "ab\\bc\\r"], NO_COOKED, "#1335"),
-    (&["print-x", "7", "32768"], NO_BIG_WRITE, "#1337"),
-    (&["print-x", "7", "100000"], NO_BIG_WRITE, "#1337"),
 ];
 
 // Our answers while those APIs are unserved (ERROR_INVALID_FUNCTION).
@@ -495,7 +493,6 @@ const NO_BUFFER: &str =
 const NO_WINDOW: &str =
     "set-window error=1 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
 const NO_COOKED: &str = "cooked wrote=error=1 read= cursor=0,0 attr=0x7";
-const NO_BIG_WRITE: &str = "print-x mode=ok n=error=6 cursor=0,0 attr=0x7";
 
 /// How one probe compared.
 #[derive(Debug, PartialEq)]
@@ -800,4 +797,44 @@ fn spawn_refuses_what_a_fresh_console_cannot_do() {
     cmd.group = GroupSpec::JoinGroup(1);
     let err = OwnPty.spawn_concrete(&cmd, SIZE).err().expect("JoinGroup");
     assert_eq!(err.kind, ErrorKind::InvalidInput);
+}
+
+/// A write larger than the per-packet cap is served a slice at a time
+/// (design §7.4), not refused: one WriteFile, and one write_all to std's
+/// stdout, of about 300 KB each, on both hosts.
+#[test]
+fn a_write_past_the_packet_cap_arrives_whole() {
+    let _g = lock();
+    const BYTES: usize = 300_000;
+    let last = format!("line {:07}", BYTES.div_ceil(14) - 1);
+    for writer in ["raw", "console"] {
+        let n = BYTES.to_string();
+        let cmd = command(&probe(), &["lines", writer, &n]);
+        for host in [Host::ConPty, Host::Own] {
+            let (out, child) = match host {
+                Host::ConPty => {
+                    let (master, child) = WindowsPty.spawn_concrete(&cmd, SIZE).expect("ConPTY");
+                    (read_all(master).map(|(out, _)| out), child)
+                }
+                Host::Own => {
+                    let (master, child) = own(&cmd);
+                    (read_all(master).map(|(out, _)| out), child)
+                }
+            };
+            let out = out.unwrap_or_else(|| panic!("{host:?} {writer}: no EOF"));
+            assert_eq!(
+                Box::new(child).wait().expect("wait"),
+                ExitStatus::Code(0),
+                "{host:?} {writer}"
+            );
+            let lines = plain_lines(&out);
+            assert!(lines.contains(&last), "{host:?} {writer}: no {last:?}");
+            // Our host passes every line through; ConPTY may skip lines
+            // that scrolled off between its frames.
+            if matches!(host, Host::Own) {
+                let numbered = lines.iter().filter(|l| l.starts_with("line ")).count();
+                assert_eq!(numbered, BYTES.div_ceil(14), "{writer}");
+            }
+        }
+    }
 }
