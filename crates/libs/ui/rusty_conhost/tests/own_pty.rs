@@ -455,11 +455,7 @@ const REFUSED_WINDOW: &str =
 /// is, so the rest of the probe still catches regressions: a gap whose
 /// answer changes in any other way is a mismatch, and one that starts to
 /// agree fails the suite until it is taken off this list.
-const GAPS: &[(&[&str], &str, &str)] = &[(
-    &["print-x", "1", "205"],
-    "print-x mode=ok n=205 cursor=199,0 attr=0x7",
-    "#1336",
-)];
+const GAPS: &[(&[&str], &str, &str)] = &[];
 
 /// How one probe compared.
 #[derive(Debug, PartialEq)]

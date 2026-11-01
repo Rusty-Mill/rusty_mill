@@ -1678,6 +1678,11 @@ impl Console {
                 }
                 return;
             }
+            // The whole call is out: make the margin move its text owes
+            // (its room was reserved when the text met the margin). Not
+            // at a slice's end, whose next slice may hold marks that
+            // join the glyph.
+            self.screen.end_write(out);
             let Some(mut done) = self.writes.pop_front() else {
                 return;
             };
@@ -2685,6 +2690,92 @@ pub(crate) mod tests {
         Some(out)
     }
 
+    /// A glyph in the last column, then `marks` past a slice, then `x`,
+    /// in one write under output `mode`: the marks join the glyph, and
+    /// the margin move comes after them.
+    fn marks_across_slices(mode: u32, mark: char, then: &str) {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.set_mode(output, mode);
+        let marks = mark.to_string().repeat(WIDE_SLICE + 5);
+        let text = format!("{}e{marks}x", "a".repeat(79));
+        assert!(text.encode_utf16().count() * 2 <= PACKET_INPUT_CAP);
+        h.vt.clear();
+        assert_eq!(h.write_w(output, &text).status, msg::STATUS_SUCCESS);
+        let shown = format!("{}e{marks}{then}x", "a".repeat(79));
+        assert!(h.vt == shown.as_bytes(), "mode {mode:#x}, {mark:?}");
+        assert_ne!(h.c.screen.grid().row(0)[79].cluster, 0, "on the e");
+    }
+
+    #[test]
+    fn marks_past_a_slice_join_the_glyph_at_the_margin() {
+        for mark in ['\u{301}', '\u{1D167}'] {
+            marks_across_slices(screen::PROCESSED_OUTPUT, mark, "\x1b[1G");
+            marks_across_slices(
+                screen::PROCESSED_OUTPUT | screen::WRAP_AT_EOL_OUTPUT,
+                mark,
+                "\r\n",
+            );
+        }
+    }
+
+    #[test]
+    fn a_control_ending_a_write_at_the_margin_keeps_its_own_column() {
+        for (control, shown) in [("\u{1}", "☺"), ("\0", " ")] {
+            let mut h = Host::new();
+            let [_, _, output] = h.connect(1, "");
+            h.set_mode(output, screen::PROCESSED_OUTPUT);
+            h.write_w(output, &"a".repeat(79));
+            h.vt.clear();
+            assert_eq!(h.write_w(output, control).status, msg::STATUS_SUCCESS);
+            assert_eq!(h.vt, format!("{shown}\x1b[80G").as_bytes(), "{control:?}");
+            assert_eq!(h.c.screen.cursor(), (79, 0));
+            // Text after it in the same write is a run of its own.
+            h.vt.clear();
+            h.write_w(output, &format!("{control}b"));
+            assert_eq!(h.vt, format!("{shown}\x1b[80Gb\x1b[80G").as_bytes());
+            assert_eq!(h.c.screen.cursor(), (79, 0));
+        }
+    }
+
+    #[test]
+    fn a_mark_in_the_next_slice_does_not_join_a_control_at_the_margin() {
+        let modes = [
+            (screen::PROCESSED_OUTPUT, "\x1b[80G"),
+            (
+                screen::PROCESSED_OUTPUT | screen::WRAP_AT_EOL_OUTPUT,
+                "\r\n",
+            ),
+        ];
+        for (control, shown) in [('\u{1}', '☺'), ('\0', ' ')] {
+            for (mode, moved) in modes {
+                let mut h = Host::new();
+                let [_, _, output] = h.connect(1, "");
+                h.set_mode(output, mode);
+                // The control is the last unit of the first slice, in the
+                // last column.
+                let lead = "b".repeat(WIDE_SLICE - 81);
+                let text = format!("{lead}\r{}{control}\u{301}x", "a".repeat(79));
+                assert_eq!(text.find(control), Some(WIDE_SLICE - 1));
+                assert_eq!(h.write_w(output, &text).status, msg::STATUS_SUCCESS);
+                let tail = format!("{shown}{moved}\u{301}x");
+                let shown_vt = String::from_utf8_lossy(&h.vt);
+                assert!(shown_vt.contains(&tail), "{control:?} mode {mode:#x}");
+                // With wrap the control keeps its row; without, x
+                // overwrites it after the mark.
+                let (x, y) = h.c.screen.cursor();
+                let (y, glyph) = if moved == "\r\n" {
+                    (y - 1, shown)
+                } else {
+                    (y, 'x')
+                };
+                assert_eq!(x, if moved == "\r\n" { 1 } else { 79 });
+                let cell = h.c.screen.grid().row(usize::from(y))[79];
+                assert_eq!((cell.ch, cell.cluster), (glyph, 0), "no mark on it");
+            }
+        }
+    }
+
     /// A stateful output code page would lose its shift state at a slice
     /// boundary, so ANSI text past the cap is refused there; W text, which
     /// no code page touches, still streams.
@@ -3116,6 +3207,62 @@ pub(crate) mod tests {
             assert_eq!(answered(&mut h, r).information, variable.len());
             assert!(h.fetches >= 1, "unicode={unicode}");
             assert!(!lf_gains_cr(&h.vt), "unicode={unicode}");
+        }
+    }
+
+    /// One call past the packet cap whose first fetched slice ends with
+    /// `e` in the last column, the marks after it in the next slice:
+    /// raw, WriteConsoleA (UTF-8) and W, with wrap on and off. The marks
+    /// join the `e`, and the margin move comes after them.
+    #[test]
+    fn marks_past_a_fetch_join_the_glyph_at_the_margin() {
+        let modes = [
+            (screen::PROCESSED_OUTPUT, "\x1b[1G"),
+            (
+                screen::PROCESSED_OUTPUT | screen::WRAP_AT_EOL_OUTPUT,
+                "\r\n",
+            ),
+        ];
+        // 0 raw, 1 A, 2 W.
+        for api_kind in 0..3 {
+            for (mode, moved) in modes {
+                let mut h = Host::new();
+                let [_, _, output] = h.connect(1, "");
+                assert_eq!(h.set_cp(65001, true), msg::STATUS_SUCCESS);
+                h.set_mode(output, mode);
+                let unit = if api_kind == 2 { 2 } else { 1 };
+                let first = match api_kind {
+                    0 => PACKET_INPUT_CAP,
+                    _ => (PACKET_INPUT_CAP - 16) / unit,
+                };
+                let marks = "\u{301}".repeat(3);
+                let text = format!("{}\r{}e{marks}x", "b".repeat(first - 81), "a".repeat(79));
+                let variable: Vec<u8> = if api_kind == 2 {
+                    text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+                } else {
+                    text.clone().into_bytes()
+                };
+                let r = if api_kind == 0 {
+                    h.packet(msg::RAW_WRITE, 1, output, &variable, 0).0
+                } else {
+                    let mut payload = Vec::new();
+                    payload.extend(api::WRITE_CONSOLE.to_le_bytes());
+                    payload.extend(8u32.to_le_bytes());
+                    payload.extend([0, 0, 0, 0, u8::from(api_kind == 2), 0, 0, 0]);
+                    payload.extend(&variable);
+                    h.packet(msg::USER_DEFINED, 1, output, &payload, 8).0
+                };
+                let what = format!("api {api_kind}, mode {mode:#x}");
+                assert_eq!(answered(&mut h, r).information, variable.len(), "{what}");
+                assert!(h.fetches >= 1, "{what}: it streamed");
+                let tail = format!("e{marks}{moved}x");
+                assert!(String::from_utf8_lossy(&h.vt).ends_with(&tail), "{what}");
+                let (_, y) = h.c.screen.cursor();
+                let y = usize::from(y) - usize::from(moved == "\r\n");
+                let cell = h.c.screen.grid().row(y)[79];
+                assert_eq!(cell.ch, 'e', "{what}");
+                assert_ne!(cell.cluster, 0, "{what}: the marks are on the e");
+            }
         }
     }
 
