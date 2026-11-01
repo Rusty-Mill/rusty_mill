@@ -10,7 +10,7 @@
 //! revision, undone) or did not (planned revision, nothing to undo).
 
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
@@ -170,7 +170,7 @@ fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
     };
-    File::open(dir)?.sync_all()
+    std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
