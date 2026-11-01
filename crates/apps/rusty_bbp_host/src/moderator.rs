@@ -1161,7 +1161,9 @@ fn marker_text(usd: f64, criteria_sha256: &str) -> String {
 
 /// Append one `bbp mod` segment, run by a `bbp` built from `build_sha`, to the
 /// task's evidence record. The moderator calls it under its lock, before it
-/// acts on the task, so a segment that did anything is recorded.
+/// acts on the task, so a segment that did anything is recorded; the record
+/// (and, on Unix, its directory entry) is synced before it returns, so it
+/// survives a crash of the host as well as of the moderator.
 pub fn record_evidence_segment(dir: &Path, task: &TaskId, build_sha: &str) -> Result<(), String> {
     use std::io::Write;
     let file = evidence_segments_path(dir, task);
@@ -1169,12 +1171,21 @@ pub fn record_evidence_segment(dir: &Path, task: &TaskId, build_sha: &str) -> Re
         bbp_build_sha: build_sha.to_owned(),
     })
     .map_err(|e| e.to_string())?;
-    std::fs::OpenOptions::new()
+    let at = |e: std::io::Error| format!("{}: {e}", file.display());
+    let mut f = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&file)
-        .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()))
-        .map_err(|e| format!("{}: {e}", file.display()))
+        .map_err(at)?;
+    f.write_all(format!("{line}\n").as_bytes()).map_err(at)?;
+    f.sync_all().map_err(at)?;
+    #[cfg(unix)]
+    if let Some(parent) = file.parent() {
+        File::open(parent)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    Ok(())
 }
 
 #[derive(Serialize, Deserialize)]

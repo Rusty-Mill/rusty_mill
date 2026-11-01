@@ -1622,7 +1622,15 @@ fn a_run_stopped_by_the_wall_limit_is_an_outcome_with_its_stop() {
 /// Everything `bbp mod` needs for a capped run of a planner that prints `body`.
 fn mod_cli(tag: &str, body: &str) -> (std::process::Output, PathBuf) {
     let (dir, task, repo) = opened(tag);
-    let planner = script(&dir, "planner", body);
+    let out = capped_mod(&dir, &task, &repo, body)
+        .output()
+        .expect("run bbp mod");
+    (out, dir)
+}
+
+/// A capped `bbp mod` (at $1, a 30 s wall) of a planner that prints `body`.
+fn capped_mod(dir: &Path, task: &TaskId, repo: &Path, body: &str) -> Proc {
+    let planner = script(dir, "planner", body);
     let mut l = planner;
     l.args
         .extend(["--model".to_owned(), "claude-sonnet-5-5".to_owned()]);
@@ -1637,11 +1645,12 @@ fn mod_cli(tag: &str, body: &str) -> (std::process::Output, PathBuf) {
     .expect("agents");
     let criteria = dir.join("criteria.json");
     std::fs::write(&criteria, SONNET_PRICES).expect("criteria");
-    let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+    let mut command = Proc::new(env!("CARGO_BIN_EXE_bbp"));
+    command
         .args(["mod", "--dir"])
-        .arg(&dir)
+        .arg(dir)
         .args(["--task", &task.0, "--repo-path"])
-        .arg(&repo)
+        .arg(repo)
         .arg("--work")
         .arg(dir.join("work"))
         .arg("--agents")
@@ -1657,10 +1666,74 @@ fn mod_cli(tag: &str, body: &str) -> (std::process::Output, PathBuf) {
             "1",
         ])
         .arg("--criteria")
-        .arg(&criteria)
-        .output()
-        .expect("run bbp mod");
-    (out, dir)
+        .arg(&criteria);
+    command
+}
+
+/// #1326 review: a capped `bbp mod` SIGKILLed mid-run never returns, so its
+/// segment must be on record before it acts on the task. Resumed under the
+/// same cap, the run is still not counted as a clean success. Red if the
+/// segment is recorded only when the loop returns.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_capped_moderator_killed_mid_run_and_resumed_is_not_counted_as_clean() {
+    let (dir, task, repo) = opened("killed-capped");
+    let mut first = capped_mod(
+        &dir,
+        &task,
+        &repo,
+        "echo '{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"model\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}'\nsleep 60",
+    )
+    .stdout(Stdio::null())
+    .spawn()
+    .expect("spawn bbp mod");
+    let log = moderator::log_path(&dir, &task, TurnId(1));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !std::fs::read_to_string(&log).is_ok_and(|t| t.contains("assistant")) {
+        assert!(
+            first.try_wait().expect("wait").is_none(),
+            "bbp mod exited early"
+        );
+        assert!(Instant::now() < deadline, "turn 1 never printed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    first.kill().expect("SIGKILL bbp mod");
+    first.wait().expect("reap");
+    // Resume under the same cap to a clean end: its output shows no stop.
+    let rev = card(&dir, &task).rev;
+    human::perform(&dir, &task, "cancel", &["stop"], Some(rev)).expect("cancel");
+    let cap = sonnet_cap(&dir, 1.0);
+    let mut second = config(&dir, &task, repo, Launchers::default(), 10);
+    second.cost_cap = Some(cap.clone());
+    let s2 = moderator::run_to_stop(&second).expect("the resume runs under its cap");
+    assert!(s2.stop.is_none(), "{:?}", s2.stop);
+    let _ = moderator::quiesce(&dir, &task);
+    let out = dir.join("mod-2.json");
+    std::fs::write(
+        &out,
+        format!(
+            r#"{{"state":"Cancelled","state_ms":[["Planning",10]],"replay_equals_live":true,"bbp_build_sha":"{}"}}"#,
+            "a".repeat(40)
+        ),
+    )
+    .expect("write mod output");
+    let r = rusty_bbp_host::pairs::facts(
+        &rusty_bbp_host::pairs::RunRef {
+            dir: dir.display().to_string(),
+            task: task.0.clone(),
+            mod_output: out.display().to_string(),
+            rubric_ok: true,
+        },
+        &cap.criteria,
+        &cap.criteria_sha256,
+        1.0,
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+    // Refused as resumed, or loaded as a stopped, failed run; never clean.
+    match r {
+        Err(e) => assert!(e.contains("2 bbp mod segments"), "{e}"),
+        Ok(f) => assert!(f.stopped && !f.succeeded(), "{f:?}"),
+    }
 }
 
 const TEN_DOLLARS: &str = r#"echo '{"type":"assistant","message":{"id":"m1","model":"claude-sonnet-5-5","usage":{"input_tokens":0,"output_tokens":1000000}}}'
@@ -1852,6 +1925,10 @@ fn a_capped_startup_refused_for_the_lock_leaves_no_marker() {
     assert!(
         moderator::require_evidence_marker(&dir, &task, 1000.0, &sha).is_err(),
         "a refused startup must not make the task an evidence run"
+    );
+    assert!(
+        !moderator::evidence_segments_path(&dir, &task).exists(),
+        "a startup refused for the lock records no segment"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
