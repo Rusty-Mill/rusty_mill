@@ -32,10 +32,11 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   every work column. A move may list more than one capability (one transition each); holding any one is enough.
   Install it by copying it to `workflow.json`, after re-filing the cards of columns it drops (below).
 - **Re-filing cards:** `rusty_mill_board --tick-url URL --retag-columns qa=v_and_ving,review=v_and_ving` prints
-  the plan as JSON (each card's id, revision, from and to). `--apply --retag-record FILE` (board stopped) first
-  saves the plan to FILE, a new file flushed to disk, then retags each card still at its planned revision, keeping
-  claims. `--undo-retag FILE` puts back each card that is in the new column at the very next revision, so a card
-  changed since is left alone and reported; after a failure midway it undoes exactly what was written.
+  the plan as JSON (each card's id, revision, from and to). `--apply --retag-record FILE` (board stopped) creates
+  FILE exclusively and syncs the plan into it, then, for each card still at its planned revision, records `begin`,
+  retags it (keeping its claim) and records `done`, each line synced. `--undo-retag FILE` puts back each card
+  recorded `done` that is in the new column at the very next revision; a card changed since, never reached, or
+  whose write's outcome is unknown is left alone and reported.
 - **Rules:** each move needs the capability the workflow gives it (by default triage, build, test, review, merge,
   close; `plan` and `architect` serve the factory workflow; `test` was `qa`, which stored roles may still say); any open card may be moved to blocked; leaving a work column needs your claim. `close` moves a card from building or qa straight to done when
   its work already merged on the forge, and lets `card_add` with `done: true` record merged work that never

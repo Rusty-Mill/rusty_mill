@@ -274,9 +274,9 @@ fn run_retag(cli: &Cli, store: &dyn Store) -> Result<(), String> {
     if let Some(path) = &cli.undo_retag {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("--undo-retag {}: {e}", path.display()))?;
-        let plan: Vec<retag::Retag> = serde_json::from_str(&text)
+        let record = retag::Record::parse(&text)
             .map_err(|e| format!("--undo-retag {}: {e}", path.display()))?;
-        let out = retag::undo(store, &plan, system_ms()).map_err(|e| e.to_string())?;
+        let out = retag::undo(store, &record, system_ms()).map_err(|e| e.to_string())?;
         println!("{}", json(&out)?);
         return Ok(());
     }
@@ -293,10 +293,11 @@ fn run_retag(cli: &Cli, store: &dyn Store) -> Result<(), String> {
         );
         return Ok(());
     };
-    let out = retag::apply_recorded(store, &plan, system_ms(), |plan| {
-        retag::save_record(record, plan)
-    })
-    .map_err(|e| format!("--retag-record {}: {e}", record.display()))?;
+    let fail = |e: String| format!("--retag-record {}: {e}", record.display());
+    let mut file = retag::RecordFile::create(record, &plan)
+        .map_err(|e| fail(format!("not saved, nothing retagged: {e}")))?;
+    let out = retag::apply(store, &plan, system_ms(), &mut |line| file.mark(line))
+        .map_err(|e| fail(format!("{e}; undo what was written with --undo-retag")))?;
     println!("{}", json(&out)?);
     Ok(())
 }
