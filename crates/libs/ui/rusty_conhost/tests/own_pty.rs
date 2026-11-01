@@ -87,14 +87,21 @@ fn plain_lines(vt: &[u8]) -> Vec<String> {
             continue;
         }
         match chars.next() {
-            // CSI: parameters up to a final byte.
+            // CSI: parameters up to a final byte. A cursor move ends the
+            // line: a cell write's repaint (CUP then text) can come out
+            // next to the result line, before or after it.
             Some('[') => {
                 for c in chars.by_ref() {
                     if ('@'..='~').contains(&c) {
+                        if matches!(c, 'H' | 'f') {
+                            plain.push('\n');
+                        }
                         break;
                     }
                 }
             }
+            // DECSC and DECRC bracket such a repaint.
+            Some('7' | '8') => plain.push('\n'),
             // OSC: up to BEL or ST.
             Some(']') => {
                 while let Some(c) = chars.next() {
