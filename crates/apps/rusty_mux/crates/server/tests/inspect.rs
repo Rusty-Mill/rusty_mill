@@ -70,7 +70,11 @@ fn list_gives_each_parent_before_its_children() {
         })
         .collect();
     let [
-        Entry::Session { session, name },
+        Entry::Session {
+            session,
+            name,
+            active,
+        },
         Entry::Window {
             window: w,
             session: ws,
@@ -97,6 +101,7 @@ fn list_gives_each_parent_before_its_children() {
     };
     assert_eq!((name.as_str(), wname.as_str()), ("s", "w"));
     assert_eq!((ws, *w, *bw1, *bw2), (session, window, window, window));
+    assert_eq!(*active, Some(window), "a session's first window is active");
     assert_eq!((*b1, *holder, *b2), (leased, client.id(), idle));
     assert_eq!((size.cols(), size.rows(), title.as_str()), (80, 24, ""));
     assert_eq!(bname, "");

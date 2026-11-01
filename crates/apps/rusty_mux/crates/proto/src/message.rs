@@ -112,6 +112,16 @@ impl Features {
     /// skipped for a client without it as the other optional kinds are.
     pub const MORE_PROGRAM_EVENTS: Self = Self(1 << 23);
 
+    /// Each session's active window: [`Message::SelectWindow`] and
+    /// [`Event::ActiveWindowChanged`] (skipped for a client without it). A
+    /// session entry carries its active window regardless, since older
+    /// decoders skip the field.
+    pub const ACTIVE_WINDOW: Self = Self(1 << 24);
+
+    /// [`Message::ReloadConfig`] and [`Event::ConfigReloaded`] (skipped
+    /// for a client without it).
+    pub const CONFIG_RELOAD: Self = Self(1 << 25);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -210,6 +220,9 @@ pub enum Entry {
     Session {
         session: SessionId,
         name: String,
+        /// `None` while it has no windows, or from a server without
+        /// [`Features::ACTIVE_WINDOW`].
+        active: Option<WindowId>,
     },
     Window {
         window: WindowId,
@@ -374,6 +387,17 @@ pub enum Message {
     Unzoom {
         req: u64,
         window: WindowId,
+    },
+    /// Makes `window` its session's active window. Negotiated with
+    /// [`Features::ACTIVE_WINDOW`].
+    SelectWindow {
+        req: u64,
+        window: WindowId,
+    },
+    /// Has the server read its config file again. Negotiated with
+    /// [`Features::CONFIG_RELOAD`].
+    ReloadConfig {
+        req: u64,
     },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
@@ -555,6 +579,8 @@ mod ty {
     pub const UNZOOM: u8 = 0x14;
     pub const OPEN_DATAGRAM: u8 = 0x15;
     pub const WHOAMI: u8 = 0x16;
+    pub const SELECT_WINDOW: u8 = 0x17;
+    pub const RELOAD_CONFIG: u8 = 0x18;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -684,6 +710,14 @@ impl Message {
             M::Unzoom { req, window } => {
                 out.varint(REQ, *req).uuid(WINDOW, window.uuid());
                 ty::UNZOOM
+            }
+            M::SelectWindow { req, window } => {
+                out.varint(REQ, *req).uuid(WINDOW, window.uuid());
+                ty::SELECT_WINDOW
+            }
+            M::ReloadConfig { req } => {
+                out.varint(REQ, *req);
+                ty::RELOAD_CONFIG
             }
             M::Welcome {
                 features,
@@ -866,6 +900,13 @@ impl Message {
             ty::UNZOOM => M::Unzoom {
                 req: f.varint(REQ)?,
                 window: window(&f, WINDOW)?,
+            },
+            ty::SELECT_WINDOW => M::SelectWindow {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
+            },
+            ty::RELOAD_CONFIG => M::ReloadConfig {
+                req: f.varint(REQ)?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
@@ -1115,6 +1156,8 @@ mod kind {
     pub const CLIENT_CONNECTION_CHANGED: u64 = 26;
     pub const CLIPBOARD_WRITTEN: u64 = 27;
     pub const STATUS_REMOVED: u64 = 28;
+    pub const ACTIVE_WINDOW_CHANGED: u64 = 29;
+    pub const CONFIG_RELOADED: u64 = 30;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1136,6 +1179,13 @@ fn put_event(out: &mut Out, event: &Event) {
         E::WindowClosed { window } => {
             out.varint(KIND, kind::WINDOW_CLOSED)
                 .uuid(WINDOW, window.uuid());
+        }
+        E::ActiveWindowChanged { session, window } => {
+            out.varint(KIND, kind::ACTIVE_WINDOW_CHANGED)
+                .uuid(SESSION, session.uuid());
+            if let Some(window) = window {
+                out.uuid(WINDOW, window.uuid());
+            }
         }
         E::BlockCreated {
             block,
@@ -1242,6 +1292,9 @@ fn put_event(out: &mut Out, event: &Event) {
                 .uuid(BLOCK, block.uuid())
                 .bytes(TITLE, title.as_bytes())
                 .bytes(BODY, body.as_bytes());
+        }
+        E::ConfigReloaded => {
+            out.varint(KIND, kind::CONFIG_RELOADED);
         }
         E::ClipboardWritten { block, selection } => {
             out.varint(KIND, kind::CLIPBOARD_WRITTEN)
@@ -1353,6 +1406,10 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::WINDOW_CLOSED => E::WindowClosed {
             window: window(f, WINDOW)?,
         },
+        kind::ACTIVE_WINDOW_CHANGED => E::ActiveWindowChanged {
+            session: session(f, SESSION)?,
+            window: f.opt(WINDOW, window)?,
+        },
         kind::BLOCK_CREATED => E::BlockCreated {
             block: block(f, BLOCK)?,
             window: window(f, WINDOW)?,
@@ -1373,6 +1430,7 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::CLIENT_DISCONNECTED => E::ClientDisconnected {
             client: client(f, CLIENT)?,
         },
+        kind::CONFIG_RELOADED => E::ConfigReloaded,
         kind::CLIPBOARD_WRITTEN => E::ClipboardWritten {
             block: block(f, BLOCK)?,
             selection: selection(f)?,
@@ -1462,10 +1520,17 @@ mod entry {
 
 fn put_entry(out: &mut Out, entry: &Entry) {
     match entry {
-        Entry::Session { session, name } => {
+        Entry::Session {
+            session,
+            name,
+            active,
+        } => {
             out.varint(KIND, entry::SESSION)
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
+            if let Some(window) = active {
+                out.uuid(WINDOW, window.uuid());
+            }
         }
         Entry::Window {
             window,
@@ -1529,6 +1594,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
         entry::SESSION => Entry::Session {
             session: session(f, SESSION)?,
             name: f.string(NAME)?,
+            active: f.opt(WINDOW, window)?,
         },
         entry::WINDOW => Entry::Window {
             window: window(f, WINDOW)?,

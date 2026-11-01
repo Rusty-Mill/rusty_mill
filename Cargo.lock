@@ -10932,6 +10932,7 @@ dependencies = [
  "rusty_libc",
  "rusty_mux_core",
  "rusty_mux_proto",
+ "rusty_mux_script",
  "rusty_mux_status",
  "rusty_mux_transport",
  "rusty_rand",

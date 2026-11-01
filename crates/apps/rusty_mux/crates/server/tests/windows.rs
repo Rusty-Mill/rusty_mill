@@ -134,12 +134,20 @@ fn closing_a_flooding_block_leaves_the_server_responsive(host: ConsoleHost) {
     b.request(|req| Message::CloseBlock { req, block: other });
 }
 
+/// A config file that does not exist, so the server never reads the
+/// user's own (`RUSTY_MUX_CONFIG`, `~/.config`).
+fn no_config() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("rusty-mux-no-config-{}.json", std::process::id()))
+}
+
 fn a_killed_server_takes_its_blocks_with_it(host: ConsoleHost) {
     let name = format!("rusty-mux-killed-{}-{host:?}.sock", std::process::id());
     let path = std::env::temp_dir().join(name);
     let _ = std::fs::remove_file(&path);
     let mut server = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
+            .arg("--config")
+            .arg(no_config())
             .arg(&path)
             .env(ConsoleHost::ENV, console_host_name(host))
             .stdin(Stdio::null())
@@ -173,6 +181,8 @@ fn a_stopped_server_ends_every_program_before_it_exits(host: ConsoleHost) {
     // Ctrl+Break can be aimed at it alone.
     let mut server = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"))
+            .arg("--config")
+            .arg(no_config())
             .arg(&path)
             .env(ConsoleHost::ENV, console_host_name(host))
             .stdin(Stdio::null())
