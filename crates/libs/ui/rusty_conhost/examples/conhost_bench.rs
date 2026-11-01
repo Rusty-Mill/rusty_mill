@@ -128,7 +128,9 @@ fn number<T: std::str::FromStr>(s: &str) -> Result<T, String> {
 }
 
 fn size(s: &str) -> Result<(u16, u16), String> {
-    let (rows, cols) = s.split_once('x').ok_or(format!("size {s:?}: <rows>x<cols>"))?;
+    let (rows, cols) = s
+        .split_once('x')
+        .ok_or(format!("size {s:?}: <rows>x<cols>"))?;
     let (rows, cols): (u16, u16) = (number(rows)?, number(cols)?);
     if rows == 0 || cols == 0 {
         return Err(format!("size {s:?}: rows and columns must be at least 1"));
@@ -305,23 +307,18 @@ mod bench {
     }
 
     /// The client command: this binary's `cat`, under `cmd /c chcp 65001`
-    /// for the raw writer.
+    /// for the raw writer. cmd reads its command line itself, so that one
+    /// goes verbatim (`raw_args`): `/s` strips the outer quotes.
     fn client(write: Write, file: &str) -> Result<Command, String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let exe = exe.to_string_lossy().into_owned();
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-        let argv: Vec<String> = match write {
-            Write::Console => vec![exe, "cat".into(), "console".into(), file.into()],
-            Write::Raw => vec![
-                "cmd.exe".into(),
-                "/c".into(),
-                format!("chcp 65001 >nul && \"{exe}\" cat raw \"{file}\""),
-            ],
-        };
-        let (program, rest) = argv.split_first().ok_or("empty command")?;
-        let mut cmd = Command::new(program, cwd);
-        cmd.argv = rest.iter().map(Into::into).collect();
-        Ok(cmd)
+        Ok(match write {
+            Write::Console => Command::new(exe, cwd).args(["cat", "console", file]),
+            Write::Raw => Command::new("cmd.exe", cwd).raw_args(format!(
+                "/d /s /c \"chcp 65001 >nul && \"{exe}\" cat raw \"{file}\"\""
+            )),
+        })
     }
 
     /// Seconds from spawn to EOF and the client's exit.
@@ -389,10 +386,18 @@ mod tests {
     #[test]
     fn options_default_and_override() {
         let o = Options::parse(&args("a.vt")).unwrap();
-        assert_eq!((o.reps, o.max_slowdown_pct, o.write), (5, 10.0, Write::Console));
-        assert_eq!((o.rows, o.cols, o.files), (30, 120, vec!["a.vt".to_owned()]));
-        let o = Options::parse(&args("--reps 3 --max-slowdown 5 --write raw --size 50x200 a b"))
-            .unwrap();
+        assert_eq!(
+            (o.reps, o.max_slowdown_pct, o.write),
+            (5, 10.0, Write::Console)
+        );
+        assert_eq!(
+            (o.rows, o.cols, o.files),
+            (30, 120, vec!["a.vt".to_owned()])
+        );
+        let o = Options::parse(&args(
+            "--reps 3 --max-slowdown 5 --write raw --size 50x200 a b",
+        ))
+        .unwrap();
         assert_eq!((o.reps, o.max_slowdown_pct, o.write), (3, 5.0, Write::Raw));
         assert_eq!((o.rows, o.cols, o.files.len()), (50, 200, 2));
     }

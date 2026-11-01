@@ -12,7 +12,7 @@
 //!   (admission and turn order from `sched`), and checks every effect
 //!   against the limits of §6.1 and §7.4 after each event.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use platform::term::WinSize;
 
@@ -208,6 +208,8 @@ struct Engine {
     next_id: u64,
     /// Calls without a reply, with their output size and function.
     owed: Vec<Owed>,
+    /// The whole input of each call too large to deliver at once.
+    inputs: HashMap<[u8; 8], Vec<u8>>,
     answered: HashSet<[u8; 8]>,
     logs: usize,
     /// Every cookie the console handed out, live or not, for the script
@@ -242,6 +244,7 @@ impl Engine {
             eof: false,
             next_id: 0,
             owed: Vec::new(),
+            inputs: HashMap::new(),
             answered: HashSet::new(),
             logs: 0,
             cookies: Vec::new(),
@@ -376,20 +379,22 @@ impl Engine {
     }
 
     /// Deliver a packet if the engine would have a READ_IO out for it.
-    /// A payload past the per-packet cap arrives empty, as the engine
-    /// reads none of it.
+    /// Only the first [`PACKET_INPUT_CAP`] bytes arrive with it, as the
+    /// engine reads no more; the rest is kept to answer fetches.
     fn send(&mut self, function: u32, process: usize, object: usize, payload: &[u8], output: u32) {
-        if self.closed || !sched::admits_read(self.c.waiting(), self.c.parked()) {
+        if self.closed
+            || self.c.streaming()
+            || !sched::admits_read(self.c.waiting(), self.c.parked())
+        {
             return;
         }
         let input_size = payload.len() as u32;
-        let payload = if payload.len() > PACKET_INPUT_CAP {
-            &[][..]
-        } else {
-            payload
-        };
         self.next_id += 1;
         let id = self.next_id.to_le_bytes();
+        if payload.len() > PACKET_INPUT_CAP {
+            self.inputs.insert(id, payload.to_vec());
+        }
+        let payload = &payload[..payload.len().min(PACKET_INPUT_CAP)];
         self.owed.push(Owed::new(id, function, payload, output));
         self.handle(Event::Packet(Packet {
             id,
@@ -453,6 +458,7 @@ impl Engine {
             reads_ready: self.c.reads_ready(),
             input_paused: self.c.input_paused(),
             writes_ready: self.c.writes_ready(),
+            streaming: self.c.streaming(),
         }
     }
 
@@ -485,6 +491,7 @@ impl Engine {
             self.c.parked()
         );
         let mut built = 0;
+        let mut fetch = None;
         for e in fx {
             match e {
                 Effect::Reply(r) => {
@@ -524,6 +531,12 @@ impl Engine {
                     );
                 }
                 Effect::SetInputAvailable(_) => {}
+                Effect::Fetch { id, at, len } => {
+                    assert!(!self.closed, "Fetch after CloseServer");
+                    assert!(fetch.is_none(), "two fetches from one event");
+                    assert!((1..=PACKET_INPUT_CAP).contains(&len), "fetch of {len}");
+                    fetch = Some((id, at, len));
+                }
             }
         }
         assert!(
@@ -537,11 +550,22 @@ impl Engine {
                 "calls owed vs. calls held"
             );
         }
+        // The engine reads the slice at once, as its next event.
+        if let Some((id, at, len)) = fetch {
+            let input = self.inputs.get(&id).expect("a fetch for a streamed call");
+            assert!(at + len <= input.len(), "fetch past the input");
+            let bytes = input[at..at + len].to_vec();
+            self.handle(Event::Fetched {
+                id,
+                bytes: Some(&bytes),
+            });
+        }
     }
 
     /// Check one answer against its call; returns its variable output.
     fn answer(&mut self, r: &Reply) -> usize {
         assert!(self.answered.insert(r.id), "{:?} answered twice", r.id);
+        self.inputs.remove(&r.id);
         let at = self.owed.iter().position(|o| o.id == r.id);
         let Some(at) = at else {
             panic!("{:?} was never asked", r.id)

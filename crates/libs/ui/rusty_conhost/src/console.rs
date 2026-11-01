@@ -143,6 +143,12 @@ pub(crate) enum Event<'a> {
     HangUp,
     /// The CTRL_CLOSE grace deadline passed (§7.3).
     GraceExpired,
+    /// The slice of a streamed write's input that [`Effect::Fetch`]
+    /// asked for; `None` when the driver could not read it.
+    Fetched {
+        id: [u8; 8],
+        bytes: Option<&'a [u8]>,
+    },
 }
 
 /// The answer to one call.
@@ -215,6 +221,14 @@ pub(crate) enum Effect {
     CloseServer,
     /// The reader gets `Ok(0)` once the queue drains.
     Eof,
+    /// Read `len` bytes of call `id`'s input from offset `at`, and hand
+    /// them back as [`Event::Fetched`] before any other event: a write
+    /// too large to read at once is served a slice at a time (§7.4).
+    Fetch {
+        id: [u8; 8],
+        at: usize,
+        len: usize,
+    },
     Log(Diag),
 }
 
@@ -537,6 +551,69 @@ struct Write {
     at: usize,
     /// Bytes this call holds while queued: text and reply buffers.
     retained: usize,
+    /// Input still to fetch, for a write too large to read at once.
+    more: Option<More>,
+}
+
+/// The unread rest of a streamed write's input (§7.4): a WriteConsole or
+/// raw write over [`PACKET_INPUT_CAP`] is read a slice at a time, each
+/// once the last is emitted, so it retains at most one slice.
+#[derive(Debug)]
+struct More {
+    /// The offset of the next unread byte in the call's input.
+    at: usize,
+    /// The call's input size.
+    end: usize,
+    /// The text is UTF-16 (WriteConsoleW).
+    wide: bool,
+    /// A trailing odd byte or high surrogate held for the next slice.
+    carry: Vec<u8>,
+    /// An [`Effect::Fetch`] is out.
+    asked: bool,
+}
+
+impl More {
+    /// The rest of a packet's input past the `read` bytes delivered with
+    /// it; `None` when it was all delivered.
+    fn after(p: &Packet<'_>, wide: bool) -> Option<More> {
+        let end = p.input_size as usize;
+        let at = p.payload.len();
+        (at < end).then(|| More {
+            at,
+            end,
+            wide,
+            carry: Vec::new(),
+            asked: false,
+        })
+    }
+
+    /// The next fetch's length: a slice, carry included.
+    fn next_len(&self) -> usize {
+        (self.end - self.at).min(PACKET_INPUT_CAP - self.carry.len())
+    }
+
+    fn done(&self) -> bool {
+        self.at >= self.end
+    }
+}
+
+/// UTF-16 units from `carry` and `bytes`. Unless `last`, a trailing odd
+/// byte or high surrogate goes back into `carry`, so no slice boundary
+/// splits a unit or a surrogate pair.
+fn wide_units(carry: &mut Vec<u8>, bytes: &[u8], last: bool) -> Vec<u16> {
+    let mut joined = std::mem::take(carry);
+    joined.extend_from_slice(bytes);
+    let mut units = msg::utf16_units(&joined);
+    if last {
+        return units;
+    }
+    let mut keep = joined.len() % 2;
+    if units.last().is_some_and(|u| (0xD800..=0xDBFF).contains(u)) {
+        units.pop();
+        keep += 2;
+    }
+    *carry = joined.split_off(joined.len() - keep);
+    units
 }
 
 pub(crate) struct Console {
@@ -699,6 +776,13 @@ impl Console {
         self.parked
     }
 
+    /// A streamed write is unfinished: no new packet is taken until it
+    /// is, so the call stays whole, as under conhost's lock, and its
+    /// slices decode in order with no other write between them.
+    pub(crate) fn streaming(&self) -> bool {
+        self.writes.iter().any(|w| w.more.is_some())
+    }
+
     /// The window and buffer size, which GetConsoleScreenBufferInfo
     /// reports.
     #[cfg(test)]
@@ -731,6 +815,7 @@ impl Console {
                 self.start_close(&mut fx);
             }
             Event::GraceExpired => self.close(&mut fx),
+            Event::Fetched { id, bytes } => self.fetched(id, bytes, out, &mut fx),
         }
         self.sync_input_available(&mut fx);
         fx
@@ -804,7 +889,7 @@ impl Console {
             fx.push(Effect::Reply(Reply::status(p.id, msg::STATUS_UNSUCCESSFUL)));
             return;
         }
-        if p.input_size as usize > PACKET_INPUT_CAP {
+        if p.input_size as usize > PACKET_INPUT_CAP && !streams(&p) {
             fx.push(Effect::Reply(Reply::status(
                 p.id,
                 msg::STATUS_INVALID_PARAMETER,
@@ -858,11 +943,13 @@ impl Console {
                 reply
             }
             msg::RAW_WRITE => {
+                let more = More::after(&p, false);
                 let mut reply = Reply::ok(p.id);
-                reply.information = p.payload.len();
+                reply.information = more.as_ref().map_or(p.payload.len(), |m| m.end);
                 // conhost serves a raw write as WriteConsoleA.
                 let text = self.ansi_text(p.payload);
-                return self.write(reply, text, Origin::Client(self.output_mode), out, fx);
+                let origin = Origin::Client(self.output_mode);
+                return self.write_streamed(reply, text, origin, more, out, fx);
             }
             msg::RAW_READ => return self.read_console(&p, None, Vec::new(), out, fx),
             msg::RAW_FLUSH => self.flush_input(&p),
@@ -1267,21 +1354,21 @@ impl Console {
             )));
             return;
         }
-        let consumed = if unicode {
-            m.variable.len() & !1
-        } else {
-            m.variable.len()
-        };
+        let mut more = More::after(p, unicode);
+        let unread = more.as_ref().map_or(0, |m| m.end - m.at);
+        let total = m.variable.len() + unread;
+        let consumed = if unicode { total & !1 } else { total };
         msg::put_u32(&mut fixed, 0, consumed as u32);
         let mut reply = Reply::ok(p.id);
         reply.information = consumed;
         reply.write_back = fixed;
-        let text = if unicode {
-            Text::Wide(msg::utf16_units(m.variable))
-        } else {
-            self.ansi_text(m.variable)
+        let text = match more.as_mut() {
+            Some(rest) if unicode => Text::Wide(wide_units(&mut rest.carry, m.variable, false)),
+            _ if unicode => Text::Wide(msg::utf16_units(m.variable)),
+            _ => self.ansi_text(m.variable),
         };
-        self.write(reply, text, Origin::Client(self.output_mode), out, fx);
+        let origin = Origin::Client(self.output_mode);
+        self.write_streamed(reply, text, origin, more, out, fx);
     }
 
     /// `CONSOLE_SETTITLE_MSG { IN Unicode }`, the title in the variable
@@ -1401,6 +1488,19 @@ impl Console {
         out: &mut OutputQueue,
         fx: &mut Vec<Effect>,
     ) {
+        self.write_streamed(reply, text, origin, None, out, fx);
+    }
+
+    /// [`Console::write`], with `more` of its input still to fetch.
+    fn write_streamed(
+        &mut self,
+        reply: Reply,
+        text: Text,
+        origin: Origin,
+        more: Option<More>,
+        out: &mut OutputQueue,
+        fx: &mut Vec<Effect>,
+    ) {
         let id = reply.id;
         let retained = text.retained() + reply.write_back.len() + reply.output.len();
         debug_assert!(
@@ -1414,8 +1514,55 @@ impl Console {
             origin,
             at: 0,
             retained,
+            more,
         });
         self.pump(Some(id), out, fx);
+    }
+
+    /// The next slice of the front write's input has arrived: it becomes
+    /// the write's text, in place of the slice just emitted. A slice the
+    /// driver could not read fails the call.
+    fn fetched(
+        &mut self,
+        id: [u8; 8],
+        bytes: Option<&[u8]>,
+        out: &mut OutputQueue,
+        fx: &mut Vec<Effect>,
+    ) {
+        if self.writes.front().is_none_or(|w| w.reply.id != id) {
+            return;
+        }
+        let Some(mut w) = self.writes.pop_front() else {
+            return;
+        };
+        let Some(mut more) = w.more.take() else {
+            self.writes.push_front(w);
+            return;
+        };
+        self.parked -= w.retained;
+        match bytes.filter(|b| !b.is_empty() && b.len() <= more.next_len()) {
+            Some(bytes) => {
+                more.at += bytes.len();
+                more.asked = false;
+                let last = more.done();
+                w.text = if more.wide {
+                    Text::Wide(wide_units(&mut more.carry, bytes, last))
+                } else {
+                    self.ansi_text(bytes)
+                };
+                w.at = 0;
+                w.more = (!last).then_some(more);
+            }
+            None => {
+                w.reply = Reply::status(id, msg::STATUS_UNSUCCESSFUL);
+                w.text = Text::Bytes(Vec::new());
+                w.at = 0;
+            }
+        }
+        w.retained = w.text.retained() + w.reply.write_back.len() + w.reply.output.len();
+        self.parked += w.retained;
+        self.writes.push_front(w);
+        self.pump(None, out, fx);
     }
 
     /// Emit from the front write while the output queue is within the
@@ -1452,6 +1599,18 @@ impl Console {
             if w.at < w.text.len() {
                 continue;
             }
+            if let Some(more) = w.more.as_mut() {
+                // Its slice is out: fetch the next before anything else.
+                if !more.asked {
+                    more.asked = true;
+                    fx.push(Effect::Fetch {
+                        id: w.reply.id,
+                        at: more.at,
+                        len: more.next_len(),
+                    });
+                }
+                return;
+            }
             let Some(done) = self.writes.pop_front() else {
                 return;
             };
@@ -1462,6 +1621,19 @@ impl Console {
                 fx.push(Effect::Complete(done.reply));
             }
         }
+    }
+}
+
+/// Whether a packet over [`PACKET_INPUT_CAP`] is served a slice at a
+/// time rather than refused: a raw write or WriteConsole, whose text
+/// needn't be held whole (§7.4).
+fn streams(p: &Packet<'_>) -> bool {
+    match p.function {
+        msg::RAW_WRITE => true,
+        msg::USER_DEFINED => {
+            msg::api_msg(p.payload).is_some_and(|m| m.number == api::WRITE_CONSOLE)
+        }
+        _ => false,
     }
 }
 
@@ -1555,6 +1727,12 @@ pub(crate) mod tests {
         next_id: u64,
         /// Each packet's output size, to check its write-back fits.
         output_sizes: HashMap<[u8; 8], u32>,
+        /// The whole input of each packet past the cap, for its fetches.
+        inputs: HashMap<[u8; 8], Vec<u8>>,
+        /// Fetches answered, as the engine answers them.
+        pub(super) fetches: usize,
+        /// Answer fetches at once; off, a test answers them itself.
+        pub(super) answer_fetches: bool,
     }
 
     impl Host {
@@ -1570,10 +1748,37 @@ pub(crate) mod tests {
                 vt: Vec::new(),
                 next_id: 0,
                 output_sizes: HashMap::new(),
+                inputs: HashMap::new(),
+                fetches: 0,
+                answer_fetches: true,
             }
         }
 
+        /// Run `ev`, then answer the fetches it asks for from the
+        /// packet's whole input, as the engine does; all their effects.
         pub(super) fn ev(&mut self, ev: Event<'_>) -> Vec<Effect> {
+            let mut fx = self.ev_one(ev);
+            let mut seen = 0;
+            if !self.answer_fetches {
+                return fx;
+            }
+            while let Some((id, at, len)) = fx[seen..].iter().find_map(|e| match e {
+                Effect::Fetch { id, at, len } => Some((*id, *at, *len)),
+                _ => None,
+            }) {
+                seen = fx.len();
+                self.fetches += 1;
+                let input = self.inputs[&id].clone();
+                let bytes = &input[at..(at + len).min(input.len())];
+                fx.extend(self.ev_one(Event::Fetched {
+                    id,
+                    bytes: Some(bytes),
+                }));
+            }
+            fx
+        }
+
+        fn ev_one(&mut self, ev: Event<'_>) -> Vec<Effect> {
             let mut out = OutputQueue::default();
             out.set_held(self.queued);
             let fx = self.c.handle(ev, &mut out);
@@ -1608,12 +1813,18 @@ pub(crate) mod tests {
             self.next_id += 1;
             let id = self.next_id.to_le_bytes();
             self.output_sizes.insert(id, output_size);
+            let input_size = payload.len() as u32;
+            if payload.len() > PACKET_INPUT_CAP {
+                self.inputs.insert(id, payload.to_vec());
+            }
+            // The engine reads at most the cap with the packet.
+            let payload = &payload[..payload.len().min(PACKET_INPUT_CAP)];
             let fx = self.ev(Event::Packet(Packet {
                 id,
                 process,
                 object,
                 function,
-                input_size: payload.len() as u32,
+                input_size,
                 output_size,
                 payload,
             }));
@@ -2680,15 +2891,134 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_oversized_packet_is_refused() {
+    fn an_oversized_packet_is_refused_unless_it_writes() {
         let mut h = Host::new();
         let [_, _, output] = h.connect(1, "");
         let big = vec![b'x'; PACKET_INPUT_CAP + 1];
-        let (r, _) = h.packet(msg::RAW_WRITE, 1, output, &big, 0);
+        let r = h.call(output, api::SET_TITLE, &[1, 0, 0, 0], &big, 0);
+        assert_eq!(r.status, msg::STATUS_INVALID_PARAMETER);
+        let (r, _) = h.packet(0x77, 1, output, &big, 0);
         assert_eq!(r.status, msg::STATUS_INVALID_PARAMETER);
         assert!(h.vt.is_empty());
         let (r, _) = h.packet(msg::RAW_WRITE, 1, output, &big[1..], 0);
         assert_eq!(r.status, msg::STATUS_SUCCESS);
+        assert_eq!(h.fetches, 0);
+    }
+
+    /// Text `n` bytes long, ASCII with a 2-, 3- and 4-byte character
+    /// every 61 bytes, so slice boundaries fall inside characters.
+    fn mixed_text(n: usize) -> String {
+        let mut s = String::with_capacity(n + 4);
+        while s.len() < n {
+            s.push_str(&"abcdefghij".repeat(6));
+            s.push(['é', '日', '😀'][s.len() % 3]);
+        }
+        while s.len() > n {
+            s.pop();
+        }
+        s
+    }
+
+    /// Drain until `id` is answered; the reply, the drains it took.
+    fn drain_until(h: &mut Host, id: [u8; 8]) -> (Reply, usize) {
+        for drains in 1..1000 {
+            let done = h.drain().into_iter().find_map(|e| match e {
+                Effect::Complete(r) if r.id == id => Some(r),
+                _ => None,
+            });
+            if let Some(r) = done {
+                return (r, drains);
+            }
+        }
+        panic!("{id:?} never completed");
+    }
+
+    #[test]
+    fn a_raw_write_past_the_cap_streams_in_slices() {
+        let mut h = Host::sized(WinSize { rows: 24, cols: 80 });
+        let [_, _, output] = h.connect(1, "");
+        let text = mixed_text(5 * PACKET_INPUT_CAP + 123);
+        let (r, fx) = h.packet(msg::RAW_WRITE, 1, output, text.as_bytes(), 0);
+        let id = r.id;
+        assert_eq!(r.status, i32::MIN, "held while it streams");
+        assert!(h.c.streaming());
+        assert!(fx.iter().all(|e| !matches!(e, Effect::Reply(_))));
+        let (r, _) = drain_until(&mut h, id);
+        assert_eq!((r.status, r.information), (msg::STATUS_SUCCESS, text.len()));
+        assert!(!h.c.streaming());
+        assert_eq!(h.fetches, 5);
+        assert!(h.high_water <= 144 * 1024, "{}", h.high_water);
+        assert!(h.c.parked() == 0);
+        // Every character arrived whole: none was cut at a slice.
+        let vt = String::from_utf8_lossy(&h.vt);
+        assert!(!vt.contains('\u{FFFD}') && vt.contains('😀'));
+    }
+
+    #[test]
+    fn write_console_w_past_the_cap_keeps_surrogate_pairs_whole() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        let text = mixed_text(3 * PACKET_INPUT_CAP);
+        let wide: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        // An odd byte past the text: consumed rounds it off.
+        let mut variable = wide.clone();
+        variable.push(0);
+        let mut payload = Vec::new();
+        payload.extend(api::WRITE_CONSOLE.to_le_bytes());
+        payload.extend(8u32.to_le_bytes());
+        payload.extend([0, 0, 0, 0, 1, 0, 0, 0]);
+        payload.extend(&variable);
+        let (r, _) = h.packet(msg::USER_DEFINED, 1, output, &payload, 8);
+        let (r, _) = if r.status == i32::MIN {
+            drain_until(&mut h, r.id)
+        } else {
+            (r, 0)
+        };
+        assert_eq!((r.status, r.information), (msg::STATUS_SUCCESS, wide.len()));
+        assert_eq!(r.write_back[..4], (wide.len() as u32).to_le_bytes());
+        assert!(h.fetches >= 5, "{}", h.fetches);
+        assert!(!String::from_utf8_lossy(&h.vt).contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn a_streamed_write_holds_new_packets_and_fails_on_a_lost_slice() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.answer_fetches = false;
+        let big = vec![b'z'; 2 * PACKET_INPUT_CAP];
+        let (r, fx) = h.packet(msg::RAW_WRITE, 1, output, &big, 0);
+        assert_eq!(r.status, i32::MIN);
+        assert!(h.c.streaming());
+        let v = crate::sched::View {
+            streaming: h.c.streaming(),
+            ..crate::sched::View::default()
+        };
+        assert!(
+            !crate::sched::turn(&v).submit_read,
+            "no READ_IO while it streams"
+        );
+        let asked = fx.iter().find_map(|e| match e {
+            Effect::Fetch { id, at, len } => Some((*id, *at, *len)),
+            _ => None,
+        });
+        assert_eq!(asked, Some((r.id, PACKET_INPUT_CAP, PACKET_INPUT_CAP)));
+        // A stale answer for another call changes nothing.
+        let fx = h.ev(Event::Fetched {
+            id: [9; 8],
+            bytes: Some(b"q"),
+        });
+        assert!(fx.is_empty() && h.c.streaming(), "{fx:?}");
+        // The driver can't read the next slice: the call fails.
+        let fx = h.ev(Event::Fetched {
+            id: r.id,
+            bytes: None,
+        });
+        let failed = fx.iter().any(|e| {
+            matches!(e, Effect::Complete(c) if c.id == r.id && c.status == msg::STATUS_UNSUCCESSFUL)
+        });
+        assert!(failed, "{fx:?}");
+        assert!(!h.c.streaming());
+        assert_eq!(h.c.parked(), 0);
     }
 
     #[test]

@@ -793,16 +793,19 @@ impl Engine {
             reads_ready: self.console.reads_ready(),
             input_paused: self.console.input_paused(),
             writes_ready: self.console.writes_ready(),
+            streaming: self.console.streaming(),
         }
     }
 
-    /// Read a packet's variable input, capped, and hand it to the console.
+    /// Read a packet's variable input, at most [`PACKET_INPUT_CAP`] of
+    /// it, and hand it to the console: a write past the cap fetches the
+    /// rest a slice at a time, and any other such packet is refused.
     fn serve(&mut self, d: IoDescriptor) -> Result<()> {
         let Some(server) = self.server.as_mut() else {
             return Ok(());
         };
         let len = d.input_size as usize;
-        let mut payload = vec![0u8; if len > PACKET_INPUT_CAP { 0 } else { len }];
+        let mut payload = vec![0u8; len.min(PACKET_INPUT_CAP)];
         let got = match server.read_input(d.id, 0, &mut payload) {
             Ok(n) => n,
             Err(e) => {
@@ -823,9 +826,39 @@ impl Engine {
         Ok(())
     }
 
-    /// Run one event through the console, inside the panic boundary, and
-    /// apply its effects in order.
+    /// Run one event through the console, then answer any slice of a
+    /// streamed write it asked for, at once (§7.4).
     fn handle(&mut self, ev: Event<'_>) {
+        let mut fetch = self.handle_one(ev);
+        while let Some((id, at, len)) = fetch {
+            let bytes = self.fetch(id, at, len);
+            fetch = self.handle_one(Event::Fetched {
+                id,
+                bytes: bytes.as_deref(),
+            });
+        }
+    }
+
+    /// Read `len` bytes of call `id`'s input from `at`; `None`, logged,
+    /// when the driver can't, which fails the call.
+    fn fetch(&mut self, id: [u8; 8], at: usize, len: usize) -> Option<Vec<u8>> {
+        let server = self.server.as_mut()?;
+        let mut bytes = vec![0u8; len];
+        match server.read_input(id, at as u32, &mut bytes) {
+            Ok(n) => {
+                bytes.truncate(n);
+                Some(bytes)
+            }
+            Err(e) => {
+                crate::diag::log(&format!("READ_INPUT of a streamed write failed: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Run one event through the console, inside the panic boundary, and
+    /// apply its effects in order; returns the fetch it asked for.
+    fn handle_one(&mut self, ev: Event<'_>) -> Option<([u8; 8], usize, usize)> {
         let packet = match &ev {
             Event::Packet(p) => Some(p.id),
             _ => None,
@@ -834,7 +867,7 @@ impl Engine {
             if let Some(id) = packet {
                 self.reply = Some(Reply::status(id, STATUS_UNSUCCESSFUL));
             }
-            return;
+            return None;
         }
         let held = self.shared.output_len();
         self.out.set_held(held);
@@ -850,14 +883,21 @@ impl Engine {
             Err(_) => {
                 self.out.take();
                 self.die(packet);
-                return;
+                return None;
             }
         };
         self.shared.push_output(self.out.take());
         let mut replied = false;
+        let mut fetch = None;
         for e in effects {
-            if let Effect::Reply(r) = &e {
-                replied |= Some(r.id) == packet;
+            match e {
+                Effect::Reply(ref r) => replied |= Some(r.id) == packet,
+                // Answered once the effects are applied, as the next event.
+                Effect::Fetch { id, at, len } => {
+                    fetch = Some((id, at, len));
+                    continue;
+                }
+                _ => {}
             }
             self.apply(e);
         }
@@ -867,6 +907,7 @@ impl Engine {
         {
             self.pending.push(id);
         }
+        fetch.filter(|_| self.server.is_some())
     }
 
     fn apply(&mut self, e: Effect) {
@@ -901,6 +942,8 @@ impl Engine {
             Effect::Kill { pid } => self.kill(pid),
             Effect::CloseServer => self.teardown(),
             Effect::Eof => self.shared.set_eof(),
+            // `handle` answers it; it never gets here.
+            Effect::Fetch { .. } => {}
             Effect::Log(d) => crate::diag::log(&d.to_string()),
         }
     }

@@ -11,6 +11,8 @@
 //! conhost_probe write <bytes>              write that many `x`s to stdout
 //! conhost_probe raw <hex>                  WriteFile those bytes to stdout: a raw
 //!                                          write, read in the output code page
+//! conhost_probe lines <raw|console> <n>    numbered lines, `n` bytes or more, in one
+//!                                          WriteFile, or in one write_all to std's stdout
 //! conhost_probe ctrl-hold <ms>             print `ready pid=<pid>`, then wait; on CTRL_CLOSE
 //!                                          print `ctrl-close` and hold the handler <ms>
 //! ```
@@ -83,6 +85,27 @@ mod probe {
                     out.write_all(chunk).map_err(|e| e.to_string())?;
                 }
                 out.flush().map_err(|e| e.to_string())?;
+                Ok(0)
+            }
+            "lines" => {
+                let n: usize = arg(2)?.parse().map_err(|_| "a byte count")?;
+                let text: String = (0..)
+                    .map(|i| format!("line {i:07}\r\n"))
+                    .take(n.div_ceil(14))
+                    .collect();
+                match arg(1)? {
+                    "raw" => {
+                        console::write_raw(text.as_bytes()).map_err(|e| format!("error={e}"))?
+                    }
+                    // std's console stdout: WriteConsoleW, in as few
+                    // calls as its version makes (one, in Rust 1.98).
+                    "console" => {
+                        let mut out = std::io::stdout().lock();
+                        out.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+                        out.flush().map_err(|e| e.to_string())?;
+                    }
+                    other => return Err(format!("lines: unknown writer {other:?}")),
+                }
                 Ok(0)
             }
             "raw" => {
