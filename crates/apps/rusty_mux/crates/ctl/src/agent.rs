@@ -127,23 +127,30 @@ fn layouts(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
 }
 
 /// The layouts that can share a skill with the chosen agents: Codex,
-/// OpenCode and Pi in user scope and in project scope, whatever scope is
-/// chosen, since a project in the home directory has user scope's skill;
-/// [`same_file`] drops those whose skill is another file. One that cannot
-/// be resolved (no home or current directory, say) holds no file, so it is
-/// left out. None when only Claude Code is chosen, whose skill is its own.
+/// OpenCode and Pi in user scope, and in project scope rooted at the
+/// current directory and at the home directory, whatever scope is chosen
+/// and wherever it runs, since a project in the home directory has user
+/// scope's skill; [`same_file`] drops those whose skill is another file.
+/// A project elsewhere whose `.agents` links to the home directory's is not
+/// found. One that cannot be resolved (no home or current directory, say)
+/// holds no file, so it is left out. None when only Claude Code is chosen,
+/// whose skill is its own.
 fn neighbours(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
     if args.agents.iter().all(|&agent| agent == AgentKind::Claude) {
         return Ok(Vec::new());
     }
     let ctl = ctl_path(env)?;
+    let homes = &env.agent_homes;
     let sharing = [AgentKind::Codex, AgentKind::OpenCode, AgentKind::Pi];
-    Ok([AgentScope::User, AgentScope::Project]
-        .iter()
-        .flat_map(|scope| sharing.map(|agent| (agent, scope)))
-        .filter_map(|(agent, scope)| {
-            layout::layout(agent, scope, &env.agent_homes, env.here.dir.as_deref(), ctl).ok()
-        })
+    let roots = [
+        (AgentScope::User, None),
+        (AgentScope::Project, env.here.dir.as_deref()),
+    ]
+    .into_iter()
+    .chain([(AgentScope::Project, homes.home.as_deref())]);
+    Ok(roots
+        .flat_map(|(scope, root)| sharing.map(|agent| (agent, scope.clone(), root)))
+        .filter_map(|(agent, scope, root)| layout::layout(agent, &scope, homes, root, ctl).ok())
         .collect())
 }
 

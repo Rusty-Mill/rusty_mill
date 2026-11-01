@@ -967,3 +967,32 @@ fn the_shared_skill_is_kept_for_a_project_in_the_home_directory() {
     assert!(out.contains("codex    skill  shared"), "{out}");
     assert!(home.join(".agents/skills/rusty-mux/SKILL.md").exists());
 }
+
+/// Review on #1372: a project in the home directory keeps its skill when
+/// user scope is removed from anywhere else.
+#[test]
+fn the_shared_skill_is_kept_for_the_home_project_from_any_directory() {
+    let home = scratch();
+    let elsewhere = home.join("work");
+    fs::create_dir_all(&elsewhere).expect("dir");
+    let mut env = env(CTL);
+    env.agent_homes.home = Some(home.clone());
+    let args = |agent, scope| AgentArgs {
+        agents: vec![agent],
+        scope,
+        dry_run: false,
+    };
+    let mut out = Vec::new();
+    env.here.dir = Some(home.clone());
+    let project = AgentCommand::Setup(args(AgentKind::OpenCode, AgentScope::Project));
+    run(&project, &env, false, &mut out).expect("project setup");
+    env.here.dir = Some(elsewhere);
+    let user = AgentCommand::Setup(args(AgentKind::Codex, AgentScope::User));
+    run(&user, &env, false, &mut out).expect("user setup");
+    let mut out = Vec::new();
+    let remove = AgentCommand::Remove(args(AgentKind::Codex, AgentScope::User));
+    run(&remove, &env, false, &mut out).expect("remove");
+    let out = String::from_utf8(out).expect("UTF-8");
+    assert!(out.contains("codex    skill  shared"), "{out}");
+    assert!(home.join(".agents/skills/rusty-mux/SKILL.md").exists());
+}
