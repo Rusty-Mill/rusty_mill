@@ -480,6 +480,7 @@ impl Settings {
         let mut next = live.clone();
         let out = f(&mut next).map_err(refused)?;
         self.keeps_an_admin(&next, &self.board.roles())?;
+        self.fits_saved_roles(&next)?;
         next.save(path).map_err(refused)?;
         *live = next;
         Ok(out)
@@ -604,19 +605,38 @@ impl Settings {
         if !path.exists() {
             return Ok(());
         }
-        Credentials::load(path, roles, &self.board.projects())
-            .map(drop)
-            .map_err(|e| {
-                refused(format!(
-                    "the saved credentials would not load with these roles ({e}); save any agent on the Agents tab first"
-                ))
-            })
+        let saved = Credentials::load(path, roles, &self.board.projects()).map_err(|e| {
+            refused(format!(
+                "the saved credentials would not load with these roles ({e}); save any agent on the Agents tab first"
+            ))
+        })?;
+        self.keeps_an_admin(&saved, roles)
+    }
+
+    /// `creds` must load with the roles as saved, the other half of [`Self::saved_creds_fit`]:
+    /// a failed roles write may still have replaced the file. No roles file: the defaults,
+    /// which is what a restart reads.
+    fn fits_saved_roles(&self, creds: &Credentials) -> Result<(), BoardError> {
+        let saved = match &self.files.roles {
+            Some(path) if path.exists() => load_roles(path).map_err(refused)?,
+            Some(_) => Roles::default(),
+            None => self.board.roles(),
+        };
+        if let Some(i) = creds.list().find(|i| !saved.0.contains_key(&i.role)) {
+            return Err(refused(format!(
+                "agent {:?} would have role {:?}, which the saved roles file lacks; save the roles on the Roles tab first",
+                i.actor, i.role
+            )));
+        }
+        self.keeps_an_admin(creds, &saved)
     }
 
     /// Rename a role and move every agent holding it: add the new name beside the old, move
     /// the agents, drop the old name. Each step leaves the files valid whatever a failed write
-    /// left behind, so nothing is rolled back: a failure keeps both names, and the error says
-    /// how to finish from there.
+    /// left behind, so nothing is rolled back: a failure keeps both names live (on disk the
+    /// old one may already be gone), and the error says how to finish from there. Every later
+    /// change is checked against the saved files as well as the live state, so none can make
+    /// them unloadable in the meantime.
     fn role_rename(&self, a: &RoleRename) -> Res {
         let mut roles = self.board.roles();
         if roles.0.contains_key(&a.to) {
@@ -629,22 +649,27 @@ impl Settings {
             .ok_or_else(|| refused(format!("there is no role {:?}", a.from)))?;
         roles.0.insert(a.to.clone(), caps);
         self.write_roles(&roles)?;
-        let partly = |e: BoardError| {
-            refused(format!(
-                "partly renamed: roles {:?} and {:?} both exist with the same capabilities ({e}). \
-                 To finish, give {:?}'s agents role {:?} on the Agents tab, then remove {:?}",
-                a.from, a.to, a.from, a.to, a.from
-            ))
-        };
         if self.held(&a.from) {
             self.change_creds(|c| {
                 c.rename_role(&a.from, &a.to);
                 Ok(())
             })
-            .map_err(partly)?;
+            .map_err(|e| {
+                refused(format!(
+                    "partly renamed: roles {:?} and {:?} both exist with the same capabilities, but the agents \
+                     may not have moved ({e}). To finish, give {:?}'s agents role {:?} on the Agents tab, then remove {:?}",
+                    a.from, a.to, a.from, a.to, a.from
+                ))
+            })?;
         }
         roles.0.remove(&a.from);
-        self.write_roles(&roles).map_err(partly)?;
+        self.write_roles(&roles).map_err(|e| {
+            refused(format!(
+                "partly renamed: the agents hold {:?}, but dropping {:?} may not have been saved ({e}). \
+                 To finish, remove {:?} on the Roles tab",
+                a.to, a.from, a.from
+            ))
+        })?;
         Ok(json!({ "roles": roles }))
     }
 

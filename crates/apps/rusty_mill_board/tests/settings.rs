@@ -552,6 +552,61 @@ fn a_role_the_saved_credentials_still_use_is_not_dropped() {
 }
 
 #[test]
+fn an_agent_is_not_given_a_role_the_saved_roles_file_lacks() {
+    // A rename's last roles write can fail after replacing the file: agents hold the new name,
+    // the file lacks the old one, the live set still has both. Simulate that end state.
+    let f = start("saved_roles");
+    let builder = f.add_agent("claude", "builder");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut both = out["roles"].clone();
+    both["maker"] = both["builder"].clone();
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": both})).0,
+        200
+    );
+    let to_maker = json!({"agent": {"name": "claude", "role": "maker"}});
+    assert_eq!(f.admin("settings_agent_update", &to_maker).0, 200);
+    let mut landed = both.clone();
+    landed.as_object_mut().expect("roles").remove("builder");
+    std::fs::write(
+        f.file("roles.json"),
+        serde_json::to_string_pretty(&landed).expect("json"),
+    )
+    .expect("simulate a roles write that landed");
+    // Giving an agent the role the file lacks is refused (live alone would allow it), and so
+    // is a new agent with it; a restart still loads.
+    let back = json!({"agent": {"name": "claude", "role": "builder"}});
+    let (status, _, text) = f.admin("settings_agent_update", &back);
+    assert_eq!(
+        (status, text.contains("saved roles file")),
+        (422, true),
+        "{text}"
+    );
+    let (status, _, _) = f.admin(
+        "settings_agent_add",
+        &json!({"agent": {"name": "codex", "role": "builder"}}),
+    );
+    assert_eq!(status, 422);
+    restarts(&f);
+    // Recovery either way: re-save the live roles, then the update goes through ...
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": both})).0,
+        200
+    );
+    assert_eq!(f.admin("settings_agent_update", &back).0, 200);
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "builder");
+    restarts(&f);
+    // ... or, as the rename's error says, remove the old name.
+    assert_eq!(f.admin("settings_agent_update", &to_maker).0, 200);
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": landed})).0,
+        200
+    );
+    assert!(!restarts(&f).0.contains_key("builder"));
+}
+
+#[test]
 fn repositories_and_projects_are_edited_live_and_written_to_their_file() {
     let f = start("projects");
     let repos = json!({
