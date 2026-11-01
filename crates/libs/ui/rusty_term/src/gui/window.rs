@@ -3952,6 +3952,10 @@ impl WindowState<'_> {
             self.apply_opacity();
             let size = window.inner_size();
             self.apply_size(size.width, size.height);
+            // A keymap zoom (Ctrl+=/Ctrl+-) returns without any other
+            // repaint, so the new cell size would otherwise only show on the
+            // next unrelated redraw (child output, a mouse move).
+            window.request_redraw();
         }
     }
 
