@@ -1,6 +1,6 @@
 # Paged Records: Record Bodies on Disk in Log-Structured Segments (Proposed)
 
-- Status: **Proposed**, draft 3 (2026-11-01)
+- Status: **Proposed**, draft 3.1 (2026-11-01)
 - Date: 2026-11-01
 - Deciders: baileyrd
 - Related: `ADR-0138` decision 2 (storage before features), `ADR-0139`
@@ -193,22 +193,27 @@ pub struct HeapOptions {
 }
 
 impl GenericMmapStore<R, I, S> {
-    pub fn create_segments(path: &Path, lock: &DirLock, opts: HeapOptions)
+    pub fn create_segments(path: &Path, opts: HeapOptions)
         -> Result<Self, DurabilityError>;
-    pub fn open_segments(path: &Path, lock: &DirLock, opts: HeapOptions)
+    pub fn open_segments(path: &Path, opts: HeapOptions)
         -> Result<Self, DurabilityError>;
 }
 ```
 
-- `lock` is the consumer's directory lock, taken before the call. Requiring
-  it is a type-level proof that the caller excludes other writers, so the
-  heap takes no lock of its own.
-- The `rusty_multimodal_db` server locks its data directory with its own
-  `DataDirLock` (`server/data_lock.rs:60`), not the engine's `DirLock`. Both
-  are the same `try_lock` on a file in the directory. The server's phase 4
-  PR replaces `DataDirLock` with `DirLock::acquire(dir, LOCK_FILE_NAME)`,
-  keeping the file name and the `Held` message, so one type proves
-  exclusion everywhere.
+- **Writer exclusion is owned by the store.** Both constructors take
+  `DirLock::acquire(parent, "<file>.lock")` (`<path>.lock`, where `<file>`
+  is `path`'s file name) before touching any segment, and the store owns
+  the `DirLock` in a field. The lock is released only when the store is
+  dropped, so a caller cannot release it early, and its domain is fixed by
+  `path` itself, so no unrelated directory or differently named lock can
+  stand in for it. A second open of the same `path`, in this process or
+  another, returns `DurabilityError::Locked { path }` while the first store
+  lives.
+- The consumer's own directory lock (`store.lock`, the server's
+  `DataDirLock`) is unchanged. It still guards the consumer's other files.
+  The two locks are different files, so they never conflict.
+- `<path>.lock` is never copied by backup or migration, and restore does
+  not need it.
 - An out-of-range `segment_bytes` returns `DurabilityError::InvalidOptions`.
 - `open_segments` on an old-layout store returns
   `DurabilityError::NeedsMigration { path }`.
@@ -216,7 +221,7 @@ impl GenericMmapStore<R, I, S> {
   `DurabilityError::LayoutMismatch { path }`.
 
 Each `open_*`/`create_*_production_stack` helper gains a `_segments`
-variant with the same extra parameters. A consumer opts in by calling them.
+variant with the extra `HeapOptions` parameter. A consumer opts in by calling them.
 The existing helpers and their defaults do not change until phase 5.
 
 ### 7.3 Files
@@ -232,6 +237,7 @@ unchanged, and the wire protocol does not change.
 | `<path>.edges`, `<path>.<label>.edges`, their `.inserts` | Edge blobs and logs, unchanged |
 | `<path>.seg-NNNNNN` | Segments, numbered from 1 |
 | `<path>.hint-NNNNNN` | Key list for one segment (§7.4) |
+| `<path>.lock` | Writer lock held by the open store (§7.2); empty, never backed up |
 
 Open deletes leftover `*.tmp` files with the store's prefix before anything
 else, and `Backup` skips any that remain. Segments are copied for backup,
@@ -265,20 +271,38 @@ names the file (`DurabilityError::ForeignSegment { path }`).
 With the id in the header, a scan builds the key directory without decoding
 payloads. A record larger than `segment_bytes` gets a segment of its own.
 
-**Hint.** A tagged header (magic `MMDBHNT\0`, version 1, the segment number,
-the tag hash), then:
+**Hint.** A tagged header (magic `MMDBHNT\0`, version 1, the tag hash),
+then:
 
 | Field | Width |
 |---|---|
+| `store_uuid` | 16 |
+| `segment` (number) | 4 |
+| `first_seq` | 8 |
 | `segment_len` | 8 |
 | `entries` | 8 |
 | rows: `kind`, `id`, `seq`, `offset` (u32), `len` (u32) | 1 + W + 8 + 4 + 4 each |
 | `crc` over the hint body | 4 |
 
 Install it as temp file, `sync_data`, rename, directory sync, the way
-`EncodedRecordBlob::write` installs a blob. Open trusts a hint only if its
-CRC is valid and `segment_len` equals the segment's length. Loading a hint
-is O(entries in the segment).
+`EncodedRecordBlob::write` installs a blob.
+
+A hint is only an accelerator; a scan of the segment is always correct.
+Open trusts a hint only if all of these hold, and otherwise ignores it,
+scans the segment, counts `hints_rejected`, and rewrites the hint if the
+segment is sealed:
+
+- its CRC is valid;
+- `store_uuid`, `segment` and `first_seq` equal the store's UUID, the
+  segment's file number and the `first_seq` in that segment's own header,
+  and `segment_len` equals the segment's length on disk. A hint copied from
+  another store, or left from an earlier segment with the same number, fails
+  here even when the lengths match;
+- its rows are in strictly increasing `offset` order, each row's
+  `kind` is 0 or 1, and each entry lies inside the segment
+  (`offset + header + len <= segment_len`), without overlapping the next.
+
+Loading a hint is O(entries in the segment).
 
 ### 7.5 Writes, reads and the key directory
 
@@ -329,8 +353,8 @@ value:
 
 ### 7.7 Open and index build
 
-1. Delete stale temp files.
-2. Read each segment's hint if it is trusted; otherwise scan the segment's
+1. Take the store lock (§7.2), then delete stale temp files.
+2. Read each segment's hint if it is trusted (§7.4); otherwise scan the segment's
    entry headers and check each CRC.
 3. Apply the recovery rule (§8.3).
 4. Build the key directory. The highest `seq` wins for each id; on equal
@@ -487,6 +511,7 @@ The server's metrics renderer exposes, per table:
 - `mmdb_heap_tombstone_bytes`
 - `mmdb_heap_needs_compaction` (0 or 1)
 - `mmdb_heap_poisoned` (0 or 1)
+- `mmdb_heap_hints_rejected` (count since open)
 
 ## 9. Security, privacy and compatibility
 
@@ -534,12 +559,21 @@ Each phase is one PR that leaves `main` green.
 
 ```rust
 pub fn migrate_to_segments<R, I, S>(
-    src: &Path, dst: &Path, lock: &DirLock, opts: HeapOptions,
+    src: &Path, dst: &Path, opts: HeapOptions,
 ) -> Result<MigrationReport, DurabilityError>;
 ```
 
-`src` and `dst` are store paths (`<path>` prefixes), and `lock` covers
-both. The tool:
+`src` and `dst` are store paths (`<path>` prefixes).
+
+- **`dst` exclusion is enforced:** the tool takes `<dst>.lock` (§7.2) first
+  and holds it until it returns.
+- **`src` exclusion is a caller precondition, not a proof.** An old-layout
+  store has no engine-owned lock; its writers are excluded only by the
+  consumer's own directory lock, whose name the engine does not know. The
+  consumer's migration command must hold that lock for the whole call, and
+  its PR tests that a running consumer makes the command fail.
+
+The tool:
 
 1. Refuses if any file with the `dst` prefix exists.
 2. Opens `src` read-only through `read_portable_records`, which writes
@@ -617,7 +651,7 @@ median of 5 runs is at most 5% slower.
 | PAGED-T5 | Backup round trip | `Backup`, restore and reopen through the server, chunked snapshot included; temp files are skipped |
 | PAGED-T6 | Codec parity | Golden vectors, plus a differential property test against bincode 1.3.3 over every persisted type in use (rusty_tick `Task`, orch-store, fair_play, rleval `SessionBlob`, the server's `Request`/`Response`/`WriteOp`/`TransactionOp`/journal entries) and adversarial inputs. `cargo tree -e normal` shows no `bincode`. remind-me runs the test on `Memory` in its own CI |
 | PAGED-T7 | Migration | `dst` matches `src` record for record; `src` bytes are unchanged; an existing `dst` is refused; `open_segments` on the old layout returns `NeedsMigration`; `open` on segments returns `LayoutMismatch` |
-| PAGED-T8 | Exclusion and options | A foreign segment is refused; out-of-range `segment_bytes` is refused; segment constructors cannot be called without a `&DirLock` (compile-time) |
+| PAGED-T8 | Exclusion and options | A foreign segment is refused; out-of-range `segment_bytes` is refused. Lock: a second `open_segments` of the same `path` (same process, and a child process) returns `Locked` while the first store lives and succeeds after it is dropped; migration refuses while `<dst>.lock` is held; a consumer's migration command fails while that consumer runs. Hints: swapping same-length hints between two same-schema stores, a hint left from an earlier segment with the same number, and a hint whose row points past `segment_len` are each ignored, the segment is scanned, and every record is found |
 
 ## 14. Traceability and API changes
 
@@ -636,7 +670,7 @@ median of 5 runs is at most 5% slower.
 |---|---|
 | `codec::Error` replaces `bincode::Error`; `DurabilityError` becomes `#[non_exhaustive]` | 0 |
 | `GetById::try_get` (defaulted); `ForEachRecord`; `replace_with_old`; layer constructors read through `for_each_overlaid` | 2 |
-| `HeapOptions`; `create_segments`/`open_segments` and the `_segments` helpers; `migrate_to_segments`; `DurabilityError::{Corrupt, Poisoned, NeedsMigration, LayoutMismatch, ForeignSegment, InvalidOptions}`; `CompactionReport` `#[non_exhaustive]` with new fields | 3 |
+| `HeapOptions`; `create_segments`/`open_segments` and the `_segments` helpers; `migrate_to_segments`; `DurabilityError::{Corrupt, Poisoned, NeedsMigration, LayoutMismatch, ForeignSegment, InvalidOptions, Locked}`; `CompactionReport` `#[non_exhaustive]` with new fields | 3 |
 | Plain helpers open segments; `open(records, path)`, `read_portable_records` and the public `insert_log` API (`clear_interrupted_creation`) are deprecated, then removed with `Map` | 5 |
 
 ## 15. Open questions
@@ -689,3 +723,11 @@ median of 5 runs is at most 5% slower.
     - IDs, traceability and the house template.
   - **Corrected:** the ADR-0138 citation (decision 2), the rusty_tick
     `snapshot()` approach, and code citations.
+- **Draft 3.1 (2026-11-01):** folded in DottiusMaximus's review of #1359.
+  - **Lock:** a `&DirLock` parameter proved nothing (it could be dropped
+    after open, or name another directory). The store now takes and owns
+    `<path>.lock` itself; `src` exclusion during migration is stated as a
+    caller precondition.
+  - **Hints:** a hint now carries the store UUID, segment number and the
+    segment's `first_seq`, and its rows are bounds-checked. Any mismatch
+    falls back to a scan, so a swapped or stale hint cannot hide records.
