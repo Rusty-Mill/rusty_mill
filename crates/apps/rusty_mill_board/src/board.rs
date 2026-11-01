@@ -48,11 +48,17 @@ impl Default for Roles {
         Self(BTreeMap::from([
             (
                 "human".into(),
-                role(&[Triage, Build, Qa, Review, Merge, Close, Project, Admin]),
+                role(&[
+                    Triage, Plan, Architect, Build, Test, Review, Merge, Close, Project, Admin,
+                ]),
             ),
             ("builder".into(), role(&[Build, Close, Project])),
-            ("qa".into(), role(&[Qa])),
-            ("reviewer".into(), role(&[Review, Merge])),
+            ("planner".into(), role(&[Plan])),
+            ("architect".into(), role(&[Architect])),
+            ("tester".into(), role(&[Test])),
+            ("qa".into(), role(&[Test])),
+            // Merging is the human's gate, so the reviewer passes work on but never merges.
+            ("reviewer".into(), role(&[Review])),
         ]))
     }
 }

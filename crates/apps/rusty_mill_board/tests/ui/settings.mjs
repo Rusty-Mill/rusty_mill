@@ -91,16 +91,16 @@ await limited.close();
 // Roles.
 await page.click("#gear");
 await dialog.getByRole("button", { name: "Roles" }).click();
-await dialog.locator("input[placeholder^='new role']").fill("tester");
+await dialog.locator("input[placeholder^='new role']").fill("checker");
 await dialog.getByRole("button", { name: "Add role" }).click();
-await dialog.locator("tr", { hasText: "tester" }).waitFor();
-check((await api(rotated, "board_roles")).body.roles.tester !== undefined, "a role is added");
+await dialog.locator("tr", { hasText: "checker" }).waitFor();
+check((await api(rotated, "board_roles")).body.roles.checker !== undefined, "a role is added");
 await page.waitForTimeout(200);
-await dialog.locator("tr", { hasText: "tester" }).locator("input[type=checkbox]").nth(2).check();
+await dialog.locator("tr", { hasText: "checker" }).locator("input[type=checkbox]").nth(4).check();
 await dialog.getByRole("button", { name: "Save roles" }).click();
 await page.waitForTimeout(400);
-check(JSON.stringify((await api(rotated, "board_roles")).body.roles.tester) === '["qa"]', "its capabilities are saved");
-check((await dialog.innerText()).includes("Verify built work"), "each capability is explained");
+check(JSON.stringify((await api(rotated, "board_roles")).body.roles.checker) === '["test"]', "its capabilities are saved");
+check((await dialog.innerText()).includes("write tests first"), "each capability is explained");
 
 // Rules: turning movement rules off and on is saved at once.
 await dialog.getByRole("button", { name: "Rules" }).click();

@@ -228,7 +228,9 @@ function render(){
 /* The roadmap: the chosen project's cards in lanes (now, next, later, blocked, shipped), laid out
    by the server's board_roadmap so the rules live in one place. Re-read whenever the board is. */
 let view=["roadmap","metrics"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
-const LANE_HINT={now:"building, qa, review",next:"ready",later:"backlog",blocked:"blocked",shipped:"done, last 30 days"};
+// Each lane's columns, from the workflow's kinds (the server's Lane::of).
+const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipped:"done"};
+const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
 const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics")};
 function setView(v){view=v;pref("view",v);pressed();render()}
 // The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
@@ -245,7 +247,7 @@ async function renderRoadmap(){
   b.classList.remove("metrics");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
-    const h=el("h2",l.lane+" · "+l.cards.length);h.title=LANE_HINT[l.lane];col.append(h);
+    const h=el("h2",l.lane+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);
     for(const k of l.cards){
       const d=el("div",null,"card");d.append(...heading(k));
       const m=el("div",null,"meta");

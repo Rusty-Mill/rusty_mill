@@ -24,10 +24,11 @@ use std::time::Duration;
 use clap::Parser;
 use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
 use rusty_mill_board::api::Shared;
-use rusty_mill_board::board::{Board, Roles};
+use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
+use rusty_mill_board::retag;
 use rusty_mill_board::settings::{
     Files, GithubFile, ServerInfo, Settings, load_github, load_roles, load_rules, load_workflow,
     open_credentials, projects_sink,
@@ -76,6 +77,17 @@ struct Cli {
     /// Requires --projects; emits the existing projects file format.
     #[arg(long, requires = "projects")]
     export_projects: bool,
+    /// Re-file cards between columns and exit, e.g. `qa=v_and_ving,review=v_and_ving` when
+    /// the workflow drops columns. Prints the plan as JSON; nothing is written without
+    /// `--apply`. Save the `--apply` output: it is the record `--undo-retag` restores from.
+    #[arg(long, value_name = "FROM=TO,...", conflicts_with_all = ["export_projects", "undo_retag"])]
+    retag_columns: Option<String>,
+    /// With --retag-columns: write the retags (stop the board first).
+    #[arg(long, requires = "retag_columns")]
+    apply: bool,
+    /// Put back the cards listed in FILE (the JSON a `--retag-columns --apply` printed) and exit.
+    #[arg(long, value_name = "FILE", conflicts_with = "export_projects")]
+    undo_retag: Option<PathBuf>,
     /// Keep the cards in this rusty_tick (e.g. `http://127.0.0.1:8788`): its tasks tagged
     /// `agent` are the board. Omit for an in-memory board. The token is read from the
     /// `RUSTY_TICK_TOKEN` environment variable only, never an argument (which process
@@ -252,6 +264,41 @@ fn stop_on_signal(
         .map_err(|e| format!("signal thread: {e}"))
 }
 
+/// `--retag-columns` / `--undo-retag`: plan or write the retags and print them as JSON.
+fn run_retag(cli: &Cli, store: &dyn Store) -> Result<(), String> {
+    let (retags, write) = match (&cli.retag_columns, &cli.undo_retag) {
+        (Some(spec), _) => {
+            let map = retag::parse_map(spec)?;
+            let cards = store.list().map_err(|e| e.to_string())?;
+            (retag::plan(&cards, &map), cli.apply)
+        }
+        (None, Some(path)) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("--undo-retag {}: {e}", path.display()))?;
+            let made: Vec<retag::Retag> = serde_json::from_str(&text)
+                .map_err(|e| format!("--undo-retag {}: {e}", path.display()))?;
+            (made.iter().map(retag::Retag::undo).collect(), true)
+        }
+        (None, None) => return Ok(()),
+    };
+    let out = if write {
+        retag::apply(store, &retags, system_ms()).map_err(|e| e.to_string())?
+    } else {
+        retags
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?
+    );
+    if !write {
+        eprintln!(
+            "dry run: {} card(s) would be retagged; add --apply to write",
+            out.len()
+        );
+    }
+    Ok(())
+}
+
 fn run(cli: Cli) -> Result<(), String> {
     refuse_retired_env()?;
     if cli.export_projects {
@@ -270,6 +317,9 @@ fn run(cli: Cli) -> Result<(), String> {
         }
         None => Box::new(MemStore::default()),
     };
+    if cli.retag_columns.is_some() || cli.undo_retag.is_some() {
+        return run_retag(&cli, store.as_ref());
+    }
     let files = files(&cli);
     required(&cli.projects, "--projects")?;
     required(&cli.roles, "--roles")?;

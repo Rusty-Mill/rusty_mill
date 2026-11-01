@@ -363,17 +363,27 @@ fn roles_are_edited_live_and_written_to_their_file() {
     assert_eq!(
         out["capabilities"],
         json!([
-            "triage", "build", "qa", "review", "merge", "close", "project", "admin"
+            "triage",
+            "plan",
+            "architect",
+            "build",
+            "test",
+            "review",
+            "merge",
+            "close",
+            "project",
+            "admin"
         ])
     );
     let mut roles = out["roles"].clone();
+    // `qa` is the old name of `test`, still accepted from stored and sent roles.
     roles["tester"] = json!(["qa"]);
     let (status, _, text) = f.admin("settings_roles_set", &json!({"roles": roles}));
     assert_eq!(status, 200, "{text}");
     // The new role can be given to an agent straight away, and is on disk.
     let token = f.add_agent("gemini", "tester");
     let (_, me, _) = call(f.addr, &token, "board_whoami", &json!({}));
-    assert_eq!(me["capabilities"], json!(["qa"]));
+    assert_eq!(me["capabilities"], json!(["test"]));
     assert!(
         load_roles(&f.file("roles.json"))
             .expect("file")

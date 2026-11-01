@@ -8,6 +8,7 @@
 //! - [`workflow`]: the admin-edited columns and the moves between them.
 //! - [`roadmap`]: a project's roadmap lanes, derived from its cards.
 //! - [`metrics`]: work in progress, flow and lead time, derived from cards.
+//! - [`retag`]: re-filing cards when the workflow's columns change, with a rollback record.
 //! - [`store`]: the storage port and an in-memory adapter.
 //! - [`mcp`], [`web`]: the two surfaces over [`api`].
 //! - [`github`]: the GitHub issues adapter.
@@ -26,6 +27,7 @@ pub mod identities;
 pub mod mcp;
 pub mod metrics;
 pub mod projects;
+pub mod retag;
 pub mod roadmap;
 pub mod settings;
 pub mod store;
