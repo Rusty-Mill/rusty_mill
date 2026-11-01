@@ -271,6 +271,12 @@ struct RolesSet {
 }
 
 #[derive(Deserialize)]
+struct RoleRename {
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
 struct RulesSet {
     movement: MoveRules,
 }
@@ -362,6 +368,7 @@ impl Settings {
             "settings_agent_rotate" => |s, _, a| s.agent_rotate(&parse(a)?),
             "settings_projects_set" => |s, _, a| s.projects_set(&parse(a)?),
             "settings_roles_set" => |s, _, a| s.roles_set(&parse(a)?),
+            "settings_role_rename" => |s, _, a| s.role_rename(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
             "settings_rules_set" => |s, by, a| s.rules_set(by, &parse(a)?),
@@ -556,23 +563,65 @@ impl Settings {
     }
 
     fn roles_set(&self, a: &RolesSet) -> Res {
+        self.write_roles(&a.roles)?;
+        Ok(json!({ "roles": a.roles }))
+    }
+
+    /// Validate `roles` against the agents, write them to their file, then apply them.
+    fn write_roles(&self, roles: &Roles) -> Result<(), BoardError> {
         let path = self.file(&self.files.roles)?;
-        check_roles(&a.roles).map_err(refused)?;
+        check_roles(roles).map_err(refused)?;
         if let Some(creds) = &self.creds {
             let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
-            if let Some(i) = creds.list().find(|i| !a.roles.0.contains_key(&i.role)) {
+            if let Some(i) = creds.list().find(|i| !roles.0.contains_key(&i.role)) {
                 return Err(refused(format!(
                     "agent {:?} has role {:?}, which would no longer exist; change the agent first",
                     i.actor, i.role
                 )));
             }
-            self.keeps_an_admin(&creds, &a.roles)?;
+            self.keeps_an_admin(&creds, roles)?;
         }
-        let json = serde_json::to_string_pretty(&a.roles).map_err(|e| refused(e.to_string()))?;
+        let json = serde_json::to_string_pretty(roles).map_err(|e| refused(e.to_string()))?;
         rusty_atomic_file::write(&path, json.as_bytes())
             .map_err(|e| refused(format!("{}: {e}", path.display())))?;
-        self.board.set_roles(a.roles.clone());
-        Ok(json!({ "roles": a.roles }))
+        self.board.set_roles(roles.clone());
+        Ok(())
+    }
+
+    /// Rename a role and move every agent holding it. Three steps, each leaving the files
+    /// consistent if the next fails: add the new name beside the old, move the agents, drop
+    /// the old name. At worst a failure leaves both names, which is a valid state to retry from.
+    fn role_rename(&self, a: &RoleRename) -> Res {
+        let mut roles = self.board.roles();
+        if roles.0.contains_key(&a.to) {
+            return Err(refused(format!("there is already a role {:?}", a.to)));
+        }
+        let caps = roles
+            .0
+            .get(&a.from)
+            .cloned()
+            .ok_or_else(|| refused(format!("there is no role {:?}", a.from)))?;
+        roles.0.insert(a.to.clone(), caps);
+        self.write_roles(&roles)?;
+        if self.held(&a.from) {
+            self.change_creds(|c| {
+                c.rename_role(&a.from, &a.to);
+                Ok(())
+            })?;
+        }
+        roles.0.remove(&a.from);
+        self.write_roles(&roles)?;
+        Ok(json!({ "roles": roles }))
+    }
+
+    /// Whether some agent holds `role`.
+    fn held(&self, role: &str) -> bool {
+        self.creds.as_ref().is_some_and(|c| {
+            c.read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .list()
+                .any(|i| i.role == role)
+        })
     }
 
     /// Turn the movement rules on or off: written first, then applied, and logged.

@@ -191,6 +191,7 @@ fn only_an_admin_may_change_settings() {
         "settings_agent_rotate",
         "settings_projects_set",
         "settings_roles_set",
+        "settings_role_rename",
         "settings_github_set",
         "settings_github_clear",
         "settings_rules_set",
@@ -388,6 +389,63 @@ fn roles_are_edited_live_and_written_to_their_file() {
         f.admin("settings_roles_set", &json!({"roles": roles})).0,
         422
     );
+}
+
+#[test]
+fn a_role_is_renamed_with_its_agents() {
+    let f = start("rename");
+    let builder = f.add_agent("claude", "builder");
+    let (_, before, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    let (status, out, text) = f.admin(
+        "settings_role_rename",
+        &json!({"from": "builder", "to": "maker"}),
+    );
+    assert_eq!(status, 200, "{text}");
+    assert!(out["roles"].get("builder").is_none(), "{out}");
+    // The agent moved with it, keeps its token and its capabilities, live and on disk.
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "maker");
+    assert_eq!(me["capabilities"], before["capabilities"]);
+    let roles = load_roles(&f.file("roles.json")).expect("file");
+    assert!(roles.0.contains_key("maker") && !roles.0.contains_key("builder"));
+    let (_, got, _) = f.admin("settings_get", &json!({}));
+    assert!(
+        got["agents"]
+            .as_array()
+            .expect("agents")
+            .iter()
+            .any(|a| a["actor"] == "claude" && a["role"] == "maker"),
+        "{got}"
+    );
+    // The admin's own role renames too, and the admin can still change settings afterwards.
+    assert_eq!(
+        f.admin(
+            "settings_role_rename",
+            &json!({"from": "human", "to": "owner"})
+        )
+        .0,
+        200
+    );
+    assert_eq!(f.admin("settings_get", &json!({})).0, 200);
+    // Refused: an unknown role, a taken name, a bad name; nothing changes.
+    for (from, to, why) in [
+        ("ghost", "spirit", "no role"),
+        ("maker", "qa", "already a role"),
+        ("maker", "Bad Name", "a-z"),
+    ] {
+        let (status, _, text) = f.admin("settings_role_rename", &json!({"from": from, "to": to}));
+        assert_eq!(
+            (status, text.contains(why)),
+            (422, true),
+            "{from}->{to}: {text}"
+        );
+    }
+    let (_, after, _) = f.admin("settings_get", &json!({}));
+    let mut expected = got["roles"].clone();
+    let roles = expected.as_object_mut().expect("roles");
+    let human = roles.remove("human").expect("human");
+    roles.insert("owner".into(), human);
+    assert_eq!(after["roles"], expected);
 }
 
 #[test]

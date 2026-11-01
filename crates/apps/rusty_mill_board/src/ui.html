@@ -528,18 +528,22 @@ function rolesTab(){
   const CAPS=cfg.capabilities,about=cfg.capability_about||{};
   const draft=JSON.parse(JSON.stringify(cfg.roles)),tbl=el("table"),head=el("tr");
   head.append(el("th","Role"));CAPS.forEach(c=>{const th=el("th",c);th.title=about[c]||"";head.append(th)});head.append(el("th",""));tbl.append(head);
+  const holders=r=>cfg.agents.filter(a=>a.role===r).map(a=>a.actor);
   for(const r of Object.keys(draft)){
-    const tr=el("tr");tr.append(el("td",r));
+    const held=holders(r),name=el("td",r);name.title=held.length?"held by "+held.join(", "):"held by no agent";
+    const tr=el("tr");tr.append(name);
     CAPS.forEach(c=>{const b=field("input",{type:"checkbox",checked:draft[r].includes(c)});b.onchange=()=>{draft[r]=CAPS.filter(x=>x===c?b.checked:draft[r].includes(x))};const td=el("td");td.append(b);tr.append(td)});
-    const rm=el("button","Remove");rm.type="button";rm.onclick=guard(err,async()=>{const next={...draft};delete next[r];await setting("settings_roles_set",{roles:next})});
-    const td=el("td");td.append(rm);tr.append(td);tbl.append(tr);
+    const mv=el("button","Rename");mv.type="button";mv.onclick=guard(err,async()=>{const to=prompt("New name for role "+r+" (its agents move with it):",r)?.trim();if(to&&to!==r)await setting("settings_role_rename",{from:r,to})});
+    const rm=el("button","Remove");rm.type="button";rm.disabled=held.length>0;rm.title=held.length?"Held by "+held.join(", ")+": give them another role first":"";
+    rm.onclick=guard(err,async()=>{if(!confirm("Remove role "+r+"?"))return;const next={...draft};delete next[r];await setting("settings_roles_set",{roles:next})});
+    const td=el("td");td.append(mv," ",rm);tr.append(td);tbl.append(tr);
   }
   const nm=field("input",{placeholder:"new role, e.g. tester",size:20}),add=el("button","Add role");add.type="button";
   add.onclick=guard(err,async()=>{const n=nm.value.trim();await setting("settings_roles_set",{roles:{...draft,[n]:[]}})});
   const save=el("button","Save roles");save.type="button";save.onclick=guard(err,()=>setting("settings_roles_set",{roles:draft}));
   const row=el("div",null,"row");row.append(nm,add);
   const help=el("table");for(const c of CAPS){const tr=el("tr");tr.append(el("td",c),el("td",about[c]||""));help.append(tr)}
-  t.append(tbl,row,save,err,help,el("p","At least one agent must keep a role with admin.","note"));
+  t.append(tbl,row,save,err,help,el("p","Roles are yours to define; capabilities are built in. A role held by an agent cannot be removed, and at least one agent must keep a role with admin.","note"));
   return t;
 }
 
