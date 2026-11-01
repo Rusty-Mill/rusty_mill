@@ -1385,12 +1385,22 @@ pub(crate) fn block_on_inner<F: Future>(future: F) -> F::Output {
 /// creation on, even unpolled (#576). Reading the flag first would let a
 /// broadcast land between the read and the creation and be missed by
 /// both (#583).
-async fn flag_or_notified(notify: &Notify, flagged: impl Fn() -> bool) {
-    let notified = notify.notified();
-    if flagged() {
-        return;
-    }
-    notified.await;
+///
+/// A `poll_fn` rather than an `async fn` so the future stays `Unpin`, as
+/// `Handle::shutdown_notified` always was.
+fn flag_or_notified<'a>(
+    notify: &'a Notify,
+    flagged: impl Fn() -> bool + 'a,
+) -> impl Future<Output = ()> + 'a {
+    let mut notified: Option<crate::sync::Notified<'a>> = None;
+    std::future::poll_fn(move |cx| {
+        let first = notified.is_none();
+        let fut = notified.get_or_insert_with(|| notify.notified());
+        if first && flagged() {
+            return Poll::Ready(());
+        }
+        std::pin::Pin::new(fut).poll(cx)
+    })
 }
 
 #[cfg(test)]
