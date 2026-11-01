@@ -153,6 +153,11 @@ pub(crate) struct State {
     hosts: pty::Hosts,
     /// Set by [`State::stop`]: no block starts any more.
     stopping: bool,
+    /// What `reload-config` reads the file with.
+    loader: crate::settings::Loader,
+    /// A reload is reading the file; one at a time, so a stalled
+    /// filesystem holds one thread at most.
+    reloading: bool,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -196,26 +201,81 @@ impl State {
             silenced: HashMap::new(),
             hosts: Default::default(),
             stopping: false,
+            loader: crate::settings::reloader(),
+            reloading: false,
         }))
     }
 
-    /// Reads the config file, keeping what it had when the file is bad:
-    /// the next block starts as it now says. Blocks already running keep
-    /// their program.
-    pub(crate) fn load_config(&mut self, when: crate::settings::When) -> Result<(), String> {
-        self.config = crate::settings::read(&self.base, when)?;
+    /// Reads the config file at start, before serving: a bad one stops
+    /// the server.
+    pub(crate) fn load_config(&mut self) -> Result<(), String> {
+        self.config = crate::settings::read(&self.base, crate::settings::When::Start)?;
         Ok(())
     }
 
-    /// `reload-config`: [`Self::load_config`], announced. A server started
-    /// with no file refuses, as does a bad file.
-    fn reload_config(&mut self) -> Result<Outcome, Refusal> {
+    /// `reload-config`: reads the file off this thread and answers once
+    /// read ([`Self::reloaded`]). A server started with no file refuses,
+    /// as does a second reload while one is reading.
+    fn reload_config(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        req: u64,
+    ) -> Result<Outcome, Refusal> {
         if self.base.config_file.is_none() {
             return Err("the server was started with no config file".into());
         }
-        self.load_config(crate::settings::When::Reload)?;
-        self.mux.note_config_reloaded();
-        Ok(Outcome::Done(None))
+        if self.reloading {
+            return Err("a reload is still reading the config file".into());
+        }
+        let cancel = self
+            .clients
+            .get(&client)
+            .map(|out| out.cancel().clone())
+            .ok_or("no such client")?;
+        let read = crate::settings::load_apart(self.loader.clone(), self.base.clone())
+            .map_err(|e| format!("reading the config file: {e}"))?;
+        self.reloading = true;
+        let weak = Rc::downgrade(shared);
+        rusty_tokio::task::spawn_local(async move {
+            let result = read
+                .await
+                .unwrap_or_else(|_| Err("reading the config file failed".into()));
+            if let Some(shared) = weak.upgrade() {
+                shared.borrow_mut().reloaded(client, &cancel, req, result);
+            }
+        });
+        Ok(Outcome::Later)
+    }
+
+    /// A reload read `result`: a good config replaces the last and is
+    /// announced, a bad one changes nothing. The answer goes to the
+    /// connection that asked, unless another took its client over, where
+    /// `req` means nothing.
+    fn reloaded(
+        &mut self,
+        client: ClientId,
+        cancel: &Rc<Notify>,
+        req: u64,
+        result: Result<Config, String>,
+    ) {
+        self.reloading = false;
+        let answer = match result {
+            Ok(config) => {
+                self.config = config;
+                self.mux.note_config_reloaded();
+                Message::Done { req, created: None }
+            }
+            Err(reason) => Message::Failed {
+                req,
+                reason,
+                code: None,
+            },
+        };
+        if self.served_by(client, cancel) {
+            self.send(client, &answer);
+        }
+        self.flush();
     }
 
     /// The server is stopping: starts no more blocks, and ends every
@@ -618,6 +678,7 @@ impl State {
                 None
             }
             Ok(Outcome::Write(write)) => Some(write),
+            Ok(Outcome::Later) => None,
             Err(Refusal { reason, code }) => {
                 this.send(client, &Message::Failed { req, reason, code });
                 None
@@ -706,7 +767,7 @@ impl State {
             M::ReloadConfig { req } => (
                 req,
                 self.require(client, Features::CONFIG_RELOAD, "reload-config")
-                    .and_then(|()| self.reload_config()),
+                    .and_then(|()| self.reload_config(shared, client, req)),
             ),
             M::Attach { req, block } => {
                 if let Err(refusal) = self.require(client, Features::CHECKPOINT_V6, "attach") {
@@ -1527,6 +1588,8 @@ enum Outcome {
     /// Encoded messages answering the request, in order.
     Reply(Vec<Vec<u8>>),
     Write(PtyWrite),
+    /// Answered later, by the task the request started.
+    Later,
 }
 
 /// `terminal.format`'s options from its arguments, which the catalog
@@ -2082,6 +2145,93 @@ mod regression {
                 return message;
             }
         }
+    }
+
+    /// A state whose reloads wait for the returned sender's go, and a
+    /// `CONFIG_RELOAD` client of it.
+    fn stalled_reloads() -> (Shared, ClientId, Inbox, std::sync::mpsc::Sender<()>) {
+        let base = Config {
+            program: "/bin/sh".into(),
+            args: vec![],
+            cwd: "/".into(),
+            console_host: ConsoleHost::default(),
+            config_file: Some("/stalled.json".into()),
+        };
+        let shared = State::shared(base, None);
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        let wait = std::sync::Mutex::new(wait);
+        shared.borrow_mut().loader = std::sync::Arc::new(move |base: &Config| {
+            // A filesystem that answers only on cue.
+            wait.lock().unwrap().recv().map_err(|e| e.to_string())?;
+            Ok(Config {
+                cwd: "/tmp".into(),
+                ..base.clone()
+            })
+        });
+        let (out, inbox, _) = outbox();
+        let client = shared.borrow_mut().connect(
+            out,
+            test_owner(),
+            Transport::Socket,
+            Features::EVENT_SEQ.union(Features::CONFIG_RELOAD),
+            None,
+            None,
+        );
+        (shared, client, inbox, go)
+    }
+
+    /// A reload reads off the server's thread: while the file stalls, other
+    /// requests are answered, a second reload is refused rather than queued,
+    /// and the stalled one lands, announced, once the read returns.
+    #[test]
+    fn a_stalled_reload_holds_up_nothing_and_only_one_runs() {
+        runtime().block_on(async {
+            let (shared, client, mut inbox, go) = stalled_reloads();
+            State::request(&shared, client, Message::ReloadConfig { req: 1 });
+            State::request(&shared, client, Message::ReloadConfig { req: 2 });
+            let second = reply_to(&mut inbox, 2).await;
+            assert!(
+                matches!(&second, Message::Failed { reason, .. } if reason.contains("still reading")),
+                "{second:?}"
+            );
+            State::request(&shared, client, Message::Sync { req: 3 });
+            assert!(matches!(reply_to(&mut inbox, 3).await, Message::Done { .. }));
+            assert_eq!(shared.borrow().config.cwd, "/");
+
+            go.send(()).unwrap();
+            assert!(matches!(reply_to(&mut inbox, 1).await, Message::Done { .. }));
+            let frame = inbox.next().await.expect("the event");
+            assert!(matches!(
+                rusty_mux_proto::decode(&frame).unwrap().unwrap().0,
+                Message::Event {
+                    event: Event::ConfigReloaded,
+                    ..
+                }
+            ));
+            assert_eq!(shared.borrow().config.cwd, "/tmp");
+            assert!(!shared.borrow().reloading);
+        });
+    }
+
+    /// A read that never returns does not keep the server from stopping:
+    /// its thread is never joined.
+    #[test]
+    fn a_stalled_reload_does_not_hold_up_a_stop() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            runtime().block_on(async {
+                let (shared, client, _inbox, go) = stalled_reloads();
+                State::request(&shared, client, Message::ReloadConfig { req: 1 });
+                let hosts = shared.borrow_mut().stop();
+                assert!(hosts.shut_down(pty::SHUTDOWN).await);
+                // Kept alive, so the read never gets its cue.
+                std::mem::forget(go);
+            });
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the runtime ended while the read stalled");
     }
 
     #[test]

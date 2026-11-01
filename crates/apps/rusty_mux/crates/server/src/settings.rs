@@ -3,6 +3,9 @@
 
 use std::io::{self, Read};
 use std::path::Path;
+use std::sync::Arc;
+
+use rusty_tokio::sync::oneshot;
 
 use rusty_mux_script::Defaults;
 
@@ -10,6 +13,32 @@ use crate::Config;
 
 /// The largest config file the server reads.
 const LIMIT: u64 = 1 << 20;
+
+/// What a reload reads the config with: [`reloader`], or in tests one that
+/// stalls on cue.
+pub(crate) type Loader = Arc<dyn Fn(&Config) -> Result<Config, String> + Send + Sync>;
+
+/// [`read`] for `reload-config`.
+pub(crate) fn reloader() -> Loader {
+    Arc::new(|base| read(base, When::Reload))
+}
+
+/// Runs `loader` on `base` on a thread of its own, never joined: a read
+/// stalled on a hung filesystem holds that thread, not the server's one,
+/// and cannot hold up the server's exit. The receiver gets the result.
+pub(crate) fn load_apart(
+    loader: Loader,
+    base: Config,
+) -> io::Result<oneshot::Receiver<Result<Config, String>>> {
+    let (tx, rx) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("rusty-mux-config".into())
+        .spawn(move || {
+            // The server may have stopped waiting; nothing is lost.
+            let _ = tx.send(loader(&base));
+        })?;
+    Ok(rx)
+}
 
 /// When the file is read, which decides what a missing one means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,9 +86,8 @@ pub(crate) fn read(base: &Config, when: When) -> Result<Config, String> {
 }
 
 /// The text of `path`, refused past [`LIMIT`] or when it is not a regular
-/// file. Read in one blocking call on the server's thread, as a local
-/// regular file is small and quick; a file on a stalled network mount
-/// would still stall it.
+/// file. A blocking read: at start before serving, on reload on a thread
+/// of its own ([`load_apart`]).
 fn bounded(path: &Path) -> io::Result<String> {
     let mut text = String::new();
     open_regular(path)?
