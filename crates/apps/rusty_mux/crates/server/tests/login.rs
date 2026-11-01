@@ -11,7 +11,7 @@
 
 mod common;
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -202,7 +202,7 @@ fn closed_unheard(socket: &Path) -> bool {
 /// Whether the peer closed `stream`: end of stream, or a reset when it
 /// closed with our bytes unread.
 fn ended(stream: &mut UnixStream) -> bool {
-    match stream.read(&mut [0u8; 64]) {
+    match common::read_again(stream, &mut [0u8; 64]) {
         Ok(0) => true,
         Err(e) => e.kind() == std::io::ErrorKind::ConnectionReset,
         Ok(_) => false,
