@@ -376,7 +376,10 @@ fn a_run_extended_back_to_its_opened_reads_per_turn_is_still_refused() {
     // this run, which ran some turns at another limit before the second
     // extension restored 30. Here one extension to 30 stands for that history.
     let err = extended_facts("extended-same", "reads_per_turn", "30").unwrap_err();
-    assert!(err.contains("reads_per_turn"), "{err}");
+    assert!(
+        err.contains("reads_per_turn") && err.contains("extended"),
+        "{err}"
+    );
 }
 
 #[test]
