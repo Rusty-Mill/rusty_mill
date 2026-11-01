@@ -588,30 +588,51 @@ impl Settings {
         Ok(())
     }
 
-    /// Rename a role and move every agent holding it. Three steps, each leaving the files
-    /// consistent if the next fails: add the new name beside the old, move the agents, drop
-    /// the old name. At worst a failure leaves both names, which is a valid state to retry from.
+    /// Rename a role and move every agent holding it: add the new name beside the old, move
+    /// the agents, drop the old name. Each step leaves the files valid. If moving the agents
+    /// fails, the added name is rolled back. Whatever fails, the leftover name is held by no
+    /// agent, and the error names it: removing it on the Roles tab finishes the job.
     fn role_rename(&self, a: &RoleRename) -> Res {
-        let mut roles = self.board.roles();
-        if roles.0.contains_key(&a.to) {
+        let before = self.board.roles();
+        if before.0.contains_key(&a.to) {
             return Err(refused(format!("there is already a role {:?}", a.to)));
         }
-        let caps = roles
+        let caps = before
             .0
             .get(&a.from)
             .cloned()
             .ok_or_else(|| refused(format!("there is no role {:?}", a.from)))?;
-        roles.0.insert(a.to.clone(), caps);
-        self.write_roles(&roles)?;
+        let mut both = before.clone();
+        both.0.insert(a.to.clone(), caps);
+        self.write_roles(&both)?;
         if self.held(&a.from) {
-            self.change_creds(|c| {
+            let moved = self.change_creds(|c| {
                 c.rename_role(&a.from, &a.to);
                 Ok(())
-            })?;
+            });
+            if let Err(e) = moved {
+                return Err(self.undo_add(&before, &a.to, &e));
+            }
         }
-        roles.0.remove(&a.from);
-        self.write_roles(&roles)?;
-        Ok(json!({ "roles": roles }))
+        let mut after = both;
+        after.0.remove(&a.from);
+        self.write_roles(&after).map_err(|e| {
+            refused(format!(
+                "agents now hold {:?}, but role {:?} could not be dropped ({e}); remove it on the Roles tab",
+                a.to, a.from
+            ))
+        })?;
+        Ok(json!({ "roles": after }))
+    }
+
+    /// Roll back a role added by a rename whose agents could not be moved.
+    fn undo_add(&self, before: &Roles, added: &str, cause: &BoardError) -> BoardError {
+        match self.write_roles(before) {
+            Ok(()) => refused(format!("not renamed: {cause}")),
+            Err(e) => refused(format!(
+                "not renamed: {cause}; role {added:?} was added but could not be taken back ({e}); remove it on the Roles tab"
+            )),
+        }
     }
 
     /// Whether some agent holds `role`.

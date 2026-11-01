@@ -449,6 +449,51 @@ fn a_role_is_renamed_with_its_agents() {
 }
 
 #[test]
+fn a_rename_whose_agents_cannot_move_is_rolled_back() {
+    let f = start("rename_fail");
+    let builder = f.add_agent("claude", "builder");
+    let creds = f.file("identities.json");
+    let saved = std::fs::read(&creds).expect("credentials");
+    // The credentials file cannot be replaced: moving the agents fails.
+    std::fs::remove_file(&creds).expect("remove");
+    std::fs::create_dir(&creds).expect("block");
+    let (status, _, text) = f.admin(
+        "settings_role_rename",
+        &json!({"from": "builder", "to": "maker"}),
+    );
+    assert_eq!(
+        (status, text.contains("not renamed")),
+        (422, true),
+        "{text}"
+    );
+    std::fs::remove_dir(&creds).expect("unblock");
+    std::fs::write(&creds, saved).expect("restore");
+    #[cfg(unix)]
+    std::fs::set_permissions(&creds, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("owner-only");
+    // Nothing changed, live or on disk: the agent keeps its role and token.
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "builder");
+    let roles = load_roles(&f.file("roles.json")).expect("file");
+    assert!(roles.0.contains_key("builder") && !roles.0.contains_key("maker"));
+    // A restart reads consistent files: every agent's role exists, an admin remains.
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert!(out["roles"].get("maker").is_none(), "{out}");
+    open_credentials(&creds, &roles, &Projects::default()).expect("restart");
+    // And the same rename now goes through.
+    assert_eq!(
+        f.admin(
+            "settings_role_rename",
+            &json!({"from": "builder", "to": "maker"})
+        )
+        .0,
+        200
+    );
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "maker");
+}
+
+#[test]
 fn repositories_and_projects_are_edited_live_and_written_to_their_file() {
     let f = start("projects");
     let repos = json!({
