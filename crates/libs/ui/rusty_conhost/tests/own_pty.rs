@@ -476,13 +476,6 @@ const GAPS: &[(&[&str], &str, &str)] = &[
     ),
     (&["largest"], "largest size=error=1", "#1333"),
     (
-        &["input"],
-        "input before=0 wrote=error=1 queued=0 peek=0: read=0: left=0 flush=ok after=0",
-        "#1335",
-    ),
-    (&["cooked", "hi\\r"], NO_COOKED, "#1335"),
-    (&["cooked", "ab\\bc\\r"], NO_COOKED, "#1335"),
-    (
         &["print-x", "1", "205"],
         "print-x mode=ok n=205 cursor=199,0 attr=0x7",
         "#1336",
@@ -499,7 +492,6 @@ const NO_BUFFER: &str =
     "set-buffer error=1 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
 const NO_WINDOW: &str =
     "set-window error=1 after=size=200,30 cursor=0,0 attr=0x7 window=0,0,199,29 max=200,30";
-const NO_COOKED: &str = "cooked wrote=error=1 read= cursor=0,0 attr=0x7";
 const NO_BIG_WRITE: &str = "print-x mode=ok n=error=6 cursor=0,0 attr=0x7";
 
 /// How one probe compared.
