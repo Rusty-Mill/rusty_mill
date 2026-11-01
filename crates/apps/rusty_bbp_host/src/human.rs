@@ -342,7 +342,8 @@ mod tests {
                 None,
             );
             assert!(
-                matches!(&fenced, Ok(Response::Rejected(r)) if r.detail.contains("evidence")),
+                matches!(&fenced, Ok(Response::Rejected(r))
+                    if r.code == Code::BadHumanInput && r.detail.contains("evidence")),
                 "{f}: {fenced:?}"
             );
         }

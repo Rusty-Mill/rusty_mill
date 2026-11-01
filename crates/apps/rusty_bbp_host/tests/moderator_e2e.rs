@@ -1932,7 +1932,7 @@ fn a_capped_first_start_on_an_extended_task_is_refused_and_leaves_no_marker() {
     );
     cfg.cost_cap = Some(sonnet_cap(&dir, 1000.0));
     let err = moderator::run(&cfg).unwrap_err();
-    assert!(err.contains("extended"), "{err}");
+    assert!(err.contains("budget was extended"), "{err}");
     assert!(
         !moderator::evidence_marker_path(&dir, &task).exists(),
         "a refused first start must not make the task an evidence run"
