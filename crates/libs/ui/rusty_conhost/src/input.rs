@@ -770,7 +770,8 @@ fn push_char(out: &mut Vec<u8>, ch: char) {
     out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
 }
 
-/// The INPUT_RECORD queue, capped at [`MAX_RECORDS`].
+/// The INPUT_RECORD queue. Terminal input keeps it at [`MAX_RECORDS`];
+/// WriteConsoleInput may take it past.
 #[derive(Debug, Default)]
 pub(crate) struct Queue {
     records: VecDeque<Record>,
@@ -797,18 +798,15 @@ impl Queue {
     }
 
     /// conhost `InputBuffer::Write` (`append`) or `Prepend` for
-    /// WriteConsoleInput. A single appended record may coalesce with the
-    /// last; otherwise `false`, with nothing stored, when the records
-    /// would take the queue past [`MAX_RECORDS`]: unlike terminal input,
-    /// a client's write fails rather than displace older input.
-    pub(crate) fn write(&mut self, records: &[Record], append: bool, coalesce: bool) -> bool {
+    /// WriteConsoleInput: a single appended record may coalesce with the
+    /// last. Unlike terminal input, a client's records are never dropped
+    /// and are not held to [`MAX_RECORDS`], as in conhost (owner decision
+    /// 2026-11-01, #1335).
+    pub(crate) fn write(&mut self, records: &[Record], append: bool, coalesce: bool) {
         if let ([r], true) = (records, append && coalesce)
             && self.coalesce(r)
         {
-            return true;
-        }
-        if self.records.len() + records.len() > MAX_RECORDS {
-            return false;
+            return;
         }
         if append {
             self.records.extend(records);
@@ -817,7 +815,6 @@ impl Queue {
                 self.records.push_front(*r);
             }
         }
-        true
     }
 
     /// conhost `_CoalesceEvent`: a key-down repeating the last key-down

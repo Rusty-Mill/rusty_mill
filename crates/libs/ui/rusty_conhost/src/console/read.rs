@@ -458,7 +458,7 @@ impl Console {
         };
         let written = self
             .input_object(p.object, true)
-            .and_then(|()| self.write_input(m.variable, unicode, append));
+            .map(|()| self.write_input(m.variable, unicode, append));
         msg::put_u32(&mut fixed, 0, *written.as_ref().unwrap_or(&0));
         let mut reply = Reply::status(p.id, written.err().unwrap_or(msg::STATUS_SUCCESS));
         reply.write_back = fixed;
@@ -470,28 +470,26 @@ impl Console {
 
     /// Queue a client's records; the count conhost reports, one per
     /// record after `A` conversion. A VT client gets keys as VT, as
-    /// terminal input; such keys never coalesce. STATUS_NO_MEMORY, with
-    /// nothing queued, when the write would pass the queue's cap (§7.4).
-    fn write_input(&mut self, variable: &[u8], unicode: bool, append: bool) -> Result<u32, i32> {
+    /// terminal input; such keys never coalesce. There is no cap, as in
+    /// conhost.
+    fn write_input(&mut self, variable: &[u8], unicode: bool, append: bool) -> u32 {
         let records: Vec<Record> = variable
             .as_chunks::<{ input::RECORD_LEN }>()
             .0
             .iter()
             .map(Record::decode)
             .collect();
-        let mut lead = self.input_lead;
         let records = if unicode {
             records
         } else {
-            input::ansi_records(&records, &mut lead, self.input_cp, &self.codec)
+            input::ansi_records(&records, &mut self.input_lead, self.input_cp, &self.codec)
         };
         let vt = self.input_mode & mode::VIRTUAL_TERMINAL_INPUT != 0;
-        let mut vt_utf8 = self.vt_utf8;
         let mut stored = Vec::with_capacity(records.len());
         for r in &records {
             match r {
                 Record::Key(k) if vt => {
-                    let bytes = input::vt_for(k, &mut vt_utf8);
+                    let bytes = input::vt_for(k, &mut self.vt_utf8);
                     let keys = input::text_events(&bytes, self.key_for);
                     stored.extend(keys.into_iter().map(Record::Key));
                 }
@@ -505,12 +503,8 @@ impl Console {
             [_] => true,
             _ => false,
         };
-        if !self.input.write(&stored, append, coalesce) {
-            return Err(msg::STATUS_NO_MEMORY);
-        }
-        self.input_lead = lead;
-        self.vt_utf8 = vt_utf8;
-        Ok(records.len() as u32)
+        self.input.write(&stored, append, coalesce);
+        records.len() as u32
     }
 
     /// ReadConsole (`m` given) and RAW_READ (`m` None, read as ANSI with
@@ -2276,29 +2270,19 @@ pub(crate) mod tests {
         assert_eq!(h.c.waiting(), 0);
     }
 
+    /// No cap, as in conhost (owner decision 2026-11-01): a client's
+    /// writes take the queue past the terminal's 4,096 and lose nothing.
     #[test]
-    fn a_write_past_the_queue_cap_fails_and_queues_nothing() {
+    fn written_records_are_never_dropped_at_the_terminal_cap() {
         let mut h = Host::new();
         let [_, input, _] = h.connect(1, "");
-        // One packet carries at most 64 KiB, so the cap takes two writes.
         let half = input::MAX_RECORDS / 2;
         let ups = |n: usize| vec![typed(0x61, false); n];
-        assert_eq!(write_input(&mut h, input, &ups(half)), (0, half as u32));
-        let (status, n) = write_input(&mut h, input, &ups(half + 1));
-        assert_eq!((status, n), (msg::STATUS_NO_MEMORY, 0));
-        assert_eq!(h.c.input.len(), half, "all or nothing");
-        assert_eq!(write_input(&mut h, input, &ups(half)), (0, half as u32));
-        let (status, _) = write_input(&mut h, input, &ups(1));
-        assert_eq!(status, msg::STATUS_NO_MEMORY);
-        assert_eq!(h.c.input.len(), input::MAX_RECORDS);
-        // A repeat still coalesces into a full queue.
-        let mut h = Host::new();
-        let [_, input, _] = h.connect(1, "");
-        for _ in 0..2 {
-            write_input(&mut h, input, &vec![typed(0x61, true); half]);
+        for _ in 0..3 {
+            assert_eq!(write_input(&mut h, input, &ups(half)), (0, half as u32));
         }
-        assert_eq!(write_input(&mut h, input, &[typed(0x61, true)]), (0, 1));
-        assert_eq!(h.c.input.len(), input::MAX_RECORDS);
+        assert_eq!(h.c.input.len(), 3 * half);
+        assert_eq!(count(&mut h, input), 3 * half as u32);
     }
 
     /// conhost `_CoalesceEvent`, for one record at a time only.
@@ -2458,8 +2442,8 @@ pub(crate) mod tests {
         assert_eq!(nul, [0]);
     }
 
-    /// A VT batch that stores one record is still a batch: it neither
-    /// coalesces nor slips past the cap.
+    /// A VT batch that stores one record is still a batch: it never
+    /// folds into the last record.
     #[test]
     fn a_vt_batch_storing_one_record_does_not_coalesce() {
         let mut h = Host::new();
@@ -2469,22 +2453,6 @@ pub(crate) mod tests {
         write_input(&mut h, input, &pair);
         assert_eq!(write_input(&mut h, input, &pair), (0, 2));
         assert_eq!(count(&mut h, input), 2);
-        // Fill to the cap with the last record an `a`: the pair must not
-        // fold into it.
-        let menus = |n: usize| {
-            let menu = Record::Other {
-                event_type: 8,
-                event: [0; 16],
-            };
-            vec![menu; n]
-        };
-        let half = input::MAX_RECORDS / 2;
-        write_input(&mut h, input, &menus(half - 1));
-        write_input(&mut h, input, &menus(half - 2));
-        assert_eq!(write_input(&mut h, input, &pair), (0, 2));
-        assert_eq!(h.c.input.len(), input::MAX_RECORDS);
-        let (status, _) = write_input(&mut h, input, &pair);
-        assert_eq!(status, msg::STATUS_NO_MEMORY);
     }
 
     #[test]

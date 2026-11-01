@@ -11,6 +11,6 @@ changelog: Our Windows console host serves WriteConsoleInput, so programs that i
   client gets written keys as VT. A single appended record coalesces as in
   conhost (key repeats, mouse moves, buffer sizes). Mouse and menu records
   are kept as written.
-- **Changed:** a write that would take the input queue past 4,096 records
-  fails with `STATUS_NO_MEMORY` and queues nothing (divergence V16;
-  conhost has no cap).
+- **Known limitations:** as in conhost, written records are not held to
+  the 4,096-record cap that terminal input keeps, so a client that writes
+  input and never reads it grows the queue (owner decision).
