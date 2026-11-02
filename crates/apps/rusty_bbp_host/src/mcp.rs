@@ -846,8 +846,8 @@ impl Server {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
-    use crate::admin;
-    use std::path::Path;
+    #[cfg(target_os = "linux")]
+    use {crate::admin, std::path::Path};
 
     fn args(json: &str) -> Value {
         rusty_serde::json::from_str(json).expect("json")
@@ -867,6 +867,7 @@ mod tests {
     }
 
     /// A task whose planner holds the first turn, so the coder waits.
+    #[cfg(target_os = "linux")]
     fn open(dir: &Path) -> TaskId {
         let task = TaskId("T1".into());
         let roster = admin::read_roster(
