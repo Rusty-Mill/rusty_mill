@@ -4,7 +4,8 @@
 //! - [`identities`]: per-model bearer tokens bound to an actor and role.
 //! - [`board`]: the service: roles, clock, commit with retry.
 //! - [`projects`]: the applications one board serves, and the paths each may change.
-//! - [`domain`]: pure cards, columns, capabilities and the transition table.
+//! - [`domain`]: pure cards, column ids and capabilities.
+//! - [`workflow`]: the admin-edited columns and the moves between them.
 //! - [`roadmap`]: a project's roadmap lanes, derived from its cards.
 //! - [`metrics`]: work in progress, flow and lead time, derived from cards.
 //! - [`store`]: the storage port and an in-memory adapter.
@@ -32,3 +33,4 @@ pub mod sync;
 pub mod syncer;
 pub mod tick;
 pub mod web;
+pub mod workflow;

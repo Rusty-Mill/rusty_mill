@@ -284,11 +284,7 @@ impl Projects {
 
 /// Card fields that live on the task itself.
 fn task_tags(card: &Card) -> Vec<String> {
-    let column = serde_json::to_value(card.column)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default();
-    let mut tags = vec![AGENT_TAG.to_owned(), format!("board:{column}")];
+    let mut tags = vec![AGENT_TAG.to_owned(), format!("board:{}", card.column)];
     tags.extend(card.claim.iter().map(|c| format!("claim:{c}")));
     tags.extend(card.number.iter().map(|n| format!("number:{n}")));
     tags.extend(card.tags.iter().cloned());
@@ -307,10 +303,10 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         task.tags
             .iter()
             .find_map(|t| t.strip_prefix("board:"))
-            .and_then(|c| serde_json::from_value(json!(c)).ok())
-            .unwrap_or(Column::Backlog)
+            .and_then(|c| Column::new(c).ok())
+            .unwrap_or(Column::BACKLOG)
     } else {
-        Column::Done
+        Column::DONE
     };
     let claim = task
         .tags
@@ -552,7 +548,7 @@ impl<T: TickApi> TickStore<T> {
             patch.insert("tags".into(), json!(task_tags(next)));
         }
         // Done is terminal on the board, so a card only ever closes its task.
-        if next.column == Column::Done && current.column != Column::Done {
+        if next.column == Column::DONE && current.column != Column::DONE {
             patch.insert("status".into(), json!("done"));
         }
         if next.project != current.project {
@@ -726,7 +722,7 @@ impl<T: TickApi> Store for TickStore<T> {
         });
         // A card recorded straight in Done is created closed, in the same request: never an
         // open task left behind if a second write failed.
-        if card.column == Column::Done {
+        if card.column == Column::DONE {
             body["status"] = json!("done");
         }
         self.start_write(card.id)?;

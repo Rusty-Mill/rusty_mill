@@ -111,7 +111,7 @@ await enforce.uncheck();
 await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("except out of Done"));
 check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "unticking turns them off");
 await dialog.getByLabel("Enforce card movement rules").check();
-await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("along the column table"));
+await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("along the Columns tab's moves"));
 check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "ticking turns them back on");
 // A failed save, either way, shows the error and puts the checkbox and its note back to what the server holds.
 const rulesShown = (on, note) => page.waitForFunction(([on, note]) => {
@@ -122,7 +122,7 @@ const refuse = () => page.route("**/api/settings_rules_set", (r) => r.fulfill({ 
 await refuse();
 await dialog.getByLabel("Enforce card movement rules").uncheck();
 await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("disk full"));
-await rulesShown(true, "along the column table");
+await rulesShown(true, "along the Columns tab's moves");
 check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "a failed turn-off leaves the checkbox, its note and the server on");
 await page.unroute("**/api/settings_rules_set");
 await dialog.getByLabel("Enforce card movement rules").uncheck();
@@ -134,7 +134,7 @@ await rulesShown(false, "except out of Done");
 check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "a failed turn-on leaves the checkbox, its note and the server off");
 await page.unroute("**/api/settings_rules_set");
 await dialog.getByLabel("Enforce card movement rules").check();
-await rulesShown(true, "along the column table");
+await rulesShown(true, "along the Columns tab's moves");
 
 // Apps and Server: read-only views of sign-in and how the board was started.
 await dialog.getByRole("button", { name: "Apps" }).click();

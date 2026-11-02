@@ -31,10 +31,10 @@ fn a_card_round_trips_through_a_real_rusty_tick() {
         .plan(card.id, &human, Some(3), Some(vec![dep.id]))
         .expect("plan");
     board
-        .move_card(card.id, Column::Ready, &human)
+        .move_card(card.id, &Column::READY, &human)
         .expect("ready");
     board
-        .move_card(dep.id, Column::Ready, &human)
+        .move_card(dep.id, &Column::READY, &human)
         .expect("ready");
     // The card waits on its dependency, so the dependency is taken first.
     let taken = board.take(&dev, None).expect("take").expect("a card");
@@ -63,7 +63,7 @@ fn a_card_round_trips_through_a_real_rusty_tick() {
     let read = board.get(dep.id).expect("get");
     assert_eq!(
         (read.column, read.claim.as_deref(), read.comments.len()),
-        (Column::Building, Some("dev"), 1)
+        (Column::BUILDING, Some("dev"), 1)
     );
     assert_eq!(
         read.execution.as_ref().map(|e| e.execution.as_str()),

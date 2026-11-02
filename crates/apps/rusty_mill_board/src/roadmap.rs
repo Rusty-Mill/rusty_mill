@@ -8,6 +8,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::domain::{Card, Column};
+use crate::workflow::{Kind, Workflow};
 
 /// How far back Shipped reaches.
 pub const SHIPPED_WINDOW_DAYS: i64 = 30;
@@ -17,13 +18,13 @@ const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lane {
-    /// Building, QA or Review.
+    /// Work columns (Building, QA, Review by default).
     Now,
-    /// Ready.
+    /// Queues (Ready by default).
     Next,
     /// Backlog.
     Later,
-    /// Blocked (from any column).
+    /// Blocked.
     Blocked,
     /// Done within [`SHIPPED_WINDOW_DAYS`].
     Shipped,
@@ -39,13 +40,14 @@ impl Lane {
         Lane::Shipped,
     ];
 
-    fn of(column: Column) -> Self {
-        match column {
-            Column::Building | Column::Qa | Column::Review => Lane::Now,
-            Column::Ready => Lane::Next,
-            Column::Backlog => Lane::Later,
-            Column::Blocked => Lane::Blocked,
-            Column::Done => Lane::Shipped,
+    /// The lane of a column of kind `kind`.
+    fn of(kind: Kind) -> Self {
+        match kind {
+            Kind::Work => Lane::Now,
+            Kind::Queue => Lane::Next,
+            Kind::Backlog => Lane::Later,
+            Kind::Blocked => Lane::Blocked,
+            Kind::Done => Lane::Shipped,
         }
     }
 }
@@ -91,19 +93,20 @@ pub struct Roadmap {
     pub lanes: Vec<LaneView>,
 }
 
-/// The roadmap of `project`. `cards` is the whole board, so dependencies in other projects
-/// resolve. Done cards appear only with a `done_ms` within the window ending at `now_ms`.
-pub fn roadmap(cards: &[Card], project: &str, now_ms: i64) -> Roadmap {
+/// The roadmap of `project`, each card in the lane of its column's kind in `flow`. `cards` is
+/// the whole board, so dependencies in other projects resolve. Done cards appear only with a
+/// `done_ms` within the window ending at `now_ms`.
+pub fn roadmap(flow: &Workflow, cards: &[Card], project: &str, now_ms: i64) -> Roadmap {
     let open: BTreeSet<Uuid> = cards
         .iter()
-        .filter(|c| c.column != Column::Done)
+        .filter(|c| c.column != Column::DONE)
         .map(|c| c.id)
         .collect();
     let since = now_ms.saturating_sub(SHIPPED_WINDOW_DAYS * DAY_MS);
     let mut mine: Vec<&Card> = cards
         .iter()
         .filter(|c| c.project == project)
-        .filter(|c| c.column != Column::Done || c.done_ms.is_some_and(|d| d >= since))
+        .filter(|c| c.column != Column::DONE || c.done_ms.is_some_and(|d| d >= since))
         .collect();
     mine.sort_by_key(|c| (Reverse(c.priority), c.sort_order, c.created_ms, c.id));
     let lanes = Lane::ALL
@@ -112,7 +115,7 @@ pub fn roadmap(cards: &[Card], project: &str, now_ms: i64) -> Roadmap {
             let mut in_lane: Vec<&Card> = mine
                 .iter()
                 .copied()
-                .filter(|c| Lane::of(c.column) == lane)
+                .filter(|c| Lane::of(flow.kind(&c.column).unwrap_or(Kind::Backlog)) == lane)
                 .collect();
             if lane == Lane::Shipped {
                 in_lane.sort_by_key(|c| (Reverse(c.done_ms), c.id));
@@ -134,7 +137,7 @@ fn view(card: &Card, open: &BTreeSet<Uuid>) -> RoadmapCard {
         id: card.id,
         number: card.number,
         title: card.title.clone(),
-        column: card.column,
+        column: card.column.clone(),
         priority: card.priority,
         tags: card.tags.clone(),
         claim: card.claim.clone(),
@@ -165,7 +168,7 @@ mod tests {
     fn done(title: &str, done_ms: Option<i64>) -> Card {
         Card {
             done_ms,
-            ..card(title, Column::Done)
+            ..card(title, Column::DONE)
         }
     }
 
@@ -182,17 +185,18 @@ mod tests {
 
     #[test]
     fn columns_map_to_lanes() {
-        let cards: Vec<Card> = Column::ALL
-            .into_iter()
-            .map(|col| match col {
-                Column::Done => done("done", Some(NOW)),
-                other => card(&format!("{other:?}"), other),
+        let cards: Vec<Card> = Workflow::default()
+            .columns()
+            .iter()
+            .map(|col| match col.kind {
+                Kind::Done => done("done", Some(NOW)),
+                _ => card(&col.label, col.id.clone()),
             })
             .collect();
-        let r = roadmap(&cards, "p", NOW);
+        let r = roadmap(&Workflow::default(), &cards, "p", NOW);
         let mut now = titles(&r, Lane::Now);
         now.sort_unstable();
-        assert_eq!(now, ["Building", "Qa", "Review"]);
+        assert_eq!(now, ["Building", "QA", "Review"]);
         assert_eq!(titles(&r, Lane::Next), ["Ready"]);
         assert_eq!(titles(&r, Lane::Later), ["Backlog"]);
         assert_eq!(titles(&r, Lane::Blocked), ["Blocked"]);
@@ -201,7 +205,7 @@ mod tests {
 
     #[test]
     fn empty_project_has_every_lane_in_order() {
-        let r = roadmap(&[], "p", NOW);
+        let r = roadmap(&Workflow::default(), &[], "p", NOW);
         let lanes: Vec<Lane> = r.lanes.iter().map(|l| l.lane).collect();
         assert_eq!(lanes, Lane::ALL);
         assert!(r.lanes.iter().all(|l| l.cards.is_empty()));
@@ -209,16 +213,17 @@ mod tests {
 
     #[test]
     fn lanes_order_by_priority_then_manual_order_then_age() {
-        let mut low = card("low", Column::Ready);
+        let mut low = card("low", Column::READY);
         low.created_ms = 1;
-        let mut high_late = card("high_late", Column::Ready);
+        let mut high_late = card("high_late", Column::READY);
         high_late.priority = 5;
         high_late.sort_order = 2;
-        let mut high_early = card("high_early", Column::Ready);
+        let mut high_early = card("high_early", Column::READY);
         high_early.priority = 5;
         high_early.sort_order = 1;
-        let mut oldest = card("oldest", Column::Ready);
+        let mut oldest = card("oldest", Column::READY);
         let r = roadmap(
+            &Workflow::default(),
             &[low.clone(), high_late, high_early, oldest.clone()],
             "p",
             NOW,
@@ -229,7 +234,12 @@ mod tests {
         );
         // Equal on everything else: the id decides, so the order is stable.
         oldest.created_ms = 1;
-        let r = roadmap(&[low.clone(), oldest.clone()], "p", NOW);
+        let r = roadmap(
+            &Workflow::default(),
+            &[low.clone(), oldest.clone()],
+            "p",
+            NOW,
+        );
         let expected = if low.id < oldest.id {
             ["low", "oldest"]
         } else {
@@ -246,7 +256,10 @@ mod tests {
             done("fresh", Some(NOW - 1)),
         ];
         assert_eq!(
-            titles(&roadmap(&cards, "p", NOW), Lane::Shipped),
+            titles(
+                &roadmap(&Workflow::default(), &cards, "p", NOW),
+                Lane::Shipped
+            ),
             ["fresh", "edge"]
         );
     }
@@ -257,29 +270,52 @@ mod tests {
             updated_ms: NOW,
             ..done("old", Some(NOW - WINDOW - 1))
         };
-        assert!(titles(&roadmap(&[old], "p", NOW), Lane::Shipped).is_empty());
+        assert!(
+            titles(
+                &roadmap(&Workflow::default(), &[old], "p", NOW),
+                Lane::Shipped
+            )
+            .is_empty()
+        );
     }
 
     #[test]
     fn closed_without_shipping_is_not_shown() {
-        assert!(titles(&roadmap(&[done("wontdo", None)], "p", NOW), Lane::Shipped).is_empty());
+        assert!(
+            titles(
+                &roadmap(&Workflow::default(), &[done("wontdo", None)], "p", NOW),
+                Lane::Shipped
+            )
+            .is_empty()
+        );
     }
 
     #[test]
     fn other_projects_are_left_out() {
-        let mut other = card("other", Column::Ready);
+        let mut other = card("other", Column::READY);
         other.project = "q".into();
-        assert!(titles(&roadmap(&[other], "p", NOW), Lane::Next).is_empty());
+        assert!(
+            titles(
+                &roadmap(&Workflow::default(), &[other], "p", NOW),
+                Lane::Next
+            )
+            .is_empty()
+        );
     }
 
     #[test]
     fn waits_on_lists_open_deps_across_projects() {
-        let mut elsewhere = card("elsewhere", Column::Building);
+        let mut elsewhere = card("elsewhere", Column::BUILDING);
         elsewhere.project = "q".into();
         let shipped = done("shipped", Some(NOW));
-        let mut c = card("c", Column::Ready);
+        let mut c = card("c", Column::READY);
         c.deps = vec![elsewhere.id, shipped.id, Uuid::new_v4()];
-        let r = roadmap(&[elsewhere.clone(), shipped, c], "p", NOW);
+        let r = roadmap(
+            &Workflow::default(),
+            &[elsewhere.clone(), shipped, c],
+            "p",
+            NOW,
+        );
         let next = &r.lanes[1].cards[0];
         assert_eq!(
             next.waits_on,

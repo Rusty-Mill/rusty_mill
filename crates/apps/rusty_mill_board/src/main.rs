@@ -29,8 +29,8 @@ use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::settings::{
-    Files, GithubFile, ServerInfo, Settings, load_github, load_roles, load_rules, open_credentials,
-    projects_sink,
+    Files, GithubFile, ServerInfo, Settings, load_github, load_roles, load_rules, load_workflow,
+    open_credentials, projects_sink,
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
@@ -89,7 +89,7 @@ struct Cli {
     #[arg(long, env = "MILL_BOARD_TOKEN", hide_env_values = true)]
     auth_token: Option<String>,
     /// Directory holding the settings files (identities.json, projects.json, roles.json,
-    /// github.json, rules.json). The UI's settings view edits them in place; a missing identities.json is
+    /// github.json, rules.json, workflow.json). The UI's settings view edits them in place; a missing identities.json is
     /// created with a first admin whose token is printed once.
     #[arg(long, env = "MILL_BOARD_SETTINGS_DIR", conflicts_with = "auth_token")]
     settings_dir: Option<PathBuf>,
@@ -287,9 +287,16 @@ fn run(cli: Cli) -> Result<(), String> {
         .map(load_rules)
         .transpose()?
         .unwrap_or_default();
+    let workflow = files
+        .workflow
+        .as_deref()
+        .map(load_workflow)
+        .transpose()?
+        .unwrap_or_default();
     let mut board = Board::new(store, roles.clone())
         .with_projects(projects.clone())
-        .with_move_rules(rules);
+        .with_move_rules(rules)
+        .with_workflow(workflow);
     if let Some(path) = &files.projects {
         board = board.with_projects_sink(projects_sink(path.clone()));
     }

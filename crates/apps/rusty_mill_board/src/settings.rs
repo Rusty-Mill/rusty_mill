@@ -26,6 +26,7 @@ use crate::github::GithubConfig;
 use crate::identities::{Credentials, read_private};
 use crate::projects::Projects;
 use crate::syncer::{MIN_SECS, Syncer};
+use crate::workflow::Workflow;
 
 const DEFAULT_API: &str = "https://api.github.com";
 const DEFAULT_SECS: u64 = 60;
@@ -45,6 +46,8 @@ pub struct Files {
     pub github: Option<PathBuf>,
     /// Whether card movement rules are enforced.
     pub rules: Option<PathBuf>,
+    /// The columns and the moves between them.
+    pub workflow: Option<PathBuf>,
 }
 
 impl Files {
@@ -56,6 +59,7 @@ impl Files {
             roles: Some(dir.join("roles.json")),
             github: Some(dir.join("github.json")),
             rules: Some(dir.join("rules.json")),
+            workflow: Some(dir.join("workflow.json")),
         }
     }
 }
@@ -139,6 +143,19 @@ pub fn load_rules(path: &Path) -> Result<MoveRules, String> {
     let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file: RulesFile = serde_json::from_str(&json).map_err(|e| format!("rules: {e}"))?;
     Ok(file.movement)
+}
+
+/// The workflow from `path`, or the default (the original seven columns) if there is no such
+/// file yet.
+///
+/// # Errors
+/// If it exists but cannot be read, parsed or validated.
+pub fn load_workflow(path: &Path) -> Result<Workflow, String> {
+    if !path.exists() {
+        return Ok(Workflow::default());
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&json).map_err(|e| format!("workflow: {e}"))
 }
 
 /// Roles must be plainly named, and some role must hold `Admin`.
@@ -282,6 +299,11 @@ struct RulesSet {
 }
 
 #[derive(Deserialize)]
+struct WorkflowSet {
+    workflow: Workflow,
+}
+
+#[derive(Deserialize)]
 struct GithubSet {
     repo: String,
     api: Option<String>,
@@ -372,6 +394,9 @@ impl Settings {
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
             "settings_rules_set" => |s, by, a| s.rules_set(by, &parse(a)?),
+            "settings_workflow_set" => {
+                |s, by, a| s.workflow_set(by, parse::<WorkflowSet>(a)?.workflow)
+            }
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
@@ -413,6 +438,7 @@ impl Settings {
                 "roles": self.files.roles.is_some(),
                 "github": self.files.github.is_some(),
                 "rules": self.files.rules.is_some(),
+                "workflow": self.files.workflow.is_some(),
             },
             "agents": agents,
             "repos": self.board.projects(),
@@ -421,6 +447,7 @@ impl Settings {
             "capability_about": Capability::ALL.map(|c| (c, c.about())).into_iter().collect::<BTreeMap<_, _>>(),
             "github": github,
             "rules": RulesFile { movement: self.board.move_rules() },
+            "workflow": self.board.workflow(),
             "apps": self.oauth.get().map(|p| p.store().list_clients()),
             "server": self.server,
             "paths": {
@@ -429,6 +456,7 @@ impl Settings {
                 "roles": self.files.roles,
                 "github": self.files.github,
                 "rules": self.files.rules,
+                "workflow": self.files.workflow,
             },
         }))
     }
@@ -695,6 +723,21 @@ impl Settings {
         self.board.set_move_rules(a.movement);
         rusty_log::warn!(actor = %by.name, movement = ?a.movement, "card movement rules changed");
         Ok(json!(file))
+    }
+
+    /// Replace the columns and moves. Refused if a removed column still holds cards; the file
+    /// is written under the board's lock, before the change applies, and the change is logged.
+    fn workflow_set(&self, by: &Actor, next: Workflow) -> Res {
+        let path = self.file(&self.files.workflow)?;
+        let json = serde_json::to_string_pretty(&next).map_err(|e| refused(e.to_string()))?;
+        self.board.set_workflow(next, |_| {
+            rusty_atomic_file::write(&path, json.as_bytes())
+                .map_err(|e| format!("{}: {e}", path.display()))
+        })?;
+        let flow = self.board.workflow();
+        let columns: Vec<&str> = flow.columns().iter().map(|c| c.id.as_str()).collect();
+        rusty_log::warn!(actor = %by.name, columns = ?columns, "board workflow changed");
+        Ok(json!({ "workflow": flow }))
     }
 
     fn github_set(&self, a: &GithubSet) -> Res {
