@@ -45,10 +45,16 @@ pub(super) enum CursorSync {
     /// Resized: the next GetConsoleScreenBufferInfo asks the terminal.
     Dirty,
     /// DSR 6 went out when the terminal had been sent `at` bytes, and its
-    /// CPR is awaited. `resized` when the size changed again since: the
-    /// CPR may predate that resize, so the terminal is asked once more,
-    /// and a timeout leaves the cursor [`CursorSync::Dirty`].
-    Asked { resized: bool, at: u64 },
+    /// CPR is awaited. `resized` when the size changed since that DSR:
+    /// its CPR may predate the resize, so the terminal is asked once
+    /// more. `resized_in_wait` when it changed at any time since the wait
+    /// began, which a retry doesn't clear: a timeout then leaves the
+    /// cursor [`CursorSync::Dirty`].
+    Asked {
+        resized: bool,
+        resized_in_wait: bool,
+        at: u64,
+    },
 }
 
 /// A GetConsoleScreenBufferInfo held for the terminal's CPR.
@@ -90,7 +96,11 @@ impl Console {
     pub(super) fn cursor_maybe_wrong(&mut self) {
         self.cursor_sync = match self.cursor_sync {
             CursorSync::Clean | CursorSync::Dirty => CursorSync::Dirty,
-            CursorSync::Asked { at, .. } => CursorSync::Asked { resized: true, at },
+            CursorSync::Asked { at, .. } => CursorSync::Asked {
+                resized: true,
+                resized_in_wait: true,
+                at,
+            },
         };
     }
 
@@ -108,7 +118,7 @@ impl Console {
         out: &mut OutputQueue,
         fx: &mut Vec<Effect>,
     ) {
-        let CursorSync::Asked { resized, at } = self.cursor_sync else {
+        let CursorSync::Asked { resized, at, .. } = self.cursor_sync else {
             return;
         };
         if resized || self.screen.emitted() != at {
@@ -124,10 +134,13 @@ impl Console {
     /// A resize during the wait stays pending: the next call asks again,
     /// as ConPTY's timeout clears only its own generation.
     pub(super) fn cursor_wait_expired(&mut self, fx: &mut Vec<Effect>) {
-        let CursorSync::Asked { resized, .. } = self.cursor_sync else {
+        let CursorSync::Asked {
+            resized_in_wait, ..
+        } = self.cursor_sync
+        else {
             return;
         };
-        self.cursor_sync = if resized {
+        self.cursor_sync = if resized_in_wait {
             CursorSync::Dirty
         } else {
             CursorSync::Clean
@@ -152,10 +165,19 @@ impl Console {
         fx.push(Effect::AwaitCursor);
     }
 
+    /// Ask the terminal, keeping whether this wait has seen a resize.
     fn send_dsr(&mut self, out: &mut OutputQueue) {
+        let resized_in_wait = matches!(
+            self.cursor_sync,
+            CursorSync::Asked {
+                resized_in_wait: true,
+                ..
+            }
+        );
         self.screen.host(DSR_CPR, out);
         self.cursor_sync = CursorSync::Asked {
             resized: false,
+            resized_in_wait,
             at: self.screen.emitted(),
         };
     }
@@ -362,6 +384,29 @@ mod tests {
         let cpr = format!("\x1b[{};{}R", y + 2, x + 1);
         let done = completed(&h.ev(Event::Input(cpr.as_bytes())));
         assert_eq!((done[0].id, cursor_of(&done[0])), (held.id, (x, y + 1)));
+    }
+
+    /// Re-review of 8e315daa: a stale CPR's retry must not forget the
+    /// resize for the timeout.
+    #[test]
+    fn a_retry_keeps_the_resize_for_the_timeout() {
+        let mut h = Host::sized(size(4));
+        let [_, _, output] = h.connect(1, "");
+        h.ev(Event::Resize(size(6)));
+        let held = sbi_packet(&mut h, output);
+        h.ev(Event::Resize(size(3)));
+        let fx = h.ev(Event::Input(b"\x1b[5;1R"));
+        assert!(completed(&fx).is_empty(), "stale: asked again");
+        assert!(
+            !fx.contains(&Effect::AwaitCursor),
+            "the first deadline holds"
+        );
+        let done = completed(&h.ev(Event::CursorWaitExpired));
+        assert_eq!(done.iter().map(|r| r.id).collect::<Vec<_>>(), [held.id]);
+        let mark = h.vt.len();
+        let next = sbi_packet(&mut h, output);
+        assert_eq!(next.status, i32::MIN, "the resize still needs a query");
+        assert_eq!(&h.vt[mark..], DSR_CPR);
     }
 
     #[test]
