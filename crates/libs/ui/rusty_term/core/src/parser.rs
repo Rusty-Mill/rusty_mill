@@ -269,44 +269,76 @@ const CSI_PARAM_MAX: usize = 256;
 /// sequences carry at most a handful; a long DEC mode list is the exception.
 const PARAMS_INLINE: usize = 16;
 
-/// A CSI's positional parameters, as a slice where an absent or empty field
-/// is `None`. Parsed without allocating up to [`PARAMS_INLINE`] fields.
-#[allow(clippy::large_enum_variant)] // the inline array is the point: no heap per CSI
-enum Params {
-    Inline([Option<usize>; PARAMS_INLINE], usize),
-    Heap(Vec<Option<usize>>),
+/// A CSI's positional parameters, where an absent or empty field is `None`.
+/// Up to [`PARAMS_INLINE`] fields live inline as plain values with a
+/// presence bit each (absent reads as 0), so building one never allocates;
+/// a longer list spills every field to the heap.
+struct Params {
+    vals: [usize; PARAMS_INLINE],
+    present: u16,
+    len: usize,
+    spill: Vec<Option<usize>>,
 }
 
 impl Params {
+    /// No fields.
+    const EMPTY: Self = Self {
+        vals: [0; PARAMS_INLINE],
+        present: 0,
+        len: 0,
+        spill: Vec::new(),
+    };
+
     /// Split `buf` on `;` and parse each field as `str::parse::<usize>` would:
     /// empty, non-digit (such as a `:` sub-parameter) or overflowing is `None`.
-    /// Inlined so the array is built in the caller's frame, not copied out.
-    #[inline(always)]
+    /// An empty `buf` has no fields.
     fn parse(buf: &[u8]) -> Self {
-        let mut vals = [None; PARAMS_INLINE];
-        if buf.is_empty() {
-            return Self::Inline(vals, 0);
+        let mut params = Self::EMPTY;
+        if !buf.is_empty() {
+            for field in buf.split(|&b| b == b';') {
+                params.push(parse_field(field));
+            }
         }
-        let mut len = 0;
-        for field in buf.split(|&b| b == b';') {
-            let Some(slot) = vals.get_mut(len) else {
-                return Self::Heap(buf.split(|&b| b == b';').map(parse_field).collect());
-            };
-            *slot = parse_field(field);
-            len += 1;
-        }
-        Self::Inline(vals, len)
+        params
     }
-}
 
-impl std::ops::Deref for Params {
-    type Target = [Option<usize>];
-
-    fn deref(&self) -> &[Option<usize>] {
-        match self {
-            Self::Inline(vals, len) => &vals[..*len],
-            Self::Heap(vals) => vals,
+    /// Append the next field.
+    #[inline(always)]
+    fn push(&mut self, val: Option<usize>) {
+        if self.len < PARAMS_INLINE {
+            self.vals[self.len] = val.unwrap_or(0);
+            self.present |= u16::from(val.is_some()) << self.len;
+        } else {
+            if self.len == PARAMS_INLINE {
+                self.spill = (0..PARAMS_INLINE).map(|i| self.get(i)).collect();
+            }
+            self.spill.push(val);
         }
+        self.len += 1;
+    }
+
+    /// Field `i`; `None` when it is absent, empty or past the end.
+    fn get(&self, i: usize) -> Option<usize> {
+        if self.len > PARAMS_INLINE {
+            return self.spill.get(i).copied().flatten();
+        }
+        (i < self.len && self.present >> i & 1 == 1).then(|| self.vals[i])
+    }
+
+    /// The number of fields.
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Every field in order.
+    fn iter(&self) -> impl Iterator<Item = Option<usize>> + '_ {
+        (0..self.len).map(|i| self.get(i))
+    }
+
+    /// The fields as SGR codes, absent as 0, without copying; `None` once
+    /// they spilled to the heap.
+    fn codes(&self) -> Option<&[usize]> {
+        (self.len <= PARAMS_INLINE).then(|| &self.vals[..self.len])
     }
 }
 
@@ -368,18 +400,67 @@ fn parse_sgr_params(buf: &[u8]) -> Vec<usize> {
     out
 }
 
-/// Length of a complete plain CSI body at the start of `rest` (the bytes
-/// after `ESC [`): parameter digits and `;` followed by a final byte, which
-/// the length includes. `None` when the sequence carries anything else (a
-/// private marker, `:`, an intermediate, a C0 control), is cut by the end of
-/// the chunk, or is longer than [`CSI_PARAM_MAX`]: the byte-wise state
-/// machine handles those.
-fn plain_csi_len(rest: &[u8]) -> Option<usize> {
-    let window = &rest[..rest.len().min(CSI_PARAM_MAX + 1)];
-    let end = window
-        .iter()
-        .position(|b| !matches!(b, b'0'..=b'9' | b';'))?;
-    (0x40..=0x7e).contains(&window[end]).then_some(end + 1)
+/// The frame of a CSI that [`scan_plain_csi`] found wholly inside one chunk.
+struct PlainCsi {
+    /// The private marker (`<`, `=`, `>`, `?`) that led the body, or 0.
+    marker: u8,
+    /// Where the parameter bytes start and end in the scanned slice.
+    raw: std::ops::Range<usize>,
+    /// The final byte.
+    cmd: u8,
+}
+
+/// Scan and parse a plain CSI body at the start of `rest` (the bytes after
+/// `ESC [`) in one pass: an optional leading private marker, parameter digits
+/// and `;`, then a final byte. Each field accumulates as its digits go by and
+/// lands in `params` as its `;` or the final byte passes, with the values
+/// [`Params::parse`] gives for the same bytes. The final byte is at
+/// `rest[raw.end]`.
+///
+/// `None` when the sequence carries anything else (a second or late marker,
+/// `:`, an intermediate, a C0 control), is cut by the end of the chunk, or
+/// holds more than [`CSI_PARAM_MAX`] parameter bytes: the byte-wise state
+/// machine handles those, and `params` is then left partly filled.
+/// Inlined so `params` stays in the caller's frame.
+#[inline(always)]
+fn scan_plain_csi(rest: &[u8], params: &mut Params) -> Option<PlainCsi> {
+    let start = usize::from(matches!(rest.first(), Some(0x3c..=0x3f)));
+    let marker = if start == 1 { rest[0] } else { 0 };
+    let body = &rest[start..rest.len().min(start + CSI_PARAM_MAX + 1)];
+    // The open field: its value so far, whether it has a digit, and whether
+    // it still fits a `usize`.
+    let (mut acc, mut digits, mut fits) = (0usize, false, true);
+    for (i, &b) in body.iter().enumerate() {
+        if b.is_ascii_digit() {
+            match acc
+                .checked_mul(10)
+                .and_then(|v| v.checked_add(usize::from(b - b'0')))
+            {
+                Some(v) => acc = v,
+                None => fits = false,
+            }
+            digits = true;
+            continue;
+        }
+        let is_final = (0x40..=0x7e).contains(&b);
+        if b != b';' && !is_final {
+            return None;
+        }
+        // Every `;` closes a field, and so does the final byte unless the
+        // body is empty (no fields at all).
+        if !is_final || i > 0 {
+            params.push((digits && fits).then_some(acc));
+            (acc, digits, fits) = (0, false, true);
+        }
+        if is_final {
+            return Some(PlainCsi {
+                marker,
+                raw: start..start + i,
+                cmd: b,
+            });
+        }
+    }
+    None
 }
 
 impl Default for AnsiParser {
@@ -557,11 +638,18 @@ impl AnsiParser {
                         // Fast path: a plain CSI wholly inside this chunk is
                         // parsed and dispatched in one step, with the same
                         // effects as the byte-wise `Csi` state.
-                        match plain_csi_len(&bytes[i..]) {
-                            Some(n) => {
+                        let mut params = Params::EMPTY;
+                        match scan_plain_csi(&bytes[i..], &mut params) {
+                            Some(csi) => {
                                 self.state = ParserState::Ground;
-                                self.dispatch_csi(bytes[i + n - 1], g, &bytes[i..i + n - 1]);
-                                i += n;
+                                let raw = &bytes[i + csi.raw.start..i + csi.raw.end];
+                                if csi.marker == 0 {
+                                    self.dispatch_csi(csi.cmd, g, raw, &params);
+                                } else {
+                                    self.csi_marker = csi.marker;
+                                    self.dispatch_private_csi(csi.cmd, g, raw, &params);
+                                }
+                                i += csi.raw.end + 1;
                             }
                             None => self.state = ParserState::Csi,
                         }
@@ -669,7 +757,7 @@ impl AnsiParser {
                     // Parameter bytes, bounded (a hostile unterminated CSI must
                     // not grow the buffer without limit). `:` (ECMA-48
                     // sub-parameter separator) is only meaningful to SGR (see
-                    // `parse_sgr_params`); every other command's `parse_params`
+                    // `parse_sgr_params`); every other command's `Params::parse`
                     // never sees a field containing one in practice, so
                     // collecting it here unconditionally is harmless.
                     b'0'..=b'9' | b';' | b':' => {
@@ -1146,6 +1234,16 @@ impl AnsiParser {
     /// …) set grid state; everything else is consumed and ignored so it never
     /// leaks as text.
     fn handle_private_csi(&mut self, cmd: u8, g: &mut Grid) {
+        // Lent out for the dispatch and handed back, so its capacity is kept.
+        let raw = std::mem::take(&mut self.param_buffer);
+        let params = Params::parse(raw.as_bytes());
+        self.dispatch_private_csi(cmd, g, raw.as_bytes(), &params);
+        self.param_buffer = raw;
+    }
+
+    /// Act on a completed private-marker CSI given its final byte, its raw
+    /// parameter bytes and their parsed [`Params`].
+    fn dispatch_private_csi(&mut self, cmd: u8, g: &mut Grid, raw: &[u8], params: &Params) {
         // DA2 (Secondary Device Attributes): `CSI > c`. Reply with a terminal
         // type (0), a firmware "version", and a ROM cartridge field (0) — the
         // values are conventional; programs care that an answer arrives.
@@ -1185,12 +1283,10 @@ impl AnsiParser {
             g.host_out.push(0x1b);
             g.host_out.push(b'[');
             g.host_out.push(self.csi_marker);
-            g.host_out.extend_from_slice(self.param_buffer.as_bytes());
+            g.host_out.extend_from_slice(raw);
             g.host_out.push(cmd);
             if kitty_keyboard {
-                let params = self.parse_params();
-                let p =
-                    |i: usize, default: usize| params.get(i).copied().flatten().unwrap_or(default);
+                let p = |i: usize, default: usize| params.get(i).unwrap_or(default);
                 match self.csi_marker {
                     b'>' => g.push_kitty_flags(p(0, 0) as u8),
                     b'<' => g.pop_kitty_flags(p(0, 1)),
@@ -1208,7 +1304,7 @@ impl AnsiParser {
         // DECRQM (`CSI ? Ps $ p`) — report whether DEC private mode `Ps` is
         // set/reset, answered with a DECRPM (`CSI ? Ps ; Pv $ y`).
         if self.csi_marker == b'?' && self.csi_intermediate == b'$' && cmd == b'p' {
-            let mode = self.parse_params().first().copied().flatten().unwrap_or(0);
+            let mode = params.get(0).unwrap_or(0);
             self.report_dec_mode(g, mode);
             return;
         }
@@ -1223,7 +1319,7 @@ impl AnsiParser {
         // Other private DSR requests are silently ignored rather than
         // answered with something we'd have to make up.
         if self.csi_marker == b'?' && cmd == b'n' {
-            let param = self.parse_params().first().copied().flatten().unwrap_or(0);
+            let param = params.get(0).unwrap_or(0);
             match param {
                 996 => self.responses.extend_from_slice(&g.color_scheme_report()),
                 6 => {
@@ -1240,13 +1336,13 @@ impl AnsiParser {
         // this before choosing an output strategy; silence makes them fall
         // back to conservative defaults.
         if self.csi_marker == b'?' && cmd == b'S' {
-            self.answer_xtsmgraphics();
+            self.answer_xtsmgraphics(params);
             return;
         }
         // DECSED / DECSEL (`CSI ? Ps J` / `CSI ? Ps K`) — selective erase:
         // like ED/EL, but cells written under DECSCA protection survive.
         if self.csi_marker == b'?' && (cmd == b'J' || cmd == b'K') {
-            let mode = self.parse_params().first().copied().flatten().unwrap_or(0);
+            let mode = params.get(0).unwrap_or(0);
             if cmd == b'J' {
                 g.selective_erase_display(mode);
             } else {
@@ -1260,8 +1356,7 @@ impl AnsiParser {
             return;
         }
         let set = cmd == b'h';
-        let params = self.parse_params();
-        for param in params.iter().flatten().copied() {
+        for param in params.iter().flatten() {
             if let Some(mode) = alt_mode(param) {
                 // 47 / 1047 / 1049 select the alternate screen buffer; the mode
                 // governs cursor save/restore (only 1049). The leave path uses
@@ -1380,9 +1475,8 @@ impl AnsiParser {
     /// runtime-adjustable, so a "set"/"reset" action succeeds by reporting
     /// the actual (unchanged) values, same as a read. Item 3 (ReGIS) is not
     /// implemented and reports an item error.
-    fn answer_xtsmgraphics(&mut self) {
-        let params = self.parse_params();
-        let p = |i: usize| params.get(i).copied().flatten().unwrap_or(0);
+    fn answer_xtsmgraphics(&mut self, params: &Params) {
+        let p = |i: usize| params.get(i).unwrap_or(0);
         let (item, action) = (p(0), p(1));
         let reply = match (item, action) {
             (1, 1..=4) => "\x1b[?1;0;256S".to_string(),
@@ -1472,35 +1566,34 @@ impl AnsiParser {
             .extend_from_slice(format!("\x1b[{mode};{status}$y").as_bytes());
     }
 
-    /// Parse `param_buffer` into positional parameters. An empty slot (e.g. the
-    /// leading field of `CSI ;5H`) becomes `None` so callers can apply the
-    /// per-command default in the correct position, per ECMA-48 §5.4.2.
-    fn parse_params(&self) -> Params {
-        Params::parse(self.param_buffer.as_bytes())
-    }
-
     /// Dispatch a completed CSI sequence given its final command byte.
     fn handle_csi(&mut self, cmd: u8, g: &mut Grid) {
         // Lent out for the dispatch and handed back, so its capacity is kept.
         let raw = std::mem::take(&mut self.param_buffer);
-        self.dispatch_csi(cmd, g, raw.as_bytes());
+        let params = Params::parse(raw.as_bytes());
+        self.dispatch_csi(cmd, g, raw.as_bytes(), &params);
         self.param_buffer = raw;
     }
 
-    /// Act on a completed CSI given its final byte and its raw parameter
-    /// bytes (digits, `;` and `:`).
-    fn dispatch_csi(&mut self, cmd: u8, g: &mut Grid, raw: &[u8]) {
-        let params = Params::parse(raw);
+    /// Act on a completed CSI given its final byte, its raw parameter bytes
+    /// (digits, `;` and `:`) and their parsed [`Params`]. An empty or absent
+    /// slot (e.g. the leading field of `CSI ;5H`) is `None`, so each command
+    /// applies its default in the right position, per ECMA-48 §5.4.2.
+    fn dispatch_csi(&mut self, cmd: u8, g: &mut Grid, raw: &[u8], params: &Params) {
         // Positional parameter `i` with `default` applied to an absent/empty slot.
-        let p = |i: usize, default: usize| params.get(i).copied().flatten().unwrap_or(default);
+        let p = |i: usize, default: usize| params.get(i).unwrap_or(default);
         // Most cursor-motion commands take a single count that defaults to (and
         // treats 0 as) 1.
         let count = p(0, 1).max(1);
 
         match cmd {
             b'm' => {
-                let sgr = parse_sgr_params(raw);
-                self.apply_sgr(&sgr);
+                // Colon-free SGR is its positional fields; only the colon
+                // sub-parameter forms need the full parse.
+                match params.codes().filter(|_| !raw.contains(&b':')) {
+                    Some(codes) => self.apply_sgr(codes),
+                    None => self.apply_sgr(&parse_sgr_params(raw)),
+                }
                 self.sync_erase_bg(g);
             }
             b'H' | b'f' => {
@@ -1614,7 +1707,7 @@ impl AnsiParser {
                 // modeled; the rest of ECMA-48's ANSI mode family (GATM, KAM,
                 // CRM, …) are vestigial even in xterm and left unimplemented.
                 let set = cmd == b'h';
-                for param in params.iter().flatten().copied() {
+                for param in params.iter().flatten() {
                     match param {
                         4 => g.insert_mode = set,
                         // BDSM (mode 8): implicit vs explicit bidi (the

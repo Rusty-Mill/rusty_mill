@@ -36,11 +36,17 @@
 # 112.3, sgr 80.4, unicode 101.9. alt, cursor and sgr move.
 # 8-byte cells over an interned style table, measured: alt 49.7, ascii
 # 34.5, cursor 57.5, scroll 100.4, sgr 85.9, unicode 106.0. alt, ascii and scroll ratchet down.
-alt_screen_flicker    55
+# Fused CSI scan and parse (fields accumulate during the scan, inline
+# Params of plain values plus a presence mask, colon-free SGR without a heap
+# list, private-marker CSIs on the fast path), measured: alt 49.1, ascii
+# 35.2, cursor 53.1, scroll 103.2, sgr 66.0, unicode 110.1, unicode_2027
+# 347.7 (main on the same machine: alt 53.1, cursor 59.4, sgr 84.7). alt,
+# cursor and sgr ratchet down.
+alt_screen_flicker    54
 ascii_throughput      38
-cursor_thrash         60
+cursor_thrash         58
 scroll_heavy         111
-sgr_churn             88
+sgr_churn             73
 unicode_heavy        112
 # unicode_2027 (unicode_heavy's mix under mode 2027) added with the
 # allocation-free cluster join (#1191), measured: 344.8 (500.1 with the old
