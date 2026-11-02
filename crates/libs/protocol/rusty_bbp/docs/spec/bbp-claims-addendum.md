@@ -116,7 +116,7 @@ Evidence is **scoring** when it is admitted while the claim is `open`, or when i
 
 **Confidence** is shown as `p = 1 / (1 + 3^(−score/4))`, rounded to whole percent. It is for people only; no rule reads it. With the defaults, `accept_at = 8` is about 90% and `drop_at = -8` about 10%.
 
-After each scoring `evidence`, and after each candidate debit (Budget), the board evaluates that claim in this order. The first rule that fires wins, and its event is generated in the same transaction (Processing model, phase 4):
+After each scoring `evidence`, and after each candidate debit on an `open` claim (Budget), the board evaluates that claim in this order. A settled or escalated claim is never evaluated by these rules; it changes status only as Evidence after settlement and C-R8 say. The first rule that fires wins, and its event is generated in the same transaction (Processing model, phase 4):
 
 1. **Accept line.** `score ≥ accept_at`, `authors(c,+) ≥ min_authors`, at least one support item is not `opinion`, and every dep is `accepted`:
    - if `reversible: false`: `claim_escalated(reason: irreversible)` (C-R6);
@@ -165,7 +165,7 @@ reversibility_factor = reversible 1 | irreversible 2
 spent(c)  = evidence items on c (all epochs) + runs started for candidates naming c
 ```
 
-The defaults give 8 to 64 units per claim. One evidence item costs 1 and one run costs 1, so a run is debited from the claim it tests (owner decision, 2026-11-02). A candidate that would start a run on a claim with `spent(c) ≥ budget(c)` is refused `claim_budget` and no run starts. Task totals (`messages`, `bytes`, `reads`) still apply and are charged as today (R11), since `claim` and `evidence` are messages. The `turns` and `iterations` budgets are not used in claims mode.
+The defaults give 8 to 64 units per claim. One evidence item costs 1 and one run costs 1, so a run is debited from the claim it tests (owner decision, 2026-11-02). A candidate that would start a run on a claim with `spent(c) ≥ budget(c)` is refused `claim_budget` and no run starts. A debit on an `open` claim is followed by the update rule, so the debit that reaches the budget escalates it. A debit on an `accepted` or `dropped` claim (a re-check) changes nothing but `spent(c)`: it never re-runs the accept or drop line, never escalates, and only executed evidence from that run can reopen the claim. Task totals (`messages`, `bytes`, `reads`) still apply and are charged as today (R11), since `claim` and `evidence` are messages. The `turns` and `iterations` budgets are not used in claims mode.
 
 ### Dependencies
 
@@ -277,7 +277,7 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-21 | Question Q with a single candidate X reaches the accept line | `claim_escalated(sole_candidate)`. With a second candidate Y present, X is accepted |
 | CL-22 | Two evidence posts race; the second append hits a stale revision. (a) The first does not settle the claim. (b) The first settles it | (a) Driver reloads; both land; the score is the sum in commit order. (b) The second (an opinion) is recorded on recompute; the settled claim's status and score are unchanged (extends TR-29) |
 | CL-23 | Replay with the same `op` after the claim settled | Original result, no new event, no charge (R15) |
-| CL-24 | Property: random evidence sequences over random DAGs | Fold equals replay. `void` is left only by human `reopen`; `dropped` and `accepted` are left only by human `reopen`, executed evidence against the outcome, or (for `accepted`) `claim_escalated(dep_collapsed)`. Recorded evidence never changes a score. `spent(c) ≤ budget(c)` always. Voids are closed under deps. No float anywhere in the fold |
+| CL-24 | Property: random evidence sequences over random DAGs | Fold equals replay. `void` is left only by human `reopen`; `dropped` and `accepted` are left only by human `reopen`, executed evidence against the outcome, or (for `accepted`) `claim_escalated(dep_collapsed)`. Recorded evidence never changes a score. `spent(c) ≤ budget(c)` always. A candidate debit alone never changes a claim's status. Voids are closed under deps. No float anywhere in the fold |
 | CL-25 | Property: random committed logs, each replayed twice; plus the a,b,c vs a,c,b example | Identical statuses and scores on every replay. The example: a,b,c accepts at b, then c reopens it into epoch 2 at −4; a,c,b stays `open` at +4 in epoch 1 |
 | CL-26 | `claims_delta(after_rev, ["http"])` | Returns changed claims in `http` and their dependents, nothing else |
 | CL-27 | `claim_line` of an accepted claim | Matches the golden one-line format |
@@ -295,7 +295,7 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-39 | Same as CL-38, but the host recorded `claim_acted(X, pr)` first | `claim_escalated(reopened_after_action)`, not `claim_reopened`. Human `reopen` → `open`, new epoch |
 | CL-40 | Dropped claim receives executed support citing a `passed` report | `claim_reopened(by: evidence)`, new epoch, score +4 |
 | CL-41 | B (accepted) depends on A (accepted); A reopened by executed counter | A `open`; B `claim_escalated(dep_collapsed)` in the same transaction |
-| CL-42 | Candidate debits. (a) Open low-stakes reversible claim with 7 evidence items; a candidate naming it is stored. (b) A claim accepted on its 8th unit; a re-check candidate naming it. (c) A candidate naming a `void` or `escalated` claim | (a) `run_started`, `spent` = 8, `claim_escalated(budget)` in the same transaction. (b) `claim_budget`, no run. (c) `claim_not_open`, no run |
+| CL-42 | Candidate debits. (a) Open low-stakes reversible claim with 7 evidence items; a candidate naming it is stored. (b) A claim accepted on its 8th unit; a re-check candidate naming it. (c) A candidate naming a `void` or `escalated` claim. (d) An irreversible claim accepted by a human `decision` (after CL-12), with budget left; a re-check candidate naming it | (a) `run_started`, `spent` = 8, `claim_escalated(budget)` in the same transaction. (b) `claim_budget`, no run. (c) `claim_not_open`, no run. (d) `run_started`, one unit debited, the claim stays `accepted`, no `claim_escalated` |
 | CL-43 | `claim_acted` on an `open` claim; twice on one accepted claim | `wrong_state`; `duplicate` |
 | CL-44 | Host test (`rusty_bbp_host`): open a claims-mode task on a host with no sandbox configured; on a sandboxed host, inspect where a candidate's run executes | `bad_claims_config(sandbox)`, nothing written; the run's process is inside the `rusty_sandbox` profile |
 
