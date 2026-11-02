@@ -12,6 +12,7 @@ pub use supervisor::{StdSupervisor, Supervised, Supervisor};
 
 use orch_cli::{CommandRunner, ExecError, StdCommand};
 use orch_core::board::{Board, Entry, EntryKind};
+use orch_core::factory::Lease;
 use orch_core::task::Task;
 use orch_core::{Ref, Text};
 use orch_dispatch::{
@@ -128,8 +129,8 @@ struct LeasePaths {
     write: Vec<String>,
 }
 impl LeasePaths {
-    fn of(fence: &Fence) -> Option<Self> {
-        fence.lease.as_ref().map(|l| Self {
+    fn of(lease: Option<&Lease>) -> Option<Self> {
+        lease.map(|l| Self {
             read: l.read.clone(),
             write: l.write.clone(),
         })
@@ -269,14 +270,14 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             _ => Err(permanent("unexpected BBP response")),
         }
     }
-    /// Freeze the task's configuration once, its pool confined to the
-    /// lease of the fence that first freezes it.
+    /// Freeze the task's configuration once, its pool and profile set
+    /// confined to `lease`, the lease of the fence that first freezes it.
     fn freeze(
         &self,
         h: &Handle,
         task: &Task,
         board: &Board,
-        fence: &Fence,
+        lease: Option<&Lease>,
     ) -> Result<Frozen, ClassifiedError> {
         let dir = Self::manifest(h);
         std::fs::create_dir_all(&dir).map_err(transient)?;
@@ -284,17 +285,21 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
         if path.exists() {
             return Self::load(h);
         }
-        let config = match &fence.lease {
-            Some(lease) => lease::confine(&self.config, lease).map_err(permanent)?,
+        let profiles = std::fs::read_to_string(&self.config.profiles).map_err(transient)?;
+        let config = match lease {
+            Some(lease) => {
+                let config = lease::confine(&self.config, lease).map_err(permanent)?;
+                lease::profiles_within(&profiles, &config, lease).map_err(permanent)?;
+                config
+            }
             None => self.config.clone(),
         };
-        let profiles = std::fs::read_to_string(&self.config.profiles).map_err(transient)?;
         let brief = format!("{}\n\n{}", self.context, orch_cli::render(task, board, ""));
         let frozen = Frozen {
             config,
             brief,
             profiles,
-            lease: LeasePaths::of(fence),
+            lease: LeasePaths::of(lease),
         };
         let bytes = rusty_serde::json::to_string(&frozen).map_err(permanent)?;
         publish_once(&dir, "manifest.json", bytes.as_bytes())?;
@@ -372,7 +377,7 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
                 )));
             }
         }
-        if frozen.lease != LeasePaths::of(fence) {
+        if frozen.lease != LeasePaths::of(fence.lease.as_ref()) {
             return Err(permanent(
                 "the hosted task was confined under another lease; \
                  changing access needs a task started under the new one",
@@ -676,7 +681,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
     ) -> Result<HostHandle, ClassifiedError> {
         let h = self.located(task, board);
         Self::admit(&h, fence)?;
-        let frozen = self.freeze(&h, task, board, fence)?;
+        let frozen = self.freeze(&h, task, board, fence.lease.as_ref())?;
         Self::leased(&frozen, fence)?;
         let config = &frozen.config;
         let agents = self.materialize(&h, &frozen)?;
@@ -841,7 +846,9 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
     /// once, with no principal assigned and no moderator started, so a
     /// superseded holder's late `open` finds it ended and starts nothing.
     /// A cancel only takes authority away, so it is not refused for an
-    /// ended or different lease.
+    /// ended or different lease, nor for a pool the lease could not confine:
+    /// a task it first freezes is frozen unleased, since nothing in it will
+    /// ever run, and any later leased holder is refused.
     fn cancel(
         &mut self,
         task: &Task,
@@ -859,7 +866,7 @@ impl<C: CommandRunner + std::fmt::Debug, S: Supervisor> TaskHost for BbpHost<C, 
             None => self.located(task, board),
         };
         Self::admit(&h, fence)?;
-        let frozen = self.freeze(&h, task, board, fence)?;
+        let frozen = self.freeze(&h, task, board, None)?;
         self.materialize(&h, &frozen)?;
         self.open_once(&frozen.config, &h)?;
         self.request_cancel(&h, &frozen.config, &words, reason)?;
