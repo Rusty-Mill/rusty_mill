@@ -4,6 +4,8 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- A lease now bounds the BBP validator profile's `read_roots` (ADR-0017): at freeze each must be a system root or within the lease, and not beneath a confined member's write root, and it is frozen as the path it resolved to. A leased profile with a toolchain outside the system roots now needs that path in the lease. Cancel freezes a never-frozen task unleased, so a pool the lease cannot confine no longer blocks it.
 ### Added
 - Permission leases (ADR-0017): `Grant.lease` holds read/write paths and an end; delegation never widens it. The hosting configuration's `lease` is granted on each run's fence, and the BBP host confines every assigned pool member's sandbox to it, requires canonical lease paths, refuses swappable roots, a changed or ended lease, and passes the end to `bbp mod --deadline-unix`, enforced by each harness group's holder. Assignment records move to schema v2; v1 records still load as unleased.
 - `run --cancel <reason>` cancels a hosted goal under a fresh generation through the new `TaskHost::cancel`, which finds each Implement card's BBP task without a checkpointed handle and waits until `bbp quiesce` finds nothing of it running, then reconciles the card's execution as cancelled and retires the assignment so the state cannot be resumed. BBP configuration gains `end_grace_secs`.

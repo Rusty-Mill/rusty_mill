@@ -35,6 +35,15 @@ The BBP host enforces the fence's lease, not its configuration:
   by orch-bbp at freeze over the members' paths, and by `bbp mod` at start
   over every root it adds too (system roots, its own directory, the
   repository's git directory, the work directory).
+- **Profile roots.** Candidate code the runner executes reads the validator
+  profile set's `read_roots`, so they are bounded at freeze too: each root,
+  resolved through symlinks, must be a system root (those BBP grants every
+  sandbox) or lie within the lease's read or write paths, and none may lie
+  beneath a confined member's write root. Each is frozen as the path it
+  resolved to, so the runner opens the root that was checked, not a spelling
+  a harness could re-point afterwards. A root outside is refused, not
+  dropped, so a validator never loses its toolchain silently; a toolchain
+  outside the system roots (a rustup sysroot, say) needs a lease path.
 - **Frozen reach.** A later fence whose lease reaches other paths, or none, is
   refused as permanent. Expanding access needs a new grant and a task started
   under it, so a running confined process never gains reach. This is the
@@ -47,7 +56,10 @@ The BBP host enforces the fence's lease, not its configuration:
   which leads the harness's process group, kills the group at it, so the
   deadline holds even when the moderator has died. A later run renews the
   lease and restarts the moderator. Cancel is never refused for an ended or
-  different lease: it only removes authority.
+  different lease: it only removes authority. A task cancel freezes first is
+  frozen unleased and unconfined, since nothing in it ever runs, so a pool
+  the lease could not confine does not block it; any later leased holder is
+  refused as a different lease.
 
 ## Not decided here
 

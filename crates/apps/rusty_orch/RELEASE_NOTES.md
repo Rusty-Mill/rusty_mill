@@ -4,6 +4,18 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Leases bound validator roots; leased cancel
+**2026-11-02**
+
+- A lease now bounds the validator profile's read roots: each must be a
+  system root or lie within the lease, and not beneath a harness's write
+  root, and it is frozen as the path it resolved to. A leased profile whose
+  toolchain lives elsewhere (a rustup sysroot, say) needs that path leased.
+- Cancelling a leased goal whose task never opened no longer fails when the
+  lease cannot confine its pool: nothing in such a task ever runs.
+
+---
+
 ## Permission leases
 **2026-10-24**
 

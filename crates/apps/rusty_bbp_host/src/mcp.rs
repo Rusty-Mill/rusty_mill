@@ -88,12 +88,49 @@ pub struct Server {
     /// Claims mode: the credential of the assignment this server was started
     /// under. Kept, never re-derived, so a reassignment revokes the session.
     credential: Option<Token>,
+    /// The client's request stream while serving, so a blocked `wait` sees
+    /// it close instead of holding the server for its full timeout.
+    hangup: Option<HangUp>,
     /// The longest `wait` sleeps between log checks; [`WAIT_RECHECK`].
     recheck: Duration,
     /// Told each time `wait` is about to block on the watch, which is by then
     /// installed and has seen every append since the last check.
     #[cfg(test)]
     blocking: Option<std::sync::mpsc::Sender<()>>,
+}
+
+/// The descriptor a client writes requests to the server on. Once every
+/// writer of a pipe or socket has closed it, it reports a hang-up, which
+/// `poll` sees without reading any request still queued in it.
+#[derive(Clone, Copy, Debug)]
+pub struct HangUp(i32);
+
+impl HangUp {
+    /// `input`'s descriptor, which must stay open while it is watched.
+    #[cfg(target_os = "linux")]
+    pub fn of(input: &impl std::os::fd::AsRawFd) -> Option<HangUp> {
+        Some(HangUp(input.as_raw_fd()))
+    }
+
+    /// Hang-ups are watched only on Linux.
+    #[cfg(not(target_os = "linux"))]
+    pub fn of<T>(_: &T) -> Option<HangUp> {
+        None
+    }
+
+    /// Whether every writer has closed the stream.
+    #[cfg(target_os = "linux")]
+    fn happened(self) -> bool {
+        use rusty_libc::fd::{poll, PollFd, POLLIN};
+        let mut fds = [PollFd::new(self.0, POLLIN)];
+        poll(&mut fds, 0).is_ok_and(|ready| ready > 0 && fds[0].is_hup())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn happened(self) -> bool {
+        let _ = self.0;
+        false
+    }
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -535,6 +572,7 @@ impl Server {
             shown: None,
             waker: None,
             credential,
+            hangup: None,
             recheck: WAIT_RECHECK,
             #[cfg(test)]
             blocking: None,
@@ -622,6 +660,9 @@ impl Server {
             self.driver.sync().map_err(|e| format!("{e:?}"))?;
             if let Some(reply) = self.woke() {
                 return Ok(reply);
+            }
+            if self.hangup.is_some_and(HangUp::happened) {
+                return Ok(self.wake_reply("closed", None));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -877,11 +918,28 @@ impl Server {
 
     /// Serve stdin to stdout until EOF.
     pub fn serve(&mut self) -> io::Result<()> {
-        self.serve_on(io::stdin().lock(), io::stdout().lock())
+        let stdin = io::stdin();
+        let hangup = HangUp::of(&stdin);
+        self.serve_on(stdin.lock(), hangup, io::stdout().lock())
     }
 
     /// Serve newline-delimited requests from `input` to `output` until EOF.
-    pub fn serve_on(&mut self, input: impl BufRead, mut stdout: impl Write) -> io::Result<()> {
+    /// A `wait` blocked when `hangup` reports the client gone returns within
+    /// one recheck interval; requests already sent are still answered.
+    pub fn serve_on(
+        &mut self,
+        input: impl BufRead,
+        hangup: Option<HangUp>,
+        stdout: impl Write,
+    ) -> io::Result<()> {
+        self.hangup = hangup;
+        let served = self.answer(input, stdout);
+        self.hangup = None;
+        served
+    }
+
+    /// Answer each request line of `input` until EOF.
+    fn answer(&mut self, input: impl BufRead, mut stdout: impl Write) -> io::Result<()> {
         for line in input.lines() {
             let line = line?;
             if line.trim().is_empty() {

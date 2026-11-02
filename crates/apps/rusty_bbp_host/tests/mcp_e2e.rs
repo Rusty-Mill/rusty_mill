@@ -723,6 +723,73 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// The hang-up probe is Linux-only; elsewhere a wait runs to its timeout.
+#[cfg(target_os = "linux")]
+#[test]
+fn closing_stdin_ends_a_blocked_wait_and_the_server() {
+    let dir = tempdir("hangup");
+    let _task = setup(&dir);
+    // The first turn is the planner's, so the coder's wait blocks.
+    let mut coder = Mcp::session(&dir, "T1", "coder");
+    let id = coder.send_call("wait", r#"{"timeout_s":30}"#);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    drop(coder.child.stdin.take());
+    let (w, _) = coder.recv_call(id);
+    assert_eq!(woke(&w), ("closed", None));
+    let status = coder.child.wait().expect("server exits");
+    assert!(status.success(), "{status}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_reply_the_client_cannot_read_ends_the_server_with_stdin_open() {
+    let dir = tempdir("deaf");
+    let _task = setup(&dir);
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .arg("mcp")
+        .env("BBP_DIR", &dir)
+        .env("BBP_TASK", "T1")
+        .env("BBP_PRINCIPAL", "coder")
+        .env_remove("BBP_TURN")
+        .env("BBP_SESSION", "yes")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn bbp mcp");
+    // The client stops reading replies but keeps its request stream open.
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+        .expect("write");
+    stdin.flush().expect("flush");
+    let started = std::time::Instant::now();
+    let exited = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break Some(status);
+        }
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(stdin);
+    assert!(
+        exited.is_some(),
+        "the server waits on input after its output failed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_partial_request_never_holds_back_a_wait_reply() {
     let dir = tempdir("partial");
