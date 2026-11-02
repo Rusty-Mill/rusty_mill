@@ -30,6 +30,9 @@ fn samples(method: &Method) -> Vec<(&'static str, Value)> {
         .map(|p| match p.name {
             // Text, but one of four words.
             "side" => (p.name, Value::Text("right".into())),
+            // Text, but a colour.
+            "foreground" | "background" | "cursor" => (p.name, Value::Text("#102030".into())),
+            "palette" => (p.name, Value::Words(vec!["1=#cc0000".into()])),
             _ => (p.name, sample(p.ty)),
         })
         .collect()
@@ -112,21 +115,45 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.pwd",
             "terminal.title",
             "terminal.status",
-            "terminal.process"
+            "terminal.process",
+            "terminal.size",
+            "terminal.reset",
+            "terminal.set-theme"
         ]
     );
+    let control = ["terminal.size", "terminal.reset", "terminal.set-theme"];
     for name in block_methods {
         let method = block_method(name).expect(name);
         assert_eq!(method.params[0].ty, Ty::Id(Entity::Block), "{name}");
-        assert_eq!(method.needs, Features::BLOCK_CALL, "{name}");
-        let writes = name == "terminal.send-keys";
-        let returns = if writes {
-            Returns::Unanswered
-        } else {
-            Returns::Text
+        let needs = match control.contains(&name) {
+            true => Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL),
+            false => Features::BLOCK_CALL,
+        };
+        assert_eq!(method.needs, needs, "{name}");
+        let returns = match name {
+            "terminal.send-keys" => Returns::Unanswered,
+            "terminal.reset" | "terminal.set-theme" => Returns::Nothing,
+            _ => Returns::Text,
         };
         assert_eq!(method.returns, returns, "{name}");
     }
+    // A theme is checked whole before anything is sent.
+    let theme = method("terminal.set-theme").expect("set-theme");
+    let block = ("block", Value::Id(id(1)));
+    assert!(matches!(
+        theme.request(1, std::slice::from_ref(&block)),
+        Err(CallError::Invalid {
+            param: "palette",
+            ..
+        })
+    ));
+    assert!(matches!(
+        theme.request(1, &[block, ("background", Value::Text("red".into()))]),
+        Err(CallError::Invalid {
+            param: "background",
+            ..
+        })
+    ));
     let format = method("terminal.format").expect("format");
     let args = [("history", Value::Lines(3)), ("block", Value::Id(id(1)))];
     assert_eq!(
@@ -247,7 +274,19 @@ fn optional_parameters_add_their_features_only_when_given() {
     assert_eq!(
         optional,
         [
-            "command", "arg", "cwd", "command", "arg", "cwd", "trim", "unwrap", "vt"
+            "command",
+            "arg",
+            "cwd",
+            "command",
+            "arg",
+            "cwd",
+            "trim",
+            "unwrap",
+            "vt",
+            "foreground",
+            "background",
+            "cursor",
+            "palette"
         ]
     );
     let format = method("terminal.format").expect("format");

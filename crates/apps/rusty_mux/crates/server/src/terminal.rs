@@ -3,10 +3,47 @@
 use std::path::Path;
 
 use rusty_mux_core::{Progress, Selection};
+use rusty_mux_proto::theme::{Colour, ThemeChange};
 use rusty_mux_status::Records;
 use rusty_term_core::{Cell, Grid, StatusSignal, WIDE_TRAILER};
 
 use crate::style::Style;
+
+/// What `terminal.reset` feeds a terminal: CAN, which ends any sequence the
+/// program left unfinished (a string, an ESC waiting for its next byte, a
+/// cut CSI or UTF-8 character) without acting on it, then RIS. Without the
+/// CAN, rusty_term_core reads the RIS's ESC as part of an unfinished string
+/// or escape and never resets, while a VT500-style outer terminal would.
+/// Clients built before CAN ended an OSC string take it into the string;
+/// a reset is refused while one is attached.
+pub(crate) const RESET: &[u8] = b"\x18\x1bc";
+
+/// The OSC sequences that make `change`, each ended by ST: OSC 10, 11 and
+/// 12 set the default foreground, background and cursor colours, 110, 111
+/// and 112 put them back, and OSC 4 and 104 do the same for a palette
+/// entry. None asks the terminal anything, so none is answered.
+pub(crate) fn theme(change: &ThemeChange) -> Vec<u8> {
+    let mut out = String::new();
+    let dynamic = [
+        (change.foreground, 10),
+        (change.background, 11),
+        (change.cursor, 12),
+    ];
+    for (colour, code) in dynamic {
+        match colour {
+            Some(Colour::Rgb(rgb)) => out.push_str(&format!("\x1b]{code};#{rgb:06x}\x1b\\")),
+            Some(Colour::Default) => out.push_str(&format!("\x1b]1{code}\x1b\\")),
+            None => {}
+        }
+    }
+    for (index, colour) in &change.palette {
+        match colour {
+            Colour::Rgb(rgb) => out.push_str(&format!("\x1b]4;{index};#{rgb:06x}\x1b\\")),
+            Colour::Default => out.push_str(&format!("\x1b]104;{index}\x1b\\")),
+        }
+    }
+    out.into_bytes()
+}
 
 /// What `terminal.format` reads, and how.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -257,6 +294,45 @@ fn percent_decode(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_term_core::AnsiParser;
+
+    /// Every state a program can leave the parser in, as the bytes that
+    /// leave it there: strings, an ESC inside a string (which starts its
+    /// terminator), escapes waiting for a byte, a CSI and a UTF-8
+    /// character cut short.
+    pub(crate) const STUCK: &[&[u8]] = &[
+        b"\x1b]0;stuck",
+        b"\x1b]0;stuck\x1b",
+        b"\x1bP1$r",
+        b"\x1bP1$r\x1b",
+        b"\x1b_Gstuck",
+        b"\x1b_Gstuck\x1b",
+        b"\x1b^stuck",
+        b"\x1b^stuck\x1b",
+        b"\x1bXstuck\x1b",
+        b"\x1b",
+        b"\x1b(",
+        b"\x1b#",
+        b"\x1b[3",
+        b"\xe2\x94",
+    ];
+
+    #[test]
+    fn a_reset_resets_whatever_the_program_left_unfinished() {
+        for stuck in STUCK {
+            let mut grid = Grid::new(20, 3);
+            let mut parser = AnsiParser::new();
+            parser.advance(&mut grid, b"\x1b[?1hBEFORE");
+            parser.advance(&mut grid, stuck);
+            parser.advance(&mut grid, RESET);
+            let screen = format(&grid, Capture::default(), usize::MAX).unwrap_or_default();
+            assert!(!screen.contains("BEFORE"), "{stuck:?}: {screen:?}");
+            assert!(!grid.app_cursor_keys, "{stuck:?}");
+            assert!(parser.ground(), "{stuck:?}");
+            assert_eq!(grid.title, "", "{stuck:?}: the string was not acted on");
+            assert!(parser.take_responses().is_empty(), "{stuck:?}");
+        }
+    }
 
     #[test]
     fn reported_paths_are_decoded() {

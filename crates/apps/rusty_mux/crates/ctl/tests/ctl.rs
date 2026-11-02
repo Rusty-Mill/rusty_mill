@@ -302,6 +302,56 @@ fn terminal_methods_read_the_block() {
     assert!(json.contains("\"text\":\"/\""), "{json}");
 }
 
+#[test]
+fn terminal_size_theme_and_reset() {
+    let socket = start_server();
+    let block = block(&socket);
+    assert_eq!(ok(&socket, &["terminal.size", "--block", &block]), "80x24");
+    let leased = [
+        "attach",
+        "--block",
+        &block,
+        "+",
+        "acquire-lease",
+        "--block",
+        &block,
+        "+",
+    ];
+    let theme = [
+        "terminal.set-theme",
+        "--block",
+        &block,
+        "--background",
+        "#102030",
+        "--palette",
+        "1=#cc0000",
+        "--palette",
+        "2=default",
+    ];
+    ok(&socket, &[&leased[..], &theme].concat());
+    ok(
+        &socket,
+        &[&leased[..], &["terminal.reset", "--block", &block]].concat(),
+    );
+    // Without the lease the server refuses; a bad colour never leaves ctl.
+    let output = ctl(&socket, &["terminal.reset", "--block", &block]);
+    assert_eq!(output.status.code(), Some(1));
+    let bad = [
+        "terminal.set-theme",
+        "--block",
+        &block,
+        "--background",
+        "red",
+    ];
+    let output = ctl(&socket, &[&leased[..], &bad].concat());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("background"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// An agent's view of a job: wait until it has the terminal, then read
 /// what runs. Linux only: Windows reports no foreground process.
 #[cfg(target_os = "linux")]
@@ -727,8 +777,15 @@ fn garbage_from_the_server_exits_1() {
 /// A server from before SYNC: it welcomes the client and then counts the
 /// request frames it receives until the client hangs up.
 fn legacy_server() -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
+    legacy_server_with(rusty_mux_proto::Features::CHECKPOINT_V6)
+}
+
+/// [`legacy_server`] offering `features`.
+fn legacy_server_with(
+    features: rusty_mux_proto::Features,
+) -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
     use rusty_mux_core::ClientId;
-    use rusty_mux_proto::{Features, Message, decode, encode};
+    use rusty_mux_proto::{Message, decode, encode};
 
     let path = socket_path("legacy");
     let listener = StdListener::bind(&path).expect("bind");
@@ -744,7 +801,7 @@ fn legacy_server() -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
                 buf.drain(..used);
                 if let Message::Hello { .. } = message {
                     let welcome = Message::Welcome {
-                        features: Features::CHECKPOINT_V6,
+                        features,
                         client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
                         cursor: None,
                         token: None,
@@ -780,6 +837,48 @@ fn a_chain_the_server_cannot_run_sends_nothing() {
     for chain in chains {
         let (path, frames) = legacy_server();
         assert_eq!(ctl(&path, chain).status.code(), Some(1), "{chain:?}");
+        let sent = frames.recv_timeout(PATIENCE).expect("frame count");
+        assert_eq!(sent, 0, "{chain:?} sent requests before refusing");
+    }
+}
+
+/// A server from before C40 has block calls but not the terminal control
+/// methods: ctl refuses them before sending anything, chained or not.
+#[test]
+fn terminal_control_is_refused_by_a_server_without_it() {
+    use rusty_mux_proto::Features;
+    let block = "00000000-0000-0000-0000-000000000001";
+    let older = Features::CHECKPOINT_V6
+        .union(Features::SYNC)
+        .union(Features::INSPECT)
+        .union(Features::BLOCK_CALL);
+    let chains: [&[&str]; 3] = [
+        &["terminal.size", "--block", block],
+        &[
+            "attach",
+            "--block",
+            block,
+            "+",
+            "acquire-lease",
+            "--block",
+            block,
+            "+",
+            "terminal.reset",
+            "--block",
+            block,
+        ],
+        &[
+            "terminal.set-theme",
+            "--block",
+            block,
+            "--background",
+            "#102030",
+        ],
+    ];
+    for chain in chains {
+        let (path, frames) = legacy_server_with(older);
+        let output = ctl(&path, chain);
+        assert_eq!(output.status.code(), Some(1), "{chain:?}");
         let sent = frames.recv_timeout(PATIENCE).expect("frame count");
         assert_eq!(sent, 0, "{chain:?} sent requests before refusing");
     }

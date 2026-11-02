@@ -11,6 +11,7 @@ use rusty_mux_core::{
     BlockId, ClientId, Event, ExitStatus, Mux, Principal, Side, Size, Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
+use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
     Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Takeover, encode,
 };
@@ -75,7 +76,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::IDENTITY)
     .union(Features::MORE_PROGRAM_EVENTS)
     .union(Features::ACTIVE_WINDOW)
-    .union(Features::CONFIG_RELOAD);
+    .union(Features::CONFIG_RELOAD)
+    .union(Features::TERMINAL_CONTROL);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -896,7 +898,7 @@ impl State {
     /// Runs block method `method` on `block`, after checking its arguments
     /// against the catalog.
     fn block_call(
-        &self,
+        &mut self,
         client: ClientId,
         req: u64,
         block: BlockId,
@@ -957,6 +959,45 @@ impl State {
             "terminal.process" => {
                 let pid = rt.process.pid().ok_or("the program has exited")?;
                 process::text(&process::chain(pid, rt.pty.foreground(), process::lookup))
+            }
+            "terminal.size" => format!("{}x{}", rt.grid.cols, rt.grid.rows),
+            "terminal.reset" => {
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                // A client without the bit was built before CAN ended an OSC
+                // string: its copy would act on what the program left
+                // unfinished and miss the RIS, or both.
+                let older = self.attached(block).into_iter().any(|c| {
+                    !(self.features.get(&c)).is_some_and(|f| f.contains(Features::TERMINAL_CONTROL))
+                });
+                if older {
+                    return Err(format!(
+                        "{method}: a client attached to this block is too old to reset \
+                         its terminal safely; detach it or update it"
+                    )
+                    .into());
+                }
+                self.inject(block, terminal::RESET);
+                return Ok(Outcome::Done(None));
+            }
+            "terminal.set-theme" => {
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                // Bytes added inside the program's unfinished sequence would
+                // end it early and leave its rest on the screen as text.
+                if !rt.parser.ground() {
+                    return Err(format!(
+                        "{method}: the program left an escape sequence unfinished; \
+                         try again, or reset the terminal"
+                    )
+                    .into());
+                }
+                let change =
+                    ThemeChange::from_args(&named).map_err(|e| format!("{method}: {e}"))?;
+                self.inject(block, &terminal::theme(&change));
+                return Ok(Outcome::Done(None));
             }
             _ => return Err(unknown()),
         };
@@ -1337,6 +1378,21 @@ impl State {
         }
         self.flush();
         replies
+    }
+
+    /// Feeds `bytes` of the server's own to `block`'s terminal and to every
+    /// client attached to it, as if its program had written them, so all
+    /// copies of the terminal stay alike. They must ask nothing: the
+    /// program would read an answer as input.
+    fn inject(&mut self, block: BlockId, bytes: &[u8]) {
+        let replies = self.output(block, bytes);
+        if !replies.is_empty() {
+            eprintln!(
+                "rusty-mux-server: block {block} answered the server's own bytes; \
+                 {} bytes of answer dropped",
+                replies.len()
+            );
+        }
     }
 
     /// Announces the foreground process group of `block` if another took

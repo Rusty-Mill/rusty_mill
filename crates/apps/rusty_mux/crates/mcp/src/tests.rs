@@ -67,6 +67,27 @@ fn keys_are_sent_under_the_lease() {
 }
 
 #[test]
+fn a_reset_and_a_theme_are_made_under_the_lease() {
+    let reset = args(r#"{"block": "2"}"#);
+    assert_eq!(
+        argv(known("terminal.reset"), Some(&reset)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + terminal.reset --block=2".into())
+    );
+    let theme = args(r##"{"block": "2", "background": "#102030", "palette": ["1=default"]}"##);
+    assert_eq!(
+        argv(known("terminal.set-theme"), Some(&theme)).map(|a| a.join(" ")),
+        Ok("attach --block=2 + acquire-lease --block=2 + \
+            terminal.set-theme --background=#102030 --block=2 --palette=1=default"
+            .into())
+    );
+    let size = args(r#"{"block": "2"}"#);
+    assert_eq!(
+        argv(known("terminal.size"), Some(&size)).map(|a| a.join(" ")),
+        Ok("terminal.size --block=2".into())
+    );
+}
+
+#[test]
 fn a_list_argument_repeats_its_flag() {
     let call = args(r#"{"arg": ["-c", "exit 3"]}"#);
     assert_eq!(
@@ -140,7 +161,7 @@ fn tools_carry_the_catalog_schema_and_hints() {
     );
     let hint = |t: &Tool, k: &str| t.annotations.as_ref().and_then(|a| a.get(k)).cloned();
     assert_eq!(hint(&format, "readOnlyHint"), Some(Value::Bool(true)));
-    for name in ["close-block", "disconnect-client"] {
+    for name in ["close-block", "disconnect-client", "terminal.reset"] {
         let ends = tool(known(name));
         assert_eq!(
             hint(&ends, "destructiveHint"),
@@ -158,8 +179,16 @@ fn tools_carry_the_catalog_schema_and_hints() {
             "{name}"
         );
     }
-    let rename = tool(known("rename-client"));
-    assert_eq!(hint(&rename, "destructiveHint"), Some(Value::Bool(false)));
+    for name in ["rename-client", "terminal.set-theme"] {
+        let changes = tool(known(name));
+        assert_eq!(
+            hint(&changes, "destructiveHint"),
+            Some(Value::Bool(false)),
+            "{name}"
+        );
+    }
+    let size = tool(known("terminal.size"));
+    assert_eq!(hint(&size, "readOnlyHint"), Some(Value::Bool(true)));
     for name in ["input", "create-block", "split-block"] {
         let runs = tool(known(name));
         assert_eq!(
