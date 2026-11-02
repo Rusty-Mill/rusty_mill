@@ -25,7 +25,8 @@ const HISTORY: usize = 3;
 struct Layout {
     size: (usize, usize),
     pad: usize,
-    font: u64,
+    /// The pane font's and the UI (bar) font's ids.
+    fonts: [u64; 2],
     colors: [u32; 3],
     chrome: Vec<Cell>,
     status: Vec<Cell>,
@@ -87,7 +88,7 @@ impl Frame {
         panes: &[PaneFrame],
         chrome: &[Cell],
         status: &[Cell],
-        font: u64,
+        fonts: [u64; 2],
         size: (usize, usize),
         colors: [u32; 3],
         pad: usize,
@@ -95,7 +96,7 @@ impl Frame {
         let layout = Layout {
             size,
             pad,
-            font,
+            fonts,
             colors,
             chrome: chrome.to_vec(),
             status: status.to_vec(),

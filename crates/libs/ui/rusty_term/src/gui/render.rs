@@ -21,19 +21,20 @@ use super::font::{FontCache, GlyphSource};
 /// Pixels of strip-colored band above the chrome bar's tabs, so a tab's top
 /// edge is visibly distinct from the window's (the tabs otherwise run flush
 /// into the frame and read as sliced off). Bounded by the window padding so
-/// the pushed-down bar can never overlap the grid, which starts a full cell
-/// row plus `pad` below the top.
-pub(super) fn bar_inset(pad: usize, cell_h: usize) -> usize {
-    pad.min(cell_h / 6)
+/// the pushed-down bar can never overlap the grid, which starts a full bar
+/// height plus `pad` below the top.
+pub(super) fn bar_inset(pad: usize, bar_h: usize) -> usize {
+    pad.min(bar_h / 6)
 }
 
-/// Pixel row where the pane grid starts: below the padding, pushed down by
-/// the chrome bar's [`bar_inset`] when there is one.
-pub(super) fn grid_top(chrome: &[Cell], pad: usize, cell_h: usize) -> usize {
+/// Pixel row where the pane grid starts: below the padding and, when there
+/// is one, the chrome bar (`bar_h` tall, the UI font's cell height) and its
+/// [`bar_inset`]. Pane rows count from 0 at this edge.
+pub(super) fn grid_top(chrome: &[Cell], pad: usize, bar_h: usize) -> usize {
     if chrome.is_empty() {
         pad
     } else {
-        pad + bar_inset(pad, cell_h)
+        pad + bar_inset(pad, bar_h) + bar_h
     }
 }
 
@@ -141,7 +142,8 @@ pub(crate) struct PaneFrame<'a> {
 /// size. `chrome` is the window's own top bar (tabs + caption buttons) as one
 /// pre-laid cell row at the top; `status` is the bottom status ribbon (cwd,
 /// git branch, exit pill, …) as one pre-laid cell row flush with the window's
-/// bottom edge (empty when disabled); `divider` fills the gaps between panes;
+/// bottom edge (empty when disabled). Both bars draw in `ui`, the window's
+/// UI font, which the Ctrl+=/Ctrl+- zoom leaves alone; panes draw in `font`; `divider` fills the gaps between panes;
 /// `bg` fills everything else — the `pad`-pixel band inset around the pane
 /// area (`[window] padding`) and any right/bottom slack, so content reads as
 /// floating on the terminal background. Both bars stay flush.
@@ -153,6 +155,7 @@ pub(crate) trait Renderer {
         chrome: &[Cell],
         status: &[Cell],
         font: &mut FontCache,
+        ui: &mut FontCache,
         width: u32,
         height: u32,
         divider: u32,
@@ -203,6 +206,7 @@ impl Renderer for CpuRenderer {
         chrome: &[Cell],
         status: &[Cell],
         font: &mut FontCache,
+        ui: &mut FontCache,
         width: u32,
         height: u32,
         divider: u32,
@@ -224,7 +228,7 @@ impl Renderer for CpuRenderer {
             panes,
             chrome,
             status,
-            font.id(),
+            [font.id(), ui.id()],
             (w, h),
             [divider, bg, bar_bg],
             pad,
@@ -237,6 +241,7 @@ impl Renderer for CpuRenderer {
             chrome,
             status,
             font,
+            ui,
             w,
             h,
             divider,
@@ -247,7 +252,7 @@ impl Renderer for CpuRenderer {
         );
         let presented = match shown {
             Some(rows) => {
-                let top = grid_top(chrome, pad, font.cell_size().1);
+                let top = grid_top(chrome, pad, ui.cell_size().1);
                 let rects = damage_rects(panes, &rows, font.cell_size(), (pad, top), (w, h));
                 buffer.present_with_damage(&rects)
             }
@@ -316,6 +321,7 @@ pub(super) fn composite(
     chrome: &[Cell],
     status: &[Cell],
     font: &mut dyn GlyphSource,
+    ui: &mut dyn GlyphSource,
     w: usize,
     h: usize,
     divider: u32,
@@ -325,11 +331,11 @@ pub(super) fn composite(
     repaint: Option<&[Vec<bool>]>,
 ) {
     let (cw, ch) = font.cell_size();
+    let (bw, bh) = ui.cell_size();
     // The chrome bar sits `inset` px below the window's top edge (the
-    // strip band shows above it); the grid shifts down by the same
-    // amount so the pad-sized gap between bar and content survives —
-    // the bottom pad absorbs the difference.
-    let oy = grid_top(chrome, pad, ch);
+    // strip band shows above it); the grid starts below the bar plus the
+    // pad-sized gap — the bottom pad absorbs the difference.
+    let oy = grid_top(chrome, pad, bh);
     if let Some(rows) = repaint {
         for (p, rows) in panes.iter().zip(rows) {
             cpu::draw_grid(
@@ -355,7 +361,7 @@ pub(super) fn composite(
         return;
     }
     buffer.fill(bg); // the padding band (and any slack) is background
-    let inset = oy - pad;
+    let inset = bar_inset(pad, bh);
     // Gaps between panes show the divider: fill the panes' bounding box
     // with it, then let the grids overpaint everything but the gaps.
     if let (Some(x1), Some(y1)) = (
@@ -371,12 +377,12 @@ pub(super) fn composite(
         }
     }
     if !chrome.is_empty() {
-        cpu::draw_chrome(buffer, w, h, chrome, font, cw, ch, inset, bar_bg);
+        cpu::draw_chrome(buffer, w, h, chrome, ui, bw, bh, inset, bar_bg);
     }
     // The status ribbon sits flush with the window's bottom edge; the
-    // grid was sized one row shorter, so it never paints under it.
-    if !status.is_empty() && h >= ch {
-        cpu::draw_bar(buffer, w, h, status, font, cw, ch, h - ch);
+    // grid was sized to stop above it, so it never paints under it.
+    if !status.is_empty() && h >= bh {
+        cpu::draw_bar(buffer, w, h, status, ui, bw, bh, h - bh);
     }
     for p in panes {
         cpu::draw_grid(
@@ -405,6 +411,92 @@ pub(super) fn composite(
 mod tests {
     use super::*;
     use crate::core::{AnsiParser, Grid};
+    use std::rc::Rc;
+
+    use super::super::font::{Glyph, Style};
+
+    /// A font of inkless glyphs at a fixed cell size, so a frame shows
+    /// only cell backgrounds.
+    struct Blank((usize, usize));
+
+    impl GlyphSource for Blank {
+        fn cell_size(&self) -> (usize, usize) {
+            self.0
+        }
+        fn baseline(&self) -> i32 {
+            0
+        }
+        fn glyph(&mut self, _ch: char, _style: Style) -> Rc<Glyph> {
+            Rc::new(Glyph {
+                width: 0,
+                height: 0,
+                left: 0,
+                top: 0,
+                coverage: Vec::new(),
+                color: None,
+            })
+        }
+    }
+
+    /// The bars lay out on the UI font's cell and the grid on its own, so a
+    /// zoomed grid font leaves the chrome and status bars their size (#1374
+    /// zoom scaled the whole window).
+    #[test]
+    fn bars_keep_the_ui_font_size_when_the_grid_font_differs() {
+        const PAD: usize = 6;
+        let (chrome_bg, status_bg, bar_bg, page_bg) = (0x111111, 0x222222, 0x333333, 0x444444);
+        let bar_cell = |bg| Cell {
+            bg,
+            ..Cell::blank()
+        };
+        let chrome = vec![bar_cell(chrome_bg); 10];
+        let status = vec![bar_cell(status_bg); 10];
+        let mut g = Grid::new(2, 2);
+        AnsiParser::new().advance(&mut g, b"\x1b[48;2;0;0;255m\x1b[2J");
+        let view = g.frame_view();
+        let pane = PaneFrame {
+            grid: &view,
+            col0: 0,
+            row0: 0,
+            focused: false,
+            cursor_on: false,
+            trail: Vec::new(),
+            hover_link: None,
+            marks: Vec::new(),
+        };
+        // A zoomed-in grid font (20×30) under a 6×12 UI font.
+        let (mut font, mut ui) = (Blank((20, 30)), Blank((6, 12)));
+        let (w, h) = (60, 120);
+        let mut buf = vec![0; w * h];
+        composite(
+            &mut buf,
+            &[pane],
+            &chrome,
+            &status,
+            &mut font,
+            &mut ui,
+            w,
+            h,
+            0,
+            page_bg,
+            bar_bg,
+            PAD,
+            None,
+        );
+        let at = |x: usize, y: usize| buf[y * w + x];
+        let inset = bar_inset(PAD, 12);
+        assert_eq!(inset, 2);
+        assert_eq!(at(0, 0), bar_bg, "strip band above the tabs");
+        assert_eq!(at(0, inset), chrome_bg, "chrome starts below the band");
+        assert_eq!(at(0, inset + 11), chrome_bg, "chrome is one UI cell tall");
+        assert_eq!(at(PAD, inset + 12), page_bg, "padding gap below the bar");
+        let top = grid_top(&chrome, PAD, 12);
+        assert_eq!(top, PAD + inset + 12);
+        assert_eq!(at(PAD, top), 0x0000FF, "the grid starts below the bar");
+        assert_eq!(at(PAD, top - 1), page_bg);
+        assert_eq!(at(0, h - 12), status_bg, "status is one UI cell tall");
+        assert_eq!(at(0, h - 13), page_bg);
+    }
 
     /// The first cell of a 1×1 grid after `bytes`, as the window draws it.
     fn drawn_after(bytes: &[u8]) -> Cell {
