@@ -27,3 +27,20 @@ This is already in the addendum at a1b741b2, listed here for the engine's record
   - some entry is `added` and `failing(c)` is non-empty.
 
   Adding tests alone needs no endorsement (owner, 2026-11-02).
+
+## A superseded dep collapses like a dropped one (owner, 2026-11-02)
+
+A dep that becomes `superseded` is treated exactly like one that is `dropped` or `void`:
+
+- An unacted dependent is voided.
+- An acted-on dependent escalates `dep_collapsed`. It is never voided automatically, even if a human has reopened it since it was acted on.
+
+Trace CL-70 covers both cases for a superseded dep and for a dropped one.
+
+## Credentials end with the task (owner, 2026-11-02)
+
+After `close` or `cancel`, the session credential is invalid (C-R1). Every claims-mode agent call is refused `bad_credential`, including views and replays of earlier ops. Retries during the task are authenticated before a cached response is returned. Humans keep read access to the log through the host. Traces: CL-64 and CL-67.
+
+## `evidence_base` is bounded (owner, 2026-11-02)
+
+`evidence_base` must be between 1 and 2^20 (`ClaimsConfig::MAX_EVIDENCE_BASE`), or the open is refused `bad_claims_config`. Extending a budget uses checked arithmetic and refuses `claim_budget` rather than wrapping. Trace: CL-69.

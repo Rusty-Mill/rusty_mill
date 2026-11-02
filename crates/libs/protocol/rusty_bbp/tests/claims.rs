@@ -2622,3 +2622,73 @@ fn cl_69_unrepresentable_budgets_are_refused_at_open() {
         ClaimsConfig::MAX_EVIDENCE_BASE * 4 * 2 * 2
     );
 }
+
+/// Owner, 2026-11-02: a superseded dep is treated exactly like a dropped one.
+/// Unacted dependents are voided; acted-on dependents escalate and are never
+/// auto-voided, whatever their own status.
+#[test]
+fn cl_70_superseded_dep_collapses_like_a_dropped_one() {
+    fn supersede(cx: &mut Cx, x: MsgId) {
+        let y = cx.claim(
+            "b",
+            ClaimBody {
+                supersedes: Some(x),
+                ..body("y")
+            },
+        );
+        accept(cx, y);
+        assert_eq!(cx.status(x), ClaimStatus::Superseded);
+    }
+    let collapsed = |cx: &Cx, b: MsgId| {
+        cx.log.iter().any(|e| {
+            matches!(e, Event::ClaimEscalated { claim, reason: ClaimEscalation::DepCollapsed } if *claim == b)
+        })
+    };
+    for superseded in [true, false] {
+        let fall = |cx: &mut Cx, x: MsgId| {
+            if superseded {
+                supersede(cx, x)
+            } else {
+                ok(cx.decide(x, ClaimOutcome::Drop))
+            }
+        };
+        // (a) unacted accepted dependent: voided.
+        let mut cx = Cx::new();
+        let x = cx.low();
+        let b = cx.claim("b", dep_on("b", vec![x]));
+        accept(&mut cx, x);
+        accept(&mut cx, b);
+        fall(&mut cx, x);
+        assert_eq!(cx.status(b), ClaimStatus::Void, "superseded={superseded}");
+        // (b) acted-on accepted dependent: escalates.
+        let mut cx = Cx::new();
+        let x = cx.low();
+        let b = cx.claim("b", dep_on("b", vec![x]));
+        accept(&mut cx, x);
+        accept(&mut cx, b);
+        cx.mark(b, "pr-1");
+        fall(&mut cx, x);
+        assert_eq!(
+            cx.status(b),
+            ClaimStatus::Escalated,
+            "superseded={superseded}"
+        );
+        assert!(collapsed(&cx, b));
+        // (c) acted-on dependent the human reopened: escalates, not voided.
+        let mut cx = Cx::new();
+        let x = cx.low();
+        let b = cx.claim("b", dep_on("b", vec![x]));
+        accept(&mut cx, x);
+        accept(&mut cx, b);
+        cx.mark(b, "pr-1");
+        ok(cx.decide(b, ClaimOutcome::Reopen));
+        assert_eq!(cx.status(b), ClaimStatus::Open);
+        fall(&mut cx, x);
+        assert_eq!(
+            cx.status(b),
+            ClaimStatus::Escalated,
+            "superseded={superseded}"
+        );
+        assert!(collapsed(&cx, b));
+    }
+}

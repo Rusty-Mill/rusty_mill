@@ -819,17 +819,20 @@ fn changed(w: &mut Work, c: MsgId, was: ClaimStatus) {
     }
 }
 
-/// Dep `d` closed (dropped, void or superseded).
+/// Dep `d` closed (dropped, void or superseded: all alike, owner 2026-11-02).
+/// An unacted dependent is voided; an acted-on one escalates and is never
+/// auto-voided, whatever its own status.
 fn collapse(w: &mut Work, e: MsgId, d: MsgId) {
     let acted = acted(&w.st, e);
     match status(&w.st, e) {
-        Some(ClaimStatus::Open) => void(w, e, d),
-        Some(ClaimStatus::Escalated) if !acted => void(w, e, d),
-        Some(ClaimStatus::Accepted) if !acted => {
+        Some(ClaimStatus::Open | ClaimStatus::Accepted) if acted => {
+            escalate(w, e, ClaimEscalation::DepCollapsed)
+        }
+        Some(ClaimStatus::Open | ClaimStatus::Escalated) if !acted => void(w, e, d),
+        Some(ClaimStatus::Accepted) => {
             reopen(w, e, ReopenCause::Dep(d));
             void(w, e, d);
         }
-        Some(ClaimStatus::Accepted) => escalate(w, e, ClaimEscalation::DepCollapsed),
         _ => {}
     }
 }
