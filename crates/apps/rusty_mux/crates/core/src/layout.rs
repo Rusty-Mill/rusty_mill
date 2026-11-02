@@ -135,13 +135,6 @@ impl FromStr for Toward {
     }
 }
 
-/// The area directions are judged on: large, so every block of a layout
-/// [`MAX_DEPTH`] deep keeps some room.
-const COMPASS: Size = Size {
-    cols: u16::MAX,
-    rows: u16::MAX,
-};
-
 /// The first child's share of a split, a percentage from 1 to 99, so
 /// neither child is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,33 +318,99 @@ impl Layout {
         }
     }
 
-    /// The block next to `block` toward `toward`, if any: on a side, the
-    /// nearest block whose place borders `block`'s there, the one sharing
-    /// the longest edge of equals; in order, the next or previous block,
-    /// wrapping around.
+    /// The block next to `block` toward `toward`, if any: on a side, of
+    /// the blocks across the nearest divider there, the one sharing the
+    /// longest edge with `block`, the nearest of equals; in order, the next
+    /// or previous block, wrapping around. Judged on the tree, not on a
+    /// screen, so a block too small to show still has neighbours.
     pub fn neighbour(&self, block: BlockId, toward: Toward) -> Option<BlockId> {
         let side = match toward {
             Toward::Side(side) => side,
             Toward::Next | Toward::Previous => return self.cycle(block, toward),
         };
-        let rects = self.rects(COMPASS);
-        let from = rects.iter().find(|(b, _)| *b == block)?.1;
-        let axis = side.axis();
-        let (start, end) = span(from, axis);
-        rects
-            .iter()
-            .filter(|(b, _)| *b != block)
-            .filter_map(|(b, r)| {
-                let (s, e) = span(*r, axis);
-                let gap = match side.first() {
-                    true => (e <= start).then(|| start - e)?,
-                    false => (s >= end).then(|| s - end)?,
-                };
-                let overlap = overlap(from, *r, other(axis));
-                (overlap > 0).then_some((gap, overlap, *b))
+        let across = other(side.axis());
+        let (lo, hi) = self.extent(block, across)?;
+        let mut facing = Vec::new();
+        self.beyond(block, side)?.facing(side, &mut facing);
+        facing
+            .into_iter()
+            .filter_map(|b| {
+                let (s, e) = self.extent(b, across)?;
+                let shared = hi.min(e) - lo.max(s);
+                let apart = ((s + e) - (lo + hi)).abs();
+                Some((shared, apart, b))
             })
-            .min_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+            .min_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)))
             .map(|(_, _, b)| b)
+    }
+
+    /// The child across the innermost split along `side`'s axis that has
+    /// `block` on the far side from `side`.
+    fn beyond(&self, block: BlockId, side: Side) -> Option<&Self> {
+        let Self::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let (inner, outer, faces) = match first.contains(block) {
+            true => (first, second, !side.first()),
+            false if second.contains(block) => (second, first, side.first()),
+            false => return None,
+        };
+        inner
+            .beyond(block, side)
+            .or_else(|| (*axis == side.axis() && faces).then_some(&**outer))
+    }
+
+    /// The blocks along the edge a move toward `side` enters by.
+    fn facing(&self, side: Side, out: &mut Vec<BlockId>) {
+        match self {
+            Self::Block(block) => out.push(*block),
+            Self::Split {
+                axis,
+                first,
+                second,
+                ..
+            } if *axis == side.axis() => match side.first() {
+                true => second.facing(side, out),
+                false => first.facing(side, out),
+            },
+            Self::Split { first, second, .. } => {
+                first.facing(side, out);
+                second.facing(side, out);
+            }
+        }
+    }
+
+    /// Where `block` starts and ends along `axis`, as parts of the whole
+    /// layout from 0 to 1, dividers ignored.
+    fn extent(&self, block: BlockId, axis: Axis) -> Option<(f64, f64)> {
+        let (mut lo, mut hi) = (0.0, 1.0);
+        let mut node = self;
+        loop {
+            let Self::Split {
+                axis: own,
+                share,
+                first,
+                second,
+            } = node
+            else {
+                return (*node == Self::Block(block)).then_some((lo, hi));
+            };
+            let in_first = first.contains(block);
+            if *own == axis {
+                let mid = lo + (hi - lo) * f64::from(share.percent()) / 100.0;
+                match in_first {
+                    true => hi = mid,
+                    false => lo = mid,
+                }
+            }
+            node = if in_first { first } else { second };
+        }
     }
 
     fn cycle(&self, block: BlockId, toward: Toward) -> Option<BlockId> {
@@ -443,21 +502,6 @@ impl Layout {
             },
         }
     }
-}
-
-/// Where `rect` starts and ends along `axis`.
-fn span(rect: Rect, axis: Axis) -> (u32, u32) {
-    let (at, len) = match axis {
-        Axis::Columns => (rect.x, rect.size.cols),
-        Axis::Rows => (rect.y, rect.size.rows),
-    };
-    (u32::from(at), u32::from(at) + u32::from(len))
-}
-
-/// How many cells `a` and `b` share along `axis`.
-fn overlap(a: Rect, b: Rect, axis: Axis) -> u32 {
-    let ((a0, a1), (b0, b1)) = (span(a, axis), span(b, axis));
-    a1.min(b1).saturating_sub(a0.max(b0))
 }
 
 const fn other(axis: Axis) -> Axis {

@@ -959,8 +959,10 @@ pub static CATALOG: &[Method] = &[
     },
     Method {
         name: "focus-block",
-        doc: "Focus a block in its window, the block clients send keys to; ends a zoom on \
-              another block of the window.",
+        doc: "Focus a block in its window; ends a zoom on another block of the window. \
+              The focus is shared by every client, but the attach client does not follow \
+              it yet, so it does not change what a person types into; input and \
+              terminal.send-keys still go to the block they name.",
         params: &[required(
             "block",
             Ty::Id(Entity::Block),
@@ -979,7 +981,8 @@ pub static CATALOG: &[Method] = &[
         name: "move-focus",
         doc: "Move a window's focus from its focused block to the nearest block on a side, \
               or to the next or previous block in layout order, wrapping around. With no \
-              block that way, nothing changes.",
+              block that way, nothing changes. Like focus-block, it does not yet change \
+              what the attach client types into.",
         params: &[
             required("window", Ty::Id(Entity::Window), "The window."),
             required(

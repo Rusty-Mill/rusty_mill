@@ -263,3 +263,59 @@ fn ways_to_move_focus_parse_by_name() {
     }
     assert_eq!("north".parse::<Toward>(), Err(ParseError));
 }
+
+fn split(axis: Axis, percent: u8, first: Layout, second: Layout) -> Layout {
+    Layout::Split {
+        axis,
+        share: Share::new(percent).expect("valid share"),
+        first: Box::new(first),
+        second: Box::new(second),
+    }
+}
+
+#[test]
+fn blocks_too_small_to_show_still_have_neighbours() {
+    // cols1(cols1(cols1(cols1(1, 2), 3), 4), 5): on any screen, even the
+    // largest, block 2 gets no room, yet moves from and to it work.
+    let b = |n| Layout::Block(id(n));
+    let mut layout = b(1);
+    for n in 2..=5 {
+        layout = split(Axis::Columns, 1, layout, b(n));
+    }
+    let largest = size(u16::MAX, u16::MAX);
+    assert!(!layout.rects(largest).iter().any(|(b, _)| *b == id(2)));
+    let side = |b, s| layout.neighbour(id(b), Toward::Side(s));
+    assert_eq!(side(2, Side::Left), Some(id(1)));
+    assert_eq!(side(2, Side::Right), Some(id(3)));
+    assert_eq!(side(1, Side::Right), Some(id(2)));
+    assert_eq!(side(3, Side::Left), Some(id(2)));
+    assert_eq!(side(5, Side::Left), Some(id(4)));
+    assert_eq!(side(2, Side::Up), None);
+}
+
+#[test]
+fn a_move_picks_the_block_sharing_the_longest_edge() {
+    // Left: 1 over cols1(cols1(cols1(cols1(5, 6), 7), 8), 9), where 6
+    // gets no room on any screen. Right: 3 (top 30%) over 4.
+    let b = |n| Layout::Block(id(n));
+    let mut low = b(5);
+    for n in 6..=9 {
+        low = split(Axis::Columns, 1, low, b(n));
+    }
+    let left = split(Axis::Rows, 50, b(1), low);
+    let right = split(Axis::Rows, 30, b(3), b(4));
+    let layout = split(Axis::Columns, 50, left, right);
+    let largest = size(u16::MAX, u16::MAX);
+    assert!(!layout.rects(largest).iter().any(|(b, _)| *b == id(6)));
+    let side = |b, s| layout.neighbour(id(b), Toward::Side(s));
+    // 1 borders 3 for 30% of the height and 4 for 20%.
+    assert_eq!(side(1, Side::Right), Some(id(3)));
+    // 4 borders 1 for 20% and 9 for 50%.
+    assert_eq!(side(4, Side::Left), Some(id(9)));
+    // Below 1 sit 5 to 9; 9 is the widest.
+    assert_eq!(side(1, Side::Down), Some(id(9)));
+    assert_eq!(side(6, Side::Up), Some(id(1)));
+    assert_eq!(side(6, Side::Right), Some(id(7)));
+    assert_eq!(side(9, Side::Right), Some(id(4)));
+    assert_eq!(side(3, Side::Left), Some(id(1)));
+}

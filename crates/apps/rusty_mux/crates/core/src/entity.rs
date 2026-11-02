@@ -112,8 +112,9 @@ impl Window {
         self.zoomed
     }
 
-    /// The block in focus, the one clients send keys to; `None` only while
-    /// none is placed.
+    /// The block in focus, shared by every client; `None` only while none
+    /// is placed. The attach client does not follow it yet, so it does not
+    /// yet route anyone's input.
     pub fn focused(&self) -> Option<BlockId> {
         self.focused
     }
