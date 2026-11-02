@@ -449,6 +449,15 @@ After that, the content and the cursor row differ until the screen is redrawn:
 
 This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd, PSReadLine and edit.exe, and is part of the Phase B gate. A synchronization strategy, such as repainting the host's screen to the terminal after every resize, would need its own validation and a design update before this document claims the screens match.
 
+**Cursor resync after resize (#1375).** S3 showed V3 is very visible with PSReadLine in rusty_term's window: PSReadLine reads the cursor from GetConsoleScreenBufferInfo and draws its line with absolute positioning, so its echo and the command's output landed on the host's row, not the terminal's. The host now resyncs the cursor, as ConPTY does (microsoft/terminal GH#18725, `SCREEN_INFORMATION::WaitForConptyCursorPositionToBeSynchronized`):
+- A resize that changes the size marks the cursor as possibly wrong. Nothing is emitted yet.
+- The next GetConsoleScreenBufferInfo (valid handle, full descriptor) sends DSR 6 to the terminal and is held. Further calls of it are held behind it, and the engine takes no packet until the wait ends, as conhost's API thread blocks. Terminal input keeps flowing.
+- The first `CSI row ; col R` in the terminal's input during the wait is the answer, never a key. It moves the host's cursor to that screen position (a position the cursor already reads as keeps its pending wrap), and the held calls are answered from the model. A resize during the wait asks again, since the answer may predate it.
+- With no answer in 500 ms the held calls are answered from the model, as before.
+- A CPR outside a wait is input, as before.
+
+Only the cursor is resynced. The contents can still differ (ReadConsoleOutput), as under ConPTY. `v3_the_cursor_resyncs_from_the_terminal_after_a_resize` pins it at core level, and `own_pty.rs`'s `a_client_positioning_from_the_cursor_follows_the_terminal_after_a_resize` on Windows.
+
 **Regression tests (PR 4, Linux, core level).** Each test runs the same VT through a host Grid (scrollback 0) and a terminal-side Grid (with scrollback), resizes both and asserts the documented result for each, so V3 is pinned as an expected difference rather than discovered later:
 - shrink then grow, using the trace above;
 - narrow then widen with a wrapped line, primary and alternate screen;
@@ -474,7 +483,7 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 |---|---|---|---|---|
 | V1 | Buffer or window other than the terminal's size | SetConsoleScreenBufferSize grows the buffer (e.g. 9001 rows); under ConPTY SetConsoleWindowInfo resizes the buffer to the window asked for; GetLargestConsoleWindowSize reports what the display could hold | SetConsoleScreenBufferSize and SetConsoleWindowInfo succeed only at the window's size (`E_INVALIDARG` otherwise); GetLargestConsoleWindowSize reports the window | scrollback belongs to the terminal, and the terminal owns the size: a buffer the host resized alone would wrap text where the terminal doesn't |
 | V2 | SetConsoleScreenBufferInfoEx colours | changes the palette | no-op | no target program needs it |
-| V3 | Content and cursor after resize | one buffer, so one history | the host's model and the terminal's screen can differ after a shrink then grow, or a narrow then widen, until a redraw; absolute positioning then lands on different rows (§5.7) | the host keeps no scrollback, the terminal does; S3 measures it before Phase B |
+| V3 | Content after resize | one buffer, so one history | the host's model and the terminal's screen can differ after a shrink then grow, or a narrow then widen, until a redraw. The cursor is resynced from the terminal (DSR 6) before the next GetConsoleScreenBufferInfo, as ConPTY does, so absolute positioning lands on the terminal's rows (§5.7, #1375) | the host keeps no scrollback, the terminal does |
 | V4 | Startup code pages, input and output | OEM (e.g. 437) | 65001; `chcp` changes both from PR 9 | consumers are UTF-8 |
 | V5 | GetConsoleWindow | a hidden pseudo-window | NULL | add a message-only window if a program in the census needs it; conhost's source names cygwin, which fails silently on NULL, so cygwin and MSYS2 (git-bash tools) are in the census |
 | V6 | Multiple screen buffers (CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer) | supported | STATUS_NOT_IMPLEMENTED | no target program uses them (edit.exe uses `?1049h`); build when the unknown-API log shows a real caller |
