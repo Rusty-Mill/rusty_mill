@@ -723,6 +723,8 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// The hang-up probe is Linux-only; elsewhere a wait runs to its timeout.
+#[cfg(target_os = "linux")]
 #[test]
 fn closing_stdin_ends_a_blocked_wait_and_the_server() {
     let dir = tempdir("hangup");
