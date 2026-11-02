@@ -199,7 +199,8 @@ Task-level state in claims mode:
 
 - `read(after, limit)` returns messages as today, including `claim` and `evidence`. In claims mode it is authorised by the session credential and charged per call (R11).
 - `claims_delta(after_rev, domains)` is a pure function over `TaskState`: the claims whose status, score or evidence changed after `after_rev`, restricted to claims with a domain in `domains`, plus any claim that depends on one of those. It is what a host's subscription polls or wakes on (the host's push waker already watches the log). It replaces `wake_set` for claims mode and names no role.
-- `claim_card(claim)` and `claim_line(claim)` are free, need no credential, and are the human-readable views:
+- **Visibility.** `claims_delta`, `claim_card` and `claim_line` show claim text and evidence, so they follow the same rule as `read`. On the Agent API they need the session credential and return only claims and evidence the caller's `read_messages` allows. A `scoped` role sees a claim only if the human addressed it to that role, and it never sees other agents' evidence. A claim it may not read is not returned, not counted, and cannot be fetched by id. The unfiltered views are on the human channel and the host side only (the moderator, and orch as the host that assembles lens contexts), never on the Agent API.
+- `claim_card(claim)` and `claim_line(claim)` are free (no charge) and are the human-readable views:
   - card: text, status, score, confidence, evidence list with direction/kind/strength/author, deps, candidates;
   - line, for compaction: `msg:17 ACCEPTED +12 (90%) 5 evd · One shared HTTP client covers all 7 call sites…`. orch uses the line form for settled claims in a lens's context.
 
@@ -212,7 +213,7 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 1. **Log schema 5** for claims-mode tasks. Stage tasks are unchanged (schemas 2 to 4, byte-identical).
 2. **`MessageKind` gains `Claim` and `Evidence`.** This is a public enum in `rusty_bbp`. Exhaustive matches in `rusty_bbp_host` and `orch-bbp` must handle them, which is a cross-crate API change.
 3. **`State` gains `Open`** (claims mode only), or claims mode keeps a separate `ClaimsState`. I prefer a separate enum, so stage-mode matches stay exhaustive and untouched. This is an implementation detail for the PR.
-4. **Agent API (MCP):** `post` accepts the two kinds with a session credential; new free tools `claims_delta`, `claim_card`. The human channel adds `decision` on a claim, `reopen` and `budget_extended(claim)`.
+4. **Agent API (MCP):** `post` accepts the two kinds with a session credential; new tools `claims_delta`, `claim_card`, `claim_line`, credentialed and filtered by `read_messages`. The human channel adds `decision` on a claim, `reopen` and `budget_extended(claim)`.
 5. **Session credential** is a new host requirement: one per assignment, injected by the adapter, never shown to the model (same treatment as turn tokens).
 6. **Candidate manifest** gains an optional `claim` field: required in claims mode, refused in stage mode.
 
@@ -251,6 +252,7 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-25 | Property: random committed logs, each replayed twice; plus the a,b,c vs a,c,b example | Identical statuses and scores on every replay. The example: a,b,c accepts and refuses c; a,c,b stays `open` at +4 |
 | CL-26 | `claims_delta(after_rev, ["http"])` | Returns changed claims in `http` and their dependents, nothing else |
 | CL-27 | `claim_line` of an accepted claim | Matches the golden one-line format |
+| CL-35 | A `scoped` role calls `claims_delta`, `claim_card` and `claim_line` on another agent's claim, and fetches it by id | Nothing returned, nothing counted. The same calls with no credential → `bad_credential`. The human-channel view returns the claim |
 | CL-28 | Message budget crossed by a turnless evidence post | Exactly one task `escalated(messages)`; crossing write accepted; the next write by anyone → `wrong_state` until `budget_extended` + `resumed(open)` (TR-16 in claims mode) |
 | CL-29 | End to end with normal APIs: open a claims task; `a` posts claim X; `a` stores two diffs and a candidate naming X; the runner stores a `passed` log and report for the started run; `a` and `b` post `executed` support citing that report | `run_started` on the candidate; report accepted; X `claim_accepted`. No turn is ever granted |
 | CL-30 | Same path with `b`'s credential on `a`'s `put_artifact`, an expired credential after reassignment, and a candidate stored in a stage-mode task with a `claim` field | `bad_credential`, `bad_credential`, `wrong_mode`; nothing stored |
