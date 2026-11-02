@@ -142,6 +142,93 @@ fn plain_tells_whether_sgr_0_alone_would_restore_the_rendition() {
 }
 
 #[test]
+fn can_and_sub_abort_an_osc_string_without_acting_on_it() {
+    for abort in [b"\x18", b"\x1a"] {
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b]0;stuck");
+        p.advance(&mut g, abort);
+        assert!(p.ground(), "{abort:?}");
+        p.advance(&mut g, b"\x07after");
+        assert_eq!(g.title, "", "{abort:?}: the title was never set");
+        assert_eq!(g.line_text(0).as_deref().map(str::trim_end), Some("after"));
+    }
+}
+
+#[test]
+fn can_and_sub_abort_a_string_at_every_split_without_acting_on_it() {
+    // Each string sets the title, writes the clipboard, posts a
+    // notification or asks for an answer. Cut after each of its bytes,
+    // its terminator's ESC included, then CAN or SUB, it does nothing.
+    let strings: [&[u8]; 7] = [
+        b"\x1b]0;stuck\x1b",
+        b"\x1b]52;c;YQ==\x1b",
+        b"\x1b]9;hello\x1b",
+        b"\x1b]777;notify;title;body\x1b",
+        b"\x1bP$qm\x1b",
+        b"\x1bP+q544e\x1b",
+        b"\x1b_Gi=99,a=q;\x1b",
+    ];
+    for string in strings {
+        for cut in 1..=string.len() {
+            for abort in [b"\x18", b"\x1a"] {
+                let what = format!("{:?} {abort:?}", &string[..cut]);
+                let mut g = Grid::new(20, 2);
+                let mut p = AnsiParser::new();
+                p.advance(&mut g, &string[..cut]);
+                p.advance(&mut g, abort);
+                assert!(p.ground(), "{what}");
+                p.advance(&mut g, b"after");
+                assert_eq!(g.title, "", "{what}");
+                assert_eq!(g.clipboard_set, None, "{what}");
+                assert!(g.notifications.is_empty(), "{what}");
+                assert!(p.take_responses().is_empty(), "{what}");
+                assert_eq!(
+                    g.line_text(0).as_deref().map(str::trim_end),
+                    Some("after"),
+                    "{what}"
+                );
+            }
+        }
+        // With ST instead, each is acted on: the test sees a real effect.
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, string);
+        p.advance(&mut g, b"\\");
+        let acted = g.title == "stuck"
+            || g.clipboard_set.is_some()
+            || !g.notifications.is_empty()
+            || !p.take_responses().is_empty();
+        assert!(acted, "{string:?}");
+    }
+}
+
+#[test]
+fn ground_is_false_inside_any_unfinished_sequence() {
+    let mut g = Grid::new(20, 2);
+    let mut p = AnsiParser::new();
+    assert!(p.ground());
+    for (input, ground) in [
+        (&b"\x1b[31m"[..], true),
+        (b"\x1b", false),
+        (b"[3", false),
+        (b"1m", true),
+        (b"\xe2\x94", false),
+        (b"\x80", true),
+        (b"\x1b]0;title", false),
+        (b"\x1b", false),
+        (b"\\", true),
+        (b"\x1bP1$r", false),
+        (b"\x18", true),
+        (b"\x1b(", false),
+        (b"0", true),
+    ] {
+        p.advance(&mut g, input);
+        assert_eq!(p.ground(), ground, "{input:?}");
+    }
+}
+
+#[test]
 fn plain_cursor_needs_origin_and_insert_mode_off_and_no_open_link() {
     let mut g = Grid::new(20, 4);
     let mut p = AnsiParser::new();
@@ -8103,7 +8190,7 @@ fn measure_string_body_scan() {
 fn string_body_len_matches_a_byte_scan() {
     // Every byte value at every position of a 19-byte buffer (two words plus
     // a tail), for both terminator sets.
-    for stops in [&[0x07, 0x1b][..], &[0x1b, 0x18, 0x1a][..]] {
+    for stops in [&[0x07, 0x1b, 0x18, 0x1a][..], &[0x1b, 0x18, 0x1a][..]] {
         for bad in 0..=255u8 {
             for pos in 0..19 {
                 let mut buf = [b'a'; 19];
@@ -8127,7 +8214,7 @@ fn string_body_len_matches_a_byte_scan() {
 fn string_bodies_split_at_every_offset_match_one_chunk() {
     let stream: &[u8] = b"\x1b]2;first title\x07A\x1b]2;second\x1b\\B\
         \x1bP+q544e\x1b\\C\x1b_Gabc\x18D\x1bPzz\x1aE\x1bXsos body\x1b\\F\
-        \x1b^pm\x18G\x1b]2;last\x07H";
+        \x1b^pm\x18G\x1b]2;cut\x18I\x1b]2;last\x07H";
     let run = |chunks: &mut dyn Iterator<Item = &[u8]>| {
         let mut g = Grid::new(20, 2);
         let mut p = AnsiParser::new();
@@ -8141,7 +8228,7 @@ fn string_bodies_split_at_every_offset_match_one_chunk() {
     AnsiParser::new().advance(&mut g, stream);
     assert_eq!(
         row_text(&g, 0).trim_end(),
-        "ABCDEFGH",
+        "ABCDEFGIH",
         "every string returns to ground"
     );
     assert_eq!(whole.1, "last");

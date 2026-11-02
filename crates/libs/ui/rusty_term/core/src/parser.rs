@@ -210,8 +210,9 @@ pub(crate) fn string_body_len(bytes: &[u8], stops: &[u8]) -> usize {
     words.len() * 8 + tail.iter().take_while(|b| !stops.contains(b)).count()
 }
 
-/// Bytes that end an OSC body: BEL, or the ESC of an ST.
-const OSC_STOPS: &[u8] = &[0x07, 0x1b];
+/// Bytes that end an OSC body: BEL, the ESC of an ST, or a CAN or SUB
+/// abort.
+const OSC_STOPS: &[u8] = &[0x07, 0x1b, 0x18, 0x1a];
 /// Bytes that end a DCS, APC or ignored string body: the ESC of an ST, or a
 /// CAN or SUB abort.
 const STRING_STOPS: &[u8] = &[0x1b, 0x18, 0x1a];
@@ -436,6 +437,14 @@ impl AnsiParser {
             && self.pen == Pen::default_colors(self.palette.fg, self.palette.bg)
             && !self.protected
             && self.charsets[self.gl] == Charset::Ascii
+    }
+
+    /// Whether the parser is between sequences: not inside an escape, control
+    /// or string sequence, nor a UTF-8 character. Bytes a host adds to the
+    /// stream here are read on their own, not as the rest of something
+    /// unfinished.
+    pub fn ground(&self) -> bool {
+        self.state == ParserState::Ground
     }
 
     /// Drain the bytes the parser owes the host in reply to queries (DA1/DA2/
@@ -723,14 +732,23 @@ impl AnsiParser {
                         self.state = ParserState::Ground;
                     }
                     0x1b => self.state = ParserState::OscEsc, // possible ST (ESC \)
+                    0x18 | 0x1a => {
+                        // CAN / SUB abort the string with no action.
+                        self.osc_buffer.clear();
+                        self.state = ParserState::Ground;
+                    }
                     // Fast path: the body up to the next terminator is
                     // collected in one step.
                     _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::OscEsc => {
                     // Whether or not this is the `\` of an ST, the OSC string is
-                    // over; act on it and return to ground.
-                    self.finish_osc(g);
+                    // over; act on it and return to ground, unless CAN / SUB
+                    // abort it.
+                    match b {
+                        0x18 | 0x1a => self.osc_buffer.clear(),
+                        _ => self.finish_osc(g),
+                    }
                     self.state = ParserState::Ground;
                 }
                 ParserState::EscCharset => {
@@ -773,8 +791,12 @@ impl AnsiParser {
                     _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::DcsEsc => {
-                    // The DCS string is over (ST or otherwise); act on it.
-                    self.finish_dcs(g);
+                    // The DCS string is over (ST or otherwise); act on it,
+                    // unless CAN / SUB abort it.
+                    match b {
+                        0x18 | 0x1a => self.dcs_buffer.clear(),
+                        _ => self.finish_dcs(g),
+                    }
                     self.state = ParserState::Ground;
                 }
                 ParserState::Apc => match b {
@@ -787,8 +809,12 @@ impl AnsiParser {
                     _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::ApcEsc => {
-                    // The APC string is over (ST or otherwise); act on it.
-                    self.finish_apc(g);
+                    // The APC string is over (ST or otherwise); act on it,
+                    // unless CAN / SUB abort it.
+                    match b {
+                        0x18 | 0x1a => self.apc_buffer.clear(),
+                        _ => self.finish_apc(g),
+                    }
                     self.state = ParserState::Ground;
                 }
             }
