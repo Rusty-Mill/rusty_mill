@@ -175,6 +175,16 @@ fn an_untracked_file_is_dirty_even_when_git_config_hides_untracked_files() {
     assert_eq!(r.built_sha(), format!("{head}-dirty"));
 }
 
+#[cfg(unix)] // Windows refuses a file named by a space
+#[test]
+fn an_untracked_file_named_by_whitespace_alone_makes_the_binary_dirty() {
+    let r = Repo::new("untracked-space");
+    let head = r.head();
+    assert_eq!(r.built_sha(), head);
+    std::fs::write(r.root.join(" "), "x").unwrap();
+    assert_eq!(r.built_sha(), format!("{head}-dirty"));
+}
+
 #[test]
 fn a_new_commit_on_the_same_branch_and_a_moved_ref_are_followed() {
     let r = Repo::new("refs");

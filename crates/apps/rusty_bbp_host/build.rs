@@ -30,8 +30,8 @@ fn build_sha(dir: &Path) -> Option<String> {
         return None;
     }
     Some(match clean_tree::dirt(dir) {
-        Ok(None) => head.stdout,
-        _ => format!("{}-dirty", head.stdout),
+        Ok(None) => head.line().to_owned(),
+        _ => format!("{}-dirty", head.line()),
     })
 }
 

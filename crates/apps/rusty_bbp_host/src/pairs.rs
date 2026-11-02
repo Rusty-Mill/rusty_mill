@@ -776,7 +776,7 @@ pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<Str
             rev.stderr
         ));
     }
-    let head = rev.stdout;
+    let head = rev.line().to_owned();
     // A question git could not answer is not a clean tree (#1328, #1361).
     let dirt = clean_tree::dirt(repo).map_err(|e| format!("{}: {e}", repo.display()))?;
     if let Some(why) = dirt {
@@ -1229,6 +1229,18 @@ mod tests {
             .unwrap_err()
             .contains("not clean"));
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[cfg(unix)] // Windows refuses a file named by a space
+    #[test]
+    fn an_untracked_file_named_by_whitespace_alone_is_dirty() {
+        // Trimming git's listing turned " \n" into nothing, and the tree
+        // read as clean.
+        refuses_hidden_change(
+            "whitespace-name",
+            |_| {},
+            |d| std::fs::write(d.join(" "), "x").unwrap(),
+        );
     }
 
     #[test]

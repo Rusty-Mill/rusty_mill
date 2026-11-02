@@ -28,12 +28,21 @@ const REDIRECTS: [&str; 4] = [
     "GIT_COMMON_DIR",
 ];
 
-/// What one git command answered.
+/// What one git command answered. `stdout` is kept whole: a path list must
+/// not be trimmed, since a file may be named by whitespace alone.
 pub struct GitOut {
     pub ok: bool,
     pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+}
+
+impl GitOut {
+    /// A one-line answer (a commit id, a path) without its newline.
+    pub fn line(&self) -> &str {
+        let s = self.stdout.strip_suffix('\n').unwrap_or(&self.stdout);
+        s.strip_suffix('\r').unwrap_or(s)
+    }
 }
 
 /// `git -C repo` with the hiding settings undone. `GIT_OPTIONAL_LOCKS=0`:
@@ -60,13 +69,13 @@ pub fn git(repo: &Path, args: &[&str]) -> Result<GitOut, String> {
     Ok(GitOut {
         ok: out.status.success(),
         code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
     })
 }
 
-/// One question about the tree: the lines of `args`' output that `counts`
-/// accepts are dirt, reported as `label: <line>`.
+/// One question about the tree: the NUL-separated records (`-z`) of `args`'
+/// output that `counts` accepts are dirt, reported as `label: <record>`.
 struct Check {
     args: &'static [&'static str],
     label: &'static str,
@@ -78,6 +87,7 @@ const CHECKS: [Check; 3] = [
         args: &[
             "status",
             "--porcelain",
+            "-z",
             "--untracked-files=no",
             "--ignore-submodules=none",
         ],
@@ -87,6 +97,7 @@ const CHECKS: [Check; 3] = [
     Check {
         args: &[
             "ls-files",
+            "-z",
             "--others",
             "--directory",
             "--no-empty-directory",
@@ -96,7 +107,7 @@ const CHECKS: [Check; 3] = [
         counts: any_line,
     },
     Check {
-        args: &["ls-files", "-v"],
+        args: &["ls-files", "-z", "-v"],
         label: "assume-unchanged or skip-worktree",
         counts: hides_edits,
     },
@@ -111,14 +122,15 @@ pub fn dirt(repo: &Path) -> Result<Option<String>, String> {
     if !top.ok {
         return Err(format!("git rev-parse failed: {}", top.stderr));
     }
-    let top = Path::new(&top.stdout);
+    let top = Path::new(top.line());
     for check in &CHECKS {
         let out = git(top, check.args)?;
         if !out.ok {
             return Err(format!("git {} failed: {}", check.args[0], out.stderr));
         }
-        if let Some(line) = out.stdout.lines().find(|l| (check.counts)(l)) {
-            return Ok(Some(format!("{}: {line}", check.label)));
+        let mut records = out.stdout.split('\0').filter(|r| !r.is_empty());
+        if let Some(record) = records.find(|r| (check.counts)(r)) {
+            return Ok(Some(format!("{}: {record:?}", check.label)));
         }
     }
     Ok(None)
@@ -128,10 +140,11 @@ fn any_line(_: &str) -> bool {
     true
 }
 
-/// A `git ls-files -v` line whose tag hides edits: lowercase is
+/// A `git ls-files -v` record whose tag hides edits: lowercase is
 /// assume-unchanged, `S` is skip-worktree.
-fn hides_edits(line: &str) -> bool {
-    line.chars()
+fn hides_edits(record: &str) -> bool {
+    record
+        .chars()
         .next()
         .is_some_and(|tag| tag.is_ascii_lowercase() || tag == 'S')
 }
