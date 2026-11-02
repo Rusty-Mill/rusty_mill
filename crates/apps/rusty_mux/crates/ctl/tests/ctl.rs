@@ -1669,6 +1669,99 @@ fn select_window_moves_the_active_window() {
     );
 }
 
+/// An agent edits a window's layout and reorders windows from the command
+/// line (C41).
+#[test]
+fn layout_edits_reshape_a_window_and_reorder_windows() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let window = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "a"],
+    );
+    let size = ["--cols", "80", "--rows", "24"];
+    let block = |socket: &Path| {
+        let mut args = vec!["create-block", "--window", &window];
+        args.extend(size);
+        ok(socket, &args)
+    };
+    let (a, b) = (block(&socket), block(&socket));
+    let layout = |socket: &Path| {
+        ok(socket, &["list"])
+            .lines()
+            .find(|l| l.starts_with(&format!("window {window}")))
+            .and_then(|l| l.split(" layout=").nth(1))
+            .map(|rest| {
+                rest.split(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_owned()
+            })
+            .expect("a window line with a layout")
+    };
+    assert_eq!(layout(&socket), format!("cols50({a},{b})"));
+    ok(
+        &socket,
+        &[
+            "resize-split",
+            "--block",
+            &b,
+            "--axis",
+            "cols",
+            "--percent",
+            "25",
+        ],
+    );
+    assert_eq!(layout(&socket), format!("cols75({a},{b})"));
+    ok(&socket, &["swap-blocks", "--block", &a, "--other", &b]);
+    assert_eq!(layout(&socket), format!("cols75({b},{a})"));
+    ok(&socket, &["detach-block", "--block", &b]);
+    assert_eq!(layout(&socket), a);
+    ok(
+        &socket,
+        &[
+            "move-block",
+            "--block",
+            &b,
+            "--beside",
+            &a,
+            "--side",
+            "down",
+        ],
+    );
+    assert_eq!(layout(&socket), format!("rows50({a},{b})"));
+    // A percent outside 1 to 99 is refused before it is sent.
+    let bad = ctl(
+        &socket,
+        &[
+            "resize-split",
+            "--block",
+            &b,
+            "--axis",
+            "rows",
+            "--percent",
+            "100",
+        ],
+    );
+    assert_ne!(bad.status.code(), Some(0));
+
+    let second = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "b"],
+    );
+    ok(
+        &socket,
+        &["move-window", "--window", &second, "--index", "0"],
+    );
+    let order: Vec<String> = ok(&socket, &["list"])
+        .lines()
+        .filter(|l| l.starts_with("window "))
+        .filter_map(|l| l.split(' ').nth(1).map(str::to_owned))
+        .collect();
+    assert_eq!(order, vec![second, window]);
+}
+
 #[test]
 fn reload_config_rereads_the_file_and_says_so() {
     let file = socket_path("config").with_extension("json");

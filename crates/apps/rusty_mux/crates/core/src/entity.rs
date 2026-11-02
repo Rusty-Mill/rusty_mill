@@ -66,8 +66,9 @@ pub struct Window {
     pub(crate) session: SessionId,
     pub(crate) name: String,
     pub(crate) blocks: Vec<BlockId>,
-    /// Holds exactly `blocks`; `None` while there are none.
+    /// Holds `blocks` but the detached ones; `None` while none is placed.
     pub(crate) layout: Option<Layout>,
+    /// One of the blocks in `layout`, never a detached one.
     pub(crate) zoomed: Option<BlockId>,
 }
 
@@ -89,9 +90,18 @@ impl Window {
         &self.blocks
     }
 
-    /// Where its blocks go; `None` while it has none.
+    /// Where its blocks go; `None` while none is placed.
     pub fn layout(&self) -> Option<&Layout> {
         self.layout.as_ref()
+    }
+
+    /// Its blocks in no layout, in creation order: they keep running
+    /// unseen until moved back in.
+    pub fn detached(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.blocks
+            .iter()
+            .copied()
+            .filter(|b| !self.layout.as_ref().is_some_and(|l| l.contains(*b)))
     }
 
     /// The block shown alone, over the whole window, if any.

@@ -829,3 +829,277 @@ fn a_reconnect_records_the_transport_and_says_so() {
     );
     assert!(mux.take_events().is_empty(), "a refusal changes nothing");
 }
+
+/// A window of three blocks, `a` left of `b`, `c` split off below `b`,
+/// events drained.
+fn three() -> (Mux, SessionId, WindowId, [BlockId; 3]) {
+    let (mut mux, session, window, a) = fixture();
+    let b = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    mux.split_block(b, a, Side::Right, size(40, 24)).unwrap();
+    let c = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    mux.split_block(c, b, Side::Down, size(40, 12)).unwrap();
+    mux.take_events();
+    (mux, session, window, [a, b, c])
+}
+
+fn layout_event(mux: &Mux, window: WindowId) -> Event {
+    let w = mux.window(window).unwrap();
+    Event::LayoutChanged {
+        window,
+        layout: w.layout().cloned(),
+        zoomed: w.zoomed(),
+    }
+}
+
+fn share(percent: u8) -> Share {
+    Share::new(percent).unwrap()
+}
+
+#[test]
+fn resizing_a_split_announces_the_layout_once() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.resize_split(c, Axis::Rows, share(25)).unwrap();
+    let text = format!("cols50({a},rows75({b},{c}))");
+    assert_eq!(layout_of(&mux, window).unwrap().to_string(), text);
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    // The same share again changes nothing.
+    mux.resize_split(b, Axis::Rows, share(75)).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn a_refused_resize_changes_nothing() {
+    let (mut mux, _, window, [a, ..]) = three();
+    let before = layout_of(&mux, window);
+    assert_eq!(
+        mux.resize_split(a, Axis::Rows, share(30)),
+        Err(Error::NoSplit {
+            block: a,
+            axis: Axis::Rows
+        })
+    );
+    mux.detach_block(a).unwrap();
+    mux.take_events();
+    assert_eq!(
+        mux.resize_split(a, Axis::Columns, share(30)),
+        Err(Error::Detached(a))
+    );
+    let gone = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.resize_split(gone, Axis::Columns, share(30)),
+        Err(Error::UnknownBlock(gone))
+    );
+    assert_ne!(layout_of(&mux, window), before);
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn swapping_trades_places_and_keeps_the_zoom_on_its_block() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.zoom(a).unwrap();
+    mux.take_events();
+    mux.swap_blocks(a, c).unwrap();
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![c, b, a]);
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    // A block swapped with itself stays.
+    mux.swap_blocks(b, b).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn swapping_with_a_detached_block_detaches_the_other() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.detach_block(c).unwrap();
+    mux.zoom(a).unwrap();
+    mux.take_events();
+    mux.swap_blocks(a, c).unwrap();
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![c, b]);
+    let detached: Vec<BlockId> = mux.window(window).unwrap().detached().collect();
+    assert_eq!(detached, vec![a]);
+    // The zoomed block left, so the zoom goes to the one in its place.
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(c));
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+}
+
+#[test]
+fn blocks_in_other_windows_neither_swap_nor_move() {
+    let (mut mux, session, _, [a, ..]) = three();
+    let other = mux.create_window(session, "x").unwrap();
+    let d = mux.create_block(other, size(80, 24)).unwrap();
+    mux.take_events();
+    let refused = Err(Error::OtherWindow { block: a, other: d });
+    assert_eq!(mux.swap_blocks(a, d), refused);
+    assert_eq!(mux.move_block(a, Some(d), Side::Left), refused);
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn moving_a_block_splits_its_new_neighbour_and_unzooms() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.zoom(b).unwrap();
+    mux.take_events();
+    mux.move_block(a, Some(c), Side::Right).unwrap();
+    // `a` left; `b` stays over the split of `c` and `a`.
+    let text = format!("rows50({b},cols50({c},{a}))");
+    assert_eq!(layout_of(&mux, window).unwrap().to_string(), text);
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+}
+
+#[test]
+fn a_detached_block_keeps_running_until_moved_back() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.zoom(b).unwrap();
+    mux.take_events();
+    mux.detach_block(b).unwrap();
+    let w = mux.window(window).unwrap();
+    assert_eq!(w.blocks(), &[a, b, c]);
+    assert_eq!(w.detached().collect::<Vec<_>>(), vec![b]);
+    assert_eq!(w.zoomed(), None);
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![a, c]);
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    // Detaching it again changes nothing.
+    mux.detach_block(b).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+    // Nothing goes beside a detached block.
+    assert_eq!(
+        mux.move_block(a, Some(b), Side::Left),
+        Err(Error::Detached(b))
+    );
+    mux.move_block(b, Some(a), Side::Up).unwrap();
+    let text = format!("cols50(rows50({b},{a}),{c})");
+    assert_eq!(layout_of(&mux, window).unwrap().to_string(), text);
+    // Closing a detached block still announces the layout.
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    mux.close_block(b).unwrap();
+    let events = mux.take_events();
+    assert_eq!(events.last(), Some(&layout_event(&mux, window)));
+}
+
+#[test]
+fn a_window_showing_nothing_takes_a_block_back_without_a_neighbour() {
+    let (mut mux, _, window, a) = fixture();
+    mux.detach_block(a).unwrap();
+    assert_eq!(layout_of(&mux, window), None);
+    let b = mux.create_block(window, size(80, 24)).unwrap();
+    assert_eq!(layout_of(&mux, window), Some(Layout::Block(b)));
+    assert_eq!(
+        mux.move_block(a, None, Side::Left),
+        Err(Error::Placed(window))
+    );
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    mux.move_block(a, None, Side::Left).unwrap();
+    assert_eq!(layout_of(&mux, window), Some(Layout::Block(a)));
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    assert_eq!(
+        mux.move_block(a, Some(a), Side::Left),
+        Err(Error::SameBlock(a))
+    );
+}
+
+#[test]
+fn moving_stops_at_the_depth_limit() {
+    let (mut mux, _, window, a) = fixture();
+    let spare = mux.create_block(window, size(80, 24)).unwrap();
+    mux.detach_block(spare).unwrap();
+    let mut target = a;
+    for _ in 0..MAX_DEPTH {
+        let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+        mux.split_block(new, target, Side::Down, size(80, 24))
+            .unwrap();
+        target = new;
+    }
+    mux.take_events();
+    assert_eq!(
+        mux.move_block(spare, Some(target), Side::Down),
+        Err(Error::TooDeep(target))
+    );
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn moving_a_window_reorders_its_session() {
+    let (mut mux, session, w1, _) = fixture();
+    let w2 = mux.create_window(session, "2").unwrap();
+    let w3 = mux.create_window(session, "3").unwrap();
+    mux.take_events();
+    mux.move_window(w3, 0).unwrap();
+    assert_eq!(mux.session(session).unwrap().windows(), &[w3, w1, w2]);
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::WindowMoved {
+            window: w3,
+            index: 0
+        }]
+    );
+    mux.move_window(w3, 2).unwrap();
+    assert_eq!(mux.session(session).unwrap().windows(), &[w1, w2, w3]);
+    mux.take_events();
+    // Its own place changes nothing; a place past the end is refused.
+    mux.move_window(w3, 2).unwrap();
+    assert_eq!(
+        mux.move_window(w3, 3),
+        Err(Error::NoPlace {
+            window: w3,
+            index: 3
+        })
+    );
+    assert_eq!(mux.take_events(), vec![]);
+    // The active window is unchanged by a move.
+    assert_eq!(mux.session(session).unwrap().active(), Some(w1));
+}
+
+#[test]
+fn a_detached_block_can_not_be_zoomed() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    assert_eq!(mux.zoom(b), Err(Error::Detached(b)));
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(mux.take_events(), vec![]);
+    // A following swap of other blocks leaves the zoom alone.
+    mux.swap_blocks(a, c).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![c, a]);
+    // Placed blocks zoom as before.
+    mux.zoom(a).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+}
+
+#[test]
+fn a_window_with_every_block_detached_zooms_nothing() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    for block in [a, b, c] {
+        mux.detach_block(block).unwrap();
+    }
+    assert_eq!(layout_of(&mux, window), None);
+    mux.take_events();
+    for block in [a, b, c] {
+        assert_eq!(mux.zoom(block), Err(Error::Detached(block)));
+    }
+    mux.swap_blocks(a, b).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn new_blocks_never_split_a_block_at_the_depth_limit() {
+    let (mut mux, _, window, _) = fixture();
+    // Each new block splits the largest; giving it 99% keeps it so, until
+    // it is too deep to split.
+    for _ in 0..=MAX_DEPTH {
+        let new = mux.create_block(window, size(80, 24)).unwrap();
+        mux.resize_split(new, Axis::Columns, share(99)).unwrap();
+    }
+    let layout = layout_of(&mux, window).unwrap();
+    let depth = layout
+        .blocks()
+        .iter()
+        .filter_map(|b| layout.depth_of(*b))
+        .max();
+    assert_eq!(depth, Some(MAX_DEPTH));
+    assert_eq!(layout.to_string().parse::<Layout>(), Ok(layout));
+}

@@ -46,6 +46,14 @@ shows one block alone and `unzoom-window` ends it; `list` gives each window's
 its first window, until `select-window --window W` picks another. A window
 you create does not take it.
 
+To rearrange a window: `resize-split --block B --axis cols --percent 30`
+gives B 30% of the split beside it (`rows` for the one above or below);
+`swap-blocks --block A --other B` trades their places; `move-block --block B
+--beside A --side down` moves B into a new split beside A. `detach-block
+--block B` takes B out of the layout while its program runs on; it stays in
+`list`, absent from the window's `layout`, until `move-block` puts it back.
+`move-window --window W --index 0` makes W its session's first window.
+
 Prefer `wait` over polling. `wait --window W` or `wait --session S` waits
 until every block there has ended, blocks started meanwhile included; it
 prints each exit and exits with the last failure, 0 if every program

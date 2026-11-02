@@ -256,6 +256,16 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             ],
         ),
         E::ConfigReloaded => ("config-reloaded", vec![]),
+        E::WindowMoved { window, index } => (
+            "window-moved",
+            vec![
+                ("window", Id(window.uuid())),
+                (
+                    "index",
+                    Field::Num(i64::try_from(index).unwrap_or(i64::MAX)),
+                ),
+            ],
+        ),
         E::BlockCreated {
             block,
             window,
@@ -533,6 +543,7 @@ mod tests {
                 session,
                 window: Some(window),
             },
+            Event::WindowMoved { window, index: 2 },
             Event::BlockCreated {
                 block,
                 window,

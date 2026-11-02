@@ -44,6 +44,21 @@ impl Axis {
             Self::Rows => "rows",
         }
     }
+
+    pub const fn name(self) -> &'static str {
+        self.word()
+    }
+}
+
+impl FromStr for Axis {
+    type Err = ParseError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        [Self::Columns, Self::Rows]
+            .into_iter()
+            .find(|axis| axis.word() == text)
+            .ok_or(ParseError)
+    }
 }
 
 /// Where a new block goes beside an existing one.
@@ -108,6 +123,11 @@ impl Share {
         self.0
     }
 
+    /// The second child's share when the first has this one.
+    const fn rest(self) -> Self {
+        Self(100 - self.0)
+    }
+
     /// Divides `len` cells into the first child's, a one-cell divider and
     /// the second child's; `None` when there is no room for all three.
     pub fn lengths(self, len: u16) -> Option<(u16, u16)> {
@@ -159,6 +179,11 @@ impl Layout {
         }
     }
 
+    /// Whether `block` is one of its leaves.
+    pub fn contains(&self, block: BlockId) -> bool {
+        self.depth_of(block).is_some()
+    }
+
     /// How many splits enclose `block`, if it is in the layout.
     pub fn depth_of(&self, block: BlockId) -> Option<usize> {
         match self {
@@ -205,14 +230,16 @@ impl Layout {
         }
     }
 
-    /// The block with the largest share of the area, the first of equals.
-    pub(crate) fn largest(&self) -> BlockId {
-        self.largest_in(1.0).1
+    /// The block with the largest share of the area that may still be
+    /// split, under [`MAX_DEPTH`] splits deep, the first of equals; `None`
+    /// only if every block is that deep.
+    pub(crate) fn largest(&self) -> Option<BlockId> {
+        self.largest_in(1.0, 0).map(|(_, block)| block)
     }
 
-    fn largest_in(&self, part: f64) -> (f64, BlockId) {
+    fn largest_in(&self, part: f64, depth: usize) -> Option<(f64, BlockId)> {
         match self {
-            Self::Block(block) => (part, *block),
+            Self::Block(block) => (depth < MAX_DEPTH).then_some((part, *block)),
             Self::Split {
                 share,
                 first,
@@ -220,9 +247,12 @@ impl Layout {
                 ..
             } => {
                 let f = f64::from(share.percent()) / 100.0;
-                let a = first.largest_in(part * f);
-                let b = second.largest_in(part * (1.0 - f));
-                if b.0 > a.0 { b } else { a }
+                let a = first.largest_in(part * f, depth + 1);
+                let b = second.largest_in(part * (1.0 - f), depth + 1);
+                match (a, b) {
+                    (Some(a), Some(b)) if b.0 > a.0 => Some(b),
+                    (a, b) => a.or(b),
+                }
             }
         }
     }
@@ -254,6 +284,47 @@ impl Layout {
                 first: Box::new(first.split(target, new, side)),
                 second: Box::new(second.split(target, new, side)),
             },
+        }
+    }
+
+    /// Gives `block` `share` of the innermost split along `axis` that
+    /// holds it; `false`, changing nothing, when no such split does.
+    pub(crate) fn resize(&mut self, block: BlockId, axis: Axis, share: Share) -> bool {
+        let Self::Split {
+            axis: own,
+            share: own_share,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        let in_first = first.contains(block);
+        if !in_first && !second.contains(block) {
+            return false;
+        }
+        let child = if in_first { first } else { second };
+        if child.resize(block, axis, share) {
+            return true;
+        }
+        if *own != axis {
+            return false;
+        }
+        *own_share = if in_first { share } else { share.rest() };
+        true
+    }
+
+    /// Puts `a` where `b` was and `b` where `a` was. One of them may be
+    /// absent: the other then takes its place.
+    pub(crate) fn swap(&mut self, a: BlockId, b: BlockId) {
+        match self {
+            Self::Block(block) if *block == a => *block = b,
+            Self::Block(block) if *block == b => *block = a,
+            Self::Block(_) => {}
+            Self::Split { first, second, .. } => {
+                first.swap(a, b);
+                second.swap(a, b);
+            }
         }
     }
 
@@ -330,7 +401,8 @@ impl fmt::Display for Layout {
     }
 }
 
-/// Text that is not a layout, or a side that is not one of the four.
+/// Text that is not a layout, a side that is not one of the four, or an
+/// axis that is neither `cols` nor `rows`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseError;
 
