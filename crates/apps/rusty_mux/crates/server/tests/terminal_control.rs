@@ -15,9 +15,8 @@ const CONTROL: Features = Features::CHECKPOINT_V6
     .union(Features::BLOCK_CALL)
     .union(Features::TERMINAL_CONTROL);
 
-/// What a reset feeds the terminal: CAN ends any unfinished sequence, then
-/// RIS.
-const RESET: &str = "\x18\x1bc";
+/// What a reset feeds the terminal: RIS.
+const RESET: &str = "\x1bc";
 
 fn call(block: BlockId, method: &str, args: &[(&str, Value)]) -> impl FnOnce(u64) -> Message {
     let method = method.to_owned();
@@ -86,11 +85,20 @@ fn palette(entries: &[&str]) -> (&'static str, Value) {
 /// swallows everything after: the raw output shows the marker, the screen
 /// does not.
 fn stick(client: &mut Client, block: BlockId) {
-    client.input(block, b"printf '\\033]0;stuck'; echo HIDDEN$((1+1))\r");
-    client.wait_for(block, "HIDDEN2");
+    stick_in(client, block, "\\033]0;stuck", 2);
+}
+
+/// Leaves the block's terminal inside the unfinished sequence `printf`
+/// writes for `opener`, then prints marker `HIDDEN{n}`, which the
+/// sequence swallows.
+fn stick_in(client: &mut Client, block: BlockId, opener: &str, n: u32) {
+    let marker = format!("HIDDEN{n}");
+    let line = format!("printf '{opener}'; echo HIDDEN$(({n}))\r");
+    client.input(block, line.as_bytes());
+    client.wait_for(block, &marker);
     assert!(
-        !screen(client, block).contains("HIDDEN2"),
-        "the OSC string swallows later output"
+        !screen(client, block).contains(&marker),
+        "{opener}: the sequence swallows later output"
     );
 }
 
@@ -137,17 +145,35 @@ fn reset_clears_the_screen_and_modes_for_the_server_and_every_client() {
 
 #[test]
 fn reset_recovers_a_terminal_stuck_in_a_sequence() {
-    let path = start_server();
-    let mut client = Client::connect_with(&path, CONTROL, None);
-    let block = block_for(&mut client);
-    stick(&mut client, block);
+    // OSC, DCS, APC and PM strings, each fed a lone ESC first where a
+    // string's ESC starts its terminator: the reset's own ESC must not be
+    // read as the rest of the program's.
+    for (n, opener) in [
+        "\\033]0;stuck",
+        "\\033]0;stuck\\033",
+        "\\033P1$r",
+        "\\033P1$r\\033",
+        "\\033_Gstuck",
+        "\\033_Gstuck\\033",
+        "\\033^stuck\\033",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = start_server();
+        let mut client = Client::connect_with(&path, CONTROL, None);
+        let block = block_for(&mut client);
+        let n = u32::try_from(n).expect("few cases") + 10;
+        stick_in(&mut client, block, opener, n);
 
-    done(&mut client, block, "terminal.reset", &[]);
+        done(&mut client, block, "terminal.reset", &[]);
 
-    client.input(block, b"echo SHOWN$((1+1))\r");
-    client.wait_for(block, "SHOWN2");
-    assert!(screen(&mut client, block).contains("SHOWN2"));
-    assert!(client.text(block).contains("SHOWN2"));
+        let shown = format!("SHOWN{n}");
+        client.input(block, format!("echo SHOWN$(({n}))\r").as_bytes());
+        client.wait_for(block, &shown);
+        assert!(screen(&mut client, block).contains(&shown), "{opener}");
+        assert!(client.text(block).contains(&shown), "{opener}");
+    }
 }
 
 #[test]

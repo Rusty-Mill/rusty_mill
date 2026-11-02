@@ -9,9 +9,10 @@ use rusty_term_core::{Cell, Grid, StatusSignal, WIDE_TRAILER};
 
 use crate::style::Style;
 
-/// What `terminal.reset` feeds a terminal: CAN ends any sequence its
-/// program left unfinished, so the RIS after it is read as one.
-pub(crate) const RESET: &[u8] = b"\x18\x1bc";
+/// What `terminal.reset` feeds a terminal: RIS. Its ESC ends any sequence
+/// the program left unfinished, string or not, so it is read as a reset
+/// whatever came before.
+pub(crate) const RESET: &[u8] = b"\x1bc";
 
 /// The OSC sequences that make `change`, each ended by ST: OSC 10, 11 and
 /// 12 set the default foreground, background and cursor colours, 110, 111
