@@ -28,6 +28,12 @@ pub enum Event {
         session: SessionId,
         window: Option<WindowId>,
     },
+    /// A client moved the window to place `index` among its session's
+    /// windows, counted from 0; the windows between shifted by one.
+    WindowMoved {
+        window: WindowId,
+        index: usize,
+    },
     BlockCreated {
         block: BlockId,
         window: WindowId,

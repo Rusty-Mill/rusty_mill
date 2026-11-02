@@ -303,6 +303,158 @@ impl Mux {
         Ok(())
     }
 
+    /// Gives `block` `share` of the innermost split along `axis` that holds
+    /// it, so a client can resize the split between it and its neighbour.
+    pub fn resize_split(&mut self, block: BlockId, axis: Axis, share: Share) -> Result<(), Error> {
+        let window = self.window_of(block)?;
+        let mut layout = self
+            .layout_of(window)
+            .filter(|l| l.contains(block))
+            .cloned()
+            .ok_or(Error::Detached(block))?;
+        if !layout.resize(block, axis, share) {
+            return Err(Error::NoSplit { block, axis });
+        }
+        self.set_layout(window, layout, false);
+        Ok(())
+    }
+
+    /// Puts each block where the other was, in the window they share. If
+    /// one is detached, the other is detached in its place. A zoom stays
+    /// on its block, or moves to the block taking its place if it left.
+    pub fn swap_blocks(&mut self, block: BlockId, other: BlockId) -> Result<(), Error> {
+        let window = self.same_window(block, other)?;
+        let Some(mut layout) = self.layout_of(window).cloned() else {
+            return Ok(());
+        };
+        layout.swap(block, other);
+        if let Some(w) = self.windows.get_mut(&window)
+            && let Some(zoomed) = w.zoomed.filter(|z| !layout.contains(*z))
+        {
+            w.zoomed = Some(if zoomed == block { other } else { block });
+        }
+        self.set_layout(window, layout, false);
+        Ok(())
+    }
+
+    /// Takes `block` from its place, if it has one, and splits `beside`'s
+    /// place in half to put it on `side`, unzooming the window as a split
+    /// does. Without `beside`, `block` fills the window, which must show
+    /// no block. Either way a detached block comes back.
+    pub fn move_block(
+        &mut self,
+        block: BlockId,
+        beside: Option<BlockId>,
+        side: Side,
+    ) -> Result<(), Error> {
+        let window = match beside {
+            Some(target) if target == block => return Err(Error::SameBlock(block)),
+            Some(target) => self.same_window(block, target)?,
+            None => self.window_of(block)?,
+        };
+        let layout = match (self.layout_of(window).cloned(), beside) {
+            (None, None) => Layout::Block(block),
+            (Some(_), None) => return Err(Error::Placed(window)),
+            (None, Some(target)) => return Err(Error::Detached(target)),
+            (Some(layout), Some(target)) => {
+                let rest = layout.remove(block).ok_or(Error::Detached(target))?;
+                let depth = rest.depth_of(target).ok_or(Error::Detached(target))?;
+                if depth >= MAX_DEPTH {
+                    return Err(Error::TooDeep(target));
+                }
+                rest.split(target, block, side)
+            }
+        };
+        self.set_layout(window, layout, true);
+        Ok(())
+    }
+
+    /// Takes `block` out of its window's layout, its sibling taking its
+    /// split's place; it keeps running, listed in the window, until moved
+    /// back in or closed. A zoom on it ends. A detached block stays so.
+    pub fn detach_block(&mut self, block: BlockId) -> Result<(), Error> {
+        let window = self.window_of(block)?;
+        let Some(parent) = self.windows.get_mut(&window) else {
+            return Err(Error::UnknownWindow(window));
+        };
+        if !parent.layout.as_ref().is_some_and(|l| l.contains(block)) {
+            return Ok(());
+        }
+        parent.layout = parent.layout.take().and_then(|l| l.remove(block));
+        if parent.zoomed == Some(block) {
+            parent.zoomed = None;
+        }
+        self.push_layout(window);
+        Ok(())
+    }
+
+    /// Moves `window` to place `index` among its session's windows,
+    /// counted from 0, shifting those between by one.
+    pub fn move_window(&mut self, window: WindowId, index: usize) -> Result<(), Error> {
+        let session = self
+            .windows
+            .get(&window)
+            .ok_or(Error::UnknownWindow(window))?
+            .session;
+        let parent = self
+            .sessions
+            .get_mut(&session)
+            .ok_or(Error::UnknownSession(session))?;
+        let from = parent
+            .windows
+            .iter()
+            .position(|w| *w == window)
+            .ok_or(Error::UnknownWindow(window))?;
+        if index >= parent.windows.len() {
+            return Err(Error::NoPlace { window, index });
+        }
+        if index == from {
+            return Ok(());
+        }
+        parent.windows.remove(from);
+        parent.windows.insert(index, window);
+        self.events.push(Event::WindowMoved { window, index });
+        Ok(())
+    }
+
+    fn window_of(&self, block: BlockId) -> Result<WindowId, Error> {
+        Ok(self
+            .blocks
+            .get(&block)
+            .ok_or(Error::UnknownBlock(block))?
+            .window)
+    }
+
+    /// The window both blocks are in.
+    fn same_window(&self, block: BlockId, other: BlockId) -> Result<WindowId, Error> {
+        let window = self.window_of(block)?;
+        if self.window_of(other)? != window {
+            return Err(Error::OtherWindow { block, other });
+        }
+        Ok(window)
+    }
+
+    fn layout_of(&self, window: WindowId) -> Option<&Layout> {
+        self.windows.get(&window).and_then(|w| w.layout.as_ref())
+    }
+
+    /// Replaces the window's layout, ending its zoom if `unzoom`, and
+    /// announces the result unless nothing changed.
+    fn set_layout(&mut self, window: WindowId, layout: Layout, unzoom: bool) {
+        let Some(w) = self.windows.get_mut(&window) else {
+            return;
+        };
+        let zoom_ends = unzoom && w.zoomed.is_some();
+        if w.layout.as_ref() == Some(&layout) && !zoom_ends {
+            return;
+        }
+        w.layout = Some(layout);
+        if zoom_ends {
+            w.zoomed = None;
+        }
+        self.push_layout(window);
+    }
+
     /// Announces the window's layout as it is now.
     fn push_layout(&mut self, window: WindowId) {
         if let Some(w) = self.windows.get(&window) {

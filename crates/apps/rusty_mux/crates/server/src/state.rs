@@ -77,7 +77,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::MORE_PROGRAM_EVENTS)
     .union(Features::ACTIVE_WINDOW)
     .union(Features::CONFIG_RELOAD)
-    .union(Features::TERMINAL_CONTROL);
+    .union(Features::TERMINAL_CONTROL)
+    .union(Features::LAYOUT_EDIT);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -786,6 +787,40 @@ impl State {
                 self.require(client, Features::ACTIVE_WINDOW, "select-window")
                     .and_then(|()| done(self.mux.select_window(window))),
             ),
+            M::ResizeSplit {
+                req,
+                block,
+                axis,
+                share,
+            } => (
+                req,
+                self.edit(client, "resize-split", |mux| {
+                    mux.resize_split(block, axis, share)
+                }),
+            ),
+            M::SwapBlocks { req, block, other } => (
+                req,
+                self.edit(client, "swap-blocks", |mux| mux.swap_blocks(block, other)),
+            ),
+            M::MoveBlock {
+                req,
+                block,
+                beside,
+                side,
+            } => (
+                req,
+                self.edit(client, "move-block", |mux| {
+                    mux.move_block(block, beside, side)
+                }),
+            ),
+            M::DetachBlock { req, block } => (
+                req,
+                self.edit(client, "detach-block", |mux| mux.detach_block(block)),
+            ),
+            M::MoveWindow { req, window, index } => (
+                req,
+                self.edit(client, "move-window", |mux| mux.move_window(window, index)),
+            ),
             M::ReloadConfig { req } => (
                 req,
                 self.require(client, Features::CONFIG_RELOAD, "reload-config")
@@ -884,6 +919,21 @@ impl State {
     }
 
     /// Fails unless `client` negotiated `feature`, which `what` needs.
+    /// A layout edit, for a client that negotiated them.
+    fn edit(
+        &mut self,
+        client: ClientId,
+        what: &str,
+        edit: impl FnOnce(&mut Mux) -> Result<(), rusty_mux_core::Error>,
+    ) -> Result<Outcome, Refusal> {
+        self.require(client, Features::LAYOUT_EDIT, what)
+            .and_then(|()| {
+                edit(&mut self.mux)
+                    .map(|()| Outcome::Done(None))
+                    .map_err(Refusal::from)
+            })
+    }
+
     fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), Refusal> {
         if self
             .features
@@ -1569,6 +1619,7 @@ fn receives(features: Features, event: &Event) -> bool {
         }
         Event::ActiveWindowChanged { .. } => Features::ACTIVE_WINDOW,
         Event::ConfigReloaded => Features::CONFIG_RELOAD,
+        Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
         _ => Features::NONE,
     };
     features.contains(needs)

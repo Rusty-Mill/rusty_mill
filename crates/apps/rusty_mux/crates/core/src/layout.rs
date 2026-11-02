@@ -44,6 +44,21 @@ impl Axis {
             Self::Rows => "rows",
         }
     }
+
+    pub const fn name(self) -> &'static str {
+        self.word()
+    }
+}
+
+impl FromStr for Axis {
+    type Err = ParseError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        [Self::Columns, Self::Rows]
+            .into_iter()
+            .find(|axis| axis.word() == text)
+            .ok_or(ParseError)
+    }
 }
 
 /// Where a new block goes beside an existing one.
@@ -108,6 +123,11 @@ impl Share {
         self.0
     }
 
+    /// The second child's share when the first has this one.
+    const fn rest(self) -> Self {
+        Self(100 - self.0)
+    }
+
     /// Divides `len` cells into the first child's, a one-cell divider and
     /// the second child's; `None` when there is no room for all three.
     pub fn lengths(self, len: u16) -> Option<(u16, u16)> {
@@ -157,6 +177,11 @@ impl Layout {
                 second.collect(out);
             }
         }
+    }
+
+    /// Whether `block` is one of its leaves.
+    pub fn contains(&self, block: BlockId) -> bool {
+        self.depth_of(block).is_some()
     }
 
     /// How many splits enclose `block`, if it is in the layout.
@@ -257,6 +282,47 @@ impl Layout {
         }
     }
 
+    /// Gives `block` `share` of the innermost split along `axis` that
+    /// holds it; `false`, changing nothing, when no such split does.
+    pub(crate) fn resize(&mut self, block: BlockId, axis: Axis, share: Share) -> bool {
+        let Self::Split {
+            axis: own,
+            share: own_share,
+            first,
+            second,
+        } = self
+        else {
+            return false;
+        };
+        let in_first = first.contains(block);
+        if !in_first && !second.contains(block) {
+            return false;
+        }
+        let child = if in_first { first } else { second };
+        if child.resize(block, axis, share) {
+            return true;
+        }
+        if *own != axis {
+            return false;
+        }
+        *own_share = if in_first { share } else { share.rest() };
+        true
+    }
+
+    /// Puts `a` where `b` was and `b` where `a` was. One of them may be
+    /// absent: the other then takes its place.
+    pub(crate) fn swap(&mut self, a: BlockId, b: BlockId) {
+        match self {
+            Self::Block(block) if *block == a => *block = b,
+            Self::Block(block) if *block == b => *block = a,
+            Self::Block(_) => {}
+            Self::Split { first, second, .. } => {
+                first.swap(a, b);
+                second.swap(a, b);
+            }
+        }
+    }
+
     /// This layout without `block`, its sibling taking its split's place;
     /// `None` if it was the only block.
     pub(crate) fn remove(self, block: BlockId) -> Option<Self> {
@@ -330,7 +396,8 @@ impl fmt::Display for Layout {
     }
 }
 
-/// Text that is not a layout, or a side that is not one of the four.
+/// Text that is not a layout, a side that is not one of the four, or an
+/// axis that is neither `cols` nor `rows`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseError;
 
