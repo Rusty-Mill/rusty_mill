@@ -39,9 +39,11 @@
 //!   of scope simply drops whatever's left in its queue (and thus their
 //!   still-boxed futures) without delivering a `JoinError` to any
 //!   `JoinHandle` still awaiting them, which then just hangs forever if
-//!   polled again. This matches (not: improves on) how this crate's
-//!   multi-threaded `Runtime` already behaves for tasks abandoned by a
-//!   hard shutdown -- not a new gap introduced here.
+//!   polled again. `Runtime` no longer behaves this way: it owns its
+//!   tasks in a registry (`OwnedTasks`) and cancels what is left at
+//!   shutdown. `LocalSet` tasks are not in that registry, so a
+//!   `spawn_local` task pending with no stored waker can still be
+//!   dropped early.
 
 use super::id::{self, CurrentTask};
 use super::join::{JoinHandle, JoinInner, Outcome};

@@ -125,24 +125,100 @@ fn spawning_after_shutdown_returns_a_cancelled_handle() {
 }
 
 /// `shutdown_background` doesn't wait for a task that is mid-poll; that
-/// task is cancelled as soon as its poll returns.
+/// task is cancelled as soon as its poll returns. The poll is held open
+/// until `shutdown_background` has returned, so the cancel always comes
+/// from the poller, not from shutdown finding the task idle.
 #[test]
 fn a_task_mid_poll_at_shutdown_background_is_cancelled_after_its_poll() {
     let rt = Runtime::new().unwrap();
     let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    // In a Mutex only so the future is Send.
+    let release_rx = std::sync::Mutex::new(release_rx);
     let handle = rt.spawn(async move {
         let mut first = true;
         poll_fn(|_| {
             if first {
                 first = false;
                 started_tx.send(()).unwrap();
-                std::thread::sleep(Duration::from_millis(200));
+                let _ = release_rx.lock().unwrap().recv();
             }
             Poll::<()>::Pending
         })
         .await;
     });
     started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let metrics = rt.metrics();
     rt.shutdown_background();
+    assert_eq!(metrics.num_alive_tasks(), 1, "still mid-poll");
+    release_tx.send(()).unwrap();
     assert_cancelled(join_elsewhere(handle));
+}
+
+#[test]
+fn shutdown_timeout_cancels_what_is_left_after_its_wait() {
+    let rt = Runtime::new().unwrap();
+    let (keep, probe) = probe();
+    let handle = rt.spawn(async move {
+        let _keep = keep;
+        wakerless().await;
+    });
+    let metrics = rt.metrics();
+    rt.shutdown_timeout(Duration::from_millis(50));
+    assert!(probe.upgrade().is_none(), "the future is dropped");
+    assert_eq!(metrics.num_alive_tasks(), 0);
+    assert_cancelled(join_elsewhere(handle));
+}
+
+/// Futures are dropped inside the runtime's context, so drop code can
+/// still reach the runtime; a spawn from there is cancelled at once.
+#[test]
+fn a_future_dropped_at_shutdown_can_still_reach_its_runtime() {
+    struct SpawnOnDrop(std::sync::mpsc::Sender<JoinHandle<()>>);
+    impl Drop for SpawnOnDrop {
+        fn drop(&mut self) {
+            let late = rusty_tokio::runtime::Handle::current().spawn(async {});
+            let _ = self.0.send(late);
+        }
+    }
+
+    for (flavor, rt) in runtimes() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let guard = SpawnOnDrop(tx);
+        let handle = rt.spawn(async move {
+            let _guard = guard;
+            wakerless().await;
+        });
+        let metrics = rt.metrics();
+        drop(rt);
+        let late = rx.try_recv().expect("the future was dropped at shutdown");
+        assert_cancelled(join_elsewhere(late));
+        assert_cancelled(join_elsewhere(handle));
+        assert_eq!(metrics.num_alive_tasks(), 0, "{flavor}");
+    }
+}
+
+#[cfg(feature = "thread-per-core")]
+#[test]
+fn every_core_cancels_its_tasks_at_shutdown() {
+    let rt = Builder::new_thread_per_core()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+    let (keep, probe) = probe();
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let keep = keep.clone();
+            rt.spawn(async move {
+                let _keep = keep;
+                wakerless().await;
+            })
+        })
+        .collect();
+    drop(keep);
+    drop(rt);
+    assert!(probe.upgrade().is_none(), "every core dropped its futures");
+    for handle in handles {
+        assert_cancelled(join_elsewhere(handle));
+    }
 }

@@ -55,6 +55,9 @@ impl State {
             // Runtime shutdown claims a queued task without dequeuing it
             // (`begin_shutdown`), so its run-queue entry can outlive it.
             if state & QUEUED == 0 {
+                // Only a task shutdown finished (or is finishing) can
+                // leave an entry behind; anything else is a double queue.
+                debug_assert!(state & ABORTED != 0);
                 return Begin::Stale;
             }
             debug_assert!(state & RUNNING == 0);

@@ -1253,18 +1253,20 @@ impl Runtime {
     /// are simple event loops with nothing of the caller's left to wait
     /// on once told to stop, so this always joins them regardless of
     /// which shutdown path called it.
-    fn cancel_all_tasks(&self) {
-        for shared in self.all_shared() {
-            shared.cancel_all_tasks();
-        }
-    }
-
     fn stop_scheduling_and_reactor(&self) {
         for shared in self.all_shared() {
             shared.shutdown.store(true, Ordering::Release);
             shared.wake_all_parked();
             shared.reactor.shutdown();
             shared.timer.shutdown();
+        }
+    }
+
+    /// Cancels every task still alive on every `Shared` this runtime
+    /// owns; see [`Shared::cancel_all_tasks`].
+    fn cancel_all_tasks(&self) {
+        for shared in self.all_shared() {
+            shared.cancel_all_tasks();
         }
     }
 
