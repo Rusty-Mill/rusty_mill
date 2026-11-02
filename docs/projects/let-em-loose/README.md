@@ -2,6 +2,8 @@
 
 > Status: concept, 2026-11-02. Source of truth while the design settles: the [live doc](https://claude.ai/artifact/JoCPd4weXwkJ7Zy8qMjiJJ). Work is tracked on Mill Board cards #592 to #599, tagged `let-em-loose`. Companion docs: [SPEC.md](SPEC.md), [DECISIONS.md](DECISIONS.md), [QUESTIONS.md](QUESTIONS.md).
 
+![Let Em Loose: how the pieces fit](map.svg)
+
 A working proposal for agentic development that isn't modelled on the assembly line.
 
 ## The problem
