@@ -31,6 +31,7 @@ pub mod confine;
 pub mod grade;
 pub mod groups;
 pub mod human;
+pub mod inbox;
 pub mod launchers;
 pub mod mcp;
 pub mod moderator;

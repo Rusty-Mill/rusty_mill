@@ -166,6 +166,8 @@ const SERVER_MSG_GROUP_AT: usize = 28;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ServerMsg {
     pub title: Vec<u16>,
+    /// `ApplicationName`, the client's executable name (`cmd.exe`).
+    pub app: Vec<u16>,
     /// `ProcessGroupId`, which GenerateConsoleCtrlEvent targets.
     pub group: u32,
 }
@@ -187,6 +189,7 @@ pub(crate) fn server_msg_info(payload: &[u8]) -> Result<ServerMsg, i32> {
         strings.push(array[..len / 2].to_vec());
     }
     Ok(ServerMsg {
+        app: strings.swap_remove(1),
         title: strings.swap_remove(0),
         group: u32_at(msg, SERVER_MSG_GROUP_AT).unwrap_or(0),
     })
@@ -249,12 +252,25 @@ pub(crate) fn server_msg(title: &str) -> Vec<u8> {
 pub(crate) fn server_msg_in_group(title: &str, group: u32) -> Vec<u8> {
     let mut m = vec![0; SERVER_MSG_LEN];
     put_u32(&mut m, SERVER_MSG_GROUP_AT, group);
-    let units: Vec<u16> = title.encode_utf16().collect();
-    m[34..36].copy_from_slice(&((units.len() * 2) as u16).to_le_bytes());
-    for (i, u) in units.iter().enumerate() {
-        m[36 + i * 2..38 + i * 2].copy_from_slice(&u.to_le_bytes());
-    }
+    put_counted(&mut m, SERVER_MSG_STRINGS[0], title);
     m
+}
+
+#[cfg(test)]
+/// A CONSOLE_SERVER_MSG from the client executable `app`.
+pub(crate) fn server_msg_from(app: &str) -> Vec<u8> {
+    let mut m = vec![0; SERVER_MSG_LEN];
+    put_counted(&mut m, SERVER_MSG_STRINGS[1], app);
+    m
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+fn put_counted(m: &mut [u8], (len_at, array_at, _): (usize, usize, usize), text: &str) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    put_u16(m, len_at, (units.len() * 2) as u16);
+    for (i, u) in units.iter().enumerate() {
+        put_u16(m, array_at + i * 2, *u);
+    }
 }
 
 #[cfg(test)]
@@ -315,6 +331,9 @@ mod tests {
             server_msg_info(&server_msg_in_group("", 4242)).map(|i| i.group),
             Ok(4242)
         );
+        let app: Vec<u16> = "pwsh.exe".encode_utf16().collect();
+        let from = server_msg_info(&server_msg_from("pwsh.exe"));
+        assert_eq!(from.map(|i| (i.title, i.app)), Ok((Vec::new(), app)));
         let longest = "x".repeat(260);
         assert_eq!(
             server_msg_info(&server_msg(&longest)).map(|i| i.title.len()),

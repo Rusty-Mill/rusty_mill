@@ -12,9 +12,14 @@
 //! a time as it paints, as conhost does. A step paints at most [`CHUNK`]
 //! cells, which keeps its VT within one emission slice (§7.4).
 //!
+//! A clear of the whole screen by cmd (`cls`) or PowerShell
+//! (`Clear-Host`, `[Console]::Clear()`) is conhost's GH#3126 shim
+//! instead: VT that clears the terminal's scrollback too (#1371).
+//!
 //! Behaviour follows microsoft/terminal's conhost (commit 09beddc6,
-//! `src/server/ApiDispatchers.cpp`, `src/host/_output.cpp`,
-//! `directio.cpp`, `getset.cpp`, `output.cpp`, `VtIo.cpp`; see
+//! `src/server/ApiDispatchers.cpp`, `ConsoleShimPolicy.cpp`,
+//! `src/host/_output.cpp`, `_stream.cpp`, `directio.cpp`, `getset.cpp`,
+//! `output.cpp`, `VtIo.cpp`; see
 //! THIRD_PARTY_NOTICES.md):
 //!
 //! Copyright (c) Microsoft Corporation. Licensed under the MIT license.
@@ -198,6 +203,35 @@ impl Rect {
     }
 }
 
+/// conhost `WriteClearScreen`: home, clear the screen, clear the
+/// scrollback.
+const CLEAR_SCREEN: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
+
+/// conhost's `ConsoleShimPolicy`: whether a client is one of the shells
+/// the GH#3126 shims apply to, by the executable name CONNECT gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ShimPolicy {
+    Cmd,
+    PowerShell,
+    Other,
+}
+
+impl ShimPolicy {
+    /// `app`'s file name, compared without regard to ASCII case.
+    pub(super) fn of(app: &[u16]) -> ShimPolicy {
+        let path = String::from_utf16_lossy(app);
+        let name = path.rsplit(['\\', '/']).next().unwrap_or_default();
+        let is = |exe: &str| name.eq_ignore_ascii_case(exe);
+        if is("cmd.exe") {
+            ShimPolicy::Cmd
+        } else if is("powershell.exe") || is("pwsh.exe") {
+            ShimPolicy::PowerShell
+        } else {
+            ShimPolicy::Other
+        }
+    }
+}
+
 /// A row of cells to paint from (`x`, `y`).
 #[derive(Debug)]
 struct Run {
@@ -294,6 +328,47 @@ enum Op {
 }
 
 impl Op {
+    /// conhost's GH#3126 shims, judged as the op starts to paint: the
+    /// VT that stands for a whole-screen clear, which paints no cells,
+    /// or `None` to paint as usual. Only the shell's own calls get here.
+    fn clear_shim(&self, screen: &Screen) -> Option<&'static [u8]> {
+        let size = screen.size();
+        let (w, h) = (i32::from(size.cols), i32::from(size.rows));
+        match self {
+            // PowerShell: spaces from the origin over the whole screen,
+            // then the default attribute, which the clear already did.
+            Op::Stream {
+                what,
+                len,
+                x: 0,
+                y: 0,
+                pos: 0,
+            } if *len == usize::from(size.cols) * usize::from(size.rows) => match what {
+                Stream::FillChar(0x20) => Some(CLEAR_SCREEN),
+                Stream::FillAttr(0x07) => Some(b""),
+                _ => None,
+            },
+            // cmd: the whole screen moved up past its top, unclipped,
+            // leaving blanks in the pen.
+            Op::Scroll(a, _) => {
+                let pen = screen.attributes();
+                let whole = a.source.left <= 0
+                    && a.source.top <= 0
+                    && a.source.right >= w - 1
+                    && a.source.bottom >= h - 1;
+                let off = a.dest.0 == 0 && a.dest.1 <= -h && a.clip.is_none();
+                let attr = if a.fill == (CharInfo { ch: 0, attr: 0 }) {
+                    pen
+                } else {
+                    a.fill.attr
+                };
+                let blank = sanitize(a.fill.ch) == ' ' && attr == pen;
+                (whole && off && blank).then_some(CLEAR_SCREEN)
+            }
+            _ => None,
+        }
+    }
+
     /// The runs of the next row, reading the Grid now; `None` when done.
     fn next_row(&mut self, screen: &Screen, decoded: &[u16]) -> Option<Vec<Run>> {
         let size = screen.size();
@@ -504,6 +579,8 @@ pub(super) struct Paint {
     /// Where the count goes in the reply's struct, and the code page an
     /// `A` write's count is measured in.
     count: Option<(usize, Option<u32>)>,
+    /// Whether the caller is the shell a GH#3126 shim applies to.
+    shim: bool,
 }
 
 impl Paint {
@@ -512,7 +589,13 @@ impl Paint {
             op,
             pending: VecDeque::new(),
             count,
+            shim: false,
         }
+    }
+
+    /// This paint from a client the GH#3126 shims apply to when `shim`.
+    fn shimmed(self, shim: bool) -> Paint {
+        Paint { shim, ..self }
     }
 
     /// Payload bytes the write retains while parked.
@@ -538,6 +621,18 @@ impl Paint {
         out: &mut OutputQueue,
         codec: &Codec,
     ) -> bool {
+        if std::mem::take(&mut self.shim)
+            && let Some(vt) = self.op.clear_shim(screen)
+        {
+            if !vt.is_empty() {
+                screen.host(vt, out);
+            }
+            // conhost counts the whole fill as done.
+            if let Op::Stream { len, pos, .. } = &mut self.op {
+                *pos = *len;
+            }
+            return true;
+        }
         let mut budget = CHUNK;
         let decoded = match &self.op {
             Op::Stream { what, .. } => what.decode(codec),
@@ -633,16 +728,12 @@ impl Console {
             ASCII => Stream::FillChar(self.ansi_unit(element as u8)),
             _ => return reply(p, msg::STATUS_FROM_INVALIDARG, fixed, fx),
         };
-        self.stream(
-            p,
-            fixed,
-            (x, y),
-            what,
-            len as usize,
-            (FILL_LENGTH, None),
-            out,
-            fx,
-        );
+        // conhost's `A` fill passes no shim.
+        let shim = kind != ASCII && self.shim_policy(p) == ShimPolicy::PowerShell;
+        match self.stream((x, y), what, len as usize, (FILL_LENGTH, None)) {
+            Some(paint) => self.paint(p, fixed, paint.shimmed(shim), out, fx),
+            None => reply(p, msg::STATUS_SUCCESS, fixed, fx),
+        }
     }
 
     /// `CONSOLE_WRITECONSOLEOUTPUTSTRING_MSG`: WriteConsoleOutputCharacter
@@ -685,27 +776,26 @@ impl Console {
             coded @ Stream::Coded { .. } => coded.decode(&self.codec).len(),
             _ => 0,
         };
-        self.stream(p, fixed, (x, y), what, len, (STRING_RECORDS, ansi), out, fx);
+        match self.stream((x, y), what, len, (STRING_RECORDS, ansi)) {
+            Some(paint) => self.paint(p, fixed, paint, out, fx),
+            None => reply(p, msg::STATUS_SUCCESS, fixed, fx),
+        }
     }
 
-    /// Queue a fill or `String` write. One that starts off the screen or
-    /// has nothing to write does nothing and succeeds.
-    #[allow(clippy::too_many_arguments)]
+    /// A fill or `String` write to queue; `None` for one that starts off
+    /// the screen or has nothing to write, which does nothing and
+    /// succeeds.
     fn stream(
-        &mut self,
-        p: &Packet<'_>,
-        fixed: Vec<u8>,
+        &self,
         (x, y): (u16, u16),
         what: Stream,
         len: usize,
         count: (usize, Option<u32>),
-        out: &mut OutputQueue,
-        fx: &mut Vec<Effect>,
-    ) {
+    ) -> Option<Paint> {
         let size = self.screen.size();
         // COORD halves are signed: a negative one is past any size.
         if len == 0 || x >= size.cols || y >= size.rows {
-            return reply(p, msg::STATUS_SUCCESS, fixed, fx);
+            return None;
         }
         let op = Op::Stream {
             what,
@@ -714,7 +804,14 @@ impl Console {
             y: usize::from(y),
             pos: 0,
         };
-        self.paint(p, fixed, Paint::new(op, Some(count)), out, fx);
+        Some(Paint::new(op, Some(count)))
+    }
+
+    /// The GH#3126 shims `p`'s client gets.
+    fn shim_policy(&self, p: &Packet<'_>) -> ShimPolicy {
+        self.clients
+            .get(&p.process)
+            .map_or(ShimPolicy::Other, |c| c.shim)
     }
 
     /// `CONSOLE_SCROLLSCREENBUFFER_MSG`: move a rectangle, within the clip
@@ -756,7 +853,10 @@ impl Console {
             dest,
             fill: CharInfo { ch, attr },
         };
-        self.paint(p, fixed, Paint::new(Op::Scroll(args, None), None), out, fx);
+        // conhost's `A` scroll passes no shim.
+        let shim = fixed[17] != 0 && self.shim_policy(p) == ShimPolicy::Cmd;
+        let paint = Paint::new(Op::Scroll(args, None), None).shimmed(shim);
+        self.paint(p, fixed, paint, out, fx);
     }
 
     /// `CONSOLE_WRITECONSOLEOUTPUT_MSG`: a rectangle of `CHAR_INFO`s from
@@ -1737,5 +1837,131 @@ mod tests {
             .expect("the fill completes");
         assert_eq!(done.status, msg::STATUS_SUCCESS);
         assert_eq!(h.c.screen.size(), WinSize { rows: 3, cols: 5 });
+    }
+
+    /// The host connected from the executable `app`, its output and the
+    /// VT mark after a line of text.
+    fn shell_host(app: &str) -> (Host, usize, usize) {
+        let mut h = Host::sized(WinSize { rows: H, cols: W });
+        let [_, _, output] = h.connect_from(1, app);
+        h.write_w(output, "text");
+        let mark = h.vt.len();
+        (h, output, mark)
+    }
+
+    fn vt_since(h: &Host, mark: usize) -> String {
+        String::from_utf8_lossy(&h.vt[mark..]).into_owned()
+    }
+
+    const AREA: u32 = W as u32 * H as u32;
+    const CLEAR: &str = "\x1b[H\x1b[2J\x1b[3J";
+
+    #[test]
+    fn shells_are_known_by_file_name_in_any_case() {
+        let of = |app: &str| ShimPolicy::of(&app.encode_utf16().collect::<Vec<_>>());
+        assert_eq!(of("cmd.exe"), ShimPolicy::Cmd);
+        assert_eq!(of(r"C:\Windows\System32\CMD.EXE"), ShimPolicy::Cmd);
+        assert_eq!(of("powershell.exe"), ShimPolicy::PowerShell);
+        assert_eq!(of("Pwsh.exe"), ShimPolicy::PowerShell);
+        for other in ["", "cmd", "xcmd.exe", "pwsh.exe.bak", "conhost_probe.exe"] {
+            assert_eq!(of(other), ShimPolicy::Other, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_powershell_clear_clears_the_scrollback_as_conhost_does() {
+        for kind in [REAL_UNICODE, FALSE_UNICODE] {
+            let (mut h, out, mark) = shell_host("pwsh.exe");
+            let r = fill(&mut h, out, kind, u16::from(b' '), AREA, (0, 0));
+            assert_eq!((r.status, length(&r)), (msg::STATUS_SUCCESS, AREA));
+            assert_eq!(vt_since(&h, mark), CLEAR, "no cells painted");
+            assert_eq!(row(&h, 0), "          ");
+            assert_eq!(h.c.screen.cursor(), (0, 0));
+            // The default attribute after it was the clear's: no VT.
+            let mark = h.vt.len();
+            let r = fill(&mut h, out, ATTRIBUTE, 0x07, AREA, (0, 0));
+            assert_eq!((r.status, length(&r)), (msg::STATUS_SUCCESS, AREA));
+            assert_eq!(h.vt.len(), mark);
+        }
+    }
+
+    #[test]
+    fn other_fills_paint_cells_and_keep_the_scrollback() {
+        let space = u16::from(b' ');
+        type Case = (&'static str, u32, u16, u32, (i16, i16));
+        let cases: [Case; 6] = [
+            ("pwsh.exe", REAL_UNICODE, space, AREA - 1, (0, 0)),
+            ("pwsh.exe", REAL_UNICODE, space, AREA, (1, 0)),
+            ("pwsh.exe", REAL_UNICODE, u16::from(b'x'), AREA, (0, 0)),
+            ("pwsh.exe", ASCII, space, AREA, (0, 0)),
+            ("pwsh.exe", ATTRIBUTE, 0x1e, AREA, (0, 0)),
+            ("app.exe", REAL_UNICODE, space, AREA, (0, 0)),
+        ];
+        for (app, kind, element, len, at) in cases {
+            let (mut h, out, mark) = shell_host(app);
+            let r = fill(&mut h, out, kind, element, len, at);
+            let vt = vt_since(&h, mark);
+            assert_eq!(r.status, msg::STATUS_SUCCESS);
+            assert!(
+                vt.starts_with("\x1b7") && !vt.contains("\x1b[3J"),
+                "{app} {kind} {len} {at:?}: {vt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cmd_cls_clears_the_scrollback_as_conhost_does() {
+        let (w, h) = (W as i16, H as i16);
+        // cmd passes the buffer's size as the right and bottom.
+        for (source, fill_cell) in [
+            ([0, 0, w, h], info(' ', 0x07)),
+            ([0, 0, w - 1, h - 1], info('\0', 0)),
+        ] {
+            let (mut host, out, mark) = shell_host("cmd.exe");
+            let r = scroll(&mut host, out, source, None, (0, -h), fill_cell);
+            assert_eq!(r.status, msg::STATUS_SUCCESS);
+            assert_eq!(vt_since(&host, mark), CLEAR, "{source:?}");
+            assert_eq!(row(&host, 0), "          ");
+        }
+    }
+
+    #[test]
+    fn other_scrolls_paint_cells_and_keep_the_scrollback() {
+        let (w, h) = (W as i16, H as i16);
+        let whole = [0, 0, w, h];
+        let blank = info(' ', 0x07);
+        type Case = (&'static str, [i16; 4], Option<[i16; 4]>, i16, CharInfo);
+        let cases: [Case; 5] = [
+            ("cmd.exe", [0, 1, w, h], None, -h, blank),
+            ("cmd.exe", whole, Some(whole), -h, blank),
+            ("cmd.exe", whole, None, 1 - h, blank),
+            ("cmd.exe", whole, None, -h, info(' ', 0x1e)),
+            ("pwsh.exe", whole, None, -h, blank),
+        ];
+        for (app, source, clip, dy, cell) in cases {
+            let (mut host, out, mark) = shell_host(app);
+            scroll(&mut host, out, source, clip, (0, dy), cell);
+            let vt = vt_since(&host, mark);
+            assert!(
+                vt.starts_with("\x1b7") && !vt.contains("\x1b[3J"),
+                "{app} {source:?} {dy}: {vt:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cls_fill_must_match_the_pen_when_it_clears() {
+        let (w, h) = (W as i16, H as i16);
+        let (mut host, out, _) = shell_host("cmd.exe");
+        host.write_w(out, "\x1b[44m");
+        let mark = host.vt.len();
+        scroll(&mut host, out, [0, 0, w, h], None, (0, -h), info(' ', 0x07));
+        assert!(
+            !vt_since(&host, mark).contains("\x1b[3J"),
+            "0x07 is not the pen"
+        );
+        let mark = host.vt.len();
+        scroll(&mut host, out, [0, 0, w, h], None, (0, -h), info(' ', 0x17));
+        assert_eq!(vt_since(&host, mark), CLEAR);
     }
 }

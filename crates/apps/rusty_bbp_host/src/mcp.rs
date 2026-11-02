@@ -18,6 +18,8 @@
 //! one, and is refused with that earlier turn's token, never relabelled with
 //! the new grant, however the requests are timed on the stream.
 
+pub mod claims;
+
 use crate::{fresh_op, now, open_driver, response_json};
 use rusty_bbp::*;
 use rusty_serde::Value;
@@ -74,6 +76,9 @@ pub struct Server {
     shown: Option<TurnId>,
     /// A session's watch on the task log, made on its first `wait`.
     waker: Option<crate::waker::Waker>,
+    /// Claims mode: the credential of the assignment this server was started
+    /// under. Kept, never re-derived, so a reassignment revokes the session.
+    credential: Option<Token>,
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -466,6 +471,7 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
                         _ => vec![],
                     };
                     ArtifactPayload::Candidate(Candidate {
+                        claim: None,
                         base: a
                             .get("base")
                             .and_then(Value::as_str)
@@ -501,11 +507,19 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
 impl Server {
     pub fn new(binding: Binding) -> Result<Server, String> {
         let driver = open_driver(&binding.dir, &binding.task)?;
+        if driver.state.mode == Mode::Claims && binding.turn.is_some() {
+            return Err("a claims task grants no turns: serve it with $BBP_SESSION=yes".into());
+        }
+        let credential = match driver.state.mode {
+            Mode::Claims => driver.state.credential_for(&binding.principal),
+            _ => None,
+        };
         Ok(Server {
             binding,
             driver,
             shown: None,
             waker: None,
+            credential,
         })
     }
 
@@ -575,6 +589,9 @@ impl Server {
     fn wait(&mut self, args: &Value) -> Result<Value, String> {
         if self.binding.turn.is_some() {
             return Err("wait is for a session; this server speaks for one turn".into());
+        }
+        if self.claims() {
+            return Err("a claims task grants no turns; act with the other tools".into());
         }
         let timeout = args
             .get("timeout_s")
@@ -684,9 +701,49 @@ impl Server {
         }
     }
 
+    /// True when the bound task is in claims mode.
+    fn claims(&self) -> bool {
+        self.driver.state.mode == Mode::Claims
+    }
+
+    /// Store the bytes of a `put_artifact` and point the action at them.
+    fn stored(
+        &mut self,
+        act: AgentAction,
+        bytes: Option<(ArtifactPayload, Vec<u8>)>,
+    ) -> Result<AgentAction, String> {
+        let Some((payload, body)) = bytes else {
+            return Ok(act);
+        };
+        let encoded = encode_artifact(&payload, &body).map_err(|e| e.to_string())?;
+        let blob = self.driver.store.blob_put(&encoded);
+        Ok(AgentAction::PutArtifact { blob, payload })
+    }
+
+    /// A claims-mode call, views included: authorised by the session
+    /// credential (C-R1) captured when this server started, which the model
+    /// never sees. Reassignment or the task's end invalidates it, and the
+    /// core refuses the call with `bad_credential`.
+    fn call_claims(&mut self, name: &str, args: &Value) -> Result<Response, String> {
+        let Translated { op, action, bytes } = claims::action(name, args)?;
+        let action = self.stored(action, bytes)?;
+        let cmd = Command::Agent {
+            principal: self.binding.principal.clone(),
+            token: self.credential,
+            op,
+            action,
+        };
+        self.driver
+            .dispatch(&cmd, now())
+            .map_err(|e| format!("{e:?}"))
+    }
+
     /// Run one tool call end to end.
     pub fn call(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         self.driver.sync().map_err(|e| format!("{e:?}"))?;
+        if self.claims() {
+            return self.call_claims(name, args);
+        }
         let Translated {
             op,
             action: mut act,
@@ -709,11 +766,7 @@ impl Server {
                 (None, None) => "you hold no turn; call wait".to_owned(),
             });
         }
-        if let Some((payload, body)) = bytes {
-            let encoded = encode_artifact(&payload, &body).map_err(|e| e.to_string())?;
-            let blob = self.driver.store.blob_put(&encoded);
-            act = AgentAction::PutArtifact { blob, payload };
-        }
+        act = self.stored(act, bytes)?;
         // A replay after the turn ended still names the turn it was made in.
         let token = turn
             .filter(|_| !matches!(act, AgentAction::TaskCard))
@@ -757,7 +810,13 @@ impl Server {
                 ),
             ])),
             "ping" => Ok(obj(vec![])),
-            "tools/list" => Ok(obj(vec![("tools", tools(self.binding.turn.is_none()))])),
+            "tools/list" => Ok(obj(vec![(
+                "tools",
+                match self.claims() {
+                    true => claims::tools(),
+                    false => tools(self.binding.turn.is_none()),
+                },
+            )])),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params

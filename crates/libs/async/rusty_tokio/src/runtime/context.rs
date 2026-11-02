@@ -305,9 +305,22 @@ pub(crate) fn enter(shared: Arc<Shared>) -> EnterGuard {
     EnterGuard { previous }
 }
 
+/// Like [`enter`], but `None` once this thread's thread-local storage
+/// for the ambient runtime has been destroyed, as when a runtime kept in
+/// another thread-local is dropped during thread exit.
+pub(crate) fn try_enter(shared: Arc<Shared>) -> Option<EnterGuard> {
+    let previous = CURRENT
+        .try_with(|c| c.borrow_mut().replace(Handle { shared }))
+        .ok()?;
+    Some(EnterGuard { previous })
+}
+
 impl Drop for EnterGuard {
     fn drop(&mut self) {
-        CURRENT.with(|c| *c.borrow_mut() = self.previous.take());
+        // `try_with`: the storage may be gone by now during thread exit,
+        // and a panic from a thread-local destructor aborts the process.
+        let previous = self.previous.take();
+        let _ = CURRENT.try_with(|c| *c.borrow_mut() = previous);
     }
 }
 

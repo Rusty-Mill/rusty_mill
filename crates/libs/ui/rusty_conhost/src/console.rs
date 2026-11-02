@@ -37,6 +37,9 @@ mod read;
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) use read::READ_REPLY_CAP;
 mod screen;
+mod sync;
+#[cfg(windows)]
+pub(crate) use sync::CURSOR_WAIT;
 
 use output::get_console_window;
 use screen::Screen;
@@ -144,6 +147,9 @@ pub(crate) enum Event<'a> {
     HangUp,
     /// The CTRL_CLOSE grace deadline passed (§7.3).
     GraceExpired,
+    /// [`CURSOR_WAIT`] passed since the last [`Effect::AwaitCursor`]
+    /// with no CPR from the terminal.
+    CursorWaitExpired,
     /// The slice of a streamed write's input that [`Effect::Fetch`]
     /// asked for; `None` when the driver could not read it.
     Fetched {
@@ -230,6 +236,10 @@ pub(crate) enum Effect {
         at: usize,
         len: usize,
     },
+    /// DSR 6 went to the terminal after a resize (#1375): the engine
+    /// takes no packet until its CPR comes, and sends
+    /// [`Event::CursorWaitExpired`] [`CURSOR_WAIT`] from now if none does.
+    AwaitCursor,
     Log(Diag),
 }
 
@@ -313,6 +323,8 @@ struct Client {
     pid: u32,
     /// CONNECT's `ProcessGroupId`.
     group: u32,
+    /// The GH#3126 shims its `ApplicationName` gets.
+    shim: cells::ShimPolicy,
     /// The input and output objects CONNECT opened, which DISCONNECT
     /// closes.
     own: [usize; 2],
@@ -712,6 +724,10 @@ pub(crate) struct Console {
     /// A DBCS lead byte's record that ended the last `WriteConsoleInputA`,
     /// for the next (conhost `_writePartialByteSequence`).
     input_lead: Option<input::KeyEvent>,
+    /// Whether the cursor still matches the terminal's after a resize.
+    cursor_sync: sync::CursorSync,
+    /// GetConsoleScreenBufferInfo calls held for the terminal's CPR.
+    held_info: VecDeque<sync::HeldInfo>,
 }
 
 impl Console {
@@ -757,6 +773,8 @@ impl Console {
             record_utf8: [input::Utf8Units::default(); 2],
             vt_utf8: input::Utf8Units::default(),
             input_lead: None,
+            cursor_sync: sync::CursorSync::Clean,
+            held_info: VecDeque::new(),
         }
     }
 
@@ -781,9 +799,10 @@ impl Console {
         self.writes_cut
     }
 
-    /// Calls held without a reply: parked writes and waiting reads.
+    /// Calls held without a reply: parked writes, waiting reads and
+    /// screen buffer info held for the terminal's cursor.
     pub(crate) fn waiting(&self) -> usize {
-        self.writes.len() + self.reads.len()
+        self.writes.len() + self.reads.len() + self.held_info()
     }
 
     /// Calls wait on the output queue draining: parked writes, or
@@ -837,6 +856,7 @@ impl Console {
                 self.start_close(&mut fx);
             }
             Event::GraceExpired => self.close(&mut fx),
+            Event::CursorWaitExpired => self.cursor_wait_expired(&mut fx),
             Event::Fetched { id, bytes } => self.fetched(id, bytes, out, &mut fx),
         }
         self.sync_input_available(&mut fx);
@@ -887,6 +907,7 @@ impl Console {
         // Their clients are about to be disconnected.
         self.writes.clear();
         self.reads.clear();
+        self.drop_held_info();
         self.echo_held = false;
         self.reads_cut = false;
         self.writes_cut = false;
@@ -1027,6 +1048,7 @@ impl Console {
                 // On CONNECT, Process carries the client's pid.
                 pid: p.process as u32,
                 group: info.group,
+                shim: cells::ShimPolicy::of(&info.app),
                 own: [input, output],
                 objects: 0,
             },
@@ -1152,7 +1174,7 @@ impl Console {
             api::SET_TITLE => return self.set_title(p, m, fixed, out, fx),
             api::GET_CURSOR_INFO => self.get_cursor_info(p.object, &mut fixed),
             api::SET_CURSOR_INFO => return self.set_cursor_info(p, fixed, out, fx),
-            api::GET_SCREEN_BUFFER_INFO => self.get_screen_buffer_info(p.object, &mut fixed),
+            api::GET_SCREEN_BUFFER_INFO => return self.screen_buffer_info(p, fixed, out, fx),
             api::SET_CURSOR_POSITION => return self.set_cursor_position(p, fixed, out, fx),
             api::SET_TEXT_ATTRIBUTE => return self.set_text_attribute(p, fixed, out, fx),
             api::GET_CURRENT_FONT => self.get_current_font(p.object, &mut fixed),
@@ -1922,8 +1944,17 @@ pub(crate) mod tests {
 
         /// CONNECT as `pid`: the (process, input, output) cookies.
         pub(super) fn connect(&mut self, pid: usize, title: &str) -> [usize; 3] {
+            self.connect_with(pid, &msg::server_msg(title))
+        }
+
+        /// CONNECT as `pid` from the executable `app`.
+        pub(super) fn connect_from(&mut self, pid: usize, app: &str) -> [usize; 3] {
+            self.connect_with(pid, &msg::server_msg_from(app))
+        }
+
+        fn connect_with(&mut self, pid: usize, server_msg: &[u8]) -> [usize; 3] {
             let info = msg::CONNECTION_INFORMATION_LEN as u32;
-            let (r, _) = self.packet(msg::CONNECT, pid, 0, &msg::server_msg(title), info);
+            let (r, _) = self.packet(msg::CONNECT, pid, 0, server_msg, info);
             assert_eq!(r.status, msg::STATUS_SUCCESS);
             let cookie = |i: usize| {
                 let bytes: [u8; 8] = r.write_back[i * 8..i * 8 + 8].try_into().expect("8 bytes");
@@ -3277,6 +3308,7 @@ pub(crate) mod tests {
         assert!(h.c.streaming());
         let v = crate::sched::View {
             streaming: h.c.streaming(),
+            awaiting_cursor: h.c.awaiting_cursor(),
             ..crate::sched::View::default()
         };
         assert!(

@@ -142,6 +142,93 @@ fn plain_tells_whether_sgr_0_alone_would_restore_the_rendition() {
 }
 
 #[test]
+fn can_and_sub_abort_an_osc_string_without_acting_on_it() {
+    for abort in [b"\x18", b"\x1a"] {
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b]0;stuck");
+        p.advance(&mut g, abort);
+        assert!(p.ground(), "{abort:?}");
+        p.advance(&mut g, b"\x07after");
+        assert_eq!(g.title, "", "{abort:?}: the title was never set");
+        assert_eq!(g.line_text(0).as_deref().map(str::trim_end), Some("after"));
+    }
+}
+
+#[test]
+fn can_and_sub_abort_a_string_at_every_split_without_acting_on_it() {
+    // Each string sets the title, writes the clipboard, posts a
+    // notification or asks for an answer. Cut after each of its bytes,
+    // its terminator's ESC included, then CAN or SUB, it does nothing.
+    let strings: [&[u8]; 7] = [
+        b"\x1b]0;stuck\x1b",
+        b"\x1b]52;c;YQ==\x1b",
+        b"\x1b]9;hello\x1b",
+        b"\x1b]777;notify;title;body\x1b",
+        b"\x1bP$qm\x1b",
+        b"\x1bP+q544e\x1b",
+        b"\x1b_Gi=99,a=q;\x1b",
+    ];
+    for string in strings {
+        for cut in 1..=string.len() {
+            for abort in [b"\x18", b"\x1a"] {
+                let what = format!("{:?} {abort:?}", &string[..cut]);
+                let mut g = Grid::new(20, 2);
+                let mut p = AnsiParser::new();
+                p.advance(&mut g, &string[..cut]);
+                p.advance(&mut g, abort);
+                assert!(p.ground(), "{what}");
+                p.advance(&mut g, b"after");
+                assert_eq!(g.title, "", "{what}");
+                assert_eq!(g.clipboard_set, None, "{what}");
+                assert!(g.notifications.is_empty(), "{what}");
+                assert!(p.take_responses().is_empty(), "{what}");
+                assert_eq!(
+                    g.line_text(0).as_deref().map(str::trim_end),
+                    Some("after"),
+                    "{what}"
+                );
+            }
+        }
+        // With ST instead, each is acted on: the test sees a real effect.
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, string);
+        p.advance(&mut g, b"\\");
+        let acted = g.title == "stuck"
+            || g.clipboard_set.is_some()
+            || !g.notifications.is_empty()
+            || !p.take_responses().is_empty();
+        assert!(acted, "{string:?}");
+    }
+}
+
+#[test]
+fn ground_is_false_inside_any_unfinished_sequence() {
+    let mut g = Grid::new(20, 2);
+    let mut p = AnsiParser::new();
+    assert!(p.ground());
+    for (input, ground) in [
+        (&b"\x1b[31m"[..], true),
+        (b"\x1b", false),
+        (b"[3", false),
+        (b"1m", true),
+        (b"\xe2\x94", false),
+        (b"\x80", true),
+        (b"\x1b]0;title", false),
+        (b"\x1b", false),
+        (b"\\", true),
+        (b"\x1bP1$r", false),
+        (b"\x18", true),
+        (b"\x1b(", false),
+        (b"0", true),
+    ] {
+        p.advance(&mut g, input);
+        assert_eq!(p.ground(), ground, "{input:?}");
+    }
+}
+
+#[test]
 fn plain_cursor_needs_origin_and_insert_mode_off_and_no_open_link() {
     let mut g = Grid::new(20, 4);
     let mut p = AnsiParser::new();
@@ -7803,6 +7890,68 @@ fn plain_csi_fast_path_matches_bytewise_parse() {
     }
 }
 
+#[test]
+fn private_csi_fast_path_matches_bytewise_parse() {
+    let private_256 = format!("\x1b[?{}h", "1".repeat(256));
+    let private_257 = format!("\x1b[?{}h", "1".repeat(257));
+    let private_17 = format!("\x1b[?{}1049h", "0;".repeat(17));
+    let cases: [&[u8]; 20] = [
+        b"\x1b[?h\x1b[?l\x1b[?;h\x1b[?25;7;6l\x1b[?25;7;6h",
+        b"\x1b[?1049hx\x1b[?1049l\x1b[?47hy\x1b[?47l\x1b[?1047hz\x1b[?1047l",
+        b"\x1b[>c\x1b[>0c\x1b[=c\x1b[>q",
+        b"\x1b[>1u\x1b[?u\x1b[=5;2u\x1b[<u\x1b[<3u\x1b[?u",
+        b"\x1b[>4;2m\x1b[>4m\x1b[>m",
+        b"\x1b[?996n\x1b[?6n\x1b[?5n",
+        b"\x1b[?1;1S\x1b[?2;1S\x1b[?3;1S\x1b[?1;9S\x1b[?S",
+        b"ab\x1b[1\"q\x1b[1;1Hc\x1b[0\"qd\x1b[?1J\x1b[?2K\x1b[?0J",
+        b"\x1b[?2026h\x1b[?2026$p\x1b[?2026l\x1b[?7$p",
+        b"\x1b[?1000;1006h\x1b[?2004h\x1b[?1004h\x1b[?2004l",
+        b"\x1b[??25l\x1b[1?25hx\x1b[?2?5lx\x1b[?25:1hx",
+        b"\x1b[?25\x01lx\x1b[?25\x18hx\x1b[?25\x1b[?25lx",
+        b"\x1b[?",
+        b"\x1b[?25",
+        b"\x1b[18446744073709551615Cx\x1b[18446744073709551616Cx",
+        b"\x1b[?18446744073709551615h\x1b[?18446744073709551616h",
+        b"\x1b[1;2;3;4;5;7;8;9;21;22;23;24;25;27;28;29;31;41mx\x1b[;;;;;;;;;;;;;;;;;1mx",
+        private_256.as_bytes(),
+        private_257.as_bytes(),
+        private_17.as_bytes(),
+    ];
+    for input in cases {
+        assert_eq!(
+            csi_paths_state(input, false),
+            csi_paths_state(input, true),
+            "fast and byte-wise CSI paths differ on {:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+#[test]
+fn private_csi_split_at_every_offset_matches_one_chunk() {
+    let input = b"a\x1b[?1049hb\x1b[>1uc\x1b[?25;7ld\x1b[?6ne\x1b[>4;2mf\x1b[?1049l";
+    let whole = csi_paths_state(input, false);
+    for cut in 1..input.len() {
+        let mut g = Grid::new(80, 24);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, &input[..cut]);
+        p.advance(&mut g, &input[cut..]);
+        let responses = p.take_responses();
+        let host_out = g.take_host_out();
+        let state = super::checkpoint::encode(&g, &p).expect("checkpoint");
+        assert_eq!((state, responses, host_out), whole, "split at byte {cut}");
+    }
+}
+
+#[test]
+fn private_csi_fast_path_relays_its_parameters() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[>1u\x1b[>4;2m");
+    assert_eq!(g.take_host_out(), b"\x1b[>1u\x1b[>4;2m");
+    assert_eq!(g.kitty_keyboard_flags(), 1);
+}
+
 /// `lines` rows of `cols` glyphs, glyph `x` of row `k` in its own truecolour
 /// `first + k * cols + x`.
 fn rainbow(first: u32, lines: usize, cols: usize) -> Vec<u8> {
@@ -8103,7 +8252,7 @@ fn measure_string_body_scan() {
 fn string_body_len_matches_a_byte_scan() {
     // Every byte value at every position of a 19-byte buffer (two words plus
     // a tail), for both terminator sets.
-    for stops in [&[0x07, 0x1b][..], &[0x1b, 0x18, 0x1a][..]] {
+    for stops in [&[0x07, 0x1b, 0x18, 0x1a][..], &[0x1b, 0x18, 0x1a][..]] {
         for bad in 0..=255u8 {
             for pos in 0..19 {
                 let mut buf = [b'a'; 19];
@@ -8127,7 +8276,7 @@ fn string_body_len_matches_a_byte_scan() {
 fn string_bodies_split_at_every_offset_match_one_chunk() {
     let stream: &[u8] = b"\x1b]2;first title\x07A\x1b]2;second\x1b\\B\
         \x1bP+q544e\x1b\\C\x1b_Gabc\x18D\x1bPzz\x1aE\x1bXsos body\x1b\\F\
-        \x1b^pm\x18G\x1b]2;last\x07H";
+        \x1b^pm\x18G\x1b]2;cut\x18I\x1b]2;last\x07H";
     let run = |chunks: &mut dyn Iterator<Item = &[u8]>| {
         let mut g = Grid::new(20, 2);
         let mut p = AnsiParser::new();
@@ -8141,7 +8290,7 @@ fn string_bodies_split_at_every_offset_match_one_chunk() {
     AnsiParser::new().advance(&mut g, stream);
     assert_eq!(
         row_text(&g, 0).trim_end(),
-        "ABCDEFGH",
+        "ABCDEFGIH",
         "every string returns to ground"
     );
     assert_eq!(whole.1, "last");

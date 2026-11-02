@@ -134,8 +134,8 @@ impl Default for Workflow {
                 mv(Column::BLOCKED, Column::READY, Triage),
                 mv(Column::READY, Column::BUILDING, Build),
                 mv(Column::BUILDING, Column::QA, Build),
-                mv(Column::QA, Column::BUILDING, Qa),
-                mv(Column::QA, Column::REVIEW, Qa),
+                mv(Column::QA, Column::BUILDING, Test),
+                mv(Column::QA, Column::REVIEW, Test),
                 mv(Column::REVIEW, Column::BUILDING, Review),
                 mv(Column::REVIEW, Column::DONE, Merge),
                 mv(Column::BUILDING, Column::DONE, Close),
@@ -152,7 +152,7 @@ impl Workflow {
     /// The reason, if: a label is blank or too long; an id repeats; an anchor (backlog, done,
     /// blocked) is missing, repeated or has the wrong id; a transition names an unknown
     /// column, goes nowhere, leaves Done, enters Blocked (always allowed, so never listed) or
-    /// repeats; or there are too many columns or transitions.
+    /// repeats with the same capability; or there are too many columns or transitions.
     pub fn new(columns: Vec<ColumnDef>, transitions: Vec<Transition>) -> Result<Self, String> {
         if columns.len() > MAX_COLUMNS {
             return Err(format!("at most {MAX_COLUMNS} columns"));
@@ -199,7 +199,9 @@ impl Workflow {
         self.column(id).map(|c| c.kind)
     }
 
-    /// The transition `from` -> `to`. `Ok(None)`: no capability needed (into Blocked).
+    /// The transitions `from` -> `to`: one per capability that may make the move (say, a
+    /// gated merge and a `Close` for work merged elsewhere), never empty. `Ok(None)`: no
+    /// capability needed (into Blocked).
     ///
     /// # Errors
     /// [`BoardError::Terminal`] out of Done, [`BoardError::NoSuchMove`] for a move the
@@ -208,7 +210,7 @@ impl Workflow {
         &self,
         from: &Column,
         to: &Column,
-    ) -> Result<Option<&Transition>, BoardError> {
+    ) -> Result<Option<Vec<&Transition>>, BoardError> {
         if *from == Column::DONE {
             return Err(BoardError::Terminal);
         }
@@ -222,11 +224,48 @@ impl Workflow {
         if self.kind(to) == Some(Kind::Blocked) {
             return Ok(None);
         }
+        let found: Vec<&Transition> = self
+            .transitions
+            .iter()
+            .filter(|t| t.from == *from && t.to == *to)
+            .collect();
+        if found.is_empty() {
+            return Err(no_such());
+        }
+        Ok(Some(found))
+    }
+
+    /// The gates a move `from` -> `to` jumps over without taking: forward gates (`g.from`
+    /// before `g.to` in display order) with `from` at or before `g.from` and `to` at or after
+    /// `g.to`. Blocked has no place in the order, so a card leaving it counts as starting from
+    /// the beginning: it crosses every gate up to `to`. Used with movement rules off, so that
+    /// skipping columns is no way around a human approval.
+    pub fn gates_crossed(&self, from: &Column, to: &Column) -> Vec<&Transition> {
+        let rank = |id: &Column| {
+            self.columns
+                .iter()
+                .filter(|c| c.kind != Kind::Blocked)
+                .position(|c| c.id == *id)
+        };
+        let Some(dest) = rank(to) else {
+            return Vec::new();
+        };
+        let start = if self.kind(from) == Some(Kind::Blocked) {
+            Some(0)
+        } else {
+            rank(from)
+        };
+        let Some(start) = start else {
+            return Vec::new();
+        };
         self.transitions
             .iter()
-            .find(|t| t.from == *from && t.to == *to)
-            .map(Some)
-            .ok_or_else(no_such)
+            .filter(|g| g.gate)
+            .filter(|g| match (rank(&g.from), rank(&g.to)) {
+                (Some(f), Some(t)) => f < t && start <= f && dest >= t,
+                _ => false,
+            })
+            .collect()
     }
 
     /// Columns where work is picked up (queues and work columns), in the order a worker
@@ -321,7 +360,7 @@ fn check_transitions(flow: &Workflow, transitions: &[Transition]) -> Result<(), 
                 "{name}: any card may be blocked, so this is never listed"
             ));
         }
-        if !seen.insert((&t.from, &t.to)) {
+        if !seen.insert((&t.from, &t.to, t.cap)) {
             return Err(format!("{name} appears twice"));
         }
     }
@@ -366,7 +405,7 @@ mod tests {
     fn default_is_the_original_table() {
         use Capability::*;
         let f = Workflow::default();
-        let need = |a: &Column, b: &Column| f.transition(a, b).map(|t| t.map(|t| t.cap));
+        let need = |a: &Column, b: &Column| f.transition(a, b).map(|t| t.map(|t| t[0].cap));
         assert_eq!(need(&Column::BACKLOG, &Column::READY), Ok(Some(Triage)));
         assert_eq!(need(&Column::REVIEW, &Column::DONE), Ok(Some(Merge)));
         assert_eq!(need(&Column::QA, &Column::BLOCKED), Ok(None));
@@ -429,12 +468,12 @@ mod tests {
     #[test]
     fn takers_override_the_derived_ones() {
         let mut work = col("work", Kind::Work);
-        work.takers = caps(&[Capability::Qa]);
+        work.takers = caps(&[Capability::Test]);
         let mut cols = anchors();
         cols.insert(1, work);
         let f = Workflow::new(cols, vec![mv("work", "done", Capability::Review)]).expect("valid");
         let id = Column::new("work").expect("id");
-        assert!(f.actionable(&id, &caps(&[Capability::Qa])));
+        assert!(f.actionable(&id, &caps(&[Capability::Test])));
         assert!(!f.actionable(&id, &caps(&[Capability::Review])));
     }
 
@@ -483,9 +522,28 @@ mod tests {
         );
         let dup = vec![
             mv("backlog", "done", Capability::Close),
-            mv("backlog", "done", Capability::Merge),
+            mv("backlog", "done", Capability::Close),
         ];
         assert!(refused(anchors(), dup).contains("twice"));
+    }
+
+    #[test]
+    fn a_move_may_be_made_with_either_of_two_capabilities() {
+        let mut merge = mv("backlog", "done", Capability::Merge);
+        merge.gate = true;
+        let f = Workflow::new(
+            anchors(),
+            vec![merge, mv("backlog", "done", Capability::Close)],
+        )
+        .expect("two ways to make one move");
+        let caps: Vec<Capability> = f
+            .transition(&Column::BACKLOG, &Column::DONE)
+            .expect("move")
+            .expect("needs a capability")
+            .iter()
+            .map(|t| t.cap)
+            .collect();
+        assert_eq!(caps, [Capability::Merge, Capability::Close]);
     }
 
     #[test]

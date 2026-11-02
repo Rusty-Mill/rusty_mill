@@ -126,21 +126,26 @@ enum Host {
 /// What precedes a probe's result line.
 const RESULT: &str = "#> ";
 
-/// Run the probe with `args` on `host` and return its result line.
-fn probe_line(host: Host, args: &[&str]) -> String {
-    let cmd = command(&probe(), args);
+/// All `cmd` writes to the terminal on `host`; it must exit 0.
+fn terminal_output(host: Host, cmd: &Command) -> Vec<u8> {
     let (out, child) = match host {
         Host::ConPty => {
-            let (master, child) = WindowsPty.spawn_concrete(&cmd, SIZE).expect("ConPTY spawn");
+            let (master, child) = WindowsPty.spawn_concrete(cmd, SIZE).expect("ConPTY spawn");
             (read_all(master).map(|(out, _)| out), child)
         }
         Host::Own => {
-            let (master, child) = own(&cmd);
+            let (master, child) = own(cmd);
             (read_all(master).map(|(out, _)| out), child)
         }
     };
     let out = out.unwrap_or_else(|| panic!("{host:?}: no EOF within the budget"));
     assert_eq!(Box::new(child).wait().expect("wait"), ExitStatus::Code(0));
+    out
+}
+
+/// Run the probe with `args` on `host` and return its result line.
+fn probe_line(host: Host, args: &[&str]) -> String {
+    let out = terminal_output(host, &command(&probe(), args));
     let head = format!("{RESULT}{} ", args[0]);
     plain_lines(&out)
         .iter()
@@ -500,6 +505,42 @@ fn parity_suite_agrees_with_conpty() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// conhost's GH#3126 shims (#1371): a whole-screen clear by cmd or
+/// PowerShell reaches the terminal as ED 3 too, which empties its
+/// scrollback; the same fill from any other client does not. The parity
+/// probes compare API answers, so this compares the VT itself.
+#[test]
+fn shell_clears_empty_the_scrollback_as_under_conpty() {
+    let _g = lock();
+    let ps = |script: &'static str| ["-NoProfile", "-NonInteractive", "-Command", script];
+    let cases: [(String, Vec<&str>, bool); 4] = [
+        ("cmd.exe".into(), vec!["/c", "cls"], true),
+        ("powershell.exe".into(), ps("Clear-Host").to_vec(), true),
+        (
+            "powershell.exe".into(),
+            ps("[Console]::Clear()").to_vec(),
+            true,
+        ),
+        // The whole screen, as Clear-Host fills it.
+        (probe(), vec!["fill", "\\s", "7", "6000", "0", "0"], false),
+    ];
+    let mut failures = Vec::new();
+    for (program, args, clears) in &cases {
+        for host in [Host::ConPty, Host::Own] {
+            let out = terminal_output(host, &command(program, args));
+            let ed3 = out.windows(4).any(|w| w == b"\x1b[3J");
+            eprintln!("{host:?} {program} {args:?}: ED 3 {ed3}");
+            if ed3 != *clears {
+                failures.push(format!(
+                    "{host:?} {program} {args:?}: ED 3 {ed3}, want {clears}: {:?}",
+                    String::from_utf8_lossy(&out)
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn a_reader_that_stalls_holds_the_writer_back() {
     let _g = lock();
@@ -748,6 +789,94 @@ fn resize_checks_the_size() {
     assert_eq!(err.kind, ErrorKind::InvalidInput);
     master.hang_up();
     let _ = child.kill_single(platform::process::Signal::Kill);
+}
+
+/// The terminal's side, as rusty_term runs it: a Grid with scrollback
+/// fed the console's output, answering its queries on the input.
+struct Terminal {
+    master: Arc<OwnPtyMaster>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    parser: rusty_term_core::AnsiParser,
+    grid: rusty_term_core::Grid,
+}
+
+impl Terminal {
+    fn new(master: Arc<OwnPtyMaster>, size: WinSize) -> Terminal {
+        let Stream { rx, .. } = Stream::new(Arc::clone(&master));
+        Terminal {
+            master,
+            rx,
+            parser: rusty_term_core::AnsiParser::new(),
+            grid: rusty_term_core::Grid::new(usize::from(size.cols), usize::from(size.rows)),
+        }
+    }
+
+    /// Parse one chunk, if one comes within `wait`, and answer it.
+    fn pump(&mut self, wait: Duration) -> bool {
+        let Ok(chunk) = self.rx.recv_timeout(wait) else {
+            return false;
+        };
+        self.parser.advance(&mut self.grid, &chunk);
+        let answers = self.parser.take_responses();
+        if !answers.is_empty() {
+            self.master.write(&answers).expect("answer the console");
+        }
+        true
+    }
+
+    /// Pump until a screen row contains `text`, then until output stops.
+    fn until(&mut self, text: &str) {
+        let deadline = Instant::now() + BUDGET;
+        while !self.rows().iter().any(|r| r.contains(text)) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(self.pump(left), "no {text:?} in {:#?}", self.rows());
+        }
+        while self.pump(Duration::from_millis(300)) {}
+    }
+
+    /// Resize as rusty_term's window does: its own Grid first.
+    fn resize(&mut self, size: WinSize) {
+        self.grid
+            .resize(usize::from(size.cols), usize::from(size.rows));
+        self.master.resize(size).expect("resize");
+        while self.pump(Duration::from_millis(300)) {}
+    }
+
+    fn rows(&self) -> Vec<String> {
+        (0..self.grid.rows)
+            .map(|y| self.grid.row(y).iter().map(|c| c.ch).collect::<String>())
+            .map(|r| r.trim_end().to_owned())
+            .collect()
+    }
+}
+
+/// #1375: a shrink then a grow pulls rows back from the terminal's
+/// scrollback, and our host keeps none, so the two cursors part. A client
+/// that positions from screen buffer info, as PSReadLine does, must still
+/// write on the terminal's cursor row: the host asks the terminal (DSR 6)
+/// before it answers.
+#[test]
+fn a_client_positioning_from_the_cursor_follows_the_terminal_after_a_resize() {
+    let _g = lock();
+    let probe = probe();
+    let (master, child) = own(&command("cmd.exe", &["/d", "/q", "/k", "prompt $g"]));
+    let _child = Reaped(child);
+    let master = Arc::new(master);
+    let mut term = Terminal::new(Arc::clone(&master), SIZE);
+    master
+        .write(b"for /l %i in (1,1,60) do @echo l%i\r")
+        .expect("write");
+    term.until("l60");
+    term.resize(WinSize { rows: 10, ..SIZE });
+    term.resize(SIZE);
+    let line = format!("\"{probe}\" mark \\x40\\x40\r");
+    master.write(line.as_bytes()).expect("write");
+    term.until("#> mark");
+    let rows = term.rows();
+    let typed = rows.iter().position(|r| r.contains(r"mark \x40"));
+    let mark = rows.iter().position(|r| r.starts_with("@@"));
+    assert!(typed.is_some(), "{rows:#?}");
+    assert_eq!(mark, typed.map(|y| y + 1), "{rows:#?}");
 }
 
 #[test]

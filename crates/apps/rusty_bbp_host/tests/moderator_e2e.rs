@@ -2409,6 +2409,8 @@ fn quiet_planner_task(tag: &str, poll: Duration) -> (PathBuf, TaskId, Config) {
     assert_eq!(
         d.dispatch(
             &Command::Open(OpenTask {
+                claims: None,
+                mode: rusty_bbp::Mode::Stages,
                 task: task.clone(),
                 roster: common::roster(),
                 repo: "local".into(),

@@ -25,7 +25,8 @@ const HISTORY: usize = 3;
 struct Layout {
     size: (usize, usize),
     pad: usize,
-    font: u64,
+    /// The pane font's and the UI (bar) font's ids.
+    fonts: [u64; 2],
     colors: [u32; 3],
     chrome: Vec<Cell>,
     status: Vec<Cell>,
@@ -87,7 +88,7 @@ impl Frame {
         panes: &[PaneFrame],
         chrome: &[Cell],
         status: &[Cell],
-        font: u64,
+        fonts: [u64; 2],
         size: (usize, usize),
         colors: [u32; 3],
         pad: usize,
@@ -95,7 +96,7 @@ impl Frame {
         let layout = Layout {
             size,
             pad,
-            font,
+            fonts,
             colors,
             chrome: chrome.to_vec(),
             status: status.to_vec(),
@@ -192,22 +193,6 @@ impl Damage {
             Some(rows) => Plan::Rows(rows),
             None => Plan::Full,
         }
-    }
-
-    /// The rows whose pixels differ from the last present once `plan` is
-    /// painted, for the compositor's damage. `None`: the whole window.
-    pub(super) fn shown(&self, frame: &Frame, plan: &Plan) -> Option<Vec<Vec<bool>>> {
-        let Plan::Rows(repaint) = plan else {
-            return None;
-        };
-        let last = changed(frame, self.history.front()?)?;
-        Some(
-            repaint
-                .iter()
-                .zip(last)
-                .map(|(a, b)| a.iter().zip(b).map(|(&a, b)| a || b).collect())
-                .collect(),
-        )
     }
 
     /// Record `frame` as presented.

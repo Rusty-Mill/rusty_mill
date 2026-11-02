@@ -25,7 +25,7 @@ const CURSOR_INFO_LEN: usize = 8;
 const CONSOLE_WINDOW_LEN: usize = 8;
 /// `CONSOLE_SCREENBUFFERINFO_MSG`: four COORDs and a USHORT around the
 /// window sizes, then the colour table at 28.
-const SBI_LEN: usize = 92;
+pub(super) const SBI_LEN: usize = 92;
 const SBI_COLOR_TABLE: usize = 28;
 /// conhost's default popup colours: magenta on white.
 const POPUP_ATTRIBUTES: u16 = 0xF5;
@@ -308,13 +308,16 @@ impl Console {
     }
 
     /// The terminal's new size (§5.7). The Grid reflows; the terminal
-    /// does its own, so nothing is emitted. A client that asked for
-    /// WINDOW_INPUT gets a WINDOW_BUFFER_SIZE_EVENT.
+    /// does its own, so nothing is emitted, and the cursor may differ
+    /// from the terminal's until the next screen buffer info resyncs it
+    /// (#1375). A client that asked for WINDOW_INPUT gets a
+    /// WINDOW_BUFFER_SIZE_EVENT.
     pub(super) fn resize(&mut self, size: WinSize, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
         if size.rows == 0 || size.cols == 0 || size == self.screen.size() {
             return;
         }
         self.screen.resize(size);
+        self.cursor_maybe_wrong();
         if self.input_mode & mode::WINDOW_INPUT == 0 {
             return;
         }
@@ -869,6 +872,42 @@ mod tests {
         // The relative write scrolls both, from different screens.
         assert_eq!(rows(h.c.screen.grid()), ["C", "D", "E"]);
         assert_eq!(rows(&t.grid), ["B", "D", "E"]);
+    }
+
+    /// #1375: the terminal answers the host's DSR after the resize, so a
+    /// client positioning from screen buffer info writes where the
+    /// terminal's cursor is. Only the contents still differ (V3).
+    #[test]
+    fn v3_the_cursor_resyncs_from_the_terminal_after_a_resize() {
+        let size = |rows| WinSize { rows, cols: 4 };
+        let mut h = Host::sized(size(3));
+        let mut t = Terminal::new(size(3));
+        let [_, _, output] = h.connect(1, "");
+        h.write_w(output, "A\r\nB\r\nC");
+        t.sync(&h);
+        resize(&mut h, &mut t, size(2));
+        resize(&mut h, &mut t, size(3));
+        assert_eq!(sbi(&mut h, output).status, i32::MIN, "held for the CPR");
+        t.sync(&h);
+        let cpr = t.parser.take_responses();
+        assert_eq!(cpr, b"\x1b[3;2R");
+        let fx = h.ev(Event::Input(&cpr));
+        let info = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::Complete(r) => Some(r.clone()),
+                _ => None,
+            })
+            .expect("answered");
+        assert_eq!(u16s(&info, &[4, 6]), [1, 2], "the terminal's cursor");
+        let [cup, rel] = positioned_then_relative(&mut h, output, 2);
+        assert_eq!(cup, b"\x1b[3;1HD");
+        assert_eq!(rel, b"\r\nE");
+        t.sync(&h);
+        let (x, y) = h.c.screen.cursor();
+        assert_eq!((usize::from(x), usize::from(y)), t.grid.cursor);
+        assert_eq!(rows(&t.grid), ["B", "D", "E"]);
+        assert_eq!(rows(h.c.screen.grid()), ["C", "D", "E"]);
     }
 
     #[test]

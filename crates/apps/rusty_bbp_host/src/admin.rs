@@ -14,6 +14,13 @@ pub fn read_roster(file: &Path) -> Result<Vec<Role>, String> {
     rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))
 }
 
+/// Read a claims config file: a JSON `ClaimsConfig`. The core validates it
+/// at open (`bad_claims_config` naming the field).
+pub fn read_claims_config(file: &Path) -> Result<ClaimsConfig, String> {
+    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    rusty_serde::json::from_str(&text).map_err(|e| format!("{}: {e}", file.display()))
+}
+
 /// A policy name as `bbp open --policy` spells it.
 pub fn parse_policy(name: &str) -> Result<SchedulingPolicy, String> {
     match name {
@@ -77,6 +84,33 @@ pub fn open_task_live(
     max_live_turns: u32,
     policy: SchedulingPolicy,
 ) -> Result<Response, String> {
+    open_mode(
+        dir,
+        task,
+        repo,
+        brief,
+        human,
+        set,
+        roster,
+        max_live_turns,
+        policy,
+        (Mode::Stages, None),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn open_mode(
+    dir: &Path,
+    task: &TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &PrincipalId,
+    set: &ProfileSet,
+    roster: Vec<Role>,
+    max_live_turns: u32,
+    policy: SchedulingPolicy,
+    (mode, claims): (Mode, Option<ClaimsConfig>),
+) -> Result<Response, String> {
     let master = crate::master::ensure(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
     let mut d = Driver::new(store, task.clone()).with_master(master);
@@ -90,6 +124,8 @@ pub fn open_task_live(
     let profile_digest = profiles::freeze(dir, task, set)?;
     let blob = d.store.blob_put(brief);
     let cmd = Command::Open(OpenTask {
+        claims,
+        mode,
         task: task.clone(),
         roster,
         repo: repo.to_owned(),
@@ -110,6 +146,53 @@ pub fn open_task_live(
         policy,
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
+/// Open `task` in claims mode (log schema 5) with `cfg` as its claims config.
+///
+/// Claims-mode runs execute only sandboxed, so the host refuses the open
+/// with `bad_claims_config(sandbox)` unless `sandbox` (the host's probe of
+/// its sandbox) succeeds, and with `bad_claims_config(test_paths)` unless
+/// the profile set names its `test_paths`. Both checks come before anything
+/// is written. Claims mode grants no turns: one live turn, turn-based.
+#[allow(clippy::too_many_arguments)]
+pub fn open_claims_task(
+    dir: &Path,
+    task: &TaskId,
+    repo: &str,
+    brief: &[u8],
+    human: &PrincipalId,
+    set: &ProfileSet,
+    roster: Vec<Role>,
+    cfg: ClaimsConfig,
+    sandbox: impl FnOnce() -> Result<(), String>,
+) -> Result<Response, String> {
+    let refuse = |detail: String| {
+        Ok(Response::Rejected(Rejection::new(
+            Code::BadClaimsConfig,
+            detail,
+        )))
+    };
+    if let Err(e) = sandbox() {
+        return refuse(format!(
+            "sandbox: this host cannot confine claims-mode runs ({e})"
+        ));
+    }
+    if set.test_paths.is_empty() {
+        return refuse("test_paths: the profile set must name its test paths".into());
+    }
+    open_mode(
+        dir,
+        task,
+        repo,
+        brief,
+        human,
+        set,
+        roster,
+        1,
+        SchedulingPolicy::TurnBased,
+        (Mode::Claims, Some(cfg)),
+    )
 }
 
 pub fn assign(

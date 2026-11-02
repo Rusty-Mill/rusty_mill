@@ -896,7 +896,7 @@ fn a_card_moved_to_another_queue_into_the_same_column_is_not_taken() {
     };
     let mut columns = base.columns().to_vec();
     columns.insert(1, col("q1", Kind::Queue, &[Capability::Build]));
-    columns.insert(2, col("q2", Kind::Queue, &[Capability::Qa]));
+    columns.insert(2, col("q2", Kind::Queue, &[Capability::Test]));
     columns.insert(3, col("w", Kind::Work, &[Capability::Build]));
     let mv = |from: &str, to: &str, cap: Capability| Transition {
         from: Column::new(from).expect("from"),

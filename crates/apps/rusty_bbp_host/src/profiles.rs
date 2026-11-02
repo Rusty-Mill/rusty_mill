@@ -35,6 +35,13 @@ pub struct ProfileSet {
     pub limits: LimitSpec,
     /// How `Report.tree` is computed; informative.
     pub tree: String,
+    /// Claims mode: globs naming every path the runners read tests, fixtures
+    /// or test configuration from. A candidate run lists each matching file
+    /// its diffs add, modify or delete in `Report.tests_changed`. Required to
+    /// open a claims task; never written when empty, so stage-mode profile
+    /// digests are unchanged.
+    #[rusty_serde(default, skip_serializing_if = "no_paths")]
+    pub test_paths: Vec<String>,
 }
 
 impl ProfileSet {
@@ -61,6 +68,7 @@ impl ProfileSet {
                 processes: 4096,
             },
             tree: "sha256(git write-tree id)".into(),
+            test_paths: vec![],
         }
     }
 
@@ -152,4 +160,84 @@ pub fn load(dir: &Path, task: &TaskId, expected: Sha256) -> Result<ProfileSet, S
         return Err("profile set on disk does not match the task's frozen digest".into());
     }
     ProfileSet::from_bytes(&bytes)
+}
+
+/// Whether `path` (relative, `/`-separated) matches `glob`. `**` as a whole
+/// segment matches any number of segments, `*` any run of characters within
+/// one segment, `?` one character; everything else is literal.
+pub fn path_matches(glob: &str, path: &str) -> bool {
+    let pat: Vec<&str> = glob.split('/').collect();
+    let segs: Vec<&str> = path.split('/').collect();
+    segments_match(&pat, &segs)
+}
+
+fn segments_match(pat: &[&str], segs: &[&str]) -> bool {
+    match pat.split_first() {
+        None => segs.is_empty(),
+        Some((&"**", rest)) => (0..=segs.len()).any(|i| segments_match(rest, &segs[i..])),
+        Some((p, rest)) => segs.split_first().is_some_and(|(s, more)| {
+            let p: Vec<char> = p.chars().collect();
+            let s: Vec<char> = s.chars().collect();
+            segment_matches(&p, &s) && segments_match(rest, more)
+        }),
+    }
+}
+
+/// One segment, by character: `?` is one character, never one byte.
+fn segment_matches(p: &[char], s: &[char]) -> bool {
+    match p.split_first() {
+        None => s.is_empty(),
+        Some(('*', rest)) => (0..=s.len()).any(|i| segment_matches(rest, &s[i..])),
+        Some(('?', rest)) => !s.is_empty() && segment_matches(rest, &s[1..]),
+        Some((c, rest)) => s.first() == Some(c) && segment_matches(rest, &s[1..]),
+    }
+}
+
+/// Whether `path` matches any of `globs`.
+pub fn is_test_path(globs: &[String], path: &str) -> bool {
+    globs.iter().any(|g| path_matches(g, path))
+}
+
+#[allow(clippy::ptr_arg)]
+fn no_paths(v: &Vec<String>) -> bool {
+    v.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn globs_match_whole_paths_by_segment() {
+        assert!(path_matches("tests/**", "tests/core.rs"));
+        assert!(path_matches("tests/**", "tests/a/b/conftest.py"));
+        assert!(!path_matches("tests/**", "src/tests.rs"));
+        assert!(path_matches("**/conftest.py", "conftest.py"));
+        assert!(path_matches("**/conftest.py", "pkg/conftest.py"));
+        assert!(path_matches("src/*_test.go", "src/a_test.go"));
+        assert!(!path_matches("src/*_test.go", "src/x/a_test.go"));
+        assert!(path_matches("pytest.ini", "pytest.ini"));
+        assert!(!path_matches("pytest.ini", "a/pytest.ini"));
+        assert!(path_matches("t?st/*", "test/x"));
+    }
+
+    #[test]
+    fn a_question_mark_is_one_character_not_one_byte() {
+        assert!(path_matches("tests/?.rs", "tests/a.rs"));
+        assert!(path_matches("tests/?.rs", "tests/é.rs"));
+        assert!(path_matches("tests/?.rs", "tests/测.rs"));
+        assert!(!path_matches("tests/?.rs", "tests/éé.rs"));
+        assert!(path_matches("tests/*é.rs", "tests/abé.rs"));
+    }
+
+    #[test]
+    fn an_empty_test_path_list_leaves_the_stage_digest_alone() {
+        let set = ProfileSet::shell("test", "true");
+        let text = String::from_utf8(set.to_bytes().unwrap_or_default()).unwrap_or_default();
+        assert!(!text.contains("test_paths"), "{text}");
+        let mut claims = set.clone();
+        claims.test_paths = vec!["tests/**".into()];
+        let back = ProfileSet::from_bytes(&claims.to_bytes().unwrap_or_default());
+        assert_eq!(back, Ok(claims));
+    }
 }
