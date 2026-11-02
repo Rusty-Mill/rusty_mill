@@ -2356,3 +2356,93 @@ fn cl_14b_a_claim_on_a_closed_dep_stays_dead_until_the_dep_reopens() {
     let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
     assert_eq!(replayed.claims, cx.st.claims);
 }
+
+#[test]
+fn cl_64_replay_needs_the_current_credential() {
+    let mut cx = Cx::new();
+    let c = cx.low();
+    let d = cx.evidence_draft(c, Support, EvidenceKind::Opinion, 1, vec![]);
+    let op = cx.op();
+    let old = cx.cred("a");
+    let first = cx.agent_with("a", old, op.clone(), AgentAction::Post(d.clone()));
+    posted(first.clone());
+    cx.assign("a"); // rotates a's credential
+    for t in [old, None] {
+        assert_eq!(
+            rejected(cx.agent_with("a", t, op.clone(), AgentAction::Post(d.clone()))),
+            Code::BadCredential
+        );
+    }
+    let now = cx.cred("a");
+    assert_eq!(cx.agent_with("a", now, op, AgentAction::Post(d)), first);
+}
+
+#[test]
+fn cl_65_human_posts_are_not_charged_to_the_task_budget() {
+    let mut cx = Cx::new();
+    let mut o = open_task(Mode::Claims, None, roster());
+    o.budget.messages = 1;
+    cx.st = TaskState::new(TaskId::from("t"));
+    cx.log.clear();
+    let r = cx.run(Command::Open(o));
+    cx.brief = stored(r);
+    for who in ["a", "b", "c", "s"] {
+        cx.assign(who);
+    }
+    let _ = cx.low(); // spends the whole message budget
+    let d = Draft {
+        kind: MessageKind::Claim,
+        to: vec![Recipient::All],
+        body: Body::Claim(body("human")),
+        refs: vec![Ref::art(cx.brief)],
+        evidence: vec![],
+        reply_to: None,
+        yield_to: None,
+        gate: false,
+    };
+    let charged = cx.count(|e| matches!(e, Event::Charged { .. }));
+    let h = posted(cx.human(HumanAction::Post(d)));
+    ok(cx.human(HumanAction::Post(cx.evidence_draft(
+        h,
+        Support,
+        EvidenceKind::Opinion,
+        1,
+        vec![],
+    ))));
+    assert_eq!(cx.count(|e| matches!(e, Event::Charged { .. })), charged);
+    assert_eq!(cx.st.state, State::Open);
+}
+
+#[test]
+fn cl_66_held_rerun_on_a_voided_claim_is_withdrawn_not_started() {
+    let mut cx = Cx::with(ClaimsConfig {
+        settle_window: 50,
+        ..ClaimsConfig::default()
+    });
+    let a = cx.low();
+    let b = cx.claim("b", dep_on("b", vec![a]));
+    let k = cx.candidate("a", b); // 1 unit
+    for i in 0..7 {
+        let who = if i % 2 == 0 { "a" } else { "b" };
+        ok(cx.opinion(who, b, Support));
+    } // 8 units: exhausted
+    let rev = cx.rev();
+    ok(cx.human(HumanAction::Rerun {
+        candidate: k,
+        expected_rev: rev,
+    }));
+    assert!(cx.st.claims.held.contains_key(&k));
+    drop_claim(&mut cx, a);
+    assert_eq!(cx.status(b), ClaimStatus::Void);
+    let live = cx.live_run(k);
+    let started = cx.count(|e| matches!(e, Event::RunStarted { .. }));
+    ok(cx.human(HumanAction::ClaimBudgetExtended { claim: b }));
+    assert_eq!(cx.count(|e| matches!(e, Event::RunStarted { .. })), started);
+    assert_eq!(cx.live_run(k), live);
+    assert_eq!(cx.status(b), ClaimStatus::Void);
+    assert!(cx.st.claims.held.is_empty());
+    assert!(cx
+        .log
+        .iter()
+        .any(|e| matches!(e, Event::RerunWithdrawn { candidate } if *candidate == k)));
+}

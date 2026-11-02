@@ -218,6 +218,11 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
                     "claims-mode operation on a stage task",
                 ));
             }
+            // Claims mode authenticates before replay: a cached response is
+            // served only to the principal's current session.
+            if claims {
+                crate::claims_engine::check_credential(&w.st, principal, *token)?;
+            }
             if !action.is_view() {
                 if let Some(r) = replay(&w.st, principal, op, &payload_hash(action)?)? {
                     return Ok(Flow::Replay(r));
@@ -225,7 +230,6 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
                 terminal(&w.st)?;
             }
             if claims {
-                crate::claims_engine::check_credential(&w.st, principal, *token)?;
                 return crate::claims_engine::agent(w, principal, &role, action).map(Flow::Done);
             }
             if !action.is_view() {

@@ -283,6 +283,12 @@ fn runnable(s: ClaimStatus) -> bool {
     )
 }
 
+/// A human rerun may also target an escalated claim, typically one waiting
+/// on budget: the rerun is then held for the extension.
+fn rerun_admits(s: ClaimStatus) -> bool {
+    runnable(s) || s == ClaimStatus::Escalated
+}
+
 fn check_source(s: &Source) -> R<()> {
     if s.excerpt.chars().count() > SOURCE_EXCERPT_CAP {
         return Err(rej(Code::BadClaim, "source excerpt over 4,000 characters"));
@@ -340,13 +346,16 @@ fn post(w: &mut Work, p: &PrincipalId, role: Option<&Role>, d: &Draft) -> R<Resp
         from_role: role.map(|r| r.id.clone()),
         draft: d.clone(),
     }));
-    w.emit(Event::Charged {
-        principal: p.clone(),
-        turn: None,
-        messages: 1,
-        bytes,
-        reads: 0,
-    });
+    // R11: human posts are not charged to the agents' task budget.
+    if role.is_some() {
+        w.emit(Event::Charged {
+            principal: p.clone(),
+            turn: None,
+            messages: 1,
+            bytes,
+            reads: 0,
+        });
+    }
     if let (Some(c), Body::Evidence(e)) = (target, &d.body) {
         after_evidence(w, id, c, e, d);
     }
@@ -1095,7 +1104,10 @@ fn extend(w: &mut Work, c: MsgId) -> R<Response> {
             .collect();
     let cfg = w.st.claims.config;
     for k in held {
-        if w.st.claims.get(c).is_some_and(|r| !r.exhausted(&cfg)) {
+        // Held reruns pass the same admission as a fresh `rerun`.
+        if !w.st.claims.get(c).is_some_and(|r| rerun_admits(r.status)) {
+            w.emit(Event::RerunWithdrawn { candidate: k });
+        } else if w.st.claims.get(c).is_some_and(|r| !r.exhausted(&cfg)) {
             start_run(w, c, k);
         }
     }
@@ -1112,9 +1124,7 @@ fn rerun(w: &mut Work, k: ArtId) -> R<Response> {
         )
     })?;
     let rec = claim_of(&w.st, c)?;
-    // The human may also rerun on an escalated claim, typically one waiting
-    // on budget: the rerun is then held for the extension.
-    if !runnable(rec.status) && rec.status != ClaimStatus::Escalated {
+    if !rerun_admits(rec.status) {
         return Err(rej(
             Code::ClaimNotOpen,
             format!("{c} is {}", rec.status.name()),
