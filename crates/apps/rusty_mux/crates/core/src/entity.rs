@@ -113,8 +113,7 @@ impl Window {
     }
 
     /// The block in focus, shared by every client; `None` only while none
-    /// is placed. The attach client does not follow it yet, so it does not
-    /// yet route anyone's input.
+    /// is placed. The attach client follows it: a person types into it.
     pub fn focused(&self) -> Option<BlockId> {
         self.focused
     }

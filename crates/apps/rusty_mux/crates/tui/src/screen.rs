@@ -123,8 +123,11 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
             }
         }
     }
-    let focus = views.iter().find(|v| v.block == focused).map(|v| v.rect);
-    dividers(&mut frame, &covered, focus);
+    // A window showing no block is blank, not one big divider.
+    if !views.is_empty() {
+        let focus = views.iter().find(|v| v.block == focused).map(|v| v.rect);
+        dividers(&mut frame, &covered, focus);
+    }
     frame
 }
 
@@ -775,6 +778,14 @@ mod tests {
             assert_eq!(cells(&term), cells(&copy), "{chunks:?}");
             assert_eq!(term.cursor, copy.cursor, "{chunks:?}");
         }
+    }
+
+    #[test]
+    fn a_window_showing_no_block_is_blank() {
+        let frame = compose(size(3, 2), &[], id(1));
+        assert_eq!(text(&frame, 0), "   ");
+        assert_eq!(text(&frame, 1), "   ");
+        assert_eq!(frame.cursor, None);
     }
 
     #[test]

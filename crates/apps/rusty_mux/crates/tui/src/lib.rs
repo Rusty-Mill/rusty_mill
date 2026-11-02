@@ -9,6 +9,7 @@
 //! machine through an OpenSSH socket forward, and [`udp`] moves it onto a
 //! UDP association when the server offers one.
 
+pub mod follow;
 pub mod keys;
 pub mod predict;
 pub mod screen;
