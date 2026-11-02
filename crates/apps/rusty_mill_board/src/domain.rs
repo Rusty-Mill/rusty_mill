@@ -101,8 +101,14 @@ pub enum Capability {
     Triage,
     /// Implement.
     Build,
-    /// Verify.
-    Qa,
+    /// Write requirements: pick up approved cards and plan them.
+    Plan,
+    /// Design: turn a card's requirements into an architecture.
+    Architect,
+    /// Plan tests, write them first, and verify built work. Was `qa`, which stored roles
+    /// still say, so it still reads as this.
+    #[serde(alias = "qa")]
+    Test,
     /// Review code.
     Review,
     /// Merge a reviewed card to Done.
@@ -118,10 +124,12 @@ pub enum Capability {
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 8] = [
+    pub const ALL: [Capability; 10] = [
         Capability::Triage,
+        Capability::Plan,
+        Capability::Architect,
         Capability::Build,
-        Capability::Qa,
+        Capability::Test,
         Capability::Review,
         Capability::Merge,
         Capability::Close,
@@ -136,7 +144,9 @@ impl Capability {
                 "Approve cards into Ready, set priority and project, and take over others' claims."
             }
             Capability::Build => "Claim Ready cards and build them, then pass them to QA.",
-            Capability::Qa => "Verify built work: pass it to Review or send it back.",
+            Capability::Plan => "Take approved cards and write their requirements.",
+            Capability::Architect => "Design cards whose requirements have passed review.",
+            Capability::Test => "Plan and write tests first, then verify built work.",
             Capability::Review => "Send reviewed work back to Building.",
             Capability::Merge => "Move reviewed cards to Done.",
             Capability::Close => {
@@ -485,6 +495,21 @@ impl Event {
     }
 }
 
+/// Whether `by` may make one of the transitions `ts` (alternatives for the same move).
+/// If none, the first one's reason.
+fn check_any(ts: &[&Transition], by: &Actor) -> Result<(), BoardError> {
+    let mut first = None;
+    for t in ts {
+        match check_transition(t, by) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                first.get_or_insert(e);
+            }
+        }
+    }
+    first.map_or(Ok(()), Err)
+}
+
 /// Whether `by` may make transition `t`: its capability, and `Admin` too for a gate.
 fn check_transition(t: &Transition, by: &Actor) -> Result<(), BoardError> {
     if !by.caps.contains(&t.cap) {
@@ -557,6 +582,17 @@ impl Card {
         }
     }
 
+    /// Re-file the card under column `to` when the workflow's columns change (a retag, not a
+    /// move): no transition, rule or claim check, and the claim is kept, since the work is the
+    /// same work in a renamed stage. Callers keep Done and Blocked out of it, as
+    /// [`crate::retag::parse_map`] does.
+    pub fn retag(&self, to: &Column, now_ms: i64) -> Self {
+        Self {
+            column: to.clone(),
+            ..self.next(now_ms)
+        }
+    }
+
     /// Move the card to `project`, dropping any claim (the claimant may not be in scope there).
     /// Only the project changes: the column stays, so a Done card is re-filed, never reopened.
     pub fn assign(&self, project: &str, now_ms: i64) -> Self {
@@ -612,8 +648,8 @@ impl Card {
         by: &Actor,
         now_ms: i64,
     ) -> Result<Self, BoardError> {
-        if let Some(t) = flow.transition(&self.column, to)? {
-            check_transition(t, by)?;
+        if let Some(ts) = flow.transition(&self.column, to)? {
+            check_any(&ts, by)?;
         }
         if flow.kind(&self.column) == Some(Kind::Work)
             && self.claim.as_deref() != Some(&by.name)
@@ -625,8 +661,11 @@ impl Card {
     }
 
     /// Move to `to` with the movement rules off: no transition table, capability or claim
-    /// check, only an actor holding some capability, except that a gate transition still
-    /// needs its capability and `Admin`. The claim is cleared on arrival.
+    /// check, only an actor holding some capability, except that gates hold: a listed move
+    /// with a gated alternative needs one of its alternatives, and a move that jumps over a
+    /// gate ([`Workflow::gates_crossed`]) needs `Admin`, or, when the workflow lists it, the
+    /// capability of one of its ways (Building -> Done by `close`). The claim is cleared on
+    /// arrival.
     ///
     /// # Errors
     /// If the card is Done, already in `to`, `to` is not a column, the actor holds no
@@ -653,10 +692,17 @@ impl Card {
         if by.caps.is_empty() {
             return Err(BoardError::Invalid("moving a card needs some capability"));
         }
-        if let Ok(Some(t)) = flow.transition(&self.column, to)
-            && t.gate
-        {
-            check_transition(t, by)?;
+        // Gates hold with the rules off. A listed move with a gated way of making it needs one
+        // of its ways (a gated merge, or the `close` beside it); a move that jumps over a gate
+        // needs `Admin`, or one of its listed ways.
+        let listed = flow.transition(&self.column, to).ok().flatten();
+        match listed {
+            Some(ts) if ts.iter().any(|t| t.gate) => check_any(&ts, by)?,
+            _ if by.caps.contains(&Capability::Admin)
+                || flow.gates_crossed(&self.column, to).is_empty() => {}
+            // A listed shortcut past a gate (Building -> Done by `close`) keeps its capability.
+            Some(ts) => check_any(&ts, by)?,
+            None => return Err(BoardError::Forbidden(Capability::Admin)),
         }
         Ok(self.arrive(to, now_ms))
     }
@@ -873,7 +919,7 @@ mod tests {
     fn happy_path_backlog_to_done() {
         let human = actor("nano", &[Capability::Triage, Capability::Merge]);
         let dev = actor("dev", &[Capability::Build]);
-        let qa = actor("qa", &[Capability::Qa]);
+        let qa = actor("qa", &[Capability::Test]);
         let rev = actor("rev", &[Capability::Review, Capability::Merge]);
 
         let c = card()
