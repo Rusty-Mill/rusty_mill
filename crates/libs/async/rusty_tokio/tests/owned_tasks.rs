@@ -347,3 +347,37 @@ fn a_panicking_join_waker_on_one_core_does_not_skip_the_others() {
     assert_cancelled(join_elsewhere(survivor));
     assert_cancelled(join_elsewhere(watched));
 }
+
+/// A runtime kept in a thread-local can be dropped after the runtime's
+/// own ambient-context thread-local is gone (thread-locals are destroyed
+/// in reverse order of first use). Shutdown must still cancel its tasks
+/// rather than panic, which would abort the process from a thread-local
+/// destructor.
+#[test]
+fn a_runtime_dropped_during_thread_local_teardown_still_cancels_its_tasks() {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static RT: RefCell<Option<Runtime>> = const { RefCell::new(None) };
+    }
+
+    let (keep, probe) = probe();
+    let handle = std::thread::spawn(move || {
+        // `RT` is touched first, so it is destroyed last: after the
+        // ambient context that `block_on` below touches.
+        RT.with(|slot| {
+            let rt = Builder::new_current_thread().enable_all().build().unwrap();
+            let handle = rt.spawn(async move {
+                let _keep = keep;
+                wakerless().await;
+            });
+            rt.block_on(async { rusty_tokio::task::yield_now().await });
+            *slot.borrow_mut() = Some(rt);
+            handle
+        })
+    })
+    .join()
+    .expect("the runtime's thread exits cleanly");
+    assert!(probe.upgrade().is_none(), "the task's future was dropped");
+    assert_cancelled(join_elsewhere(handle));
+}

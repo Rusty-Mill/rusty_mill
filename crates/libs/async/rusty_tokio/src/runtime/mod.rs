@@ -377,7 +377,8 @@ impl Shared {
 
     /// Cancels every task still alive, as the last step of runtime
     /// shutdown: each one's future is dropped, inside this runtime's
-    /// context so drop code can still reach it, and its `JoinHandle`
+    /// context where the thread still has one, so drop code can still
+    /// reach it, and its `JoinHandle`
     /// resolves as cancelled. Spawns from then on are cancelled too
     /// (see [`task::OwnedTasks::bind`]).
     ///
@@ -387,7 +388,9 @@ impl Shared {
     /// caller to re-raise once every `Shared` is swept; later ones are
     /// kept out of the way by [`keep_first_panic`].
     fn cancel_all_tasks(self: &Arc<Self>) -> Option<PanicPayload> {
-        let _context = context::enter(self.clone());
+        // `None` during thread-local teardown: drop code then can't reach
+        // the runtime, but the tasks are still cancelled.
+        let _context = context::try_enter(self.clone());
         let mut first_panic = None;
         for task in self.owned.close() {
             let cancelled =
