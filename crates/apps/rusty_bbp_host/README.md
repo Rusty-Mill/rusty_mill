@@ -71,6 +71,26 @@ Diffs reach `git apply --index` on standard input; the supervisor writes no file
 
 The runner is Unix-shaped: profile sets take Unix absolute read roots and the default profile is `/bin/sh`. On Windows `bbp runner` compiles and reports every run as `error` before anything executes; its end-to-end tests are compiled on Unix only.
 
+## Claims mode
+
+A task opened with `bbp open --mode claims` follows the claims addendum (`rusty_bbp/docs/spec/bbp-claims-addendum.md`, #593): agents post claims and evidence with no turn, and the board settles each claim. What the host adds:
+
+- **Opening.** Claims-mode runs execute only sandboxed, so the open first probes the sandbox by running `/bin/true` under it. A host that cannot confine a workload, or `--confine none`, is refused `bad_claims_config(sandbox)`. A profile set with no `test_paths` is refused `bad_claims_config(test_paths)`. Both checks run before anything is written. `--claims FILE` is a JSON `ClaimsConfig`; otherwise the owner's defaults apply.
+- **Credentials.** `bbp mcp` with `BBP_SESSION=yes` on a claims task derives the principal's session credential from the master secret on every call and sends it with the call. The model never sees it. Reassigning the role or ending the task invalidates it, and the core refuses the call `bad_credential`. A claims task has no turns, so `BBP_TURN` is refused and there is no `wait`.
+- **Tools.** The tools are `task_card`, `read`, `get_artifact`, `post` (kind `claim` or `evidence`), `put_artifact` (`diff`, `candidate` with its `claim`, `source`), `claims_delta`, `claim_card` and `claim_line`. The views are filtered by the role's `read_messages` and `read_artifacts`. Evidence automatically refs its claim, and a `source` digest is computed by the host.
+- **Runs.** `bbp runner` serves the oldest live claims run with no report. It refuses `--confine none`. After applying the diffs, it lists in `Report.tests_changed` each file matching the frozen `test_paths` globs that the diffs add, modify or delete relative to `base`. A rename counts as a delete and an add. In the globs, `**` matches any number of path segments, `*` matches within one segment, and `?` matches one character.
+- **Inbox.** `bbp inbox --dir D --task T1,T2` prints each task's open escalations as JSON, irreversible first, then oldest:
+  - an escalated claim, with its card, its strongest two support and two counter items, and, for a stuck question, every live candidate;
+  - an overdue action mark with no result;
+  - a held rerun;
+  - a task stopped on a task total.
+
+  Each escalation has an id that names its task, subject and log position, and the `rev` to fence an action on. `bbp inbox` writes nothing.
+- **Human verbs.** `claim MSG accept|drop|reopen`, `choose Q C`, `extend-claim MSG`, `withdraw-rerun ART`, `action-result MARK done|aborted`, and `close` (which needs `--rev`). `resume open` resumes an escalated claims task.
+- **Dry run.** Any `bbp human` command with `--dry-run yes` applies the action to the task's current state with the pure engine and prints `{rev, response, events}` without committing. The preview is exactly what the commit would do at that revision.
+
+Not here yet: the moderator does not launch claims-mode runners or harnesses. In claims mode the host that decides whom to run is orch.
+
 ## The moderator
 
 `bbp mod` is the loop that makes the core's decisions happen. Every poll it re-reads the store, fires deadlines (`Tick`), starts the runner once for a selected run with no report, launches one agent harness for a newly granted turn, and reaps a harness whose turn has ended. A harness whose turn ended gets `--end-grace-secs` (default 60) to exit on its own and print its final `result` line, which prices the turn; then it is killed. A cap or wall stop kills at once. `--deadline-unix` is an absolute end, a hosting lease's: no grace runs past it, the loop stops as at the wall when it comes, and each harness's `bbp slot-hold` holder kills its whole group at it, so it holds even if the moderator dies first. Human gates are states with no turn, so the loop waits through them; `bbp human` from another shell moves the task on. It returns when the task is `closed` or `cancelled`, or fails after `--max-wall-secs`; at `escalated` it keeps polling until a human command moves the task on (`resume` or `cancel` are the usual choices; `reject` back to `planning` also leaves it).
