@@ -230,14 +230,16 @@ impl Layout {
         }
     }
 
-    /// The block with the largest share of the area, the first of equals.
-    pub(crate) fn largest(&self) -> BlockId {
-        self.largest_in(1.0).1
+    /// The block with the largest share of the area that may still be
+    /// split, under [`MAX_DEPTH`] splits deep, the first of equals; `None`
+    /// only if every block is that deep.
+    pub(crate) fn largest(&self) -> Option<BlockId> {
+        self.largest_in(1.0, 0).map(|(_, block)| block)
     }
 
-    fn largest_in(&self, part: f64) -> (f64, BlockId) {
+    fn largest_in(&self, part: f64, depth: usize) -> Option<(f64, BlockId)> {
         match self {
-            Self::Block(block) => (part, *block),
+            Self::Block(block) => (depth < MAX_DEPTH).then_some((part, *block)),
             Self::Split {
                 share,
                 first,
@@ -245,9 +247,12 @@ impl Layout {
                 ..
             } => {
                 let f = f64::from(share.percent()) / 100.0;
-                let a = first.largest_in(part * f);
-                let b = second.largest_in(part * (1.0 - f));
-                if b.0 > a.0 { b } else { a }
+                let a = first.largest_in(part * f, depth + 1);
+                let b = second.largest_in(part * (1.0 - f), depth + 1);
+                match (a, b) {
+                    (Some(a), Some(b)) if b.0 > a.0 => Some(b),
+                    (a, b) => a.or(b),
+                }
             }
         }
     }

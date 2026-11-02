@@ -60,9 +60,9 @@ fn depth_counts_enclosing_splits() {
 
 #[test]
 fn the_largest_block_is_the_first_of_the_biggest_share() {
-    assert_eq!(three().largest(), id(1));
+    assert_eq!(three().largest(), Some(id(1)));
     let even = Layout::Block(id(1)).split(id(1), id(2), Side::Down);
-    assert_eq!(even.largest(), id(1));
+    assert_eq!(even.largest(), Some(id(1)));
 }
 
 #[test]
@@ -208,4 +208,20 @@ fn axes_parse_by_name() {
     assert_eq!("rows".parse(), Ok(Axis::Rows));
     assert_eq!("left".parse::<Axis>(), Err(ParseError));
     assert_eq!(Axis::Rows.name(), "rows");
+}
+
+#[test]
+fn the_largest_block_is_one_that_may_still_be_split() {
+    // A chain where each split gives its second child 99%: the deepest
+    // leaf is the largest, but it sits MAX_DEPTH splits deep.
+    let mut layout = Layout::Block(id(0));
+    for n in 1..=MAX_DEPTH as u128 {
+        layout = layout.split(id(n - 1), id(n), Side::Right);
+        assert!(layout.resize(id(n), Axis::Columns, Share::new(99).expect("in range")));
+    }
+    let deepest = id(MAX_DEPTH as u128);
+    assert_eq!(layout.depth_of(deepest), Some(MAX_DEPTH));
+    let largest = layout.largest().expect("a shallower block");
+    assert_ne!(largest, deepest);
+    assert!(layout.depth_of(largest).is_some_and(|d| d < MAX_DEPTH));
 }

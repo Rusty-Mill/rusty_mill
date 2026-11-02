@@ -159,20 +159,20 @@ impl Mux {
 
     /// Adds a block whose id the caller chose, such as one already given to
     /// the block's program before it started. It splits the window's
-    /// largest block, side by side if that block is wider than tall (a cell
-    /// being about twice as tall as wide), stacked otherwise; a zoom stays.
+    /// largest block that may still be split, side by side if that block is
+    /// wider than tall (a cell being about twice as tall as wide), stacked
+    /// otherwise; a zoom stays.
     pub fn add_block(&mut self, id: BlockId, window: WindowId, size: Size) -> Result<(), Error> {
         if self.blocks.contains_key(&id) {
             return Err(Error::BlockExists(id));
         }
-        let parent = self
-            .windows
-            .get_mut(&window)
-            .ok_or(Error::UnknownWindow(window))?;
-        let layout = match parent.layout.take() {
+        if !self.windows.contains_key(&window) {
+            return Err(Error::UnknownWindow(window));
+        }
+        let layout = match self.layout_of(window).cloned() {
             None => Layout::Block(id),
             Some(layout) => {
-                let target = layout.largest();
+                let target = layout.largest().ok_or(Error::TooDeep(id))?;
                 let side = match self.blocks.get(&target).map(|b| b.size) {
                     Some(s) if s.cols / 2 < s.rows => Side::Down,
                     _ => Side::Right,
@@ -180,7 +180,9 @@ impl Mux {
                 layout.split(target, id, side)
             }
         };
-        parent.layout = Some(layout);
+        if let Some(parent) = self.windows.get_mut(&window) {
+            parent.layout = Some(layout);
+        }
         self.insert_block(id, window, size);
         Ok(())
     }

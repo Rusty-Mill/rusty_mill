@@ -1084,3 +1084,22 @@ fn a_window_with_every_block_detached_zooms_nothing() {
     assert_eq!(mux.window(window).unwrap().zoomed(), None);
     assert_eq!(mux.take_events(), vec![]);
 }
+
+#[test]
+fn new_blocks_never_split_a_block_at_the_depth_limit() {
+    let (mut mux, _, window, _) = fixture();
+    // Each new block splits the largest; giving it 99% keeps it so, until
+    // it is too deep to split.
+    for _ in 0..=MAX_DEPTH {
+        let new = mux.create_block(window, size(80, 24)).unwrap();
+        mux.resize_split(new, Axis::Columns, share(99)).unwrap();
+    }
+    let layout = layout_of(&mux, window).unwrap();
+    let depth = layout
+        .blocks()
+        .iter()
+        .filter_map(|b| layout.depth_of(*b))
+        .max();
+    assert_eq!(depth, Some(MAX_DEPTH));
+    assert_eq!(layout.to_string().parse::<Layout>(), Ok(layout));
+}
