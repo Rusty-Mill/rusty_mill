@@ -750,6 +750,94 @@ fn resize_checks_the_size() {
     let _ = child.kill_single(platform::process::Signal::Kill);
 }
 
+/// The terminal's side, as rusty_term runs it: a Grid with scrollback
+/// fed the console's output, answering its queries on the input.
+struct Terminal {
+    master: Arc<OwnPtyMaster>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    parser: rusty_term_core::AnsiParser,
+    grid: rusty_term_core::Grid,
+}
+
+impl Terminal {
+    fn new(master: Arc<OwnPtyMaster>, size: WinSize) -> Terminal {
+        let Stream { rx, .. } = Stream::new(Arc::clone(&master));
+        Terminal {
+            master,
+            rx,
+            parser: rusty_term_core::AnsiParser::new(),
+            grid: rusty_term_core::Grid::new(usize::from(size.cols), usize::from(size.rows)),
+        }
+    }
+
+    /// Parse one chunk, if one comes within `wait`, and answer it.
+    fn pump(&mut self, wait: Duration) -> bool {
+        let Ok(chunk) = self.rx.recv_timeout(wait) else {
+            return false;
+        };
+        self.parser.advance(&mut self.grid, &chunk);
+        let answers = self.parser.take_responses();
+        if !answers.is_empty() {
+            self.master.write(&answers).expect("answer the console");
+        }
+        true
+    }
+
+    /// Pump until a screen row contains `text`, then until output stops.
+    fn until(&mut self, text: &str) {
+        let deadline = Instant::now() + BUDGET;
+        while !self.rows().iter().any(|r| r.contains(text)) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(self.pump(left), "no {text:?} in {:#?}", self.rows());
+        }
+        while self.pump(Duration::from_millis(300)) {}
+    }
+
+    /// Resize as rusty_term's window does: its own Grid first.
+    fn resize(&mut self, size: WinSize) {
+        self.grid
+            .resize(usize::from(size.cols), usize::from(size.rows));
+        self.master.resize(size).expect("resize");
+        while self.pump(Duration::from_millis(300)) {}
+    }
+
+    fn rows(&self) -> Vec<String> {
+        (0..self.grid.rows)
+            .map(|y| self.grid.row(y).iter().map(|c| c.ch).collect::<String>())
+            .map(|r| r.trim_end().to_owned())
+            .collect()
+    }
+}
+
+/// #1375: a shrink then a grow pulls rows back from the terminal's
+/// scrollback, and our host keeps none, so the two cursors part. A client
+/// that positions from screen buffer info, as PSReadLine does, must still
+/// write on the terminal's cursor row: the host asks the terminal (DSR 6)
+/// before it answers.
+#[test]
+fn a_client_positioning_from_the_cursor_follows_the_terminal_after_a_resize() {
+    let _g = lock();
+    let probe = probe();
+    let (master, child) = own(&command("cmd.exe", &["/d", "/q", "/k", "prompt $g"]));
+    let _child = Reaped(child);
+    let master = Arc::new(master);
+    let mut term = Terminal::new(Arc::clone(&master), SIZE);
+    master
+        .write(b"for /l %i in (1,1,60) do @echo l%i\r")
+        .expect("write");
+    term.until("l60");
+    term.resize(WinSize { rows: 10, ..SIZE });
+    term.resize(SIZE);
+    let line = format!("\"{probe}\" mark \\x40\\x40\r");
+    master.write(line.as_bytes()).expect("write");
+    term.until("#> mark");
+    let rows = term.rows();
+    let typed = rows.iter().position(|r| r.contains(r"mark \x40"));
+    let mark = rows.iter().position(|r| r.starts_with("@@"));
+    assert!(typed.is_some(), "{rows:#?}");
+    assert_eq!(mark, typed.map(|y| y + 1), "{rows:#?}");
+}
+
 #[test]
 fn spawn_refuses_what_a_fresh_console_cannot_do() {
     let _g = lock();
