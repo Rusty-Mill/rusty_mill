@@ -50,6 +50,10 @@ impl Default for ClaimsConfig {
 }
 
 impl ClaimsConfig {
+    /// The largest `evidence_base`: with the stakes (×4) and reversibility
+    /// (×2) factors, every budget and extension stays far inside `u64`.
+    pub const MAX_EVIDENCE_BASE: u64 = 1 << 20;
+
     /// The first field that breaks the open-time rules, if any.
     pub fn invalid_field(&self) -> Option<&'static str> {
         if self.accept_at <= 0 {
@@ -70,7 +74,7 @@ impl ClaimsConfig {
         if self.settle_delta < 0 {
             return Some("settle_delta");
         }
-        if self.evidence_base < 1 {
+        if !(1..=Self::MAX_EVIDENCE_BASE).contains(&self.evidence_base) {
             return Some("evidence_base");
         }
         if self.mark_timeout_secs < 60 {
@@ -260,6 +264,10 @@ pub struct ClaimRecord {
     pub current: Option<ArtId>,
     /// Profiles failing on the current candidate (Failing runs block).
     pub failing: BTreeSet<String>,
+    /// The report that put each `failing` profile there (for the card).
+    pub failing_from: BTreeMap<String, ArtId>,
+    /// `sole_candidate` of the last `claim_accepted` (C-R7).
+    pub sole_candidate: bool,
     /// The rev of the last change to status, score or evidence.
     pub changed: Rev,
     /// Score at the last settlement, for the card.
@@ -280,6 +288,8 @@ impl ClaimRecord {
             marks: Vec::new(),
             current: None,
             failing: BTreeSet::new(),
+            failing_from: BTreeMap::new(),
+            sole_candidate: false,
             changed: rev,
             last_score: 0,
         }
@@ -545,6 +555,15 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
     use crate::event::Event as E;
     let rev = st.rev;
     let book = &mut st.claims;
+    // The report a newly failing profile comes from: the current candidate's
+    // latest, which the runner has just stored.
+    let failing_report = match e {
+        E::ClaimFailing { claim, .. } => book
+            .get(*claim)
+            .and_then(|c| c.current)
+            .and_then(|k| book.latest_report(k)),
+        _ => None,
+    };
     let mut touch = |id: &MsgId, f: &mut dyn FnMut(&mut ClaimRecord)| {
         if let Some(c) = book.claims.get_mut(id) {
             f(c);
@@ -552,9 +571,15 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
         }
     };
     match e {
-        E::ClaimAccepted { claim, score, .. } => touch(claim, &mut |c| {
+        E::ClaimAccepted {
+            claim,
+            score,
+            sole_candidate,
+            ..
+        } => touch(claim, &mut |c| {
             c.status = ClaimStatus::Accepted;
             c.last_score = *score;
+            c.sole_candidate = *sole_candidate;
         }),
         E::ClaimDropped { claim, score, .. } => touch(claim, &mut |c| {
             c.status = ClaimStatus::Dropped;
@@ -572,6 +597,7 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
         E::ClaimReopened { claim, epoch, by } => touch(claim, &mut |c| {
             c.status = ClaimStatus::Open;
             c.epoch = *epoch;
+            c.sole_candidate = false;
             // Reopened by evidence: that item is the new epoch's first scoring
             // one. Reopened by the human: dormant items count in the new epoch.
             for i in c.items.iter_mut() {
@@ -601,6 +627,14 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
         }
         E::ClaimFailing { claim, failing } => touch(claim, &mut |c| {
             c.failing = failing.iter().cloned().collect();
+            let mut from = BTreeMap::new();
+            for name in &c.failing {
+                let set_by = c.failing_from.get(name).copied().or(failing_report);
+                if let Some(r) = set_by {
+                    from.insert(name.clone(), r);
+                }
+            }
+            c.failing_from = from;
         }),
         E::ClaimActing {
             claim,
@@ -669,12 +703,29 @@ pub struct ClaimView {
     pub evidence: Vec<EvidenceView>,
     pub deps: Vec<MsgId>,
     pub candidates: Vec<MsgId>,
-    pub failing: Vec<String>,
+    /// C-R7: accepted while its question had fewer than two candidates.
+    pub sole_candidate: bool,
+    /// The candidate stored last naming this claim, if the viewer may read it.
+    pub current: Option<ArtId>,
+    /// `failing(c)`, each with the report that set it (Failing runs block).
+    pub failing: Vec<FailingView>,
+    /// The test-path changes of the current candidate's latest report.
+    pub tests_changed: Vec<crate::record::TestChange>,
+    /// The cited support that endorses those changes, if any.
+    pub endorsement: Option<MsgId>,
+}
+
+/// A failing profile and the report that set it (hidden if unreadable).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailingView {
+    pub profile: String,
+    pub report: Option<ArtId>,
 }
 
 /// What a viewer may see. The human channel and the host pass `all`.
 pub struct Sight<'a> {
     pub message: Box<dyn Fn(MsgId) -> bool + 'a>,
+    pub artifact: Box<dyn Fn(ArtId) -> bool + 'a>,
 }
 
 impl Sight<'_> {
@@ -682,13 +733,30 @@ impl Sight<'_> {
     pub fn all() -> Sight<'static> {
         Sight {
             message: Box::new(|_| true),
+            artifact: Box::new(|_| true),
         }
     }
 }
 
 /// The card of `c`, with nested content filtered by `sight`.
-pub fn card(book: &ClaimsBook, c: &ClaimRecord, sight: &Sight) -> ClaimView {
+pub fn card(st: &crate::state::TaskState, c: &ClaimRecord, sight: &Sight) -> ClaimView {
+    let book = &st.claims;
     let score = shown_score(c);
+    let current = c.current.filter(|k| (sight.artifact)(*k));
+    let report = current
+        .and_then(|k| book.latest_report(k))
+        .filter(|r| (sight.artifact)(*r));
+    let tests_changed = match report
+        .and_then(|r| st.artifacts.get(&r))
+        .map(|a| &a.payload)
+    {
+        Some(crate::record::ArtifactPayload::TestReport(r)) => r.tests_changed.clone(),
+        _ => Vec::new(),
+    };
+    let endorsement = current
+        .filter(|_| !tests_changed.is_empty())
+        .and_then(|k| crate::claims_engine::endorsement(st, c.id, k))
+        .filter(|m| (sight.message)(*m));
     ClaimView {
         id: c.id,
         text: c.body.text.clone(),
@@ -726,7 +794,22 @@ pub fn card(book: &ClaimsBook, c: &ClaimRecord, sight: &Sight) -> ClaimView {
             .filter(|x| x.body.answers == Some(c.id) && (sight.message)(x.id))
             .map(|x| x.id)
             .collect(),
-        failing: c.failing.iter().cloned().collect(),
+        sole_candidate: c.sole_candidate,
+        current,
+        failing: c
+            .failing
+            .iter()
+            .map(|p| FailingView {
+                profile: p.clone(),
+                report: c
+                    .failing_from
+                    .get(p)
+                    .copied()
+                    .filter(|r| (sight.artifact)(*r)),
+            })
+            .collect(),
+        tests_changed,
+        endorsement,
     }
 }
 

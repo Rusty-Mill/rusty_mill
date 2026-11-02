@@ -2446,3 +2446,179 @@ fn cl_66_held_rerun_on_a_voided_claim_is_withdrawn_not_started() {
         .iter()
         .any(|e| matches!(e, Event::RerunWithdrawn { candidate } if *candidate == k)));
 }
+
+#[test]
+fn cl_67_task_end_invalidates_session_credentials() {
+    for close in [true, false] {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let op = cx.op();
+        let d = cx.evidence_draft(c, Support, EvidenceKind::Opinion, 1, vec![]);
+        let saved = cx.cred("a");
+        posted(cx.agent_with("a", saved, op.clone(), AgentAction::Post(d.clone())));
+        let rev = cx.rev();
+        ok(cx.human(if close {
+            HumanAction::Close { expected_rev: rev }
+        } else {
+            HumanAction::Cancel {
+                expected_rev: rev,
+                reason: "stop".into(),
+            }
+        }));
+        assert!(cx.st.state.terminal());
+        for view in [
+            AgentAction::ClaimCard { claim: c },
+            AgentAction::ClaimLine { claim: c },
+            AgentAction::ClaimsDelta {
+                after: Rev(0),
+                domains: vec![],
+            },
+        ] {
+            let op = cx.op();
+            assert_eq!(
+                rejected(cx.agent_with("a", saved, op, view)),
+                Code::BadCredential
+            );
+        }
+        // The credential is gone, so its cached responses are too.
+        assert_eq!(
+            rejected(cx.agent_with("a", saved, op, AgentAction::Post(d))),
+            Code::BadCredential
+        );
+        // The human's own inspection is unaffected.
+        let card = rusty_bbp::claims::card(&cx.st, cx.rec(c), &rusty_bbp::claims::Sight::all());
+        assert_eq!(card.id, c);
+    }
+}
+
+fn card_all(st: &TaskState, c: MsgId) -> rusty_bbp::claims::ClaimView {
+    rusty_bbp::claims::card(st, &st.claims.claims[&c], &rusty_bbp::claims::Sight::all())
+}
+
+#[test]
+fn cl_68_card_carries_the_decision_facts_and_replays() {
+    use rusty_bbp::claims::FailingView;
+    // (a) sole_candidate is on the card, not only on the event.
+    let mut cx = Cx::new();
+    let q = cx.low();
+    let x = cx.claim(
+        "a",
+        ClaimBody {
+            answers: Some(q),
+            ..body("x")
+        },
+    );
+    accept(&mut cx, x);
+    assert!(card_all(&cx.st, x).sole_candidate);
+    let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
+    assert_eq!(card_all(&replayed, x), card_all(&cx.st, x));
+
+    // (b) a block names the report that set it; the override shows the test
+    // change and its endorsement.
+    let mut cx = Cx::new();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+    let rev = cx.rev();
+    ok(cx.human(HumanAction::Rerun {
+        candidate: k,
+        expected_rev: rev,
+    }));
+    let fail = stored(cx.report_profiles(k, &[("unit", 1)], vec![]));
+    let v = card_all(&cx.st, x);
+    assert_eq!(v.current, Some(k));
+    assert_eq!(
+        v.failing,
+        vec![FailingView {
+            profile: "unit".into(),
+            report: Some(fail),
+        }]
+    );
+    assert!(v.tests_changed.is_empty());
+    assert_eq!(v.endorsement, None);
+    let k2 = cx.candidate("a", x);
+    let changed = TestChange::modified("tests/core.rs");
+    stored(cx.report_profiles(k2, &[("unit", 0)], vec![changed.clone()]));
+    let v = card_all(&cx.st, x);
+    assert_eq!(v.current, Some(k2));
+    assert_eq!(v.tests_changed, vec![changed.clone()]);
+    assert_eq!(v.endorsement, None);
+    assert_eq!(v.failing.len(), 1);
+    let e = posted(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
+    let v = card_all(&cx.st, x);
+    assert!(v.failing.is_empty());
+    assert_eq!(v.endorsement, Some(e));
+    let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
+    assert_eq!(card_all(&replayed, x), v);
+
+    // (c) a reader without candidate/report access sees none of it.
+    let mut o = open_task(Mode::Claims, None, roster());
+    o.roster
+        .push(Role::new("n", 4).post(&[MessageKind::Evidence]));
+    cx.st = TaskState::new(TaskId::from("t"));
+    cx.log.clear();
+    cx.brief = stored(cx.run(Command::Open(o)));
+    for who in ["a", "b", "c", "s", "n"] {
+        cx.assign(who);
+    }
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+    let rev = cx.rev();
+    ok(cx.human(HumanAction::Rerun {
+        candidate: k,
+        expected_rev: rev,
+    }));
+    stored(cx.report_profiles(k, &[("unit", 1)], vec![changed]));
+    let Response::Claims(vs) = cx.agent("n", AgentAction::ClaimCard { claim: x }) else {
+        panic!("card")
+    };
+    assert_eq!(vs[0].current, None);
+    assert_eq!(
+        vs[0].failing,
+        vec![FailingView {
+            profile: "unit".into(),
+            report: None,
+        }]
+    );
+    assert!(vs[0].tests_changed.is_empty());
+}
+
+#[test]
+fn cl_69_unrepresentable_budgets_are_refused_at_open() {
+    let open = |base: u64| {
+        let cfg = ClaimsConfig {
+            evidence_base: base,
+            ..ClaimsConfig::default()
+        };
+        handle(
+            &TaskState::new(TaskId::from("t")),
+            &Command::Open(open_task(Mode::Claims, Some(cfg), roster())),
+            Time(0),
+        )
+        .response
+    };
+    for base in [ClaimsConfig::MAX_EVIDENCE_BASE + 1, 1 << 63, u64::MAX] {
+        let (code, d) = detail(open(base));
+        assert_eq!(code, Code::BadClaimsConfig);
+        assert!(d.contains("evidence_base"), "{d}");
+    }
+    // The largest base still gives every claim a representable budget.
+    let mut cx = Cx::with(ClaimsConfig {
+        evidence_base: ClaimsConfig::MAX_EVIDENCE_BASE,
+        ..ClaimsConfig::default()
+    });
+    let x = cx.claim(
+        "a",
+        ClaimBody {
+            stakes: Stakes::High,
+            reversible: false,
+            ..body("x")
+        },
+    );
+    ok(cx.human(HumanAction::ClaimBudgetExtended { claim: x }));
+    assert_eq!(
+        cx.rec(x).budget(&cx.st.claims.config),
+        ClaimsConfig::MAX_EVIDENCE_BASE * 4 * 2 * 2
+    );
+}

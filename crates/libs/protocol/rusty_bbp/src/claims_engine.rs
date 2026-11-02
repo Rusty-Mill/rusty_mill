@@ -57,6 +57,9 @@ pub(crate) fn check_open(o: &OpenTask) -> R<()> {
 
 /// C-R1: the session credential of the principal's current assignment.
 pub(crate) fn check_credential(st: &TaskState, p: &PrincipalId, token: Option<Token>) -> R<()> {
+    if st.state.terminal() {
+        return Err(rej(Code::BadCredential, "the task has ended"));
+    }
     match (token, st.credential_for(p)) {
         (Some(t), Some(expected)) if t == expected => Ok(()),
         (None, _) => Err(rej(Code::BadCredential, "no session credential")),
@@ -129,6 +132,11 @@ pub(crate) fn agent(w: &mut Work, p: &PrincipalId, role: &RoleId, a: &AgentActio
 fn sight_of<'a>(st: &'a TaskState, role: &'a Role) -> Sight<'a> {
     Sight {
         message: Box::new(move |id: MsgId| st.message(id).is_some_and(|m| visible(st, role, m))),
+        artifact: Box::new(move |id: ArtId| {
+            st.artifacts
+                .get(&id)
+                .is_some_and(|a| role.holds(Cap::Read(a.kind)))
+        }),
     }
 }
 
@@ -136,7 +144,7 @@ fn cards(st: &TaskState, ids: &[MsgId], sight: &Sight) -> Vec<ClaimView> {
     ids.iter()
         .filter(|id| (sight.message)(**id))
         .filter_map(|id| st.claims.get(*id))
-        .map(|c| card(&st.claims, c, sight))
+        .map(|c| card(st, c, sight))
         .collect()
 }
 
@@ -511,15 +519,19 @@ fn needs_endorsement(st: &TaskState, c: MsgId, r: &Report) -> bool {
 /// Interim test-change rule: `k`'s test change on `c` is endorsed by cited
 /// support citing `k` from a principal who authored neither `k` nor its diffs.
 fn endorsed(st: &TaskState, c: MsgId, k: ArtId) -> bool {
-    let Some(rec) = st.claims.get(c) else {
-        return false;
-    };
+    endorsement(st, c, k).is_some()
+}
+
+/// The first evidence on `c` that endorses `k`'s test change, if any.
+pub(crate) fn endorsement(st: &TaskState, c: MsgId, k: ArtId) -> Option<MsgId> {
+    let rec = st.claims.get(c)?;
     let authors = authors_of(st, k);
     rec.items
         .iter()
         .filter(|i| i.kind == EvidenceKind::Cited && i.direction == Direction::Support)
         .filter(|i| !authors.contains(&i.author))
-        .any(|i| cites(st, i.msg, k))
+        .find(|i| cites(st, i.msg, k))
+        .map(|i| i.msg)
 }
 
 /// The author of candidate `k` and of each of its diffs.
@@ -1093,7 +1105,18 @@ fn choose(w: &mut Work, q: MsgId, chosen: MsgId) -> R<Response> {
 
 /// `budget_extended(claim)`: one more `base(c)`, then any held rerun starts.
 fn extend(w: &mut Work, c: MsgId) -> R<Response> {
-    claim_of(&w.st, c)?;
+    let rec = claim_of(&w.st, c)?;
+    // Refuse rather than wrap: the extended budget must be representable.
+    let next = rec
+        .extensions
+        .checked_add(2)
+        .and_then(|n| rec.base(&w.st.claims.config).checked_mul(n));
+    if next.is_none() {
+        return Err(rej(
+            Code::ClaimBudget,
+            format!("{c}: budget would overflow"),
+        ));
+    }
     w.emit(Event::ClaimBudgetExtended { claim: c });
     let held: Vec<ArtId> =
         w.st.claims
