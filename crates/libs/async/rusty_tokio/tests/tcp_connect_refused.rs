@@ -29,8 +29,10 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
 /// An ephemeral loopback port that refuses connections for as long as
 /// the returned socket lives. The socket holds the port bound but never
-/// listens, so a SYN to it is answered with a reset (refused), and no
-/// other socket on the machine can claim the port in the meantime.
+/// listens, so a SYN to it is answered with a reset (refused). On Linux
+/// and macOS no other socket can bind the port meanwhile. On Windows one
+/// that sets `SO_REUSEADDR` still could, since the holder doesn't set
+/// `SO_EXCLUSIVEADDRUSE`.
 ///
 /// Releasing the port before connecting, as this used to, let any other
 /// process (a parallel test run, say) bind and listen on it first. The
