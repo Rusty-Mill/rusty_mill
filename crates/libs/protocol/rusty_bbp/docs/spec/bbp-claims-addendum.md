@@ -1,6 +1,6 @@
 # BBP claims addendum (draft, v0)
 
-Nov 2, 2026 · **Status: approved by the owner on 2026-11-02, including the schema and API changes listed below. Second owner review (2026-11-02): order-dependent settlement accepted; settled claims keep taking evidence and executable evidence reopens them; candidate runs approved if debited from the claim budget and sandboxed. Open questions Q1 to Q5 stand at their proposals, listed with their answers at the end. Spec only; the engine change is a separate PR.**
+Nov 2, 2026 · **Status: approved by the owner on 2026-11-02, including the schema and API changes listed below. Second owner review (2026-11-02): order-dependent settlement accepted; settled claims keep taking evidence and executable evidence reopens them; candidate runs approved if debited from the claim budget and sandboxed. Third owner review (2026-11-02): reopen symmetry with a supersede exception; dependency collapse reopens unacted dependents; `sole_candidate` is a recorded fact, not an escalation; `source` artifacts for cited evidence; human reruns past budget escalate; overdue action marks escalate. Q1, Q2, Q3, Q5 and `min_authors` decided; the other Q4 numbers are restated in plain terms for the owner. Spec only; the engine change is a separate PR.**
 Extends [`bbp-v0.5-implementation-spec.md`](bbp-v0.5-implementation-spec.md). Card: Mill Board #593 (Let Em Loose).
 
 ## Summary
@@ -16,7 +16,7 @@ Owner decisions this rests on (2026-11-02): evidence posts need no turn; the one
 | Today | Claims mode |
 | --- | --- |
 | Task lifecycle = the factory pipeline (`planning` → `plan_gate` → `build` → `test` → `review` → `merge_gate`) | Task states `open`, `escalated`, `closed`, `cancelled`. Each claim has its own status |
-| Every agent write needs a live turn token (R14) | `claim`, `evidence`, `read`, `get_artifact` and `put_artifact` of `diff`/`candidate` are turnless, authorised by a per-assignment session credential (C-R1) |
+| Every agent write needs a live turn token (R14) | `claim`, `evidence`, `read`, `get_artifact` and `put_artifact` of `diff`/`candidate`/`source` are turnless, authorised by a per-assignment session credential (C-R1) |
 | `wake_set` wakes **roles** (Addressed/State/Artifact/Observer) and the moderator grants a turn | `claims_delta` tells a host which claims changed for a **subscription**; the host (orch) decides whom to run. BBP grants no agent turn in claims mode |
 | Budgets: task totals (messages, bytes, reads, turns, iterations) | Same task totals, plus a per-claim evidence budget scaled by stakes and reversibility |
 | Escalation: budget crossed, request deadline, runner error | Claim escalates when stuck, out of budget, or irreversible at the accept line |
@@ -34,14 +34,15 @@ Owner decisions this rests on (2026-11-02): evidence posts need no turn; the one
     "accept_at": 8, "drop_at": -8,
     "min_authors": 2,
     "settle_window": 6, "settle_delta": 2,
-    "evidence_base": 8
+    "evidence_base": 8,
+    "mark_timeout_secs": 3600
   }
 }
 ```
 
 - `mode` absent means `stages`: no field is written, the schema stays 2, 3 or 4, and the log is byte-identical to today.
 - `mode: "claims"` writes **schema 5**. A reader older than this addendum refuses schema 5 rather than replaying it as a stage task.
-- `claims` is validated at open: `drop_at < 0 < accept_at`, `min_authors ≥ 1`, `settle_window ≥ 2`, `settle_delta ≥ 0`, `evidence_base ≥ 1`. A bad value refuses the open as `bad_claims_config`, naming the field. The values above are the defaults; they are judgment, not data, and are fixed before the first run.
+- `claims` is validated at open: `drop_at < 0 < accept_at`, `min_authors ≥ 1`, `settle_window ≥ 2`, `settle_delta ≥ 0`, `evidence_base ≥ 1`, `mark_timeout_secs ≥ 60`. A bad value refuses the open as `bad_claims_config`, naming the field. The values above are the defaults; they are judgment, not data, and are fixed before the first run.
 - `max_live_turns` and `policy` are not used in claims mode, because no agent turn is granted. A claims-mode open that names either is refused as `bad_claims_config`.
 
 **Roster in claims mode.** Same `Role` type, no new fields. `post` may contain the two new kinds `claim` and `evidence`. The requirement table (planning/build/test/review) does not apply. Instead, validation needs at least one role with `post ∋ claim` and at least one with `post ∋ evidence`, or the open fails as `Unservable(claims)`. `verdict_at`, `final_decision` and `consultable` are ignored.
@@ -60,6 +61,7 @@ Both records are **message kinds** with typed bodies, like `verdict` and `decisi
     "domains": ["http", "dedup"],
     "deps": ["msg:12"],
     "answers": "msg:4",
+    "supersedes": "msg:9",
     "stakes": "medium",
     "reversible": true
   }
@@ -71,7 +73,8 @@ Both records are **message kinds** with typed bodies, like `verdict` and `decisi
 | `text` | 1 to 1,200 characters (R8) |
 | `domains` | 1 to 8 tokens, `[a-z0-9_-]{1,32}`. Opaque to BBP; used only to match subscriptions |
 | `deps` | Earlier `claim` messages on the task, at most 16. They must already exist, so the graph is acyclic by construction |
-| `answers` | Optional earlier `claim` this one is a candidate answer to (an open question). Candidates of one question compete (C-R7) |
+| `answers` | Optional earlier `claim` this one is a candidate answer to (an open question). Candidates of one question compete; BBP records how many there are (C-R7) |
+| `supersedes` | Optional earlier claim this one replaces. It must be settled (`accepted`, `dropped` or `void`) and not already superseded. From then on the old claim stays closed: evidence on it is recorded only and never reopens it (Evidence after settlement) |
 | `stakes` | `low`, `medium` or `high` |
 | `reversible` | `false` means the board never accepts it alone (C-R6) |
 | `refs` | At least one (R2), usually the brief or an artifact |
@@ -92,7 +95,7 @@ A claim starts `open` with score 0 (neutral).
 | --- | --- |
 | `claim` | An earlier `claim` on the task, and it must appear in `refs` |
 | `direction` | `support` or `counter` |
-| `kind` | `executed`: `evidence` cites a runner `test_report` (written by the runner principal, so an agent cannot fake one). `cited`: `evidence` cites at least one artifact or message range. `opinion`: no `evidence` required |
+| `kind` | `executed`: `evidence` cites a runner `test_report` (written by the runner principal, so an agent cannot fake one). `cited`: `evidence` cites at least one artifact (including a `source` artifact holding outside material) or message range. `opinion`: no `evidence` required |
 | `strength` | 1, 2 or 3, the author's own rating |
 | `note` | 0 to 1,200 characters |
 
@@ -114,14 +117,13 @@ authors(c, −) = distinct principals with scoring counter in the current epoch
 
 Evidence is **scoring** when it is admitted while the claim is `open`, or when it reopens the claim (it is then the first item of the new epoch). Evidence recorded on a settled claim without reopening it is **recorded**: stored, shown, charged, never scored.
 
-**Confidence** is shown as `p = 1 / (1 + 3^(−score/4))`, rounded to whole percent. It is for people only; no rule reads it. With the defaults, `accept_at = 8` is about 90% and `drop_at = -8` about 10%.
+**Confidence** is shown as `p = 1 / (1 + 3^(−score/4))`, rounded to whole percent. It is for people only; no rule reads it. With the defaults, `accept_at = 8` is exactly 90% (3² = 9, so 9 / 10) and `drop_at = -8` exactly 10%.
 
 After each scoring `evidence`, and after each candidate debit on an `open` claim (Budget), the board evaluates that claim in this order. A settled or escalated claim is never evaluated by these rules; it changes status only as Evidence after settlement and C-R8 say. The first rule that fires wins, and its event is generated in the same transaction (Processing model, phase 4):
 
 1. **Accept line.** `score ≥ accept_at`, `authors(c,+) ≥ min_authors`, at least one support item is not `opinion`, and every dep is `accepted`:
    - if `reversible: false`: `claim_escalated(reason: irreversible)` (C-R6);
-   - if it is a candidate whose question has fewer than two candidates: `claim_escalated(reason: sole_candidate)` (C-R7);
-   - otherwise `claim_accepted`.
+   - otherwise `claim_accepted`. If it is a candidate whose question has fewer than two candidates, the event carries `sole_candidate: true` (C-R7). BBP does not act on that fact; orch decides what to do about it.
 2. **Drop line.** `score ≤ drop_at`, `authors(c,−) ≥ min_authors`, and at least one counter item is not `opinion`: `claim_dropped`. Dropping an irreversible claim needs no human, because not doing something can be undone.
 3. **Budget.** `spent(c)` reaches `budget(c)`: `claim_escalated(reason: budget)`.
 4. **Settling.** The current epoch has at least `settle_window` scoring items, and `|score now − score settle_window items ago| ≤ settle_delta`: `claim_escalated(reason: stuck)`.
@@ -147,6 +149,7 @@ A settled claim keeps taking evidence. What that evidence does depends on its ki
 | `accepted` | `counter` citing a `failed` report **reopens** it | Recorded |
 | `dropped` | `support` citing a `passed` report **reopens** it | Recorded |
 | `escalated`, `void` | Recorded (the human decides an escalation; a void claim waits for its dep) | Recorded |
+| superseded (any status) | Recorded: a replaced claim stays closed | Recorded |
 
 - "Executed" means a runner `test_report` bound to the claim (C-R4). Tests, holdout sets and golden sets are all runner profiles and all produce one. Cited and opinion evidence never reopen a claim and never move its confidence.
 - **Reopen by evidence.** The board writes `claim_reopened(by: evidence)` in the same transaction. The claim is `open`, a new epoch starts, and that evidence is its first scoring item (so a counter reopen starts below zero). It must earn its way back to a settlement with fresh evidence from `min_authors` principals in the new epoch.
@@ -163,41 +166,45 @@ The host records use of an accepted claim **before** it acts, so no race between
 Interleavings:
 - Mark commits, then contrary executed evidence commits before the action finishes: the claim is acted on, so it escalates `reopened_after_action`. The receipt then lands on the mark whatever the outcome; `aborted` clears the mark, but the escalation stays for the human.
 - Contrary evidence reopens the claim first: the mark is refused `wrong_state` and the host does not act.
-- A host that crashes between mark and result leaves the mark open, which counts as acted on (conservative). The inbox lists open marks without a result as "action unconfirmed" for the human to reconcile with a `claim_action_result` from the human channel.
-- **Dependents.** When an accepted claim leaves `accepted` (reopened, or escalated after action), each accepted dependent is escalated with `dep_collapsed`, as for a dropped dep. Open dependents stay open and stop meeting the accept line until the dep is accepted again.
+- A host that crashes between mark and result leaves the mark open, which counts as acted on (conservative). After `mark_timeout_secs` it escalates `action_unconfirmed` (Overdue marks), and the human reconciles it with a `claim_action_result` from the human channel.
+- **Dependents.** When an accepted claim leaves `accepted` (reopened, dropped by a human, or escalated after action), its accepted dependents are handled as in Dependencies: reopened if nothing acted on them, escalated `dep_collapsed` if something did. Open dependents stay open and stop meeting the accept line until the dep is accepted again.
 - Every evidence item, recorded or scoring, counts toward `spent(c)`. At `spent(c) ≥ budget(c)` further evidence on the claim is refused `claim_budget` until the human records `budget_extended(claim)`.
+- **Overdue marks.** A mark with no result `mark_timeout_secs` after it committed is reported by the moderator as `claim_escalated(reason: action_unconfirmed, mark)`, so a crash cannot leave a claim marked as acted on with nothing checked. The host's moderator checks this on its wake loop, using the `now` it already passes to the engine, so replay reproduces it from the logged event. The claim keeps its status; the inbox shows the escalation, and the human records `claim_action_result` (`done` or `aborted`).
 
 **No rule reads who the author is beyond counting distinct principals.** Track-record weighting is out of v0 (open question Q2).
 
 ### Budget
 
 ```
-budget(c) = evidence_base × stakes_factor × reversibility_factor + Σ budget_extended(c)
+base(c)   = evidence_base × stakes_factor × reversibility_factor
+budget(c) = base(c) × (1 + number of budget_extended(c))
 stakes_factor        = low 1 | medium 2 | high 4
 reversibility_factor = reversible 1 | irreversible 2
 spent(c)  = evidence items on c (all epochs) + runs started for candidates naming c
 ```
 
-The defaults give 8 to 64 units per claim. One evidence item costs 1 and one run costs 1, so a run is debited from the claim it tests (owner decision, 2026-11-02). A candidate that would start a run on a claim with `spent(c) ≥ budget(c)` is refused `claim_budget` and no run starts. A debit on an `open` claim is followed by the update rule, so the debit that reaches the budget escalates it. A debit on an `accepted` or `dropped` claim (a re-check) changes nothing but `spent(c)`: it never re-runs the accept or drop line, never escalates, and only executed evidence from that run can reopen the claim. Task totals (`messages`, `bytes`, `reads`) still apply and are charged as today (R11), since `claim` and `evidence` are messages. The `turns` and `iterations` budgets are not used in claims mode.
+In plain terms: **one unit buys one evidence post or one test run.** With the defaults a claim gets 8 units (low stakes), 16 (medium) or 32 (high), doubled if irreversible, so 8 to 64. A human extension always adds exactly one `base(c)`, never an amount typed by hand, and an approval of an irreversible action adds none.
+
+The defaults give 8 to 64 units per claim. One evidence item costs 1 and one run costs 1, so a run is debited from the claim it tests (owner decision, 2026-11-02). A candidate that would start a run on a claim with `spent(c) ≥ budget(c)` is refused `claim_budget` and no run starts (human reruns differ, see Runs and candidates). A debit on an `open` claim is followed by the update rule, so the debit that reaches the budget escalates it. A debit on an `accepted` or `dropped` claim (a re-check) changes nothing but `spent(c)`: it never re-runs the accept or drop line, never escalates, and only executed evidence from that run can reopen the claim. Task totals (`messages`, `bytes`, `reads`) still apply and are charged as today (R11), since `claim` and `evidence` are messages. The `turns` and `iterations` budgets are not used in claims mode.
 
 ### Dependencies
 
 - When a claim becomes `dropped` or `void`, every claim that lists it in `deps` and is not yet settled becomes `void` (`claim_voided(by)`). This repeats to a fixed point in the same transaction, so a collapse is atomic.
-- An already-`accepted` dependent is **not** reopened automatically. It is escalated with `reason: dep_collapsed`, because acceptance may already have been acted on. The same applies when a dep leaves `accepted` by a reopen (Evidence after settlement). (Open question Q3.)
+- An already-`accepted` dependent of a dep that leaves `accepted` (dropped, voided or reopened) is **reopened automatically** if nothing acted on it: `claim_reopened(by: dep)`, a new epoch. It is then treated like any open dependent in the same transaction: voided if the dep was dropped or voided, waiting if the dep is open. A dependent that **was acted on** (Action marks) is escalated `dep_collapsed` instead, because undoing it is the human's call (owner decision Q3, 2026-11-02). The cascade repeats to a fixed point, so a reopen of a dependent can in turn reopen or escalate its own dependents.
 - When a dep becomes `accepted`, each `open` dependent is re-evaluated against the accept line.
 
 ## Rules (claims mode)
 
 | Id | Rule | Rejects with |
 | --- | --- | --- |
-| C-R1 | In claims mode, `post` of `claim` or `evidence`, `read`, `get_artifact`, and `put_artifact` of `diff` or `candidate` need no turn. They carry the **session credential** issued to the principal at `assigned` and invalidated when the role is reassigned or the task ends. Credential binding replaces R14 for exactly these operations in claims mode. Any other Agent API mutation in claims mode is refused, and stage mode keeps R14 unchanged. | `bad_credential`, `wrong_mode` |
+| C-R1 | In claims mode, `post` of `claim` or `evidence`, `read`, `get_artifact`, and `put_artifact` of `diff`, `candidate` or `source` need no turn. They carry the **session credential** issued to the principal at `assigned` and invalidated when the role is reassigned or the task ends. Credential binding replaces R14 for exactly these operations in claims mode. Any other Agent API mutation in claims mode is refused, and stage mode keeps R14 unchanged. | `bad_credential`, `wrong_mode` |
 | C-R2 | The task is in `open` (not `escalated` on a task total, not terminal). A stage-mode task refuses both kinds. | `wrong_state`, `wrong_mode` |
-| C-R3 | Body fields as in Records; `deps`, `answers` and `claim` resolve to `claim` messages on the task (R4). A new claim may not name a `dropped` or `void` dep, since it would be born dead; an `open`, `accepted` or `escalated` dep is fine. | `bad_claim`, `ref_unresolved`, `wrong_kind`, `dep_closed` |
+| C-R3 | Body fields as in Records; `deps`, `answers`, `supersedes` and `claim` resolve to `claim` messages on the task (R4). A `supersedes` target that is open, escalated or already superseded is `bad_claim`. A new claim may not name a `dropped` or `void` dep, since it would be born dead; an `open`, `accepted` or `escalated` dep is fine. | `bad_claim`, `ref_unresolved`, `wrong_kind`, `dep_closed` |
 | C-R4 | Evidence targets any claim on the task with `spent(c) < budget(c)`; whether it scores, reopens or is recorded follows Evidence after settlement. `executed` cites a final runner `test_report` of a run whose candidate names the same claim; `support` needs that report `passed`, `counter` needs it `failed` (an `error` report is not evidence). `cited` cites at least one artifact or message. | `claim_budget`, `evidence_required`, `evidence_unbound`, `not_passed` |
 | C-R5 | Settling is generated by the board (update rule), never posted by an agent. | n/a |
 | C-R6 | An irreversible claim is never accepted without a human `decision`. | n/a (escalates) |
-| C-R7 | A candidate claim (`answers` set) is accepted only while its question has at least two candidates. | n/a (escalates) |
-| C-R8 | A human `decision` with `subject` a claim and `outcome` `accept`, `drop` or `reopen` settles or reopens it (a reopen starts a new epoch). `reopen` on a budget escalation needs a `budget_extended(claim)` first. Human decisions bypass `min_authors` and thresholds; they are the override. | `stale_rev`, `wrong_state` |
+| C-R7 | When a candidate claim (`answers` set) is accepted while its question has fewer than two candidates, `claim_accepted` records `sole_candidate: true` and `claim_card` shows it. BBP takes no other action (owner, Q5). | n/a |
+| C-R8 | A human `decision` with `subject` a claim and `outcome` `accept`, `drop` or `reopen` settles or reopens it (a reopen starts a new epoch). `reopen` on a budget escalation needs a `budget_extended(claim)` first, which adds exactly one `base(c)`. Human decisions bypass `min_authors` and thresholds; they are the override. | `stale_rev`, `wrong_state` |
 | C-R9 | `claim_acting(claim, epoch, ref)` is written by the host or the human only on a claim `accepted` in that epoch, before the action. `claim_action_result(mark, done \| aborted)` names an existing mark, at most once (Action marks). | `wrong_state`, `ref_unresolved`, `duplicate` |
 
 R1 to R13, R15 and R18 apply unchanged, except that R11's per-turn read charges become per (principal, artifact id) in claims mode and `reads_per_turn` does not apply. R17 never fires in claims mode (no gates). R16 is replaced in claims mode by the gating rows below; in stage mode it is unchanged.
@@ -211,10 +218,14 @@ This is the path from a prototype to `executed` evidence, using the normal APIs.
 | `diff` | role with `write` ∋ `diff` | session credential | Envelope limit. No state gate (claims mode has no `build`) |
 | `candidate` | role with `write` ∋ `candidate` | session credential | Manifest `{base, diffs, claim}`. `claim` is **required** in claims mode and **refused** in stage mode, so stage gating is unchanged. `claim` must be an `open`, `accepted` or `dropped` claim on the task (a candidate on a settled claim is a re-check, for example a holdout run against an accepted claim), with `spent(c) < budget(c)` (`claim_not_open`, `claim_budget`); every `diffs` entry must be a `diff` on the task (R4). Storing it debits one unit from the claim (Budget) |
 | `test_report`, `log` | runner | run secret | As R16: names its run and that run's candidate, presents the run's secret, is the first final report or log of that run, and `passed` needs every profile clean with `profile_digest` equal to the task's |
+| `source` | role with `write` ∋ `source` | session credential | Outside material for `cited` evidence: `{origin, retrieved_at, excerpt, digest}`, envelope-limited, `excerpt` at most 4,000 characters. Turnless in claims mode, refused in stage mode (`wrong_mode`). BBP checks shape and digest only, not truth: a `source` is still `cited` (weight 2), never `executed` |
 | `spec`, `brief` | no agent | | `spec` is refused in claims mode (`wrong_mode`). `brief` is human-only at open, as now |
 
 - **Each stored candidate gets its own run.** In the same transaction the moderator records `run_started(candidate, run)` and hands the supervisor the run id and secret out of band, as today. Several candidates may have pending runs at once; how many execute together is the host's admission slots, not a protocol limit. A candidate has at most one live run. A human `rerun(candidate)` revokes it and selects a fresh one (T12's effect, no state change), and the old secret is dead, so a late report is `stale_run`.
-- **Every run start is debited, in the same transaction.** Storing a candidate and a human `rerun` both start a run, so both check `spent(c) < budget(c)` and debit one unit atomically with `run_started`. At `spent(c) ≥ budget(c)` either is refused `claim_budget`: nothing is written, and for a rerun the old run stays live with its secret valid. The human extends with `budget_extended(claim)` first. A replay of the same `op` returns the original result and debits nothing (R15). There is no other run-start path.
+- **Every run start is debited, in the same transaction.** Storing a candidate and a human `rerun` both start a run, so both check `spent(c) < budget(c)` and debit one unit atomically with `run_started`. At `spent(c) ≥ budget(c)`:
+  - storing a candidate (the only run start an agent has) is refused `claim_budget`, and nothing is written;
+  - a human `rerun(K)` is held instead of refused: the moderator writes `rerun_held(claim, candidate)` and the inbox shows it as a budget escalation. The claim's status does not change. Approve = `budget_extended(claim)` (one `base(c)`) and then the rerun, in one transaction; Reject withdraws it. A second rerun of the same candidate while one is held returns the held one.
+  - In every case the old run stays live with its secret valid until a new run actually starts. A replay of the same `op` returns the original result and debits nothing (R15). There is no other run-start path.
 - **Sandbox only.** A claims-mode run executes only inside the host's sandbox (`rusty_sandbox`, through `rusty_worktree`), never on the host directly. This is a host requirement, since BBP cannot see where a run executes: a host that cannot sandbox refuses to open a claims-mode task (`bad_claims_config(sandbox)`), and the runner principal is the only writer of reports.
 - **Reads.** `get_artifact` needs the session credential and the role's `read_artifacts`, as in stage mode.
 - **Binding.** An `executed` evidence item binds to one final report, and through it to one run, one candidate and one claim (C-R4). Evidence citing a report from a different claim's candidate, a non-final report or a report the runner did not write is `evidence_unbound`.
@@ -223,11 +234,12 @@ This is the path from a prototype to `executed` evidence, using the normal APIs.
 
 | Event | Writer | Payload |
 | --- | --- | --- |
-| `claim_accepted` | moderator | claim, score, evidence count |
+| `claim_accepted` | moderator | claim, score, evidence count, `sole_candidate` when true |
 | `claim_dropped` | moderator | claim, score, evidence count |
 | `claim_voided` | moderator | claim, by (the dep that fell) |
-| `claim_escalated` | moderator | claim, reason: `irreversible`, `sole_candidate`, `budget`, `stuck`, `dep_collapsed`, `reopened_after_action` |
-| `claim_reopened` | human or moderator | claim, by (`decision` or the reopening evidence), new epoch number; a human reopen also carries the expected `rev`. Reopening a claim does not revive dependents it voided; each needs its own `reopen` |
+| `claim_escalated` | moderator | claim, reason: `irreversible`, `budget`, `stuck`, `dep_collapsed`, `reopened_after_action`, `action_unconfirmed` (with the mark) |
+| `rerun_held` | moderator | claim, candidate (a human rerun waiting on budget) |
+| `claim_reopened` | human or moderator | claim, by (`decision`, the reopening evidence, or the dep that left `accepted`), new epoch number; a human reopen also carries the expected `rev`. Reopening a claim does not revive dependents it voided; each needs its own `reopen` |
 | `claim_acting` | host or human | claim, epoch, ref (C-R9) |
 | `claim_action_result` | host or human | mark, `done` or `aborted` (C-R9) |
 | `run_started` | moderator | candidate id, run id (existing event, also emitted in claims mode on candidate storage) |
@@ -259,6 +271,7 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 4. **Agent API (MCP):** `post` accepts the two kinds with a session credential; new tools `claims_delta`, `claim_card`, `claim_line`, credentialed and filtered by `read_messages`. The human channel adds `decision` on a claim, `reopen` and `budget_extended(claim)`.
 5. **Session credential** is a new host requirement: one per assignment, injected by the adapter, never shown to the model (same treatment as turn tokens).
 6. **Candidate manifest** gains an optional `claim` field: required in claims mode, refused in stage mode.
+8. **Third review additions:** the `supersedes` claim field, the `source` artifact kind, the `rerun_held` event, the `action_unconfirmed` escalation and `mark_timeout_secs`, and `sole_candidate` moved from an escalation reason to a field on `claim_accepted`.
 7. **Action marks** (`claim_acting`, `claim_action_result`) are new host/human writes, and the host must mark before acting, and **sandboxed runs** are a host requirement for claims mode (orch-bbp runs candidates through `rusty_sandbox` only).
 
 No change to `rusty_crdt`, `coedit` or the stage-mode rules.
@@ -285,14 +298,14 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-14 | B depends on A; A dropped | B `claim_voided(by: A)` in the same transaction; evidence on B, even executed, is recorded and B stays `void` |
 | CL-15 | C → B → A chain; A dropped | B and C both voided, atomically (fixed point) |
 | CL-16 | B (depends on A) reaches the accept line while A is open; then A accepted | B stays `open`, then `claim_accepted` when A is accepted |
-| CL-17 | B accepted, then its dep A is reopened by the human and dropped | B `claim_escalated(dep_collapsed)`, not voided |
+| CL-17 | B accepted and acted on (mark `done`), then its dep A is reopened by the human and dropped | B `claim_escalated(dep_collapsed)`, not voided or reopened |
 | CL-18 | Six alternating ±1 opinions on a claim (net movement ≤ 2) | `claim_escalated(stuck)` on the sixth |
 | CL-19 | `a` and `b` alternate opinion support strength 1 on a low-stakes reversible claim (score climbs, never accepts: no non-opinion support) | 8th item → `claim_escalated(budget)`; 9th → `claim_budget`; `budget_extended(claim)` + `reopen` → accepts more |
 | CL-20 | Budget arithmetic: high stakes and irreversible | Budget = 64 |
-| CL-21 | Question Q with a single candidate X reaches the accept line | `claim_escalated(sole_candidate)`. With a second candidate Y present, X is accepted |
+| CL-21 | Question Q with a single candidate X reaches the accept line; separately, with a second candidate Y present | `claim_accepted` with `sole_candidate: true`; with Y present, `claim_accepted` without it. No escalation either way |
 | CL-22 | Two evidence posts race; the second append hits a stale revision. (a) The first does not settle the claim. (b) The first settles it | (a) Driver reloads; both land; the score is the sum in commit order. (b) The second (an opinion) is recorded on recompute; the settled claim's status and score are unchanged (extends TR-29) |
 | CL-23 | Replay with the same `op` after the claim settled | Original result, no new event, no charge (R15) |
-| CL-24 | Property: random evidence sequences over random DAGs | Fold equals replay. `void` is left only by human `reopen`; `dropped` and `accepted` are left only by human `reopen`, executed evidence against the outcome, or (for `accepted`) `claim_escalated(dep_collapsed)`. Recorded evidence never changes a score. `spent(c) ≤ budget(c)` always. A run debit alone never changes the status of a settled claim (on an `open` claim it may escalate `budget`, as in CL-42(a)). Voids are closed under deps. No float anywhere in the fold |
+| CL-24 | Property: random evidence sequences over random DAGs | Fold equals replay. `void` is left only by human `reopen`; `dropped` and `accepted` are left only by human `reopen`, executed evidence against the outcome, or (for `accepted`) a dep leaving `accepted`. A superseded claim never reopens by evidence. Recorded evidence never changes a score. `spent(c) ≤ budget(c)` always. A run debit alone never changes the status of a settled claim (on an `open` claim it may escalate `budget`, as in CL-42(a)). Voids are closed under deps. No float anywhere in the fold |
 | CL-25 | Property: random committed logs, each replayed twice; plus the a,b,c vs a,c,b example | Identical statuses and scores on every replay. The example: a,b,c accepts at b, then c reopens it into epoch 2 at −4; a,c,b stays `open` at +4 in epoch 1 |
 | CL-26 | `claims_delta(after_rev, ["http"])` | Returns changed claims in `http` and their dependents, nothing else |
 | CL-27 | `claim_line` of an accepted claim | Matches the golden one-line format |
@@ -309,21 +322,32 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-38 | Accepted claim X, not acted on; `c` stores a re-check candidate naming X; its run reports `failed`; `c` posts executed counter citing it | `run_started`, one unit debited; `claim_reopened(by: evidence)`, epoch 2, score −4. One further support from `a` does not re-accept (one author in epoch 2) |
 | CL-39 | Same as CL-38, but the host recorded `claim_acting(X, 1, pr)` first | `claim_escalated(reopened_after_action)`, not `claim_reopened`. Human `reopen` → `open`, new epoch |
 | CL-40 | Dropped claim receives executed support citing a `passed` report | `claim_reopened(by: evidence)`, new epoch, score +4 |
-| CL-41 | B (accepted) depends on A (accepted); A reopened by executed counter | A `open`; B `claim_escalated(dep_collapsed)` in the same transaction |
+| CL-41 | B (accepted, not acted on) depends on A (accepted); A reopened by executed counter | A `open`; B `claim_reopened(by: A)`, new epoch, `open`, all in one transaction |
+| CL-47 | B and C accepted, both depend on A; C acted on (mark `done`); A dropped by executed counter evidence (via reopen, then drop line) | B reopened then voided in the same transaction; C `claim_escalated(dep_collapsed)` |
+| CL-48 | D depends on B, B depends on A, all accepted, none acted on; A reopened | B and D both reopened, atomically (fixed point) |
+| CL-49 | X accepted then superseded by Y; executed counter evidence on X citing a failed report | Recorded; X keeps its status and is not reopened. `supersedes` naming an open claim, or X again → `bad_claim` |
+| CL-50 | Dropped claim X (not superseded) receives executed support citing a passed report | `claim_reopened(by: evidence)` (symmetry; same as CL-40) |
+| CL-51 | Mark on X with no result. (a) `mark_timeout_secs` passes. (b) The human then records `aborted`. (c) A result arrives before the timeout | (a) `claim_escalated(action_unconfirmed, mark)`; X keeps its status. (b) The mark is cleared; X is no longer acted on. (c) No escalation |
+| CL-52 | A `source` artifact stored turnless, then `cited` evidence citing it; the same `source` in a stage task; a `source` with a bad digest | Accepted with weight 2; `wrong_mode`; refused, nothing stored |
 | CL-42 | Candidate debits. (a) Open low-stakes reversible claim with 7 evidence items; a candidate naming it is stored. (b) A claim accepted on its 8th unit; a re-check candidate naming it. (c) A candidate naming a `void` or `escalated` claim. (d) An irreversible claim accepted by a human `decision` (after CL-12), with budget left; a re-check candidate naming it | (a) `run_started`, `spent` = 8, `claim_escalated(budget)` in the same transaction. (b) `claim_budget`, no run. (c) `claim_not_open`, no run. (d) `run_started`, one unit debited, the claim stays `accepted`, no `claim_escalated` |
 | CL-43 | `claim_acting` on an `open` claim, or naming an old epoch; `claim_action_result` for an unknown mark; a second result for one mark | `wrong_state`; `ref_unresolved`; `duplicate` |
 | CL-45 | X accepted in epoch 1. (a) Host marks `claim_acting(X, 1, pr)`; contrary executed evidence commits; host records `done`. (b) Contrary evidence reopens X first; host then tries to mark epoch 1. (c) As (a), then the human reopens, X is accepted in epoch 2, and the epoch-1 result arrives late | (a) `claim_escalated(reopened_after_action)`; the result lands on the epoch-1 mark. (b) `wrong_state`, no mark, so the host does not act. (c) The result binds to the epoch-1 mark, not epoch 2; X stays acted on |
-| CL-46 | Run budget on reruns: candidate K on claim X. (a) One unit left: human `rerun(K)`. (b) Exactly at the limit: `rerun(K)`. (c) Replay of (a)'s `op`. (d) `budget_extended(X)`, then `rerun(K)` | (a) Old run revoked, new `run_started`, one unit debited. (b) `claim_budget`, nothing written, the old run's report is still accepted. (c) Original result, no second debit. (d) New run, one unit debited |
+| CL-46 | Run budget on reruns: candidate K on claim X. (a) One unit left: human `rerun(K)`. (b) Exactly at the limit: human `rerun(K)`. (c) Replay of (a)'s `op`. (d) Approve the held rerun from (b). (e) At the limit, an agent stores a new candidate on X | (a) Old run revoked, new `run_started`, one unit debited. (b) `rerun_held(X, K)`, X's status unchanged, the old run's report is still accepted. (c) Original result, no second debit. (d) `budget_extended(X)` adds one `base(X)`, the old run is revoked, a new run starts, one unit debited. (e) `claim_budget`, nothing written |
 | CL-44 | Host test (`rusty_bbp_host`): open a claims-mode task on a host with no sandbox configured; on a sandboxed host, inspect where a candidate's run executes | `bad_claims_config(sandbox)`, nothing written; the run's process is inside the `rusty_sandbox` profile |
 
-## Open questions: answers in force
+## Owner answers (2026-11-02)
 
-The owner's "Approved" was taken to cover these at their proposals. They are listed so the owner can change any of them before the engine change.
-
-| Id | Question | Answer in force |
+| Id | Question | Answer |
 | --- | --- | --- |
-| Q1 | How is an `executed` run requested in claims mode? | Storing a candidate that names a claim starts its run, debited one unit from that claim (Runs and candidates, Budget) |
-| Q2 | Track-record weighting? | None in v0: every author weighs 1, and only distinct principals are counted. Later, if wanted: per-principal weights fixed in `task_opened` (immutable, so replay holds), supplied by orch from the lens's record |
-| Q3 | Accepted claim whose dep collapses or reopens? | Escalate with `dep_collapsed`, never auto-void, because the acceptance may already have been acted on |
-| Q4 | Default numbers? | `accept_at 8`, `drop_at -8`, `min_authors 2`, `settle_window 6`, `settle_delta 2`, `evidence_base 8` (so a budget of 8 to 64 units) |
-| Q5 | `sole_candidate` in BBP or orch? | In BBP (C-R7), since it is the one groupthink rule that needs board data. Blind first pass, rebel candidate and look-harder stay in the lens runner (#594) |
+| Q1 | How is an `executed` run requested in claims mode? | **Accepted.** Storing a candidate that names a claim starts its run, debited one unit from that claim |
+| Q2 | Track-record weighting? | **Accepted.** None in v0: every author weighs 1, and only distinct principals are counted |
+| Q3 | Accepted claim whose dep collapses? | **Changed by the owner.** It reopens automatically if nothing acted on it; only an acted-on claim escalates `dep_collapsed` (Dependencies) |
+| Q4 | Default numbers? | `min_authors 2` **accepted**. The rest await the owner, restated below |
+| Q5 | `sole_candidate` in BBP or orch? | **Accepted, as a fact.** BBP records it on `claim_accepted`; orch decides what to do about it |
+
+**Q4 in plain terms (awaiting the owner):**
+- `accept_at 8` means **90%** shown confidence; `drop_at -8` means **10%**. Exactly, not approximately: p = 1/(1+3^(−score/4)).
+- **Two passing tests from two different authors reach accept.** Each passing test at strength 1 adds 4, so two make 8. One author alone never accepts (`min_authors 2`), and a single test at strength 2 still needs a second author. Cited evidence (weight 2) needs twice as much: for example two strength-2 citations from two authors. Opinions alone never accept.
+- `settle_window 6` and `settle_delta 2` count **evidence items, not rounds**: if the last 6 scoring items in the current epoch moved the score by 2 or less in total, the claim escalates `stuck`. Recorded (non-scoring) items and runs do not count.
+- `evidence_base 8`: **one unit buys one evidence post or one test run.** A claim gets 8, 16 or 32 units for low, medium or high stakes, doubled if irreversible.
+- `mark_timeout_secs 3600`: an action mark with no result for an hour escalates.
