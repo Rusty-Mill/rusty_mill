@@ -30,6 +30,9 @@ fn samples(method: &Method) -> Vec<(&'static str, Value)> {
         .map(|p| match p.name {
             // Text, but one of four words.
             "side" => (p.name, Value::Text("right".into())),
+            "axis" => (p.name, Value::Text("rows".into())),
+            // A number, but a share from 1 to 99.
+            "percent" => (p.name, Value::Lines(30)),
             // Text, but a colour.
             "foreground" | "background" | "cursor" => (p.name, Value::Text("#102030".into())),
             "palette" => (p.name, Value::Words(vec!["1=#cc0000".into()])),
@@ -90,10 +93,10 @@ fn catalog_covers_each_request_type_once() {
     assert_eq!(unique.len(), types.len(), "two methods build one type");
     // 0x0d was Capture; 0x0f is BlockCall, 0x10 Rename. 0x15, OpenDatagram,
     // is the attach client's own, not an agent's; 0x16 is Whoami, 0x17
-    // SelectWindow, 0x18 ReloadConfig.
+    // SelectWindow, 0x18 ReloadConfig, 0x19 to 0x1d the layout edits.
     let expected = (0x02..=0x14)
         .filter(|t| ![0x0d, 0x0f, 0x10].contains(t))
-        .chain([0x16, 0x17, 0x18]);
+        .chain(0x16..=0x1d);
     assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
     assert_eq!(renames.len(), 4);
@@ -220,6 +223,15 @@ fn methods_need_the_features_their_messages_are_gated_by() {
         assert_eq!(needs(name), Features::LAYOUT, "{name}");
     }
     assert_eq!(needs("select-window"), Features::ACTIVE_WINDOW);
+    for name in [
+        "resize-split",
+        "swap-blocks",
+        "move-block",
+        "detach-block",
+        "move-window",
+    ] {
+        assert_eq!(needs(name), Features::LAYOUT_EDIT, "{name}");
+    }
     assert_eq!(needs("reload-config"), Features::CONFIG_RELOAD);
 }
 
@@ -280,6 +292,7 @@ fn optional_parameters_add_their_features_only_when_given() {
             "command",
             "arg",
             "cwd",
+            "beside",
             "trim",
             "unwrap",
             "vt",
@@ -470,5 +483,63 @@ fn split_names_its_side_and_launch() {
     assert_eq!(
         method.needs_for(["block", "side", "cwd"]),
         Features::LAYOUT.union(Features::LAUNCH)
+    );
+}
+
+#[test]
+fn layout_edits_check_their_axis_share_and_neighbour() {
+    let block = ("block", Value::Id(id(1)));
+    let resize = method("resize-split").expect("resize-split");
+    let args = |axis: &str, percent| {
+        [
+            block.clone(),
+            ("axis", Value::Text(axis.into())),
+            ("percent", Value::Lines(percent)),
+        ]
+    };
+    assert_eq!(
+        resize.request(1, &args("cols", 25)),
+        Ok(Message::ResizeSplit {
+            req: 1,
+            block: BlockId::from_uuid(id(1)),
+            axis: Axis::Columns,
+            share: Share::new(25).expect("in range"),
+        })
+    );
+    for percent in [0, 100, 256] {
+        assert!(
+            matches!(
+                resize.request(1, &args("rows", percent)),
+                Err(CallError::Invalid {
+                    param: "percent",
+                    ..
+                })
+            ),
+            "{percent}"
+        );
+    }
+    assert!(matches!(
+        resize.request(1, &args("left", 50)),
+        Err(CallError::Invalid { param: "axis", .. })
+    ));
+    let move_block = method("move-block").expect("move-block");
+    let side = ("side", Value::Text("up".into()));
+    assert_eq!(
+        move_block.request(2, &[block.clone(), side.clone()]),
+        Ok(Message::MoveBlock {
+            req: 2,
+            block: BlockId::from_uuid(id(1)),
+            beside: None,
+            side: Side::Up,
+        })
+    );
+    assert_eq!(
+        move_block.request(2, &[block, ("beside", Value::Id(id(2))), side]),
+        Ok(Message::MoveBlock {
+            req: 2,
+            block: BlockId::from_uuid(id(1)),
+            beside: Some(BlockId::from_uuid(id(2))),
+            side: Side::Up,
+        })
     );
 }

@@ -60,9 +60,9 @@ fn depth_counts_enclosing_splits() {
 
 #[test]
 fn the_largest_block_is_the_first_of_the_biggest_share() {
-    assert_eq!(three().largest(), id(1));
+    assert_eq!(three().largest(), Some(id(1)));
     let even = Layout::Block(id(1)).split(id(1), id(2), Side::Down);
-    assert_eq!(even.largest(), id(1));
+    assert_eq!(even.largest(), Some(id(1)));
 }
 
 #[test]
@@ -154,4 +154,74 @@ fn sides_parse_by_name() {
         assert_eq!(side.name().parse(), Ok(side));
     }
     assert_eq!("sideways".parse::<Side>(), Err(ParseError));
+}
+
+#[test]
+fn resizing_sets_the_innermost_split_along_the_axis() {
+    // cols50(1, rows50(2, 3))
+    let mut layout = three();
+    let share = |p| Share::new(p).expect("in range");
+    // 3 is the second child of the rows split: it gets 30, 2 gets 70.
+    assert!(layout.resize(id(3), Axis::Rows, share(30)));
+    assert_eq!(
+        layout.to_string(),
+        format!("cols50({},rows70({},{}))", id(1), id(2), id(3))
+    );
+    // Along columns the innermost split holding 3 is the outer one.
+    assert!(layout.resize(id(3), Axis::Columns, share(75)));
+    assert_eq!(
+        layout.to_string(),
+        format!("cols25({},rows70({},{}))", id(1), id(2), id(3))
+    );
+    assert!(layout.resize(id(1), Axis::Columns, share(60)));
+    assert_eq!(
+        layout.to_string(),
+        format!("cols60({},rows70({},{}))", id(1), id(2), id(3))
+    );
+}
+
+#[test]
+fn resizing_without_a_split_along_the_axis_changes_nothing() {
+    let mut layout = three();
+    let before = layout.clone();
+    assert!(!layout.resize(id(1), Axis::Rows, Share::HALF));
+    assert!(!layout.resize(id(9), Axis::Columns, Share::HALF));
+    let mut alone = Layout::Block(id(1));
+    assert!(!alone.resize(id(1), Axis::Columns, Share::HALF));
+    assert_eq!(layout, before);
+}
+
+#[test]
+fn swapping_trades_places_or_takes_an_absent_block_in() {
+    let mut layout = three();
+    layout.swap(id(1), id(3));
+    assert_eq!(layout.blocks(), vec![id(3), id(2), id(1)]);
+    // 4 is not in the layout: it takes 2's place, and 2 leaves.
+    layout.swap(id(2), id(4));
+    assert_eq!(layout.blocks(), vec![id(3), id(4), id(1)]);
+    assert!(!layout.contains(id(2)));
+}
+
+#[test]
+fn axes_parse_by_name() {
+    assert_eq!("cols".parse(), Ok(Axis::Columns));
+    assert_eq!("rows".parse(), Ok(Axis::Rows));
+    assert_eq!("left".parse::<Axis>(), Err(ParseError));
+    assert_eq!(Axis::Rows.name(), "rows");
+}
+
+#[test]
+fn the_largest_block_is_one_that_may_still_be_split() {
+    // A chain where each split gives its second child 99%: the deepest
+    // leaf is the largest, but it sits MAX_DEPTH splits deep.
+    let mut layout = Layout::Block(id(0));
+    for n in 1..=MAX_DEPTH as u128 {
+        layout = layout.split(id(n - 1), id(n), Side::Right);
+        assert!(layout.resize(id(n), Axis::Columns, Share::new(99).expect("in range")));
+    }
+    let deepest = id(MAX_DEPTH as u128);
+    assert_eq!(layout.depth_of(deepest), Some(MAX_DEPTH));
+    let largest = layout.largest().expect("a shallower block");
+    assert_ne!(largest, deepest);
+    assert!(layout.depth_of(largest).is_some_and(|d| d < MAX_DEPTH));
 }

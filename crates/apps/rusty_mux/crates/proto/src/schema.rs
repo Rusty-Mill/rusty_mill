@@ -27,7 +27,7 @@
 
 use std::fmt;
 
-use rusty_mux_core::{BlockId, ClientId, EntityId, SessionId, Side, Size, WindowId};
+use rusty_mux_core::{Axis, BlockId, ClientId, EntityId, SessionId, Share, Side, Size, WindowId};
 use rusty_uuid::Uuid;
 
 use crate::theme::ThemeChange;
@@ -434,6 +434,45 @@ impl Args<'_> {
         self.uuid("block", Entity::Block).map(BlockId::from_uuid)
     }
 
+    fn window(&self) -> Result<WindowId, CallError> {
+        self.uuid("window", Entity::Window).map(WindowId::from_uuid)
+    }
+
+    /// The block named `name`, if given.
+    fn opt_block(&self, name: &'static str) -> Result<Option<BlockId>, CallError> {
+        self.has(name)
+            .then(|| self.uuid(name, Entity::Block).map(BlockId::from_uuid))
+            .transpose()
+    }
+
+    /// The `axis` parameter: `cols` or `rows`.
+    fn axis(&self) -> Result<Axis, CallError> {
+        let text = self.text("axis")?;
+        text.parse().map_err(|_| CallError::Invalid {
+            param: "axis",
+            why: format!("`{text}` is not cols or rows"),
+        })
+    }
+
+    fn number(&self, name: &'static str) -> Result<u32, CallError> {
+        match self.get(name)? {
+            Value::Lines(n) => Ok(*n),
+            _ => Err(self.wrong(name, Ty::Lines)),
+        }
+    }
+
+    /// The `percent` parameter, from 1 to 99.
+    fn share(&self) -> Result<Share, CallError> {
+        let percent = self.number("percent")?;
+        u8::try_from(percent)
+            .ok()
+            .and_then(Share::new)
+            .ok_or_else(|| CallError::Invalid {
+                param: "percent",
+                why: format!("{percent} is not from 1 to 99"),
+            })
+    }
+
     fn wrong(&self, param: &'static str, ty: Ty) -> CallError {
         CallError::WrongType { param, ty }
     }
@@ -785,6 +824,125 @@ pub static CATALOG: &[Method] = &[
             Ok(Message::Unzoom {
                 req,
                 window: WindowId::from_uuid(a.uuid("window", Entity::Window)?),
+            })
+        },
+    },
+    Method {
+        name: "resize-split",
+        doc: "Resize the split between a block and its neighbour: give the block a share \
+              of the innermost split along an axis that holds it.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "The block to resize."),
+            required(
+                "axis",
+                Ty::Text,
+                "`cols` for the split beside it, `rows` for the one above or below.",
+            ),
+            required(
+                "percent",
+                Ty::Lines,
+                "The block's side's share of the split, from 1 to 99.",
+            ),
+        ],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::ResizeSplit {
+                req,
+                block: a.block()?,
+                axis: a.axis()?,
+                share: a.share()?,
+            })
+        },
+    },
+    Method {
+        name: "swap-blocks",
+        doc: "Put two blocks of one window each where the other was. If one is detached, \
+              the other is detached in its place.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "One block."),
+            required(
+                "other",
+                Ty::Id(Entity::Block),
+                "The other, in the same window.",
+            ),
+        ],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::SwapBlocks {
+                req,
+                block: a.block()?,
+                other: BlockId::from_uuid(a.uuid("other", Entity::Block)?),
+            })
+        },
+    },
+    Method {
+        name: "move-block",
+        doc: "Move a block, detached or not, into a new split beside another block of its \
+              window, splitting that one's place in half; unzooms the window. Without \
+              `beside` the block fills a window that shows no block.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "The block to move."),
+            Param {
+                name: "beside",
+                ty: Ty::Id(Entity::Block),
+                doc: "The block whose place it shares; left out only when the window \
+                      shows no block.",
+                presence: Presence::Optional {
+                    needs: Features::LAYOUT_EDIT,
+                },
+            },
+            required(
+                "side",
+                Ty::Text,
+                "Which side of `beside` it goes: `left`, `right`, `up` or `down`.",
+            ),
+        ],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::MoveBlock {
+                req,
+                block: a.block()?,
+                beside: a.opt_block("beside")?,
+                side: a.side()?,
+            })
+        },
+    },
+    Method {
+        name: "detach-block",
+        doc: "Take a block out of its window's layout. Its program keeps running and it \
+              stays listed in the window, until `move-block` puts it back or it closes.",
+        params: &[required(
+            "block",
+            Ty::Id(Entity::Block),
+            "The block to detach.",
+        )],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::DetachBlock {
+                req,
+                block: a.block()?,
+            })
+        },
+    },
+    Method {
+        name: "move-window",
+        doc: "Move a window to another place among its session's windows, shifting those \
+              between by one.",
+        params: &[
+            required("window", Ty::Id(Entity::Window), "The window to move."),
+            required("index", Ty::Lines, "Its new place, from 0 for the first."),
+        ],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::MoveWindow {
+                req,
+                window: a.window()?,
+                index: usize::try_from(a.number("index")?).unwrap_or(usize::MAX),
             })
         },
     },
