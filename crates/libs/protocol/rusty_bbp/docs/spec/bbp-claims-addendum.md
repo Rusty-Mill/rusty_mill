@@ -1,6 +1,6 @@
 # BBP claims addendum (draft, v0)
 
-Nov 2, 2026 · **Status: approved by the owner on 2026-11-02, including the schema and API changes listed below. Second owner review (2026-11-02): order-dependent settlement accepted; settled claims keep taking evidence and executable evidence reopens them; candidate runs approved if debited from the claim budget and sandboxed. Third owner review (2026-11-02): reopen symmetry with a supersede exception; dependency collapse reopens unacted dependents; `sole_candidate` is a recorded fact, not an escalation; `source` artifacts for cited evidence; human reruns past budget escalate; overdue action marks escalate. Q1 to Q5 decided. Fourth owner review (2026-11-02): Q4 accepted with a stricter accept line (12) for high-stakes and irreversible claims and −8 for a failing test; superseding open claims allowed; a human `choose` among candidates. Spec only; the engine change is a separate PR.**
+Nov 2, 2026 · **Status: approved by the owner on 2026-11-02, including the schema and API changes listed below. Second owner review (2026-11-02): order-dependent settlement accepted; settled claims keep taking evidence and executable evidence reopens them; candidate runs approved if debited from the claim budget and sandboxed. Third owner review (2026-11-02): reopen symmetry with a supersede exception; dependency collapse reopens unacted dependents; `sole_candidate` is a recorded fact, not an escalation; `source` artifacts for cited evidence; human reruns past budget escalate; overdue action marks escalate. Q1 to Q5 decided. Fourth owner review (2026-11-02): Q4 accepted with a stricter accept line (12) for high-stakes and irreversible claims and −8 for a failing test; superseding open claims allowed; a human `choose` among candidates. Fifth owner decision (2026-11-02): a failing run of the current candidate blocks acceptance until a passing run that includes the failed profiles. Spec only; the engine change is a separate PR.**
 Extends [`bbp-v0.5-implementation-spec.md`](bbp-v0.5-implementation-spec.md). Card: Mill Board #593 (Let Em Loose).
 
 ## Summary
@@ -120,9 +120,9 @@ Evidence is **scoring** when it is admitted while the claim is `open`, or when i
 
 **Confidence** is shown as `p = 1 / (1 + 3^(−score/4))`, rounded to whole percent. It is for people only; no rule reads it. With the defaults, `accept_at = 8` is exactly 90% (3² = 9, so 9 / 10), `accept_at_strict = 12` is 96% (27 / 28) and `drop_at = -8` exactly 10%. A failing test weighs twice a passing one (owner, 2026-11-02): objections are cheap to raise and expensive to ignore, and a flaky test is handled by a budgeted rerun, not by a lower weight.
 
-After each scoring `evidence`, and after each candidate debit on an `open` claim (Budget), the board evaluates that claim in this order. A settled or escalated claim is never evaluated by these rules; it changes status only as Evidence after settlement and C-R8 say. The first rule that fires wins, and its event is generated in the same transaction (Processing model, phase 4):
+After each scoring `evidence`, after each candidate debit on an `open` claim (Budget), and after each final report of an `open` claim's current candidate (Failing runs block), the board evaluates that claim in this order. A settled or escalated claim is never evaluated by these rules; it changes status only as Evidence after settlement and C-R8 say. The first rule that fires wins, and its event is generated in the same transaction (Processing model, phase 4):
 
-1. **Accept line.** `score ≥ accept(c)`, `authors(c,+) ≥ min_authors`, at least one support item is not `opinion`, and every dep is `accepted`:
+1. **Accept line.** `score ≥ accept(c)`, `authors(c,+) ≥ min_authors`, at least one support item is not `opinion`, every dep is `accepted`, and `failing(c)` is empty (Failing runs block):
    - if `reversible: false`: `claim_escalated(reason: irreversible)` (C-R6);
    - otherwise `claim_accepted`. If it is a candidate whose question has fewer than two candidates, the event carries `sole_candidate: true` (C-R7). BBP does not act on that fact; orch decides what to do about it.
 2. **Drop line.** `score ≤ drop_at`, `authors(c,−) ≥ min_authors`, and at least one counter item is not `opinion`: `claim_dropped`. Dropping an irreversible claim needs no human, because not doing something can be undone.
@@ -130,6 +130,26 @@ After each scoring `evidence`, and after each candidate debit on an `open` claim
 4. **Settling.** The current epoch has at least `settle_window` scoring items, and `|score now − score settle_window items ago| ≤ settle_delta`: `claim_escalated(reason: stuck)`.
 
 A claim that crosses the accept line while a dep is still `open` stays `open`. It is re-evaluated whenever a dep settles (C-R5).
+
+### Failing runs block
+
+A failing test cannot drop a claim alone (`min_authors`), but it **blocks acceptance** (owner decision, 2026-11-02). The block is about the code that would be accepted, so it follows runner reports, not evidence posts: a failed run blocks even if nobody posts counter evidence about it.
+
+```
+current(c) = the candidate naming c that was stored last (log order); none before the first
+failed(r)  = names of the profiles in report r with exit_code ≠ 0 or failed > 0
+failing(c) = set of profile names, empty when c is posted, updated by each final report r
+             of a run of current(c) (as current at r's commit):
+               r failed:  failing(c) ∪= failed(r)
+               r passed:  failing(c) −= names of the profiles r lists
+               r error:   no change
+```
+
+- **The clearing run must include what failed.** A passing report removes only the profiles it lists, so a passing run of a reduced suite clears nothing it did not run. Granularity is the runner profile: `Report` carries profile names and failure counts, not test ids. Per-test ids would be a `Report` schema change and are not proposed; a lens that wants a finer split defines finer profiles.
+- **Only the candidate that would be accepted matters.** Storing a new candidate makes it current and carries `failing(c)` over: it is not cleared by being newer, only by the new candidate's own passing run that lists the failed profiles. A report on a candidate that is no longer current (a replaced candidate's late or rerun failure) leaves `failing(c)` unchanged, so it cannot block.
+- **Epochs do not reset it.** `failing(c)` is a fact about the current code, not about scoring, so a reopen keeps it. This is what makes a reopen by a failing re-check (CL-38) start blocked.
+- **Overrides.** A human `decision accept` or `choose` (C-R8) bypasses it like any other threshold. The card shows `failing(c)` and the report that set each entry.
+- A blocked claim is still evaluated by the drop, budget and settling lines, so a block that nobody clears ends as a drop, a `budget` escalation or a `stuck` escalation, never a silent wait.
 
 ### Settlement follows committed order
 
@@ -277,6 +297,7 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 7. **Action marks** (`claim_acting`, `claim_action_result`) are new host/human writes, and the host must mark before acting, and **sandboxed runs** are a host requirement for claims mode (orch-bbp runs candidates through `rusty_sandbox` only).
 8. **Third review additions:** the `supersedes` claim field, the `source` artifact kind, the `rerun_held` event, the `action_unconfirmed` escalation and `mark_timeout_secs`, and `sole_candidate` moved from an escalation reason to a field on `claim_accepted`.
 9. **Fourth review additions:** `accept_at_strict`, executed counter weight 8 with executed strength fixed at 1, `claim_superseded` and the `superseded` status, and the human `choose` decision.
+10. **Fifth decision:** the claim's `current` candidate and `failing` profile set in claims-mode state and on `claim_card`. Derived by the fold from existing reports; no new record, event or `Report` field.
 
 No change to `rusty_crdt`, `coedit` or the stage-mode rules.
 
@@ -343,6 +364,8 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-43 | `claim_acting` on an `open` claim, or naming an old epoch; `claim_action_result` for an unknown mark; a second result for one mark | `wrong_state`; `ref_unresolved`; `duplicate` |
 | CL-45 | X accepted in epoch 1. (a) Host marks `claim_acting(X, 1, pr)`; contrary executed evidence commits; host records `done`. (b) Contrary evidence reopens X first; host then tries to mark epoch 1. (c) As (a), then the human reopens, X is accepted in epoch 2, and the epoch-1 result arrives late | (a) `claim_escalated(reopened_after_action)`; the result lands on the epoch-1 mark. (b) `wrong_state`, no mark, so the host does not act. (c) The result binds to the epoch-1 mark, not epoch 2; X stays acted on |
 | CL-46 | Run budget on reruns: candidate K on claim X. (a) One unit left: human `rerun(K)`. (b) Exactly at the limit: human `rerun(K)`. (c) Replay of (a)'s `op`. (d) Approve the held rerun from (b). (e) At the limit, an agent stores a new candidate on X | (a) Old run revoked, new `run_started`, one unit debited. (b) `rerun_held(X, K)`, X's status unchanged, the old run's report is still accepted. (c) Original result, no second debit. (d) `budget_extended(X)` adds one `base(X)`, the old run is revoked, a new run starts, one unit debited. (e) `claim_budget`, nothing written |
+| CL-59 | Low-stakes claim X, candidate K with profiles `unit`, `lint`. (a) K's run fails `unit`; `a` and `b` post support from two earlier passing runs of K, score 8. (b) Rerun of K passes listing only `lint`. (c) Rerun of K passes listing `unit` and `lint`. (d) Accepted X re-checked: the re-check run fails `unit`, `c` posts executed counter | (a) X stays `open`, `failing(X) = {unit}`. (b) Still `open`, `failing(X) = {unit}` (a reduced suite does not clear). (c) `failing(X)` empty; X `claim_accepted` on that report's commit with no new evidence. (d) `claim_reopened(by: evidence)`, and X is blocked in epoch 2 (`failing(X) = {unit}`) |
+| CL-60 | Claim X, candidate K1 fails `unit` (`failing(X) = {unit}`); K2 stored naming X. (a) Support reaches 8 before K2 reports. (b) K2's run passes listing only `lint`. (c) K2's run passes listing `unit`. (d) Then K1's rerun fails `unit` and `lint` | (a) X stays `open`: K2 is current and inherits the block. (b) Still blocked. (c) `failing(X)` empty, X `claim_accepted`. (d) K1 is not current, `failing(X)` stays empty, X stays `accepted` |
 | CL-44 | Host test (`rusty_bbp_host`): open a claims-mode task on a host with no sandbox configured; on a sandboxed host, inspect where a candidate's run executes | `bad_claims_config(sandbox)`, nothing written; the run's process is inside the `rusty_sandbox` profile |
 
 ## Owner answers (2026-11-02)
