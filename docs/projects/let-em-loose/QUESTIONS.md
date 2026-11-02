@@ -1,122 +1,119 @@
 # Let Em Loose: pre-answered questions
 
-These are the questions an implementer would ask while building v0 ([SPEC.md](SPEC.md)), each with a proposed answer. Answers marked **[Nano decides]** are recommendations only: they need Nano's call before code depends on them. Everything else is a default the implementer may adopt, recording any deviation in [DECISIONS.md](DECISIONS.md).
+These are the questions an implementer would ask while building v0 ([SPEC.md](SPEC.md)), with their answers. Most were settled during the #592–#597 design reviews on 2026-11-02; each settled answer names the decision in [DECISIONS.md](DECISIONS.md) that records it. Answers marked **[Nano decides]** are still open.
 
-## Nano's open calls at a glance
+## Still open
 
 | Q | Decision needed |
 | --- | --- |
-| 2 | Default accept and drop thresholds |
-| 5 | BBP schema version bump for claims |
-| 9 | Which executor the lens runner extends or replaces |
-| 11 | Starting model for each lens, given API cost |
-| 19 | Global spend ceiling per run |
-| 21 | Whether the inbox lives in Mill Board or rusty_tick |
-| 22 | How Nano is notified of escalations |
-| 26 | When the intent interview happens |
-| 27 | Target scan time and reference hardware |
-| 28 | Signing off the golden set |
+| 26 | When the intent interview for the #600 experiment happens |
+| 27 | The #600 experiment's own targets (Phase B targets are settled) |
+| 28 | Signing off the golden sets |
+| 31 | The write to existing remind-me records |
 
 ## Claims model (BBP, #593)
 
 **1. What exactly is the confidence update rule?**
-Log-odds accumulation. A claim starts at 0.5 (log-odds 0). Each evidence item adds `direction × strength × kind_weight × author_weight` to the log-odds, and confidence is the sigmoid of the total. Starting kind weights: executable test or benchmark 1.0, measurement 0.8, sourced citation 0.5, opinion 0.0 for support and 0.3 for counter-evidence, so objections stay cheap and agreement doesn't. `author_weight` is 1.0 in v0 (see Q16). It must be a pure function of the evidence log and covered by trace tests. The weights are tuned later through calibration (#597).
+A whole-number score. An executed test adds +4 for a pass and -8 for a failure, with strength fixed at 1. A cited source counts 2. Opinion alone can never reach accept. Track records are recorded but not used as weights in v0. (D29)
 
-**2. Are the thresholds fixed or per claim?** **[Nano decides]**
-Recommended: accept at 0.90 and drop at 0.10 by default, overridable per intent. A claim marked irreversible needs 0.95 and always escalates, whatever its confidence.
+**2. What are the accept and drop lines?**
+Accept at 8 (90%) for low and medium stakes, and 12 (about 96%) for high-stakes and irreversible claims. Drop at -8 (10%). At least two distinct authors are needed to accept. Irreversible claims always escalate, whatever their score. (D29)
 
-**3. What happens to dependents when a foundation claim collapses?**
-They move to `reopened` and are flagged, not deleted. Their confidence is capped at their parent's until the parent recovers or they are re-proven on other grounds. All history is kept.
+**3. What happens to dependents when a dependency collapses?**
+Dependents nothing has acted on reopen automatically; if the dependency was dropped, they are voided in the same step and stay visible. Only dependents already acted on escalate. A new claim cannot depend on a dropped one. (D32)
 
-**4. How is "settled" detected?**
-A claim is settled when its last 3 evidence events each moved confidence by less than 0.02 and it sits outside the open band. Both numbers are config. A settled claim stops attracting work and is compacted to one line plus an evidence link.
+**4. How are "settled" and "stuck" detected?**
+By evidence posts, not rounds. If the last 6 posts moved the score by 2 or less in total and the claim is still between the lines, it escalates as stuck. Settled claims keep taking evidence: an executed contrary result reopens them into a fresh epoch. (D28, D29)
 
-**5. How do existing BBP posts map onto claims?** **[Nano decides]**
-Keep the post as the transport and add `claim` and `evidence` payload types. Today's free-form posts become opinion-kind evidence or are left untyped. This needs a schema version bump. Recommended: an additive bump with a reader for old logs, and no migration of historical logs.
+**5. How do existing BBP tasks and posts relate to claims?**
+Claims sit beside the stage lifecycle as a per-task mode; stage-mode tasks are unchanged. Evidence posts need no turn; state changes, budgets and approvals keep the one-live-turn rule. Old logs are read as they are, with no migration. (D27)
 
 **6. Can claims be edited?**
-No. Claim text is immutable, and evidence is append-only. A change creates a new claim that `supersedes` the old one. This makes illegal states unrepresentable and keeps replay exact.
+No. Claims are immutable and evidence is append-only. A change is a new claim that supersedes the old one, and it takes effect only once the new claim is accepted. Superseding an acted-on claim needs Nano's accept. (D31)
 
-**7. Who can create claims, and how are duplicates handled?**
-The seeding pass, any lens, and Nano through intent can all create claims. The board flags near-duplicates, and merging them is an explicit `supersedes`, never silent.
+**7. Who can create claims?**
+The seeding pass, any lens, and Nano through intent. Storing a candidate that names a claim starts its run. `sole_candidate` is recorded on the claim; orch decides what to do about it. (D29)
 
-**8. How are concurrent writes handled?**
-Evidence is an append-only log, so there are no write conflicts. Confidence is recomputed from the log. State transitions, budget debits and escalations go through the serialized control plane. Confirm on main what Phase 2a already provides before designing (#593 first step).
+**8. How are concurrent writes handled, and what does "deterministic" promise?**
+Evidence is an append-only log. The promise is that the same log always replays to the same outcome; settling depends on arrival order, which the log records. Before acting on a claim, the host records an action mark against the epoch it saw. (D28, D33)
 
 ## Lenses and orch (#594)
 
-**9. Which executor does the lens runner extend or replace?** **[Nano decides]**
-Decide after the reconnaissance report. Leaning: extend the orch dispatcher for lenses, and reuse mill-runner's worktree and rusty_sandbox for builders. Retire nothing without Nano's approval.
+**9. Which executor does the lens runner extend?**
+orch, next to the dispatcher, on its existing model port. super-board was retired on 2026-10-28, and mill-runner is left alone. (D20)
 
 **10. What are the starter lenses?**
-Adversary, Operator and Research, plus a Builder that is not a critic. Holdout and Intent lenses come with #597.
+Three blind Architect proposers per question, then Research, Adversary and Operator. The holdout lens comes with #597. Builders arrive with #600. (D34)
 
-**11. Which model runs each lens at first?** **[Nano decides]**
-Recommended: Builder on Claude, Adversary on OpenAI/Codex, Research on Gemini, Operator on the local llama-swap model. Every lens falls back to the local model when its budget runs low. This depends on API keys and cost.
+**11. Which model runs each lens?**
+Architects on Claude, local and Codex, with the rebel set in config. Operator on Qwen3.6-35B-A3B via llama-swap. gpt-oss-120b is the local high tier for sensitive or contested claims. Context starts at 32k. No Gemini in v0. (D34)
 
 **12. What does the port contract look like?**
-Request: lens id, question, and the assembled context bundle. Response: a JSON list of evidence items or new claims, checked against a schema in the adapter. Anything that doesn't conform is rejected, retried once, then logged as a lens failure. Adapters return `Result`, never panic, and attach the provider and model to every item.
+Request: lens id, question and the assembled context. Response: evidence items or new claims, checked against a schema in the adapter, with non-conforming replies rejected. The hard-coded provider list becomes a config registry; `orch-openai` is a new adapter crate for llama-swap, allowing plain HTTP only to loopback and private addresses. (D34)
 
 **13. How is the blind first pass enforced?**
-Through context assembly. For a claim in its candidate phase, a lens's bundle excludes other lenses' evidence on that claim until every asked lens has posted or timed out. It is enforced by construction, not by the prompt.
+Through context assembly: a lens's first pass on a claim excludes the other lenses' evidence on it. Each question gets three blind Architect proposals before any attack. (D7, D34)
 
 **14. How is "agreement costs evidence" enforced?**
-Support evidence of kind opinion has zero weight (Q1). Support counts only if it references an artefact the board can resolve: a test id, a benchmark run or a citation URL.
+Support must cite a source artifact or a test run. Opinion can never reach accept. (D29)
 
 **15. How is "look harder" triggered?**
-When a critic lens posts no counter-evidence on 3 consecutive contested claims, it is re-asked once with an explicit adversarial framing. A second empty pass is accepted and recorded.
+A critic lens that finds nothing gets one "look harder" retry; a second empty pass is accepted and recorded.
 
 **16. How are track records handled in v0?**
-Logged only. Each lens's evidence is recorded against final outcomes, but `author_weight` stays at 1.0 until there is enough data. Difficulty-weighted scoring comes in #599.
+Recorded and reported, not used as weights. (D29, D37)
 
-**17. How do builders (Claude Code, Codex) take part in v0?**
-They work in a sandboxed worktree through the MCP door to the board (D14), posting test and benchmark results as executable evidence. Exactly how depends on Q9.
+**17. How do builders take part?**
+Through #600's builder, in a sandboxed worktree, posting candidate runs as executed evidence. Joining the board over MCP (D14) is still proposed.
 
 **18. Where do lens prompts come from?**
-From the generic experts in Expert-Agents, bound and versioned as config in the Factory repo. orch loads them by name and version, and nothing is hard-coded.
+From the generic experts in Expert-Agents, bound and versioned as config in the Factory repo.
 
 ## Budget and cost
 
-**19. What are the budget units and starting numbers?** **[Nano decides]**
-Tokens and wall-clock time per claim, by tier: low, medium, high and irreversible, each tier with roughly four times the allowance of the one below. Nano sets the global ceiling per run, in dollars or tokens. The circuit breaker pauses the run and escalates when spend rises while total confidence movement stays flat (#598).
+**19. What are the budget units and caps?**
+One unit buys one evidence post or one candidate run. Claims get 8, 16 or 32 units for low, medium or high stakes, doubled if irreversible. For Phase B: $200 in total, a $25 hard cap per run, and a pause if the first paired intent costs more than $40. (D29, D38)
 
 **20. Who assigns stakes and reversibility?**
 The intent declares never-rules and reversibility classes, and the seeding pass tags each claim. Anything that writes to user data, shared branches or external systems defaults to irreversible.
 
-## Inbox and Nano
+## Inbox and Nano (#595)
 
-**21. Where does the inbox live?** **[Nano decides]**
-Recommended: store escalations in rusty_tick and show them in Mill Board, matching the 2026-10-26 decision that Mill Board is the agent view over rusty_tick. #595 confirms.
+**21. Where does the inbox live?**
+A read view over BBP in Mill Board, reading only through the host's `bbp` command. Nothing goes into rusty_tick. (D35; this reverses the earlier recommendation.)
 
-**22. How is Nano notified?** **[Nano decides]**
-For v0, recommended: the inbox only, with no pings. Push notifications can come later.
+**22. How is Nano notified?**
+No push notifications in v0. (D35)
 
-**23. What do Approve, Reject and Refine do?**
-Approve posts human evidence that is decisive, and the action proceeds. Reject drops the claim with Nano's reason attached. Refine opens the intent: Nano's edit bumps the intent version and reopens the claims bound to the old version (#598).
+**23. What do the actions do?**
+Approve accepts, and on a budget escalation adds one base allowance (never open-ended; none for irreversible claims). Reject drops, and creates a "Remediate" card if the claim was already acted on. Choose picks one of several candidates for a taste call. Refine intent sends a human answer the lenses see. (D35)
 
 **24. What counts as irreversible?**
-Deleting, moving or overwriting user data. Pushing to shared branches. External messages. Schema migrations. Spend above a tier allowance. Agents never merge PRs in any case (repository rule).
+Deleting, moving or overwriting user data. Pushing to shared branches. External messages. Schema migrations. Spend above a tier allowance. Agents never merge PRs in any case.
 
 ## Intent
 
 **25. What is the intent format?**
-A Markdown file with a YAML block: `goal`, `targets`, `always`, `never`, `examples`, `taste`, `reversibility`, plus a `version`. The template lives in the Factory repo, and each project keeps its own copy. Every never-rule should map to at least one property test.
+YAML with `id`, `goal`, `interface`, `acceptance`, `non_goals`, `taste_domains` and `oracle`, kept in the Factory repo. Acceptance lines describe observable behaviour, never method. (D38)
 
-**26. Who runs the intent interview?** **[Nano decides when]**
-Claude, in chat with Nano, interviewing by example: concrete cases rather than requirement questions. The output is committed to the experiment repo as `INTENT.md`.
+**26. Who runs the intent interview for #600?** **[Nano decides when]**
+Claude, in chat with Nano, interviewing by example. The output is committed to the experiment repo.
 
-## The dedup experiment
+## Experiments
 
-**27. What are the success criteria?** **[Nano decides the targets]**
-Compared with `rusty_fclone` on the same data: scan throughput, work lost on a crash, zero false duplicates on the golden set, GUI usability as judged by Nano, tokens or dollars spent, and Nano's minutes. Nano sets "acceptable scan time" and the reference hardware.
+**27. What are the targets?** **[Nano decides for #600]**
+Phase B is settled: five small intents, a pre-registered decision rule, and a `dedup-lite` timing target of 2 seconds on Nano's desktop, warm cache, median of 5. The #600 experiment, the full 20 TB app, gets its targets from the intent interview. (D36, D38)
 
-**28. What test data is used?** **[Nano signs off the golden set]**
-A synthetic generator that reproduces the shape of the 20 TB drive (file-count and size distribution, nesting, duplicate ratio) at a smaller scale, plus a golden set of real cases with known answers. The real drive is used only in a read-only shadow run.
+**28. What ground truth is used?** **[Nano signs off the golden sets]**
+Holdout suites written from intent only, plus golden sets in the Factory repo that only Nano can sign off. Private fixtures from Nano's drive are recorded as hashes and mounted read-only. (D37)
 
 **29. What may the agents read?**
-Public prior art, including fclones, papers and benchmarks, for study only, with no copied code. No access to `rusty_fclone` or rusty_mill. Network access follows the sandbox policy.
+Public prior art, including fclones, for study only, with no copied code. No access to `rusty_fclone` or rusty_mill. Builders see only pass or fail counts for holdouts.
 
 ## Process
 
 **30. Where does work land, and how?**
-Designs go in `docs/projects/let-em-loose/` and as comments on the cards. Code goes in the existing crates. One PR per card, each with a change fragment, reviewed by `dottiusmaximus`. Agents never queue or merge. Decisions are saved to remind-me with the tag `let-em-loose`, the card number, and `project="let-em-loose"`.
+BBP rules in the claims addendum (PR #1386). Each card's design on its card. Code in the existing crates, one PR per card, test-first, with a change fragment, reviewed by `dottiusmaximus`. Agents never queue or merge. Next up is the #593 engine; #598 and #599 are not designed yet. (D40)
+
+**31. What about existing remind-me records?** **[Nano decides]**
+The explicit `project` parameter is approved. Any write to existing records waits until Nano has seen exactly which records it would change. (D39)

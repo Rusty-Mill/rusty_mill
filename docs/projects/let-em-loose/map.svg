@@ -27,7 +27,7 @@
   <text x="60" y="126" class="t h">Factory repo</text>
   <text x="60" y="146" class="m xs">process and config only · knows no project · no code</text>
   <rect x="60" y="160" width="380" height="44" rx="8" class="chip"/>
-  <text x="76" y="187" class="t s"><tspan class="mono">lenses/</tspan><tspan class="m xs" dx="10">Adversary · Operator · Research · Holdout</tspan></text>
+  <text x="76" y="187" class="t s"><tspan class="mono">lenses/</tspan><tspan class="m xs" dx="10">Architect · Research · Adversary · Operator</tspan></text>
   <rect x="60" y="212" width="380" height="44" rx="8" class="chip"/>
   <text x="76" y="239" class="t s"><tspan class="mono">knowledge/</tspan><tspan class="m xs" dx="10">59 domain experts → lens prompts</tspan></text>
   <rect x="60" y="264" width="380" height="44" rx="8" class="chip"/>
@@ -66,8 +66,8 @@
   <!-- ============ ROW 2: ORCH ============ -->
   <rect x="300" y="410" width="900" height="92" rx="12" class="panel" stroke="#a371f7"/>
   <text x="320" y="438" class="t h">orch: the model-independent engine</text>
-  <text x="320" y="464" class="s t">Port + adapters: <tspan fill="#a371f7">Claude · OpenAI/Codex · Gemini · local llama-swap</tspan><tspan class="m" dx="6">· swapping a model is a config edit</tspan></text>
-  <text x="320" y="488" class="xs m">Fresh context per question: intent + the claim + its evidence + settled claims + track record · blind first pass · a rebel candidate required</text>
+  <text x="320" y="464" class="s t">Port + adapters: <tspan fill="#a371f7">Claude · Codex · local llama-swap</tspan><tspan class="m" dx="6">· provider registry is config · Gemini later</tspan></text>
+  <text x="320" y="488" class="xs m">Fresh context per question: intent + the claim + its evidence + settled claims + track record · 3 blind Architects incl. a rebel · never asks a claim's author</text>
 
   <path d="M250,366 C250,400 280,430 296,440" stroke="#4ea1ff" stroke-width="1.6" fill="none" marker-end="url(#aB)"/>
   <text x="242" y="394" class="xs" fill="#4ea1ff" text-anchor="end">lens prompts</text>
@@ -90,20 +90,20 @@
   <!-- Lenses -->
   <g>
     <rect x="50" y="592" width="200" height="44" rx="8" fill="#1d2632" stroke="#a371f7" stroke-width="1.5"/>
-    <text x="64" y="610" class="t s" font-weight="600">Builder <tspan class="m xs" font-weight="400">· Claude</tspan></text>
-    <text x="64" y="627" class="m xs">code + tests in a sandbox</text>
+    <text x="64" y="610" class="t s" font-weight="600">Architect ×3 <tspan class="m xs" font-weight="400">· blind</tspan></text>
+    <text x="64" y="627" class="m xs">Claude · local · Codex rebel</text>
     <rect x="50" y="644" width="200" height="44" rx="8" fill="#1d2632" stroke="#a371f7" stroke-width="1.5"/>
-    <text x="64" y="662" class="t s" font-weight="600">Adversary <tspan class="m xs" font-weight="400">· Codex</tspan></text>
+    <text x="64" y="662" class="t s" font-weight="600">Adversary <tspan class="m xs" font-weight="400">· rotates</tspan></text>
     <text x="64" y="679" class="m xs">how does this break?</text>
     <rect x="50" y="696" width="200" height="44" rx="8" fill="#1d2632" stroke="#a371f7" stroke-width="1.5"/>
-    <text x="64" y="714" class="t s" font-weight="600">Research <tspan class="m xs" font-weight="400">· Gemini</tspan></text>
-    <text x="64" y="731" class="m xs">prior art, cited, never copied</text>
+    <text x="64" y="714" class="t s" font-weight="600">Research <tspan class="m xs" font-weight="400">· cites sources</tspan></text>
+    <text x="64" y="731" class="m xs">prior art, never copied</text>
     <rect x="50" y="748" width="200" height="44" rx="8" fill="#1d2632" stroke="#a371f7" stroke-width="1.5"/>
-    <text x="64" y="766" class="t s" font-weight="600">Operator <tspan class="m xs" font-weight="400">· local</tspan></text>
+    <text x="64" y="766" class="t s" font-weight="600">Operator <tspan class="m xs" font-weight="400">· Qwen local</tspan></text>
     <text x="64" y="783" class="m xs">kill it mid-run, odd disks</text>
     <rect x="50" y="800" width="200" height="44" rx="8" fill="#1d2632" stroke="#39c5cf" stroke-width="1.5" stroke-dasharray="4 3"/>
-    <text x="64" y="818" class="t s" font-weight="600">Holdout <tspan class="m xs" font-weight="400">· local</tspan></text>
-    <text x="64" y="835" class="m xs">tests builders never see</text>
+    <text x="64" y="818" class="t s" font-weight="600">Holdout <tspan class="m xs" font-weight="400">· own model</tspan></text>
+    <text x="64" y="835" class="m xs">required to accept</text>
   </g>
   <g stroke="#8b98a5" stroke-width="1.4" fill="none" marker-start="url(#a)" marker-end="url(#a)">
     <path d="M254,614 L290,614"/>
@@ -121,8 +121,8 @@
     <rect x="320" y="612" width="240" height="64" rx="8" fill="#1d2632" stroke="#2a3644"/>
     <text x="334" y="630" class="t s" font-weight="600">C1 · hash cascade</text>
     <text x="334" y="646" class="m xs">size → partial → full hash</text>
-    <text x="334" y="662" class="xs" fill="#3fb950">92% · settled, compacted</text>
-    <rect x="334" y="668" width="212" height="3" rx="1.5" fill="#2a3644"/><rect x="334" y="668" width="195" height="3" rx="1.5" fill="#3fb950"/>
+    <text x="334" y="662" class="xs" fill="#3fb950">90% · settled, compacted</text>
+    <rect x="334" y="668" width="212" height="3" rx="1.5" fill="#2a3644"/><rect x="334" y="668" width="191" height="3" rx="1.5" fill="#3fb950"/>
   </g>
   <!-- C4 -->
   <rect x="320" y="700" width="240" height="64" rx="8" fill="#1d2632" stroke="#8b98a5"/>
@@ -134,8 +134,8 @@
   <rect x="620" y="612" width="240" height="64" rx="8" fill="#2a1416" stroke="#f85149" stroke-width="2"/>
   <text x="634" y="630" class="t s" font-weight="600">C2 · hardlink swap</text>
   <text x="634" y="646" class="m xs">within one volume, else report</text>
-  <text x="634" y="662" class="xs" fill="#f85149">91% · irreversible → inbox</text>
-  <rect x="634" y="668" width="212" height="3" rx="1.5" fill="#2a3644"/><rect x="634" y="668" width="193" height="3" rx="1.5" fill="#f85149"/>
+  <text x="634" y="662" class="xs" fill="#f85149">96% · irreversible → inbox</text>
+  <rect x="634" y="668" width="212" height="3" rx="1.5" fill="#2a3644"/><rect x="634" y="668" width="204" height="3" rx="1.5" fill="#f85149"/>
   <!-- C3 fork -->
   <rect x="620" y="700" width="240" height="64" rx="8" fill="#1d2632" stroke="#e3b341" stroke-dasharray="5 4"/>
   <text x="634" y="718" class="t s" font-weight="600">C3 · scan index</text>
@@ -157,19 +157,19 @@
 
   <!-- rules strip -->
   <rect x="294" y="808" width="826" height="40" rx="8" fill="#1a2230" stroke="#2a3644"/>
-  <text x="308" y="824" class="xs t">Board computes confidence · weight: tests &gt; measurements &gt; citations &gt; opinion · agreement must cite an artefact</text>
-  <text x="308" y="841" class="xs m">Accept ≥ 90% · drop ≤ 10% · irreversible always escalates · stop when settled · budget scales with stakes</text>
+  <text x="308" y="824" class="xs t">Board computes the score · test pass +4, fail −8 · cited source +2 · opinion never accepts · 2 authors · same log, same outcome</text>
+  <text x="308" y="841" class="xs m">Accept 90% (96% high-stakes) · drop 10% · a failing run blocks · holdout pass required · irreversible escalates</text>
 
   <!-- C2 -> inbox -->
   <path d="M740,612 L740,602 L1132,602 L1132,636 L1146,636" stroke="#f85149" stroke-width="1.6" fill="none" marker-end="url(#aR)"/>
 
   <!-- Right column -->
   <rect x="1150" y="592" width="300" height="118" rx="10" fill="#2a1416" stroke="#f85149" stroke-width="2"/>
-  <text x="1166" y="616" class="t s" font-weight="600">Decision inbox <tspan class="m xs" font-weight="400">· Nano · usually empty</tspan></text>
+  <text x="1166" y="616" class="t s" font-weight="600">Decision inbox <tspan class="m xs" font-weight="400">· Mill Board view</tspan></text>
   <text x="1166" y="640" class="xs" fill="#f85149">irreversible · taste · deadlock · budget</text>
   <text x="1166" y="660" class="m xs">one card: decision, confidence, evidence,</text>
-  <text x="1166" y="676" class="m xs">and a dry run of what would change</text>
-  <text x="1166" y="698" class="t xs">Approve · Reject · Refine intent</text>
+  <text x="1166" y="676" class="m xs">and a dry run · usually empty</text>
+  <text x="1166" y="698" class="t xs">Approve · Reject · Choose · Refine intent</text>
   <rect x="1150" y="728" width="300" height="46" rx="10" fill="#1d2632" stroke="#2a3644" stroke-width="1.5"/>
   <text x="1166" y="748" class="t s" font-weight="600">Shadow run</text>
   <text x="1166" y="765" class="m xs">read-only on real data · reports what it would do</text>
@@ -201,13 +201,13 @@
   <text x="356" y="986" class="t s" font-weight="600">Calibration</text>
   <text x="356" y="1008" class="m xs">accepted at 90% should hold</text>
   <text x="356" y="1026" class="m xs">about 90% of the time</text>
-  <text x="356" y="1044" class="m xs">→ retune evidence weights</text>
+  <text x="356" y="1044" class="m xs">informational in v0 · 14-day horizon</text>
 
   <rect x="620" y="960" width="250" height="104" rx="10" fill="#1d2632" stroke="#39c5cf"/>
   <text x="636" y="986" class="t s" font-weight="600">Track records</text>
   <text x="636" y="1008" class="m xs">difficulty-weighted, per lens</text>
-  <text x="636" y="1026" class="m xs">right on hard claims counts most</text>
-  <text x="636" y="1044" class="m xs">→ lens weight on the board</text>
+  <text x="636" y="1026" class="m xs">recorded and reported</text>
+  <text x="636" y="1044" class="m xs">not used as weights in v0</text>
 
   <rect x="900" y="960" width="250" height="104" rx="10" fill="#1d2632" stroke="#39c5cf"/>
   <text x="916" y="986" class="t s" font-weight="600">Lessons</text>

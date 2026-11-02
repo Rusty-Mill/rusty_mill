@@ -1,6 +1,6 @@
 # Let Em Loose: decisions
 
-Each entry gives the decision, why it was made, and what was rejected. **Agreed** means Nano has approved it. **Proposed** means it is the working direction but still awaits a design or confirmation. Dates are when the decision was made.
+Each entry gives the decision, why it was made, and what was rejected. **Agreed** means Nano has approved it. **Proposed** means it is the working direction but still awaits a design or confirmation. Dates are when the decision was made. Where an earlier entry and a later one conflict, the later one wins. The detailed BBP rules are in the claims addendum, `crates/libs/protocol/rusty_bbp/docs/spec/bbp-claims-addendum.md` (PR #1386).
 
 | # | Decision | Status |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 | D9 | Planning, building and testing are concurrent | Agreed 2026-11-02 |
 | D10 | Research: learn, don't inherit | Agreed 2026-11-01 |
 | D11 | BBP is a pure protocol | Agreed 2026-10-11, reaffirmed 2026-11-02 |
-| D12 | orch is model-independent, via ports and adapters | Agreed 2026-11-02 |
+| D12 | orch is model-independent, via ports and adapters | Agreed 2026-11-02; providers refined in D34 |
 | D13 | No agent-to-agent calls | Agreed 2026-11-02 |
 | D14 | Tool-using agents join through the board over MCP | Proposed 2026-11-02 |
 | D15 | Concurrent, event-driven evidence posting | Agreed 2026-11-02 |
@@ -23,13 +23,27 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 | D17 | Build in the rusty_mill monorepo | Agreed 2026-11-02 |
 | D18 | The dedup experiment gets a fresh repo and intent only | Agreed 2026-11-01 |
 | D19 | The Factory repo holds process and config only | Agreed 2026-11-02 |
-| D20 | No fourth executor | Agreed 2026-11-02; which executor is still open |
+| D20 | No fourth executor: extend orch | Agreed 2026-11-02 |
 | D21 | Thin slice first, then let it build itself | Agreed 2026-11-01 |
-| D22 | Ground truth sits outside the agents' loop | Proposed 2026-11-02 (#597) |
+| D22 | Ground truth sits outside the agents' loop | Agreed 2026-11-02; designed in D37 |
 | D23 | Defer existing code and the smaller gaps | Agreed 2026-11-02 |
 | D24 | Audit remind-me before building | Agreed 2026-11-01 |
 | D25 | Design first on every card | Agreed 2026-11-02 |
 | D26 | The name is Let Em Loose | Agreed 2026-11-02 |
+| D27 | Claims sit beside the stage lifecycle | Agreed 2026-11-02 (#593) |
+| D28 | Replay determinism, not order independence | Agreed 2026-11-02 (#593) |
+| D29 | Scoring and budget defaults | Agreed 2026-11-02 (#593) |
+| D30 | A failing test blocks acceptance | Agreed 2026-11-02 (#593) |
+| D31 | Superseding a claim | Agreed 2026-11-02 (#593) |
+| D32 | When a dependency collapses | Agreed 2026-11-02 (#593) |
+| D33 | Action marks and held reruns | Agreed 2026-11-02 (#593) |
+| D34 | Lenses, providers and local models | Agreed 2026-11-02 (#594) |
+| D35 | The inbox is a read view over BBP in Mill Board | Agreed 2026-11-02 (#595) |
+| D36 | Value scheduling lives in orch, with a pre-registered rule | Agreed 2026-11-02 (#596) |
+| D37 | Holdouts, protected tests, golden sets, calibration | Agreed 2026-11-02 (#597) |
+| D38 | Phase B intents and spend | Agreed 2026-11-02 (#596) |
+| D39 | remind-me gets an explicit project parameter | Agreed 2026-11-02 (#592) |
+| D40 | Build the slice before designing more | Agreed 2026-11-02 |
 
 ## D1. Lenses, not stages
 
@@ -102,6 +116,7 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 **Decision.** orch core defines one port: given a lens's context and claims, return structured evidence. There is one adapter per provider: Claude, OpenAI/Codex, Gemini, local llama-swap. Config binds each lens to an adapter, a model, a tier and fallbacks. Adapters validate output and reject non-conforming replies. JARVIS is the face, not the engine.
 **Why.** Model diversity only works if no single model owns the engine. Swapping a model should be a config edit.
 **Rejected.** A single-vendor engine. JARVIS as the engine. Vendor logic in orch core.
+**Later.** D34 replaced the planned Gemini adapter: v0 runs Claude, Codex and local models.
 
 ## D13. No agent-to-agent calls
 
@@ -152,7 +167,7 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 **Decision.** rusty_mill already has three executors: the orch dispatcher with BBP, mill-runner (worktree plus rusty_sandbox), and the super-board robot. The lens runner extends or replaces one of them.
 **Why.** A fourth would deepen the duplication the consolidation audit is trying to remove.
 **Rejected.** A new standalone executor.
-**Open.** Which executor. #594 starts with a reconnaissance report, and Nano decides.
+**Resolved 2026-11-02.** The reconnaissance found super-board already retired (2026-10-28), so two executors remain. The lens runner extends orch, next to the dispatcher on orch's existing model port. mill-runner is left alone.
 
 ## D21. Thin slice first, then let it build itself
 
@@ -189,3 +204,116 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 **Decision.** The project is called Let Em Loose. A suggested tagline: loose, but on evidence.
 **Why.** Nano chose it.
 **Rejected.** "Beyond the Software Factory", which is kept as the concept doc's subtitle.
+
+## D27. Claims sit beside the stage lifecycle
+
+**Decision.** BBP's task lifecycle (planning, build, test, review) is itself the factory pipeline. In v0, claims are an opt-in mode per task: claims-mode tasks skip the stage lifecycle, and stage-mode tasks are unchanged. Evidence posts need no turn; the one-live-turn rule stays for state changes, budgets and approvals.
+**Why.** Additive, so nothing existing breaks. Retiring the lifecycle is a later, separate decision once claims have proven themselves.
+**Rejected.** Replacing the lifecycle in v0. Lifting the one-live-turn rule for every write.
+
+## D28. Replay determinism, not order independence
+
+**Decision.** The guarantee is that the same log always replays to the same outcome. Settling depends on arrival order, which the log records. Settled claims keep taking evidence: an executed contrary result reopens a claim into a fresh epoch, where it must re-earn its settlement, and a claim already acted on escalates instead. A passing run reopens a dropped claim the same way. A claim that has been superseded stays closed.
+**Why.** Order independence could not hold once claims settle at a threshold. Refusing evidence after settling would stop holdouts and golden sets from catching a wrong settlement.
+**Rejected.** Order independence. Refusing evidence once a claim settles.
+
+## D29. Scoring and budget defaults
+
+**Decision.** Confidence is a whole-number score.
+
+| Setting | Value |
+| --- | --- |
+| Accept | 8 (90%) for low and medium stakes; 12 (about 96%) for high stakes and irreversible claims |
+| Drop | -8 (10%) |
+| Executed test | pass +4, fail -8; strength fixed at 1 |
+| Cited source | weight 2, through a `source` artifact |
+| Opinion | can never reach accept |
+| Authors | at least 2 distinct authors to accept |
+| Stuck | the last 6 evidence posts moved the score by 2 or less in total: escalate |
+| Budget unit | one evidence post or one candidate run |
+| Budget per claim | 8, 16 or 32 units for low, medium or high stakes; doubled if irreversible |
+| Track records | recorded, not used as weights in v0 |
+
+Storing a candidate that names a claim starts its run, which costs one unit and runs only in the sandbox. `sole_candidate` is a fact recorded in BBP; what to do about it is orch's decision.
+**Why.** Two independent passing tests reach accept; one counterexample weighs as much as two passes, because a failure falsifies and a pass only supports. High-stakes claims need a third test.
+**Rejected.** Probability floats with author-rated strength (one author could make a failure worth -24). A single accept line for every stake.
+
+## D30. A failing test blocks acceptance
+
+**Decision.** A claim cannot be accepted while the current candidate's latest run in the epoch failed. Only a passing run that includes the failed profiles clears it. The host freezes the profile set when a task opens, in a host-only file, and records its hash in `task_opened`; the runner and the report check refuse any mismatch. A new candidate inherits the block until its own passing run includes those profiles. A reopened claim starts out blocked. A candidate whose diff changes or deletes listed test files cannot clear a block unless a different principal endorses the test change with cited support.
+**Why.** Without the block, enough passes from other authors could accept a claim while a real failure stood. The rest closes the ways around it: dropping the test from the rerun, editing the profile, or editing the test.
+**Rejected.** Score-only treatment of failures. Tracking individual tests, which would need a report schema change.
+**Known limit.** Rust unit tests inside source files are not caught by the path check. The holdout suite (D37) covers this.
+
+## D31. Superseding a claim
+
+**Decision.** Any claim can be superseded, open or settled. The replacement takes effect only once the new claim is itself accepted; until then both stay live. Superseding a claim that was already acted on needs Nano's accept in the inbox, and the action record is kept.
+**Why.** A badly worded open claim needs to be replaceable, but posting a replacement must not let an agent escape a failing test.
+**Rejected.** Immediate supersession. Superseding settled claims only.
+
+## D32. When a dependency collapses
+
+**Decision.** Dependents that nothing has acted on reopen automatically. If the dependency was dropped, those dependents are voided in the same step and stay visible, so they can be re-proposed with new dependencies. Only dependents already acted on escalate. A new claim cannot depend on a dropped one.
+**Why.** Escalating every collapse would flood the inbox with decisions that don't need Nano.
+**Rejected.** Escalating every collapse. Automatically voiding claims that were already acted on.
+
+## D33. Action marks and held reruns
+
+**Decision.** Before acting on a claim, the host records a mark ("about to merge X") against the epoch it saw. If contrary evidence got in first, the mark is refused and nothing happens. A marked claim counts as acted on even if the host crashes; a mark with no recorded outcome after 1 hour (configurable) escalates for reconciliation. When the budget is spent, a rerun requested by an agent is refused, and one requested by a human becomes a budget escalation in the inbox. The old run stays valid either way.
+**Why.** Without marks, a merge racing a failing test could lose the record that the claim was used. A human should never be silently blocked by a budget.
+**Rejected.** Acting without a mark. Refusing human reruns outright.
+
+## D34. Lenses, providers and local models
+
+**Decision.**
+- **Providers in v0:** Claude, Codex and local. The hard-coded provider list in orch core becomes a config-driven registry. A new `orch-openai` crate (one crate per adapter, as orch already does) talks to llama-swap, and plain HTTP is allowed only to loopback and private addresses. Gemini joins later through the same adapter over HTTPS. Stored records keep old provider names; readers map them.
+- **Lenses:** each new question gets three blind Architect proposals on three models (Claude, local, and a Codex rebel; which model is the rebel is config). Research, Adversary and Operator follow. The lens asked about a claim rotates across the eligible lenses and models, and is never the claim's author.
+- **Local models:** Operator on Qwen3.6-35B-A3B; gpt-oss-120b as the local high tier for sensitive or contested claims; 32k context to start.
+**Why.** The Gemini CLI was discontinued, and every existing adapter is a CLI. One OpenAI-compatible adapter covers llama-swap now and Gemini later. Rotation and author exclusion keep the old "the reviewer is never the builder" rule.
+**Rejected.** A Gemini adapter in v0. A fixed lens per kind of question.
+
+## D35. The inbox is a read view over BBP in Mill Board
+
+**Decision.** The inbox is a read view over BBP served by Mill Board. Nothing is copied into rusty_tick, because an escalation is a decision, not a task (ADR-0012). Mill Board reads only through the host's `bbp` command, never BBP's files, so in v0 it runs on the orch host. Each card shows the claim, confidence, budget, reason, the top two supporting and contrary evidence items, and a dry run computed by the pure engine. Actions:
+- **Approve:** accepts. On a budget escalation, or on a whole-task budget, it adds one base allowance for the claim's tier, never more. On an irreversible claim it adds no budget.
+- **Reject:** drops. If the claim was already acted on, it also creates a "Remediate" card carrying the dry-run diff.
+- **Choose:** for taste escalations, Nano picks one of several candidates; the chosen one is accepted and the rest dropped, in one step.
+- **Refine intent:** a human answer that the lenses see in their context. Recorded so it can become an intent version under #598.
+No push notifications in v0. Sorting uses BBP facts: irreversible first, then oldest.
+**Why.** One source of truth, and Mill Board already has admin gates, MCP and a web UI.
+**Rejected.** Storing escalations in rusty_tick (this reverses the earlier recommendation in QUESTIONS Q21). Approve and Reject only.
+
+## D36. Value scheduling lives in orch, with a pre-registered rule
+
+**Decision.** The value score, "the board asks" and fork-and-collapse all live in orch behind a `Policy` trait, with no BBP change. Fork-and-collapse only starts after #600, on reversible claims, with two sandboxed branches capped at 2 units and 30 minutes each. On a tie, the simpler or cheaper branch wins and the reason is recorded; it goes to Nano as `choose` only if the intent marks it as taste. Evaluation runs in shadow mode first, then paired runs on five intents. Value scheduling becomes the default only if (a) its holdout result is no worse on all five (at most one more failing holdout test than the baseline), (b) it uses at most 80% of the baseline's tokens on at least four of five, and (c) total escalations are no higher than the baseline.
+**Why.** The score is a scheduling policy, not a board rule, so it can change without touching replayed logs. Five runs is a small sample, so quality and Nano's time are not traded for savings.
+**Rejected.** Exposing the score from BBP for sorting the inbox. A rule that allows worse quality on one intent.
+
+## D37. Holdouts, protected tests, golden sets, calibration
+
+**Decision.**
+- **Holdouts:** a second frozen profile suite, written from the intent alone by a holdout lens on a model no builder uses (config is refused otherwise). Only the holdout lens can run it, on the same base and diffs as the current candidate. Every claim with a candidate needs a passed holdout run to be accepted. Builders see only profile names and pass or fail counts.
+- **Protected test paths:** a candidate whose diff touches one is refused, with the paths named. A real test fix goes in as its own `tests` claim, which a different lens must support. This replaces the interim rule in D30.
+- **Holdout versions:** a new version needs Nano only when an existing holdout test is removed or changed; pure additions are adopted automatically.
+- **Golden sets:** in the Factory repo at `golden/<intent>/`, with a SIGNOFF file only Nano can commit (CODEOWNERS). The host refuses to open a task with an unsigned set. Private fixtures from Nano's drive are recorded as hashes only and mounted read-only. Golden cases run as `golden:` profiles inside the holdout suite.
+- **Calibration:** orch-store records each accepted claim as held, reversed or unknown, at a 14-day horizon, with a hold rate per score band and nothing proposed below 20 claims per band. It is informational in v0. `rusty_orch calibrate` proposes changes that Nano approves, and they apply only to tasks opened afterwards.
+**Why.** Agents that write and judge their own tests can be confidently wrong. Quietly restoring tests would hide the fact that an agent tried to change them.
+**Rejected.** Restoring protected paths from base. Using track records as weights in v0.
+
+## D38. Phase B intents and spend
+
+**Decision.** The five Phase B intents are `dedup-lite`, `tick-lite`, `vt-grid`, `gate-board` and `frag-check`, each a cut-down version of an existing project. `dedup-lite` is a benchmark, not the #600 experiment. Acceptance lines describe observable behaviour, never method: for example, "two concurrent writers never corrupt the store and neither write is lost", not "temp file then rename". The `dedup-lite` timing target is 2 seconds on Nano's desktop, warm cache, median of 5, both arms on the same host. Taste domains: `cli-output` in tick-lite and `api-shape` in gate-board. Spend: $200 in total for Phase B, a $25 hard cap per run, and a pause to report if the first paired intent costs more than $40.
+**Why.** Small, checkable intents with exact reference implementations keep a five-sample comparison meaningful.
+**Rejected.** Method-prescribing acceptance lines. Swapping `vt-grid` for a fuzzier intent.
+
+## D39. remind-me gets an explicit project parameter
+
+**Decision.** `remind_me_add`, search and capture get an explicit `project` parameter, and the remote connector sends it. The proposed write to existing records is on hold until Nano has seen exactly which records it changes.
+**Why.** The project was guessed from the caller's working folder; the remote connector has none, so it came out null.
+**Rejected.** Guessing the project from other fields.
+
+## D40. Build the slice before designing more
+
+**Decision.** After #597, implementation starts: the #593 engine first, test-first from the claims traces, on its own PR. #598 and #599 are not designed yet.
+**Why.** They don't block v0 (D23), and the slice will show which gaps actually matter.
+**Rejected.** Designing every card before building any.

@@ -1,6 +1,6 @@
 # Let Em Loose - Beyond the Software Factory
 
-> Status: concept, 2026-11-02. Source of truth while the design settles: the [live doc](https://claude.ai/artifact/JoCPd4weXwkJ7Zy8qMjiJJ). Work is tracked on Mill Board cards #592 to #599, tagged `let-em-loose`. Companion docs: [SPEC.md](SPEC.md), [DECISIONS.md](DECISIONS.md), [QUESTIONS.md](QUESTIONS.md).
+> Status: concept, 2026-11-02. This is the original concept and is not kept in step with later decisions: where it and [DECISIONS.md](DECISIONS.md) differ, DECISIONS.md wins (for example, v0 runs Claude, Codex and local models, not Gemini). Source of truth while the design settles: the [live doc](https://claude.ai/artifact/JoCPd4weXwkJ7Zy8qMjiJJ). Work is tracked on Mill Board cards #592 to #599, tagged `let-em-loose`. Companion docs: [SPEC.md](SPEC.md), [DECISIONS.md](DECISIONS.md), [QUESTIONS.md](QUESTIONS.md).
 
 ![Let Em Loose: how the pieces fit](map.svg)
 

@@ -1,6 +1,6 @@
 # Let Em Loose: spec
 
-Status: concept, 2026-11-02. Concept: [README.md](README.md). Decisions: [DECISIONS.md](DECISIONS.md). Pre-answered questions: [QUESTIONS.md](QUESTIONS.md).
+Status: designs for #592–#597 approved 2026-11-02; implementation starts with the #593 engine. BBP rules: the claims addendum (PR #1386). Concept: [README.md](README.md). Decisions: [DECISIONS.md](DECISIONS.md). Pre-answered questions: [QUESTIONS.md](QUESTIONS.md).
 
 ## What it is for
 
@@ -22,17 +22,18 @@ The factory pipeline (planner → coder → tester → reviewer) is replaced by 
 
 The smallest thing that runs end to end. Its first real job is the dedup experiment.
 
-1. **Claims model in BBP** (#593). Claim and Evidence as first-class board objects. Deterministic confidence update, dependencies, accept/drop/escalate thresholds, settling detection, stakes-scaled budgets. Built on event-driven, concurrent evidence posting.
-2. **Lens runner in orch** (#594). One port, one adapter per provider (Claude, OpenAI/Codex, Gemini, local llama-swap). Per-question context assembly. Two or three critic lenses plus a builder. Blind first pass, evidence-required agreement and look-harder rules enforced as checks.
-3. **Decision inbox** (#595). Escalations only. Approve, Reject, Refine intent.
-4. **Intent format v0.** Goal, targets, always, never, examples, taste, reversibility. Versioned.
-5. **remind-me active-project filtering** (#592), audit first.
-6. **The dedup experiment.** Intent for a 20 TB duplicate-file manager with a GUI, run in a fresh empty repo, compared against `rusty_fclone`.
+1. **Claims model in BBP** (#593). Claims as a per-task mode beside the stage lifecycle. Whole-number scores, two-author acceptance, the failing-test block, supersession, dependency collapse, action marks, stakes-scaled budgets. Evidence posts need no turn. Same log, same outcome.
+2. **Lens runner in orch** (#594). A config-driven provider registry with Claude, Codex and local (llama-swap through a new OpenAI-compatible adapter). Three blind Architect proposals per question, then Research, Adversary and Operator. Fresh context per question. The groupthink rules enforced as code checks.
+3. **Decision inbox** (#595). A read view over BBP in Mill Board. Approve, Reject, Choose, Refine intent.
+4. **Ground truth** (#597). Holdout suites required for acceptance, protected test paths, golden sets signed off by Nano, calibration recorded.
+5. **Intent format v0.** Goal, targets, always, never, examples, taste, reversibility. Versioned.
+6. **remind-me project parameter** (#592), sent explicitly by every client.
+7. **The dedup experiment** (#600). Intent for a 20 TB duplicate-file manager with a GUI, run in a fresh empty repo, compared against `rusty_fclone`.
 
 ### v1: after the slice works
 
-- Value-driven scheduling: value scoring, the board asks, fork and collapse (#596), as a shadow-mode experiment.
-- Ground truth: holdout tests, golden set, calibration tracking (#597).
+- Value-driven scheduling (#596): shadow mode, then paired runs on five Phase B intents against a pre-registered rule.
+- Calibration that changes weights (recorded but informational in v0).
 - Existing code, sandbox and data boundaries, intent versioning, runaway cost (#598).
 - Cross-project lessons, difficulty-weighted track records, post-ship maintenance, decision replay (#599).
 - The full UI: intent panel, zoomable claims map, inbox, spend meter.
@@ -42,6 +43,7 @@ The smallest thing that runs end to end. Its first real job is the dedup experim
 - **Agents talking to each other.** All exchange goes through the board. No agent-to-agent calls, no prose debate.
 - **A pipeline with stages.** Planning, building and testing are concurrent activities, not phases.
 - **Vendor lock-in.** No model or vendor logic in orch core.
+- **Replacing BBP's stage lifecycle in v0.** Claims are an opt-in mode beside it.
 - **Roles in BBP.** BBP stays a pure protocol.
 - **A fourth executor.** The lens runner extends or replaces one of the three that exist.
 - **A new platform repo.** The build lives in rusty_mill.
@@ -68,10 +70,10 @@ The smallest thing that runs end to end. Its first real job is the dedup experim
 | Component | Location | Owns |
 | --- | --- | --- |
 | BBP | `crates/libs/protocol/rusty_bbp` | Claim and evidence semantics, confidence rule, thresholds, settling, budgets, escalation, event log |
-| orch | `rusty_orch` | Lens definitions, model adapters, context assembly, which lens is asked, tiering, enforcement of the anti-groupthink rules |
-| Inbox | Mill Board view over rusty_tick (to confirm in #595) | Escalation cards and Nano's three actions |
+| orch | `rusty_orch` (lens runner beside the dispatcher; `orch-openai` adapter) | Lens definitions, provider registry, context assembly, which lens is asked, tiering, the groupthink rules, value scheduling, calibration records |
+| Inbox | Mill Board, reading BBP through the host's `bbp` command | Escalation cards and Nano's four actions; nothing stored in rusty_tick |
 | remind-me | its own repo after the planned split | Cross-project lessons, decisions, active-project filtering |
-| Factory repo | `baileyrd/Factory` | Process and config only: intent template, lens definitions, model bindings |
+| Factory repo | `baileyrd/Factory` | Process and config only: intent template, lens definitions, model bindings, experiment intents, holdout suites, `golden/` sets |
 | Expert-Agents | `baileyrd/Expert-Agents` | Source prompts for lenses |
 | JARVIS | Hermes harness | The face: priorities and talking to Nano. Not the engine. |
 
@@ -91,5 +93,10 @@ The smallest thing that runs end to end. Its first real job is the dedup experim
 - **Lens:** a critic perspective (adversary, operator, research, security and so on) bound to a model by config.
 - **Settled:** recent evidence no longer moves a claim's confidence.
 - **Escalation:** a claim sent to Nano's inbox.
+- **Candidate:** a built version (base plus diffs) tied to a claim. Storing one starts its sandboxed run.
+- **Epoch:** one attempt at settling a claim. A reopen starts a new epoch, which must re-earn its settlement.
+- **Profile:** a named test set, frozen by the host when a task opens.
+- **Holdout suite:** tests written from intent alone that only the holdout lens can run.
+- **Action mark:** the host's record that it is about to act on a claim, checked against the epoch.
 - **Rebel candidate:** a candidate that deliberately departs from prior art.
 - **Shadow mode:** run alongside without acting; record what would have happened.
