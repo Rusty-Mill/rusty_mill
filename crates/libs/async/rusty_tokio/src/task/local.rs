@@ -45,7 +45,7 @@
 
 use super::id::{self, CurrentTask};
 use super::join::{JoinHandle, JoinInner, Outcome};
-use super::state::{State, StateSnapshot};
+use super::state::{Begin, State, StateSnapshot};
 use super::TaskId;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -114,7 +114,13 @@ impl LocalTask {
     /// call on the single thread `bind_or_check_thread` bound this set
     /// to, same as from `drive` itself.
     pub(crate) fn run(self: Arc<Self>) {
-        if !self.state.begin_poll() {
+        let begin = self.state.begin_poll();
+        // Only runtime shutdown makes an entry stale, and it never claims
+        // `LocalSet` tasks.
+        if begin == Begin::Stale {
+            return;
+        }
+        if begin == Begin::Aborted {
             self.future.borrow_mut().take();
             self.state.end_poll(true);
             self.fire_abnormal_hook(Outcome::Aborted);

@@ -162,6 +162,10 @@ pub(crate) struct Shared {
     /// the necessary synchronization with whichever thread just
     /// decremented it to zero.
     active_tasks: AtomicUsize,
+    /// Every task spawned and not yet finished. The runtime owns its
+    /// tasks through this, not only through their wakers, so a task with
+    /// no stored waker stays alive until shutdown cancels it (#405).
+    pub(crate) owned: task::OwnedTasks,
     drain_lock: Mutex<()>,
     drain_condvar: Condvar,
     /// Per-worker counters backing [`RuntimeMetrics`] -- how many tasks
@@ -354,6 +358,18 @@ impl Shared {
             }
             let wait = (deadline - now).min(Duration::from_millis(50));
             guard = self.drain_condvar.wait_timeout(guard, wait).unwrap().0;
+        }
+    }
+
+    /// Cancels every task still alive, as the last step of runtime
+    /// shutdown: each one's future is dropped, inside this runtime's
+    /// context so drop code can still reach it, and its `JoinHandle`
+    /// resolves as cancelled. Spawns from then on are cancelled too
+    /// (see [`task::OwnedTasks::bind`]).
+    fn cancel_all_tasks(self: &Arc<Self>) {
+        let _context = context::enter(self.clone());
+        for task in self.owned.close() {
+            task.shutdown();
         }
     }
 
@@ -683,6 +699,7 @@ impl Builder {
             shutting_down: AtomicBool::new(false),
             shutdown_signal: Notify::new(),
             active_tasks: AtomicUsize::new(0),
+            owned: task::OwnedTasks::new(),
             drain_lock: Mutex::new(()),
             drain_condvar: Condvar::new(),
             steal_counts: vec![AtomicU64::new(0)],
@@ -777,6 +794,7 @@ impl Builder {
             shutting_down: AtomicBool::new(false),
             shutdown_signal: Notify::new(),
             active_tasks: AtomicUsize::new(0),
+            owned: task::OwnedTasks::new(),
             drain_lock: Mutex::new(()),
             drain_condvar: Condvar::new(),
             steal_counts,
@@ -1235,6 +1253,12 @@ impl Runtime {
     /// are simple event loops with nothing of the caller's left to wait
     /// on once told to stop, so this always joins them regardless of
     /// which shutdown path called it.
+    fn cancel_all_tasks(&self) {
+        for shared in self.all_shared() {
+            shared.cancel_all_tasks();
+        }
+    }
+
     fn stop_scheduling_and_reactor(&self) {
         for shared in self.all_shared() {
             shared.shutdown.store(true, Ordering::Release);
@@ -1268,6 +1292,9 @@ impl Runtime {
             shared.blocking_pool.signal_shutdown();
         }
         self.take_workers();
+        // Workers may still be mid-poll here; `Task::shutdown` leaves
+        // those tasks for their poller to cancel when the poll returns.
+        self.cancel_all_tasks();
     }
 
     /// Signals shutdown, then waits up to `timeout` for every
@@ -1307,6 +1334,7 @@ impl Runtime {
         for w in self.take_workers() {
             let _ = w.join();
         }
+        self.cancel_all_tasks();
     }
 }
 
@@ -1328,6 +1356,7 @@ impl Drop for Runtime {
         for w in self.take_workers() {
             let _ = w.join();
         }
+        self.cancel_all_tasks();
     }
 }
 

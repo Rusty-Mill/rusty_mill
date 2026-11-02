@@ -12,6 +12,17 @@ const ABORTED: u8 = 1 << 4;
 
 pub(super) struct State(AtomicU8);
 
+/// What [`State::begin_poll`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Begin {
+    /// The caller owns RUNNING and polls the future.
+    Poll,
+    /// The caller owns RUNNING and cancels the task instead.
+    Aborted,
+    /// A run-queue entry for a task shutdown already claimed: skip it.
+    Stale,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum StateSnapshot {
     ShouldSchedule,
@@ -29,18 +40,24 @@ impl State {
         self.0.load(Ordering::Acquire) & ABORTED != 0
     }
 
-    /// Transition QUEUED -> RUNNING. Returns `false` if the task was
-    /// aborted before this poll. The caller still owns RUNNING and must
-    /// finish cancellation with `end_poll(true)`, even on `false`.
-    pub(super) fn begin_poll(&self) -> bool {
+    /// Transition QUEUED -> RUNNING. On [`Begin::Aborted`] the caller
+    /// still owns RUNNING and must finish cancellation with
+    /// `end_poll(true)`. On [`Begin::Stale`] it owns nothing and must
+    /// leave the task alone.
+    pub(super) fn begin_poll(&self) -> Begin {
         self.begin_poll_from(self.0.load(Ordering::Acquire))
     }
 
     // Keep the initial observation separate so tests can deterministically
     // insert an abort between the load and the first CAS.
-    fn begin_poll_from(&self, mut state: u8) -> bool {
+    fn begin_poll_from(&self, mut state: u8) -> Begin {
         loop {
-            debug_assert!(state & QUEUED != 0 && state & RUNNING == 0);
+            // Runtime shutdown claims a queued task without dequeuing it
+            // (`begin_shutdown`), so its run-queue entry can outlive it.
+            if state & QUEUED == 0 {
+                return Begin::Stale;
+            }
+            debug_assert!(state & RUNNING == 0);
             let new = (state & !(QUEUED | NOTIFIED)) | RUNNING;
             // Only the dequeuer can claim RUNNING, but request_abort can
             // add ABORTED while the task is still QUEUED. Retry with the
@@ -49,7 +66,35 @@ impl State {
                 .0
                 .compare_exchange(state, new, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => return state & ABORTED == 0,
+                Ok(_) if state & ABORTED == 0 => return Begin::Poll,
+                Ok(_) => return Begin::Aborted,
+                Err(actual) => state = actual,
+            }
+        }
+    }
+
+    /// Claims the task for cancellation at runtime shutdown, whether it
+    /// is idle or sitting in a run queue. Returns `true` if the caller
+    /// now owns RUNNING and must finish the task with `end_poll(true)`.
+    /// Returns `false` if it already completed, or if it is mid-poll: then
+    /// ABORTED and NOTIFIED make the poller finish it once its poll ends.
+    pub(super) fn begin_shutdown(&self) -> bool {
+        let mut state = self.0.load(Ordering::Acquire);
+        loop {
+            if state & COMPLETE != 0 {
+                return false;
+            }
+            let running = state & RUNNING != 0;
+            let new = if running {
+                state | ABORTED | NOTIFIED
+            } else {
+                (state & !(QUEUED | NOTIFIED)) | RUNNING | ABORTED
+            };
+            match self
+                .0
+                .compare_exchange(state, new, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return !running,
                 Err(actual) => state = actual,
             }
         }
@@ -158,13 +203,13 @@ mod tests {
     #[test]
     fn fresh_state_is_queued_and_pollable() {
         let s = State::new();
-        assert!(s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Poll);
     }
 
     #[test]
     fn wake_while_running_defers_to_notified() {
         let s = State::new();
-        assert!(s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Poll);
         // Woken mid-poll: not our job to schedule, the poller will.
         assert_eq!(s.wake(), StateSnapshot::NoOp);
         assert!(s.end_poll(false));
@@ -173,7 +218,7 @@ mod tests {
     #[test]
     fn wake_while_idle_schedules() {
         let s = State::new();
-        assert!(s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Poll);
         assert!(!s.end_poll(false));
         assert_eq!(s.wake(), StateSnapshot::ShouldSchedule);
     }
@@ -181,7 +226,7 @@ mod tests {
     #[test]
     fn double_wake_only_schedules_once() {
         let s = State::new();
-        assert!(s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Poll);
         assert!(!s.end_poll(false));
         assert_eq!(s.wake(), StateSnapshot::ShouldSchedule);
         assert_eq!(s.wake(), StateSnapshot::NoOp);
@@ -196,7 +241,7 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| assert!(!s.request_abort())).join().unwrap();
         });
-        assert!(!s.begin_poll_from(observed));
+        assert_eq!(s.begin_poll_from(observed), Begin::Aborted);
         assert_eq!(s.0.load(Ordering::Acquire), RUNNING | ABORTED);
         assert!(!s.end_poll(true));
         assert_eq!(s.0.load(Ordering::Acquire), COMPLETE | ABORTED);
@@ -257,12 +302,12 @@ mod tests {
     #[test]
     fn abort_while_running_is_rescheduled_once() {
         let s = State::new();
-        assert!(s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Poll);
         assert!(!s.request_abort());
         assert!(!s.request_abort());
         assert_eq!(s.wake(), StateSnapshot::NoOp);
         assert!(s.end_poll(false));
-        assert!(!s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Aborted);
         assert!(!s.end_poll(true));
         assert_eq!(s.wake(), StateSnapshot::NoOp);
         assert!(!s.request_abort());
@@ -271,12 +316,12 @@ mod tests {
     #[test]
     fn abort_while_idle_schedules_once() {
         let s = State::new();
-        assert!(s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Poll);
         assert!(!s.end_poll(false));
         assert!(s.request_abort());
         assert!(!s.request_abort());
         assert_eq!(s.wake(), StateSnapshot::NoOp);
-        assert!(!s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Aborted);
         assert!(!s.end_poll(true));
         assert_eq!(s.wake(), StateSnapshot::NoOp);
     }
@@ -285,6 +330,46 @@ mod tests {
     fn abort_before_first_poll() {
         let s = State::new();
         assert!(!s.request_abort()); // already queued -> no extra schedule needed
-        assert!(!s.begin_poll());
+        assert_eq!(s.begin_poll(), Begin::Aborted);
+    }
+
+    #[test]
+    fn shutdown_claims_a_queued_task_and_its_queue_entry_goes_stale() {
+        let s = State::new();
+        assert!(s.begin_shutdown());
+        assert_eq!(s.wake(), StateSnapshot::NoOp);
+        assert!(!s.end_poll(true));
+        assert_eq!(s.begin_poll(), Begin::Stale);
+        assert!(!s.begin_shutdown());
+    }
+
+    #[test]
+    fn shutdown_claims_an_idle_task() {
+        let s = State::new();
+        assert_eq!(s.begin_poll(), Begin::Poll);
+        assert!(!s.end_poll(false));
+        assert!(s.begin_shutdown());
+        assert!(!s.end_poll(true));
+        assert_eq!(s.wake(), StateSnapshot::NoOp);
+    }
+
+    #[test]
+    fn shutdown_of_a_running_task_leaves_it_to_the_poller() {
+        let s = State::new();
+        assert_eq!(s.begin_poll(), Begin::Poll);
+        assert!(!s.begin_shutdown());
+        // The poller is told to go around again, and finds it aborted.
+        assert!(s.end_poll(false));
+        assert!(s.is_aborted());
+        assert_eq!(s.begin_poll(), Begin::Aborted);
+        assert!(!s.end_poll(true));
+    }
+
+    #[test]
+    fn shutdown_leaves_a_completed_task_alone() {
+        let s = State::new();
+        assert_eq!(s.begin_poll(), Begin::Poll);
+        assert!(!s.end_poll(true));
+        assert!(!s.begin_shutdown());
     }
 }
