@@ -234,7 +234,6 @@ impl Renderer for CpuRenderer {
             pad,
         );
         let plan = self.damage.plan(&frame, buffer.age());
-        let shown = self.damage.shown(&frame, &plan);
         composite(
             &mut buffer,
             panes,
@@ -250,61 +249,18 @@ impl Renderer for CpuRenderer {
             pad,
             plan.rows(),
         );
-        let presented = match shown {
-            Some(rows) => {
-                let top = grid_top(chrome, pad, ui.cell_size().1);
-                let rects = damage_rects(panes, &rows, font.cell_size(), (pad, top), (w, h));
-                buffer.present_with_damage(&rects)
-            }
-            None => buffer.present(),
-        };
+        // Present every pixel, not just the repainted rows: the buffer holds
+        // the whole frame either way, and the window may have lost pixels
+        // the rows don't cover. Moving it off screen and back, or resizing
+        // it, asks for a repaint with no row changed, and a damage-only
+        // present then leaves that area white or stale (#1387).
+        let presented = buffer.present();
         // A failed present leaves the buffer's age unknown to us.
         match presented {
             Ok(()) => self.damage.presented(frame),
             Err(_) => self.damage.forget(),
         }
     }
-}
-
-/// The window rectangles of the marked pane rows, one per run of rows.
-pub(super) fn damage_rects(
-    panes: &[PaneFrame],
-    rows: &[Vec<bool>],
-    (cw, ch): (usize, usize),
-    (ox, oy): (usize, usize),
-    (w, h): (usize, usize),
-) -> Vec<softbuffer::Rect> {
-    let mut rects = Vec::new();
-    for (p, marked) in panes.iter().zip(rows) {
-        let x0 = (ox + p.col0 * cw).min(w);
-        let x1 = (ox + (p.col0 + p.grid.cols) * cw).min(w);
-        let mut r = 0;
-        while r < marked.len() {
-            if !marked[r] {
-                r += 1;
-                continue;
-            }
-            let start = r;
-            while r < marked.len() && marked[r] {
-                r += 1;
-            }
-            let y0 = (oy + (p.row0 + start) * ch).min(h);
-            let y1 = (oy + (p.row0 + r) * ch).min(h);
-            let size = (
-                NonZeroU32::new((x1 - x0) as u32),
-                NonZeroU32::new((y1 - y0) as u32),
-            );
-            if let (Some(width), Some(height)) = size {
-                rects.push(softbuffer::Rect {
-                    x: x0 as u32,
-                    y: y0 as u32,
-                    width,
-                    height,
-                });
-            }
-        }
-    }
-    rects
 }
 
 /// Paint one frame into `buffer` (`width × height` pixels): everything
