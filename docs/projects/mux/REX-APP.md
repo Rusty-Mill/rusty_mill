@@ -48,7 +48,7 @@ Status against rusty_mux: **have** (done), **part** (partly done), **plan** (on 
 |---|---|---|---|
 | A1 | Server-owned sessions outlive clients; the app reconnects ("Sessions stay open while Rex reconnects") | [str app]; [docs] | have (C01 part) |
 | A2 | Four kinds of object (session, window, block, client), each with an id and a changeable label | [docs]; [pkg] `session/label.go`, `client/label.go` | have (C11, C33) |
-| A3 | *(inferred)* **Sessions survive a server restart**: they are persisted to a SQLite store (generations, sweeping, transactions) and restored | [pkg] `server/persist/{persist,restore,attach}.go`, `session/record_restore.go`, `internal/snapshot/*`; [str] `PRAGMA user_version` | new (beyond C36) |
+| A3 | *(inferred)* **Sessions survive a server restart**: package names (persist, restore, snapshot) and a SQLite pragma string suggest session state is stored and restored. What is restored (metadata, layouts, screens) is unknown, and nothing suggests running programs survive | [pkg] `server/persist/{persist,restore,attach}.go`, `session/record_restore.go`, `internal/snapshot/*`; [str] `PRAGMA user_version` | new (beyond C36) |
 | A4 | *(inferred)* **Encrypted on-disk terminal state**: sealed files with chunk headers and keys | [pkg] `blocks/terminal/internal/sealfile/*`, `savedstate` | plan (C28) |
 | A5 | *(inferred)* Idle-terminal **parking, suspend and compression** inside the terminal block's mux layer | [pkg] `blocks/terminal/internal/mux/{park,suspend,compress,memory,pause}.go`, `terminal/suspend.go`, `server/stream_suspend.go` | plan (C22) |
 | A6 | Server-wide limits (such as a session cap) | [pkg] `server/limits.go`, `session/limit.go`; [docs] `--max-sessions` | plan (C23) |
