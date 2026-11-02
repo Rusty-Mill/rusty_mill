@@ -27,14 +27,28 @@ use std::time::Duration;
 /// the 600s test-runner kill that the original bug hit.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
-/// An ephemeral loopback port that was bound a moment ago and is now
-/// closed -- connecting to it gets refused (nothing listens there), and
-/// the kernel just gave it out so it's not in use by anything else.
-fn refused_addr() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
-    let addr = listener.local_addr().expect("local_addr");
-    drop(listener);
-    addr
+/// An ephemeral loopback port that refuses connections for as long as
+/// the returned socket lives. The socket holds the port bound but never
+/// listens, so a SYN to it is answered with a reset (refused), and no
+/// other socket on the machine can claim the port in the meantime.
+///
+/// Releasing the port before connecting, as this used to, let any other
+/// process (a parallel test run, say) bind and listen on it first. The
+/// connect then reached `ESTABLISHED` and came back as a success or, once
+/// that listener went away, as `ConnectionReset` (card #589).
+fn refused_addr() -> (TcpSocket, SocketAddr) {
+    // The port is picked by a throwaway listener and claimed by `holder`
+    // straight after; if something else got there in between, try another.
+    for _ in 0..100 {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        drop(listener);
+        let holder = TcpSocket::new_v4().expect("TcpSocket::new_v4");
+        if holder.bind(addr).is_ok() {
+            return (holder, addr);
+        }
+    }
+    panic!("could not hold a free loopback port in 100 attempts");
 }
 
 fn assert_refused(result: Result<std::io::Result<TcpStream>, rusty_tokio::time::Elapsed>) {
@@ -58,7 +72,7 @@ fn assert_refused(result: Result<std::io::Result<TcpStream>, rusty_tokio::time::
 
 #[rusty_tokio::test]
 async fn tcp_stream_connect_to_a_closed_loopback_port_is_refused() {
-    let addr = refused_addr();
+    let (_held, addr) = refused_addr();
     let result = timeout(CONNECT_DEADLINE, TcpStream::connect_addr(addr)).await;
     assert_refused(result);
 }
@@ -67,14 +81,14 @@ async fn tcp_stream_connect_to_a_closed_loopback_port_is_refused() {
 async fn tcp_stream_connect_resolves_and_is_refused_too() {
     // Through the `ToSocketAddrs` path (`&str` -> resolution -> each
     // candidate tried in turn) rather than `connect_addr` directly.
-    let addr = refused_addr();
+    let (_held, addr) = refused_addr();
     let result = timeout(CONNECT_DEADLINE, TcpStream::connect(addr.to_string())).await;
     assert_refused(result);
 }
 
 #[rusty_tokio::test]
 async fn tcp_socket_connect_to_a_closed_loopback_port_is_refused() {
-    let addr = refused_addr();
+    let (_held, addr) = refused_addr();
     let socket = TcpSocket::new_v4().expect("TcpSocket::new_v4");
     let result = timeout(CONNECT_DEADLINE, socket.connect(addr)).await;
     assert_refused(result);
