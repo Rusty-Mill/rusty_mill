@@ -38,10 +38,9 @@ pub struct GitOut {
 }
 
 impl GitOut {
-    /// A one-line answer (a commit id, a path) without its newline.
+    /// A one-line answer (a commit id) without git's terminating newline.
     pub fn line(&self) -> &str {
-        let s = self.stdout.strip_suffix('\n').unwrap_or(&self.stdout);
-        s.strip_suffix('\r').unwrap_or(s)
+        self.stdout.strip_suffix('\n').unwrap_or(&self.stdout)
     }
 }
 
@@ -118,11 +117,8 @@ const CHECKS: [Check; 3] = [
 /// a subdirectory (`build.rs` passes its crate's); `ls-files` lists only the
 /// directory it runs in, so the checks run at the top of the tree.
 pub fn dirt(repo: &Path) -> Result<Option<String>, String> {
-    let top = git(repo, &["rev-parse", "--show-toplevel"])?;
-    if !top.ok {
-        return Err(format!("git rev-parse failed: {}", top.stderr));
-    }
-    let top = Path::new(top.line());
+    let top = repo.join(cdup(repo)?);
+    let top = top.as_path();
     for check in &CHECKS {
         let out = git(top, check.args)?;
         if !out.ok {
@@ -134,6 +130,21 @@ pub fn dirt(repo: &Path) -> Result<Option<String>, String> {
         }
     }
     Ok(None)
+}
+
+/// The way up from `repo` to the top of its tree: `../` steps only. Unlike
+/// `--show-toplevel`, it carries no name, so a root whose name ends in
+/// whitespace or a CR, or is not UTF-8, is never decoded into a different path.
+fn cdup(repo: &Path) -> Result<String, String> {
+    let out = git(repo, &["rev-parse", "--show-cdup"])?;
+    if !out.ok {
+        return Err(format!("git rev-parse failed: {}", out.stderr));
+    }
+    let up = out.line();
+    if !up.split_terminator('/').all(|step| step == "..") {
+        return Err(format!("git rev-parse --show-cdup answered {up:?}"));
+    }
+    Ok(up.to_owned())
 }
 
 fn any_line(_: &str) -> bool {

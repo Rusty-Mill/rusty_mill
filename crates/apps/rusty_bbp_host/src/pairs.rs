@@ -1145,7 +1145,16 @@ mod tests {
     /// A scratch git repo with two commits, in its own directory per `tag`;
     /// returns (dir, first sha, second sha).
     fn repo(tag: &str) -> (std::path::PathBuf, String, String) {
-        let d = std::env::temp_dir().join(format!("pin-{}-{tag}", std::process::id()));
+        repo_at(scratch(tag))
+    }
+
+    /// The scratch directory for `tag`.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("pin-{}-{tag}", std::process::id()))
+    }
+
+    /// [`repo`] at `d`.
+    fn repo_at(d: std::path::PathBuf) -> (std::path::PathBuf, String, String) {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let g = |a: &[&str]| setup_git(&d, a);
@@ -1243,18 +1252,40 @@ mod tests {
         );
     }
 
-    #[cfg(unix)] // Windows refuses a directory name ending in a space
-    #[test]
-    fn a_checkout_whose_path_ends_in_whitespace_is_checked_not_its_namesake() {
-        // Trimming `--show-toplevel` sent the checks to the clean sibling
-        // `pin-…-trail` instead of the edited `pin-…-trail `.
-        let (clean, _, _) = repo("trail");
-        let (d, first, second) = repo("trail ");
+    /// An edited checkout at `d` must refuse although its namesake `clean`
+    /// (the name a lossy reading of `d` would give) is a clean checkout.
+    fn refuses_beside_clean_namesake(d: std::path::PathBuf, clean: std::path::PathBuf) {
+        let (clean, _, _) = repo_at(clean);
+        let (d, first, second) = repo_at(d);
         std::fs::write(d.join("a"), "edited").unwrap();
-        let err = pin(&d, Some(&first), &second).unwrap_err();
-        assert!(err.contains("not clean"), "{err}");
+        for at in [d.clone(), d.join("sub")] {
+            std::fs::create_dir_all(&at).unwrap();
+            let err = pin(&at, Some(&first), &second).unwrap_err();
+            assert!(err.contains("not clean"), "{}: {err}", at.display());
+        }
         std::fs::remove_dir_all(d).unwrap();
         std::fs::remove_dir_all(clean).unwrap();
+    }
+
+    #[cfg(unix)] // Windows refuses a directory name ending in a space or CR
+    #[test]
+    fn a_checkout_whose_name_ends_in_whitespace_is_checked_not_its_namesake() {
+        // Trimming `--show-toplevel` sent the checks to the clean sibling.
+        for end in [" ", "\r", "\n"] {
+            refuses_beside_clean_namesake(scratch(&format!("trail{end}")), scratch("trail"));
+        }
+    }
+
+    #[cfg(target_os = "linux")] // macOS and Windows refuse non-UTF-8 names
+    #[test]
+    fn a_checkout_whose_name_is_not_utf8_is_checked_not_its_namesake() {
+        // A lossy reading of the root would turn the byte 0xff into U+FFFD.
+        use std::os::unix::ffi::OsStringExt;
+        let name = format!("pin-{}-bad", std::process::id()).into_bytes();
+        let bad = std::ffi::OsString::from_vec([name.clone(), vec![0xff]].concat());
+        let lossy = format!("{}\u{fffd}", String::from_utf8_lossy(&name));
+        let tmp = std::env::temp_dir();
+        refuses_beside_clean_namesake(tmp.join(bad), tmp.join(lossy));
     }
 
     #[test]
