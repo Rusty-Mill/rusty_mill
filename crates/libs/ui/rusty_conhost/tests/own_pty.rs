@@ -126,21 +126,26 @@ enum Host {
 /// What precedes a probe's result line.
 const RESULT: &str = "#> ";
 
-/// Run the probe with `args` on `host` and return its result line.
-fn probe_line(host: Host, args: &[&str]) -> String {
-    let cmd = command(&probe(), args);
+/// All `cmd` writes to the terminal on `host`; it must exit 0.
+fn terminal_output(host: Host, cmd: &Command) -> Vec<u8> {
     let (out, child) = match host {
         Host::ConPty => {
-            let (master, child) = WindowsPty.spawn_concrete(&cmd, SIZE).expect("ConPTY spawn");
+            let (master, child) = WindowsPty.spawn_concrete(cmd, SIZE).expect("ConPTY spawn");
             (read_all(master).map(|(out, _)| out), child)
         }
         Host::Own => {
-            let (master, child) = own(&cmd);
+            let (master, child) = own(cmd);
             (read_all(master).map(|(out, _)| out), child)
         }
     };
     let out = out.unwrap_or_else(|| panic!("{host:?}: no EOF within the budget"));
     assert_eq!(Box::new(child).wait().expect("wait"), ExitStatus::Code(0));
+    out
+}
+
+/// Run the probe with `args` on `host` and return its result line.
+fn probe_line(host: Host, args: &[&str]) -> String {
+    let out = terminal_output(host, &command(&probe(), args));
     let head = format!("{RESULT}{} ", args[0]);
     plain_lines(&out)
         .iter()
@@ -495,6 +500,42 @@ fn parity_suite_agrees_with_conpty() {
         eprintln!("{v:?}\t{args:?}\n  conpty {conpty}\n  ours   {ours}");
         if matches!(v, Verdict::Mismatch | Verdict::Closed(_)) {
             failures.push(format!("{v:?} {args:?}: ConPTY {conpty:?}, ours {ours:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// conhost's GH#3126 shims (#1371): a whole-screen clear by cmd or
+/// PowerShell reaches the terminal as ED 3 too, which empties its
+/// scrollback; the same fill from any other client does not. The parity
+/// probes compare API answers, so this compares the VT itself.
+#[test]
+fn shell_clears_empty_the_scrollback_as_under_conpty() {
+    let _g = lock();
+    let ps = |script: &'static str| ["-NoProfile", "-NonInteractive", "-Command", script];
+    let cases: [(String, Vec<&str>, bool); 4] = [
+        ("cmd.exe".into(), vec!["/c", "cls"], true),
+        ("powershell.exe".into(), ps("Clear-Host").to_vec(), true),
+        (
+            "powershell.exe".into(),
+            ps("[Console]::Clear()").to_vec(),
+            true,
+        ),
+        // The whole screen, as Clear-Host fills it.
+        (probe(), vec!["fill", "\\s", "7", "6000", "0", "0"], false),
+    ];
+    let mut failures = Vec::new();
+    for (program, args, clears) in &cases {
+        for host in [Host::ConPty, Host::Own] {
+            let out = terminal_output(host, &command(program, args));
+            let ed3 = out.windows(4).any(|w| w == b"\x1b[3J");
+            eprintln!("{host:?} {program} {args:?}: ED 3 {ed3}");
+            if ed3 != *clears {
+                failures.push(format!(
+                    "{host:?} {program} {args:?}: ED 3 {ed3}, want {clears}: {:?}",
+                    String::from_utf8_lossy(&out)
+                ));
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

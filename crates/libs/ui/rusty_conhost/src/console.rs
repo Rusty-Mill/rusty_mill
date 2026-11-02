@@ -313,6 +313,8 @@ struct Client {
     pid: u32,
     /// CONNECT's `ProcessGroupId`.
     group: u32,
+    /// The GH#3126 shims its `ApplicationName` gets.
+    shim: cells::ShimPolicy,
     /// The input and output objects CONNECT opened, which DISCONNECT
     /// closes.
     own: [usize; 2],
@@ -1027,6 +1029,7 @@ impl Console {
                 // On CONNECT, Process carries the client's pid.
                 pid: p.process as u32,
                 group: info.group,
+                shim: cells::ShimPolicy::of(&info.app),
                 own: [input, output],
                 objects: 0,
             },
@@ -1922,8 +1925,17 @@ pub(crate) mod tests {
 
         /// CONNECT as `pid`: the (process, input, output) cookies.
         pub(super) fn connect(&mut self, pid: usize, title: &str) -> [usize; 3] {
+            self.connect_with(pid, &msg::server_msg(title))
+        }
+
+        /// CONNECT as `pid` from the executable `app`.
+        pub(super) fn connect_from(&mut self, pid: usize, app: &str) -> [usize; 3] {
+            self.connect_with(pid, &msg::server_msg_from(app))
+        }
+
+        fn connect_with(&mut self, pid: usize, server_msg: &[u8]) -> [usize; 3] {
             let info = msg::CONNECTION_INFORMATION_LEN as u32;
-            let (r, _) = self.packet(msg::CONNECT, pid, 0, &msg::server_msg(title), info);
+            let (r, _) = self.packet(msg::CONNECT, pid, 0, server_msg, info);
             assert_eq!(r.status, msg::STATUS_SUCCESS);
             let cookie = |i: usize| {
                 let bytes: [u8; 8] = r.write_back[i * 8..i * 8 + 8].try_into().expect("8 bytes");
