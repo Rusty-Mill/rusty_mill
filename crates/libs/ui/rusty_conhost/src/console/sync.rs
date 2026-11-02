@@ -113,9 +113,15 @@ impl Console {
     }
 
     /// No CPR came in time: answer from the host's model, as ConPTY does.
+    /// A resize during the wait stays pending: the next call asks again,
+    /// as ConPTY's timeout clears only its own generation.
     pub(super) fn cursor_wait_expired(&mut self, fx: &mut Vec<Effect>) {
-        if self.awaiting_cursor() {
-            self.answer_held_info(fx);
+        let CursorSync::Asked { stale } = self.cursor_sync else {
+            return;
+        };
+        self.answer_held_info(fx);
+        if stale {
+            self.cursor_sync = CursorSync::Dirty;
         }
     }
 
@@ -291,6 +297,24 @@ mod tests {
         assert_eq!((done[0].id, cursor_of(&done[0])), (held.id, (2, 0)));
         assert!(!h.c.awaiting_cursor());
         assert!(h.ev(Event::CursorWaitExpired).is_empty(), "a late timer");
+    }
+
+    #[test]
+    fn a_resize_during_a_timed_out_wait_asks_again_next_time() {
+        let mut h = Host::sized(size(4));
+        let [_, _, output] = h.connect(1, "");
+        h.ev(Event::Resize(size(6)));
+        let held = sbi_packet(&mut h, output);
+        h.ev(Event::Resize(size(3)));
+        let done = completed(&h.ev(Event::CursorWaitExpired));
+        assert_eq!(done.iter().map(|r| r.id).collect::<Vec<_>>(), [held.id]);
+        assert!(!h.c.awaiting_cursor(), "the timed-out callers are released");
+        let mark = h.vt.len();
+        let next = sbi_packet(&mut h, output);
+        assert_eq!(next.status, i32::MIN, "the newer resize is not forgotten");
+        assert_eq!(&h.vt[mark..], DSR_CPR);
+        let done = completed(&h.ev(Event::Input(b"\x1b[2;3R")));
+        assert_eq!((done[0].id, cursor_of(&done[0])), (next.id, (2, 1)));
     }
 
     #[test]
