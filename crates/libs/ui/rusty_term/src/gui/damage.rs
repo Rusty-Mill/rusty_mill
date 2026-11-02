@@ -195,22 +195,6 @@ impl Damage {
         }
     }
 
-    /// The rows whose pixels differ from the last present once `plan` is
-    /// painted, for the compositor's damage. `None`: the whole window.
-    pub(super) fn shown(&self, frame: &Frame, plan: &Plan) -> Option<Vec<Vec<bool>>> {
-        let Plan::Rows(repaint) = plan else {
-            return None;
-        };
-        let last = changed(frame, self.history.front()?)?;
-        Some(
-            repaint
-                .iter()
-                .zip(last)
-                .map(|(a, b)| a.iter().zip(b).map(|(&a, b)| a || b).collect())
-                .collect(),
-        )
-    }
-
     /// Record `frame` as presented.
     pub(super) fn presented(&mut self, frame: Frame) {
         self.history.push_front(frame);
