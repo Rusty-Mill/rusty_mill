@@ -618,12 +618,7 @@ fn set_failing(w: &mut Work, c: MsgId, f: impl FnOnce(&mut std::collections::BTr
 
 /// The first dep of `c` that is dropped, void or superseded.
 fn closed_dep(st: &TaskState, c: MsgId) -> Option<MsgId> {
-    let rec = st.claims.get(c)?;
-    rec.body
-        .deps
-        .iter()
-        .copied()
-        .find(|d| st.claims.get(*d).is_some_and(|x| x.closed()))
+    st.claims.get(c).and_then(|r| st.claims.closed_dep(r))
 }
 
 fn acted(st: &TaskState, c: MsgId) -> bool {
@@ -1009,7 +1004,10 @@ fn decide(w: &mut Work, c: MsgId, outcome: ClaimOutcome) -> R<Response> {
     if let (ClaimOutcome::Reopen, Some(d)) = (outcome, closed_dep(&w.st, c)) {
         return Err(rej(
             Code::DepClosed,
-            format!("{c} rests on {d}, which is closed: reopen the dep first"),
+            format!(
+                "{c} rests on {d}, which is {}: reopen {d} first",
+                status(&w.st, d).map_or("closed", |s| s.name())
+            ),
         ));
     }
     if outcome == ClaimOutcome::Reopen && rec.exhausted(&cfg) {
@@ -1022,7 +1020,11 @@ fn decide(w: &mut Work, c: MsgId, outcome: ClaimOutcome) -> R<Response> {
     match outcome {
         ClaimOutcome::Accept => accept(w, c, true),
         ClaimOutcome::Drop => human_drop(w, c),
-        ClaimOutcome::Reopen => reopen(w, c, ReopenCause::Human),
+        ClaimOutcome::Reopen => {
+            // Dormant evidence now scores in the new epoch, so evaluate it.
+            reopen(w, c, ReopenCause::Human);
+            evaluate(w, c);
+        }
     }
     Ok(Response::Ok)
 }

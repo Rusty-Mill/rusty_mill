@@ -2316,10 +2316,13 @@ mod properties {
     }
 }
 
-/// Found by CL-24: a dropped claim whose dep is closed stays dead. Passing
-/// executed support is recorded, and a human reopen names the closed dep.
+/// Found by CL-24; owner decision 2026-11-02 ("stay dead"). A dropped claim
+/// whose dep is dropped records passing results only, and a human reopen is
+/// refused naming that dep. Once the dep is reopened, the dependent may be
+/// reopened, and the passing results recorded meanwhile count in its new
+/// epoch with no rerun.
 #[test]
-fn cl_14b_a_claim_on_a_closed_dep_does_not_reopen() {
+fn cl_14b_a_claim_on_a_closed_dep_stays_dead_until_the_dep_reopens() {
     let mut cx = Cx::new();
     let a = cx.low();
     let b = cx.claim("b", dep_on("b", vec![a]));
@@ -2327,12 +2330,29 @@ fn cl_14b_a_claim_on_a_closed_dep_does_not_reopen() {
     drop_claim(&mut cx, b);
     drop_claim(&mut cx, a);
     ok(cx.executed("c", b, Support, pass));
-    assert_eq!(cx.status(b), ClaimStatus::Dropped);
-    assert_eq!(
-        rejected(cx.decide(b, ClaimOutcome::Reopen)),
-        Code::DepClosed
-    );
+    assert_eq!(cx.status(b), ClaimStatus::Dropped, "recorded, not reopened");
+    assert!(cx
+        .rec(b)
+        .items
+        .last()
+        .is_some_and(|i| i.dormant && !i.scoring));
+    let (code, d) = detail(cx.decide(b, ClaimOutcome::Reopen));
+    assert_eq!(code, Code::DepClosed);
+    assert!(d.contains(&a.to_string()) && d.contains("DROPPED"), "{d}");
+
     ok(cx.decide(a, ClaimOutcome::Reopen));
     ok(cx.decide(b, ClaimOutcome::Reopen));
     assert_eq!(cx.status(b), ClaimStatus::Open);
+    assert_eq!(cx.rec(b).epoch, 2);
+    assert_eq!(
+        cx.score(b),
+        4,
+        "the recorded passing result counts, no rerun"
+    );
+    ok(cx.executed("a", b, Support, pass));
+    assert_eq!(cx.status(b), ClaimStatus::Open, "waits for its dep");
+    accept(&mut cx, a);
+    assert_eq!(cx.status(b), ClaimStatus::Accepted);
+    let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
+    assert_eq!(replayed.claims, cx.st.claims);
 }

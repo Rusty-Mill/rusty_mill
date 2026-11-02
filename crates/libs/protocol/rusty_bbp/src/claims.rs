@@ -227,6 +227,10 @@ pub struct Item {
     pub epoch: u32,
     /// Admitted while the claim was `open` (or reopened by it).
     pub scoring: bool,
+    /// Executed evidence against a settled outcome, recorded only because a
+    /// dep was closed (owner, 2026-11-02: the claim stays dead). A human
+    /// reopen, possible once the dep is live again, makes it count.
+    pub dormant: bool,
 }
 
 /// An action mark (C-R9).
@@ -401,6 +405,15 @@ impl ClaimsBook {
             .collect()
     }
 
+    /// The first dep of `c` that is dropped, void or superseded.
+    pub fn closed_dep(&self, c: &ClaimRecord) -> Option<MsgId> {
+        c.body
+            .deps
+            .iter()
+            .copied()
+            .find(|d| self.claims.get(d).is_some_and(|x| x.closed()))
+    }
+
     /// Is `target` among `deps` or their deps, transitively?
     pub fn reaches(&self, deps: &[MsgId], target: MsgId) -> bool {
         let mut stack: Vec<MsgId> = deps.to_vec();
@@ -474,6 +487,21 @@ pub(crate) fn on_message(st: &mut crate::state::TaskState, m: &crate::record::Me
                 .insert(m.id, ClaimRecord::new(m.id, m.from.clone(), b.clone(), rev));
         }
         crate::record::Body::Evidence(e) => {
+            let dormant = st.claims.get(e.claim).is_some_and(|c| {
+                let against = matches!(
+                    (c.status, e.kind, e.direction),
+                    (
+                        ClaimStatus::Accepted,
+                        EvidenceKind::Executed,
+                        Direction::Counter
+                    ) | (
+                        ClaimStatus::Dropped,
+                        EvidenceKind::Executed,
+                        Direction::Support
+                    )
+                );
+                against && st.claims.closed_dep(c).is_some()
+            });
             if let Some(c) = st.claims.claims.get_mut(&e.claim) {
                 c.items.push(Item {
                     msg: m.id,
@@ -483,6 +511,7 @@ pub(crate) fn on_message(st: &mut crate::state::TaskState, m: &crate::record::Me
                     delta: delta(e.kind, e.direction, e.strength),
                     epoch: c.epoch,
                     scoring: c.status == ClaimStatus::Open,
+                    dormant,
                 });
                 c.changed = rev;
             }
@@ -543,11 +572,18 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
         E::ClaimReopened { claim, epoch, by } => touch(claim, &mut |c| {
             c.status = ClaimStatus::Open;
             c.epoch = *epoch;
-            // Reopened by evidence: that item is the new epoch's first scoring one.
-            if let ReopenCause::Evidence(m) = by {
-                if let Some(i) = c.items.iter_mut().find(|i| i.msg == *m) {
+            // Reopened by evidence: that item is the new epoch's first scoring
+            // one. Reopened by the human: dormant items count in the new epoch.
+            for i in c.items.iter_mut() {
+                let wakes = match by {
+                    ReopenCause::Evidence(m) => i.msg == *m,
+                    ReopenCause::Human => i.dormant,
+                    ReopenCause::Dep(_) => false,
+                };
+                if wakes {
                     i.epoch = *epoch;
                     i.scoring = true;
+                    i.dormant = false;
                 }
             }
         }),
