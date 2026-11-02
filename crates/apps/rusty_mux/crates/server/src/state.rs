@@ -78,7 +78,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::ACTIVE_WINDOW)
     .union(Features::CONFIG_RELOAD)
     .union(Features::TERMINAL_CONTROL)
-    .union(Features::LAYOUT_EDIT);
+    .union(Features::LAYOUT_EDIT)
+    .union(Features::FOCUS);
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -821,6 +822,20 @@ impl State {
                 req,
                 self.edit(client, "move-window", |mux| mux.move_window(window, index)),
             ),
+            M::FocusBlock { req, block } => (
+                req,
+                self.require(client, Features::FOCUS, "focus-block")
+                    .and_then(|()| done(self.mux.focus_block(block))),
+            ),
+            M::MoveFocus {
+                req,
+                window,
+                toward,
+            } => (
+                req,
+                self.require(client, Features::FOCUS, "move-focus")
+                    .and_then(|()| done(self.mux.move_focus(window, toward))),
+            ),
             M::ReloadConfig { req } => (
                 req,
                 self.require(client, Features::CONFIG_RELOAD, "reload-config")
@@ -1087,6 +1102,7 @@ impl State {
                     name: window.name().to_owned(),
                     layout: window.layout().cloned(),
                     zoomed: window.zoomed(),
+                    focused: window.focused(),
                 });
                 for block in window.blocks().iter().filter_map(|b| self.mux.block(*b)) {
                     entries.push(Entry::Block {
@@ -1620,6 +1636,7 @@ fn receives(features: Features, event: &Event) -> bool {
         Event::ActiveWindowChanged { .. } => Features::ACTIVE_WINDOW,
         Event::ConfigReloaded => Features::CONFIG_RELOAD,
         Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
+        Event::FocusChanged { .. } => Features::FOCUS,
         _ => Features::NONE,
     };
     features.contains(needs)

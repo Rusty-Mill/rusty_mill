@@ -70,6 +70,9 @@ pub struct Window {
     pub(crate) layout: Option<Layout>,
     /// One of the blocks in `layout`, never a detached one.
     pub(crate) zoomed: Option<BlockId>,
+    /// One of the blocks in `layout`, the zoomed one if any; `None` only
+    /// while none is placed.
+    pub(crate) focused: Option<BlockId>,
 }
 
 impl Window {
@@ -107,6 +110,13 @@ impl Window {
     /// The block shown alone, over the whole window, if any.
     pub fn zoomed(&self) -> Option<BlockId> {
         self.zoomed
+    }
+
+    /// The block in focus, shared by every client; `None` only while none
+    /// is placed. The attach client does not follow it yet, so it does not
+    /// yet route anyone's input.
+    pub fn focused(&self) -> Option<BlockId> {
+        self.focused
     }
 }
 

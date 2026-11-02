@@ -534,6 +534,7 @@ mod tests {
             name: String::new(),
             layout: None,
             zoomed: None,
+            focused: None,
         };
         let block = |b: u8, w: u8| Entry::Block {
             block: BlockId::from_uuid(id(b)),

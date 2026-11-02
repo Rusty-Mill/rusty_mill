@@ -24,6 +24,10 @@ use std::str::FromStr;
 
 use crate::{BlockId, Size};
 
+use exact::Exact;
+
+mod exact;
+
 /// How deep a layout may nest. It bounds the recursion of every walk, and
 /// of a client parsing a layout it was sent.
 pub const MAX_DEPTH: usize = 32;
@@ -101,6 +105,37 @@ impl FromStr for Side {
             .into_iter()
             .find(|side| side.name() == text)
             .ok_or(ParseError)
+    }
+}
+
+/// Where focus moves from a block: to the nearest block on a side, or to
+/// the next or previous block in layout order, wrapping around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toward {
+    Side(Side),
+    Next,
+    Previous,
+}
+
+impl Toward {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Side(side) => side.name(),
+            Self::Next => "next",
+            Self::Previous => "previous",
+        }
+    }
+}
+
+impl FromStr for Toward {
+    type Err = ParseError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "next" => Ok(Self::Next),
+            "previous" => Ok(Self::Previous),
+            side => side.parse().map(Self::Side),
+        }
     }
 }
 
@@ -287,6 +322,129 @@ impl Layout {
         }
     }
 
+    /// The block next to `block` toward `toward`, if any: on a side, of
+    /// the blocks across the nearest divider there, the one sharing the
+    /// longest edge with `block`, the nearest of equals; in order, the next
+    /// or previous block, wrapping around. Judged on the tree, not on a
+    /// screen, so a block too small to show still has neighbours.
+    pub fn neighbour(&self, block: BlockId, toward: Toward) -> Option<BlockId> {
+        let side = match toward {
+            Toward::Side(side) => side,
+            Toward::Next | Toward::Previous => return self.cycle(block, toward),
+        };
+        let across = other(side.axis());
+        let (lo, hi) = self.extent(block, across)?;
+        let mut facing = Vec::new();
+        self.beyond(block, side)?.facing(side, &mut facing);
+        facing
+            .into_iter()
+            .filter_map(|b| {
+                let (s, e) = self.extent(b, across)?;
+                let shared = hi.min(e).minus(lo.max(s));
+                let (mid, own) = (s.plus(e), lo.plus(hi));
+                let apart = mid.max(own).minus(mid.min(own));
+                Some((shared, apart, b))
+            })
+            .min_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)))
+            .map(|(_, _, b)| b)
+    }
+
+    /// The child across the innermost split along `side`'s axis that has
+    /// `block` on the far side from `side`.
+    fn beyond(&self, block: BlockId, side: Side) -> Option<&Self> {
+        let Self::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let (inner, outer, faces) = match first.contains(block) {
+            true => (first, second, !side.first()),
+            false if second.contains(block) => (second, first, side.first()),
+            false => return None,
+        };
+        inner
+            .beyond(block, side)
+            .or_else(|| (*axis == side.axis() && faces).then_some(&**outer))
+    }
+
+    /// The blocks along the edge a move toward `side` enters by.
+    fn facing(&self, side: Side, out: &mut Vec<BlockId>) {
+        match self {
+            Self::Block(block) => out.push(*block),
+            Self::Split {
+                axis,
+                first,
+                second,
+                ..
+            } if *axis == side.axis() => match side.first() {
+                true => second.facing(side, out),
+                false => first.facing(side, out),
+            },
+            Self::Split { first, second, .. } => {
+                first.facing(side, out);
+                second.facing(side, out);
+            }
+        }
+    }
+
+    /// Where `block` starts and ends along `axis`, exactly, as parts of
+    /// the whole layout, dividers ignored.
+    fn extent(&self, block: BlockId, axis: Axis) -> Option<(Exact, Exact)> {
+        let (mut lo, mut hi) = (Exact::ZERO, Exact::whole());
+        let mut node = self;
+        loop {
+            let Self::Split {
+                axis: own,
+                share,
+                first,
+                second,
+            } = node
+            else {
+                return (*node == Self::Block(block)).then_some((lo, hi));
+            };
+            let in_first = first.contains(block);
+            if *own == axis {
+                let mid = lo.plus(hi.minus(lo).percent(share.percent()));
+                match in_first {
+                    true => hi = mid,
+                    false => lo = mid,
+                }
+            }
+            node = if in_first { first } else { second };
+        }
+    }
+
+    fn cycle(&self, block: BlockId, toward: Toward) -> Option<BlockId> {
+        let blocks = self.blocks();
+        let at = blocks.iter().position(|b| *b == block)?;
+        let n = blocks.len();
+        let to = match toward {
+            Toward::Previous => (at + n - 1) % n,
+            _ => (at + 1) % n,
+        };
+        (to != at).then(|| blocks[to])
+    }
+
+    /// The block next to `block` in its split, the one that takes the
+    /// split's place if `block` leaves: of the other child, its block
+    /// nearest `block`.
+    pub(crate) fn sibling(&self, block: BlockId) -> Option<BlockId> {
+        let Self::Split { first, second, .. } = self else {
+            return None;
+        };
+        if **first == Self::Block(block) {
+            return second.blocks().first().copied();
+        }
+        if **second == Self::Block(block) {
+            return first.blocks().last().copied();
+        }
+        first.sibling(block).or_else(|| second.sibling(block))
+    }
+
     /// Gives `block` `share` of the innermost split along `axis` that
     /// holds it; `false`, changing nothing, when no such split does.
     pub(crate) fn resize(&mut self, block: BlockId, axis: Axis, share: Share) -> bool {
@@ -351,6 +509,13 @@ impl Layout {
     }
 }
 
+const fn other(axis: Axis) -> Axis {
+    match axis {
+        Axis::Columns => Axis::Rows,
+        Axis::Rows => Axis::Columns,
+    }
+}
+
 /// `rect` divided along `axis` into the first child's part and the
 /// second's, a one-cell divider between; `None` when it is too small.
 fn divide(rect: Rect, axis: Axis, share: Share) -> Option<(Rect, Rect)> {
@@ -401,8 +566,9 @@ impl fmt::Display for Layout {
     }
 }
 
-/// Text that is not a layout, a side that is not one of the four, or an
-/// axis that is neither `cols` nor `rows`.
+/// Text that is not a layout, a side that is not one of the four, an axis
+/// that is neither `cols` nor `rows`, or a way to move focus that is
+/// neither a side nor `next` nor `previous`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseError;
 

@@ -31,6 +31,7 @@ fn listing() -> Vec<Entry> {
         name: "logs".into(),
         layout: None,
         zoomed: None,
+        focused: None,
     };
     let block = |b: &str, w: &str, name: &str| Entry::Block {
         block: BlockId::from_uuid(id(b)),

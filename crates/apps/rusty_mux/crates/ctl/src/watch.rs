@@ -114,6 +114,7 @@ pub(crate) fn needs(kind: &str) -> Features {
         "active-window-changed" => Features::ACTIVE_WINDOW,
         "config-reloaded" => Features::CONFIG_RELOAD,
         "window-moved" => Features::LAYOUT_EDIT,
+        "focus-changed" => Features::FOCUS,
         _ => Features::NONE,
     }
 }

@@ -225,3 +225,177 @@ fn the_largest_block_is_one_that_may_still_be_split() {
     assert_ne!(largest, deepest);
     assert!(layout.depth_of(largest).is_some_and(|d| d < MAX_DEPTH));
 }
+
+#[test]
+fn neighbours_border_the_block_on_their_side() {
+    // cols50(1, rows50(2, 3))
+    let layout = three();
+    let side = |b, s| layout.neighbour(id(b), Toward::Side(s));
+    assert_eq!(side(1, Side::Right), Some(id(2)));
+    assert_eq!(side(3, Side::Left), Some(id(1)));
+    assert_eq!(side(2, Side::Down), Some(id(3)));
+    assert_eq!(side(3, Side::Up), Some(id(2)));
+    assert_eq!(side(1, Side::Up), None);
+    assert_eq!(side(9, Side::Up), None);
+    assert_eq!(layout.neighbour(id(3), Toward::Next), Some(id(1)));
+    assert_eq!(layout.neighbour(id(1), Toward::Previous), Some(id(3)));
+    assert_eq!(Layout::Block(id(1)).neighbour(id(1), Toward::Next), None);
+}
+
+#[test]
+fn a_sibling_is_the_nearest_block_of_the_other_child() {
+    let layout = three();
+    assert_eq!(layout.sibling(id(1)), Some(id(2)));
+    assert_eq!(layout.sibling(id(2)), Some(id(3)));
+    assert_eq!(layout.sibling(id(3)), Some(id(2)));
+    assert_eq!(Layout::Block(id(1)).sibling(id(1)), None);
+}
+
+#[test]
+fn ways_to_move_focus_parse_by_name() {
+    for toward in [
+        Toward::Side(Side::Left),
+        Toward::Side(Side::Down),
+        Toward::Next,
+        Toward::Previous,
+    ] {
+        assert_eq!(toward.name().parse(), Ok(toward));
+    }
+    assert_eq!("north".parse::<Toward>(), Err(ParseError));
+}
+
+fn split(axis: Axis, percent: u8, first: Layout, second: Layout) -> Layout {
+    Layout::Split {
+        axis,
+        share: Share::new(percent).expect("valid share"),
+        first: Box::new(first),
+        second: Box::new(second),
+    }
+}
+
+#[test]
+fn blocks_too_small_to_show_still_have_neighbours() {
+    // cols1(cols1(cols1(cols1(1, 2), 3), 4), 5): on any screen, even the
+    // largest, block 2 gets no room, yet moves from and to it work.
+    let b = |n| Layout::Block(id(n));
+    let mut layout = b(1);
+    for n in 2..=5 {
+        layout = split(Axis::Columns, 1, layout, b(n));
+    }
+    let largest = size(u16::MAX, u16::MAX);
+    assert!(!layout.rects(largest).iter().any(|(b, _)| *b == id(2)));
+    let side = |b, s| layout.neighbour(id(b), Toward::Side(s));
+    assert_eq!(side(2, Side::Left), Some(id(1)));
+    assert_eq!(side(2, Side::Right), Some(id(3)));
+    assert_eq!(side(1, Side::Right), Some(id(2)));
+    assert_eq!(side(3, Side::Left), Some(id(2)));
+    assert_eq!(side(5, Side::Left), Some(id(4)));
+    assert_eq!(side(2, Side::Up), None);
+}
+
+#[test]
+fn a_move_picks_the_block_sharing_the_longest_edge() {
+    // Left: 1 over cols1(cols1(cols1(cols1(5, 6), 7), 8), 9), where 6
+    // gets no room on any screen. Right: 3 (top 30%) over 4.
+    let b = |n| Layout::Block(id(n));
+    let mut low = b(5);
+    for n in 6..=9 {
+        low = split(Axis::Columns, 1, low, b(n));
+    }
+    let left = split(Axis::Rows, 50, b(1), low);
+    let right = split(Axis::Rows, 30, b(3), b(4));
+    let layout = split(Axis::Columns, 50, left, right);
+    let largest = size(u16::MAX, u16::MAX);
+    assert!(!layout.rects(largest).iter().any(|(b, _)| *b == id(6)));
+    let side = |b, s| layout.neighbour(id(b), Toward::Side(s));
+    // 1 borders 3 for 30% of the height and 4 for 20%.
+    assert_eq!(side(1, Side::Right), Some(id(3)));
+    // 4 borders 1 for 20% and 9 for 50%.
+    assert_eq!(side(4, Side::Left), Some(id(9)));
+    // Below 1 sit 5 to 9; 9 is the widest.
+    assert_eq!(side(1, Side::Down), Some(id(9)));
+    assert_eq!(side(6, Side::Up), Some(id(1)));
+    assert_eq!(side(6, Side::Right), Some(id(7)));
+    assert_eq!(side(9, Side::Right), Some(id(4)));
+    assert_eq!(side(3, Side::Left), Some(id(1)));
+}
+
+#[test]
+fn moves_stay_exact_in_slivers_far_below_a_float_cell() {
+    // Left: ten rows99 splits, 1 at the bottom, 1e-20 of the height.
+    // Right: nine rows99 splits ending in rows30(2, 3) at the bottom,
+    // 1e-18 of the height. 1 lies beside 3 only; 3 shares more with 100,
+    // just above 1, than with 1.
+    let b = |n| Layout::Block(id(n));
+    let chain = |bottom, from: u128, levels: u128| {
+        (from..from + levels).fold(bottom, |low, n| split(Axis::Rows, 99, b(n), low))
+    };
+    let left = chain(b(1), 100, 10);
+    let right = chain(split(Axis::Rows, 30, b(2), b(3)), 200, 9);
+    let layout = split(Axis::Columns, 50, left, right);
+    assert_eq!(
+        layout.neighbour(id(1), Toward::Side(Side::Right)),
+        Some(id(3))
+    );
+    assert_eq!(
+        layout.neighbour(id(3), Toward::Side(Side::Left)),
+        Some(id(100))
+    );
+    assert_eq!(
+        layout.neighbour(id(2), Toward::Side(Side::Left)),
+        Some(id(100))
+    );
+}
+
+#[test]
+fn moves_reach_blocks_at_the_depth_limit() {
+    // Left: 30 rows1 splits, each giving its second child 99%, down to
+    // cols1(1, 2) at depth 32. Right: 3.
+    let b = |n| Layout::Block(id(n));
+    let left = (100..130).fold(split(Axis::Columns, 1, b(1), b(2)), |low, n| {
+        split(Axis::Rows, 1, b(n), low)
+    });
+    let layout = split(Axis::Columns, 1, left, b(3));
+    assert_eq!(layout.depth_of(id(1)), Some(MAX_DEPTH));
+    let side = |b, s| layout.neighbour(id(b), Toward::Side(s));
+    assert_eq!(side(1, Side::Right), Some(id(2)));
+    assert_eq!(side(2, Side::Left), Some(id(1)));
+    assert_eq!(side(2, Side::Right), Some(id(3)));
+    assert_eq!(side(1, Side::Up), Some(id(100)));
+    // 2 is 99% of the deepest row, wider than 1, and the tallest left.
+    assert_eq!(side(3, Side::Left), Some(id(2)));
+}
+
+#[test]
+fn mirrored_deep_rows_face_their_twins() {
+    // cols50 of two identical trees: twelve rows99 splits, each giving
+    // its second child 1%, so the lower rows sit far below a float's
+    // precision near the bottom edge.
+    let b = |n| Layout::Block(id(n));
+    let tower = |base: u128| {
+        (0..12).rev().fold(b(base + 12), |low, n| {
+            split(Axis::Rows, 99, b(base + n), low)
+        })
+    };
+    let layout = split(Axis::Columns, 50, tower(100), tower(200));
+    for n in 0..=12 {
+        let right = layout.neighbour(id(100 + n), Toward::Side(Side::Right));
+        let left = layout.neighbour(id(200 + n), Toward::Side(Side::Left));
+        assert_eq!(right, Some(id(200 + n)), "right of row {n}");
+        assert_eq!(left, Some(id(100 + n)), "left of row {n}");
+    }
+}
+
+#[test]
+fn the_longest_edge_wins_deep_near_the_bottom() {
+    // cols50(1, rows1(2, 3)) under rows99 splits, its row 1% of 1% ...
+    // of the height: 3 shares 99% of 1's edge, 2 only 1%.
+    let b = |n| Layout::Block(id(n));
+    for wrappers in [9, 30] {
+        let inner = split(Axis::Columns, 50, b(1), split(Axis::Rows, 1, b(2), b(3)));
+        let layout = (0..wrappers).fold(inner, |low, n| split(Axis::Rows, 99, b(100 + n), low));
+        assert!(layout.depth_of(id(3)).is_some_and(|d| d <= MAX_DEPTH));
+        let right = layout.neighbour(id(1), Toward::Side(Side::Right));
+        assert_eq!(right, Some(id(3)), "{wrappers} wrappers");
+    }
+}

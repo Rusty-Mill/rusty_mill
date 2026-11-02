@@ -526,6 +526,7 @@ fn serve_control(stream: Stream, shared: &Shared) {
                     name: "main".into(),
                     layout: Some(shared.layout()),
                     zoomed: None,
+                    focused: None,
                 }];
                 for block in shared.layout().blocks() {
                     entries.push(Entry::Block {

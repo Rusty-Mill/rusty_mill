@@ -1762,6 +1762,54 @@ fn layout_edits_reshape_a_window_and_reorder_windows() {
     assert_eq!(order, vec![second, window]);
 }
 
+/// An agent moves a window's focus from the command line, and `list`
+/// shows it (C41).
+#[test]
+fn focus_moves_between_blocks_and_shows_in_the_listing() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let window = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "a"],
+    );
+    let block = |socket: &Path| {
+        ok(
+            socket,
+            &[
+                "create-block",
+                "--window",
+                &window,
+                "--cols",
+                "80",
+                "--rows",
+                "24",
+            ],
+        )
+    };
+    let (a, b) = (block(&socket), block(&socket));
+    let focus = |socket: &Path| {
+        ok(socket, &["list"])
+            .lines()
+            .find(|l| l.starts_with(&format!("window {window}")))
+            .and_then(|l| l.split(" focused=").nth(1))
+            .map(str::to_owned)
+            .expect("a window line with its focus")
+    };
+    assert_eq!(focus(&socket), a);
+    ok(
+        &socket,
+        &["move-focus", "--window", &window, "--toward", "right"],
+    );
+    assert_eq!(focus(&socket), b);
+    ok(&socket, &["focus-block", "--block", &a]);
+    assert_eq!(focus(&socket), a);
+    let bad = ctl(
+        &socket,
+        &["move-focus", "--window", &window, "--toward", "north"],
+    );
+    assert_ne!(bad.status.code(), Some(0));
+}
+
 #[test]
 fn reload_config_rereads_the_file_and_says_so() {
     let file = socket_path("config").with_extension("json");

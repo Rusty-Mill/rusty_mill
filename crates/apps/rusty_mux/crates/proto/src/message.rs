@@ -2,7 +2,7 @@
 
 use rusty_mux_core::{
     Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
-    SessionId, Share, Side, Size, Transport, WindowId,
+    SessionId, Share, Side, Size, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -138,6 +138,13 @@ impl Features {
     /// leaves detached blocks out.
     pub const LAYOUT_EDIT: Self = Self(1 << 27);
 
+    /// Each window's focused block, held by the server:
+    /// [`Message::FocusBlock`], [`Message::MoveFocus`] and
+    /// [`Event::FocusChanged`] (skipped for a client without it). A window
+    /// entry carries its focused block regardless, since older decoders
+    /// skip the field.
+    pub const FOCUS: Self = Self(1 << 28);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -248,6 +255,9 @@ pub enum Entry {
         /// [`Features::LAYOUT`].
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
+        /// `None` while no block is placed, or from a server without
+        /// [`Features::FOCUS`].
+        focused: Option<BlockId>,
     },
     Block {
         block: BlockId,
@@ -454,6 +464,19 @@ pub enum Message {
         window: WindowId,
         index: usize,
     },
+    /// Focuses `block` in its window, ending a zoom on another block.
+    /// Negotiated with [`Features::FOCUS`].
+    FocusBlock {
+        req: u64,
+        block: BlockId,
+    },
+    /// Moves `window`'s focus from its focused block toward a side, or to
+    /// the next or previous block. Negotiated with [`Features::FOCUS`].
+    MoveFocus {
+        req: u64,
+        window: WindowId,
+        toward: Toward,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -614,8 +637,13 @@ const AXIS: u32 = 46;
 const OTHER: u32 = 47;
 /// A place in a list, from 0.
 const INDEX: u32 = 48;
-// IDs 1..=INDEX are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = INDEX as usize;
+/// A [`Toward`]: 0 to 3 a side as [`SIDE`] numbers them, 4 next, 5
+/// previous.
+const TOWARD: u32 = 49;
+/// A window's focused block.
+const FOCUSED: u32 = 50;
+// IDs 1..=FOCUSED are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = FOCUSED as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -647,6 +675,8 @@ mod ty {
     pub const MOVE_BLOCK: u8 = 0x1b;
     pub const DETACH_BLOCK: u8 = 0x1c;
     pub const MOVE_WINDOW: u8 = 0x1d;
+    pub const FOCUS_BLOCK: u8 = 0x1e;
+    pub const MOVE_FOCUS: u8 = 0x1f;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -823,6 +853,17 @@ impl Message {
                     .uuid(WINDOW, window.uuid())
                     .varint(INDEX, index_wire(*index));
                 ty::MOVE_WINDOW
+            }
+            M::FocusBlock { req, block } => req_block(out, *req, *block, ty::FOCUS_BLOCK),
+            M::MoveFocus {
+                req,
+                window,
+                toward,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(WINDOW, window.uuid())
+                    .varint(TOWARD, toward_wire(*toward));
+                ty::MOVE_FOCUS
             }
             M::Welcome {
                 features,
@@ -1042,6 +1083,15 @@ impl Message {
                 window: window(&f, WINDOW)?,
                 index: get_index(&f)?,
             },
+            ty::FOCUS_BLOCK => M::FocusBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+            },
+            ty::MOVE_FOCUS => M::MoveFocus {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
+                toward: get_toward(&f)?,
+            },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
                 client: client(&f, CLIENT)?,
@@ -1258,6 +1308,26 @@ fn get_axis(f: &In<'_>) -> Result<Axis, Error> {
     }
 }
 
+fn toward_wire(toward: Toward) -> u64 {
+    match toward {
+        Toward::Side(side) => side_wire(side),
+        Toward::Next => 4,
+        Toward::Previous => 5,
+    }
+}
+
+fn get_toward(f: &In<'_>) -> Result<Toward, Error> {
+    match f.varint(TOWARD)? {
+        4 => Ok(Toward::Next),
+        5 => Ok(Toward::Previous),
+        n => usize::try_from(n)
+            .ok()
+            .and_then(|i| SIDES.get(i).copied())
+            .map(Toward::Side)
+            .ok_or_else(|| f.invalid(TOWARD)),
+    }
+}
+
 fn index_wire(index: usize) -> u64 {
     u64::try_from(index).unwrap_or(u64::MAX)
 }
@@ -1316,6 +1386,7 @@ mod kind {
     pub const ACTIVE_WINDOW_CHANGED: u64 = 29;
     pub const CONFIG_RELOADED: u64 = 30;
     pub const WINDOW_MOVED: u64 = 31;
+    pub const FOCUS_CHANGED: u64 = 32;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1337,6 +1408,13 @@ fn put_event(out: &mut Out, event: &Event) {
         E::WindowClosed { window } => {
             out.varint(KIND, kind::WINDOW_CLOSED)
                 .uuid(WINDOW, window.uuid());
+        }
+        E::FocusChanged { window, block } => {
+            out.varint(KIND, kind::FOCUS_CHANGED)
+                .uuid(WINDOW, window.uuid());
+            if let Some(block) = block {
+                out.uuid(BLOCK, block.uuid());
+            }
         }
         E::WindowMoved { window, index } => {
             out.varint(KIND, kind::WINDOW_MOVED)
@@ -1569,6 +1647,10 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::WINDOW_CLOSED => E::WindowClosed {
             window: window(f, WINDOW)?,
         },
+        kind::FOCUS_CHANGED => E::FocusChanged {
+            window: window(f, WINDOW)?,
+            block: f.opt(BLOCK, block)?,
+        },
         kind::WINDOW_MOVED => E::WindowMoved {
             window: window(f, WINDOW)?,
             index: get_index(f)?,
@@ -1705,6 +1787,7 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             name,
             layout,
             zoomed,
+            focused,
         } => {
             let out = out
                 .varint(KIND, entry::WINDOW)
@@ -1712,6 +1795,9 @@ fn put_entry(out: &mut Out, entry: &Entry) {
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
             put_layout(out, layout.as_ref(), *zoomed);
+            if let Some(block) = focused {
+                out.uuid(FOCUSED, block.uuid());
+            }
         }
         Entry::Block {
             block,
@@ -1770,6 +1856,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             // An older server sends no layout.
             layout: f.opt(LAYOUT, |_, _| get_layout(f))?.flatten(),
             zoomed: f.opt(ZOOMED, block)?,
+            focused: f.opt(FOCUSED, block)?,
         },
         entry::BLOCK => Entry::Block {
             block: block(f, BLOCK)?,
