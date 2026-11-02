@@ -319,3 +319,49 @@ fn a_move_picks_the_block_sharing_the_longest_edge() {
     assert_eq!(side(9, Side::Right), Some(id(4)));
     assert_eq!(side(3, Side::Left), Some(id(1)));
 }
+
+#[test]
+fn moves_stay_exact_in_slivers_far_below_a_float_cell() {
+    // Left: ten rows99 splits, 1 at the bottom, 1e-20 of the height.
+    // Right: nine rows99 splits ending in rows30(2, 3) at the bottom,
+    // 1e-18 of the height. 1 lies beside 3 only; 3 shares more with 100,
+    // just above 1, than with 1.
+    let b = |n| Layout::Block(id(n));
+    let chain = |bottom, from: u128, levels: u128| {
+        (from..from + levels).fold(bottom, |low, n| split(Axis::Rows, 99, b(n), low))
+    };
+    let left = chain(b(1), 100, 10);
+    let right = chain(split(Axis::Rows, 30, b(2), b(3)), 200, 9);
+    let layout = split(Axis::Columns, 50, left, right);
+    assert_eq!(
+        layout.neighbour(id(1), Toward::Side(Side::Right)),
+        Some(id(3))
+    );
+    assert_eq!(
+        layout.neighbour(id(3), Toward::Side(Side::Left)),
+        Some(id(100))
+    );
+    assert_eq!(
+        layout.neighbour(id(2), Toward::Side(Side::Left)),
+        Some(id(100))
+    );
+}
+
+#[test]
+fn moves_reach_blocks_at_the_depth_limit() {
+    // Left: 30 rows1 splits, each giving its second child 99%, down to
+    // cols1(1, 2) at depth 32. Right: 3.
+    let b = |n| Layout::Block(id(n));
+    let left = (100..130).fold(split(Axis::Columns, 1, b(1), b(2)), |low, n| {
+        split(Axis::Rows, 1, b(n), low)
+    });
+    let layout = split(Axis::Columns, 1, left, b(3));
+    assert_eq!(layout.depth_of(id(1)), Some(MAX_DEPTH));
+    let side = |b, s| layout.neighbour(id(b), Toward::Side(s));
+    assert_eq!(side(1, Side::Right), Some(id(2)));
+    assert_eq!(side(2, Side::Left), Some(id(1)));
+    assert_eq!(side(2, Side::Right), Some(id(3)));
+    assert_eq!(side(1, Side::Up), Some(id(100)));
+    // 2 is 99% of the deepest row, wider than 1, and the tallest left.
+    assert_eq!(side(3, Side::Left), Some(id(2)));
+}

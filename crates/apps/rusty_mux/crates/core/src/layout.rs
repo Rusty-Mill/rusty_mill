@@ -24,6 +24,10 @@ use std::str::FromStr;
 
 use crate::{BlockId, Size};
 
+use exact::Exact;
+
+mod exact;
+
 /// How deep a layout may nest. It bounds the recursion of every walk, and
 /// of a client parsing a layout it was sent.
 pub const MAX_DEPTH: usize = 32;
@@ -336,11 +340,12 @@ impl Layout {
             .into_iter()
             .filter_map(|b| {
                 let (s, e) = self.extent(b, across)?;
-                let shared = hi.min(e) - lo.max(s);
-                let apart = ((s + e) - (lo + hi)).abs();
+                let shared = hi.min(e).minus(lo.max(s));
+                let (mid, own) = (s.plus(e), lo.plus(hi));
+                let apart = mid.max(own).minus(mid.min(own));
                 Some((shared, apart, b))
             })
-            .min_by(|a, b| b.0.total_cmp(&a.0).then(a.1.total_cmp(&b.1)))
+            .min_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)))
             .map(|(_, _, b)| b)
     }
 
@@ -386,10 +391,10 @@ impl Layout {
         }
     }
 
-    /// Where `block` starts and ends along `axis`, as parts of the whole
-    /// layout from 0 to 1, dividers ignored.
-    fn extent(&self, block: BlockId, axis: Axis) -> Option<(f64, f64)> {
-        let (mut lo, mut hi) = (0.0, 1.0);
+    /// Where `block` starts and ends along `axis`, exactly, as parts of
+    /// the whole layout, dividers ignored.
+    fn extent(&self, block: BlockId, axis: Axis) -> Option<(Exact, Exact)> {
+        let (mut lo, mut hi) = (Exact::ZERO, Exact::whole());
         let mut node = self;
         loop {
             let Self::Split {
@@ -403,7 +408,7 @@ impl Layout {
             };
             let in_first = first.contains(block);
             if *own == axis {
-                let mid = lo + (hi - lo) * f64::from(share.percent()) / 100.0;
+                let mid = lo.plus(hi.minus(lo).percent(share.percent()));
                 match in_first {
                     true => hi = mid,
                     false => lo = mid,
