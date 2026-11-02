@@ -117,6 +117,9 @@ pub(super) struct Screen {
     /// emitted so far: the move it owes waits for the next slice, whose
     /// marks may still join the glyph, or for the write's end.
     owed: Option<Margin>,
+    /// Bytes sent to the terminal so far: a cursor sample taken at one
+    /// count is stale once more has gone out (#1375).
+    emitted: u64,
 }
 
 /// Where the cursor goes when legacy text meets the margin.
@@ -142,6 +145,7 @@ impl Screen {
             legacy_meta: 0,
             run: None,
             owed: None,
+            emitted: 0,
         };
         // conhost's colour table, which GetConsoleScreenBufferInfoEx
         // reports and legacy attributes are matched against. Only the
@@ -444,6 +448,7 @@ impl Screen {
             return;
         }
         out.push(vt);
+        self.emitted += vt.len() as u64;
         self.feed(vt);
     }
 
@@ -481,6 +486,11 @@ impl Screen {
             x.min(last(self.grid.cols)) as u16,
             y.min(last(self.grid.rows)) as u16,
         )
+    }
+
+    /// Bytes sent to the terminal so far.
+    pub(super) fn emitted(&self) -> u64 {
+        self.emitted
     }
 
     /// Move the cursor to screen position (`x`, `y`), where the terminal

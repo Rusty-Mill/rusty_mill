@@ -11,6 +11,12 @@
 //! terminal's; the held calls are then answered. Only the cursor is
 //! resynced: the screen's contents may still differ (V3).
 //!
+//! The CPR is the terminal's cursor where it parsed the DSR. Output that
+//! went out after the DSR (a parked write, a cooked read's echo) has
+//! moved both cursors since, so a CPR is applied only when nothing was
+//! emitted after its DSR; otherwise the terminal is asked again, within
+//! the same [`CURSOR_WAIT`].
+//!
 //! Behaviour follows microsoft/terminal's conhost (GH#18725,
 //! `src/host/screenInfo.cpp` `WaitForConptyCursorPositionToBeSynchronized`,
 //! `src/server/ApiDispatchers.cpp` `ServerGetConsoleScreenBufferInfo`,
@@ -38,10 +44,11 @@ pub(super) enum CursorSync {
     Clean,
     /// Resized: the next GetConsoleScreenBufferInfo asks the terminal.
     Dirty,
-    /// DSR 6 went out and its CPR is awaited. `stale` when the size
-    /// changed again since: the CPR may predate that resize, so the
-    /// terminal is asked once more.
-    Asked { stale: bool },
+    /// DSR 6 went out when the terminal had been sent `at` bytes, and its
+    /// CPR is awaited. `resized` when the size changed again since: the
+    /// CPR may predate that resize, so the terminal is asked once more,
+    /// and a timeout leaves the cursor [`CursorSync::Dirty`].
+    Asked { resized: bool, at: u64 },
 }
 
 /// A GetConsoleScreenBufferInfo held for the terminal's CPR.
@@ -83,7 +90,7 @@ impl Console {
     pub(super) fn cursor_maybe_wrong(&mut self) {
         self.cursor_sync = match self.cursor_sync {
             CursorSync::Clean | CursorSync::Dirty => CursorSync::Dirty,
-            CursorSync::Asked { .. } => CursorSync::Asked { stale: true },
+            CursorSync::Asked { at, .. } => CursorSync::Asked { resized: true, at },
         };
     }
 
@@ -94,35 +101,38 @@ impl Console {
     }
 
     /// The terminal's CPR, 1-based: the host's cursor moves there, unless
-    /// a resize since makes the terminal be asked again.
+    /// a resize or output since its DSR makes the terminal be asked again.
     pub(super) fn cursor_reported(
         &mut self,
         (row, col): (u16, u16),
         out: &mut OutputQueue,
         fx: &mut Vec<Effect>,
     ) {
-        match self.cursor_sync {
-            CursorSync::Asked { stale: true } => self.ask_cursor(out, fx),
-            CursorSync::Asked { stale: false } => {
-                self.screen
-                    .place_cursor(col.saturating_sub(1), row.saturating_sub(1));
-                self.answer_held_info(fx);
-            }
-            CursorSync::Clean | CursorSync::Dirty => {}
+        let CursorSync::Asked { resized, at } = self.cursor_sync else {
+            return;
+        };
+        if resized || self.screen.emitted() != at {
+            return self.send_dsr(out);
         }
+        self.screen
+            .place_cursor(col.saturating_sub(1), row.saturating_sub(1));
+        self.cursor_sync = CursorSync::Clean;
+        self.answer_held_info(fx);
     }
 
     /// No CPR came in time: answer from the host's model, as ConPTY does.
     /// A resize during the wait stays pending: the next call asks again,
     /// as ConPTY's timeout clears only its own generation.
     pub(super) fn cursor_wait_expired(&mut self, fx: &mut Vec<Effect>) {
-        let CursorSync::Asked { stale } = self.cursor_sync else {
+        let CursorSync::Asked { resized, .. } = self.cursor_sync else {
             return;
         };
+        self.cursor_sync = if resized {
+            CursorSync::Dirty
+        } else {
+            CursorSync::Clean
+        };
         self.answer_held_info(fx);
-        if stale {
-            self.cursor_sync = CursorSync::Dirty;
-        }
     }
 
     /// Calls held for the CPR; the console is closing.
@@ -135,14 +145,23 @@ impl Console {
         self.held_info.len()
     }
 
+    /// Start the wait: one deadline bounds it, however often the
+    /// terminal is asked again.
     fn ask_cursor(&mut self, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
-        self.screen.host(DSR_CPR, out);
-        self.cursor_sync = CursorSync::Asked { stale: false };
+        self.send_dsr(out);
         fx.push(Effect::AwaitCursor);
     }
 
+    fn send_dsr(&mut self, out: &mut OutputQueue) {
+        self.screen.host(DSR_CPR, out);
+        self.cursor_sync = CursorSync::Asked {
+            resized: false,
+            at: self.screen.emitted(),
+        };
+    }
+
+    /// Answer the held calls from the model; the caller has set the sync.
     fn answer_held_info(&mut self, fx: &mut Vec<Effect>) {
-        self.cursor_sync = CursorSync::Clean;
         while let Some(HeldInfo {
             id,
             object,
@@ -169,7 +188,7 @@ mod tests {
     use platform::term::WinSize;
 
     use super::super::tests::Host;
-    use super::super::{Effect, Event};
+    use super::super::{CLIENT_BUDGET, Effect, Event};
     use super::*;
     use crate::msg::{self, api};
 
@@ -276,7 +295,10 @@ mod tests {
             completed(&fx).is_empty(),
             "the answer may predate the resize"
         );
-        assert!(fx.contains(&Effect::AwaitCursor));
+        assert!(
+            !fx.contains(&Effect::AwaitCursor),
+            "the first deadline holds"
+        );
         assert_eq!(&h.vt[mark..], [DSR_CPR, DSR_CPR].concat());
         let fx = h.ev(Event::Input(b"\x1b[2;1R"));
         let done = completed(&fx);
@@ -315,6 +337,31 @@ mod tests {
         assert_eq!(&h.vt[mark..], DSR_CPR);
         let done = completed(&h.ev(Event::Input(b"\x1b[2;3R")));
         assert_eq!((done[0].id, cursor_of(&done[0])), (next.id, (2, 1)));
+    }
+
+    /// Review of 3d537c2c: output already admitted ahead of the query
+    /// goes out after the DSR, so the CPR predates it.
+    #[test]
+    fn output_after_the_query_makes_its_cpr_stale() {
+        let mut h = Host::sized(size(4));
+        let [_, _, output] = h.connect(1, "");
+        let fill = "y".repeat(CLIENT_BUDGET + 1);
+        h.write_w(output, &fill);
+        let parked = h.write_w(output, "\r\nX");
+        assert_eq!(parked.status, i32::MIN, "parked behind the full queue");
+        h.ev(Event::Resize(size(6)));
+        let mark = h.vt.len();
+        let held = sbi_packet(&mut h, output);
+        assert_eq!(&h.vt[mark..], DSR_CPR, "asked ahead of the parked write");
+        let done = completed(&h.drain());
+        assert_eq!(done.iter().map(|r| r.id).collect::<Vec<_>>(), [parked.id]);
+        let fx = h.ev(Event::Input(b"\x1b[4;10R"));
+        assert!(completed(&fx).is_empty(), "X went out after that DSR");
+        assert!(h.vt.ends_with(DSR_CPR), "asked again, behind X");
+        let (x, y) = h.c.screen.cursor();
+        let cpr = format!("\x1b[{};{}R", y + 2, x + 1);
+        let done = completed(&h.ev(Event::Input(cpr.as_bytes())));
+        assert_eq!((done[0].id, cursor_of(&done[0])), (held.id, (x, y + 1)));
     }
 
     #[test]
