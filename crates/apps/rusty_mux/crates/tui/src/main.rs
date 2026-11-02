@@ -962,6 +962,9 @@ mod client {
             opened: 0,
             mirrored: None,
             passed: None,
+            coloured: false,
+            #[cfg(test)]
+            handed: Vec::new(),
             no_win32: NoWin32Input::default(),
             pending: None,
             detaching: None,
@@ -1738,6 +1741,13 @@ mod client {
         mirrored: Option<Vec<u8>>,
         /// Predictions drawn over the passing block since its last output.
         passed: Option<Passed>,
+        /// Whether the terminal's cursor has a colour this client or a
+        /// passing block's program gave it, rather than its own. Kept apart
+        /// from the panes, which may be gone by the time the view changes.
+        coloured: bool,
+        /// The bytes the last view change wrote, for tests.
+        #[cfg(test)]
+        handed: Vec<u8>,
         /// Filters the passing block's raw output.
         no_win32: NoWin32Input,
         /// A layout change held back while blocks it drops drain.
@@ -2429,6 +2439,7 @@ mod client {
                             write(&pass(grid), &mut self.ended);
                             self.passed = None;
                         }
+                        self.coloured = self.pass_coloured(block);
                     }
                     self.fit();
                 }
@@ -2442,6 +2453,7 @@ mod client {
                             &[erased.unwrap_or_default(), bytes].concat(),
                             &mut self.ended,
                         );
+                        self.coloured = self.pass_coloured(block);
                     }
                 }
                 // The focus may have moved on while the lease was asked for.
@@ -2654,9 +2666,27 @@ mod client {
             }
             let bytes = self.handover(&shown);
             write(&bytes, &mut self.ended);
+            #[cfg(test)]
+            {
+                self.handed = bytes.clone();
+            }
+            self.coloured = match &shown {
+                Shown::Passing(block) => self.pass_coloured(*block),
+                // A first frame starts from the terminal's own colour.
+                Shown::Composed(_) if bytes.is_empty() => self.coloured,
+                Shown::Composed(_) => false,
+                Shown::Nothing => self.coloured,
+            };
             self.mirrored = None;
             self.passed = None;
             self.shown = shown;
+        }
+
+        /// Whether the passing `block`'s program gave the cursor a colour,
+        /// which reached the terminal with its output.
+        fn pass_coloured(&self, block: BlockId) -> bool {
+            self.grid(block)
+                .is_some_and(|g| screen::chosen_cursor(g).is_some())
         }
 
         /// The bytes that hand the terminal from what it shows to `shown`.
@@ -2680,24 +2710,11 @@ mod client {
                 },
                 Shown::Nothing => return Vec::new(),
             };
-            let uncolour = match self.cursor_coloured() {
+            let uncolour = match self.coloured {
                 true => screen::cursor_colour(None).into_bytes(),
                 false => Vec::new(),
             };
             [uncolour, next].concat()
-        }
-
-        /// Whether what the terminal shows gave its cursor a colour: the
-        /// last composed frame, or the passing block, whose program's own
-        /// OSC 12 reached the terminal.
-        fn cursor_coloured(&self) -> bool {
-            match &self.shown {
-                Shown::Composed(last) => last.as_ref().is_some_and(|f| f.cursor_colour().is_some()),
-                Shown::Passing(block) => self
-                    .grid(*block)
-                    .is_some_and(|g| screen::chosen_cursor(g).is_some()),
-                Shown::Nothing => false,
-            }
         }
 
         /// What `block` shows: from its connection, or while the path is
@@ -2772,6 +2789,7 @@ mod client {
                 self.mirrored = wanted;
             }
             write(&bytes, &mut self.ended);
+            self.coloured = frame.cursor_colour().is_some();
             self.shown = Shown::Composed(Some(frame));
         }
     }
@@ -3204,6 +3222,8 @@ mod client {
                 opened: 0,
                 mirrored: None,
                 passed: None,
+                coloured: false,
+                handed: Vec::new(),
                 no_win32: NoWin32Input::default(),
                 pending: None,
                 detaching: None,
@@ -3228,6 +3248,15 @@ mod client {
             (grid, parser)
         }
 
+        /// What the last view change wrote.
+        #[cfg(unix)]
+        fn handed(app: &App) -> String {
+            String::from_utf8(app.handed.clone()).expect("text")
+        }
+
+        #[cfg(unix)]
+        const BACK: &str = "\x1b]112\x1b\\";
+
         #[cfg(unix)]
         #[test]
         fn a_cursor_colour_is_put_back_whichever_way_the_view_changes() {
@@ -3235,42 +3264,56 @@ mod client {
             let (a, b) = (block(1), block(2));
             app.panes.get_mut(&a).expect("A").term = Some(term(b"\x1b]12;#ff8000\x07"));
             app.panes.get_mut(&b).expect("B").term = Some(term(b""));
-            let back = "\x1b]112\x1b\\";
-            let orange = "\x1b]12;#ff8000\x1b\\";
-            let to =
-                |app: &App, shown: Shown| String::from_utf8(app.handover(&shown)).expect("text");
 
-            // From A, whose program coloured the cursor, to B or the split
-            // screen: the terminal's own colour comes back first.
-            app.shown = Shown::Passing(a);
-            let passing_b = to(&app, Shown::Passing(b));
-            assert!(passing_b.starts_with(back), "{passing_b:?}");
-            assert!(!passing_b.contains("\x1b]12;"), "{passing_b:?}");
-            assert!(to(&app, Shown::Composed(None)).starts_with(back));
+            // Passing A, whose program coloured the cursor, then B or the
+            // split screen: the terminal's own colour comes back first.
+            app.show(Shown::Passing(a));
+            assert!(handed(&app).ends_with("\x1b]12;#ff8000\x1b\\"));
+            app.show(Shown::Passing(b));
+            assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
+            assert!(!handed(&app).contains("\x1b]12;"));
+            app.show(Shown::Passing(a));
+            app.show(Shown::Composed(None));
+            assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
 
-            // From B, which did not: nothing to put back, and A gets its own.
-            app.shown = Shown::Passing(b);
-            assert!(!to(&app, Shown::Composed(None)).contains("\x1b]1"));
-            let passing_a = to(&app, Shown::Passing(a));
-            assert!(!passing_a.contains(back), "{passing_a:?}");
-            assert!(passing_a.ends_with(orange), "{passing_a:?}");
+            // From B, which did not: nothing to put back.
+            app.show(Shown::Passing(b));
+            app.show(Shown::Composed(None));
+            assert!(!handed(&app).contains("\x1b]1"), "{:?}", handed(&app));
 
             // From the split screen focused on A, to B passing.
-            let grid = &app.panes[&a].term.as_ref().expect("A's terminal").0;
-            let views = [View {
-                block: a,
-                rect: Rect {
-                    x: 0,
-                    y: 0,
-                    size: Size::new(10, 2).expect("size"),
-                },
-                grid: Some(grid),
-                overlay: None,
-            }];
-            let frame = screen::compose(Size::new(10, 2).expect("size"), &views, a);
-            app.shown = Shown::Composed(Some(frame));
-            assert!(to(&app, Shown::Passing(b)).starts_with(back));
-            assert!(to(&app, Shown::Composed(None)).is_empty(), "same screen");
+            app.focus = a;
+            app.draw();
+            assert!(app.coloured);
+            app.show(Shown::Passing(b));
+            assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
+            assert!(!app.coloured);
+        }
+
+        /// The zoom moving from A to B drops A's pane before the view
+        /// changes: what A's program did to the cursor is still put back.
+        #[cfg(unix)]
+        #[test]
+        fn a_cursor_colour_is_put_back_after_the_block_that_gave_it_is_gone() {
+            let (mut app, _inbox, _far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.panes.get_mut(&a).expect("A").term = Some(term(b"\x1b]12;#ff8000\x07"));
+            app.zoomed = Some(a);
+            app.sync();
+            assert!(matches!(app.shown, Shown::Passing(x) if x == a));
+            assert!(app.coloured);
+
+            // B, dropped by the zoom on A, is open again when the zoom moves.
+            let (b_open, _b_far) = opened(b, takeover(13));
+            let mut pane = app.pane(b_open);
+            pane.term = Some(term(b""));
+            app.panes.insert(b, pane);
+            app.zoomed = Some(b);
+            app.sync();
+            assert!(!app.panes.contains_key(&a), "A's pane is gone");
+            assert!(matches!(app.shown, Shown::Passing(x) if x == b));
+            assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
+            assert!(!app.coloured);
         }
 
         /// Answers a block's lease request on its fresh connection, as the
