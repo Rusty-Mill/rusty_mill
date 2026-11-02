@@ -219,6 +219,34 @@ fn reset_drops_a_clipboard_write_the_program_left_unfinished() {
     }
 }
 
+/// A client built before CAN ended an OSC string would act on the
+/// program's unfinished one and miss the RIS: while one is attached, a
+/// reset changes nothing, for it or anyone.
+#[test]
+fn reset_is_refused_while_an_older_client_is_attached() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CONTROL, None);
+    let block = block_for(&mut client);
+    let older = Features::CHECKPOINT_V6
+        .union(Features::INSPECT)
+        .union(Features::BLOCK_CALL);
+    let mut watcher = Client::connect_with(&path, older, None);
+    watcher.request(|req| Message::Attach { req, block });
+    watcher.wait_ready(block);
+    client.input(block, b"printf '\\033]52;c;YQ==\\033'; read x\r");
+    client.wait_for(block, "\x1b]52;c;YQ==\x1b");
+    watcher.wait_for(block, "\x1b]52;c;YQ==\x1b");
+    let before = client.text(block);
+
+    let reason = refusal(&mut client, block, "terminal.reset", &[]);
+    assert!(reason.contains("too old"), "{reason}");
+    assert_eq!(client.text(block), before, "nothing was fed");
+
+    watcher.request(|req| Message::Detach { req });
+    done(&mut client, block, "terminal.reset", &[]);
+    client.wait_for(block, RESET);
+}
+
 #[test]
 fn set_theme_sets_the_colours_programs_ask_for() {
     let path = start_server();

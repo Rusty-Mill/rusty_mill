@@ -64,7 +64,7 @@ rusty-mux-ctl acquire-lease --block dev-server + terminal.reset --block dev-serv
 ```
 
 `terminal.reset` clears the screen, scrollback and modes, as when a program
-left the terminal garbled. `terminal.set-theme` sets `--foreground`,
+left the terminal garbled; it is refused while an older client is attached. `terminal.set-theme` sets `--foreground`,
 `--background`, `--cursor` and `--palette N=COLOUR` as `#RRGGBB` or `default`.
 
 Typing (`input`, `terminal.send-keys`), resetting and theming need the

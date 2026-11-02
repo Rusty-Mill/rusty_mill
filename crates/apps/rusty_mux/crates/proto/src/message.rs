@@ -124,8 +124,10 @@ impl Features {
 
     /// The block methods that measure and change a block's terminal:
     /// `terminal.size`, `terminal.reset` and `terminal.set-theme`. They
-    /// travel as [`Message::BlockCall`], so the bit only says the server
-    /// knows them.
+    /// travel as [`Message::BlockCall`], so from a server the bit only says
+    /// it knows them. From a client it also says its copy of a block's
+    /// terminal ends a string on CAN without acting on it, as a reset needs:
+    /// the server refuses a reset while a client without it is attached.
     pub const TERMINAL_CONTROL: Self = Self(1 << 26);
 
     pub const fn from_bits(bits: u64) -> Self {

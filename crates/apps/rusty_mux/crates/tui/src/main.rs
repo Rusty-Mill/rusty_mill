@@ -102,8 +102,10 @@ mod client {
         .union(Features::SYNC)
         .union(Features::TAKEOVER);
 
-    /// What a block's connection asks for.
+    /// What a block's connection asks for. `TERMINAL_CONTROL` tells the
+    /// server this client's copy of the terminal can be reset safely.
     const PANE: Features = Features::CHECKPOINT_V6
+        .union(Features::TERMINAL_CONTROL)
         .union(Features::TAKEOVER)
         .union(Features::ECHO_ACK)
         .union(Features::SYNC);
@@ -2646,39 +2648,56 @@ mod client {
         /// Switches what the terminal shows: one block's own output, or
         /// several composed on the alternate screen.
         fn show(&mut self, shown: Shown) {
-            let bytes = match &shown {
-                // A block not ready yet is passed on Ready.
-                Shown::Passing(block) => {
-                    // A new stream: what was held belongs to the last one.
-                    self.no_win32 = NoWin32Input::default();
-                    // A cursor colour the composed screen gave the
-                    // terminal is put back before the block sets its own.
-                    let recoloured = match &self.shown {
-                        Shown::Composed(Some(last)) => last.cursor_colour().is_some(),
-                        _ => false,
-                    };
-                    let uncolour = match recoloured {
-                        true => screen::cursor_colour(None).into_bytes(),
-                        false => Vec::new(),
-                    };
-                    let passed = match self.panes.get(block).and_then(|p| p.term.as_ref()) {
-                        Some((grid, _)) => pass(grid),
-                        None => b"\x1b[?1049l".to_vec(),
-                    };
-                    [uncolour, passed].concat()
-                }
-                Shown::Composed(_) => match self.shown {
-                    Shown::Composed(_) => Vec::new(),
-                    // Undo the modes the passed-through program set, then
-                    // draw where the shell's screen is kept.
-                    _ => [RESTORE, b"\x1b[?1049h"].concat(),
-                },
-                Shown::Nothing => Vec::new(),
-            };
+            if matches!(shown, Shown::Passing(_)) {
+                // A new stream: what was held belongs to the last one.
+                self.no_win32 = NoWin32Input::default();
+            }
+            let bytes = self.handover(&shown);
             write(&bytes, &mut self.ended);
             self.mirrored = None;
             self.passed = None;
             self.shown = shown;
+        }
+
+        /// The bytes that hand the terminal from what it shows to `shown`.
+        /// A cursor colour the last view gave it is put back first, so the
+        /// next starts from the terminal's own, as [`pass`] and a first
+        /// [`screen::render`] take it to.
+        fn handover(&self, shown: &Shown) -> Vec<u8> {
+            let next = match shown {
+                // A block not ready yet is passed on Ready.
+                Shown::Passing(block) => {
+                    match self.panes.get(block).and_then(|p| p.term.as_ref()) {
+                        Some((grid, _)) => pass(grid),
+                        None => b"\x1b[?1049l".to_vec(),
+                    }
+                }
+                Shown::Composed(_) => match self.shown {
+                    Shown::Composed(_) => return Vec::new(),
+                    // Undo the modes the passed-through program set, then
+                    // draw where the shell's screen is kept.
+                    _ => [RESTORE, b"\x1b[?1049h"].concat(),
+                },
+                Shown::Nothing => return Vec::new(),
+            };
+            let uncolour = match self.cursor_coloured() {
+                true => screen::cursor_colour(None).into_bytes(),
+                false => Vec::new(),
+            };
+            [uncolour, next].concat()
+        }
+
+        /// Whether what the terminal shows gave its cursor a colour: the
+        /// last composed frame, or the passing block, whose program's own
+        /// OSC 12 reached the terminal.
+        fn cursor_coloured(&self) -> bool {
+            match &self.shown {
+                Shown::Composed(last) => last.as_ref().is_some_and(|f| f.cursor_colour().is_some()),
+                Shown::Passing(block) => self
+                    .grid(*block)
+                    .is_some_and(|g| screen::chosen_cursor(g).is_some()),
+                Shown::Nothing => false,
+            }
         }
 
         /// What `block` shows: from its connection, or while the path is
@@ -3198,6 +3217,60 @@ mod client {
             }
             app.panes.get_mut(&a).expect("A").leased = true;
             (app, inbox, [control, a_far, b_far])
+        }
+
+        /// A block's terminal after `input`.
+        #[cfg(unix)]
+        fn term(input: &[u8]) -> (Grid, AnsiParser) {
+            let mut grid = Grid::new(10, 2);
+            let mut parser = AnsiParser::new();
+            parser.advance(&mut grid, input);
+            (grid, parser)
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_cursor_colour_is_put_back_whichever_way_the_view_changes() {
+            let (mut app, _inbox, _far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.panes.get_mut(&a).expect("A").term = Some(term(b"\x1b]12;#ff8000\x07"));
+            app.panes.get_mut(&b).expect("B").term = Some(term(b""));
+            let back = "\x1b]112\x1b\\";
+            let orange = "\x1b]12;#ff8000\x1b\\";
+            let to =
+                |app: &App, shown: Shown| String::from_utf8(app.handover(&shown)).expect("text");
+
+            // From A, whose program coloured the cursor, to B or the split
+            // screen: the terminal's own colour comes back first.
+            app.shown = Shown::Passing(a);
+            let passing_b = to(&app, Shown::Passing(b));
+            assert!(passing_b.starts_with(back), "{passing_b:?}");
+            assert!(!passing_b.contains("\x1b]12;"), "{passing_b:?}");
+            assert!(to(&app, Shown::Composed(None)).starts_with(back));
+
+            // From B, which did not: nothing to put back, and A gets its own.
+            app.shown = Shown::Passing(b);
+            assert!(!to(&app, Shown::Composed(None)).contains("\x1b]1"));
+            let passing_a = to(&app, Shown::Passing(a));
+            assert!(!passing_a.contains(back), "{passing_a:?}");
+            assert!(passing_a.ends_with(orange), "{passing_a:?}");
+
+            // From the split screen focused on A, to B passing.
+            let grid = &app.panes[&a].term.as_ref().expect("A's terminal").0;
+            let views = [View {
+                block: a,
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    size: Size::new(10, 2).expect("size"),
+                },
+                grid: Some(grid),
+                overlay: None,
+            }];
+            let frame = screen::compose(Size::new(10, 2).expect("size"), &views, a);
+            app.shown = Shown::Composed(Some(frame));
+            assert!(to(&app, Shown::Passing(b)).starts_with(back));
+            assert!(to(&app, Shown::Composed(None)).is_empty(), "same screen");
         }
 
         /// Answers a block's lease request on its fresh connection, as the

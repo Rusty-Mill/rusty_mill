@@ -965,6 +965,19 @@ impl State {
                 self.mux
                     .authorize_input(client, block)
                     .map_err(Refusal::from)?;
+                // A client without the bit was built before CAN ended an OSC
+                // string: its copy would act on what the program left
+                // unfinished and miss the RIS, or both.
+                let older = self.attached(block).into_iter().any(|c| {
+                    !(self.features.get(&c)).is_some_and(|f| f.contains(Features::TERMINAL_CONTROL))
+                });
+                if older {
+                    return Err(format!(
+                        "{method}: a client attached to this block is too old to reset \
+                         its terminal safely; detach it or update it"
+                    )
+                    .into());
+                }
                 self.inject(block, terminal::RESET);
                 return Ok(Outcome::Done(None));
             }

@@ -11,15 +11,12 @@ use crate::style::Style;
 
 /// What `terminal.reset` feeds a terminal: CAN, which ends any sequence the
 /// program left unfinished (a string, an ESC waiting for its next byte, a
-/// cut CSI or UTF-8 character) without acting on it, then ST, then RIS.
-/// Without the CAN, rusty_term_core reads the RIS's ESC as part of an
-/// unfinished string or escape and never resets, while a VT500-style outer
-/// terminal would. The ST does nothing after the CAN; it is for attached
-/// clients built before CAN ended an OSC string, which collect the CAN into
-/// the string and would take the RIS's ESC and `c` as its end: the ST ends
-/// it there instead (acting on it, as those clients always did), so the
-/// RIS resets their copy too.
-pub(crate) const RESET: &[u8] = b"\x18\x1b\\\x1bc";
+/// cut CSI or UTF-8 character) without acting on it, then RIS. Without the
+/// CAN, rusty_term_core reads the RIS's ESC as part of an unfinished string
+/// or escape and never resets, while a VT500-style outer terminal would.
+/// Clients built before CAN ended an OSC string take it into the string;
+/// a reset is refused while one is attached.
+pub(crate) const RESET: &[u8] = b"\x18\x1bc";
 
 /// The OSC sequences that make `change`, each ended by ST: OSC 10, 11 and
 /// 12 set the default foreground, background and cursor colours, 110, 111
@@ -334,40 +331,6 @@ mod tests {
             assert!(parser.ground(), "{stuck:?}");
             assert_eq!(grid.title, "", "{stuck:?}: the string was not acted on");
             assert!(parser.take_responses().is_empty(), "{stuck:?}");
-        }
-    }
-
-    /// Where an OSC string ends in `rest` for a client built before CAN
-    /// ended one: its body takes every byte but BEL and ESC, CAN included,
-    /// and the byte after an ESC ends it, whatever that byte is. A model of
-    /// rusty_term_core's `Osc` and `OscEsc` states before this change;
-    /// every other state treated CAN as now.
-    fn pre_change_osc_end(after_esc: bool, rest: &[u8]) -> Option<usize> {
-        let mut esc = after_esc;
-        for (i, &b) in rest.iter().enumerate() {
-            if esc || b == 0x07 {
-                return Some(i + 1);
-            }
-            esc = b == 0x1b;
-        }
-        None
-    }
-
-    #[test]
-    fn a_reset_reaches_clients_whose_osc_strings_take_can_as_text() {
-        for after_esc in [false, true] {
-            let end = pre_change_osc_end(after_esc, RESET).expect("the string ends");
-            // Past the string, such a client reads as this parser does.
-            let mut grid = Grid::new(20, 3);
-            let mut parser = AnsiParser::new();
-            parser.advance(&mut grid, b"\x1b[?1hBEFORE");
-            parser.advance(&mut grid, &RESET[end..]);
-            let screen = format(&grid, Capture::default(), usize::MAX).unwrap_or_default();
-            assert!(
-                !screen.contains("BEFORE"),
-                "after_esc={after_esc}: {screen:?}"
-            );
-            assert!(!grid.app_cursor_keys, "after_esc={after_esc}");
         }
     }
 
