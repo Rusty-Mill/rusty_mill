@@ -25,8 +25,8 @@
 //! Note: this drives a live window and so cannot be exercised in a headless
 //! environment — the render, input-encoding, and font layers it composes are
 //! unit-tested independently. Wired here: mouse drag-selection, clipboard
-//! copy/paste (Ctrl+Shift+C / Ctrl+Shift+V) plus OSC 52 get/set, SGR/1006 mouse
-//! reporting, Ctrl+click to open OSC 8 hyperlinks, DECSCUSR cursor styles +
+//! copy/paste (Ctrl+Shift+C / Ctrl+Shift+V, plus Ctrl+V on Windows), OSC 52
+//! get/set, SGR/1006 mouse reporting, Ctrl+click to open OSC 8 hyperlinks, DECSCUSR cursor styles +
 //! blink, and a Windows child-exit watcher.
 
 use std::sync::Arc;
@@ -3066,7 +3066,8 @@ impl WindowState<'_> {
         self.snap_to_bottom();
     }
 
-    /// Paste the system clipboard into the active tab's child (Ctrl+Shift+V).
+    /// Paste the system clipboard into the active tab's child (Ctrl+Shift+V, and
+    /// Ctrl+V on Windows).
     fn paste(&mut self) {
         let Some(cb) = self.clipboard.as_mut() else {
             return;

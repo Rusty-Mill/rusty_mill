@@ -278,7 +278,7 @@ window edges to resize.
 | Left-drag | Select text (highlighted by inversion); double/triple-click first to extend by word/line as you drag, and drag past a pane's top/bottom edge to auto-scroll. |
 | Ctrl+hover / Ctrl+click | Underline + pointer cursor over a hyperlink (OSC 8 or a detected plain-text URL), Ctrl+click opens it. |
 | Ctrl+Shift+C | Copy the selection to the system clipboard. |
-| Ctrl+Shift+V | Paste the clipboard into the shell (bracketed-paste aware). |
+| Ctrl+Shift+V (and Ctrl+V on Windows) | Paste the clipboard into the shell (bracketed-paste aware). Plain Ctrl+V pastes on Windows only, as in Windows Terminal; to send a raw ^V there instead, set `paste = "Ctrl+Shift+V"` under `[keys]`. |
 | Ctrl+Shift+F | Open the in-window search bar (incremental match highlighting; Ctrl+R toggles regex, Alt+C toggles case sensitivity, Ctrl+V/middle-click pastes into the query). |
 | Ctrl+Shift+, | Open the config file in your editor (created from a template on first use). |
 | Ctrl+, / `▾` menu | Toggle the in-app **settings page** (it opens as its own tab in the strip): an Appearance / Terminal / Window sidebar covering theme, font, cursor, contrast, shell, scrollback, clipboard, padding, opacity, launch size, and more, each with a one-line description. `Tab` switches category, `↑`/`↓` pick a row, `←`/`→` (or a click on the value) change it — `Shift` steps numbers ×10, `Home`/`End` jump to the bound, `Enter` (or a typed digit) edits a number directly — type (or `/` / `Ctrl+F`) to search across every category, the wheel scrolls, `Esc` saves & closes; changes apply live. |
