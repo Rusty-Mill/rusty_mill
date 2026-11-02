@@ -59,14 +59,11 @@ fn runtimes() -> [(&'static str, Runtime); 2] {
 fn a_wakerless_pending_task_stays_alive_until_shutdown() {
     for (flavor, rt) in runtimes() {
         let (keep, probe) = probe();
-        let handle = rt.block_on(async {
-            let handle = rusty_tokio::spawn(async move {
-                let _keep = keep;
-                wakerless().await;
-            });
-            rusty_tokio::time::sleep(Duration::from_millis(100)).await;
-            handle
+        let handle = rt.spawn(async move {
+            let _keep = keep;
+            wakerless().await;
         });
+        rt.block_on(async { rusty_tokio::time::sleep(Duration::from_millis(100)).await });
         assert!(
             probe.upgrade().is_some(),
             "{flavor}: the task's future was dropped while it was still alive"
@@ -101,11 +98,8 @@ fn a_task_never_polled_before_shutdown_is_cancelled() {
 #[test]
 fn a_task_pending_on_a_live_waker_is_cancelled_at_shutdown() {
     for (flavor, rt) in runtimes() {
-        let handle = rt.block_on(async {
-            let handle = rusty_tokio::spawn(pending::<()>());
-            rusty_tokio::task::yield_now().await;
-            handle
-        });
+        let handle = rt.spawn(pending::<()>());
+        rt.block_on(async { rusty_tokio::time::sleep(Duration::from_millis(50)).await });
         let metrics = rt.metrics();
         drop(rt);
         assert_eq!(metrics.num_alive_tasks(), 0, "{flavor}");
