@@ -11,7 +11,9 @@
 //! Each window is borderless (`decorations(false)`) and draws its own chrome: a
 //! one-cell-row bar across the top holding the session tabs, a `+` new-tab
 //! button, and the minimize/maximize/close caption buttons, all laid out as
-//! ordinary cells so both renderers composite it for free. Dragging the bar
+//! ordinary cells so both renderers composite it for free. The bars use their
+//! own UI font at the configured size, so the Ctrl+=/Ctrl+- font zoom scales
+//! only the terminal text. Dragging the bar
 //! moves the window, double-click toggles maximize, and a thin band at the
 //! window edges drag-resizes (the native frame is gone).
 //!
@@ -572,6 +574,12 @@ struct WindowState<'a> {
     font: FontCache,
     cell_w: usize,
     cell_h: usize,
+    /// The chrome bar's and status ribbon's font, at the configured size
+    /// (`ui_px`): the Ctrl+=/Ctrl+- zoom changes only `font`.
+    ui_font: FontCache,
+    /// `ui_font`'s cell size: one bar cell.
+    bar_w: usize,
+    bar_h: usize,
     /// Inner margin in pixels around the pane area (`[window] padding`). The
     /// chrome bar stays flush; the grid sits inset by this on the other three
     /// sides (and below the bar), painted in the theme background.
@@ -661,8 +669,11 @@ struct WindowState<'a> {
     shells: Vec<crate::shells::DetectedShell>,
     /// The open settings page / shell menu, if any (drawn over the active tab).
     overlay: Option<Overlay>,
-    /// Current font size in px, tracked so the settings page can rebuild it.
+    /// Current terminal font size in px, zoom included.
     font_px: f32,
+    /// The configured (unzoomed) font size in px at the current DPI: the
+    /// bars' size, and what Ctrl+0 resets the terminal font to.
+    ui_px: f32,
     /// The window's current monitor DPI scale factor (1.0 = 100%), tracked so
     /// `WindowEvent::ScaleFactorChanged` can rescale `font_px` proportionally
     /// instead of leaving text rendered at the wrong physical size after a
@@ -1323,10 +1334,9 @@ impl WindowState<'_> {
         let inner_w = (px_w as usize).saturating_sub(2 * self.pad);
         let inner_h = (px_h as usize).saturating_sub(2 * self.pad);
         let cols = ((inner_w / self.cell_w).max(1)) as u16;
-        // One screen row goes to the chrome bar; one more to the status
-        // ribbon when it's on.
-        let bars = 1 + usize::from(self.status_enabled());
-        let rows = (((inner_h / self.cell_h).saturating_sub(bars)).max(1)) as u16;
+        // One bar row goes to the chrome bar; one more to the status ribbon
+        // when it's on.
+        let rows = ((inner_h.saturating_sub(self.bars_h()) / self.cell_h).max(1)) as u16;
         if (cols, rows) != (self.cols, self.rows) {
             self.cols = cols;
             self.rows = rows;
@@ -1351,7 +1361,7 @@ impl WindowState<'_> {
             let frame = PaneFrame {
                 grid: &page,
                 col0: 0,
-                row0: 1,
+                row0: 0,
                 focused: false,
                 cursor_on: false,
                 trail: Vec::new(),
@@ -1363,6 +1373,7 @@ impl WindowState<'_> {
                 &chrome,
                 &status,
                 &mut self.font,
+                &mut self.ui_font,
                 size.width,
                 size.height,
                 divider,
@@ -1486,7 +1497,7 @@ impl WindowState<'_> {
             .map(|(g, r, foc)| PaneFrame {
                 grid: g,
                 col0: r.col,
-                row0: r.row + 1,
+                row0: r.row,
                 focused: *foc,
                 cursor_on: blink,
                 trail: if *foc {
@@ -1510,7 +1521,7 @@ impl WindowState<'_> {
             frames.push(PaneFrame {
                 grid: dg,
                 col0: area.cols + 1, // right of the pane area's divider column
-                row0: 1,
+                row0: 0,
                 focused: false,
                 cursor_on: false,
                 trail: Vec::new(),
@@ -1523,6 +1534,7 @@ impl WindowState<'_> {
             &chrome,
             &status,
             &mut self.font,
+            &mut self.ui_font,
             size.width,
             size.height,
             divider,
@@ -1567,11 +1579,11 @@ impl WindowState<'_> {
             .as_ref()
             .map(|w| w.inner_size().width)
             .unwrap_or(0) as usize;
-        if px == 0 || self.cell_w == 0 {
+        if px == 0 {
             let c = self.cols as usize;
             return (c, c);
         }
-        (px.div_ceil(self.cell_w), px / self.cell_w)
+        (px.div_ceil(self.bar_w), px / self.bar_w)
     }
 
     /// Whether the bottom status ribbon is on (`[window] status_bar`,
@@ -2156,21 +2168,41 @@ impl WindowState<'_> {
         }
     }
 
-    /// The grid content's vertical pixel offset: the padding band plus the
-    /// chrome bar's own downward inset (the strip band above the tabs pushes
-    /// the bar — and everything under it — down; see `render::bar_inset`).
-    fn grid_oy(&self) -> usize {
-        self.pad + super::render::bar_inset(self.pad, self.cell_h)
+    /// Pixel height of the chrome bar plus its downward inset (the strip
+    /// band above the tabs; see `render::bar_inset`): the bar's hit area.
+    fn chrome_h(&self) -> usize {
+        super::render::bar_inset(self.pad, self.bar_h) + self.bar_h
     }
 
-    /// Map a physical pixel position to a clamped `(col, row)` *grid* cell
-    /// (the chrome bar occupies the screen row above grid row 0).
+    /// Pixel height both bars take from the pane area: the chrome bar (with
+    /// its inset) plus the status ribbon when it's on.
+    fn bars_h(&self) -> usize {
+        self.chrome_h() + usize::from(self.status_enabled()) * self.bar_h
+    }
+
+    /// The grid content's vertical pixel offset: the padding band below the
+    /// chrome bar (see `render::grid_top`).
+    fn grid_oy(&self) -> usize {
+        self.pad + self.chrome_h()
+    }
+
+    /// Whether window pixel row `y` is on the chrome bar.
+    fn in_chrome(&self, y: f64) -> bool {
+        (y.max(0.0) as usize) < self.chrome_h()
+    }
+
+    /// The chrome bar cell under window pixel column `x`, clamped to the hit
+    /// map. Callers check `hits` is non-empty first.
+    fn bar_col(&self, x: f64) -> usize {
+        (x.max(0.0) as usize / self.bar_w).min(self.hits.len() - 1)
+    }
+
+    /// Map a physical pixel position to a clamped `(col, row)` *grid* cell.
     fn cell_at(&self, px: f64, py: f64) -> (usize, usize) {
         let pad = self.pad as f64;
         let col = ((px - pad).max(0.0) as usize / self.cell_w)
             .min((self.cols as usize).saturating_sub(1));
         let row = ((py - self.grid_oy() as f64).max(0.0) as usize / self.cell_h)
-            .saturating_sub(1)
             .min((self.rows as usize).saturating_sub(1));
         (col, row)
     }
@@ -2214,7 +2246,7 @@ impl WindowState<'_> {
             }
             return;
         }
-        if (y.max(0.0) as usize) < self.cell_h {
+        if self.in_chrome(y) {
             return self.on_bar_click(x);
         }
         if self.overlay.is_some() {
@@ -2413,8 +2445,8 @@ impl WindowState<'_> {
         let Some(r) = self.focused_pane_rect() else {
             return false;
         };
-        let top_px = (self.grid_oy() + (r.row + 1) * self.cell_h) as f64;
-        let bottom_px = (self.grid_oy() + (r.row + r.rows + 1) * self.cell_h) as f64;
+        let top_px = (self.grid_oy() + r.row * self.cell_h) as f64;
+        let bottom_px = (self.grid_oy() + (r.row + r.rows) * self.cell_h) as f64;
         let Some(scroll_up) =
             drag_scroll_direction(self.mouse_pos.1, top_px, bottom_px, DRAG_SCROLL_MARGIN)
         else {
@@ -2444,7 +2476,7 @@ impl WindowState<'_> {
         if self.hits.is_empty() {
             return; // no frame laid out yet
         }
-        let col = (x.max(0.0) as usize / self.cell_w).min(self.hits.len() - 1);
+        let col = self.bar_col(x);
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -2518,7 +2550,7 @@ impl WindowState<'_> {
         if self.hits.is_empty() {
             return;
         }
-        let col = (x.max(0.0) as usize / self.cell_w).min(self.hits.len() - 1);
+        let col = self.bar_col(x);
         if let Hit::Tab(i) | Hit::CloseTab(i) = self.hits[col]
             && i < self.tabs.len()
         {
@@ -2776,13 +2808,9 @@ impl WindowState<'_> {
             Action::ScrollPromptUp => self.scroll_key(true, true),
             Action::ScrollPromptDown => self.scroll_key(true, false),
             Action::ToggleFullscreen => self.toggle_fullscreen(),
-            Action::FontSizeUp => self.zoom_font(FONT_ZOOM_STEP),
-            Action::FontSizeDown => self.zoom_font(-FONT_ZOOM_STEP),
-            Action::FontSizeReset => {
-                let px = self.config.font_size.unwrap_or(FONT_PX);
-                let ligatures = self.config.ligatures.unwrap_or(true);
-                self.rebuild_font(px, ligatures);
-            }
+            Action::FontSizeUp => self.zoom_font(Zoom::In),
+            Action::FontSizeDown => self.zoom_font(Zoom::Out),
+            Action::FontSizeReset => self.zoom_font(Zoom::Reset),
         }
     }
 
@@ -2798,13 +2826,14 @@ impl WindowState<'_> {
         window.set_fullscreen((!now_fullscreen).then_some(Fullscreen::Borderless(None)));
     }
 
-    /// Grow/shrink the font by `delta` px (Ctrl+=/Ctrl+-, the Chrome/VS Code/
-    /// iTerm2/Windows Terminal convention), clamped to the same range the
-    /// settings overlay enforces.
-    fn zoom_font(&mut self, delta: f32) {
-        let px = (self.font_px + delta).clamp(super::settings::FONT_MIN, super::settings::FONT_MAX);
+    /// Zoom the terminal text (Ctrl+=/Ctrl+-/Ctrl+0, the Chrome/VS Code/
+    /// iTerm2/Windows Terminal convention); see [`zoom_px`]. Only the panes'
+    /// font changes: the chrome and status bars keep the UI font, and the
+    /// configured size is untouched, so a zoom never persists.
+    fn zoom_font(&mut self, zoom: Zoom) {
+        let px = zoom_px(zoom, self.font_px, self.ui_px, self.scale_factor);
         let ligatures = self.config.ligatures.unwrap_or(true);
-        self.rebuild_font(px, ligatures);
+        self.rebuild_font_at(px, ligatures);
     }
 
     /// Enter incremental scrollback-search mode with an empty query.
@@ -3098,8 +3127,7 @@ impl WindowState<'_> {
         // SGR-pixel mode (`?1016`): the same SGR encoding, but the position
         // is the pointer's pixel offset within the target pane's text area
         // (this pane is its own terminal, so pane-relative is the analogue of
-        // xterm's text-area-relative pixels). The chrome bar above the grid
-        // is one cell row tall, hence the +1 on the pane's row origin.
+        // xterm's text-area-relative pixels), below the chrome bar.
         if modes.extended & 8 != 0
             && let Some(r) = self.pane_rect(id)
         {
@@ -3107,7 +3135,7 @@ impl WindowState<'_> {
                 self.mouse_pos,
                 (
                     self.pad + r.col * self.cell_w,
-                    self.pad + (r.row + 1) * self.cell_h,
+                    self.grid_oy() + r.row * self.cell_h,
                 ),
                 (r.cols * self.cell_w, r.rows * self.cell_h),
             );
@@ -3151,7 +3179,7 @@ impl WindowState<'_> {
     /// repaint.
     fn update_hover_link(&mut self) -> bool {
         let (x, y) = self.mouse_pos;
-        let new = if self.mods.control_key() && (y.max(0.0) as usize) >= self.cell_h {
+        let new = if self.mods.control_key() && !self.in_chrome(y) {
             self.pane().and_then(|p| {
                 let (col, row) = self.cell_in_focused(x, y);
                 let g = p.grid.lock();
@@ -3377,7 +3405,7 @@ impl WindowState<'_> {
         let s = Settings::new(
             &self.config,
             &self.theme,
-            self.font_px,
+            self.ui_px,
             &self.shells,
             opacity_supported,
         );
@@ -3648,12 +3676,15 @@ impl WindowState<'_> {
     }
 
     /// The overlay-grid cell under window pixel `(x, y)`, `None` above the
-    /// chrome bar. Mirrors the overlay's own layout: the bar takes the first
-    /// cell row flush, the grid sits below it inset by `pad`.
+    /// chrome bar. Mirrors the overlay's own layout: the bar sits flush on
+    /// top, the grid below it inset by `pad`.
     fn overlay_cell(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        if self.in_chrome(y) {
+            return None;
+        }
         let col = ((x - self.pad as f64).max(0.0) as usize) / self.cell_w;
-        let screen_row = ((y - self.grid_oy() as f64).max(0.0) as usize) / self.cell_h;
-        Some((col, screen_row.checked_sub(1)?))
+        let row = ((y - self.grid_oy() as f64).max(0.0) as usize) / self.cell_h;
+        Some((col, row))
     }
 
     /// Handle a click in the overlay body (below the chrome bar): select the
@@ -3746,8 +3777,10 @@ impl WindowState<'_> {
                     self.apply_theme_live(t);
                 }
             }
-            Field::FontSize => self.rebuild_font(font_size, self.config.ligatures.unwrap_or(true)),
-            Field::Ligatures => self.rebuild_font(self.font_px, ligatures),
+            Field::FontSize => {
+                self.rebuild_font(font_size, font_size, self.config.ligatures.unwrap_or(true))
+            }
+            Field::Ligatures => self.rebuild_font(self.ui_px, self.font_px, ligatures),
             Field::Cursor => {
                 self.config.cursor_style = Some(cursor);
                 let blink = self.config.cursor_blink.unwrap_or(false);
@@ -3881,16 +3914,18 @@ impl WindowState<'_> {
         }
     }
 
-    /// Rebuild the glyph cache at `px` / `ligatures`, re-fit the grid to the new
-    /// cell size, and rebuild the renderer (the GPU atlas is font-bound). This
-    /// is the user-driven entry point (settings overlay font-size/ligatures
-    /// fields): it persists `px` as the configured font size. A monitor-DPI
-    /// change should *not* overwrite that preference — see
-    /// [`Self::on_scale_factor_changed`], which calls [`Self::rebuild_font_at`]
-    /// directly instead.
-    fn rebuild_font(&mut self, px: f32, ligatures: bool) {
-        if self.rebuild_font_at(px, ligatures) {
-            self.config.font_size = Some(px);
+    /// Rebuild both fonts, the bars' at `ui_px` and the panes' at `font_px`,
+    /// re-fit the grid to the new cell size, and rebuild the renderer (the
+    /// GPU atlas is font-bound). This is the user-driven entry point
+    /// (settings overlay font-size/ligatures fields): it persists `ui_px` as
+    /// the configured font size. A monitor-DPI change should *not* overwrite
+    /// that preference — see [`Self::on_scale_factor_changed`].
+    fn rebuild_font(&mut self, ui_px: f32, font_px: f32, ligatures: bool) {
+        if !self.rescale_ui_font(ui_px, ligatures) {
+            return;
+        }
+        if self.rebuild_font_at(font_px, ligatures) {
+            self.config.font_size = Some(ui_px);
             self.config.ligatures = Some(ligatures);
         }
     }
@@ -3914,16 +3949,7 @@ impl WindowState<'_> {
     /// whether it succeeded (a missing/unparseable font leaves state
     /// untouched).
     fn rescale_font_cache(&mut self, px: f32, ligatures: bool, scale_factor: f64) -> bool {
-        let Some(font_set) = font::load_set(
-            self.config.font.as_deref(),
-            self.config.font_bold.as_deref(),
-            self.config.font_italic.as_deref(),
-            self.config.font_bold_italic.as_deref(),
-            self.config.font_fallback.as_deref(),
-        ) else {
-            return false;
-        };
-        let Some(font) = FontCache::new(font_set, px, ligatures) else {
+        let Some(font) = load_font(&self.config, px, ligatures) else {
             return false;
         };
         let (cw, ch) = font.cell_size();
@@ -3932,6 +3958,21 @@ impl WindowState<'_> {
         self.cell_h = ch.max(1);
         self.font_px = px;
         self.scale_factor = scale_factor;
+        true
+    }
+
+    /// Rebuild the bars' UI font at `px` — no renderer rebuild, so this is
+    /// safe before an OS window exists. Returns whether it succeeded (a
+    /// missing/unparseable font leaves state untouched).
+    fn rescale_ui_font(&mut self, px: f32, ligatures: bool) -> bool {
+        let Some(font) = load_font(&self.config, px, ligatures) else {
+            return false;
+        };
+        let (bw, bh) = font.cell_size();
+        self.ui_font = font;
+        self.bar_w = bw.max(1);
+        self.bar_h = bh.max(1);
+        self.ui_px = px;
         true
     }
 
@@ -3981,6 +4022,7 @@ impl WindowState<'_> {
         let ratio = new_scale / self.scale_factor;
         let ligatures = self.config.ligatures.unwrap_or(true);
         let px = ((self.font_px as f64) * ratio) as f32;
+        self.rescale_ui_font(((self.ui_px as f64) * ratio) as f32, ligatures);
         if self.rescale_font_cache(px, ligatures, new_scale) {
             self.after_font_rescale();
         }
@@ -4842,13 +4884,13 @@ impl WindowState<'_> {
             let ratio = target_scale / self.scale_factor;
             let px = ((self.font_px as f64) * ratio) as f32;
             let ligatures = self.config.ligatures.unwrap_or(true);
+            self.rescale_ui_font(((self.ui_px as f64) * ratio) as f32, ligatures);
             self.rescale_font_cache(px, ligatures, target_scale);
         }
         let width = (self.cols as usize * self.cell_w + 2 * self.pad) as u32;
-        // One extra cell row on top for the chrome bar (plus one at the bottom
-        // for the status ribbon when it's on), plus the padding band.
-        let bars = 1 + usize::from(self.status_enabled());
-        let height = ((self.rows as usize + bars) * self.cell_h + 2 * self.pad) as u32;
+        // The chrome bar on top (plus the status ribbon at the bottom when
+        // it's on), plus the padding band.
+        let height = (self.rows as usize * self.cell_h + self.bars_h() + 2 * self.pad) as u32;
         // `--title` (or a config `title` key) seeds the initial title; the
         // child's own OSC 0/2 still wins once it emits one (see the per-frame
         // `set_title` above).
@@ -5274,13 +5316,12 @@ impl WindowState<'_> {
                         let d = self.tab_drag.as_ref().unwrap();
                         (d.moving, d.press_x, d.idx)
                     };
-                    if !moving && (position.x - press_x).abs() > self.cell_w as f64 {
+                    if !moving && (position.x - press_x).abs() > self.bar_w as f64 {
                         moving = true;
                     }
                     let mut to = from;
                     if moving {
-                        let col =
-                            (position.x.max(0.0) as usize / self.cell_w).min(self.hits.len() - 1);
+                        let col = self.bar_col(position.x);
                         to = tab_drag_target(col, &tab_spans(&self.hits), from);
                     }
                     if let Some(d) = &mut self.tab_drag {
@@ -5294,9 +5335,8 @@ impl WindowState<'_> {
                 // Chrome-bar hover feedback: track the element under the
                 // pointer and repaint when it changes (drag-strip cells and
                 // anything below the bar count as no hover).
-                let hover = if (position.y.max(0.0) as usize) < self.cell_h && !self.hits.is_empty()
-                {
-                    let col = (position.x.max(0.0) as usize / self.cell_w).min(self.hits.len() - 1);
+                let hover = if self.in_chrome(position.y) && !self.hits.is_empty() {
+                    let col = self.bar_col(position.x);
                     match self.hits[col] {
                         Hit::Drag => None,
                         h => Some(h),
@@ -5356,7 +5396,7 @@ impl WindowState<'_> {
                     // An open overlay (menu / settings) is a page of controls,
                     // not selectable text — the I-beam below would mislead.
                     None if self.overlay.is_some() => CursorIcon::Default,
-                    None if (position.y.max(0.0) as usize) >= self.cell_h => {
+                    None if !self.in_chrome(position.y) => {
                         if self.hover_link.is_some() {
                             CursorIcon::Pointer
                         } else {
@@ -5428,7 +5468,7 @@ impl WindowState<'_> {
                             // of falling through to PRIMARY-paste, which
                             // previously happened regardless of y-position —
                             // the chrome bar was never even consulted.
-                            if (self.mouse_pos.1.max(0.0) as usize) < self.cell_h {
+                            if self.in_chrome(self.mouse_pos.1) {
                                 self.on_bar_middle_click(self.mouse_pos.0);
                                 return;
                             }
@@ -5616,8 +5656,11 @@ impl<'a> App<'a> {
         )
         .ok_or("no monospace font found")?;
         let ligatures = self.config.ligatures.unwrap_or(true);
+        let ui_font =
+            FontCache::new(font_set.clone(), font_px, ligatures).ok_or("font failed to parse")?;
         let font = FontCache::new(font_set, font_px, ligatures).ok_or("font failed to parse")?;
         let (cell_w, cell_h) = font.cell_size();
+        let (bar_w, bar_h) = ui_font.cell_size();
         Ok(WindowState {
             backend: self.backend,
             config: self.config.clone(),
@@ -5630,6 +5673,9 @@ impl<'a> App<'a> {
             font,
             cell_w: cell_w.max(1),
             cell_h: cell_h.max(1),
+            ui_font,
+            bar_w: bar_w.max(1),
+            bar_h: bar_h.max(1),
             pad: self.config.padding.unwrap_or(DEFAULT_PAD) as usize,
             window: None,
             renderer: None,
@@ -5662,6 +5708,7 @@ impl<'a> App<'a> {
             shells: self.shells.clone(),
             overlay: None,
             font_px,
+            ui_px: font_px,
             // Updated to the real value once the OS window exists (see
             // `ensure_window`); 1.0 is the correct assumption until then.
             scale_factor: 1.0,
@@ -5960,6 +6007,44 @@ fn ime_commit_target(searching: bool, overlay: bool, copy_mode: bool) -> ImeComm
     }
 }
 
+/// A Ctrl+=/Ctrl+-/Ctrl+0 font zoom.
+#[derive(Clone, Copy, Debug)]
+enum Zoom {
+    In,
+    Out,
+    Reset,
+}
+
+/// The terminal font size, in physical px, after `zoom` from `current`.
+/// `base` is the configured size at the current DPI: a reset returns to it
+/// exactly. A step stays within the settings range scaled to the monitor
+/// (`FONT_MIN..=FONT_MAX` logical px), widened to include `base`, so a
+/// DPI-scaled size outside the logical range is still reachable.
+fn zoom_px(zoom: Zoom, current: f32, base: f32, scale: f64) -> f32 {
+    let step = match zoom {
+        Zoom::Reset => return base,
+        Zoom::In => FONT_ZOOM_STEP,
+        Zoom::Out => -FONT_ZOOM_STEP,
+    };
+    let scale = scale as f32;
+    let lo = (super::settings::FONT_MIN * scale).min(base);
+    let hi = (super::settings::FONT_MAX * scale).max(base);
+    (current + step).clamp(lo, hi)
+}
+
+/// Load the configured font set and build a glyph cache at `px`, `None` when
+/// no usable font is found.
+fn load_font(config: &Config, px: f32, ligatures: bool) -> Option<FontCache> {
+    let set = font::load_set(
+        config.font.as_deref(),
+        config.font_bold.as_deref(),
+        config.font_italic.as_deref(),
+        config.font_bold_italic.as_deref(),
+        config.font_fallback.as_deref(),
+    )?;
+    FontCache::new(set, px, ligatures)
+}
+
 /// The IME candidate-popup origin, in physical pixels, for a cursor at
 /// pane-local `(col, row)` within the pane whose rect starts at
 /// `pane_origin` (in cells) — pulled out of `update_ime_area` so the split
@@ -5975,9 +6060,9 @@ fn ime_cursor_area_origin(
     let (base_col, base_row) = pane_origin;
     let (col, row) = cursor;
     let x = (pad + (base_col + col) * cell_w) as f64;
-    // +1 cell row for the chrome bar above the grid, plus the grid's own
-    // vertical offset (padding band + the bar's inset).
-    let y = (oy + (base_row + row + 1) * cell_h) as f64;
+    // The cell's top, below the grid's own vertical offset (padding band +
+    // the chrome bar).
+    let y = (oy + (base_row + row) * cell_h) as f64;
     (x, y)
 }
 
@@ -6361,12 +6446,12 @@ mod tests {
     use super::shell_quote;
     use super::{
         Hit, ImeCommitTarget, MenuKind, SETTINGS_CARDS_TOP, SETTINGS_FOOTER_H, SETTINGS_ROW_H,
-        SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SettingsHit, Widget, accumulate_scroll_lines,
+        SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SettingsHit, Widget, Zoom, accumulate_scroll_lines,
         arrow_presses, display_path, drag_scroll_direction, encode_paste, fmt_runtime,
         ime_commit_target, ime_cursor_area_origin, is_openable_url, mix, osc52_reply,
         pane_pixel_point, path_from_file_uri, put_text, read_git_branch, settings_hit,
         settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
-        tab_widths, visible_tab_range, widget_text,
+        tab_widths, visible_tab_range, widget_text, zoom_px,
     };
     use crate::core::Cell;
 
@@ -6868,11 +6953,32 @@ mod tests {
     }
 
     #[test]
+    fn zoom_reset_restores_the_dpi_scaled_size_exactly() {
+        // Configured 48 px on a 200% monitor: 96 physical px, above the
+        // logical FONT_MAX. Reset lands on it; zoom steps reach past it.
+        assert_eq!(zoom_px(Zoom::Reset, 72.0, 96.0, 2.0), 96.0);
+        assert_eq!(zoom_px(Zoom::In, 96.0, 96.0, 2.0), 97.0);
+        assert_eq!(zoom_px(Zoom::Out, 96.0, 96.0, 2.0), 95.0);
+        // Configured 4 px at 100% (below FONT_MIN): reset is exact too.
+        assert_eq!(zoom_px(Zoom::Reset, 10.0, 4.0, 1.0), 4.0);
+        assert_eq!(zoom_px(Zoom::Out, 4.0, 4.0, 1.0), 4.0);
+    }
+
+    #[test]
+    fn zoom_steps_clamp_to_the_dpi_scaled_range() {
+        assert_eq!(zoom_px(Zoom::In, 72.0, 18.0, 1.0), 72.0);
+        assert_eq!(zoom_px(Zoom::Out, 6.0, 18.0, 1.0), 6.0);
+        assert_eq!(zoom_px(Zoom::In, 144.0, 36.0, 2.0), 144.0);
+        assert_eq!(zoom_px(Zoom::Out, 12.0, 36.0, 2.0), 12.0);
+        assert_eq!(zoom_px(Zoom::In, 18.0, 18.0, 1.0), 19.0);
+    }
+
+    #[test]
     fn ime_cursor_area_origin_is_window_relative_for_an_unsplit_pane() {
-        // Unsplit pane origin (0, 0): matches the pre-fix single-pane math
-        // exactly, including the chrome-bar +1 row and the padding band.
+        // Unsplit pane origin (0, 0): the grid offset (padding band and
+        // chrome bar) plus the cursor's cell.
         let (x, y) = ime_cursor_area_origin(4, 4, 10, 20, (0, 0), (3, 2));
-        assert_eq!((x, y), ((4 + 3 * 10) as f64, (4 + (2 + 1) * 20) as f64));
+        assert_eq!((x, y), ((4 + 3 * 10) as f64, (4 + 2 * 20) as f64));
     }
 
     #[test]

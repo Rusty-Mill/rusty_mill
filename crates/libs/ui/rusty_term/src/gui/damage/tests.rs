@@ -165,7 +165,7 @@ pub(in crate::gui) fn panes<'a>(
             let p = PaneFrame {
                 grid: v,
                 col0,
-                row0: 1,
+                row0: 0,
                 focused: x.focused == (i == 0),
                 cursor_on: x.cursor_on,
                 trail: x
@@ -212,7 +212,7 @@ fn assert_partial_matches_full(
     let rows = sizes.iter().map(|s| s.1).max().unwrap_or(0);
     let (w, h) = (PAD * 2 + cols * CELL.0, PAD * 2 + (rows + 2) * CELL.1);
     let (chrome, status) = (bar("tab", 0x404080), bar("status", 0x204020));
-    let mut font = OverhangFont;
+    let (mut font, mut ui) = (OverhangFont, OverhangFont);
     let mut x = Extras {
         cursor_on: true,
         focused: true,
@@ -230,13 +230,13 @@ fn assert_partial_matches_full(
         let panes = panes(&views, x);
         let mut full = vec![0xDEAD_BEEF; w * h];
         composite(
-            &mut full, &panes, &chrome, &status, &mut font, w, h, COLORS[0], COLORS[1], COLORS[2],
-            PAD, None,
+            &mut full, &panes, &chrome, &status, &mut font, &mut ui, w, h, COLORS[0], COLORS[1],
+            COLORS[2], PAD, None,
         );
 
         let slot = n % chain;
         let age = painted_at[slot].map_or(0, |f| (n - f) as u8);
-        let frame = Frame::capture(&panes, &chrome, &status, 7, (w, h), COLORS, PAD);
+        let frame = Frame::capture(&panes, &chrome, &status, [7, 7], (w, h), COLORS, PAD);
         let plan = damage.plan(&frame, age);
         let shown = damage.shown(&frame, &plan);
         let buf = &mut bufs[slot];
@@ -246,6 +246,7 @@ fn assert_partial_matches_full(
             &chrome,
             &status,
             &mut font,
+            &mut ui,
             w,
             h,
             COLORS[0],
@@ -341,7 +342,7 @@ fn repaint_after(bytes: &[u8]) -> Vec<bool> {
             hover_link: None,
             marks: Vec::new(),
         };
-        Frame::capture(&[pane], &[], &[], 1, (120, 80), COLORS, 0)
+        Frame::capture(&[pane], &[], &[], [1, 1], (120, 80), COLORS, 0)
     };
     let mut damage = Damage::default();
     damage.presented(capture(&g));
@@ -376,7 +377,7 @@ fn unknown_or_stale_buffers_repaint_fully() {
         hover_link: None,
         marks: Vec::new(),
     };
-    let frame = |v, font| Frame::capture(&[pane(v)], &[], &[], font, (24, 20), COLORS, 0);
+    let frame = |v, font| Frame::capture(&[pane(v)], &[], &[], [font, font], (24, 20), COLORS, 0);
     let mut damage = Damage::default();
     assert_eq!(damage.plan(&frame(&v, 1), 1), Plan::Full, "no history");
     damage.presented(frame(&v, 1));
@@ -429,7 +430,7 @@ fn ime_overhang_survives_a_neighbor_repaint() {
                 hover_link: None,
                 marks: Vec::new(),
             }];
-            let frame = Frame::capture(&pane, &[], &[], 7, (w, h), COLORS, 0);
+            let frame = Frame::capture(&pane, &[], &[], [7, 7], (w, h), COLORS, 0);
             let plan = damage.as_ref().map_or(Plan::Full, |d| d.plan(&frame, 1));
             composite(
                 buf,
@@ -437,6 +438,7 @@ fn ime_overhang_survives_a_neighbor_repaint() {
                 &[],
                 &[],
                 font,
+                &mut OverhangFont,
                 w,
                 h,
                 COLORS[0],
