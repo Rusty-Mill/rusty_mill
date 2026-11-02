@@ -51,6 +51,7 @@ pub(crate) fn event_line(ev: &Event<'_>, held: usize) -> String {
         Event::ChildExited => "exited".to_owned(),
         Event::HangUp => "hangup".to_owned(),
         Event::GraceExpired => "grace-expired".to_owned(),
+        Event::CursorWaitExpired => "cursor-wait-expired".to_owned(),
         // A failed read replays as an empty slice, which fails the same way.
         Event::Fetched { bytes, .. } => {
             format!("fetched {}", hex_or_dash(bytes.unwrap_or_default()))
@@ -152,6 +153,7 @@ mod tests {
             Effect::CloseServer => Some("close".to_owned()),
             Effect::Eof => Some("eof".to_owned()),
             Effect::Fetch { at, len, .. } => Some(format!("fetch {at} {len}")),
+            Effect::AwaitCursor => Some("await-cursor".to_owned()),
             Effect::Log(_) => None,
         }
     }
@@ -226,6 +228,7 @@ mod tests {
             "serve-reads" => Event::ServeReads,
             "hangup" => Event::HangUp,
             "grace-expired" => Event::GraceExpired,
+            "cursor-wait-expired" => Event::CursorWaitExpired,
             "exited" => Event::ChildExited,
             "fetched" => {
                 *payload = unhex(words[1]).expect("fetched hex");

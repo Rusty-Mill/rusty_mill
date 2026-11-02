@@ -83,6 +83,10 @@ pub(crate) struct View {
     pub writes_ready: bool,
     /// A streamed write is unfinished: no packet is taken until it is.
     pub streaming: bool,
+    /// A CPR the host asked for after a resize is awaited: no packet is
+    /// taken until it comes or its wait ends, as conhost holds its API
+    /// thread (#1375).
+    pub awaiting_cursor: bool,
     /// A streamed write's next slice is due: the next turn reads it.
     pub fetch_due: bool,
 }
@@ -120,9 +124,14 @@ pub(crate) fn turn(v: &View) -> Turn {
 }
 
 /// Whether a READ_IO can be sent now: none is in flight, no streamed
-/// write is unfinished, and admission allows another packet.
+/// write is unfinished, no CPR is awaited, and admission allows another
+/// packet.
 fn read_admitted(v: &View) -> bool {
-    !v.closed && !v.read_in_flight && !v.streaming && admits_read(v.waiting, v.parked)
+    !v.closed
+        && !v.read_in_flight
+        && !v.streaming
+        && !v.awaiting_cursor
+        && admits_read(v.waiting, v.parked)
 }
 
 /// Whether the engine's wait must not block: work is left that the next
@@ -510,5 +519,18 @@ mod tests {
         assert!(!grace.expire(deadline - Duration::from_nanos(1)));
         assert!(grace.expire(deadline + Duration::from_secs(9)));
         assert_eq!(grace.until(false, deadline), None);
+    }
+
+    #[test]
+    fn an_awaited_cursor_holds_packets_but_not_input() {
+        let v = View {
+            input: 10,
+            awaiting_cursor: true,
+            ..View::default()
+        };
+        let t = turn(&v);
+        assert!(!t.submit_read, "no packet until the CPR or the wait ends");
+        assert_eq!(t.input, 10, "the CPR comes in the input");
+        assert!(turn(&View::default()).submit_read);
     }
 }

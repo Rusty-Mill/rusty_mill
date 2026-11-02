@@ -50,6 +50,7 @@ pub(crate) fn run(args: &[String]) -> Result<String, String> {
             let set = calls::set_cursor_info(a.num(0)?, a.num::<u8>(1)? != 0);
             format!("{} after={}", done(set), cursor_info())
         }
+        "mark" => mark(&a.text(0)?),
         "set-cursor" => {
             let set = calls::set_cursor(coord(a.num(0)?, a.num(1)?));
             format!("{} {}", done(set), pen())
@@ -242,6 +243,24 @@ fn print(mode: u32, units: &[u16]) -> String {
         done(set),
         val(n, |n| n.to_string()),
         pen()
+    )
+}
+
+/// What PSReadLine does to draw its line: read the cursor from screen
+/// buffer info, put it at the start of that row absolutely, and write
+/// `units` there (#1375).
+fn mark(units: &[u16]) -> String {
+    let at = match calls::sbi() {
+        Ok(i) => i.dwCursorPosition,
+        Err(e) => return format!("error={e}"),
+    };
+    let set = calls::set_cursor(coord(0, at.Y));
+    let n = calls::write_w(units);
+    format!(
+        "row={} set={} n={}",
+        at.Y,
+        done(set),
+        val(n, |n| n.to_string())
     )
 }
 

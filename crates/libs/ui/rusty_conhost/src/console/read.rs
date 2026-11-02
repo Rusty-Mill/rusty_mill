@@ -129,6 +129,13 @@ impl Console {
                 self.input_end = false;
             }
             for piece in self.decoder.feed(byte.as_slice(), end) {
+                // The CPR a resize asked for is the host's, not a key.
+                if self.awaiting_cursor()
+                    && let Some(at) = super::sync::cursor_report(&piece.raw)
+                {
+                    self.cursor_reported(at, out, fx);
+                    continue;
+                }
                 match (&piece.token, vt) {
                     (Token::Win32(k), _) => self.input_keys.push_back((*k, vt)),
                     // Ctrl+C is the host's under PROCESSED_INPUT in either mode.
