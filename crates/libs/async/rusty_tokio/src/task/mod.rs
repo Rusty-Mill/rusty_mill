@@ -26,6 +26,7 @@ mod join;
 mod join_set;
 mod local;
 mod local_key;
+mod owned;
 mod state;
 pub(crate) mod trace;
 mod yield_now;
@@ -41,9 +42,11 @@ pub use local::{spawn_local, LocalEnterGuard, LocalSet};
 pub use local_key::{AccessError, LocalKey, TaskLocalFuture};
 pub use yield_now::{yield_now, YieldNow};
 
+pub(crate) use owned::OwnedTasks;
+
 use crate::runtime::Shared;
 use join::{AbnormalHook, JoinInner, Outcome};
-use state::{State, StateSnapshot};
+use state::{Begin, State, StateSnapshot};
 use std::future::Future;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
@@ -79,22 +82,15 @@ impl Task {
     /// abort requests, and re-schedules itself if it was woken again
     /// while it was running.
     pub(crate) fn run(self: Arc<Self>) {
-        if !self.state.begin_poll() {
-            // Someone aborted us before we ever got polled; the future
-            // (if still present) is dropped without being polled again.
-            self.future.lock().unwrap().take();
-            self.state.end_poll(true);
-            self.fire_abnormal_hook(Outcome::Aborted);
-            self.mark_finished();
-            return;
+        match self.state.begin_poll() {
+            Begin::Poll => {}
+            Begin::Aborted => return self.cancel(),
+            // Runtime shutdown already finished this task.
+            Begin::Stale => return,
         }
 
         if self.state.is_aborted() {
-            self.future.lock().unwrap().take();
-            self.state.end_poll(true);
-            self.fire_abnormal_hook(Outcome::Aborted);
-            self.mark_finished();
-            return;
+            return self.cancel();
         }
 
         let mut slot = self.future.lock().unwrap();
@@ -104,10 +100,7 @@ impl Task {
             // must never panic a worker thread, and the joiner must
             // never be left hanging because of it).
             drop(slot);
-            self.state.end_poll(true);
-            self.fire_abnormal_hook(Outcome::Aborted);
-            self.mark_finished();
-            return;
+            return self.cancel();
         };
         drop(slot);
 
@@ -140,6 +133,12 @@ impl Task {
             Ok(std::task::Poll::Pending) => {
                 *self.future.lock().unwrap() = Some(future);
                 if self.state.end_poll(false) {
+                    if self.state.is_aborted() {
+                        // Aborted mid-poll, perhaps by runtime shutdown,
+                        // whose run queues nothing will drain: cancel
+                        // here rather than through the scheduler.
+                        return self.run();
+                    }
                     // Woken again while we were polling: go around once
                     // more instead of waiting for an external wake.
                     self.schedule();
@@ -148,26 +147,63 @@ impl Task {
             Err(payload) => {
                 *self.future.lock().unwrap() = None;
                 self.state.end_poll(true);
-                self.fire_abnormal_hook(Outcome::Panicked(payload));
+                // Released before the join waker runs, as in `cancel`.
                 self.mark_finished();
+                self.fire_abnormal_hook(Outcome::Panicked(payload));
             }
         }
     }
 
-    /// Decrements the scheduler's live-task count -- see
-    /// [`Shared::wait_for_tasks_drain`] and issue #12's graceful
-    /// shutdown, the only consumer of this count. Called from every
-    /// terminal path in `run` (normal completion, panic, or abort),
-    /// never on `Pending`, since a `Pending` task is still alive and
-    /// expected to be polled again.
+    /// Finishes a task this thread owns RUNNING for without polling it
+    /// again: drops the future, resolves the `JoinHandle` as cancelled
+    /// and releases the task.
+    ///
+    /// Panic-safe: a future whose destructor panics still leaves the
+    /// task complete and released, and its `JoinHandle` reports that
+    /// panic, as on tokio. The task is released before its `JoinHandle`
+    /// is resolved, so a join waker that panics can only unwind out of
+    /// the hook, with the bookkeeping already done.
+    fn cancel(&self) {
+        let future = self.future.lock().unwrap().take();
+        // Dropped after the lock: a future's drop can run arbitrary code.
+        let dropped = panic::catch_unwind(AssertUnwindSafe(move || drop(future)));
+        self.state.end_poll(true);
+        self.mark_finished();
+        self.fire_abnormal_hook(match dropped {
+            Ok(()) => Outcome::Aborted,
+            Err(payload) => Outcome::Panicked(payload),
+        });
+    }
+
+    /// Releases the task from the runtime's [`OwnedTasks`] and counts it
+    /// out of `num_alive_tasks` (see [`Shared::wait_for_tasks_drain`]).
+    /// Called from every terminal path in `run`, never on `Pending`, since
+    /// a `Pending` task is still alive and expected to be polled again.
+    /// Only the first call for a task counts.
     fn mark_finished(&self) {
-        if let Some(shared) = self.scheduler.upgrade() {
+        let Some(shared) = self.scheduler.upgrade() else {
+            return;
+        };
+        let released = shared.owned.remove(self.id);
+        if released.is_some() {
             shared.task_finished();
         }
     }
 
+    /// Cancels this task as part of runtime shutdown, wherever it is: an
+    /// idle or queued task is finished here; a task mid-poll on another
+    /// thread is finished by that thread as soon as its poll returns.
+    pub(crate) fn shutdown(self: Arc<Self>) {
+        if self.state.begin_shutdown() {
+            self.cancel();
+        }
+    }
+
     fn fire_abnormal_hook(&self, outcome: Outcome) {
-        if let Some(hook) = self.abnormal_hook.lock().unwrap().take() {
+        // Taken in its own statement so the lock is released before the
+        // hook runs: it wakes the join waker, which may panic.
+        let hook = self.abnormal_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
             hook(outcome);
         }
     }
@@ -246,6 +282,14 @@ where
     });
 
     shared.task_spawned();
-    shared.schedule(task.clone());
+    if shared.owned.bind(&task) {
+        shared.schedule(task.clone());
+    } else {
+        // The runtime has shut down: nothing would ever run this task.
+        // Its never-polled future is dropped and the handle resolves as
+        // cancelled, as on tokio.
+        shared.task_finished();
+        task.clone().shutdown();
+    }
     handle.with_task(task)
 }

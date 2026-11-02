@@ -162,6 +162,10 @@ pub(crate) struct Shared {
     /// the necessary synchronization with whichever thread just
     /// decremented it to zero.
     active_tasks: AtomicUsize,
+    /// Every task spawned and not yet finished. The runtime owns its
+    /// tasks through this, not only through their wakers, so a task with
+    /// no stored waker stays alive until shutdown cancels it (#405).
+    pub(crate) owned: task::OwnedTasks,
     drain_lock: Mutex<()>,
     drain_condvar: Condvar,
     /// Per-worker counters backing [`RuntimeMetrics`] -- how many tasks
@@ -206,6 +210,20 @@ pub(crate) struct Shared {
     name: Option<String>,
     /// This runtime's opaque identity -- see [`Id`]/[`Handle::id`].
     pub(crate) id: Id,
+}
+
+type PanicPayload = Box<dyn std::any::Any + Send>;
+
+/// Keeps the first panic payload of a shutdown sweep. Later ones are
+/// leaked rather than dropped: a payload is arbitrary user data whose
+/// destructor could itself panic and cut the sweep short. Shutdown
+/// happens once per runtime, so the leak is bounded.
+fn keep_first_panic(first: &mut Option<PanicPayload>, payload: PanicPayload) {
+    if first.is_none() {
+        *first = Some(payload);
+    } else {
+        std::mem::forget(payload);
+    }
 }
 
 impl Shared {
@@ -355,6 +373,33 @@ impl Shared {
             let wait = (deadline - now).min(Duration::from_millis(50));
             guard = self.drain_condvar.wait_timeout(guard, wait).unwrap().0;
         }
+    }
+
+    /// Cancels every task still alive, as the last step of runtime
+    /// shutdown: each one's future is dropped, inside this runtime's
+    /// context where the thread still has one, so drop code can still
+    /// reach it, and its `JoinHandle`
+    /// resolves as cancelled. Spawns from then on are cancelled too
+    /// (see [`task::OwnedTasks::bind`]).
+    ///
+    /// Each task is cancelled on its own: a panic from one (its join
+    /// waker; a destructor panic goes to its `JoinHandle` instead)
+    /// doesn't stop the rest. Returns the first such panic for the
+    /// caller to re-raise once every `Shared` is swept; later ones are
+    /// kept out of the way by [`keep_first_panic`].
+    fn cancel_all_tasks(self: &Arc<Self>) -> Option<PanicPayload> {
+        // `None` during thread-local teardown: drop code then can't reach
+        // the runtime, but the tasks are still cancelled.
+        let _context = context::try_enter(self.clone());
+        let mut first_panic = None;
+        for task in self.owned.close() {
+            let cancelled =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.shutdown()));
+            if let Err(payload) = cancelled {
+                keep_first_panic(&mut first_panic, payload);
+            }
+        }
+        first_panic
     }
 
     /// Marks shutdown as having begun and wakes every task currently
@@ -683,6 +728,7 @@ impl Builder {
             shutting_down: AtomicBool::new(false),
             shutdown_signal: Notify::new(),
             active_tasks: AtomicUsize::new(0),
+            owned: task::OwnedTasks::new(),
             drain_lock: Mutex::new(()),
             drain_condvar: Condvar::new(),
             steal_counts: vec![AtomicU64::new(0)],
@@ -777,6 +823,7 @@ impl Builder {
             shutting_down: AtomicBool::new(false),
             shutdown_signal: Notify::new(),
             active_tasks: AtomicUsize::new(0),
+            owned: task::OwnedTasks::new(),
             drain_lock: Mutex::new(()),
             drain_condvar: Condvar::new(),
             steal_counts,
@@ -1244,6 +1291,28 @@ impl Runtime {
         }
     }
 
+    /// Cancels every task still alive on every `Shared` this runtime
+    /// owns; see [`Shared::cancel_all_tasks`]. Every core is swept before
+    /// the first panic, if any, is re-raised, unless this thread is
+    /// already unwinding, where a second panic would abort the process.
+    fn cancel_all_tasks(&self) {
+        let mut first_panic = None;
+        for shared in self.all_shared() {
+            if let Some(payload) = shared.cancel_all_tasks() {
+                keep_first_panic(&mut first_panic, payload);
+            }
+        }
+        let Some(payload) = first_panic else {
+            return;
+        };
+        if std::thread::panicking() {
+            // See `keep_first_panic`: dropping it could panic again.
+            std::mem::forget(payload);
+            return;
+        }
+        std::panic::resume_unwind(payload);
+    }
+
     /// Signals shutdown and returns immediately -- doesn't wait for
     /// outstanding tasks to finish, the blocking pool to drain, or even
     /// the worker threads themselves to exit. Dropping the worker
@@ -1268,6 +1337,9 @@ impl Runtime {
             shared.blocking_pool.signal_shutdown();
         }
         self.take_workers();
+        // Workers may still be mid-poll here; `Task::shutdown` leaves
+        // those tasks for their poller to cancel when the poll returns.
+        self.cancel_all_tasks();
     }
 
     /// Signals shutdown, then waits up to `timeout` for every
@@ -1307,6 +1379,7 @@ impl Runtime {
         for w in self.take_workers() {
             let _ = w.join();
         }
+        self.cancel_all_tasks();
     }
 }
 
@@ -1328,6 +1401,7 @@ impl Drop for Runtime {
         for w in self.take_workers() {
             let _ = w.join();
         }
+        self.cancel_all_tasks();
     }
 }
 
