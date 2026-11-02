@@ -12,6 +12,10 @@ __pycache__/
 # Runtime SQLite artifacts
 meshed_registry.db
 
+# Each person's own Claude Code permissions (AGENTS.md). Ignored here, not only
+# in a global excludes file, which the bbp clean-tree check does not read (#1361).
+.claude/settings.local.json
+
 # super-board
 .claude/super-board/active
 .claude/super-board/onboard-answers.json
