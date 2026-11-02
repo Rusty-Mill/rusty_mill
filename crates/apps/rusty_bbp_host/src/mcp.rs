@@ -76,6 +76,9 @@ pub struct Server {
     shown: Option<TurnId>,
     /// A session's watch on the task log, made on its first `wait`.
     waker: Option<crate::waker::Waker>,
+    /// Claims mode: the credential of the assignment this server was started
+    /// under. Kept, never re-derived, so a reassignment revokes the session.
+    credential: Option<Token>,
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -507,11 +510,16 @@ impl Server {
         if driver.state.mode == Mode::Claims && binding.turn.is_some() {
             return Err("a claims task grants no turns: serve it with $BBP_SESSION=yes".into());
         }
+        let credential = match driver.state.mode {
+            Mode::Claims => driver.state.credential_for(&binding.principal),
+            _ => None,
+        };
         Ok(Server {
             binding,
             driver,
             shown: None,
             waker: None,
+            credential,
         })
     }
 
@@ -712,20 +720,16 @@ impl Server {
         Ok(AgentAction::PutArtifact { blob, payload })
     }
 
-    /// A claims-mode call: authorised by the principal's session credential
-    /// (C-R1), which this process derives from the task's master secret and
-    /// never shows the model. Reassignment or the task's end invalidates it,
-    /// and the core refuses the call with `bad_credential`.
+    /// A claims-mode call, views included: authorised by the session
+    /// credential (C-R1) captured when this server started, which the model
+    /// never sees. Reassignment or the task's end invalidates it, and the
+    /// core refuses the call with `bad_credential`.
     fn call_claims(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         let Translated { op, action, bytes } = claims::action(name, args)?;
         let action = self.stored(action, bytes)?;
-        let token = match action {
-            AgentAction::TaskCard => None,
-            _ => self.driver.state.credential_for(&self.binding.principal),
-        };
         let cmd = Command::Agent {
             principal: self.binding.principal.clone(),
-            token,
+            token: self.credential,
             op,
             action,
         };

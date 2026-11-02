@@ -255,6 +255,7 @@ fn a_claims_session_posts_with_its_credential_and_never_shows_it() {
     }
     assert!(!names.contains(&"wait"), "a claims task has no turns");
 
+    let task_card = ok(&mut s, "task_card", "{}");
     let c = claim(&dir, "a", "flag", true);
     cited(&dir, "b", c, 1);
     let card = ok(&mut s, "claim_card", &format!(r#"{{"claim":{c}}}"#));
@@ -273,7 +274,7 @@ fn a_claims_session_posts_with_its_credential_and_never_shows_it() {
     let cred = state(&dir)
         .credential_for(&PrincipalId("a".into()))
         .unwrap();
-    for text in [&card, &line, &delta, &src] {
+    for text in [&task_card, &card, &line, &delta, &src] {
         assert!(!text.contains(&cred.0.hex()), "credential leaked");
     }
     // A per-turn binding on a claims task is refused; so is wait.
@@ -303,7 +304,58 @@ fn a_closed_task_refuses_every_session_call() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn reassign(dir: &Path, role: &str, who: &str) {
+    admin::assign(
+        dir,
+        &task(),
+        &RoleId::from(role),
+        &PrincipalId(who.into()),
+        "v",
+    )
+    .expect("assign");
+}
+
+#[test]
+fn a_reassignment_revokes_a_running_session() {
+    let dir = tempdir("reassign");
+    claims_task(&dir);
+    let b = brief(&dir);
+    let post = |op: &str| {
+        format!(
+            r#"{{"op":"{op}","kind":"claim","text":"{op}","domains":["d"],"stakes":"low","reversible":true,"refs":["art:{b}"]}}"#
+        )
+    };
+    // A to A: the same principal, a new assignment.
+    let mut old = server(&dir, "a");
+    reassign(&dir, "a", "a");
+    let (text, err) = call(&mut old, "post", &post("p1"));
+    assert!(err && text.contains("BadCredential"), "{text}");
+    // A to B to A: the role comes back, the old session does not.
+    reassign(&dir, "a", "x");
+    reassign(&dir, "a", "a");
+    let (text, err) = call(&mut old, "task_card", "{}");
+    assert!(err && text.contains("BadCredential"), "{text}");
+    // A session started under the current assignment works.
+    ok(&mut server(&dir, "a"), "post", &post("p2"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- inbox
+
+#[test]
+fn an_ended_task_leaves_the_inbox() {
+    let dir = tempdir("ended");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "ship it", false);
+    cited(&dir, "a", x, 3);
+    cited(&dir, "b", x, 3);
+    assert_eq!(inbox::read(&dir, &[task()]).unwrap().len(), 1);
+    let rev = state(&dir).rev;
+    let r = human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(r, Response::Ok);
+    assert!(inbox::read(&dir, &[task()]).unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 #[test]
 fn an_irreversible_claim_reaches_the_inbox_and_a_dry_run_commits_nothing() {

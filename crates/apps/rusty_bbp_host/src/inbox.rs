@@ -88,8 +88,9 @@ pub fn json(dir: &Path, tasks: &[TaskId]) -> Result<String, String> {
 }
 
 /// The open escalations of one task, from its state and its log.
+/// An ended task has none: its human verbs are refused, so nothing in it is actionable.
 pub fn open(st: &TaskState, events: &[Event]) -> Vec<Escalation> {
-    if st.mode != Mode::Claims {
+    if st.mode != Mode::Claims || st.state.terminal() {
         return vec![];
     }
     let mut claim_at: BTreeMap<MsgId, (usize, ClaimEscalation)> = BTreeMap::new();
