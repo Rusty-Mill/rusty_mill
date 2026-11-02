@@ -366,10 +366,26 @@ impl Shared {
     /// context so drop code can still reach it, and its `JoinHandle`
     /// resolves as cancelled. Spawns from then on are cancelled too
     /// (see [`task::OwnedTasks::bind`]).
+    ///
+    /// Each task is cancelled on its own: a panic from one (its future's
+    /// destructor or its join waker) doesn't stop the rest from being
+    /// cancelled. The first such panic is re-raised once all are done,
+    /// unless this thread is already unwinding, where a second panic
+    /// would abort the process.
     fn cancel_all_tasks(self: &Arc<Self>) {
         let _context = context::enter(self.clone());
+        let mut first_panic = None;
         for task in self.owned.close() {
-            task.shutdown();
+            let cancelled =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.shutdown()));
+            if let Err(payload) = cancelled {
+                first_panic.get_or_insert(payload);
+            }
+        }
+        if let Some(payload) = first_panic {
+            if !std::thread::panicking() {
+                std::panic::resume_unwind(payload);
+            }
         }
     }
 

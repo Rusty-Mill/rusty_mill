@@ -147,8 +147,9 @@ impl Task {
             Err(payload) => {
                 *self.future.lock().unwrap() = None;
                 self.state.end_poll(true);
-                self.fire_abnormal_hook(Outcome::Panicked(payload));
+                // Released before the join waker runs, as in `cancel`.
                 self.mark_finished();
+                self.fire_abnormal_hook(Outcome::Panicked(payload));
             }
         }
     }
@@ -156,13 +157,22 @@ impl Task {
     /// Finishes a task this thread owns RUNNING for without polling it
     /// again: drops the future, resolves the `JoinHandle` as cancelled
     /// and releases the task.
+    ///
+    /// Panic-safe: a future whose destructor panics still leaves the
+    /// task complete and released, and its `JoinHandle` reports that
+    /// panic, as on tokio. The task is released before its `JoinHandle`
+    /// is resolved, so a join waker that panics can only unwind out of
+    /// the hook, with the bookkeeping already done.
     fn cancel(&self) {
         let future = self.future.lock().unwrap().take();
         // Dropped after the lock: a future's drop can run arbitrary code.
-        drop(future);
+        let dropped = panic::catch_unwind(AssertUnwindSafe(move || drop(future)));
         self.state.end_poll(true);
-        self.fire_abnormal_hook(Outcome::Aborted);
         self.mark_finished();
+        self.fire_abnormal_hook(match dropped {
+            Ok(()) => Outcome::Aborted,
+            Err(payload) => Outcome::Panicked(payload),
+        });
     }
 
     /// Releases the task from the runtime's [`OwnedTasks`] and counts it
@@ -190,7 +200,10 @@ impl Task {
     }
 
     fn fire_abnormal_hook(&self, outcome: Outcome) {
-        if let Some(hook) = self.abnormal_hook.lock().unwrap().take() {
+        // Taken in its own statement so the lock is released before the
+        // hook runs: it wakes the join waker, which may panic.
+        let hook = self.abnormal_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
             hook(outcome);
         }
     }

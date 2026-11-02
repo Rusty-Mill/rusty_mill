@@ -222,3 +222,94 @@ fn every_core_cancels_its_tasks_at_shutdown() {
         assert_cancelled(join_elsewhere(handle));
     }
 }
+
+/// Panics when dropped.
+struct PanicOnDrop;
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        panic!("PanicOnDrop");
+    }
+}
+
+/// Spawns a wakerless task that holds `probe`'s value, for checking that
+/// it is still cancelled after another task's cancellation panicked.
+fn spawn_survivor(rt: &Runtime) -> (JoinHandle<()>, Weak<()>) {
+    let (keep, probe) = probe();
+    let handle = rt.spawn(async move {
+        let _keep = keep;
+        wakerless().await;
+    });
+    (handle, probe)
+}
+
+/// A future whose destructor panics while shutdown cancels it: its
+/// handle reports that panic (it is delivered there, as on tokio, not
+/// raised out of shutdown), every other task is still cancelled and the
+/// alive count still reaches zero.
+#[test]
+fn a_panicking_future_destructor_does_not_stop_the_shutdown_sweep() {
+    for (flavor, rt) in runtimes() {
+        let bomb = PanicOnDrop;
+        let panicky = rt.spawn(async move {
+            let _bomb = bomb;
+            wakerless().await;
+        });
+        let (survivor, probe) = spawn_survivor(&rt);
+        rt.block_on(async { rusty_tokio::time::sleep(Duration::from_millis(50)).await });
+        let metrics = rt.metrics();
+
+        drop(rt);
+        assert!(
+            probe.upgrade().is_none(),
+            "{flavor}: the other task was cancelled"
+        );
+        assert_eq!(metrics.num_alive_tasks(), 0, "{flavor}");
+        assert_cancelled(join_elsewhere(survivor));
+        let err = join_elsewhere(panicky).expect_err("no output");
+        assert!(
+            err.is_panic(),
+            "{flavor}: expected the drop panic, got {err:?}"
+        );
+    }
+}
+
+/// A join waker that panics when shutdown resolves its handle.
+struct PanicWake;
+
+impl std::task::Wake for PanicWake {
+    fn wake(self: Arc<Self>) {
+        panic!("PanicWake");
+    }
+}
+
+#[test]
+fn a_panicking_join_waker_does_not_stop_the_shutdown_sweep() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    for (flavor, rt) in runtimes() {
+        let mut watched = rt.spawn(wakerless());
+        let (survivor, probe) = spawn_survivor(&rt);
+        rt.block_on(async { rusty_tokio::time::sleep(Duration::from_millis(50)).await });
+        // Register the panicking waker as the handle's join waker.
+        let waker = Waker::from(Arc::new(PanicWake));
+        assert!(std::pin::Pin::new(&mut watched)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        let metrics = rt.metrics();
+
+        let shutdown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(rt)));
+        assert!(
+            shutdown.is_err(),
+            "{flavor}: the waker's panic is re-raised"
+        );
+        assert!(
+            probe.upgrade().is_none(),
+            "{flavor}: the other task was cancelled"
+        );
+        assert_eq!(metrics.num_alive_tasks(), 0, "{flavor}");
+        assert_cancelled(join_elsewhere(survivor));
+        assert_cancelled(join_elsewhere(watched));
+    }
+}
