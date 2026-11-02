@@ -4,6 +4,7 @@
 //! `fixtures/stream-json/` (captured 2026-10-15 with Claude Code 2.1.300).
 //! Each test states what a correct tool does; they were red before the fixes.
 
+mod common;
 use rusty_bbp::*;
 use rusty_bbp_host::moderator::log_path;
 use rusty_bbp_host::tokens::{self, Criteria};
@@ -17,10 +18,7 @@ fn fixture(name: &str) -> String {
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("bbp-review-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).expect("mkdir");
-    d
+    common::fresh_dir("bbp-review", tag)
 }
 
 /// Sonnet 5.5 and Haiku 5.5 as the price page lists them (Haiku: input 0.10,
