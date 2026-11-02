@@ -271,8 +271,8 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 4. **Agent API (MCP):** `post` accepts the two kinds with a session credential; new tools `claims_delta`, `claim_card`, `claim_line`, credentialed and filtered by `read_messages`. The human channel adds `decision` on a claim, `reopen` and `budget_extended(claim)`.
 5. **Session credential** is a new host requirement: one per assignment, injected by the adapter, never shown to the model (same treatment as turn tokens).
 6. **Candidate manifest** gains an optional `claim` field: required in claims mode, refused in stage mode.
-8. **Third review additions:** the `supersedes` claim field, the `source` artifact kind, the `rerun_held` event, the `action_unconfirmed` escalation and `mark_timeout_secs`, and `sole_candidate` moved from an escalation reason to a field on `claim_accepted`.
 7. **Action marks** (`claim_acting`, `claim_action_result`) are new host/human writes, and the host must mark before acting, and **sandboxed runs** are a host requirement for claims mode (orch-bbp runs candidates through `rusty_sandbox` only).
+8. **Third review additions:** the `supersedes` claim field, the `source` artifact kind, the `rerun_held` event, the `action_unconfirmed` escalation and `mark_timeout_secs`, and `sole_candidate` moved from an escalation reason to a field on `claim_accepted`.
 
 No change to `rusty_crdt`, `coedit` or the stage-mode rules.
 
