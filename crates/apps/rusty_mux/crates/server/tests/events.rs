@@ -113,8 +113,10 @@ fn status_changes_reach_only_clients_that_asked() {
     let path = start_server();
     let wanted = SEQ.union(Features::STATUS).union(Features::CHECKPOINT_V6);
     let mut watcher = Client::connect_with(&path, wanted, None);
-    // With layout events, so its only gap is the status event.
-    let mut plain = Client::connect_with(&path, SEQ.union(Features::LAYOUT), None);
+    // With layout and active-window events, so its only gap is the status
+    // event.
+    let others = SEQ.union(Features::LAYOUT).union(Features::ACTIVE_WINDOW);
+    let mut plain = Client::connect_with(&path, others, None);
     let block = block_for(&mut watcher);
     watcher.input(block, b"printf '\\033]7501;state=working\\007'\r");
     let status = Event::BlockStatus { block };

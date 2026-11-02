@@ -35,6 +35,8 @@ pub struct Session {
     pub(crate) id: SessionId,
     pub(crate) name: String,
     pub(crate) windows: Vec<WindowId>,
+    /// One of `windows`; `None` only while there are none.
+    pub(crate) active: Option<WindowId>,
 }
 
 impl Session {
@@ -49,6 +51,11 @@ impl Session {
     /// Windows in creation order.
     pub fn windows(&self) -> &[WindowId] {
         &self.windows
+    }
+
+    /// The window clients show for the session unless told otherwise.
+    pub fn active(&self) -> Option<WindowId> {
+        self.active
     }
 }
 

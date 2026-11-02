@@ -42,7 +42,9 @@ rusty-mux-ctl close-block --block dev-server
 `run` places a block out of the way. To show one beside yours instead, split
 it off: `rusty-mux-ctl split-block --side right --command htop`. `zoom-block`
 shows one block alone and `unzoom-window` ends it; `list` gives each window's
-`layout`.
+`layout`. Each session has an active window, the one clients show for it:
+its first window, until `select-window --window W` picks another. A window
+you create does not take it.
 
 Prefer `wait` over polling. `wait --window W` or `wait --session S` waits
 until every block there has ended, blocks started meanwhile included; it

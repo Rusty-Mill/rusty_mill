@@ -6,7 +6,8 @@
 //! may hold `${arg}` placeholders for the arguments it declares. A binding
 //! maps a key chord sequence to an action or a catalog method. A rule (`on`)
 //! runs one when an event happens, its values taking the event's fields,
-//! such as `${block}` or `${pwd}`.
+//! such as `${block}` or `${pwd}`. The `server` section ([`Defaults`]) is
+//! the server's own: what a new block runs and where.
 //!
 //! [`parse`] checks every method, parameter, placeholder and binding
 //! against the catalog and reports every problem at once, so a config that
@@ -31,11 +32,13 @@
 //! assert!(calls[1].params.contains(&("window", "logs".to_owned())));
 //! ```
 
+use std::ffi::OsString;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 mod parse;
 
-pub use parse::parse;
+pub use parse::{parse, parse_server};
 
 /// A checked config.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -46,6 +49,34 @@ pub struct Config {
     pub binds: Vec<Bind>,
     /// In the order they are defined.
     pub rules: Vec<Rule>,
+    /// The `server` section, which the server reads; empty when absent.
+    pub server: Defaults,
+}
+
+/// What the server starts a new block with when the request names
+/// nothing else: the config's `server` section. Each part left out keeps
+/// the server's own default (the user's shell, the server's directory).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Defaults {
+    /// A program to run instead of the user's shell.
+    pub command: Option<String>,
+    /// Its arguments, in order; only with `command`.
+    pub args: Vec<String>,
+    /// An absolute directory to start in.
+    pub cwd: Option<String>,
+}
+
+/// The config file: `$RUSTY_MUX_CONFIG`, else `rusty_mux/config.json` under
+/// `$XDG_CONFIG_HOME`, else under `$HOME/.config`. `var` reads one
+/// environment variable, so ctl and the server find the same file.
+pub fn default_path(var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    if let Some(path) = var("RUSTY_MUX_CONFIG") {
+        return Some(path.into());
+    }
+    let base = var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| var("HOME").map(|home| Path::new(&home).join(".config")))?;
+    Some(base.join("rusty_mux").join("config.json"))
 }
 
 impl Config {
@@ -126,6 +157,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("session-closed", &["session"]),
     ("window-created", &["window", "session"]),
     ("window-closed", &["window"]),
+    ("active-window-changed", &["session", "window"]),
     ("block-created", &["block", "window", "cols", "rows"]),
     ("block-resized", &["block", "cols", "rows"]),
     ("block-closed", &["block"]),
@@ -153,6 +185,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ),
     ("clipboard-written", &["block", "selection"]),
     ("status-removed", &["block", "id"]),
+    ("config-reloaded", &[]),
 ];
 
 /// What to run when an event of one kind happens.

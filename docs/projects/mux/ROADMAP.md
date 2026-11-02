@@ -58,13 +58,15 @@ Identity, login server mode, roaming transport, sharing, several servers per cli
 
 Identity scope from the [Rex delta check](REX-DELTA.md) (owner, 2026-10-31): every client entry, `client-connected` and `client-connection-changed` carry the client's principal, with a `whoami` method (C25, D8; the owner narrowed it from every client event on 2026-11-01); login mode maps principals, the SSH user included, to accounts from a file that starts empty, and per-account servers outlive the front door (C26, C27, D9); a saved host holds several addresses tried in order (C35, D10).
 
+Login mode for local peers (C26): `rusty-mux-server --login MAP` maps each peer's uid, the SSH user included, to an account and relays it to that account's own server, which outlives the front door; `server/tests/login.rs` is the exit test for peer credentials. Not yet: PAM checks, shared mode, Tailscale principals (C27).
+
 ## Phase 3b: Rex parity follow-ups
 
-From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3's identity steps; starting it still needs the owner's go. One PR per step, in order. Each extends a done capability; no new crate and no new dependency.
+From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3's identity steps; starting it still needs the owner's go. One PR per step, in order. Each extends a done capability; no new crate and no new third-party dependency.
 
 1. Wait on a window or a session (C37). Done: `wait --window`, `wait --session`, exiting with the last failure. Started ahead of Phase 3 identity at the owner's call, confirmed on #1348 (2026-11-01).
-2. Events: clipboard written, program status removed, active window changed, config reloaded (C38). In progress: `clipboard-written` and `status-removed` (2026-11-01); the other two wait on the owner's scope call (see C38).
-3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did.
+2. Events: clipboard written, program status removed, active window changed, config reloaded (C38). Done: `clipboard-written` and `status-removed` (#1364), `active-window-changed` with `select-window` (#1368), and `config-reloaded` with `reload-config` and the config file's `server` section. The owner chose all four on 2026-11-01.
+3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did. In progress: the owner said go on 2026-11-01; the paths in DECISIONS.md await the owner's confirmation on the PR. Skill text read from the installed binary (Rex delta D1) is not part of this step.
 4. Block methods `terminal.reset`, `terminal.set-theme`, `terminal.size` (C40).
 5. Layout editing: resize splits, swap blocks, move a block into a new split, detach a block from the layout while it keeps running, reorder windows, server-side focus (C41).
 

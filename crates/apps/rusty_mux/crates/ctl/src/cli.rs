@@ -49,16 +49,59 @@ pub enum Command {
     Bridge,
 }
 
-/// `agent`: each verb but `hook` works in `--dir`, else the agent's usual
-/// config directory.
+/// `agent`: each verb but `hook` acts on the chosen agents in one scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
-    Setup(Option<PathBuf>),
-    /// Exits 0 only when the skill and hook are installed and current.
-    Status(Option<PathBuf>),
-    Remove(Option<PathBuf>),
+    /// With `dry_run`, reports what it would do and writes nothing.
+    Setup(AgentArgs),
+    /// Exits 0 only when every item is installed and current.
+    Status(AgentArgs),
+    Remove(AgentArgs),
     /// What the session-start hook runs.
     Hook,
+}
+
+/// Which agents an `agent` verb acts on, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentArgs {
+    /// Each named once, in the order [`AgentKind::ALL`] lists them.
+    pub agents: Vec<AgentKind>,
+    pub scope: AgentScope,
+    pub dry_run: bool,
+}
+
+/// A coding agent `agent setup` knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    OpenCode,
+    Pi,
+}
+
+impl AgentKind {
+    pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::OpenCode, Self::Pi];
+
+    /// Its name on the command line and in output.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::Pi => "pi",
+        }
+    }
+}
+
+/// Where an agent's files go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentScope {
+    /// The agent's own config directory, for every project.
+    User,
+    /// The project in the current directory, for that project only.
+    Project,
+    /// Claude Code's config directory given by `--dir`.
+    Dir(PathBuf),
 }
 
 /// What `wait` waits for, and for how long at most.
@@ -273,22 +316,59 @@ fn watch(args: &[String]) -> Result<Command, String> {
     }
 }
 
-const AGENT_USAGE: &str = "usage: agent setup|status|remove [--dir DIR] | agent hook";
+const AGENT_USAGE: &str = "usage: agent setup|status|remove [--agent claude|codex|opencode|pi|all]... \
+     [--project | --dir DIR] [--dry-run] | agent hook";
 
 fn agent(args: &[String]) -> Result<AgentCommand, String> {
     let (verb, rest) = args.split_first().ok_or(AGENT_USAGE)?;
-    let dir = match flags("agent", rest, |_| false)?.as_slice() {
-        [] => None,
-        [("dir", dir)] if verb != "hook" => Some(PathBuf::from(dir)),
+    let make: fn(AgentArgs) -> AgentCommand = match verb.as_str() {
+        "setup" => AgentCommand::Setup,
+        "status" => AgentCommand::Status,
+        "remove" => AgentCommand::Remove,
+        "hook" if rest.is_empty() => return Ok(AgentCommand::Hook),
         _ => return Err(AGENT_USAGE.into()),
     };
-    match verb.as_str() {
-        "setup" => Ok(AgentCommand::Setup(dir)),
-        "status" => Ok(AgentCommand::Status(dir)),
-        "remove" => Ok(AgentCommand::Remove(dir)),
-        "hook" => Ok(AgentCommand::Hook),
-        _ => Err(AGENT_USAGE.into()),
+    let mut agents = Vec::new();
+    let mut scope = AgentScope::User;
+    let mut dry_run = false;
+    for (key, text) in flags("agent", rest, |f| matches!(f, "project" | "dry-run"))? {
+        match (key, &scope) {
+            ("agent", _) => agents.extend(agent_kinds(text)?),
+            ("project", AgentScope::User) if text == "true" => scope = AgentScope::Project,
+            ("dir", AgentScope::User) => scope = AgentScope::Dir(PathBuf::from(text)),
+            ("dry-run", _) if text == "true" && verb != "status" => dry_run = true,
+            _ => return Err(AGENT_USAGE.into()),
+        }
     }
+    agents.sort_unstable();
+    agents.dedup();
+    if agents.is_empty() {
+        agents.push(AgentKind::Claude);
+    }
+    if matches!(scope, AgentScope::Dir(_)) && agents != [AgentKind::Claude] {
+        return Err(
+            "agent: --dir is Claude Code's directory; use --project for other agents".into(),
+        );
+    }
+    Ok(make(AgentArgs {
+        agents,
+        scope,
+        dry_run,
+    }))
+}
+
+/// The agents `--agent NAME` names.
+fn agent_kinds(name: &str) -> Result<Vec<AgentKind>, String> {
+    if name == "all" {
+        return Ok(AgentKind::ALL.to_vec());
+    }
+    AgentKind::ALL
+        .into_iter()
+        .find(|kind| kind.name() == name)
+        .map(|kind| vec![kind])
+        .ok_or_else(|| {
+            format!("agent: unknown agent `{name}`; expected claude, codex, opencode, pi or all")
+        })
 }
 
 const WAIT_USAGE: &str = "usage: wait (--block BLOCK | --window WINDOW | --session SESSION) [--timeout SECS] | wait --event KIND [--FIELD VALUE]... [--timeout SECS]";
@@ -593,9 +673,10 @@ pub fn usage(method: Option<&Method>) -> String {
                  \x20                  [--timeout SECS]] [--] COMMAND [ARG]...\n",
             );
             text.push_str(
-                "  agent            Set up Claude Code to use rusty_mux: a skill and a session-start\n\
-                 \x20                  hook in $CLAUDE_CONFIG_DIR or ~/.claude: agent setup|status|remove\n\
-                 \x20                  [--dir DIR]; status exits 0 only when both are current\n",
+                "  agent            Set up coding agents to use rusty_mux: a skill and a session-start\n\
+                 \x20                  hook: agent setup|status|remove [--agent claude|codex|opencode|\n\
+                 \x20                  pi|all]... [--project | --dir DIR] [--dry-run]; Claude Code when\n\
+                 \x20                  no --agent; status exits 0 only when every item is current\n",
             );
             text.push_str(
                 "  bridge           Join stdin and stdout to the socket, for a client that runs\n\

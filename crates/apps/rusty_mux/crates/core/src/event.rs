@@ -21,6 +21,13 @@ pub enum Event {
     WindowClosed {
         window: WindowId,
     },
+    /// The session's active window changed: its first window was made,
+    /// a client selected one, or the active one closed. `None` once the
+    /// session has no windows.
+    ActiveWindowChanged {
+        session: SessionId,
+        window: Option<WindowId>,
+    },
     BlockCreated {
         block: BlockId,
         window: WindowId,
@@ -134,6 +141,9 @@ pub enum Event {
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
     },
+    /// The server read its config again and now starts new blocks as it
+    /// says.
+    ConfigReloaded,
     /// The block's program set a selection (OSC 52). The text is not in
     /// the event: it may be a secret, and clients attached to the block
     /// already received it in the output. Several writes read at once are

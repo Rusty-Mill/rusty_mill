@@ -353,27 +353,69 @@ fn a_repeated_list_flag_gathers_its_values() {
 }
 
 #[test]
-fn agent_verbs_take_an_optional_dir() {
+fn agent_verbs_take_agents_a_scope_and_dry_run() {
     let agent = |line: &str| parse(&args(line)).map(|i| i.command);
+    let with = |agents: &[AgentKind], scope: AgentScope, dry_run: bool| AgentArgs {
+        agents: agents.to_vec(),
+        scope,
+        dry_run,
+    };
     assert_eq!(
         agent("agent setup"),
-        Ok(Command::Agent(AgentCommand::Setup(None)))
+        Ok(Command::Agent(AgentCommand::Setup(with(
+            &[AgentKind::Claude],
+            AgentScope::User,
+            false
+        ))))
     );
     assert_eq!(
         agent("agent remove --dir .claude"),
-        Ok(Command::Agent(AgentCommand::Remove(Some(".claude".into()))))
+        Ok(Command::Agent(AgentCommand::Remove(with(
+            &[AgentKind::Claude],
+            AgentScope::Dir(".claude".into()),
+            false
+        ))))
     );
     assert_eq!(
-        agent("agent status --dir=x"),
-        Ok(Command::Agent(AgentCommand::Status(Some("x".into()))))
+        agent("agent status --dir=x --agent claude"),
+        Ok(Command::Agent(AgentCommand::Status(with(
+            &[AgentKind::Claude],
+            AgentScope::Dir("x".into()),
+            false
+        ))))
+    );
+    // Named in any order and more than once, each is kept once, in order.
+    assert_eq!(
+        agent("agent setup --agent pi --agent codex --project --agent pi --dry-run"),
+        Ok(Command::Agent(AgentCommand::Setup(with(
+            &[AgentKind::Codex, AgentKind::Pi],
+            AgentScope::Project,
+            true
+        ))))
+    );
+    assert_eq!(
+        agent("agent remove --agent all --dry-run"),
+        Ok(Command::Agent(AgentCommand::Remove(with(
+            &AgentKind::ALL,
+            AgentScope::User,
+            true
+        ))))
     );
     assert_eq!(agent("agent hook"), Ok(Command::Agent(AgentCommand::Hook)));
     for bad in [
         "agent",
         "agent install",
         "agent hook --dir x",
+        "agent hook --agent codex",
         "agent setup --to x",
         "agent setup x",
+        "agent setup --agent cursor",
+        "agent setup --agent codex --dir x",
+        "agent setup --project --dir x",
+        "agent setup --dir x --project",
+        "agent setup --project=yes",
+        "agent status --dry-run",
+        "agent setup --dry-run=no",
     ] {
         assert!(agent(bad).is_err(), "{bad}");
     }

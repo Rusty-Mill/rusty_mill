@@ -1,12 +1,25 @@
-//! `rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] <socket>`: serves
-//! rusty_mux on a Unix socket. Each new block runs `$SHELL` (or `/bin/sh`)
-//! in `$HOME` (or `/`).
+//! `rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
+//! <socket>`: serves rusty_mux on a Unix socket. Each new block runs
+//! `$SHELL` (or `/bin/sh`) in `$HOME` (or `/`), unless the config file's
+//! `server` section names a command or directory. The file is `--config`,
+//! else `$RUSTY_MUX_CONFIG`, else `$XDG_CONFIG_HOME/rusty_mux/config.json`
+//! (or `~/.config/rusty_mux/config.json`); a missing file sets nothing and
+//! a bad one stops the server before it starts. `reload-config` reads it
+//! again, keeping what it had if the file has gone bad.
 //!
 //! With `--udp` the server also listens for UDP on `ADDR`, port 60001 unless
 //! given, and offers each client an association there to move its
 //! connections onto (docs/projects/mux/UDP-TRANSPORT.md). A silent
 //! association, and its clients, last `--udp-idle` seconds (a day unless
 //! given).
+//!
+//! `rusty-mux-server --login MAP [--runtime DIR] <socket>` runs login
+//! mode's front door instead (Linux, normally as root): any local user may
+//! connect, and `MAP` says which account each may use; each account gets a
+//! server of its own under `DIR` (`/run/rusty-mux` unless given). SIGHUP
+//! reads `MAP` again. The front door starts each account's server with
+//! `--forwarded-by UID`, which serves a peer of that uid only after the
+//! preface naming who it verified. See `login.rs`.
 //!
 //! On Windows (10 1809 or later, for ConPTY; AF_UNIX alone needs 1803)
 //! each block runs `%COMSPEC%` (or `cmd.exe`) in `%USERPROFILE%` (or `C:\`)
@@ -30,7 +43,11 @@ use rusty_mux_server::{Config, ConsoleHost, Udp, serve_until};
 use rusty_tokio::io::{UdpSocket, UnixListener};
 use rusty_tokio::{Builder, LocalOptions};
 
-const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] <socket>";
+const USAGE: &str =
+    "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE] <socket>
+       rusty-mux-server --login MAP [--runtime DIR] <socket>";
+/// Where login mode puts each account's server unless `--runtime` says.
+const RUNTIME: &str = "/run/rusty-mux";
 /// The UDP port when `--udp` names an address only.
 const UDP_PORT: u16 = 60001;
 /// How long a silent association lasts unless `--udp-idle` says.
@@ -42,6 +59,20 @@ struct Args {
     socket: PathBuf,
     udp: Option<SocketAddr>,
     idle: Duration,
+    /// `--config`, if given.
+    config: Option<PathBuf>,
+    mode: Mode,
+}
+
+/// Which server this is.
+#[derive(Debug, PartialEq, Eq)]
+enum Mode {
+    /// A user's own server: today's default.
+    Personal,
+    /// An account's server behind the front door, whose uid this is.
+    Forwarded(u32),
+    /// The front door: the map file and the runtime directory.
+    Login { map: PathBuf, runtime: PathBuf },
 }
 
 fn main() -> ExitCode {
@@ -69,7 +100,8 @@ fn main() -> ExitCode {
 }
 
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
-    let (mut socket, mut udp, mut idle) = (None, None, UDP_IDLE);
+    let (mut socket, mut udp, mut idle, mut config) = (None, None, UDP_IDLE, None);
+    let (mut login, mut runtime, mut forwarded_by) = (None, None, None);
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
             args.next()
@@ -78,6 +110,16 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         };
         match arg.to_str() {
             Some("--udp") => udp = Some(udp_addr(&value("--udp")?)?),
+            Some("--config") => config = Some(PathBuf::from(value("--config")?)),
+            Some("--login") => login = Some(PathBuf::from(value("--login")?)),
+            Some("--runtime") => runtime = Some(PathBuf::from(value("--runtime")?)),
+            Some("--forwarded-by") => {
+                let uid = value("--forwarded-by")?;
+                let parsed = uid
+                    .parse()
+                    .map_err(|_| format!("--forwarded-by {uid}: not a uid"))?;
+                forwarded_by = Some(parsed);
+            }
             Some("--udp-idle") => {
                 let secs = value("--udp-idle")?;
                 let secs = secs
@@ -92,7 +134,32 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         }
     }
     let socket = socket.ok_or("no socket given")?;
-    Ok(Args { socket, udp, idle })
+    let mode = match (login, runtime, forwarded_by) {
+        (None, None, None) => Mode::Personal,
+        (None, None, Some(_)) if udp.is_some() => {
+            return Err("an account's server takes no --udp yet".into());
+        }
+        (None, None, Some(uid)) => Mode::Forwarded(uid),
+        (None, Some(_), _) => return Err("--runtime needs --login".into()),
+        (Some(_), _, Some(_)) => return Err("--login and --forwarded-by are two modes".into()),
+        (Some(map), runtime, None) => {
+            if udp.is_some() || config.is_some() {
+                return Err("the front door takes no --udp or --config".into());
+            }
+            let runtime = runtime.unwrap_or_else(|| PathBuf::from(RUNTIME));
+            Mode::Login { map, runtime }
+        }
+    };
+    if mode != Mode::Personal && !cfg!(target_os = "linux") {
+        return Err("login mode runs on Linux only".into());
+    }
+    Ok(Args {
+        socket,
+        udp,
+        idle,
+        config,
+        mode,
+    })
 }
 
 /// `ADDR:PORT`, or `ADDR` alone for [`UDP_PORT`]; an IPv6 address with a
@@ -109,7 +176,14 @@ fn udp_addr(value: &str) -> Result<SocketAddr, String> {
 }
 
 fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
-    let config = default_config(console_host);
+    #[cfg(target_os = "linux")]
+    if let Mode::Login { map, runtime } = args.mode {
+        return run_login(args.socket, map, runtime);
+    }
+    let config_file = args
+        .config
+        .or_else(|| rusty_mux_script::default_path(|name| std::env::var_os(name)));
+    let config = default_config(console_host, config_file);
     let socket = args.socket;
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     runtime.block_on(async {
@@ -132,7 +206,46 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
             }),
             None => None,
         };
-        serve_until(listener, config, udp, stop_requested()?).await
+        match args.mode {
+            #[cfg(target_os = "linux")]
+            Mode::Forwarded(uid) => {
+                rusty_mux_server::serve_forwarded(listener, config, uid, stop_requested()?).await
+            }
+            _ => serve_until(listener, config, udp, stop_requested()?).await,
+        }
+    })
+}
+
+/// The front door: any local user may connect, so the socket is open to
+/// all; the map decides who gets in. SIGHUP reads the map again.
+#[cfg(target_os = "linux")]
+fn run_login(socket: PathBuf, map: PathBuf, runtime: PathBuf) -> std::io::Result<()> {
+    use rusty_tokio::signal::unix::{SignalKind, signal};
+
+    // Before the runtime starts a thread: binding sets the umask.
+    let listener = rusty_mux_server::bind_front_door(&socket)?;
+    let server = std::env::current_exe()?;
+    let login = rusty_mux_server::Login {
+        map,
+        runtime,
+        server,
+        limits: rusty_mux_server::Limits::default(),
+    };
+    let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
+    runtime.block_on(async {
+        let mut hangups = signal(SignalKind::hangup())?;
+        let listener = UnixListener::from_std(listener)?;
+        let (reload, reloads) = rusty_tokio::sync::mpsc::unbounded_channel();
+        rusty_tokio::task::spawn_local(async move {
+            while hangups.recv().await.is_some() {
+                // The answer is logged by the front door; nobody waits here.
+                let (answer, _) = rusty_tokio::sync::oneshot::channel();
+                if reload.send(answer).is_err() {
+                    break;
+                }
+            }
+        });
+        rusty_mux_server::serve_login(listener, login, reloads).await
     })
 }
 
@@ -164,22 +277,24 @@ fn stop_requested() -> std::io::Result<impl Future<Output = ()>> {
 }
 
 #[cfg(not(windows))]
-fn default_config(console_host: ConsoleHost) -> Config {
+fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Config {
     Config {
         program: std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/sh")),
         args: Vec::new(),
         cwd: std::env::var_os("HOME").unwrap_or_else(|| OsString::from("/")),
         console_host,
+        config_file,
     }
 }
 
 #[cfg(windows)]
-fn default_config(console_host: ConsoleHost) -> Config {
+fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Config {
     Config {
         program: std::env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe")),
         args: Vec::new(),
         cwd: std::env::var_os("USERPROFILE").unwrap_or_else(|| OsString::from("C:\\")),
         console_host,
+        config_file,
     }
 }
 
@@ -202,6 +317,29 @@ mod tests {
         assert_eq!(v6.udp, Some("[::1]:7000".parse().unwrap()));
         assert_eq!(v6.idle, Duration::from_secs(90));
         assert_eq!(v6.socket, PathBuf::from("s.sock"));
+        assert_eq!(v6.config, None);
+        let file = parse_str(&["--config", "c.json", "s.sock"]).unwrap();
+        assert_eq!(file.config, Some(PathBuf::from("c.json")));
+        assert_eq!(file.mode, Mode::Personal);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn login_mode_and_forwarding_are_asked_for() {
+        let front = parse_str(&["--login", "/etc/m", "s.sock"]).unwrap();
+        let expected = Mode::Login {
+            map: "/etc/m".into(),
+            runtime: RUNTIME.into(),
+        };
+        assert_eq!(front.mode, expected);
+        let elsewhere = parse_str(&["--login", "m", "--runtime", "/tmp/r", "s"]).unwrap();
+        let expected = Mode::Login {
+            map: "m".into(),
+            runtime: "/tmp/r".into(),
+        };
+        assert_eq!(elsewhere.mode, expected);
+        let behind = parse_str(&["--forwarded-by", "0", "s"]).unwrap();
+        assert_eq!(behind.mode, Mode::Forwarded(0));
     }
 
     #[test]
@@ -213,6 +351,15 @@ mod tests {
             &["--udp", "nowhere", "s"],
             &["--udp-idle", "0", "s"],
             &["--udp-idle", "1h", "s"],
+            &["s", "--config"],
+            &["--login", "m"],
+            &["--runtime", "r", "s"],
+            &["--login", "m", "--forwarded-by", "0", "s"],
+            &["--login", "m", "--udp", "0.0.0.0", "s"],
+            &["--login", "m", "--config", "c", "s"],
+            &["--forwarded-by", "x", "s"],
+            &["--forwarded-by", "-1", "s"],
+            &["--forwarded-by", "0", "--udp", "0.0.0.0", "s"],
         ] {
             assert!(parse_str(bad).is_err(), "{bad:?}");
         }

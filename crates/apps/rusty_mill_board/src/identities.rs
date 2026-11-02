@@ -201,6 +201,13 @@ impl Credentials {
         Ok(())
     }
 
+    /// Give every agent holding role `from` the role `to` instead.
+    pub fn rename_role(&mut self, from: &str, to: &str) {
+        for (_, i) in self.0.iter_mut().filter(|(_, i)| i.role == from) {
+            i.role = to.to_owned();
+        }
+    }
+
     /// Give an agent a new token (the old one stops working); returns it.
     ///
     /// # Errors
