@@ -58,13 +58,19 @@ succeeded. `wait --event KIND --FIELD VALUE` waits for an event, such as
 rusty-mux-ctl terminal.format --block dev-server --history 200 --trim --unwrap
 rusty-mux-ctl terminal.process --block dev-server   # what runs there now
 rusty-mux-ctl terminal.pwd --block dev-server
+rusty-mux-ctl terminal.size --block dev-server      # COLSxROWS, such as 80x24
 rusty-mux-ctl acquire-lease --block dev-server + terminal.send-keys --block dev-server --key ctrl+c
+rusty-mux-ctl acquire-lease --block dev-server + terminal.reset --block dev-server
 ```
 
-Typing (`input`, `terminal.send-keys`) needs the block's input lease, and a
-user typing in that block holds it. Only type into a block someone else uses
-when the user asked you to. Requests joined by `+` run in order on one
-connection.
+`terminal.reset` clears the screen, scrollback and modes, as when a program
+left the terminal garbled. `terminal.set-theme` sets `--foreground`,
+`--background`, `--cursor` and `--palette N=COLOUR` as `#RRGGBB` or `default`.
+
+Typing (`input`, `terminal.send-keys`), resetting and theming need the
+block's input lease, and a user typing in that block holds it. Only type into
+a block someone else uses when the user asked you to. Requests joined by `+`
+run in order on one connection.
 
 ## Finding out more
 

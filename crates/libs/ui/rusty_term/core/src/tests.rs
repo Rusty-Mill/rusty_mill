@@ -142,6 +142,31 @@ fn plain_tells_whether_sgr_0_alone_would_restore_the_rendition() {
 }
 
 #[test]
+fn ground_is_false_inside_any_unfinished_sequence() {
+    let mut g = Grid::new(20, 2);
+    let mut p = AnsiParser::new();
+    assert!(p.ground());
+    for (input, ground) in [
+        (&b"\x1b[31m"[..], true),
+        (b"\x1b", false),
+        (b"[3", false),
+        (b"1m", true),
+        (b"\xe2\x94", false),
+        (b"\x80", true),
+        (b"\x1b]0;title", false),
+        (b"\x1b", false),
+        (b"\\", true),
+        (b"\x1bP1$r", false),
+        (b"\x18", true),
+        (b"\x1b(", false),
+        (b"0", true),
+    ] {
+        p.advance(&mut g, input);
+        assert_eq!(p.ground(), ground, "{input:?}");
+    }
+}
+
+#[test]
 fn plain_cursor_needs_origin_and_insert_mode_off_and_no_open_link() {
     let mut g = Grid::new(20, 4);
     let mut p = AnsiParser::new();

@@ -438,6 +438,14 @@ impl AnsiParser {
             && self.charsets[self.gl] == Charset::Ascii
     }
 
+    /// Whether the parser is between sequences: not inside an escape, control
+    /// or string sequence, nor a UTF-8 character. Bytes a host adds to the
+    /// stream here are read on their own, not as the rest of something
+    /// unfinished.
+    pub fn ground(&self) -> bool {
+        self.state == ParserState::Ground
+    }
+
     /// Drain the bytes the parser owes the host in reply to queries (DA1/DA2/
     /// DSR). Returns an empty vector when there is nothing to send. The driver
     /// calls this after `advance` and writes the result to the PTY master.

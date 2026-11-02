@@ -3,10 +3,42 @@
 use std::path::Path;
 
 use rusty_mux_core::{Progress, Selection};
+use rusty_mux_proto::theme::{Colour, ThemeChange};
 use rusty_mux_status::Records;
 use rusty_term_core::{Cell, Grid, StatusSignal, WIDE_TRAILER};
 
 use crate::style::Style;
+
+/// What `terminal.reset` feeds a terminal: CAN ends any sequence its
+/// program left unfinished, so the RIS after it is read as one.
+pub(crate) const RESET: &[u8] = b"\x18\x1bc";
+
+/// The OSC sequences that make `change`, each ended by ST: OSC 10, 11 and
+/// 12 set the default foreground, background and cursor colours, 110, 111
+/// and 112 put them back, and OSC 4 and 104 do the same for a palette
+/// entry. None asks the terminal anything, so none is answered.
+pub(crate) fn theme(change: &ThemeChange) -> Vec<u8> {
+    let mut out = String::new();
+    let dynamic = [
+        (change.foreground, 10),
+        (change.background, 11),
+        (change.cursor, 12),
+    ];
+    for (colour, code) in dynamic {
+        match colour {
+            Some(Colour::Rgb(rgb)) => out.push_str(&format!("\x1b]{code};#{rgb:06x}\x1b\\")),
+            Some(Colour::Default) => out.push_str(&format!("\x1b]1{code}\x1b\\")),
+            None => {}
+        }
+    }
+    for (index, colour) in &change.palette {
+        match colour {
+            Colour::Rgb(rgb) => out.push_str(&format!("\x1b]4;{index};#{rgb:06x}\x1b\\")),
+            Colour::Default => out.push_str(&format!("\x1b]104;{index}\x1b\\")),
+        }
+    }
+    out.into_bytes()
+}
 
 /// What `terminal.format` reads, and how.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

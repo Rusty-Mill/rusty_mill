@@ -122,6 +122,12 @@ impl Features {
     /// for a client without it).
     pub const CONFIG_RELOAD: Self = Self(1 << 25);
 
+    /// The block methods that measure and change a block's terminal:
+    /// `terminal.size`, `terminal.reset` and `terminal.set-theme`. They
+    /// travel as [`Message::BlockCall`], so the bit only says the server
+    /// knows them.
+    pub const TERMINAL_CONTROL: Self = Self(1 << 26);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }

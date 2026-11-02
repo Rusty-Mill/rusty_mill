@@ -30,6 +30,7 @@ use std::fmt;
 use rusty_mux_core::{BlockId, ClientId, EntityId, SessionId, Side, Size, WindowId};
 use rusty_uuid::Uuid;
 
+use crate::theme::ThemeChange;
 use crate::{Features, Launch, Message, Program};
 
 /// Which entity an id names.
@@ -472,6 +473,21 @@ const fn capture(name: &'static str, doc: &'static str) -> Param {
     }
 }
 
+/// What the block methods that measure and change a terminal need.
+const TERMINAL_CONTROL: Features = Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL);
+
+/// An optional parameter of `terminal.set-theme`.
+const fn theme(name: &'static str, ty: Ty, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::TERMINAL_CONTROL,
+        },
+    }
+}
+
 const BLOCK: Param = required("block", Ty::Id(Entity::Block), "The block to act on.");
 const NEW_NAME: Param = required(
     "name",
@@ -900,6 +916,62 @@ pub static CATALOG: &[Method] = &[
         needs: Features::BLOCK_CALL,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.process"),
+    },
+    Method {
+        name: "terminal.size",
+        doc: "Read the terminal's size in cells, as `COLSxROWS`, such as `80x24`.",
+        params: &[BLOCK],
+        needs: TERMINAL_CONTROL,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.size"),
+    },
+    Method {
+        name: "terminal.reset",
+        doc: "Reset the terminal as its program sending RIS would, ending any sequence it \
+              left unfinished: the screen and its scrollback are cleared, and modes, \
+              colours and the cursor go back to how they started. The program is not \
+              told. Needs the lease.",
+        params: &[BLOCK],
+        needs: TERMINAL_CONTROL,
+        returns: Returns::Nothing,
+        build: |req, a| block_call(req, a, "terminal.reset"),
+    },
+    Method {
+        name: "terminal.set-theme",
+        doc: "Set the terminal's colours as its program could with OSC 4, 10, 11 and 12: \
+              programs that ask see them and clients draw with them, until the program \
+              changes them or the terminal is reset. Refused while the program is in the \
+              middle of an escape sequence. Needs the lease.",
+        params: &[
+            BLOCK,
+            theme(
+                "foreground",
+                Ty::Text,
+                "The default text colour: `#RRGGBB`, or `default` for the terminal's own.",
+            ),
+            theme(
+                "background",
+                Ty::Text,
+                "The default background colour: `#RRGGBB` or `default`.",
+            ),
+            theme(
+                "cursor",
+                Ty::Text,
+                "The cursor colour: `#RRGGBB` or `default`.",
+            ),
+            theme(
+                "palette",
+                Ty::Words,
+                "A palette entry as `INDEX=COLOUR`, the index from 0 to 255 and the colour \
+                 `#RRGGBB` or `default`, as in `1=#cc0000`. Repeat the flag for each.",
+            ),
+        ],
+        needs: TERMINAL_CONTROL,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            ThemeChange::from_args(a.0)?;
+            block_call(req, a, "terminal.set-theme")
+        },
     },
     Method {
         name: "close-block",
