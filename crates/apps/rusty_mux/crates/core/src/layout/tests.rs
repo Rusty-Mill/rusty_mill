@@ -365,3 +365,37 @@ fn moves_reach_blocks_at_the_depth_limit() {
     // 2 is 99% of the deepest row, wider than 1, and the tallest left.
     assert_eq!(side(3, Side::Left), Some(id(2)));
 }
+
+#[test]
+fn mirrored_deep_rows_face_their_twins() {
+    // cols50 of two identical trees: twelve rows99 splits, each giving
+    // its second child 1%, so the lower rows sit far below a float's
+    // precision near the bottom edge.
+    let b = |n| Layout::Block(id(n));
+    let tower = |base: u128| {
+        (0..12).rev().fold(b(base + 12), |low, n| {
+            split(Axis::Rows, 99, b(base + n), low)
+        })
+    };
+    let layout = split(Axis::Columns, 50, tower(100), tower(200));
+    for n in 0..=12 {
+        let right = layout.neighbour(id(100 + n), Toward::Side(Side::Right));
+        let left = layout.neighbour(id(200 + n), Toward::Side(Side::Left));
+        assert_eq!(right, Some(id(200 + n)), "right of row {n}");
+        assert_eq!(left, Some(id(100 + n)), "left of row {n}");
+    }
+}
+
+#[test]
+fn the_longest_edge_wins_deep_near_the_bottom() {
+    // cols50(1, rows1(2, 3)) under rows99 splits, its row 1% of 1% ...
+    // of the height: 3 shares 99% of 1's edge, 2 only 1%.
+    let b = |n| Layout::Block(id(n));
+    for wrappers in [9, 30] {
+        let inner = split(Axis::Columns, 50, b(1), split(Axis::Rows, 1, b(2), b(3)));
+        let layout = (0..wrappers).fold(inner, |low, n| split(Axis::Rows, 99, b(100 + n), low));
+        assert!(layout.depth_of(id(3)).is_some_and(|d| d <= MAX_DEPTH));
+        let right = layout.neighbour(id(1), Toward::Side(Side::Right));
+        assert_eq!(right, Some(id(3)), "{wrappers} wrappers");
+    }
+}
