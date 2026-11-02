@@ -212,6 +212,20 @@ pub(crate) struct Shared {
     pub(crate) id: Id,
 }
 
+type PanicPayload = Box<dyn std::any::Any + Send>;
+
+/// Keeps the first panic payload of a shutdown sweep. Later ones are
+/// leaked rather than dropped: a payload is arbitrary user data whose
+/// destructor could itself panic and cut the sweep short. Shutdown
+/// happens once per runtime, so the leak is bounded.
+fn keep_first_panic(first: &mut Option<PanicPayload>, payload: PanicPayload) {
+    if first.is_none() {
+        *first = Some(payload);
+    } else {
+        std::mem::forget(payload);
+    }
+}
+
 impl Shared {
     pub(crate) fn schedule(&self, task: Arc<task::Task>) {
         match &self.local {
@@ -367,26 +381,22 @@ impl Shared {
     /// resolves as cancelled. Spawns from then on are cancelled too
     /// (see [`task::OwnedTasks::bind`]).
     ///
-    /// Each task is cancelled on its own: a panic from one (its future's
-    /// destructor or its join waker) doesn't stop the rest from being
-    /// cancelled. The first such panic is re-raised once all are done,
-    /// unless this thread is already unwinding, where a second panic
-    /// would abort the process.
-    fn cancel_all_tasks(self: &Arc<Self>) {
+    /// Each task is cancelled on its own: a panic from one (its join
+    /// waker; a destructor panic goes to its `JoinHandle` instead)
+    /// doesn't stop the rest. Returns the first such panic for the
+    /// caller to re-raise once every `Shared` is swept; later ones are
+    /// kept out of the way by [`keep_first_panic`].
+    fn cancel_all_tasks(self: &Arc<Self>) -> Option<PanicPayload> {
         let _context = context::enter(self.clone());
         let mut first_panic = None;
         for task in self.owned.close() {
             let cancelled =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.shutdown()));
             if let Err(payload) = cancelled {
-                first_panic.get_or_insert(payload);
+                keep_first_panic(&mut first_panic, payload);
             }
         }
-        if let Some(payload) = first_panic {
-            if !std::thread::panicking() {
-                std::panic::resume_unwind(payload);
-            }
-        }
+        first_panic
     }
 
     /// Marks shutdown as having begun and wakes every task currently
@@ -1279,11 +1289,25 @@ impl Runtime {
     }
 
     /// Cancels every task still alive on every `Shared` this runtime
-    /// owns; see [`Shared::cancel_all_tasks`].
+    /// owns; see [`Shared::cancel_all_tasks`]. Every core is swept before
+    /// the first panic, if any, is re-raised, unless this thread is
+    /// already unwinding, where a second panic would abort the process.
     fn cancel_all_tasks(&self) {
+        let mut first_panic = None;
         for shared in self.all_shared() {
-            shared.cancel_all_tasks();
+            if let Some(payload) = shared.cancel_all_tasks() {
+                keep_first_panic(&mut first_panic, payload);
+            }
         }
+        let Some(payload) = first_panic else {
+            return;
+        };
+        if std::thread::panicking() {
+            // See `keep_first_panic`: dropping it could panic again.
+            std::mem::forget(payload);
+            return;
+        }
+        std::panic::resume_unwind(payload);
     }
 
     /// Signals shutdown and returns immediately -- doesn't wait for

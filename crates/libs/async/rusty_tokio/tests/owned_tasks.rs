@@ -313,3 +313,37 @@ fn a_panicking_join_waker_does_not_stop_the_shutdown_sweep() {
         assert_cancelled(join_elsewhere(watched));
     }
 }
+
+/// A panicking join waker on one core doesn't stop the other cores from
+/// being swept: every core is closed and cancelled before the panic is
+/// re-raised.
+#[cfg(feature = "thread-per-core")]
+#[test]
+fn a_panicking_join_waker_on_one_core_does_not_skip_the_others() {
+    use std::future::Future;
+    use std::task::{Context, Waker};
+
+    let rt = Builder::new_thread_per_core()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+    let mut watched = rt.core_handle(0).spawn(wakerless());
+    let (keep, probe) = probe();
+    let survivor = rt.core_handle(1).spawn(async move {
+        let _keep = keep;
+        wakerless().await;
+    });
+    let core1 = rt.core_handle(1).metrics();
+    std::thread::sleep(Duration::from_millis(50));
+    let waker = Waker::from(Arc::new(PanicWake));
+    assert!(std::pin::Pin::new(&mut watched)
+        .poll(&mut Context::from_waker(&waker))
+        .is_pending());
+
+    let shutdown = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(rt)));
+    assert!(shutdown.is_err(), "the waker's panic is re-raised");
+    assert!(probe.upgrade().is_none(), "core 1's task was cancelled");
+    assert_eq!(core1.num_alive_tasks(), 0);
+    assert_cancelled(join_elsewhere(survivor));
+    assert_cancelled(join_elsewhere(watched));
+}
