@@ -74,7 +74,7 @@ Both records are **message kinds** with typed bodies, like `verdict` and `decisi
 | `domains` | 1 to 8 tokens, `[a-z0-9_-]{1,32}`. Opaque to BBP; used only to match subscriptions |
 | `deps` | Earlier `claim` messages on the task, at most 16. They must already exist, so the graph is acyclic by construction |
 | `answers` | Optional earlier `claim` this one is a candidate answer to (an open question). Candidates of one question compete; BBP records how many there are (C-R7) |
-| `supersedes` | Optional earlier claim this one replaces, in any status, if not already superseded. From then on the old claim stays closed: evidence on it is recorded only and never reopens it (Evidence after settlement). A settled old claim keeps its status. An `open` or `escalated` old claim is closed as `superseded` (`claim_superseded(by)`), any pending escalation or held rerun on it is withdrawn, and its dependents are handled as for a dropped dep. Action marks on the old claim are kept: an acted-on claim stays acted on |
+| `supersedes` | Optional earlier claim X this one (Y) replaces, in any status, if X is not already superseded. **It takes effect only when Y is accepted** (by the update rule, `choose` or a human `decision`); until then X behaves normally, so a claim post alone cannot disable anything. If X is acted on, Y's accept line escalates `supersedes_acted` instead of accepting, and only a human `accept` lets it replace X. When it takes effect, X becomes `superseded` whatever its status (`claim_superseded(X, by: Y)`), in the same transaction: X can no longer be marked or satisfy a dependency, any pending escalation or held rerun on X is withdrawn, X's dependents are handled as for a dep leaving `accepted` (or a dropped dep, if X was not accepted), and X keeps its action marks. From then on X stays closed: evidence on it is recorded only and never reopens it |
 | `stakes` | `low`, `medium` or `high` |
 | `reversible` | `false` means the board never accepts it alone (C-R6) |
 | `refs` | At least one (R2), usually the brief or an artifact |
@@ -150,7 +150,7 @@ A settled claim keeps taking evidence. What that evidence does depends on its ki
 | `accepted` | `counter` citing a `failed` report **reopens** it | Recorded |
 | `dropped` | `support` citing a `passed` report **reopens** it | Recorded |
 | `escalated`, `void` | Recorded (the human decides an escalation; a void claim waits for its dep) | Recorded |
-| superseded (any status, including `superseded`) | Recorded: a replaced claim stays closed | Recorded |
+| `superseded` | Recorded: a replaced claim stays closed | Recorded |
 
 - "Executed" means a runner `test_report` bound to the claim (C-R4). Tests, holdout sets and golden sets are all runner profiles and all produce one. Cited and opinion evidence never reopen a claim and never move its confidence.
 - **Reopen by evidence.** The board writes `claim_reopened(by: evidence)` in the same transaction. The claim is `open`, a new epoch starts, and that evidence is its first scoring item (so a counter reopen starts below zero). It must earn its way back to a settlement with fresh evidence from `min_authors` principals in the new epoch.
@@ -192,6 +192,7 @@ The defaults give 8 to 64 units per claim. One evidence item costs 1 and one run
 
 - When a claim becomes `dropped` or `void`, every claim that lists it in `deps` and is not yet settled becomes `void` (`claim_voided(by)`). This repeats to a fixed point in the same transaction, so a collapse is atomic.
 - An already-`accepted` dependent of a dep that leaves `accepted` (dropped, voided or reopened) is **reopened automatically** if nothing acted on it: `claim_reopened(by: dep)`, a new epoch. It is then treated like any open dependent in the same transaction: voided if the dep was dropped or voided, waiting if the dep is open. A dependent that **was acted on** (Action marks) is escalated `dep_collapsed` instead, because undoing it is the human's call (owner decision Q3, 2026-11-02). The cascade repeats to a fixed point, so a reopen of a dependent can in turn reopen or escalate its own dependents.
+- **Every reopen checks the budget.** After any reopen that is not a human `reopen` (those need `budget_extended` first, C-R8), the board runs the budget line on the reopened claim in the same transaction: a claim reopened with `spent(c) ≥ budget(c)` escalates `budget` at once, so it never sits open with no units to spend.
 - When a dep becomes `accepted`, each `open` dependent is re-evaluated against the accept line.
 
 ## Rules (claims mode)
@@ -238,9 +239,9 @@ This is the path from a prototype to `executed` evidence, using the normal APIs.
 | `claim_accepted` | moderator | claim, score, evidence count, `sole_candidate` when true |
 | `claim_dropped` | moderator | claim, score, evidence count |
 | `claim_voided` | moderator | claim, by (the dep that fell) |
-| `claim_escalated` | moderator | claim, reason: `irreversible`, `budget`, `stuck`, `dep_collapsed`, `reopened_after_action`, `action_unconfirmed` (with the mark) |
+| `claim_escalated` | moderator | claim, reason: `irreversible`, `supersedes_acted`, `budget`, `stuck`, `dep_collapsed`, `reopened_after_action`, `action_unconfirmed` (with the mark) |
 | `rerun_held` | moderator | claim, candidate (a human rerun waiting on budget) |
-| `claim_superseded` | moderator | claim, by (the superseding claim); only for an `open` or `escalated` claim |
+| `claim_superseded` | moderator | claim, by (the superseding claim), prior status; written when the superseding claim is accepted |
 | `claim_reopened` | human or moderator | claim, by (`decision`, the reopening evidence, or the dep that left `accepted`), new epoch number; a human reopen also carries the expected `rev`. Reopening a claim does not revive dependents it voided; each needs its own `reopen` |
 | `claim_acting` | host or human | claim, epoch, ref (C-R9) |
 | `claim_action_result` | host or human | mark, `done` or `aborted` (C-R9) |
@@ -328,9 +329,10 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-41 | B (accepted, not acted on) depends on A (accepted); A reopened by executed counter | A `open`; B `claim_reopened(by: A)`, new epoch, `open`, all in one transaction |
 | CL-47 | B and C accepted, both depend on A; C acted on (mark `done`); A dropped by executed counter evidence (via reopen, then drop line) | B reopened then voided in the same transaction; C `claim_escalated(dep_collapsed)` |
 | CL-48 | D depends on B, B depends on A, all accepted, none acted on; A reopened | B and D both reopened, atomically (fixed point) |
-| CL-49 | X accepted then superseded by Y; executed counter evidence on X citing a failed report | Recorded; X keeps its status and is not reopened. A second `supersedes` naming X → `bad_claim` |
-| CL-53 | Open claim X with an open dependent D and a held rerun is superseded by Y; separately, acted-on accepted claim Z is superseded | X `claim_superseded(by: Y)`, the held rerun withdrawn, D voided, all in one transaction; Z keeps `accepted` and its action mark |
+| CL-49 | Agent posts Y with `supersedes: X` right after X is accepted (X acted on, irreversible); Y stays open; then a failed report on X | X still `accepted`, so the failed report escalates `reopened_after_action` as usual. Later, Y reaches its accept line → `claim_escalated(supersedes_acted)`; human `accept` → Y accepted, X `superseded` with its marks; further counter evidence on X is recorded only. A second `supersedes` naming X → `bad_claim` |
+| CL-53 | Open claim X with an open dependent D and a held rerun; Y supersedes X; Y accepted | Before Y's acceptance nothing changes; on it, X `claim_superseded(by: Y, prior: open)`, the held rerun withdrawn, D voided, one transaction. If Y is dropped instead, X is untouched |
 | CL-54 | High-stakes claim: two passing tests (8), then a third (12); an irreversible low-stakes claim the same | Open at 8, accepted at 12; the irreversible one escalates `irreversible` at 12, not at 8 |
+| CL-56 | B accepted on its last budget unit, not acted on, depends on A; A reopened by executed counter | B `claim_reopened(by: A)` and `claim_escalated(budget)` in the same transaction |
 | CL-55 | Question Q with candidates A (open), B (escalated `stuck`), C (accepted, acted on), D (void); human `choose(Q, B)` | B accepted; A and C dropped, C keeps its mark; D unchanged; dependents of A and C follow Dependencies; one transaction; a stale `rev` → `stale_rev`, nothing written |
 | CL-50 | Dropped claim X (not superseded) receives executed support citing a passed report | `claim_reopened(by: evidence)` (symmetry; same as CL-40) |
 | CL-51 | Mark on X with no result. (a) `mark_timeout_secs` passes. (b) The human then records `aborted`. (c) A result arrives before the timeout | (a) `claim_escalated(action_unconfirmed, mark)`; X keeps its status. (b) The mark is cleared; X is no longer acted on. (c) No escalation |
