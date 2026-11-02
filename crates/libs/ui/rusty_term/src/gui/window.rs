@@ -3952,6 +3952,10 @@ impl WindowState<'_> {
             self.apply_opacity();
             let size = window.inner_size();
             self.apply_size(size.width, size.height);
+            // A keymap zoom (Ctrl+=/Ctrl+-) returns without any other
+            // repaint, so the new cell size would otherwise only show on the
+            // next unrelated redraw (child output, a mouse move).
+            window.request_redraw();
         }
     }
 
@@ -6295,6 +6299,10 @@ fn chord_key(code: KeyCode) -> Option<crate::keymap::Key> {
         KeyCode::F12 => Key::F12,
         KeyCode::Comma => Key::Char(','),
         KeyCode::Period => Key::Char('.'),
+        // The font-zoom chords (Ctrl+=, Ctrl+Shift+=, Ctrl+-) are bound to
+        // these; without them those presses fell through to the child.
+        KeyCode::Equal => Key::Char('='),
+        KeyCode::Minus => Key::Char('-'),
         KeyCode::KeyA => Key::Char('a'),
         KeyCode::KeyB => Key::Char('b'),
         KeyCode::KeyC => Key::Char('c'),
@@ -6361,6 +6369,22 @@ mod tests {
         tab_widths, visible_tab_range, widget_text,
     };
     use crate::core::Cell;
+
+    #[test]
+    fn the_font_zoom_keys_reach_their_default_bindings() {
+        use super::chord_key;
+        use crate::keymap::{Action, Chord, Keymap};
+        use winit::keyboard::KeyCode;
+        let km = Keymap::default();
+        let action = |shift: bool, code: KeyCode| {
+            let key = chord_key(code).expect("the key maps to a chord key");
+            km.action(Chord::new(true, shift, false, key))
+        };
+        assert_eq!(action(false, KeyCode::Equal), Some(Action::FontSizeUp));
+        assert_eq!(action(true, KeyCode::Equal), Some(Action::FontSizeUp));
+        assert_eq!(action(false, KeyCode::Minus), Some(Action::FontSizeDown));
+        assert_eq!(action(false, KeyCode::Digit0), Some(Action::FontSizeReset));
+    }
 
     #[test]
     fn a_synchronized_update_repaints_the_last_frame_until_it_closes() {
