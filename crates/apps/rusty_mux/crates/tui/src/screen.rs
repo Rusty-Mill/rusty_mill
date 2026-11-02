@@ -601,6 +601,40 @@ mod tests {
     }
 
     #[test]
+    fn the_cursor_colour_follows_focus_and_a_reset() {
+        let mut orange = grid(4, 1, "a\x1b]12;#ff8000\x1b\\");
+        let blue = grid(4, 1, "b\x1b]12;#0000ff\x07");
+        let plain = grid(4, 1, "c");
+        let rect = |x| Rect {
+            x,
+            y: 0,
+            size: size(4, 1),
+        };
+        let screen = |a: &Grid, focused| {
+            let views = [(1, &plain, 0), (2, a, 5), (3, &blue, 10)].map(|(n, g, x)| View {
+                block: id(n),
+                rect: rect(x),
+                grid: Some(g),
+                overlay: None,
+            });
+            compose(size(14, 1), &views, id(focused))
+        };
+        let tail =
+            |prev: &Frame, next: &Frame| String::from_utf8(render(Some(prev), next)).unwrap();
+        let (on_plain, on_orange, on_blue) =
+            (screen(&orange, 1), screen(&orange, 2), screen(&orange, 3));
+        assert_eq!(on_plain.cursor_colour(), None);
+        assert!(tail(&on_plain, &on_orange).ends_with("\x1b]12;#ff8000\x1b\\"));
+        assert!(tail(&on_orange, &on_blue).ends_with("\x1b]12;#0000ff\x1b\\"));
+        assert!(tail(&on_blue, &on_plain).ends_with("\x1b]112\x1b\\"));
+        // What `terminal.reset` feeds puts the focused block's colour back.
+        AnsiParser::new().advance(&mut orange, b"\x18\x1b\\\x1bc");
+        let reset = screen(&orange, 2);
+        assert_eq!(reset.cursor_colour(), None);
+        assert!(tail(&on_orange, &reset).ends_with("\x1b]112\x1b\\"));
+    }
+
+    #[test]
     fn predictions_are_drawn_underlined_with_the_cursor_after_them() {
         let typed = grid(4, 2, "$ ");
         let rect = Rect {

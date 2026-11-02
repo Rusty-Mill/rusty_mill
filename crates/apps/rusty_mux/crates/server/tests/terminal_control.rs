@@ -6,7 +6,7 @@
 mod common;
 
 use common::{Client, block_for, start_server};
-use rusty_mux_core::{BlockId, Size};
+use rusty_mux_core::{BlockId, Event, Selection, Size};
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Features, Message};
 
@@ -153,10 +153,11 @@ fn reset_recovers_a_terminal_stuck_in_a_sequence() {
         let path = start_server();
         let mut client = Client::connect_with(&path, CONTROL, None);
         let block = block_for(&mut client);
-        // DECCKM on and a marker, then the unfinished sequence, then `cat`
-        // writes nothing until it is interrupted.
+        // DECCKM on and a marker, then the unfinished sequence, then `read`
+        // writes nothing until a line comes. (Not `cat` and Ctrl-C: SIGINT
+        // flushes the tty's input, keys typed behind it included.)
         let before = format!("BEFORE{n}");
-        let line = format!("printf '\\033[?1hBEFORE%s\\n' {n}; printf '{printf}'; cat\r");
+        let line = format!("printf '\\033[?1hBEFORE%s\\n' {n}; printf '{printf}'; read x\r");
         client.input(block, line.as_bytes());
         client.wait_for(block, &format!("{before}\r\n{written}"));
         assert!(screen(&mut client, block).contains(&before), "{printf}");
@@ -169,11 +170,52 @@ fn reset_recovers_a_terminal_stuck_in_a_sequence() {
             "{printf}: the client's copy"
         );
         // Out of application cursor keys: Up is CSI A, not SS3 A.
-        client.input(block, b"\x03cat -v\r");
+        client.input(block, b"\rcat -v\r");
         client.wait_for(block, "cat -v\r\n");
         let keys = Value::Words(vec!["up".into(), "enter".into()]);
         client.send(&call(block, "terminal.send-keys", &[("key", keys)])(99));
         client.wait_for(block, "^[[A");
+    }
+}
+
+#[test]
+fn reset_drops_a_clipboard_write_the_program_left_unfinished() {
+    let path = start_server();
+    let wanted = CONTROL
+        .union(Features::EVENT_SEQ)
+        .union(Features::MORE_PROGRAM_EVENTS);
+    // "YQ==" is "a": the write is whole but for its terminator, or its ST's
+    // ESC came and the `\` did not.
+    let cases = [
+        ("\\033]52;c;YQ==", "\x1b]52;c;YQ=="),
+        ("\\033]52;c;YQ==\\033", "\x1b]52;c;YQ==\x1b"),
+    ];
+    for (printf, written) in cases {
+        let mut client = Client::connect_with(&path, wanted, None);
+        let block = block_for(&mut client);
+        let line = format!("printf '{printf}'; read x\r");
+        client.input(block, line.as_bytes());
+        client.wait_for(block, written);
+
+        done(&mut client, block, "terminal.reset", &[]);
+
+        // A whole write after it is announced; the abandoned one never is.
+        client.input(block, b"\rprintf '\\033]52;p;aGk=\\007'\r");
+        let primary = Event::ClipboardWritten {
+            block,
+            selection: Selection::Primary,
+        };
+        while !client.events.iter().any(|(_, e)| *e == primary) {
+            client.recv();
+        }
+        let clipboard = Event::ClipboardWritten {
+            block,
+            selection: Selection::Clipboard,
+        };
+        assert!(
+            !client.events.iter().any(|(_, e)| *e == clipboard),
+            "{printf}"
+        );
     }
 }
 

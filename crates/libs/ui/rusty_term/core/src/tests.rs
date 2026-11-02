@@ -156,36 +156,50 @@ fn can_and_sub_abort_an_osc_string_without_acting_on_it() {
 }
 
 #[test]
-fn can_and_sub_after_a_strings_esc_abort_it_without_acting_on_it() {
-    // Each string asks for an answer or sets the title; its ESC could start
-    // the ST, but CAN or SUB comes instead.
-    let strings: [&[u8]; 4] = [
+fn can_and_sub_abort_a_string_at_every_split_without_acting_on_it() {
+    // Each string sets the title, writes the clipboard, posts a
+    // notification or asks for an answer. Cut after each of its bytes,
+    // its terminator's ESC included, then CAN or SUB, it does nothing.
+    let strings: [&[u8]; 7] = [
         b"\x1b]0;stuck\x1b",
+        b"\x1b]52;c;YQ==\x1b",
+        b"\x1b]9;hello\x1b",
+        b"\x1b]777;notify;title;body\x1b",
         b"\x1bP$qm\x1b",
         b"\x1bP+q544e\x1b",
         b"\x1b_Gi=99,a=q;\x1b",
     ];
     for string in strings {
-        for abort in [b"\x18", b"\x1a"] {
-            let mut g = Grid::new(20, 2);
-            let mut p = AnsiParser::new();
-            p.advance(&mut g, string);
-            p.advance(&mut g, abort);
-            assert!(p.ground(), "{string:?} {abort:?}");
-            p.advance(&mut g, b"after");
-            assert_eq!(g.title, "", "{string:?} {abort:?}");
-            assert!(p.take_responses().is_empty(), "{string:?} {abort:?}");
-            assert_eq!(g.line_text(0).as_deref().map(str::trim_end), Some("after"));
+        for cut in 1..=string.len() {
+            for abort in [b"\x18", b"\x1a"] {
+                let what = format!("{:?} {abort:?}", &string[..cut]);
+                let mut g = Grid::new(20, 2);
+                let mut p = AnsiParser::new();
+                p.advance(&mut g, &string[..cut]);
+                p.advance(&mut g, abort);
+                assert!(p.ground(), "{what}");
+                p.advance(&mut g, b"after");
+                assert_eq!(g.title, "", "{what}");
+                assert_eq!(g.clipboard_set, None, "{what}");
+                assert!(g.notifications.is_empty(), "{what}");
+                assert!(p.take_responses().is_empty(), "{what}");
+                assert_eq!(
+                    g.line_text(0).as_deref().map(str::trim_end),
+                    Some("after"),
+                    "{what}"
+                );
+            }
         }
         // With ST instead, each is acted on: the test sees a real effect.
         let mut g = Grid::new(20, 2);
         let mut p = AnsiParser::new();
         p.advance(&mut g, string);
         p.advance(&mut g, b"\\");
-        assert!(
-            g.title == "stuck" || !p.take_responses().is_empty(),
-            "{string:?}"
-        );
+        let acted = g.title == "stuck"
+            || g.clipboard_set.is_some()
+            || !g.notifications.is_empty()
+            || !p.take_responses().is_empty();
+        assert!(acted, "{string:?}");
     }
 }
 

@@ -337,6 +337,40 @@ mod tests {
         }
     }
 
+    /// Where an OSC string ends in `rest` for a client built before CAN
+    /// ended one: its body takes every byte but BEL and ESC, CAN included,
+    /// and the byte after an ESC ends it, whatever that byte is. A model of
+    /// rusty_term_core's `Osc` and `OscEsc` states before this change;
+    /// every other state treated CAN as now.
+    fn pre_change_osc_end(after_esc: bool, rest: &[u8]) -> Option<usize> {
+        let mut esc = after_esc;
+        for (i, &b) in rest.iter().enumerate() {
+            if esc || b == 0x07 {
+                return Some(i + 1);
+            }
+            esc = b == 0x1b;
+        }
+        None
+    }
+
+    #[test]
+    fn a_reset_reaches_clients_whose_osc_strings_take_can_as_text() {
+        for after_esc in [false, true] {
+            let end = pre_change_osc_end(after_esc, RESET).expect("the string ends");
+            // Past the string, such a client reads as this parser does.
+            let mut grid = Grid::new(20, 3);
+            let mut parser = AnsiParser::new();
+            parser.advance(&mut grid, b"\x1b[?1hBEFORE");
+            parser.advance(&mut grid, &RESET[end..]);
+            let screen = format(&grid, Capture::default(), usize::MAX).unwrap_or_default();
+            assert!(
+                !screen.contains("BEFORE"),
+                "after_esc={after_esc}: {screen:?}"
+            );
+            assert!(!grid.app_cursor_keys, "after_esc={after_esc}");
+        }
+    }
+
     #[test]
     fn reported_paths_are_decoded() {
         assert_eq!(
