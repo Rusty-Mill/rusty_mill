@@ -286,13 +286,14 @@ impl<C: CommandRunner, S: Supervisor> BbpHost<C, S> {
             return Self::load(h);
         }
         let profiles = std::fs::read_to_string(&self.config.profiles).map_err(transient)?;
-        let config = match lease {
+        let (config, profiles) = match lease {
             Some(lease) => {
                 let config = lease::confine(&self.config, lease).map_err(permanent)?;
-                lease::profiles_within(&profiles, &config, lease).map_err(permanent)?;
-                config
+                let profiles =
+                    lease::bounded_profiles(&profiles, &config, lease).map_err(permanent)?;
+                (config, profiles)
             }
-            None => self.config.clone(),
+            None => (self.config.clone(), profiles),
         };
         let brief = format!("{}\n\n{}", self.context, orch_cli::render(task, board, ""));
         let frozen = Frozen {

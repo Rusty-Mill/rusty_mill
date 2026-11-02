@@ -784,6 +784,64 @@ fn a_lease_refuses_a_profile_root_outside_it_before_anything_runs() {
 
 #[cfg(unix)]
 #[test]
+fn a_leased_task_freezes_profile_roots_as_resolved_so_a_swap_cannot_move_them() {
+    let dir = temp().canonicalize().unwrap();
+    let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+    for made in ["src", "tool", "secret"] {
+        std::fs::create_dir_all(dir.join(made)).unwrap();
+    }
+    // `src/link` lies in the harness's write root and resolves into the lease.
+    std::os::unix::fs::symlink(dir.join("tool"), dir.join("src/link")).unwrap();
+    let mut c = config(&dir);
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            write: vec![path("src")],
+            ..Sandbox::default()
+        });
+    }
+    std::fs::write(
+        &c.profiles,
+        format!(r#"{{"read_roots":[{}]}}"#, json(&path("src/link"))),
+    )
+    .unwrap();
+    let mut leased = fence();
+    leased.lease = Some(orch_core::factory::Lease {
+        read: vec![path("tool")],
+        write: vec![path("src")],
+        expires: None,
+    });
+    let (task, board) = task();
+    let command = Contract::default();
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        json(&Response::Ok),
+    ]);
+    let mut host = BbpHost::with_seams(
+        c,
+        "goal".into(),
+        "alias".into(),
+        command,
+        FakeSupervisor::default(),
+    )
+    .unwrap();
+    let handle = host.open(&task, &board, &leased).unwrap();
+    // The harness re-points the link once the task is frozen.
+    std::fs::remove_file(dir.join("src/link")).unwrap();
+    std::os::unix::fs::symlink(dir.join("secret"), dir.join("src/link")).unwrap();
+    let h = host.handle(&handle).unwrap();
+    let manifest = BbpHost::<Contract, FakeSupervisor>::manifest(&h);
+    let given = std::fs::read_to_string(manifest.join("profiles.json")).unwrap();
+    let given: rusty_serde::json::Value = rusty_serde::json::from_str(&given).unwrap();
+    // The runner's rule names the root checked at freeze, never the link.
+    assert_eq!(given["read_roots"][0].as_str(), Some(path("tool").as_str()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn cancel_of_a_never_frozen_leased_task_skips_confinement() {
     let dir = temp().canonicalize().unwrap();
     std::fs::create_dir_all(dir.join("src")).unwrap();

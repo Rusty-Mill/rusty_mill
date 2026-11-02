@@ -21,7 +21,7 @@
 use crate::config::resolved;
 use crate::{Config, Sandbox};
 use orch_core::factory::{contains, Lease};
-use rusty_serde::Deserialize;
+use rusty_serde::json::Value;
 use std::path::Path;
 
 /// The system's programs and libraries, which BBP grants every sandbox it
@@ -35,13 +35,6 @@ const SYSTEM_ROOTS: [&str; 7] = [
     "/etc",
     "/dev/urandom",
 ];
-
-/// The one part of a BBP profile set the lease bounds.
-#[derive(Deserialize)]
-struct ProfileRoots {
-    #[rusty_serde(default)]
-    read_roots: Vec<String>,
-}
 
 /// The pool of `config` with every assigned member's sandbox bounded by
 /// `lease`. An assigned member without a sandbox cannot be bounded, so it is
@@ -74,17 +67,33 @@ pub(crate) fn confine(config: &Config, lease: &Lease) -> Result<Config, String> 
     Ok(confined)
 }
 
-/// Refuse a profile set whose `read_roots` would let candidate code read
-/// outside `lease`, or through a root that a member of the `confined` pool
-/// could swap. Roots are resolved through symlinks first.
-pub(crate) fn profiles_within(
+/// `profiles` with each `read_roots` entry replaced by the path it resolves
+/// to, so the runner later opens the root checked here rather than a
+/// spelling some harness could re-point. Refused when a root lies outside
+/// `lease`, or beneath a write root of the `confined` pool, where a harness
+/// could swap it.
+pub(crate) fn bounded_profiles(
     profiles: &str,
     confined: &Config,
     lease: &Lease,
-) -> Result<(), String> {
-    let set: ProfileRoots =
+) -> Result<String, String> {
+    let mut set: Value =
         rusty_serde::json::from_str(profiles).map_err(|e| format!("profile set: {e}"))?;
-    let roots = canonical(&set.read_roots)?;
+    let Some(spelled) = set.get("read_roots") else {
+        return Ok(profiles.to_owned());
+    };
+    let Value::Seq(spelled) = spelled else {
+        return Err("profile read_roots is not a list".into());
+    };
+    let spelled = spelled
+        .iter()
+        .map(|r| {
+            r.as_str()
+                .map(str::to_owned)
+                .ok_or("profile read root is not a string")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let roots = canonical(&spelled)?;
     let reach: Vec<String> = canonical(&SYSTEM_ROOTS.map(str::to_owned))?
         .into_iter()
         .chain(lease.read.iter().cloned())
@@ -105,7 +114,11 @@ pub(crate) fn profiles_within(
             ));
         }
     }
-    Ok(())
+    set.insert(
+        "read_roots",
+        Value::Seq(roots.into_iter().map(Value::from).collect()),
+    );
+    rusty_serde::json::to_string(&set).map_err(|e| format!("profile set: {e}"))
 }
 
 /// Each lease path exactly as the kernel resolves it: existing, with no
@@ -357,11 +370,11 @@ mod tests {
         let lease = lease(&[&tool], &[&src]);
         let within = |roots: &[&std::path::Path]| {
             let roots = rusty_serde::json::to_string(&strings(roots)).unwrap();
-            profiles_within(&format!(r#"{{"read_roots":{roots}}}"#), &config, &lease)
+            bounded_profiles(&format!(r#"{{"read_roots":{roots}}}"#), &config, &lease)
         };
         // System roots, and roots the lease reaches, are kept.
         assert!(within(&[Path::new("/usr"), Path::new("/lib"), &tool, &src]).is_ok());
-        assert!(profiles_within("{}", &config, &lease).is_ok());
+        assert_eq!(bounded_profiles("{}", &config, &lease).unwrap(), "{}");
         // A root outside the lease, even one spelled inside it, is refused.
         for outside in [&secret, &tool.join("escape")] {
             let refused = within(&[outside]).unwrap_err();
@@ -370,6 +383,36 @@ mod tests {
         // So is one beneath a confined member's write root.
         let refused = within(&[&src.join("out/vendor")]).unwrap_err();
         assert!(refused.contains("swap"), "{refused}");
+    }
+
+    #[test]
+    fn profile_roots_are_frozen_as_the_paths_checked() {
+        // A harness writes `out`, where a link resolves to the leased `tool`
+        // when checked; re-pointing it later must not move the runner's root.
+        let dir = temp().canonicalize().unwrap();
+        let (out, tool, secret) = (dir.join("out"), dir.join("tool"), dir.join("secret"));
+        made(&[&out, &tool, &secret]);
+        std::os::unix::fs::symlink(&tool, out.join("link")).unwrap();
+        let mut config = config(&dir);
+        sandboxed(
+            &mut config,
+            Sandbox {
+                write: strings(&[&out]),
+                ..Sandbox::default()
+            },
+        );
+        let lease = lease(&[&tool], &[&out]);
+        let spelled = rusty_serde::json::to_string(&strings(&[&out.join("link")])).unwrap();
+        let profiles = format!(r#"{{"profiles":[],"read_roots":{spelled},"tree":"t"}}"#);
+        let frozen = bounded_profiles(&profiles, &config, &lease).unwrap();
+        std::fs::remove_file(out.join("link")).unwrap();
+        std::os::unix::fs::symlink(&secret, out.join("link")).unwrap();
+        let frozen: Value = rusty_serde::json::from_str(&frozen).unwrap();
+        assert_eq!(
+            frozen.get("read_roots").unwrap(),
+            &Value::Seq(vec![Value::from(path(&tool).unwrap())])
+        );
+        assert_eq!(frozen.get("tree").and_then(Value::as_str), Some("t"));
     }
 
     #[test]

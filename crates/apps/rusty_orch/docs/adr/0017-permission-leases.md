@@ -39,7 +39,9 @@ The BBP host enforces the fence's lease, not its configuration:
   profile set's `read_roots`, so they are bounded at freeze too: each root,
   resolved through symlinks, must be a system root (those BBP grants every
   sandbox) or lie within the lease's read or write paths, and none may lie
-  beneath a confined member's write root. A root outside is refused, not
+  beneath a confined member's write root. Each is frozen as the path it
+  resolved to, so the runner opens the root that was checked, not a spelling
+  a harness could re-point afterwards. A root outside is refused, not
   dropped, so a validator never loses its toolchain silently; a toolchain
   outside the system roots (a rustup sysroot, say) needs a lease path.
 - **Frozen reach.** A later fence whose lease reaches other paths, or none, is
