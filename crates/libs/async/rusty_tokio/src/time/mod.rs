@@ -203,8 +203,9 @@ impl TimerDriver {
                     // Virtual time only moves when `advance()` says so --
                     // there's no real-time deadline to compute a sleep
                     // duration from, so just wait to be re-notified
-                    // (`pause`/`resume`/`advance` all notify), bounded the
-                    // same way the "nothing scheduled" branch is.
+                    // (`pause`/`resume` notify; `advance` fires timers
+                    // itself), bounded the same way the "nothing
+                    // scheduled" branch is.
                     let _ = self
                         .condvar
                         .wait_timeout(guard, Duration::from_millis(200))
@@ -376,14 +377,20 @@ mod tests {
 
     /// The timer thread reads the pause state under `inner` and then
     /// waits, so `pause` and `resume` publish under `inner` too, or a
-    /// resume that lands in between is lost for up to 200 ms (#587).
+    /// change that lands in between is lost for up to 200 ms (#587).
     #[test]
-    fn pause_and_resume_change_the_clock_under_inner() {
+    fn pause_changes_the_clock_under_inner() {
         let driver = Arc::new(TimerDriver::new());
         assert!(
             !pause_state_changes_without_inner(&driver, TimerDriver::pause),
             "pause changed the clock without holding inner"
         );
+    }
+
+    #[test]
+    fn resume_changes_the_clock_under_inner() {
+        let driver = Arc::new(TimerDriver::new());
+        driver.pause();
         assert!(
             !pause_state_changes_without_inner(&driver, TimerDriver::resume),
             "resume changed the clock without holding inner"
