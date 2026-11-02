@@ -1741,9 +1741,11 @@ mod client {
         mirrored: Option<Vec<u8>>,
         /// Predictions drawn over the passing block since its last output.
         passed: Option<Passed>,
-        /// Whether the terminal's cursor has a colour this client or a
-        /// passing block's program gave it, rather than its own. Kept apart
-        /// from the panes, which may be gone by the time the view changes.
+        /// Whether the terminal's cursor may have a colour other than its
+        /// own: one a composed frame gave it, or any while a block passes
+        /// through, since its program's OSC 12 reaches the terminal as it is
+        /// (even one equal to the grid's default). Kept apart from the
+        /// panes, which may be gone by the time the view changes.
         coloured: bool,
         /// The bytes the last view change wrote, for tests.
         #[cfg(test)]
@@ -2439,7 +2441,6 @@ mod client {
                             write(&pass(grid), &mut self.ended);
                             self.passed = None;
                         }
-                        self.coloured = self.pass_coloured(block);
                     }
                     self.fit();
                 }
@@ -2453,7 +2454,6 @@ mod client {
                             &[erased.unwrap_or_default(), bytes].concat(),
                             &mut self.ended,
                         );
-                        self.coloured = self.pass_coloured(block);
                     }
                 }
                 // The focus may have moved on while the lease was asked for.
@@ -2671,8 +2671,8 @@ mod client {
                 self.handed = bytes.clone();
             }
             self.coloured = match &shown {
-                Shown::Passing(block) => self.pass_coloured(*block),
-                // A first frame starts from the terminal's own colour.
+                Shown::Passing(_) => true,
+                // RESTORE put the terminal's own colour back.
                 Shown::Composed(_) if bytes.is_empty() => self.coloured,
                 Shown::Composed(_) => false,
                 Shown::Nothing => self.coloured,
@@ -2682,39 +2682,32 @@ mod client {
             self.shown = shown;
         }
 
-        /// Whether the passing `block`'s program gave the cursor a colour,
-        /// which reached the terminal with its output.
-        fn pass_coloured(&self, block: BlockId) -> bool {
-            self.grid(block)
-                .is_some_and(|g| screen::chosen_cursor(g).is_some())
-        }
-
         /// The bytes that hand the terminal from what it shows to `shown`.
-        /// A cursor colour the last view gave it is put back first, so the
-        /// next starts from the terminal's own, as [`pass`] and a first
-        /// [`screen::render`] take it to.
+        /// Whatever colour the last view may have given the cursor is put
+        /// back first, so the next starts from the terminal's own, as
+        /// [`pass`] and a first [`screen::render`] take it to.
         fn handover(&self, shown: &Shown) -> Vec<u8> {
-            let next = match shown {
+            match shown {
                 // A block not ready yet is passed on Ready.
                 Shown::Passing(block) => {
-                    match self.panes.get(block).and_then(|p| p.term.as_ref()) {
+                    let uncolour = match self.coloured {
+                        true => screen::cursor_colour(None).into_bytes(),
+                        false => Vec::new(),
+                    };
+                    let passed = match self.panes.get(block).and_then(|p| p.term.as_ref()) {
                         Some((grid, _)) => pass(grid),
                         None => b"\x1b[?1049l".to_vec(),
-                    }
+                    };
+                    [uncolour, passed].concat()
                 }
                 Shown::Composed(_) => match self.shown {
-                    Shown::Composed(_) => return Vec::new(),
-                    // Undo the modes the passed-through program set, then
-                    // draw where the shell's screen is kept.
+                    Shown::Composed(_) => Vec::new(),
+                    // Undo the modes and cursor colour the passed-through
+                    // program set, then draw where the shell's screen is kept.
                     _ => [RESTORE, b"\x1b[?1049h"].concat(),
                 },
-                Shown::Nothing => return Vec::new(),
-            };
-            let uncolour = match self.coloured {
-                true => screen::cursor_colour(None).into_bytes(),
-                false => Vec::new(),
-            };
-            [uncolour, next].concat()
+                Shown::Nothing => Vec::new(),
+            }
         }
 
         /// What `block` shows: from its connection, or while the path is
@@ -3268,26 +3261,52 @@ mod client {
             // Passing A, whose program coloured the cursor, then B or the
             // split screen: the terminal's own colour comes back first.
             app.show(Shown::Passing(a));
+            assert!(!handed(&app).contains(BACK), "nothing to put back yet");
             assert!(handed(&app).ends_with("\x1b]12;#ff8000\x1b\\"));
             app.show(Shown::Passing(b));
             assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
             assert!(!handed(&app).contains("\x1b]12;"));
-            app.show(Shown::Passing(a));
             app.show(Shown::Composed(None));
-            assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
+            assert!(handed(&app).contains(BACK), "{:?}", handed(&app));
 
-            // From B, which did not: nothing to put back.
-            app.show(Shown::Passing(b));
-            app.show(Shown::Composed(None));
-            assert!(!handed(&app).contains("\x1b]1"), "{:?}", handed(&app));
-
-            // From the split screen focused on A, to B passing.
+            // The split screen focused on A, then on B, which has none.
             app.focus = a;
             app.draw();
             assert!(app.coloured);
+            app.focus = b;
+            app.draw();
+            assert!(!app.coloured);
+            // Nothing left to put back when B passes.
+            app.show(Shown::Passing(b));
+            assert!(!handed(&app).contains(BACK), "{:?}", handed(&app));
+            // Focused on A again, then B passing.
+            app.show(Shown::Composed(None));
+            app.focus = a;
+            app.draw();
             app.show(Shown::Passing(b));
             assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
-            assert!(!app.coloured);
+        }
+
+        /// A passing program's OSC 12 reaches the terminal as it is, even
+        /// one its grid cannot tell from the default: it is put back too.
+        #[cfg(unix)]
+        #[test]
+        fn a_passing_programs_cursor_colour_is_put_back_even_the_default_one() {
+            let (mut app, _inbox, _far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.panes.get_mut(&a).expect("A").term = Some(term(b""));
+            app.panes.get_mut(&b).expect("B").term = Some(term(b""));
+            app.show(Shown::Passing(a));
+            // A's program writes white; the raw bytes reach the terminal.
+            let pane = app.panes.get_mut(&a).expect("A");
+            let (grid, parser) = pane.term.as_mut().expect("A's terminal");
+            parser.advance(grid, b"\x1b]12;#ffffff\x07");
+            assert_eq!(screen::chosen_cursor(grid), None, "the grid can't tell");
+            app.show(Shown::Passing(b));
+            assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
+            app.show(Shown::Passing(a));
+            app.show(Shown::Composed(None));
+            assert!(handed(&app).contains(BACK), "{:?}", handed(&app));
         }
 
         /// The zoom moving from A to B drops A's pane before the view
@@ -3313,7 +3332,6 @@ mod client {
             assert!(!app.panes.contains_key(&a), "A's pane is gone");
             assert!(matches!(app.shown, Shown::Passing(x) if x == b));
             assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
-            assert!(!app.coloured);
         }
 
         /// Answers a block's lease request on its fresh connection, as the

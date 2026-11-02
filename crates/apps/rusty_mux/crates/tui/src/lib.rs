@@ -27,10 +27,12 @@ use rusty_term_core::{Grid, WIDE_TRAILER};
 /// Written on every exit after raw output stops: leaves the alternate
 /// screen, soft-resets (DECSTR: pen, cursor visibility and keys, margins,
 /// charsets), restores the numeric keypad and turns off bracketed paste,
-/// mouse and focus reporting and win32-input-mode. A block's program may
-/// have set any of them on this terminal through the passthrough.
+/// mouse and focus reporting and win32-input-mode, and puts the terminal's
+/// own cursor colour back (OSC 112). A block's program may have set any of
+/// them on this terminal through the passthrough.
 pub const RESTORE: &[u8] = b"\x1b[?1049l\x1b[!p\x1b[?25h\x1b>\x1b[?2004l\
-\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?9001l\x1b[0m";
+\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?9001l\x1b[0m\
+\x1b]112\x1b\\";
 
 /// The longest unfinished mode set [`NoWin32Input`] holds back. Past it
 /// the bytes pass as they are, so a set split across reads after this
@@ -383,6 +385,7 @@ mod tests {
         let modes = String::from_utf8(modes(&Grid::new(20, 3), true)).unwrap();
         assert!(modes.contains("\x1b[?9001l"), "{modes:?}");
         assert!(String::from_utf8_lossy(RESTORE).contains("\x1b[?9001l"));
+        assert!(String::from_utf8_lossy(RESTORE).ends_with("\x1b]112\x1b\\"));
     }
 
     #[test]
