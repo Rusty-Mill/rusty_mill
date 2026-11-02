@@ -1,6 +1,6 @@
 use rusty_mux_core::{
     Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
-    SessionId, Share, Side, Size, Transport, WindowId,
+    SessionId, Share, Side, Size, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
@@ -171,6 +171,7 @@ fn every_message_round_trips() {
                 name: String::new(),
                 layout: None,
                 zoomed: None,
+                focused: None,
             },
         },
         Message::Entry {
@@ -181,6 +182,7 @@ fn every_message_round_trips() {
                 name: "w".into(),
                 layout: Some(split_layout(block)),
                 zoomed: Some(block),
+                focused: Some(block),
             },
         },
         Message::Entry {
@@ -305,6 +307,17 @@ fn every_message_round_trips() {
             window,
             index: 7,
         },
+        Message::FocusBlock { req: 32, block },
+        Message::MoveFocus {
+            req: 33,
+            window,
+            toward: Toward::Side(Side::Up),
+        },
+        Message::MoveFocus {
+            req: 34,
+            window,
+            toward: Toward::Previous,
+        },
         Message::Welcome {
             features: Features::NONE,
             client,
@@ -387,6 +400,14 @@ fn every_event_round_trips() {
         Event::WindowCreated { window, session },
         Event::WindowClosed { window },
         Event::WindowMoved { window, index: 0 },
+        Event::FocusChanged {
+            window,
+            block: Some(block),
+        },
+        Event::FocusChanged {
+            window,
+            block: None,
+        },
         Event::ActiveWindowChanged {
             session,
             window: Some(window),

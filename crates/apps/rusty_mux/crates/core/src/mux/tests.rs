@@ -58,6 +58,10 @@ fn create_links_children_and_emits_in_order() {
                 layout: Some(Layout::Block(block)),
                 zoomed: None,
             },
+            Event::FocusChanged {
+                window,
+                block: Some(block)
+            },
         ]
     );
     assert!(mux.take_events().is_empty());
@@ -752,16 +756,27 @@ fn closing_a_block_promotes_its_sibling_and_ends_its_zoom() {
                 layout: Some(Layout::Block(a)),
                 zoomed: None
             },
+            Event::FocusChanged {
+                window,
+                block: Some(a)
+            },
         ]
     );
     mux.close_block(a).unwrap();
+    let events = mux.take_events();
     assert_eq!(
-        mux.take_events().last(),
-        Some(&Event::LayoutChanged {
-            window,
-            layout: None,
-            zoomed: None
-        })
+        events[events.len() - 2..],
+        [
+            Event::LayoutChanged {
+                window,
+                layout: None,
+                zoomed: None
+            },
+            Event::FocusChanged {
+                window,
+                block: None
+            },
+        ]
     );
     assert_eq!(layout_of(&mux, window), None);
 }
@@ -851,6 +866,13 @@ fn layout_event(mux: &Mux, window: WindowId) -> Event {
     }
 }
 
+fn focus_event(window: WindowId, block: BlockId) -> Event {
+    Event::FocusChanged {
+        window,
+        block: Some(block),
+    }
+}
+
 fn share(percent: u8) -> Share {
     Share::new(percent).unwrap()
 }
@@ -919,7 +941,10 @@ fn swapping_with_a_detached_block_detaches_the_other() {
     assert_eq!(detached, vec![a]);
     // The zoomed block left, so the zoom goes to the one in its place.
     assert_eq!(mux.window(window).unwrap().zoomed(), Some(c));
-    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, c)]
+    );
 }
 
 #[test]
@@ -958,7 +983,11 @@ fn a_detached_block_keeps_running_until_moved_back() {
     assert_eq!(w.detached().collect::<Vec<_>>(), vec![b]);
     assert_eq!(w.zoomed(), None);
     assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![a, c]);
-    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    // The focus was on `b`, zoomed; `c`, below it, takes its place.
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, c)]
+    );
     // Detaching it again changes nothing.
     mux.detach_block(b).unwrap();
     assert_eq!(mux.take_events(), vec![]);
@@ -993,7 +1022,10 @@ fn a_window_showing_nothing_takes_a_block_back_without_a_neighbour() {
     mux.take_events();
     mux.move_block(a, None, Side::Left).unwrap();
     assert_eq!(layout_of(&mux, window), Some(Layout::Block(a)));
-    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, a)]
+    );
     assert_eq!(
         mux.move_block(a, Some(a), Side::Left),
         Err(Error::SameBlock(a))
@@ -1102,4 +1134,102 @@ fn new_blocks_never_split_a_block_at_the_depth_limit() {
         .max();
     assert_eq!(depth, Some(MAX_DEPTH));
     assert_eq!(layout.to_string().parse::<Layout>(), Ok(layout));
+}
+
+#[test]
+fn the_first_placed_block_takes_the_focus_and_new_ones_do_not() {
+    let (mut mux, _, window, [a, b, _]) = three();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    mux.create_block(window, size(80, 24)).unwrap();
+    let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    mux.split_block(new, b, Side::Left, size(10, 10)).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    assert!(
+        !mux.take_events()
+            .iter()
+            .any(|e| matches!(e, Event::FocusChanged { .. }))
+    );
+}
+
+#[test]
+fn focusing_a_block_announces_it_once_and_ends_another_zoom() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.focus_block(c).unwrap();
+    assert_eq!(mux.take_events(), vec![focus_event(window, c)]);
+    mux.focus_block(c).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+    // Zooming focuses; focusing another block ends the zoom first.
+    mux.zoom(b).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, b)]
+    );
+    mux.focus_block(a).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, a)]
+    );
+    // Focusing the zoomed block keeps its zoom.
+    mux.zoom(c).unwrap();
+    mux.take_events();
+    mux.focus_block(c).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(c));
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn a_detached_block_can_not_take_the_focus() {
+    let (mut mux, _, window, [a, b, _]) = three();
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    assert_eq!(mux.focus_block(b), Err(Error::Detached(b)));
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn focus_passes_to_the_block_taking_its_place() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    // `b` over `c`, right of `a`: closing `b` leaves `c` in its place.
+    mux.focus_block(b).unwrap();
+    mux.close_block(b).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(c));
+    // Swapping the focused block for a detached one focuses that one.
+    let d = mux.create_block(window, size(80, 24)).unwrap();
+    mux.detach_block(d).unwrap();
+    mux.swap_blocks(c, d).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(d));
+    // Swapping two placed blocks keeps the focus on its block.
+    mux.swap_blocks(a, d).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(d));
+    // Moving the focused block keeps it focused.
+    mux.move_block(d, Some(a), Side::Down).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(d));
+}
+
+#[test]
+fn focus_moves_by_side_and_by_order() {
+    // `a` left; `b` over `c` on the right.
+    let (mut mux, _, window, [a, b, c]) = three();
+    let go = |mux: &mut Mux, toward| {
+        mux.move_focus(window, toward).unwrap();
+        mux.window(window).unwrap().focused().unwrap()
+    };
+    assert_eq!(go(&mut mux, Toward::Side(Side::Right)), b);
+    assert_eq!(go(&mut mux, Toward::Side(Side::Down)), c);
+    assert_eq!(go(&mut mux, Toward::Side(Side::Left)), a);
+    // Nothing further left: the focus stays, and nothing is announced.
+    mux.take_events();
+    assert_eq!(go(&mut mux, Toward::Side(Side::Left)), a);
+    assert_eq!(mux.take_events(), vec![]);
+    assert_eq!(go(&mut mux, Toward::Next), b);
+    assert_eq!(go(&mut mux, Toward::Next), c);
+    assert_eq!(go(&mut mux, Toward::Next), a);
+    assert_eq!(go(&mut mux, Toward::Previous), c);
+    let gone = WindowId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.move_focus(gone, Toward::Next),
+        Err(Error::UnknownWindow(gone))
+    );
 }

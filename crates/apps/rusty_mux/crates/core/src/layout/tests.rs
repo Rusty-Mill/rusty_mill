@@ -225,3 +225,41 @@ fn the_largest_block_is_one_that_may_still_be_split() {
     assert_ne!(largest, deepest);
     assert!(layout.depth_of(largest).is_some_and(|d| d < MAX_DEPTH));
 }
+
+#[test]
+fn neighbours_border_the_block_on_their_side() {
+    // cols50(1, rows50(2, 3))
+    let layout = three();
+    let side = |b, s| layout.neighbour(id(b), Toward::Side(s));
+    assert_eq!(side(1, Side::Right), Some(id(2)));
+    assert_eq!(side(3, Side::Left), Some(id(1)));
+    assert_eq!(side(2, Side::Down), Some(id(3)));
+    assert_eq!(side(3, Side::Up), Some(id(2)));
+    assert_eq!(side(1, Side::Up), None);
+    assert_eq!(side(9, Side::Up), None);
+    assert_eq!(layout.neighbour(id(3), Toward::Next), Some(id(1)));
+    assert_eq!(layout.neighbour(id(1), Toward::Previous), Some(id(3)));
+    assert_eq!(Layout::Block(id(1)).neighbour(id(1), Toward::Next), None);
+}
+
+#[test]
+fn a_sibling_is_the_nearest_block_of_the_other_child() {
+    let layout = three();
+    assert_eq!(layout.sibling(id(1)), Some(id(2)));
+    assert_eq!(layout.sibling(id(2)), Some(id(3)));
+    assert_eq!(layout.sibling(id(3)), Some(id(2)));
+    assert_eq!(Layout::Block(id(1)).sibling(id(1)), None);
+}
+
+#[test]
+fn ways_to_move_focus_parse_by_name() {
+    for toward in [
+        Toward::Side(Side::Left),
+        Toward::Side(Side::Down),
+        Toward::Next,
+        Toward::Previous,
+    ] {
+        assert_eq!(toward.name().parse(), Ok(toward));
+    }
+    assert_eq!("north".parse::<Toward>(), Err(ParseError));
+}

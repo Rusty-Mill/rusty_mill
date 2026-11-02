@@ -27,7 +27,9 @@
 
 use std::fmt;
 
-use rusty_mux_core::{Axis, BlockId, ClientId, EntityId, SessionId, Share, Side, Size, WindowId};
+use rusty_mux_core::{
+    Axis, BlockId, ClientId, EntityId, SessionId, Share, Side, Size, Toward, WindowId,
+};
 use rusty_uuid::Uuid;
 
 use crate::theme::ThemeChange;
@@ -443,6 +445,15 @@ impl Args<'_> {
         self.has(name)
             .then(|| self.uuid(name, Entity::Block).map(BlockId::from_uuid))
             .transpose()
+    }
+
+    /// The `toward` parameter: a side, `next` or `previous`.
+    fn toward(&self) -> Result<Toward, CallError> {
+        let text = self.text("toward")?;
+        text.parse().map_err(|_| CallError::Invalid {
+            param: "toward",
+            why: format!("`{text}` is not left, right, up, down, next or previous"),
+        })
     }
 
     /// The `axis` parameter: `cols` or `rows`.
@@ -943,6 +954,47 @@ pub static CATALOG: &[Method] = &[
                 req,
                 window: a.window()?,
                 index: usize::try_from(a.number("index")?).unwrap_or(usize::MAX),
+            })
+        },
+    },
+    Method {
+        name: "focus-block",
+        doc: "Focus a block in its window, the block clients send keys to; ends a zoom on \
+              another block of the window.",
+        params: &[required(
+            "block",
+            Ty::Id(Entity::Block),
+            "The block to focus; not a detached one.",
+        )],
+        needs: Features::FOCUS,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::FocusBlock {
+                req,
+                block: a.block()?,
+            })
+        },
+    },
+    Method {
+        name: "move-focus",
+        doc: "Move a window's focus from its focused block to the nearest block on a side, \
+              or to the next or previous block in layout order, wrapping around. With no \
+              block that way, nothing changes.",
+        params: &[
+            required("window", Ty::Id(Entity::Window), "The window."),
+            required(
+                "toward",
+                Ty::Text,
+                "`left`, `right`, `up`, `down`, `next` or `previous`.",
+            ),
+        ],
+        needs: Features::FOCUS,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::MoveFocus {
+                req,
+                window: a.window()?,
+                toward: a.toward()?,
             })
         },
     },

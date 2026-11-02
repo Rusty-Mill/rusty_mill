@@ -104,6 +104,44 @@ impl FromStr for Side {
     }
 }
 
+/// Where focus moves from a block: to the nearest block on a side, or to
+/// the next or previous block in layout order, wrapping around.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toward {
+    Side(Side),
+    Next,
+    Previous,
+}
+
+impl Toward {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Side(side) => side.name(),
+            Self::Next => "next",
+            Self::Previous => "previous",
+        }
+    }
+}
+
+impl FromStr for Toward {
+    type Err = ParseError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "next" => Ok(Self::Next),
+            "previous" => Ok(Self::Previous),
+            side => side.parse().map(Self::Side),
+        }
+    }
+}
+
+/// The area directions are judged on: large, so every block of a layout
+/// [`MAX_DEPTH`] deep keeps some room.
+const COMPASS: Size = Size {
+    cols: u16::MAX,
+    rows: u16::MAX,
+};
+
 /// The first child's share of a split, a percentage from 1 to 99, so
 /// neither child is empty.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,6 +325,62 @@ impl Layout {
         }
     }
 
+    /// The block next to `block` toward `toward`, if any: on a side, the
+    /// nearest block whose place borders `block`'s there, the one sharing
+    /// the longest edge of equals; in order, the next or previous block,
+    /// wrapping around.
+    pub fn neighbour(&self, block: BlockId, toward: Toward) -> Option<BlockId> {
+        let side = match toward {
+            Toward::Side(side) => side,
+            Toward::Next | Toward::Previous => return self.cycle(block, toward),
+        };
+        let rects = self.rects(COMPASS);
+        let from = rects.iter().find(|(b, _)| *b == block)?.1;
+        let axis = side.axis();
+        let (start, end) = span(from, axis);
+        rects
+            .iter()
+            .filter(|(b, _)| *b != block)
+            .filter_map(|(b, r)| {
+                let (s, e) = span(*r, axis);
+                let gap = match side.first() {
+                    true => (e <= start).then(|| start - e)?,
+                    false => (s >= end).then(|| s - end)?,
+                };
+                let overlap = overlap(from, *r, other(axis));
+                (overlap > 0).then_some((gap, overlap, *b))
+            })
+            .min_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)))
+            .map(|(_, _, b)| b)
+    }
+
+    fn cycle(&self, block: BlockId, toward: Toward) -> Option<BlockId> {
+        let blocks = self.blocks();
+        let at = blocks.iter().position(|b| *b == block)?;
+        let n = blocks.len();
+        let to = match toward {
+            Toward::Previous => (at + n - 1) % n,
+            _ => (at + 1) % n,
+        };
+        (to != at).then(|| blocks[to])
+    }
+
+    /// The block next to `block` in its split, the one that takes the
+    /// split's place if `block` leaves: of the other child, its block
+    /// nearest `block`.
+    pub(crate) fn sibling(&self, block: BlockId) -> Option<BlockId> {
+        let Self::Split { first, second, .. } = self else {
+            return None;
+        };
+        if **first == Self::Block(block) {
+            return second.blocks().first().copied();
+        }
+        if **second == Self::Block(block) {
+            return first.blocks().last().copied();
+        }
+        first.sibling(block).or_else(|| second.sibling(block))
+    }
+
     /// Gives `block` `share` of the innermost split along `axis` that
     /// holds it; `false`, changing nothing, when no such split does.
     pub(crate) fn resize(&mut self, block: BlockId, axis: Axis, share: Share) -> bool {
@@ -351,6 +445,28 @@ impl Layout {
     }
 }
 
+/// Where `rect` starts and ends along `axis`.
+fn span(rect: Rect, axis: Axis) -> (u32, u32) {
+    let (at, len) = match axis {
+        Axis::Columns => (rect.x, rect.size.cols),
+        Axis::Rows => (rect.y, rect.size.rows),
+    };
+    (u32::from(at), u32::from(at) + u32::from(len))
+}
+
+/// How many cells `a` and `b` share along `axis`.
+fn overlap(a: Rect, b: Rect, axis: Axis) -> u32 {
+    let ((a0, a1), (b0, b1)) = (span(a, axis), span(b, axis));
+    a1.min(b1).saturating_sub(a0.max(b0))
+}
+
+const fn other(axis: Axis) -> Axis {
+    match axis {
+        Axis::Columns => Axis::Rows,
+        Axis::Rows => Axis::Columns,
+    }
+}
+
 /// `rect` divided along `axis` into the first child's part and the
 /// second's, a one-cell divider between; `None` when it is too small.
 fn divide(rect: Rect, axis: Axis, share: Share) -> Option<(Rect, Rect)> {
@@ -401,8 +517,9 @@ impl fmt::Display for Layout {
     }
 }
 
-/// Text that is not a layout, a side that is not one of the four, or an
-/// axis that is neither `cols` nor `rows`.
+/// Text that is not a layout, a side that is not one of the four, an axis
+/// that is neither `cols` nor `rows`, or a way to move focus that is
+/// neither a side nor `next` nor `previous`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParseError;
 

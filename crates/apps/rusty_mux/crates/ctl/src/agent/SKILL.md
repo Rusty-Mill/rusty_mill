@@ -54,6 +54,11 @@ gives B 30% of the split beside it (`rows` for the one above or below);
 `list`, absent from the window's `layout`, until `move-block` puts it back.
 `move-window --window W --index 0` makes W its session's first window.
 
+Each window has a focused block, the one people type into; `list` shows it
+as `focused`. `focus-block --block B` focuses B, and `move-focus --window W
+--toward right` (or `left`, `up`, `down`, `next`, `previous`) moves it. A
+block you start does not take the focus; leave it alone unless asked.
+
 Prefer `wait` over polling. `wait --window W` or `wait --session S` waits
 until every block there has ended, blocks started meanwhile included; it
 prints each exit and exits with the last failure, 0 if every program

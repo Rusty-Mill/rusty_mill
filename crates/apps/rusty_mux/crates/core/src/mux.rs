@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Layout, MAX_DEPTH,
-    Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Transport, Window,
-    WindowId,
+    Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Toward, Transport,
+    Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -113,6 +113,7 @@ impl Mux {
                 blocks: Vec::new(),
                 layout: None,
                 zoomed: None,
+                focused: None,
             },
         );
         self.events.push(Event::WindowCreated {
@@ -273,7 +274,7 @@ impl Mux {
             window,
             size,
         });
-        self.push_layout(window);
+        self.push_layout(window, None);
     }
 
     /// Shows `block` alone over its whole window, until it is unzoomed,
@@ -301,7 +302,7 @@ impl Mux {
             return Ok(());
         }
         target.zoomed = zoomed;
-        self.push_layout(window);
+        self.push_layout(window, None);
         Ok(())
     }
 
@@ -317,7 +318,7 @@ impl Mux {
         if !layout.resize(block, axis, share) {
             return Err(Error::NoSplit { block, axis });
         }
-        self.set_layout(window, layout, false);
+        self.set_layout(window, layout, false, None);
         Ok(())
     }
 
@@ -330,12 +331,15 @@ impl Mux {
             return Ok(());
         };
         layout.swap(block, other);
-        if let Some(w) = self.windows.get_mut(&window)
-            && let Some(zoomed) = w.zoomed.filter(|z| !layout.contains(*z))
-        {
-            w.zoomed = Some(if zoomed == block { other } else { block });
+        let partner = |b: BlockId| if b == block { other } else { block };
+        let mut heir = None;
+        if let Some(w) = self.windows.get_mut(&window) {
+            if let Some(zoomed) = w.zoomed.filter(|z| !layout.contains(*z)) {
+                w.zoomed = Some(partner(zoomed));
+            }
+            heir = w.focused.map(partner);
         }
-        self.set_layout(window, layout, false);
+        self.set_layout(window, layout, false, heir);
         Ok(())
     }
 
@@ -367,7 +371,7 @@ impl Mux {
                 rest.split(target, block, side)
             }
         };
-        self.set_layout(window, layout, true);
+        self.set_layout(window, layout, true, None);
         Ok(())
     }
 
@@ -382,11 +386,12 @@ impl Mux {
         if !parent.layout.as_ref().is_some_and(|l| l.contains(block)) {
             return Ok(());
         }
+        let heir = parent.layout.as_ref().and_then(|l| l.sibling(block));
         parent.layout = parent.layout.take().and_then(|l| l.remove(block));
         if parent.zoomed == Some(block) {
             parent.zoomed = None;
         }
-        self.push_layout(window);
+        self.push_layout(window, heir);
         Ok(())
     }
 
@@ -441,8 +446,15 @@ impl Mux {
     }
 
     /// Replaces the window's layout, ending its zoom if `unzoom`, and
-    /// announces the result unless nothing changed.
-    fn set_layout(&mut self, window: WindowId, layout: Layout, unzoom: bool) {
+    /// announces the result unless nothing changed; focus left without a
+    /// place goes to `heir` (see [`Self::push_layout`]).
+    fn set_layout(
+        &mut self,
+        window: WindowId,
+        layout: Layout,
+        unzoom: bool,
+        heir: Option<BlockId>,
+    ) {
         let Some(w) = self.windows.get_mut(&window) else {
             return;
         };
@@ -454,17 +466,89 @@ impl Mux {
         if zoom_ends {
             w.zoomed = None;
         }
-        self.push_layout(window);
+        self.push_layout(window, heir);
     }
 
-    /// Announces the window's layout as it is now.
-    fn push_layout(&mut self, window: WindowId) {
+    /// Announces the window's layout as it is now, then moves its focus
+    /// if it must: to the zoomed block; else, if the focused block left
+    /// the layout, to `heir` if placed, or the first block; else nowhere
+    /// once none is placed.
+    fn push_layout(&mut self, window: WindowId, heir: Option<BlockId>) {
+        self.announce_layout(window);
+        let Some(w) = self.windows.get_mut(&window) else {
+            return;
+        };
+        let Some(layout) = w.layout.as_ref() else {
+            return self.set_focus(window, None);
+        };
+        let kept = w.focused.filter(|b| layout.contains(*b));
+        let focus = w
+            .zoomed
+            .or(kept)
+            .or(heir.filter(|b| layout.contains(*b)))
+            .or_else(|| layout.blocks().first().copied());
+        self.set_focus(window, focus);
+    }
+
+    fn announce_layout(&mut self, window: WindowId) {
         if let Some(w) = self.windows.get(&window) {
             self.events.push(Event::LayoutChanged {
                 window,
                 layout: w.layout.clone(),
                 zoomed: w.zoomed,
             });
+        }
+    }
+
+    /// Focuses `block` in `window`, announcing a change.
+    fn set_focus(&mut self, window: WindowId, block: Option<BlockId>) {
+        let Some(w) = self.windows.get_mut(&window) else {
+            return;
+        };
+        if w.focused == block {
+            return;
+        }
+        w.focused = block;
+        self.events.push(Event::FocusChanged { window, block });
+    }
+
+    /// Focuses `block` in its window, so clients send their keys to it. A
+    /// zoom on another block ends, so the focused block always shows; a
+    /// detached block is refused.
+    pub fn focus_block(&mut self, block: BlockId) -> Result<(), Error> {
+        let window = self.window_of(block)?;
+        if !self.layout_of(window).is_some_and(|l| l.contains(block)) {
+            return Err(Error::Detached(block));
+        }
+        let unzoom = self
+            .windows
+            .get_mut(&window)
+            .filter(|w| w.zoomed.is_some_and(|z| z != block))
+            .map(|w| w.zoomed = None)
+            .is_some();
+        if unzoom {
+            self.announce_layout(window);
+        }
+        self.set_focus(window, Some(block));
+        Ok(())
+    }
+
+    /// Moves the window's focus from its focused block toward a side or
+    /// along the layout's order, as [`Self::focus_block`] does; with no
+    /// block that way, nothing changes.
+    pub fn move_focus(&mut self, window: WindowId, toward: Toward) -> Result<(), Error> {
+        let w = self
+            .windows
+            .get(&window)
+            .ok_or(Error::UnknownWindow(window))?;
+        let next = w
+            .layout
+            .as_ref()
+            .zip(w.focused)
+            .and_then(|(layout, focused)| layout.neighbour(focused, toward));
+        match next {
+            Some(block) => self.focus_block(block),
+            None => Ok(()),
         }
     }
 
@@ -672,6 +756,7 @@ impl Mux {
             .get(&block)
             .ok_or(Error::UnknownBlock(block))?
             .window;
+        let heir = self.layout_of(window).and_then(|l| l.sibling(block));
         self.remove_block(block);
         if let Some(parent) = self.windows.get_mut(&window) {
             parent.blocks.retain(|&b| b != block);
@@ -680,7 +765,7 @@ impl Mux {
                 parent.zoomed = None;
             }
         }
-        self.push_layout(window);
+        self.push_layout(window, heir);
         Ok(())
     }
 
