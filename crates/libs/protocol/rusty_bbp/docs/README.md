@@ -7,7 +7,7 @@ The Blackboard Protocol's specification and the review rounds that shaped it, mo
 | File | What |
 | --- | --- |
 | [`spec/bbp-v0.5-implementation-spec.md`](spec/bbp-v0.5-implementation-spec.md) | The spec to implement: roles as data, roster injection, capability checks. |
-| [`spec/bbp-claims-addendum.md`](spec/bbp-claims-addendum.md) | Draft (2026-11-02): claims mode. Turnless claims and evidence, board-computed scores, thresholds, dependencies, escalation. Not implemented. |
+| [`spec/bbp-claims-addendum.md`](spec/bbp-claims-addendum.md) | Approved 2026-11-02: claims mode. Turnless claims and evidence, board-computed scores, thresholds, dependencies, escalation. Not implemented. |
 | [`spec/bbp-v0.4-implementation-spec.md`](spec/bbp-v0.4-implementation-spec.md) | v0.4.1, superseded by v0.5. The crate implements it until the v0.5 engine lands. |
 | `spec/bbp-v0.3-draft-design.md`, `v0.2`, `v0.1`, `v0` | Earlier drafts, kept for the review history. |
 

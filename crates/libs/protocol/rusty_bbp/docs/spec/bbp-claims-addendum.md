@@ -1,6 +1,6 @@
 # BBP claims addendum (draft, v0)
 
-Nov 2, 2026 · **Status: draft for the owner's review. Spec only; no engine change until it is approved.**
+Nov 2, 2026 · **Status: approved by the owner on 2026-11-02, including the schema and API changes listed below. Open questions Q1 to Q5 stand at their proposals until the owner says otherwise. Spec only; the engine change is a separate PR.**
 Extends [`bbp-v0.5-implementation-spec.md`](bbp-v0.5-implementation-spec.md). Card: Mill Board #593 (Let Em Loose).
 
 ## Summary
