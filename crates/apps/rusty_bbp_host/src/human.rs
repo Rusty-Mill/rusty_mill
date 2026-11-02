@@ -38,6 +38,7 @@ pub fn parse_state(s: &str) -> Result<State, String> {
         "merge_gate" => State::MergeGate,
         "approved" => State::Approved,
         "escalated" => State::Escalated,
+        "open" => State::Open,
         other => return Err(format!("unknown state {other}")),
     })
 }
@@ -129,6 +130,46 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
             expected_rev: rev()?,
             reason: rest(0),
         },
+        // Claims mode (C-R8, C-R9).
+        "claim" => HumanAction::ClaimDecision {
+            claim: msg(a(0)?)?,
+            outcome: match a(1)? {
+                "accept" => ClaimOutcome::Accept,
+                "drop" => ClaimOutcome::Drop,
+                "reopen" => ClaimOutcome::Reopen,
+                other => {
+                    return Err(format!(
+                        "claim outcome must be accept, drop or reopen, got {other}"
+                    ))
+                }
+            },
+        },
+        "choose" => HumanAction::Choose {
+            question: msg(a(0)?)?,
+            chosen: msg(a(1)?)?,
+        },
+        "extend-claim" => HumanAction::ClaimBudgetExtended { claim: msg(a(0)?)? },
+        "withdraw-rerun" => HumanAction::WithdrawRerun {
+            candidate: art(a(0)?)?,
+        },
+        "action-result" => HumanAction::ClaimActionResult {
+            mark: a(0)?
+                .trim_start_matches("mark:")
+                .parse()
+                .map_err(|_| "mark must be a number".to_owned())?,
+            outcome: match a(1)? {
+                "done" => MarkOutcome::Done,
+                "aborted" => MarkOutcome::Aborted,
+                other => {
+                    return Err(format!(
+                        "action result must be done or aborted, got {other}"
+                    ))
+                }
+            },
+        },
+        "close" => HumanAction::Close {
+            expected_rev: rev()?,
+        },
         other => return Err(format!("unknown human action {other}")),
     })
 }
@@ -186,26 +227,28 @@ pub fn perform_as(
         .map_err(|e| format!("{e:?}"))
 }
 
-/// Human action with an optional transactional revision fence and retry op.
-/// The host's existing unfenced CLI behavior remains available to direct users.
-#[allow(clippy::too_many_arguments)]
-pub fn perform_fenced(
-    dir: &Path,
-    task: &TaskId,
+/// What `bbp human … --dry-run` prints: the events the action would append
+/// and the response it would return at `rev`. Nothing is committed.
+#[derive(Clone, Debug, PartialEq, Eq, rusty_serde::Serialize)]
+pub struct Preview {
+    pub rev: Rev,
+    pub response: Response,
+    pub events: Vec<rusty_bbp::event::Event>,
+}
+
+/// The fenced human command `perform_fenced` would dispatch.
+fn command(
     verb: &str,
     args: &[&str],
     rev: Option<Rev>,
     by: &str,
     fence: Option<Rev>,
     op: Option<OpId>,
-) -> Result<Response, String> {
+) -> Result<Result<Command, Rejection>, String> {
     let action = match action(verb, args, rev) {
         Ok(action) => action,
         Err(detail) if fence.is_some() => {
-            return Ok(Response::Rejected(Rejection::new(
-                Code::BadHumanInput,
-                detail,
-            )))
+            return Ok(Err(Rejection::new(Code::BadHumanInput, detail)))
         }
         Err(error) => return Err(error),
     };
@@ -220,8 +263,62 @@ pub fn perform_fenced(
         Some(op) => op,
         None => labelled_op(by)?,
     };
+    Ok(Ok(Command::Human { op, action }))
+}
+
+/// [`perform_fenced`] without committing: the pure engine applied to the
+/// task's current state, so the preview is what the commit would do at that
+/// revision (#595 dry run).
+#[allow(clippy::too_many_arguments)]
+pub fn preview_fenced(
+    dir: &Path,
+    task: &TaskId,
+    verb: &str,
+    args: &[&str],
+    rev: Option<Rev>,
+    by: &str,
+    fence: Option<Rev>,
+    op: Option<OpId>,
+) -> Result<Preview, String> {
+    let d = open_driver(dir, task)?;
+    let rev_now = d.state.rev;
+    let cmd = match command(verb, args, rev, by, fence, op)? {
+        Ok(cmd) => cmd,
+        Err(rej) => {
+            return Ok(Preview {
+                rev: rev_now,
+                response: Response::Rejected(rej),
+                events: vec![],
+            })
+        }
+    };
+    let out = handle(&d.state, &cmd, now());
+    Ok(Preview {
+        rev: rev_now,
+        response: out.response,
+        events: out.events,
+    })
+}
+
+/// Human action with an optional transactional revision fence and retry op.
+/// The host's existing unfenced CLI behavior remains available to direct users.
+#[allow(clippy::too_many_arguments)]
+pub fn perform_fenced(
+    dir: &Path,
+    task: &TaskId,
+    verb: &str,
+    args: &[&str],
+    rev: Option<Rev>,
+    by: &str,
+    fence: Option<Rev>,
+    op: Option<OpId>,
+) -> Result<Response, String> {
+    let cmd = match command(verb, args, rev, by, fence, op)? {
+        Ok(cmd) => cmd,
+        Err(rej) => return Ok(Response::Rejected(rej)),
+    };
     open_driver(dir, task)?
-        .dispatch(&Command::Human { op, action }, now())
+        .dispatch(&cmd, now())
         .map_err(|e| format!("{e:?}"))
 }
 
