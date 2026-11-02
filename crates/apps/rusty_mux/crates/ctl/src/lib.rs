@@ -115,9 +115,8 @@ pub struct Env {
     /// The config file `do` and `config` read: `$RUSTY_MUX_CONFIG`, else
     /// `rusty_mux/config.json` in the config directory.
     pub config: Option<PathBuf>,
-    /// The agent config directory `agent` works in: `$CLAUDE_CONFIG_DIR`,
-    /// else `.claude` in the home directory.
-    pub agent_dir: Option<PathBuf>,
+    /// Where `agent` finds each agent's config directory.
+    pub agent_homes: AgentHomes,
     /// This program, which the agent's session-start hook runs.
     pub ctl: Option<PathBuf>,
 }
@@ -135,18 +134,44 @@ impl Env {
                 dir: std::env::current_dir().ok(),
             },
             config: config::default_path(),
-            agent_dir: agent_dir(),
+            agent_homes: AgentHomes::from_process(),
             ctl: std::env::current_exe().ok(),
         }
     }
 }
 
-fn agent_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return Some(dir.into());
+/// The environment that says where coding agents keep their config. An
+/// empty variable counts as unset.
+#[derive(Debug, Clone, Default)]
+pub struct AgentHomes {
+    /// `$HOME`, else `%USERPROFILE%`.
+    pub home: Option<PathBuf>,
+    /// `$CLAUDE_CONFIG_DIR`: Claude Code's directory, else `~/.claude`.
+    pub claude: Option<PathBuf>,
+    /// `$CODEX_HOME`: Codex's directory, else `~/.codex`.
+    pub codex: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME` when absolute: holds OpenCode's `opencode`, else
+    /// `~/.config` does.
+    pub config: Option<PathBuf>,
+    /// `$PI_CODING_AGENT_DIR`: Pi's directory, else `~/.pi/agent`.
+    pub pi: Option<PathBuf>,
+}
+
+impl AgentHomes {
+    fn from_process() -> Self {
+        let var = |name: &str| {
+            std::env::var_os(name)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            home: var("HOME").or_else(|| var("USERPROFILE")),
+            claude: var("CLAUDE_CONFIG_DIR"),
+            codex: var("CODEX_HOME"),
+            config: var("XDG_CONFIG_HOME").filter(|dir| dir.is_absolute()),
+            pi: var("PI_CODING_AGENT_DIR"),
+        }
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(Path::new(&home).join(".claude"))
 }
 
 fn id_var(name: &str) -> Option<Uuid> {
@@ -848,7 +873,7 @@ mod tests {
             socket: Some(socket.clone()),
             here: Defaults::default(),
             config: None,
-            agent_dir: None,
+            agent_homes: AgentHomes::default(),
             ctl: None,
         };
         let stop = Stop::after(std::time::Duration::ZERO);
