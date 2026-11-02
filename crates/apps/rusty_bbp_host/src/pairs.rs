@@ -1252,6 +1252,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // only the Unix-only tests below have such names
     /// An edited checkout at `d` must refuse although its namesake `clean`
     /// (the name a lossy reading of `d` would give) is a clean checkout.
     fn refuses_beside_clean_namesake(d: std::path::PathBuf, clean: std::path::PathBuf) {
