@@ -44,8 +44,10 @@ fn refused_addr() -> (TcpSocket, SocketAddr) {
         let addr = listener.local_addr().expect("local_addr");
         drop(listener);
         let holder = TcpSocket::new_v4().expect("TcpSocket::new_v4");
-        if holder.bind(addr).is_ok() {
-            return (holder, addr);
+        match holder.bind(addr) {
+            Ok(()) => return (holder, addr),
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(err) => panic!("hold {addr}: {err}"),
         }
     }
     panic!("could not hold a free loopback port in 100 attempts");
