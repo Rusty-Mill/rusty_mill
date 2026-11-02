@@ -2808,9 +2808,9 @@ impl WindowState<'_> {
             Action::ScrollPromptUp => self.scroll_key(true, true),
             Action::ScrollPromptDown => self.scroll_key(true, false),
             Action::ToggleFullscreen => self.toggle_fullscreen(),
-            Action::FontSizeUp => self.zoom_font(self.font_px + FONT_ZOOM_STEP),
-            Action::FontSizeDown => self.zoom_font(self.font_px - FONT_ZOOM_STEP),
-            Action::FontSizeReset => self.zoom_font(self.ui_px),
+            Action::FontSizeUp => self.zoom_font(Zoom::In),
+            Action::FontSizeDown => self.zoom_font(Zoom::Out),
+            Action::FontSizeReset => self.zoom_font(Zoom::Reset),
         }
     }
 
@@ -2826,13 +2826,12 @@ impl WindowState<'_> {
         window.set_fullscreen((!now_fullscreen).then_some(Fullscreen::Borderless(None)));
     }
 
-    /// Zoom the terminal text to `px` (Ctrl+=/Ctrl+-/Ctrl+0, the Chrome/VS
-    /// Code/iTerm2/Windows Terminal convention), clamped to the same range
-    /// the settings overlay enforces. Only the panes' font changes: the
-    /// chrome and status bars keep the UI font, and the configured size is
-    /// untouched, so a zoom never persists.
-    fn zoom_font(&mut self, px: f32) {
-        let px = px.clamp(super::settings::FONT_MIN, super::settings::FONT_MAX);
+    /// Zoom the terminal text (Ctrl+=/Ctrl+-/Ctrl+0, the Chrome/VS Code/
+    /// iTerm2/Windows Terminal convention); see [`zoom_px`]. Only the panes'
+    /// font changes: the chrome and status bars keep the UI font, and the
+    /// configured size is untouched, so a zoom never persists.
+    fn zoom_font(&mut self, zoom: Zoom) {
+        let px = zoom_px(zoom, self.font_px, self.ui_px, self.scale_factor);
         let ligatures = self.config.ligatures.unwrap_or(true);
         self.rebuild_font_at(px, ligatures);
     }
@@ -6008,6 +6007,31 @@ fn ime_commit_target(searching: bool, overlay: bool, copy_mode: bool) -> ImeComm
     }
 }
 
+/// A Ctrl+=/Ctrl+-/Ctrl+0 font zoom.
+#[derive(Clone, Copy, Debug)]
+enum Zoom {
+    In,
+    Out,
+    Reset,
+}
+
+/// The terminal font size, in physical px, after `zoom` from `current`.
+/// `base` is the configured size at the current DPI: a reset returns to it
+/// exactly. A step stays within the settings range scaled to the monitor
+/// (`FONT_MIN..=FONT_MAX` logical px), widened to include `base`, so a
+/// DPI-scaled size outside the logical range is still reachable.
+fn zoom_px(zoom: Zoom, current: f32, base: f32, scale: f64) -> f32 {
+    let step = match zoom {
+        Zoom::Reset => return base,
+        Zoom::In => FONT_ZOOM_STEP,
+        Zoom::Out => -FONT_ZOOM_STEP,
+    };
+    let scale = scale as f32;
+    let lo = (super::settings::FONT_MIN * scale).min(base);
+    let hi = (super::settings::FONT_MAX * scale).max(base);
+    (current + step).clamp(lo, hi)
+}
+
 /// Load the configured font set and build a glyph cache at `px`, `None` when
 /// no usable font is found.
 fn load_font(config: &Config, px: f32, ligatures: bool) -> Option<FontCache> {
@@ -6422,12 +6446,12 @@ mod tests {
     use super::shell_quote;
     use super::{
         Hit, ImeCommitTarget, MenuKind, SETTINGS_CARDS_TOP, SETTINGS_FOOTER_H, SETTINGS_ROW_H,
-        SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SettingsHit, Widget, accumulate_scroll_lines,
+        SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SettingsHit, Widget, Zoom, accumulate_scroll_lines,
         arrow_presses, display_path, drag_scroll_direction, encode_paste, fmt_runtime,
         ime_commit_target, ime_cursor_area_origin, is_openable_url, mix, osc52_reply,
         pane_pixel_point, path_from_file_uri, put_text, read_git_branch, settings_hit,
         settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
-        tab_widths, visible_tab_range, widget_text,
+        tab_widths, visible_tab_range, widget_text, zoom_px,
     };
     use crate::core::Cell;
 
@@ -6926,6 +6950,27 @@ mod tests {
         assert_eq!((p.col, p.row), (0, 0));
         let p = pane_pixel_point((500.0, 500.0), (10, 16), (100, 80));
         assert_eq!((p.col, p.row), (99, 79));
+    }
+
+    #[test]
+    fn zoom_reset_restores_the_dpi_scaled_size_exactly() {
+        // Configured 48 px on a 200% monitor: 96 physical px, above the
+        // logical FONT_MAX. Reset lands on it; zoom steps reach past it.
+        assert_eq!(zoom_px(Zoom::Reset, 72.0, 96.0, 2.0), 96.0);
+        assert_eq!(zoom_px(Zoom::In, 96.0, 96.0, 2.0), 97.0);
+        assert_eq!(zoom_px(Zoom::Out, 96.0, 96.0, 2.0), 95.0);
+        // Configured 4 px at 100% (below FONT_MIN): reset is exact too.
+        assert_eq!(zoom_px(Zoom::Reset, 10.0, 4.0, 1.0), 4.0);
+        assert_eq!(zoom_px(Zoom::Out, 4.0, 4.0, 1.0), 4.0);
+    }
+
+    #[test]
+    fn zoom_steps_clamp_to_the_dpi_scaled_range() {
+        assert_eq!(zoom_px(Zoom::In, 72.0, 18.0, 1.0), 72.0);
+        assert_eq!(zoom_px(Zoom::Out, 6.0, 18.0, 1.0), 6.0);
+        assert_eq!(zoom_px(Zoom::In, 144.0, 36.0, 2.0), 144.0);
+        assert_eq!(zoom_px(Zoom::Out, 12.0, 36.0, 2.0), 12.0);
+        assert_eq!(zoom_px(Zoom::In, 18.0, 18.0, 1.0), 19.0);
     }
 
     #[test]
