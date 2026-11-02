@@ -85,6 +85,10 @@ pub struct Server {
     waker: Option<crate::waker::Waker>,
     /// The longest `wait` sleeps between log checks; [`WAIT_RECHECK`].
     recheck: Duration,
+    /// Told each time `wait` is about to block on the watch, which is by then
+    /// installed and has seen every append since the last check.
+    #[cfg(test)]
+    blocking: Option<std::sync::mpsc::Sender<()>>,
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -519,6 +523,8 @@ impl Server {
             shown: None,
             waker: None,
             recheck: WAIT_RECHECK,
+            #[cfg(test)]
+            blocking: None,
         })
     }
 
@@ -590,6 +596,12 @@ impl Server {
             return Err("wait is for a session; this server speaks for one turn".into());
         }
         let deadline = Instant::now() + wait_timeout(args);
+        // Watch before the first check, so an append between the two still
+        // wakes the wait instead of waiting out the recheck.
+        if self.waker.is_none() {
+            let log = log_path_for(&self.binding.dir, &self.binding.task);
+            self.waker = Some(crate::waker::Waker::new(&log));
+        }
         loop {
             self.driver.sync().map_err(|e| format!("{e:?}"))?;
             if let Some(reply) = self.woke() {
@@ -599,10 +611,13 @@ impl Server {
             if left.is_zero() {
                 return Ok(self.wake_reply("timeout", None));
             }
-            let log = log_path_for(&self.binding.dir, &self.binding.task);
-            self.waker
-                .get_or_insert_with(|| crate::waker::Waker::new(&log))
-                .wait(&[], left.min(self.recheck))?;
+            #[cfg(test)]
+            if let Some(tx) = &self.blocking {
+                let _ = tx.send(());
+            }
+            if let Some(waker) = &mut self.waker {
+                waker.wait(&[], left.min(self.recheck))?;
+            }
         }
     }
 
@@ -918,10 +933,14 @@ mod tests {
         .expect("server");
         // With the recheck past the timeout, only the log watch can wake it.
         coder.recheck = Duration::from_secs(3_600);
+        // Cancel only once the wait has checked the log and is about to
+        // block, so the cancellation can reach it only through the watch.
+        let (tx, blocking) = std::sync::mpsc::channel();
+        coder.blocking = Some(tx);
         let ender = {
             let (dir, task) = (dir.clone(), task.clone());
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_millis(300));
+                blocking.recv().expect("wait blocks");
                 let rev = admin::card(&dir, &task).expect("card").rev;
                 crate::human::perform(&dir, &task, "cancel", &["done"], Some(rev)).expect("cancel");
             })
