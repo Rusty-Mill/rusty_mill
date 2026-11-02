@@ -210,8 +210,9 @@ pub(crate) fn string_body_len(bytes: &[u8], stops: &[u8]) -> usize {
     words.len() * 8 + tail.iter().take_while(|b| !stops.contains(b)).count()
 }
 
-/// Bytes that end an OSC body: BEL, or the ESC of an ST.
-const OSC_STOPS: &[u8] = &[0x07, 0x1b];
+/// Bytes that end an OSC body: BEL, the ESC of an ST, or a CAN or SUB
+/// abort.
+const OSC_STOPS: &[u8] = &[0x07, 0x1b, 0x18, 0x1a];
 /// Bytes that end a DCS, APC or ignored string body: the ESC of an ST, or a
 /// CAN or SUB abort.
 const STRING_STOPS: &[u8] = &[0x1b, 0x18, 0x1a];
@@ -731,6 +732,11 @@ impl AnsiParser {
                         self.state = ParserState::Ground;
                     }
                     0x1b => self.state = ParserState::OscEsc, // possible ST (ESC \)
+                    0x18 | 0x1a => {
+                        // CAN / SUB abort the string with no action.
+                        self.osc_buffer.clear();
+                        self.state = ParserState::Ground;
+                    }
                     // Fast path: the body up to the next terminator is
                     // collected in one step.
                     _ => i += self.string_body(&bytes[i - 1..]) - 1,

@@ -9,10 +9,12 @@ use rusty_term_core::{Cell, Grid, StatusSignal, WIDE_TRAILER};
 
 use crate::style::Style;
 
-/// What `terminal.reset` feeds a terminal: RIS. Its ESC ends any sequence
-/// the program left unfinished, string or not, so it is read as a reset
-/// whatever came before.
-pub(crate) const RESET: &[u8] = b"\x1bc";
+/// What `terminal.reset` feeds a terminal: CAN, which ends any sequence the
+/// program left unfinished (a string, an ESC waiting for its next byte, a
+/// cut CSI or UTF-8 character), then RIS. Without the CAN, rusty_term_core
+/// reads the RIS's ESC as part of an unfinished string or escape and never
+/// resets, while a VT500-style outer terminal would.
+pub(crate) const RESET: &[u8] = b"\x18\x1bc";
 
 /// The OSC sequences that make `change`, each ended by ST: OSC 10, 11 and
 /// 12 set the default foreground, background and cursor colours, 110, 111
@@ -290,6 +292,43 @@ fn percent_decode(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_term_core::AnsiParser;
+
+    /// Every state a program can leave the parser in, as the bytes that
+    /// leave it there: strings, an ESC inside a string (which starts its
+    /// terminator), escapes waiting for a byte, a CSI and a UTF-8
+    /// character cut short.
+    pub(crate) const STUCK: &[&[u8]] = &[
+        b"\x1b]0;stuck",
+        b"\x1b]0;stuck\x1b",
+        b"\x1bP1$r",
+        b"\x1bP1$r\x1b",
+        b"\x1b_Gstuck",
+        b"\x1b_Gstuck\x1b",
+        b"\x1b^stuck",
+        b"\x1b^stuck\x1b",
+        b"\x1bXstuck\x1b",
+        b"\x1b",
+        b"\x1b(",
+        b"\x1b#",
+        b"\x1b[3",
+        b"\xe2\x94",
+    ];
+
+    #[test]
+    fn a_reset_resets_whatever_the_program_left_unfinished() {
+        for stuck in STUCK {
+            let mut grid = Grid::new(20, 3);
+            let mut parser = AnsiParser::new();
+            parser.advance(&mut grid, b"\x1b[?1hBEFORE");
+            parser.advance(&mut grid, stuck);
+            parser.advance(&mut grid, RESET);
+            let screen = format(&grid, Capture::default(), usize::MAX).unwrap_or_default();
+            assert!(!screen.contains("BEFORE"), "{stuck:?}: {screen:?}");
+            assert!(!grid.app_cursor_keys, "{stuck:?}");
+            assert!(parser.ground(), "{stuck:?}");
+        }
+    }
 
     #[test]
     fn reported_paths_are_decoded() {

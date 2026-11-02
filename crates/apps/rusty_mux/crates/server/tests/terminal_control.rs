@@ -85,20 +85,11 @@ fn palette(entries: &[&str]) -> (&'static str, Value) {
 /// swallows everything after: the raw output shows the marker, the screen
 /// does not.
 fn stick(client: &mut Client, block: BlockId) {
-    stick_in(client, block, "\\033]0;stuck", 2);
-}
-
-/// Leaves the block's terminal inside the unfinished sequence `printf`
-/// writes for `opener`, then prints marker `HIDDEN{n}`, which the
-/// sequence swallows.
-fn stick_in(client: &mut Client, block: BlockId, opener: &str, n: u32) {
-    let marker = format!("HIDDEN{n}");
-    let line = format!("printf '{opener}'; echo HIDDEN$(({n}))\r");
-    client.input(block, line.as_bytes());
-    client.wait_for(block, &marker);
+    client.input(block, b"printf '\\033]0;stuck'; echo HIDDEN$((1+1))\r");
+    client.wait_for(block, "HIDDEN2");
     assert!(
-        !screen(client, block).contains(&marker),
-        "{opener}: the sequence swallows later output"
+        !screen(client, block).contains("HIDDEN2"),
+        "the OSC string swallows later output"
     );
 }
 
@@ -145,34 +136,44 @@ fn reset_clears_the_screen_and_modes_for_the_server_and_every_client() {
 
 #[test]
 fn reset_recovers_a_terminal_stuck_in_a_sequence() {
-    // OSC, DCS, APC and PM strings, each fed a lone ESC first where a
-    // string's ESC starts its terminator: the reset's own ESC must not be
-    // read as the rest of the program's.
-    for (n, opener) in [
-        "\\033]0;stuck",
-        "\\033]0;stuck\\033",
-        "\\033P1$r",
-        "\\033P1$r\\033",
-        "\\033_Gstuck",
-        "\\033_Gstuck\\033",
-        "\\033^stuck\\033",
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    // `printf` text for each state a program can leave the terminal in, and
+    // the bytes it writes: strings, an ESC inside a string (the start of
+    // its terminator), escapes waiting for a byte, a cut CSI and UTF-8.
+    let cases = [
+        ("\\033]0;stuck", "\x1b]0;stuck"),
+        ("\\033]0;stuck\\033", "\x1b]0;stuck\x1b"),
+        ("\\033P1$r", "\x1bP1$r"),
+        ("\\033_Gstuck\\033", "\x1b_Gstuck\x1b"),
+        ("\\033^stuck", "\x1b^stuck"),
+        ("\\033", "\x1b"),
+        ("\\033(", "\x1b("),
+        ("\\033[3", "\x1b[3"),
+    ];
+    for (n, (printf, written)) in cases.into_iter().enumerate() {
         let path = start_server();
         let mut client = Client::connect_with(&path, CONTROL, None);
         let block = block_for(&mut client);
-        let n = u32::try_from(n).expect("few cases") + 10;
-        stick_in(&mut client, block, opener, n);
+        // DECCKM on and a marker, then the unfinished sequence, then `cat`
+        // writes nothing until it is interrupted.
+        let before = format!("BEFORE{n}");
+        let line = format!("printf '\\033[?1hBEFORE%s\\n' {n}; printf '{printf}'; cat\r");
+        client.input(block, line.as_bytes());
+        client.wait_for(block, &format!("{before}\r\n{written}"));
+        assert!(screen(&mut client, block).contains(&before), "{printf}");
 
         done(&mut client, block, "terminal.reset", &[]);
 
-        let shown = format!("SHOWN{n}");
-        client.input(block, format!("echo SHOWN$(({n}))\r").as_bytes());
-        client.wait_for(block, &shown);
-        assert!(screen(&mut client, block).contains(&shown), "{opener}");
-        assert!(client.text(block).contains(&shown), "{opener}");
+        assert!(!screen(&mut client, block).contains(&before), "{printf}");
+        assert!(
+            !client.text(block).contains(&before),
+            "{printf}: the client's copy"
+        );
+        // Out of application cursor keys: Up is CSI A, not SS3 A.
+        client.input(block, b"\x03cat -v\r");
+        client.wait_for(block, "cat -v\r\n");
+        let keys = Value::Words(vec!["up".into(), "enter".into()]);
+        client.send(&call(block, "terminal.send-keys", &[("key", keys)])(99));
+        client.wait_for(block, "^[[A");
     }
 }
 

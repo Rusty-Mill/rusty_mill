@@ -142,6 +142,20 @@ fn plain_tells_whether_sgr_0_alone_would_restore_the_rendition() {
 }
 
 #[test]
+fn can_and_sub_abort_an_osc_string_without_acting_on_it() {
+    for abort in [b"\x18", b"\x1a"] {
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b]0;stuck");
+        p.advance(&mut g, abort);
+        assert!(p.ground(), "{abort:?}");
+        p.advance(&mut g, b"\x07after");
+        assert_eq!(g.title, "", "{abort:?}: the title was never set");
+        assert_eq!(g.line_text(0).as_deref().map(str::trim_end), Some("after"));
+    }
+}
+
+#[test]
 fn ground_is_false_inside_any_unfinished_sequence() {
     let mut g = Grid::new(20, 2);
     let mut p = AnsiParser::new();
