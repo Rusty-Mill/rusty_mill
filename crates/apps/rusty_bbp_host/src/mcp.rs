@@ -34,6 +34,15 @@ const WAIT_MAX: Duration = Duration::from_secs(600);
 /// sooner, so this only bounds a platform or setup without one.
 const WAIT_RECHECK: Duration = Duration::from_secs(1);
 
+/// How long a `wait` called with `args` may block: its `timeout_s`, else
+/// [`WAIT_DEFAULT`], never past [`WAIT_MAX`].
+fn wait_timeout(args: &Value) -> Duration {
+    args.get("timeout_s")
+        .and_then(Value::as_u64)
+        .map_or(WAIT_DEFAULT, Duration::from_secs)
+        .min(WAIT_MAX)
+}
+
 /// What one `bbp mcp` process is bound to.
 #[derive(Clone, Debug)]
 pub struct Binding {
@@ -79,6 +88,12 @@ pub struct Server {
     /// Claims mode: the credential of the assignment this server was started
     /// under. Kept, never re-derived, so a reassignment revokes the session.
     credential: Option<Token>,
+    /// The longest `wait` sleeps between log checks; [`WAIT_RECHECK`].
+    recheck: Duration,
+    /// Told each time `wait` is about to block on the watch, which is by then
+    /// installed and has seen every append since the last check.
+    #[cfg(test)]
+    blocking: Option<std::sync::mpsc::Sender<()>>,
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -520,6 +535,9 @@ impl Server {
             shown: None,
             waker: None,
             credential,
+            recheck: WAIT_RECHECK,
+            #[cfg(test)]
+            blocking: None,
         })
     }
 
@@ -593,12 +611,13 @@ impl Server {
         if self.claims() {
             return Err("a claims task grants no turns; act with the other tools".into());
         }
-        let timeout = args
-            .get("timeout_s")
-            .and_then(Value::as_u64)
-            .map_or(WAIT_DEFAULT, Duration::from_secs)
-            .min(WAIT_MAX);
-        let deadline = Instant::now() + timeout;
+        let deadline = Instant::now() + wait_timeout(args);
+        // Watch before the first check, so an append between the two still
+        // wakes the wait instead of waiting out the recheck.
+        if self.waker.is_none() {
+            let log = log_path_for(&self.binding.dir, &self.binding.task);
+            self.waker = Some(crate::waker::Waker::new(&log));
+        }
         loop {
             self.driver.sync().map_err(|e| format!("{e:?}"))?;
             if let Some(reply) = self.woke() {
@@ -608,10 +627,13 @@ impl Server {
             if left.is_zero() {
                 return Ok(self.wake_reply("timeout", None));
             }
-            let log = log_path_for(&self.binding.dir, &self.binding.task);
-            self.waker
-                .get_or_insert_with(|| crate::waker::Waker::new(&log))
-                .wait(&[], left.min(WAIT_RECHECK))?;
+            #[cfg(test)]
+            if let Some(tx) = &self.blocking {
+                let _ = tx.send(());
+            }
+            if let Some(waker) = &mut self.waker {
+                waker.wait(&[], left.min(self.recheck))?;
+            }
         }
     }
 
@@ -890,5 +912,106 @@ impl Server {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    use super::*;
+    #[cfg(target_os = "linux")]
+    use {crate::admin, std::path::Path};
+
+    fn args(json: &str) -> Value {
+        rusty_serde::json::from_str(json).expect("json")
+    }
+
+    #[test]
+    fn wait_is_capped_at_ten_minutes_and_defaults_to_one() {
+        assert_eq!(wait_timeout(&args("{}")), WAIT_DEFAULT);
+        assert_eq!(
+            wait_timeout(&args(r#"{"timeout_s":5}"#)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(wait_timeout(&args(r#"{"timeout_s":600}"#)), WAIT_MAX);
+        assert_eq!(wait_timeout(&args(r#"{"timeout_s":601}"#)), WAIT_MAX);
+        assert_eq!(wait_timeout(&args(r#"{"timeout_s":86400}"#)), WAIT_MAX);
+        assert_eq!(WAIT_MAX, Duration::from_secs(600));
+    }
+
+    /// A task whose planner holds the first turn, so the coder waits.
+    #[cfg(target_os = "linux")]
+    fn open(dir: &Path) -> TaskId {
+        let task = TaskId("T1".into());
+        let roster = admin::read_roster(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/proving/roster.json"),
+        )
+        .expect("roster");
+        admin::open_task(
+            dir,
+            &task,
+            "github.com/example/repo",
+            b"Brief.",
+            &PrincipalId("human".into()),
+            &crate::profiles::ProfileSet::shell("test", "true"),
+            roster,
+        )
+        .expect("open");
+        for (role, vendor) in [
+            ("planner", "anthropic"),
+            ("coder", "openai"),
+            ("tester", "google"),
+            ("reviewer", "anthropic"),
+        ] {
+            admin::assign(
+                dir,
+                &task,
+                &RoleId(role.into()),
+                &PrincipalId(role.into()),
+                vendor,
+            )
+            .expect("assign");
+        }
+        admin::tick(dir, &task).expect("tick");
+        task
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_wait_wakes_on_the_log_watch_not_the_recheck() {
+        let dir = std::env::temp_dir().join(format!("bbp_mcp_wake_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let task = open(&dir);
+        let mut coder = Server::new(Binding {
+            dir: dir.clone(),
+            task: task.clone(),
+            principal: PrincipalId("coder".into()),
+            turn: None,
+        })
+        .expect("server");
+        // With the recheck past the timeout, only the log watch can wake it.
+        coder.recheck = Duration::from_secs(3_600);
+        // Cancel only once the wait has checked the log and is about to
+        // block, so the cancellation can reach it only through the watch.
+        let (tx, blocking) = std::sync::mpsc::channel();
+        coder.blocking = Some(tx);
+        let ender = {
+            let (dir, task) = (dir.clone(), task.clone());
+            std::thread::spawn(move || {
+                blocking.recv().expect("wait blocks");
+                let rev = admin::card(&dir, &task).expect("card").rev;
+                crate::human::perform(&dir, &task, "cancel", &["done"], Some(rev)).expect("cancel");
+            })
+        };
+        let started = Instant::now();
+        let reply = coder.wait(&args(r#"{"timeout_s":60}"#)).expect("wait");
+        ender.join().expect("ender");
+        assert_eq!(reply["woke"].as_str(), Some("ended"), "{reply}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

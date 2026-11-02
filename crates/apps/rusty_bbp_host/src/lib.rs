@@ -1,7 +1,8 @@
 //! Host for the Blackboard Protocol over a `rusty_bbp` file store.
 //!
-//! - [`mcp`]: the per-turn MCP server an agent harness talks to over stdio.
-//!   One process serves one turn; when that turn ends every call is refused.
+//! - [`mcp`]: the MCP server an agent harness talks to over stdio. A per-turn
+//!   process serves one turn and refuses every call once it ends; a session
+//!   process serves its principal's turns, each named by a `wait` ticket.
 //! - [`human`]: the human channel as CLI actions.
 //! - [`moderator`]: the loop that launches one agent harness per granted
 //!   turn and the runner per selected run, until the task closes.

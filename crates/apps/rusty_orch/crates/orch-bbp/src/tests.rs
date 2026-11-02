@@ -742,7 +742,7 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
 fn an_unleased_task_refuses_a_leased_holder() {
     let dir = temp();
     let c = config(&dir);
-    let (task, board) = task();
+    let (task, mut board) = task();
     let command = Contract::default();
     command.replies.borrow_mut().extend([
         "null".into(),
@@ -755,20 +755,36 @@ fn an_unleased_task_refuses_a_leased_holder() {
         c,
         "goal".into(),
         "unleased".into(),
-        command,
+        command.clone(),
         FakeSupervisor::default(),
     )
     .unwrap();
     let handle = host.open(&task, &board, &fence()).unwrap();
-    let mut leased = fence();
-    leased.lease = Some(orch_core::factory::Lease {
-        read: vec!["/".into()],
-        write: vec!["/".into()],
-        expires: None,
-    });
+    let lease = |expires: Option<u64>| {
+        let mut f = fence();
+        f.lease = Some(orch_core::factory::Lease {
+            read: vec!["/".into()],
+            write: vec!["/".into()],
+            expires,
+        });
+        f
+    };
     assert!(matches!(
-        host.poll(&handle, &leased),
+        host.poll(&handle, &lease(None)),
         Err(ClassifiedError::Permanent(_))
     ));
+    // A human answer is checked against the lease too, before BBP is asked.
+    let gate = question(&mut board, &handle);
+    let calls = command.calls.borrow().len();
+    let answer = txt("approve-plan art:2");
+    assert!(matches!(
+        host.relay(&handle, &gate, &answer, &lease(None)),
+        Err(ClassifiedError::Permanent(_))
+    ));
+    assert!(matches!(
+        host.relay(&handle, &gate, &answer, &lease(Some(1))),
+        Err(ClassifiedError::Unavailable(_))
+    ));
+    assert_eq!(command.calls.borrow().len(), calls, "BBP was never asked");
     std::fs::remove_dir_all(dir).unwrap();
 }
