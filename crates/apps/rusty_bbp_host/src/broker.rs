@@ -6,9 +6,10 @@
 //! copies its stdin into the `mcp.in` named pipe and the `mcp.out` pipe to
 //! its stdout. The broker, which the moderator starts outside the sandbox
 //! with the turn's binding, serves each connection on those pipes with the
-//! ordinary per-turn [`Server`]. The harness is granted the two pipes and
-//! nothing else of the directory that holds them, so it can neither replace
-//! them nor reach the broker any other way.
+//! ordinary [`Server`] bound to that one turn; a broker never serves a
+//! session. The harness is granted the two pipes and nothing else of the
+//! directory that holds them, so it can neither replace them nor reach the
+//! broker any other way.
 
 use crate::mcp::{Binding, Server};
 use std::fs::{File, OpenOptions};
