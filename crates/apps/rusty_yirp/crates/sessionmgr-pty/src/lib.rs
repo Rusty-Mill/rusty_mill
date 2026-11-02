@@ -73,17 +73,18 @@ const SHUTDOWN: Duration = Duration::from_secs(6);
 /// Elsewhere there is only the platform's own pty, and this is ignored.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConsoleHost {
-    /// Microsoft's ConPTY. The default.
-    #[default]
+    /// Microsoft's ConPTY, kept selectable as the rollback.
     Conpty,
-    /// Our own host, `rusty_conhost`. If this Windows can't run it,
-    /// [`PtySession::spawn`] fails: there is no silent fallback.
+    /// Our own host, `rusty_conhost`. The default (design §9.2, Phase B).
+    /// If this Windows can't run it, [`PtySession::spawn`] fails: there
+    /// is no silent fallback.
+    #[default]
     Own,
 }
 
 impl ConsoleHost {
-    /// Reads `RUSTY_CONSOLE_HOST`: `conpty` or `own`, and [`Conpty`](
-    /// ConsoleHost::Conpty) when unset. Any other value is an
+    /// Reads `RUSTY_CONSOLE_HOST`: `conpty` or `own`, and [`Own`](
+    /// ConsoleHost::Own) when unset. Any other value is an
     /// `InvalidInput` error naming the variable. Off Windows the variable
     /// is not read at all, so a Windows-only setting can never fail a
     /// session there.
@@ -96,7 +97,7 @@ impl ConsoleHost {
 
     fn parse(value: Option<&OsStr>) -> io::Result<Self> {
         let Some(value) = value else {
-            return Ok(ConsoleHost::Conpty);
+            return Ok(ConsoleHost::default());
         };
         match value.to_str() {
             Some("conpty") => Ok(ConsoleHost::Conpty),
@@ -452,11 +453,8 @@ mod tests {
     }
 
     #[test]
-    fn the_console_host_defaults_to_conpty_when_unset() {
-        assert_eq!(
-            ConsoleHost::parse(None).expect("unset"),
-            ConsoleHost::Conpty
-        );
+    fn the_console_host_defaults_to_own_when_unset() {
+        assert_eq!(ConsoleHost::parse(None).expect("unset"), ConsoleHost::Own);
     }
 
     #[test]
@@ -475,7 +473,7 @@ mod tests {
         std::env::set_var(CONSOLE_HOST_ENV, "not-a-host");
         let host = ConsoleHost::from_env();
         std::env::remove_var(CONSOLE_HOST_ENV);
-        assert_eq!(host.expect("ignored off Windows"), ConsoleHost::Conpty);
+        assert_eq!(host.expect("ignored off Windows"), ConsoleHost::default());
     }
 
     #[test]
@@ -500,12 +498,18 @@ mod tests {
     /// `cmd.exe` with `args` on our own console host.
     #[cfg(windows)]
     fn own_cmd(args: &[&str]) -> PtyOptions {
+        cmd_on(ConsoleHost::Own, args)
+    }
+
+    /// `cmd.exe` with `args` on `host`.
+    #[cfg(windows)]
+    fn cmd_on(host: ConsoleHost, args: &[&str]) -> PtyOptions {
         PtyOptions {
             program: "cmd.exe".into(),
             args: args.iter().map(Into::into).collect(),
             cwd: std::env::temp_dir().into_os_string(),
             size: TerminalSize::default(),
-            console_host: ConsoleHost::Own,
+            console_host: host,
         }
     }
 
@@ -539,6 +543,26 @@ mod tests {
 
         let session =
             std::sync::Arc::new(PtySession::spawn(own_cmd(&["/c", "exit", "7"])).expect("spawn"));
+        read_within_budget(&session).expect("the stream ends");
+        assert_eq!(session.wait().expect("wait"), Some(7));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn conpty_stays_selectable_and_reports_output_and_exit_code() {
+        // Our host is the default, so the daemon's Windows tests no longer
+        // reach ConPTY; this keeps the rollback path exercised.
+        let session = std::sync::Arc::new(
+            PtySession::spawn(cmd_on(ConsoleHost::Conpty, &["/c", "echo", "hello"]))
+                .expect("spawn on ConPTY"),
+        );
+        let output = read_within_budget(&session).expect("the stream ends");
+        assert!(String::from_utf8_lossy(&output).contains("hello"));
+        assert_eq!(session.wait().expect("wait"), Some(0));
+
+        let session = std::sync::Arc::new(
+            PtySession::spawn(cmd_on(ConsoleHost::Conpty, &["/c", "exit", "7"])).expect("spawn"),
+        );
         read_within_budget(&session).expect("the stream ends");
         assert_eq!(session.wait().expect("wait"), Some(7));
     }

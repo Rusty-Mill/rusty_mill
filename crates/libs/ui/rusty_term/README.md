@@ -154,7 +154,7 @@ is written for cmd's quote stripping (`/s`, or a command starting `""`), and
 shell = "pwsh"           # or "wsl", "powershell", "C:\\tools\\nu.exe", ...
 
 [console]                # Windows only
-host = "own"             # conpty (default) | own
+host = "conpty"          # own (default) | conpty
 
 [window]                 # windowed (--gui) front-end only
 cols = 120               # initial size in cells; default 80x24
@@ -185,10 +185,11 @@ color1 = "#cc6666"
 ```
 
 On Windows, `[console] host` chooses who serves the shell's console:
-`"conpty"` (the default) is Windows' ConPTY, and `"own"` is rusty_conhost, our
-own console host. It is read at launch. If `own` can't start (an older
-Windows without a usable ConDrv, for example), the error is shown and the
-terminal does not fall back to ConPTY. With `own`, the program is found in
+`"own"` (the default) is rusty_conhost, our own console host, and `"conpty"`
+is Windows' ConPTY, kept as the rollback. It is read at launch. If `own`
+can't start (an older Windows without a usable ConDrv, for example), the
+error is shown and the terminal does not fall back to ConPTY; set
+`host = "conpty"` there. With `own`, the program is found in
 `shell` by the rules `CreateProcessW` uses, and the rest of the line reaches
 it as written, as under ConPTY. Only the program token differs: the child
 sees it as a quoted full path, followed by one space (cmd's `%CMDCMDLINE%`

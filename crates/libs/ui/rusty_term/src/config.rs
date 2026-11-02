@@ -53,10 +53,10 @@ pub enum ClipboardPolicy {
 /// launch; ignored off Windows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConsoleHost {
-    /// Windows' ConPTY. Default.
-    #[default]
+    /// Windows' ConPTY, kept selectable as the rollback.
     ConPty,
-    /// Our own console host, rusty_conhost.
+    /// Our own console host, rusty_conhost. Default (design §9.2, Phase B).
+    #[default]
     Own,
 }
 
@@ -1444,6 +1444,7 @@ color15 = "ffffff"
             "{warns:?}"
         );
         assert_eq!(Config::default().console_host, None);
+        assert_eq!(ConsoleHost::default(), ConsoleHost::Own);
     }
 
     #[test]
