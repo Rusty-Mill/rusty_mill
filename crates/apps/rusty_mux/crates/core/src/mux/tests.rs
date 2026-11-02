@@ -1051,3 +1051,36 @@ fn moving_a_window_reorders_its_session() {
     // The active window is unchanged by a move.
     assert_eq!(mux.session(session).unwrap().active(), Some(w1));
 }
+
+#[test]
+fn a_detached_block_can_not_be_zoomed() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    assert_eq!(mux.zoom(b), Err(Error::Detached(b)));
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(mux.take_events(), vec![]);
+    // A following swap of other blocks leaves the zoom alone.
+    mux.swap_blocks(a, c).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![c, a]);
+    // Placed blocks zoom as before.
+    mux.zoom(a).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+}
+
+#[test]
+fn a_window_with_every_block_detached_zooms_nothing() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    for block in [a, b, c] {
+        mux.detach_block(block).unwrap();
+    }
+    assert_eq!(layout_of(&mux, window), None);
+    mux.take_events();
+    for block in [a, b, c] {
+        assert_eq!(mux.zoom(block), Err(Error::Detached(block)));
+    }
+    mux.swap_blocks(a, b).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(mux.take_events(), vec![]);
+}

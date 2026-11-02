@@ -275,13 +275,13 @@ impl Mux {
     }
 
     /// Shows `block` alone over its whole window, until it is unzoomed,
-    /// closed, or another block is split off in the window.
+    /// closed, or another block is split off in the window. A detached
+    /// block is refused: only a block in the layout can be shown.
     pub fn zoom(&mut self, block: BlockId) -> Result<(), Error> {
-        let window = self
-            .blocks
-            .get(&block)
-            .ok_or(Error::UnknownBlock(block))?
-            .window;
+        let window = self.window_of(block)?;
+        if !self.layout_of(window).is_some_and(|l| l.contains(block)) {
+            return Err(Error::Detached(block));
+        }
         self.set_zoom(window, Some(block))
     }
 

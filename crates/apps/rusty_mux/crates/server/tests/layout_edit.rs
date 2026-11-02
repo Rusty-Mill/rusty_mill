@@ -134,6 +134,9 @@ fn blocks_resize_swap_move_and_detach() {
     while !client.events.iter().any(|(_, e)| *e == event) {
         client.recv();
     }
+    // Only a block in the layout can be shown alone.
+    let answer = client.answer(|req| Message::Zoom { req, block: c });
+    assert!(refused(&answer, None), "{answer:?}");
     // A detached block can be attached to, as any other.
     client.request(|req| Message::Attach { req, block: c });
 

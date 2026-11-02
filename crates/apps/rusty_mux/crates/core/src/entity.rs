@@ -68,6 +68,7 @@ pub struct Window {
     pub(crate) blocks: Vec<BlockId>,
     /// Holds `blocks` but the detached ones; `None` while none is placed.
     pub(crate) layout: Option<Layout>,
+    /// One of the blocks in `layout`, never a detached one.
     pub(crate) zoomed: Option<BlockId>,
 }
 
