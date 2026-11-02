@@ -102,6 +102,19 @@ pub fn start_server_with(config: Config) -> PathBuf {
     path
 }
 
+/// `read`, again after `EINTR`. With a read timeout set, Linux does not
+/// restart an interrupted socket read even under `SA_RESTART`, and a stop
+/// and continue interrupts it with no handler at all (signal(7)), as CI
+/// saw on #1373.
+pub fn read_again(stream: &mut UnixStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        match stream.read(buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            other => return other,
+        }
+    }
+}
+
 /// A blocking test client that keeps its own terminal per attached block.
 pub struct Client {
     stream: UnixStream,
@@ -198,7 +211,7 @@ impl Client {
                 return message;
             }
             let mut chunk = [0u8; 65536];
-            let n = self.stream.read(&mut chunk).expect("read");
+            let n = read_again(&mut self.stream, &mut chunk).expect("read");
             assert!(n > 0, "server closed the connection");
             self.buf.extend_from_slice(&chunk[..n]);
         }
@@ -318,7 +331,7 @@ impl Client {
     pub fn wait_closed(&mut self) {
         let mut chunk = [0u8; 65536];
         loop {
-            match self.stream.read(&mut chunk) {
+            match read_again(&mut self.stream, &mut chunk) {
                 Ok(0) => return,
                 Ok(_) => {}
                 // Windows reports a reset where Unix sees end of stream.

@@ -58,6 +58,8 @@ Identity, login server mode, roaming transport, sharing, several servers per cli
 
 Identity scope from the [Rex delta check](REX-DELTA.md) (owner, 2026-10-31): every client entry, `client-connected` and `client-connection-changed` carry the client's principal, with a `whoami` method (C25, D8; the owner narrowed it from every client event on 2026-11-01); login mode maps principals, the SSH user included, to accounts from a file that starts empty, and per-account servers outlive the front door (C26, C27, D9); a saved host holds several addresses tried in order (C35, D10).
 
+Login mode for local peers (C26): `rusty-mux-server --login MAP` maps each peer's uid, the SSH user included, to an account and relays it to that account's own server, which outlives the front door; `server/tests/login.rs` is the exit test for peer credentials. Not yet: PAM checks, shared mode, Tailscale principals (C27).
+
 ## Phase 3b: Rex parity follow-ups
 
 From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3's identity steps; starting it still needs the owner's go. One PR per step, in order. Each extends a done capability; no new crate and no new third-party dependency.

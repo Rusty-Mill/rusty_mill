@@ -29,6 +29,8 @@ mod echo;
 mod history;
 #[cfg(any(target_os = "linux", windows))]
 mod keys;
+#[cfg(target_os = "linux")]
+mod login;
 #[cfg(any(target_os = "linux", windows))]
 mod outbox;
 #[cfg(any(target_os = "linux", windows))]
@@ -52,6 +54,9 @@ use rusty_mux_core::{Principal, Transport};
 #[cfg(any(target_os = "linux", windows))]
 use rusty_tokio::io::UnixStream;
 use rusty_tokio::io::{UdpSocket, UnixListener};
+
+#[cfg(target_os = "linux")]
+pub use login::{Limits, Login, MAX_MAP, Reload, bind as bind_front_door, serve_login};
 
 /// How the server starts each block's program.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +169,31 @@ pub async fn serve_until(
     serve_for(listener, config, udp, peer_check, stop).await
 }
 
+/// [`serve_until`] for an account's server behind login mode's front
+/// door: a peer running as `forwarder` (the front door's uid) is served
+/// only after a [`login::forward`] preface, and as the principal it names;
+/// any other peer as before.
+#[cfg(target_os = "linux")]
+pub async fn serve_forwarded(
+    listener: UnixListener,
+    config: Config,
+    forwarder: u32,
+    stop: impl Future<Output = ()>,
+) -> io::Result<()> {
+    let owner = rusty_libc::process::geteuid();
+    let allowed = move |stream: &UnixStream| {
+        let uid = stream.peer_cred()?.uid();
+        Ok(if uid == forwarder {
+            Peer::Forwarded
+        } else if uid == owner {
+            Peer::Allowed
+        } else {
+            Peer::Refused(format!("uid {uid}"))
+        })
+    };
+    serve_for(listener, config, None, allowed, stop).await
+}
+
 /// The principal every client of this server has: its own user, the only
 /// peer [`peer_check`] lets in.
 #[cfg(target_os = "linux")]
@@ -188,6 +218,10 @@ fn owner() -> io::Result<Principal> {
 #[cfg(any(target_os = "linux", windows))]
 pub(crate) enum Peer {
     Allowed,
+    /// The login front door: the connection starts with a preface naming
+    /// the principal it verified.
+    #[cfg(target_os = "linux")]
+    Forwarded,
     /// Who was refused, for the log.
     Refused(String),
 }
@@ -305,10 +339,31 @@ async fn accept(
                     |_, _| {},
                 ));
             }
+            #[cfg(target_os = "linux")]
+            Ok(Peer::Forwarded) => {
+                rusty_tokio::task::spawn_local(forwarded(state.clone(), stream));
+            }
             Ok(Peer::Refused(who)) => eprintln!("rusty-mux-server: refusing a client of {who}"),
             Err(err) => eprintln!("rusty-mux-server: reading a client's credentials: {err}"),
         }
     }
+}
+
+/// How long the front door has to send its preface.
+#[cfg(target_os = "linux")]
+const PREFACE: Duration = Duration::from_secs(5);
+
+/// Serves a connection from the front door as the principal its preface
+/// names; a missing, bad or late preface closes it.
+#[cfg(target_os = "linux")]
+async fn forwarded(state: state::Shared, stream: UnixStream) {
+    let (mut rd, wr) = stream.into_split();
+    let principal = match rusty_tokio::time::timeout(PREFACE, login::forward::read(&mut rd)).await {
+        Ok(Ok(principal)) => principal,
+        Ok(Err(err)) => return eprintln!("rusty-mux-server: a forwarded client: {err}"),
+        Err(_) => return eprintln!("rusty-mux-server: a forwarded client sent no preface"),
+    };
+    conn::run(state, rd, wr, principal, Transport::Socket, |_, _| {}).await;
 }
 
 #[cfg(all(test, any(target_os = "linux", windows)))]
