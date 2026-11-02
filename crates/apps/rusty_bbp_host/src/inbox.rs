@@ -70,16 +70,19 @@ pub struct Escalation {
     pub candidate: Option<ArtId>,
 }
 
-/// The open escalations of `tasks` in `dir`: irreversible first, then oldest.
+/// The open escalations of `tasks` in `dir`: irreversible first, then task
+/// by task in the order given, oldest first within each task. A log position
+/// orders only its own task's events, and the log records no time for an
+/// escalation, so no age is compared across tasks.
 pub fn read(dir: &Path, tasks: &[TaskId]) -> Result<Vec<Escalation>, String> {
     let mut out = Vec::new();
-    for task in tasks {
+    for (n, task) in tasks.iter().enumerate() {
         let d = open_driver(dir, task)?;
         let events = d.store.events(task, 0).map_err(|e| format!("{e:?}"))?;
-        out.extend(open(&d.state, &events));
+        out.extend(open(&d.state, &events).into_iter().map(|e| (n, e)));
     }
-    out.sort_by_key(|e| (e.reversible != Some(false), e.seq, e.id.clone()));
-    Ok(out)
+    out.sort_by_key(|(n, e)| (e.reversible != Some(false), *n, e.seq, e.id.clone()));
+    Ok(out.into_iter().map(|(_, e)| e).collect())
 }
 
 /// The JSON `bbp inbox` prints.
@@ -188,13 +191,14 @@ fn of_claim(st: &TaskState, c: MsgId, seq: usize, reason: Reason) -> Escalation 
     }
 }
 
-/// The two strongest scoring items each way, by `|delta|`, newest first on ties.
+/// The two strongest scoring items each way from the claim's current epoch,
+/// by `|delta|`, newest first on ties. Evidence from before a reopen is history.
 fn strongest(v: &ClaimView) -> Vec<EvidenceView> {
     let side = |d: Direction| {
         let mut items: Vec<&EvidenceView> = v
             .evidence
             .iter()
-            .filter(|i| i.direction == d && i.scoring)
+            .filter(|i| i.direction == d && i.scoring && i.epoch == v.epoch)
             .collect();
         items.sort_by_key(|i| {
             (

@@ -41,9 +41,13 @@ fn task() -> TaskId {
 }
 
 fn open(dir: &Path, set: &ProfileSet, probe: Result<(), String>) -> Response {
+    open_as(dir, &task(), set, probe)
+}
+
+fn open_as(dir: &Path, t: &TaskId, set: &ProfileSet, probe: Result<(), String>) -> Response {
     admin::open_claims_task(
         dir,
-        &task(),
+        t,
         "local",
         b"Make the flag say ok.",
         &PrincipalId("human".into()),
@@ -57,19 +61,16 @@ fn open(dir: &Path, set: &ProfileSet, probe: Result<(), String>) -> Response {
 
 /// A claims task with lenses `a` and `b` assigned.
 fn claims_task(dir: &Path) {
+    claims_task_as(dir, &task());
+}
+
+fn claims_task_as(dir: &Path, t: &TaskId) {
     assert!(matches!(
-        open(dir, &profiles(), Ok(())),
+        open_as(dir, t, &profiles(), Ok(())),
         Response::Stored(_)
     ));
     for who in ["a", "b"] {
-        admin::assign(
-            dir,
-            &task(),
-            &RoleId::from(who),
-            &PrincipalId(who.into()),
-            "v",
-        )
-        .expect("assign");
+        admin::assign(dir, t, &RoleId::from(who), &PrincipalId(who.into()), "v").expect("assign");
     }
 }
 
@@ -157,9 +158,13 @@ fn a_claims_open_writes_a_claims_task() {
 // ---------------------------------------------------------------- MCP
 
 fn server(dir: &Path, who: &str) -> Server {
+    server_as(dir, &task(), who)
+}
+
+fn server_as(dir: &Path, t: &TaskId, who: &str) -> Server {
     Server::new(Binding {
         dir: dir.to_path_buf(),
-        task: task(),
+        task: t.clone(),
         principal: PrincipalId(who.into()),
         turn: None,
     })
@@ -344,16 +349,104 @@ fn a_reassignment_revokes_a_running_session() {
 
 #[test]
 fn an_ended_task_leaves_the_inbox() {
-    let dir = tempdir("ended");
+    for (verb, args) in [("close", vec![]), ("cancel", vec!["done here"])] {
+        let dir = tempdir(&format!("ended-{verb}"));
+        claims_task(&dir);
+        let x = claim(&dir, "a", "ship it", false);
+        cited(&dir, "a", x, 3);
+        cited(&dir, "b", x, 3);
+        assert_eq!(inbox::read(&dir, &[task()]).unwrap().len(), 1);
+        let rev = state(&dir).rev;
+        let r = human::perform(&dir, &task(), verb, &args, Some(rev)).expect(verb);
+        assert_eq!(r, Response::Ok, "{verb}");
+        assert!(state(&dir).state.terminal(), "{verb}");
+        assert!(inbox::read(&dir, &[task()]).unwrap().is_empty(), "{verb}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// An irreversible claim on `t`, escalated by two cited +6 items.
+fn escalate(dir: &Path, t: &TaskId, text: &str) -> u64 {
+    let b = open_driver(dir, t).unwrap().state.brief.unwrap().0;
+    let x = id_of(&ok(
+        &mut server_as(dir, t, "a"),
+        "post",
+        &format!(
+            r#"{{"op":"c-{text}","kind":"claim","text":"{text}","domains":["d"],"stakes":"low","reversible":false,"refs":["art:{b}"]}}"#
+        ),
+    ));
+    for who in ["a", "b"] {
+        ok(
+            &mut server_as(dir, t, who),
+            "post",
+            &format!(
+                r#"{{"op":"e-{who}-{x}","kind":"evidence","claim":{x},"direction":"support","evidence_kind":"cited","strength":3,"refs":["art:{b}"],"evidence":["art:{b}"]}}"#
+            ),
+        );
+    }
+    x
+}
+
+#[test]
+fn the_inbox_never_compares_log_positions_across_tasks() {
+    let dir = tempdir("order");
+    let (late, early) = (TaskId("C1".into()), TaskId("C2".into()));
+    claims_task_as(&dir, &late);
+    claims_task_as(&dir, &early);
+    escalate(&dir, &late, "filler");
+    escalate(&dir, &late, "late");
+    escalate(&dir, &early, "early");
+    let rows = inbox::read(&dir, &[late.clone(), early.clone()]).unwrap();
+    let order: Vec<(&str, usize)> = rows.iter().map(|e| (e.task.0.as_str(), e.seq)).collect();
+    assert_eq!(order.len(), 3, "{order:?}");
+    assert!(
+        order[2].1 < order[1].1,
+        "the later task's log is shorter: {order:?}"
+    );
+    assert_eq!(
+        order.iter().map(|o| o.0).collect::<Vec<_>>(),
+        ["C1", "C1", "C2"],
+        "tasks in the order given"
+    );
+    let rows = inbox::read(&dir, &[early, late]).unwrap();
+    assert_eq!(
+        rows.iter().map(|e| e.task.0.as_str()).collect::<Vec<_>>(),
+        ["C2", "C1", "C1"]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_reopened_claim_shows_only_its_current_evidence() {
+    let dir = tempdir("epoch");
     claims_task(&dir);
-    let x = claim(&dir, "a", "ship it", false);
-    cited(&dir, "a", x, 3);
-    cited(&dir, "b", x, 3);
-    assert_eq!(inbox::read(&dir, &[task()]).unwrap().len(), 1);
-    let rev = state(&dir).rev;
-    let r = human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
-    assert_eq!(r, Response::Ok);
-    assert!(inbox::read(&dir, &[task()]).unwrap().is_empty());
+    let x = escalate(&dir, &task(), "ship it");
+    let arg = format!("msg:{x}");
+    for verb in ["accept", "reopen"] {
+        let rev = state(&dir).rev;
+        let r = human::perform(&dir, &task(), "claim", &[&arg, verb], Some(rev)).expect(verb);
+        assert_eq!(r, Response::Ok, "{verb}");
+    }
+    // The new epoch reaches +12 again on +4 items, weaker than the old +6s.
+    let b = brief(&dir);
+    for (n, who) in ["a", "b", "a"].iter().enumerate() {
+        ok(
+            &mut server(&dir, who),
+            "post",
+            &format!(
+                r#"{{"op":"r-{n}","kind":"evidence","claim":{x},"direction":"support","evidence_kind":"cited","strength":2,"refs":["art:{b}"],"evidence":["art:{b}"]}}"#
+            ),
+        );
+    }
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let card = rows[0].claim.as_ref().expect("card");
+    assert!(card.epoch > 0);
+    assert_eq!(rows[0].evidence.len(), 2, "{:?}", rows[0].evidence);
+    for item in &rows[0].evidence {
+        assert_eq!(item.epoch, card.epoch, "{item:?}");
+        assert_eq!(item.delta, 4, "{item:?}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -466,6 +559,41 @@ const DIFF: &str = "--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n\
 --- a/tests/core.txt\n+++ b/tests/core.txt\n@@ -1 +1 @@\n-one\n+two\n\
 --- /dev/null\n+++ b/tests/new.txt\n@@ -0,0 +1 @@\n+new\n\
 --- a/tests/old.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n";
+
+#[test]
+fn tests_changed_matches_unicode_paths_and_refuses_non_utf8_ones() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempdir("unicode");
+    let (repo, base) = repo(&dir);
+    for (name, body) in [("ü.rs", "1"), ("ñ.rs", "1")] {
+        std::fs::write(repo.join("tests").join(name), body).unwrap();
+    }
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "unicode"]);
+    let base2 = git(&repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join("tests/é.rs"), "new").unwrap();
+    std::fs::write(repo.join("tests/éé.rs"), "two chars").unwrap();
+    std::fs::write(repo.join("tests/ü.rs"), "2").unwrap();
+    std::fs::remove_file(repo.join("tests/ñ.rs")).unwrap();
+    git(&repo, &["add", "-A"]);
+    let globs = vec!["tests/?.rs".to_owned()];
+    let mut got = runner::tests_changed(&repo, &base2, &globs).expect("tests_changed");
+    got.sort_by(|a, b| a.path.cmp(&b.path));
+    let want = [
+        ("tests/é.rs", FileChange::Added),
+        ("tests/ñ.rs", FileChange::Deleted),
+        ("tests/ü.rs", FileChange::Modified),
+    ];
+    let got: Vec<(&str, FileChange)> = got.iter().map(|c| (c.path.as_str(), c.change)).collect();
+    assert_eq!(got, want);
+    // A path git reports as raw non-UTF-8 bytes fails closed.
+    let odd = std::ffi::OsStr::from_bytes(b"tests/\xff.rs");
+    std::fs::write(repo.join(odd), "x").unwrap();
+    git(&repo, &["add", "-A"]);
+    let err = runner::tests_changed(&repo, &base, &globs).unwrap_err();
+    assert!(err.contains("not UTF-8"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
 
 /// A claim and a candidate on it through the MCP tools: a pending claims run.
 fn candidate(dir: &Path, base: &str) {

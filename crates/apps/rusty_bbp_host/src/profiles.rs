@@ -176,16 +176,19 @@ fn segments_match(pat: &[&str], segs: &[&str]) -> bool {
         None => segs.is_empty(),
         Some((&"**", rest)) => (0..=segs.len()).any(|i| segments_match(rest, &segs[i..])),
         Some((p, rest)) => segs.split_first().is_some_and(|(s, more)| {
-            segment_matches(p.as_bytes(), s.as_bytes()) && segments_match(rest, more)
+            let p: Vec<char> = p.chars().collect();
+            let s: Vec<char> = s.chars().collect();
+            segment_matches(&p, &s) && segments_match(rest, more)
         }),
     }
 }
 
-fn segment_matches(p: &[u8], s: &[u8]) -> bool {
+/// One segment, by character: `?` is one character, never one byte.
+fn segment_matches(p: &[char], s: &[char]) -> bool {
     match p.split_first() {
         None => s.is_empty(),
-        Some((b'*', rest)) => (0..=s.len()).any(|i| segment_matches(rest, &s[i..])),
-        Some((b'?', rest)) => !s.is_empty() && segment_matches(rest, &s[1..]),
+        Some(('*', rest)) => (0..=s.len()).any(|i| segment_matches(rest, &s[i..])),
+        Some(('?', rest)) => !s.is_empty() && segment_matches(rest, &s[1..]),
         Some((c, rest)) => s.first() == Some(c) && segment_matches(rest, &s[1..]),
     }
 }
@@ -216,6 +219,15 @@ mod tests {
         assert!(path_matches("pytest.ini", "pytest.ini"));
         assert!(!path_matches("pytest.ini", "a/pytest.ini"));
         assert!(path_matches("t?st/*", "test/x"));
+    }
+
+    #[test]
+    fn a_question_mark_is_one_character_not_one_byte() {
+        assert!(path_matches("tests/?.rs", "tests/a.rs"));
+        assert!(path_matches("tests/?.rs", "tests/é.rs"));
+        assert!(path_matches("tests/?.rs", "tests/测.rs"));
+        assert!(!path_matches("tests/?.rs", "tests/éé.rs"));
+        assert!(path_matches("tests/*é.rs", "tests/abé.rs"));
     }
 
     #[test]

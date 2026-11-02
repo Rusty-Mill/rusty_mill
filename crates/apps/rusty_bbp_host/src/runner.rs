@@ -174,6 +174,12 @@ fn git(work: &Path, args: &[&str]) -> Result<String, String> {
 /// way so the supervisor never writes a file into the candidate's checkout,
 /// where a tracked or candidate-created symlink could redirect the write.
 fn git_with_stdin(work: &Path, args: &[&str], stdin: &[u8]) -> Result<String, String> {
+    let out = git_raw(work, args, stdin)?;
+    Ok(String::from_utf8_lossy(&out).trim().to_owned())
+}
+
+/// Run git in `work`; its standard output, byte for byte.
+fn git_raw(work: &Path, args: &[&str], stdin: &[u8]) -> Result<Vec<u8>, String> {
     let mut child = Proc::new("git")
         .arg("-C")
         .arg(work)
@@ -195,7 +201,7 @@ fn git_with_stdin(work: &Path, args: &[&str], stdin: &[u8]) -> Result<String, St
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    Ok(out.stdout)
 }
 
 /// Clone `repo` into `work`, check out `base`, apply `diffs` in order.
@@ -529,9 +535,10 @@ fn pending_run(st: &TaskState) -> Option<Pending> {
 
 /// Every file under `globs` that the staged diffs in `work` add, modify or
 /// delete relative to `base` (a rename is a delete and an add). Read from
-/// git's NUL-separated output, so any path survives.
+/// git's NUL-separated output, so any path survives; a path that is not
+/// UTF-8 cannot be matched faithfully, so it fails the run closed.
 pub fn tests_changed(work: &Path, base: &str, globs: &[String]) -> Result<Vec<TestChange>, String> {
-    let out = git(
+    let raw = git_raw(
         work,
         &[
             "diff",
@@ -541,7 +548,10 @@ pub fn tests_changed(work: &Path, base: &str, globs: &[String]) -> Result<Vec<Te
             "-z",
             base,
         ],
+        &[],
     )?;
+    let out = String::from_utf8(raw)
+        .map_err(|_| "tests_changed: a changed path is not UTF-8; refusing to guess".to_owned())?;
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut changed = Vec::new();
     while let (Some(status), Some(path)) = (fields.next(), fields.next()) {

@@ -16,8 +16,8 @@ changelog: **`rusty_bbp_host`: claims mode.** `bbp open --mode claims` opens a c
 - **Added:** `ProfileSet.test_paths`, a list of globs.
   - It is written only when non-empty, so stage-mode profile digests are unchanged.
   - The runner serves claims runs only sandboxed.
-  - It fills `Report.tests_changed` with each matching file the candidate adds, modifies or deletes.
-- **Added:** `bbp inbox --task T1,T2`, which lists escalated claims, overdue marks, held reruns and task totals as JSON. A closed or cancelled task lists nothing.
+  - It fills `Report.tests_changed` with each matching file the candidate adds, modifies or deletes. `?` matches one character, not one byte, and a changed path that is not UTF-8 fails the run.
+- **Added:** `bbp inbox --task T1,T2`, which lists escalated claims, overdue marks, held reruns and task totals as JSON. Irreversible rows come first, then the tasks in the order given, oldest first within each task; the log records no escalation time, so ages are not compared across tasks. Evidence shown is from the claim's current epoch. A closed or cancelled task lists nothing.
 - **Added:** new human verbs: `claim`, `choose`, `extend-claim`, `withdraw-rerun`, `action-result` and `close`.
 - **Added:** `--dry-run yes` on `bbp human`, which prints the events an action would commit.
 - **Known limitations:** the moderator does not launch claims-mode runners or harnesses yet. Orch decides whom to run in claims mode, and that wiring is the next step. Flags take a value in this CLI, so the dry run is spelled `--dry-run yes`, and `bbp inbox` always prints JSON.
