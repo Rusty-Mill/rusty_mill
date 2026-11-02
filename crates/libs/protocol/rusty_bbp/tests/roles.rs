@@ -190,6 +190,8 @@ fn opening_a_task_with_an_invalid_roster_is_refused_and_no_task_exists() {
     let task = TaskId("T9".into());
     let mut d = Driver::new(store, task.clone());
     let cmd = Command::Open(OpenTask {
+        claims: None,
+        mode: rusty_bbp::Mode::Stages,
         task,
         roster: r,
         repo: "r".into(),
@@ -560,6 +562,8 @@ fn the_roster_is_recorded_and_cannot_change() {
     }));
     assert_eq!(r.code, Code::UnknownRole);
     let again = Command::Open(OpenTask {
+        claims: None,
+        mode: rusty_bbp::Mode::Stages,
         task: task.clone(),
         roster: two_roles(),
         repo: "r".into(),
@@ -581,6 +585,8 @@ fn a_log_under_another_schema_does_not_replay() {
     let mut store = MemStore::new();
     let task = TaskId("T7".into());
     let opened = Event::TaskOpened {
+        claims: None,
+        mode: rusty_bbp::Mode::Stages,
         schema: 1,
         roster: four_roles(),
         task: task.clone(),
@@ -628,7 +634,9 @@ fn the_file_store_refuses_a_v0_4_log_and_a_future_schema() {
     let task = TaskId("T3".into());
     let mut store = FsStore::open(&dir).expect("fresh dir");
     let opened = Event::TaskOpened {
-        schema: LOG_SCHEMA_EVENT_DRIVEN + 1,
+        claims: None,
+        mode: rusty_bbp::Mode::Stages,
+        schema: LOG_SCHEMA_CLAIMS + 1,
         roster: four_roles(),
         task: task.clone(),
         repo: "r".into(),
@@ -651,7 +659,7 @@ fn the_file_store_refuses_a_v0_4_log_and_a_future_schema() {
     drop(store);
     let err = FsStore::open(&dir).err().expect("refused");
     assert!(
-        matches!(err, FsError::UnsupportedSchema { found: Some(n), .. } if n == LOG_SCHEMA_EVENT_DRIVEN + 1),
+        matches!(err, FsError::UnsupportedSchema { found: Some(n), .. } if n == LOG_SCHEMA_CLAIMS + 1),
         "{err}"
     );
     let _ = std::fs::remove_dir_all(&dir);

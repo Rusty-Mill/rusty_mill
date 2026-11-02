@@ -536,6 +536,7 @@ where
         }
     };
     let report = Report {
+        tests_changed: vec![],
         candidate: run.candidate,
         run: run.id,
         profile_digest: d.state.profile_digest,

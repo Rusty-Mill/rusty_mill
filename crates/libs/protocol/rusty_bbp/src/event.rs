@@ -1,6 +1,8 @@
 //! Events: the append-only log. `TaskState` is a fold over these.
 
-use crate::claims::{ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimsConfig, MarkOutcome, Mode, ReopenCause};
+use crate::claims::{
+    ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimsConfig, MarkOutcome, Mode, ReopenCause,
+};
 use crate::command::Response;
 use crate::ids::*;
 use crate::policy::SchedulingPolicy;

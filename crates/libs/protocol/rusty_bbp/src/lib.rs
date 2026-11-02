@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod claims;
+mod claims_engine;
 pub mod codec;
 pub mod coedit;
 pub mod command;
@@ -24,10 +25,15 @@ pub mod state;
 pub mod store;
 pub mod wake;
 
-pub use claims::{ClaimBody, ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimView, ClaimsConfig, Direction, EvidenceBody, EvidenceKind, MarkOutcome, Mode, ReopenCause, Stakes};
+pub use claims::{
+    ClaimBody, ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimView, ClaimsConfig, Direction,
+    EvidenceBody, EvidenceKind, MarkOutcome, Mode, ReopenCause, Stakes,
+};
 pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
 pub use coedit::{Doc, LineId, LineOp, Missing, SpecEdit, Version};
-pub use command::{AgentAction, Code, Command, HostAction, HumanAction, OpenTask, Rejection, Response};
+pub use command::{
+    AgentAction, Code, Command, HostAction, HumanAction, OpenTask, Rejection, Response,
+};
 pub use engine::{handle, Handled};
 pub use event::{
     log_schema, schema_for, schema_supported, EscalateReason, Event, TurnEnd, LOG_SCHEMA,

@@ -1,0 +1,11 @@
+---
+category: Added
+changelog: **`rusty_bbp`: claims mode.** A task opened with `mode: claims` (log schema 5) takes turnless `claim` and `evidence` posts under a per-assignment session credential; the board scores evidence with an integer fold, settles claims at the accept and drop lines, voids or reopens dependents, escalates on budget, settling, irreversibility and acted-on reopens, blocks acceptance on failing runs of the current candidate, and records action marks. Stage tasks are unchanged.
+---
+## 2026-11-02 - rusty_bbp: claims mode engine (Let Em Loose #593)
+
+- **Added:** claims mode as specified in `docs/spec/bbp-claims-addendum.md` (PR #1386): `claim` and `evidence` message kinds, the `source` artifact, `Command::Host` action marks, the human `ClaimDecision`, `Choose`, `ClaimBudgetExtended`, `WithdrawRerun`, `ClaimActionResult` and `Close` actions, and the `ClaimsDelta`, `ClaimCard` and `ClaimLine` views filtered by `read_messages`. The rules live in `src/claims_engine.rs`; the fold and views in `src/claims.rs`.
+- **Added:** `Report.tests_changed` lists each `test_paths` file a candidate adds, modifies or deletes. A passing run with any change clears a failing block only once a principal who authored neither the candidate nor its diffs endorses it; adding tests needs no endorsement unless the candidate is clearing a block (owner, 2026-11-02).
+- **Added:** `tests/claims.rs`, one test per trace row CL-01 to CL-63 except the host-side CL-44, plus CL-22 through the real `Driver` and a CL-24/25 property test. The property test found that evidence could reopen a dropped claim whose dep is closed; such a claim now records the evidence, and a human reopen is refused `dep_closed` until the dep is reopened.
+- **Changed:** `Candidate` gains an optional `claim` (claims mode only, refused in stage mode) and `OpenTask` gains `mode` and `claims`; neither is written for a stage task, so stage logs stay byte-identical.
+- **Known limitations:** the host side is not wired yet: `rusty_bbp_host` cannot open a claims-mode task, issue credentials to harnesses, serve the new MCP tools, freeze `test_paths` or compute `tests_changed`, and the sandbox refusal (CL-44) is untested. That is the next PR.

@@ -128,9 +128,44 @@ pub struct Report {
     pub sandbox: String,
     pub log: ArtId,
     /// Claims mode: files under the frozen `test_paths` that the candidate's
-    /// diffs modify or delete (interim test-change rule). Not written empty.
+    /// diffs add, modify or delete (interim test-change rule). Not written empty.
     #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tests_changed: Vec<String>,
+    pub tests_changed: Vec<TestChange>,
+}
+
+/// One test file a candidate changes, as the runner reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestChange {
+    pub path: String,
+    pub change: FileChange,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileChange {
+    Added,
+    Modified,
+    Deleted,
+}
+
+impl TestChange {
+    pub fn added(path: &str) -> TestChange {
+        TestChange {
+            path: path.into(),
+            change: FileChange::Added,
+        }
+    }
+    pub fn modified(path: &str) -> TestChange {
+        TestChange {
+            path: path.into(),
+            change: FileChange::Modified,
+        }
+    }
+    pub fn deleted(path: &str) -> TestChange {
+        TestChange {
+            path: path.into(),
+            change: FileChange::Deleted,
+        }
+    }
 }
 
 impl Report {

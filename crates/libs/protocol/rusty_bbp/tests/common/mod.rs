@@ -230,6 +230,8 @@ impl<S: Store> Fx<S> {
             shadows: Vec::new(),
         };
         let open = Command::Open(OpenTask {
+            claims: None,
+            mode: rusty_bbp::Mode::Stages,
             task,
             roster: roles.clone(),
             repo: "github.com/example/repo".into(),
@@ -498,6 +500,7 @@ impl<S: Store> Fx<S> {
             RunStatus::Error => (1, 0),
         };
         let rep = Report {
+            tests_changed: vec![],
             candidate: cand,
             run,
             profile_digest: DIGEST,
@@ -570,6 +573,7 @@ impl<S: Store> Fx<S> {
         stored(self.put(
             builder,
             ArtifactPayload::Candidate(Candidate {
+                claim: None,
                 base: "a".repeat(40),
                 diffs: vec![diff],
             }),

@@ -120,6 +120,19 @@ pub enum AgentAction {
     },
 }
 
+impl AgentAction {
+    /// A read-only view: not fenced by a turn, not recorded for replay (R15).
+    pub fn is_view(&self) -> bool {
+        matches!(
+            self,
+            AgentAction::TaskCard
+                | AgentAction::ClaimsDelta { .. }
+                | AgentAction::ClaimCard { .. }
+                | AgentAction::ClaimLine { .. }
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HumanAction {
     /// Apply any human action only to the exact public revision shown.

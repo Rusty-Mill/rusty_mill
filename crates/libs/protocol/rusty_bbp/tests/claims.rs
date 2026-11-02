@@ -6,8 +6,6 @@
 
 use rusty_bbp::*;
 
-const RUNNER: &str = "runner";
-
 fn lens(id: &str, order: u16) -> Role {
     use ArtifactKind::*;
     use MessageKind::*;
@@ -125,7 +123,13 @@ impl Cx {
         self.st.credential_for(&pid(who))
     }
 
-    fn agent_with(&mut self, who: &str, token: Option<Token>, op: OpId, a: AgentAction) -> Response {
+    fn agent_with(
+        &mut self,
+        who: &str,
+        token: Option<Token>,
+        op: OpId,
+        a: AgentAction,
+    ) -> Response {
         self.run(Command::Agent {
             principal: pid(who),
             token,
@@ -172,7 +176,14 @@ impl Cx {
         self.claim("a", body("x"))
     }
 
-    fn evidence_draft(&self, c: MsgId, dir: Direction, kind: EvidenceKind, strength: u8, ev: Vec<Ref>) -> Draft {
+    fn evidence_draft(
+        &self,
+        c: MsgId,
+        dir: Direction,
+        kind: EvidenceKind,
+        strength: u8,
+        ev: Vec<Ref>,
+    ) -> Draft {
         Draft {
             kind: MessageKind::Evidence,
             to: vec![Recipient::All],
@@ -191,7 +202,15 @@ impl Cx {
         }
     }
 
-    fn ev(&mut self, who: &str, c: MsgId, dir: Direction, kind: EvidenceKind, strength: u8, ev: Vec<Ref>) -> Response {
+    fn ev(
+        &mut self,
+        who: &str,
+        c: MsgId,
+        dir: Direction,
+        kind: EvidenceKind,
+        strength: u8,
+        ev: Vec<Ref>,
+    ) -> Response {
         let d = self.evidence_draft(c, dir, kind, strength, ev);
         self.agent(who, AgentAction::Post(d))
     }
@@ -202,11 +221,25 @@ impl Cx {
 
     fn cited(&mut self, who: &str, c: MsgId, dir: Direction, strength: u8) -> Response {
         let b = self.brief;
-        self.ev(who, c, dir, EvidenceKind::Cited, strength, vec![Ref::art(b)])
+        self.ev(
+            who,
+            c,
+            dir,
+            EvidenceKind::Cited,
+            strength,
+            vec![Ref::art(b)],
+        )
     }
 
     fn executed(&mut self, who: &str, c: MsgId, dir: Direction, report: ArtId) -> Response {
-        self.ev(who, c, dir, EvidenceKind::Executed, 1, vec![Ref::art(report)])
+        self.ev(
+            who,
+            c,
+            dir,
+            EvidenceKind::Executed,
+            1,
+            vec![Ref::art(report)],
+        )
     }
 
     fn put(&mut self, who: &str, tag: &str, payload: ArtifactPayload) -> Response {
@@ -234,7 +267,12 @@ impl Cx {
     }
 
     /// The runner stores a log and a report for `k`'s live run.
-    fn report_profiles(&mut self, k: ArtId, profiles: &[(&str, u32)], tests_changed: Vec<String>) -> Response {
+    fn report_profiles(
+        &mut self,
+        k: ArtId,
+        profiles: &[(&str, u32)],
+        tests_changed: Vec<TestChange>,
+    ) -> Response {
         let run = self.live_run(k);
         let secret = self.st.secret_for(run);
         self.report_as(k, run, secret, profiles, tests_changed)
@@ -246,7 +284,7 @@ impl Cx {
         run: RunId,
         secret: RunSecret,
         profiles: &[(&str, u32)],
-        tests_changed: Vec<String>,
+        tests_changed: Vec<TestChange>,
     ) -> Response {
         let op = self.op();
         let log = self.run(Command::Runner {
@@ -265,7 +303,11 @@ impl Cx {
             candidate: k,
             run,
             profile_digest: self.st.profile_digest,
-            status: if failed { RunStatus::Failed } else { RunStatus::Passed },
+            status: if failed {
+                RunStatus::Failed
+            } else {
+                RunStatus::Passed
+            },
             profiles: profiles
                 .iter()
                 .map(|(n, f)| ProfileResult {
@@ -391,7 +433,11 @@ fn cl_01_stage_open_without_mode_is_unchanged() {
     // nor `claims`, so its bytes match a pre-addendum build's.
     let mut o = open_task(Mode::Stages, None, stage_roster());
     o.claims = None;
-    let h = handle(&TaskState::new(TaskId::from("t")), &Command::Open(o), Time(0));
+    let h = handle(
+        &TaskState::new(TaskId::from("t")),
+        &Command::Open(o),
+        Time(0),
+    );
     let opened = h
         .events
         .iter()
@@ -446,7 +492,11 @@ fn cl_02_bad_config_refused_naming_the_field() {
     // A claims open that names live turns is refused too.
     let mut o = open_task(Mode::Claims, None, roster());
     o.max_live_turns = 2;
-    let h = handle(&TaskState::new(TaskId::from("t")), &Command::Open(o), Time(0));
+    let h = handle(
+        &TaskState::new(TaskId::from("t")),
+        &Command::Open(o),
+        Time(0),
+    );
     assert_eq!(rejected(h.response), Code::BadClaimsConfig);
 }
 
@@ -506,7 +556,11 @@ fn cl_06_claim_in_stage_task_is_wrong_mode() {
         r[0].post.push(MessageKind::Claim);
         r
     };
-    let h = handle(&st, &Command::Open(open_task(Mode::Stages, None, roles)), Time(0));
+    let h = handle(
+        &st,
+        &Command::Open(open_task(Mode::Stages, None, roles)),
+        Time(0),
+    );
     for e in &h.events {
         st.apply(e);
     }
@@ -562,7 +616,10 @@ fn cl_07_two_executed_supports_accept() {
     ok(cx.executed("b", c, Support, r));
     assert_eq!(cx.status(c), ClaimStatus::Accepted);
     assert!(matches!(
-        cx.log.iter().rev().find(|e| matches!(e, Event::ClaimAccepted { .. })),
+        cx.log
+            .iter()
+            .rev()
+            .find(|e| matches!(e, Event::ClaimAccepted { .. })),
         Some(Event::ClaimAccepted { score: 8, .. })
     ));
 }
@@ -577,7 +634,14 @@ fn cl_08_one_author_never_accepts_and_executed_strength_is_one() {
     }
     assert_eq!(cx.score(c), 12);
     assert_eq!(cx.status(c), ClaimStatus::Open);
-    let r2 = cx.ev("b", c, Support, EvidenceKind::Executed, 2, vec![Ref::art(r)]);
+    let r2 = cx.ev(
+        "b",
+        c,
+        Support,
+        EvidenceKind::Executed,
+        2,
+        vec![Ref::art(r)],
+    );
     assert_eq!(rejected(r2), Code::BadClaim);
 }
 
@@ -603,7 +667,10 @@ fn cl_10_drop_needs_two_counter_authors() {
     assert_eq!(cx.status(c), ClaimStatus::Open);
     ok(cx.executed("b", c, Counter, r));
     assert_eq!(cx.status(c), ClaimStatus::Dropped);
-    assert!(cx.log.iter().any(|e| matches!(e, Event::ClaimDropped { score: -16, .. })));
+    assert!(cx
+        .log
+        .iter()
+        .any(|e| matches!(e, Event::ClaimDropped { score: -16, .. })));
 }
 
 #[test]
@@ -615,7 +682,10 @@ fn cl_11_executed_must_cite_a_runner_report() {
         ArtifactPayload::Candidate(x) => x.diffs[0],
         _ => unreachable!(),
     };
-    assert_eq!(rejected(cx.executed("a", c, Support, diff)), Code::WrongKind);
+    assert_eq!(
+        rejected(cx.executed("a", c, Support, diff)),
+        Code::WrongKind
+    );
     assert_eq!(
         rejected(cx.ev("a", c, Support, EvidenceKind::Executed, 1, vec![])),
         Code::EvidenceRequired
@@ -640,7 +710,10 @@ fn cl_12_irreversible_escalates_then_human_accepts() {
     assert_eq!(cx.status(c), ClaimStatus::Escalated);
     assert!(cx.log.iter().any(|e| matches!(
         e,
-        Event::ClaimEscalated { reason: ClaimEscalation::Irreversible, .. }
+        Event::ClaimEscalated {
+            reason: ClaimEscalation::Irreversible,
+            ..
+        }
     )));
     assert_eq!(cx.count(|e| matches!(e, Event::ClaimAccepted { .. })), 0);
     ok(cx.opinion("b", other, Support));
@@ -679,10 +752,7 @@ fn drop_claim(cx: &mut Cx, c: MsgId) {
 }
 
 fn dep_on(text: &str, deps: Vec<MsgId>) -> ClaimBody {
-    ClaimBody {
-        deps,
-        ..body(text)
-    }
+    ClaimBody { deps, ..body(text) }
 }
 
 #[test]
@@ -690,13 +760,14 @@ fn cl_14_dependent_voided_and_stays_void() {
     let mut cx = Cx::new();
     let a = cx.low();
     let b = cx.claim("b", dep_on("b", vec![a]));
+    // The run is made while B is open: a candidate on a void claim is refused.
+    let r = cx.tested("c", b, true);
     drop_claim(&mut cx, a);
     assert_eq!(cx.status(b), ClaimStatus::Void);
     assert!(cx
         .log
         .iter()
         .any(|e| matches!(e, Event::ClaimVoided { claim, by } if *claim == b && *by == a)));
-    let r = cx.tested("c", b, true);
     ok(cx.executed("a", b, Support, r));
     ok(cx.executed("c", b, Support, r));
     assert_eq!(cx.status(b), ClaimStatus::Void);
@@ -754,7 +825,11 @@ fn cl_18_flat_evidence_escalates_stuck() {
     let mut cx = Cx::new();
     let c = cx.low();
     for i in 0..6 {
-        let (who, dir) = if i % 2 == 0 { ("a", Support) } else { ("b", Counter) };
+        let (who, dir) = if i % 2 == 0 {
+            ("a", Support)
+        } else {
+            ("b", Counter)
+        };
         ok(cx.opinion(who, c, dir));
         if i < 5 {
             assert_eq!(cx.status(c), ClaimStatus::Open, "item {i}");
@@ -762,7 +837,10 @@ fn cl_18_flat_evidence_escalates_stuck() {
     }
     assert!(cx.log.iter().any(|e| matches!(
         e,
-        Event::ClaimEscalated { reason: ClaimEscalation::Stuck, .. }
+        Event::ClaimEscalated {
+            reason: ClaimEscalation::Stuck,
+            ..
+        }
     )));
 }
 
@@ -780,7 +858,10 @@ fn cl_19_budget_escalates_then_refuses_then_extends() {
     assert_eq!(cx.status(c), ClaimStatus::Escalated);
     assert!(cx.log.iter().any(|e| matches!(
         e,
-        Event::ClaimEscalated { reason: ClaimEscalation::Budget, .. }
+        Event::ClaimEscalated {
+            reason: ClaimEscalation::Budget,
+            ..
+        }
     )));
     assert_eq!(rejected(cx.opinion("a", c, Support)), Code::ClaimBudget);
     ok(cx.human(HumanAction::ClaimBudgetExtended { claim: c }));
@@ -955,7 +1036,8 @@ fn cl_27_line_matches_the_golden_format() {
 fn cl_28_task_budget_crossing_escalates_the_task_once() {
     let mut cx = Cx::new();
     let mut o = open_task(Mode::Claims, None, roster());
-    o.budget.messages = 3;
+    // Escalation fires when spent exceeds the limit: the third message crosses.
+    o.budget.messages = 2;
     cx.st = TaskState::new(TaskId::from("t"));
     cx.log.clear();
     let r = cx.run(Command::Open(o));
@@ -973,6 +1055,16 @@ fn cl_28_task_budget_crossing_escalates_the_task_once() {
         field: BudgetField::Messages,
         limit: 10,
     }));
+    let rev = cx.rev();
+    let r = cx.human(HumanAction::Resume {
+        target: State::Planning,
+        expected_rev: rev,
+    });
+    assert_eq!(
+        rejected(r),
+        Code::WrongState,
+        "a claims task resumes only to open"
+    );
     let rev = cx.rev();
     ok(cx.human(HumanAction::Resume {
         target: State::Open,
@@ -1078,9 +1170,15 @@ fn cl_32_executed_evidence_binds_to_its_claim() {
     let x = cx.low();
     let y = cx.low();
     let rx = cx.tested("a", x, true);
-    assert_eq!(rejected(cx.executed("a", y, Support, rx)), Code::EvidenceUnbound);
+    assert_eq!(
+        rejected(cx.executed("a", y, Support, rx)),
+        Code::EvidenceUnbound
+    );
     let fail = cx.tested("a", y, false);
-    assert_eq!(rejected(cx.executed("a", y, Support, fail)), Code::NotPassed);
+    assert_eq!(
+        rejected(cx.executed("a", y, Support, fail)),
+        Code::NotPassed
+    );
 }
 
 #[test]
@@ -1089,8 +1187,14 @@ fn cl_33_new_claim_may_not_rest_on_a_closed_dep() {
     let a = cx.low();
     let v = cx.claim("a", dep_on("v", vec![a]));
     drop_claim(&mut cx, a);
-    assert_eq!(rejected(cx.claim_with("b", dep_on("x", vec![a]))), Code::DepClosed);
-    assert_eq!(rejected(cx.claim_with("b", dep_on("x", vec![v]))), Code::DepClosed);
+    assert_eq!(
+        rejected(cx.claim_with("b", dep_on("x", vec![a]))),
+        Code::DepClosed
+    );
+    assert_eq!(
+        rejected(cx.claim_with("b", dep_on("x", vec![v]))),
+        Code::DepClosed
+    );
     let e = cx.claim(
         "a",
         ClaimBody {
@@ -1211,7 +1315,10 @@ fn cl_39_acted_on_claim_escalates_instead_of_reopening() {
     assert_eq!(cx.status(x), ClaimStatus::Escalated);
     assert!(cx.log.iter().any(|e| matches!(
         e,
-        Event::ClaimEscalated { reason: ClaimEscalation::ReopenedAfterAction, .. }
+        Event::ClaimEscalated {
+            reason: ClaimEscalation::ReopenedAfterAction,
+            ..
+        }
     )));
     ok(cx.decide(x, ClaimOutcome::Reopen));
     assert_eq!(cx.status(x), ClaimStatus::Open);
@@ -1404,7 +1511,10 @@ fn cl_46_reruns_past_budget_are_held_for_the_human() {
             claim: Some(x),
         }),
     );
-    assert!(matches!(rejected(r), Code::ClaimBudget | Code::ClaimNotOpen));
+    assert!(matches!(
+        rejected(r),
+        Code::ClaimBudget | Code::ClaimNotOpen
+    ));
     // (d) approve the held rerun.
     ok(cx.human(HumanAction::ClaimBudgetExtended { claim: x }));
     assert_ne!(cx.live_run(k), live);
@@ -1643,7 +1753,11 @@ fn cl_55_choose_settles_a_question_in_one_transaction() {
     let b = cx.claim("b", ans("b"));
     let c = cx.claim("c", ans("c"));
     for i in 0..6 {
-        let (who, dir) = if i % 2 == 0 { ("a", Support) } else { ("c", Counter) };
+        let (who, dir) = if i % 2 == 0 {
+            ("a", Support)
+        } else {
+            ("c", Counter)
+        };
         ok(cx.opinion(who, b, dir));
     }
     assert_eq!(cx.status(b), ClaimStatus::Escalated);
@@ -1670,7 +1784,9 @@ fn cl_55_choose_settles_a_question_in_one_transaction() {
         }),
     });
     assert_eq!(rejected(r), Code::StaleRev);
-    assert!(cx.log[n..].iter().all(|e| matches!(e, Event::Rejected { .. })));
+    assert!(cx.log[n..]
+        .iter()
+        .all(|e| matches!(e, Event::Rejected { .. })));
 }
 
 #[test]
@@ -1724,7 +1840,10 @@ fn cl_57_replacements_cannot_rest_on_what_they_retire() {
         },
     );
     accept(&mut cx, y);
-    assert_eq!(rejected(cx.claim_with("c", dep_on("b", vec![x]))), Code::DepClosed);
+    assert_eq!(
+        rejected(cx.claim_with("c", dep_on("b", vec![x]))),
+        Code::DepClosed
+    );
 }
 
 #[test]
@@ -1855,11 +1974,7 @@ fn cl_61_a_report_on_another_profile_set_is_refused() {
     });
     assert_eq!(rejected(r), Code::ProfileMismatch);
     // (c) No agent write can carry a report.
-    let r = cx.put(
-        "a",
-        "fake",
-        ArtifactPayload::Log,
-    );
+    let r = cx.put("a", "fake", ArtifactPayload::Log);
     assert_eq!(rejected(r), Code::KindForbidden);
 }
 
@@ -1878,16 +1993,57 @@ fn block(cx: &mut Cx, x: MsgId) -> ArtId {
 
 #[test]
 fn cl_62_changed_tests_do_not_clear() {
+    // The runner lists every test_paths file the candidate's diffs add,
+    // modify or delete (#1386, 72a8ce8e: added files count, since an added
+    // conftest can skip tests). The core only reads that list.
     let mut cx = Cx::new();
     let x = cx.low();
     block(&mut cx, x);
-    let k2 = cx.candidate("a", x);
-    let r = stored(cx.report_profiles(k2, &[("unit", 0)], vec!["tests/core.rs".into()]));
+    // (a) modifies, (b) deletes, (c) adds a test file: the block stays.
+    for changed in [
+        TestChange::modified("tests/core.rs"),
+        TestChange::deleted("tests/core.rs"),
+        TestChange::added("tests/new.rs"),
+    ] {
+        let k = cx.candidate("a", x);
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![changed.clone()]));
+        assert!(cx.rec(x).failing.contains("unit"), "{changed:?}");
+    }
+    // (d) an added conftest keeps the block, and support citing it is refused.
+    let k = cx.candidate("a", x);
+    let r = stored(cx.report_profiles(
+        k,
+        &[("unit", 0)],
+        vec![TestChange::added("tests/conftest.py")],
+    ));
     assert!(cx.rec(x).failing.contains("unit"));
-    let _ = r;
-    let k4 = cx.candidate("a", x);
-    stored(cx.report_profiles(k4, &[("unit", 0)], vec![]));
+    assert_eq!(
+        rejected(cx.executed("b", x, Support, r)),
+        Code::TestsUnendorsed
+    );
+    // (e) no test-path change: the passing run clears.
+    let k = cx.candidate("a", x);
+    stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
     assert!(cx.rec(x).failing.is_empty());
+
+    // (f) no block: a candidate that only adds tests needs no endorsement,
+    // one that modifies a test still does.
+    let mut cx = Cx::new();
+    let y = cx.low();
+    let k = cx.candidate("a", y);
+    let added =
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![TestChange::added("tests/new.rs")]));
+    ok(cx.executed("b", y, Support, added));
+    let k = cx.candidate("a", y);
+    let modified = stored(cx.report_profiles(
+        k,
+        &[("unit", 0)],
+        vec![TestChange::modified("tests/core.rs")],
+    ));
+    assert_eq!(
+        rejected(cx.executed("b", y, Support, modified)),
+        Code::TestsUnendorsed
+    );
 }
 
 #[test]
@@ -1896,10 +2052,20 @@ fn cl_63_endorsement_by_another_principal_unlocks() {
     let x = cx.low();
     block(&mut cx, x);
     let k2 = cx.candidate("a", x);
-    let r2 = stored(cx.report_profiles(k2, &[("unit", 0)], vec!["tests/core.rs".into()]));
-    assert_eq!(rejected(cx.executed("b", x, Support, r2)), Code::TestsUnendorsed);
+    let r2 = stored(cx.report_profiles(
+        k2,
+        &[("unit", 0)],
+        vec![TestChange::modified("tests/core.rs")],
+    ));
+    assert_eq!(
+        rejected(cx.executed("b", x, Support, r2)),
+        Code::TestsUnendorsed
+    );
     ok(cx.ev("a", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
-    assert_eq!(rejected(cx.executed("b", x, Support, r2)), Code::TestsUnendorsed);
+    assert_eq!(
+        rejected(cx.executed("b", x, Support, r2)),
+        Code::TestsUnendorsed
+    );
     ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
     assert!(cx.rec(x).failing.is_empty());
     ok(cx.executed("b", x, Support, r2));
@@ -1910,8 +2076,263 @@ fn cl_63_endorsement_by_another_principal_unlocks() {
     let x = cx.low();
     block(&mut cx, x);
     let k2 = cx.candidate("a", x);
-    stored(cx.report_profiles(k2, &[("unit", 0)], vec!["tests/core.rs".into()]));
+    stored(cx.report_profiles(
+        k2,
+        &[("unit", 0)],
+        vec![TestChange::modified("tests/core.rs")],
+    ));
     let _k3 = cx.candidate("b", x);
     ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
     assert!(cx.rec(x).failing.contains("unit"));
+}
+
+// ---------------------------------------------------------------- concurrency and properties
+
+/// CL-22: two evidence posts race through the real `Driver`; the second
+/// append hits a stale revision, reloads and is judged at its commit.
+#[test]
+fn cl_22_racing_posts_are_judged_in_commit_order() {
+    fn drive(d: &mut Driver<MemStore>, cmd: Command) -> Response {
+        d.dispatch(&cmd, Time(1_000)).expect("store")
+    }
+    fn post(d: &Driver<MemStore>, who: &str, op: &str, draft: Draft) -> Command {
+        Command::Agent {
+            principal: pid(who),
+            token: d.state.credential_for(&pid(who)),
+            op: OpId::from(op),
+            action: AgentAction::Post(draft),
+        }
+    }
+    fn evidence(c: MsgId, kind: EvidenceKind, strength: u8, brief: ArtId) -> Draft {
+        let cx = Cx::new();
+        let mut d = cx.evidence_draft(c, Support, kind, strength, vec![]);
+        if kind == EvidenceKind::Cited {
+            d.evidence = vec![Ref::art(brief)];
+        }
+        d
+    }
+    let setup = || {
+        let mut store = MemStore::new();
+        let brief = store.blob_put(b"brief");
+        let mut d = Driver::new(store, TaskId::from("t"));
+        let mut o = open_task(Mode::Claims, None, roster());
+        o.brief = brief;
+        let art = stored(drive(&mut d, Command::Open(o)));
+        for who in ["a", "b", "c"] {
+            ok(drive(
+                &mut d,
+                Command::Assign {
+                    role: RoleId::from(who),
+                    principal: Principal {
+                        id: pid(who),
+                        kind: PrincipalKind::Agent {
+                            role: RoleId::from(who),
+                            vendor: "test".into(),
+                        },
+                    },
+                },
+            ));
+        }
+        let claim = Draft {
+            kind: MessageKind::Claim,
+            to: vec![Recipient::All],
+            body: Body::Claim(body("x")),
+            refs: vec![Ref::art(art)],
+            evidence: vec![],
+            reply_to: None,
+            yield_to: None,
+            gate: false,
+        };
+        let cmd = post(&d, "a", "claim", claim);
+        let c = posted(drive(&mut d, cmd));
+        (d, c, art)
+    };
+
+    // (a) The first post does not settle: both land, summed in commit order.
+    let (mut d, c, brief) = setup();
+    let stale = d.state.clone();
+    let cmd = post(&d, "a", "e1", evidence(c, EvidenceKind::Opinion, 1, brief));
+    ok(drive(&mut d, cmd));
+    let second = post(&d, "b", "e2", evidence(c, EvidenceKind::Opinion, 2, brief));
+    d.state = stale; // b's moderator computed against the old revision
+    ok(drive(&mut d, second));
+    let rec = d.state.claims.get(c).expect("claim");
+    assert_eq!((rec.items.len(), rec.score()), (2, 3));
+
+    // (b) The first post settles: the second is recorded on recompute.
+    let (mut d, c, brief) = setup();
+    let cmd = post(&d, "a", "e1", evidence(c, EvidenceKind::Cited, 3, brief));
+    ok(drive(&mut d, cmd));
+    let stale = d.state.clone();
+    let cmd = post(&d, "b", "e2", evidence(c, EvidenceKind::Cited, 1, brief));
+    ok(drive(&mut d, cmd));
+    assert_eq!(
+        d.state.claims.get(c).map(|r| r.status),
+        Some(ClaimStatus::Accepted)
+    );
+    let third = post(&d, "c", "e3", evidence(c, EvidenceKind::Opinion, 3, brief));
+    d.state = stale;
+    ok(drive(&mut d, third));
+    let rec = d.state.claims.get(c).expect("claim");
+    assert_eq!(rec.status, ClaimStatus::Accepted);
+    assert_eq!(rec.score(), 8);
+    assert!(!rec.items[2].scoring, "recorded, not scored");
+}
+
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Clone, Debug)]
+    enum Op {
+        Claim {
+            deps: Vec<usize>,
+        },
+        Opinion {
+            claim: usize,
+            who: usize,
+            counter: bool,
+            strength: u8,
+        },
+        Cited {
+            claim: usize,
+            who: usize,
+            counter: bool,
+            strength: u8,
+        },
+        Executed {
+            claim: usize,
+            who: usize,
+            pass: bool,
+        },
+        Reopen {
+            claim: usize,
+        },
+    }
+
+    fn op() -> impl Strategy<Value = Op> {
+        prop_oneof![
+            1 => prop::collection::vec(0usize..8, 0..3).prop_map(|deps| Op::Claim { deps }),
+            3 => (0usize..8, 0usize..3, any::<bool>(), 1u8..=3)
+                .prop_map(|(claim, who, counter, strength)| Op::Opinion { claim, who, counter, strength }),
+            3 => (0usize..8, 0usize..3, any::<bool>(), 1u8..=3)
+                .prop_map(|(claim, who, counter, strength)| Op::Cited { claim, who, counter, strength }),
+            2 => (0usize..8, 0usize..3, any::<bool>())
+                .prop_map(|(claim, who, pass)| Op::Executed { claim, who, pass }),
+            1 => (0usize..8).prop_map(|claim| Op::Reopen { claim }),
+        ]
+    }
+
+    const WHO: [&str; 3] = ["a", "b", "c"];
+
+    /// Run `ops`, ignoring refusals: every refusal is a rule doing its job.
+    fn run(ops: &[Op]) -> Cx {
+        let mut cx = Cx::new();
+        let mut claims: Vec<MsgId> = vec![cx.low()];
+        for op in ops {
+            let pick = |i: usize| claims[i % claims.len()];
+            let dir = |counter: bool| if counter { Counter } else { Support };
+            match op {
+                Op::Claim { deps } => {
+                    let deps: Vec<MsgId> = deps.iter().map(|i| pick(*i)).collect();
+                    if let Response::Posted(id) = cx.claim_with("a", dep_on("p", deps)) {
+                        claims.push(id);
+                    }
+                }
+                Op::Opinion {
+                    claim,
+                    who,
+                    counter,
+                    strength,
+                } => {
+                    let c = pick(*claim);
+                    let _ = cx.ev(
+                        WHO[*who],
+                        c,
+                        dir(*counter),
+                        EvidenceKind::Opinion,
+                        *strength,
+                        vec![],
+                    );
+                }
+                Op::Cited {
+                    claim,
+                    who,
+                    counter,
+                    strength,
+                } => {
+                    let _ = cx.cited(WHO[*who], pick(*claim), dir(*counter), *strength);
+                }
+                Op::Executed { claim, who, pass } => {
+                    let c = pick(*claim);
+                    let ok = cx.st.claims.get(c).is_some_and(|r| {
+                        matches!(
+                            r.status,
+                            ClaimStatus::Open | ClaimStatus::Accepted | ClaimStatus::Dropped
+                        ) && !r.exhausted(&cx.st.claims.config)
+                    });
+                    if ok {
+                        let r = cx.tested("c", c, *pass);
+                        let _ = cx.executed(WHO[*who], c, dir(!*pass), r);
+                    }
+                }
+                Op::Reopen { claim } => {
+                    let _ = cx.decide(pick(*claim), ClaimOutcome::Reopen);
+                }
+            }
+        }
+        cx
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        /// CL-24 and CL-25: the fold equals replay, twice; the budget holds;
+        /// voids are closed under deps; an accepted claim rests on accepted deps.
+        #[test]
+        fn cl_24_25_fold_equals_replay_and_invariants_hold(ops in prop::collection::vec(op(), 1..60)) {
+            let cx = run(&ops);
+            let once = TaskState::fold(TaskId::from("t"), &cx.log);
+            let twice = TaskState::fold(TaskId::from("t"), &cx.log);
+            prop_assert_eq!(&once.claims, &cx.st.claims);
+            prop_assert_eq!(&once.claims, &twice.claims);
+            let book = &cx.st.claims;
+            for c in book.claims.values() {
+                prop_assert!(c.spent() <= c.budget(&book.config), "{} over budget", c.id);
+                for d in &c.body.deps {
+                    let dep = book.get(*d).expect("dep");
+                    if dep.closed() {
+                        prop_assert!(c.closed(), "{} is {:?} on closed {}", c.id, c.status, d);
+                    }
+                    if c.status == ClaimStatus::Accepted {
+                        prop_assert_eq!(dep.status, ClaimStatus::Accepted);
+                    }
+                }
+                // Recorded items never score.
+                let scored: i64 = c.items.iter().filter(|i| i.scoring && i.epoch == c.epoch).map(|i| i.delta).sum();
+                prop_assert_eq!(scored, c.score());
+            }
+        }
+    }
+}
+
+/// Found by CL-24: a dropped claim whose dep is closed stays dead. Passing
+/// executed support is recorded, and a human reopen names the closed dep.
+#[test]
+fn cl_14b_a_claim_on_a_closed_dep_does_not_reopen() {
+    let mut cx = Cx::new();
+    let a = cx.low();
+    let b = cx.claim("b", dep_on("b", vec![a]));
+    let pass = cx.tested("c", b, true);
+    drop_claim(&mut cx, b);
+    drop_claim(&mut cx, a);
+    ok(cx.executed("c", b, Support, pass));
+    assert_eq!(cx.status(b), ClaimStatus::Dropped);
+    assert_eq!(
+        rejected(cx.decide(b, ClaimOutcome::Reopen)),
+        Code::DepClosed
+    );
+    ok(cx.decide(a, ClaimOutcome::Reopen));
+    ok(cx.decide(b, ClaimOutcome::Reopen));
+    assert_eq!(cx.status(b), ClaimStatus::Open);
 }

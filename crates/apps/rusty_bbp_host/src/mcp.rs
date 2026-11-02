@@ -466,6 +466,7 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
                         _ => vec![],
                     };
                     ArtifactPayload::Candidate(Candidate {
+                        claim: None,
                         base: a
                             .get("base")
                             .and_then(Value::as_str)

@@ -90,6 +90,8 @@ pub fn open_task_live(
     let profile_digest = profiles::freeze(dir, task, set)?;
     let blob = d.store.blob_put(brief);
     let cmd = Command::Open(OpenTask {
+        claims: None,
+        mode: rusty_bbp::Mode::Stages,
         task: task.clone(),
         roster,
         repo: repo.to_owned(),

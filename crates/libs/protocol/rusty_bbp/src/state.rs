@@ -482,6 +482,7 @@ impl TaskState {
             .iter()
             .map(|t| t.deadline)
             .chain(self.request_deadline())
+            .chain(self.claims.next_mark_deadline())
             .min()
     }
 
@@ -847,8 +848,11 @@ impl TaskState {
                         candidate: *candidate,
                         revoked: false,
                         report: None,
+                        log: None,
                     },
                 );
+                // A run starting for a candidate settles any rerun held on it.
+                self.claims.held.remove(candidate);
                 self.next_run = run.0 + 1;
             }
             Event::RunStarted { candidate, run } => {
@@ -1004,6 +1008,10 @@ impl TaskState {
                     (principal.clone(), op.clone()),
                     (*payload, response.clone()),
                 );
+                if let (crate::claims::Mode::Claims, Response::Artifact(a)) = (self.mode, response)
+                {
+                    self.claims.read_arts.insert((principal.clone(), a.id));
+                }
                 self.mark_seen(principal, response);
             }
             Event::VerdictsStaled { candidate } => {

@@ -422,6 +422,7 @@ fn runner_passes(dir: &Path, task: &TaskId, log: &[u8]) -> (ArtId, ArtId) {
     };
     let log_id = store_as(&mut d, blob, ArtifactPayload::Log, "log");
     let report = ArtifactPayload::TestReport(Report {
+        tests_changed: vec![],
         candidate: run.candidate,
         run: run.id,
         profile_digest: d.state.profile_digest,

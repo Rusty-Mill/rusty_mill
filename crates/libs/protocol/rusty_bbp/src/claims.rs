@@ -374,6 +374,9 @@ pub struct ClaimsBook {
     /// Held human reruns: candidate → claim.
     pub held: BTreeMap<ArtId, MsgId>,
     pub next_mark: u64,
+    /// Artifacts each principal has been charged a read for (R11 in claims
+    /// mode: one charge per principal and artifact).
+    pub read_arts: BTreeSet<(PrincipalId, ArtId)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -381,6 +384,7 @@ pub struct ClaimRun {
     pub candidate: ArtId,
     pub revoked: bool,
     pub report: Option<ArtId>,
+    pub log: Option<ArtId>,
 }
 
 impl ClaimsBook {
@@ -431,6 +435,31 @@ impl ClaimsBook {
             .find(|(_, r)| r.candidate == candidate && !r.revoked)
             .map(|(id, _)| *id)
     }
+
+    /// The latest final report of any run of `candidate`.
+    pub fn latest_report(&self, candidate: ArtId) -> Option<ArtId> {
+        self.runs
+            .values()
+            .filter(|r| r.candidate == candidate)
+            .filter_map(|r| r.report)
+            .max()
+    }
+
+    /// Marks with no result and no escalation yet, with their deadline.
+    pub fn pending_marks(&self) -> impl Iterator<Item = (MsgId, u64, Time)> + '_ {
+        let ms = self.config.mark_timeout_secs.saturating_mul(1_000);
+        self.claims.values().flat_map(move |c| {
+            c.marks
+                .iter()
+                .filter(|m| m.outcome.is_none() && !m.escalated)
+                .map(move |m| (c.id, m.id, m.at.plus(ms)))
+        })
+    }
+
+    /// The earliest time a pending mark becomes overdue.
+    pub fn next_mark_deadline(&self) -> Option<Time> {
+        self.pending_marks().map(|(_, _, t)| t).min()
+    }
 }
 
 // ---------------------------------------------------------------- fold
@@ -464,6 +493,12 @@ pub(crate) fn on_message(st: &mut crate::state::TaskState, m: &crate::record::Me
 
 /// Fold a claims-mode artifact: a candidate naming a claim becomes current.
 pub(crate) fn on_artifact(st: &mut crate::state::TaskState, a: &crate::record::ArtifactRecord) {
+    if let (crate::record::ArtifactKind::Log, Some(run)) = (a.kind, a.run) {
+        if let Some(r) = st.claims.runs.get_mut(&run) {
+            r.log = Some(a.id);
+        }
+        return;
+    }
     let crate::record::ArtifactPayload::Candidate(k) = &a.payload else {
         return;
     };
@@ -505,9 +540,16 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
             }),
             _ => touch(claim, &mut |c| c.status = ClaimStatus::Escalated),
         },
-        E::ClaimReopened { claim, epoch, .. } => touch(claim, &mut |c| {
+        E::ClaimReopened { claim, epoch, by } => touch(claim, &mut |c| {
             c.status = ClaimStatus::Open;
             c.epoch = *epoch;
+            // Reopened by evidence: that item is the new epoch's first scoring one.
+            if let ReopenCause::Evidence(m) = by {
+                if let Some(i) = c.items.iter_mut().find(|i| i.msg == *m) {
+                    i.epoch = *epoch;
+                    i.scoring = true;
+                }
+            }
         }),
         E::ClaimSuperseded { claim, .. } => {
             touch(claim, &mut |c| c.status = ClaimStatus::Superseded);
@@ -596,7 +638,16 @@ pub struct ClaimView {
 
 /// What a viewer may see. The human channel and the host pass `all`.
 pub struct Sight<'a> {
-    pub message: &'a dyn Fn(MsgId) -> bool,
+    pub message: Box<dyn Fn(MsgId) -> bool + 'a>,
+}
+
+impl Sight<'_> {
+    /// The unfiltered view: the human channel and the host.
+    pub fn all() -> Sight<'static> {
+        Sight {
+            message: Box::new(|_| true),
+        }
+    }
 }
 
 /// The card of `c`, with nested content filtered by `sight`.
@@ -654,12 +705,16 @@ pub fn shown_score(c: &ClaimRecord) -> i64 {
 
 /// The one-line compaction: `msg:17 ACCEPTED +12 (96%) 5 evd · text…`.
 pub fn line(c: &ClaimRecord) -> String {
+    // The text part is at most 60 characters, ellipsis included.
     const TEXT: usize = 60;
     let score = shown_score(c);
-    let mut text: String = c.body.text.chars().take(TEXT).collect();
-    if c.body.text.chars().count() > TEXT {
-        text.push('…');
-    }
+    let text: String = if c.body.text.chars().count() > TEXT {
+        let mut t: String = c.body.text.chars().take(TEXT - 1).collect();
+        t.push('…');
+        t
+    } else {
+        c.body.text.clone()
+    };
     format!(
         "{} {} {:+} ({}%) {} evd · {}",
         c.id,
@@ -672,18 +727,20 @@ pub fn line(c: &ClaimRecord) -> String {
 }
 
 /// Claims changed after `after` with a domain in `domains`, plus their
-/// dependents (transitively), in id order.
-pub fn delta_ids(book: &ClaimsBook, after: Rev, domains: &[String]) -> Vec<MsgId> {
+/// dependents (transitively), in id order. Only claims `sight` allows are
+/// returned or followed, so a hidden claim is neither shown nor hinted at.
+pub fn delta_ids(book: &ClaimsBook, after: Rev, domains: &[String], sight: &Sight) -> Vec<MsgId> {
     let mut out: BTreeSet<MsgId> = book
         .claims
         .values()
         .filter(|c| c.changed > after && c.body.domains.iter().any(|d| domains.contains(d)))
+        .filter(|c| (sight.message)(c.id))
         .map(|c| c.id)
         .collect();
     let mut stack: Vec<MsgId> = out.iter().copied().collect();
     while let Some(id) = stack.pop() {
         for d in book.dependents(id) {
-            if out.insert(d) {
+            if (sight.message)(d) && out.insert(d) {
                 stack.push(d);
             }
         }
@@ -738,10 +795,7 @@ mod tests {
     fn config_rules_name_the_field() {
         let ok = ClaimsConfig::default();
         assert_eq!(ok.invalid_field(), None);
-        let bad = ClaimsConfig {
-            accept_at: 0,
-            ..ok
-        };
+        let bad = ClaimsConfig { accept_at: 0, ..ok };
         assert_eq!(bad.invalid_field(), Some("accept_at"));
         let bad = ClaimsConfig {
             mark_timeout_secs: 59,
