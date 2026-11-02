@@ -64,7 +64,7 @@ From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3'
 
 1. Wait on a window or a session (C37). Done: `wait --window`, `wait --session`, exiting with the last failure. Started ahead of Phase 3 identity at the owner's call, confirmed on #1348 (2026-11-01).
 2. Events: clipboard written, program status removed, active window changed, config reloaded (C38). Done: `clipboard-written` and `status-removed` (#1364), `active-window-changed` with `select-window` (#1368), and `config-reloaded` with `reload-config` and the config file's `server` section. The owner chose all four on 2026-11-01.
-3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did. In progress: the owner said go on 2026-11-01; the paths in DECISIONS.md await the owner's confirmation on the PR. Skill text read from the installed binary (Rex delta D1) is not part of this step.
+3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did. Done (#1372): the owner said go on 2026-11-01 and confirmed the paths in DECISIONS.md on the PR. Skill text read from the installed binary (Rex delta D1) is not part of this step.
 4. Block methods `terminal.reset`, `terminal.set-theme`, `terminal.size` (C40).
 5. Layout editing: resize splits, swap blocks, move a block into a new split, detach a block from the layout while it keeps running, reorder windows, server-side focus (C41).
 
