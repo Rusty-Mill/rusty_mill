@@ -8142,7 +8142,7 @@ fn measure_string_body_scan() {
 fn string_body_len_matches_a_byte_scan() {
     // Every byte value at every position of a 19-byte buffer (two words plus
     // a tail), for both terminator sets.
-    for stops in [&[0x07, 0x1b][..], &[0x1b, 0x18, 0x1a][..]] {
+    for stops in [&[0x07, 0x1b, 0x18, 0x1a][..], &[0x1b, 0x18, 0x1a][..]] {
         for bad in 0..=255u8 {
             for pos in 0..19 {
                 let mut buf = [b'a'; 19];
@@ -8166,7 +8166,7 @@ fn string_body_len_matches_a_byte_scan() {
 fn string_bodies_split_at_every_offset_match_one_chunk() {
     let stream: &[u8] = b"\x1b]2;first title\x07A\x1b]2;second\x1b\\B\
         \x1bP+q544e\x1b\\C\x1b_Gabc\x18D\x1bPzz\x1aE\x1bXsos body\x1b\\F\
-        \x1b^pm\x18G\x1b]2;last\x07H";
+        \x1b^pm\x18G\x1b]2;cut\x18I\x1b]2;last\x07H";
     let run = |chunks: &mut dyn Iterator<Item = &[u8]>| {
         let mut g = Grid::new(20, 2);
         let mut p = AnsiParser::new();
@@ -8180,7 +8180,7 @@ fn string_bodies_split_at_every_offset_match_one_chunk() {
     AnsiParser::new().advance(&mut g, stream);
     assert_eq!(
         row_text(&g, 0).trim_end(),
-        "ABCDEFGH",
+        "ABCDEFGIH",
         "every string returns to ground"
     );
     assert_eq!(whole.1, "last");
