@@ -21,6 +21,7 @@ fn tr_01_candidate_cannot_be_replaced_at_merge_gate() {
     let r = fx.put(
         Who::Coder,
         ArtifactPayload::Candidate(Candidate {
+            claim: None,
             base: "b".repeat(40),
             diffs: vec![diff],
         }),
@@ -104,6 +105,7 @@ fn tr_06_manifest_references_kind_checked() {
         rejected(fx.put(
             Who::Coder,
             ArtifactPayload::Candidate(Candidate {
+                claim: None,
                 base: "a".repeat(40),
                 diffs: vec![spec]
             }),
@@ -202,6 +204,7 @@ fn tr_10_replay_after_turn_ended_returns_original() {
     let tok = fx.tok(Who::Coder);
     let op = fx.op();
     let payload = ArtifactPayload::Candidate(Candidate {
+        claim: None,
         base: "a".repeat(40),
         diffs: vec![diff],
     });
@@ -492,6 +495,7 @@ fn tr_22_coder_cannot_write_report() {
     let mut fx = Fx::new();
     fx.reach_build();
     let rep = Report {
+        tests_changed: vec![],
         candidate: ArtId(1),
         run: RunId(1),
         profile_digest: DIGEST,

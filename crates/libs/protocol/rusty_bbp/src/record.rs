@@ -26,6 +26,8 @@ pub enum ArtifactKind {
     Candidate,
     TestReport,
     Log,
+    /// Outside material for `cited` evidence (claims mode).
+    Source,
 }
 
 /// Typed artifact contents, decoded by the adapter from the exact bytes stored (A1).
@@ -42,7 +44,20 @@ pub enum ArtifactPayload {
     Candidate(Candidate),
     TestReport(Report),
     Log,
+    Source(Source),
 }
+
+/// Outside material cited as evidence. BBP checks shape and digest, not truth.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Source {
+    pub origin: String,
+    pub retrieved_at: String,
+    pub excerpt: String,
+    /// SHA-256 of `excerpt`.
+    pub digest: Sha256,
+}
+
+pub const SOURCE_EXCERPT_CAP: usize = 4_000;
 
 impl ArtifactKind {
     /// The kind's snake_case name, as the spec writes it.
@@ -54,6 +69,7 @@ impl ArtifactKind {
             ArtifactKind::Candidate => "candidate",
             ArtifactKind::TestReport => "test_report",
             ArtifactKind::Log => "log",
+            ArtifactKind::Source => "source",
         }
     }
 }
@@ -67,6 +83,7 @@ impl ArtifactPayload {
             ArtifactPayload::Candidate(_) => ArtifactKind::Candidate,
             ArtifactPayload::TestReport(_) => ArtifactKind::TestReport,
             ArtifactPayload::Log => ArtifactKind::Log,
+            ArtifactPayload::Source(_) => ArtifactKind::Source,
         }
     }
 }
@@ -77,6 +94,10 @@ pub struct Candidate {
     pub base: String,
     /// Applied in index order.
     pub diffs: Vec<ArtId>,
+    /// Claims mode: the claim this candidate tests. Required there, refused in
+    /// stage mode; absent, it is not written, so stage logs are unchanged.
+    #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<MsgId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +127,60 @@ pub struct Report {
     /// local run). Reviewers read it; the core records it.
     pub sandbox: String,
     pub log: ArtId,
+    /// Claims mode: files under the frozen `test_paths` that the candidate's
+    /// diffs add, modify or delete (interim test-change rule). Not written empty.
+    #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tests_changed: Vec<TestChange>,
+}
+
+/// One test file a candidate changes, as the runner reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestChange {
+    pub path: String,
+    pub change: FileChange,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileChange {
+    Added,
+    Modified,
+    Deleted,
+}
+
+impl TestChange {
+    pub fn added(path: &str) -> TestChange {
+        TestChange {
+            path: path.into(),
+            change: FileChange::Added,
+        }
+    }
+    pub fn modified(path: &str) -> TestChange {
+        TestChange {
+            path: path.into(),
+            change: FileChange::Modified,
+        }
+    }
+    pub fn deleted(path: &str) -> TestChange {
+        TestChange {
+            path: path.into(),
+            change: FileChange::Deleted,
+        }
+    }
+}
+
+impl Report {
+    /// Profiles that failed: a non-zero exit or any failed test.
+    pub fn failed_profiles(&self) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter(|p| p.exit_code != 0 || p.failed > 0)
+            .map(|p| p.name.clone())
+            .collect()
+    }
+
+    pub fn listed_profiles(&self) -> Vec<String> {
+        self.profiles.iter().map(|p| p.name.clone()).collect()
+    }
 }
 
 impl Report {
@@ -145,6 +220,10 @@ pub enum MessageKind {
     RequestDecision,
     Decision,
     Pass,
+    /// Claims mode: a proposition the board scores.
+    Claim,
+    /// Claims mode: support or counter for a claim.
+    Evidence,
 }
 
 impl MessageKind {
@@ -159,6 +238,8 @@ impl MessageKind {
             MessageKind::RequestDecision => "request_decision",
             MessageKind::Decision => "decision",
             MessageKind::Pass => "pass",
+            MessageKind::Claim => "claim",
+            MessageKind::Evidence => "evidence",
         }
     }
 }
@@ -224,6 +305,8 @@ pub enum Body {
     Prose(String),
     Verdict(Verdict),
     Decision(Decision),
+    Claim(crate::claims::ClaimBody),
+    Evidence(crate::claims::EvidenceBody),
 }
 
 /// What an author submits; the store assigns `id`.

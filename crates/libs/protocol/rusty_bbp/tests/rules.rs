@@ -410,6 +410,7 @@ fn r16_runner_secret_and_consistency() {
         payload: ArtifactPayload::Log,
     }));
     let rep = Report {
+        tests_changed: vec![],
         candidate: cand,
         run,
         profile_digest: DIGEST,
@@ -460,6 +461,7 @@ fn r17_candidate_needs_approved_spec_and_approval_binds() {
         rejected(fx.put(
             Who::Coder,
             ArtifactPayload::Candidate(Candidate {
+                claim: None,
                 base: "a".repeat(40),
                 diffs: vec![]
             }),
@@ -574,6 +576,8 @@ fn assignment_grants_nothing_until_the_first_tick() {
     let task = TaskId("T2".into());
     let mut d = Driver::new(store, task.clone());
     let open = Command::Open(OpenTask {
+        claims: None,
+        mode: rusty_bbp::Mode::Stages,
         task,
         roster: four_roles(),
         repo: "r".into(),

@@ -40,6 +40,28 @@ pub enum Command {
         op: OpId,
         action: HumanAction,
     },
+    /// Claims mode: a write by the host (orch), outside any role. Today only
+    /// action marks (C-R9).
+    Host {
+        op: OpId,
+        action: HostAction,
+    },
+}
+
+/// Host writes in claims mode.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HostAction {
+    /// Record use of an accepted claim before acting on it.
+    Acting {
+        claim: MsgId,
+        epoch: u32,
+        reference: String,
+    },
+    /// The outcome of a mark.
+    ActionResult {
+        mark: u64,
+        outcome: crate::claims::MarkOutcome,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +82,12 @@ pub struct OpenTask {
     /// Added after schema 2 shipped: a payload without it opens as `TurnBased`.
     #[rusty_serde(default)]
     pub policy: crate::policy::SchedulingPolicy,
+    /// Stage pipeline (default) or claims mode.
+    #[rusty_serde(default)]
+    pub mode: crate::claims::Mode,
+    /// Claims mode only: the update rule's numbers. `None` takes the defaults.
+    #[rusty_serde(default)]
+    pub claims: Option<crate::claims::ClaimsConfig>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +105,32 @@ pub enum AgentAction {
         id: ArtId,
     },
     TaskCard,
+    /// Claims mode: claims changed after `after` in `domains`, plus dependents.
+    ClaimsDelta {
+        after: Rev,
+        domains: Vec<String>,
+    },
+    /// Claims mode: one claim's card.
+    ClaimCard {
+        claim: MsgId,
+    },
+    /// Claims mode: one claim's compaction line.
+    ClaimLine {
+        claim: MsgId,
+    },
+}
+
+impl AgentAction {
+    /// A read-only view: not fenced by a turn, not recorded for replay (R15).
+    pub fn is_view(&self) -> bool {
+        matches!(
+            self,
+            AgentAction::TaskCard
+                | AgentAction::ClaimsDelta { .. }
+                | AgentAction::ClaimCard { .. }
+                | AgentAction::ClaimLine { .. }
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +172,33 @@ pub enum HumanAction {
         expected_rev: Rev,
         reason: String,
     },
+    /// Claims mode: settle or reopen one claim (C-R8).
+    ClaimDecision {
+        claim: MsgId,
+        outcome: crate::claims::ClaimOutcome,
+    },
+    /// Claims mode: accept `chosen` and drop the other live candidates of `question`.
+    Choose {
+        question: MsgId,
+        chosen: MsgId,
+    },
+    /// Claims mode: one more `base(c)` of budget; approves a held rerun.
+    ClaimBudgetExtended {
+        claim: MsgId,
+    },
+    /// Claims mode: withdraw a held rerun.
+    WithdrawRerun {
+        candidate: ArtId,
+    },
+    /// Claims mode: the human reconciles a mark.
+    ClaimActionResult {
+        mark: u64,
+        outcome: crate::claims::MarkOutcome,
+    },
+    /// Claims mode: end the task.
+    Close {
+        expected_rev: Rev,
+    },
 }
 
 /// What a command returns. Stored with the accepted op so replays reproduce it.
@@ -134,6 +215,11 @@ pub enum Response {
     Artifact(ArtifactRecord),
     Card(Card),
     Rejected(Rejection),
+    /// Claims mode views.
+    Claims(Vec<crate::claims::ClaimView>),
+    Line(Option<String>),
+    /// A mark was recorded.
+    Marked(u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,4 +303,22 @@ pub enum Code {
     BlobMissing,
     /// Driver boundary: the claimed payload is not what the stored bytes decode to.
     PayloadMismatch,
+    /// Claims mode: `open` carried a bad `claims` value (detail names the field).
+    BadClaimsConfig,
+    /// Claims mode: the session credential is missing, foreign or expired.
+    BadCredential,
+    /// The operation belongs to the other mode.
+    WrongMode,
+    /// A claim or evidence body breaks its field rules.
+    BadClaim,
+    /// A new claim names a dropped, void or superseded dep.
+    DepClosed,
+    /// The claim's evidence budget is spent.
+    ClaimBudget,
+    /// A candidate names a claim that is void or escalated.
+    ClaimNotOpen,
+    /// A second result for one mark.
+    Duplicate,
+    /// Executed support cites a run whose candidate changed tests, unendorsed.
+    TestsUnendorsed,
 }

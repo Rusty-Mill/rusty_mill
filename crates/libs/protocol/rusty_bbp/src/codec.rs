@@ -62,6 +62,7 @@ pub fn decode_artifact(kind: ArtifactKind, bytes: &[u8]) -> Result<ArtifactPaylo
         ArtifactKind::Spec => spec_payload(json(bytes)?)?,
         ArtifactKind::Candidate => ArtifactPayload::Candidate(json(bytes)?),
         ArtifactKind::TestReport => ArtifactPayload::TestReport(json(bytes)?),
+        ArtifactKind::Source => ArtifactPayload::Source(json(bytes)?),
     })
 }
 
@@ -87,7 +88,7 @@ pub fn spec_markdown(bytes: &[u8]) -> Result<String, DecodeError> {
 
 /// Produce the bytes whose decoding yields `payload`. `body` is the raw
 /// content for `brief`, `diff` and `log`, and the Markdown for `spec`;
-/// it is ignored for `candidate` and `test_report`.
+/// it is ignored for `candidate`, `test_report` and `source`.
 pub fn encode_artifact(payload: &ArtifactPayload, body: &[u8]) -> Result<Vec<u8>, DecodeError> {
     let text = match payload {
         ArtifactPayload::Brief | ArtifactPayload::Diff | ArtifactPayload::Log => {
@@ -107,6 +108,7 @@ pub fn encode_artifact(payload: &ArtifactPayload, body: &[u8]) -> Result<Vec<u8>
         }),
         ArtifactPayload::Candidate(c) => rusty_serde::json::to_string(c),
         ArtifactPayload::TestReport(r) => rusty_serde::json::to_string(r),
+        ArtifactPayload::Source(s) => rusty_serde::json::to_string(s),
     };
     text.map(String::into_bytes)
         .map_err(|e| DecodeError(e.to_string()))
