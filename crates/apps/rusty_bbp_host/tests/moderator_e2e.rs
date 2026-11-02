@@ -42,10 +42,7 @@ fn fake_claude_on_path() {
 
 fn tempdir(tag: &str) -> PathBuf {
     fake_claude_on_path();
-    let dir = std::env::temp_dir().join(format!("bbp_mod_{}_{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    dir
+    common::fresh_dir("bbp_mod", tag)
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {

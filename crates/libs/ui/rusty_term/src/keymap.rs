@@ -119,11 +119,23 @@ pub struct Keymap {
 
 impl Default for Keymap {
     fn default() -> Self {
+        Self::builtin(cfg!(windows))
+    }
+}
+
+impl Keymap {
+    /// The built-in bindings. `windows` adds plain Ctrl+V as a second Paste
+    /// chord, as Windows Terminal does: there Ctrl+V means paste everywhere,
+    /// and the shells (PowerShell's PSReadLine, cmd) have no use for a raw ^V.
+    /// Elsewhere ^V stays the child's (bash/zsh quoted insert, vim block
+    /// select). On Windows a child that needs raw ^V gets it back by rebinding
+    /// `paste` in `[keys]`, which replaces both default chords.
+    fn builtin(windows: bool) -> Self {
         use Action::*;
         use Key::{Char, PageDown, PageUp, Tab};
         // `c(ctrl, shift, key)` — all built-in chords are alt-free.
         let c = |ctrl, shift, key| Chord::new(ctrl, shift, false, key);
-        Self {
+        let mut km = Self {
             binds: vec![
                 (c(true, true, Char('c')), Copy),
                 (c(true, true, Char('v')), Paste),
@@ -165,11 +177,13 @@ impl Default for Keymap {
                 (c(true, false, Char('0')), FontSizeReset),
                 (c(true, true, Char('k')), ToggleDock),
             ],
+        };
+        if windows {
+            km.binds.push((c(true, false, Char('v')), Paste));
         }
+        km
     }
-}
 
-impl Keymap {
     /// Rebind `action` to `chord`, dropping any previous binding for that action
     /// and any other action currently on that chord (a chord triggers one
     /// thing).
@@ -338,6 +352,37 @@ mod tests {
         );
         assert_eq!(
             km.action(Chord::new(true, false, false, Key::Char('c'))),
+            None
+        );
+    }
+
+    #[test]
+    fn plain_ctrl_v_pastes_on_windows_only() {
+        let ctrl_v = Chord::new(true, false, false, Key::Char('v'));
+        let ctrl_shift_v = Chord::new(true, true, false, Key::Char('v'));
+        let windows = Keymap::builtin(true);
+        assert_eq!(windows.action(ctrl_v), Some(Action::Paste));
+        assert_eq!(windows.action(ctrl_shift_v), Some(Action::Paste));
+        // Elsewhere ^V reaches the child (quoted insert, vim block select).
+        let other = Keymap::builtin(false);
+        assert_eq!(other.action(ctrl_v), None);
+        assert_eq!(other.action(ctrl_shift_v), Some(Action::Paste));
+        // AltGr arrives as Ctrl+Alt on Windows; it must not paste.
+        assert_eq!(
+            windows.action(Chord::new(true, false, true, Key::Char('v'))),
+            None
+        );
+    }
+
+    #[test]
+    fn rebinding_paste_frees_plain_ctrl_v() {
+        // The escape hatch for a child that needs raw ^V on Windows.
+        let mut km = Keymap::builtin(true);
+        let ctrl_shift_v = Chord::new(true, true, false, Key::Char('v'));
+        km.set(Action::Paste, ctrl_shift_v);
+        assert_eq!(km.action(ctrl_shift_v), Some(Action::Paste));
+        assert_eq!(
+            km.action(Chord::new(true, false, false, Key::Char('v'))),
             None
         );
     }
