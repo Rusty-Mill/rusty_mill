@@ -1243,6 +1243,20 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // Windows refuses a directory name ending in a space
+    #[test]
+    fn a_checkout_whose_path_ends_in_whitespace_is_checked_not_its_namesake() {
+        // Trimming `--show-toplevel` sent the checks to the clean sibling
+        // `pin-…-trail` instead of the edited `pin-…-trail `.
+        let (clean, _, _) = repo("trail");
+        let (d, first, second) = repo("trail ");
+        std::fs::write(d.join("a"), "edited").unwrap();
+        let err = pin(&d, Some(&first), &second).unwrap_err();
+        assert!(err.contains("not clean"), "{err}");
+        std::fs::remove_dir_all(d).unwrap();
+        std::fs::remove_dir_all(clean).unwrap();
+    }
+
     #[test]
     fn an_untracked_file_is_dirty_even_when_an_excludes_file_lists_it() {
         // The repository's own config stands in for a user's global one.
