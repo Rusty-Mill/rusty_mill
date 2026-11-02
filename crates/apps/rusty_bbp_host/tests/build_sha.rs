@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BUILD_RS: &str = include_str!("../build.rs");
+/// The tree check `build.rs` includes from `src/`.
+const CLEAN_TREE_RS: &str = include_str!("../src/clean_tree.rs");
 
 fn cargo() -> String {
     std::env::var("CARGO").unwrap_or_else(|_| "cargo".into())
@@ -49,6 +51,7 @@ impl Repo {
             "[package]\nname = \"app\"\nversion = \"0.0.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]\ndep = { path = \"../dep\" }\n\n[workspace]\n",
         );
         w("app/build.rs", BUILD_RS);
+        w("app/src/clean_tree.rs", CLEAN_TREE_RS);
         w(
             "app/src/main.rs",
             "fn main() {\n    print!(\"{}\", env!(\"BBP_BUILD_SHA\"));\n    let _ = dep::answer();\n}\n",

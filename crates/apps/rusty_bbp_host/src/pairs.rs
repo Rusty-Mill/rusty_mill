@@ -8,6 +8,7 @@
 //! see "2b gate criteria" in `docs/bbp-concurrency-design.md` for the
 //! definitions and the thresholds.
 
+use crate::clean_tree::{self, git};
 use crate::{report, tokens};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
@@ -760,37 +761,9 @@ pub fn check_settings(pairs: &[Pair], reads_per_turn: u64) -> Result<(), String>
     Ok(())
 }
 
-/// What one git command answered.
-struct GitOut {
-    ok: bool,
-    code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-/// Run git on `repo`. `GIT_OPTIONAL_LOCKS=0`, as in `build.rs`: reading the
-/// tree's state must not refresh and rewrite the index it inspects.
-fn git(repo: &Path, args: &[&str]) -> Result<GitOut, String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-    Ok(GitOut {
-        ok: out.status.success(),
-        code: out.status.code(),
-        stdout: String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-        stderr: String::from_utf8_lossy(&out.stderr).trim().to_owned(),
-    })
-}
-
-/// The commit a run is pinned to: HEAD of `repo`, which must be clean as
-/// `git status --porcelain --untracked-files=normal` sees it (the flag overrides
-/// `status.showUntrackedFiles`; excludes files, index bits such as
-/// assume-unchanged, and submodule ignore settings can still hide a change) and
-/// must contain `min_commit` (the merge of the verdict-binding fix). A criteria file
+/// The commit a run is pinned to: HEAD of `repo`, whose tree must be exactly
+/// HEAD as [`clean_tree::dirt`] sees it (past git settings that hide a change)
+/// and which must contain `min_commit` (the merge of the verdict-binding fix). A criteria file
 /// with no `min_commit` refuses: the pin is part of the criteria.
 pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<String, String> {
     let min =
@@ -804,18 +777,13 @@ pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<Str
         ));
     }
     let head = rev.stdout;
-    // `--untracked-files=normal` overrides a user's `status.showUntrackedFiles=no`
-    // (#1328), and a status git could not produce is not a clean tree.
-    let status = git(repo, &["status", "--porcelain", "--untracked-files=normal"])?;
-    if !status.ok {
+    // A question git could not answer is not a clean tree (#1328, #1361).
+    let dirt = clean_tree::dirt(repo).map_err(|e| format!("{}: {e}", repo.display()))?;
+    if let Some(why) = dirt {
         return Err(format!(
-            "{}: git status failed: {}",
-            repo.display(),
-            status.stderr
+            "{}: the working tree is not clean ({why})",
+            repo.display()
         ));
-    }
-    if !status.stdout.is_empty() {
-        return Err(format!("{}: the working tree is not clean", repo.display()));
     }
     // Exit 1 is "not an ancestor"; any other failure (an unknown commit)
     // refuses too, with git's reason.
@@ -1154,23 +1122,33 @@ mod tests {
         assert!(spec_wall_ms("not json").is_err());
     }
 
+    /// Run test-setup git on `d`, isolated from the developer's own git config
+    /// (a global hook, signing or excludes file must not turn a test red).
+    fn setup_git(d: &Path, a: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(a)
+            .env("GIT_CONFIG_GLOBAL", d.with_extension("no-gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{a:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+    }
+
     /// A scratch git repo with two commits, in its own directory per `tag`;
     /// returns (dir, first sha, second sha).
     fn repo(tag: &str) -> (std::path::PathBuf, String, String) {
         let d = std::env::temp_dir().join(format!("pin-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let g = |a: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&d)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(a)
-                .output()
-                .unwrap();
-            assert!(o.status.success(), "{a:?}");
-            String::from_utf8_lossy(&o.stdout).trim().to_owned()
-        };
+        let g = |a: &[&str]| setup_git(&d, a);
         g(&["init", "-q"]);
         std::fs::write(d.join("a"), "1").unwrap();
         g(&["add", "a"]);
@@ -1180,6 +1158,24 @@ mod tests {
         g(&["commit", "-q", "-am", "two"]);
         let second = g(&["rev-parse", "HEAD"]);
         (d, first, second)
+    }
+
+    /// `hide` sets a git setting on a clean scratch repo, which still pins;
+    /// `change` then makes a change the setting hides from `git status`, and
+    /// the pin must refuse it (#1361).
+    fn refuses_hidden_change(tag: &str, hide: impl Fn(&Path), change: impl Fn(&Path)) {
+        let (d, first, _) = repo(tag);
+        hide(&d);
+        let head = setup_git(&d, &["rev-parse", "HEAD"]);
+        assert_eq!(pin(&d, Some(&first), &head).unwrap(), head);
+        change(&d);
+        let err = pin(&d, Some(&first), &head).unwrap_err();
+        assert!(err.contains("not clean"), "{err}");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    fn untracked(d: &Path) {
+        std::fs::write(d.join("new.rs"), "// untracked\n").unwrap();
     }
 
     #[test]
@@ -1233,6 +1229,127 @@ mod tests {
             .unwrap_err()
             .contains("not clean"));
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn an_untracked_file_is_dirty_even_when_an_excludes_file_lists_it() {
+        // The repository's own config stands in for a user's global one.
+        refuses_hidden_change(
+            "excludes-file",
+            |d| {
+                let ex = d.with_extension("excludes");
+                std::fs::write(&ex, "new.rs\n").unwrap();
+                setup_git(d, &["config", "core.excludesFile", ex.to_str().unwrap()]);
+            },
+            untracked,
+        );
+    }
+
+    #[test]
+    fn an_untracked_file_is_dirty_even_when_info_exclude_lists_it() {
+        refuses_hidden_change(
+            "info-exclude",
+            |d| std::fs::write(d.join(".git/info/exclude"), "new.rs\n").unwrap(),
+            untracked,
+        );
+    }
+
+    #[test]
+    fn a_tree_with_assume_unchanged_or_skip_worktree_entries_refuses() {
+        // No flag makes `git status` look past these bits, so an entry with
+        // one refuses whether or not its file was edited.
+        for flag in ["--assume-unchanged", "--skip-worktree"] {
+            let (d, first, second) = repo(flag.trim_start_matches('-'));
+            setup_git(&d, &["update-index", flag, "a"]);
+            std::fs::write(d.join("a"), "edited").unwrap();
+            // Also from a subdirectory, as `build.rs` asks from its crate's.
+            std::fs::create_dir(d.join("sub")).unwrap();
+            for at in [d.clone(), d.join("sub")] {
+                let err = pin(&at, Some(&first), &second).unwrap_err();
+                assert!(err.contains("skip-worktree: "), "{err}");
+            }
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_edit_is_dirty_even_under_core_ignore_stat() {
+        // `core.ignoreStat` marks files assume-unchanged as git updates them.
+        refuses_hidden_change(
+            "ignore-stat",
+            |d| {
+                setup_git(d, &["config", "core.ignoreStat", "true"]);
+            },
+            |d| {
+                std::fs::write(d.join("a"), "3").unwrap();
+                setup_git(d, &["commit", "-q", "-am", "three"]);
+                std::fs::write(d.join("a"), "edited").unwrap();
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_change_is_dirty_even_under_core_file_mode_false() {
+        use std::os::unix::fs::PermissionsExt;
+        refuses_hidden_change(
+            "file-mode",
+            |d| {
+                setup_git(d, &["config", "core.fileMode", "false"]);
+            },
+            |d| {
+                let perms = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(d.join("a"), perms).unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn a_submodule_change_is_dirty_even_when_git_config_ignores_submodules() {
+        let (inner, _, _) = repo("submodule-inner");
+        refuses_hidden_change(
+            "submodule",
+            |d| {
+                let url = inner.to_str().unwrap();
+                setup_git(
+                    d,
+                    &[
+                        "-c",
+                        "protocol.file.allow=always",
+                        "submodule",
+                        "add",
+                        "-q",
+                        url,
+                        "sub",
+                    ],
+                );
+                setup_git(d, &["commit", "-q", "-m", "sub"]);
+                setup_git(d, &["config", "diff.ignoreSubmodules", "all"]);
+                setup_git(d, &["config", "submodule.sub.ignore", "all"]);
+            },
+            |d| std::fs::write(d.join("sub/a"), "edited").unwrap(),
+        );
+        std::fs::remove_dir_all(inner).unwrap();
+    }
+
+    #[test]
+    fn the_checks_ignore_git_environment_that_points_at_another_tree() {
+        // A git hook that runs cargo exports these; inherited, they make the
+        // checks inspect the hook's repository instead of `repo`.
+        let cmd = clean_tree::command(Path::new("."));
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+        ] {
+            assert!(removed.iter().any(|k| k == var), "{var} is inherited");
+        }
     }
 
     #[test]
