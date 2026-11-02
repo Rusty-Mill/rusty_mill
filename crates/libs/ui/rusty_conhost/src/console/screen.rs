@@ -483,6 +483,15 @@ impl Screen {
         )
     }
 
+    /// Move the cursor to screen position (`x`, `y`), where the terminal
+    /// reports its own (#1375); nothing is emitted. A position the cursor
+    /// already reads as keeps its pending wrap.
+    pub(super) fn place_cursor(&mut self, x: u16, y: u16) {
+        if self.cursor() != (x, y) {
+            self.grid.set_cursor(usize::from(x), usize::from(y));
+        }
+    }
+
     /// CUP to screen position (`x`, `y`), for the Grid as it is now. The
     /// Win32 position is absolute, so under the client's origin mode
     /// (DECOM) it is made relative to the region; a position outside the

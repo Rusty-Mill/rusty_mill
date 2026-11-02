@@ -25,7 +25,9 @@ use platform_windows::condrv::{
 use platform_windows::sys::handle::OwnedWinHandle;
 
 use crate::codepage::Codec;
-use crate::console::{Console, Effect, Event, OutputQueue, POSTAMBLE, PREAMBLE, Packet, Reply};
+use crate::console::{
+    CURSOR_WAIT, Console, Effect, Event, OutputQueue, POSTAMBLE, PREAMBLE, Packet, Reply,
+};
 use crate::ctrl::{self, Ctrl, Pushed};
 use crate::fixture::{self, FIXTURE_CAP};
 use crate::msg::STATUS_UNSUCCESSFUL;
@@ -568,6 +570,9 @@ struct Engine {
     exit_handled: bool,
     /// The CTRL_CLOSE deadline, armed by the first hang-up or child exit.
     grace: Grace,
+    /// When the console stops waiting for the CPR it asked for after a
+    /// resize ([`Effect::AwaitCursor`], #1375).
+    cursor_until: Option<Instant>,
     /// Attached client processes by pid, ended if still attached at the
     /// deadline (#1259). One that couldn't be opened is missing.
     clients: HashMap<u32, ClientProcess>,
@@ -626,6 +631,7 @@ impl Engine {
             exited: false,
             exit_handled: false,
             grace: Grace::default(),
+            cursor_until: None,
             clients: HashMap::new(),
             open_failed_logged: false,
             doomed: Vec::new(),
@@ -676,6 +682,10 @@ impl Engine {
         self.work()?;
         // Decided on what the turn's events left, not on its plan.
         let until = self.grace.until(self.must_poll(), Instant::now());
+        if !self.console.awaiting_cursor() {
+            self.cursor_until = None;
+        }
+        let until = earliest(until, self.cursor_until);
         let Some(server) = self.server.as_mut() else {
             return Ok(());
         };
@@ -707,6 +717,10 @@ impl Engine {
         let now = Instant::now();
         if self.grace.expire(now) {
             self.handle(Event::GraceExpired);
+        }
+        if self.cursor_until.is_some_and(|at| now >= at) {
+            self.cursor_until = None;
+            self.handle(Event::CursorWaitExpired);
         }
         let (mut control, input) = self.shared.take_control();
         // Discarded output drains at once, but each drain releases only one
@@ -812,6 +826,7 @@ impl Engine {
             input_paused: self.console.input_paused(),
             writes_ready: self.console.writes_ready(),
             streaming: self.console.streaming(),
+            awaiting_cursor: self.console.awaiting_cursor(),
             fetch_due: self.fetch.is_some(),
         }
     }
@@ -974,6 +989,7 @@ impl Engine {
                 self.clients.remove(&pid);
             }
             Effect::Kill { pid } => self.kill(pid),
+            Effect::AwaitCursor => self.cursor_until = Some(Instant::now() + CURSOR_WAIT),
             Effect::CloseServer => self.teardown(),
             Effect::Eof => self.shared.set_eof(),
             // `handle` answers it; it never gets here.
@@ -1147,6 +1163,14 @@ fn drain_cancelled(server: &mut ConsoleServer, waker: &Waker) {
             // Cancelled, or failed: either way it is no longer in flight.
             Err(_) => return,
         }
+    }
+}
+
+/// The sooner of two optional deadlines.
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
     }
 }
 
