@@ -15,7 +15,7 @@ const CONTROL: Features = Features::CHECKPOINT_V6
     .union(Features::BLOCK_CALL)
     .union(Features::TERMINAL_CONTROL);
 
-/// What a reset feeds the terminal: RIS.
+/// How what a reset feeds the terminal ends: RIS.
 const RESET: &str = "\x1bc";
 
 fn call(block: BlockId, method: &str, args: &[(&str, Value)]) -> impl FnOnce(u64) -> Message {

@@ -2651,10 +2651,21 @@ mod client {
                 Shown::Passing(block) => {
                     // A new stream: what was held belongs to the last one.
                     self.no_win32 = NoWin32Input::default();
-                    match self.panes.get(block).and_then(|p| p.term.as_ref()) {
+                    // A cursor colour the composed screen gave the
+                    // terminal is put back before the block sets its own.
+                    let recoloured = match &self.shown {
+                        Shown::Composed(Some(last)) => last.cursor_colour().is_some(),
+                        _ => false,
+                    };
+                    let uncolour = match recoloured {
+                        true => screen::cursor_colour(None).into_bytes(),
+                        false => Vec::new(),
+                    };
+                    let passed = match self.panes.get(block).and_then(|p| p.term.as_ref()) {
                         Some((grid, _)) => pass(grid),
                         None => b"\x1b[?1049l".to_vec(),
-                    }
+                    };
+                    [uncolour, passed].concat()
                 }
                 Shown::Composed(_) => match self.shown {
                     Shown::Composed(_) => Vec::new(),

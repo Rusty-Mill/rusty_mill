@@ -743,8 +743,12 @@ impl AnsiParser {
                 },
                 ParserState::OscEsc => {
                     // Whether or not this is the `\` of an ST, the OSC string is
-                    // over; act on it and return to ground.
-                    self.finish_osc(g);
+                    // over; act on it and return to ground, unless CAN / SUB
+                    // abort it.
+                    match b {
+                        0x18 | 0x1a => self.osc_buffer.clear(),
+                        _ => self.finish_osc(g),
+                    }
                     self.state = ParserState::Ground;
                 }
                 ParserState::EscCharset => {
@@ -787,8 +791,12 @@ impl AnsiParser {
                     _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::DcsEsc => {
-                    // The DCS string is over (ST or otherwise); act on it.
-                    self.finish_dcs(g);
+                    // The DCS string is over (ST or otherwise); act on it,
+                    // unless CAN / SUB abort it.
+                    match b {
+                        0x18 | 0x1a => self.dcs_buffer.clear(),
+                        _ => self.finish_dcs(g),
+                    }
                     self.state = ParserState::Ground;
                 }
                 ParserState::Apc => match b {
@@ -801,8 +809,12 @@ impl AnsiParser {
                     _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::ApcEsc => {
-                    // The APC string is over (ST or otherwise); act on it.
-                    self.finish_apc(g);
+                    // The APC string is over (ST or otherwise); act on it,
+                    // unless CAN / SUB abort it.
+                    match b {
+                        0x18 | 0x1a => self.apc_buffer.clear(),
+                        _ => self.finish_apc(g),
+                    }
                     self.state = ParserState::Ground;
                 }
             }

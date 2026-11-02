@@ -11,10 +11,15 @@ use crate::style::Style;
 
 /// What `terminal.reset` feeds a terminal: CAN, which ends any sequence the
 /// program left unfinished (a string, an ESC waiting for its next byte, a
-/// cut CSI or UTF-8 character), then RIS. Without the CAN, rusty_term_core
-/// reads the RIS's ESC as part of an unfinished string or escape and never
-/// resets, while a VT500-style outer terminal would.
-pub(crate) const RESET: &[u8] = b"\x18\x1bc";
+/// cut CSI or UTF-8 character) without acting on it, then ST, then RIS.
+/// Without the CAN, rusty_term_core reads the RIS's ESC as part of an
+/// unfinished string or escape and never resets, while a VT500-style outer
+/// terminal would. The ST does nothing after the CAN; it is for attached
+/// clients built before CAN ended an OSC string, which collect the CAN into
+/// the string and would take the RIS's ESC and `c` as its end: the ST ends
+/// it there instead (acting on it, as those clients always did), so the
+/// RIS resets their copy too.
+pub(crate) const RESET: &[u8] = b"\x18\x1b\\\x1bc";
 
 /// The OSC sequences that make `change`, each ended by ST: OSC 10, 11 and
 /// 12 set the default foreground, background and cursor colours, 110, 111
@@ -327,6 +332,8 @@ mod tests {
             assert!(!screen.contains("BEFORE"), "{stuck:?}: {screen:?}");
             assert!(!grid.app_cursor_keys, "{stuck:?}");
             assert!(parser.ground(), "{stuck:?}");
+            assert_eq!(grid.title, "", "{stuck:?}: the string was not acted on");
+            assert!(parser.take_responses().is_empty(), "{stuck:?}");
         }
     }
 

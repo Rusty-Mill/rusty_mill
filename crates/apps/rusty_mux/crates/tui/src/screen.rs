@@ -48,6 +48,9 @@ pub struct Frame {
     cells: Vec<Glyph>,
     /// Where the focused block's cursor is, if it shows one.
     cursor: Option<(u16, u16)>,
+    /// The focused block's cursor colour, if its program or a theme chose
+    /// one; see [`chosen_cursor`].
+    cursor_colour: Option<u32>,
 }
 
 /// One block to draw: its place and, once attached, its grid, with the
@@ -68,6 +71,27 @@ impl Frame {
         let start = self.index(0, y);
         &self.cells[start..start + usize::from(self.area.cols())]
     }
+
+    /// The cursor colour this frame gave the terminal, if any.
+    pub fn cursor_colour(&self) -> Option<u32> {
+        self.cursor_colour
+    }
+}
+
+/// `grid`'s cursor colour when its program or a theme chose one (OSC 12),
+/// `None` while it is the grid's default. A colour chosen equal to that
+/// default reads as the default.
+pub fn chosen_cursor(grid: &Grid) -> Option<u32> {
+    (grid.cursor_color != Cell::blank().fg).then_some(grid.cursor_color)
+}
+
+/// The sequence that gives the terminal's cursor `colour` (OSC 12), or for
+/// `None` puts the terminal's own back (OSC 112).
+pub fn cursor_colour(colour: Option<u32>) -> String {
+    match colour {
+        Some(rgb) => format!("\x1b]12;#{rgb:06x}\x1b\\"),
+        None => "\x1b]112\x1b\\".to_owned(),
+    }
 }
 
 /// The screen of `area` with each view's grid clipped to its rect, the
@@ -77,6 +101,7 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
         area,
         cells: vec![Glyph::blank(); usize::from(area.cols()) * usize::from(area.rows())],
         cursor: None,
+        cursor_colour: None,
     };
     let mut covered = vec![false; frame.cells.len()];
     for view in views {
@@ -94,6 +119,7 @@ pub fn compose(area: Size, views: &[View<'_>], focused: BlockId) -> Frame {
                 // Shown only where the grid shows it, after the predictions.
                 let shown = cursor(view.rect, grid);
                 frame.cursor = shown.and(ahead).or(shown);
+                frame.cursor_colour = chosen_cursor(grid);
             }
         }
     }
@@ -228,8 +254,10 @@ fn touches(rect: Rect, x: u16, y: u16) -> bool {
 }
 
 /// The bytes that turn the screen `prev` showed into `next`: every row
-/// that changed, whole, then the cursor. Everything when there is no
-/// `prev` or its size differs; nothing when nothing changed.
+/// that changed, whole, then the cursor, and its colour if that changed.
+/// Everything but an unchanged colour when there is no `prev` or its size
+/// differs; nothing when nothing changed. With no `prev` the terminal's
+/// cursor is taken to have its own colour.
 pub fn render(prev: Option<&Frame>, next: &Frame) -> Vec<u8> {
     let fresh = prev.filter(|p| p.area == next.area);
     let mut out = String::new();
@@ -252,7 +280,8 @@ pub fn render(prev: Option<&Frame>, next: &Frame) -> Vec<u8> {
             out.push_str(&glyph.extra);
         }
     }
-    if fresh.is_some_and(|p| p.cursor == next.cursor) && out.is_empty() {
+    let recolour = prev.and_then(|p| p.cursor_colour) != next.cursor_colour;
+    if fresh.is_some_and(|p| p.cursor == next.cursor) && out.is_empty() && !recolour {
         return Vec::new();
     }
     // Drawing moved the cursor; hide it while it is elsewhere.
@@ -261,6 +290,9 @@ pub fn render(prev: Option<&Frame>, next: &Frame) -> Vec<u8> {
     framed.push_str("\x1b[0m");
     if let Some((x, y)) = next.cursor {
         let _ = write!(framed, "\x1b[{};{}H\x1b[?25h", y + 1, x + 1);
+    }
+    if recolour {
+        framed.push_str(&cursor_colour(next.cursor_colour));
     }
     framed.into_bytes()
 }
@@ -529,6 +561,43 @@ mod tests {
         );
         assert!(delta.ends_with("\x1b[2;3H\x1b[?25h"), "{delta:?}");
         assert!(render(Some(&second), &second).is_empty());
+    }
+
+    #[test]
+    fn the_focused_blocks_cursor_colour_is_drawn_and_put_back() {
+        let plain = grid(4, 2, "ab");
+        let orange = grid(4, 2, "ab\x1b]12;#ff8000\x1b\\");
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            size: size(4, 2),
+        };
+        let frame = |g, focused| {
+            let views = [View {
+                block: id(1),
+                rect,
+                grid: Some(g),
+                overlay: None,
+            }];
+            compose(size(4, 2), &views, id(focused))
+        };
+        let (a, b) = (frame(&plain, 1), frame(&orange, 1));
+        assert_eq!(b.cursor_colour(), Some(0xff8000));
+        let full = String::from_utf8(render(None, &a)).unwrap();
+        assert!(!full.contains("\x1b]1"), "{full:?}");
+        // Only the colour changed: no row is redrawn.
+        let set = String::from_utf8(render(Some(&a), &b)).unwrap();
+        assert!(!set.contains("\x1b[1;1H"), "{set:?}");
+        assert!(set.ends_with("\x1b]12;#ff8000\x1b\\"), "{set:?}");
+        assert!(render(Some(&b), &b).is_empty());
+        let back = String::from_utf8(render(Some(&b), &a)).unwrap();
+        assert!(back.ends_with("\x1b]112\x1b\\"), "{back:?}");
+        // A redraw at a new size puts back the colour the last one set.
+        let small = compose(size(3, 2), &[], id(1));
+        let resized = String::from_utf8(render(Some(&b), &small)).unwrap();
+        assert!(resized.ends_with("\x1b]112\x1b\\"), "{resized:?}");
+        // Another block's colour is not the terminal's.
+        assert_eq!(frame(&orange, 2).cursor_colour(), None);
     }
 
     #[test]
