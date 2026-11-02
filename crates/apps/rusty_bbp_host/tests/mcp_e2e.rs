@@ -724,6 +724,28 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
 }
 
 #[test]
+fn closing_stdin_ends_a_blocked_wait_and_the_server() {
+    let dir = tempdir("hangup");
+    let _task = setup(&dir);
+    // The first turn is the planner's, so the coder's wait blocks.
+    let mut coder = Mcp::session(&dir, "T1", "coder");
+    let id = coder.send_call("wait", r#"{"timeout_s":30}"#);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    drop(coder.child.stdin.take());
+    let (w, _) = coder.recv_call(id);
+    assert_eq!(woke(&w), ("closed", None));
+    let status = coder.child.wait().expect("server exits");
+    assert!(status.success(), "{status}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn a_partial_request_never_holds_back_a_wait_reply() {
     let dir = tempdir("partial");
     let task = setup(&dir);

@@ -23,6 +23,8 @@ use rusty_bbp::*;
 use rusty_serde::Value;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 /// How long `wait` blocks when the model names no timeout, and at most.
@@ -74,6 +76,9 @@ pub struct Server {
     shown: Option<TurnId>,
     /// A session's watch on the task log, made on its first `wait`.
     waker: Option<crate::waker::Waker>,
+    /// Set once the client's input has ended, so a blocked `wait` returns
+    /// instead of holding a server no one will read for its full timeout.
+    hung_up: Arc<AtomicBool>,
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -507,6 +512,7 @@ impl Server {
             driver,
             shown: None,
             waker: None,
+            hung_up: Arc::default(),
         })
     }
 
@@ -587,6 +593,9 @@ impl Server {
             self.driver.sync().map_err(|e| format!("{e:?}"))?;
             if let Some(reply) = self.woke() {
                 return Ok(reply);
+            }
+            if self.hung_up.load(Ordering::SeqCst) {
+                return Ok(self.wake_reply("closed", None));
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -797,12 +806,29 @@ impl Server {
 
     /// Serve stdin to stdout until EOF.
     pub fn serve(&mut self) -> io::Result<()> {
-        self.serve_on(io::stdin().lock(), io::stdout().lock())
+        self.serve_on(io::BufReader::new(io::stdin()), io::stdout().lock())
     }
 
     /// Serve newline-delimited requests from `input` to `output` until EOF.
-    pub fn serve_on(&mut self, input: impl BufRead, mut stdout: impl Write) -> io::Result<()> {
-        for line in input.lines() {
+    /// Requests sent before EOF are all answered, in order; a `wait` blocked
+    /// when it arrives returns within one recheck interval.
+    pub fn serve_on(&mut self, input: impl BufRead + Send, stdout: impl Write) -> io::Result<()> {
+        let hung_up = Arc::new(AtomicBool::new(false));
+        self.hung_up = Arc::clone(&hung_up);
+        std::thread::scope(|scope| {
+            let (lines, rx) = mpsc::channel();
+            scope.spawn(move || read_lines(input, &lines, &hung_up));
+            self.answer(rx, stdout)
+        })
+    }
+
+    /// Answer each request line `lines` delivers until it ends.
+    fn answer(
+        &mut self,
+        lines: mpsc::Receiver<io::Result<String>>,
+        mut stdout: impl Write,
+    ) -> io::Result<()> {
+        for line in lines {
             let line = line?;
             if line.trim().is_empty() {
                 continue;
@@ -833,4 +859,17 @@ impl Server {
         }
         Ok(())
     }
+}
+
+/// Send each line of `input` to `lines`, stopping at the first read error or
+/// when no one receives; mark `hung_up` once nothing more will come, after the
+/// last line is queued.
+fn read_lines(input: impl BufRead, lines: &mpsc::Sender<io::Result<String>>, hung_up: &AtomicBool) {
+    for line in input.lines() {
+        let failed = line.is_err();
+        if lines.send(line).is_err() || failed {
+            break;
+        }
+    }
+    hung_up.store(true, Ordering::SeqCst);
 }
