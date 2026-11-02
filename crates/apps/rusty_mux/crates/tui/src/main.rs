@@ -1747,7 +1747,7 @@ mod client {
         /// (even one equal to the grid's default). Kept apart from the
         /// panes, which may be gone by the time the view changes.
         coloured: bool,
-        /// The bytes the last view change wrote, for tests.
+        /// The bytes the last view change or composed draw wrote, for tests.
         #[cfg(test)]
         handed: Vec<u8>,
         /// Filters the passing block's raw output.
@@ -2774,6 +2774,12 @@ mod client {
                 .collect();
             let frame = screen::compose(self.area, &views, self.focus);
             let mut bytes = screen::render(last.as_ref(), &frame);
+            // With no frame before (the layout or focus changed), `render`
+            // takes the cursor to have the terminal's own colour; one the
+            // frame thrown away gave it is put back here.
+            if last.is_none() && self.coloured && frame.cursor_colour().is_none() {
+                bytes.extend(screen::cursor_colour(None).into_bytes());
+            }
             // Keys reach the focused block encoded as it asked for.
             let focused = views.iter().find(|v| v.block == self.focus);
             let wanted = focused.and_then(|v| v.grid).map(|g| modes(g, false));
@@ -2782,6 +2788,10 @@ mod client {
                 self.mirrored = wanted;
             }
             write(&bytes, &mut self.ended);
+            #[cfg(test)]
+            {
+                self.handed = bytes;
+            }
             self.coloured = frame.cursor_colour().is_some();
             self.shown = Shown::Composed(Some(frame));
         }
@@ -3285,6 +3295,32 @@ mod client {
             app.draw();
             app.show(Shown::Passing(b));
             assert!(handed(&app).starts_with(BACK), "{:?}", handed(&app));
+        }
+
+        /// Moving the focus between split panes throws the composed frame
+        /// away: a colour the old focus gave the cursor is still put back.
+        #[cfg(unix)]
+        #[test]
+        fn a_cursor_colour_is_put_back_when_the_focus_moves() {
+            let (mut app, _inbox, _far) = app(None);
+            let (a, b) = (block(1), block(2));
+            app.panes.get_mut(&a).expect("A").term = Some(term(b"\x1b]12;#ff8000\x07"));
+            app.panes.get_mut(&b).expect("B").term = Some(term(b""));
+            app.sync();
+            app.draw();
+            assert!(
+                handed(&app).contains("\x1b]12;#ff8000\x1b\\"),
+                "A is focused"
+            );
+            app.act(Action::Focus(Dir::Right));
+            assert_eq!(app.focus, b);
+            app.draw();
+            assert!(handed(&app).contains(BACK), "{:?}", handed(&app));
+            assert!(!app.coloured);
+            // And back to A: its colour again.
+            app.act(Action::Focus(Dir::Left));
+            app.draw();
+            assert!(handed(&app).contains("\x1b]12;#ff8000\x1b\\"));
         }
 
         /// A passing program's OSC 12 reaches the terminal as it is, even
