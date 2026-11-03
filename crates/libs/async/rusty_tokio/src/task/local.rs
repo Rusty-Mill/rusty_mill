@@ -14,10 +14,9 @@
 //! `wake()` -- is safe from any thread. Only the boxed future itself
 //! (behind a plain, non-atomic [`RefCell`]) is genuinely `!Send`, and it
 //! is *never* actually touched except from [`LocalTask::run`], which is
-//! only ever invoked from [`LocalSet::run_until`]'s own loop --
-//! [`LocalSet`] asserts (`bind_or_check_thread`) that every
-//! `spawn_local`/`run_until` call on it happens on the one thread that
-//! first used it. See the `unsafe impl Send + Sync for LocalTask` below
+//! only ever invoked from [`LocalSet::run_until`]'s own loop -- and
+//! [`LocalSet`] is `!Send + !Sync`, so that loop always runs on the
+//! thread that created the set. See the `unsafe impl Send + Sync for LocalTask` below
 //! for the exact safety argument -- the same "documented exclusivity
 //! invariant instead of relying on the type system alone" shape as
 //! `sync::Mutex`/`sync::RwLock`'s own `unsafe impl`s.
@@ -49,14 +48,14 @@ use super::id::{self, CurrentTask};
 use super::join::{JoinHandle, JoinInner, Outcome};
 use super::state::{Begin, State, StateSnapshot};
 use super::TaskId;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 type LocalBoxFuture = Pin<Box<dyn Future<Output = ()>>>;
@@ -77,9 +76,9 @@ pub(crate) struct LocalTask {
 
 // SAFETY: `future` and `abnormal_hook` are only ever touched from
 // `LocalTask::run`, which is only ever called from `LocalSet::
-// run_until`'s own loop -- and `LocalSet` asserts, via
-// `bind_or_check_thread`, that every `spawn_local`/`run_until` call
-// happens on the single thread that first used it. So even though this
+// run_until`'s own loop (or `LocalRuntime::block_on`'s, which owns the
+// set) -- and `LocalSet` is `!Send + !Sync`, so those loops run on the
+// thread that created the set. So even though this
 // `Arc` -- and the cross-thread-capable `Waker` built from it, needed so
 // the reactor/timer background threads can wake a local task's I/O or
 // timer interest just like any other task's -- can be freely cloned,
@@ -113,8 +112,8 @@ impl LocalTask {
     /// combined drive loop -- interleaving this set's tasks with
     /// `Handle::spawn`'d ones on the same thread -- can run a task it
     /// pulled off this set's queue directly. Still only ever safe to
-    /// call on the single thread `bind_or_check_thread` bound this set
-    /// to, same as from `drive` itself.
+    /// call on the thread that owns this set, same as from `drive`
+    /// itself.
     pub(crate) fn run(self: Arc<Self>) {
         let begin = self.state.begin_poll();
         // Only runtime shutdown makes an entry stale, and it never claims
@@ -391,49 +390,36 @@ where
 /// work, and nothing runs until [`LocalSet::run_until`] actually drives
 /// it, on whichever thread calls `run_until`.
 ///
-/// A `LocalSet` binds itself to the first thread that calls
-/// `spawn_local` or `run_until` on it (not at [`LocalSet::new`] time),
-/// so it's fine to construct one on a thread that isn't the one
-/// eventually going to use it -- just not to use it concurrently from
-/// two different threads, which panics.
+/// Like tokio's, a `LocalSet` is `!Send`: it holds `!Send` tasks, so it
+/// stays on the thread that created it.
+///
+/// ```compile_fail
+/// fn assert_send<T: Send>() {}
+/// assert_send::<rusty_tokio::task::LocalSet>();
+/// ```
 pub struct LocalSet {
     shared: Arc<LocalShared>,
-    owner_thread: Cell<Option<ThreadId>>,
+    /// Keeps `LocalSet` `!Send` like tokio's: its tasks are `!Send`, so the
+    /// set must stay on the thread that created it.
+    _not_send: PhantomData<*const ()>,
 }
 
 impl LocalSet {
     pub fn new() -> Self {
         LocalSet {
             shared: Arc::new(LocalShared::new()),
-            owner_thread: Cell::new(None),
-        }
-    }
-
-    fn bind_or_check_thread(&self) {
-        let current = thread::current().id();
-        match self.owner_thread.get() {
-            Some(owner) => assert_eq!(
-                owner, current,
-                "a LocalSet may only be used (spawn_local/run_until) from the \
-                 single thread that first used it"
-            ),
-            None => self.owner_thread.set(Some(current)),
+            _not_send: PhantomData,
         }
     }
 
     /// Spawn a `!Send` future onto this set. It doesn't run until a
     /// [`LocalSet::run_until`] call on this same set actually drives it.
-    ///
-    /// # Panics
-    /// Panics if called from a different thread than whichever one
-    /// first called `spawn_local`/`run_until` on this set.
     #[track_caller]
     pub fn spawn_local<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + 'static,
         F::Output: 'static,
     {
-        self.bind_or_check_thread();
         spawn(&self.shared, future)
     }
 
@@ -444,12 +430,7 @@ impl LocalSet {
     /// call `run_until` again (with another future, even just `async {}`
     /// if nothing else needs driving right now) to keep making progress
     /// on them.
-    ///
-    /// # Panics
-    /// Panics if called from a different thread than whichever one
-    /// first called `spawn_local`/`run_until` on this set.
     pub fn run_until<F: Future>(&self, future: F) -> F::Output {
-        self.bind_or_check_thread();
         let _guard = enter(self.shared.clone());
         drive(&self.shared, future)
     }
@@ -462,13 +443,8 @@ impl LocalSet {
     /// call on this same set (on this same thread) drives it, whether
     /// that happens while this guard is still held or after it's
     /// dropped.
-    ///
-    /// # Panics
-    /// Panics if called from a different thread than whichever one
-    /// first called `spawn_local`/`run_until`/`enter` on this set.
     #[track_caller]
     pub fn enter(&self) -> LocalEnterGuard {
-        self.bind_or_check_thread();
         LocalEnterGuard(enter(self.shared.clone()))
     }
 
