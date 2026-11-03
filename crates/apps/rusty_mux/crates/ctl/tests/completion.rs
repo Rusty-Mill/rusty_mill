@@ -53,9 +53,15 @@ impl Scratch {
     /// Creates `path` exclusively (mode 0700 on Unix); fails if anything
     /// is there.
     fn acquire(path: PathBuf) -> io::Result<Self> {
-        let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        let builder = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = fs::DirBuilder::new();
         builder.create(&path)?;
         Ok(Self(path))
     }
@@ -177,6 +183,7 @@ fn check(program: &str, args: &[&str], work: &Path) {
 
 /// Bash, with `COMP_WORDS` split as readline splits the line: quotes kept
 /// together, and an empty word after a trailing space.
+#[cfg(unix)]
 fn bash_program(script: &Path) -> String {
     format!(
         "source '{}'; eval \"COMP_WORDS=($LINE)\"; \
