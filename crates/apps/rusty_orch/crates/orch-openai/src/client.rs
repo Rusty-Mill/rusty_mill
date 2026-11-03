@@ -1,12 +1,14 @@
 //! One blocking chat completion: resolve, check, connect, send, read.
 
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::{mpsc, Arc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use orch_dispatch::{AgentError, ClassifiedError};
 use rusty_http::body::{self, DEFAULT_MAX_BODY_LEN};
-use rusty_http::head::{RequestHead, DEFAULT_MAX_HEAD_LEN};
+use rusty_http::head::{RequestHead, ResponseHead, DEFAULT_MAX_HEAD_LEN};
 use rusty_http::sync::SyncTransport;
 use rusty_http::{HeaderMap, Method, StatusCode, TransportError, Version};
 
@@ -14,8 +16,14 @@ use crate::address::all_private;
 use crate::wire::{parse_response, request_body, Completion, Prompt};
 use crate::Config;
 
+/// Interim (1xx) responses read past before giving up on a final one.
+const MAX_INTERIM: usize = 8;
+
 /// Turns a host name into addresses. A seam so tests control DNS.
-pub trait Resolve {
+///
+/// Lookups run on their own thread so the call's deadline bounds them; a
+/// lookup still running at the deadline is abandoned, not cancelled.
+pub trait Resolve: Send + Sync + 'static {
     fn resolve(&self, host: &str, port: u16) -> io::Result<Vec<SocketAddr>>;
 }
 
@@ -41,7 +49,7 @@ fn process_env(name: &str) -> Option<String> {
 /// [`OpenAiHttp::complete`] resolves, checks and connects afresh.
 pub struct OpenAiHttp<R = SystemResolver> {
     config: Config,
-    resolver: R,
+    resolver: Arc<R>,
     env: EnvLookup,
 }
 
@@ -50,7 +58,7 @@ impl OpenAiHttp<SystemResolver> {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            resolver: SystemResolver,
+            resolver: Arc::new(SystemResolver),
             env: process_env,
         }
     }
@@ -61,7 +69,7 @@ impl<R: Resolve> OpenAiHttp<R> {
     pub fn with_resolver<S: Resolve>(self, resolver: S) -> OpenAiHttp<S> {
         OpenAiHttp {
             config: self.config,
-            resolver,
+            resolver: Arc::new(resolver),
             env: self.env,
         }
     }
@@ -79,34 +87,65 @@ impl<R: Resolve> OpenAiHttp<R> {
     /// Ask once. Errors are classified for fallback: a down or unreachable
     /// server, or a missing key, is `Unavailable`; a timeout, a rate limit
     /// or a server error is `Transient`; a refused address, a malformed
-    /// reply or any other client error is `Permanent`.
+    /// reply or any other client error is `Permanent`. No error carries
+    /// the API key, whatever the server sends back.
     pub fn complete(&self, prompt: &Prompt<'_>) -> Result<Completion, ClassifiedError> {
-        let end = Instant::now() + self.config.timeout();
         let key = self.api_key()?;
-        let addrs = self.checked_addrs()?;
+        self.exchange(prompt, key.as_deref())
+            .map_err(|e| scrub(e, key.as_deref()))
+    }
+
+    fn exchange(
+        &self,
+        prompt: &Prompt<'_>,
+        key: Option<&str>,
+    ) -> Result<Completion, ClassifiedError> {
+        let end = Instant::now() + self.config.timeout();
+        let addrs = self.checked_addrs(end)?;
         let stream = connect(&addrs, end)?;
         let mut transport = SyncTransport::new(Deadline { stream, end });
         let body = request_body(self.config.model(), prompt, self.config.json_mode());
-        let head = self
-            .request_head(body.len(), key.as_deref())
-            .map_err(permanent)?;
+        let head = self.request_head(body.len(), key).map_err(permanent)?;
         transport
             .write_request_head(&head)
             .map_err(|e| self.io(e))?;
         transport
             .write_body(body.as_bytes())
             .map_err(|e| self.io(e))?;
-        let response = transport
-            .read_response_head(DEFAULT_MAX_HEAD_LEN)
-            .map_err(|e| self.io(e))?;
+        let response = self.final_head(&mut transport)?;
         let framing = body::response_framing(&response.headers, &Method::Post, response.status)
             .map_err(|e| permanent(format!("bad response framing: {e}")))?;
         let raw = transport
             .read_request_body(framing, DEFAULT_MAX_BODY_LEN)
             .map_err(|e| self.io(e))?;
-        let text = String::from_utf8_lossy(&raw);
-        check_status(response.status, &redact(&text, key.as_deref()))?;
+        check_status(response.status, &String::from_utf8_lossy(&raw))?;
+        let text = String::from_utf8(raw)
+            .map_err(|_| permanent("the reply is not valid UTF-8".to_owned()))?;
         parse_response(&text).map_err(permanent)
+    }
+
+    /// The final response head, read past interim 1xx responses such as
+    /// `103 Early Hints`. A protocol switch is refused.
+    fn final_head(
+        &self,
+        transport: &mut SyncTransport<Deadline>,
+    ) -> Result<ResponseHead, ClassifiedError> {
+        for _ in 0..=MAX_INTERIM {
+            let head = transport
+                .read_response_head(DEFAULT_MAX_HEAD_LEN)
+                .map_err(|e| self.io(e))?;
+            if head.status.as_u16() == 101 {
+                return Err(permanent(
+                    "unexpected protocol switch (HTTP 101)".to_owned(),
+                ));
+            }
+            if !head.status.is_informational() {
+                return Ok(head);
+            }
+        }
+        Err(permanent(format!(
+            "more than {MAX_INTERIM} interim responses"
+        )))
     }
 
     fn api_key(&self) -> Result<Option<String>, ClassifiedError> {
@@ -121,14 +160,11 @@ impl<R: Resolve> OpenAiHttp<R> {
         }
     }
 
-    fn checked_addrs(&self) -> Result<Vec<SocketAddr>, ClassifiedError> {
+    fn checked_addrs(&self, end: Instant) -> Result<Vec<SocketAddr>, ClassifiedError> {
         let host = self.config.resolve_host();
-        let resolved = self
-            .resolver
-            .resolve(host, self.config.base().port)
-            .map_err(|e| {
-                ClassifiedError::Unavailable(err(format!("cannot resolve {host}: {e}")))
-            })?;
+        let resolved = self.lookup(host, end)?.map_err(|e| {
+            ClassifiedError::Unavailable(err(format!("cannot resolve {host}: {e}")))
+        })?;
         all_private(resolved).map_err(|bad| match bad {
             Some(addr) => permanent(format!(
                 "refusing {host}: it resolves to {}, which is not loopback or private",
@@ -136,6 +172,30 @@ impl<R: Resolve> OpenAiHttp<R> {
             )),
             None => permanent(format!("refusing {host}: it resolves to no address")),
         })
+    }
+
+    /// Resolve `host` before `end`. An IP literal needs no lookup.
+    fn lookup(
+        &self,
+        host: &str,
+        end: Instant,
+    ) -> Result<io::Result<Vec<SocketAddr>>, ClassifiedError> {
+        let port = self.config.base().port;
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(Ok(vec![SocketAddr::new(ip, port)]));
+        }
+        let (tx, rx) = mpsc::channel();
+        let resolver = Arc::clone(&self.resolver);
+        let name = host.to_owned();
+        thread::Builder::new()
+            .name("orch-openai-dns".to_owned())
+            .spawn(move || {
+                // The receiver is gone once the deadline passed; nothing to do.
+                let _ = tx.send(resolver.resolve(&name, port));
+            })
+            .map_err(|e| ClassifiedError::Transient(err(format!("cannot start lookup: {e}"))))?;
+        let left = remaining(end).map_err(|_| timed_out())?;
+        rx.recv_timeout(left).map_err(|_| timed_out())
     }
 
     fn request_head(&self, len: usize, key: Option<&str>) -> Result<RequestHead, String> {
@@ -210,8 +270,18 @@ fn check_status(status: StatusCode, body: &str) -> Result<(), ClassifiedError> {
     })
 }
 
-/// `body` with every copy of the key masked, in case a server echoes the
-/// request back in an error.
+/// `e` with every copy of the key masked: a server can echo the request
+/// back in a body, a header or a framing line.
+fn scrub(e: ClassifiedError, key: Option<&str>) -> ClassifiedError {
+    let clean = |m: AgentError| AgentError(redact(&m.0, key));
+    match e {
+        ClassifiedError::Transient(m) => ClassifiedError::Transient(clean(m)),
+        ClassifiedError::Permanent(m) => ClassifiedError::Permanent(clean(m)),
+        ClassifiedError::Unavailable(m) => ClassifiedError::Unavailable(clean(m)),
+    }
+}
+
+/// `body` with every copy of the key masked.
 fn redact(body: &str, key: Option<&str>) -> String {
     match key {
         Some(key) if !key.is_empty() => body.replace(key, "[redacted]"),

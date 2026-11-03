@@ -54,6 +54,13 @@ impl Config {
         timeout: Duration,
         json_mode: bool,
     ) -> Result<Self, ConfigError> {
+        // Only visible ASCII: the path becomes the request-target verbatim,
+        // so a space or CR/LF would split the request line.
+        if let Some(b) = base_url.bytes().find(|b| !(0x21..=0x7e).contains(b)) {
+            return Err(ConfigError::BadUrl(format!(
+                "byte 0x{b:02x} is not allowed; percent-encode it"
+            )));
+        }
         let base = Url::parse(base_url).map_err(|e| ConfigError::BadUrl(e.to_string()))?;
         if base.scheme != "http" {
             return Err(ConfigError::Https);
@@ -134,6 +141,19 @@ mod tests {
         assert_eq!(c.base().port, 8080);
         let v6 = Config::new("http://[::1]:8080/v1", "m", None, SECS, false).expect("ok");
         assert_eq!(v6.resolve_host(), "::1");
+    }
+
+    #[test]
+    fn control_characters_and_spaces_are_refused() {
+        for url in [
+            "http://127.0.0.1/v1 HTTP/1.1\r\nX-Injected: yes\r\n\r\nPOST /",
+            "http://127.0.0.1/v 1",
+            "http://127.0.0.1/v1\t",
+            "http://127.0.0.1/v\u{e9}",
+        ] {
+            let e = Config::new(url, "m", None, SECS, false).expect_err(url);
+            assert!(matches!(e, ConfigError::BadUrl(_)), "{url}: {e:?}");
+        }
     }
 
     #[test]
