@@ -6,4 +6,5 @@ changelog: orch-claude serves the lens runner's Model port; a lens question runs
 
 - **Added:** `ClaudeAgent` implements `orch_lens::Model` (Let Em Loose #594). After the login probe, `claude -p` runs with the question's prefix as the whole system prompt and its body on stdin, in the repository root with the usual scrubbed environment. The reply text must pass `orch_lens::parse`, or the call is `Permanent`. A lens question runs with `--tools ""` unless the agent is built with `lens_read_only()`, which gives the usual `Read,Grep,Glob`. Usage counts fresh input, cache writes and cache reads as input, cache reads as cached.
 - **Changed:** the `claude -p` argv is built from one shared base, so the dispatcher's argv is unchanged.
+- **Changed:** `orch-claude` now declares rust-version 1.89, the floor of `orch-lens` (via `rusty_bbp`).
 - **Known limitations:** nothing calls it yet. `claude -p` has no output-token flag, so the runner enforces the question's output cap from the reported usage.
