@@ -286,6 +286,7 @@ fn a_protocol_switch_is_permanent() {
 fn the_key_never_appears_in_a_framing_or_parse_error() {
     let replies = [
         "HTTP/1.1 200 OK\r\nContent-Length: sk-test-secret\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nsk-test-secret\r\n\r\n",
         "HTTP/1.1 200 sk-test-secret\r\nTransfer-Encoding: chunked\r\n\r\nsk-test-secret\r\n",
         "HTTP/1.1 2sk-test-secret OK\r\n\r\n",
         "sk-test-secret\r\n\r\n",
