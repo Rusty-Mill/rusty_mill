@@ -427,6 +427,11 @@ impl<S: Store> Board<S> {
                 .map_err(inbox_error)?;
             return Ok(InboxAnswer::Outcome(outcome));
         }
+        if !self.store.durable() {
+            return Err(BoardError::Refused(
+                "this decision drops acted-on work, and its Remediate card must be written to a durable store first: start the board with --tick-url".into(),
+            ));
+        }
         // Write ahead: the Remediate card is committed before BBP is asked to drop the
         // work, so no drop sent from here can lose its card. A retry finds the card by
         // its derived id, whether BBP's answer was lost or the escalation is already gone.

@@ -322,6 +322,9 @@ impl Store for Flaky {
     fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
         self.inner.reserve_number(card, floor)
     }
+    fn durable(&self) -> bool {
+        true
+    }
 }
 
 /// An escalation of T1 whose claim was already acted on (mark `pr-7`).
@@ -686,4 +689,27 @@ fn a_losing_send_does_not_close_the_winners_card() {
     let said = card.comments.last().map(|c| c.text.as_str()).unwrap_or("");
     assert!(said.contains("check BBP's log"), "{said}");
     assert!(!said.contains("nothing was dropped"), "{said}");
+}
+
+/// The Remediate card is a write-ahead record: on a board that keeps cards only in
+/// memory a restart would lose it, so a drop of acted-on work is refused there.
+#[test]
+fn a_memory_only_board_refuses_a_drop_of_acted_on_work() {
+    let fake = Arc::new(Fake::with(vec![shipped()]));
+    let board: Shared = Board::new(
+        Box::new(MemStore::default()) as Box<dyn Store>,
+        Roles::default(),
+    )
+    .with_escalations(Arc::clone(&fake) as Arc<dyn Escalations>);
+    let nano = board.roles().actor("nano", "human").unwrap();
+    let card = board.add(&nano, "ship the release", "", vec![]).unwrap();
+    board.bind_execution(card.id, link("T1"), &nano).unwrap();
+    assert!(refused(call(&board, &owner(), "inbox_act", reject())).contains("durable store"));
+    assert!(fake.acted.lock().unwrap().is_empty());
+    let approve = json!({"id": "T1/msg:1/3", "rev": 7, "action": "approve"});
+    assert_eq!(
+        call(&board, &owner(), "inbox_act", approve).unwrap(),
+        json!({"outcome": "Done"}),
+        "a decision that drops nothing still works"
+    );
 }

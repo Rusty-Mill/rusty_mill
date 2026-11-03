@@ -9,6 +9,7 @@ changelog: Mill Board inbox Refine, one-allowance Approve on task totals, and Re
 - **Added:** a Reject, or a Choose, that drops acted-on work files one Backlog "Remediate" card in the owning card's project. The card lists each dropped claim with its action references (a PR, a deploy id) and BBP's dry run of the decision. Its id is derived from the owning project and the exact decision (escalation id, the rev it was read at, and the action), so two different choices on one question are two records, and every other card id is random, so the card at that id is the record. Its `remediate:<escalation id>` tag is for people only: a card someone tags by hand, in this project or another, is not taken for the record and is never returned.
 - **Added:** the card is written before BBP is asked to drop anything, so no drop sent from Mill Board can lose its card:
   - If the card cannot be written, nothing is sent.
+  - The store must be durable (`--tick-url`). On a board that keeps cards only in memory, a decision that drops acted-on work is refused; other decisions still work.
   - If BBP refuses the drop outright, a comment on the card says this send was refused and to check BBP's log before closing it: another send of the same decision may still apply it.
   - If BBP's answer is lost, the error names the card. A retry of the closed escalation answers `recorded` with that card and sends nothing to BBP again.
   - A successful decision answers `remediated` with the card.
