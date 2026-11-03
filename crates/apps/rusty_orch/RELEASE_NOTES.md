@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Lens jobs fall back and are metered per call
+**2026-11-03**
+
+- One lens job now has a call step (#594). It tries the job's providers in
+  order and fits the context to each one's window. It reserves the worst
+  case before every ask and settles what the reply cost. An unavailable
+  provider, a context that does not fit, or the experiment ceiling on a
+  paid provider moves the job on. A bad reply or a task ceiling ends it.
+- Replies are capped at 4096 output tokens on every provider. A longer
+  reply is refused and still paid for.
+
 ## `rusty_orch lens check`
 **2026-11-03**
 
