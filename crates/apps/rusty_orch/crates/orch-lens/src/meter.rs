@@ -95,75 +95,89 @@ impl fmt::Display for Stop {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ticket(u64);
 
-/// Spend for one task, beside the experiment total it shares.
+/// What one task has settled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Account {
+    spent: u64,
+    calls: u32,
+}
+
+/// One experiment's spend: every task's settled and reserved calls under
+/// one owner, so no task can spend what another has reserved or settled.
+/// The shell keeps exactly one meter per experiment and persists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Meter {
     ceilings: Ceilings,
-    /// Settled spend under the experiment before this task's meter, plus
-    /// this task's settled spend.
+    /// Settled spend across every task, including before this meter.
     experiment_spent: u64,
-    task_spent: u64,
-    calls: u32,
-    reserved: BTreeMap<u64, u64>,
+    tasks: BTreeMap<String, Account>,
+    /// Ticket id to (task, amount held).
+    reserved: BTreeMap<u64, (String, u64)>,
     next: u64,
 }
 
 impl Meter {
-    /// A task's meter, starting from what the experiment has spent so far.
+    /// An experiment's meter, starting from what it has spent so far.
     pub fn new(ceilings: Ceilings, experiment_spent: u64) -> Self {
         Self {
             ceilings,
             experiment_spent,
-            task_spent: 0,
-            calls: 0,
+            tasks: BTreeMap::new(),
             reserved: BTreeMap::new(),
             next: 0,
         }
     }
 
-    /// Hold `amount` for a call about to start, or say why it may not.
-    /// A free call is still counted against `task_calls` and stopped by a
-    /// spent task; only the experiment ceiling lets free calls go on.
-    pub fn reserve(&mut self, amount: u64) -> Result<Ticket, Stop> {
-        let held: u64 = self.reserved.values().sum();
-        let in_flight = u32::try_from(self.reserved.len()).unwrap_or(u32::MAX);
-        if self.calls.saturating_add(in_flight) >= self.ceilings.task_calls {
+    /// Hold `amount` for a call `task` is about to make, or say why it may
+    /// not. A free call is still counted against `task_calls` and stopped by
+    /// a spent task; only the experiment ceiling lets free calls go on.
+    pub fn reserve(&mut self, task: &str, amount: u64) -> Result<Ticket, Stop> {
+        let account = self.tasks.get(task).copied().unwrap_or_default();
+        let (task_held, task_in_flight) = self.held_by(task);
+        let all_held = self.reserved();
+        if account.calls.saturating_add(task_in_flight) >= self.ceilings.task_calls {
             return Err(Stop::TaskCalls);
         }
-        if self.task_spent >= self.ceilings.task {
+        if account.spent >= self.ceilings.task {
             return Err(Stop::TaskSpend);
         }
         if amount > 0 {
-            let over = |spent: u64, ceiling: u64| {
+            let over = |spent: u64, held: u64, ceiling: u64| {
                 spent.saturating_add(held).saturating_add(amount) > ceiling
             };
-            if over(self.task_spent, self.ceilings.task) {
+            if over(account.spent, task_held, self.ceilings.task) {
                 return Err(Stop::TaskSpend);
             }
-            if over(self.experiment_spent, self.ceilings.experiment) {
+            if over(self.experiment_spent, all_held, self.ceilings.experiment) {
                 return Err(Stop::Experiment);
             }
         }
         let id = self.next;
         self.next += 1;
-        self.reserved.insert(id, amount);
+        self.reserved.insert(id, (task.to_owned(), amount));
         Ok(Ticket(id))
     }
 
     /// Replace a reservation with what the call cost. A call that failed
     /// before reaching the provider settles at 0 but still counts as a call.
     pub fn settle(&mut self, ticket: Ticket, actual: u64) {
-        if self.reserved.remove(&ticket.0).is_none() {
+        let Some((task, _)) = self.reserved.remove(&ticket.0) else {
             return;
-        }
-        self.calls = self.calls.saturating_add(1);
-        self.task_spent = self.task_spent.saturating_add(actual);
+        };
+        let account = self.tasks.entry(task).or_default();
+        account.calls = account.calls.saturating_add(1);
+        account.spent = account.spent.saturating_add(actual);
         self.experiment_spent = self.experiment_spent.saturating_add(actual);
     }
 
-    /// Settled spend for this task, micro-dollars.
-    pub fn task_spent(&self) -> u64 {
-        self.task_spent
+    /// Settled spend for `task`, micro-dollars.
+    pub fn task_spent(&self, task: &str) -> u64 {
+        self.tasks.get(task).map_or(0, |a| a.spent)
+    }
+
+    /// Settled calls for `task`.
+    pub fn calls(&self, task: &str) -> u32 {
+        self.tasks.get(task).map_or(0, |a| a.calls)
     }
 
     /// Settled spend for the experiment, micro-dollars.
@@ -171,16 +185,23 @@ impl Meter {
         self.experiment_spent
     }
 
-    /// Settled calls for this task.
-    pub fn calls(&self) -> u32 {
-        self.calls
+    /// Held for calls in flight across every task, micro-dollars. After a
+    /// crash this is lost with the process; the caller persists
+    /// reservations so a restart errs toward stopping.
+    pub fn reserved(&self) -> u64 {
+        self.reserved
+            .values()
+            .fold(0, |sum, (_, amount)| sum.saturating_add(*amount))
     }
 
-    /// Held for calls in flight, micro-dollars. After a crash this is lost
-    /// with the process; the caller persists reservations so a restart errs
-    /// toward stopping.
-    pub fn reserved(&self) -> u64 {
-        self.reserved.values().sum()
+    /// Held and in flight for one task.
+    fn held_by(&self, task: &str) -> (u64, u32) {
+        self.reserved
+            .values()
+            .filter(|(t, _)| t == task)
+            .fold((0, 0), |(sum, n), (_, amount)| {
+                (sum.saturating_add(*amount), n.saturating_add(1))
+            })
     }
 }
 
@@ -189,6 +210,7 @@ mod tests {
     use super::*;
 
     const USD: u64 = 1_000_000;
+    const T: &str = "task-1";
     const CEIL: Ceilings = Ceilings {
         experiment: 200 * USD,
         task: 25 * USD,
@@ -303,31 +325,67 @@ mod tests {
             },
             0,
         );
-        let t = m.reserve(10).expect("fits");
+        let t = m.reserve(T, 10).expect("fits");
         m.settle(t, 10);
-        assert_eq!(m.reserve(0), Err(Stop::TaskSpend));
+        assert_eq!(m.reserve(T, 0), Err(Stop::TaskSpend));
     }
 
     #[test]
     fn parallel_reservations_cannot_pass_the_task_ceiling() {
         let mut m = Meter::new(CEIL, 0);
-        let a = m.reserve(10 * USD).expect("first");
-        let _b = m.reserve(10 * USD).expect("second");
-        assert_eq!(m.reserve(6 * USD), Err(Stop::TaskSpend));
+        let a = m.reserve(T, 10 * USD).expect("first");
+        let _b = m.reserve(T, 10 * USD).expect("second");
+        assert_eq!(m.reserve(T, 6 * USD), Err(Stop::TaskSpend));
         assert!(
-            m.reserve(5 * USD).is_ok(),
+            m.reserve(T, 5 * USD).is_ok(),
             "exactly at the ceiling is allowed"
         );
         m.settle(a, 2 * USD);
-        assert_eq!(m.task_spent(), 2 * USD);
+        assert_eq!(m.task_spent(T), 2 * USD);
         assert_eq!(m.reserved(), 15 * USD);
     }
 
     #[test]
     fn the_experiment_ceiling_stops_paid_calls_only() {
         let mut m = Meter::new(CEIL, 199 * USD);
-        assert_eq!(m.reserve(2 * USD), Err(Stop::Experiment));
-        assert!(m.reserve(0).is_ok(), "a free local call still runs");
+        assert_eq!(m.reserve(T, 2 * USD), Err(Stop::Experiment));
+        assert!(m.reserve(T, 0).is_ok(), "a free local call still runs");
+    }
+
+    #[test]
+    fn tasks_share_the_experiment_ceiling() {
+        let ceil = Ceilings {
+            experiment: 100,
+            task: 50,
+            task_calls: 50,
+        };
+        // Concurrent: A's reservation holds the experiment's last 10.
+        let mut m = Meter::new(ceil, 90);
+        let a = m.reserve("a", 10).expect("a fits");
+        assert_eq!(m.reserve("b", 10), Err(Stop::Experiment));
+        assert!(m.reserve("b", 0).is_ok(), "free calls still run");
+        // Serial: once A has settled, B still cannot spend it again.
+        m.settle(a, 10);
+        assert_eq!(m.reserve("b", 1), Err(Stop::Experiment));
+        assert_eq!(m.experiment_spent(), 100);
+        assert_eq!((m.task_spent("a"), m.task_spent("b")), (10, 0));
+    }
+
+    #[test]
+    fn task_ceilings_are_per_task() {
+        let mut m = Meter::new(
+            Ceilings {
+                experiment: 1_000,
+                task: 10,
+                task_calls: 1,
+            },
+            0,
+        );
+        let a = m.reserve("a", 10).expect("a");
+        assert_eq!(m.reserve("a", 0), Err(Stop::TaskCalls));
+        assert!(m.reserve("b", 10).is_ok(), "b has its own task ceiling");
+        m.settle(a, 10);
+        assert_eq!(m.calls("a"), 1);
     }
 
     #[test]
@@ -339,13 +397,13 @@ mod tests {
             },
             0,
         );
-        let a = m.reserve(0).expect("one");
-        let _b = m.reserve(0).expect("two in flight");
-        assert_eq!(m.reserve(0), Err(Stop::TaskCalls));
+        let a = m.reserve(T, 0).expect("one");
+        let _b = m.reserve(T, 0).expect("two in flight");
+        assert_eq!(m.reserve(T, 0), Err(Stop::TaskCalls));
         m.settle(a, 0);
-        assert_eq!(m.calls(), 1);
+        assert_eq!(m.calls(T), 1);
         assert_eq!(
-            m.reserve(0),
+            m.reserve(T, 0),
             Err(Stop::TaskCalls),
             "one settled, one in flight"
         );
@@ -354,7 +412,7 @@ mod tests {
     #[test]
     fn an_unsettled_reservation_stays_charged() {
         let mut m = Meter::new(CEIL, 0);
-        let _lost = m.reserve(20 * USD).expect("held");
-        assert_eq!(m.reserve(6 * USD), Err(Stop::TaskSpend));
+        let _lost = m.reserve(T, 20 * USD).expect("held");
+        assert_eq!(m.reserve(T, 6 * USD), Err(Stop::TaskSpend));
     }
 }

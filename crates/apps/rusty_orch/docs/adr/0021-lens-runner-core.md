@@ -23,7 +23,10 @@ providers and posts.
 - **Money is integer micro-dollars** with reserve-before-call, so parallel
   jobs cannot pass a ceiling. Every provider needs a `price` block (0 is
   allowed, missing is not). The experiment ceiling stops paid calls only;
-  task spend and call ceilings stop the task.
+  task spend and call ceilings stop the task. One meter holds a whole
+  experiment, every task's settled and reserved spend, so tasks cannot
+  overspend the experiment together; reservations bound the worst case
+  (a token per prompt byte plus framing, at the dearer input rate).
 - **A question** is an open claim with the domain `question` and no
   `answers`. BBP has no question flag, so orch reads it from the domain the
   intent gives it.
