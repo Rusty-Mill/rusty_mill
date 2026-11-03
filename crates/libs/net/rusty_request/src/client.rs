@@ -175,6 +175,14 @@ impl ClientBuilder {
         Ok(self)
     }
 
+    /// Sends no `User-Agent` of the library's own: a request carries one
+    /// only if it sets it. For a proxy, which forwards a request as it
+    /// arrived, header for header.
+    pub fn no_user_agent(mut self) -> Self {
+        self.default_headers.remove("User-Agent");
+        self
+    }
+
     /// Sets `Authorization: Basic <base64(username:password)>` (RFC
     /// 7617) on every request built from the resulting [`Client`],
     /// unless a specific request overrides it with its own
