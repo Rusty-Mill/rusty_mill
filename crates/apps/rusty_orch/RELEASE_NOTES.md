@@ -4,6 +4,13 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## orch-openai: local model servers over HTTP
+**2026-11-03**
+
+- New adapter crate for OpenAI-compatible servers such as llama-swap:
+  plain HTTP only, and only to loopback or private addresses, checked on
+  every call against the address it connects to (ADR-0020).
+
 ## Providers are ids, not an enum
 **2026-11-03**
 

@@ -4,6 +4,8 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- `orch-openai`: one OpenAI-compatible chat completion over plain HTTP/1.1 to loopback and private addresses only, for llama-swap (ADR-0020).
 ### Changed
 - Providers are `AgentId` tokens instead of the closed `Agent` enum (ADR-0019). `orch-store` writes the id and reads the old variants; errors print the id (`codex`, not `Codex`).
 ### Fixed
