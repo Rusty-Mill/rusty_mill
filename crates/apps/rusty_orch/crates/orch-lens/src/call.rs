@@ -12,7 +12,9 @@
 //!   `Permanent`; its cost is still settled.
 //! - The meter is saved after every reservation, before the provider is
 //!   asked, and again after it settles. A reservation that cannot be saved
-//!   is released and ends the job: no call goes out unrecorded.
+//!   is released and ends the job: no call goes out unrecorded. A
+//!   settlement that cannot be saved ends the fallback too, so no further
+//!   provider is asked before the shell sees it.
 
 use std::collections::BTreeMap;
 
@@ -51,7 +53,9 @@ pub enum End {
     Stopped(Stop),
     /// Every provider was passed over.
     Exhausted,
-    /// A reservation could not be saved; it was released, nothing was asked.
+    /// The meter could not be saved: a reservation (released, nothing
+    /// asked) or a passed-over provider's settlement (no further provider
+    /// asked).
     Unsaved(String),
 }
 
@@ -87,7 +91,17 @@ pub fn call(job: &Job, parts: &Parts<'_>, mut ctx: Ctx<'_>, models: &mut dyn Mod
     let mut unsaved = None;
     for &id in &job.providers {
         match attempt(job, &parts, id, &mut ctx, models, &mut unsaved) {
-            Step::Pass(reason) => passed.push((id, reason)),
+            Step::Pass(reason) => {
+                passed.push((id, reason));
+                if let Some(e) = &unsaved {
+                    let end = End::Unsaved(e.clone());
+                    return Called {
+                        passed,
+                        end,
+                        unsaved,
+                    };
+                }
+            }
             Step::Experiment => {
                 experiment = true;
                 passed.push((id, Stop::Experiment.to_string()));
@@ -598,5 +612,26 @@ mod tests {
         });
         assert!(matches!(r.called.end, End::Answered { .. }));
         assert_eq!(r.called.unsaved, Some("disk full".to_owned()));
+    }
+
+    #[test]
+    fn an_unsaved_settlement_stops_the_fallback() {
+        let cfg = providers(&[("a", provider(32_768, FREE)), ("b", provider(32_768, FREE))]);
+        let fakes = Fakes::new(vec![
+            ("a", vec![err(ClassifiedError::Unavailable)]),
+            ("b", vec![answer(10)]),
+        ]);
+        let mut n = 0;
+        let r = run_saving(&job(&["a", "b"]), &cfg, meter(USD, 10), fakes, &mut |_| {
+            n += 1;
+            if n == 2 {
+                Err("disk full".to_owned())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(r.called.end, End::Unsaved("disk full".to_owned()));
+        assert_eq!(r.called.unsaved, Some("disk full".to_owned()));
+        assert!(r.fakes.asked("b").is_empty(), "no provider after it");
     }
 }
