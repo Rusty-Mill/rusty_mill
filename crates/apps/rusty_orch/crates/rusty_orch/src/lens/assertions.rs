@@ -6,7 +6,9 @@
 //! ```json
 //! {
 //!   "no_overage": [
-//!     {"provider": "claude", "account": "nano@example.com", "checked": "2026-11-03"}
+//!     {"provider": "claude", "account": "nano@example.com", "checked": "2026-11-03"},
+//!     {"provider": "codex", "account": "nano@example.com", "checked": "2026-11-03",
+//!      "machine_id": "4c4c4544..."}
 //!   ],
 //!   "host_cleared": [
 //!     {"provider": "codex", "machine_id": "4c4c4544...", "checked": "2026-11-03"}
@@ -15,8 +17,11 @@
 //! ```
 //!
 //! - `no_overage`: credits and extra usage are off on this provider's
-//!   account, checked by the operator on `checked`. It lapses
-//!   [`NO_OVERAGE_DAYS`] days later.
+//!   `account`, checked by the operator on `checked`. It lapses
+//!   [`NO_OVERAGE_DAYS`] days later. The Claude adapter admits a question
+//!   only when its login reports that same account. Codex cannot report
+//!   its account, so its entry must name the dedicated machine
+//!   (`machine_id`) whose login the operator set up, and holds only there.
 //! - `host_cleared`: everything this host lets the provider read is cleared
 //!   for it, which in practice means a dedicated container or VM holding
 //!   only the experiment repository and synthetic data. It holds only on the
@@ -27,14 +32,14 @@
 //! means the assertion is off. The ownership check protects the operator
 //! only when the runner runs as a different user from the file's owner.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use orch_core::AgentId;
 use rusty_json::{Map, Value};
 use rusty_time::{Date, DateTime, Time};
 
-use super::registry::Assertions;
+use super::registry::{Assertions, NoOverage};
 
 /// How long a no-overage check holds, in days.
 pub const NO_OVERAGE_DAYS: i64 = 30;
@@ -53,7 +58,7 @@ impl Grants {
 
     /// What holds for provider `id`; nothing when the file does not name it.
     pub fn for_provider(&self, id: AgentId) -> Assertions {
-        self.by_provider.get(&id).copied().unwrap_or_default()
+        self.by_provider.get(&id).cloned().unwrap_or_default()
     }
 }
 
@@ -79,17 +84,29 @@ pub fn grants(text: &str, today: i64, machine_id: Option<&str>) -> Result<Grants
         return Err(format!("assertions.{k}: not an assertion"));
     }
     let mut g = Grants::none();
+    let mut seen = BTreeSet::new();
     for (i, e) in entries(top, "no_overage")?.iter().enumerate() {
         let at = |m: String| format!("no_overage[{i}].{m}");
-        let (id, checked) = entry(e, &["provider", "account", "checked"]).map_err(at)?;
-        text_field(e, "account").map_err(at)?;
-        if holds(checked, today, NO_OVERAGE_DAYS).map_err(at)? {
-            g.by_provider.entry(id).or_default().no_overage = true;
+        let keys = ["provider", "account", "checked", "machine_id"];
+        let (id, checked) = entry(e, &keys, &mut seen).map_err(at)?;
+        let account = text_field(e, "account").map_err(at)?.trim().to_owned();
+        let bound = match e.get("machine_id") {
+            None => None,
+            Some(_) => Some(text_field(e, "machine_id").map_err(at)?),
+        };
+        let here = bound.is_none_or(|m| machine_id == Some(m));
+        if holds(checked, today, NO_OVERAGE_DAYS).map_err(at)? && here {
+            g.by_provider.entry(id).or_default().no_overage = Some(NoOverage {
+                account,
+                machine_bound: bound.is_some(),
+            });
         }
     }
+    let mut seen = BTreeSet::new();
     for (i, e) in entries(top, "host_cleared")?.iter().enumerate() {
         let at = |m: String| format!("host_cleared[{i}].{m}");
-        let (id, checked) = entry(e, &["provider", "machine_id", "checked"]).map_err(at)?;
+        let keys = ["provider", "machine_id", "checked"];
+        let (id, checked) = entry(e, &keys, &mut seen).map_err(at)?;
         let named = text_field(e, "machine_id").map_err(at)?;
         holds(checked, today, i64::MAX).map_err(at)?;
         if machine_id == Some(named) {
@@ -114,12 +131,16 @@ fn entries<'a>(top: &'a Map, k: &str) -> Result<Vec<&'a Map>, String> {
         .collect()
 }
 
-/// The entry's provider and check day, after refusing unknown keys.
-fn entry(e: &Map, keys: &[&str]) -> Result<(AgentId, i64), String> {
+/// The entry's provider and check day, after refusing unknown keys and a
+/// provider already named in this list.
+fn entry(e: &Map, keys: &[&str], seen: &mut BTreeSet<AgentId>) -> Result<(AgentId, i64), String> {
     if let Some(k) = e.keys().find(|k| !keys.contains(&k.as_str())) {
         return Err(format!("{k}: not a field of this assertion"));
     }
     let id = AgentId::new(text_field(e, "provider")?).map_err(|e| format!("provider: {e}"))?;
+    if !seen.insert(id) {
+        return Err(format!("provider: {id} is already named in this list"));
+    }
     Ok((id, day(text_field(e, "checked")?)?))
 }
 
@@ -272,8 +293,31 @@ mod tests {
     fn no_overage_lapses_after_thirty_days() {
         let g = grants(FILE, TODAY, None).expect("parses");
         // 29 days old: holds. 30 days old: lapsed.
-        assert!(g.for_provider(id("claude")).no_overage);
-        assert!(!g.for_provider(id("codex")).no_overage);
+        assert!(g.for_provider(id("claude")).no_overage.is_some());
+        assert!(g.for_provider(id("codex")).no_overage.is_none());
+    }
+
+    #[test]
+    fn no_overage_carries_its_account_and_machine_binding() {
+        let text = r#"{"no_overage": [
+          {"provider": "claude", "account": " nano@example.com ", "checked": "2026-11-01"},
+          {"provider": "codex", "account": "nano@example.com", "checked": "2026-11-01",
+           "machine_id": "box-1"}
+        ]}"#;
+        let here = grants(text, TODAY, Some("box-1")).expect("parses");
+        let claude = here.for_provider(id("claude")).no_overage.expect("claude");
+        assert_eq!(claude.account, "nano@example.com");
+        assert!(!claude.machine_bound);
+        let codex = here.for_provider(id("codex")).no_overage.expect("codex");
+        assert!(codex.machine_bound);
+        for elsewhere in [Some("desktop"), None] {
+            let g = grants(text, TODAY, elsewhere).expect("parses");
+            assert!(
+                g.for_provider(id("codex")).no_overage.is_none(),
+                "{elsewhere:?}"
+            );
+            assert!(g.for_provider(id("claude")).no_overage.is_some());
+        }
     }
 
     #[test]
@@ -318,6 +362,16 @@ mod tests {
         refused(
             r#"{"host_cleared": [{"provider": "codex", "machine_id": "m", "checked": "2026-11-01", "by": "agent"}]}"#,
             "host_cleared[0].by: not a field",
+        );
+        refused(
+            r#"{"no_overage": [
+              {"provider": "claude", "account": "a", "checked": "2026-11-01"},
+              {"provider": "claude", "account": "b", "checked": "2026-11-01"}]}"#,
+            "no_overage[1].provider: claude is already named",
+        );
+        refused(
+            r#"{"no_overage": [{"provider": "codex", "account": "a", "checked": "2026-11-01", "machine_id": ""}]}"#,
+            "no_overage[0].machine_id: non-empty",
         );
         refused(
             r#"{"host_cleared": [{"provider": "codex", "checked": "2026-11-01"}]}"#,

@@ -31,16 +31,27 @@ pub const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 /// mean a typo, and an unbounded one could overflow a deadline.
 pub const MAX_TIMEOUT_SECS: u64 = 86_400;
 
-/// What the operator asserts about the hosts and accounts the CLI
-/// providers run on. The adapters cannot check either, so both default to
-/// false and the providers that need them stay `Unavailable`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// What the operator asserts about one CLI provider's account and host.
+/// The adapters cannot check either, so both default to off and the
+/// providers that need them stay `Unavailable`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Assertions {
-    /// Credits and extra usage are disabled on every subscription a CLI
-    /// provider logs in with, so a call can never be billed per token.
-    pub no_overage: bool,
-    /// Everything the Codex host lets Codex read is cleared for it.
+    /// Credits and extra usage are disabled on this account, so a call can
+    /// never be billed per token.
+    pub no_overage: Option<NoOverage>,
+    /// Everything this host lets the provider read is cleared for it.
     pub host_cleared: bool,
+}
+
+/// A no-overage assertion: the account it names, and whether it is bound
+/// to this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoOverage {
+    pub account: String,
+    /// The entry names this host's machine id. Codex cannot report which
+    /// account it is logged into, so its assertion counts only when bound
+    /// to the dedicated machine whose login the operator set up.
+    pub machine_bound: bool,
 }
 
 /// One provider's adapters. Claude runs tool-less unless a lens asks for
@@ -77,7 +88,7 @@ impl Registry {
         let mut entries = BTreeMap::new();
         for (id, p) in &config.providers {
             let at = |e: String| format!("providers.{id}.{e}");
-            let a = grants.for_provider(*id);
+            let a = &grants.for_provider(*id);
             let entry = match p.kind {
                 ProviderKind::ClaudeCli => claude(&p.settings, repo, a, &runner).map_err(at)?,
                 ProviderKind::CodexCli => codex(&p.settings, repo, a, &runner).map_err(at)?,
@@ -107,7 +118,7 @@ impl Registry {
 fn claude<C: CommandRunner + 'static>(
     s: &Map,
     repo: &Path,
-    a: Assertions,
+    a: &Assertions,
     runner: &impl Fn() -> C,
 ) -> Result<Entry, String> {
     only(s, &["model", "timeout_secs"])?;
@@ -120,8 +131,8 @@ fn claude<C: CommandRunner + 'static>(
         if let Some(t) = timeout {
             agent = agent.timeout(t);
         }
-        if a.no_overage {
-            agent = agent.lens_no_overage();
+        if let Some(n) = &a.no_overage {
+            agent = agent.lens_no_overage(n.account.clone());
         }
         agent
     };
@@ -134,7 +145,7 @@ fn claude<C: CommandRunner + 'static>(
 fn codex<C: CommandRunner + 'static>(
     s: &Map,
     repo: &Path,
-    a: Assertions,
+    a: &Assertions,
     runner: &impl Fn() -> C,
 ) -> Result<Entry, String> {
     only(s, &["model", "timeout_secs"])?;
@@ -145,7 +156,7 @@ fn codex<C: CommandRunner + 'static>(
     if let Some(t) = opt_secs(s)? {
         agent = agent.timeout(t);
     }
-    if a.no_overage {
+    if a.no_overage.as_ref().is_some_and(|n| n.machine_bound) {
         agent = agent.lens_no_overage();
     }
     if a.host_cleared {
@@ -277,13 +288,24 @@ mod tests {
         AgentId::new(s).expect("id")
     }
 
+    const ACCOUNT: &str = "nano@example.com";
+
+    fn no_overage(account: &str, machine_bound: bool) -> Option<NoOverage> {
+        Some(NoOverage {
+            account: account.to_owned(),
+            machine_bound,
+        })
+    }
+
     fn build(c: &LensConfig, a: Assertions) -> (Result<Registry, String>, Arc<FakeCommand>) {
         let grants: Grants = ["claude", "codex", "local"]
             .into_iter()
-            .map(|p| (id(p), a))
+            .map(|p| (id(p), a.clone()))
             .collect();
-        // Passes the subscription probe, then is not a valid reply.
-        let fake = Arc::new(FakeCommand::ok(r#"{"authMethod":"claude.ai"}"#));
+        // Passes the subscription probe for ACCOUNT, then is not a valid reply.
+        let fake = Arc::new(FakeCommand::ok(
+            r#"{"authMethod":"claude.ai","email":"nano@example.com"}"#,
+        ));
         let shared = Shared(Arc::clone(&fake));
         let r = Registry::build_with(c, &PathBuf::from("/repo"), &grants, || shared.clone());
         (r, fake)
@@ -335,7 +357,7 @@ mod tests {
     #[test]
     fn codex_needs_both_assertions() {
         let only_overage = Assertions {
-            no_overage: true,
+            no_overage: no_overage(ACCOUNT, true),
             host_cleared: false,
         };
         let (r, fake) = build(&config("", "", LOCAL), only_overage);
@@ -350,9 +372,45 @@ mod tests {
     }
 
     #[test]
+    fn codex_no_overage_counts_only_when_bound_to_this_machine() {
+        let unbound = Assertions {
+            no_overage: no_overage(ACCOUNT, false),
+            host_cleared: true,
+        };
+        let (r, fake) = build(&config("", "", LOCAL), unbound);
+        let e = r
+            .expect("builds")
+            .get(id("codex"), Tools::None)
+            .expect("configured")
+            .ask(&question())
+            .expect_err("codex cannot report its account");
+        assert!(matches!(e, ClassifiedError::Unavailable(_)), "{e:?}");
+        assert!(calls(&fake).is_empty());
+    }
+
+    #[test]
+    fn claude_logged_into_another_account_gets_no_grant() {
+        let other = Assertions {
+            no_overage: no_overage("someone@example.com", false),
+            host_cleared: false,
+        };
+        let (r, fake) = build(&config("", "", LOCAL), other);
+        let e = r
+            .expect("builds")
+            .get(id("claude"), Tools::None)
+            .expect("configured")
+            .ask(&question())
+            .expect_err("another account");
+        assert!(matches!(e, ClassifiedError::Unavailable(_)), "{e:?}");
+        let calls = calls(&fake);
+        assert_eq!(calls.len(), 1, "only the login probe ran: {calls:?}");
+        assert!(!calls[0].iter().any(|a| a == "--system-prompt"));
+    }
+
+    #[test]
     fn asserted_claude_runs_with_settings_and_the_lens_tools() {
         let a = Assertions {
-            no_overage: true,
+            no_overage: no_overage(ACCOUNT, true),
             host_cleared: true,
         };
         let (r, fake) = build(

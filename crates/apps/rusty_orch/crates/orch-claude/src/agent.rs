@@ -64,7 +64,7 @@ pub struct ClaudeAgent<C = StdCommand> {
     max_turns: u32,
     stop: StopRule,
     pub(crate) lens_tools: &'static str,
-    pub(crate) lens_no_overage: bool,
+    pub(crate) lens_no_overage: Option<String>,
     runner: C,
 }
 
@@ -85,7 +85,7 @@ impl<C: CommandRunner> ClaudeAgent<C> {
             max_turns: DEFAULT_MAX_TURNS,
             stop: StopRule::Checkpoint,
             lens_tools: "",
-            lens_no_overage: false,
+            lens_no_overage: None,
             runner,
         }
     }
@@ -124,12 +124,14 @@ impl<C: CommandRunner> ClaudeAgent<C> {
         self
     }
 
-    /// Admit lens questions. The operator asserts, after checking the
-    /// account, that usage beyond the plan (usage credits, extra usage)
-    /// is disabled, so a call can add no charge. Nothing here can verify
-    /// that; without it every lens question is `Unavailable`.
-    pub fn lens_no_overage(mut self) -> Self {
-        self.lens_no_overage = true;
+    /// Admit lens questions logged into `account`. The operator asserts,
+    /// after checking that account, that usage beyond the plan (usage
+    /// credits, extra usage) is disabled, so a call can add no charge.
+    /// Nothing here can verify that; without it every lens question is
+    /// `Unavailable`, and so is one whose login reports another account or
+    /// none.
+    pub fn lens_no_overage(mut self, account: impl Into<String>) -> Self {
+        self.lens_no_overage = Some(account.into());
         self
     }
 
