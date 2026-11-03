@@ -80,7 +80,10 @@ An answer settles *what* to build, not permission. Design approval, ask-first
 gates, spending, deployment and review/merge rules still apply after an ANSWER.
 
 ## Record a settled answer (best effort, at most once per key)
-Skip this when a DECISIONS.md entry or QA line already answers it; cite that.
+When a DECISIONS.md entry or QA line already answers it, cite that and record
+nothing new, except: if that entry says `remind-me: pending` or has no memory
+with its key, finish the missing half now (steps 1 and 2, keeping its D-number)
+and replace `pending` with the id.
 - **[stated] needs an attributable reference.** Record Nano's answer as
   `[stated]` only when the caller passes his words *and* where he said them:
   a thread message id or link, a card comment, a GitHub comment by `baileyrd`,
