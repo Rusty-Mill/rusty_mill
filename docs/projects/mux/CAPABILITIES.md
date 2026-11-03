@@ -93,7 +93,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 | C68 | Developer diagnostics: network timeline and trace (sizes and timings, never bodies), endpoint inspector | 5 | `rusty_mux` clients | not-started | [Rex app check](REX-APP.md) I13 |
 | C69 | Service units, socket activation, auto-start and idle exit, utmp entries | 5 | `rusty_mux_server` | not-started | [Rex app check](REX-APP.md) J2, J3, A9; Rex delta D11. FreeBSD stays an owner call |
 | C70 | Scrollback spooled to disk | 5 | `rusty_mux_server` | not-started | [Rex app check](REX-APP.md) C8; depends on the owner's call on the scrollback budget (Rex delta D14) |
-| C71 | Block methods `terminal.clear`, `terminal.modes`, `terminal.shell` | 3b | `rusty_mux_server` | not-started | [Rex app check](REX-APP.md) C1; extends C06 and C40 |
+| C71 | Block methods `terminal.clear`, `terminal.modes`, `terminal.shell` | 3b | `rusty_mux_proto`, `rusty_mux_server` | in-progress | [Rex app check](REX-APP.md) C1; extends C06 and C40. Part 1: `terminal.modes` (one `NAME<TAB>VALUE` line per mode the program set) and `terminal.clear` (ED 2 and 3 fed like the program's output, keeping modes; needs the lease) behind `Features::TERMINAL_MORE` (bit 31). Part 2: `terminal.shell`, semantics awaiting the owner |
 | C72 | Theme kept through a reset: a theme set on a block outlasts RIS and `terminal.reset`, and clients learn it | 4 | `rusty_mux_proto`, `rusty_mux_server` | not-started | [Rex app check](REX-APP.md) C10, inferred from a file name only; C40's program-visible colours stay as shipped. Needs a new message, so a feature bit |
 
 Update a row's status in the same PR that moves it.

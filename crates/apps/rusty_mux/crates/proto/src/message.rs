@@ -155,6 +155,11 @@ impl Features {
     /// [`Message::NameSession`], refused once somebody chose a name.
     pub const NAME_SESSION: Self = Self(1 << 30);
 
+    /// More block methods on a block's terminal: `terminal.modes` and
+    /// `terminal.clear`. They travel as [`Message::BlockCall`], so the bit
+    /// only says the server knows them.
+    pub const TERMINAL_MORE: Self = Self(1 << 31);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }

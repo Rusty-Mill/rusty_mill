@@ -1,5 +1,6 @@
-//! Changing and measuring a block's terminal (C40): `terminal.size`,
-//! `terminal.reset` and `terminal.set-theme`.
+//! Changing and measuring a block's terminal: `terminal.size`,
+//! `terminal.reset` and `terminal.set-theme` (C40), `terminal.modes` and
+//! `terminal.clear` (C71).
 
 #![cfg(target_os = "linux")]
 
@@ -13,7 +14,11 @@ use rusty_mux_proto::{Features, Message};
 const CONTROL: Features = Features::CHECKPOINT_V6
     .union(Features::INSPECT)
     .union(Features::BLOCK_CALL)
-    .union(Features::TERMINAL_CONTROL);
+    .union(Features::TERMINAL_CONTROL)
+    .union(Features::TERMINAL_MORE);
+
+/// What a clear feeds the terminal.
+const CLEAR: &str = "\x1b[H\x1b[2J\x1b[3J";
 
 /// How what a reset feeds the terminal ends: RIS.
 const RESET: &str = "\x1bc";
@@ -317,7 +322,7 @@ fn set_theme_refuses_what_it_cannot_apply_whole() {
 }
 
 #[test]
-fn reset_and_set_theme_need_the_lease_and_size_does_not() {
+fn changes_need_the_lease_and_reads_do_not() {
     let path = start_server();
     let mut client = Client::connect_with(&path, CONTROL, None);
     let block = block_for(&mut client);
@@ -330,6 +335,7 @@ fn reset_and_set_theme_need_the_lease_and_size_does_not() {
         for (method, args) in [
             ("terminal.reset", &[][..]),
             ("terminal.set-theme", &theme[..]),
+            ("terminal.clear", &[][..]),
         ] {
             let reason = refusal(&mut other, block, method, args);
             assert!(
@@ -338,6 +344,7 @@ fn reset_and_set_theme_need_the_lease_and_size_does_not() {
             );
         }
         assert_eq!(text(&mut other, block, "terminal.size"), "80x24");
+        assert!(text(&mut other, block, "terminal.modes").contains("mouse\toff"));
     }
 }
 
@@ -359,4 +366,74 @@ fn a_client_without_the_feature_is_refused() {
     let theme = [colour("background", "#102030")];
     let reason = refusal(&mut client, block, "terminal.set-theme", &theme);
     assert!(reason.contains("requires feature bits"), "{reason}");
+
+    // C40's bit does not bring C71's methods.
+    let mut client = Client::connect_with(&path, older.union(Features::TERMINAL_CONTROL), None);
+    let block = block_for(&mut client);
+    for method in ["terminal.modes", "terminal.clear"] {
+        let reason = refusal(&mut client, block, method, &[]);
+        assert!(
+            reason.contains("requires feature bits"),
+            "{method}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn modes_follow_what_the_program_sets() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CONTROL, None);
+    let block = block_for(&mut client);
+    let modes = text(&mut client, block, "terminal.modes");
+    assert!(modes.contains("bracketed-paste\toff"), "{modes}");
+    assert!(modes.contains("mouse\toff"), "{modes}");
+
+    // The echo shows `%s`, so the marker means printf ran.
+    client.input(
+        block,
+        b"printf '\\033[?2004h\\033[?1002h\\033[?1006hSET%s\\n' 1\r",
+    );
+    client.wait_for(block, "SET1");
+    let modes = text(&mut client, block, "terminal.modes");
+    assert!(modes.contains("bracketed-paste\ton"), "{modes}");
+    assert!(modes.contains("mouse\tdrag"), "{modes}");
+    assert!(modes.contains("mouse-encoding\tsgr"), "{modes}");
+}
+
+#[test]
+fn clear_empties_the_screen_and_scrollback_for_the_server_and_every_client() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CONTROL, None);
+    let block = block_for(&mut client);
+    let mut watcher = Client::connect_with(&path, CONTROL, None);
+    watcher.request(|req| Message::Attach { req, block });
+    watcher.wait_ready(block);
+    // Bracketed paste on, then more lines than the screen holds.
+    client.input(block, b"printf '\\033[?2004h'; seq -f 'ROW%g' 1 60\r");
+    client.wait_for(block, "ROW60");
+    watcher.wait_for(block, "ROW60");
+    assert!(screen(&mut client, block).contains("ROW1\n"));
+
+    done(&mut client, block, "terminal.clear", &[]);
+
+    assert!(!screen(&mut client, block).contains("ROW"));
+    watcher.wait_for(block, CLEAR);
+    assert!(
+        !watcher.text(block).contains("ROW"),
+        "the watcher's copy too"
+    );
+    let modes = text(&mut client, block, "terminal.modes");
+    assert!(modes.contains("bracketed-paste\ton"), "modes stay: {modes}");
+}
+
+#[test]
+fn clear_waits_for_a_whole_sequence() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CONTROL, None);
+    let block = block_for(&mut client);
+    stick(&mut client, block);
+    let reason = refusal(&mut client, block, "terminal.clear", &[]);
+    assert!(reason.contains("unfinished"), "{reason}");
+    done(&mut client, block, "terminal.reset", &[]);
+    done(&mut client, block, "terminal.clear", &[]);
 }

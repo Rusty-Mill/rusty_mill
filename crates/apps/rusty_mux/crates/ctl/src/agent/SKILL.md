@@ -74,6 +74,7 @@ rusty-mux-ctl terminal.format --block dev-server --history 200 --trim --unwrap
 rusty-mux-ctl terminal.process --block dev-server   # what runs there now
 rusty-mux-ctl terminal.pwd --block dev-server
 rusty-mux-ctl terminal.size --block dev-server      # COLSxROWS, such as 80x24
+rusty-mux-ctl terminal.modes --block dev-server     # NAME<TAB>VALUE: mouse, bracketed-paste, alt-screen, ...
 rusty-mux-ctl acquire-lease --block dev-server + terminal.send-keys --block dev-server --key ctrl+c
 rusty-mux-ctl acquire-lease --block dev-server + terminal.reset --block dev-server
 ```
@@ -81,8 +82,10 @@ rusty-mux-ctl acquire-lease --block dev-server + terminal.reset --block dev-serv
 `terminal.reset` clears the screen, scrollback and modes, as when a program
 left the terminal garbled; it is refused while an older client is attached. `terminal.set-theme` sets `--foreground`,
 `--background`, `--cursor` and `--palette N=COLOUR` as `#RRGGBB` or `default`.
+`terminal.clear` clears the screen and scrollback as `clear` does and keeps
+the modes; the program's prompt comes back with its next output.
 
-Typing (`input`, `terminal.send-keys`), resetting and theming need the
+Typing (`input`, `terminal.send-keys`), resetting, clearing and theming need the
 block's input lease, and a user typing in that block holds it. Only type into
 a block someone else uses when the user asked you to. Requests joined by `+`
 run in order on one connection.

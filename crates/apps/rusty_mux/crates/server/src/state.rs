@@ -81,7 +81,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::LAYOUT_EDIT)
     .union(Features::FOCUS)
     .union(Features::SESSION_NAMES)
-    .union(Features::NAME_SESSION);
+    .union(Features::NAME_SESSION)
+    .union(Features::TERMINAL_MORE);
 
 /// Fresh randomness to pick a generated session name with.
 fn name_seed() -> u64 {
@@ -1067,7 +1068,8 @@ impl State {
                 self.inject(block, terminal::RESET);
                 return Ok(Outcome::Done(None));
             }
-            "terminal.set-theme" => {
+            "terminal.modes" => terminal::modes(&rt.grid),
+            "terminal.set-theme" | "terminal.clear" => {
                 self.mux
                     .authorize_input(client, block)
                     .map_err(Refusal::from)?;
@@ -1080,9 +1082,13 @@ impl State {
                     )
                     .into());
                 }
-                let change =
-                    ThemeChange::from_args(&named).map_err(|e| format!("{method}: {e}"))?;
-                self.inject(block, &terminal::theme(&change));
+                let bytes = match found.name {
+                    "terminal.clear" => terminal::CLEAR.to_vec(),
+                    _ => terminal::theme(
+                        &ThemeChange::from_args(&named).map_err(|e| format!("{method}: {e}"))?,
+                    ),
+                };
+                self.inject(block, &bytes);
                 return Ok(Outcome::Done(None));
             }
             _ => return Err(unknown()),
