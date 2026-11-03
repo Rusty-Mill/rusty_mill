@@ -145,6 +145,28 @@ pub(crate) fn acting(
 struct Nothing {}
 
 #[derive(Deserialize, JsonSchema)]
+struct InboxListArgs {
+    #[serde(flatten)]
+    who: Who,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct InboxActArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// The escalation id from `inbox_list`.
+    id: String,
+    /// Its `rev` from `inbox_list`; an action against newer work is refused.
+    rev: u64,
+    /// What you decide.
+    #[serde(flatten)]
+    action: crate::inbox::Action,
+    /// Only show what the first command would write.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct TakeArgs {
     #[serde(flatten)]
     who: Who,
@@ -632,6 +654,24 @@ pub fn ops() -> Vec<Op> {
                     })
                     .transpose()?;
                 card(b.plan(card_ref(b, &a.id)?, &who, a.priority, deps)?)
+            },
+        ),
+        op(
+            "inbox_list",
+            "The decisions waiting for the owner (needs admin): open BBP escalations of the tasks linked from cards, irreversible first, then oldest. Each has an `id`, a `rev`, the `reason` (and `label` in plain words), the claim with its confidence and budget, the strongest evidence, and its card. Empty means nothing needs you.",
+            |b, i, a: InboxListArgs| {
+                let who = acting(b, i, &a.who)?;
+                Ok(json!(b.inbox(&who)?))
+            },
+        ),
+        op(
+            "inbox_act",
+            "Decide an escalation from `inbox_list` (needs admin). `action`: `approve` (do it, keep it, or spend exactly one more allowance), `reject` (drop it; a task total needs `reason`), `choose` with `chosen` (a stuck question's candidate id), or `refine` with `note` (clarify the intent, then the lenses judge again). Pass the `rev` you read; `dry_run: true` shows what BBP would write and writes nothing.",
+            |b, i, a: InboxActArgs| {
+                let who = acting(b, i, &a.who)?;
+                Ok(json!(
+                    b.inbox_act(&who, &a.id, a.rev, &a.action, a.dry_run)?
+                ))
             },
         ),
         op(

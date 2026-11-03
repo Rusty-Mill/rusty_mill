@@ -70,8 +70,11 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
-  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`. The web API
+  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`, `inbox_list`, `inbox_act`. The web API
   exposes the same table, so the two cannot drift.
+- **Decision inbox (#595).** `inbox_list` and `inbox_act` (admin only) show and decide the open BBP escalations
+  of the tasks linked from cards. Mill Board stores none of it: run with `--bbp-bin PATH --bbp-root DIR` on the
+  orch host and it runs `bbp inbox` and fenced `bbp human` commands, so the host stays the only writer of the log.
 - **Settings.** The ⚙ button opens a view to add and remove agents (credentials: name, role, project limit; a
   token is shown once; "New token" replaces it), edit repositories and their projects, edit roles, and configure
   the GitHub sync. It needs the `admin` capability (the default `human` role has it). Run with
