@@ -12,7 +12,7 @@ Build-time questions not already answered in [../QUESTIONS.md](../QUESTIONS.md) 
 - **Q:** Which languages and files? **A:** Rust only. Non-code files are ignored. `#[cfg(test)]` modules and `tests/` are skipped. Other languages are added when a real task needs one. [agreed] D45; card #704 Build 1
 - **Q:** Python for the SlopCodeBench spike? **A:** Add Python support to `rusty_erosion` for #705; don't port the problems to Rust. [default] card #705 comment (agreed in voice 2026-11-03, Nano can overrule)
 - **Q:** New dependencies? **A:** None: `tree-sitter` and `tree-sitter-rust` are already workspace dependencies (`Cargo.toml`). The new crate itself needs approval as listed in the design. [agreed] card #704 Build 1; erosion-gate-design §9
-- **Q:** When does cleanup run? **A:** orch writes a `consolidate` intent at half the drift limit or after 5 accepted claims, whichever comes first. The frozen suite and holdouts must stay green, and limits are negative so erosion must go down. [agreed] D44
+- **Q:** When does cleanup run? **A:** orch writes a `consolidate` intent at half the drift limit or after 5 accepted claims, whichever comes first. The frozen suite and holdouts must stay green, and limits are negative so erosion must go down. [agreed] D44. A metric already at 0 is an open case (OPEN_QUESTIONS Q11).
 - **Q:** What does an erosion escalation show? **A:** The per-metric delta and the three worst-affected functions, plus `unmeasured` code on the claim. [agreed] D43; card #704 Build 3
 - **Q:** What tests are required? **A:** Fixtures, a renamed clone still detected, the 49 vs 50 token boundary, determinism, and a real-host test where a pasted duplicate is reported and later blocked once enforcing. [agreed] card #704 Done when
 
