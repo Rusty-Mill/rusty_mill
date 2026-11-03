@@ -724,7 +724,7 @@ fn clear_if_endorsed(w: &mut Work, c: MsgId, d: &Draft) {
             .candidates
             .iter()
             .filter(|(id, claim)| **claim == c && builds_current(&w.st, rec, **id))
-            .filter_map(|(id, _)| unlockable(&w.st, *id))
+            .filter_map(|(id, _)| unlockable(&w.st, c, *id))
             .collect();
     let st = &w.st;
     let cleared: Vec<String> = rec
@@ -762,14 +762,33 @@ fn last_failure(st: &TaskState, c: &ClaimRecord, n: &str) -> Option<ArtId> {
 }
 
 /// `k`'s latest report and its listed profiles, when it passed with a test
-/// change and, for a holdout candidate, under the current holdout digest.
-fn unlockable(st: &TaskState, k: ArtId) -> Option<(ArtId, Vec<String>)> {
+/// change and, for a holdout candidate, under the current holdout digest and
+/// on the tree the current candidate tested.
+fn unlockable(st: &TaskState, c: MsgId, k: ArtId) -> Option<(ArtId, Vec<String>)> {
     let id = st.claims.latest_report(k)?;
     let r = report_of(st, id)?;
     let holdout = manifest(st, k).is_some_and(|m| m.suite == Suite::Holdout);
     let current_suite = !holdout || Some(r.profile_digest) == st.claims.holdout_digest;
-    let ok = r.status == RunStatus::Passed && !r.tests_changed.is_empty() && current_suite;
+    let ok = r.status == RunStatus::Passed
+        && !r.tests_changed.is_empty()
+        && current_suite
+        && on_tested_tree(st, c, k, r);
     ok.then(|| (id, r.listed_profiles()))
+}
+
+/// Can a pass of `k` on `c` speak for the current code? The current
+/// candidate's own report always can; a holdout candidate's only on the tree
+/// (`Some`) that the current candidate's latest report tested, since equal
+/// manifests may resolve a moving base to another tree.
+fn on_tested_tree(st: &TaskState, c: MsgId, k: ArtId, rep: &Report) -> bool {
+    let Some(cur) = st.claims.get(c).and_then(|r| r.current) else {
+        return false;
+    };
+    if k == cur {
+        return true;
+    }
+    let tested = latest_report(st, cur).and_then(|r| r.tree);
+    tested.is_some() && rep.tree == tested
 }
 
 fn report_of(st: &TaskState, id: ArtId) -> Option<&Report> {
@@ -1133,6 +1152,7 @@ fn on_report(w: &mut Work, k: ArtId, rep: &Report) {
             let failed = rep.failed_profiles();
             set_failing(w, c, |f| f.extend(failed));
         }
+        RunStatus::Passed if !on_tested_tree(&w.st, c, k, rep) => {}
         RunStatus::Passed if rep.tests_changed.is_empty() || endorsed_code(&w.st, c, k) => {
             let listed = rep.listed_profiles();
             set_failing(w, c, |f| {

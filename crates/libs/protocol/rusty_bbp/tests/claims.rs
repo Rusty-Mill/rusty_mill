@@ -3085,6 +3085,8 @@ fn cl_92_an_endorsement_unlocks_holdout_reports_of_the_same_code() {
         stored(cx.holdout_run(k, &[("holdout:api", 1)]));
         assert!(cx.rec(x).failing.contains("holdout:api"));
         let k2 = cx.candidate("a", x);
+        // The build report names the tree a holdout pass must match.
+        stored(cx.report_profiles(k2, &[("unit", 0)], vec![]));
         if endorse_first {
             ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
         }
@@ -3338,4 +3340,47 @@ fn cl_99_an_endorsement_does_not_clear_a_profile_that_failed_again() {
     ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
     assert!(cx.rec(x).failing.contains("holdout:api"));
     assert!(card_of(&cx, x).holdout_due);
+}
+
+/// #597 re-review: a holdout pass on another tree than the build tested
+/// clears no failure, neither when it arrives nor at an endorsement.
+#[test]
+fn cl_100_a_holdout_pass_on_another_tree_clears_no_failure() {
+    let tree1 = Some(Sha256::of(b"tree-1"));
+    let tree2 = Some(Sha256::of(b"tree-2"));
+    for endorsed in [false, true] {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        cx.tree = tree1;
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+        cx.tree = tree2;
+        let h = stored(cx.holdout_of("h", k));
+        let run = cx.live_run(h);
+        let secret = cx.st.secret_for(run);
+        let changed = match endorsed {
+            true => vec![TestChange::modified("tests/core.rs")],
+            false => vec![],
+        };
+        stored(cx.report_full(
+            h,
+            run,
+            secret,
+            holdout_digest(),
+            &[("holdout:api", 0)],
+            changed,
+        ));
+        if endorsed {
+            ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+        }
+        assert!(
+            cx.rec(x).failing.contains("holdout:api"),
+            "endorsed: {endorsed}"
+        );
+        // The same pass on the tested tree clears it.
+        cx.tree = tree1;
+        stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+        assert!(cx.rec(x).failing.is_empty(), "endorsed: {endorsed}");
+    }
 }
