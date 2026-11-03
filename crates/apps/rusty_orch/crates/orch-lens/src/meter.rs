@@ -44,13 +44,19 @@ pub fn cost(u: &Usage, p: &Price) -> u64 {
 /// separators, a system preamble.
 pub const FRAMING_TOKENS: u64 = 1_024;
 
-/// The most a call can cost: every prompt byte as its own input token at
-/// the uncached rate, plus [`FRAMING_TOKENS`], plus every output token
-/// allowed. Byte-level tokenizers never emit more tokens than bytes, so
-/// this is an upper bound, not the estimate context fitting uses.
+/// The most a call can cost: every prompt byte as its own input token,
+/// plus [`FRAMING_TOKENS`], each at the dearer of the fresh and cached
+/// input rates, plus every output token allowed, plus one micro-dollar for
+/// [`cost`] rounding the fresh and cached buckets up separately. Byte-level
+/// tokenizers never emit more tokens than bytes, so this bounds [`cost`]
+/// for any split of the input into fresh and cached tokens; it is not the
+/// estimate context fitting uses.
 pub fn worst_case(prompt_bytes: u64, max_output_tokens: u32, p: &Price) -> u64 {
     let input = prompt_bytes.saturating_add(FRAMING_TOKENS);
-    charge(input, p.input).saturating_add(charge(u64::from(max_output_tokens), p.output))
+    let rate = p.input.max(p.cached_input);
+    charge(input, rate)
+        .saturating_add(charge(u64::from(max_output_tokens), p.output))
+        .saturating_add(1)
 }
 
 /// The ceilings, from Factory config.
@@ -223,11 +229,12 @@ mod tests {
     #[test]
     fn worst_case_counts_every_byte_and_output_token() {
         // 4,000 bytes = 1,000 tokens × $3/M = 3,000 µ$; 1,000 out × $15/M = 15,000 µ$.
-        // (4,000 + 1,024) × $3/M = 15,072 µ$; 1,000 × $15/M = 15,000 µ$.
-        assert_eq!(worst_case(4_000, 1_000, &PAID), 30_072);
+        // (4,000 + 1,024) × $3/M = 15,072 µ$; 1,000 × $15/M = 15,000 µ$;
+        // plus 1 µ$ of rounding slack.
+        assert_eq!(worst_case(4_000, 1_000, &PAID), 30_073);
         assert_eq!(
             worst_case(4_001, 0, &PAID),
-            charge(4_001 + FRAMING_TOKENS, PAID.input)
+            charge(4_001 + FRAMING_TOKENS, PAID.input) + 1
         );
     }
 
@@ -245,6 +252,44 @@ mod tests {
                 cost(&billed, &PAID) <= worst_case(bytes, 2_048, &PAID),
                 "{bytes}"
             );
+        }
+    }
+
+    #[test]
+    fn worst_case_covers_any_cached_split_and_rounding() {
+        let prices = [
+            PAID,
+            // Cached dearer than fresh.
+            Price {
+                input: 0,
+                output: 0,
+                cached_input: USD,
+            },
+            // Tiny rates where per-bucket rounding matters.
+            Price {
+                input: 2,
+                output: 0,
+                cached_input: 1,
+            },
+            Price {
+                input: 1,
+                output: 1,
+                cached_input: 1,
+            },
+        ];
+        for p in prices {
+            for bytes in [0, 1, 4, 8, 999] {
+                let tokens = bytes + FRAMING_TOKENS;
+                let bound = worst_case(bytes, 7, &p);
+                for cached in [0, 1, tokens / 2, tokens - 1, tokens] {
+                    let u = Usage {
+                        input_tokens: tokens,
+                        output_tokens: 7,
+                        cached_input_tokens: cached,
+                    };
+                    assert!(cost(&u, &p) <= bound, "{p:?} {bytes} {cached}");
+                }
+            }
         }
     }
 

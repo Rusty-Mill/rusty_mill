@@ -77,7 +77,9 @@ pub struct Job {
     pub foreign_seen: usize,
 }
 
-/// A job the rules allow but no provider can take.
+/// A job the rules allow but no provider can take. For a proposal slot
+/// this is permanent; the runner passes it to [`State::unservable`] so the
+/// question can move on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skipped {
     pub key: JobKey,
@@ -109,6 +111,8 @@ pub struct Proposals {
     pub used: Vec<AgentId>,
     /// Ordinary proposal slots that answered or failed for good.
     pub settled: BTreeSet<u8>,
+    /// The provider each in-flight proposal slot runs on.
+    pub running: BTreeMap<Slot, AgentId>,
     pub rebel_landed: bool,
     pub rebel_failures: u32,
     /// Attack passes per candidate.
@@ -187,8 +191,12 @@ fn cleared_for(config: &LensConfig, card: &Card, p: AgentId) -> bool {
 }
 
 /// Proposal jobs a lens owes a question: its first two proposers and its
-/// rebel, each once, each falling back only to cleared providers the
-/// question has not used.
+/// rebel, each slot once. Each job gets exactly one provider, so no two
+/// proposals of a question ever share a model: none a provider that already
+/// proposed a candidate, none a provider another slot is running on or was
+/// just given. A slot that only waits on a running provider gets no job; a
+/// slot no unused cleared provider can ever serve gets an empty provider
+/// list, which [`schedule`] reports as [`Skipped`].
 fn proposals(config: &LensConfig, lens: &Lens, question: &Card, state: &State) -> Vec<Wanted> {
     if !lens.claims || lens.proposers.is_empty() {
         return Vec::new();
@@ -198,27 +206,36 @@ fn proposals(config: &LensConfig, lens: &Lens, question: &Card, state: &State) -
         .get(&question.id)
         .cloned()
         .unwrap_or_default();
-    let fresh = |want: AgentId| -> Vec<AgentId> {
-        std::iter::once(want)
-            .chain(lens.proposers.iter().copied())
-            .filter(|p| !seen.used.contains(p) && cleared_for(config, question, *p))
-            .fold(Vec::new(), |mut acc, p| {
-                if !acc.contains(&p) {
-                    acc.push(p);
-                }
-                acc
-            })
-    };
-    let mut wanted = Vec::new();
-    for (n, want) in (0u8..).zip(lens.proposers.iter().take(ORDINARY)) {
-        if !seen.settled.contains(&n) {
-            wanted.push((Slot::Propose(n), Phase::Blind, fresh(*want), None));
-        }
-    }
+    let mut slots: Vec<(Slot, AgentId, Option<&'static str>)> = (0u8..)
+        .zip(lens.proposers.iter().take(ORDINARY))
+        .filter(|(n, _)| !seen.settled.contains(n))
+        .map(|(n, want)| (Slot::Propose(n), *want, None))
+        .collect();
     if let Some(rebel) = lens.rebel {
         if !seen.rebel_landed && seen.rebel_failures < REBEL_TRIES {
-            wanted.push((Slot::Rebel, Phase::Blind, fresh(rebel), Some(REBEL)));
+            slots.push((Slot::Rebel, rebel, Some(REBEL)));
         }
+    }
+    let mut taken: BTreeSet<AgentId> = seen.running.values().copied().collect();
+    let mut wanted = Vec::new();
+    for (slot, want, suffix) in slots {
+        if seen.running.contains_key(&slot) {
+            continue;
+        }
+        let eligible: Vec<AgentId> = std::iter::once(want)
+            .chain(lens.proposers.iter().copied())
+            .chain(lens.rebel)
+            .filter(|p| !seen.used.contains(p) && cleared_for(config, question, *p))
+            .collect();
+        if eligible.is_empty() {
+            wanted.push((slot, Phase::Blind, Vec::new(), suffix));
+            continue;
+        }
+        let Some(pick) = eligible.into_iter().find(|p| !taken.contains(p)) else {
+            continue;
+        };
+        taken.insert(pick);
+        wanted.push((slot, Phase::Blind, vec![pick], suffix));
     }
     wanted
 }
@@ -317,6 +334,26 @@ impl State {
     /// Mark a job started.
     pub fn start(&mut self, job: &Job) {
         self.in_flight.insert(job.key.clone());
+        if let (Slot::Propose(_) | Slot::Rebel, Some(p)) = (job.key.slot, job.providers.first()) {
+            self.questions
+                .entry(job.key.claim)
+                .or_default()
+                .running
+                .insert(job.key.slot, *p);
+        }
+    }
+
+    /// Settle a proposal slot that no unused cleared provider can serve:
+    /// an ordinary slot settles without a candidate, the rebel stops trying.
+    pub fn unservable(&mut self, skipped: &Skipped) {
+        let q = self.questions.entry(skipped.key.claim).or_default();
+        match skipped.key.slot {
+            Slot::Propose(n) => {
+                q.settled.insert(n);
+            }
+            Slot::Rebel => q.rebel_failures = q.rebel_failures.max(REBEL_TRIES),
+            Slot::Review | Slot::LookHarder => {}
+        }
     }
 
     /// Record a job that got an answer from `provider` with `posts` posts,
@@ -344,6 +381,7 @@ impl State {
             }
             Slot::Propose(n) => {
                 let q = self.questions.entry(key.claim).or_default();
+                q.running.remove(&key.slot);
                 q.settled.insert(n);
                 if posts > 0 {
                     q.used.push(provider);
@@ -351,6 +389,7 @@ impl State {
             }
             Slot::Rebel => {
                 let q = self.questions.entry(key.claim).or_default();
+                q.running.remove(&key.slot);
                 if posts > 0 {
                     q.used.push(provider);
                     q.rebel_landed = true;
@@ -366,20 +405,16 @@ impl State {
     /// slot is then settled without a candidate; the rebel may try again.
     pub fn failed(&mut self, job: &Job) {
         self.in_flight.remove(&job.key);
+        if matches!(job.key.slot, Slot::Review | Slot::LookHarder) {
+            return;
+        }
+        let q = self.questions.entry(job.key.claim).or_default();
+        q.running.remove(&job.key.slot);
         match job.key.slot {
             Slot::Propose(n) => {
-                self.questions
-                    .entry(job.key.claim)
-                    .or_default()
-                    .settled
-                    .insert(n);
+                q.settled.insert(n);
             }
-            Slot::Rebel => {
-                self.questions
-                    .entry(job.key.claim)
-                    .or_default()
-                    .rebel_failures += 1;
-            }
+            Slot::Rebel => q.rebel_failures += 1,
             Slot::Review | Slot::LookHarder => {}
         }
     }
@@ -554,7 +589,8 @@ mod tests {
         assert_eq!(slots, [Slot::Propose(0), Slot::Propose(1), Slot::Rebel]);
         assert_eq!(arch[0].providers[0], id("claude"));
         assert_eq!(arch[1].providers[0], id("local"));
-        assert_eq!(arch[2].providers, [id("codex"), id("claude"), id("local")]);
+        assert_eq!(arch[2].providers, [id("codex")]);
+        assert!(arch.iter().all(|j| j.providers.len() == 1), "no fallback");
         assert_eq!(arch[2].suffix, Some(REBEL));
         assert!(arch.iter().all(|j| j.allowed.claims
             == Some(ClaimRule {
@@ -637,14 +673,13 @@ mod tests {
             st.start(j);
         }
         st.answered(&slot_job(&jobs, Slot::Propose(1)), id("local"), 1, 0);
-        for j in &jobs {
-            if j.key.slot != Slot::Propose(1) {
-                st.in_flight.remove(&j.key);
-            }
-        }
-        let again = arch_jobs(&cfg, &q, &st);
-        let slots: Vec<Slot> = again.iter().map(|j| j.key.slot).collect();
-        assert_eq!(slots, [Slot::Propose(0), Slot::Rebel]);
+        assert!(
+            arch_jobs(&cfg, &q, &st).is_empty(),
+            "slot 1 answered; slot 0 and the rebel are still running"
+        );
+        st.answered(&slot_job(&jobs, Slot::Rebel), id("codex"), 1, 0);
+        st.failed(&slot_job(&jobs, Slot::Propose(0)));
+        assert!(arch_jobs(&cfg, &q, &st).is_empty(), "every slot settled");
     }
 
     #[test]
@@ -703,6 +738,38 @@ mod tests {
             .map(|j| j.key.slot)
             .collect();
         assert_eq!(slots, [Slot::Propose(0), Slot::Rebel]);
+    }
+
+    #[test]
+    fn concurrent_proposals_never_share_a_model() {
+        let cfg = config();
+        let mut q = question(3, &[]);
+        q.class = DataClass::Sensitive;
+        let mut st = State::default();
+        let (jobs, skipped) = schedule(&cfg, std::slice::from_ref(&q), &st);
+        let arch: Vec<&Job> = jobs_for(&jobs, "architect");
+        assert_eq!(arch.len(), 1, "only local is cleared; the rest wait");
+        assert_eq!(arch[0].providers, [id("local")]);
+        assert!(skipped.is_empty(), "waiting is not unservable");
+        st.start(arch[0]);
+        let (again, skipped) = schedule(&cfg, std::slice::from_ref(&q), &st);
+        assert!(jobs_for(&again, "architect").is_empty());
+        assert!(skipped.is_empty());
+
+        // Local proposes a candidate: no unused cleared provider is left.
+        st.answered(arch[0], id("local"), 1, 0);
+        let (again, skipped) = schedule(&cfg, std::slice::from_ref(&q), &st);
+        assert!(jobs_for(&again, "architect").is_empty());
+        let slots: Vec<Slot> = skipped.iter().map(|s| s.key.slot).collect();
+        assert_eq!(slots, [Slot::Propose(1), Slot::Rebel]);
+        for s in &skipped {
+            st.unservable(s);
+        }
+        let (again, skipped) = schedule(&cfg, std::slice::from_ref(&q), &st);
+        assert!(again.is_empty() && skipped.is_empty(), "terminal");
+        let seen = &st.questions[&MsgId(3)];
+        assert_eq!(seen.settled, [0, 1].into());
+        assert_eq!(seen.rebel_failures, REBEL_TRIES);
     }
 
     #[test]
