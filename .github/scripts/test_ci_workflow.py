@@ -55,7 +55,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_every_job_has_a_timeout_inside_the_queue_check_timeout(self) -> None:
         # A hung job must fail itself, not hold a merge-queue entry until the
-        # queue's 180-minute check timeout drops it (ADR-0009).
+        # queue's status check timeout drops it (ADR-0009).
         jobs = self.workflow[self.workflow.index("\njobs:\n"):]
         blocks = re.split(r"\n  (?=[A-Za-z0-9_-]+:\n)", jobs)[1:]
         self.assertGreater(len(blocks), 30)

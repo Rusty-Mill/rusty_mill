@@ -100,7 +100,7 @@ concurrency:
 # clippy/test and msrv-compile jobs (longest seen ~41 min, Windows test
 # shard 1), 5 for required-gate, 30 for the rest. Time spent waiting for a
 # runner does not count, so a limit fires only on a hang, well inside the
-# merge queue's 180-minute check timeout (ADR-0009).
+# merge queue's status check timeout (ruleset, ADR-0009).
 jobs:
   fmt:
     name: fmt
