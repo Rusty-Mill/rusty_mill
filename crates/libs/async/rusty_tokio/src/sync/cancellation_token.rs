@@ -227,6 +227,46 @@ impl CancellationToken {
             armed: true,
         }
     }
+
+    /// Like [`drop_guard`](Self::drop_guard), but borrows the token.
+    pub fn drop_guard_ref(&self) -> DropGuardRef<'_> {
+        DropGuardRef {
+            token: self,
+            armed: true,
+        }
+    }
+
+    /// Runs `fut` until it completes or this token is cancelled: `Some`
+    /// with its output, or `None` (dropping `fut`) on cancellation. A token
+    /// already cancelled returns `None` without polling `fut`, and
+    /// cancellation wins when both are ready, as on tokio-util.
+    pub async fn run_until_cancelled<F: Future>(&self, fut: F) -> Option<F::Output> {
+        race_cancelled(self.cancelled(), fut).await
+    }
+
+    /// Like [`run_until_cancelled`](Self::run_until_cancelled), but owns
+    /// the token, so the future is `'static` when `fut` is.
+    pub async fn run_until_cancelled_owned<F: Future>(self, fut: F) -> Option<F::Output> {
+        race_cancelled(self.cancelled_owned(), fut).await
+    }
+}
+
+/// `None` once `cancelled` resolves, else `fut`'s output; `cancelled` is
+/// polled first.
+async fn race_cancelled<C, F>(cancelled: C, fut: F) -> Option<F::Output>
+where
+    C: Future<Output = ()>,
+    F: Future,
+{
+    let mut cancelled = std::pin::pin!(cancelled);
+    let mut fut = std::pin::pin!(fut);
+    std::future::poll_fn(|cx| {
+        if cancelled.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        fut.as_mut().poll(cx).map(Some)
+    })
+    .await
 }
 
 impl Default for CancellationToken {
@@ -359,6 +399,31 @@ impl DropGuard {
 }
 
 impl Drop for DropGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
+        }
+    }
+}
+
+/// Cancels the token it borrows when dropped -- see
+/// [`CancellationToken::drop_guard_ref`].
+#[derive(Debug)]
+pub struct DropGuardRef<'a> {
+    token: &'a CancellationToken,
+    /// As [`DropGuard`]'s.
+    armed: bool,
+}
+
+impl<'a> DropGuardRef<'a> {
+    /// Returns the token without cancelling it.
+    pub fn disarm(mut self) -> &'a CancellationToken {
+        self.armed = false;
+        self.token
+    }
+}
+
+impl Drop for DropGuardRef<'_> {
     fn drop(&mut self) {
         if self.armed {
             self.token.cancel();
