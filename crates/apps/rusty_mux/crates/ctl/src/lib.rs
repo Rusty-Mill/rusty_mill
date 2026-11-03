@@ -278,13 +278,19 @@ pub fn run_until(
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
     };
+    // Where the agent hook asks for its session's name.
+    let hook_socket = socket(&invocation, env).ok();
     match invocation.command {
         Command::Help(method) => return write_line(out, cli::usage(method).trim_end()),
         Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
         Command::Api(Api::Describe(method)) => return write_line(out, &api::describe(method)),
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
         Command::Agent(command) => {
-            return agent::run(&command, env, invocation.json, out)
+            let generated_name = || {
+                let (socket, session) = (hook_socket.as_deref()?, env.here.session?);
+                hook_generated_name(socket, session, stop).ok().flatten()
+            };
+            return agent::run(&command, env, invocation.json, out, &generated_name)
                 .unwrap_or_else(|reason| report(err, Exit::Failed, &reason));
         }
         Command::Do { action, args } => match action_calls(&action, &args, env) {
@@ -544,6 +550,55 @@ fn follow(
     _: &mut dyn Write,
     _: &mut OnEvent<'_>,
 ) -> Result<(), Failure> {
+    Err(unsupported())
+}
+
+/// How long the agent hook waits for the server to tell a session's name,
+/// well inside the 5 s the OpenCode and Pi scripts give the whole hook.
+/// A hard bound only where [`conn::connect`] bounds connecting and writes
+/// (Linux); elsewhere the host's hook timeout is the bound.
+const HOOK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The name of `session` on the server at `socket` while it is one the
+/// server made up and nobody has renamed it since, for the agent hook.
+/// `None` from a server without [`Features::NAME_SESSION`], which could
+/// not keep a name chosen after the hook ran.
+#[cfg(any(unix, windows))]
+fn hook_generated_name(
+    socket: &Path,
+    session: Uuid,
+    stop: &Stop,
+) -> Result<Option<String>, Failure> {
+    let stop = stop.sooner(Instant::now() + HOOK_PATIENCE);
+    let mut conn = Conn::new(conn::connect(socket, &stop)?, stop);
+    let mut sink = io::sink();
+    let mut client = Session {
+        conn: &mut conn,
+        out: &mut sink,
+        json: false,
+        here: None,
+    };
+    let (features, _) = client.hello(Features::INSPECT.union(Features::NAME_SESSION), None)?;
+    if !features.contains(Features::NAME_SESSION) {
+        return Ok(None);
+    }
+    client
+        .list(features, 1)?
+        .into_iter()
+        .find_map(|entry| match entry {
+            Entry::Session {
+                session: s,
+                name,
+                generated,
+                ..
+            } if s.uuid() == session => Some(generated.then_some(name)),
+            _ => None,
+        })
+        .ok_or_else(|| Failure::Failed(format!("no session {session}")))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hook_generated_name(_: &Path, _: Uuid, _: &Stop) -> Result<Option<String>, Failure> {
     Err(unsupported())
 }
 

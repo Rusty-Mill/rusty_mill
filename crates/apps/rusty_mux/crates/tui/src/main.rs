@@ -4222,6 +4222,7 @@ mod client {
                     session: session_id(8),
                     name: String::new(),
                     active: Some(window_id(active)),
+                    generated: false,
                 })
             };
             let (at, shape) = view_back(vec![session(9), window(7), window(9)], window_id(7));
@@ -4244,11 +4245,13 @@ mod client {
                     session: session_id(5),
                     name: String::new(),
                     active: Some(window_id(5)),
+                    generated: false,
                 }),
                 entry(Entry::Session {
                     session: session_id(8),
                     name: String::new(),
                     active: Some(window_id(9)),
+                    generated: false,
                 }),
                 entry(Entry::Window {
                     window: window_id(7),

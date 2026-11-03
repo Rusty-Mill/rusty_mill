@@ -11,14 +11,22 @@
 use rusty_json::{Map, Value};
 
 use super::State;
+use super::layout::Ctl;
 
 const EVENT: &str = "SessionStart";
-const SUFFIX: &str = " agent hook";
 
-/// The hook command that runs the ctl at `ctl`, quoted for the POSIX shell
-/// Claude Code runs hooks in (Git Bash on Windows).
-pub(crate) fn command(ctl: &str) -> String {
-    format!("'{}'{SUFFIX}", ctl.replace('\'', r"'\''"))
+/// The command after the ctl's path, for `ctl`.
+fn suffix(ctl: Ctl<'_>) -> String {
+    format!(" {}", ctl.args().join(" "))
+}
+
+/// Every suffix a hook of ours may have, whether or not it names sessions.
+const SUFFIXES: [&str; 2] = [" agent hook", " agent hook --name-session"];
+
+/// The hook command that runs `ctl`, quoted for the POSIX shell Claude
+/// Code runs hooks in (Git Bash on Windows).
+pub(crate) fn command(ctl: Ctl<'_>) -> String {
+    format!("'{}'{}", ctl.path.replace('\'', r"'\''"), suffix(ctl))
 }
 
 /// The key of the Windows command Codex runs instead of `command` there.
@@ -29,17 +37,18 @@ const WINDOWS: &str = "commandWindows";
 /// all three, so the path goes unquoted, with `/` for `\` (which all three
 /// take in an absolute path), and a path with any character one of them
 /// would read specially is refused.
-pub(crate) fn windows_command(ctl: &str) -> Result<String, String> {
-    let path = ctl.replace('\\', "/");
+pub(crate) fn windows_command(ctl: Ctl<'_>) -> Result<String, String> {
+    let path = ctl.path.replace('\\', "/");
     let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '.' | '-' | '_');
     if path.is_empty() || !path.chars().all(plain) {
         return Err(format!(
-            "{ctl}: Codex on Windows runs hooks in the session's shell, and this path \
+            "{}: Codex on Windows runs hooks in the session's shell, and this path \
              needs quoting there; put rusty-mux-ctl in a directory whose path has only \
-             letters, digits, `-`, `_` and `.`"
+             letters, digits, `-`, `_` and `.`",
+            ctl.path
         ));
     }
-    Ok(format!("{path}{SUFFIX}"))
+    Ok(format!("{path}{}", suffix(ctl)))
 }
 
 fn is_ours(hook: &Value) -> bool {
@@ -52,7 +61,11 @@ fn is_ours(hook: &Value) -> bool {
 
 /// Whether [`command`] wrote `command`, for a ctl at any path.
 fn is_ours_command(command: &str) -> bool {
-    let Some(path) = command.strip_suffix(SUFFIX).and_then(unquote) else {
+    let Some(path) = SUFFIXES
+        .iter()
+        .find_map(|suffix| command.strip_suffix(suffix))
+        .and_then(unquote)
+    else {
         return false;
     };
     let name = path.rsplit(['/', '\\']).next().unwrap_or_default();

@@ -152,8 +152,81 @@ fn a_request_prints_its_new_id() {
 fn a_session_created_without_a_name_gets_a_generated_one() {
     let socket = start_server();
     let session = ok(&socket, &["create-session"]);
-    let listing = ok(&socket, &["--json", "list"]);
-    let name = listing
+    let name = session_name(&socket, &session);
+    assert!(rusty_mux_core::is_generated(&name), "{name}");
+    let help = ok(&socket, &["help", "create-session"]);
+    assert!(help.contains("[--name <text>]"), "{help}");
+}
+
+#[test]
+fn the_naming_hook_asks_only_while_the_name_is_generated() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session"]);
+    let block = "00000000-0000-0000-0000-00000000000b";
+    let hook = |session: &str, flag: &[&str]| {
+        let mut args = vec!["agent", "hook"];
+        args.extend(flag);
+        let output = ctl_command(&socket, &args)
+            .env("RUSTY_MUX_SESSION", session)
+            .env("RUSTY_MUX_BLOCK", block)
+            .output()
+            .expect("run rusty-mux-ctl");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        stdout(&output)
+    };
+    let asked = hook(&session, &["--name-session"]);
+    assert!(
+        asked.contains(&format!("name-session --session {session} --name NAME")),
+        "{asked}"
+    );
+    assert!(
+        !hook(&session, &[]).contains("name-session"),
+        "not opted in"
+    );
+
+    rename(&socket, &session, "fix-login");
+    let named = hook(&session, &["--name-session"]);
+    assert!(
+        named.contains(block) && !named.contains("name-session"),
+        "{named}"
+    );
+
+    // A name chosen in the generated shape is still chosen.
+    let chosen = ok(&socket, &["create-session", "--name", "quiet-harbor"]);
+    let text = hook(&chosen, &["--name-session"]);
+    assert!(
+        text.contains(block) && !text.contains("name-session"),
+        "{text}"
+    );
+}
+
+fn rename(socket: &Path, session: &str, name: &str) {
+    ok(
+        socket,
+        &["rename-session", "--session", session, "--name", name],
+    );
+}
+
+/// Runs the naming hook's instruction; true if the name was taken.
+fn name_session(socket: &Path, session: &str, name: &str) -> bool {
+    let output = ctl(
+        socket,
+        &["name-session", "--session", session, "--name", name],
+    );
+    match output.status.code() {
+        Some(0) => true,
+        Some(1) => {
+            let err = String::from_utf8_lossy(&output.stderr);
+            assert!(err.contains("chosen name"), "{err}");
+            false
+        }
+        other => panic!("{other:?}: {output:?}"),
+    }
+}
+
+/// The name `list` reports for `session`.
+fn session_name(socket: &Path, session: &str) -> String {
+    ok(socket, &["--json", "list"])
         .lines()
         .find_map(|line| {
             let rusty_json::Value::Object(map) =
@@ -161,16 +234,29 @@ fn a_session_created_without_a_name_gets_a_generated_one() {
             else {
                 panic!("object")
             };
-            let is_it = map.get("session") == Some(&rusty_json::Value::String(session.clone()));
+            let is_it = map.get("session") == Some(&rusty_json::Value::String(session.into()));
             match (is_it, map.get("name")) {
                 (true, Some(rusty_json::Value::String(name))) => Some(name.clone()),
                 _ => None,
             }
         })
-        .expect("the session is listed");
-    assert!(rusty_mux_core::is_generated(&name), "{name}");
-    let help = ok(&socket, &["help", "create-session"]);
-    assert!(help.contains("[--name <text>]"), "{help}");
+        .expect("the session is listed")
+}
+
+#[test]
+fn a_stale_naming_instruction_keeps_a_name_chosen_since() {
+    let socket = start_server();
+    // The hook told the agent to name this session; then a person did.
+    let session = ok(&socket, &["create-session"]);
+    rename(&socket, &session, "release-notes");
+    assert!(!name_session(&socket, &session, "fix-login"));
+    assert_eq!(session_name(&socket, &session), "release-notes");
+
+    // Two agents told to name one session: only the first does.
+    let shared = ok(&socket, &["create-session"]);
+    assert!(name_session(&socket, &shared, "fix-login"));
+    assert!(!name_session(&socket, &shared, "write-docs"));
+    assert_eq!(session_name(&socket, &shared), "fix-login");
 }
 
 #[test]

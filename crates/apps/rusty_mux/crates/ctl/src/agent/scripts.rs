@@ -6,6 +6,8 @@
 
 use rusty_json::Value;
 
+use super::layout::Ctl;
+
 /// The first line of every file this module writes.
 pub(super) const MARK: &str =
     "// Installed by `rusty-mux-ctl agent setup`; `rusty-mux-ctl agent remove` deletes it.\n";
@@ -13,7 +15,7 @@ pub(super) const MARK: &str =
 /// The OpenCode plugin. `experimental.chat.system.transform` is OpenCode's
 /// documented way to add system prompt lines; a ctl that fails or is gone
 /// adds nothing, as a hook that prints nothing does.
-pub(super) fn opencode(ctl: &str) -> String {
+pub(super) fn opencode(ctl: Ctl<'_>) -> String {
     format!(
         r#"{MARK}// Tells OpenCode which rusty_mux block it runs in.
 import {{ execFile }} from "node:child_process";
@@ -22,7 +24,7 @@ const CTL = {ctl};
 
 export const RustyMux = async () => {{
   const text = await new Promise((resolve) => {{
-    execFile(CTL, ["agent", "hook"], {{ timeout: 5000 }}, (error, stdout) =>
+    execFile(CTL, {args}, {{ timeout: 5000 }}, (error, stdout) =>
       resolve(error ? "" : stdout.trim()),
     );
   }});
@@ -34,7 +36,8 @@ export const RustyMux = async () => {{
   }};
 }};
 "#,
-        ctl = literal(ctl)
+        ctl = literal(ctl.path),
+        args = list(ctl.args()),
     )
 }
 
@@ -42,7 +45,7 @@ export const RustyMux = async () => {{
 /// `before_agent_start` adds the answer to each run's system prompt, as a
 /// prompt section (`appendSystemPrompt`) where Pi has them, else by
 /// returning the whole prompt as older Pi wants.
-pub(super) fn pi(ctl: &str) -> String {
+pub(super) fn pi(ctl: Ctl<'_>) -> String {
     format!(
         r#"{MARK}// Tells Pi which rusty_mux block it runs in.
 const CTL = {ctl};
@@ -50,7 +53,7 @@ const CTL = {ctl};
 export default function rustyMux(pi: any) {{
   let text = "";
   pi.on("session_start", async () => {{
-    const result = await pi.exec(CTL, ["agent", "hook"], {{ timeout: 5000 }});
+    const result = await pi.exec(CTL, {args}, {{ timeout: 5000 }});
     text = result.code === 0 ? result.stdout.trim() : "";
   }});
   pi.on("before_agent_start", async (event: any) => {{
@@ -64,8 +67,16 @@ export default function rustyMux(pi: any) {{
   }});
 }}
 "#,
-        ctl = literal(ctl)
+        ctl = literal(ctl.path),
+        args = list(ctl.args()),
     )
+}
+
+/// `words` as a JavaScript array of string literals, spaced as the hook
+/// files always were: `["agent", "hook"]`.
+fn list(words: &[&str]) -> String {
+    let items: Vec<String> = words.iter().map(|w| literal(w)).collect();
+    format!("[{}]", items.join(", "))
 }
 
 /// `text` as a JavaScript string literal: JSON's quoting is valid

@@ -1251,3 +1251,75 @@ fn a_generated_session_name_is_one_no_other_session_has() {
         [taken, first, second].map(|session| Event::SessionCreated { session })
     );
 }
+
+#[test]
+fn a_session_keeps_its_generated_mark_until_renamed() {
+    let mut mux = Mux::new();
+    let chosen = mux.create_session("quiet-harbor").unwrap();
+    let made = mux.create_generated_session(7).unwrap();
+    assert!(
+        !mux.session(chosen).unwrap().generated(),
+        "chosen, whatever its spelling"
+    );
+    assert!(mux.session(made).unwrap().generated());
+
+    let name = mux.session(made).unwrap().name().to_owned();
+    mux.rename(EntityId::Session(made), name).unwrap();
+    assert!(
+        mux.session(made).unwrap().generated(),
+        "a no-op rename keeps it"
+    );
+    mux.rename(EntityId::Session(made), "fix-login").unwrap();
+    assert!(!mux.session(made).unwrap().generated());
+}
+
+#[test]
+fn name_session_names_only_a_generated_name_and_only_once() {
+    let mut mux = Mux::new();
+    let chosen = mux.create_session("quiet-harbor").unwrap();
+    let made = mux.create_generated_session(7).unwrap();
+    mux.take_events();
+
+    assert_eq!(
+        mux.name_session(chosen, "fix-login"),
+        Err(Error::NameChosen(chosen)),
+        "a chosen name stays, whatever its spelling"
+    );
+    mux.name_session(made, "fix-login").unwrap();
+    assert_eq!(
+        mux.name_session(made, "write-docs"),
+        Err(Error::NameChosen(made)),
+        "the second of two stale attempts is refused"
+    );
+    assert_eq!(mux.session(chosen).unwrap().name(), "quiet-harbor");
+    assert_eq!(mux.session(made).unwrap().name(), "fix-login");
+    assert_eq!(
+        mux.take_events(),
+        [Event::SessionRenamed {
+            session: made,
+            name: "fix-login".into()
+        }]
+    );
+    let gone = SessionId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.name_session(gone, "x"),
+        Err(Error::UnknownSession(gone))
+    );
+}
+
+#[test]
+fn name_session_to_the_current_name_still_claims_it() {
+    let mut mux = Mux::new();
+    let made = mux.create_generated_session(7).unwrap();
+    let name = mux.session(made).unwrap().name().to_owned();
+    mux.take_events();
+
+    mux.name_session(made, name.clone()).unwrap();
+    assert!(!mux.session(made).unwrap().generated());
+    assert_eq!(
+        mux.name_session(made, "write-docs"),
+        Err(Error::NameChosen(made))
+    );
+    assert_eq!(mux.session(made).unwrap().name(), name);
+    assert_eq!(mux.take_events(), [], "the name never changed");
+}

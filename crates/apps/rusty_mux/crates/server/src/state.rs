@@ -80,7 +80,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_CONTROL)
     .union(Features::LAYOUT_EDIT)
     .union(Features::FOCUS)
-    .union(Features::SESSION_NAMES);
+    .union(Features::SESSION_NAMES)
+    .union(Features::NAME_SESSION);
 
 /// Fresh randomness to pick a generated session name with.
 fn name_seed() -> u64 {
@@ -905,6 +906,11 @@ impl State {
                 self.require(client, Features::LABELS, "rename")
                     .and_then(|()| done(self.mux.rename(target, name))),
             ),
+            M::NameSession { req, session, name } => (
+                req,
+                self.require(client, Features::NAME_SESSION, "name-session")
+                    .and_then(|()| done(self.mux.name_session(session, name))),
+            ),
             M::Disconnect {
                 req,
                 client: target,
@@ -1109,6 +1115,7 @@ impl State {
                 session: session.id(),
                 name: session.name().to_owned(),
                 active: session.active(),
+                generated: session.generated(),
             });
             for window in session.windows().iter().filter_map(|w| self.mux.window(*w)) {
                 entries.push(Entry::Window {

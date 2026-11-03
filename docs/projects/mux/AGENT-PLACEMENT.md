@@ -53,6 +53,24 @@ nothing outside rusty_mux. Codex runs a new hook only after it is trusted
 (`/hooks` in Codex), and a project's hook only in a project whose `.codex`
 layer is trusted.
 
+`agent setup --name-session` (C50, opt-in) installs the hook as
+`rusty-mux-ctl agent hook --name-session`. When the agent starts, the
+hook asks the server about its session. Only while the server made up the
+name (such as `quiet-harbor`) and nobody has renamed the session since does
+it add one sentence asking the agent to name the session after its task,
+once, with `name-session`. The server remembers that mark per session;
+the spelling alone is no proof, since a person may choose such a name.
+`name-session` renames only while the mark is set, checking and renaming in
+one step, so an instruction given before a person (or another agent) named
+the session is refused and their name stays. With no answer from the server
+within 2 s, or a server without `name-session`, the sentence is left out.
+On Linux 2 s bounds the whole lookup; elsewhere connecting is checked
+against it only once before a blocking connect, and on Windows writes are
+not timed out (`ctl/src/conn.rs`), so there the only hard bound is the
+host's: OpenCode's and Pi's scripts kill the hook after 5 s, and Claude
+Code and Codex apply their own hook timeouts. `agent setup` without the
+flag puts the plain hook back; `agent status` checks for the form its flag names.
+
 `agent setup --project` writes the same files under the current directory.
 Each hook names this machine's ctl by absolute path, so a hook committed to
 a repository fails quietly (prints nothing) for anyone whose ctl is
