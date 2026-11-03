@@ -3979,13 +3979,13 @@ mod client {
             app.settle();
         }
 
-        #[cfg(unix)]
         #[test]
         fn a_new_session_gets_a_generated_name_where_the_server_makes_them() {
             assert_eq!(first_session_name(CONTROL), "");
             assert_eq!(first_session_name(Features::CHECKPOINT_V6), "main");
         }
 
+        #[cfg(unix)]
         #[test]
         fn the_sessions_active_window_is_followed() {
             let (mut app, _inbox, [control, _a, _b]) = following();
