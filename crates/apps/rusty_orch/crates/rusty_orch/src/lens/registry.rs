@@ -384,6 +384,15 @@ mod tests {
     }
 
     #[test]
+    fn the_longest_timeout_is_accepted_without_a_call() {
+        let day = r#", "timeout_secs": 86400"#;
+        let local = format!("{LOCAL}{day}");
+        let (r, fake) = build(&config(day, day, &local), Assertions::default());
+        assert!(r.is_ok(), "{:?}", r.err());
+        assert!(calls(&fake).is_empty());
+    }
+
+    #[test]
     fn settings_are_checked_at_load_with_the_field_named() {
         let refused = |claude: &str, codex: &str, local: &str, expected: &str| {
             let (r, fake) = build(&config(claude, codex, local), Assertions::default());
@@ -402,6 +411,18 @@ mod tests {
             r#", "timeout_secs": 0"#,
             LOCAL,
             "providers.codex.timeout_secs",
+        );
+        refused(
+            r#", "timeout_secs": 86401"#,
+            "",
+            LOCAL,
+            "providers.claude.timeout_secs: a whole number from 1 to 86400",
+        );
+        refused(
+            "",
+            "",
+            r#", "base_url": "http://127.0.0.1/v1", "model": "q", "timeout_secs": 18446744073709551615"#,
+            "providers.local.timeout_secs: a whole number from 1 to 86400",
         );
         refused(
             "",
