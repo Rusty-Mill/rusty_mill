@@ -2,7 +2,7 @@
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -396,4 +396,72 @@ fn abandoned_lookups_are_bounded_across_calls() {
         refused.iter().all(|e| e.contains("lookups still pending")),
         "{errors:?}"
     );
+}
+
+/// A resolver that blocks until its gate opens, then answers `addr`.
+#[derive(Clone)]
+struct GatedDns {
+    open: Arc<(Mutex<bool>, Condvar)>,
+    addr: SocketAddr,
+}
+
+impl GatedDns {
+    fn release(&self) {
+        let (lock, cvar) = &*self.open;
+        *lock.lock().expect("gate") = true;
+        cvar.notify_all();
+    }
+}
+
+impl Resolve for GatedDns {
+    fn resolve(&self, _: &str, _: u16) -> io::Result<Vec<SocketAddr>> {
+        let (lock, cvar) = &*self.open;
+        let mut open = lock.lock().expect("gate");
+        while !*open {
+            open = cvar.wait(open).expect("gate");
+        }
+        Ok(vec![self.addr])
+    }
+}
+
+#[test]
+fn lookups_recover_once_the_resolver_unblocks() {
+    let (addr, _seen) = serve_once(Some(response("200 OK", OK_BODY)));
+    let dns = GatedDns {
+        open: Arc::new((Mutex::new(false), Condvar::new())),
+        addr,
+    };
+    let config = |ms| {
+        Config::new(
+            "http://llama.lan:8080/v1",
+            "m",
+            None,
+            Duration::from_millis(ms),
+            false,
+        )
+        .expect("config")
+    };
+    let stalled = OpenAiHttp::new(config(200)).with_resolver(dns.clone());
+    for _ in 0..MAX_PENDING_LOOKUPS {
+        stalled.complete(&PROMPT).expect_err("stalled");
+    }
+    let full = format!("{:?}", stalled.complete(&PROMPT).expect_err("full"));
+    assert!(full.contains("lookups still pending"), "{full}");
+
+    dns.release();
+    let start = Instant::now();
+    let c = loop {
+        match stalled.complete(&PROMPT) {
+            Ok(c) => break c,
+            Err(e) if format!("{e:?}").contains("lookups still pending") => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(2),
+                    "slots never freed"
+                );
+                thread::yield_now();
+            }
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    };
+    assert_eq!(c.text, r#"{"posts":[]}"#);
 }
