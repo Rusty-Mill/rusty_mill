@@ -54,7 +54,7 @@ impl Escalations for Fake {
 
 fn escalation(task: &str, rev: u64) -> Escalation {
     serde_json::from_value(json!({
-        "id": format!("{task}/msg:1/3"), "task": task, "rev": rev, "seq": 3,
+        "id": format!("{task}/msg:1/3"), "task": task, "brief": 2, "rev": rev, "seq": 3,
         "reason": "Irreversible",
         "claim": {"id": 1, "text": "ship it", "status": "Escalated", "score": 12,
                   "confidence": 96, "epoch": 0, "spent": 2, "budget": 16},
@@ -225,4 +225,63 @@ fn without_a_bbp_host_the_inbox_says_how_to_enable_it() {
         Roles::default(),
     );
     assert!(refused(call(&board, &owner(), "inbox_list", json!({}))).contains("--bbp-bin"));
+}
+
+#[test]
+fn rejecting_acted_on_work_files_one_remediate_card() {
+    let mut shipped = escalation("T1", 7);
+    shipped.reason = rusty_mill_board::inbox::Reason::ReopenedAfterAction;
+    shipped.acted = vec![rusty_mill_board::inbox::Acted {
+        claim: 1,
+        marks: vec!["pr-7".into()],
+    }];
+    let fake = Arc::new(Fake {
+        rows: vec![shipped],
+        ..Fake::default()
+    });
+    let board: Shared = Board::new(
+        Box::new(MemStore::default()) as Box<dyn Store>,
+        Roles::default(),
+    )
+    .with_escalations(Arc::clone(&fake) as Arc<dyn Escalations>);
+    let nano = board.roles().actor("nano", "human").unwrap();
+    let card = board.add(&nano, "ship the release", "", vec![]).unwrap();
+    board.bind_execution(card.id, link("T1"), &nano).unwrap();
+    let reject = json!({"id": "T1/msg:1/3", "rev": 7, "action": "reject"});
+
+    let out = call(&board, &owner(), "inbox_act", reject.clone()).unwrap();
+    assert_eq!(out["remediated"]["outcome"], "Done", "{out}");
+    let title = out["remediated"]["card"]["title"].as_str().unwrap();
+    assert_eq!(title, "Remediate: ship it");
+    let made = board
+        .list(None)
+        .unwrap()
+        .into_iter()
+        .find(|c| c.title == title)
+        .unwrap();
+    assert!(
+        made.body.contains("pr-7") && made.body.contains("claim msg:1 drop"),
+        "{}",
+        made.body
+    );
+    assert!(made.tags.contains(&"remediate:T1/msg:1/3".to_owned()));
+
+    // A retry of the same escalation finds the card instead of filing a second.
+    call(&board, &owner(), "inbox_act", reject).unwrap();
+    let count = board
+        .list(None)
+        .unwrap()
+        .iter()
+        .filter(|c| c.title == title)
+        .count();
+    assert_eq!(count, 1);
+    // Approve keeps the work: nothing to remediate.
+    let out = call(
+        &board,
+        &owner(),
+        "inbox_act",
+        json!({"id": "T1/msg:1/3", "rev": 7, "action": "approve"}),
+    )
+    .unwrap();
+    assert_eq!(out, json!({"outcome": "Done"}));
 }

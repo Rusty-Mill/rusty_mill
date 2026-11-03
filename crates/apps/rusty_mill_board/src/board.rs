@@ -13,7 +13,7 @@ use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
     MoveRules, import_id, text_hash,
 };
-use crate::inbox::{Action, DryRun, Escalation, Escalations, InboxError, Outcome};
+use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
 use crate::projects::Projects;
 use crate::roadmap::{Roadmap, roadmap};
@@ -400,11 +400,14 @@ impl<S: Store> Board<S> {
         dry_run: bool,
     ) -> Result<InboxAnswer, BoardError> {
         let source = self.inbox_source(by)?;
-        let e: Escalation = self
+        let InboxItem {
+            escalation: e,
+            card: owner,
+            ..
+        } = self
             .inbox(by)?
             .into_iter()
-            .map(|i| i.escalation)
-            .find(|e| e.id == id)
+            .find(|i| i.escalation.id == id)
             .ok_or_else(|| BoardError::Refused(format!("no open escalation {id}")))?;
         if e.rev != rev {
             return Err(BoardError::Refused(format!(
@@ -418,10 +421,73 @@ impl<S: Store> Board<S> {
                 .map(InboxAnswer::DryRun)
                 .map_err(inbox_error);
         }
-        source
+        let dropped = e.dropped_acted(action);
+        // The dry run goes on the Remediate card, so take it before acting.
+        let preview = (!dropped.is_empty())
+            .then(|| source.preview(&e, action))
+            .transpose()
+            .map_err(inbox_error)?;
+        let outcome = source
             .act(&e, action, &answerer(&by.name))
-            .map(InboxAnswer::Outcome)
-            .map_err(inbox_error)
+            .map_err(inbox_error)?;
+        let (Some(dry), Outcome::Done) = (preview, &outcome) else {
+            return Ok(InboxAnswer::Outcome(outcome));
+        };
+        let project = owner.map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project);
+        let card = self.remediate(by, &project, &e, &dropped, &dry)?;
+        Ok(InboxAnswer::Remediated { outcome, card })
+    }
+
+    /// The one Backlog "Remediate" card for `e`'s dropped acted-on work (#595 §4).
+    /// Tagged with the escalation id, so a retry finds it rather than adding a second.
+    fn remediate(
+        &self,
+        by: &Actor,
+        project: &str,
+        e: &Escalation,
+        dropped: &[&Acted],
+        dry: &DryRun,
+    ) -> Result<InboxCard, BoardError> {
+        let tag = format!("remediate:{}", e.id);
+        if let Some(c) = self.cards()?.iter().find(|c| c.tags.contains(&tag)) {
+            return Ok(InboxCard::of(c));
+        }
+        let text = |id: u64| {
+            e.candidates
+                .iter()
+                .chain(e.claim.as_ref())
+                .find(|c| c.id == id)
+                .map_or_else(|| format!("msg:{id}"), |c| c.text.clone())
+        };
+        let mut body = format!(
+            "The decision on BBP escalation `{}` dropped work that was already acted on. Undo or reconcile it.\n\n",
+            e.id
+        );
+        for x in dropped {
+            body.push_str(&format!(
+                "- msg:{} \"{}\": {}\n",
+                x.claim,
+                text(x.claim),
+                x.marks.join(", ")
+            ));
+        }
+        let events: Vec<&str> = dry
+            .events
+            .iter()
+            .filter_map(|v| v.as_object()?.keys().next().map(String::as_str))
+            .collect();
+        body.push_str(&format!(
+            "\nBBP dry run of `{} {}`: {}\n",
+            dry.step.verb,
+            dry.step.args.join(" "),
+            events.join(", ")
+        ));
+        let title = format!(
+            "Remediate: {}",
+            text(dropped.first().map_or(0, |x| x.claim))
+        );
+        let card = self.add_in(by, project, &title, &body, vec![tag])?;
+        Ok(InboxCard::of(&card))
     }
 
     fn inbox_source(&self, by: &Actor) -> Result<&Arc<dyn Escalations>, BoardError> {
@@ -1125,6 +1191,8 @@ pub struct InboxCard {
     pub number: Option<u64>,
     /// Card title.
     pub title: String,
+    /// Its project.
+    pub project: String,
 }
 
 impl InboxCard {
@@ -1133,6 +1201,7 @@ impl InboxCard {
             id: c.id,
             number: c.number,
             title: c.title.clone(),
+            project: c.project.clone(),
         }
     }
 }
@@ -1145,6 +1214,13 @@ pub enum InboxAnswer {
     DryRun(DryRun),
     /// What happened.
     Outcome(Outcome),
+    /// It was done, and it dropped acted-on work: the Remediate card made for it.
+    Remediated {
+        /// What happened.
+        outcome: Outcome,
+        /// The Backlog card to undo or reconcile the work.
+        card: InboxCard,
+    },
 }
 
 fn inbox_error(e: InboxError) -> BoardError {

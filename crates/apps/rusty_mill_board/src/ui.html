@@ -447,8 +447,9 @@ async function decide(item,action){
     if(d.response.Rejected){toast("BBP would refuse: "+d.response.Rejected.code+" "+d.response.Rejected.detail);return}
     const then=d.then.length?"\nThen: "+d.then.map(s=>s.verb+" "+s.args.join(" ")).join("; "):"";
     if(!confirm(d.step.verb+" "+d.step.args.join(" ")+"\nWould write: "+changes(d)+then))return;
-    const out=(await api("inbox_act",args)).outcome;
+    const r=await api("inbox_act",args),out=r.outcome??r.remediated.outcome;
     if(out.Refused)toast("Refused at step "+(out.Refused.step+1)+": "+out.Refused.code+" "+out.Refused.detail);
+    else if(r.remediated)toast("Filed "+(r.remediated.card.number?"#"+r.remediated.card.number+" ":"")+r.remediated.card.title);
   }catch(e){toast(e.message)}
   await refresh().catch(()=>{});
 }
@@ -461,7 +462,9 @@ function renderDecisions(){
     const s=el("section",null,"col"),c=it.claim;
     s.append(el("h2",it.label+(it.reversible===false?" · irreversible":"")+(it.stakes?" · "+it.stakes+" stakes":"")));
     if(it.card){const h=el("p",null,"meta");h.append(el("a",(it.card.number?"#"+it.card.number+" ":"")+it.card.title));h.firstChild.href="#";h.firstChild.onclick=e=>{e.preventDefault();show(it.card.id)};s.append(h)}
-    if(c){s.append(el("p",c.text),el("p",pct(c),"meta"))}else s.append(el("p","Task "+it.task+" crossed a budget total and paused."));
+    if(c){s.append(el("p",c.text),el("p",pct(c),"meta"))}else s.append(el("p","Task "+it.task+" paused."));
+    for(const t of it.totals||[])s.append(el("p",t.field+": spent "+t.spent+" of "+t.limit+"; Approve adds "+t.allowance,"meta"));
+    for(const a of it.acted||[])s.append(el("p","Already acted on: msg:"+a.claim+(a.marks.length?" ("+a.marks.join(", ")+")":"")+". Dropping it files a Remediate card.","meta"));
     for(const e of it.evidence)s.append(el("p",(e.delta>0?"+":"")+e.delta+" "+e.kind.toLowerCase()+" "+e.direction.toLowerCase()+" by "+e.author+" (msg:"+e.msg+")","meta"));
     for(const k of it.candidates){
       const d=el("div",null,"cand");d.append(el("b",k.text),el("p",pct(k),"meta"));
