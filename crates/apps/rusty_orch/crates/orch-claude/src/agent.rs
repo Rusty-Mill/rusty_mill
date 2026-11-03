@@ -37,6 +37,9 @@ pub const SCRUBBED_ENV: &[&str] = &[
     "ANTHROPIC_BASE_URL",
     "CLAUDE_CODE_USE_BEDROCK",
     "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+    "CLAUDE_CODE_USE_MANTLE",
 ];
 
 /// The id this adapter serves by default.
@@ -243,6 +246,12 @@ impl<C: CommandRunner> ClaudeAgent<C> {
     /// probe runs with the same environment as the run, so a scrubbed key
     /// cannot make it report a login the run will not have.
     pub(crate) fn probe_login(&self) -> Result<(), ClassifiedError> {
+        self.probe().map(drop)
+    }
+
+    /// The probe's exit when it reports a login, else the unavailable
+    /// prerequisite.
+    pub(crate) fn probe(&self) -> Result<Exit, ClassifiedError> {
         let exit = self
             .runner
             .run_in(
@@ -255,7 +264,7 @@ impl<C: CommandRunner> ClaudeAgent<C> {
             .map_err(exec_error)
             .map_err(ClassifiedError::Transient)?;
         if exit.status == 0 {
-            return Ok(());
+            return Ok(exit);
         }
         Err(not_logged_in(&excerpt(&exit.stdout)))
     }

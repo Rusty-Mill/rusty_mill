@@ -84,6 +84,9 @@ fn constants_are_pinned() {
             "ANTHROPIC_BASE_URL",
             "CLAUDE_CODE_USE_BEDROCK",
             "CLAUDE_CODE_USE_VERTEX",
+            "CLAUDE_CODE_USE_FOUNDRY",
+            "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+            "CLAUDE_CODE_USE_MANTLE",
         ]
     );
     assert_eq!(orch_claude::DEFAULT_TIMEOUT, Duration::from_secs(600));

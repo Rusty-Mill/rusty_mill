@@ -16,7 +16,9 @@
 //! [`ClaudeAgent`] also serves the lens runner's [`orch_lens::Model`]
 //! (#594): the question's prefix is the system prompt, its body goes on
 //! stdin, and the reply text must pass [`orch_lens::parse`]. A lens
-//! question runs with no tools unless [`ClaudeAgent::lens_read_only`].
+//! question runs with no tools unless [`ClaudeAgent::lens_read_only`],
+//! and only on a subscription login ([`SUBSCRIPTION_AUTH`]): `claude -p`
+//! cannot bound an agent loop's cost before the call.
 #![cfg_attr(
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
@@ -29,4 +31,5 @@ mod prompt;
 pub use agent::{
     ClaudeAgent, AUTH_TIMEOUT, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT, ID, SCRUBBED_ENV, TOOLS,
 };
+pub use lens::SUBSCRIPTION_AUTH;
 pub use prompt::render;
