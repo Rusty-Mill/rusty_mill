@@ -732,8 +732,24 @@ const FLAG_ONLY: &str = "--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n
 #[test]
 fn protected_paths_are_refused_outside_an_accepted_tests_claim() {
     let dir = tempdir("protected");
+    let base = "a".repeat(40);
     let mut set = profiles();
     set.protected = vec!["tests/**".into()];
+    // Protected paths need a baseline, and globs a matcher reads literally
+    // (protecting nothing) are refused.
+    for (globs, baseline) in [
+        (vec!["tests/**"], None),
+        (vec!["tests/[ab].rs"], Some(base.clone())),
+        (vec!["/tests/**"], Some(base.clone())),
+    ] {
+        let mut bad = set.clone();
+        bad.protected = globs.into_iter().map(str::to_owned).collect();
+        bad.baseline = baseline;
+        let (code, detail) = rejected(open(&dir, &bad, Ok(())));
+        assert_eq!(code, Code::BadClaimsConfig, "{detail}");
+        assert!(detail.starts_with("protected:"), "{detail}");
+    }
+    set.baseline = Some(base.clone());
     assert!(matches!(open(&dir, &set, Ok(())), Response::Stored(_)));
     for who in ["a", "b"] {
         admin::assign(
@@ -745,9 +761,11 @@ fn protected_paths_are_refused_outside_an_accepted_tests_claim() {
         )
         .expect("assign");
     }
-    let base = "a".repeat(40);
     let c = claim(&dir, "a", "flag", true);
     let mut s = server(&dir, "a");
+    // Another base could carry weaker tests that no diff shows.
+    let (text, err) = put_candidate(&mut s, "old", &"b".repeat(40), FLAG_ONLY, c);
+    assert!(err && text.contains("baseline"), "{text}");
 
     let (text, err) = put_candidate(&mut s, "all", &base, DIFF, c);
     assert!(err && text.contains("ProtectedPath"), "{text}");
@@ -793,6 +811,16 @@ fn protected_paths_are_refused_outside_an_accepted_tests_claim() {
     let reuse = reuse.replace("\"reuse\"", "\"reuse2\"");
     let (text, err) = call(&mut s, "put_artifact", &reuse);
     assert!(!err, "{text}");
+    // Once T is dropped its diff is no longer exempt, but the committed op
+    // still replays its stored answer.
+    let rev = state(&dir).rev;
+    let r = human::perform(&dir, &task(), "claim", &[&arg, "drop"], Some(rev)).expect("drop");
+    assert_eq!(r, Response::Ok);
+    let (again, err) = call(&mut s, "put_artifact", &reuse);
+    assert!(!err && again == text, "{again}");
+    let fresh = reuse.replace("\"reuse2\"", "\"reuse3\"");
+    let (text, err) = call(&mut s, "put_artifact", &fresh);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
     // A fresh diff to the same path is still refused.
     let (text, err) = put_candidate(&mut s, "again", &base, TESTS_ONLY, c);
     assert!(err && text.contains("ProtectedPath"), "{text}");

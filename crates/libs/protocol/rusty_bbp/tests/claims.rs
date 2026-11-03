@@ -63,6 +63,8 @@ struct Cx {
     now: Time,
     ops: u64,
     brief: ArtId,
+    /// The tree the runner reports; `None` unless a test sets it.
+    tree: Option<Sha256>,
 }
 
 fn pid(s: &str) -> PrincipalId {
@@ -77,6 +79,7 @@ impl Cx {
             now: Time(1_000),
             ops: 0,
             brief: ArtId(0),
+            tree: None,
         };
         let r = cx.run(Command::Open(open_task(Mode::Claims, Some(cfg), roster())));
         let Response::Stored(brief) = r else {
@@ -339,7 +342,7 @@ impl Cx {
                     failed: *f,
                 })
                 .collect(),
-            tree: None,
+            tree: self.tree,
             sandbox: "landlock+seccomp:no-net".into(),
             log,
             tests_changed,
@@ -3047,4 +3050,164 @@ fn cl_78_a_tests_claim_needs_support_from_outside_its_authors() {
     ok(cx.executed("a", y, Support, r));
     ok(cx.executed("b", y, Support, r));
     assert_eq!(cx.status(y), ClaimStatus::Accepted);
+}
+
+/// #597 review: a manifest names its base by any ref, so a holdout pass
+/// counts only on the tree the current candidate's latest report tested.
+#[test]
+fn cl_91_a_holdout_pass_counts_only_on_the_tree_the_build_tested() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    cx.tree = Some(Sha256::of(b"tree-1"));
+    let pass = stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+    ok(cx.executed("a", x, Support, pass));
+    ok(cx.executed("b", x, Support, pass));
+    // The base ref moved between the runs: the holdout built another tree.
+    cx.tree = Some(Sha256::of(b"tree-2"));
+    stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+    assert_eq!(cx.status(x), ClaimStatus::Open);
+    assert!(card_of(&cx, x).holdout_due);
+    cx.tree = Some(Sha256::of(b"tree-1"));
+    stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+}
+
+/// #597 review: the endorsement of a candidate's test change also covers
+/// the holdout candidates building its code, whichever comes first.
+#[test]
+fn cl_92_an_endorsement_unlocks_holdout_reports_of_the_same_code() {
+    let changed = || vec![TestChange::modified("tests/core.rs")];
+    for endorse_first in [false, true] {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+        assert!(cx.rec(x).failing.contains("holdout:api"));
+        let k2 = cx.candidate("a", x);
+        if endorse_first {
+            ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
+        }
+        let h = stored(cx.holdout_of("h", k2));
+        let run = cx.live_run(h);
+        let secret = cx.st.secret_for(run);
+        stored(cx.report_full(
+            h,
+            run,
+            secret,
+            holdout_digest(),
+            &[("holdout:api", 0)],
+            changed(),
+        ));
+        assert_eq!(
+            cx.rec(x).failing.contains("holdout:api"),
+            !endorse_first,
+            "endorse first: {endorse_first}"
+        );
+        if !endorse_first {
+            ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
+            assert!(cx.rec(x).failing.is_empty());
+        }
+    }
+}
+
+/// #597 review: a suite version makes every claim with a candidate due
+/// again, so the delta shows them; a retired suite is never adopted again,
+/// or its old passes would count once more.
+#[test]
+fn cl_93_suite_versions_reach_the_delta_and_never_return() {
+    let v2 = Sha256::of(b"holdout suite v2");
+    let mut cx = holdout_cx();
+    let y = cx.low();
+    let ky = cx.candidate("a", y);
+    stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(ky, &[("holdout:api", 0)]));
+    let bare = cx.low();
+    let before = cx.st.rev;
+    ok(cx.host(HostAction::HoldoutExtended { digest: v2 }));
+    let delta = rusty_bbp::claims::delta_ids(
+        &cx.st.claims,
+        before,
+        &["http".into()],
+        &rusty_bbp::claims::Sight::all(),
+    );
+    assert!(delta.contains(&y), "{delta:?}");
+    assert!(
+        !delta.contains(&bare),
+        "no candidate, nothing due: {delta:?}"
+    );
+    // Back to v1, by the host or the human: refused.
+    let v1 = holdout_digest();
+    assert_eq!(
+        rejected(cx.host(HostAction::HoldoutExtended { digest: v1 })),
+        Code::Duplicate
+    );
+    assert_eq!(
+        rejected(cx.human(HumanAction::HoldoutUpdated { digest: v1 })),
+        Code::Duplicate
+    );
+    assert_eq!(cx.st.claims.holdout_digest, Some(v2));
+    let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
+    assert_eq!(replayed.claims, cx.st.claims);
+}
+
+/// #597 review: a host rule passed to `dispatch_guarded` is judged against
+/// the state the commit lands on: after a revision conflict it is judged
+/// again on the reloaded state, and its refusal leaves the log alone.
+#[test]
+fn cl_94_a_dispatch_guard_is_rejudged_after_a_reload() {
+    let mut store = MemStore::new();
+    let brief = store.blob_put(b"brief");
+    let mut d = Driver::new(store, TaskId::from("t"));
+    let mut o = open_task(Mode::Claims, None, roster());
+    o.brief = brief;
+    let art = stored(d.dispatch(&Command::Open(o), Time(1_000)).expect("store"));
+    for who in ["a", "b"] {
+        let assign = Command::Assign {
+            role: RoleId::from(who),
+            principal: Principal {
+                id: pid(who),
+                kind: PrincipalKind::Agent {
+                    role: RoleId::from(who),
+                    vendor: "test".into(),
+                },
+            },
+        };
+        ok(d.dispatch(&assign, Time(1_000)).expect("store"));
+    }
+    let post = |d: &Driver<MemStore>, who: &str, op: &str, text: &str| Command::Agent {
+        principal: pid(who),
+        token: d.state.credential_for(&pid(who)),
+        op: OpId::from(op),
+        action: AgentAction::Post(Draft {
+            kind: MessageKind::Claim,
+            to: vec![Recipient::All],
+            body: Body::Claim(body(text)),
+            refs: vec![Ref::art(art)],
+            evidence: vec![],
+            reply_to: None,
+            yield_to: None,
+            gate: false,
+        }),
+    };
+    let stale = d.state.clone();
+    let first = post(&d, "a", "x", "x");
+    posted(d.dispatch(&first, Time(1_000)).expect("store"));
+    let committed = d.state.rev;
+    // b's server read the old revision; the rule only fails on the new one.
+    d.state = stale.clone();
+    let second = post(&d, "b", "y", "y");
+    let r = d
+        .dispatch_guarded(&second, Time(1_000), |st| {
+            (st.rev > stale.rev).then(|| Rejection::new(Code::ProtectedPath, "changed"))
+        })
+        .expect("store");
+    assert_eq!(rejected(r), Code::ProtectedPath);
+    assert_eq!(d.state.rev, committed, "nothing appended");
+    // A guard that holds on the reloaded state lets the command through.
+    d.state = stale;
+    posted(
+        d.dispatch_guarded(&second, Time(1_000), |_| None)
+            .expect("store"),
+    );
 }

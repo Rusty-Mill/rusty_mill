@@ -185,6 +185,9 @@ pub fn open_claims_task(
     if set.test_paths.is_empty() {
         return refuse("test_paths: the profile set must name its test paths".into());
     }
+    if let Err(e) = set.check_protected() {
+        return refuse(format!("protected: {e}"));
+    }
     let repo_dir = Path::new(repo);
     let dirs: &[&Path] = match repo_dir.is_absolute() {
         true => &[repo_dir],
