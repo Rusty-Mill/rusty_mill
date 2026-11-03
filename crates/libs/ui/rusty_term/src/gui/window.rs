@@ -610,10 +610,10 @@ struct WindowState<'a> {
     /// reporting (which button to report) and whether `?1002` reports motion
     /// at all (only while a button is down; `?1003` reports regardless).
     mouse_button_down: Option<MouseButtonKind>,
-    /// The key whose press a window shortcut consumed: its release is
-    /// swallowed too, so a child reading key-ups (win32-input-mode, Kitty
-    /// event types) never sees a release without its press.
-    swallowed_release: Option<PhysicalKey>,
+    /// Keys held down whose press a window shortcut consumed. Their repeats
+    /// and releases never reach the child, so one reading key-ups
+    /// (win32-input-mode, Kitty event types) sees no unpaired events.
+    consumed_keys: ConsumedKeys,
     /// Per-cell click actions for the chrome bar, rebuilt with each layout.
     hits: Vec<Hit>,
     /// An in-progress tab drag (press on a tab arms it; releasing clears).
@@ -2769,6 +2769,16 @@ impl WindowState<'_> {
                 window.request_redraw();
             }
         }
+    }
+
+    /// Run a key's action; returns whether it consumed the key. Only
+    /// [`Action::CopyOrSend`] with nothing selected leaves it for the child.
+    fn exec_action(&mut self, action: Action) -> bool {
+        if action == Action::CopyOrSend {
+            return self.copy_or_send();
+        }
+        self.run_action(action);
+        true
     }
 
     /// Dispatch a terminal-owned [`Action`] resolved from the keymap.
@@ -5124,7 +5134,7 @@ impl WindowState<'_> {
                         win32_input,
                     };
                     if let Some(bytes) =
-                        release_input(&mut self.swallowed_release, ui_owns_keys, &release)
+                        release_input(&mut self.consumed_keys, ui_owns_keys, &release)
                     {
                         self.write_child(&bytes);
                     }
@@ -5147,28 +5157,28 @@ impl WindowState<'_> {
                 // Terminal-owned shortcuts (configurable via the `[keys]` config
                 // section) are looked up before native encoding, so a bound chord
                 // never reaches the child.
-                if let PhysicalKey::Code(code) = event.physical_key
-                    && let Some(key) = chord_key(code)
-                {
-                    let chord = Chord::new(
-                        self.mods.control_key(),
-                        self.mods.shift_key(),
-                        self.mods.alt_key(),
-                        key,
-                    );
-                    let consumed = match self.config.keys.action(chord) {
-                        // Nothing selected: fall through so ^C interrupts.
-                        Some(Action::CopyOrSend) => self.copy_or_send(),
-                        Some(action) => {
-                            self.run_action(action);
-                            true
-                        }
-                        None => false,
-                    };
-                    if consumed {
-                        self.swallowed_release = Some(event.physical_key);
-                        return;
-                    }
+                let action = match event.physical_key {
+                    PhysicalKey::Code(code) => chord_key(code).and_then(|key| {
+                        self.config.keys.action(Chord::new(
+                            self.mods.control_key(),
+                            self.mods.shift_key(),
+                            self.mods.alt_key(),
+                            key,
+                        ))
+                    }),
+                    PhysicalKey::Unidentified(_) => None,
+                };
+                let mut consumed = std::mem::take(&mut self.consumed_keys);
+                let taken = route_key_down(
+                    &mut consumed,
+                    event.physical_key,
+                    event.repeat,
+                    action,
+                    |a| self.exec_action(a),
+                );
+                self.consumed_keys = consumed;
+                if taken {
+                    return;
                 }
                 // Ctrl+Alt+1..9 jump straight to that tab (the Windows
                 // Terminal convention; 9 = last tab, browser-style). After
@@ -5725,7 +5735,7 @@ impl<'a> App<'a> {
             last_grid_click: None,
             click_streak: 0,
             mouse_button_down: None,
-            swallowed_release: None,
+            consumed_keys: ConsumedKeys::default(),
             hits: Vec::new(),
             tab_drag: None,
             last_strip_click: None,
@@ -5990,11 +6000,11 @@ struct KeyRelease<'a> {
 /// would arrive unpaired) or a UI layer (overlay, search, copy mode) owns the
 /// keyboard. The swallowed key is cleared first, whatever owns the keys.
 fn release_input(
-    swallowed: &mut Option<PhysicalKey>,
+    consumed: &mut ConsumedKeys,
     ui_owns_keys: bool,
     r: &KeyRelease,
 ) -> Option<Vec<u8>> {
-    if take_if_eq(swallowed, r.physical) || ui_owns_keys {
+    if consumed.release(r.physical) || ui_owns_keys {
         return None;
     }
     if r.win32_input {
@@ -6014,13 +6024,65 @@ fn release_input(
     )
 }
 
-/// Clear `slot` and return true if it holds `key`.
-fn take_if_eq<T: PartialEq>(slot: &mut Option<T>, key: T) -> bool {
-    if slot.as_ref() != Some(&key) {
-        return false;
+/// Physical keys held down whose press a window shortcut consumed. Each
+/// stays until its own release, so overlapping shortcuts are independent.
+#[derive(Debug, Default)]
+struct ConsumedKeys(Vec<PhysicalKey>);
+
+impl ConsumedKeys {
+    /// A keydown of `key`. Returns whether it repeats a consumed press. A
+    /// fresh press of a key still listed means its release was lost (focus
+    /// change), so the stale entry is dropped and the press is new.
+    fn press(&mut self, key: PhysicalKey, repeat: bool) -> bool {
+        if !self.0.contains(&key) {
+            return false;
+        }
+        if repeat {
+            return true;
+        }
+        self.release(key);
+        false
     }
-    *slot = None;
-    true
+
+    fn consume(&mut self, key: PhysicalKey) {
+        if !self.0.contains(&key) {
+            self.0.push(key);
+        }
+    }
+
+    /// A key-up of `key`. Returns whether its press was consumed.
+    fn release(&mut self, key: PhysicalKey) -> bool {
+        let Some(i) = self.0.iter().position(|k| *k == key) else {
+            return false;
+        };
+        self.0.swap_remove(i);
+        true
+    }
+}
+
+/// Route a keydown the keymap resolved to `action` (None: unbound). `exec`
+/// runs an action and returns whether it consumed the key. Returns whether
+/// the key is consumed; if not, it goes on to the child. A repeat of a
+/// consumed press never reaches the child: a held Ctrl+C that copied must
+/// not turn into ^C once the selection is gone, and the child would see
+/// repeats with no press. Other actions still repeat (zoom, scrolling).
+fn route_key_down(
+    consumed: &mut ConsumedKeys,
+    key: PhysicalKey,
+    repeat: bool,
+    action: Option<Action>,
+    exec: impl FnOnce(Action) -> bool,
+) -> bool {
+    let held = consumed.press(key, repeat);
+    let taken = match action {
+        Some(Action::CopyOrSend) if held => true,
+        Some(action) => exec(action),
+        None => held,
+    };
+    if taken {
+        consumed.consume(key);
+    }
+    taken
 }
 
 /// What copying the selection achieved.
@@ -6595,14 +6657,14 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        Copied, Hit, ImeCommitTarget, KeyRelease, MenuKind, SETTINGS_CARDS_TOP, SETTINGS_FOOTER_H,
-        SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag, SettingsHit, Widget,
-        Zoom, accumulate_scroll_lines, arrow_presses, copy_text, display_path,
+        ConsumedKeys, Copied, Hit, ImeCommitTarget, KeyRelease, MenuKind, SETTINGS_CARDS_TOP,
+        SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
+        SettingsHit, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text, display_path,
         drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
         ime_cursor_area_origin, is_openable_url, mix, osc52_reply, pane_pixel_point,
-        path_from_file_uri, put_text, read_git_branch, release_input, settings_hit,
+        path_from_file_uri, put_text, read_git_branch, release_input, route_key_down, settings_hit,
         settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
-        tab_widths, take_if_eq, visible_tab_range, widget_text, zoom_px,
+        tab_widths, visible_tab_range, widget_text, zoom_px,
     };
     use crate::core::Cell;
 
@@ -6871,70 +6933,151 @@ mod tests {
 
     type Write = fn(String) -> Result<(), String>;
 
-    #[test]
-    fn a_consumed_press_swallows_only_its_own_release() {
-        let mut slot = Some('c');
-        assert!(!take_if_eq(&mut slot, 'x')); // another key's release passes
-        assert_eq!(slot, Some('c'));
-        assert!(take_if_eq(&mut slot, 'c'));
-        assert!(!take_if_eq(&mut slot, 'c')); // only once
-    }
+    use crate::keymap::Action as KeyAction;
+    use winit::keyboard::{Key as WKey, KeyCode, ModifiersState, PhysicalKey};
 
-    fn ctrl_c_release(win32_input: bool, kitty_flags: u8) -> Option<Vec<u8>> {
-        ctrl_c_release_after(&mut None, win32_input, kitty_flags)
-    }
+    const C: PhysicalKey = PhysicalKey::Code(KeyCode::KeyC);
+    const V: PhysicalKey = PhysicalKey::Code(KeyCode::KeyV);
 
-    fn ctrl_c_release_after(
-        swallowed: &mut Option<winit::keyboard::PhysicalKey>,
-        win32_input: bool,
-        kitty_flags: u8,
-    ) -> Option<Vec<u8>> {
-        use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
-        let logical = Key::Character("c".into());
+    /// Bytes a release of `key` sends under win32-input-mode or Kitty
+    /// event types (`win32` picks which).
+    fn up(consumed: &mut ConsumedKeys, key: PhysicalKey, win32: bool) -> Option<Vec<u8>> {
+        let ch = if key == C { "c" } else { "v" };
+        let logical = WKey::Character(ch.into());
         let release = KeyRelease {
-            physical: PhysicalKey::Code(KeyCode::KeyC),
+            physical: key,
             logical: &logical,
             mods: ModifiersState::CONTROL,
             app_cursor: false,
-            kitty_flags,
-            win32_input,
+            kitty_flags: if win32 { 0 } else { 2 | 1 },
+            win32_input: win32,
         };
-        release_input(swallowed, false, &release)
+        release_input(consumed, false, &release)
+    }
+
+    /// A keydown of plain Ctrl+C bound to CopyOrSend, with `selected`
+    /// standing in for the pane selection. Returns whether it was consumed
+    /// and whether the copy ran.
+    fn ctrl_c_down(consumed: &mut ConsumedKeys, repeat: bool, selected: &mut bool) -> (bool, bool) {
+        let mut ran = false;
+        let taken = route_key_down(consumed, C, repeat, Some(KeyAction::CopyOrSend), |_| {
+            ran = true;
+            std::mem::replace(selected, false)
+        });
+        (taken, ran)
     }
 
     #[test]
-    fn a_consumed_copy_press_sends_no_release_in_either_mode() {
-        use winit::keyboard::{KeyCode, PhysicalKey};
-        let c = PhysicalKey::Code(KeyCode::KeyC);
-        for (win32, kitty) in [(true, 0), (false, 2 | 1)] {
-            // Unconsumed (nothing selected): the release reaches the child.
-            assert!(ctrl_c_release(win32, kitty).is_some(), "{win32} {kitty}");
-            // Consumed (copied): its release is swallowed, exactly once.
-            let mut swallowed = Some(c);
-            assert_eq!(ctrl_c_release_after(&mut swallowed, win32, kitty), None);
-            assert_eq!(swallowed, None);
-            assert!(ctrl_c_release_after(&mut swallowed, win32, kitty).is_some());
+    fn a_held_copy_never_interrupts_and_stays_paired() {
+        for win32 in [true, false] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = true;
+            // Selected Ctrl+C: copies, consumed.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (true, true)
+            );
+            // Held: repeats are swallowed and do not re-run the copy, so
+            // they never become ^C now the selection is gone.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (true, false)
+            );
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (true, false)
+            );
+            // Its release is swallowed too.
+            assert_eq!(up(&mut consumed, C, win32), None, "win32={win32}");
+            // A later, unselected Ctrl+C reaches the child down and up.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (false, true)
+            );
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (false, true)
+            );
+            assert!(up(&mut consumed, C, win32).is_some(), "win32={win32}");
         }
-        // Without either reporting mode releases are never input.
-        assert_eq!(ctrl_c_release(false, 1), None);
+    }
+
+    #[test]
+    fn overlapping_consumed_shortcuts_release_in_either_order() {
+        for (first, second) in [(C, V), (V, C)] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = true;
+            assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+            assert!(route_key_down(
+                &mut consumed,
+                V,
+                false,
+                Some(KeyAction::Paste),
+                |_| true
+            ));
+            assert_eq!(up(&mut consumed, first, true), None);
+            assert_eq!(up(&mut consumed, second, true), None);
+            // Both cleared: the next releases are ordinary input again.
+            assert!(up(&mut consumed, C, true).is_some());
+            assert!(up(&mut consumed, V, true).is_some());
+        }
+    }
+
+    #[test]
+    fn other_shortcuts_still_repeat() {
+        let mut consumed = ConsumedKeys::default();
+        let mut runs = 0;
+        for repeat in [false, true, true] {
+            assert!(route_key_down(
+                &mut consumed,
+                V,
+                repeat,
+                Some(KeyAction::Paste),
+                |_| {
+                    runs += 1;
+                    true
+                }
+            ));
+        }
+        assert_eq!(runs, 3);
+    }
+
+    #[test]
+    fn a_held_consumed_key_stays_swallowed_after_its_modifier_lifts() {
+        let mut consumed = ConsumedKeys::default();
+        let mut selected = true;
+        assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+        // Ctrl released first: C now repeats as an unbound key.
+        assert!(route_key_down(&mut consumed, C, true, None, |_| false));
+        assert_eq!(up(&mut consumed, C, true), None);
+    }
+
+    #[test]
+    fn a_lost_release_does_not_eat_the_next_press() {
+        let mut consumed = ConsumedKeys::default();
+        let mut selected = true;
+        assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+        // The key-up never came (focus moved). A fresh, unbound press of
+        // the same key is ordinary input, and so is its release.
+        assert!(!route_key_down(&mut consumed, C, false, None, |_| false));
+        assert!(up(&mut consumed, C, true).is_some());
     }
 
     #[test]
     fn a_swallowed_release_clears_even_while_the_ui_owns_keys() {
-        use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
-        let c = PhysicalKey::Code(KeyCode::KeyC);
-        let logical = Key::Character("c".into());
+        let mut consumed = ConsumedKeys::default();
+        consumed.consume(C);
+        let logical = WKey::Character("c".into());
         let release = KeyRelease {
-            physical: c,
+            physical: C,
             logical: &logical,
             mods: ModifiersState::CONTROL,
             app_cursor: false,
             kitty_flags: 0,
             win32_input: true,
         };
-        let mut swallowed = Some(c);
-        assert_eq!(release_input(&mut swallowed, true, &release), None);
-        assert_eq!(swallowed, None);
+        assert_eq!(release_input(&mut consumed, true, &release), None);
+        assert!(up(&mut consumed, C, true).is_some());
     }
 
     #[test]
