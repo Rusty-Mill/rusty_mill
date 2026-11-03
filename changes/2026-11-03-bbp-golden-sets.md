@@ -12,3 +12,4 @@ changelog: rusty_bbp_host golden sets (#597 slice 5) - signed MANIFEST/SIGNOFF c
 - **Added:** unit tests for sign-off, tampering, host-only fixtures and case judging, and a sandboxed host test (trace CL-90).
 - **Known limitations:** CODEOWNERS on Factory's `golden/**` belongs to the Factory repository. `rusty_codec`'s TOML has no multi-line strings, so long expected outputs go in `stdout_file` or `json_file`.
 - **Fixed (review):** the isolation check covers each golden set's absolute fixture files as well as the suite root, at open, at `bbp holdout` and before every run, so a fixture inside the repository, the work root or a build read root is refused.
+- **Fixed (review):** a case command ended by a signal fails its case instead of reporting exit 128. `case.toml` fields of the wrong type (`stdout = ["ok"]`, `exit = "1"`) and unknown keys fail the case instead of defaulting to an expectation that accepts anything.

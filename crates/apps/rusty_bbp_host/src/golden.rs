@@ -194,9 +194,41 @@ pub enum Out {
 /// What a case's command did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ran {
-    pub exit: i32,
+    /// `None` when a signal ended it: no expected exit code matches that.
+    pub exit: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+}
+
+const CASE_KEYS: &[&str] = &["cmd", "args", "stdin", "expect"];
+const EXPECT_KEYS: &[&str] = &[
+    "exit",
+    "stdout",
+    "stdout_file",
+    "json_file",
+    "stderr_contains",
+];
+
+/// `v` is a table holding no key outside `allowed`: a misspelt or unknown
+/// expectation would otherwise be ignored and pass anything.
+fn only_keys(v: &TomlValue, allowed: &[&str]) -> Result<(), String> {
+    let table = v.as_table().ok_or("not a table")?;
+    match table.keys().find(|k| !allowed.contains(&k.as_str())) {
+        Some(k) => Err(format!("unknown key {k:?}")),
+        None => Ok(()),
+    }
+}
+
+/// String `k` of `v`: absent is `None`, any other type an error, never a
+/// default that would weaken the expectation.
+fn opt_str(v: &TomlValue, k: &str) -> Result<Option<String>, String> {
+    match v.get(k) {
+        None => Ok(None),
+        Some(x) => x
+            .as_str()
+            .map(|t| Some(t.to_owned()))
+            .ok_or_else(|| format!("{k} must be a string")),
+    }
 }
 
 /// Parse `case.toml` of case `name`. A `*_file` path names a file of the
@@ -209,8 +241,13 @@ pub fn parse_case(
     text: &str,
 ) -> Result<Case, String> {
     let doc = TomlValue::parse_str(text).map_err(|e| format!("{name}: case.toml: {e}"))?;
-    let s = |v: &TomlValue, k: &str| v.get(k).and_then(TomlValue::as_str).map(str::to_owned);
-    let cmd = s(&doc, "cmd").ok_or_else(|| format!("{name}: no cmd"))?;
+    let expect = doc
+        .get("expect")
+        .ok_or_else(|| format!("{name}: no [expect]"))?;
+    only_keys(&doc, CASE_KEYS).map_err(|e| format!("{name}: {e}"))?;
+    only_keys(expect, EXPECT_KEYS).map_err(|e| format!("{name}: [expect]: {e}"))?;
+    let s = |v: &TomlValue, k: &str| opt_str(v, k).map_err(|e| format!("{name}: {e}"));
+    let cmd = s(&doc, "cmd")?.ok_or_else(|| format!("{name}: no cmd"))?;
     let dir_text = golden.to_str().ok_or("golden dir is not UTF-8")?;
     let args = match doc.get("args") {
         None => vec![],
@@ -222,18 +259,20 @@ pub fn parse_case(
             .collect::<Option<Vec<_>>>()
             .ok_or_else(|| format!("{name}: args must be strings"))?,
     };
-    let expect = doc
-        .get("expect")
-        .ok_or_else(|| format!("{name}: no [expect]"))?;
-    let exit = expect.get("exit").and_then(TomlValue::as_i64).unwrap_or(0);
+    let exit = match expect.get("exit") {
+        None => 0,
+        Some(v) => v
+            .as_i64()
+            .ok_or_else(|| format!("{name}: exit must be an integer"))?,
+    };
     let file = |k: &str| -> Result<Option<String>, String> {
-        s(expect, k)
+        s(expect, k)?
             .map(|f| signed_file(golden, signed, &format!("cases/{name}/{f}")))
             .transpose()
             .map_err(|e| format!("{name}: {k}: {e}"))
     };
     let out = match (
-        s(expect, "stdout"),
+        s(expect, "stdout")?,
         file("stdout_file")?,
         file("json_file")?,
     ) {
@@ -252,19 +291,22 @@ pub fn parse_case(
         name: name.to_owned(),
         cmd,
         args,
-        stdin: s(&doc, "stdin"),
+        stdin: s(&doc, "stdin")?,
         expect: Expect {
             exit: i32::try_from(exit).map_err(|_| format!("{name}: exit out of range"))?,
             out,
-            stderr_contains: s(expect, "stderr_contains"),
+            stderr_contains: s(expect, "stderr_contains")?,
         },
     })
 }
 
 /// Did `ran` meet `case`? `Err` says how it did not. Pure.
 pub fn judge(case: &Case, ran: &Ran) -> Result<(), String> {
-    if ran.exit != case.expect.exit {
-        return Err(format!("exit {} (want {})", ran.exit, case.expect.exit));
+    let want = case.expect.exit;
+    match ran.exit {
+        None => return Err(format!("killed by a signal (want exit {want})")),
+        Some(got) if got != want => return Err(format!("exit {got} (want {want})")),
+        Some(_) => {}
     }
     match &case.expect.out {
         Out::Any => {}
@@ -372,7 +414,7 @@ pub fn run(case: &Case, cwd: &Path) -> Result<Ran, String> {
             .map_err(|_| "stdin feeder panicked".to_owned())?;
     }
     Ok(Ran {
-        exit: out.status.code().unwrap_or(128),
+        exit: out.status.code(),
         stdout: out.stdout,
         stderr: out.stderr,
     })
@@ -549,8 +591,8 @@ mod tests {
                 stderr_contains: Some("warn".into()),
             },
         };
-        let ran = |exit, out: &str, err: &str| Ran {
-            exit,
+        let ran = |exit: i32, out: &str, err: &str| Ran {
+            exit: Some(exit),
             stdout: out.as_bytes().to_vec(),
             stderr: err.as_bytes().to_vec(),
         };
@@ -562,6 +604,32 @@ mod tests {
         assert!(judge(&case, &ran(2, "out", ""))
             .unwrap_err()
             .contains("stderr"));
+        // A signal is no exit code, so it never matches one, not even 128.
+        let mut killed = ran(2, "out", "a warning");
+        killed.exit = None;
+        assert!(judge(&case, &killed).unwrap_err().contains("signal"));
+    }
+
+    /// #597 review: a field of the wrong type or an unknown key fails the
+    /// case instead of falling back to a default that accepts anything.
+    #[test]
+    fn mistyped_or_unknown_expectations_are_refused() {
+        let d = Path::new("/nonexistent");
+        let none = BTreeMap::new();
+        for bad in [
+            "cmd = \"x\"\n[expect]\nstdout = [\"ok\"]\n",
+            "cmd = \"x\"\n[expect]\nexit = \"1\"\n",
+            "cmd = \"x\"\n[expect]\nstderr_contains = 1\n",
+            "cmd = \"x\"\n[expect]\nstdotu = \"ok\"\n",
+            "cmd = \"x\"\nstdin = 3\n[expect]\n",
+            "cmd = \"x\"\nenv = \"y\"\n[expect]\n",
+            "cmd = \"x\"\nexpect = 1\n",
+            "cmd = 1\n[expect]\n",
+        ] {
+            assert!(parse_case("c", d, &none, bad).is_err(), "{bad}");
+        }
+        let fine = "cmd = \"x\"\nstdin = \"in\"\n[expect]\nexit = 1\nstdout = \"ok\"\n";
+        assert!(parse_case("c", d, &none, fine).is_ok());
     }
 
     #[test]
