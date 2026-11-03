@@ -9,10 +9,16 @@
 //!
 //! Pacing applies only to output-driven repaints. Repaints that the UI
 //! requests itself (input that changes the view, resize, timers) still happen
-//! at once, and any frame they paint also covers held output. The first
-//! output after input to the child, such as a shell echoing a key, also
-//! repaints at once if it arrives within [`INPUT_GRACE`]. Typing never waits
-//! for a frame; a flood that input starts is paced from its second wakeup.
+//! at once, and any frame they paint also covers held output.
+//!
+//! Input to the child arms a one-shot grace per window: the first visible
+//! output wakeup within [`INPUT_GRACE`] repaints at once. This is a
+//! heuristic and does not track which output answers which input. Another
+//! visible pane's output, or an unrelated wakeup already queued in the same
+//! pane, can use up the grace before the echo arrives. That echo, and any
+//! response after the grace, is paced: it waits at most the rest of one frame
+//! interval (4.2 ms at 240 Hz, 16.7 ms at the 60 Hz fallback) plus
+//! scheduling.
 
 use std::time::{Duration, Instant};
 
@@ -61,8 +67,8 @@ impl Pacer {
         self.due = None;
     }
 
-    /// Input was sent to the child at `now`: its first output within
-    /// [`INPUT_GRACE`] repaints at once, so echo never waits for a frame.
+    /// Input was sent to the child at `now`: the next output wakeup within
+    /// [`INPUT_GRACE`], from any visible pane, repaints at once.
     pub(crate) fn input(&mut self, now: Instant) {
         self.input_until = Some(now + INPUT_GRACE);
     }
