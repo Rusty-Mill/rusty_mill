@@ -259,6 +259,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. |
 | apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. |
+| apps | rusty_orch | orch-lens | Orchestrator lens runner core: critic lenses over a BBP claims board. Reply protocol, context assembly, tiering, data classes and the money meter. Pure, no I/O. |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-openai | Orchestrator adapter: one OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only (llama-swap in v0). |
 | apps | rusty_orch | orch-store | Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process. |

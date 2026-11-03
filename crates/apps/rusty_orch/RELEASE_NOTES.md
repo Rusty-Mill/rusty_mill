@@ -4,6 +4,13 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## orch-lens: the lens runner's core
+**2026-11-03**
+
+- New pure crate holding the lens runner's decisions: which jobs run, what
+  each provider may see, what it may post back and what it may spend
+  (ADR-0021). Nothing calls it yet; the `rusty_orch lens` shell follows.
+
 ## orch-openai: local model servers over HTTP
 **2026-11-03**
 
