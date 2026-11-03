@@ -62,6 +62,8 @@ CASES = (
          "a_confined_session_keeps_its_home_and_one_fresh_workspace_across_turns"),
     Case("holdout-confined", "rusty_bbp_host", ("--test", "claims_host"),
          "confined_holdout_run_passes_and_builds_cannot_read_the_suite"),
+    Case("golden-confined", "rusty_bbp_host", ("--test", "claims_host"),
+         "confined_golden_run_passes_and_reads_only_signed_fixtures"),
     Case("rust-lld", "rusty_bbp_host", ("--test", "rust_lld_profile"),
          "confined_rust_lld_profile_passes_under_one_gib"),
     Case("maintenance", "rusty_orch", ("--lib",),

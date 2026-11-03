@@ -71,7 +71,7 @@ pub fn with_golden(
         set.read_roots.push(text(bin)?);
     }
     set.read_roots
-        .extend(crate::golden::fixture_roots(&golden)?);
+        .extend(crate::golden::fixture_files(&golden)?);
     HoldoutSet::scan(set, &root)
 }
 

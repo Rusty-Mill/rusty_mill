@@ -147,18 +147,14 @@ pub fn local_files(dir: &Path) -> Result<BTreeMap<String, Sha256>, String> {
     Ok(out)
 }
 
-/// Directories holding the set's absolute (host-only) fixtures: a holdout
-/// run must be able to read them.
-pub fn fixture_roots(dir: &Path) -> Result<Vec<String>, String> {
+/// The set's absolute (host-only) fixture files, each granted to a holdout
+/// run on its own: never its directory, whose other files nobody signed.
+pub fn fixture_files(dir: &Path) -> Result<Vec<String>, String> {
     let (listed, _) = parse_manifest(&read_text(&dir.join(MANIFEST))?)?;
-    let mut roots: Vec<String> = listed
-        .keys()
+    Ok(listed
+        .into_keys()
         .filter(|p| Path::new(p).is_absolute())
-        .filter_map(|p| Path::new(p).parent()?.to_str().map(str::to_owned))
-        .collect();
-    roots.sort();
-    roots.dedup();
-    Ok(roots)
+        .collect())
 }
 
 fn read_text(p: &Path) -> Result<String, String> {
@@ -203,8 +199,15 @@ pub struct Ran {
     pub stderr: Vec<u8>,
 }
 
-/// Parse `case.toml` of case `name`; `*_file` paths are read from `dir`.
-pub fn parse_case(name: &str, dir: &Path, golden: &Path, text: &str) -> Result<Case, String> {
+/// Parse `case.toml` of case `name`. A `*_file` path names a file of the
+/// case's directory that the signed `MANIFEST` lists, read and checked
+/// against its digest: the oracle is signed like the cases.
+pub fn parse_case(
+    name: &str,
+    golden: &Path,
+    signed: &BTreeMap<String, Sha256>,
+    text: &str,
+) -> Result<Case, String> {
     let doc = TomlValue::parse_str(text).map_err(|e| format!("{name}: case.toml: {e}"))?;
     let s = |v: &TomlValue, k: &str| v.get(k).and_then(TomlValue::as_str).map(str::to_owned);
     let cmd = s(&doc, "cmd").ok_or_else(|| format!("{name}: no cmd"))?;
@@ -224,7 +227,10 @@ pub fn parse_case(name: &str, dir: &Path, golden: &Path, text: &str) -> Result<C
         .ok_or_else(|| format!("{name}: no [expect]"))?;
     let exit = expect.get("exit").and_then(TomlValue::as_i64).unwrap_or(0);
     let file = |k: &str| -> Result<Option<String>, String> {
-        s(expect, k).map(|f| read_text(&dir.join(f))).transpose()
+        s(expect, k)
+            .map(|f| signed_file(golden, signed, &format!("cases/{name}/{f}")))
+            .transpose()
+            .map_err(|e| format!("{name}: {k}: {e}"))
     };
     let out = match (
         s(expect, "stdout"),
@@ -283,6 +289,27 @@ pub fn judge(case: &Case, ran: &Ran) -> Result<(), String> {
     Ok(())
 }
 
+/// The text of `rel`, a relative path inside the golden set that `signed`
+/// lists, verified against its digest. Absolute paths, `.`, `..` and empty
+/// segments are refused before anything is read.
+fn signed_file(
+    golden: &Path,
+    signed: &BTreeMap<String, Sha256>,
+    rel: &str,
+) -> Result<String, String> {
+    if rel.split('/').any(|seg| matches!(seg, "" | "." | "..")) {
+        return Err(format!("{rel:?} must stay inside the case directory"));
+    }
+    let want = signed
+        .get(rel)
+        .ok_or_else(|| format!("{rel} is not in MANIFEST"))?;
+    let bytes = std::fs::read(golden.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
+    if Sha256::of(&bytes) != *want {
+        return Err(format!("{rel} differs from MANIFEST"));
+    }
+    String::from_utf8(bytes).map_err(|_| format!("{rel} is not UTF-8"))
+}
+
 /// Object keys sorted, recursively, so JSON compares by content.
 fn canonical(v: Value) -> Value {
     match v {
@@ -295,8 +322,9 @@ fn canonical(v: Value) -> Value {
     }
 }
 
-/// Every case of the golden set at `golden`, sorted by name.
-pub fn cases(golden: &Path) -> Result<Vec<Case>, String> {
+/// Every case of the golden set at `golden`, sorted by name; `signed` is
+/// its verified `MANIFEST`.
+pub fn cases(golden: &Path, signed: &BTreeMap<String, Sha256>) -> Result<Vec<Case>, String> {
     let root = golden.join("cases");
     let mut names: Vec<PathBuf> = std::fs::read_dir(&root)
         .map_err(|e| format!("{}: {e}", root.display()))?
@@ -310,12 +338,14 @@ pub fn cases(golden: &Path) -> Result<Vec<Case>, String> {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .ok_or("case name is not UTF-8")?;
-            parse_case(name, d, golden, &read_text(&d.join("case.toml"))?)
+            parse_case(name, golden, signed, &read_text(&d.join("case.toml"))?)
         })
         .collect()
 }
 
-/// Run `case` in `cwd`.
+/// Run `case` in `cwd`. Input is fed on its own thread while the output is
+/// drained, so a command that writes before it has read everything cannot
+/// deadlock on a full pipe.
 pub fn run(case: &Case, cwd: &Path) -> Result<Ran, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -327,12 +357,20 @@ pub fn run(case: &Case, cwd: &Path) -> Result<Ran, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("{}: {e}", case.cmd))?;
-    if let Some(mut pipe) = child.stdin.take() {
-        // A command that ignores its input closes the pipe early; that is
-        // its choice, and its output is still judged.
-        let _ = pipe.write_all(case.stdin.as_deref().unwrap_or("").as_bytes());
-    }
+    let input = case.stdin.clone().unwrap_or_default();
+    let feeder = child.stdin.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            // A command that ignores its input closes the pipe early; that
+            // is its choice, and its output is still judged.
+            let _ = pipe.write_all(input.as_bytes());
+        })
+    });
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if let Some(feeder) = feeder {
+        feeder
+            .join()
+            .map_err(|_| "stdin feeder panicked".to_owned())?;
+    }
     Ok(Ran {
         exit: out.status.code().unwrap_or(128),
         stdout: out.stdout,
@@ -345,9 +383,10 @@ pub fn run(case: &Case, cwd: &Path) -> Result<Ran, String> {
 /// printed, only verdicts.
 pub fn run_all(golden: &Path, cwd: &Path) -> Result<(String, bool), String> {
     check_signed(golden).map_err(|e| format!("bad_golden: {e}"))?;
+    let (signed, _) = parse_manifest(&read_text(&golden.join(MANIFEST))?)?;
     let mut report = String::new();
     let mut all = true;
-    for case in cases(golden)? {
+    for case in cases(golden, &signed)? {
         let verdict = run(&case, cwd).and_then(|ran| judge(&case, &ran));
         all &= verdict.is_ok();
         match verdict {
@@ -450,7 +489,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(check_signed(&g).unwrap(), set);
-        assert_eq!(fixture_roots(&g).unwrap(), [private.to_str().unwrap()]);
+        assert_eq!(fixture_files(&g).unwrap(), std::slice::from_ref(&abs));
         std::fs::write(private.join("drive.bin"), "changed").unwrap();
         assert!(check_signed(&g).unwrap_err().contains(&abs));
         let _ = std::fs::remove_dir_all(&g);
@@ -528,12 +567,56 @@ mod tests {
     #[test]
     fn a_case_names_one_expected_output() {
         let d = Path::new("/nonexistent");
+        let none = BTreeMap::new();
         let both = "cmd = \"x\"\n[expect]\nstdout = \"a\"\njson_file = \"b\"\n";
-        assert!(parse_case("c", d, d, both).is_err());
-        let none = "cmd = \"x\"\n[expect]\nexit = 3\n";
-        let c = parse_case("c", d, d, none).unwrap();
+        assert!(parse_case("c", d, &none, both).is_err());
+        let any = "cmd = \"x\"\n[expect]\nexit = 3\n";
+        let c = parse_case("c", d, &none, any).unwrap();
         assert_eq!(c.expect.out, Out::Any);
         assert_eq!(c.expect.exit, 3);
-        assert!(parse_case("c", d, d, "[expect]\n").is_err());
+        assert!(parse_case("c", d, &none, "[expect]\n").is_err());
+    }
+
+    #[test]
+    fn expected_output_comes_only_from_signed_files_of_the_case() {
+        let g = golden("oracle");
+        let (signed, _) = parse_manifest(&read_text(&g.join(MANIFEST)).unwrap()).unwrap();
+        let outside = tmp("oracle-outside");
+        std::fs::write(outside.join("want.json"), "{}").unwrap();
+        let abs = outside.join("want.json");
+        for f in [
+            abs.to_str().unwrap(),
+            "../echo/case.toml",
+            "./want.json",
+            "nope.json",
+        ] {
+            let text = format!("cmd = \"x\"\n[expect]\njson_file = \"{f}\"\n");
+            assert!(parse_case("json", &g, &signed, &text).is_err(), "{f}");
+        }
+        // A signed file changed after the check is refused too.
+        std::fs::write(g.join("cases/json/want.json"), "{}").unwrap();
+        let text = "cmd = \"x\"\n[expect]\njson_file = \"want.json\"\n";
+        let err = parse_case("json", &g, &signed, text).unwrap_err();
+        assert!(err.contains("differs from MANIFEST"), "{err}");
+        let _ = std::fs::remove_dir_all(&g);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn large_input_streams_through_a_case_without_deadlock() {
+        let input: String = "line of input\n".repeat(64 * 1024);
+        let case = Case {
+            name: "cat".into(),
+            cmd: "/bin/cat".into(),
+            args: vec![],
+            stdin: Some(input.clone()),
+            expect: Expect {
+                exit: 0,
+                out: Out::Exact(input),
+                stderr_contains: None,
+            },
+        };
+        let ran = run(&case, Path::new("/")).expect("run");
+        assert_eq!(judge(&case, &ran), Ok(()));
     }
 }
