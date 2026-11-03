@@ -334,11 +334,17 @@ fn builds_current(st: &TaskState, c: &ClaimRecord, k: ArtId) -> bool {
 
 /// The holdout condition of the accept line (#597): with a holdout suite and
 /// a current candidate, a `passed` holdout report on the current code, under
-/// the task's holdout digest, stored after that candidate became current.
-/// True when the task has no holdout suite or the claim no candidate.
+/// the task's holdout digest, stored after that candidate became current,
+/// whose tree is the one the current candidate's latest report tested. A
+/// manifest names its base by any ref, so equal manifests alone do not prove
+/// that two checkouts built the same tree. True when the task has no holdout
+/// suite or the claim no candidate.
 pub(crate) fn holdout_passed(st: &TaskState, c: &ClaimRecord) -> bool {
     let (Some(digest), Some(cur)) = (st.claims.holdout_digest, c.current) else {
         return true;
+    };
+    let Some(tested) = latest_report(st, cur).map(|r| r.tree) else {
+        return false;
     };
     st.claims
         .runs
@@ -350,7 +356,9 @@ pub(crate) fn holdout_passed(st: &TaskState, c: &ClaimRecord) -> bool {
             ArtifactPayload::TestReport(rep) => Some(rep),
             _ => None,
         })
-        .any(|rep| rep.status == RunStatus::Passed && rep.profile_digest == digest)
+        .any(|rep| {
+            rep.status == RunStatus::Passed && rep.profile_digest == digest && rep.tree == tested
+        })
 }
 
 /// A run may start on an open claim or re-check a settled one.
@@ -592,6 +600,21 @@ fn endorsed(st: &TaskState, c: MsgId, k: ArtId) -> bool {
     endorsement(st, c, k).is_some()
 }
 
+/// `endorsed`, where a holdout candidate is covered by the endorsement of
+/// the current candidate whose code it builds.
+fn endorsed_code(st: &TaskState, c: MsgId, k: ArtId) -> bool {
+    if endorsed(st, c, k) {
+        return true;
+    }
+    let Some(rec) = st.claims.get(c) else {
+        return false;
+    };
+    match rec.current {
+        Some(cur) if cur != k && builds_current(st, rec, k) => endorsed(st, c, cur),
+        _ => false,
+    }
+}
+
 /// The first evidence on `c` that endorses `k`'s test change, if any.
 pub(crate) fn endorsement(st: &TaskState, c: MsgId, k: ArtId) -> Option<MsgId> {
     let rec = st.claims.get(c)?;
@@ -660,9 +683,13 @@ fn after_evidence(w: &mut Work, m: MsgId, c: MsgId, e: &EvidenceBody, d: &Draft)
 }
 
 /// An endorsement unlocks the latest passing report of the current
-/// candidate: its listed profiles leave `failing(c)` at this commit.
+/// candidate, and of each holdout candidate building its code: their listed
+/// profiles leave `failing(c)` at this commit.
 fn clear_if_endorsed(w: &mut Work, c: MsgId, d: &Draft) {
-    let Some(k) = w.st.claims.get(c).and_then(|r| r.current) else {
+    let Some(rec) = w.st.claims.get(c) else {
+        return;
+    };
+    let Some(k) = rec.current else {
         return;
     };
     let names_k = d
@@ -672,17 +699,27 @@ fn clear_if_endorsed(w: &mut Work, c: MsgId, d: &Draft) {
     if !names_k || !endorsed(&w.st, c, k) {
         return;
     }
-    let Some(report) = latest_report(&w.st, k) else {
+    let code: Vec<ArtId> =
+        w.st.claims
+            .candidates
+            .iter()
+            .filter(|(id, claim)| **claim == c && builds_current(&w.st, rec, **id))
+            .map(|(id, _)| *id)
+            .collect();
+    let listed: Vec<String> = code
+        .into_iter()
+        .filter_map(|id| latest_report(&w.st, id))
+        .filter(|r| r.status == RunStatus::Passed && !r.tests_changed.is_empty())
+        .flat_map(|r| r.listed_profiles())
+        .collect();
+    if listed.is_empty() {
         return;
-    };
-    if report.status == RunStatus::Passed && !report.tests_changed.is_empty() {
-        let listed = report.listed_profiles();
-        set_failing(w, c, |f| {
-            for n in &listed {
-                f.remove(n);
-            }
-        });
     }
+    set_failing(w, c, |f| {
+        for n in &listed {
+            f.remove(n);
+        }
+    });
 }
 
 fn latest_report(st: &TaskState, k: ArtId) -> Option<Report> {
@@ -1042,7 +1079,7 @@ fn on_report(w: &mut Work, k: ArtId, rep: &Report) {
             let failed = rep.failed_profiles();
             set_failing(w, c, |f| f.extend(failed));
         }
-        RunStatus::Passed if rep.tests_changed.is_empty() || endorsed(&w.st, c, k) => {
+        RunStatus::Passed if rep.tests_changed.is_empty() || endorsed_code(&w.st, c, k) => {
             let listed = rep.listed_profiles();
             set_failing(w, c, |f| {
                 for n in &listed {
