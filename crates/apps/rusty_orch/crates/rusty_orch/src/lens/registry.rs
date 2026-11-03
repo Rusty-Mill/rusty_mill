@@ -475,7 +475,14 @@ mod tests {
         assert!(matches!(e, ClassifiedError::Unavailable(_)), "{e:?}");
         assert_eq!(
             calls(&fake),
-            [["/usr/bin/podman", "container", "inspect", "--", "lel-codex"]]
+            [[
+                "/usr/bin/podman",
+                "--remote=false",
+                "container",
+                "inspect",
+                "--",
+                "lel-codex"
+            ]]
         );
     }
 

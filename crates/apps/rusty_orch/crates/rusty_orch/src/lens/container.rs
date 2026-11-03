@@ -28,6 +28,44 @@ pub const MACHINE_ID_PATH: &str = "/etc/machine-id";
 /// containers: finding the container at all shows the runner owns it.
 pub const PODMAN: &str = "/usr/bin/podman";
 
+/// Removed from podman's environment on every call: each could point it
+/// at a remote or differently configured engine, whose inspect would
+/// describe mounts other than those on this host. `--remote=false` (see
+/// [`podman`]) overrides a `remote = true` in the user's containers.conf.
+/// A runner running as root never gets here: it cannot read the
+/// machine-id source ([`read_machine_id`] refuses root).
+pub const PODMAN_ENV: &[&str] = &[
+    "CONTAINER_HOST",
+    "CONTAINER_CONNECTION",
+    "CONTAINER_SSHKEY",
+    "CONTAINER_PASSPHRASE",
+    "CONTAINERS_CONF",
+    "CONTAINERS_CONF_OVERRIDE",
+    "DOCKER_HOST",
+];
+
+/// Namespace settings that must not join the host's or another
+/// container's namespace: `host`, `container:<id>` and `ns:<path>` are
+/// refused. Sharing the host's PID namespace alone would show host
+/// processes, and their files through `/proc`, outside the mount list.
+const NAMESPACES: &[&str] = &[
+    "PidMode",
+    "IpcMode",
+    "NetworkMode",
+    "UTSMode",
+    "UsernsMode",
+    "CgroupnsMode",
+];
+
+/// The local podman with `args`, never a remote engine.
+pub fn podman(args: &[&str]) -> Vec<String> {
+    [PODMAN, "--remote=false"]
+        .iter()
+        .chain(args)
+        .map(|a| (*a).to_owned())
+        .collect()
+}
+
 /// `podman container inspect` reads local state; a minute is generous.
 pub const INSPECT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -118,6 +156,7 @@ pub fn check(
             return Err(format!("HostConfig.{k} is not empty"));
         }
     }
+    check_namespaces(c.get("HostConfig"))?;
     check_env(c.pointer("/Config/Env"))?;
     let seen = mounts(c.get("Mounts"))?;
     let wanted: BTreeSet<&Mount> = spec.mounts.iter().collect();
@@ -142,6 +181,20 @@ fn empty_or_null(v: Option<&Value>) -> bool {
         None => true,
         Some(v) => v.is_null() || v.as_array().is_some_and(Vec::is_empty),
     }
+}
+
+fn check_namespaces(host: Option<&Value>) -> Result<(), String> {
+    let mode = |k: &str| host.and_then(|h| h.get(k)).and_then(Value::as_str);
+    if mode("PidMode").is_none_or(str::is_empty) {
+        return Err("HostConfig.PidMode not reported".to_owned());
+    }
+    for k in NAMESPACES {
+        let Some(m) = mode(k) else { continue };
+        if m == "host" || m.starts_with("container:") || m.starts_with("ns:") {
+            return Err(format!("HostConfig.{k} is {m:?}: a shared namespace"));
+        }
+    }
+    Ok(())
 }
 
 fn check_env(env: Option<&Value>) -> Result<(), String> {
@@ -247,10 +300,10 @@ impl<C: CommandRunner> Contained<C> {
     }
 
     fn verify(&self) -> Result<String, String> {
-        let argv = [PODMAN, "container", "inspect", "--", &self.spec.name].map(str::to_owned);
+        let argv = podman(&["container", "inspect", "--", &self.spec.name]);
         let exit = self
             .runner
-            .run_scrubbed(&argv, b"", INSPECT_TIMEOUT, &[])
+            .run_scrubbed(&argv, b"", INSPECT_TIMEOUT, PODMAN_ENV)
             .map_err(|e| format!("podman: {e}"))?;
         if exit.status != 0 {
             return Err("not found in the runner's podman".to_owned());
@@ -273,8 +326,8 @@ impl<C: CommandRunner> Model for Contained<C> {
 }
 
 /// A [`CommandRunner`] that runs every command inside the container
-/// [`Contained`] verified for the call in progress, as `podman exec -i
-/// --workdir <workdir> <id> <argv...>`. With no verified container it
+/// [`Contained`] verified for the call in progress, as `podman --remote=false exec
+/// -i --workdir <workdir> <id> <argv...>`. With no verified container it
 /// starts nothing.
 pub struct InContainer<C> {
     inner: C,
@@ -306,11 +359,10 @@ impl<C: CommandRunner> CommandRunner for InContainer<C> {
             .verified
             .get()
             .ok_or_else(|| ExecError::Spawn("no verified container".to_owned()))?;
-        let mut full: Vec<String> = [PODMAN, "exec", "-i", "--workdir", &self.workdir, &id]
-            .map(str::to_owned)
-            .to_vec();
+        let mut full = podman(&["exec", "-i", "--workdir", &self.workdir, &id]);
         full.extend_from_slice(argv);
-        self.inner.run_in(None, &full, stdin, timeout, remove_env)
+        let scrub: Vec<&str> = remove_env.iter().chain(PODMAN_ENV).copied().collect();
+        self.inner.run_in(None, &full, stdin, timeout, &scrub)
     }
 }
 
@@ -362,7 +414,7 @@ mod tests {
         )
     }
 
-    const HOST: &str = r#"{"Privileged": false, "Devices": [], "CapAdd": null}"#;
+    const HOST: &str = r#"{"Privileged": false, "Devices": [], "CapAdd": null, "PidMode": "private", "IpcMode": "shareable", "NetworkMode": "pasta", "UTSMode": "private", "UsernsMode": "", "CgroupnsMode": "private"}"#;
     const ENV: &str = r#"["PATH=/usr/bin", "HOME=/root"]"#;
 
     fn holds(id: &'static str) -> impl Fn(&Path) -> Result<String, String> {
@@ -441,6 +493,23 @@ mod tests {
             "no container id",
         );
         refused("[]".to_owned(), "exactly one container");
+        refused(
+            inspect(MOUNTS, r#"{"Privileged": false}"#, ENV),
+            "HostConfig.PidMode not reported",
+        );
+        for (k, m) in [
+            ("PidMode", "host"),
+            ("PidMode", "container:4f1c"),
+            ("IpcMode", "host"),
+            ("NetworkMode", "host"),
+            ("NetworkMode", "ns:/proc/1/ns/net"),
+            ("UTSMode", "host"),
+            ("UsernsMode", "host"),
+            ("CgroupnsMode", "host"),
+        ] {
+            let host = format!(r#"{{"Privileged": false, "PidMode": "private", "{k}": "{m}"}}"#);
+            refused(inspect(MOUNTS, &host, ENV), &format!("HostConfig.{k} is"));
+        }
         let e = check(&spec(), &inspect(MOUNTS, HOST, ENV), &holds("other"))
             .expect_err("another machine id");
         assert!(e.contains("does not hold the asserted machine id"), "{e}");
@@ -456,6 +525,7 @@ mod tests {
     struct Podman {
         inspect_out: Exit,
         calls: Mutex<Vec<Vec<String>>>,
+        scrubbed: Mutex<Vec<Vec<String>>>,
     }
 
     impl CommandRunner for Podman {
@@ -465,12 +535,15 @@ mod tests {
             argv: &[String],
             _stdin: &[u8],
             _timeout: Duration,
-            _remove_env: &[&str],
+            remove_env: &[&str],
         ) -> Result<Exit, ExecError> {
             if let Ok(mut calls) = self.calls.lock() {
                 calls.push(argv.to_vec());
             }
-            if argv.get(1).map(String::as_str) == Some("container") {
+            if let Ok(mut s) = self.scrubbed.lock() {
+                s.push(remove_env.iter().map(|e| (*e).to_owned()).collect());
+            }
+            if argv.get(2).map(String::as_str) == Some("container") {
                 return Ok(self.inspect_out.clone());
             }
             if argv.iter().any(|a| a == "login") {
@@ -511,6 +584,7 @@ mod tests {
         let podman = Arc::new(Podman {
             inspect_out,
             calls: Mutex::new(Vec::new()),
+            scrubbed: Mutex::new(Vec::new()),
         });
         let verified = Verified::default();
         let exec = InContainer::new(Shared(Arc::clone(&podman)), "/work", verified.clone());
@@ -548,14 +622,40 @@ mod tests {
         assert_eq!(calls.len(), 3, "{calls:?}");
         assert_eq!(
             calls[0],
-            ["/usr/bin/podman", "container", "inspect", "--", "lel-codex"]
+            [
+                "/usr/bin/podman",
+                "--remote=false",
+                "container",
+                "inspect",
+                "--",
+                "lel-codex"
+            ]
         );
         for c in &calls[1..] {
             assert_eq!(
-                c[..6],
-                ["/usr/bin/podman", "exec", "-i", "--workdir", "/work", ID]
+                c[..7],
+                [
+                    "/usr/bin/podman",
+                    "--remote=false",
+                    "exec",
+                    "-i",
+                    "--workdir",
+                    "/work",
+                    ID
+                ]
             );
-            assert_eq!(c[6], "codex");
+            assert_eq!(c[7], "codex");
+        }
+        // Every podman call runs without the remote-engine variables, and
+        // the Codex runs keep their own API-key scrubbing too.
+        let scrubbed = podman.scrubbed.lock().expect("lock").clone();
+        for s in &scrubbed {
+            for v in PODMAN_ENV {
+                assert!(s.iter().any(|e| e == v), "{v} not scrubbed: {s:?}");
+            }
+        }
+        for s in &scrubbed[1..] {
+            assert!(s.iter().any(|e| e == "OPENAI_API_KEY"), "{s:?}");
         }
         let exec = &calls[2];
         let at = exec.iter().position(|a| a == "-C").expect("-C");
