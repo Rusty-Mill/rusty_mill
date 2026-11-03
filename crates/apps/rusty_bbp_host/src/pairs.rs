@@ -2,7 +2,8 @@
 //! evaluation is pure ([`evaluate`] over [`Pair`] facts); [`load`] reads the
 //! facts from each run's log, harness output and saved `bbp mod` output, and
 //! from its evidence record: a run that more than one `bbp mod` produced is a
-//! failed, stopped run (`resumed`), and a record that is missing, unreadable
+//! failed, stopped run (`resumed`), as is one whose log holds a budget
+//! extension (`budget extended`), and a record that is missing, unreadable
 //! or names another build is refused ([`check_segments`]). It decides
 //! nothing the criteria note does not say;
 //! see "2b gate criteria" in `docs/bbp-concurrency-design.md` for the
@@ -70,7 +71,7 @@ pub struct RunFacts {
     /// The run's harnesses cost more than the per-run cap.
     pub over_cap: bool,
     /// The `reads_per_turn` the task was opened with (its `TaskOpened`
-    /// event). A run whose limit was later extended does not load.
+    /// event), whatever the log extended it to.
     pub reads_per_turn: u64,
     /// The models each role's turns used, from the harness output.
     pub role_models: BTreeMap<String, BTreeSet<String>>,
@@ -82,14 +83,16 @@ pub struct RunFacts {
     /// Turns that ended with no valid result (killed, interrupted, crashed):
     /// their cost is only known from below.
     pub killed_turns: u64,
-    /// Why the run stopped: `cap` or `wall` from its `bbp mod` output, or
+    /// Why the run stopped: `cap` or `wall` from its `bbp mod` output,
     /// `resumed: N bbp mod segments` (with `; last: cap|wall` when the last
-    /// output stopped) when more than one `bbp mod` produced it. Reported with a
-    /// failed pair.
+    /// output stopped) when more than one `bbp mod` produced it, and
+    /// `budget extended: F opened at X, extended to Y` when its log holds an
+    /// extension, joined by `; `. Reported with a failed pair.
     pub stop: Option<String>,
-    /// The moderator stopped the run (cap or wall limit), or it was resumed
-    /// (a later segment cannot show an earlier one's stop): it may have printed
-    /// little or nothing a model can be read from.
+    /// The moderator stopped the run (cap or wall limit), it was resumed (a
+    /// later segment cannot show an earlier one's stop), or its budget was
+    /// extended: a failed run by rule, which may have printed little or
+    /// nothing a model can be read from.
     pub stopped: bool,
     /// The dollars the run is known to have cost, at least: complete turns at
     /// their result, the rest at what their printed messages show.
@@ -577,10 +580,15 @@ pub fn facts(
     let m = mod_facts(&text)?;
     let build_sha = build_sha_of(&text)?;
     let resumed = check_segments(&segments, &build_sha)?;
+    let (opened, extended) = opened_budget(&events)?;
     let stop = match (resumed, &m.stop) {
         (Some(n), None) => Some(format!("resumed: {n} bbp mod segments")),
         (Some(n), Some(last)) => Some(format!("resumed: {n} bbp mod segments; last: {last}")),
         (None, s) => s.clone(),
+    };
+    let stop = match (stop, extended) {
+        (Some(s), Some(x)) => Some(format!("{s}; {x}")),
+        (s, x) => s.or(x),
     };
     let stopped = stop.is_some();
     // A resumed run's saved output describes only its last segment: it timed
@@ -609,10 +617,10 @@ pub fn facts(
         replay_equals_live,
         over_cap: m.stop.as_deref() == Some("cap") || tok.usd_floor.is_some_and(|f| f > cap_usd),
         tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
-        overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
+        overshoot: overshoot(&st.spent, &opened),
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
-        reads_per_turn: opened_reads_per_turn(&events)?,
+        reads_per_turn: opened.reads_per_turn,
         role_models,
         build_sha,
         no_model_turns,
@@ -642,28 +650,43 @@ pub fn check_segments(segments: &[String], build_sha: &str) -> Result<Option<usi
     Ok((segments.len() > 1).then_some(segments.len()))
 }
 
-/// The `reads_per_turn` a run was opened with. The final card is not the
-/// run's limit: a human extension changes it after turns already ran under the
-/// opened one, so the arms of a pair could differ while both cards match the
-/// manifest. A run with any `reads_per_turn` extension, even one back to the
-/// opened value, ran under more than one limit and refuses (#1327).
-fn opened_reads_per_turn(events: &[Event]) -> Result<u64, String> {
+/// The budget a run's task was opened with, and why the run failed when its
+/// log holds a budget extension, in any field and even one back to the opened
+/// value. `bbp human extend` refuses on an evidence task, but one logged anyway
+/// (by an older `bbp`) means the run did not run under the budget it was
+/// opened with, so its arms are not comparable (#1327). Owner decision,
+/// 2026-11-03: such a run is a failed run, its costs kept and no run
+/// replacing it. Its overshoot and `reads_per_turn` come from the opened
+/// budget, so an extension cannot hide either.
+fn opened_budget(events: &[Event]) -> Result<(Budget, Option<String>), String> {
     let Some(Event::TaskOpened { budget, .. }) = events.first() else {
         return Err("the log does not start with TaskOpened".to_owned());
     };
     let extended = events.iter().find_map(|e| match e {
-        Event::BudgetExtended {
-            field: BudgetField::ReadsPerTurn,
-            limit,
-        } => Some(*limit),
+        Event::BudgetExtended { field, limit } => Some(format!(
+            "budget extended: {} opened at {}, extended to {limit}",
+            field_name(*field),
+            budget.get(*field)
+        )),
         _ => None,
     });
-    match extended {
-        Some(limit) => Err(format!(
-            "reads_per_turn was opened at {} and extended to {limit}: the run ran under more than one limit",
-            budget.reads_per_turn
-        )),
-        None => Ok(budget.reads_per_turn),
+    Ok((*budget, extended))
+}
+
+/// `spent.messages` or `spent.bytes` above the opened totals.
+fn overshoot(spent: &rusty_bbp::state::Spent, opened: &Budget) -> bool {
+    spent.messages > opened.messages || spent.bytes > opened.bytes
+}
+
+/// The name `bbp human extend` takes for `f`.
+fn field_name(f: BudgetField) -> &'static str {
+    match f {
+        BudgetField::Messages => "messages",
+        BudgetField::Bytes => "bytes",
+        BudgetField::Reads => "reads",
+        BudgetField::ReadsPerTurn => "reads_per_turn",
+        BudgetField::Turns => "turns",
+        BudgetField::Iterations => "iterations",
     }
 }
 
@@ -1075,6 +1098,81 @@ mod tests {
         p[i].treatment.stop = Some("resumed: 2 bbp mod segments".into());
         p[i].treatment.replay_equals_live = None;
         assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Inconclusive);
+    }
+
+    /// Owner decision 2026-11-03: an extended run is a failed run, counted
+    /// against criterion 2, out of every median, and its costs kept.
+    #[test]
+    fn an_extended_run_fails_its_pair_and_keeps_its_costs() {
+        let mut p = all([0.6, 0.6, 0.6, 0.6, 0.6], 0, 0);
+        let i = p.iter().position(|q| q.kind == Kind::Separable).unwrap();
+        p[i].treatment.stopped = true;
+        p[i].treatment.stop = Some("budget extended: messages opened at 10, extended to 20".into());
+        p[i].treatment.usd_floor = Some(0.25);
+        p[i].treatment.accounting_errors = vec!["turn 3: no result".into()];
+        let e = evaluate(&p, 1000);
+        assert_eq!(
+            e.separable_ratios.len(),
+            4,
+            "the failed pair is out of the medians"
+        );
+        let cost = e
+            .failed_pair_costs
+            .iter()
+            .find(|c| c.pair == p[i].id)
+            .expect("the failed pair's costs are reported");
+        assert!(cost.usd_at_least >= 0.25, "{cost:?}");
+        assert_eq!(
+            cost.stops,
+            vec!["treatment: budget extended: messages opened at 10, extended to 20".to_owned()]
+        );
+        assert_eq!(cost.accounting_errors, vec!["turn 3: no result".to_owned()]);
+        // Two more failed N=2 runs make three: N=2 fails more than N=1 + 1.
+        for j in p
+            .iter()
+            .enumerate()
+            .filter(|(j, q)| *j != i && q.kind == Kind::Shared)
+            .map(|(j, _)| j)
+            .take(2)
+            .collect::<Vec<_>>()
+        {
+            p[j].treatment.stopped = true;
+            p[j].treatment.stop =
+                Some("budget extended: bytes opened at 10, extended to 20".into());
+        }
+        assert_eq!(evaluate(&p, 1000).c2_comparable, Verdict::Fails);
+    }
+
+    #[test]
+    fn an_extension_cannot_hide_an_overshoot_of_the_opened_budget() {
+        let opened = Budget {
+            messages: 10,
+            bytes: 100,
+            reads: 5,
+            reads_per_turn: 3,
+            turns: 4,
+            iterations: 2,
+        };
+        let spent = rusty_bbp::state::Spent {
+            messages: 11,
+            bytes: 50,
+            reads: 0,
+            turns: 0,
+        };
+        assert!(
+            overshoot(&spent, &opened),
+            "11 messages against an opened 10"
+        );
+        let within = rusty_bbp::state::Spent {
+            messages: 10,
+            ..spent
+        };
+        assert!(!overshoot(&within, &opened));
+        let bytes = rusty_bbp::state::Spent {
+            bytes: 101,
+            ..within
+        };
+        assert!(overshoot(&bytes, &opened));
     }
 
     #[test]

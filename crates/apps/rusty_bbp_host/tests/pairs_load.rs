@@ -460,8 +460,10 @@ fn a_marker_from_before_segments_is_refused_and_an_older_bbp_refuses_the_new_one
 
 // ---- #1327: reads_per_turn is the opened budget, and an extended one refuses
 
-/// The facts of a run opened at `reads_per_turn` 30 that a human then
-/// extended with `extend <field> <limit>`.
+/// The facts of a run opened at `reads_per_turn` 30 whose log then holds a
+/// `BudgetExtended` of `field` to `limit`. It is dispatched to the engine
+/// directly: `bbp human extend` refuses on an evidence task, so this stands
+/// for a log written before the marker or by an older `bbp`.
 fn extended_facts(tag: &str, field: &str, limit: &str) -> Result<pairs::RunFacts, String> {
     let root = tempdir(tag);
     let (_repo, head) = checkout(&root);
@@ -473,7 +475,16 @@ fn extended_facts(tag: &str, field: &str, limit: &str) -> Result<pairs::RunFacts
     .unwrap();
     let r = run(&root, "extended", &mod_out(Some(&head)), Some(ASSISTANT));
     let task = TaskId("T1".into());
-    rusty_bbp_host::human::perform(Path::new(&r.dir), &task, "extend", &[field, limit], None)
+    let action = rusty_bbp_host::human::action("extend", &[field, limit], None).unwrap();
+    rusty_bbp_host::open_driver(Path::new(&r.dir), &task)
+        .unwrap()
+        .dispatch(
+            &rusty_bbp::Command::Human {
+                op: rusty_bbp_host::fresh_op(),
+                action,
+            },
+            rusty_bbp_host::now(),
+        )
         .expect("extend");
     let (c, sha) = rusty_bbp_host::tokens::read_criteria(&criteria).unwrap();
     let f = pairs::facts(
@@ -492,30 +503,38 @@ fn extended_facts(tag: &str, field: &str, limit: &str) -> Result<pairs::RunFacts
 }
 
 #[test]
-fn a_run_whose_reads_per_turn_was_extended_is_refused() {
-    // Opened at 30 and extended to 60: the final card says 60 and the opened
-    // task 30. Neither may stand for the run, whatever the manifest says.
-    let err = extended_facts("extended-rpt", "reads_per_turn", "60").unwrap_err();
-    assert!(
-        err.contains("reads_per_turn") && err.contains("30") && err.contains("60"),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_run_extended_back_to_its_opened_reads_per_turn_is_still_refused() {
-    // Guard: comparing only the final card with the opened task would pass
-    // this run, which ran some turns at another limit before the second
-    // extension restored 30. Here one extension to 30 stands for that history.
-    let err = extended_facts("extended-same", "reads_per_turn", "30").unwrap_err();
-    assert!(
-        err.contains("reads_per_turn") && err.contains("extended"),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_run_extended_in_another_field_keeps_its_opened_reads_per_turn() {
-    let f = extended_facts("extended-msgs", "messages", "1000").expect("loads");
-    assert_eq!(f.reads_per_turn, 30);
+fn a_run_extended_in_any_budget_field_loads_as_a_failed_run() {
+    // Owner decision 2026-11-03: an evidence run extended anyway is a failed
+    // run, its costs kept, with no replacement. It loads (the manifest is not
+    // dropped), keeps the budget it was opened with, and says why it failed.
+    // Extending `reads_per_turn` back to its opened 30 still counts: the log
+    // shows the run ran under more than one budget.
+    for (field, limit) in [
+        ("messages", "100000"),
+        ("bytes", "100000"),
+        ("reads", "100000"),
+        ("reads_per_turn", "60"),
+        ("reads_per_turn", "30"),
+        ("turns", "100000"),
+        ("iterations", "100000"),
+    ] {
+        let f = extended_facts(&format!("extended-{field}-{limit}"), field, limit)
+            .unwrap_or_else(|e| panic!("{field}={limit}: {e}"));
+        assert!(!f.succeeded(), "{field}={limit}: {f:?}");
+        assert!(f.stopped, "{field}={limit}: {f:?}");
+        let stop = f.stop.clone().unwrap_or_default();
+        assert!(
+            stop.starts_with(&format!("budget extended: {field} opened at "))
+                && stop.ends_with(&format!("extended to {limit}")),
+            "{field}={limit}: {stop}"
+        );
+        assert_eq!(
+            f.reads_per_turn, 30,
+            "{field}={limit}: the opened reads_per_turn"
+        );
+        assert!(
+            f.usd_floor.is_some_and(|u| u > 0.0),
+            "{field}={limit}: its recorded spend is kept: {f:?}"
+        );
+    }
 }
