@@ -9,12 +9,19 @@
 //! Codex authenticates with the ChatGPT subscription login. The child never
 //! sees `OPENAI_API_KEY`: it is scrubbed from the environment on every run.
 //!
+//! [`CodexAgent`] also serves the lens runner's [`orch_lens::Model`]
+//! (#594): prefix and body on stdin, usage from the `--json` events, the
+//! reply checked by [`orch_lens::parse`]. A lens question runs in an empty
+//! scratch directory unless [`CodexAgent::lens_read_only`]; the read-only
+//! sandbox itself is unchanged.
+//!
 #![cfg_attr(
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
 mod agent;
+mod lens;
 mod prompt;
 
 pub use agent::{CodexAgent, DEFAULT_TIMEOUT, ID, SCRUBBED_ENV};
