@@ -553,6 +553,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // runs /bin/echo and /bin/cat
     fn cases_compare_exactly_or_as_json() {
         let g = golden("run");
         let (report, all) = run_all(&g, &g).expect("run");
@@ -671,6 +672,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // runs /bin/echo and /bin/cat
     fn large_input_streams_through_a_case_without_deadlock() {
         let input: String = "line of input\n".repeat(64 * 1024);
         let case = Case {
