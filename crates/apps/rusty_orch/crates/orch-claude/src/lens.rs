@@ -3,11 +3,12 @@
 //! `claude -p` has no before-call bound on an agent loop's tokens, so this
 //! adapter is admitted only at zero price, and only where no call can add a
 //! charge. Two separate gates, both fail closed: the operator's assertion
-//! that the account cannot bill beyond its plan
-//! ([`ClaudeAgent::lens_no_overage`]), and a subscription login on every
-//! question. The login check establishes the auth method, not billing: a
-//! subscription with usage credits enabled can still be charged, which is
-//! why the first gate exists.
+//! that one named account cannot bill beyond its plan
+//! ([`ClaudeAgent::lens_no_overage`]), and, on every question, a
+//! subscription login to that same account (`email` in `claude auth
+//! status`). The login check establishes the auth method and the account,
+//! not billing: a subscription with usage credits enabled can still be
+//! charged, which is why the first gate exists.
 
 use orch_cli::{excerpt, CommandRunner, Exit};
 use orch_dispatch::{AgentError, ClassifiedError};
@@ -34,40 +35,53 @@ impl<C: CommandRunner> ClaudeAgent<C> {
         argv
     }
 
-    /// The login probe, accepted only for a subscription login.
-    fn probe_subscription(&self) -> Result<(), ClassifiedError> {
+    /// The login probe, accepted only for a subscription login to
+    /// `account`. The reported account never reaches the error.
+    fn probe_subscription(&self, account: &str) -> Result<(), ClassifiedError> {
         let exit = self.probe()?;
-        let method = std::str::from_utf8(&exit.stdout)
+        let status = std::str::from_utf8(&exit.stdout)
             .ok()
-            .and_then(|s| Value::parse(s.trim()).ok())
-            .and_then(|v| {
-                v.get("authMethod")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
-        match method {
-            Some(m) if SUBSCRIPTION_AUTH.contains(&m.as_str()) => Ok(()),
-            other => Err(ClassifiedError::Unavailable(AgentError(format!(
+            .and_then(|s| Value::parse(s.trim()).ok());
+        let field = |k: &str| {
+            status
+                .as_ref()
+                .and_then(|v| v.get(k))
+                .and_then(Value::as_str)
+                .map(str::trim)
+        };
+        let method = field("authMethod");
+        if !method.is_some_and(|m| SUBSCRIPTION_AUTH.contains(&m)) {
+            return Err(unavailable(format!(
                 "claude: lens questions need a subscription login, got authMethod {}",
-                other.as_deref().unwrap_or("(unreported)")
-            )))),
+                method.unwrap_or("(unreported)")
+            )));
+        }
+        match field("email") {
+            Some(e) if e.eq_ignore_ascii_case(account.trim()) => Ok(()),
+            Some(_) => Err(unavailable(
+                "claude: logged into another account than the no-overage assertion names".to_owned(),
+            )),
+            None => Err(unavailable(
+                "claude: the login does not report its account, so the no-overage assertion cannot apply"
+                    .to_owned(),
+            )),
         }
     }
 }
 
 impl<C: CommandRunner> Model for ClaudeAgent<C> {
     /// Refuse without the no-overage assertion, check the subscription
-    /// login, then ask with the body on stdin. A
+    /// login and its account, then ask with the body on stdin. A
     /// reply that is not UTF-8, does not pass [`parse`], or does not report
     /// its usage is `Permanent`.
     fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
-        if !self.lens_no_overage {
-            return Err(ClassifiedError::Unavailable(AgentError(
+        let Some(account) = self.lens_no_overage.as_deref() else {
+            return Err(unavailable(
                 "claude: lens questions need the operator's no-overage assertion (lens_no_overage)"
                     .to_owned(),
-            )));
-        }
-        self.probe_subscription()?;
+            ));
+        };
+        self.probe_subscription(account)?;
         let exit = self.exec(&self.lens_argv(&q.prefix), q.body.as_bytes())?;
         strict_utf8(&exit)?;
         let envelope = envelope(&exit)?;
@@ -115,4 +129,8 @@ fn usage(envelope: &Value) -> Result<Usage, String> {
         output_tokens: count("output_tokens", true)?,
         cached_input_tokens: cached,
     })
+}
+
+fn unavailable(message: String) -> ClassifiedError {
+    ClassifiedError::Unavailable(AgentError(message))
 }

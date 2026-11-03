@@ -43,12 +43,19 @@ fn reply(result: &str) -> String {
     reply_with(result, USAGE)
 }
 
-fn status(method: &str) -> Result<Exit, orch_cli::ExecError> {
+/// The account the operator's no-overage assertion names.
+const ACCOUNT: &str = "nano@example.com";
+
+fn status_as(method: &str, email: &str) -> Result<Exit, orch_cli::ExecError> {
     Ok(exit(
         0,
-        &format!(r#"{{"loggedIn":true,"authMethod":"{method}"}}"#),
+        &format!(r#"{{"loggedIn":true,"authMethod":"{method}","email":"{email}"}}"#),
         "",
     ))
+}
+
+fn status(method: &str) -> Result<Exit, orch_cli::ExecError> {
+    status_as(method, ACCOUNT)
 }
 
 /// Logged in with a subscription; the run exits 0 with `stdout`.
@@ -59,7 +66,7 @@ fn subscribed(stdout: &str) -> Scripted {
 fn agent(fake: Scripted) -> ClaudeAgent<Scripted> {
     ClaudeAgent::with_runner("/repo", fake)
         .timeout(Duration::from_secs(30))
-        .lens_no_overage()
+        .lens_no_overage(ACCOUNT)
 }
 
 fn arg_after<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
@@ -110,6 +117,35 @@ fn without_the_no_overage_assertion_nothing_runs() {
     let err = a.ask(&question()).expect_err("refused");
     assert!(matches!(err, ClassifiedError::Unavailable(_)), "{err:?}");
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
+}
+
+#[test]
+fn another_or_an_unreported_account_is_unavailable_and_nothing_runs() {
+    let no_email = Ok(exit(0, r#"{"loggedIn":true,"authMethod":"claude.ai"}"#, ""));
+    for probe in [status_as("claude.ai", "someone@example.com"), no_email] {
+        let mut a = agent(Scripted::both(
+            probe.clone(),
+            Ok(exit(0, &reply(r#"{"posts":[]}"#), "")),
+        ));
+        let err = a.ask(&question()).expect_err("refused");
+        let ClassifiedError::Unavailable(m) = &err else {
+            panic!("{probe:?}: {err:?}");
+        };
+        assert!(
+            !m.0.contains("someone@"),
+            "the reported account leaked: {m:?}"
+        );
+        assert_eq!(a.runner().inner.calls.lock().expect("lock").len(), 1);
+    }
+}
+
+#[test]
+fn the_account_matches_without_regard_to_case() {
+    let mut a = agent(Scripted::both(
+        status_as("claude.ai", "Nano@Example.com"),
+        Ok(exit(0, &reply(r#"{"posts":[]}"#), "")),
+    ));
+    a.ask(&question()).expect("answers");
 }
 
 #[test]

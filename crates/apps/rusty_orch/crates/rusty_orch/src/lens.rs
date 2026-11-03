@@ -4,5 +4,7 @@
 //!
 //! - [`registry`]: one [`orch_lens::Model`] per configured provider, with
 //!   the operator's assertions passed to the CLI adapters.
+//! - [`assertions`]: the operator's assertions file, read fail-closed.
 
+pub mod assertions;
 pub mod registry;
