@@ -11,14 +11,8 @@ use std::num::NonZeroU32;
 
 use crate::{EntryId, GoalId, Ref, TaskId, Text};
 
-/// A model backend the dispatcher can run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Agent {
-    Claude,
-    Codex,
-    Gemini,
-    Local,
-}
+/// A configured model backend the dispatcher can run.
+pub use crate::agent_id::AgentId;
 
 /// The kind of work a card asks for. Routing maps roles to agents, so a
 /// card never names an agent.
@@ -61,20 +55,20 @@ pub enum Status {
 pub enum TaskState {
     Pending,
     Running {
-        agent: Agent,
+        agent: AgentId,
     },
     /// Waiting on a `Question` entry.
     Blocked {
-        agent: Agent,
+        agent: AgentId,
         question: EntryId,
     },
     /// `outputs` is non-empty: the entries the agent wrote.
     Done {
-        agent: Agent,
+        agent: AgentId,
         outputs: Vec<EntryId>,
     },
     Failed {
-        agent: Agent,
+        agent: AgentId,
         reason: Text,
     },
 }
@@ -91,7 +85,7 @@ impl TaskState {
         }
     }
 
-    fn agent(&self) -> Option<Agent> {
+    fn agent(&self) -> Option<AgentId> {
         match self {
             Self::Pending => None,
             Self::Running { agent }
@@ -145,7 +139,7 @@ pub enum PlanError {
     NotReady(TaskId),
     SelfReview {
         task: TaskId,
-        agent: Agent,
+        agent: AgentId,
     },
     InvalidTransition {
         task: TaskId,
@@ -163,7 +157,7 @@ impl fmt::Display for PlanError {
             Self::UnknownDependency(id) => write!(f, "prerequisite {id} does not exist"),
             Self::NotReady(id) => write!(f, "{id} has unfinished prerequisites"),
             Self::SelfReview { task, agent } => {
-                write!(f, "{agent:?} cannot review its own work in {task}")
+                write!(f, "{agent} cannot review its own work in {task}")
             }
             Self::InvalidTransition { task, from, action } => {
                 write!(f, "cannot {action} {task} while {from:?}")
@@ -237,7 +231,7 @@ impl Plan {
     }
 
     /// Hand a ready card to `agent`. Reviews reject the target's author.
-    pub fn start(&mut self, id: TaskId, agent: Agent) -> Result<(), PlanError> {
+    pub fn start(&mut self, id: TaskId, agent: AgentId) -> Result<(), PlanError> {
         let task = self.task(id)?;
         if task.state != TaskState::Pending {
             return Err(invalid(task, "start"));
@@ -295,7 +289,7 @@ impl Plan {
         Ok(())
     }
 
-    fn running_agent(&self, id: TaskId, action: &'static str) -> Result<Agent, PlanError> {
+    fn running_agent(&self, id: TaskId, action: &'static str) -> Result<AgentId, PlanError> {
         let task = self.task(id)?;
         match task.state {
             TaskState::Running { agent } => Ok(agent),
@@ -328,6 +322,10 @@ fn invalid(task: &Task, action: &'static str) -> PlanError {
 mod tests {
     use super::*;
 
+    const CLAUDE: crate::AgentId = crate::AgentId::from_static("claude");
+    const CODEX: crate::AgentId = crate::AgentId::from_static("codex");
+    const GEMINI: crate::AgentId = crate::AgentId::from_static("gemini");
+    const LOCAL: crate::AgentId = crate::AgentId::from_static("local");
     fn text(s: &str) -> Text {
         Text::new(s).expect("non-blank")
     }
@@ -389,9 +387,9 @@ mod tests {
         let a = p.add(spec(Role::Research, vec![])).expect("add");
         let b = p.add(spec(Role::Design, vec![a])).expect("add");
         assert_eq!(p.ready().map(Task::id).collect::<Vec<_>>(), vec![a]);
-        assert_eq!(p.start(b, Agent::Claude), Err(PlanError::NotReady(b)));
+        assert_eq!(p.start(b, CLAUDE), Err(PlanError::NotReady(b)));
 
-        p.start(a, Agent::Gemini).expect("start");
+        p.start(a, GEMINI).expect("start");
         p.complete(a, vec![e(1)]).expect("complete");
         assert_eq!(p.ready().map(Task::id).collect::<Vec<_>>(), vec![b]);
     }
@@ -403,24 +401,24 @@ mod tests {
         let review = p
             .add(spec(Role::Review { target: work }, vec![]))
             .expect("add");
-        p.start(work, Agent::Codex).expect("start");
+        p.start(work, CODEX).expect("start");
         p.complete(work, vec![e(1)]).expect("complete");
 
         assert_eq!(
-            p.start(review, Agent::Codex),
+            p.start(review, CODEX),
             Err(PlanError::SelfReview {
                 task: review,
-                agent: Agent::Codex
+                agent: CODEX
             })
         );
-        assert_eq!(p.start(review, Agent::Claude), Ok(()));
+        assert_eq!(p.start(review, CLAUDE), Ok(()));
     }
 
     #[test]
     fn complete_requires_outputs() {
         let mut p = plan();
         let a = p.add(spec(Role::Research, vec![])).expect("add");
-        p.start(a, Agent::Gemini).expect("start");
+        p.start(a, GEMINI).expect("start");
         assert_eq!(p.complete(a, vec![]), Err(PlanError::NoOutputs(a)));
     }
 
@@ -450,15 +448,13 @@ mod tests {
     fn block_and_resume_keep_the_agent() {
         let mut p = plan();
         let a = p.add(spec(Role::Design, vec![])).expect("add");
-        p.start(a, Agent::Claude).expect("start");
+        p.start(a, CLAUDE).expect("start");
         p.block(a, e(4)).expect("block");
         assert_eq!(p.get(a).map(|t| t.state().status()), Some(Status::Blocked));
         p.resume(a).expect("resume");
         assert_eq!(
             p.get(a).map(|t| t.state().clone()),
-            Some(TaskState::Running {
-                agent: Agent::Claude
-            })
+            Some(TaskState::Running { agent: CLAUDE })
         );
     }
 
@@ -467,7 +463,7 @@ mod tests {
         let mut p = plan();
         assert!(!p.is_finished());
         let a = p.add(spec(Role::Triage, vec![])).expect("add");
-        p.start(a, Agent::Local).expect("start");
+        p.start(a, LOCAL).expect("start");
         p.fail(a, text("model timeout")).expect("fail");
         assert!(!p.is_finished());
     }
@@ -476,7 +472,7 @@ mod tests {
     fn unknown_task_is_reported() {
         let ghost = TaskId::from_raw(0);
         assert_eq!(
-            plan().start(ghost, Agent::Claude),
+            plan().start(ghost, CLAUDE),
             Err(PlanError::UnknownTask(ghost))
         );
     }

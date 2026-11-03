@@ -28,6 +28,19 @@ pub enum Event {
         session: SessionId,
         window: Option<WindowId>,
     },
+    /// The window's focus moved to `block`: a client focused or zoomed it,
+    /// or the focused block left the layout and the block that took its
+    /// place has it. `None` once no block is placed.
+    FocusChanged {
+        window: WindowId,
+        block: Option<BlockId>,
+    },
+    /// A client moved the window to place `index` among its session's
+    /// windows, counted from 0; the windows between shifted by one.
+    WindowMoved {
+        window: WindowId,
+        index: usize,
+    },
     BlockCreated {
         block: BlockId,
         window: WindowId,

@@ -4,11 +4,19 @@
 //! bbp mcp                                   per-turn MCP server; env BBP_DIR, BBP_TASK, BBP_PRINCIPAL, BBP_TURN or BBP_SESSION=yes (with BBP_MCP_RELAY: relay to the broker)
 //! bbp mcp-broker --pipes DIR --harness PID  serves a confined harness's relay; env as bbp mcp
 //! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
+//! bbp open    --mode claims --dir D --task T --repo R --brief FILE --roster FILE --profiles FILE [--claims FILE] [--human ID] [--confine sandbox|none]
+//!                                          claims mode: the profile set names test_paths; a host that cannot sandbox refuses (bad_claims_config)
+//!                                          [--holdout-profiles FILE --holdout-root DIR] freezes a holdout suite (#597): holdout:/golden: profiles over the files under DIR
+//!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
+//! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
+//! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
+//! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
-//! bbp human   --dir D --task T [--rev N] [--as WHO] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
-//!                                          reject, rerun, resume and cancel need --rev, the card revision you saw
+//! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
+//!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST
+//!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
 //! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner or harness group of it runs; kills groups a dead moderator left
@@ -27,12 +35,48 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, admission, args::Args, broker, grade, human, mcp, moderator, pairs, pins, profiles,
-    report, response_json, runner, shadow, slots, tokens, why,
+    admin, admission, args::Args, broker, golden, grade, holdout, human, inbox, mcp, moderator,
+    pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// `--holdout-profiles FILE --holdout-root DIR`, both or neither, and an
+/// optional signed `--golden DIR`. The inner `Err` is a refusal the CLI
+/// prints like any other response: an unsigned golden set (`bad_golden`).
+type Loaded = Result<Option<holdout::HoldoutSet>, Rejection>;
+
+fn holdout_set(a: &Args) -> Result<Loaded, String> {
+    let base = match (a.flags.get("holdout-profiles"), a.flags.get("holdout-root")) {
+        (None, None) => None,
+        (Some(p), Some(root)) => {
+            let set = profiles::read_file(&PathBuf::from(p))?;
+            Some(holdout::HoldoutSet::scan(set, &PathBuf::from(root))?)
+        }
+        _ => return Err("--holdout-profiles and --holdout-root go together".into()),
+    };
+    let Some(g) = a.flags.get("golden") else {
+        return Ok(Ok(base));
+    };
+    let g = PathBuf::from(g);
+    if let Err(why) = golden::check_signed(&g) {
+        return Ok(Err(Rejection::new(Code::BadGolden, why)));
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    holdout::with_golden(base, &g, &exe).map(|h| Ok(Some(h)))
+}
+
+/// Run `f` on the holdout set, or print the refusal that stopped it.
+fn with_holdout(
+    a: &Args,
+    f: impl FnOnce(Option<holdout::HoldoutSet>) -> Result<String, String>,
+) -> Result<String, String> {
+    match holdout_set(a)? {
+        Ok(hs) => f(hs),
+        Err(refused) => Ok(response_json(&Response::Rejected(refused))),
+    }
+}
 
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -101,6 +145,13 @@ fn run() -> Result<String, String> {
             json(&treatment)?
         ));
     }
+    if sub == "golden-run" {
+        // The `golden:` profile's command, inside the sandbox, in the
+        // candidate's tree: verdicts only, never case output.
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        let (report, all) = golden::run_all(&PathBuf::from(a.pos(0)?), &cwd)?;
+        return if all { Ok(report) } else { Err(report) };
+    }
     if sub == "pairs" {
         return pairs::json(&PathBuf::from(a.flag("manifest")?));
     }
@@ -129,6 +180,11 @@ fn run() -> Result<String, String> {
         ("why", Some(t)) => TaskId(t.clone()),
         _ => TaskId(a.flag_or_env("task", "BBP_TASK")?),
     };
+    if sub == "inbox" {
+        let mut tasks: Vec<TaskId> = task.0.split(',').map(|t| TaskId(t.to_owned())).collect();
+        tasks.extend(a.positional.iter().map(|t| TaskId(t.clone())));
+        return inbox::json(&dir, &tasks);
+    }
     if sub == "quiesce" {
         return moderator::quiesce(&dir, &task).map(|quiet| quiet.to_string());
     }
@@ -160,6 +216,32 @@ fn run() -> Result<String, String> {
                 None => profiles::ProfileSet::shell("test", "cargo test"),
             };
             let roster = admin::read_roster(&PathBuf::from(a.flag("roster")?))?;
+            if a.flags.get("mode").is_some_and(|m| m == "claims") {
+                let cfg = match a.flags.get("claims") {
+                    Some(file) => admin::read_claims_config(&PathBuf::from(file))?,
+                    None => ClaimsConfig::default(),
+                };
+                let confine = a.flags.get("confine").map(String::as_str);
+                let probe = || match confine {
+                    None | Some("sandbox") => runner::probe_host(),
+                    Some(other) => Err(format!("--confine {other}")),
+                };
+                return with_holdout(&a, |holdout| {
+                    admin::open_claims_task(
+                        &dir,
+                        &task,
+                        a.flag("repo")?,
+                        &brief,
+                        &human,
+                        &set,
+                        holdout.as_ref(),
+                        roster,
+                        cfg,
+                        probe,
+                    )
+                    .map(|r| response_json(&r))
+                });
+            }
             let live = match a.flags.get("live-turns") {
                 Some(v) => v.parse().map_err(|_| "--live-turns must be a number")?,
                 None => 1,
@@ -179,6 +261,13 @@ fn run() -> Result<String, String> {
                 live,
                 policy,
             )?
+        }
+        "holdout" => {
+            return with_holdout(&a, |next| {
+                let next =
+                    next.ok_or("--holdout-profiles and --holdout-root, or --golden, are required")?;
+                admin::adopt_holdout(&dir, &task, &next).map(|r| response_json(&r))
+            });
         }
         "mod" => {
             let confinement = match a.flags.get("confine").map(String::as_str) {
@@ -375,6 +464,26 @@ fn run() -> Result<String, String> {
                         .map_err(|_| "--rev must be a number".to_owned())
                 })
                 .transpose()?;
+            if a.flags.get("dry-run").is_some_and(|v| v != "no") {
+                let preview = human::preview_fenced(
+                    &dir,
+                    &task,
+                    verb,
+                    &rest,
+                    rev,
+                    a.flags.get("as").map_or(human::UNLABELLED, String::as_str),
+                    a.flags
+                        .get("fence")
+                        .map(|r| {
+                            r.parse()
+                                .map(Rev)
+                                .map_err(|_| "--fence must be a revision".to_owned())
+                        })
+                        .transpose()?,
+                    a.flags.get("op").map(|s| OpId(s.clone())),
+                )?;
+                return rusty_serde::json::to_string(&preview).map_err(|e| e.to_string());
+            }
             human::perform_fenced(
                 &dir,
                 &task,

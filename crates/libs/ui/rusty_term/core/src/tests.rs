@@ -2749,6 +2749,35 @@ fn osc_133_not_recorded_on_alt_screen() {
 }
 
 #[test]
+fn osc_133_marks_drive_the_shell_phase_and_exit() {
+    let mut g = Grid::new(10, 3);
+    let mut p = AnsiParser::new();
+    assert_eq!(g.shell_phase(), None);
+    assert_eq!(g.last_command_exit(), None);
+    p.advance(&mut g, b"\x1b]133;A\x07$ ");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
+    p.advance(&mut g, b"\x1b]133;C\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Running));
+    p.advance(&mut g, b"\x1b]133;D;2\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Finished));
+    assert_eq!(g.last_command_exit(), Some(2));
+    // A new prompt keeps the last exit code; a `D` without one clears it.
+    p.advance(&mut g, b"\x1b]633;A\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
+    assert_eq!(g.last_command_exit(), Some(2));
+    p.advance(&mut g, b"\x1b]133;D\x07");
+    assert_eq!(g.last_command_exit(), None);
+}
+
+#[test]
+fn shell_phase_survives_ris() {
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b]133;A\x07\x1bc");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
+}
+
+#[test]
 fn osc_133_marks_cleared_on_ris() {
     let mut g = Grid::new(4, 2);
     let mut p = AnsiParser::new();
@@ -7888,6 +7917,68 @@ fn plain_csi_fast_path_matches_bytewise_parse() {
             String::from_utf8_lossy(input)
         );
     }
+}
+
+#[test]
+fn private_csi_fast_path_matches_bytewise_parse() {
+    let private_256 = format!("\x1b[?{}h", "1".repeat(256));
+    let private_257 = format!("\x1b[?{}h", "1".repeat(257));
+    let private_17 = format!("\x1b[?{}1049h", "0;".repeat(17));
+    let cases: [&[u8]; 20] = [
+        b"\x1b[?h\x1b[?l\x1b[?;h\x1b[?25;7;6l\x1b[?25;7;6h",
+        b"\x1b[?1049hx\x1b[?1049l\x1b[?47hy\x1b[?47l\x1b[?1047hz\x1b[?1047l",
+        b"\x1b[>c\x1b[>0c\x1b[=c\x1b[>q",
+        b"\x1b[>1u\x1b[?u\x1b[=5;2u\x1b[<u\x1b[<3u\x1b[?u",
+        b"\x1b[>4;2m\x1b[>4m\x1b[>m",
+        b"\x1b[?996n\x1b[?6n\x1b[?5n",
+        b"\x1b[?1;1S\x1b[?2;1S\x1b[?3;1S\x1b[?1;9S\x1b[?S",
+        b"ab\x1b[1\"q\x1b[1;1Hc\x1b[0\"qd\x1b[?1J\x1b[?2K\x1b[?0J",
+        b"\x1b[?2026h\x1b[?2026$p\x1b[?2026l\x1b[?7$p",
+        b"\x1b[?1000;1006h\x1b[?2004h\x1b[?1004h\x1b[?2004l",
+        b"\x1b[??25l\x1b[1?25hx\x1b[?2?5lx\x1b[?25:1hx",
+        b"\x1b[?25\x01lx\x1b[?25\x18hx\x1b[?25\x1b[?25lx",
+        b"\x1b[?",
+        b"\x1b[?25",
+        b"\x1b[18446744073709551615Cx\x1b[18446744073709551616Cx",
+        b"\x1b[?18446744073709551615h\x1b[?18446744073709551616h",
+        b"\x1b[1;2;3;4;5;7;8;9;21;22;23;24;25;27;28;29;31;41mx\x1b[;;;;;;;;;;;;;;;;;1mx",
+        private_256.as_bytes(),
+        private_257.as_bytes(),
+        private_17.as_bytes(),
+    ];
+    for input in cases {
+        assert_eq!(
+            csi_paths_state(input, false),
+            csi_paths_state(input, true),
+            "fast and byte-wise CSI paths differ on {:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+#[test]
+fn private_csi_split_at_every_offset_matches_one_chunk() {
+    let input = b"a\x1b[?1049hb\x1b[>1uc\x1b[?25;7ld\x1b[?6ne\x1b[>4;2mf\x1b[?1049l";
+    let whole = csi_paths_state(input, false);
+    for cut in 1..input.len() {
+        let mut g = Grid::new(80, 24);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, &input[..cut]);
+        p.advance(&mut g, &input[cut..]);
+        let responses = p.take_responses();
+        let host_out = g.take_host_out();
+        let state = super::checkpoint::encode(&g, &p).expect("checkpoint");
+        assert_eq!((state, responses, host_out), whole, "split at byte {cut}");
+    }
+}
+
+#[test]
+fn private_csi_fast_path_relays_its_parameters() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[>1u\x1b[>4;2m");
+    assert_eq!(g.take_host_out(), b"\x1b[>1u\x1b[>4;2m");
+    assert_eq!(g.kitty_keyboard_flags(), 1);
 }
 
 /// `lines` rows of `cols` glyphs, glyph `x` of row `k` in its own truecolour

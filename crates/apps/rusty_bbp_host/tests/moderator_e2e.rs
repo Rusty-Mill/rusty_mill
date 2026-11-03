@@ -42,10 +42,7 @@ fn fake_claude_on_path() {
 
 fn tempdir(tag: &str) -> PathBuf {
     fake_claude_on_path();
-    let dir = std::env::temp_dir().join(format!("bbp_mod_{}_{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    dir
+    common::fresh_dir("bbp_mod", tag)
 }
 
 fn git(repo: &Path, args: &[&str]) -> String {
@@ -2409,6 +2406,8 @@ fn quiet_planner_task(tag: &str, poll: Duration) -> (PathBuf, TaskId, Config) {
     assert_eq!(
         d.dispatch(
             &Command::Open(OpenTask {
+                claims: None,
+                mode: rusty_bbp::Mode::Stages,
                 task: task.clone(),
                 roster: common::roster(),
                 repo: "local".into(),
@@ -2427,6 +2426,7 @@ fn quiet_planner_task(tag: &str, poll: Duration) -> (PathBuf, TaskId, Config) {
                 brief,
                 human: "human".into(),
                 policy: SchedulingPolicy::TurnBased,
+                holdout_digest: None,
             }),
             rusty_bbp_host::now()
         )

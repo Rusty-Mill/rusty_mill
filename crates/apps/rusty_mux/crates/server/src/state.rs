@@ -77,7 +77,21 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::MORE_PROGRAM_EVENTS)
     .union(Features::ACTIVE_WINDOW)
     .union(Features::CONFIG_RELOAD)
-    .union(Features::TERMINAL_CONTROL);
+    .union(Features::TERMINAL_CONTROL)
+    .union(Features::LAYOUT_EDIT)
+    .union(Features::FOCUS)
+    .union(Features::SESSION_NAMES)
+    .union(Features::NAME_SESSION)
+    .union(Features::TERMINAL_MORE)
+    .union(Features::TERMINAL_SHELL);
+
+/// Fresh randomness to pick a generated session name with.
+fn name_seed() -> u64 {
+    let bytes = Uuid::new_v4();
+    let mut seed = [0; 8];
+    seed.copy_from_slice(&bytes.as_bytes()[..8]);
+    u64::from_le_bytes(seed)
+}
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -101,6 +115,8 @@ pub(crate) enum Pending {
 struct BlockRt {
     pty: Rc<Pty>,
     process: Process,
+    /// The program the block started, as configured, for `terminal.shell`.
+    program: String,
     grid: Grid,
     parser: AnsiParser,
     /// What the program reported with OSC 7501.
@@ -722,7 +738,10 @@ impl State {
         };
         match message {
             M::CreateSession { req, name } => {
-                let result = self.mux.create_session(name);
+                let result = match name.is_empty() && self.has(client, Features::SESSION_NAMES) {
+                    true => self.mux.create_generated_session(name_seed()),
+                    false => self.mux.create_session(name),
+                };
                 (
                     req,
                     result
@@ -786,6 +805,54 @@ impl State {
                 self.require(client, Features::ACTIVE_WINDOW, "select-window")
                     .and_then(|()| done(self.mux.select_window(window))),
             ),
+            M::ResizeSplit {
+                req,
+                block,
+                axis,
+                share,
+            } => (
+                req,
+                self.edit(client, "resize-split", |mux| {
+                    mux.resize_split(block, axis, share)
+                }),
+            ),
+            M::SwapBlocks { req, block, other } => (
+                req,
+                self.edit(client, "swap-blocks", |mux| mux.swap_blocks(block, other)),
+            ),
+            M::MoveBlock {
+                req,
+                block,
+                beside,
+                side,
+            } => (
+                req,
+                self.edit(client, "move-block", |mux| {
+                    mux.move_block(block, beside, side)
+                }),
+            ),
+            M::DetachBlock { req, block } => (
+                req,
+                self.edit(client, "detach-block", |mux| mux.detach_block(block)),
+            ),
+            M::MoveWindow { req, window, index } => (
+                req,
+                self.edit(client, "move-window", |mux| mux.move_window(window, index)),
+            ),
+            M::FocusBlock { req, block } => (
+                req,
+                self.require(client, Features::FOCUS, "focus-block")
+                    .and_then(|()| done(self.mux.focus_block(block))),
+            ),
+            M::MoveFocus {
+                req,
+                window,
+                toward,
+            } => (
+                req,
+                self.require(client, Features::FOCUS, "move-focus")
+                    .and_then(|()| done(self.mux.move_focus(window, toward))),
+            ),
             M::ReloadConfig { req } => (
                 req,
                 self.require(client, Features::CONFIG_RELOAD, "reload-config")
@@ -843,6 +910,11 @@ impl State {
                 self.require(client, Features::LABELS, "rename")
                     .and_then(|()| done(self.mux.rename(target, name))),
             ),
+            M::NameSession { req, session, name } => (
+                req,
+                self.require(client, Features::NAME_SESSION, "name-session")
+                    .and_then(|()| done(self.mux.name_session(session, name))),
+            ),
             M::Disconnect {
                 req,
                 client: target,
@@ -884,12 +956,30 @@ impl State {
     }
 
     /// Fails unless `client` negotiated `feature`, which `what` needs.
-    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), Refusal> {
-        if self
-            .features
+    /// A layout edit, for a client that negotiated them.
+    fn edit(
+        &mut self,
+        client: ClientId,
+        what: &str,
+        edit: impl FnOnce(&mut Mux) -> Result<(), rusty_mux_core::Error>,
+    ) -> Result<Outcome, Refusal> {
+        self.require(client, Features::LAYOUT_EDIT, what)
+            .and_then(|()| {
+                edit(&mut self.mux)
+                    .map(|()| Outcome::Done(None))
+                    .map_err(Refusal::from)
+            })
+    }
+
+    /// Whether `client` negotiated `feature`.
+    fn has(&self, client: ClientId, feature: Features) -> bool {
+        self.features
             .get(&client)
             .is_some_and(|f| f.contains(feature))
-        {
+    }
+
+    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), Refusal> {
+        if self.has(client, feature) {
             return Ok(());
         }
         Err(format!("{what} requires feature bits {:#x}", feature.bits()).into())
@@ -981,7 +1071,13 @@ impl State {
                 self.inject(block, terminal::RESET);
                 return Ok(Outcome::Done(None));
             }
-            "terminal.set-theme" => {
+            "terminal.modes" => terminal::modes(&rt.grid),
+            "terminal.shell" => {
+                let pid = rt.process.pid().ok_or("the program has exited")?;
+                let activity = process::activity(pid, rt.pty.foreground());
+                terminal::shell(&rt.grid, &rt.program, activity)
+            }
+            "terminal.set-theme" | "terminal.clear" => {
                 self.mux
                     .authorize_input(client, block)
                     .map_err(Refusal::from)?;
@@ -994,9 +1090,13 @@ impl State {
                     )
                     .into());
                 }
-                let change =
-                    ThemeChange::from_args(&named).map_err(|e| format!("{method}: {e}"))?;
-                self.inject(block, &terminal::theme(&change));
+                let bytes = match found.name {
+                    "terminal.clear" => terminal::CLEAR.to_vec(),
+                    _ => terminal::theme(
+                        &ThemeChange::from_args(&named).map_err(|e| format!("{method}: {e}"))?,
+                    ),
+                };
+                self.inject(block, &bytes);
                 return Ok(Outcome::Done(None));
             }
             _ => return Err(unknown()),
@@ -1029,6 +1129,7 @@ impl State {
                 session: session.id(),
                 name: session.name().to_owned(),
                 active: session.active(),
+                generated: session.generated(),
             });
             for window in session.windows().iter().filter_map(|w| self.mux.window(*w)) {
                 entries.push(Entry::Window {
@@ -1037,6 +1138,7 @@ impl State {
                     name: window.name().to_owned(),
                     layout: window.layout().cloned(),
                     zoomed: window.zoomed(),
+                    focused: window.focused(),
                 });
                 for block in window.blocks().iter().filter_map(|b| self.mux.block(*b)) {
                     entries.push(Entry::Block {
@@ -1153,6 +1255,7 @@ impl State {
             BlockRt {
                 pty,
                 process,
+                program: config.program.to_string_lossy().into_owned(),
                 grid,
                 parser: AnsiParser::new(),
                 status: Records::default(),
@@ -1569,6 +1672,8 @@ fn receives(features: Features, event: &Event) -> bool {
         }
         Event::ActiveWindowChanged { .. } => Features::ACTIVE_WINDOW,
         Event::ConfigReloaded => Features::CONFIG_RELOAD,
+        Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
+        Event::FocusChanged { .. } => Features::FOCUS,
         _ => Features::NONE,
     };
     features.contains(needs)

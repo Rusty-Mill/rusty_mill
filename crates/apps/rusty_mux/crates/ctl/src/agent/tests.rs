@@ -16,8 +16,16 @@ fn json(text: &str) -> Value {
     Value::from_json_str(text).expect("JSON")
 }
 
+/// The ctl at `path`, its hook not naming sessions.
+fn plain(path: &str) -> layout::Ctl<'_> {
+    layout::Ctl {
+        path,
+        name_session: false,
+    }
+}
+
 fn ours() -> String {
-    settings::command(CTL)
+    settings::command(plain(CTL))
 }
 
 /// A fresh, empty agent config directory.
@@ -43,13 +51,21 @@ fn claude_in(dir: &Path) -> AgentArgs {
         agents: vec![AgentKind::Claude],
         scope: AgentScope::Dir(dir.into()),
         dry_run: false,
+        name_session: false,
     }
 }
 
 /// Runs `command` for Claude Code in `dir`, returning the exit and stdout.
 fn agent(command: fn(AgentArgs) -> AgentCommand, dir: &Path, ctl: &str) -> (Exit, String) {
     let mut out = Vec::new();
-    let exit = run(&command(claude_in(dir)), &env(ctl), false, &mut out).expect("runs");
+    let exit = run(
+        &command(claude_in(dir)),
+        &env(ctl),
+        false,
+        &mut out,
+        &|| None,
+    )
+    .expect("runs");
     (exit, String::from_utf8(out).expect("UTF-8"))
 }
 
@@ -65,11 +81,11 @@ fn files_in(dir: &Path) -> Vec<String> {
 #[test]
 fn the_command_quotes_the_path_for_a_posix_shell() {
     assert_eq!(
-        settings::command("/a b/rusty-mux-ctl"),
+        settings::command(plain("/a b/rusty-mux-ctl")),
         "'/a b/rusty-mux-ctl' agent hook"
     );
     assert_eq!(
-        settings::command("/it's/rusty-mux-ctl"),
+        settings::command(plain("/it's/rusty-mux-ctl")),
         r"'/it'\''s/rusty-mux-ctl' agent hook"
     );
 }
@@ -98,8 +114,12 @@ fn adding_keeps_every_other_setting_and_hook() {
 
 #[test]
 fn a_moved_ctl_is_updated_in_place_not_added_twice() {
-    let old = settings::with_hook(json("{}"), &settings::command("/old/rusty-mux-ctl"), None)
-        .expect("adds");
+    let old = settings::with_hook(
+        json("{}"),
+        &settings::command(plain("/old/rusty-mux-ctl")),
+        None,
+    )
+    .expect("adds");
     assert_eq!(settings::state(&old, &ours(), None), Ok(State::Outdated));
     let new = settings::with_hook(old, &ours(), None).expect("updates");
     let groups = new["hooks"]["SessionStart"].as_array().expect("array");
@@ -206,6 +226,7 @@ fn foreign_files_are_never_replaced() {
         &env(CTL),
         false,
         &mut out,
+        &|| None,
     );
     assert!(refused.is_err());
     assert!(!dir.join("settings.json").exists(), "nothing is written");
@@ -220,7 +241,8 @@ fn foreign_files_are_never_replaced() {
             &AgentCommand::Setup(claude_in(&dir)),
             &env(CTL),
             false,
-            &mut out
+            &mut out,
+            &|| None
         )
         .is_err()
     );
@@ -262,7 +284,10 @@ fn id(n: u8) -> Uuid {
 
 #[test]
 fn the_hook_speaks_only_inside_a_block() {
-    assert_eq!(hook_text(&Defaults::default(), Some(Path::new(CTL))), None);
+    assert_eq!(
+        hook_text(&Defaults::default(), Some(Path::new(CTL)), None),
+        None
+    );
     let block = id(3);
     let here = Defaults {
         session: Some(id(1)),
@@ -270,11 +295,105 @@ fn the_hook_speaks_only_inside_a_block() {
         block: Some(block),
         dir: None,
     };
-    let text = hook_text(&here, Some(Path::new(CTL))).expect("text");
+    let text = hook_text(&here, Some(Path::new(CTL)), None).expect("text");
     assert!(
         text.contains(&block.to_string()) && text.contains(CTL),
         "{text}"
     );
+}
+
+#[test]
+fn the_naming_hook_asks_only_about_a_generated_name() {
+    let here = Defaults {
+        session: Some(id(1)),
+        window: Some(id(2)),
+        block: Some(id(3)),
+        dir: None,
+    };
+    let text = hook_text(&here, None, Some("quiet-harbor")).expect("text");
+    assert!(
+        text.contains("`quiet-harbor`")
+            && text.contains(&format!("name-session --session {} --name NAME", id(1))),
+        "{text}"
+    );
+    // Without a session to name, it says nothing about naming.
+    let no_session = Defaults {
+        session: None,
+        ..here.clone()
+    };
+    let text = hook_text(&no_session, None, Some("quiet-harbor")).expect("text");
+    assert!(!text.contains("name-session"), "{text}");
+
+    let env = Env {
+        here,
+        ..Env::default()
+    };
+    // The lookup answers the session's name only while it is generated.
+    let hook = |name_session, generated: Option<&'static str>| {
+        let mut out = Vec::new();
+        let asked = std::cell::Cell::new(false);
+        let lookup = || {
+            asked.set(true);
+            generated.map(str::to_owned)
+        };
+        run(
+            &AgentCommand::Hook { name_session },
+            &env,
+            false,
+            &mut out,
+            &lookup,
+        )
+        .expect("runs");
+        (String::from_utf8(out).expect("UTF-8"), asked.get())
+    };
+    let (text, asked) = hook(true, Some("quiet-harbor-2"));
+    assert!(asked && text.contains("`quiet-harbor-2`"), "{text}");
+    let (text, asked) = hook(true, None);
+    assert!(
+        asked && !text.contains("name-session"),
+        "a chosen name is kept: {text}"
+    );
+    let (text, asked) = hook(false, Some("quiet-harbor"));
+    assert!(!asked && !text.contains("name-session"), "{text}");
+}
+
+#[test]
+fn the_naming_hook_is_ours_and_another_version_of_the_plain_one() {
+    let naming = layout::Ctl {
+        path: CTL,
+        name_session: true,
+    };
+    let command = settings::command(naming);
+    assert!(
+        command.ends_with("' agent hook --name-session"),
+        "{command}"
+    );
+    let with = settings::with_hook(json("{}"), &command, None).expect("adds");
+    assert!(settings::has_hook(&with).expect("readable"));
+    assert_eq!(settings::state(&with, &command, None), Ok(State::Installed));
+    assert_eq!(settings::state(&with, &ours(), None), Ok(State::Outdated));
+    // Setting up the plain hook over it replaces it rather than adding one.
+    let plain_again = settings::with_hook(with, &ours(), None).expect("replaces");
+    let text = plain_again.to_json_string();
+    assert_eq!(text.matches("agent hook").count(), 1, "{text}");
+    assert!(!text.contains("--name-session"), "{text}");
+
+    assert_eq!(
+        settings::windows_command(layout::Ctl {
+            path: r"C:\bin\rusty-mux-ctl.exe",
+            name_session: true,
+        }),
+        Ok("C:/bin/rusty-mux-ctl.exe agent hook --name-session".into())
+    );
+    for text in [scripts::opencode(naming), scripts::pi(naming)] {
+        assert!(
+            text.contains(r#"["agent", "hook", "--name-session"]"#),
+            "{text}"
+        );
+    }
+    for text in [scripts::opencode(plain(CTL)), scripts::pi(plain(CTL))] {
+        assert!(text.contains(r#"["agent", "hook"]"#), "{text}");
+    }
 }
 
 #[test]
@@ -317,7 +436,8 @@ fn only_the_exact_generated_command_is_ours() {
         );
     }
     for moved in ["/it's/rusty-mux-ctl", r"C:\Program Files\rusty-mux-ctl.exe"] {
-        let old = settings::with_hook(json("{}"), &settings::command(moved), None).expect("adds");
+        let old =
+            settings::with_hook(json("{}"), &settings::command(plain(moved)), None).expect("adds");
         assert_eq!(
             settings::state(&old, &ours(), None),
             Ok(State::Outdated),
@@ -496,9 +616,10 @@ fn in_home(
         agents: agents.to_vec(),
         scope,
         dry_run,
+        name_session: false,
     };
     let mut out = Vec::new();
-    let exit = run(&command(args), &env, false, &mut out)?;
+    let exit = run(&command(args), &env, false, &mut out, &|| None)?;
     Ok((exit, String::from_utf8(out).expect("UTF-8")))
 }
 
@@ -528,8 +649,8 @@ fn each_agent_has_its_own_hook_and_a_shared_skill() {
         ..AgentHomes::default()
     };
     let at = |agent, scope: &AgentScope| {
-        let layout =
-            layout::layout(agent, scope, &homes, Some(Path::new("/p")), CTL).expect("layout");
+        let layout = layout::layout(agent, scope, &homes, Some(Path::new("/p")), plain(CTL))
+            .expect("layout");
         (layout.skill, layout.hook.path().to_path_buf())
     };
     let paths = |skill: &str, hook: &str| (PathBuf::from(skill), PathBuf::from(hook));
@@ -597,7 +718,7 @@ fn each_agents_variable_moves_its_user_directory() {
         pi: Some("/pi".into()),
     };
     let hook = |agent| {
-        layout::layout(agent, &AgentScope::User, &homes, None, CTL)
+        layout::layout(agent, &AgentScope::User, &homes, None, plain(CTL))
             .map(|l| l.hook.path().to_path_buf())
     };
     assert_eq!(hook(AgentKind::Claude), Ok("/c/settings.json".into()));
@@ -612,12 +733,27 @@ fn each_agents_variable_moves_its_user_directory() {
     );
     // The shared skill lives under the home directory, which may be unknown.
     homes.home = None;
-    let err = layout::layout(AgentKind::Codex, &AgentScope::User, &homes, None, CTL)
-        .err()
-        .expect("no home");
+    let err = layout::layout(
+        AgentKind::Codex,
+        &AgentScope::User,
+        &homes,
+        None,
+        plain(CTL),
+    )
+    .err()
+    .expect("no home");
     assert!(err.contains("HOME"), "{err}");
     // Project scope needs the current directory.
-    assert!(layout::layout(AgentKind::Pi, &AgentScope::Project, &homes, None, CTL).is_err());
+    assert!(
+        layout::layout(
+            AgentKind::Pi,
+            &AgentScope::Project,
+            &homes,
+            None,
+            plain(CTL)
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -675,13 +811,13 @@ fn opencode_and_pi_hooks_are_whole_files_naming_this_ctl() {
     let extension = home.join(".pi/agent/extensions/rusty-mux.ts");
     assert_eq!(
         fs::read_to_string(&plugin).expect("plugin"),
-        scripts::opencode(CTL)
+        scripts::opencode(plain(CTL))
     );
     assert_eq!(
         fs::read_to_string(&extension).expect("extension"),
-        scripts::pi(CTL)
+        scripts::pi(plain(CTL))
     );
-    for text in [scripts::opencode(CTL), scripts::pi(CTL)] {
+    for text in [scripts::opencode(plain(CTL)), scripts::pi(plain(CTL))] {
         assert!(text.starts_with(scripts::MARK));
         let line = format!("const CTL = {};", Value::from(CTL).to_json_string());
         assert!(text.contains(&line), "{text}");
@@ -703,9 +839,10 @@ fn opencode_and_pi_hooks_are_whole_files_naming_this_ctl() {
             agents: agents.to_vec(),
             scope: AgentScope::User,
             dry_run: false,
+            name_session: false,
         };
         let mut out = Vec::new();
-        let exit = run(&command(args), &env, false, &mut out).expect("runs");
+        let exit = run(&command(args), &env, false, &mut out, &|| None).expect("runs");
         (exit, String::from_utf8(out).expect("UTF-8"))
     };
     let (exit, out) = moved(AgentCommand::Status);
@@ -715,7 +852,7 @@ fn opencode_and_pi_hooks_are_whole_files_naming_this_ctl() {
     assert_eq!(out.matches("hook   updated").count(), 2, "{out}");
     assert_eq!(
         fs::read_to_string(&plugin).expect("plugin"),
-        scripts::opencode("/new/rusty-mux-ctl")
+        scripts::opencode(plain("/new/rusty-mux-ctl"))
     );
 
     let removed = in_home(
@@ -737,7 +874,7 @@ fn opencode_and_pi_hooks_are_whole_files_naming_this_ctl() {
 #[test]
 fn a_path_cannot_end_the_scripts_string_early() {
     let ctl = "/a\"b\\c\n';`${x}`/rusty-mux-ctl";
-    for text in [scripts::opencode(ctl), scripts::pi(ctl)] {
+    for text in [scripts::opencode(plain(ctl)), scripts::pi(plain(ctl))] {
         let line = text
             .lines()
             .find_map(|l| l.strip_prefix("const CTL = "))
@@ -834,9 +971,10 @@ fn dry_run_reports_and_writes_nothing() {
         agents: vec![AgentKind::Pi],
         scope: AgentScope::Project,
         dry_run: true,
+        name_session: false,
     };
     let mut out = Vec::new();
-    run(&AgentCommand::Setup(args), &env, true, &mut out).expect("json");
+    run(&AgentCommand::Setup(args), &env, true, &mut out, &|| None).expect("json");
     let first = String::from_utf8(out).expect("UTF-8");
     let first = json(first.lines().next().expect("a line"));
     assert_eq!(first["agent"].as_str(), Some("pi"));
@@ -881,10 +1019,18 @@ fn removing_claude_alone_needs_no_home() {
         agents: vec![AgentKind::Claude],
         scope: AgentScope::User,
         dry_run: false,
+        name_session: false,
     };
     let mut out = Vec::new();
-    run(&AgentCommand::Setup(args.clone()), &env, false, &mut out).expect("setup");
-    run(&AgentCommand::Remove(args), &env, false, &mut out).expect("remove");
+    run(
+        &AgentCommand::Setup(args.clone()),
+        &env,
+        false,
+        &mut out,
+        &|| None,
+    )
+    .expect("setup");
+    run(&AgentCommand::Remove(args), &env, false, &mut out, &|| None).expect("remove");
     assert!(files_in(&dir).is_empty(), "{:?}", files_in(&dir));
 }
 
@@ -901,6 +1047,7 @@ fn the_shared_skill_is_kept_for_another_scope() {
         agents: agents.to_vec(),
         scope,
         dry_run: false,
+        name_session: false,
     };
     let mut out = Vec::new();
     let both = [AgentKind::Codex, AgentKind::OpenCode];
@@ -909,11 +1056,12 @@ fn the_shared_skill_is_kept_for_another_scope() {
         &env,
         false,
         &mut out,
+        &|| None,
     )
     .expect("setup");
     let mut out = Vec::new();
     let remove = AgentCommand::Remove(args(&[AgentKind::Codex], AgentScope::Project));
-    run(&remove, &env, false, &mut out).expect("remove");
+    run(&remove, &env, false, &mut out, &|| None).expect("remove");
     let out = String::from_utf8(out).expect("UTF-8");
     assert!(out.contains("codex    skill  shared"), "{out}");
     assert!(home.join(".agents/skills/rusty-mux/SKILL.md").exists());
@@ -960,15 +1108,16 @@ fn the_shared_skill_is_kept_for_a_project_in_the_home_directory() {
         agents: vec![agent],
         scope,
         dry_run: false,
+        name_session: false,
     };
     let mut out = Vec::new();
     let project = AgentCommand::Setup(args(AgentKind::OpenCode, AgentScope::Project));
-    run(&project, &env, false, &mut out).expect("project setup");
+    run(&project, &env, false, &mut out, &|| None).expect("project setup");
     let user = AgentCommand::Setup(args(AgentKind::Codex, AgentScope::User));
-    run(&user, &env, false, &mut out).expect("user setup");
+    run(&user, &env, false, &mut out, &|| None).expect("user setup");
     let mut out = Vec::new();
     let remove = AgentCommand::Remove(args(AgentKind::Codex, AgentScope::User));
-    run(&remove, &env, false, &mut out).expect("remove");
+    run(&remove, &env, false, &mut out, &|| None).expect("remove");
     let out = String::from_utf8(out).expect("UTF-8");
     assert!(out.contains("codex    skill  shared"), "{out}");
     assert!(home.join(".agents/skills/rusty-mux/SKILL.md").exists());
@@ -987,17 +1136,18 @@ fn the_shared_skill_is_kept_for_the_home_project_from_any_directory() {
         agents: vec![agent],
         scope,
         dry_run: false,
+        name_session: false,
     };
     let mut out = Vec::new();
     env.here.dir = Some(home.clone());
     let project = AgentCommand::Setup(args(AgentKind::OpenCode, AgentScope::Project));
-    run(&project, &env, false, &mut out).expect("project setup");
+    run(&project, &env, false, &mut out, &|| None).expect("project setup");
     env.here.dir = Some(elsewhere);
     let user = AgentCommand::Setup(args(AgentKind::Codex, AgentScope::User));
-    run(&user, &env, false, &mut out).expect("user setup");
+    run(&user, &env, false, &mut out, &|| None).expect("user setup");
     let mut out = Vec::new();
     let remove = AgentCommand::Remove(args(AgentKind::Codex, AgentScope::User));
-    run(&remove, &env, false, &mut out).expect("remove");
+    run(&remove, &env, false, &mut out, &|| None).expect("remove");
     let out = String::from_utf8(out).expect("UTF-8");
     assert!(out.contains("codex    skill  shared"), "{out}");
     assert!(home.join(".agents/skills/rusty-mux/SKILL.md").exists());
@@ -1055,10 +1205,18 @@ fn claude_can_share_the_skill_too() {
         agents: vec![agent],
         scope: AgentScope::User,
         dry_run: false,
+        name_session: false,
     };
     let mut out = Vec::new();
     for agent in [AgentKind::Claude, AgentKind::Codex] {
-        run(&AgentCommand::Setup(args(agent)), &env, false, &mut out).expect("setup");
+        run(
+            &AgentCommand::Setup(args(agent)),
+            &env,
+            false,
+            &mut out,
+            &|| None,
+        )
+        .expect("setup");
     }
     let skill = home.join(".agents/skills/rusty-mux/SKILL.md");
     let mut out = Vec::new();
@@ -1067,6 +1225,7 @@ fn claude_can_share_the_skill_too() {
         &env,
         false,
         &mut out,
+        &|| None,
     )
     .expect("remove");
     let out = String::from_utf8(out).expect("UTF-8");
@@ -1078,6 +1237,7 @@ fn claude_can_share_the_skill_too() {
         &env,
         false,
         &mut out,
+        &|| None,
     )
     .expect("remove");
     assert!(!skill.exists());
@@ -1089,7 +1249,7 @@ fn claude_can_share_the_skill_too() {
 #[test]
 fn codex_gets_a_windows_command_every_windows_shell_runs() {
     assert_eq!(
-        settings::windows_command(r"C:\Users\me\.cargo\bin\rusty-mux-ctl.exe"),
+        settings::windows_command(plain(r"C:\Users\me\.cargo\bin\rusty-mux-ctl.exe")),
         Ok("C:/Users/me/.cargo/bin/rusty-mux-ctl.exe agent hook".to_owned())
     );
     for bad in [
@@ -1101,7 +1261,7 @@ fn codex_gets_a_windows_command_every_windows_shell_runs() {
         r"C:\a%b%\rusty-mux-ctl.exe",
         "",
     ] {
-        assert!(settings::windows_command(bad).is_err(), "{bad}");
+        assert!(settings::windows_command(plain(bad)).is_err(), "{bad}");
     }
     // Ours with the Windows command, and updated when it changes.
     let windows = "C:/new/rusty-mux-ctl.exe agent hook";
@@ -1139,7 +1299,7 @@ fn codex_on_windows_refuses_a_path_its_shells_misread() {
         ..AgentHomes::default()
     };
     let on_windows = |agent, ctl| {
-        layout::layout_on(agent, &AgentScope::User, &homes, None, ctl, true).expect("layout")
+        layout::layout_on(agent, &AgentScope::User, &homes, None, plain(ctl), true).expect("layout")
     };
     let spaced = r"C:\Program Files\rusty-mux\rusty-mux-ctl.exe";
     let codex = on_windows(AgentKind::Codex, spaced);

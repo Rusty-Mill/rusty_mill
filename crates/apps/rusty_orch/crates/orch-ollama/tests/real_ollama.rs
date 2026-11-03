@@ -8,10 +8,12 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use orch_core::board::Board;
-use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec};
 use orch_core::{GoalId, Text};
 use orch_dispatch::AgentRunner;
 use orch_ollama::OllamaAgent;
+
+const LOCAL: AgentId = AgentId::from_static("local");
 
 #[test]
 #[ignore = "needs the ollama binary and ORCH_OLLAMA_MODEL"]
@@ -45,7 +47,7 @@ fn ollama_reads_the_prompt_from_stdin_and_echoes_the_nonce() {
     // on stdin, so a body containing the nonce proves stdin delivery under
     // `--format json`; a non-empty reply alone would not (#441).
     let out = agent
-        .run(Agent::Local, plan.tasks().first().expect("card"), &board)
+        .run(LOCAL, plan.tasks().first().expect("card"), &board)
         .expect("ollama produced parseable entries");
 
     assert!(

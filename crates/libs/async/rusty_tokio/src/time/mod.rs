@@ -70,17 +70,32 @@ impl TimerDriver {
         self.clock.is_paused()
     }
 
+    /// # Panics
+    /// Panics if already paused.
     pub(crate) fn pause(&self) {
-        self.clock.pause();
-        // The event loop's own wait needs to re-check `is_paused()`
-        // immediately rather than potentially sleeping against real
-        // time for up to its current wait duration first.
-        self.condvar.notify_all();
+        let changed = self.change_clock(Clock::pause);
+        assert!(changed, "time is already paused");
     }
 
+    /// # Panics
+    /// Panics if not currently paused.
     pub(crate) fn resume(&self) {
-        self.clock.resume();
-        self.condvar.notify_all();
+        let changed = self.change_clock(Clock::resume);
+        assert!(changed, "time is not paused");
+    }
+
+    /// Applies a pause-state change under `inner` and wakes the timer
+    /// thread. The thread reads the pause state under `inner` and then
+    /// waits, so a change published without it can land in between and
+    /// go unseen until the 200 ms poll (#587).
+    fn change_clock(&self, change: fn(&Clock) -> bool) -> bool {
+        let inner = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let changed = change(&self.clock);
+        drop(inner);
+        if changed {
+            self.condvar.notify_all();
+        }
+        changed
     }
 
     /// See [`advance`]'s docs -- this is its actual
@@ -188,8 +203,9 @@ impl TimerDriver {
                     // Virtual time only moves when `advance()` says so --
                     // there's no real-time deadline to compute a sleep
                     // duration from, so just wait to be re-notified
-                    // (`pause`/`resume`/`advance` all notify), bounded the
-                    // same way the "nothing scheduled" branch is.
+                    // (`pause`/`resume` notify; `advance` fires timers
+                    // itself), bounded the same way the "nothing
+                    // scheduled" branch is.
                     let _ = self
                         .condvar
                         .wait_timeout(guard, Duration::from_millis(200))
@@ -221,9 +237,12 @@ impl TimerDriver {
 
     fn register(&self, deadline: StdInstant, waker: Waker) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        // Waker clone and drop run user code that may call back into this
+        // driver, so neither happens while `inner` is held (#588).
+        let stored = waker.clone();
         let mut guard = self.inner.lock().unwrap();
         guard.heap.push(Reverse((deadline, id)));
-        guard.wakers.insert(id, waker.clone());
+        guard.wakers.insert(id, stored);
         drop(guard);
         // A newly registered deadline might be sooner than whatever the
         // timer thread is currently sleeping until.
@@ -246,7 +265,13 @@ impl TimerDriver {
     }
 
     fn update_waker(&self, id: u64, waker: Waker) {
-        self.inner.lock().unwrap().wakers.insert(id, waker.clone());
+        // Clone before locking and drop the old waker after unlocking;
+        // see `register`.
+        let stored = waker.clone();
+        let mut guard = self.inner.lock().unwrap();
+        let old = guard.wakers.insert(id, stored);
+        drop(guard);
+        drop(old);
         // See `register`'s identical check for why.
         if self.shutdown.load(Ordering::Acquire) {
             waker.wake();
@@ -256,8 +281,12 @@ impl TimerDriver {
     fn cancel(&self, id: u64) {
         // The heap entry itself is left in place -- removing from a
         // binary heap isn't O(1) -- and simply skipped when it's popped
-        // since its waker is gone by then.
-        self.inner.lock().unwrap().wakers.remove(&id);
+        // since its waker is gone by then. The removed waker is dropped
+        // after unlocking; see `register`.
+        let mut guard = self.inner.lock().unwrap();
+        let removed = guard.wakers.remove(&id);
+        drop(guard);
+        drop(removed);
     }
 
     pub(crate) fn shutdown(&self) {
@@ -334,6 +363,196 @@ mod tests {
         finished
             .recv_timeout(Duration::from_secs(10))
             .expect("shutdown returns instead of waiting out the hour-long timer");
+    }
+
+    /// Runs `change` on another thread while the test holds `inner`, and
+    /// reports whether the pause state moved before the guard dropped.
+    fn pause_state_changes_without_inner(
+        driver: &Arc<TimerDriver>,
+        change: fn(&TimerDriver),
+    ) -> bool {
+        let before = driver.is_paused();
+        let held = driver.inner.lock().unwrap();
+        let changer = driver.clone();
+        let thread = std::thread::spawn(move || change(&changer));
+        // Too short a pause can only make the test pass vacuously.
+        std::thread::sleep(Duration::from_millis(100));
+        let moved = driver.is_paused() != before;
+        drop(held);
+        thread.join().expect("pause or resume panicked");
+        assert_ne!(
+            driver.is_paused(),
+            before,
+            "the change lands once inner is free"
+        );
+        moved
+    }
+
+    /// The timer thread reads the pause state under `inner` and then
+    /// waits, so `pause` and `resume` publish under `inner` too, or a
+    /// change that lands in between is lost for up to 200 ms (#587).
+    #[test]
+    fn pause_changes_the_clock_under_inner() {
+        let driver = Arc::new(TimerDriver::new());
+        assert!(
+            !pause_state_changes_without_inner(&driver, TimerDriver::pause),
+            "pause changed the clock without holding inner"
+        );
+    }
+
+    #[test]
+    fn resume_changes_the_clock_under_inner() {
+        let driver = Arc::new(TimerDriver::new());
+        driver.pause();
+        assert!(
+            !pause_state_changes_without_inner(&driver, TimerDriver::resume),
+            "resume changed the clock without holding inner"
+        );
+    }
+
+    /// A misuse panic from `pause` or `resume` must not poison the
+    /// driver's locks, or every later timer call panics too.
+    #[test]
+    fn a_double_pause_or_resume_panics_without_breaking_the_driver() {
+        let driver = TimerDriver::new();
+        let quiet = std::panic::AssertUnwindSafe(&driver);
+        assert!(std::panic::catch_unwind(|| quiet.resume()).is_err());
+        driver.pause();
+        assert!(std::panic::catch_unwind(|| quiet.pause()).is_err());
+        assert!(driver.is_paused());
+        let _ = driver.now();
+        driver.resume();
+        driver.register(
+            driver.now() + Duration::from_secs(3600),
+            Waker::noop().clone(),
+        );
+    }
+
+    /// A waker that calls back into the timer driver when it is cloned
+    /// (if `on_clone`) and when it is dropped, the way a user waker may.
+    struct Reentrant {
+        driver: Arc<TimerDriver>,
+        on_clone: bool,
+    }
+
+    impl Reentrant {
+        fn poke(&self) {
+            // Takes `inner`; deadlocks if the caller already holds it.
+            self.driver.cancel(u64::MAX);
+        }
+
+        fn waker(driver: &Arc<TimerDriver>, on_clone: bool) -> Waker {
+            use std::task::{RawWaker, RawWakerVTable};
+            unsafe fn clone(data: *const ()) -> RawWaker {
+                // SAFETY: every data pointer comes from Arc::into_raw below.
+                let value = unsafe { &*data.cast::<Reentrant>() };
+                if value.on_clone {
+                    value.poke();
+                }
+                // SAFETY: the borrowed waker keeps this allocation alive.
+                unsafe { Arc::increment_strong_count(data.cast::<Reentrant>()) };
+                RawWaker::new(data, &VTABLE)
+            }
+            unsafe fn drop_raw(data: *const ()) {
+                // SAFETY: each raw waker owns exactly one Arc reference.
+                let value = unsafe { Arc::from_raw(data.cast::<Reentrant>()) };
+                value.poke();
+            }
+            unsafe fn wake(data: *const ()) {
+                // SAFETY: wake consumes the same reference as drop.
+                unsafe { drop_raw(data) };
+            }
+            unsafe fn wake_by_ref(_: *const ()) {}
+            static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake_by_ref, drop_raw);
+            let value = Arc::new(Reentrant {
+                driver: driver.clone(),
+                on_clone,
+            });
+            let raw = RawWaker::new(Arc::into_raw(value).cast(), &VTABLE);
+            // SAFETY: the vtable keeps Arc ownership for every operation.
+            unsafe { Waker::from_raw(raw) }
+        }
+    }
+
+    /// Runs `op` on its own thread and fails if it does not finish:
+    /// re-entering `inner` from a waker deadlocks instead of returning.
+    fn finishes(what: &str, op: impl FnOnce() + Send + 'static) {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            op();
+            let _ = done.send(());
+        });
+        finished
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|_| panic!("{what} deadlocked on a re-entrant waker"));
+    }
+
+    /// Waker clone and drop run user code, which may call back into the
+    /// driver, so neither happens while `inner` is held (#588).
+    #[test]
+    fn wakers_are_cloned_and_dropped_outside_inner() {
+        let driver = Arc::new(TimerDriver::new());
+        let later = driver.now() + Duration::from_secs(3600);
+
+        let d = driver.clone();
+        finishes("register cloning the waker", move || {
+            d.register(later, Reentrant::waker(&d, true));
+        });
+        let id = driver.register(later, Waker::noop().clone());
+        let d = driver.clone();
+        finishes("update_waker cloning the waker", move || {
+            d.update_waker(id, Reentrant::waker(&d, true));
+        });
+
+        let id = driver.register(later, Reentrant::waker(&driver, false));
+        let d = driver.clone();
+        finishes("update_waker dropping the old waker", move || {
+            d.update_waker(id, Waker::noop().clone());
+        });
+        let id = driver.register(later, Reentrant::waker(&driver, false));
+        let d = driver.clone();
+        finishes("cancel dropping the waker", move || d.cancel(id));
+    }
+
+    /// Resumes paused time when its last reference goes, as a user
+    /// waker's destructor may.
+    struct ResumeOnDrop(Arc<TimerDriver>);
+
+    // Waking is irrelevant here; only the destructor matters, which
+    // `Waker::noop()` cannot carry.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for ResumeOnDrop {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            self.0.resume();
+        }
+    }
+
+    /// `pause` and `resume` take `inner` (#587), so a stored waker whose
+    /// destructor resumes time must not be dropped under it (#588):
+    /// cancelling a paused `Sleep`, or replacing its waker, finishes.
+    #[test]
+    fn a_waker_destructor_can_resume_paused_time() {
+        let driver = Arc::new(TimerDriver::new());
+        let later = driver.now() + Duration::from_secs(3600);
+        let resumer = |d: &Arc<TimerDriver>| Waker::from(Arc::new(ResumeOnDrop(d.clone())));
+
+        driver.pause();
+        let id = driver.register(later, resumer(&driver));
+        let d = driver.clone();
+        finishes("cancel dropping a resuming waker", move || d.cancel(id));
+        assert!(!driver.is_paused(), "the destructor resumed time");
+
+        driver.pause();
+        let id = driver.register(later, resumer(&driver));
+        let d = driver.clone();
+        finishes("update_waker dropping a resuming waker", move || {
+            d.update_waker(id, Waker::noop().clone());
+        });
+        assert!(!driver.is_paused(), "the destructor resumed time");
     }
 
     #[test]

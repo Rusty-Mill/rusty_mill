@@ -62,6 +62,14 @@ pub struct Role {
     pub final_decision: bool,
     /// The role may receive a yielded turn.
     pub consultable: bool,
+    /// Claims mode: the role may store holdout candidates (#597). Not written
+    /// when false, so existing rosters and logs are unchanged.
+    #[rusty_serde(default, skip_serializing_if = "is_false")]
+    pub holdout: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Role {
@@ -77,6 +85,7 @@ impl Role {
             verdict_at: Vec::new(),
             final_decision: false,
             consultable: false,
+            holdout: false,
         }
     }
 
@@ -115,12 +124,19 @@ impl Role {
         self
     }
 
+    /// Claims mode: may store holdout candidates.
+    pub fn holdout(mut self) -> Role {
+        self.holdout = true;
+        self
+    }
+
     pub fn holds(&self, cap: Cap) -> bool {
         match cap {
             Cap::Post(k) => self.post.contains(&k),
             Cap::Write(k) => self.write.contains(&k),
             Cap::Read(k) => self.read_artifacts.contains(&k),
             Cap::Verdict(s) => self.verdict_at.contains(&s),
+            Cap::Holdout => self.holdout,
         }
     }
 
@@ -137,6 +153,8 @@ pub enum Cap {
     Write(ArtifactKind),
     Read(ArtifactKind),
     Verdict(Stage),
+    /// Store a holdout candidate (claims mode, #597).
+    Holdout,
 }
 
 impl fmt::Display for Cap {
@@ -146,6 +164,7 @@ impl fmt::Display for Cap {
             Cap::Write(k) => write!(f, "write:{}", k.name()),
             Cap::Read(k) => write!(f, "read_artifacts:{}", k.name()),
             Cap::Verdict(s) => write!(f, "verdict_at:{}", s.name()),
+            Cap::Holdout => write!(f, "write:holdout"),
         }
     }
 }
@@ -234,6 +253,10 @@ pub enum RosterError {
     },
     /// Some role could judge `review` but none holds `final_decision`.
     NoFinalizer,
+    /// Claims mode: no role posts `claim`, or none posts `evidence`.
+    UnservableClaims {
+        needs: String,
+    },
 }
 
 impl fmt::Display for RosterError {
@@ -257,6 +280,9 @@ impl fmt::Display for RosterError {
                 f,
                 "no finalizer: a review judge must also hold final_decision"
             ),
+            RosterError::UnservableClaims { needs } => {
+                write!(f, "Unservable(claims): no role holds {needs}")
+            }
         }
     }
 }
@@ -282,30 +308,28 @@ pub struct Roster {
 }
 
 impl Roster {
+    /// Validate and build for a task's mode: the stage requirement table, or
+    /// in claims mode a role posting `claim` and one posting `evidence`.
+    pub fn for_mode(roles: Vec<Role>, mode: crate::claims::Mode) -> Result<Roster, RosterError> {
+        match mode {
+            crate::claims::Mode::Stages => Roster::new(roles),
+            crate::claims::Mode::Claims => {
+                Roster::check_ids(&roles)?;
+                for k in [MessageKind::Claim, MessageKind::Evidence] {
+                    if !roles.iter().any(|r| r.holds(Cap::Post(k))) {
+                        return Err(RosterError::UnservableClaims {
+                            needs: Cap::Post(k).to_string(),
+                        });
+                    }
+                }
+                Ok(Roster { roles })
+            }
+        }
+    }
+
     /// Validate and build. See the spec's Roster section for the checks.
     pub fn new(roles: Vec<Role>) -> Result<Roster, RosterError> {
-        let mut ids: BTreeMap<&RoleId, ()> = BTreeMap::new();
-        let mut orders: BTreeMap<u16, &RoleId> = BTreeMap::new();
-        for r in &roles {
-            if !valid_token(&r.id.0) {
-                return Err(RosterError::BadId { id: r.id.clone() });
-            }
-            if RESERVED.contains(&r.id.0.as_str()) {
-                return Err(RosterError::ReservedId { id: r.id.clone() });
-            }
-            if ids.insert(&r.id, ()).is_some() {
-                return Err(RosterError::DuplicateId { id: r.id.clone() });
-            }
-        }
-        for r in &roles {
-            if let Some(first) = orders.insert(r.turn_order, &r.id) {
-                return Err(RosterError::DuplicateTurnOrder {
-                    order: r.turn_order,
-                    first: first.clone(),
-                    second: r.id.clone(),
-                });
-            }
-        }
+        Roster::check_ids(&roles)?;
         for q in &REQUIREMENTS {
             if roles.iter().any(|r| q.served_by(r)) {
                 continue;
@@ -320,6 +344,33 @@ impl Roster {
             });
         }
         Ok(Roster { roles })
+    }
+
+    /// The checks every roster passes whatever the mode.
+    fn check_ids(roles: &[Role]) -> Result<(), RosterError> {
+        let mut ids: BTreeMap<&RoleId, ()> = BTreeMap::new();
+        let mut orders: BTreeMap<u16, &RoleId> = BTreeMap::new();
+        for r in roles {
+            if !valid_token(&r.id.0) {
+                return Err(RosterError::BadId { id: r.id.clone() });
+            }
+            if RESERVED.contains(&r.id.0.as_str()) {
+                return Err(RosterError::ReservedId { id: r.id.clone() });
+            }
+            if ids.insert(&r.id, ()).is_some() {
+                return Err(RosterError::DuplicateId { id: r.id.clone() });
+            }
+        }
+        for r in roles {
+            if let Some(first) = orders.insert(r.turn_order, &r.id) {
+                return Err(RosterError::DuplicateTurnOrder {
+                    order: r.turn_order,
+                    first: first.clone(),
+                    second: r.id.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 
     pub fn roles(&self) -> &[Role] {

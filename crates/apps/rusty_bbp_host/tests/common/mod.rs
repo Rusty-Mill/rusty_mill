@@ -5,7 +5,23 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::admin;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// A fresh, empty directory under the system temp dir, unique to this call.
+///
+/// Tests in one binary run in parallel and share a process id, and helpers
+/// reuse tags (fixture names, `confine`/`mode` pairs), so a tag must never be
+/// the only thing that names the directory: one test's setup would wipe
+/// another's live run.
+pub fn fresh_dir(prefix: &str, tag: &str) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("{prefix}_{}_{n}_{tag}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    dir
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Who {

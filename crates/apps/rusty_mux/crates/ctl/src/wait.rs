@@ -534,6 +534,7 @@ mod tests {
             name: String::new(),
             layout: None,
             zoomed: None,
+            focused: None,
         };
         let block = |b: u8, w: u8| Entry::Block {
             block: BlockId::from_uuid(id(b)),
@@ -548,6 +549,7 @@ mod tests {
                 session: SessionId::from_uuid(id(1)),
                 name: "s".into(),
                 active: None,
+                generated: false,
             },
             window(2, 1),
             window(3, 1),

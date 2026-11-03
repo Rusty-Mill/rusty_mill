@@ -21,6 +21,24 @@ use super::scripts;
 use crate::AgentHomes;
 use crate::cli::{AgentKind, AgentScope};
 
+/// The ctl the hook runs, and whether it asks the agent to name its
+/// session (`agent hook --name-session`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Ctl<'a> {
+    pub path: &'a str,
+    pub name_session: bool,
+}
+
+impl Ctl<'_> {
+    /// The words after the ctl's path in the hook's command.
+    pub fn args(self) -> &'static [&'static str] {
+        match self.name_session {
+            true => &["agent", "hook", "--name-session"],
+            false => &["agent", "hook"],
+        }
+    }
+}
+
 /// What setup manages for one agent.
 pub(super) struct Layout {
     pub agent: AgentKind,
@@ -55,14 +73,14 @@ impl Hook {
     }
 }
 
-/// The layout of `agent` in `scope` for the ctl at `ctl`; `cwd` is the
-/// project directory in project scope.
+/// The layout of `agent` in `scope` for `ctl`; `cwd` is the project
+/// directory in project scope.
 pub(super) fn layout(
     agent: AgentKind,
     scope: &AgentScope,
     homes: &AgentHomes,
     cwd: Option<&Path>,
-    ctl: &str,
+    ctl: Ctl<'_>,
 ) -> Result<Layout, String> {
     layout_on(agent, scope, homes, cwd, ctl, cfg!(windows))
 }
@@ -73,7 +91,7 @@ pub(super) fn layout_on(
     scope: &AgentScope,
     homes: &AgentHomes,
     cwd: Option<&Path>,
-    ctl: &str,
+    ctl: Ctl<'_>,
     windows: bool,
 ) -> Result<Layout, String> {
     let roots = Roots::new(scope, homes, cwd)?;
@@ -111,7 +129,7 @@ pub(super) fn layout_on(
     })
 }
 
-fn settings(file: PathBuf, ctl: &str, windows: Option<String>) -> Hook {
+fn settings(file: PathBuf, ctl: Ctl<'_>, windows: Option<String>) -> Hook {
     let mut backup = file.clone().into_os_string();
     backup.push(".rusty-mux.bak");
     Hook::Settings {

@@ -48,6 +48,15 @@ impl Scripted {
         }
     }
 
+    /// The probe ends as `auth`, the run as `main`.
+    pub fn both(auth: Result<Exit, ExecError>, main: Result<Exit, ExecError>) -> Self {
+        Self {
+            inner: FakeCommand::ok(""),
+            auth,
+            main,
+        }
+    }
+
     /// The probe ends as `result`; the run would succeed if reached.
     pub fn auth(result: Result<Exit, ExecError>) -> Self {
         Self {

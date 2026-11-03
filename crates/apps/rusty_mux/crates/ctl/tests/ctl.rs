@@ -149,6 +149,117 @@ fn a_request_prints_its_new_id() {
 }
 
 #[test]
+fn a_session_created_without_a_name_gets_a_generated_one() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session"]);
+    let name = session_name(&socket, &session);
+    assert!(rusty_mux_core::is_generated(&name), "{name}");
+    let help = ok(&socket, &["help", "create-session"]);
+    assert!(help.contains("[--name <text>]"), "{help}");
+}
+
+#[test]
+fn the_naming_hook_asks_only_while_the_name_is_generated() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session"]);
+    let block = "00000000-0000-0000-0000-00000000000b";
+    let hook = |session: &str, flag: &[&str]| {
+        let mut args = vec!["agent", "hook"];
+        args.extend(flag);
+        let output = ctl_command(&socket, &args)
+            .env("RUSTY_MUX_SESSION", session)
+            .env("RUSTY_MUX_BLOCK", block)
+            .output()
+            .expect("run rusty-mux-ctl");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        stdout(&output)
+    };
+    let asked = hook(&session, &["--name-session"]);
+    assert!(
+        asked.contains(&format!("name-session --session {session} --name NAME")),
+        "{asked}"
+    );
+    assert!(
+        !hook(&session, &[]).contains("name-session"),
+        "not opted in"
+    );
+
+    rename(&socket, &session, "fix-login");
+    let named = hook(&session, &["--name-session"]);
+    assert!(
+        named.contains(block) && !named.contains("name-session"),
+        "{named}"
+    );
+
+    // A name chosen in the generated shape is still chosen.
+    let chosen = ok(&socket, &["create-session", "--name", "quiet-harbor"]);
+    let text = hook(&chosen, &["--name-session"]);
+    assert!(
+        text.contains(block) && !text.contains("name-session"),
+        "{text}"
+    );
+}
+
+fn rename(socket: &Path, session: &str, name: &str) {
+    ok(
+        socket,
+        &["rename-session", "--session", session, "--name", name],
+    );
+}
+
+/// Runs the naming hook's instruction; true if the name was taken.
+fn name_session(socket: &Path, session: &str, name: &str) -> bool {
+    let output = ctl(
+        socket,
+        &["name-session", "--session", session, "--name", name],
+    );
+    match output.status.code() {
+        Some(0) => true,
+        Some(1) => {
+            let err = String::from_utf8_lossy(&output.stderr);
+            assert!(err.contains("chosen name"), "{err}");
+            false
+        }
+        other => panic!("{other:?}: {output:?}"),
+    }
+}
+
+/// The name `list` reports for `session`.
+fn session_name(socket: &Path, session: &str) -> String {
+    ok(socket, &["--json", "list"])
+        .lines()
+        .find_map(|line| {
+            let rusty_json::Value::Object(map) =
+                rusty_json::Value::from_json_str(line).expect("json")
+            else {
+                panic!("object")
+            };
+            let is_it = map.get("session") == Some(&rusty_json::Value::String(session.into()));
+            match (is_it, map.get("name")) {
+                (true, Some(rusty_json::Value::String(name))) => Some(name.clone()),
+                _ => None,
+            }
+        })
+        .expect("the session is listed")
+}
+
+#[test]
+fn a_stale_naming_instruction_keeps_a_name_chosen_since() {
+    let socket = start_server();
+    // The hook told the agent to name this session; then a person did.
+    let session = ok(&socket, &["create-session"]);
+    rename(&socket, &session, "release-notes");
+    assert!(!name_session(&socket, &session, "fix-login"));
+    assert_eq!(session_name(&socket, &session), "release-notes");
+
+    // Two agents told to name one session: only the first does.
+    let shared = ok(&socket, &["create-session"]);
+    assert!(name_session(&socket, &shared, "fix-login"));
+    assert!(!name_session(&socket, &shared, "write-docs"));
+    assert_eq!(session_name(&socket, &shared), "fix-login");
+}
+
+#[test]
 fn a_chain_takes_the_lease_and_types() {
     let socket = start_server();
     let block = block(&socket);
@@ -421,7 +532,15 @@ fn api_lists_and_describes_methods_without_a_server() {
         panic!("{described}");
     };
     assert_eq!(map.get("name"), Some(&"resize".into()));
-    for args in [&["api", "describe", "nope"][..], &["api"], &["api", "call"]] {
+    let llms = ok(nowhere, &["api", "llms"]);
+    assert!(llms.starts_with("# rusty_mux API\n"), "{llms}");
+    assert!(llms.contains("\n### `terminal.format`\n"), "{llms}");
+    for args in [
+        &["api", "describe", "nope"][..],
+        &["api"],
+        &["api", "call"],
+        &["api", "llms", "extra"],
+    ] {
         assert_eq!(ctl(nowhere, args).status.code(), Some(2), "{args:?}");
     }
 }
@@ -732,7 +851,7 @@ fn a_bad_command_line_exits_2() {
     let socket = start_server();
     for args in [
         &["frobnicate"][..],
-        &["create-session"],
+        &["create-window"],
         &["resize", "--block", "x"],
     ] {
         assert_eq!(ctl(&socket, args).status.code(), Some(2), "{args:?}");
@@ -1667,6 +1786,147 @@ fn select_window_moves_the_active_window() {
             .code(),
         Some(3)
     );
+}
+
+/// An agent edits a window's layout and reorders windows from the command
+/// line (C41).
+#[test]
+fn layout_edits_reshape_a_window_and_reorder_windows() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let window = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "a"],
+    );
+    let size = ["--cols", "80", "--rows", "24"];
+    let block = |socket: &Path| {
+        let mut args = vec!["create-block", "--window", &window];
+        args.extend(size);
+        ok(socket, &args)
+    };
+    let (a, b) = (block(&socket), block(&socket));
+    let layout = |socket: &Path| {
+        ok(socket, &["list"])
+            .lines()
+            .find(|l| l.starts_with(&format!("window {window}")))
+            .and_then(|l| l.split(" layout=").nth(1))
+            .map(|rest| {
+                rest.split(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_owned()
+            })
+            .expect("a window line with a layout")
+    };
+    assert_eq!(layout(&socket), format!("cols50({a},{b})"));
+    ok(
+        &socket,
+        &[
+            "resize-split",
+            "--block",
+            &b,
+            "--axis",
+            "cols",
+            "--percent",
+            "25",
+        ],
+    );
+    assert_eq!(layout(&socket), format!("cols75({a},{b})"));
+    ok(&socket, &["swap-blocks", "--block", &a, "--other", &b]);
+    assert_eq!(layout(&socket), format!("cols75({b},{a})"));
+    ok(&socket, &["detach-block", "--block", &b]);
+    assert_eq!(layout(&socket), a);
+    ok(
+        &socket,
+        &[
+            "move-block",
+            "--block",
+            &b,
+            "--beside",
+            &a,
+            "--side",
+            "down",
+        ],
+    );
+    assert_eq!(layout(&socket), format!("rows50({a},{b})"));
+    // A percent outside 1 to 99 is refused before it is sent.
+    let bad = ctl(
+        &socket,
+        &[
+            "resize-split",
+            "--block",
+            &b,
+            "--axis",
+            "rows",
+            "--percent",
+            "100",
+        ],
+    );
+    assert_ne!(bad.status.code(), Some(0));
+
+    let second = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "b"],
+    );
+    ok(
+        &socket,
+        &["move-window", "--window", &second, "--index", "0"],
+    );
+    let order: Vec<String> = ok(&socket, &["list"])
+        .lines()
+        .filter(|l| l.starts_with("window "))
+        .filter_map(|l| l.split(' ').nth(1).map(str::to_owned))
+        .collect();
+    assert_eq!(order, vec![second, window]);
+}
+
+/// An agent moves a window's focus from the command line, and `list`
+/// shows it (C41).
+#[test]
+fn focus_moves_between_blocks_and_shows_in_the_listing() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let window = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "a"],
+    );
+    let block = |socket: &Path| {
+        ok(
+            socket,
+            &[
+                "create-block",
+                "--window",
+                &window,
+                "--cols",
+                "80",
+                "--rows",
+                "24",
+            ],
+        )
+    };
+    let (a, b) = (block(&socket), block(&socket));
+    let focus = |socket: &Path| {
+        ok(socket, &["list"])
+            .lines()
+            .find(|l| l.starts_with(&format!("window {window}")))
+            .and_then(|l| l.split(" focused=").nth(1))
+            .map(str::to_owned)
+            .expect("a window line with its focus")
+    };
+    assert_eq!(focus(&socket), a);
+    ok(
+        &socket,
+        &["move-focus", "--window", &window, "--toward", "right"],
+    );
+    assert_eq!(focus(&socket), b);
+    ok(&socket, &["focus-block", "--block", &a]);
+    assert_eq!(focus(&socket), a);
+    let bad = ctl(
+        &socket,
+        &["move-focus", "--window", &window, "--toward", "north"],
+    );
+    assert_ne!(bad.status.code(), Some(0));
 }
 
 #[test]

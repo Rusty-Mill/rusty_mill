@@ -46,6 +46,21 @@ shows one block alone and `unzoom-window` ends it; `list` gives each window's
 its first window, until `select-window --window W` picks another. A window
 you create does not take it.
 
+To rearrange a window: `resize-split --block B --axis cols --percent 30`
+gives B 30% of the split beside it (`rows` for the one above or below);
+`swap-blocks --block A --other B` trades their places; `move-block --block B
+--beside A --side down` moves B into a new split beside A. `detach-block
+--block B` takes B out of the layout while its program runs on; it stays in
+`list`, absent from the window's `layout`, until `move-block` puts it back.
+`move-window --window W --index 0` makes W its session's first window.
+
+Each window has a focused block, shared by every client; `list` shows it as
+`focused`. `focus-block --block B` focuses B, and `move-focus --window W
+--toward right` (or `left`, `up`, `down`, `next`, `previous`) moves it. The
+attach client follows it, so focusing a block moves where a person types;
+`input` and `terminal.send-keys` still go to the block you name. A block
+you start does not take the focus; leave it alone unless asked.
+
 Prefer `wait` over polling. `wait --window W` or `wait --session S` waits
 until every block there has ended, blocks started meanwhile included; it
 prints each exit and exits with the last failure, 0 if every program
@@ -59,6 +74,8 @@ rusty-mux-ctl terminal.format --block dev-server --history 200 --trim --unwrap
 rusty-mux-ctl terminal.process --block dev-server   # what runs there now
 rusty-mux-ctl terminal.pwd --block dev-server
 rusty-mux-ctl terminal.size --block dev-server      # COLSxROWS, such as 80x24
+rusty-mux-ctl terminal.modes --block dev-server     # NAME<TAB>VALUE: mouse, bracketed-paste, alt-screen, ...
+rusty-mux-ctl terminal.shell --block dev-server     # program, activity idle/busy, OSC 133 phase and exit
 rusty-mux-ctl acquire-lease --block dev-server + terminal.send-keys --block dev-server --key ctrl+c
 rusty-mux-ctl acquire-lease --block dev-server + terminal.reset --block dev-server
 ```
@@ -66,8 +83,10 @@ rusty-mux-ctl acquire-lease --block dev-server + terminal.reset --block dev-serv
 `terminal.reset` clears the screen, scrollback and modes, as when a program
 left the terminal garbled; it is refused while an older client is attached. `terminal.set-theme` sets `--foreground`,
 `--background`, `--cursor` and `--palette N=COLOUR` as `#RRGGBB` or `default`.
+`terminal.clear` clears the screen and scrollback as `clear` does and keeps
+the modes; the program's prompt comes back with its next output.
 
-Typing (`input`, `terminal.send-keys`), resetting and theming need the
+Typing (`input`, `terminal.send-keys`), resetting, clearing and theming need the
 block's input lease, and a user typing in that block holds it. Only type into
 a block someone else uses when the user asked you to. Requests joined by `+`
 run in order on one connection.
@@ -79,6 +98,8 @@ run in order on one connection.
   `rusty-mux-ctl whoami` shows your principal. Each ctl call is its own
   client, so the id it prints is gone once the call returns.
 - `rusty-mux-ctl help` lists every command; `help COMMAND` shows its flags.
+- `rusty-mux-ctl api llms` prints every command and method, with its flags,
+  as one Markdown document.
 - `--json` prints one JSON object per line.
 - Exit codes: 0 ok, 1 refused, 2 bad command line, 3 target missing or
   ambiguous, 4 no server, 124 timed out; `wait` and `run --wait` otherwise

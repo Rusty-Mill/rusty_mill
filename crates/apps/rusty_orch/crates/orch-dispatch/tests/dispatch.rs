@@ -5,13 +5,18 @@ use std::num::NonZeroU32;
 
 use orch_core::board::{Author, Board, BoardError, Confidence, EntryKind, NewEntry, Verdict};
 use orch_core::goal::{Goal, GoalDraft, StopRule};
-use orch_core::task::{Agent, Plan, PlanError, Role, Status, Task, TaskSpec, TaskState};
+use orch_core::task::{AgentId, Plan, PlanError, Role, Status, Task, TaskSpec, TaskState};
 use orch_core::{GoalId, TaskId, Text};
 use orch_dispatch::fake::{FakeAgent, Reply};
 use orch_dispatch::{
     AgentError, AgentRunner, Ceiling, ClassifiedError, DispatchError, Dispatcher, Ledger, Outcome,
     Output, Routing, RoutingConfig,
 };
+
+const CLAUDE: AgentId = AgentId::from_static("claude");
+const CODEX: AgentId = AgentId::from_static("codex");
+const GEMINI: AgentId = AgentId::from_static("gemini");
+const LOCAL: AgentId = AgentId::from_static("local");
 
 fn text(s: &str) -> Text {
     Text::new(s).expect("non-blank")
@@ -45,12 +50,12 @@ fn spec(role: Role, depends_on: Vec<TaskId>, max_calls: u32) -> TaskSpec {
     }
 }
 
-fn routing(implement: Agent, reviewers: Vec<Agent>) -> Routing {
+fn routing(implement: AgentId, reviewers: Vec<AgentId>) -> Routing {
     Routing::try_from(RoutingConfig {
-        research: Agent::Claude,
-        design: Agent::Claude,
+        research: CLAUDE,
+        design: CLAUDE,
         implement,
-        triage: Agent::Local,
+        triage: LOCAL,
         reviewers,
     })
     .expect("valid routing")
@@ -75,7 +80,7 @@ fn finding() -> EntryKind {
     }
 }
 
-fn agent_of(plan: &Plan, id: TaskId) -> Agent {
+fn agent_of(plan: &Plan, id: TaskId) -> AgentId {
     match plan.get(id).expect("task").state() {
         TaskState::Done { agent, .. } => *agent,
         other => panic!("{id} is {other:?}"),
@@ -94,10 +99,7 @@ fn pipeline_finishes_with_reviewer_distinct_from_author() {
             verdict: Verdict::Approve,
         }]),
     ]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Gemini, Agent::Codex]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![GEMINI, CODEX]), fake);
     let mut ledger = Ledger::new();
 
     let outcome = d
@@ -106,16 +108,12 @@ fn pipeline_finishes_with_reviewer_distinct_from_author() {
 
     assert_eq!(outcome, Outcome::Finished);
     assert!(plan.is_finished());
-    assert_eq!(agent_of(&plan, implement), Agent::Codex);
-    assert_eq!(agent_of(&plan, review), Agent::Gemini);
+    assert_eq!(agent_of(&plan, implement), CODEX);
+    assert_eq!(agent_of(&plan, review), GEMINI);
     assert_ne!(agent_of(&plan, review), agent_of(&plan, implement));
     assert_eq!(
         d.runner().calls(),
-        &[
-            (Agent::Claude, research),
-            (Agent::Codex, implement),
-            (Agent::Gemini, review)
-        ]
+        &[(CLAUDE, research), (CODEX, implement), (GEMINI, review)]
     );
     assert_eq!(ledger.calls(), 3);
     assert_eq!(board.entries().len(), 3);
@@ -138,27 +136,24 @@ fn review_falls_back_when_primary_reviewer_is_the_author() {
         }]),
     ]);
     // Codex is both the implementer and the preferred reviewer.
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
 
     d.run(&goal(10), &mut plan, &mut board, &mut ledger)
         .expect("runs");
 
-    assert_eq!(agent_of(&plan, implement), Agent::Codex);
-    assert_eq!(agent_of(&plan, review), Agent::Gemini);
+    assert_eq!(agent_of(&plan, implement), CODEX);
+    assert_eq!(agent_of(&plan, review), GEMINI);
 }
 
 #[test]
 fn routing_rejects_fewer_than_two_distinct_reviewers() {
     let err = Routing::try_from(RoutingConfig {
-        research: Agent::Claude,
-        design: Agent::Claude,
-        implement: Agent::Claude,
-        triage: Agent::Claude,
-        reviewers: vec![Agent::Codex, Agent::Codex],
+        research: CLAUDE,
+        design: CLAUDE,
+        implement: CLAUDE,
+        triage: CLAUDE,
+        reviewers: vec![CODEX, CODEX],
     })
     .expect_err("one distinct reviewer");
     assert_eq!(
@@ -176,10 +171,7 @@ fn question_blocks_and_answer_resumes() {
         Reply::Write(vec![EntryKind::Question]),
         Reply::Write(vec![finding()]),
     ]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
     let goal = goal(10);
 
@@ -217,10 +209,7 @@ fn question_blocks_and_answer_resumes() {
         .expect("finishes");
     assert_eq!(second, Outcome::Finished);
     assert_eq!(ledger.calls(), 2);
-    assert_eq!(
-        d.runner().calls(),
-        &[(Agent::Claude, task), (Agent::Claude, task)]
-    );
+    assert_eq!(d.runner().calls(), &[(CLAUDE, task), (CLAUDE, task)]);
 }
 
 #[test]
@@ -228,10 +217,7 @@ fn goal_ceiling_stops_the_loop_with_typed_error() {
     let (mut plan, _, implement, _) = pipeline();
     let mut board = Board::new(plan.goal());
     let fake = FakeAgent::new(std::iter::repeat_with(|| Reply::Write(vec![finding()])).take(3));
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
 
     let err = d
@@ -263,10 +249,7 @@ fn task_ceiling_stops_the_loop_with_typed_error() {
         Reply::Write(vec![EntryKind::Question]),
         Reply::Write(vec![finding()]),
     ]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
     let goal = goal(10);
 
@@ -299,10 +282,7 @@ fn zero_entries_surfaces_no_outputs() {
     let task = plan.add(spec(Role::Research, vec![], 2)).expect("add");
     let mut board = Board::new(plan.goal());
     let fake = FakeAgent::new([Reply::Write(vec![])]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
 
     let err = d
@@ -318,17 +298,14 @@ fn agent_failure_is_typed_and_leaves_the_card_running() {
     let task = plan.add(spec(Role::Research, vec![], 2)).expect("add");
     let mut board = Board::new(plan.goal());
     let fake = FakeAgent::new([Reply::Fail("boom".into()), Reply::Write(vec![finding()])]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
     let goal = goal(10);
 
     let err = d
         .run(&goal, &mut plan, &mut board, &mut ledger)
         .expect_err("agent error");
-    assert!(matches!(err, DispatchError::Agent { task: t, agent: Agent::Claude, .. } if t == task));
+    assert!(matches!(err, DispatchError::Agent { task: t, agent: CLAUDE, .. } if t == task));
     assert_eq!(
         plan.get(task).expect("task").state().status(),
         Status::Running
@@ -349,13 +326,13 @@ fn agent_failure_is_typed_and_leaves_the_card_running() {
 struct NoImplement(FakeAgent);
 
 impl AgentRunner for NoImplement {
-    fn supports(&self, _agent: Agent, role: Role) -> bool {
+    fn supports(&self, _agent: AgentId, role: Role) -> bool {
         role != Role::Implement
     }
 
     fn run(
         &mut self,
-        agent: Agent,
+        agent: AgentId,
         task: &orch_core::task::Task,
         board: &Board,
     ) -> Result<Vec<Output>, AgentError> {
@@ -401,13 +378,13 @@ impl TypedRunner {
 }
 
 impl AgentRunner for TypedRunner {
-    fn run(&mut self, _: Agent, _: &Task, _: &Board) -> Result<Vec<Output>, AgentError> {
+    fn run(&mut self, _: AgentId, _: &Task, _: &Board) -> Result<Vec<Output>, AgentError> {
         self.next().map_err(ClassifiedError::into_error)
     }
 
     fn run_classified(
         &mut self,
-        _: Agent,
+        _: AgentId,
         _: &Task,
         _: &Board,
     ) -> Result<Vec<Output>, ClassifiedError> {
@@ -419,13 +396,18 @@ impl AgentRunner for TypedRunner {
 struct Composite(TypedRunner);
 
 impl AgentRunner for Composite {
-    fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
+    fn run(
+        &mut self,
+        agent: AgentId,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentError> {
         self.0.run(agent, task, board)
     }
 
     fn run_classified(
         &mut self,
-        agent: Agent,
+        agent: AgentId,
         task: &Task,
         board: &Board,
     ) -> Result<Vec<Output>, ClassifiedError> {
@@ -444,10 +426,7 @@ fn permanent_agent_failure_fails_the_card_once_and_strands_dependents() {
         TypedReply::Fail(ClassifiedError::Permanent(AgentError("refused".into()))),
         TypedReply::Write,
     ]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
     let goal = goal(10);
 
@@ -456,7 +435,7 @@ fn permanent_agent_failure_fails_the_card_once_and_strands_dependents() {
         .expect_err("permanent agent error");
     assert!(matches!(
         &err,
-        DispatchError::Agent { task: t, agent: Agent::Claude, source: AgentError(m) }
+        DispatchError::Agent { task: t, agent: CLAUDE, source: AgentError(m) }
             if *t == task && m == "refused"
     ));
     assert_eq!(
@@ -493,10 +472,7 @@ fn unavailable_prerequisite_can_repeat_then_resume_at_max_calls() {
         ))),
         TypedReply::Write,
     ]));
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
     let goal = goal(1);
 
@@ -541,10 +517,7 @@ fn unavailable_restores_only_its_charge_with_prior_usage() {
         TypedReply::Fail(ClassifiedError::Unavailable(AgentError("login".into()))),
         TypedReply::Write,
     ]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        runner,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), runner);
     let mut ledger = Ledger::new();
     let goal = goal(2);
 
@@ -578,10 +551,7 @@ fn exhausted_budget_refuses_without_invocation_or_recovery_credit() {
         TypedReply::Write,
         TypedReply::Fail(ClassifiedError::Unavailable(AgentError("login".into()))),
     ]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        runner,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), runner);
     let mut ledger = Ledger::new();
 
     let error = d
@@ -604,7 +574,7 @@ fn exhausted_budget_refuses_without_invocation_or_recovery_credit() {
 #[test]
 fn downstream_legacy_api_remains_exhaustively_matchable() {
     fn legacy_call(runner: &mut impl AgentRunner, task: &Task, board: &Board) -> String {
-        match runner.run(Agent::Claude, task, board) {
+        match runner.run(CLAUDE, task, board) {
             Ok(_) => String::new(),
             Err(error) => error.0,
         }
@@ -647,10 +617,7 @@ fn unsupported_role_fails_once_without_call_or_fabricated_output() {
     let dependent = plan.add(spec(Role::Research, vec![task], 2)).expect("add");
     let mut board = Board::new(plan.goal());
     let runner = NoImplement(FakeAgent::new([Reply::Write(vec![finding()])]));
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        runner,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), runner);
     let mut ledger = Ledger::new();
     let goal = goal(10);
 
@@ -661,7 +628,7 @@ fn unsupported_role_fails_once_without_call_or_fabricated_output() {
         err,
         DispatchError::UnsupportedRole {
             task,
-            agent: Agent::Codex,
+            agent: CODEX,
             role: Role::Implement,
         }
     );
@@ -710,10 +677,7 @@ fn invalid_output_leaves_board_unchanged_and_card_running() {
     let mut board = Board::new(plan.goal());
     // Second output is an artifact with no refs, which the board rejects.
     let fake = FakeAgent::new([Reply::Write(vec![finding(), EntryKind::Artifact])]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
     let before = board.clone();
 
@@ -739,7 +703,7 @@ fn fresh_dispatcher_with_same_ledger_still_hits_goal_ceiling() {
     let mut ledger = Ledger::new();
 
     let mut first = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        routing(CODEX, vec![CODEX, GEMINI]),
         FakeAgent::new([Reply::Write(vec![finding()])]),
     );
     let err = first
@@ -759,7 +723,7 @@ fn fresh_dispatcher_with_same_ledger_still_hits_goal_ceiling() {
     drop(first);
 
     let mut second = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
+        routing(CODEX, vec![CODEX, GEMINI]),
         FakeAgent::new([Reply::Write(vec![finding()])]),
     );
     let err = second
@@ -785,10 +749,7 @@ fn repeated_agent_failure_exhausts_retries_and_strands_dependents() {
     let dependent = plan.add(spec(Role::Implement, vec![task], 2)).expect("add");
     let mut board = Board::new(plan.goal());
     let fake = FakeAgent::new([Reply::Fail("boom".into()), Reply::Fail("boom".into())]);
-    let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Codex, Agent::Gemini]),
-        fake,
-    );
+    let mut d = Dispatcher::new(routing(CODEX, vec![CODEX, GEMINI]), fake);
     let mut ledger = Ledger::new();
     let goal = goal(10);
 
@@ -860,11 +821,8 @@ fn hosted_cards_resume_gates_and_complete_once_without_runner_calls() {
         .progress
         .extend([Ok(Progress::Working), Ok(gate(10))]);
     let make_dispatcher = || {
-        Dispatcher::new(
-            routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
-            FakeAgent::new([]),
-        )
-        .with_host(host.clone(), fence(1, "first"))
+        Dispatcher::new(routing(CODEX, vec![CLAUDE, CODEX]), FakeAgent::new([]))
+            .with_host(host.clone(), fence(1, "first"))
     };
     let mut dispatcher = make_dispatcher();
     assert_eq!(
@@ -948,11 +906,8 @@ fn hosted_failure_or_empty_completion_does_not_finish_a_card() {
         let mut ledger = Ledger::new();
         let host = FakeHost::default();
         host.0.borrow_mut().progress.push_back(Ok(progress));
-        let mut d = Dispatcher::new(
-            routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
-            FakeAgent::new([]),
-        )
-        .with_host(host, fence(1, "first"));
+        let mut d = Dispatcher::new(routing(CODEX, vec![CLAUDE, CODEX]), FakeAgent::new([]))
+            .with_host(host, fence(1, "first"));
         assert!(d.run(&goal(1), &mut plan, &mut board, &mut ledger).is_err());
         assert_ne!(plan.get(id).unwrap().state().status(), Status::Done);
         assert_eq!(ledger.calls(), 1);
@@ -969,7 +924,7 @@ fn hosting_does_not_reroute_research_or_design() {
     let mut ledger = Ledger::new();
     let host = FakeHost::default();
     let mut d = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
+        routing(CODEX, vec![CLAUDE, CODEX]),
         FakeAgent::new([Reply::Write(vec![finding()]), Reply::Write(vec![finding()])]),
     )
     .with_host(host.clone(), fence(1, "first"));
@@ -990,11 +945,8 @@ fn an_agent_answer_cannot_approve_a_hosted_task() {
     let mut ledger = Ledger::new();
     let host = FakeHost::default();
     host.0.borrow_mut().progress.push_back(Ok(gate(1)));
-    let mut dispatcher = Dispatcher::new(
-        routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
-        FakeAgent::new([]),
-    )
-    .with_host(host.clone(), fence(1, "first"));
+    let mut dispatcher = Dispatcher::new(routing(CODEX, vec![CLAUDE, CODEX]), FakeAgent::new([]))
+        .with_host(host.clone(), fence(1, "first"));
     assert_eq!(
         dispatcher.run(&goal(1), &mut plan, &mut board, &mut ledger),
         Ok(Outcome::Blocked(vec![id]))
@@ -1003,7 +955,7 @@ fn an_agent_answer_cannot_approve_a_hosted_task() {
     board
         .append(NewEntry {
             task: Some(id),
-            author: Author::Agent(Agent::Claude),
+            author: Author::Agent(CLAUDE),
             kind: EntryKind::Answer { to: question },
             body: text("approve-plan art:2"),
             refs: vec![],
@@ -1029,7 +981,7 @@ fn a_saved_host_handle_cannot_fall_back_to_a_one_call_runner() {
         .borrow_mut()
         .progress
         .push_back(Ok(Progress::Working));
-    let route = routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]);
+    let route = routing(CODEX, vec![CLAUDE, CODEX]);
     Dispatcher::new(route.clone(), FakeAgent::new([]))
         .with_host(host, fence(1, "first"))
         .run(&goal(1), &mut plan, &mut board, &mut ledger)
@@ -1056,11 +1008,8 @@ fn a_superseded_holder_stops_without_changing_the_card_or_its_charge() {
     let mut ledger = Ledger::new();
     let host = FakeHost::default();
     let dispatcher = |fence| {
-        Dispatcher::new(
-            routing(Agent::Codex, vec![Agent::Claude, Agent::Codex]),
-            FakeAgent::new([]),
-        )
-        .with_host(host.clone(), fence)
+        Dispatcher::new(routing(CODEX, vec![CLAUDE, CODEX]), FakeAgent::new([]))
+            .with_host(host.clone(), fence)
     };
     assert_eq!(
         dispatcher(fence(1, "first")).run(&goal(1), &mut plan, &mut board, &mut ledger),

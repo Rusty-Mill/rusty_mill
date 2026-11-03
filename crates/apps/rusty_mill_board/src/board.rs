@@ -3,7 +3,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
     MoveRules, import_id, text_hash,
 };
+use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
 use crate::projects::Projects;
 use crate::roadmap::{Roadmap, roadmap};
@@ -99,6 +100,8 @@ pub struct Board<S> {
     /// Uniqueness does not rest on it: the store reserves each number (`Store::reserve_number`).
     numbering: Mutex<()>,
     clock: fn() -> i64,
+    /// The decision inbox's source (#595); `None` when no BBP host is configured.
+    escalations: Option<Arc<dyn Escalations>>,
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -131,6 +134,7 @@ impl<S: Store> Board<S> {
             projects_sink: None,
             numbering: Mutex::new(()),
             clock,
+            escalations: None,
         }
     }
 
@@ -158,6 +162,13 @@ impl<S: Store> Board<S> {
             .workflow
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = workflow;
+        self
+    }
+
+    /// Serve the decision inbox from `source`.
+    #[must_use]
+    pub fn with_escalations(mut self, source: Arc<dyn Escalations>) -> Self {
+        self.escalations = Some(source);
         self
     }
 
@@ -345,6 +356,245 @@ impl<S: Store> Board<S> {
             .into_iter()
             .map(|c| placed(flow, c))
             .collect())
+    }
+
+    /// The open escalations of the BBP tasks linked from cards `by` may see,
+    /// each with its card (design #595 §6). Needs admin: the inbox is the owner's.
+    ///
+    /// # Errors
+    /// [`BoardError::Forbidden`] without admin, [`BoardError::Refused`] when
+    /// no BBP host is configured, and storage or host failures.
+    pub fn inbox(&self, by: &Actor) -> Result<Vec<InboxItem>, BoardError> {
+        let source = self.inbox_source(by)?;
+        let cards: BTreeMap<String, Card> = self
+            .cards()?
+            .into_iter()
+            .filter(|c| by.may_work_in(&c.project))
+            .filter_map(|c| Some((c.execution.as_ref()?.bbp_task.clone(), c)))
+            .collect();
+        let tasks: Vec<String> = cards.keys().cloned().collect();
+        let open = source.open(&tasks).map_err(inbox_error)?;
+        Ok(open
+            .into_iter()
+            .map(|e| InboxItem {
+                card: cards.get(&e.task).map(InboxCard::of),
+                label: e.reason.label(),
+                escalation: e,
+            })
+            .collect())
+    }
+
+    /// Preview (`dry_run`) or take `action` on escalation `id`, read at `rev`.
+    /// The escalation is re-read first: one that has closed, or moved past
+    /// `rev`, is refused before anything is sent, and BBP fences the rest.
+    ///
+    /// # Errors
+    /// As [`Board::inbox`], plus [`BoardError::Refused`] for a closed or stale
+    /// escalation or an action that does not fit it.
+    pub fn inbox_act(
+        &self,
+        by: &Actor,
+        id: &str,
+        rev: u64,
+        action: &Action,
+        dry_run: bool,
+    ) -> Result<InboxAnswer, BoardError> {
+        let source = self.inbox_source(by)?;
+        let Some(InboxItem {
+            escalation: e,
+            card: owner,
+            ..
+        }) = self.inbox(by)?.into_iter().find(|i| i.escalation.id == id)
+        else {
+            return self.closed_escalation(by, id, rev, action, dry_run);
+        };
+        if e.rev != rev {
+            return Err(BoardError::Refused(format!(
+                "stale_rev: {id} is at rev {}, not {rev}; re-read the inbox",
+                e.rev
+            )));
+        }
+        if dry_run {
+            return source
+                .preview(&e, action)
+                .map(InboxAnswer::DryRun)
+                .map_err(inbox_error);
+        }
+        let dropped = e.dropped_acted(action).map_err(inbox_error)?;
+        if dropped.is_empty() {
+            let outcome = source
+                .act(&e, action, &answerer(&by.name))
+                .map_err(inbox_error)?;
+            return Ok(InboxAnswer::Outcome(outcome));
+        }
+        if !self.store.durable() {
+            return Err(BoardError::Refused(
+                "this decision drops acted-on work, and its Remediate card must be written to a durable store first: start the board with --tick-url".into(),
+            ));
+        }
+        // Write ahead: the Remediate card is committed before BBP is asked to drop the
+        // work, so no drop sent from here can lose its card. A retry finds the card by
+        // its derived id, whether BBP's answer was lost or the escalation is already gone.
+        let dry = source.preview(&e, action).map_err(inbox_error)?;
+        let project = owner.map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project);
+        let decision = Decision {
+            escalation: id,
+            rev,
+            action,
+        };
+        let card = self.remediate(by, &project, &e, &decision, &dropped, &dry)?;
+        let outcome =
+            source
+                .act(&e, action, &answerer(&by.name))
+                .map_err(|err| match inbox_error(err) {
+                    BoardError::Storage(why) => BoardError::Storage(format!(
+                        "{why}; its Remediate card {} was written first, so retry to reconcile",
+                        card.label()
+                    )),
+                    other => other,
+                })?;
+        if let Outcome::Refused { step: 0, code, .. } = &outcome {
+            // Only this send is known to have written nothing: another send of the same
+            // decision shares the card and may commit before or after any re-read.
+            self.comment(
+                card.id,
+                by,
+                &format!("BBP refused this send ({code}). Another send of the same decision may still apply it, so check BBP's log before closing this card."),
+            )?;
+        }
+        Ok(InboxAnswer::Remediated { outcome, card })
+    }
+
+    /// An escalation that is no longer open: if this exact decision was sent from here
+    /// and dropped acted-on work, its Remediate card is the answer to a retry.
+    fn closed_escalation(
+        &self,
+        by: &Actor,
+        id: &str,
+        rev: u64,
+        action: &Action,
+        dry_run: bool,
+    ) -> Result<InboxAnswer, BoardError> {
+        let closed = || BoardError::Refused(format!("no open escalation {id}"));
+        if dry_run {
+            return Err(closed());
+        }
+        let task = id.split('/').next().unwrap_or_default();
+        let project = self.owning_project(by, task)?;
+        let decision = Decision {
+            escalation: id,
+            rev,
+            action,
+        };
+        self.remediation_card(by, &project, &decision)?
+            .map(|card| InboxCard::of(&card))
+            .map(|card| InboxAnswer::Recorded { card })
+            .ok_or_else(closed)
+    }
+
+    /// The project of the card linked to BBP task `task`, as `inbox` attaches it.
+    fn owning_project(&self, by: &Actor, task: &str) -> Result<String, BoardError> {
+        Ok(self
+            .cards()?
+            .into_iter()
+            .filter(|c| by.may_work_in(&c.project))
+            .find(|c| c.execution.as_ref().is_some_and(|x| x.bbp_task == task))
+            .map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project))
+    }
+
+    /// The Remediate card written for `decision` in `project`. It is found by its
+    /// derived id, never by its tag: a tag anyone can add to any card is no record.
+    fn remediation_card(
+        &self,
+        by: &Actor,
+        project: &str,
+        decision: &Decision<'_>,
+    ) -> Result<Option<Card>, BoardError> {
+        if !by.may_work_in(project) {
+            return Ok(None);
+        }
+        Ok(self
+            .store
+            .get(decision.card_id(project)?)?
+            .filter(|c| c.project == project))
+    }
+
+    /// The one Backlog "Remediate" card for `decision`'s dropped acted-on work (#595 §4),
+    /// at the id derived from `project` and the exact decision, so a retry of it finds
+    /// the card rather than adding a second, and a different decision never reuses it.
+    /// Its `remediate:` tag is for people only.
+    fn remediate(
+        &self,
+        by: &Actor,
+        project: &str,
+        e: &Escalation,
+        decision: &Decision<'_>,
+        dropped: &[&Acted],
+        dry: &DryRun,
+    ) -> Result<InboxCard, BoardError> {
+        if let Some(card) = self.remediation_card(by, project, decision)? {
+            return Ok(InboxCard::of(&card));
+        }
+        let tag = format!("remediate:{}", e.id);
+        let text = |id: u64| {
+            e.candidates
+                .iter()
+                .chain(e.claim.as_ref())
+                .find(|c| c.id == id)
+                .map_or_else(|| format!("msg:{id}"), |c| c.text.clone())
+        };
+        let mut body = format!(
+            "The decision on BBP escalation `{}` dropped work that was already acted on. Undo or reconcile it.\n\n",
+            e.id
+        );
+        for x in dropped {
+            body.push_str(&format!(
+                "- msg:{} \"{}\": {}\n",
+                x.claim,
+                text(x.claim),
+                x.marks.join(", ")
+            ));
+        }
+        let events: Vec<&str> = dry
+            .events
+            .iter()
+            .filter_map(|v| v.as_object()?.keys().next().map(String::as_str))
+            .collect();
+        body.push_str(&format!(
+            "\nBBP dry run of `{} {}`: {}\n",
+            dry.step.verb,
+            dry.step.args.join(" "),
+            events.join(", ")
+        ));
+        body.push_str("\nFiled before the decision was sent to BBP. If BBP's log shows it was not applied, close this card.\n");
+        let title = format!(
+            "Remediate: {}",
+            text(dropped.first().map_or(0, |x| x.claim))
+        );
+        let card = Card {
+            id: decision.card_id(project)?,
+            ..Card::new(&title, &body, vec![tag], (self.clock)())?
+        };
+        match self.create(by, project, card) {
+            Ok(card) => Ok(InboxCard::of(&card)),
+            // A concurrent retry of the same decision wrote it first.
+            Err(BoardError::Conflict) => self
+                .remediation_card(by, project, decision)?
+                .map(|c| InboxCard::of(&c))
+                .ok_or(BoardError::Conflict),
+            Err(other) => Err(other),
+        }
+    }
+
+    fn inbox_source(&self, by: &Actor) -> Result<&Arc<dyn Escalations>, BoardError> {
+        if !by.caps.contains(&Capability::Admin) {
+            return Err(BoardError::Forbidden(Capability::Admin));
+        }
+        self.escalations.as_ref().ok_or_else(|| {
+            BoardError::Refused(
+                "the inbox has no BBP host: start with --bbp-bin and --bbp-root".into(),
+            )
+        })
     }
 
     /// All cards, optionally one column only.
@@ -1014,4 +1264,122 @@ fn waiting_on_deps(cards: &[Card]) -> BTreeSet<Uuid> {
         .filter(|c| c.deps.iter().any(|d| open.contains(d)))
         .map(|c| c.id)
         .collect()
+}
+
+/// One inbox entry: the escalation, its reason in plain words, and its card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InboxItem {
+    /// As BBP reports it.
+    #[serde(flatten)]
+    pub escalation: Escalation,
+    /// The reason in plain words.
+    pub label: &'static str,
+    /// The card whose execution owns the BBP task.
+    pub card: Option<InboxCard>,
+}
+
+/// The board card an escalation belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InboxCard {
+    /// Card id.
+    pub id: Uuid,
+    /// Card number.
+    pub number: Option<u64>,
+    /// Card title.
+    pub title: String,
+    /// Its project.
+    pub project: String,
+}
+
+impl InboxCard {
+    fn of(c: &Card) -> Self {
+        Self {
+            id: c.id,
+            number: c.number,
+            title: c.title.clone(),
+            project: c.project.clone(),
+        }
+    }
+
+    /// `#N "title"`, or the quoted title alone while the card has no number.
+    fn label(&self) -> String {
+        match self.number {
+            Some(n) => format!("#{n} {:?}", self.title),
+            None => format!("{:?}", self.title),
+        }
+    }
+}
+
+/// What an inbox action returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxAnswer {
+    /// What it would write; nothing was.
+    DryRun(DryRun),
+    /// What happened.
+    Outcome(Outcome),
+    /// It could drop acted-on work: the Remediate card, written before BBP was asked.
+    /// On a refusal at the first step this send wrote nothing, but another send of the
+    /// same decision may have, so the card says to check BBP's log before closing it.
+    Remediated {
+        /// What happened.
+        outcome: Outcome,
+        /// The Backlog card to undo or reconcile the work.
+        card: InboxCard,
+    },
+    /// The escalation is closed and a decision sent from here had filed this Remediate
+    /// card for it: the answer to a retry, without sending anything to BBP again.
+    Recorded {
+        /// The Backlog card to undo or reconcile the work.
+        card: InboxCard,
+    },
+}
+
+/// Namespace of the Remediate card ids (UUIDv5).
+const REMEDIATION_NS: Uuid = Uuid::from_u128(0x6d69_6c6c_2d72_656d_6564_6961_7465_0595);
+
+/// One exact inbox decision: the escalation, the rev it was read at, and the action.
+/// Two decisions on one escalation (Choose A, Choose B) are two records.
+struct Decision<'a> {
+    escalation: &'a str,
+    rev: u64,
+    action: &'a Action,
+}
+
+impl Decision<'_> {
+    /// The id of this decision's Remediate card in `project`. Every other card id is
+    /// random, so a card at this id was written by [`Board::inbox_act`] for it.
+    fn card_id(&self, project: &str) -> Result<Uuid, BoardError> {
+        let action =
+            serde_json::to_string(self.action).map_err(|e| BoardError::Storage(e.to_string()))?;
+        let key = format!("{project}\n{}\n{}\n{action}", self.escalation, self.rev);
+        Ok(Uuid::new_v5(&REMEDIATION_NS, key.as_bytes()))
+    }
+}
+
+fn inbox_error(e: InboxError) -> BoardError {
+    match e {
+        InboxError::Host(why) => BoardError::Storage(format!("bbp host: {why}")),
+        other => BoardError::Refused(other.to_string()),
+    }
+}
+
+/// The answerer label BBP records in the op id: 1 to 32 of `[A-Za-z0-9._-]`.
+fn answerer(actor: &str) -> String {
+    let label: String = actor
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(32)
+        .collect();
+    if label.is_empty() {
+        "board".to_owned()
+    } else {
+        label
+    }
 }

@@ -391,6 +391,18 @@ pub struct KittyFrame {
 /// drains.
 pub const PROGRAM_STATUS_MAX: usize = 256;
 
+/// Where a shell is in its command cycle, by the last OSC 133/633 mark it
+/// sent (see [`Grid::shell_phase`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellPhase {
+    /// `A`: its prompt is showing, and any command line is being typed.
+    Prompt,
+    /// `C`: a command it started is running.
+    Running,
+    /// `D`: a command finished and no prompt has started since.
+    Finished,
+}
+
 /// An input to a program-status (OSC 7501) record store, in the order the
 /// program produced it. The grid only collects them; the host interprets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -800,12 +812,13 @@ pub struct Grid {
     /// over the bottom row by every renderer. `None` (no allocation) when unset.
     status_line: Option<StatusLine>,
     /// Exit code of the last finished command, reported via OSC 133;D. Surfaced
-    /// to a structured client as the `terminal://exit` resource and shown by
-    /// the windowed front-end's status ribbon; `None` until a command
-    /// finishes (or when the shell omits the code). Written by every build
-    /// (the OSC 133;D path), read only by the `gui`/`l13` fronts.
-    #[cfg_attr(not(any(feature = "gui", feature = "l13")), allow(dead_code))]
+    /// to a structured client as the `terminal://exit` resource, shown by
+    /// the windowed front-end's status ribbon and read by a multiplexer;
+    /// `None` until a command finishes (or when the shell omits the code).
     last_exit: Option<i32>,
+    /// The shell's last OSC 133/633 lifecycle mark, `None` until it sends
+    /// one. Not checkpointed: a restored grid learns it from the next mark.
+    shell_phase: Option<ShellPhase>,
     /// Absolute logical line (`scrollback.len() + cursor row`) where the running
     /// command's output began (OSC 133;C), or `None` outside a command. Decays
     /// with scrollback eviction and is remapped across a resize (it rides the
@@ -1554,6 +1567,7 @@ impl Grid {
             channel: rusty_term_l13::ChannelState::default(),
             status_line: None,
             last_exit: None,
+            shell_phase: None,
             #[cfg(feature = "l13")]
             command_start: None,
             #[cfg(feature = "l13")]
@@ -4383,12 +4397,11 @@ impl Grid {
         self.command_start = Some(self.scrollback.len() + self.cursor.1);
     }
 
-    /// A command finished (OSC 133;D): record its exit status and, if its output
-    /// start was marked (C), capture the text from there to the cursor as the
-    /// `terminal://command` resource.
+    /// A command finished (OSC 133;D): if its output start was marked (C),
+    /// capture the text from there to the cursor as the `terminal://command`
+    /// resource. The exit code is recorded by [`Grid::mark_shell_phase`].
     #[cfg(feature = "l13")]
-    pub(crate) fn command_finished(&mut self, exit: Option<i32>) {
-        self.last_exit = exit;
+    pub(crate) fn command_finished(&mut self) {
         if let Some(start) = self.command_start.take() {
             self.last_command_output = Some(self.capture_command_output(start));
         }
@@ -4794,10 +4807,6 @@ impl Grid {
     /// `C`). Bounded so an undrained grid never grows it.
     #[cfg(any(test, feature = "gui"))]
     pub(crate) fn command_timer_end(&mut self, exit: Option<i32>) {
-        // The status ribbon's exit pill reads this even when the l13 capture
-        // path (which also records it) is compiled out. `D` without a
-        // matching `C` still updates it — the exit code needs no timer.
-        self.last_exit = exit;
         let Some(began) = self.command_began.take() else {
             return;
         };
@@ -4981,10 +4990,26 @@ impl Grid {
     /// The exit code of the last finished command, or `None` if none has
     /// finished (or the shell reported no code). The windowed front-end's
     /// status ribbon shows it as a success/error pill; L13 reads it for the
-    /// structured side-channel.
-    #[cfg(any(feature = "l13", feature = "gui"))]
+    /// structured side-channel, and a multiplexer reports it.
     pub fn last_command_exit(&self) -> Option<i32> {
         self.last_exit
+    }
+
+    /// Where the shell is in its command cycle, by the last OSC 133/633
+    /// `A`, `C` or `D` mark it sent; `None` if it never sent one, as a
+    /// shell without that integration does not.
+    pub fn shell_phase(&self) -> Option<ShellPhase> {
+        self.shell_phase
+    }
+
+    /// The shell sent lifecycle mark `phase`; `D` (`Finished`) carries
+    /// `exit`, its code, or `None` when the shell gave none. A `D` without
+    /// a `C` still counts: the exit code needs no start.
+    pub(crate) fn mark_shell_phase(&mut self, phase: ShellPhase, exit: Option<i32>) {
+        self.shell_phase = Some(phase);
+        if phase == ShellPhase::Finished {
+            self.last_exit = exit;
+        }
     }
 
     /// The output text of the last finished command (OSC 133;C..D), if captured.

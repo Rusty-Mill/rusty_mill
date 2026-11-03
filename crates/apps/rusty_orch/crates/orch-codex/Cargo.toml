@@ -2,7 +2,7 @@
 name = "orch-codex"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.81"
+rust-version = "1.89"
 description = "Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out."
 license = "MIT"
 
@@ -13,9 +13,12 @@ layer = "apps"
 orch-core = { workspace = true }
 orch-dispatch = { workspace = true }
 orch-cli = { workspace = true }
+# The `Model` port and reply parser this adapter serves (#594).
+orch-lens = { workspace = true }
+# Reads the usage events `codex exec --json` prints. Foundation crate,
+# serde off, as in orch-cli.
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 orch-cli = { workspace = true, features = ["fake"] }
 orch-ollama = { workspace = true }
-# Dev-only: the contract test parses OUTPUT_SCHEMA to check it against the parser.
-rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }

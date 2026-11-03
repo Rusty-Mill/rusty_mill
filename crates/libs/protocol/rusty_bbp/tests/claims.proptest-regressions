@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc c6b70ab6d87a7bb675129459ea2799e9f2b709efe25181a29e58828658338a61 # shrinks to ops = [Claim { deps: [0] }, Claim { deps: [] }, Opinion { claim: 0, who: 0, counter: false, strength: 1 }, Opinion { claim: 3, who: 0, counter: true, strength: 1 }, Executed { claim: 1, who: 0, pass: false }, Opinion { claim: 4, who: 1, counter: true, strength: 1 }, Cited { claim: 0, who: 1, counter: true, strength: 3 }, Cited { claim: 3, who: 0, counter: true, strength: 1 }, Executed { claim: 1, who: 0, pass: true }]

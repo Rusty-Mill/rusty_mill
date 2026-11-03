@@ -56,7 +56,10 @@ fn plus_chains_requests() {
 fn bad_calls_fail_before_sending() {
     for (line, want) in [
         ("frobnicate", "unknown command `frobnicate`"),
-        ("create-session", "create-session: missing parameter `name`"),
+        (
+            "create-window --session 00000000-0000-0000-0000-000000000009",
+            "create-window: missing parameter `name`",
+        ),
         ("create-session --nme x", "unknown parameter `nme`"),
         ("create-session --name", "--name needs a value"),
         ("create-session name", "expected a --flag"),
@@ -359,6 +362,7 @@ fn agent_verbs_take_agents_a_scope_and_dry_run() {
         agents: agents.to_vec(),
         scope,
         dry_run,
+        name_session: false,
     };
     assert_eq!(
         agent("agent setup"),
@@ -401,8 +405,20 @@ fn agent_verbs_take_agents_a_scope_and_dry_run() {
             true
         ))))
     );
-    assert_eq!(agent("agent hook"), Ok(Command::Agent(AgentCommand::Hook)));
+    let naming = |name_session| Ok(Command::Agent(AgentCommand::Hook { name_session }));
+    assert_eq!(agent("agent hook"), naming(false));
+    assert_eq!(agent("agent hook --name-session"), naming(true));
+    assert_eq!(
+        agent("agent setup --name-session --agent codex"),
+        Ok(Command::Agent(AgentCommand::Setup(AgentArgs {
+            name_session: true,
+            ..with(&[AgentKind::Codex], AgentScope::User, false)
+        })))
+    );
     for bad in [
+        "agent hook --name-session --name-session",
+        "agent hook --name-session=true",
+        "agent setup --name-session=yes",
         "agent",
         "agent install",
         "agent hook --dir x",

@@ -178,6 +178,7 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             session,
             name,
             active,
+            ..
         } => (
             "session",
             session.uuid(),
@@ -192,12 +193,14 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             name,
             layout,
             zoomed,
+            focused,
         } => {
             let mut fields = vec![
                 ("session", Id(session.uuid())),
                 ("name", Text(name.clone())),
             ];
             fields.extend(layout_fields(layout.as_ref(), *zoomed));
+            fields.push(("focused", focused.map_or(Field::Absent, |b| Id(b.uuid()))));
             ("window", window.uuid(), fields)
         }
         Entry::Block {
@@ -256,6 +259,23 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             ],
         ),
         E::ConfigReloaded => ("config-reloaded", vec![]),
+        E::FocusChanged { window, block } => (
+            "focus-changed",
+            vec![
+                ("window", Id(window.uuid())),
+                ("block", block.map_or(Field::Absent, |b| Id(b.uuid()))),
+            ],
+        ),
+        E::WindowMoved { window, index } => (
+            "window-moved",
+            vec![
+                ("window", Id(window.uuid())),
+                (
+                    "index",
+                    Field::Num(i64::try_from(index).unwrap_or(i64::MAX)),
+                ),
+            ],
+        ),
         E::BlockCreated {
             block,
             window,
@@ -533,6 +553,11 @@ mod tests {
                 session,
                 window: Some(window),
             },
+            Event::WindowMoved { window, index: 2 },
+            Event::FocusChanged {
+                window,
+                block: Some(block),
+            },
             Event::BlockCreated {
                 block,
                 window,
@@ -706,11 +731,12 @@ mod tests {
             name: "w".into(),
             layout: Some(layout.clone()),
             zoomed: None,
+            focused: Some(a),
         };
         assert_eq!(
             entry_line(&window, false),
             format!(
-                "window {} session={} name=\"w\" layout=\"rows50({a},{b})\" zoomed=-",
+                "window {} session={} name=\"w\" layout=\"rows50({a},{b})\" zoomed=- focused={a}",
                 id(2),
                 id(4)
             )
@@ -747,6 +773,7 @@ mod tests {
             session: SessionId::from_uuid(id(1)),
             name: name.into(),
             active: None,
+            generated: false,
         };
         let text = entry_line(&session, false);
         assert_eq!(

@@ -2,10 +2,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::names;
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Layout, MAX_DEPTH,
-    Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Transport, Window,
-    WindowId,
+    Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Toward, Transport,
+    Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -70,7 +71,10 @@ impl Mux {
     }
 
     pub fn create_session(&mut self, name: impl Into<String>) -> Result<SessionId, Error> {
-        let name = name.into();
+        self.add_session(name.into(), false)
+    }
+
+    fn add_session(&mut self, name: String, generated: bool) -> Result<SessionId, Error> {
         check_name(&name)?;
         let id = SessionId::random();
         let session = Session {
@@ -78,11 +82,23 @@ impl Mux {
             name,
             windows: Vec::new(),
             active: None,
+            generated,
         };
         self.sessions.insert(id, session);
         self.session_order.push(id);
         self.events.push(Event::SessionCreated { session: id });
         Ok(id)
+    }
+
+    /// Creates a session with a generated name, such as `quiet-harbor`,
+    /// that no other session has; `seed` picks it ([`is_generated`]
+    /// recognises its shape). The caller supplies the randomness, so the model stays
+    /// deterministic.
+    ///
+    /// [`is_generated`]: crate::is_generated
+    pub fn create_generated_session(&mut self, seed: u64) -> Result<SessionId, Error> {
+        let name = names::generate(seed, |name| self.sessions.values().any(|s| s.name == name));
+        self.add_session(name, true)
     }
 
     pub fn create_window(
@@ -113,6 +129,7 @@ impl Mux {
                 blocks: Vec::new(),
                 layout: None,
                 zoomed: None,
+                focused: None,
             },
         );
         self.events.push(Event::WindowCreated {
@@ -159,20 +176,20 @@ impl Mux {
 
     /// Adds a block whose id the caller chose, such as one already given to
     /// the block's program before it started. It splits the window's
-    /// largest block, side by side if that block is wider than tall (a cell
-    /// being about twice as tall as wide), stacked otherwise; a zoom stays.
+    /// largest block that may still be split, side by side if that block is
+    /// wider than tall (a cell being about twice as tall as wide), stacked
+    /// otherwise; a zoom stays.
     pub fn add_block(&mut self, id: BlockId, window: WindowId, size: Size) -> Result<(), Error> {
         if self.blocks.contains_key(&id) {
             return Err(Error::BlockExists(id));
         }
-        let parent = self
-            .windows
-            .get_mut(&window)
-            .ok_or(Error::UnknownWindow(window))?;
-        let layout = match parent.layout.take() {
+        if !self.windows.contains_key(&window) {
+            return Err(Error::UnknownWindow(window));
+        }
+        let layout = match self.layout_of(window).cloned() {
             None => Layout::Block(id),
             Some(layout) => {
-                let target = layout.largest();
+                let target = layout.largest().ok_or(Error::TooDeep(id))?;
                 let side = match self.blocks.get(&target).map(|b| b.size) {
                     Some(s) if s.cols / 2 < s.rows => Side::Down,
                     _ => Side::Right,
@@ -180,7 +197,9 @@ impl Mux {
                 layout.split(target, id, side)
             }
         };
-        parent.layout = Some(layout);
+        if let Some(parent) = self.windows.get_mut(&window) {
+            parent.layout = Some(layout);
+        }
         self.insert_block(id, window, size);
         Ok(())
     }
@@ -271,17 +290,17 @@ impl Mux {
             window,
             size,
         });
-        self.push_layout(window);
+        self.push_layout(window, None);
     }
 
     /// Shows `block` alone over its whole window, until it is unzoomed,
-    /// closed, or another block is split off in the window.
+    /// closed, or another block is split off in the window. A detached
+    /// block is refused: only a block in the layout can be shown.
     pub fn zoom(&mut self, block: BlockId) -> Result<(), Error> {
-        let window = self
-            .blocks
-            .get(&block)
-            .ok_or(Error::UnknownBlock(block))?
-            .window;
+        let window = self.window_of(block)?;
+        if !self.layout_of(window).is_some_and(|l| l.contains(block)) {
+            return Err(Error::Detached(block));
+        }
         self.set_zoom(window, Some(block))
     }
 
@@ -299,18 +318,253 @@ impl Mux {
             return Ok(());
         }
         target.zoomed = zoomed;
-        self.push_layout(window);
+        self.push_layout(window, None);
         Ok(())
     }
 
-    /// Announces the window's layout as it is now.
-    fn push_layout(&mut self, window: WindowId) {
+    /// Gives `block` `share` of the innermost split along `axis` that holds
+    /// it, so a client can resize the split between it and its neighbour.
+    pub fn resize_split(&mut self, block: BlockId, axis: Axis, share: Share) -> Result<(), Error> {
+        let window = self.window_of(block)?;
+        let mut layout = self
+            .layout_of(window)
+            .filter(|l| l.contains(block))
+            .cloned()
+            .ok_or(Error::Detached(block))?;
+        if !layout.resize(block, axis, share) {
+            return Err(Error::NoSplit { block, axis });
+        }
+        self.set_layout(window, layout, false, None);
+        Ok(())
+    }
+
+    /// Puts each block where the other was, in the window they share. If
+    /// one is detached, the other is detached in its place. A zoom stays
+    /// on its block, or moves to the block taking its place if it left.
+    pub fn swap_blocks(&mut self, block: BlockId, other: BlockId) -> Result<(), Error> {
+        let window = self.same_window(block, other)?;
+        let Some(mut layout) = self.layout_of(window).cloned() else {
+            return Ok(());
+        };
+        layout.swap(block, other);
+        let partner = |b: BlockId| if b == block { other } else { block };
+        let mut heir = None;
+        if let Some(w) = self.windows.get_mut(&window) {
+            if let Some(zoomed) = w.zoomed.filter(|z| !layout.contains(*z)) {
+                w.zoomed = Some(partner(zoomed));
+            }
+            heir = w.focused.map(partner);
+        }
+        self.set_layout(window, layout, false, heir);
+        Ok(())
+    }
+
+    /// Takes `block` from its place, if it has one, and splits `beside`'s
+    /// place in half to put it on `side`, unzooming the window as a split
+    /// does. Without `beside`, `block` fills the window, which must show
+    /// no block. Either way a detached block comes back.
+    pub fn move_block(
+        &mut self,
+        block: BlockId,
+        beside: Option<BlockId>,
+        side: Side,
+    ) -> Result<(), Error> {
+        let window = match beside {
+            Some(target) if target == block => return Err(Error::SameBlock(block)),
+            Some(target) => self.same_window(block, target)?,
+            None => self.window_of(block)?,
+        };
+        let layout = match (self.layout_of(window).cloned(), beside) {
+            (None, None) => Layout::Block(block),
+            (Some(_), None) => return Err(Error::Placed(window)),
+            (None, Some(target)) => return Err(Error::Detached(target)),
+            (Some(layout), Some(target)) => {
+                let rest = layout.remove(block).ok_or(Error::Detached(target))?;
+                let depth = rest.depth_of(target).ok_or(Error::Detached(target))?;
+                if depth >= MAX_DEPTH {
+                    return Err(Error::TooDeep(target));
+                }
+                rest.split(target, block, side)
+            }
+        };
+        self.set_layout(window, layout, true, None);
+        Ok(())
+    }
+
+    /// Takes `block` out of its window's layout, its sibling taking its
+    /// split's place; it keeps running, listed in the window, until moved
+    /// back in or closed. A zoom on it ends. A detached block stays so.
+    pub fn detach_block(&mut self, block: BlockId) -> Result<(), Error> {
+        let window = self.window_of(block)?;
+        let Some(parent) = self.windows.get_mut(&window) else {
+            return Err(Error::UnknownWindow(window));
+        };
+        if !parent.layout.as_ref().is_some_and(|l| l.contains(block)) {
+            return Ok(());
+        }
+        let heir = parent.layout.as_ref().and_then(|l| l.sibling(block));
+        parent.layout = parent.layout.take().and_then(|l| l.remove(block));
+        if parent.zoomed == Some(block) {
+            parent.zoomed = None;
+        }
+        self.push_layout(window, heir);
+        Ok(())
+    }
+
+    /// Moves `window` to place `index` among its session's windows,
+    /// counted from 0, shifting those between by one.
+    pub fn move_window(&mut self, window: WindowId, index: usize) -> Result<(), Error> {
+        let session = self
+            .windows
+            .get(&window)
+            .ok_or(Error::UnknownWindow(window))?
+            .session;
+        let parent = self
+            .sessions
+            .get_mut(&session)
+            .ok_or(Error::UnknownSession(session))?;
+        let from = parent
+            .windows
+            .iter()
+            .position(|w| *w == window)
+            .ok_or(Error::UnknownWindow(window))?;
+        if index >= parent.windows.len() {
+            return Err(Error::NoPlace { window, index });
+        }
+        if index == from {
+            return Ok(());
+        }
+        parent.windows.remove(from);
+        parent.windows.insert(index, window);
+        self.events.push(Event::WindowMoved { window, index });
+        Ok(())
+    }
+
+    fn window_of(&self, block: BlockId) -> Result<WindowId, Error> {
+        Ok(self
+            .blocks
+            .get(&block)
+            .ok_or(Error::UnknownBlock(block))?
+            .window)
+    }
+
+    /// The window both blocks are in.
+    fn same_window(&self, block: BlockId, other: BlockId) -> Result<WindowId, Error> {
+        let window = self.window_of(block)?;
+        if self.window_of(other)? != window {
+            return Err(Error::OtherWindow { block, other });
+        }
+        Ok(window)
+    }
+
+    fn layout_of(&self, window: WindowId) -> Option<&Layout> {
+        self.windows.get(&window).and_then(|w| w.layout.as_ref())
+    }
+
+    /// Replaces the window's layout, ending its zoom if `unzoom`, and
+    /// announces the result unless nothing changed; focus left without a
+    /// place goes to `heir` (see [`Self::push_layout`]).
+    fn set_layout(
+        &mut self,
+        window: WindowId,
+        layout: Layout,
+        unzoom: bool,
+        heir: Option<BlockId>,
+    ) {
+        let Some(w) = self.windows.get_mut(&window) else {
+            return;
+        };
+        let zoom_ends = unzoom && w.zoomed.is_some();
+        if w.layout.as_ref() == Some(&layout) && !zoom_ends {
+            return;
+        }
+        w.layout = Some(layout);
+        if zoom_ends {
+            w.zoomed = None;
+        }
+        self.push_layout(window, heir);
+    }
+
+    /// Announces the window's layout as it is now, then moves its focus
+    /// if it must: to the zoomed block; else, if the focused block left
+    /// the layout, to `heir` if placed, or the first block; else nowhere
+    /// once none is placed.
+    fn push_layout(&mut self, window: WindowId, heir: Option<BlockId>) {
+        self.announce_layout(window);
+        let Some(w) = self.windows.get_mut(&window) else {
+            return;
+        };
+        let Some(layout) = w.layout.as_ref() else {
+            return self.set_focus(window, None);
+        };
+        let kept = w.focused.filter(|b| layout.contains(*b));
+        let focus = w
+            .zoomed
+            .or(kept)
+            .or(heir.filter(|b| layout.contains(*b)))
+            .or_else(|| layout.blocks().first().copied());
+        self.set_focus(window, focus);
+    }
+
+    fn announce_layout(&mut self, window: WindowId) {
         if let Some(w) = self.windows.get(&window) {
             self.events.push(Event::LayoutChanged {
                 window,
                 layout: w.layout.clone(),
                 zoomed: w.zoomed,
             });
+        }
+    }
+
+    /// Focuses `block` in `window`, announcing a change.
+    fn set_focus(&mut self, window: WindowId, block: Option<BlockId>) {
+        let Some(w) = self.windows.get_mut(&window) else {
+            return;
+        };
+        if w.focused == block {
+            return;
+        }
+        w.focused = block;
+        self.events.push(Event::FocusChanged { window, block });
+    }
+
+    /// Focuses `block` in its window, so clients send their keys to it. A
+    /// zoom on another block ends, so the focused block always shows; a
+    /// detached block is refused.
+    pub fn focus_block(&mut self, block: BlockId) -> Result<(), Error> {
+        let window = self.window_of(block)?;
+        if !self.layout_of(window).is_some_and(|l| l.contains(block)) {
+            return Err(Error::Detached(block));
+        }
+        let unzoom = self
+            .windows
+            .get_mut(&window)
+            .filter(|w| w.zoomed.is_some_and(|z| z != block))
+            .map(|w| w.zoomed = None)
+            .is_some();
+        if unzoom {
+            self.announce_layout(window);
+        }
+        self.set_focus(window, Some(block));
+        Ok(())
+    }
+
+    /// Moves the window's focus from its focused block toward a side or
+    /// along the layout's order, as [`Self::focus_block`] does; with no
+    /// block that way, nothing changes.
+    pub fn move_focus(&mut self, window: WindowId, toward: Toward) -> Result<(), Error> {
+        let w = self
+            .windows
+            .get(&window)
+            .ok_or(Error::UnknownWindow(window))?;
+        let next = w
+            .layout
+            .as_ref()
+            .zip(w.focused)
+            .and_then(|(layout, focused)| layout.neighbour(focused, toward));
+        match next {
+            Some(block) => self.focus_block(block),
+            None => Ok(()),
         }
     }
 
@@ -400,9 +654,37 @@ impl Mux {
         self.note(block, Event::ProcessChanged { block, pid, name })
     }
 
+    /// Renames the session as [`Mux::rename`] does, but only while its name
+    /// is generated ([`Session::generated`]); once somebody chose a name,
+    /// it is refused with [`Error::NameChosen`] and the name stays. The
+    /// check and the rename happen together, so of two such calls on one
+    /// generated session only the first takes effect. Naming it its current
+    /// name also ends the mark, though, as with [`Mux::rename`], nothing is
+    /// emitted.
+    pub fn name_session(
+        &mut self,
+        session: SessionId,
+        name: impl Into<String>,
+    ) -> Result<(), Error> {
+        let found = self
+            .sessions
+            .get(&session)
+            .ok_or(Error::UnknownSession(session))?;
+        if !found.generated {
+            return Err(Error::NameChosen(session));
+        }
+        self.rename(EntityId::Session(session), name)?;
+        // A rename to the same name keeps the mark; this one is a choice.
+        if let Some(named) = self.sessions.get_mut(&session) {
+            named.generated = false;
+        }
+        Ok(())
+    }
+
     /// Names the entity `name`, replacing its old name. Renaming to the
     /// same name changes nothing and emits nothing; a name over
-    /// [`MAX_NAME`] is refused.
+    /// [`MAX_NAME`] is refused. Renaming a session ends its generated mark
+    /// ([`Session::generated`]).
     pub fn rename(&mut self, id: EntityId, name: impl Into<String>) -> Result<(), Error> {
         let name = name.into();
         check_name(&name)?;
@@ -452,6 +734,12 @@ impl Mux {
             return Ok(());
         }
         *slot = name;
+        // A session renamed has a name somebody chose.
+        if let EntityId::Session(session) = id
+            && let Some(renamed) = self.sessions.get_mut(&session)
+        {
+            renamed.generated = false;
+        }
         self.events.push(event);
         Ok(())
     }
@@ -518,6 +806,7 @@ impl Mux {
             .get(&block)
             .ok_or(Error::UnknownBlock(block))?
             .window;
+        let heir = self.layout_of(window).and_then(|l| l.sibling(block));
         self.remove_block(block);
         if let Some(parent) = self.windows.get_mut(&window) {
             parent.blocks.retain(|&b| b != block);
@@ -526,7 +815,7 @@ impl Mux {
                 parent.zoomed = None;
             }
         }
-        self.push_layout(window);
+        self.push_layout(window, heir);
         Ok(())
     }
 

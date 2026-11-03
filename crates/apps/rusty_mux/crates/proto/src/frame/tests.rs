@@ -1,6 +1,6 @@
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
-    SessionId, Side, Size, Transport, WindowId,
+    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
+    SessionId, Share, Side, Size, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
@@ -153,14 +153,16 @@ fn every_message_round_trips() {
                 session,
                 name: "main".into(),
                 active: None,
+                generated: false,
             },
         },
         Message::Entry {
             req: 18,
             entry: Entry::Session {
                 session,
-                name: String::new(),
+                name: "quiet-harbor".into(),
                 active: Some(window),
+                generated: true,
             },
         },
         Message::Entry {
@@ -171,6 +173,7 @@ fn every_message_round_trips() {
                 name: String::new(),
                 layout: None,
                 zoomed: None,
+                focused: None,
             },
         },
         Message::Entry {
@@ -181,6 +184,7 @@ fn every_message_round_trips() {
                 name: "w".into(),
                 layout: Some(split_layout(block)),
                 zoomed: Some(block),
+                focused: Some(block),
             },
         },
         Message::Entry {
@@ -276,6 +280,51 @@ fn every_message_round_trips() {
         Message::Unzoom { req: 23, window },
         Message::SelectWindow { req: 24, window },
         Message::ReloadConfig { req: 25 },
+        Message::ResizeSplit {
+            req: 26,
+            block,
+            axis: Axis::Rows,
+            share: Share::new(99).expect("in range"),
+        },
+        Message::SwapBlocks {
+            req: 27,
+            block,
+            other: block,
+        },
+        Message::MoveBlock {
+            req: 28,
+            block,
+            beside: Some(block),
+            side: Side::Down,
+        },
+        Message::MoveBlock {
+            req: 29,
+            block,
+            beside: None,
+            side: Side::Left,
+        },
+        Message::DetachBlock { req: 30, block },
+        Message::MoveWindow {
+            req: 31,
+            window,
+            index: 7,
+        },
+        Message::FocusBlock { req: 32, block },
+        Message::MoveFocus {
+            req: 33,
+            window,
+            toward: Toward::Side(Side::Up),
+        },
+        Message::MoveFocus {
+            req: 34,
+            window,
+            toward: Toward::Previous,
+        },
+        Message::NameSession {
+            req: 35,
+            session,
+            name: "fix-login".into(),
+        },
         Message::Welcome {
             features: Features::NONE,
             client,
@@ -357,6 +406,15 @@ fn every_event_round_trips() {
         Event::SessionClosed { session },
         Event::WindowCreated { window, session },
         Event::WindowClosed { window },
+        Event::WindowMoved { window, index: 0 },
+        Event::FocusChanged {
+            window,
+            block: Some(block),
+        },
+        Event::FocusChanged {
+            window,
+            block: None,
+        },
         Event::ActiveWindowChanged {
             session,
             window: Some(window),

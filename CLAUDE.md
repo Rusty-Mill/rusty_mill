@@ -3,21 +3,27 @@
 Follow the current CONTRIBUTING workflow in AGENTS.md. The super-board robot is active under
 `docs/super-board/autonomy-policy.md`; `/super-review` is part of its lanes, not of the human workflow.
 
-## Let Em Loose: design questions go to let-em-loose-expert first
-Applies only to Let Em Loose work: Mill Board cards tagged `let-em-loose`, and changes under
-`crates/apps/rusty_bbp_host`, `crates/libs/protocol/rusty_bbp`, `crates/apps/rusty_orch`,
-`crates/foundation/rusty_crdt`, `docs/bbp`, `docs/projects/let-em-loose`, and
-`crates/apps/rusty_mill_board` for #595 inbox work. Other projects in this repo are unaffected.
+## Project experts
+Before asking Nano any design, scope or behaviour question, ask the expert for the paths involved.
+Never ask Nano first. Most specific row first; paths not listed have no expert yet.
 
-Threads and the orchestrator: before asking Nano any design, scope or behaviour question on that
-work, consult the `let-em-loose-expert` subagent. Never ask Nano first.
-- ANSWER: act on it; the source is cited.
+| Paths | Expert |
+|---|---|
+| `crates/libs/ui/rusty_term/src/gui/**` and GUI visual design (`docs/projects/rusty_term/gui-design/**`) | `rusty-term-design-expert`. Needs the Paper MCP server, which runs locally on Nano's Windows machine; in a cloud session it answers from its pack only and can't edit designs. Code behaviour of the GUI goes to `rusty-term-expert`. |
+| `crates/libs/ui/rusty_term/**`, `crates/libs/ui/rusty_conhost/**`, `crates/apps/rusty_mux/**`, `crates/platform/rustils/crates/platform-windows/**` (condrv), `docs/projects/rusty_term/**`, `docs/projects/term/**`, `docs/projects/mux/**` | `rusty-term-expert` |
+| `crates/apps/rusty_bbp_host/**`, `crates/libs/protocol/rusty_bbp/**`, `crates/apps/rusty_orch/**`, `crates/foundation/rusty_crdt/**`, `docs/bbp/**`, `docs/projects/let-em-loose/**`, `crates/apps/rusty_mill_board/**` for #595 inbox work, and any Mill Board card tagged `let-em-loose` | `let-em-loose-expert`. It records Nano's answers only with a reference to where he said them (message link or id, card comment, or remind-me id), and its open questions go to `docs/projects/let-em-loose/handoff/OPEN_QUESTIONS.md`. |
+
+Call it with `subagent_type: "<expert>"`. **Fallback:** if that type isn't available (cloud sessions can
+fail to load agents), read `.claude/agents/<expert>.md` fresh at call time and spawn a general-purpose
+Agent whose prompt is the file's body (everything after the frontmatter) followed by the question. That
+counts as the expert. Never answer without it, and never copy the file's text anywhere.
+**Missing expert:** if `.claude/agents/<expert>.md` doesn't exist either, use the next row that matches
+the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design questions go to
+`rusty-term-expert`, which escalates them to Nano rather than answering (its pack, D10).
+- ANSWER: act on it; the source is cited. An answer settles what to build, not permission: review,
+  merge and owner gates still apply.
 - ESCALATE: ask Nano exactly that block: question, options, recommendation. Nothing more.
-- An ANSWER settles what to build, not permission: design approval, ask-first gates, spending,
-  deployment and review/merge rules still apply.
-- When Nano answers, pass the answer to `let-em-loose-expert` to record, quoted, with its date and
-  where he said it (message link or id, card comment, or remind-me id). Don't write
-  `docs/projects/let-em-loose/DECISIONS.md` or remind-me decisions yourself; a single keyed
-  writer keeps each answer recorded once.
-- Non-blocking? Take the expert's recommendation, keep going, and let the expert add the question
-  to `docs/projects/let-em-loose/handoff/OPEN_QUESTIONS.md`.
+- When Nano answers, pass the answer to the expert with his words and where he said them. Don't write
+  the pack's DECISIONS.md or remind-me decisions yourself; one writer keeps each answer recorded once.
+- Non-blocking? Take the expert's recommendation, keep going, and let the expert add the question to
+  the pack's OPEN_QUESTIONS.md.

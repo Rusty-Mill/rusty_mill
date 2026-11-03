@@ -10,9 +10,12 @@ use orch_claude::{ClaudeAgent, SCRUBBED_ENV};
 use orch_cli::ExecError;
 use orch_core::board::EntryKind;
 use orch_core::goal::StopRule;
-use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec};
 use orch_core::GoalId;
 use orch_dispatch::{AgentRunner, ClassifiedError};
+
+const CLAUDE: AgentId = AgentId::from_static("claude");
+const CODEX: AgentId = AgentId::from_static("codex");
 
 fn agent(fake: Scripted) -> ClaudeAgent<Scripted> {
     ClaudeAgent::with_runner("/repo", fake).timeout(Duration::from_secs(30))
@@ -23,7 +26,7 @@ fn success_probes_the_login_then_runs_in_the_repo_with_the_key_scrubbed() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(Scripted::ok(&envelope(REPLY_ONE)));
 
-    let out = a.run(Agent::Claude, task(&plan), &board).expect("ok");
+    let out = a.run(CLAUDE, task(&plan), &board).expect("ok");
 
     assert_eq!(out.len(), 1);
     let calls = a.runner().inner.calls.lock().expect("lock");
@@ -50,13 +53,11 @@ fn success_probes_the_login_then_runs_in_the_repo_with_the_key_scrubbed() {
 fn wrong_agent_is_refused_without_running() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(Scripted::ok(&envelope(REPLY_ONE)));
-    let err = a
-        .run(Agent::Codex, task(&plan), &board)
-        .expect_err("refused");
+    let err = a.run(CODEX, task(&plan), &board).expect_err("refused");
     assert!(err
         .0
         .as_str()
-        .contains("cannot serve Research through Codex"));
+        .contains("cannot serve Research through codex"));
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
 
@@ -77,11 +78,11 @@ fn implement_is_refused_before_any_process() {
     let mut a = agent(Scripted::ok(&envelope(REPLY_ONE)));
 
     let err = a
-        .run_classified(Agent::Claude, plan.get(id).expect("task"), &board)
+        .run_classified(CLAUDE, plan.get(id).expect("task"), &board)
         .expect_err("unsupported");
 
     assert!(
-        matches!(&err, ClassifiedError::Permanent(e) if e.0.contains("cannot serve Implement through Claude"))
+        matches!(&err, ClassifiedError::Permanent(e) if e.0.contains("cannot serve Implement through claude"))
     );
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
@@ -96,7 +97,7 @@ fn logged_out_probe_is_unavailable_and_skips_the_run() {
     ))));
 
     let failure = a
-        .run_classified(Agent::Claude, task(&plan), &board)
+        .run_classified(CLAUDE, task(&plan), &board)
         .expect_err("logged out");
 
     assert!(matches!(&failure, ClassifiedError::Unavailable(e)
@@ -111,7 +112,7 @@ fn probe_that_cannot_run_is_transient() {
         "No such file or directory".to_owned(),
     ))));
     let failure = a
-        .run_classified(Agent::Claude, task(&plan), &board)
+        .run_classified(CLAUDE, task(&plan), &board)
         .expect_err("no binary");
     assert!(
         matches!(&failure, ClassifiedError::Transient(e) if e.0.contains("could not start process"))
@@ -127,7 +128,7 @@ fn login_failure_inside_the_envelope_is_unavailable() {
     )));
 
     let failure = a
-        .run_classified(Agent::Claude, task(&plan), &board)
+        .run_classified(CLAUDE, task(&plan), &board)
         .expect_err("login");
 
     assert!(matches!(&failure, ClassifiedError::Unavailable(e)
@@ -147,9 +148,7 @@ fn rate_limit_is_named_and_distinct_from_login() {
             "error_during_execution",
             result,
         )));
-        let err = a
-            .run(Agent::Claude, task(&plan), &board)
-            .expect_err("limited");
+        let err = a.run(CLAUDE, task(&plan), &board).expect_err("limited");
         assert!(
             err.0.as_str().starts_with("claude: rate limited"),
             "{}",
@@ -167,9 +166,7 @@ fn other_envelope_error_keeps_status_and_subtype() {
         &error_envelope("error_max_turns", "Reached max turns (20)"),
         "",
     ))));
-    let err = a
-        .run(Agent::Claude, task(&plan), &board)
-        .expect_err("max turns");
+    let err = a.run(CLAUDE, task(&plan), &board).expect_err("max turns");
     assert!(
         err.0
             .as_str()
@@ -189,9 +186,7 @@ fn non_zero_exit_without_an_envelope_reports_stderr() {
         "",
         "error: unknown option '--json-schema'",
     ))));
-    let err = a
-        .run(Agent::Claude, task(&plan), &board)
-        .expect_err("exit 2");
+    let err = a.run(CLAUDE, task(&plan), &board).expect_err("exit 2");
     assert!(
         err.0.as_str().starts_with("claude exited with status 2"),
         "{}",
@@ -205,7 +200,7 @@ fn prose_instead_of_an_envelope_is_transient() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(Scripted::ok("Sure! Here is what I found."));
     let failure = a
-        .run_classified(Agent::Claude, task(&plan), &board)
+        .run_classified(CLAUDE, task(&plan), &board)
         .expect_err("prose");
     assert!(
         matches!(&failure, ClassifiedError::Transient(e) if e.0.contains("no result envelope"))
@@ -218,7 +213,7 @@ fn envelope_without_structured_output_is_transient() {
     let bare = r#"{"type":"result","subtype":"success","is_error":false,"result":"I could not form the object."}"#;
     let mut a = agent(Scripted::ok(bare));
     let failure = a
-        .run_classified(Agent::Claude, task(&plan), &board)
+        .run_classified(CLAUDE, task(&plan), &board)
         .expect_err("no object");
     assert!(matches!(&failure, ClassifiedError::Transient(e)
         if e.0.contains("no structured output") && e.0.contains("could not form")));
@@ -229,9 +224,7 @@ fn structured_output_still_goes_through_the_parser() {
     let (plan, board, _, _) = fixture();
     let off_protocol = r#"{"entries":[{"kind":"poem","body":"roses","refs":[]}]}"#;
     let mut a = agent(Scripted::ok(&envelope(off_protocol)));
-    let err = a
-        .run(Agent::Claude, task(&plan), &board)
-        .expect_err("bad kind");
+    let err = a.run(CLAUDE, task(&plan), &board).expect_err("bad kind");
     assert!(err.0.as_str().contains("kind"), "{}", err.0.as_str());
 }
 
@@ -241,9 +234,7 @@ fn timeout_maps_to_agent_error() {
     let mut a = agent(Scripted::main(Err(ExecError::Timeout(
         Duration::from_secs(30),
     ))));
-    let err = a
-        .run(Agent::Claude, task(&plan), &board)
-        .expect_err("timeout");
+    let err = a.run(CLAUDE, task(&plan), &board).expect_err("timeout");
     assert!(err.0.as_str().contains("exceeded 30s"));
 }
 
@@ -254,7 +245,7 @@ fn best_effort_withdraws_questions_from_prompt_schema_and_parser() {
     let mut a = agent(Scripted::ok(&envelope(question))).with_stop_rule(StopRule::BestEffort);
 
     let err = a
-        .run_classified(Agent::Claude, task(&plan), &board)
+        .run_classified(CLAUDE, task(&plan), &board)
         .expect_err("questions are withdrawn under best effort");
     assert!(
         matches!(&err, ClassifiedError::Transient(e) if e.0.contains("question")),
@@ -270,6 +261,6 @@ fn best_effort_withdraws_questions_from_prompt_schema_and_parser() {
 
     // Under checkpoint the same reply is a question the dispatcher can block on.
     let mut a = agent(Scripted::ok(&envelope(question)));
-    let out = a.run(Agent::Claude, task(&plan), &board).expect("ok");
+    let out = a.run(CLAUDE, task(&plan), &board).expect("ok");
     assert_eq!(out[0].kind, EntryKind::Question);
 }

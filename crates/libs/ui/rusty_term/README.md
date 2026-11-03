@@ -154,7 +154,7 @@ is written for cmd's quote stripping (`/s`, or a command starting `""`), and
 shell = "pwsh"           # or "wsl", "powershell", "C:\\tools\\nu.exe", ...
 
 [console]                # Windows only
-host = "own"             # conpty (default) | own
+host = "conpty"          # own (default) | conpty
 
 [window]                 # windowed (--gui) front-end only
 cols = 120               # initial size in cells; default 80x24
@@ -185,10 +185,11 @@ color1 = "#cc6666"
 ```
 
 On Windows, `[console] host` chooses who serves the shell's console:
-`"conpty"` (the default) is Windows' ConPTY, and `"own"` is rusty_conhost, our
-own console host. It is read at launch. If `own` can't start (an older
-Windows without a usable ConDrv, for example), the error is shown and the
-terminal does not fall back to ConPTY. With `own`, the program is found in
+`"own"` (the default) is rusty_conhost, our own console host, and `"conpty"`
+is Windows' ConPTY, kept as the rollback. It is read at launch. If `own`
+can't start (an older Windows without a usable ConDrv, for example), the
+error is shown and the terminal does not fall back to ConPTY; set
+`host = "conpty"` there. With `own`, the program is found in
 `shell` by the rules `CreateProcessW` uses, and the rest of the line reaches
 it as written, as under ConPTY. Only the program token differs: the child
 sees it as a quoted full path, followed by one space (cmd's `%CMDCMDLINE%`
@@ -238,7 +239,8 @@ area re-tiles around the dock, and it auto-hides on windows too narrow to
 fit it beside a usable terminal.
 
 The `[keys]` section rebinds any window shortcut as `action = "chord"`. The
-actions are `copy`, `paste`, `new_tab`, `new_window`, `fold_output`,
+actions are `copy`, `copy_or_send` (copy if there is a selection, else pass
+the key to the shell), `paste`, `new_tab`, `new_window`, `fold_output`,
 `close_tab`, `next_tab`, `prev_tab`, `open_config`, `open_settings`, `search`,
 `open_links`, `copy_mode`, `broadcast`, `split_right`, `split_down`,
 `focus_next`, `focus_left`, `focus_right`, `focus_up`, `focus_down`,
@@ -277,8 +279,8 @@ window edges to resize.
 |-------|--------|
 | Left-drag | Select text (highlighted by inversion); double/triple-click first to extend by word/line as you drag, and drag past a pane's top/bottom edge to auto-scroll. |
 | Ctrl+hover / Ctrl+click | Underline + pointer cursor over a hyperlink (OSC 8 or a detected plain-text URL), Ctrl+click opens it. |
-| Ctrl+Shift+C | Copy the selection to the system clipboard. |
-| Ctrl+Shift+V | Paste the clipboard into the shell (bracketed-paste aware). |
+| Ctrl+Shift+C (and Ctrl+C on Windows) | Copy the selection to the system clipboard. On Windows, plain Ctrl+C copies and clears the selection when there is one, and otherwise sends ^C to the shell as usual, as in Windows Terminal. |
+| Ctrl+Shift+V (and Ctrl+V on Windows) | Paste the clipboard into the shell (bracketed-paste aware). Plain Ctrl+V pastes on Windows only, as in Windows Terminal; to send a raw ^V there instead, set `paste = "Ctrl+Shift+V"` under `[keys]`. |
 | Ctrl+Shift+F | Open the in-window search bar (incremental match highlighting; Ctrl+R toggles regex, Alt+C toggles case sensitivity, Ctrl+V/middle-click pastes into the query). |
 | Ctrl+Shift+, | Open the config file in your editor (created from a template on first use). |
 | Ctrl+, / `▾` menu | Toggle the in-app **settings page** (it opens as its own tab in the strip): an Appearance / Terminal / Window sidebar covering theme, font, cursor, contrast, shell, scrollback, clipboard, padding, opacity, launch size, and more, each with a one-line description. `Tab` switches category, `↑`/`↓` pick a row, `←`/`→` (or a click on the value) change it — `Shift` steps numbers ×10, `Home`/`End` jump to the bound, `Enter` (or a typed digit) edits a number directly — type (or `/` / `Ctrl+F`) to search across every category, the wheel scrolls, `Esc` saves & closes; changes apply live. |

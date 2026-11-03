@@ -198,11 +198,27 @@ impl<S: Store> Driver<S> {
     /// and the claimed payload is what those bytes decode to (A1). A failure is
     /// a rejection returned without touching the log.
     pub fn dispatch(&mut self, cmd: &Command, now: Time) -> Result<Response, StoreError> {
+        self.dispatch_guarded(cmd, now, |_| None)
+    }
+
+    /// [`Driver::dispatch`], with `guard` judged against the state each
+    /// attempt computes on, the reloaded one included: a host rule the core
+    /// does not know (#597 protected paths) holds at the commit, not just at
+    /// the first read. A `Some` rejection is returned without touching the log.
+    pub fn dispatch_guarded(
+        &mut self,
+        cmd: &Command,
+        now: Time,
+        guard: impl Fn(&TaskState) -> Option<Rejection>,
+    ) -> Result<Response, StoreError> {
         self.shadow.clear();
         if let Some(rej) = self.check_boundary(cmd) {
             return Ok(Response::Rejected(rej));
         }
         for _ in 0..2 {
+            if let Some(rej) = guard(&self.state) {
+                return Ok(Response::Rejected(rej));
+            }
             let out = handle(&self.state, cmd, now);
             match self
                 .store

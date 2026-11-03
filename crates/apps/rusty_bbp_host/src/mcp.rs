@@ -18,6 +18,8 @@
 //! one, and is refused with that earlier turn's token, never relabelled with
 //! the new grant, however the requests are timed on the stream.
 
+pub mod claims;
+
 use crate::{fresh_op, now, open_driver, response_json};
 use rusty_bbp::*;
 use rusty_serde::Value;
@@ -31,6 +33,15 @@ const WAIT_MAX: Duration = Duration::from_secs(600);
 /// The longest a `wait` sleeps between log checks: the log watch wakes it
 /// sooner, so this only bounds a platform or setup without one.
 const WAIT_RECHECK: Duration = Duration::from_secs(1);
+
+/// How long a `wait` called with `args` may block: its `timeout_s`, else
+/// [`WAIT_DEFAULT`], never past [`WAIT_MAX`].
+fn wait_timeout(args: &Value) -> Duration {
+    args.get("timeout_s")
+        .and_then(Value::as_u64)
+        .map_or(WAIT_DEFAULT, Duration::from_secs)
+        .min(WAIT_MAX)
+}
 
 /// What one `bbp mcp` process is bound to.
 #[derive(Clone, Debug)]
@@ -74,6 +85,52 @@ pub struct Server {
     shown: Option<TurnId>,
     /// A session's watch on the task log, made on its first `wait`.
     waker: Option<crate::waker::Waker>,
+    /// Claims mode: the credential of the assignment this server was started
+    /// under. Kept, never re-derived, so a reassignment revokes the session.
+    credential: Option<Token>,
+    /// The client's request stream while serving, so a blocked `wait` sees
+    /// it close instead of holding the server for its full timeout.
+    hangup: Option<HangUp>,
+    /// The longest `wait` sleeps between log checks; [`WAIT_RECHECK`].
+    recheck: Duration,
+    /// Told each time `wait` is about to block on the watch, which is by then
+    /// installed and has seen every append since the last check.
+    #[cfg(test)]
+    blocking: Option<std::sync::mpsc::Sender<()>>,
+}
+
+/// The descriptor a client writes requests to the server on. Once every
+/// writer of a pipe or socket has closed it, it reports a hang-up, which
+/// `poll` sees without reading any request still queued in it.
+#[derive(Clone, Copy, Debug)]
+pub struct HangUp(i32);
+
+impl HangUp {
+    /// `input`'s descriptor, which must stay open while it is watched.
+    #[cfg(target_os = "linux")]
+    pub fn of(input: &impl std::os::fd::AsRawFd) -> Option<HangUp> {
+        Some(HangUp(input.as_raw_fd()))
+    }
+
+    /// Hang-ups are watched only on Linux.
+    #[cfg(not(target_os = "linux"))]
+    pub fn of<T>(_: &T) -> Option<HangUp> {
+        None
+    }
+
+    /// Whether every writer has closed the stream.
+    #[cfg(target_os = "linux")]
+    fn happened(self) -> bool {
+        use rusty_libc::fd::{poll, PollFd, POLLIN};
+        let mut fds = [PollFd::new(self.0, POLLIN)];
+        poll(&mut fds, 0).is_ok_and(|ready| ready > 0 && fds[0].is_hup())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn happened(self) -> bool {
+        let _ = self.0;
+        false
+    }
 }
 
 fn obj(pairs: Vec<(&str, Value)>) -> Value {
@@ -466,12 +523,14 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
                         _ => vec![],
                     };
                     ArtifactPayload::Candidate(Candidate {
+                        claim: None,
                         base: a
                             .get("base")
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_owned(),
                         diffs,
+                        suite: Suite::Build,
                     })
                 }
                 other => {
@@ -501,11 +560,23 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
 impl Server {
     pub fn new(binding: Binding) -> Result<Server, String> {
         let driver = open_driver(&binding.dir, &binding.task)?;
+        if driver.state.mode == Mode::Claims && binding.turn.is_some() {
+            return Err("a claims task grants no turns: serve it with $BBP_SESSION=yes".into());
+        }
+        let credential = match driver.state.mode {
+            Mode::Claims => driver.state.credential_for(&binding.principal),
+            _ => None,
+        };
         Ok(Server {
             binding,
             driver,
             shown: None,
             waker: None,
+            credential,
+            hangup: None,
+            recheck: WAIT_RECHECK,
+            #[cfg(test)]
+            blocking: None,
         })
     }
 
@@ -576,25 +647,35 @@ impl Server {
         if self.binding.turn.is_some() {
             return Err("wait is for a session; this server speaks for one turn".into());
         }
-        let timeout = args
-            .get("timeout_s")
-            .and_then(Value::as_u64)
-            .map_or(WAIT_DEFAULT, Duration::from_secs)
-            .min(WAIT_MAX);
-        let deadline = Instant::now() + timeout;
+        if self.claims() {
+            return Err("a claims task grants no turns; act with the other tools".into());
+        }
+        let deadline = Instant::now() + wait_timeout(args);
+        // Watch before the first check, so an append between the two still
+        // wakes the wait instead of waiting out the recheck.
+        if self.waker.is_none() {
+            let log = log_path_for(&self.binding.dir, &self.binding.task);
+            self.waker = Some(crate::waker::Waker::new(&log));
+        }
         loop {
             self.driver.sync().map_err(|e| format!("{e:?}"))?;
             if let Some(reply) = self.woke() {
                 return Ok(reply);
             }
+            if self.hangup.is_some_and(HangUp::happened) {
+                return Ok(self.wake_reply("closed", None));
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(self.wake_reply("timeout", None));
             }
-            let log = log_path_for(&self.binding.dir, &self.binding.task);
-            self.waker
-                .get_or_insert_with(|| crate::waker::Waker::new(&log))
-                .wait(&[], left.min(WAIT_RECHECK))?;
+            #[cfg(test)]
+            if let Some(tx) = &self.blocking {
+                let _ = tx.send(());
+            }
+            if let Some(waker) = &mut self.waker {
+                waker.wait(&[], left.min(self.recheck))?;
+            }
         }
     }
 
@@ -684,9 +765,101 @@ impl Server {
         }
     }
 
+    /// True when the bound task is in claims mode.
+    fn claims(&self) -> bool {
+        self.driver.state.mode == Mode::Claims
+    }
+
+    /// Store the bytes of a `put_artifact` and point the action at them.
+    fn stored(
+        &mut self,
+        act: AgentAction,
+        bytes: Option<(ArtifactPayload, Vec<u8>)>,
+    ) -> Result<AgentAction, String> {
+        let Some((payload, body)) = bytes else {
+            return Ok(act);
+        };
+        let encoded = encode_artifact(&payload, &body).map_err(|e| e.to_string())?;
+        let blob = self.driver.store.blob_put(&encoded);
+        Ok(AgentAction::PutArtifact { blob, payload })
+    }
+
+    /// A claims-mode call, views included: authorised by the session
+    /// credential (C-R1) captured when this server started, which the model
+    /// never sees. Reassignment or the task's end invalidates it, and the
+    /// core refuses the call with `bad_credential`.
+    fn call_claims(&mut self, name: &str, args: &Value) -> Result<Response, String> {
+        let Translated { op, action, bytes } = claims::action(name, args)?;
+        let key = (self.binding.principal.clone(), op.clone());
+        let guard = match &action {
+            AgentAction::PutArtifact {
+                payload: ArtifactPayload::Candidate(m),
+                ..
+            } => self.protected(m)?,
+            _ => None,
+        };
+        // An op the core already committed replays its stored answer: the
+        // exemptions of today never re-judge it. Otherwise the rule holds at
+        // the commit, re-judged on every reload, and a refusal stores nothing.
+        let judge = |st: &TaskState| match st.ops.contains_key(&key) {
+            true => None,
+            false => guard.as_ref().and_then(|g| g.judge(st)),
+        };
+        if let Some(refused) = judge(&self.driver.state) {
+            return Ok(Response::Rejected(refused));
+        }
+        let action = self.stored(action, bytes)?;
+        let cmd = Command::Agent {
+            principal: key.0.clone(),
+            token: self.credential,
+            op,
+            action,
+        };
+        self.driver
+            .dispatch_guarded(&cmd, now(), judge)
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// #597: the protected-path rule for candidate `m`, when the task has
+    /// protected paths: its baseline and the paths its diffs touch.
+    fn protected(&self, m: &Candidate) -> Result<Option<crate::protect::Guard>, String> {
+        let st = &self.driver.state;
+        let set = crate::profiles::load(&self.binding.dir, &self.binding.task, st.profile_digest)?;
+        if set.protected.is_empty() {
+            return Ok(None);
+        }
+        set.check_protected()?;
+        let scratch = self.binding.dir.join("scratch").join("protect");
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
+        let store = &self.driver.store;
+        let touched = crate::protect::touched(m, &scratch, |id| {
+            // An id that is no diff reads as an empty patch; the core then
+            // refuses the candidate with its own code. A missing id is
+            // refused below, since another session may store it later.
+            match st
+                .artifacts
+                .get(&id)
+                .filter(|a| a.kind == ArtifactKind::Diff)
+            {
+                Some(a) => store.blob_get(&a.blob.sha).map_err(|e| format!("{e:?}")),
+                None => Ok(Vec::new()),
+            }
+        })?;
+        Ok(Some(crate::protect::Guard {
+            refused: crate::protect::off_baseline(set.baseline.as_deref(), m)
+                .or_else(|| crate::protect::unresolved(st, m)),
+            protected: set.protected,
+            touched,
+            claim: m.claim,
+        }))
+    }
+
     /// Run one tool call end to end.
     pub fn call(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         self.driver.sync().map_err(|e| format!("{e:?}"))?;
+        if self.claims() {
+            return self.call_claims(name, args);
+        }
         let Translated {
             op,
             action: mut act,
@@ -709,11 +882,7 @@ impl Server {
                 (None, None) => "you hold no turn; call wait".to_owned(),
             });
         }
-        if let Some((payload, body)) = bytes {
-            let encoded = encode_artifact(&payload, &body).map_err(|e| e.to_string())?;
-            let blob = self.driver.store.blob_put(&encoded);
-            act = AgentAction::PutArtifact { blob, payload };
-        }
+        act = self.stored(act, bytes)?;
         // A replay after the turn ended still names the turn it was made in.
         let token = turn
             .filter(|_| !matches!(act, AgentAction::TaskCard))
@@ -757,7 +926,13 @@ impl Server {
                 ),
             ])),
             "ping" => Ok(obj(vec![])),
-            "tools/list" => Ok(obj(vec![("tools", tools(self.binding.turn.is_none()))])),
+            "tools/list" => Ok(obj(vec![(
+                "tools",
+                match self.claims() {
+                    true => claims::tools(),
+                    false => tools(self.binding.turn.is_none()),
+                },
+            )])),
             "tools/call" => {
                 let name = params.get("name").and_then(Value::as_str).unwrap_or("");
                 let args = params
@@ -796,11 +971,28 @@ impl Server {
 
     /// Serve stdin to stdout until EOF.
     pub fn serve(&mut self) -> io::Result<()> {
-        self.serve_on(io::stdin().lock(), io::stdout().lock())
+        let stdin = io::stdin();
+        let hangup = HangUp::of(&stdin);
+        self.serve_on(stdin.lock(), hangup, io::stdout().lock())
     }
 
     /// Serve newline-delimited requests from `input` to `output` until EOF.
-    pub fn serve_on(&mut self, input: impl BufRead, mut stdout: impl Write) -> io::Result<()> {
+    /// A `wait` blocked when `hangup` reports the client gone returns within
+    /// one recheck interval; requests already sent are still answered.
+    pub fn serve_on(
+        &mut self,
+        input: impl BufRead,
+        hangup: Option<HangUp>,
+        stdout: impl Write,
+    ) -> io::Result<()> {
+        self.hangup = hangup;
+        let served = self.answer(input, stdout);
+        self.hangup = None;
+        served
+    }
+
+    /// Answer each request line of `input` until EOF.
+    fn answer(&mut self, input: impl BufRead, mut stdout: impl Write) -> io::Result<()> {
         for line in input.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -831,5 +1023,106 @@ impl Server {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+    use super::*;
+    #[cfg(target_os = "linux")]
+    use {crate::admin, std::path::Path};
+
+    fn args(json: &str) -> Value {
+        rusty_serde::json::from_str(json).expect("json")
+    }
+
+    #[test]
+    fn wait_is_capped_at_ten_minutes_and_defaults_to_one() {
+        assert_eq!(wait_timeout(&args("{}")), WAIT_DEFAULT);
+        assert_eq!(
+            wait_timeout(&args(r#"{"timeout_s":5}"#)),
+            Duration::from_secs(5)
+        );
+        assert_eq!(wait_timeout(&args(r#"{"timeout_s":600}"#)), WAIT_MAX);
+        assert_eq!(wait_timeout(&args(r#"{"timeout_s":601}"#)), WAIT_MAX);
+        assert_eq!(wait_timeout(&args(r#"{"timeout_s":86400}"#)), WAIT_MAX);
+        assert_eq!(WAIT_MAX, Duration::from_secs(600));
+    }
+
+    /// A task whose planner holds the first turn, so the coder waits.
+    #[cfg(target_os = "linux")]
+    fn open(dir: &Path) -> TaskId {
+        let task = TaskId("T1".into());
+        let roster = admin::read_roster(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/proving/roster.json"),
+        )
+        .expect("roster");
+        admin::open_task(
+            dir,
+            &task,
+            "github.com/example/repo",
+            b"Brief.",
+            &PrincipalId("human".into()),
+            &crate::profiles::ProfileSet::shell("test", "true"),
+            roster,
+        )
+        .expect("open");
+        for (role, vendor) in [
+            ("planner", "anthropic"),
+            ("coder", "openai"),
+            ("tester", "google"),
+            ("reviewer", "anthropic"),
+        ] {
+            admin::assign(
+                dir,
+                &task,
+                &RoleId(role.into()),
+                &PrincipalId(role.into()),
+                vendor,
+            )
+            .expect("assign");
+        }
+        admin::tick(dir, &task).expect("tick");
+        task
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_wait_wakes_on_the_log_watch_not_the_recheck() {
+        let dir = std::env::temp_dir().join(format!("bbp_mcp_wake_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let task = open(&dir);
+        let mut coder = Server::new(Binding {
+            dir: dir.clone(),
+            task: task.clone(),
+            principal: PrincipalId("coder".into()),
+            turn: None,
+        })
+        .expect("server");
+        // With the recheck past the timeout, only the log watch can wake it.
+        coder.recheck = Duration::from_secs(3_600);
+        // Cancel only once the wait has checked the log and is about to
+        // block, so the cancellation can reach it only through the watch.
+        let (tx, blocking) = std::sync::mpsc::channel();
+        coder.blocking = Some(tx);
+        let ender = {
+            let (dir, task) = (dir.clone(), task.clone());
+            std::thread::spawn(move || {
+                blocking.recv().expect("wait blocks");
+                let rev = admin::card(&dir, &task).expect("card").rev;
+                crate::human::perform(&dir, &task, "cancel", &["done"], Some(rev)).expect("cancel");
+            })
+        };
+        let started = Instant::now();
+        let reply = coder.wait(&args(r#"{"timeout_s":60}"#)).expect("wait");
+        ender.join().expect("ender");
+        assert_eq!(reply["woke"].as_str(), Some("ended"), "{reply}");
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

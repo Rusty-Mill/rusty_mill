@@ -161,7 +161,12 @@ fn tools_carry_the_catalog_schema_and_hints() {
     );
     let hint = |t: &Tool, k: &str| t.annotations.as_ref().and_then(|a| a.get(k)).cloned();
     assert_eq!(hint(&format, "readOnlyHint"), Some(Value::Bool(true)));
-    for name in ["close-block", "disconnect-client", "terminal.reset"] {
+    for name in [
+        "close-block",
+        "disconnect-client",
+        "terminal.reset",
+        "terminal.clear",
+    ] {
         let ends = tool(known(name));
         assert_eq!(
             hint(&ends, "destructiveHint"),
@@ -187,8 +192,14 @@ fn tools_carry_the_catalog_schema_and_hints() {
             "{name}"
         );
     }
-    let size = tool(known("terminal.size"));
-    assert_eq!(hint(&size, "readOnlyHint"), Some(Value::Bool(true)));
+    for name in ["terminal.size", "terminal.modes", "terminal.shell"] {
+        let reads = tool(known(name));
+        assert_eq!(
+            hint(&reads, "readOnlyHint"),
+            Some(Value::Bool(true)),
+            "{name}"
+        );
+    }
     for name in ["input", "create-block", "split-block"] {
         let runs = tool(known(name));
         assert_eq!(

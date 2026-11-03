@@ -8,7 +8,7 @@
 use std::num::NonZeroU32;
 
 use orch_core::board::{Author, Board, Confidence, EntryKind, NewEntry, Verdict};
-use orch_core::task::{Agent, Plan, Role, TaskSpec, TaskState};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec, TaskState};
 use orch_core::{EntryId, GoalId, Ref, TaskId, Text};
 use orch_dispatch::Ledger;
 use rusty_multimodal_db_engine::generic::traits::{
@@ -90,12 +90,16 @@ enum RoleRow {
     Review { target: u64 },
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// The first four variants are the closed enum of v1 files written before
+/// providers became configuration; they are read, never written. `Id` is
+/// appended, so their positional tags still decode (ADR-0019).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum AgentRow {
     Claude,
     Codex,
     Gemini,
     Local,
+    Id(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +130,7 @@ struct EntryRow {
     supersedes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum AuthorRow {
     Human,
     Agent(AgentRow),
@@ -256,13 +260,8 @@ fn entry_row(e: &orch_core::board::Entry) -> EntryRow {
     }
 }
 
-fn agent_row(a: Agent) -> AgentRow {
-    match a {
-        Agent::Claude => AgentRow::Claude,
-        Agent::Codex => AgentRow::Codex,
-        Agent::Gemini => AgentRow::Gemini,
-        Agent::Local => AgentRow::Local,
-    }
+fn agent_row(a: AgentId) -> AgentRow {
+    AgentRow::Id(a.as_str().to_owned())
 }
 
 fn ref_row(r: &Ref) -> RefRow {
@@ -320,19 +319,19 @@ fn plan(goal: GoalId, rows: &[TaskRow]) -> Result<Plan, StoreError> {
         let id = TaskId::from_raw(row.id);
         match &row.state {
             StateRow::Pending => {}
-            StateRow::Running { agent } => plan.start(id, agent_of(*agent)).map_err(corrupt)?,
+            StateRow::Running { agent } => plan.start(id, agent_of(agent)?).map_err(corrupt)?,
             StateRow::Blocked { agent, question } => {
-                plan.start(id, agent_of(*agent)).map_err(corrupt)?;
+                plan.start(id, agent_of(agent)?).map_err(corrupt)?;
                 plan.block(id, EntryId::from_raw(*question))
                     .map_err(corrupt)?;
             }
             StateRow::Done { agent, outputs } => {
-                plan.start(id, agent_of(*agent)).map_err(corrupt)?;
+                plan.start(id, agent_of(agent)?).map_err(corrupt)?;
                 let outputs = outputs.iter().map(|o| EntryId::from_raw(*o)).collect();
                 plan.complete(id, outputs).map_err(corrupt)?;
             }
             StateRow::Failed { agent, reason } => {
-                plan.start(id, agent_of(*agent)).map_err(corrupt)?;
+                plan.start(id, agent_of(agent)?).map_err(corrupt)?;
                 plan.fail(id, text_of(reason)?).map_err(corrupt)?;
             }
         }
@@ -387,9 +386,9 @@ fn board(goal: GoalId, rows: &[EntryRow]) -> Result<Board, StoreError> {
 fn new_entry(row: &EntryRow) -> Result<NewEntry, StoreError> {
     Ok(NewEntry {
         task: row.task.map(TaskId::from_raw),
-        author: match row.author {
+        author: match &row.author {
             AuthorRow::Human => Author::Human,
-            AuthorRow::Agent(a) => Author::Agent(agent_of(a)),
+            AuthorRow::Agent(a) => Author::Agent(agent_of(a)?),
         },
         kind: match row.kind {
             KindRow::Finding { confidence } => EntryKind::Finding {
@@ -420,13 +419,16 @@ fn new_entry(row: &EntryRow) -> Result<NewEntry, StoreError> {
     })
 }
 
-fn agent_of(a: AgentRow) -> Agent {
-    match a {
-        AgentRow::Claude => Agent::Claude,
-        AgentRow::Codex => Agent::Codex,
-        AgentRow::Gemini => Agent::Gemini,
-        AgentRow::Local => Agent::Local,
-    }
+/// Old variants map to the ids their providers carry now.
+fn agent_of(a: &AgentRow) -> Result<AgentId, StoreError> {
+    let name = match a {
+        AgentRow::Claude => "claude",
+        AgentRow::Codex => "codex",
+        AgentRow::Gemini => "gemini",
+        AgentRow::Local => "local",
+        AgentRow::Id(name) => name,
+    };
+    AgentId::new(name).map_err(corrupt)
 }
 
 fn ref_of(r: &RefRow) -> Result<Ref, StoreError> {
@@ -674,6 +676,55 @@ mod format_tests {
         assert_eq!(state.board.entries().len(), 11);
         assert_eq!(state.ledger.calls(), 7);
         assert_eq!(state.ledger.task_calls(TaskId::from_raw(4)), 3);
+    }
+
+    #[test]
+    fn old_agent_variants_read_as_ids_and_new_rows_write_the_id() {
+        let old = [
+            (AgentRow::Claude, "claude"),
+            (AgentRow::Codex, "codex"),
+            (AgentRow::Gemini, "gemini"),
+            (AgentRow::Local, "local"),
+        ];
+        for (row, name) in old {
+            assert_eq!(agent_of(&row).expect("old variant").as_str(), name);
+        }
+
+        let id = AgentId::new("local-high").expect("valid");
+        let row = agent_row(id);
+        assert!(matches!(&row, AgentRow::Id(name) if name == "local-high"));
+        let bytes = codec::encode(&row).expect("encode");
+        let back: AgentRow = codec::decode(&bytes).expect("decode");
+        assert_eq!(agent_of(&back).expect("new row"), id);
+    }
+
+    #[test]
+    fn a_rebuilt_snapshot_saves_ids_and_reloads_the_same_agents() {
+        let state = populated_v1().into_state().expect("old layout loads");
+        let saved = GoalRecord::from_state(&state, 2);
+        assert!(saved.tasks.iter().all(|t| match &t.state {
+            StateRow::Pending => true,
+            StateRow::Running { agent }
+            | StateRow::Blocked { agent, .. }
+            | StateRow::Done { agent, .. }
+            | StateRow::Failed { agent, .. } => matches!(agent, AgentRow::Id(_)),
+        }));
+        let bytes = codec::encode(&saved).expect("encode");
+        let reloaded = codec::decode::<GoalRecord>(&bytes)
+            .expect("decode")
+            .into_state()
+            .expect("rebuild");
+        assert_eq!(reloaded.plan, state.plan);
+        assert_eq!(reloaded.board.entries(), state.board.entries());
+    }
+
+    #[test]
+    fn an_invalid_stored_id_is_corrupt() {
+        let mut record = populated_v1();
+        record.tasks[0].state = StateRow::Running {
+            agent: AgentRow::Id("Not Valid".to_owned()),
+        };
+        assert!(matches!(record.into_state(), Err(StoreError::Corrupt(_))));
     }
 
     #[test]

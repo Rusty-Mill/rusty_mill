@@ -11,37 +11,35 @@
 //! built from edited code reporting the clean commit it was last built at. So
 //! the script names a path that never exists, which cargo treats as always
 //! changed, and asks git each time. A rebuild whose answer is the same costs
-//! one `git status`; a different answer recompiles the crate with the new sha.
+//! four quick git calls; a different answer recompiles the crate with the new sha.
 //!
-//! `--untracked-files=normal` overrides a user's `status.showUntrackedFiles=no`,
-//! which would otherwise hide an untracked source file and report clean (#1328).
+//! The tree check is `src/clean_tree.rs`, shared with the `bbp pairs` pin: a
+//! plain `git status` misses changes hidden by git settings (#1328, #1361).
 
-use std::process::Command;
+use std::path::Path;
 
-fn git(args: &[&str]) -> Option<String> {
-    let dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        // Reading the state must not rewrite the index (that would touch the
-        // tree it is describing).
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+#[allow(dead_code)] // the pin uses parts this script does not
+#[path = "src/clean_tree.rs"]
+mod clean_tree;
+
+/// The build's commit, `-dirty` when the tree is not exactly it, or `None`
+/// when git cannot say which commit this is.
+fn build_sha(dir: &Path) -> Option<String> {
+    let head = clean_tree::git(dir, &["rev-parse", "HEAD"]).ok()?;
+    if !head.ok {
+        return None;
+    }
+    Some(match clean_tree::dirt(dir) {
+        Ok(None) => head.line().to_owned(),
+        _ => format!("{}-dirty", head.line()),
+    })
 }
 
 fn main() {
-    let sha = git(&["rev-parse", "HEAD"]).map_or_else(
-        || "unknown".to_owned(),
-        |head| match git(&["status", "--porcelain", "--untracked-files=normal"]) {
-            Some(s) if s.is_empty() => head,
-            _ => format!("{head}-dirty"),
-        },
-    );
+    let sha = std::env::var("CARGO_MANIFEST_DIR")
+        .ok()
+        .and_then(|dir| build_sha(Path::new(&dir)))
+        .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=BBP_BUILD_SHA={sha}");
     println!("cargo:rerun-if-changed=.bbp-build-sha-is-recomputed-every-build");
 }

@@ -51,6 +51,7 @@ fn stage_one_end_to_end() {
         payload: ArtifactPayload::Log,
     }));
     let rep = Report {
+        tests_changed: vec![],
         candidate: cand,
         run,
         profile_digest: DIGEST,

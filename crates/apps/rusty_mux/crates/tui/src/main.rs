@@ -10,7 +10,9 @@
 //! Without a block id it creates a session, window and block first.
 //! Ctrl-] then `d` detaches; the blocks keep running and the focused one's
 //! id is printed for reattaching. The other Ctrl-] commands are listed in
-//! `rusty_mux_tui::keys`. With `RUSTY_MUX_KEYLOG` set to a new file's path,
+//! `rusty_mux_tui::keys`. The focus is the window's, shared with every
+//! other client (`rusty_mux_tui::follow`), and the client shows the
+//! session's active window as it changes. With `RUSTY_MUX_KEYLOG` set to a new file's path,
 //! every keyboard read is written to it as one line of hex, to see what a
 //! terminal really sends. That is everything typed, passwords included:
 //! the file is created the owner's alone (mode 0600 on Unix, an
@@ -79,10 +81,13 @@ mod client {
     use platform_linux::LinuxTerminal as Term;
     #[cfg(windows)]
     use platform_windows::{WindowsTerminal as Term, WindowsUnixStream as UnixStream};
-    use rusty_mux_core::{BlockId, Event, Layout, Rect, SessionId, Side, Size, WindowId};
+    use rusty_mux_core::{
+        Axis, BlockId, Event, Layout, Rect, SessionId, Share, Side, Size, Toward, WindowId,
+    };
     use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
     use rusty_mux_server::checkpoint::Receiver;
-    use rusty_mux_tui::keys::{Action, Keys};
+    use rusty_mux_tui::follow::Follow;
+    use rusty_mux_tui::keys::{Action, Dir, Keys};
     use rusty_mux_tui::predict::{Gate, Overlay, Predictor};
     use rusty_mux_tui::screen::{self, Frame, Passed, View};
     use rusty_mux_tui::{Conn, NoWin32Input, RESTORE, create_private, modes, pass};
@@ -100,7 +105,11 @@ mod client {
         .union(Features::INSPECT)
         .union(Features::LAYOUT)
         .union(Features::SYNC)
-        .union(Features::TAKEOVER);
+        .union(Features::TAKEOVER)
+        .union(Features::LAYOUT_EDIT)
+        .union(Features::FOCUS)
+        .union(Features::ACTIVE_WINDOW)
+        .union(Features::SESSION_NAMES);
 
     /// What a block's connection asks for. `TERMINAL_CONTROL` tells the
     /// server this client's copy of the terminal can be reset safely.
@@ -124,6 +133,9 @@ mod client {
     const SILENT: Duration = Duration::from_secs(6);
     /// At most this many typed actions wait for a move onto UDP to end.
     const HELD: usize = 1024;
+    /// How many points of its split Ctrl-] H, J, K or L moves a block's
+    /// edge.
+    const STEP: u8 = 5;
     /// At most this many bytes typed wait for a block's lease.
     const WAITING: usize = 64 * 1024;
 
@@ -254,8 +266,11 @@ mod client {
         writer: Conn<UnixStream>,
         me: Takeover,
         next: u64,
-        /// The window's layout and zoomed block, when asked for.
-        layout: Option<(Option<Layout>, Option<BlockId>)>,
+        /// The window `layout` is of, when asked for: the session's active
+        /// window, if it moved while the path was away.
+        window: Option<WindowId>,
+        /// What the window shows, when asked for.
+        layout: Option<Shape>,
         panes: Vec<Opened>,
     }
 
@@ -864,11 +879,17 @@ mod client {
         let Welcomed { features, takeover } = req.welcome()?;
         let block = match block {
             Some(id) => BlockId::from_uuid(parse_uuid(id)?),
-            None => req.create(area)?,
+            None => req.create(area, first_session_name(features))?,
         };
-        let (window, layout, zoomed) = match features.contains(Features::INSPECT) {
+        let (window, shape) = match features.contains(Features::INSPECT) {
             true => req.place(block)?,
-            false => (None, Layout::Block(block), None),
+            false => (
+                None,
+                Shape {
+                    layout: Some(Layout::Block(block)),
+                    ..Shape::default()
+                },
+            ),
         };
         let mut next = req.next;
         let (mut socket, mut stream, mut conn, mut takeover) = (socket, stream, conn, takeover);
@@ -949,9 +970,16 @@ mod client {
             next,
             inspect: features.contains(Features::INSPECT),
             layouts: features.contains(Features::LAYOUT),
+            editing: features.contains(Features::LAYOUT_EDIT),
+            focusing: features.contains(Features::FOCUS),
+            follow: Follow::default(),
+            session: shape.session,
+            listing: None,
+            wanted: Wants::default(),
+            gone: false,
             window,
-            layout: Some(layout),
-            zoomed,
+            layout: shape.layout,
+            zoomed: shape.zoomed,
             focus: block,
             panes: HashMap::new(),
             keys: Keys::default(),
@@ -970,6 +998,10 @@ mod client {
             detaching: None,
             ended: None,
         };
+        // Attached to `block`: it takes the window's shared focus.
+        if shape.focused != Some(block) {
+            app.focus_on(block);
+        }
         app.sync();
         let ended = app.serve(&term, &inbox);
         let focus = app.focus;
@@ -1181,6 +1213,15 @@ mod client {
         }
     }
 
+    /// The name to ask for a new session by: none, for a generated one, from
+    /// a server that makes them up; else `main`.
+    fn first_session_name(features: Features) -> &'static str {
+        match features.contains(Features::SESSION_NAMES) {
+            true => "",
+            false => "main",
+        }
+    }
+
     /// Requests answered before the main loop starts, or on a fresh path,
     /// each answer due `by`, if given, unless `cancel` is set first.
     struct Requests<'a> {
@@ -1256,10 +1297,11 @@ mod client {
             }
         }
 
-        fn create(&mut self, size: Size) -> Result<BlockId, String> {
+        /// Creates a session named `name`, a window and a block of `size`.
+        fn create(&mut self, size: Size, name: &str) -> Result<BlockId, String> {
             let session = SessionId::from_uuid(self.create_id(|req| Message::CreateSession {
                 req,
-                name: "main".into(),
+                name: name.into(),
             })?);
             let window = WindowId::from_uuid(self.create_id(|req| Message::CreateWindow {
                 req,
@@ -1275,11 +1317,9 @@ mod client {
             Ok(BlockId::from_uuid(block))
         }
 
-        /// The window `block` is in, its layout and its zoomed block.
-        fn place(
-            &mut self,
-            block: BlockId,
-        ) -> Result<(Option<WindowId>, Layout, Option<BlockId>), String> {
+        /// The window `block` is in and what it shows; with no layout,
+        /// `block` alone.
+        fn place(&mut self, block: BlockId) -> Result<(Option<WindowId>, Shape), String> {
             let entries = self.call(|req| Message::List { req })?;
             let window = entries
                 .iter()
@@ -1294,28 +1334,62 @@ mod client {
                     _ => None,
                 })
                 .ok_or_else(|| format!("unknown block {block}"))?;
-            let (layout, zoomed) = layout_of(entries, window).unwrap_or_default();
-            Ok((Some(window), layout.unwrap_or(Layout::Block(block)), zoomed))
+            let mut shape = shape_of(entries, window).unwrap_or_default();
+            shape.layout = shape.layout.or(Some(Layout::Block(block)));
+            Ok((Some(window), shape))
         }
     }
 
-    /// `window`'s layout and zoomed block in a List's `entries`; `None`
-    /// when the window is gone.
-    fn layout_of(
-        entries: Vec<Message>,
-        window: WindowId,
-    ) -> Option<(Option<Layout>, Option<BlockId>)> {
-        entries.into_iter().find_map(|m| match m {
+    /// What a window shows, as a List tells it.
+    #[derive(Debug, Default)]
+    struct Shape {
+        layout: Option<Layout>,
+        zoomed: Option<BlockId>,
+        /// The server's focus, from a server with [`Features::FOCUS`].
+        focused: Option<BlockId>,
+        session: Option<SessionId>,
+        /// The session's active window, from a server with
+        /// [`Features::ACTIVE_WINDOW`].
+        active: Option<WindowId>,
+    }
+
+    /// What `window` shows, from a List's `entries`; `None` when the window
+    /// is gone.
+    fn shape_of(entries: Vec<Message>, window: WindowId) -> Option<Shape> {
+        let mut shape = window_shape(&entries, window)?;
+        shape.active = entries.into_iter().find_map(|m| match m {
+            Message::Entry {
+                entry: Entry::Session {
+                    session, active, ..
+                },
+                ..
+            } if Some(session) == shape.session => active,
+            _ => None,
+        });
+        Some(shape)
+    }
+
+    /// [`shape_of`], short of the session's active window.
+    fn window_shape(entries: &[Message], window: WindowId) -> Option<Shape> {
+        entries.iter().cloned().find_map(|m| match m {
             Message::Entry {
                 entry:
                     Entry::Window {
                         window: w,
+                        session,
                         layout,
                         zoomed,
+                        focused,
                         ..
                     },
                 ..
-            } if w == window => Some((layout, zoomed)),
+            } if w == window => Some(Shape {
+                layout,
+                zoomed,
+                focused,
+                session: Some(session),
+                active: None,
+            }),
             _ => None,
         })
     }
@@ -1384,14 +1458,15 @@ mod client {
             _ => return Err(Missed::Dropped),
         };
         // Taken over: from here on, a failure ends the client.
-        let layout = match plan.window {
+        let (window, layout) = match plan.window {
             Some(window) => {
                 let entries = req
                     .call(|req| Message::List { req })
                     .map_err(|why| Missed::Broken(why, me))?;
-                Some(layout_of(entries, window).unwrap_or_default())
+                let (window, shape) = view_back(entries, window);
+                (Some(window), Some(shape))
             }
-            None => None,
+            None => (None, None),
         };
         let next = req.next;
         let panes = plan
@@ -1411,9 +1486,22 @@ mod client {
             writer,
             me,
             next,
+            window,
             layout,
             panes,
         })
+    }
+
+    /// The window to show on the path back, and what it shows, from the
+    /// path's List: `window`, or its session's active window if that moved
+    /// while the path was away (its event is never told).
+    fn view_back(entries: Vec<Message>, window: WindowId) -> (WindowId, Shape) {
+        let shape = shape_of(entries.clone(), window).unwrap_or_default();
+        let moved = shape.active.filter(|active| *active != window);
+        match moved.and_then(|active| Some((active, shape_of(entries, active)?))) {
+            Some(view) => view,
+            None => (window, shape),
+        }
     }
 
     /// A block's connection past its Welcome, its reader not started yet.
@@ -1722,6 +1810,21 @@ mod client {
         /// Whether the server keeps layouts; without, only the first block
         /// shows.
         layouts: bool,
+        /// Whether the server edits layouts: [`Features::LAYOUT_EDIT`].
+        editing: bool,
+        /// Whether the server keeps each window's focus, which this client
+        /// then follows: [`Features::FOCUS`].
+        focusing: bool,
+        follow: Follow,
+        /// The window's session, whose active window this client follows.
+        session: Option<SessionId>,
+        /// A List asked for, with the answer so far.
+        listing: Option<Listing>,
+        /// What the next List is to answer, asked while one is in flight.
+        wanted: Wants,
+        /// Whether the window was closed, so an empty layout ends the
+        /// client rather than showing an empty window.
+        gone: bool,
         window: Option<WindowId>,
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
@@ -1759,6 +1862,50 @@ mod client {
         ended: Option<Ended>,
     }
 
+    /// A List asked for while running.
+    struct Listing {
+        req: u64,
+        wants: Wants,
+        entries: Vec<Message>,
+    }
+
+    /// What a List is asked for: one answers every reason given meanwhile.
+    #[derive(Debug, Clone, Copy)]
+    enum Why {
+        /// The session's active window moved to this one: show it.
+        Show(WindowId),
+        /// The layout is empty: whether any block is left in the window,
+        /// detached from its layout, or the window shows nothing for good.
+        Blocks,
+    }
+
+    /// The reasons for one List, gathered. Only the latest window to show
+    /// counts.
+    #[derive(Debug, Default, Clone, Copy)]
+    struct Wants {
+        show: Option<WindowId>,
+        blocks: bool,
+    }
+
+    impl Wants {
+        fn add(&mut self, why: Why) {
+            match why {
+                Why::Show(window) => self.show = Some(window),
+                Why::Blocks => self.blocks = true,
+            }
+        }
+
+        fn is_empty(&self) -> bool {
+            self.show.is_none() && !self.blocks
+        }
+
+        /// Adds the reasons of `older`, asked before these.
+        fn merge(&mut self, older: Wants) {
+            self.show = self.show.or(older.show);
+            self.blocks |= older.blocks;
+        }
+    }
+
     /// A layout change that drops shown blocks. The server tells it on the
     /// control connection, which is not ordered with the blocks' own; so
     /// the old layout stays on screen until each dropped block's connection
@@ -1767,6 +1914,8 @@ mod client {
     struct Pending {
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
+        /// The server's focus, announced since.
+        focus: Option<BlockId>,
         leaving: Vec<BlockId>,
         by: Instant,
     }
@@ -1933,6 +2082,89 @@ mod client {
             }
         }
 
+        /// Whether `req` is the List asked for while running.
+        fn listing(&self, req: u64) -> bool {
+            self.listing.as_ref().is_some_and(|l| l.req == req)
+        }
+
+        /// Asks for a List for `why`. One in flight answers it only if
+        /// asked before it, so then the next List, sent once that one is
+        /// in, does.
+        fn list(&mut self, why: Why) {
+            self.wanted.add(why);
+            self.list_wanted();
+        }
+
+        /// Sends a List for what is wanted, unless one is in flight.
+        fn list_wanted(&mut self) {
+            if self.listing.is_some() || self.wanted.is_empty() {
+                return;
+            }
+            let req = self.request(|req| Message::List { req });
+            // 0: not sent, the path being down; still wanted.
+            if req != 0 {
+                self.listing = Some(Listing {
+                    req,
+                    wants: std::mem::take(&mut self.wanted),
+                    entries: Vec::new(),
+                });
+            }
+        }
+
+        /// The window this client shows once the Lists asked for are in.
+        fn heading(&self) -> Option<WindowId> {
+            let listing = self.listing.as_ref().and_then(|l| l.wants.show);
+            self.wanted.show.or(listing).or(self.window)
+        }
+
+        /// The List asked for while running is in.
+        fn listed(&mut self) {
+            let Some(Listing { wants, entries, .. }) = self.listing.take() else {
+                return;
+            };
+            // A window to show was asked for since: this answer is stale,
+            // and the next one answers all.
+            if self.wanted.show.is_some() {
+                self.wanted.blocks |= wants.blocks;
+                return self.list_wanted();
+            }
+            let shown = wants
+                .show
+                .is_some_and(|window| self.show_window(window, entries.clone()));
+            // A window shown anew asks again once its layout is in, if empty.
+            if wants.blocks && !shown {
+                self.blocks_left(&entries);
+            }
+            self.list_wanted();
+        }
+
+        /// Ends the client if its layout is empty and `entries` list no
+        /// block left in its window.
+        fn blocks_left(&mut self, entries: &[Message]) {
+            let window = self.window;
+            let left = entries.iter().any(|m| {
+                matches!(m, Message::Entry { entry: Entry::Block { window: w, .. }, .. }
+                    if Some(*w) == window)
+            });
+            if !left && self.layout.is_none() {
+                self.end(Ended::Closed);
+            }
+        }
+
+        /// Shows `window`, the session's active one now, as `entries` tell
+        /// it, focus and all. Whether it was: not if gone meanwhile.
+        fn show_window(&mut self, window: WindowId, entries: Vec<Message>) -> bool {
+            // Gone meanwhile: its close is told, or the next change is.
+            let Some(shape) = shape_of(entries, window) else {
+                return false;
+            };
+            self.window = Some(window);
+            self.gone = false;
+            self.relayout(shape.layout, shape.zoomed);
+            self.take_focus(shape.focused);
+            true
+        }
+
         /// Whether `req` asked for the new association awaited.
         fn asked(&self, req: u64) -> bool {
             matches!(self.standby.moving, Moving::Asked(asked) if asked == req)
@@ -2060,7 +2292,7 @@ mod client {
                 match action {
                     Action::Detach => return self.detach(),
                     Action::Focus(_) if self.visible().iter().any(|(b, _)| *b == at) => {
-                        self.focus = at;
+                        self.focus_on(at);
                         self.sync();
                     }
                     action if at == self.focus && !matches!(action, Action::Focus(_)) => {
@@ -2153,8 +2385,31 @@ mod client {
             self.me = Some(back.me);
             // Past any id the old path used meanwhile, as on a move.
             self.next = self.next.max(back.next);
-            if let Some((layout, zoomed)) = back.layout {
-                (self.layout, self.zoomed) = (layout, zoomed);
+            // Requests on the old path are never answered: a List asked
+            // there is asked again here, and focus requests are forgotten,
+            // the server's focus being taken from the path's List.
+            self.follow = Follow::default();
+            if let Some(listing) = self.listing.take() {
+                self.wanted.merge(listing.wants);
+            }
+            if let Some(window) = back.window.filter(|w| Some(*w) != self.window) {
+                self.window = Some(window);
+                self.gone = false;
+            }
+            if let Some(shape) = back.layout {
+                (self.layout, self.zoomed) = (shape.layout, shape.zoomed);
+                if let Some(focused) = shape.focused.filter(|_| self.focusing) {
+                    self.focus = focused;
+                }
+                // Blocks may have closed, or the window, unseen meanwhile.
+                if self.layout.is_none() && self.layouts && !self.gone {
+                    self.wanted.add(Why::Blocks);
+                }
+                // The session's active window, shown already (see
+                // [`view_back`]), overrides any window to show asked before.
+                if shape.active.is_some() {
+                    self.wanted.show = None;
+                }
             }
             self.joined += 1;
             let joined = self.joined;
@@ -2190,6 +2445,7 @@ mod client {
             if let Some(rejoiner) = &self.rejoiner {
                 rejoiner.ask(Ask::Settle);
             }
+            self.list_wanted();
             let held = std::mem::take(&mut self.held);
             self.replay(held);
         }
@@ -2211,7 +2467,9 @@ mod client {
                 .filter(|(b, p)| !staying.contains(b) && !p.closed)
                 .map(|(b, _)| *b)
                 .collect();
+            let mut focus = None;
             if let Some(old) = self.pending.take() {
+                focus = old.focus;
                 for block in old.leaving {
                     if !leaving.contains(&block) {
                         leaving.push(block);
@@ -2221,6 +2479,7 @@ mod client {
             self.pending = Some(Pending {
                 layout,
                 zoomed,
+                focus,
                 by: Instant::now() + GRACE,
                 leaving,
             });
@@ -2252,6 +2511,12 @@ mod client {
             self.draw();
             self.layout = pending.layout;
             self.zoomed = pending.zoomed;
+            if let Some(focus) = pending.focus {
+                self.focus = focus;
+            }
+            if self.layout.is_none() && self.layouts && !self.gone {
+                self.list(Why::Blocks);
+            }
             self.sync();
         }
 
@@ -2339,6 +2604,11 @@ mod client {
 
         fn act(&mut self, action: Action) {
             let focus = self.focus;
+            // An empty window keeps the last focus for want of another: no
+            // block of its to act on, nor one detached or of a window left.
+            if action.on_focused_block() && !self.shows(focus) {
+                return bell();
+            }
             match action {
                 Action::Input(data) => {
                     if let Some(pane) = self.panes.get_mut(&focus) {
@@ -2348,7 +2618,7 @@ mod client {
                 Action::Detach => self.detach(),
                 Action::Focus(dir) => {
                     match screen::neighbor(&self.visible(), focus, dir) {
-                        Some(block) => self.focus = block,
+                        Some(block) => self.focus_on(block),
                         None => bell(),
                     }
                     self.sync();
@@ -2377,7 +2647,100 @@ mod client {
                 Action::Close => {
                     self.request(|req| Message::CloseBlock { req, block: focus });
                 }
+                Action::Resize(_) | Action::Swap { .. } | Action::DetachBlock if !self.editing => {
+                    bell()
+                }
+                Action::Resize(dir) => self.resize(dir),
+                Action::Swap { next } => self.swap(next),
+                Action::DetachBlock => {
+                    self.request(|req| Message::DetachBlock { req, block: focus });
+                }
                 Action::Unknown => bell(),
+            }
+        }
+
+        /// Whether `block` is in the layout shown.
+        fn shows(&self, block: BlockId) -> bool {
+            self.layout
+                .as_ref()
+                .is_some_and(|l| l.blocks().contains(&block))
+        }
+
+        /// Focuses `block` here at once and, on a server that keeps the
+        /// focus, there too (see [`Follow`]).
+        fn focus_on(&mut self, block: BlockId) {
+            self.focus = block;
+            if !self.focusing || self.window.is_none() {
+                return;
+            }
+            let req = self.request(|req| Message::FocusBlock { req, block });
+            // 0: not sent, the path being down.
+            if req != 0 {
+                self.follow.asked(req);
+            }
+        }
+
+        /// Takes the server's focus: at once, or with a layout change held
+        /// back, once it is applied.
+        fn take_focus(&mut self, focus: Option<BlockId>) {
+            let Some(block) = focus else {
+                return;
+            };
+            match self.pending.as_mut() {
+                Some(pending) => pending.focus = Some(block),
+                None if block != self.focus => {
+                    self.focus = block;
+                    self.sync();
+                }
+                None => {}
+            }
+        }
+
+        /// Asks for the focused block's share of its split along `dir`'s
+        /// axis to grow (right, down) or shrink (left, up) by [`STEP`]
+        /// points.
+        fn resize(&mut self, dir: Dir) {
+            let block = self.focus;
+            let (axis, grow) = match dir {
+                Dir::Left => (Axis::Columns, false),
+                Dir::Right => (Axis::Columns, true),
+                Dir::Up => (Axis::Rows, false),
+                Dir::Down => (Axis::Rows, true),
+            };
+            let Some(now) = self.layout.as_ref().and_then(|l| l.share_of(block, axis)) else {
+                return bell();
+            };
+            let percent = match grow {
+                true => now.percent().saturating_add(STEP),
+                false => now.percent().saturating_sub(STEP),
+            };
+            match Share::new(percent.clamp(1, 99)) {
+                Some(share) if share != now => {
+                    self.request(|req| Message::ResizeSplit {
+                        req,
+                        block,
+                        axis,
+                        share,
+                    });
+                }
+                _ => bell(),
+            }
+        }
+
+        /// Asks for the focused block to trade places with the next or
+        /// previous block in layout order; the focus goes with it.
+        fn swap(&mut self, next: bool) {
+            let block = self.focus;
+            let toward = if next { Toward::Next } else { Toward::Previous };
+            let other = self
+                .layout
+                .as_ref()
+                .and_then(|l| l.neighbour(block, toward));
+            match other {
+                Some(other) => {
+                    self.request(|req| Message::SwapBlocks { req, block, other });
+                }
+                None => bell(),
             }
         }
 
@@ -2396,6 +2759,23 @@ mod client {
                     self.offered(Some(Onto::Offer(port, id, key.0)))
                 }
                 Message::Failed { req, .. } if self.asked(req) => self.offered(None),
+                Message::Done { req, .. } if self.follow.owns(req) => self.follow.done(req),
+                // A focus request refused (the block left meanwhile) needs
+                // no bell: the server's focus is taken all the same.
+                Message::Failed { req, .. } if self.follow.owns(req) => {
+                    let focus = self.follow.refused(req);
+                    self.take_focus(focus.flatten());
+                }
+                Message::Entry { req, .. } if self.listing(req) => {
+                    if let Some(listing) = self.listing.as_mut() {
+                        listing.entries.push(message);
+                    }
+                }
+                Message::Done { req, .. } if self.listing(req) => self.listed(),
+                Message::Failed { req, .. } if self.listing(req) => {
+                    self.listing = None;
+                    self.list_wanted();
+                }
                 Message::Failed { .. } => bell(),
                 _ => {}
             }
@@ -2409,7 +2789,23 @@ mod client {
                     zoomed,
                 } if Some(window) == self.window => self.relayout(layout, zoomed),
                 Event::WindowClosed { window } if Some(window) == self.window => {
+                    self.gone = true;
                     self.relayout(None, None)
+                }
+                Event::FocusChanged { window, block } if Some(window) == self.window => {
+                    let focus = self.follow.told(block);
+                    self.take_focus(focus.flatten());
+                }
+                // The session's active window moved to another: show it.
+                Event::ActiveWindowChanged {
+                    session,
+                    window: Some(window),
+                } if self.session == Some(session) && Some(window) != self.heading() => {
+                    self.list(Why::Show(window))
+                }
+                // A block detached from the empty layout may have closed.
+                Event::BlockClosed { .. } if self.layouts && self.layout.is_none() => {
+                    self.list(Why::Blocks)
                 }
                 // Without layouts the only block shown is the first.
                 Event::BlockClosed { block }
@@ -2508,16 +2904,21 @@ mod client {
                 return;
             }
             let visible = self.visible();
-            let Some(&(first, _)) = visible.first() else {
+            // A window whose blocks are all detached from its layout shows
+            // nothing until one is moved back; a closed one ends the client.
+            let empty_window = self.layouts && self.inspect && self.window.is_some() && !self.gone;
+            if visible.is_empty() && !empty_window {
                 self.end(Ended::Closed);
                 return;
-            };
+            }
             let shows = |block: BlockId| visible.iter().any(|(b, _)| *b == block);
             if let Some(block) = self.arriving.filter(|b| shows(*b)) {
-                self.focus = block;
                 self.arriving = None;
+                self.focus_on(block);
             }
-            if !shows(self.focus) {
+            if let Some(&(first, _)) = visible.first()
+                && !shows(self.focus)
+            {
                 self.focus = first;
             }
             let gone: Vec<BlockId> = self.panes.keys().filter(|b| !shows(**b)).copied().collect();
@@ -2835,7 +3236,6 @@ mod client {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use rusty_mux_tui::keys::Dir;
 
         /// Records what a [`Rejoin`] is asked, in order.
         #[derive(Default)]
@@ -3173,6 +3573,7 @@ mod client {
                 stream,
                 me,
                 next: 50,
+                window: None,
                 layout: None,
                 panes: vec![a, b],
             };
@@ -3207,6 +3608,13 @@ mod client {
                 next: 1,
                 inspect: false,
                 layouts: true,
+                editing: true,
+                focusing: false,
+                follow: Follow::default(),
+                session: None,
+                listing: None,
+                wanted: Wants::default(),
+                gone: false,
                 window: None,
                 layout: Some(Layout::Split {
                     axis: rusty_mux_core::Axis::Columns,
@@ -3321,6 +3729,680 @@ mod client {
             app.act(Action::Focus(Dir::Left));
             app.draw();
             assert!(handed(&app).contains("\x1b]12;#ff8000\x1b\\"));
+        }
+
+        #[cfg(unix)]
+        fn window_id(n: u8) -> WindowId {
+            WindowId::from_uuid(Uuid::from_bytes([n; 16]))
+        }
+
+        #[cfg(unix)]
+        fn session_id(n: u8) -> SessionId {
+            SessionId::from_uuid(Uuid::from_bytes([n; 16]))
+        }
+
+        /// The client of [`app`], on a server that keeps the focus, in
+        /// window 7 of session 8.
+        #[cfg(unix)]
+        fn following() -> (App, Inbox<Input>, [UnixStream; 3]) {
+            let (mut app, inbox, far) = app(None);
+            app.focusing = true;
+            app.inspect = true;
+            app.window = Some(window_id(7));
+            app.session = Some(session_id(8));
+            (app, inbox, far)
+        }
+
+        #[cfg(unix)]
+        fn focus_changed(block: Option<BlockId>) -> Message {
+            Message::Event {
+                seq: None,
+                event: Event::FocusChanged {
+                    window: window_id(7),
+                    block,
+                },
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_focus_key_moves_at_once_and_tells_the_server() {
+            let (mut app, _inbox, [control, _a, _b]) = following();
+            let (a, b) = (block(1), block(2));
+            app.act(Action::Focus(Dir::Right));
+            assert_eq!(app.focus, b);
+            let asked = sent(&control);
+            assert!(
+                asked
+                    .iter()
+                    .any(|m| matches!(m, Message::FocusBlock { block, .. } if *block == b)),
+                "{asked:?}"
+            );
+            // The echo of an earlier move, then the answer: still on B.
+            app.focus = a;
+            app.act(Action::Focus(Dir::Right));
+            let req = app.next - 1;
+            app.on_control(focus_changed(Some(b)));
+            app.on_control(Message::Done { req, created: None });
+            assert_eq!(app.focus, b);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn the_servers_focus_is_followed() {
+            let (mut app, _inbox, _far) = following();
+            let (a, b) = (block(1), block(2));
+            // Another client moved it.
+            app.on_control(focus_changed(Some(b)));
+            assert_eq!(app.focus, b);
+            // Moved here, then elsewhere before the answer: the later wins.
+            app.act(Action::Focus(Dir::Left));
+            assert_eq!(app.focus, a);
+            let req = app.next - 1;
+            app.on_control(focus_changed(Some(a)));
+            app.on_control(focus_changed(Some(b)));
+            assert_eq!(app.focus, a, "not before the answer");
+            app.on_control(Message::Failed {
+                req,
+                reason: "late".into(),
+                code: None,
+            });
+            assert_eq!(app.focus, b);
+            // Another window's focus is not this one's.
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::FocusChanged {
+                    window: window_id(9),
+                    block: Some(a),
+                },
+            });
+            assert_eq!(app.focus, b);
+        }
+
+        /// Answers the List the client asked for last with `blocks` in
+        /// window 7.
+        #[cfg(unix)]
+        fn answer_list(app: &mut App, control: &UnixStream, blocks: &[BlockId]) {
+            let req = app.next - 1;
+            let asked = sent(control);
+            assert!(
+                asked
+                    .iter()
+                    .any(|m| matches!(m, Message::List { req: r } if *r == req)),
+                "{asked:?}"
+            );
+            for &block in blocks {
+                app.on_control(Message::Entry {
+                    req,
+                    entry: Entry::Block {
+                        block,
+                        window: window_id(7),
+                        size: Size::new(80, 24).expect("size"),
+                        holder: None,
+                        title: String::new(),
+                        name: String::new(),
+                    },
+                });
+            }
+            app.on_control(Message::Done { req, created: None });
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_window_with_every_block_detached_stays_until_none_is_left() {
+            let (mut app, _inbox, [control, _a, _b]) = following();
+            let (a, b) = (block(1), block(2));
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::LayoutChanged {
+                    window: window_id(7),
+                    layout: None,
+                    zoomed: None,
+                },
+            });
+            app.settle();
+            // Both detached, still running: an empty window.
+            answer_list(&mut app, &control, &[a, b]);
+            assert!(app.ended.is_none());
+            assert!(app.panes.is_empty(), "nothing shown, nothing leased");
+            assert!(matches!(app.shown, Shown::Composed(_)));
+            // A closes, then B: once none is left, the client ends.
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::BlockClosed { block: a },
+            });
+            answer_list(&mut app, &control, &[b]);
+            assert!(app.ended.is_none());
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::BlockClosed { block: b },
+            });
+            answer_list(&mut app, &control, &[]);
+            assert!(matches!(app.ended, Some(Ended::Closed)));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_closed_window_ends_the_client_at_once() {
+            let (mut app, _inbox, _far) = following();
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::WindowClosed {
+                    window: window_id(7),
+                },
+            });
+            app.settle();
+            assert!(matches!(app.ended, Some(Ended::Closed)));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn layout_keys_ask_the_server() {
+            let (mut client, _inbox, [control, _a, _b]) = app(None);
+            let (a, b) = (block(1), block(2));
+            client.act(Action::Resize(Dir::Right));
+            client.act(Action::Resize(Dir::Down));
+            client.act(Action::Swap { next: true });
+            client.act(Action::DetachBlock);
+            let asked = sent(&control);
+            let wider = asked.iter().any(|m| {
+                matches!(m, Message::ResizeSplit { block, axis: Axis::Columns, share, .. }
+                    if *block == a && share.percent() == 55)
+            });
+            assert!(wider, "{asked:?}");
+            // No split along the rows: nothing asked.
+            assert!(!asked.iter().any(|m| matches!(
+                m,
+                Message::ResizeSplit {
+                    axis: Axis::Rows,
+                    ..
+                }
+            )));
+            assert!(asked.iter().any(|m| matches!(
+                m,
+                Message::SwapBlocks { block, other, .. } if *block == a && *other == b
+            )));
+            assert!(asked.iter().any(|m| matches!(
+                m,
+                Message::DetachBlock { block, .. } if *block == a
+            )));
+
+            // A server that cannot edit layouts is not asked.
+            let (mut old, _inbox, [control, _a, _b]) = app(None);
+            old.editing = false;
+            old.act(Action::DetachBlock);
+            assert!(sent(&control).is_empty());
+        }
+
+        #[cfg(unix)]
+        fn activate(app: &mut App, window: WindowId) {
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::ActiveWindowChanged {
+                    session: session_id(8),
+                    window: Some(window),
+                },
+            });
+        }
+
+        /// The List last sent on `control`, which must be `req`.
+        #[cfg(unix)]
+        fn listed_as(control: &UnixStream, req: u64) {
+            let asked = sent(control);
+            assert!(
+                asked
+                    .iter()
+                    .any(|m| matches!(m, Message::List { req: r } if *r == req)),
+                "{asked:?}"
+            );
+        }
+
+        /// Answers List `req` with windows 7, 9 and 10, each showing one
+        /// block of its own, focused.
+        #[cfg(unix)]
+        fn answer_windows(app: &mut App, req: u64) {
+            for n in [7, 9, 10] {
+                let block = block(n);
+                app.on_control(Message::Entry {
+                    req,
+                    entry: Entry::Window {
+                        window: window_id(n),
+                        session: session_id(8),
+                        name: String::new(),
+                        layout: Some(Layout::Block(block)),
+                        zoomed: None,
+                        focused: Some(block),
+                    },
+                });
+            }
+            app.on_control(Message::Done { req, created: None });
+            app.settle();
+        }
+
+        #[test]
+        fn a_new_session_gets_a_generated_name_where_the_server_makes_them() {
+            assert_eq!(first_session_name(CONTROL), "");
+            assert_eq!(first_session_name(Features::CHECKPOINT_V6), "main");
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn the_sessions_active_window_is_followed() {
+            let (mut app, _inbox, [control, _a, _b]) = following();
+            let other = window_id(9);
+            activate(&mut app, other);
+            let req = app.next - 1;
+            listed_as(&control, req);
+            answer_windows(&mut app, req);
+            assert_eq!(app.window, Some(other));
+            assert_eq!(app.layout, Some(Layout::Block(block(9))));
+            assert_eq!(app.focus, block(9));
+        }
+
+        /// Moves of the active window while a List is in flight are not
+        /// lost: the latest is shown, after one more List.
+        #[cfg(unix)]
+        #[test]
+        fn active_window_moves_during_a_list_end_on_the_latest() {
+            let (mut app, _inbox, [control, _a, _b]) = following();
+            // 7 → 9, then 9 → 10 before the first answer.
+            activate(&mut app, window_id(9));
+            let first = app.next - 1;
+            activate(&mut app, window_id(10));
+            assert_eq!(app.next - 1, first, "one List in flight");
+            answer_windows(&mut app, first);
+            assert_eq!(
+                app.window,
+                Some(window_id(7)),
+                "the stale answer is not shown"
+            );
+            let second = app.next - 1;
+            assert_ne!(second, first);
+            listed_as(&control, second);
+            answer_windows(&mut app, second);
+            assert_eq!(app.window, Some(window_id(10)));
+            assert_eq!(app.focus, block(10));
+
+            // 10 → 9 → 10 again: back where it was, after all.
+            activate(&mut app, window_id(9));
+            let third = app.next - 1;
+            activate(&mut app, window_id(10));
+            answer_windows(&mut app, third);
+            let fourth = app.next - 1;
+            assert_ne!(fourth, third, "the move back is asked too");
+            answer_windows(&mut app, fourth);
+            assert_eq!(app.window, Some(window_id(10)));
+        }
+
+        /// A move of the active window while the empty layout's List is in
+        /// flight is shown, and the empty window's question still answered.
+        #[cfg(unix)]
+        #[test]
+        fn an_active_window_move_during_a_blocks_list_is_shown() {
+            let (mut app, _inbox, [control, _a, _b]) = following();
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::LayoutChanged {
+                    window: window_id(7),
+                    layout: None,
+                    zoomed: None,
+                },
+            });
+            app.settle();
+            let probe = app.next - 1;
+            listed_as(&control, probe);
+            activate(&mut app, window_id(9));
+            // The probe's answer: no block left in 7, yet 9 is to be shown.
+            app.on_control(Message::Done {
+                req: probe,
+                created: None,
+            });
+            assert!(app.ended.is_none(), "a window to show is still asked for");
+            let req = app.next - 1;
+            assert_ne!(req, probe);
+            listed_as(&control, req);
+            answer_windows(&mut app, req);
+            // (Opening 9's block fails here, there being no server.)
+            assert!(!matches!(app.ended, Some(Ended::Closed)));
+            assert_eq!(app.window, Some(window_id(9)));
+            assert_eq!(app.layout, Some(Layout::Block(block(9))));
+        }
+
+        /// The server answers each request before announcing what it did:
+        /// the first move's echo, arriving after its answer, must not pull
+        /// the focus back while the second is in flight, nor after.
+        #[cfg(unix)]
+        #[test]
+        fn quick_moves_hold_in_the_servers_order() {
+            let (mut app, _inbox, [_control, _a, _b]) = following();
+            let (a, b) = (block(1), block(2));
+            app.act(Action::Focus(Dir::Right));
+            let first = app.next - 1;
+            app.act(Action::Focus(Dir::Left));
+            let second = app.next - 1;
+            assert_eq!(app.focus, a);
+            for message in [
+                Message::Done {
+                    req: first,
+                    created: None,
+                },
+                focus_changed(Some(b)),
+                Message::Done {
+                    req: second,
+                    created: None,
+                },
+            ] {
+                app.on_control(message);
+                assert_eq!(app.focus, a);
+            }
+            app.on_control(focus_changed(Some(a)));
+            assert_eq!(app.focus, a);
+        }
+
+        /// [`following`], on a path that can be lost and brought back.
+        #[cfg(unix)]
+        fn following_on_a_path() -> (App, Inbox<Input>, [UnixStream; 3]) {
+            let (mut app, inbox, far) = app(Some(Box::new(Never)));
+            app.focusing = true;
+            app.inspect = true;
+            app.window = Some(window_id(7));
+            app.session = Some(session_id(8));
+            (app, inbox, far)
+        }
+
+        /// Requests asked on a path given up are never answered: following
+        /// and listing go on afresh on the path back.
+        #[cfg(unix)]
+        #[test]
+        fn requests_lost_with_the_path_do_not_stall_following() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            let (a, b) = (block(1), block(2));
+            app.act(Action::Focus(Dir::Right));
+            activate(&mut app, window_id(9));
+            assert!(app.listing.is_some());
+            app.lose(false);
+            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+            back.layout = Some(Shape {
+                layout: app.layout.clone(),
+                focused: Some(a),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert_eq!(app.focus, a, "the server's focus, from the path's List");
+            // The List is asked again on the path back.
+            let req = app.next - 1;
+            listed_as(&control, req);
+            // Another client's move is followed at once.
+            app.on_control(focus_changed(Some(b)));
+            assert_eq!(app.focus, b);
+            answer_windows(&mut app, req);
+            assert_eq!(app.window, Some(window_id(9)));
+        }
+
+        /// A focus key held while the path was away moves the shared focus
+        /// too, once it is back.
+        #[cfg(unix)]
+        #[test]
+        fn a_focus_key_held_through_a_lost_path_tells_the_server() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            let b = block(2);
+            // A move breaks, holding what is typed through the lost path.
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"kept"));
+            app.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            app.typed(Action::Focus(Dir::Right));
+            assert!(!app.held.is_empty(), "held for the path back");
+            let (back, control, _a_new, _b_new) = back(takeover(1));
+            app.take(Input::Rejoined(Ok(back)));
+            assert_eq!(app.focus, b);
+            let asked = sent(&control);
+            assert!(
+                asked
+                    .iter()
+                    .any(|m| matches!(m, Message::FocusBlock { block, .. } if *block == b)),
+                "{asked:?}"
+            );
+        }
+
+        /// The session's active window moved while the path was away, its
+        /// event missed: the path back shows it at once, before anything
+        /// held is taken. Keys typed into A are not A's to have any more,
+        /// nor the new window's block's: neither gets them.
+        #[cfg(unix)]
+        #[test]
+        fn an_active_window_moved_while_the_path_was_away_is_shown_before_held_keys() {
+            let (mut app, _inbox, [_control, a_old, b_old]) = following_on_a_path();
+            let c = block(3);
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"kept"));
+            app.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            app.typed(input(b"held"));
+            assert!(!app.held.is_empty());
+            let (mut back, control, a_new, b_new) = back(takeover(1));
+            back.window = Some(window_id(9));
+            back.layout = Some(Shape {
+                layout: Some(Layout::Block(c)),
+                focused: Some(c),
+                session: Some(session_id(8)),
+                active: Some(window_id(9)),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert_eq!(app.window, Some(window_id(9)));
+            assert_eq!(app.focus, c);
+            assert!(app.listing.is_none(), "nothing left to ask");
+            assert!(app.kept.is_none() && app.held.is_empty(), "dropped");
+            for far in [&a_old, &b_old, &a_new, &b_new, &control] {
+                assert!(typed_in(&sent(far)).is_empty());
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn the_view_back_is_the_sessions_active_window() {
+            let entry = |entry| Message::Entry { req: 1, entry };
+            let window = |n: u8| {
+                entry(Entry::Window {
+                    window: window_id(n),
+                    session: session_id(8),
+                    name: String::new(),
+                    layout: Some(Layout::Block(block(n))),
+                    zoomed: None,
+                    focused: Some(block(n)),
+                })
+            };
+            let session = |active: u8| {
+                entry(Entry::Session {
+                    session: session_id(8),
+                    name: String::new(),
+                    active: Some(window_id(active)),
+                    generated: false,
+                })
+            };
+            let (at, shape) = view_back(vec![session(9), window(7), window(9)], window_id(7));
+            assert_eq!(at, window_id(9));
+            assert_eq!(shape.layout, Some(Layout::Block(block(9))));
+            let (at, shape) = view_back(vec![session(7), window(7), window(9)], window_id(7));
+            assert_eq!(at, window_id(7));
+            assert_eq!(shape.layout, Some(Layout::Block(block(7))));
+            // The active window gone too: the client's own, as it is.
+            let (at, _) = view_back(vec![session(9), window(7)], window_id(7));
+            assert_eq!(at, window_id(7));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_windows_shape_tells_its_sessions_active_window() {
+            let entry = |entry| Message::Entry { req: 1, entry };
+            let entries = vec![
+                entry(Entry::Session {
+                    session: session_id(5),
+                    name: String::new(),
+                    active: Some(window_id(5)),
+                    generated: false,
+                }),
+                entry(Entry::Session {
+                    session: session_id(8),
+                    name: String::new(),
+                    active: Some(window_id(9)),
+                    generated: false,
+                }),
+                entry(Entry::Window {
+                    window: window_id(7),
+                    session: session_id(8),
+                    name: String::new(),
+                    layout: None,
+                    zoomed: None,
+                    focused: None,
+                }),
+            ];
+            let shape = shape_of(entries, window_id(7)).expect("window 7");
+            assert_eq!(shape.session, Some(session_id(8)));
+            assert_eq!(shape.active, Some(window_id(9)));
+            assert!(shape_of(Vec::new(), window_id(7)).is_none());
+        }
+
+        /// A window to show asked before the path was lost is overridden by
+        /// the session's active window the path's List tells.
+        #[cfg(unix)]
+        #[test]
+        fn a_show_asked_before_the_path_was_lost_yields_to_the_active_window() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            activate(&mut app, window_id(9));
+            app.lose(false);
+            let (mut back, _control, _a_new, _b_new) = back(takeover(1));
+            back.layout = Some(Shape {
+                layout: app.layout.clone(),
+                session: Some(session_id(8)),
+                active: Some(window_id(7)),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert!(app.listing.is_none(), "7 shows already: nothing to ask");
+            assert_eq!(app.window, Some(window_id(7)));
+        }
+
+        /// In an empty window the focus left over is no block to act on:
+        /// keys for it ring the bell and nothing is sent.
+        #[cfg(unix)]
+        #[test]
+        fn keys_in_an_empty_window_touch_no_block() {
+            let (mut app, _inbox, [control, a_far, _b_far]) = following();
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::LayoutChanged {
+                    window: window_id(7),
+                    layout: None,
+                    zoomed: None,
+                },
+            });
+            app.settle();
+            answer_list(&mut app, &control, &[block(1)]);
+            assert_eq!(app.focus, block(1), "the stale focus");
+            for action in [
+                input(b"x"),
+                Action::Close,
+                Action::DetachBlock,
+                Action::ToggleZoom,
+                Action::Split { beside: true },
+                Action::Swap { next: true },
+                Action::Resize(Dir::Right),
+            ] {
+                app.act(action);
+            }
+            let asked = sent(&control);
+            assert!(
+                !asked.iter().any(|m| matches!(
+                    m,
+                    Message::CloseBlock { .. }
+                        | Message::DetachBlock { .. }
+                        | Message::Zoom { .. }
+                        | Message::Split { .. }
+                        | Message::SwapBlocks { .. }
+                        | Message::ResizeSplit { .. }
+                )),
+                "{asked:?}"
+            );
+            assert!(typed_in(&sent(&a_far)).is_empty());
+        }
+
+        /// A Close held for a block of the window left behind, on the path
+        /// back into an empty active window, closes nothing.
+        #[cfg(unix)]
+        #[test]
+        fn a_held_close_for_the_window_left_behind_closes_nothing() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"kept"));
+            app.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            app.typed(Action::Close);
+            app.typed(input(b"held"));
+            let (mut back, control, a_new, b_new) = back(takeover(1));
+            back.window = Some(window_id(9));
+            back.layout = Some(Shape {
+                session: Some(session_id(8)),
+                active: Some(window_id(9)),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert_eq!(app.window, Some(window_id(9)));
+            let asked = sent(&control);
+            assert!(
+                !asked
+                    .iter()
+                    .any(|m| matches!(m, Message::CloseBlock { .. })),
+                "{asked:?}"
+            );
+            for far in [&a_new, &b_new, &control] {
+                assert!(typed_in(&sent(far)).is_empty());
+            }
+        }
+
+        /// An empty window with a block still detached in it stays open on
+        /// the path back.
+        #[cfg(unix)]
+        #[test]
+        fn an_empty_window_still_holding_a_block_stays_on_the_path_back() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            app.lose(false);
+            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+            back.panes.clear();
+            back.layout = Some(Shape {
+                session: Some(session_id(8)),
+                active: Some(window_id(7)),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            answer_list(&mut app, &control, &[block(1)]);
+            assert!(app.ended.is_none());
+            assert_eq!(app.window, Some(window_id(7)));
+            assert_eq!(app.layout, None);
+            assert!(app.listing.is_none(), "nothing more to ask");
+        }
+
+        /// An empty window whose last blocks closed while the path was away
+        /// ends the client once the path is back.
+        #[cfg(unix)]
+        #[test]
+        fn an_empty_window_emptied_for_good_meanwhile_ends_on_the_path_back() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            app.lose(false);
+            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+            back.panes.clear();
+            back.layout = Some(Shape::default());
+            app.take(Input::Rejoined(Ok(back)));
+            assert!(app.ended.is_none());
+            answer_list(&mut app, &control, &[]);
+            assert!(matches!(app.ended, Some(Ended::Closed)));
         }
 
         /// A passing program's OSC 12 reaches the terminal as it is, even
@@ -3687,7 +4769,10 @@ mod client {
             sent(&b_old);
             app.lose(false);
             let (mut path, _control, a_new, b_new) = back(takeover(1));
-            path.layout = Some((Some(Layout::Block(block(1))), None));
+            path.layout = Some(Shape {
+                layout: Some(Layout::Block(block(1))),
+                ..Shape::default()
+            });
             app.take(Input::Rejoined(Ok(path)));
             assert_eq!(app.focus, block(1));
             assert!(typed_in(&sent(&a_new)).is_empty(), "not A's keys");
@@ -3706,7 +4791,10 @@ mod client {
             app.standby.moving = Moving::Taking(Taking::default());
             app.typed(input(b"for-a"));
             let (mut path, _control, a_new, b_new) = back(takeover(1));
-            path.layout = Some((Some(Layout::Block(block(2))), None));
+            path.layout = Some(Shape {
+                layout: Some(Layout::Block(block(2))),
+                ..Shape::default()
+            });
             app.take(Input::Moved(Ok(path)));
             assert_eq!(app.focus, block(2));
             assert!(typed_in(&sent(&a_new)).is_empty());
@@ -3729,7 +4817,10 @@ mod client {
                 takeover(1),
             ))));
             let (mut path, _control, a_new, b_new) = back(takeover(1));
-            path.layout = Some((Some(Layout::Block(block(2))), None));
+            path.layout = Some(Shape {
+                layout: Some(Layout::Block(block(2))),
+                ..Shape::default()
+            });
             app.take(Input::Rejoined(Ok(path)));
             assert_eq!(app.focus, block(2));
             assert!(typed_in(&sent(&a_new)).is_empty());

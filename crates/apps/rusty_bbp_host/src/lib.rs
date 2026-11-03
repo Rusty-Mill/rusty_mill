@@ -1,7 +1,8 @@
 //! Host for the Blackboard Protocol over a `rusty_bbp` file store.
 //!
-//! - [`mcp`]: the per-turn MCP server an agent harness talks to over stdio.
-//!   One process serves one turn; when that turn ends every call is refused.
+//! - [`mcp`]: the MCP server an agent harness talks to over stdio. A per-turn
+//!   process serves one turn and refuses every call once it ends; a session
+//!   process serves its principal's turns, each named by a `wait` ticket.
 //! - [`human`]: the human channel as CLI actions.
 //! - [`moderator`]: the loop that launches one agent harness per granted
 //!   turn and the runner per selected run, until the task closes.
@@ -27,10 +28,14 @@ pub mod admin;
 pub mod admission;
 pub mod args;
 pub mod broker;
+pub mod clean_tree;
 pub mod confine;
+pub mod golden;
 pub mod grade;
 pub mod groups;
+pub mod holdout;
 pub mod human;
+pub mod inbox;
 pub mod launchers;
 pub mod mcp;
 pub mod moderator;
@@ -38,6 +43,7 @@ pub mod moderator_health;
 pub mod pairs;
 pub mod pins;
 pub mod profiles;
+pub mod protect;
 pub mod report;
 pub mod run_control;
 pub mod runner;

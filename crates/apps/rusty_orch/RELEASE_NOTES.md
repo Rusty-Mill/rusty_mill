@@ -4,6 +4,90 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Lens jobs fall back and are metered per call
+**2026-11-03**
+
+- One lens job now has a call step (#594). It tries the job's providers in
+  order and fits the context to each one's window. It reserves the worst
+  case before every ask and settles what the reply cost. An unavailable
+  provider, a context that does not fit, or the experiment ceiling on a
+  paid provider moves the job on. A bad reply or a task ceiling ends it.
+- Replies are capped at 4096 output tokens on every provider. A longer
+  reply is refused and still paid for.
+
+## `rusty_orch lens check`
+**2026-11-03**
+
+- A dry run of the lens provider setup (#594): it loads the config and the
+  operator's assertions file (default `/etc/let-em-loose/assertions.json`),
+  builds every provider and prints one line each saying whether it would
+  be admitted and what is still checked at call time. No model is called
+  and no container is inspected.
+
+## Codex lens questions run only in the checked container
+**2026-11-03**
+
+- Before every Codex lens question the runner inspects the operator's
+  container on its own local podman and refuses anything but the asserted
+  mounts and machine id, an unprivileged container with no extra devices,
+  capabilities or shared namespaces, and no API key in its environment
+  (#594). A failed check is `Unavailable` and runs nothing.
+- The login probe and `codex exec` run with `podman exec` by the checked
+  container id.
+
+## Lens assertions can name a container
+**2026-11-03**
+
+- The operator's `host_cleared` entry may name a container and its exact
+  mounts, including a read-only bind of `/etc/machine-id` (#594). Nothing
+  runs under it yet; the per-call container check follows.
+- Under a container clearance, a machine-bound no-overage entry must name
+  the container's id, and Claude gets no grant.
+
+## orch-codex: lens replies from the JSON events
+**2026-11-03**
+
+- A lens question now reads Codex's reply from the `--json` event stream
+  it already reads for usage, so no reply file is written on the host and
+  Codex can run inside the `lel-codex` container (#594).
+- `CodexAgent::lens_argv()` no longer takes a reply path.
+
+## orch-lens: the lens runner's core
+**2026-11-03**
+
+- New pure crate holding the lens runner's decisions: which jobs run, what
+  each provider may see, what it may post back and what it may spend
+  (ADR-0021). Nothing calls it yet; the `rusty_orch lens` shell follows.
+
+## orch-openai: local model servers over HTTP
+**2026-11-03**
+
+- New adapter crate for OpenAI-compatible servers such as llama-swap:
+  plain HTTP only, and only to loopback or private addresses, checked on
+  every call against the address it connects to (ADR-0020).
+
+## Providers are ids, not an enum
+**2026-11-03**
+
+- `orch_core::task::Agent` is now `AgentId`, a validated token, so a new
+  model backend is configuration rather than a core change (ADR-0019).
+- Snapshots write the id; the four old variants still load as `claude`,
+  `codex`, `gemini` and `local`. An older binary cannot read a snapshot
+  saved by this one.
+- Errors and progress lines print the id (`codex failed T-1`).
+
+## Leases bound validator roots; leased cancel
+**2026-11-02**
+
+- A lease now bounds the validator profile's read roots: each must be a
+  system root or lie within the lease, and not beneath a harness's write
+  root, and it is frozen as the path it resolved to. A leased profile whose
+  toolchain lives elsewhere (a rustup sysroot, say) needs that path leased.
+- Cancelling a leased goal whose task never opened no longer fails when the
+  lease cannot confine its pool: nothing in such a task ever runs.
+
+---
+
 ## Permission leases
 **2026-10-24**
 

@@ -1,8 +1,8 @@
 //! The messages and their field layouts.
 
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
-    SessionId, Side, Size, Transport, WindowId,
+    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
+    SessionId, Share, Side, Size, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -130,6 +130,40 @@ impl Features {
     /// the server refuses a reset while a client without it is attached.
     pub const TERMINAL_CONTROL: Self = Self(1 << 26);
 
+    /// Editing layouts and the order of windows: [`Message::ResizeSplit`],
+    /// [`Message::SwapBlocks`], [`Message::MoveBlock`],
+    /// [`Message::DetachBlock`], [`Message::MoveWindow`] and
+    /// [`Event::WindowMoved`] (skipped for a client without it). The edits
+    /// of a layout are announced by [`Event::LayoutChanged`], whose layout
+    /// leaves detached blocks out.
+    pub const LAYOUT_EDIT: Self = Self(1 << 27);
+
+    /// Each window's focused block, held by the server:
+    /// [`Message::FocusBlock`], [`Message::MoveFocus`] and
+    /// [`Event::FocusChanged`] (skipped for a client without it). A window
+    /// entry carries its focused block regardless, since older decoders
+    /// skip the field.
+    pub const FOCUS: Self = Self(1 << 28);
+
+    /// Generated session names: a [`Message::CreateSession`] with an empty
+    /// name from a client with this bit gets a name no other session has,
+    /// such as `quiet-harbor` ([`rusty_mux_core::is_generated`]). From a
+    /// client without it an empty name stays empty, as before.
+    pub const SESSION_NAMES: Self = Self(1 << 29);
+
+    /// Naming a session only while its name is generated:
+    /// [`Message::NameSession`], refused once somebody chose a name.
+    pub const NAME_SESSION: Self = Self(1 << 30);
+
+    /// More block methods on a block's terminal: `terminal.modes` and
+    /// `terminal.clear`. They travel as [`Message::BlockCall`], so the bit
+    /// only says the server knows them.
+    pub const TERMINAL_MORE: Self = Self(1 << 31);
+
+    /// The block method `terminal.shell`. It travels as
+    /// [`Message::BlockCall`], so the bit only says the server knows it.
+    pub const TERMINAL_SHELL: Self = Self(1 << 32);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -231,6 +265,10 @@ pub enum Entry {
         /// `None` while it has no windows, or from a server without
         /// [`Features::ACTIVE_WINDOW`].
         active: Option<WindowId>,
+        /// The server made up `name` and nobody has renamed the session
+        /// since ([`Features::SESSION_NAMES`]); `false` from an older
+        /// server.
+        generated: bool,
     },
     Window {
         window: WindowId,
@@ -240,6 +278,9 @@ pub enum Entry {
         /// [`Features::LAYOUT`].
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
+        /// `None` while no block is placed, or from a server without
+        /// [`Features::FOCUS`].
+        focused: Option<BlockId>,
     },
     Block {
         block: BlockId,
@@ -407,6 +448,68 @@ pub enum Message {
     ReloadConfig {
         req: u64,
     },
+    /// Gives `block` `share` of the innermost split along `axis` that
+    /// holds it. Negotiated with [`Features::LAYOUT_EDIT`].
+    ResizeSplit {
+        req: u64,
+        block: BlockId,
+        axis: Axis,
+        share: Share,
+    },
+    /// Puts each block where the other was, in their shared window; one
+    /// may be detached, and the other then is. Negotiated with
+    /// [`Features::LAYOUT_EDIT`].
+    SwapBlocks {
+        req: u64,
+        block: BlockId,
+        other: BlockId,
+    },
+    /// Takes `block` from its place and splits `beside`'s, in the same
+    /// window, to put it on `side`, unzooming the window; without `beside`
+    /// it fills a window that shows no block. Negotiated with
+    /// [`Features::LAYOUT_EDIT`].
+    MoveBlock {
+        req: u64,
+        block: BlockId,
+        beside: Option<BlockId>,
+        side: Side,
+    },
+    /// Takes `block` out of its window's layout; it keeps running, listed
+    /// in the window. Negotiated with [`Features::LAYOUT_EDIT`].
+    DetachBlock {
+        req: u64,
+        block: BlockId,
+    },
+    /// Moves `window` to place `index`, from 0, among its session's
+    /// windows. Negotiated with [`Features::LAYOUT_EDIT`].
+    MoveWindow {
+        req: u64,
+        window: WindowId,
+        index: usize,
+    },
+    /// Focuses `block` in its window, ending a zoom on another block.
+    /// Negotiated with [`Features::FOCUS`].
+    FocusBlock {
+        req: u64,
+        block: BlockId,
+    },
+    /// Moves `window`'s focus from its focused block toward a side, or to
+    /// the next or previous block. Negotiated with [`Features::FOCUS`].
+    MoveFocus {
+        req: u64,
+        window: WindowId,
+        toward: Toward,
+    },
+    /// Renames `session` as [`Message::Rename`] does, but only while its
+    /// name is generated; once somebody chose one, refused and the name
+    /// stays. The server checks and renames in one step, so of two such
+    /// requests only the first can take effect. Negotiated with
+    /// [`Features::NAME_SESSION`].
+    NameSession {
+        req: u64,
+        session: SessionId,
+        name: String,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -561,8 +664,21 @@ const USER: u32 = 43;
 const SELECTION: u32 = 44;
 /// A status record's id, its path; empty for the root.
 const STATUS: u32 = 45;
-// IDs 1..=STATUS are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = STATUS as usize;
+/// An [`Axis`]: 0 columns, 1 rows.
+const AXIS: u32 = 46;
+/// A second block: the one to swap with, or to go beside.
+const OTHER: u32 = 47;
+/// A place in a list, from 0.
+const INDEX: u32 = 48;
+/// A [`Toward`]: 0 to 3 a side as [`SIDE`] numbers them, 4 next, 5
+/// previous.
+const TOWARD: u32 = 49;
+/// A window's focused block.
+const FOCUSED: u32 = 50;
+/// A session entry's mark that the server made up its name: 1, or absent.
+const GENERATED: u32 = 51;
+// IDs 1..=GENERATED are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = GENERATED as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -589,6 +705,14 @@ mod ty {
     pub const WHOAMI: u8 = 0x16;
     pub const SELECT_WINDOW: u8 = 0x17;
     pub const RELOAD_CONFIG: u8 = 0x18;
+    pub const RESIZE_SPLIT: u8 = 0x19;
+    pub const SWAP_BLOCKS: u8 = 0x1a;
+    pub const MOVE_BLOCK: u8 = 0x1b;
+    pub const DETACH_BLOCK: u8 = 0x1c;
+    pub const MOVE_WINDOW: u8 = 0x1d;
+    pub const FOCUS_BLOCK: u8 = 0x1e;
+    pub const MOVE_FOCUS: u8 = 0x1f;
+    pub const NAME_SESSION: u8 = 0x20;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -726,6 +850,62 @@ impl Message {
             M::ReloadConfig { req } => {
                 out.varint(REQ, *req);
                 ty::RELOAD_CONFIG
+            }
+            M::ResizeSplit {
+                req,
+                block,
+                axis,
+                share,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .varint(AXIS, axis_wire(*axis))
+                    .varint(PERCENT, share.percent().into());
+                ty::RESIZE_SPLIT
+            }
+            M::SwapBlocks { req, block, other } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .uuid(OTHER, other.uuid());
+                ty::SWAP_BLOCKS
+            }
+            M::MoveBlock {
+                req,
+                block,
+                beside,
+                side,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .varint(SIDE, side_wire(*side));
+                if let Some(beside) = beside {
+                    out.uuid(OTHER, beside.uuid());
+                }
+                ty::MOVE_BLOCK
+            }
+            M::DetachBlock { req, block } => req_block(out, *req, *block, ty::DETACH_BLOCK),
+            M::MoveWindow { req, window, index } => {
+                out.varint(REQ, *req)
+                    .uuid(WINDOW, window.uuid())
+                    .varint(INDEX, index_wire(*index));
+                ty::MOVE_WINDOW
+            }
+            M::FocusBlock { req, block } => req_block(out, *req, *block, ty::FOCUS_BLOCK),
+            M::MoveFocus {
+                req,
+                window,
+                toward,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(WINDOW, window.uuid())
+                    .varint(TOWARD, toward_wire(*toward));
+                ty::MOVE_FOCUS
+            }
+            M::NameSession { req, session, name } => {
+                out.varint(REQ, *req)
+                    .uuid(SESSION, session.uuid())
+                    .bytes(NAME, name.as_bytes());
+                ty::NAME_SESSION
             }
             M::Welcome {
                 features,
@@ -915,6 +1095,49 @@ impl Message {
             },
             ty::RELOAD_CONFIG => M::ReloadConfig {
                 req: f.varint(REQ)?,
+            },
+            ty::RESIZE_SPLIT => M::ResizeSplit {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                axis: get_axis(&f)?,
+                share: u8::try_from(f.varint(PERCENT)?)
+                    .ok()
+                    .and_then(Share::new)
+                    .ok_or_else(|| f.invalid(PERCENT))?,
+            },
+            ty::SWAP_BLOCKS => M::SwapBlocks {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                other: block(&f, OTHER)?,
+            },
+            ty::MOVE_BLOCK => M::MoveBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                beside: f.opt(OTHER, block)?,
+                side: get_side(&f)?,
+            },
+            ty::DETACH_BLOCK => M::DetachBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+            },
+            ty::MOVE_WINDOW => M::MoveWindow {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
+                index: get_index(&f)?,
+            },
+            ty::FOCUS_BLOCK => M::FocusBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+            },
+            ty::MOVE_FOCUS => M::MoveFocus {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
+                toward: get_toward(&f)?,
+            },
+            ty::NAME_SESSION => M::NameSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                name: f.string(NAME)?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
@@ -1117,6 +1340,49 @@ fn get_side(f: &In<'_>) -> Result<Side, Error> {
         .ok_or_else(|| f.invalid(SIDE))
 }
 
+fn axis_wire(axis: Axis) -> u64 {
+    match axis {
+        Axis::Columns => 0,
+        Axis::Rows => 1,
+    }
+}
+
+fn get_axis(f: &In<'_>) -> Result<Axis, Error> {
+    match f.varint(AXIS)? {
+        0 => Ok(Axis::Columns),
+        1 => Ok(Axis::Rows),
+        _ => Err(f.invalid(AXIS)),
+    }
+}
+
+fn toward_wire(toward: Toward) -> u64 {
+    match toward {
+        Toward::Side(side) => side_wire(side),
+        Toward::Next => 4,
+        Toward::Previous => 5,
+    }
+}
+
+fn get_toward(f: &In<'_>) -> Result<Toward, Error> {
+    match f.varint(TOWARD)? {
+        4 => Ok(Toward::Next),
+        5 => Ok(Toward::Previous),
+        n => usize::try_from(n)
+            .ok()
+            .and_then(|i| SIDES.get(i).copied())
+            .map(Toward::Side)
+            .ok_or_else(|| f.invalid(TOWARD)),
+    }
+}
+
+fn index_wire(index: usize) -> u64 {
+    u64::try_from(index).unwrap_or(u64::MAX)
+}
+
+fn get_index(f: &In<'_>) -> Result<usize, Error> {
+    usize::try_from(f.varint(INDEX)?).map_err(|_| f.invalid(INDEX))
+}
+
 /// A layout and zoom, the layout as text, empty for none.
 fn put_layout(out: &mut Out, layout: Option<&Layout>, zoomed: Option<BlockId>) {
     let text = layout.map(Layout::to_string).unwrap_or_default();
@@ -1166,6 +1432,8 @@ mod kind {
     pub const STATUS_REMOVED: u64 = 28;
     pub const ACTIVE_WINDOW_CHANGED: u64 = 29;
     pub const CONFIG_RELOADED: u64 = 30;
+    pub const WINDOW_MOVED: u64 = 31;
+    pub const FOCUS_CHANGED: u64 = 32;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1187,6 +1455,18 @@ fn put_event(out: &mut Out, event: &Event) {
         E::WindowClosed { window } => {
             out.varint(KIND, kind::WINDOW_CLOSED)
                 .uuid(WINDOW, window.uuid());
+        }
+        E::FocusChanged { window, block } => {
+            out.varint(KIND, kind::FOCUS_CHANGED)
+                .uuid(WINDOW, window.uuid());
+            if let Some(block) = block {
+                out.uuid(BLOCK, block.uuid());
+            }
+        }
+        E::WindowMoved { window, index } => {
+            out.varint(KIND, kind::WINDOW_MOVED)
+                .uuid(WINDOW, window.uuid())
+                .varint(INDEX, index_wire(index));
         }
         E::ActiveWindowChanged { session, window } => {
             out.varint(KIND, kind::ACTIVE_WINDOW_CHANGED)
@@ -1414,6 +1694,14 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::WINDOW_CLOSED => E::WindowClosed {
             window: window(f, WINDOW)?,
         },
+        kind::FOCUS_CHANGED => E::FocusChanged {
+            window: window(f, WINDOW)?,
+            block: f.opt(BLOCK, block)?,
+        },
+        kind::WINDOW_MOVED => E::WindowMoved {
+            window: window(f, WINDOW)?,
+            index: get_index(f)?,
+        },
         kind::ACTIVE_WINDOW_CHANGED => E::ActiveWindowChanged {
             session: session(f, SESSION)?,
             window: f.opt(WINDOW, window)?,
@@ -1532,12 +1820,16 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             session,
             name,
             active,
+            generated,
         } => {
             out.varint(KIND, entry::SESSION)
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
             if let Some(window) = active {
                 out.uuid(WINDOW, window.uuid());
+            }
+            if *generated {
+                out.varint(GENERATED, 1);
             }
         }
         Entry::Window {
@@ -1546,6 +1838,7 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             name,
             layout,
             zoomed,
+            focused,
         } => {
             let out = out
                 .varint(KIND, entry::WINDOW)
@@ -1553,6 +1846,9 @@ fn put_entry(out: &mut Out, entry: &Entry) {
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
             put_layout(out, layout.as_ref(), *zoomed);
+            if let Some(block) = focused {
+                out.uuid(FOCUSED, block.uuid());
+            }
         }
         Entry::Block {
             block,
@@ -1603,6 +1899,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             session: session(f, SESSION)?,
             name: f.string(NAME)?,
             active: f.opt(WINDOW, window)?,
+            generated: f.opt(GENERATED, In::varint)? == Some(1),
         },
         entry::WINDOW => Entry::Window {
             window: window(f, WINDOW)?,
@@ -1611,6 +1908,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             // An older server sends no layout.
             layout: f.opt(LAYOUT, |_, _| get_layout(f))?.flatten(),
             zoomed: f.opt(ZOOMED, block)?,
+            focused: f.opt(FOCUSED, block)?,
         },
         entry::BLOCK => Entry::Block {
             block: block(f, BLOCK)?,
