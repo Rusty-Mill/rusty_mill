@@ -41,6 +41,7 @@ pub mod moderator_health;
 pub mod pairs;
 pub mod pins;
 pub mod profiles;
+pub mod protect;
 pub mod report;
 pub mod run_control;
 pub mod runner;

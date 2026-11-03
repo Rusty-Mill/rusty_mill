@@ -42,6 +42,17 @@ pub struct ProfileSet {
     /// digests are unchanged.
     #[rusty_serde(default, skip_serializing_if = "no_paths")]
     pub test_paths: Vec<String>,
+    /// Claims mode (#597): globs no candidate diff may add, modify or delete,
+    /// except through an accepted `tests` claim. Covered by the digest; never
+    /// written when empty.
+    #[rusty_serde(default, skip_serializing_if = "no_paths")]
+    pub protected: Vec<String>,
+    /// Claims mode with `protected`: the full commit id every candidate
+    /// builds on. The diffs are all a candidate changes, so pinning the base
+    /// keeps an older revision with weaker tests out (#597 G2). Required
+    /// with `protected`; never written when absent.
+    #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<String>,
 }
 
 impl ProfileSet {
@@ -69,6 +80,8 @@ impl ProfileSet {
             },
             tree: "sha256(git write-tree id)".into(),
             test_paths: vec![],
+            protected: vec![],
+            baseline: None,
         }
     }
 
@@ -113,6 +126,24 @@ impl ProfileSet {
         set.limits.cpu_secs = 10;
         set.limits.wall_secs = 30;
         Ok(set)
+    }
+
+    /// The protected-path configuration is enforceable: every glob in the
+    /// grammar [`path_matches`] implements, and a full-commit `baseline`
+    /// whenever any is set. A pattern it would read literally (`[ab]`, a
+    /// leading `/` or `./`) would silently protect nothing, so it fails here.
+    pub fn check_protected(&self) -> Result<(), String> {
+        if self.protected.is_empty() {
+            return Ok(());
+        }
+        for g in &self.protected {
+            check_glob(g).map_err(|e| format!("protected glob {g:?}: {e}"))?;
+        }
+        match self.baseline.as_deref() {
+            Some(b) if is_commit_id(b) => Ok(()),
+            Some(b) => Err(format!("baseline {b:?} is not a full commit id")),
+            None => Err("protected paths need a baseline commit".into()),
+        }
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
@@ -193,6 +224,46 @@ fn segment_matches(p: &[char], s: &[char]) -> bool {
     }
 }
 
+/// `glob` is in the grammar of [`path_matches`]: relative `/`-separated
+/// segments, none empty, `.` or `..`, with `**` only as a whole segment and
+/// no syntax it does not implement (`[`, `]`, `{`, `}`, `\`, `!`). A
+/// control character or a Windows drive prefix (`C:`) is refused too: such
+/// a pattern looks absolute or unprintable and never matches a repository
+/// path, so it would protect nothing. `!` is refused, not read literally.
+pub fn check_glob(glob: &str) -> Result<(), String> {
+    if glob.is_empty() {
+        return Err("empty".into());
+    }
+    if glob.chars().any(char::is_control) {
+        return Err("a control character".into());
+    }
+    if let [d, b':', ..] = glob.as_bytes() {
+        if d.is_ascii_alphabetic() {
+            return Err("a drive prefix makes it absolute".into());
+        }
+    }
+    if let Some(c) = glob.chars().find(|c| "[]{}\\!".contains(*c)) {
+        return Err(format!("{c:?} is not supported; only *, ** and ? are"));
+    }
+    for seg in glob.split('/') {
+        match seg {
+            "" => return Err("absolute, or an empty segment".into()),
+            "." | ".." => return Err(format!("{seg:?} segment")),
+            "**" => {}
+            s if s.contains("**") => return Err("** must be a whole segment".into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A full commit id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits.
+pub fn is_commit_id(s: &str) -> bool {
+    matches!(s.len(), 40 | 64)
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Whether `path` matches any of `globs`.
 pub fn is_test_path(globs: &[String], path: &str) -> bool {
     globs.iter().any(|g| path_matches(g, path))
@@ -219,6 +290,49 @@ mod tests {
         assert!(path_matches("pytest.ini", "pytest.ini"));
         assert!(!path_matches("pytest.ini", "a/pytest.ini"));
         assert!(path_matches("t?st/*", "test/x"));
+    }
+
+    #[test]
+    fn protected_globs_outside_the_grammar_are_refused() {
+        for ok in [
+            "tests/**",
+            "**/conftest.py",
+            "src/*_test.go",
+            "t?st/*",
+            "pytest.ini",
+        ] {
+            assert_eq!(check_glob(ok), Ok(()), "{ok}");
+        }
+        for bad in [
+            "",
+            "/tests/**",
+            "./tests/**",
+            "tests/../src",
+            "tests//a",
+            "tests/",
+            "tests/[ab].rs",
+            "tests/{a,b}.rs",
+            "!tests/a.rs",
+            "tests\\a.rs",
+            "tests/a**",
+            "C:/tests/**",
+            "c:tests/**",
+            "tests/\u{7f}a.rs",
+            "tests/a\n.rs",
+            "tests/\ta.rs",
+        ] {
+            assert!(check_glob(bad).is_err(), "{bad:?}");
+        }
+        let mut set = ProfileSet::shell("test", "true");
+        assert_eq!(set.check_protected(), Ok(()));
+        set.protected = vec!["tests/**".into()];
+        assert!(set.check_protected().is_err_and(|e| e.contains("baseline")));
+        set.baseline = Some("main".into());
+        assert!(set.check_protected().is_err());
+        set.baseline = Some("a".repeat(40));
+        assert_eq!(set.check_protected(), Ok(()));
+        set.protected.push("tests/[ab].rs".into());
+        assert!(set.check_protected().is_err_and(|e| e.contains("[ab]")));
     }
 
     #[test]
