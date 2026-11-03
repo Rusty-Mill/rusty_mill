@@ -615,6 +615,10 @@ struct WindowState<'a> {
     /// coordinates (`(col, abs_row)`) so the anchor survives scrolling
     /// mid-drag.
     sel_anchor: Option<(usize, usize)>,
+    /// The key whose press a window shortcut consumed: its release is
+    /// swallowed too, so a child reading key-ups (win32-input-mode, Kitty
+    /// event types) never sees a release without its press.
+    swallowed_release: Option<PhysicalKey>,
     /// Per-cell click actions for the chrome bar, rebuilt with each layout.
     hits: Vec<Hit>,
     /// An in-progress tab drag (press on a tab arms it; releasing clears).
@@ -2571,6 +2575,10 @@ impl WindowState<'_> {
             if let Some(p) = self.pane() {
                 p.grid.lock().selection = None;
             }
+            // End a drag still in progress, or the next pointer move or
+            // edge auto-scroll tick would rebuild the selection.
+            self.selecting = false;
+            self.sel_anchor = None;
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
@@ -5103,6 +5111,9 @@ impl WindowState<'_> {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    if take_if_eq(&mut self.swallowed_release, event.physical_key) {
+                        return;
+                    }
                     // Key releases are terminal input only under win32-input-
                     // mode (?9001) or Kitty keyboard flag 2 (report event
                     // types); the UI layers (chords, search, copy mode) never
@@ -5172,18 +5183,18 @@ impl WindowState<'_> {
                         self.mods.alt_key(),
                         key,
                     );
-                    match self.config.keys.action(chord) {
+                    let consumed = match self.config.keys.action(chord) {
                         // Nothing selected: fall through so ^C interrupts.
-                        Some(Action::CopyOrSend) => {
-                            if self.copy_or_send() {
-                                return;
-                            }
-                        }
+                        Some(Action::CopyOrSend) => self.copy_or_send(),
                         Some(action) => {
                             self.run_action(action);
-                            return;
+                            true
                         }
-                        None => {}
+                        None => false,
+                    };
+                    if consumed {
+                        self.swallowed_release = Some(event.physical_key);
+                        return;
                     }
                 }
                 // Ctrl+Alt+1..9 jump straight to that tab (the Windows
@@ -5743,6 +5754,7 @@ impl<'a> App<'a> {
             click_streak: 0,
             mouse_button_down: None,
             sel_anchor: None,
+            swallowed_release: None,
             hits: Vec::new(),
             tab_drag: None,
             last_strip_click: None,
@@ -5954,6 +5966,15 @@ impl ApplicationHandler<UserEvent> for App<'_> {
         }
         self.reap_and_spawn(event_loop);
     }
+}
+
+/// Clear `slot` and return true if it holds `key`.
+fn take_if_eq<T: PartialEq>(slot: &mut Option<T>, key: T) -> bool {
+    if slot.as_ref() != Some(&key) {
+        return false;
+    }
+    *slot = None;
+    true
 }
 
 /// What copying the selection achieved.
@@ -6534,7 +6555,7 @@ mod tests {
         encode_paste, fmt_runtime, ime_commit_target, ime_cursor_area_origin, is_openable_url, mix,
         osc52_reply, pane_pixel_point, path_from_file_uri, put_text, read_git_branch, settings_hit,
         settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
-        tab_widths, visible_tab_range, widget_text, zoom_px,
+        tab_widths, take_if_eq, visible_tab_range, widget_text, zoom_px,
     };
     use crate::core::Cell;
 
@@ -6802,6 +6823,15 @@ mod tests {
     }
 
     type Write = fn(String) -> Result<(), String>;
+
+    #[test]
+    fn a_consumed_press_swallows_only_its_own_release() {
+        let mut slot = Some('c');
+        assert!(!take_if_eq(&mut slot, 'x')); // another key's release passes
+        assert_eq!(slot, Some('c'));
+        assert!(take_if_eq(&mut slot, 'c'));
+        assert!(!take_if_eq(&mut slot, 'c')); // only once
+    }
 
     #[test]
     fn copy_or_send_copies_then_clears_the_selection() {
