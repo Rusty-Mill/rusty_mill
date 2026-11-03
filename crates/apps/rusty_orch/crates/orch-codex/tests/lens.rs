@@ -75,6 +75,7 @@ fn agent(fake: Probed) -> CodexAgent<Probed> {
     CodexAgent::with_runner("/repo", fake)
         .timeout(Duration::from_secs(30))
         .lens_no_overage()
+        .lens_host_cleared()
 }
 
 fn arg_after<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
@@ -87,7 +88,7 @@ fn runs(a: &CodexAgent<Probed>) -> usize {
 }
 
 #[test]
-fn a_question_runs_in_a_scratch_dir_and_returns_posts_and_usage() {
+fn a_question_runs_in_the_repo_and_returns_posts_and_usage() {
     let mut a = agent(replying(r#"{"posts":[]}"#, EVENTS));
 
     let answer = a.ask(&question()).expect("answers");
@@ -105,12 +106,15 @@ fn a_question_runs_in_a_scratch_dir_and_returns_posts_and_usage() {
     let calls = a.runner().run.inner.calls.lock().expect("lock");
     let (argv, stdin, timeout) = &calls[0];
     assert_eq!(argv[0..4], ["codex", "exec", "--sandbox", "read-only"]);
-    let cwd = arg_after(argv, "-C").expect("-C");
-    assert_ne!(cwd, "/repo");
-    assert!(!Path::new(cwd).exists(), "scratch dir removed");
+    assert_eq!(arg_after(argv, "-C"), Some("/repo"));
     assert!(argv.iter().any(|a| a == "--json"));
-    assert!(argv.iter().any(|a| a == "--skip-git-repo-check"));
+    assert!(!argv.iter().any(|a| a == "--skip-git-repo-check"));
     assert!(!argv.iter().any(|a| a == "--output-schema"));
+    let reply = Path::new(arg_after(argv, "--output-last-message").expect("reply"));
+    assert!(
+        !reply.parent().expect("dir").exists(),
+        "scratch dir removed"
+    );
     assert_eq!(argv.last().map(String::as_str), Some("-"));
     assert_eq!(stdin, b"intent and rules\n\nclaim C-1");
     assert_eq!(*timeout, Duration::from_secs(30));
@@ -119,8 +123,19 @@ fn a_question_runs_in_a_scratch_dir_and_returns_posts_and_usage() {
 }
 
 #[test]
+fn without_the_host_cleared_assertion_nothing_runs() {
+    let mut a =
+        CodexAgent::with_runner("/repo", replying(r#"{"posts":[]}"#, EVENTS)).lens_no_overage();
+    let err = a.ask(&question()).expect_err("refused");
+    assert!(matches!(err, ClassifiedError::Unavailable(_)), "{err:?}");
+    assert!(a.runner().probes.lock().expect("lock").is_empty());
+    assert_eq!(runs(&a), 0);
+}
+
+#[test]
 fn without_the_no_overage_assertion_nothing_runs() {
-    let mut a = CodexAgent::with_runner("/repo", replying(r#"{"posts":[]}"#, EVENTS));
+    let mut a =
+        CodexAgent::with_runner("/repo", replying(r#"{"posts":[]}"#, EVENTS)).lens_host_cleared();
     let err = a.ask(&question()).expect_err("refused");
     assert!(matches!(err, ClassifiedError::Unavailable(_)), "{err:?}");
     assert!(a.runner().probes.lock().expect("lock").is_empty());
@@ -143,14 +158,6 @@ fn a_non_subscription_login_is_unavailable_and_nothing_runs() {
         assert!(!m.0.contains("sk-proj"), "{}", m.0);
         assert_eq!(runs(&a), 0, "{probe:?}");
     }
-}
-
-#[test]
-fn a_read_only_lens_runs_in_the_repo() {
-    let mut a = agent(replying(r#"{"posts":[]}"#, EVENTS)).lens_read_only();
-    a.ask(&question()).expect("answers");
-    let calls = a.runner().run.inner.calls.lock().expect("lock");
-    assert_eq!(arg_after(&calls[0].0, "-C"), Some("/repo"));
 }
 
 #[test]

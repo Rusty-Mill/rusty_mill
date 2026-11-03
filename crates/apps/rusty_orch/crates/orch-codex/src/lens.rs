@@ -2,8 +2,11 @@
 //!
 //! `codex exec` has no before-call bound on its agent loop, so this adapter
 //! is admitted only at zero price, and only where no call can add a charge.
-//! Two separate gates, both fail closed: the operator's assertion that the
-//! account cannot bill beyond its plan ([`CodexAgent::lens_no_overage`]),
+//! Three separate gates, all fail closed: the operator's assertion that
+//! the account cannot bill beyond its plan ([`CodexAgent::lens_no_overage`]),
+//! the operator's assertion that everything the host lets Codex read is
+//! cleared for it ([`CodexAgent::lens_host_cleared`]; Codex has no
+//! tool-less mode and its read-only sandbox reads the whole filesystem),
 //! and a ChatGPT login on every question. The login check establishes the
 //! auth method, not billing.
 
@@ -31,14 +34,12 @@ pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(60);
 const SUBSCRIPTION_LOGIN: &str = "Logged in using ChatGPT";
 
 impl<C: CommandRunner> CodexAgent<C> {
-    /// The argv for one lens question run in `cwd`: the base argv, JSONL
-    /// events on stdout (for usage), the last message to `reply`, the
-    /// prompt on stdin. No schema: the reply is checked by
+    /// The argv for one lens question: the base argv in the repository
+    /// root, JSONL events on stdout (for usage), the last message to
+    /// `reply`, the prompt on stdin. No schema: the reply is checked by
     /// [`orch_lens::parse`]. Public so tests and docs can pin it.
-    pub fn lens_argv(&self, cwd: &Path, reply: &Path) -> Vec<String> {
-        let mut argv = self.base_argv(cwd);
-        // The scratch directory is not a git repository.
-        argv.push("--skip-git-repo-check".to_owned());
+    pub fn lens_argv(&self, reply: &Path) -> Vec<String> {
+        let mut argv = self.base_argv(self.repo_root());
         argv.push("--json".to_owned());
         argv.push("--output-last-message".to_owned());
         argv.push(reply.display().to_string());
@@ -48,26 +49,23 @@ impl<C: CommandRunner> CodexAgent<C> {
 }
 
 impl<C: CommandRunner> Model for CodexAgent<C> {
-    /// Ask with the prefix and body on stdin, in the repository root for a
-    /// read-only lens and an empty scratch directory otherwise. A reply
-    /// that does not pass [`parse`] is `Permanent`.
+    /// Refuse without both operator assertions, check the login, then
+    /// ask with the prefix and body on stdin. A reply that does not pass
+    /// [`parse`] or lacks measured usage is `Permanent`.
     fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
         if !self.lens_no_overage {
-            return Err(ClassifiedError::Unavailable(AgentError(
-                "codex: lens questions need the operator's no-overage assertion (lens_no_overage)"
-                    .to_owned(),
-            )));
+            return Err(unavailable("the no-overage assertion (lens_no_overage)"));
+        }
+        if !self.lens_host_cleared {
+            return Err(unavailable(
+                "the host-cleared assertion (lens_host_cleared)",
+            ));
         }
         self.probe_subscription()?;
         let scratch = LensScratch::create().map_err(ClassifiedError::Transient)?;
-        let cwd = if self.lens_reads_repo {
-            self.repo_root().to_path_buf()
-        } else {
-            scratch.dir.clone()
-        };
         let prompt = format!("{}\n\n{}", q.prefix, q.body);
         let (exit, text) = self.exec(
-            &self.lens_argv(&cwd, &scratch.reply),
+            &self.lens_argv(&scratch.reply),
             prompt.as_bytes(),
             &scratch.reply,
         )?;
@@ -97,6 +95,12 @@ impl<C: CommandRunner> CodexAgent<C> {
             "codex: lens questions need a ChatGPT subscription login (`codex login`)".to_owned(),
         )))
     }
+}
+
+fn unavailable(what: &str) -> ClassifiedError {
+    ClassifiedError::Unavailable(AgentError(format!(
+        "codex: lens questions need the operator's {what}"
+    )))
 }
 
 fn refuse(e: String) -> ClassifiedError {
@@ -147,8 +151,10 @@ fn turn_usage(v: &Value) -> Result<Usage, String> {
     })
 }
 
-/// An empty working directory and a last-message file beside it, both in
-/// the OS temp dir and removed on drop. One pair per question.
+/// A private scratch directory holding the last-message file, removed on
+/// drop. The directory is created exclusively (an existing path of that
+/// name, symlink or not, fails the call) and, on Unix, readable by this
+/// user only, so nobody else can plant or swap the reply file inside it.
 struct LensScratch {
     dir: PathBuf,
     reply: PathBuf,
@@ -157,22 +163,38 @@ struct LensScratch {
 impl LensScratch {
     fn create() -> Result<Self, AgentError> {
         let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
-        let stem = format!("orch-codex-lens-{}-{seq}", std::process::id());
-        let tmp = std::env::temp_dir();
-        let dir = tmp.join(&stem);
-        fs::create_dir(&dir)
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let stem = format!("orch-codex-lens-{}-{seq}-{nanos}", std::process::id());
+        Self::create_in(&std::env::temp_dir(), &stem)
+    }
+
+    fn create_in(base: &Path, stem: &str) -> Result<Self, AgentError> {
+        let dir = base.join(stem);
+        private_dir(&dir)
             .map_err(|e| AgentError(format!("codex: cannot create scratch dir: {e}")))?;
         Ok(Self {
+            reply: dir.join("reply.txt"),
             dir,
-            reply: tmp.join(format!("{stem}.reply.txt")),
         })
     }
+}
+
+#[cfg(unix)]
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(dir)
+}
+
+#[cfg(not(unix))]
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::DirBuilder::new().create(dir)
 }
 
 impl Drop for LensScratch {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.dir);
-        let _ = fs::remove_file(&self.reply);
     }
 }
 
@@ -210,5 +232,35 @@ mod tests {
         ] {
             assert!(usage(events).is_err(), "{events}");
         }
+    }
+
+    #[test]
+    fn a_scratch_name_already_taken_is_refused_and_left_alone() {
+        let base =
+            std::env::temp_dir().join(format!("orch-codex-scratch-test-{}", std::process::id()));
+        fs::create_dir_all(&base).unwrap();
+        let victim = base.join("victim.txt");
+        fs::write(&victim, "keep").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&base, base.join("taken")).unwrap();
+        #[cfg(not(unix))]
+        fs::create_dir(base.join("taken")).unwrap();
+
+        assert!(LensScratch::create_in(&base, "taken").is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+
+        let fresh = LensScratch::create_in(&base, "fresh").unwrap();
+        assert_eq!(fresh.reply.parent(), Some(fresh.dir.as_path()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&fresh.dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let dir = fresh.dir.clone();
+        drop(fresh);
+        assert!(!dir.exists());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        fs::remove_dir_all(&base).unwrap();
     }
 }

@@ -43,7 +43,7 @@ pub struct CodexAgent<C = StdCommand> {
     timeout: Duration,
     model: Option<String>,
     stop: StopRule,
-    pub(crate) lens_reads_repo: bool,
+    pub(crate) lens_host_cleared: bool,
     pub(crate) lens_no_overage: bool,
     runner: C,
 }
@@ -63,7 +63,7 @@ impl<C: CommandRunner> CodexAgent<C> {
             timeout: DEFAULT_TIMEOUT,
             model: None,
             stop: StopRule::Checkpoint,
-            lens_reads_repo: false,
+            lens_host_cleared: false,
             lens_no_overage: false,
             runner,
         }
@@ -89,11 +89,14 @@ impl<C: CommandRunner> CodexAgent<C> {
         self
     }
 
-    /// Run lens questions in the repository root, for a lens configured
-    /// `tools: read-only`. Without it a lens question runs in an empty
-    /// scratch directory.
-    pub fn lens_read_only(mut self) -> Self {
-        self.lens_reads_repo = true;
+    /// Admit lens questions. The operator asserts that everything this
+    /// host lets `codex exec` read (its read-only sandbox can read the
+    /// whole filesystem, not just the repository) is cleared for this
+    /// provider, e.g. because it runs in a dedicated container holding only
+    /// cleared data. Codex has no tool-less mode and nothing here can
+    /// confine its reads; without it every lens question is `Unavailable`.
+    pub fn lens_host_cleared(mut self) -> Self {
+        self.lens_host_cleared = true;
         self
     }
 
