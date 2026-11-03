@@ -223,6 +223,7 @@ members = [
     "crates/apps/rusty_orch/crates/orch-ollama",
     "crates/apps/rusty_orch/crates/orch-codex",
     "crates/apps/rusty_orch/crates/orch-claude",
+    "crates/apps/rusty_orch/crates/orch-openai",
     "crates/apps/rusty_orch/crates/orch-store",
     "crates/apps/rusty_orch/crates/rusty_orch",
     "crates/apps/rusty_key/crates/config",

@@ -1,0 +1,20 @@
+[package]
+name = "orch-openai"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Orchestrator adapter: one OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only (llama-swap in v0)."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+# `ClassifiedError`, so a down server falls back instead of failing the job.
+orch-dispatch = { workspace = true }
+# The workspace's one sans-IO HTTP/1.1 message layer and `Url`, driven over a
+# blocking `std::net::TcpStream` (owner answer L2 on #594). No TLS: https is
+# refused until the canonical blocking client exists.
+rusty_http = { workspace = true }
+# Request and response bodies. Foundation crate, serde off, as in orch-cli.
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }

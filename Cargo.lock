@@ -7165,6 +7165,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-openai"
+version = "0.1.0"
+dependencies = [
+ "orch-dispatch",
+ "rusty_http",
+ "rusty_json",
+]
+
+[[package]]
 name = "orch-store"
 version = "0.1.0"
 dependencies = [
