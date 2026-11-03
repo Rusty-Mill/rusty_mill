@@ -449,34 +449,15 @@ impl<S: Store> Board<S> {
                     other => other,
                 })?;
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
-            self.comment(card.id, by, &self.refusal_note(by, id, rev, code)?)?;
+            // Only this send is known to have written nothing: another send of the same
+            // decision shares the card and may commit before or after any re-read.
+            self.comment(
+                card.id,
+                by,
+                &format!("BBP refused this send ({code}). Another send of the same decision may still apply it, so check BBP's log before closing this card."),
+            )?;
         }
         Ok(InboxAnswer::Remediated { outcome, card })
-    }
-
-    /// What a refusal at the first step means for the card. A concurrent send of the
-    /// same decision shares it, so "nothing was dropped" holds only while the
-    /// escalation is still open at the rev this request read: then no write landed.
-    fn refusal_note(
-        &self,
-        by: &Actor,
-        id: &str,
-        rev: u64,
-        code: &str,
-    ) -> Result<String, BoardError> {
-        let untouched = self
-            .inbox(by)?
-            .iter()
-            .any(|i| i.escalation.id == id && i.escalation.rev == rev);
-        Ok(if untouched {
-            format!(
-                "BBP refused the decision ({code}) and the escalation is unchanged, so nothing was dropped: close this card."
-            )
-        } else {
-            format!(
-                "BBP refused this send ({code}), but the escalation has moved on, so another send may have applied the decision. Check BBP's log before closing this card."
-            )
-        })
     }
 
     /// An escalation that is no longer open: if this exact decision was sent from here
@@ -1332,8 +1313,9 @@ pub enum InboxAnswer {
     DryRun(DryRun),
     /// What happened.
     Outcome(Outcome),
-    /// It dropped acted-on work: the Remediate card, written before BBP was asked.
-    /// On a refusal at the first step nothing was dropped, and the card says so.
+    /// It could drop acted-on work: the Remediate card, written before BBP was asked.
+    /// On a refusal at the first step this send wrote nothing, but another send of the
+    /// same decision may have, so the card says to check BBP's log before closing it.
     Remediated {
         /// What happened.
         outcome: Outcome,

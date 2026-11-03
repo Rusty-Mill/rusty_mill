@@ -495,9 +495,10 @@ fn refused_storage(r: Result<Value, CallError>) -> String {
     }
 }
 
-/// BBP refused the drop outright: the card written ahead says nothing was dropped.
+/// BBP refused this send with the escalation untouched: the card still says only that
+/// this send was refused, since a pending send of the same decision may yet commit.
 #[test]
-fn a_refused_drop_marks_its_card_as_nothing_to_remediate() {
+fn a_refused_send_leaves_its_card_for_the_log_to_settle() {
     let fake = Arc::new(Fake {
         refuse_at: Some(0),
         ..Fake::with(vec![shipped()])
@@ -511,7 +512,8 @@ fn a_refused_drop_marks_its_card_as_nothing_to_remediate() {
     assert_eq!(out["remediated"]["outcome"]["Refused"]["step"], 0, "{out}");
     let card = &remediate_cards(&board)[0];
     let said = card.comments.last().map(|c| c.text.as_str()).unwrap_or("");
-    assert!(said.contains("nothing was dropped"), "{said}");
+    assert!(said.contains("check BBP's log"), "{said}");
+    assert!(!said.contains("nothing was dropped"), "{said}");
 }
 
 /// The record of a remediation is the card at its derived id, never a tag: a card
@@ -682,6 +684,6 @@ fn a_losing_send_does_not_close_the_winners_card() {
     call(&board, &owner(), "inbox_act", reject()).unwrap();
     let card = &remediate_cards(&board)[0];
     let said = card.comments.last().map(|c| c.text.as_str()).unwrap_or("");
-    assert!(said.contains("Check BBP's log"), "{said}");
-    assert!(!said.contains("close this card."), "{said}");
+    assert!(said.contains("check BBP's log"), "{said}");
+    assert!(!said.contains("nothing was dropped"), "{said}");
 }
