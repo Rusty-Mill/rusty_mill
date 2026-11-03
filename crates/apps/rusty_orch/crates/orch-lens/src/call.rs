@@ -10,6 +10,9 @@
 //! - A task ceiling ends the job before any call.
 //! - A reply using more output tokens than allowed is refused as
 //!   `Permanent`; its cost is still settled.
+//! - The meter is saved after every reservation, before the provider is
+//!   asked, and again after it settles. A reservation that cannot be saved
+//!   is released and ends the job: no call goes out unrecorded.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +51,8 @@ pub enum End {
     Stopped(Stop),
     /// Every provider was passed over.
     Exhausted,
+    /// A reservation could not be saved; it was released, nothing was asked.
+    Unsaved(String),
 }
 
 /// A job's call: the providers passed over, and how it ended.
@@ -55,6 +60,9 @@ pub enum End {
 pub struct Called {
     pub passed: Vec<(AgentId, String)>,
     pub end: End,
+    /// A settlement that could not be saved. The saved reservation then
+    /// settles at its worst case on restart; the shell should stop.
+    pub unsaved: Option<String>,
 }
 
 /// What a call is billed to and sized by: the task, the configured
@@ -63,6 +71,8 @@ pub struct Ctx<'a> {
     pub task: &'a str,
     pub providers: &'a BTreeMap<AgentId, Provider>,
     pub meter: &'a mut Meter,
+    /// Persists the meter; called after each reserve and each settle.
+    pub save: &'a mut dyn FnMut(&Meter) -> Result<(), String>,
 }
 
 /// Run `job` with `parts` (its phase and suffix are taken from the job).
@@ -74,14 +84,21 @@ pub fn call(job: &Job, parts: &Parts<'_>, mut ctx: Ctx<'_>, models: &mut dyn Mod
     };
     let mut passed = Vec::new();
     let mut experiment = false;
+    let mut unsaved = None;
     for &id in &job.providers {
-        match attempt(job, &parts, id, &mut ctx, models) {
+        match attempt(job, &parts, id, &mut ctx, models, &mut unsaved) {
             Step::Pass(reason) => passed.push((id, reason)),
             Step::Experiment => {
                 experiment = true;
                 passed.push((id, Stop::Experiment.to_string()));
             }
-            Step::End(end) => return Called { passed, end },
+            Step::End(end) => {
+                return Called {
+                    passed,
+                    end,
+                    unsaved,
+                }
+            }
         }
     }
     let end = if experiment {
@@ -89,7 +106,11 @@ pub fn call(job: &Job, parts: &Parts<'_>, mut ctx: Ctx<'_>, models: &mut dyn Mod
     } else {
         End::Exhausted
     };
-    Called { passed, end }
+    Called {
+        passed,
+        end,
+        unsaved,
+    }
 }
 
 enum Step {
@@ -104,6 +125,7 @@ fn attempt(
     id: AgentId,
     ctx: &mut Ctx<'_>,
     models: &mut dyn Models,
+    unsaved: &mut Option<String>,
 ) -> Step {
     let providers = ctx.providers;
     let Some(provider) = providers.get(&id) else {
@@ -123,11 +145,20 @@ fn attempt(
     };
     let bytes = (prefix.len() + body.len()) as u64;
     let held = worst_case(bytes, MAX_OUTPUT_TOKENS, &provider.price);
-    let meter = &mut *ctx.meter;
-    let ticket = match meter.reserve(ctx.task, held) {
+    let ticket = match ctx.meter.reserve(ctx.task, held) {
         Ok(t) => t,
         Err(Stop::Experiment) => return Step::Experiment,
         Err(stop) => return Step::End(End::Stopped(stop)),
+    };
+    if let Err(e) = (ctx.save)(ctx.meter) {
+        ctx.meter.release(ticket);
+        return Step::End(End::Unsaved(e));
+    }
+    let settle = |amount: u64| {
+        ctx.meter.settle(ticket, amount);
+        if let Err(e) = (ctx.save)(ctx.meter) {
+            unsaved.get_or_insert(e);
+        }
     };
     let question = Question {
         prefix,
@@ -137,7 +168,7 @@ fn attempt(
     };
     match model.ask(&question) {
         Ok(answer) => {
-            meter.settle(ticket, cost(&answer.usage, &provider.price));
+            settle(cost(&answer.usage, &provider.price));
             if answer.usage.output_tokens > u64::from(MAX_OUTPUT_TOKENS) {
                 let error = ClassifiedError::Permanent(AgentError(format!(
                     "reply used {} output tokens, over {MAX_OUTPUT_TOKENS}",
@@ -154,13 +185,13 @@ fn attempt(
             })
         }
         Err(ClassifiedError::Unavailable(e)) => {
-            meter.settle(ticket, 0);
+            settle(0);
             Step::Pass(format!("unavailable: {e}"))
         }
         // Usage is unknown: settle the worst case, so a restart errs
         // toward stopping.
         Err(error) => {
-            meter.settle(ticket, held);
+            settle(held);
             Step::End(End::Failed {
                 provider: id,
                 error,
@@ -316,11 +347,16 @@ mod tests {
         meter: Meter,
     }
 
-    fn run(
+    fn run(job: &Job, cfg: &BTreeMap<AgentId, Provider>, meter: Meter, fakes: Fakes) -> Run {
+        run_saving(job, cfg, meter, fakes, &mut |_| Ok(()))
+    }
+
+    fn run_saving(
         job: &Job,
         cfg: &BTreeMap<AgentId, Provider>,
         mut meter: Meter,
         mut fakes: Fakes,
+        save: &mut dyn FnMut(&Meter) -> Result<(), String>,
     ) -> Run {
         let c = card(vec![item(
             20,
@@ -342,6 +378,7 @@ mod tests {
             task: T,
             providers: cfg,
             meter: &mut meter,
+            save,
         };
         let called = call(job, &parts, ctx, &mut fakes);
         Run {
@@ -507,5 +544,59 @@ mod tests {
         );
         assert!(q.body.contains("Look harder."), "{}", q.body);
         assert_eq!(q.max_output_tokens, MAX_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn the_reservation_is_saved_before_the_provider_is_asked() {
+        let cfg = providers(&[("paid", provider(32_768, PAID))]);
+        let fakes = Fakes::new(vec![("paid", vec![answer(10)])]);
+        let mut held = Vec::new();
+        let r = run_saving(
+            &job(&["paid"]),
+            &cfg,
+            meter(100 * USD, 10),
+            fakes,
+            &mut |m| {
+                held.push((m.reserved(), m.calls(T)));
+                Ok(())
+            },
+        );
+        assert!(matches!(r.called.end, End::Answered { .. }));
+        assert_eq!(held.len(), 2, "after reserve and after settle");
+        assert!(
+            held[0].0 > 0 && held[0].1 == 0,
+            "held, not yet a call: {held:?}"
+        );
+        assert_eq!(held[1], (0, 1), "settled");
+        assert_eq!(r.called.unsaved, None);
+    }
+
+    #[test]
+    fn an_unsaved_reservation_is_released_and_nothing_is_asked() {
+        let cfg = providers(&[("a", provider(32_768, FREE)), ("b", provider(32_768, FREE))]);
+        let fakes = Fakes::new(vec![("a", vec![answer(10)]), ("b", vec![answer(10)])]);
+        let r = run_saving(&job(&["a", "b"]), &cfg, meter(USD, 10), fakes, &mut |_| {
+            Err("disk full".to_owned())
+        });
+        assert_eq!(r.called.end, End::Unsaved("disk full".to_owned()));
+        assert!(r.fakes.asked("a").is_empty() && r.fakes.asked("b").is_empty());
+        assert_eq!((r.meter.reserved(), r.meter.calls(T)), (0, 0));
+    }
+
+    #[test]
+    fn an_unsaved_settlement_keeps_the_answer_and_is_reported() {
+        let cfg = providers(&[("a", provider(32_768, FREE))]);
+        let fakes = Fakes::new(vec![("a", vec![answer(10)])]);
+        let mut n = 0;
+        let r = run_saving(&job(&["a"]), &cfg, meter(USD, 10), fakes, &mut |_| {
+            n += 1;
+            if n == 1 {
+                Ok(())
+            } else {
+                Err("disk full".to_owned())
+            }
+        });
+        assert!(matches!(r.called.end, End::Answered { .. }));
+        assert_eq!(r.called.unsaved, Some("disk full".to_owned()));
     }
 }
