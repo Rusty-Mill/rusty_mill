@@ -190,6 +190,18 @@ fn ui_is_served_without_token_but_requires_allowed_host() {
 }
 
 #[test]
+fn the_inbox_path_serves_the_same_page() {
+    let addr = start(Some("tok"));
+    let (status, body) = send(addr, "GET", "/inbox", &[], "");
+    assert_eq!(status, 200);
+    assert!(body.contains("id=\"decide\""));
+    assert_eq!(
+        send(addr, "GET", "/inbox", &[("Host", "evil.com")], "").0,
+        403
+    );
+}
+
+#[test]
 fn mcp_requires_token_and_lists_tools() {
     let addr = start(Some("tok"));
     let call = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;

@@ -352,7 +352,8 @@ impl SharedHandler for Web {
         if let Some(response) = oauth.and_then(|e| rusty_oauth_server::serve::handle(e, request)) {
             return response;
         }
-        if path == "/" && request.method == &Method::Get {
+        // `/inbox` is the same page, opened on the decisions view.
+        if matches!(path, "/" | "/inbox") && request.method == &Method::Get {
             // The page holds no data; it reads the token from the URL fragment.
             return Response::stream(
                 "text/html; charset=utf-8",
