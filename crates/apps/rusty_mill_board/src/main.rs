@@ -24,6 +24,7 @@ use std::time::Duration;
 use clap::Parser;
 use rusty_mcp_server::{HttpConfig, HttpHandler, serve_stdio};
 use rusty_mill_board::api::Shared;
+use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::mcp;
@@ -162,6 +163,13 @@ struct Cli {
     /// Accepted Host names (HTTP only).
     #[arg(long = "allowed-host", env = "MILL_BOARD_ALLOWED_HOSTS", value_delimiter = ',', default_values_t = ["127.0.0.1".to_owned(), "localhost".to_owned(), "[::1]".to_owned()])]
     allowed_hosts: Vec<String>,
+    /// The orch host's `bbp` binary, for the decision inbox (#595). Mill Board runs it
+    /// to read escalations and to act on them; it never reads BBP files itself.
+    #[arg(long, env = "MILL_BOARD_BBP_BIN", requires = "bbp_root")]
+    bbp_bin: Option<PathBuf>,
+    /// The BBP task directory `bbp` serves (its `--dir`).
+    #[arg(long, env = "MILL_BOARD_BBP_ROOT", requires = "bbp_bin")]
+    bbp_root: Option<PathBuf>,
 }
 
 /// The settings files: the directory's, each overridden by its own flag.
@@ -357,6 +365,9 @@ fn run(cli: Cli) -> Result<(), String> {
         .with_workflow(workflow);
     if let Some(path) = &files.projects {
         board = board.with_projects_sink(projects_sink(path.clone()));
+    }
+    if let (Some(bin), Some(root)) = (&cli.bbp_bin, &cli.bbp_root) {
+        board = board.with_escalations(Arc::new(BbpCli::new(bin.clone(), root.clone())));
     }
     let board: Arc<Shared> = Arc::new(board);
     // Cards made before numbering, or directly in rusty_tick, get their numbers now. A store

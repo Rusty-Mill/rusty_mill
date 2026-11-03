@@ -3,7 +3,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Mutex, PoisonError, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,7 @@ use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
     MoveRules, import_id, text_hash,
 };
+use crate::inbox::{Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
 use crate::projects::Projects;
 use crate::roadmap::{Roadmap, roadmap};
@@ -99,6 +100,8 @@ pub struct Board<S> {
     /// Uniqueness does not rest on it: the store reserves each number (`Store::reserve_number`).
     numbering: Mutex<()>,
     clock: fn() -> i64,
+    /// The decision inbox's source (#595); `None` when no BBP host is configured.
+    escalations: Option<Arc<dyn Escalations>>,
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -131,6 +134,7 @@ impl<S: Store> Board<S> {
             projects_sink: None,
             numbering: Mutex::new(()),
             clock,
+            escalations: None,
         }
     }
 
@@ -158,6 +162,13 @@ impl<S: Store> Board<S> {
             .workflow
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = workflow;
+        self
+    }
+
+    /// Serve the decision inbox from `source`.
+    #[must_use]
+    pub fn with_escalations(mut self, source: Arc<dyn Escalations>) -> Self {
+        self.escalations = Some(source);
         self
     }
 
@@ -345,6 +356,83 @@ impl<S: Store> Board<S> {
             .into_iter()
             .map(|c| placed(flow, c))
             .collect())
+    }
+
+    /// The open escalations of the BBP tasks linked from cards `by` may see,
+    /// each with its card (design #595 §6). Needs admin: the inbox is the owner's.
+    ///
+    /// # Errors
+    /// [`BoardError::Forbidden`] without admin, [`BoardError::Refused`] when
+    /// no BBP host is configured, and storage or host failures.
+    pub fn inbox(&self, by: &Actor) -> Result<Vec<InboxItem>, BoardError> {
+        let source = self.inbox_source(by)?;
+        let cards: BTreeMap<String, Card> = self
+            .cards()?
+            .into_iter()
+            .filter(|c| by.may_work_in(&c.project))
+            .filter_map(|c| Some((c.execution.as_ref()?.bbp_task.clone(), c)))
+            .collect();
+        let tasks: Vec<String> = cards.keys().cloned().collect();
+        let open = source.open(&tasks).map_err(inbox_error)?;
+        Ok(open
+            .into_iter()
+            .map(|e| InboxItem {
+                card: cards.get(&e.task).map(InboxCard::of),
+                label: e.reason.label(),
+                escalation: e,
+            })
+            .collect())
+    }
+
+    /// Preview (`dry_run`) or take `action` on escalation `id`, read at `rev`.
+    /// The escalation is re-read first: one that has closed, or moved past
+    /// `rev`, is refused before anything is sent, and BBP fences the rest.
+    ///
+    /// # Errors
+    /// As [`Board::inbox`], plus [`BoardError::Refused`] for a closed or stale
+    /// escalation or an action that does not fit it.
+    pub fn inbox_act(
+        &self,
+        by: &Actor,
+        id: &str,
+        rev: u64,
+        action: &Action,
+        dry_run: bool,
+    ) -> Result<InboxAnswer, BoardError> {
+        let source = self.inbox_source(by)?;
+        let e: Escalation = self
+            .inbox(by)?
+            .into_iter()
+            .map(|i| i.escalation)
+            .find(|e| e.id == id)
+            .ok_or_else(|| BoardError::Refused(format!("no open escalation {id}")))?;
+        if e.rev != rev {
+            return Err(BoardError::Refused(format!(
+                "stale_rev: {id} is at rev {}, not {rev}; re-read the inbox",
+                e.rev
+            )));
+        }
+        if dry_run {
+            return source
+                .preview(&e, action)
+                .map(InboxAnswer::DryRun)
+                .map_err(inbox_error);
+        }
+        source
+            .act(&e, action, &answerer(&by.name))
+            .map(InboxAnswer::Outcome)
+            .map_err(inbox_error)
+    }
+
+    fn inbox_source(&self, by: &Actor) -> Result<&Arc<dyn Escalations>, BoardError> {
+        if !by.caps.contains(&Capability::Admin) {
+            return Err(BoardError::Forbidden(Capability::Admin));
+        }
+        self.escalations.as_ref().ok_or_else(|| {
+            BoardError::Refused(
+                "the inbox has no BBP host: start with --bbp-bin and --bbp-root".into(),
+            )
+        })
     }
 
     /// All cards, optionally one column only.
@@ -1014,4 +1102,74 @@ fn waiting_on_deps(cards: &[Card]) -> BTreeSet<Uuid> {
         .filter(|c| c.deps.iter().any(|d| open.contains(d)))
         .map(|c| c.id)
         .collect()
+}
+
+/// One inbox entry: the escalation, its reason in plain words, and its card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InboxItem {
+    /// As BBP reports it.
+    #[serde(flatten)]
+    pub escalation: Escalation,
+    /// The reason in plain words.
+    pub label: &'static str,
+    /// The card whose execution owns the BBP task.
+    pub card: Option<InboxCard>,
+}
+
+/// The board card an escalation belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InboxCard {
+    /// Card id.
+    pub id: Uuid,
+    /// Card number.
+    pub number: Option<u64>,
+    /// Card title.
+    pub title: String,
+}
+
+impl InboxCard {
+    fn of(c: &Card) -> Self {
+        Self {
+            id: c.id,
+            number: c.number,
+            title: c.title.clone(),
+        }
+    }
+}
+
+/// What an inbox action returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxAnswer {
+    /// What it would write; nothing was.
+    DryRun(DryRun),
+    /// What happened.
+    Outcome(Outcome),
+}
+
+fn inbox_error(e: InboxError) -> BoardError {
+    match e {
+        InboxError::Host(why) => BoardError::Storage(format!("bbp host: {why}")),
+        other => BoardError::Refused(other.to_string()),
+    }
+}
+
+/// The answerer label BBP records in the op id: 1 to 32 of `[A-Za-z0-9._-]`.
+fn answerer(actor: &str) -> String {
+    let label: String = actor
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(32)
+        .collect();
+    if label.is_empty() {
+        "board".to_owned()
+    } else {
+        label
+    }
 }
