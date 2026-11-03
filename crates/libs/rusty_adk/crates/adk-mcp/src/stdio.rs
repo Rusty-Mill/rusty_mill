@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use adk_core::{AdkError, Result};
 use rusty_mcp_server::{serve_lines, StdioConfig};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use rusty_tokio::sync::mpsc;
 
 use crate::line_cap::{cap_error, LineCapped, MAX_LINE_BYTES};
 use crate::server::McpServer;
@@ -27,7 +27,7 @@ const BUFFERED_CHUNKS: usize = 8;
 
 /// Serves `server` over stdin and stdout until stdin closes.
 pub async fn serve_stdio(server: &McpServer) -> Result<()> {
-    serve_stream(server, tokio::io::stdin(), tokio::io::stdout()).await
+    serve_stream(server, rusty_tokio::io::stdin(), rusty_tokio::io::stdout()).await
 }
 
 /// Serves `server` over an arbitrary reader and writer, until the reader
@@ -58,7 +58,7 @@ where
     // Reader pump: ends at end of input, on a read error, or at the line cap;
     // dropping the reader then tells the peer to stop writing.
     let capped = LineCapped::new(reader, Arc::clone(&exceeded));
-    let pump_in = tokio::spawn(async move {
+    let pump_in = rusty_tokio::spawn(async move {
         let mut capped = capped;
         let mut buf = vec![0u8; CHUNK];
         loop {
@@ -74,7 +74,7 @@ where
     });
 
     // Writer pump: every chunk is written and flushed as it arrives.
-    let pump_out = tokio::spawn(async move {
+    let pump_out = rusty_tokio::spawn(async move {
         let mut writer = writer;
         while let Some(chunk) = out_rx.recv().await {
             if writer.write_all(&chunk).await.is_err() || writer.flush().await.is_err() {
@@ -87,7 +87,7 @@ where
         max_line_bytes: usize::try_from(MAX_LINE_BYTES).unwrap_or(usize::MAX),
         ..StdioConfig::default()
     };
-    let served = tokio::task::spawn_blocking(move || {
+    let served = rusty_tokio::spawn_blocking(move || {
         serve_lines(
             wire,
             BufReader::new(ChannelReader::new(in_rx)),

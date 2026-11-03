@@ -14,7 +14,7 @@
 //! # use adk_sessions::InMemorySessionService;
 //! # use adk_tools::FunctionTool;
 //! # use std::sync::Arc;
-//! # #[tokio::main]
+//! # #[rusty_tokio::main]
 //! # async fn main() -> adk_core::Result<()> {
 //! let weather = FunctionTool::new(
 //!     "get_weather",

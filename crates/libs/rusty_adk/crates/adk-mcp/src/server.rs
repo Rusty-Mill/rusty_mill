@@ -5,7 +5,7 @@
 //! owns only what is ADK-specific, running ADK tools against a session.
 //!
 //! `rusty_mcp_server`'s handlers block, while ADK tools are async, so each
-//! call runs the tool on the tokio runtime the transport was started on
+//! call runs the tool on the `rusty_tokio` runtime the transport was started on
 //! (stdio, HTTP and [`router`](crate::router) record it).
 
 use std::sync::{Arc, OnceLock};
@@ -16,8 +16,8 @@ use rusty_mcp_server::proto::{
     CallToolParams, CallToolResult, ErrorCode, ErrorData, Tool as McpTool,
 };
 use rusty_mcp_server::{BuildError, CallContext, Server, ToolSource};
+use rusty_tokio::runtime::Handle;
 use serde_json::{Map, Value};
-use tokio::runtime::Handle;
 
 use crate::protocol::{from_wire, supported_versions, tool_entry, tool_result};
 
@@ -74,11 +74,11 @@ impl McpServer {
         &self.tools
     }
 
-    /// Records the current tokio runtime as the one tool calls run on (the
-    /// first one recorded wins). Does nothing outside a runtime.
+    /// Records the current `rusty_tokio` runtime as the one tool calls run
+    /// on (the first one recorded wins). Does nothing outside a runtime.
     #[cfg_attr(not(any(feature = "stdio", feature = "http")), allow(dead_code))]
     pub(crate) fn bind_runtime(&self) {
-        if let Ok(handle) = Handle::try_current() {
+        if let Some(handle) = Handle::try_current() {
             let _ = self.runtime.set(handle);
         }
     }
@@ -173,15 +173,10 @@ impl ToolSource for McpServer {
                 )))
             }
         };
-        let Some(handle) = self
-            .runtime
-            .get()
-            .cloned()
-            .or_else(|| Handle::try_current().ok())
-        else {
+        let Some(handle) = self.runtime.get().cloned().or_else(Handle::try_current) else {
             return Some(Err(ErrorData::new(
                 ErrorCode::INTERNAL_ERROR,
-                "no tokio runtime to run the tool on",
+                "no rusty_tokio runtime to run the tool on",
             )));
         };
         Some(handle.block_on(self.call(&call.name, args)))

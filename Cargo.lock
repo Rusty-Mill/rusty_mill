@@ -246,7 +246,6 @@ dependencies = [
  "rusty_mcp_server",
  "rusty_tokio",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -5957,8 +5956,8 @@ name = "mcp-tool-server"
 version = "0.1.0"
 dependencies = [
  "rusty-adk",
+ "rusty_tokio",
  "serde_json",
- "tokio",
 ]
 
 [[package]]

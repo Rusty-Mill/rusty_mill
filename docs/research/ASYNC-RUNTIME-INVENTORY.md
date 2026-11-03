@@ -144,14 +144,15 @@ run each query on a thread and return the result on a `rusty_tokio`
 oneshot. Streams cross into tier C at two places, both through
 `rusty_stream::Compat`: the model stream from `adk-models` (in
 `adk-agents`) and the streaming client of `rusty_a2a` (in `adk-a2a`).
-Four crates still run on tokio because they drive a tier C crate:
+Three crates still run on tokio because they drive a tier C crate:
 - `adk-agui` and `agui-agent-server`: `AdkAgent` drives runs on the runtime
   it is given, and the live models in `adk-models` use reqwest. A loopback
   test covers this.
 - `weather-agent`: it uses the same live models.
-- `mcp-tool-server`: it uses the stdio transport of `adk-mcp`.
 
-They move when `adk-models` or `adk-mcp` moves.
+They move when `adk-models` moves. `adk-mcp` and `mcp-tool-server` moved to
+`rusty_tokio` in card #719: tool calls now run on the caller's `rusty_tokio`
+runtime, and `serve_stream` takes `rusty_tokio::io` readers and writers.
 
 #911 tier A (2026-10-25): `skillopt-core`, `agentgateway-agui` and
 `rusty_mill_board` are on `rusty_tokio`, and `rk-mcp`'s tests are. `rk-mcp`
@@ -284,7 +285,7 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `adk-agui` | `libs/rusty_adk/crates/adk-agui` | f t | 2 | f::StreamExt×1, t::runtime::Handle×1, t::runtime::Runtime×1 | — | adk-graph, adk-runner | G1 G7 | B |
 | `adk-graph` | `libs/rusty_adk/crates/adk-graph` | as f t tt(dev) | 4 | t::test×21, t::sync::mpsc×2, f::future::BoxFuture×1, f::StreamExt×1, f::stream::BoxStream×1, as::try_stream!×1, +1 | — | — | G7 | B |
 | `adk-macros` | `libs/rusty_adk/crates/adk-macros` | t(dev) | 1 | t::test×7 | — | — | — | A |
-| `adk-mcp` | `libs/rusty_adk/crates/adk-mcp` | t | 7 | t::test×7, t::spawn×6, t::io::duplex×4, t::io::AsyncReadExt×3, t::io::AsyncWriteExt×3, t::io::AsyncRead×2, +18 | axum | adk-tools, rusty-mcp-client, rusty_mcp_axum, rusty_mcp_server | G1 G9 | C |
+| `adk-mcp` | `libs/rusty_adk/crates/adk-mcp` | — | 0 | — (on `rusty_tokio`, card #719) | — | adk-tools, rusty-mcp-client, rusty_mcp_axum, rusty_mcp_server | — | done |
 | `adk-models` | `libs/rusty_adk/crates/adk-models` | f t tt(dev) | 2 | t::test×6, f::stream×2, f::stream::BoxStream×2, f::stream::StreamExt×1 | reqwest | — | G7 G9 | C |
 | `adk-runner` | `libs/rusty_adk/crates/adk-runner` | as f t(dev) tt(dev) | 1 | t::test×8, f::stream::BoxStream×1, f::StreamExt×1, as::try_stream!×1 | — | adk-agents, adk-graph | G7 | B |
 | `adk-sessions` | `libs/rusty_adk/crates/adk-sessions` | t tt(dev) | 5 | t::test×52, t::task::spawn_blocking×1 | — | — | G1 | A |
@@ -292,7 +293,7 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `rusty-adk` | `libs/rusty_adk/crates/rusty-adk` | f(dev) t(dev) tt(dev) | 1 | t::test×3, f::StreamExt×1 | — | adk-a2a, adk-agents, adk-agui, adk-graph, adk-macros, adk-mcp, adk-models, adk-runner, adk-sessions, adk-tools | G7 | B |
 | `a2a-agent-server` | `libs/rusty_adk/examples/a2a-agent-server` | t | 1 | t::main×1, t::net::TcpListener::bind×1 | axum | adk-a2a, rusty-adk | G1 G9 | C |
 | `agui-agent-server` | `libs/rusty_adk/examples/agui-agent-server` | t | 1 | t::runtime::Runtime::new×1 | — | rusty-adk | G1 | A |
-| `mcp-tool-server` | `libs/rusty_adk/examples/mcp-tool-server` | t | 1 | t::main×1 | — | rusty-adk | — | A |
+| `mcp-tool-server` | `libs/rusty_adk/examples/mcp-tool-server` | — | 0 | — (`#[rusty_tokio::main]`, card #719) | — | rusty-adk | — | done |
 | `weather-agent` | `libs/rusty_adk/examples/weather-agent` | f t | 1 | f::StreamExt×1, t::main×1 | — | rusty-adk | G7 | B |
 | `rusty-db-core` | `libs/storage/rusty_db/crates/rusty-db-core` | t | 1 | t::time::timeout×1 (`with_timeout`; every caller runs sqlx on tokio) | — | — | G9 (via drivers) | C; streams on `rusty_stream` (#909) |
 | `rusty-db-mysql` | `libs/storage/rusty_db/crates/rusty-db-mysql` | — | 0 | — (streams on `rusty_stream`, sqlx bridged by `Compat`, #909) | sqlx | rusty-db-core | G9 | C |
