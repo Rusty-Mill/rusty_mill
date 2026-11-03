@@ -44,6 +44,7 @@ pub struct CodexAgent<C = StdCommand> {
     model: Option<String>,
     stop: StopRule,
     pub(crate) lens_reads_repo: bool,
+    pub(crate) lens_no_overage: bool,
     runner: C,
 }
 
@@ -63,6 +64,7 @@ impl<C: CommandRunner> CodexAgent<C> {
             model: None,
             stop: StopRule::Checkpoint,
             lens_reads_repo: false,
+            lens_no_overage: false,
             runner,
         }
     }
@@ -92,6 +94,15 @@ impl<C: CommandRunner> CodexAgent<C> {
     /// scratch directory.
     pub fn lens_read_only(mut self) -> Self {
         self.lens_reads_repo = true;
+        self
+    }
+
+    /// Admit lens questions. The operator asserts, after checking the
+    /// account, that usage beyond the plan (credits) is disabled, so a
+    /// call can add no charge. Nothing here can verify that; without it
+    /// every lens question is `Unavailable`.
+    pub fn lens_no_overage(mut self) -> Self {
+        self.lens_no_overage = true;
         self
     }
 

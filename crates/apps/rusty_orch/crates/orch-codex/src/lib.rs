@@ -11,7 +11,8 @@
 //! scrubbed from the environment on every run.
 //!
 //! [`CodexAgent`] also serves the lens runner's [`orch_lens::Model`]
-//! (#594), on a ChatGPT subscription login only ([`LOGIN_ARGV`]): prefix
+//! (#594), only with the operator's no-overage assertion
+//! ([`CodexAgent::lens_no_overage`]) and a ChatGPT login ([`LOGIN_ARGV`]): prefix
 //! and body on stdin, measured usage from the `--json` events, the reply
 //! checked by [`orch_lens::parse`]. `codex exec` cannot bound its cost
 //! before the call, so it is never priced per token. A lens question runs in an empty

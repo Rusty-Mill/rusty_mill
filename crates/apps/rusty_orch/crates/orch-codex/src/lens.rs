@@ -1,8 +1,11 @@
 //! The lens runner's [`Model`] port over `codex exec` (#594).
 //!
-//! Admitted only as a flat-rate subscription provider: the lens config
-//! refuses any nonzero price, and every question first proves the ChatGPT
-//! login. `codex exec` has no before-call bound on its agent loop.
+//! `codex exec` has no before-call bound on its agent loop, so this adapter
+//! is admitted only at zero price, and only where no call can add a charge.
+//! Two separate gates, both fail closed: the operator's assertion that the
+//! account cannot bill beyond its plan ([`CodexAgent::lens_no_overage`]),
+//! and a ChatGPT login on every question. The login check establishes the
+//! auth method, not billing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,6 +52,12 @@ impl<C: CommandRunner> Model for CodexAgent<C> {
     /// read-only lens and an empty scratch directory otherwise. A reply
     /// that does not pass [`parse`] is `Permanent`.
     fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
+        if !self.lens_no_overage {
+            return Err(ClassifiedError::Unavailable(AgentError(
+                "codex: lens questions need the operator's no-overage assertion (lens_no_overage)"
+                    .to_owned(),
+            )));
+        }
         self.probe_subscription()?;
         let scratch = LensScratch::create().map_err(ClassifiedError::Transient)?;
         let cwd = if self.lens_reads_repo {

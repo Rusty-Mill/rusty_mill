@@ -72,7 +72,9 @@ fn replying(reply: &str, events: &str) -> Probed {
 }
 
 fn agent(fake: Probed) -> CodexAgent<Probed> {
-    CodexAgent::with_runner("/repo", fake).timeout(Duration::from_secs(30))
+    CodexAgent::with_runner("/repo", fake)
+        .timeout(Duration::from_secs(30))
+        .lens_no_overage()
 }
 
 fn arg_after<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
@@ -114,6 +116,15 @@ fn a_question_runs_in_a_scratch_dir_and_returns_posts_and_usage() {
     assert_eq!(*timeout, Duration::from_secs(30));
     let scrubbed = a.runner().run.inner.scrubbed.lock().expect("lock");
     assert_eq!(scrubbed[0], SCRUBBED_ENV);
+}
+
+#[test]
+fn without_the_no_overage_assertion_nothing_runs() {
+    let mut a = CodexAgent::with_runner("/repo", replying(r#"{"posts":[]}"#, EVENTS));
+    let err = a.ask(&question()).expect_err("refused");
+    assert!(matches!(err, ClassifiedError::Unavailable(_)), "{err:?}");
+    assert!(a.runner().probes.lock().expect("lock").is_empty());
+    assert_eq!(runs(&a), 0);
 }
 
 #[test]
