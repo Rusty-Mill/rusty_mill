@@ -45,6 +45,64 @@ pub(crate) fn theme(change: &ThemeChange) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// What `terminal.clear` feeds a terminal, as `clear` writes it: the
+/// cursor home, the screen erased (ED 2), then the scrollback (ED 3).
+/// Nothing asks the terminal anything, so nothing is answered.
+pub(crate) const CLEAR: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
+
+/// The mouse tracking DEC mode `base` turns on, as `terminal.modes` names
+/// it.
+fn mouse_tracking(base: usize) -> &'static str {
+    match base {
+        1000 => "click",
+        1002 => "drag",
+        1003 => "any",
+        _ => "off",
+    }
+}
+
+/// The mouse report encodings in `extended`, as `terminal.modes` names
+/// them: `default` when none is on.
+fn mouse_encoding(extended: u8) -> String {
+    let names: Vec<&str> = [(1, "utf8"), (2, "sgr"), (4, "urxvt"), (8, "sgr-pixels")]
+        .into_iter()
+        .filter(|(bit, _)| extended & bit != 0)
+        .map(|(_, name)| name)
+        .collect();
+    match names.is_empty() {
+        true => "default".to_owned(),
+        false => names.join(","),
+    }
+}
+
+/// `terminal.modes`: the modes `grid`'s program set, one `NAME<TAB>VALUE`
+/// line each.
+pub(crate) fn modes(grid: &Grid) -> String {
+    let flag = |on: bool| if on { "on" } else { "off" }.to_owned();
+    let mouse = grid.mouse_modes;
+    let lines = [
+        ("app-cursor-keys", flag(grid.app_cursor_keys)),
+        ("app-keypad", flag(grid.app_keypad)),
+        ("bracketed-paste", flag(grid.bracketed_paste)),
+        ("focus-reporting", flag(grid.focus_reporting)),
+        ("mouse", mouse_tracking(mouse.base).to_owned()),
+        ("mouse-encoding", mouse_encoding(mouse.extended)),
+        ("alt-screen", flag(grid.in_alt_screen())),
+        ("alt-scroll", flag(grid.alt_scroll)),
+        ("insert", flag(grid.insert_mode())),
+        ("cursor-visible", flag(grid.cursor_visible)),
+        ("cursor-blink", flag(grid.cursor_blink)),
+        ("report-color-scheme", flag(grid.report_color_scheme)),
+        ("win32-input", flag(grid.win32_input)),
+        ("kitty-keyboard", grid.kitty_keyboard_flags().to_string()),
+    ];
+    lines
+        .iter()
+        .map(|(name, value)| format!("{name}\t{value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// What `terminal.format` reads, and how.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Capture {
@@ -332,6 +390,103 @@ mod tests {
             assert_eq!(grid.title, "", "{stuck:?}: the string was not acted on");
             assert!(parser.take_responses().is_empty(), "{stuck:?}");
         }
+    }
+
+    /// `terminal.modes` as a map from name to value.
+    fn mode_map(grid: &Grid) -> Vec<(String, String)> {
+        modes(grid)
+            .lines()
+            .map(|l| {
+                let (name, value) = l.split_once('\t').unwrap_or((l, ""));
+                (name.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    fn mode(grid: &Grid, name: &str) -> String {
+        let found = mode_map(grid).into_iter().find(|(n, _)| n == name);
+        found.map(|(_, v)| v).unwrap_or_else(|| panic!("no {name}"))
+    }
+
+    #[test]
+    fn modes_start_as_a_fresh_terminal_sets_them() {
+        let grid = Grid::new(20, 3);
+        let names: Vec<String> = mode_map(&grid).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            [
+                "app-cursor-keys",
+                "app-keypad",
+                "bracketed-paste",
+                "focus-reporting",
+                "mouse",
+                "mouse-encoding",
+                "alt-screen",
+                "alt-scroll",
+                "insert",
+                "cursor-visible",
+                "cursor-blink",
+                "report-color-scheme",
+                "win32-input",
+                "kitty-keyboard",
+            ]
+        );
+        assert_eq!(mode(&grid, "cursor-visible"), "on");
+        assert_eq!(mode(&grid, "bracketed-paste"), "off");
+        assert_eq!(mode(&grid, "mouse"), "off");
+        assert_eq!(mode(&grid, "mouse-encoding"), "default");
+        assert_eq!(mode(&grid, "kitty-keyboard"), "0");
+    }
+
+    #[test]
+    fn modes_follow_what_the_program_sets() {
+        let mut grid = Grid::new(20, 3);
+        let mut parser = AnsiParser::new();
+        parser.advance(
+            &mut grid,
+            b"\x1b[?1h\x1b=\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h\x1b[?1016h\
+              \x1b[?1049h\x1b[4h\x1b[?25l\x1b[>5u",
+        );
+        for (name, value) in [
+            ("app-cursor-keys", "on"),
+            ("app-keypad", "on"),
+            ("bracketed-paste", "on"),
+            ("focus-reporting", "on"),
+            ("mouse", "drag"),
+            ("mouse-encoding", "sgr,sgr-pixels"),
+            ("alt-screen", "on"),
+            ("insert", "on"),
+            ("cursor-visible", "off"),
+            ("kitty-keyboard", "5"),
+        ] {
+            assert_eq!(mode(&grid, name), value, "{name}");
+        }
+        parser.advance(&mut grid, b"\x1b[?1003h\x1b[?1002l\x1b[?1049l");
+        assert_eq!(mode(&grid, "mouse"), "any");
+        assert_eq!(mode(&grid, "alt-screen"), "off");
+    }
+
+    #[test]
+    fn a_clear_empties_the_screen_and_scrollback_and_keeps_modes() {
+        let mut grid = Grid::new(20, 3);
+        let mut parser = AnsiParser::new();
+        parser.advance(&mut grid, b"\x1b]0;kept\x07\x1b[?2004h");
+        for n in 0..10 {
+            parser.advance(&mut grid, format!("LINE{n}\r\n").as_bytes());
+        }
+        let all = Capture {
+            history: 1000,
+            ..Capture::default()
+        };
+        let before = format(&grid, all, usize::MAX).unwrap_or_default();
+        assert!(before.contains("LINE0"), "scrolled back: {before:?}");
+        parser.advance(&mut grid, CLEAR);
+        let screen = format(&grid, all, usize::MAX).unwrap_or_default();
+        assert!(!screen.contains("LINE"), "{screen:?}");
+        assert_eq!(grid.cursor, (0, 0));
+        assert!(grid.bracketed_paste);
+        assert_eq!(grid.title, "kept");
+        assert!(parser.take_responses().is_empty());
     }
 
     #[test]

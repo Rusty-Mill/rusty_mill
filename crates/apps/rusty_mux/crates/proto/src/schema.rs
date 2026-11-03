@@ -556,6 +556,9 @@ const fn capture(name: &'static str, doc: &'static str) -> Param {
 /// What the block methods that measure and change a terminal need.
 const TERMINAL_CONTROL: Features = Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL);
 
+/// What `terminal.modes` and `terminal.clear` need.
+const TERMINAL_MORE: Features = Features::BLOCK_CALL.union(Features::TERMINAL_MORE);
+
 /// An optional parameter of `terminal.set-theme`.
 const fn theme(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     Param {
@@ -1236,6 +1239,32 @@ pub static CATALOG: &[Method] = &[
             ThemeChange::from_args(a.0)?;
             block_call(req, a, "terminal.set-theme")
         },
+    },
+    Method {
+        name: "terminal.modes",
+        doc: "Read the terminal modes its program set, one per line as `NAME<TAB>VALUE`: \
+              `app-cursor-keys`, `app-keypad`, `bracketed-paste`, `focus-reporting`, \
+              `alt-screen`, `alt-scroll`, `insert`, `cursor-visible`, `cursor-blink`, \
+              `report-color-scheme` and `win32-input` are `on` or `off`; `mouse` is `off`, \
+              `click`, `drag` or `any`; `mouse-encoding` is `default` or a comma-separated \
+              list of `utf8`, `sgr`, `urxvt` and `sgr-pixels`; `kitty-keyboard` is the \
+              Kitty keyboard flags in effect, as a decimal number. Lines may be added; \
+              read them by name.",
+        params: &[BLOCK],
+        needs: TERMINAL_MORE,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.modes"),
+    },
+    Method {
+        name: "terminal.clear",
+        doc: "Clear the screen and its scrollback as `clear` does, the cursor going to the \
+              top left; modes, colours and the title stay. The program is not told, so \
+              its prompt comes back with its next output. Refused while the program is in \
+              the middle of an escape sequence. Needs the lease.",
+        params: &[BLOCK],
+        needs: TERMINAL_MORE,
+        returns: Returns::Nothing,
+        build: |req, a| block_call(req, a, "terminal.clear"),
     },
     Method {
         name: "close-block",

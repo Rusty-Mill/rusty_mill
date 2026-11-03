@@ -12,7 +12,8 @@
 //! Because each call has its own connection, the methods that only make
 //! sense within one (attaching, taking or giving back the lease, `sync`) are
 //! not tools. The methods that need the lease (`input`, `resize`,
-//! `terminal.send-keys`, `terminal.reset` and `terminal.set-theme`) attach
+//! `terminal.send-keys`, `terminal.reset`, `terminal.set-theme` and
+//! `terminal.clear`) attach
 //! and take it first in the same call, so they fail while someone else
 //! holds it.
 //!
@@ -45,9 +46,8 @@ enum Shape {
 fn shape(method: &Method) -> Shape {
     match method.name {
         "attach" | "detach" | "acquire-lease" | "release-lease" | "sync" => Shape::Connection,
-        "input" | "resize" | "terminal.send-keys" | "terminal.reset" | "terminal.set-theme" => {
-            Shape::Leased
-        }
+        "input" | "resize" | "terminal.send-keys" | "terminal.reset" | "terminal.set-theme"
+        | "terminal.clear" => Shape::Leased,
         _ => Shape::Plain,
     }
 }
@@ -90,7 +90,7 @@ fn tool(method: &Method) -> Tool {
 
 /// Behaviour hints: reads are read-only; closing, disconnecting another
 /// client, which ends its connection and frees its lease, and resetting a
-/// terminal, which clears its scrollback, are destructive.
+/// or clearing a terminal, which drops its scrollback, are destructive.
 /// `input` types into a shell, and `create-block` and `split-block` run
 /// any program they are given; each can delete data and reach any system,
 /// so all are destructive and open-world. The rest stays on the local server.
@@ -100,7 +100,7 @@ fn annotations(method: &Method) -> Value {
     let destructive = runs
         || method.name.starts_with("close-")
         || method.name.starts_with("disconnect-")
-        || method.name == "terminal.reset";
+        || matches!(method.name, "terminal.reset" | "terminal.clear");
     let hints: Map = [
         ("readOnlyHint", read_only),
         ("destructiveHint", destructive),
