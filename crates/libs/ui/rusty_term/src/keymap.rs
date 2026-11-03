@@ -323,8 +323,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_is_this_platforms_builtin_table() {
+        assert_eq!(Keymap::default(), Keymap::builtin(cfg!(windows)));
+    }
+
+    #[test]
     fn defaults_bind_the_builtin_shortcuts() {
-        let km = Keymap::default();
+        // The shared table; Windows adds plain Ctrl+C/Ctrl+V (tested below).
+        let km = Keymap::builtin(false);
         assert_eq!(
             km.action(Chord::new(true, true, false, Key::Char('c'))),
             Some(Action::Copy)
