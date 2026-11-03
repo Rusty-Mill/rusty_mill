@@ -180,17 +180,36 @@ pub struct Guard {
     pub protected: Vec<String>,
     pub touched: Vec<Touched>,
     pub claim: Option<MsgId>,
-    /// Set when the candidate leaves the task's baseline.
-    pub off_baseline: Option<Rejection>,
+    /// A refusal that holds in every state: the candidate leaves the task's
+    /// baseline, or names a diff not stored when `touched` was read.
+    pub refused: Option<Rejection>,
 }
 
 impl Guard {
     /// `Some` rejection when the candidate may not be stored in `st`.
     pub fn judge(&self, st: &TaskState) -> Option<Rejection> {
-        self.off_baseline
+        self.refused
             .clone()
             .or_else(|| verdict(st, &self.protected, &self.touched, self.claim))
     }
+}
+
+/// A refusal of `manifest` when one of its diffs is not stored in `st`. Its
+/// paths could not be read, and a diff stored at that id after the read
+/// (by another session) must not pass a guard built without it.
+pub fn unresolved(st: &TaskState, manifest: &Candidate) -> Option<Rejection> {
+    let missing: Vec<String> = manifest
+        .diffs
+        .iter()
+        .filter(|id| !st.artifacts.contains_key(id))
+        .map(|id| id.to_string())
+        .collect();
+    (!missing.is_empty()).then(|| {
+        Rejection::new(
+            Code::RefUnresolved,
+            format!("diffs not stored: {}", missing.join(", ")),
+        )
+    })
 }
 
 /// The paths each of `manifest`'s diffs touches. Diffs are read from
@@ -261,6 +280,44 @@ mod tests {
 
     fn globs() -> Vec<String> {
         vec!["tests/**".into(), "**/conftest.py".into()]
+    }
+
+    /// #597 review: a diff id missing when the guard was built stays refused
+    /// after another session stores a diff there, whose paths were never read.
+    #[test]
+    fn a_diff_missing_at_the_read_is_refused_in_every_later_state() {
+        let m = Candidate {
+            base: "a".repeat(40),
+            diffs: vec![ArtId(5)],
+            claim: None,
+            suite: Suite::Build,
+        };
+        let mut st = TaskState::new(TaskId::from("t"));
+        let guard = Guard {
+            protected: globs(),
+            touched: vec![t(5, &[])],
+            claim: None,
+            refused: unresolved(&st, &m),
+        };
+        assert!(guard.judge(&st).is_some_and(|r| r.code == Code::RefUnresolved));
+        st.artifacts.insert(
+            ArtId(5),
+            ArtifactRecord {
+                id: ArtId(5),
+                author: PrincipalId::from("b"),
+                kind: ArtifactKind::Diff,
+                blob: BlobRef {
+                    sha: Sha256::of(b"tests/core.rs"),
+                    len: 13,
+                },
+                payload: ArtifactPayload::Diff,
+                spec: None,
+                candidate: None,
+                run: None,
+            },
+        );
+        assert!(unresolved(&st, &m).is_none());
+        assert!(guard.judge(&st).is_some_and(|r| r.code == Code::RefUnresolved));
     }
 
     #[test]
