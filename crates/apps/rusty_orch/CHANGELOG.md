@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `orch-lens`: `call::call` runs one lens job over its providers in fallback order. It fits the context to each window, reserves the worst case on the meter and caps output at `MAX_OUTPUT_TOKENS`. `Unavailable`, an unfit context and the experiment ceiling (paid only) pass to the next provider; `Permanent`, `Transient` and task ceilings end the job.
 - `rusty_orch lens check <config> [--assertions <file>] [--repo <dir>]`: loads the lens config and the operator's assertions, builds every provider and reports which would be admitted, including an HTTP provider whose key variable is unset, without calling a model or inspecting a container.
 - `rusty_orch::lens::container`: under a container clearance, every Codex lens question first inspects the container through the runner's local rootless podman (`--remote=false`, remote-engine variables removed). It requires the exact asserted mounts, a read-only machine-id from a file the runner cannot change, no privilege, devices, added capabilities, shared namespaces or API-key environment. Codex then runs via `podman exec` by the checked id.
 - `rusty_orch::lens`: a `host_cleared` assertion may name the dedicated container a provider runs in, with its exact mounts. A machine-bound no-overage entry then counts only against the container's id, and a container clearance never grants Claude, which runs on the host. Codex stays unavailable under it until the container check lands.

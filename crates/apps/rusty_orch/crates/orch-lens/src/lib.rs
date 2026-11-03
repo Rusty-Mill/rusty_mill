@@ -5,6 +5,7 @@
 //! through the [`Model`] port and posts what comes back; everything it
 //! decides is decided here.
 //!
+//! - [`call`]: one job over its fallback order, metered before each ask.
 //! - [`port`]: the [`Model`] port, one stateless question per call.
 //! - [`post`]: the strict reply protocol every adapter applies ([`parse`]).
 //! - [`config`]: providers, data classes, ceilings and lenses, checked at load.
@@ -21,6 +22,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+pub mod call;
 pub mod card;
 pub mod class;
 pub mod config;
