@@ -178,6 +178,15 @@ fn provider(v: &Value) -> Result<Provider, String> {
             .ok_or("price: required (0 rates are allowed)")?,
     )
     .map_err(|e| format!("price.{e}"))?;
+    // No adapter bounds a call's cost before it is made (agentic CLI
+    // turns, unbounded chat-template tokens), so v0 admits only flat-rate
+    // and local providers. The meter stays for a bounded paid adapter.
+    if !price.is_free() {
+        return Err(
+            "price: v0 admits only zero rates; no adapter bounds a call's cost before it is made"
+                .to_owned(),
+        );
+    }
     let mut settings = m.clone();
     for k in ["kind", "max_class", "context_tokens", "price"] {
         settings.remove(k);
@@ -557,6 +566,13 @@ pub(crate) mod tests {
                   "price": {"input": 0, "output": 0, "cached_input": 0}}"#,
             r#", "context_tokens": 200000}"#,
             "providers.codex.price: required",
+        );
+        refused(
+            r#""context_tokens": 200000,
+                  "price": {"input": 0, "output": 0, "cached_input": 0}}"#,
+            r#""context_tokens": 200000,
+                  "price": {"input": 0, "output": 1, "cached_input": 0}}"#,
+            "providers.codex.price: v0 admits only zero rates",
         );
         refused(
             r#""claude": {"kind""#,

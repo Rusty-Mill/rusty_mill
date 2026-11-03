@@ -28,6 +28,10 @@ providers and posts.
   experiment, every task's settled and reserved spend, so tasks cannot
   overspend the experiment together; reservations bound the worst case
   (a token per prompt byte plus framing, at the dearer input rate).
+  That bound holds only if the provider honours it, and no v0 adapter can
+  promise that before a call (CLI agent loops, chat-template tokens), so
+  config refuses any nonzero rate: v0 runs flat-rate subscriptions and
+  local models, and the meter waits for a provider with a pre-call bound.
 - **A question** is an open claim with the domain `question` and no
   `answers`. BBP has no question flag, so orch reads it from the domain the
   intent gives it.
