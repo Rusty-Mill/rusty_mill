@@ -5,7 +5,7 @@ use std::path::Path;
 use rusty_mux_core::{Progress, Selection};
 use rusty_mux_proto::theme::{Colour, ThemeChange};
 use rusty_mux_status::Records;
-use rusty_term_core::{Cell, Grid, StatusSignal, WIDE_TRAILER};
+use rusty_term_core::{Cell, Grid, ShellPhase, StatusSignal, WIDE_TRAILER};
 
 use crate::style::Style;
 
@@ -101,6 +101,35 @@ pub(crate) fn modes(grid: &Grid) -> String {
         .map(|(name, value)| format!("{name}\t{value}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `terminal.shell`: what the block's shell is and does, one
+/// `NAME<TAB>VALUE` line each. `program` is what the block started and
+/// `activity` comes from the process table (see [`crate::process::activity`]);
+/// `phase` and `exit` come from the shell's OSC 133 marks in `grid`, and
+/// are `unknown` until it sends one, as a shell without that integration
+/// never does. The program is [`crate::process::escape`]d, so its path can
+/// add neither a field nor a line.
+pub(crate) fn shell(grid: &Grid, program: &str, activity: &str) -> String {
+    let phase = match grid.shell_phase() {
+        None => "unknown",
+        Some(ShellPhase::Prompt) => "prompt",
+        Some(ShellPhase::Running) => "running",
+        Some(ShellPhase::Finished) => "finished",
+    };
+    let exit = grid
+        .last_command_exit()
+        .map_or_else(|| "unknown".to_owned(), |code| code.to_string());
+    [
+        ("program", crate::process::escape(program)),
+        ("activity", activity.to_owned()),
+        ("phase", phase.to_owned()),
+        ("exit", exit),
+    ]
+    .iter()
+    .map(|(name, value)| format!("{name}\t{value}"))
+    .collect::<Vec<_>>()
+    .join("\n")
 }
 
 /// What `terminal.format` reads, and how.
@@ -464,6 +493,46 @@ mod tests {
         parser.advance(&mut grid, b"\x1b[?1003h\x1b[?1002l\x1b[?1049l");
         assert_eq!(mode(&grid, "mouse"), "any");
         assert_eq!(mode(&grid, "alt-screen"), "off");
+    }
+
+    /// The value of `terminal.shell`'s line `name`.
+    fn shell_line(grid: &Grid, name: &str) -> String {
+        let text = shell(grid, "/bin/sh", "idle");
+        let found = text
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{name}\t")));
+        found.unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn shell_reports_unknown_marks_until_the_shell_sends_one() {
+        let grid = Grid::new(20, 3);
+        let text = shell(&grid, "/bin/sh", "idle");
+        assert_eq!(
+            text,
+            "program\t/bin/sh\nactivity\tidle\nphase\tunknown\nexit\tunknown"
+        );
+    }
+
+    #[test]
+    fn shell_follows_osc_133_marks() {
+        let mut grid = Grid::new(20, 3);
+        let mut parser = AnsiParser::new();
+        parser.advance(&mut grid, b"\x1b]133;A\x07$ ");
+        assert_eq!(shell_line(&grid, "phase"), "prompt");
+        parser.advance(&mut grid, b"\x1b]133;C\x07");
+        assert_eq!(shell_line(&grid, "phase"), "running");
+        parser.advance(&mut grid, b"\x1b]133;D;127\x07");
+        assert_eq!(shell_line(&grid, "phase"), "finished");
+        assert_eq!(shell_line(&grid, "exit"), "127");
+    }
+
+    #[test]
+    fn shell_escapes_the_program() {
+        let grid = Grid::new(20, 3);
+        let text = shell(&grid, "/odd\tpath\nx", "busy");
+        assert_eq!(text.lines().count(), 4, "{text:?}");
+        assert!(text.starts_with("program\t/odd\\tpath\\nx\n"), "{text:?}");
     }
 
     #[test]

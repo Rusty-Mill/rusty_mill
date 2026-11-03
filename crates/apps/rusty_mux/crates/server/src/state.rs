@@ -82,7 +82,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::FOCUS)
     .union(Features::SESSION_NAMES)
     .union(Features::NAME_SESSION)
-    .union(Features::TERMINAL_MORE);
+    .union(Features::TERMINAL_MORE)
+    .union(Features::TERMINAL_SHELL);
 
 /// Fresh randomness to pick a generated session name with.
 fn name_seed() -> u64 {
@@ -114,6 +115,8 @@ pub(crate) enum Pending {
 struct BlockRt {
     pty: Rc<Pty>,
     process: Process,
+    /// The program the block started, as configured, for `terminal.shell`.
+    program: String,
     grid: Grid,
     parser: AnsiParser,
     /// What the program reported with OSC 7501.
@@ -1069,6 +1072,11 @@ impl State {
                 return Ok(Outcome::Done(None));
             }
             "terminal.modes" => terminal::modes(&rt.grid),
+            "terminal.shell" => {
+                let pid = rt.process.pid().ok_or("the program has exited")?;
+                let activity = process::activity(pid, rt.pty.foreground());
+                terminal::shell(&rt.grid, &rt.program, activity)
+            }
             "terminal.set-theme" | "terminal.clear" => {
                 self.mux
                     .authorize_input(client, block)
@@ -1247,6 +1255,7 @@ impl State {
             BlockRt {
                 pty,
                 process,
+                program: config.program.to_string_lossy().into_owned(),
                 grid,
                 parser: AnsiParser::new(),
                 status: Records::default(),

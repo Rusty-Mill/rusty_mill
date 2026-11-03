@@ -13,7 +13,7 @@
 
 use super::cell::Pen;
 use super::color::{Palette, format_color_spec, parse_color_spec};
-use super::grid::Grid;
+use super::grid::{Grid, ShellPhase};
 
 /// The answer to an OSC 7501 `?` query. Listing no states or kinds, it
 /// claims all of draft 0.4's: five states and three kinds.
@@ -322,10 +322,12 @@ fn mark_command_lifecycle(
     match sub {
         "A" => {
             g.mark_prompt();
+            g.mark_shell_phase(ShellPhase::Prompt, None);
             g.push_program_status(super::grid::StatusSignal::Prompt);
             true
         }
         "C" => {
+            g.mark_shell_phase(ShellPhase::Running, None);
             #[cfg(feature = "l13")]
             g.command_output_begin();
             #[cfg(any(test, feature = "gui"))]
@@ -337,10 +339,10 @@ fn mark_command_lifecycle(
         }
         "D" => {
             let exit = parts.next().and_then(|s| s.parse::<i32>().ok());
-            let _ = exit; // consumed only by the cfg-gated arms below
+            g.mark_shell_phase(ShellPhase::Finished, exit);
             #[cfg(feature = "l13")]
             {
-                g.command_finished(exit);
+                g.command_finished();
                 rusty_term_l13::notify_command_finished(g, exit, responses);
                 rusty_term_l13::notify_resource_changed(g, rusty_term_l13::RES_COMMAND, responses);
             }

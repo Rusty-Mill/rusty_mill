@@ -559,6 +559,9 @@ const TERMINAL_CONTROL: Features = Features::BLOCK_CALL.union(Features::TERMINAL
 /// What `terminal.modes` and `terminal.clear` need.
 const TERMINAL_MORE: Features = Features::BLOCK_CALL.union(Features::TERMINAL_MORE);
 
+/// What `terminal.shell` needs.
+const TERMINAL_SHELL: Features = Features::BLOCK_CALL.union(Features::TERMINAL_SHELL);
+
 /// An optional parameter of `terminal.set-theme`.
 const fn theme(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     Param {
@@ -1265,6 +1268,21 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_MORE,
         returns: Returns::Nothing,
         build: |req, a| block_call(req, a, "terminal.clear"),
+    },
+    Method {
+        name: "terminal.shell",
+        doc: "Read what the block's shell is and does, one per line as `NAME<TAB>VALUE`: \
+              `program` is the program the block started; `activity` is `idle` while it \
+              has the terminal, `busy` while a job it started does, or `unknown` where \
+              the platform cannot tell, as on Windows (a program that exits closes its \
+              block); `phase` \
+              is `prompt`, `running` or `finished` by the last OSC 133 mark the shell \
+              sent, and `exit` the code its last finished command reported, both \
+              `unknown` until it sends them. Lines may be added; read them by name.",
+        params: &[BLOCK],
+        needs: TERMINAL_SHELL,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.shell"),
     },
     Method {
         name: "close-block",
