@@ -53,6 +53,7 @@ fn open_task(mode: Mode, claims: Option<ClaimsConfig>, roster: Vec<Role>) -> Ope
         policy: SchedulingPolicy::TurnBased,
         mode,
         claims,
+        holdout_digest: None,
     }
 }
 
@@ -62,6 +63,8 @@ struct Cx {
     now: Time,
     ops: u64,
     brief: ArtId,
+    /// The tree the runner reports.
+    tree: Option<Sha256>,
 }
 
 fn pid(s: &str) -> PrincipalId {
@@ -76,6 +79,7 @@ impl Cx {
             now: Time(1_000),
             ops: 0,
             brief: ArtId(0),
+            tree: Some(Sha256::of(b"tree")),
         };
         let r = cx.run(Command::Open(open_task(Mode::Claims, Some(cfg), roster())));
         let Response::Stored(brief) = r else {
@@ -258,6 +262,7 @@ impl Cx {
                 base: "a".repeat(40),
                 diffs: vec![diff],
                 claim: Some(c),
+                suite: Suite::Build,
             }),
         ))
     }
@@ -286,6 +291,27 @@ impl Cx {
         profiles: &[(&str, u32)],
         tests_changed: Vec<TestChange>,
     ) -> Response {
+        let digest = self.st.profile_digest;
+        self.report_full(k, run, secret, digest, profiles, tests_changed)
+    }
+
+    /// `k`'s live run reports under `digest` (a holdout run passes the
+    /// task's holdout digest).
+    fn report_under(&mut self, k: ArtId, digest: Sha256, profiles: &[(&str, u32)]) -> Response {
+        let run = self.live_run(k);
+        let secret = self.st.secret_for(run);
+        self.report_full(k, run, secret, digest, profiles, vec![])
+    }
+
+    fn report_full(
+        &mut self,
+        k: ArtId,
+        run: RunId,
+        secret: RunSecret,
+        digest: Sha256,
+        profiles: &[(&str, u32)],
+        tests_changed: Vec<TestChange>,
+    ) -> Response {
         let op = self.op();
         let log = self.run(Command::Runner {
             op,
@@ -302,7 +328,7 @@ impl Cx {
         let rep = Report {
             candidate: k,
             run,
-            profile_digest: self.st.profile_digest,
+            profile_digest: digest,
             status: if failed {
                 RunStatus::Failed
             } else {
@@ -316,7 +342,7 @@ impl Cx {
                     failed: *f,
                 })
                 .collect(),
-            tree: None,
+            tree: self.tree,
             sandbox: "landlock+seccomp:no-net".into(),
             log,
             tests_changed,
@@ -1086,6 +1112,7 @@ fn cl_29_end_to_end_with_normal_apis() {
             base: "a".repeat(40),
             diffs: vec![d1, d2],
             claim: Some(x),
+            suite: Suite::Build,
         }),
     ));
     assert!(cx
@@ -1127,6 +1154,7 @@ fn cl_30_writes_bind_to_the_credential_and_mode() {
                 base: "a".repeat(40),
                 diffs: vec![d],
                 claim: None,
+                suite: Suite::Build,
             })
         )),
         Code::BadClaim
@@ -1380,6 +1408,7 @@ fn cl_42_candidate_debits() {
                 base: "a".repeat(40),
                 diffs: vec![d],
                 claim: Some(x),
+                suite: Suite::Build,
             })
         )),
         Code::ClaimNotOpen
@@ -1509,6 +1538,7 @@ fn cl_46_reruns_past_budget_are_held_for_the_human() {
             base: "a".repeat(40),
             diffs: vec![d],
             claim: Some(x),
+            suite: Suite::Build,
         }),
     );
     assert!(matches!(
@@ -2691,4 +2721,447 @@ fn cl_70_superseded_dep_collapses_like_a_dropped_one() {
         );
         assert!(collapsed(&cx, b));
     }
+}
+
+// ---------------------------------------------------------------- holdouts (#597)
+
+fn holdout_digest() -> Sha256 {
+    Sha256::of(b"holdout suite")
+}
+
+/// A claims task whose roster adds the holdout lens `h`, opened with a
+/// holdout suite.
+fn holdout_cx() -> Cx {
+    holdout_cx_with(Some(holdout_digest()))
+}
+
+fn holdout_cx_with(digest: Option<Sha256>) -> Cx {
+    let mut cx = Cx::new();
+    let mut roles = roster();
+    roles.push(lens("h", 4).holdout());
+    let mut o = open_task(Mode::Claims, None, roles);
+    o.holdout_digest = digest;
+    cx.st = TaskState::new(TaskId::from("t"));
+    cx.log.clear();
+    cx.brief = stored(cx.run(Command::Open(o)));
+    for who in ["a", "b", "c", "s", "h"] {
+        cx.assign(who);
+    }
+    cx
+}
+
+impl Cx {
+    fn manifest(&self, k: ArtId) -> Candidate {
+        match &self.st.artifacts[&k].payload {
+            ArtifactPayload::Candidate(c) => c.clone(),
+            other => panic!("not a candidate: {other:?}"),
+        }
+    }
+
+    /// `who` stores a holdout candidate with `k`'s manifest.
+    fn holdout_of(&mut self, who: &str, k: ArtId) -> Response {
+        let m = Candidate {
+            suite: Suite::Holdout,
+            ..self.manifest(k)
+        };
+        self.put(who, "holdout", ArtifactPayload::Candidate(m))
+    }
+
+    /// The holdout lens re-runs `k`'s code; its run reports `profiles`.
+    fn holdout_run(&mut self, k: ArtId, profiles: &[(&str, u32)]) -> Response {
+        let h = stored(self.holdout_of("h", k));
+        self.report_under(h, holdout_digest(), profiles)
+    }
+}
+
+#[test]
+fn cl_71_holdout_candidates_are_gated() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    // (a) Only a role with write:holdout stores one.
+    let (code, why) = detail(cx.holdout_of("a", k));
+    assert_eq!(code, Code::KindForbidden);
+    assert!(why.contains("write:holdout"), "{why}");
+    // (b) It must build exactly the current code.
+    let other = Candidate {
+        base: "b".repeat(40),
+        suite: Suite::Holdout,
+        ..cx.manifest(k)
+    };
+    let r = cx.put("h", "h1", ArtifactPayload::Candidate(other));
+    assert_eq!(rejected(r), Code::HoldoutMismatch);
+    // (c) A valid one debits a run and leaves current(c) alone.
+    let runs = cx.rec(x).runs;
+    let h = stored(cx.holdout_of("h", k));
+    assert_eq!(cx.rec(x).runs, runs + 1);
+    assert_eq!(cx.rec(x).current, Some(k));
+    assert!(cx.st.claims.live_run(h).is_some());
+    // (d) A task without a holdout suite refuses one, and its accept line
+    // is unchanged.
+    let mut plain = holdout_cx_with(None);
+    let y = plain.low();
+    let k = plain.candidate("a", y);
+    assert_eq!(rejected(plain.holdout_of("h", k)), Code::HoldoutMismatch);
+    let pass = stored(plain.report_profiles(k, &[("unit", 0)], vec![]));
+    ok(plain.executed("a", y, Support, pass));
+    ok(plain.executed("b", y, Support, pass));
+    assert_eq!(plain.status(y), ClaimStatus::Accepted);
+}
+
+#[test]
+fn cl_72_accept_waits_for_a_holdout_pass() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    let pass = stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+    ok(cx.executed("a", x, Support, pass));
+    ok(cx.executed("b", x, Support, pass));
+    assert_eq!(cx.status(x), ClaimStatus::Open, "no holdout pass yet");
+    assert!(card_of(&cx, x).holdout_due);
+    stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+    assert!(!card_of(&cx, x).holdout_due);
+    // A claim with no candidate (research, design) is unaffected.
+    let y = cx.low();
+    ok(cx.cited("a", y, Support, 2));
+    ok(cx.cited("b", y, Support, 2));
+    assert_eq!(cx.status(y), ClaimStatus::Accepted);
+}
+
+fn card_of(cx: &Cx, c: MsgId) -> ClaimView {
+    rusty_bbp::claims::card(&cx.st, cx.rec(c), &rusty_bbp::claims::Sight::all())
+}
+
+#[test]
+fn cl_73_a_holdout_failure_blocks_until_a_holdout_pass_lists_it() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    let pass = stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+    let fail = stored(cx.holdout_run(k, &[("holdout:api", 2)]));
+    assert_eq!(
+        cx.rec(x).failing.iter().cloned().collect::<Vec<_>>(),
+        ["holdout:api"]
+    );
+    assert_eq!(card_of(&cx, x).failing[0].report, Some(fail));
+    // A new builder candidate inherits the block; its build pass cannot
+    // clear a holdout profile.
+    let k2 = cx.candidate("b", x);
+    let pass2 = stored(cx.report_profiles(k2, &[("unit", 0)], vec![]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    ok(cx.executed("a", x, Support, pass));
+    ok(cx.executed("b", x, Support, pass2));
+    assert_eq!(cx.status(x), ClaimStatus::Open);
+    // A holdout pass on the new code that lists the profile clears it.
+    stored(cx.holdout_run(k2, &[("holdout:api", 0)]));
+    assert!(cx.rec(x).failing.is_empty());
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+}
+
+#[test]
+fn cl_74_reports_bind_to_their_suite() {
+    let mut cx = holdout_cx_with(Some(holdout_digest()));
+    let x = cx.claim(
+        "a",
+        ClaimBody {
+            stakes: Stakes::High,
+            ..body("x")
+        },
+    );
+    let build = cx.st.profile_digest;
+    // A build run reporting under the holdout digest, or a holdout profile.
+    for (digest, profile, code) in [
+        (holdout_digest(), "unit", Code::ProfileMismatch),
+        (build, "holdout:api", Code::InconsistentReport),
+        (build, "golden:cases", Code::InconsistentReport),
+    ] {
+        let k = cx.candidate("a", x);
+        assert_eq!(rejected(cx.report_under(k, digest, &[(profile, 0)])), code);
+    }
+    // A holdout run reporting under the build digest, or a build profile.
+    let k = cx.candidate("a", x);
+    for (digest, profile, code) in [
+        (build, "holdout:api", Code::ProfileMismatch),
+        (holdout_digest(), "unit", Code::InconsistentReport),
+    ] {
+        let h = stored(cx.holdout_of("h", k));
+        assert_eq!(rejected(cx.report_under(h, digest, &[(profile, 0)])), code);
+    }
+    let h = stored(cx.holdout_of("h", k));
+    stored(cx.report_under(h, holdout_digest(), &[("golden:cases", 0)]));
+}
+
+#[test]
+fn cl_75_holdout_runs_on_replaced_code_change_nothing() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    let pass = stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+    let h = stored(cx.holdout_of("h", k));
+    let k2 = cx.candidate("b", x);
+    // The holdout of K1 reports after K2 became current: no block, no pass.
+    stored(cx.report_under(h, holdout_digest(), &[("holdout:api", 1)]));
+    assert!(cx.rec(x).failing.is_empty());
+    ok(cx.executed("a", x, Support, pass));
+    let pass2 = stored(cx.report_profiles(k2, &[("unit", 0)], vec![]));
+    ok(cx.executed("b", x, Support, pass2));
+    assert_eq!(cx.status(x), ClaimStatus::Open);
+    // A human accept still overrides.
+    ok(cx.decide(x, ClaimOutcome::Accept));
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+}
+
+#[test]
+fn cl_76_holdout_suite_needs_claims_mode_and_replays() {
+    let mut o = open_task(Mode::Stages, None, stage_roster());
+    o.holdout_digest = Some(holdout_digest());
+    let h = handle(
+        &TaskState::new(TaskId::from("t")),
+        &Command::Open(o),
+        Time(1),
+    );
+    assert!(matches!(
+        h.response,
+        Response::Rejected(Rejection {
+            code: Code::BadClaimsConfig,
+            ..
+        })
+    ));
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+    let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
+    assert_eq!(replayed.claims, cx.st.claims);
+    assert_eq!(replayed.claims.holdout_digest, Some(holdout_digest()));
+}
+
+/// #597 review: a manifest names its base by any ref, so a holdout pass
+/// counts only on the tree the current candidate's latest report tested.
+#[test]
+fn cl_91_a_holdout_pass_counts_only_on_the_tree_the_build_tested() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    cx.tree = Some(Sha256::of(b"tree-1"));
+    let pass = stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+    ok(cx.executed("a", x, Support, pass));
+    ok(cx.executed("b", x, Support, pass));
+    // The base ref moved between the runs: the holdout built another tree.
+    cx.tree = Some(Sha256::of(b"tree-2"));
+    stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+    assert_eq!(cx.status(x), ClaimStatus::Open);
+    assert!(card_of(&cx, x).holdout_due);
+    cx.tree = Some(Sha256::of(b"tree-1"));
+    stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+}
+
+/// #597 review: the endorsement of a candidate's test change also covers
+/// the holdout candidates building its code, whichever comes first.
+#[test]
+fn cl_92_an_endorsement_unlocks_holdout_reports_of_the_same_code() {
+    let changed = || vec![TestChange::modified("tests/core.rs")];
+    for endorse_first in [false, true] {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+        assert!(cx.rec(x).failing.contains("holdout:api"));
+        let k2 = cx.candidate("a", x);
+        // The build report names the tree a holdout pass must match.
+        stored(cx.report_profiles(k2, &[("unit", 0)], vec![]));
+        if endorse_first {
+            ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
+        }
+        let h = stored(cx.holdout_of("h", k2));
+        let run = cx.live_run(h);
+        let secret = cx.st.secret_for(run);
+        stored(cx.report_full(
+            h,
+            run,
+            secret,
+            holdout_digest(),
+            &[("holdout:api", 0)],
+            changed(),
+        ));
+        assert_eq!(
+            cx.rec(x).failing.contains("holdout:api"),
+            !endorse_first,
+            "endorse first: {endorse_first}"
+        );
+        if !endorse_first {
+            ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k2)]));
+            assert!(cx.rec(x).failing.is_empty());
+        }
+    }
+}
+
+/// #597 re-review: a report without a tree proves no tree, so a holdout pass
+/// counts only when both it and the build report name one.
+#[test]
+fn cl_95_a_holdout_pass_needs_a_tree_on_both_sides() {
+    for (build, holdout) in [
+        (None, None),
+        (Some(b"t".as_slice()), None),
+        (None, Some(b"t".as_slice())),
+    ] {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        cx.tree = build.map(Sha256::of);
+        let pass = stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        ok(cx.executed("a", x, Support, pass));
+        ok(cx.executed("b", x, Support, pass));
+        cx.tree = holdout.map(Sha256::of);
+        stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+        assert_eq!(cx.status(x), ClaimStatus::Open, "{build:?} {holdout:?}");
+        assert!(card_of(&cx, x).holdout_due);
+    }
+}
+
+/// #597 re-review: an endorsement unlocks only a pass newer than the failure
+/// that blocks the profile, and a later holdout failure supersedes a pass.
+#[test]
+fn cl_96_a_pass_older_than_the_block_does_not_clear_it() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    let h1 = stored(cx.holdout_of("h", k));
+    let run = cx.live_run(h1);
+    let secret = cx.st.secret_for(run);
+    let changed = vec![TestChange::modified("tests/core.rs")];
+    stored(cx.report_full(
+        h1,
+        run,
+        secret,
+        holdout_digest(),
+        &[("holdout:api", 0)],
+        changed,
+    ));
+    stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    assert!(card_of(&cx, x).holdout_due);
+}
+
+/// #597 re-review: the current candidate's endorsement also covers executed
+/// support citing a holdout report of the same code.
+#[test]
+fn cl_97_executed_holdout_evidence_uses_the_code_endorsement() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+    let h = stored(cx.holdout_of("h", k));
+    let run = cx.live_run(h);
+    let secret = cx.st.secret_for(run);
+    let changed = vec![TestChange::modified("tests/core.rs")];
+    let rep = stored(cx.report_full(
+        h,
+        run,
+        secret,
+        holdout_digest(),
+        &[("holdout:api", 0)],
+        changed,
+    ));
+    ok(cx.executed("a", x, Support, rep));
+}
+
+/// #597 re-review: `failing_from` keeps the first failure, so an endorsement
+/// compares a pass with the latest failure of the profile: fail, pass with a
+/// test change, fail again, endorse leaves the block.
+#[test]
+fn cl_99_an_endorsement_does_not_clear_a_profile_that_failed_again() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+    let h1 = stored(cx.holdout_of("h", k));
+    let run = cx.live_run(h1);
+    let secret = cx.st.secret_for(run);
+    let changed = vec![TestChange::modified("tests/core.rs")];
+    stored(cx.report_full(
+        h1,
+        run,
+        secret,
+        holdout_digest(),
+        &[("holdout:api", 0)],
+        changed,
+    ));
+    stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+    ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    assert!(card_of(&cx, x).holdout_due);
+}
+
+/// #597 re-review: a holdout pass on another tree than the build tested
+/// clears no failure, neither when it arrives nor at an endorsement.
+#[test]
+fn cl_100_a_holdout_pass_on_another_tree_clears_no_failure() {
+    let tree1 = Some(Sha256::of(b"tree-1"));
+    let tree2 = Some(Sha256::of(b"tree-2"));
+    for endorsed in [false, true] {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        cx.tree = tree1;
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+        cx.tree = tree2;
+        let h = stored(cx.holdout_of("h", k));
+        let run = cx.live_run(h);
+        let secret = cx.st.secret_for(run);
+        let changed = match endorsed {
+            true => vec![TestChange::modified("tests/core.rs")],
+            false => vec![],
+        };
+        stored(cx.report_full(
+            h,
+            run,
+            secret,
+            holdout_digest(),
+            &[("holdout:api", 0)],
+            changed,
+        ));
+        if endorsed {
+            ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+        }
+        assert!(
+            cx.rec(x).failing.contains("holdout:api"),
+            "endorsed: {endorsed}"
+        );
+        // The same pass on the tested tree clears it.
+        cx.tree = tree1;
+        stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+        assert!(cx.rec(x).failing.is_empty(), "endorsed: {endorsed}");
+    }
+}
+
+/// #597 re-review: a holdout report of another claim's candidate of equal
+/// code neither blocks nor decides this claim.
+#[test]
+fn cl_101_another_claims_holdout_of_equal_code_does_not_count() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let y = cx.low();
+    let ka = cx.candidate("a", x);
+    stored(cx.report_profiles(ka, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(ka, &[("holdout:api", 0)]));
+    assert!(!card_of(&cx, x).holdout_due);
+    let same = Candidate {
+        claim: Some(y),
+        ..cx.manifest(ka)
+    };
+    let kb = stored(cx.put("b", "same-code", ArtifactPayload::Candidate(same)));
+    stored(cx.report_profiles(kb, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(kb, &[("holdout:api", 1)]));
+    assert!(cx.rec(y).failing.contains("holdout:api"));
+    assert!(cx.rec(x).failing.is_empty());
+    assert!(
+        !card_of(&cx, x).holdout_due,
+        "y's failure does not decide x"
+    );
 }

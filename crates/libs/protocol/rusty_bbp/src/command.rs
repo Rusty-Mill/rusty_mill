@@ -88,6 +88,10 @@ pub struct OpenTask {
     /// Claims mode only: the update rule's numbers. `None` takes the defaults.
     #[rusty_serde(default)]
     pub claims: Option<crate::claims::ClaimsConfig>,
+    /// Claims mode only: SHA-256 of the frozen holdout suite (#597). `None`
+    /// opens a task without one.
+    #[rusty_serde(default)]
+    pub holdout_digest: Option<Sha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,4 +325,7 @@ pub enum Code {
     Duplicate,
     /// Executed support cites a run whose candidate changed tests, unendorsed.
     TestsUnendorsed,
+    /// A holdout candidate does not build the claim's current code, or the
+    /// task has no holdout suite.
+    HoldoutMismatch,
 }

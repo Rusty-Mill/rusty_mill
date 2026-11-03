@@ -87,6 +87,7 @@ fn open_task() -> OpenTask {
         brief: store.blob_put(b"brief"),
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::TurnBased,
+        holdout_digest: None,
     }
 }
 

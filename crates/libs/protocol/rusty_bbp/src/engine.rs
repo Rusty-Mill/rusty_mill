@@ -336,6 +336,11 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
     }
     if o.mode == Mode::Claims {
         crate::claims_engine::check_open(o)?;
+    } else if o.holdout_digest.is_some() {
+        return Err(rej(
+            Code::BadClaimsConfig,
+            "holdout_digest: a holdout suite needs claims mode",
+        ));
     }
     let roster = Roster::for_mode(o.roster.clone(), o.mode)
         .map_err(|e| rej(Code::BadRoster, e.to_string()))?;
@@ -377,6 +382,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         policy: o.policy,
         mode: o.mode,
         claims: claims.then(|| o.claims.unwrap_or_default()),
+        holdout_digest: o.holdout_digest,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {

@@ -24,6 +24,7 @@ fn tr_01_candidate_cannot_be_replaced_at_merge_gate() {
             claim: None,
             base: "b".repeat(40),
             diffs: vec![diff],
+            suite: Suite::Build,
         }),
         b"",
     );
@@ -107,7 +108,8 @@ fn tr_06_manifest_references_kind_checked() {
             ArtifactPayload::Candidate(Candidate {
                 claim: None,
                 base: "a".repeat(40),
-                diffs: vec![spec]
+                diffs: vec![spec],
+                suite: Suite::Build,
             }),
             b"{}"
         )),
@@ -207,6 +209,7 @@ fn tr_10_replay_after_turn_ended_returns_original() {
         claim: None,
         base: "a".repeat(40),
         diffs: vec![diff],
+        suite: Suite::Build,
     });
     let blob =
         fx.d.store

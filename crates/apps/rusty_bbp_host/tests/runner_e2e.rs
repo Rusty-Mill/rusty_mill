@@ -155,6 +155,7 @@ fn submit_candidate(t: &Task, base: &str, diffs: &[Vec<u8>]) {
             claim: None,
             base: base.to_owned(),
             diffs: ids,
+            suite: Suite::Build,
         }),
         b"",
     );

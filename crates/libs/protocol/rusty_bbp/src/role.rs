@@ -62,6 +62,14 @@ pub struct Role {
     pub final_decision: bool,
     /// The role may receive a yielded turn.
     pub consultable: bool,
+    /// Claims mode: the role may store holdout candidates (#597). Not written
+    /// when false, so existing rosters and logs are unchanged.
+    #[rusty_serde(default, skip_serializing_if = "is_false")]
+    pub holdout: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Role {
@@ -77,6 +85,7 @@ impl Role {
             verdict_at: Vec::new(),
             final_decision: false,
             consultable: false,
+            holdout: false,
         }
     }
 
@@ -115,12 +124,19 @@ impl Role {
         self
     }
 
+    /// Claims mode: may store holdout candidates.
+    pub fn holdout(mut self) -> Role {
+        self.holdout = true;
+        self
+    }
+
     pub fn holds(&self, cap: Cap) -> bool {
         match cap {
             Cap::Post(k) => self.post.contains(&k),
             Cap::Write(k) => self.write.contains(&k),
             Cap::Read(k) => self.read_artifacts.contains(&k),
             Cap::Verdict(s) => self.verdict_at.contains(&s),
+            Cap::Holdout => self.holdout,
         }
     }
 
@@ -137,6 +153,8 @@ pub enum Cap {
     Write(ArtifactKind),
     Read(ArtifactKind),
     Verdict(Stage),
+    /// Store a holdout candidate (claims mode, #597).
+    Holdout,
 }
 
 impl fmt::Display for Cap {
@@ -146,6 +164,7 @@ impl fmt::Display for Cap {
             Cap::Write(k) => write!(f, "write:{}", k.name()),
             Cap::Read(k) => write!(f, "read_artifacts:{}", k.name()),
             Cap::Verdict(s) => write!(f, "verdict_at:{}", s.name()),
+            Cap::Holdout => write!(f, "write:holdout"),
         }
     }
 }
