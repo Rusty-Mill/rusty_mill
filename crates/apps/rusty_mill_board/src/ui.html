@@ -22,6 +22,7 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .card b{display:block}
 .num{float:right;margin-left:6px;color:var(--mute);font-size:12px}
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
+.meta.stale{color:var(--err)}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
 .tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
@@ -430,13 +431,19 @@ async function refresh(){await snapshot();await loadPending();render()}
 
 /* Decisions (#595): the open BBP escalations of the tasks linked from cards, read through inbox_list
    (admin only; Mill Board stores none of it). `pending` is null when this credential or board has no
-   inbox, which hides the button. Each action is dry-run first, and BBP's answer is shown before it is taken. */
-let pending=null,pendingAt=0;
+   inbox (a 403 or 422), which hides the button. Any other failure is a read failure: `pendingErr` says
+   so, and the decisions last read stay shown, marked stale, so a host hiccup never hides one.
+   Each action is dry-run first, and BBP's answer is shown before it is taken. */
+let pending=null,pendingAt=0,pendingRead=0,pendingErr=null;
 async function loadPending(){
-  try{pending=await api("inbox_list",who())}catch{pending=null}
   pendingAt=Date.now();
-  $("decide").hidden=pending===null&&view!=="decisions";
-  $("decide-n").textContent=pending?.length?" · "+pending.length:"";
+  try{pending=await api("inbox_list",who());pendingRead=pendingAt;pendingErr=null}
+  catch(e){
+    if(e.status===403||e.status===422){pending=null;pendingErr=null}
+    else pendingErr=e.message||"no answer";
+  }
+  $("decide").hidden=pending===null&&pendingErr===null&&view!=="decisions";
+  $("decide-n").textContent=(pending?.length?" · "+pending.length:"")+(pendingErr?" · ⚠":"");
 }
 const pct=c=>c.confidence+"% · score "+c.score+" · budget "+c.spent+"/"+c.budget+(c.epoch?" · epoch "+c.epoch:"");
 const changes=d=>d.events.map(e=>Object.keys(e)[0]).join(", ")||"nothing";
@@ -456,6 +463,8 @@ async function decide(item,action){
 function renderDecisions(){
   mapSeq++;
   const b=$("board");b.classList.remove("roadmap","metrics");b.classList.add("decisions");b.replaceChildren();
+  if(pendingErr)b.append(el("p","Could not read the inbox: "+pendingErr+(pending?". Showing what was read at "+new Date(pendingRead).toLocaleTimeString()+", which may be stale.":"."),"meta stale"));
+  if(pending===null&&pendingErr){renderSide();return}
   if(pending===null){b.append(el("p","The inbox needs an admin token (sign in with one) and a board started with --bbp-bin and --bbp-root.","meta"));renderSide();return}
   if(!pending.length){b.append(el("p","Nothing needs you.","meta"));renderSide();return}
   for(const it of pending){
@@ -488,7 +497,7 @@ async function pollColumns(){
 async function poll(){
   try{
     let redraw=await pollColumns();
-    if(Date.now()-pendingAt>30000){const n=JSON.stringify(pending);await loadPending();redraw||=n!==JSON.stringify(pending)}
+    if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
       const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried

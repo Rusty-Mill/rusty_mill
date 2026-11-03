@@ -1,8 +1,10 @@
 #!/bin/sh
 # A stand-in `bbp` for tests/ui/decisions.mjs: one stuck question with two candidates, until any
-# committed action, after which the inbox is empty. Logs every call to $FAKE_BBP_DIR/calls.
+# committed action, after which the inbox is empty. While $FAKE_BBP_DIR/fail exists every call
+# fails, as a host whose log is unreadable does. Logs every call to $FAKE_BBP_DIR/calls.
 D=${FAKE_BBP_DIR:?set FAKE_BBP_DIR}
 echo "$@" >> $D/calls
+if [ -f $D/fail ]; then echo "log unreadable" >&2; exit 1; fi
 case "$1" in inbox)
   if [ -f $D/done ]; then echo '[]'; exit 0; fi
   cat <<'J'
