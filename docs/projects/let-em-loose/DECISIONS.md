@@ -1,6 +1,19 @@
 # Let Em Loose: decisions
 
-Each entry gives the decision, why it was made, and what was rejected. **Agreed** means Nano has approved it. **Proposed** means it is the working direction but still awaits a design or confirmation. Dates are when the decision was made. Where an earlier entry and a later one conflict, the later one wins. The detailed BBP rules are in the claims addendum, `crates/libs/protocol/rusty_bbp/docs/spec/bbp-claims-addendum.md` (PR #1386).
+Each entry gives the decision, why it was made, and what was rejected. **Agreed** records the original author's report of Nano's approval; it is not independent verification or an operational authorization. **Proposed** means it is the working direction but still awaits a design or confirmation. Dates are when the decision was made. Where an earlier entry and a later one conflict, the later one wins. The detailed BBP rules are in the claims addendum, `crates/libs/protocol/rusty_bbp/docs/spec/bbp-claims-addendum.md` (PR #1386).
+
+## Authority, provenance and current contracts
+
+The original author reported the design approvals below in [#1384](https://github.com/Rusty-Mill/rusty_mill/pull/1384). The external [source concept](https://claude.ai/artifact/JoCPd4weXwkJ7Zy8qMjiJJ) and Mill Board card numbers are provenance pointers, not independently verified approval records in this bundle. Where no attributable approval is linked, the reported approval remains subject to owner verification. In particular, D41–D45 originated as the author's report of #704 approval. The later D42 expiry and D44 zero-floor choices are explicitly recorded by the coordinator in [the owner-decision record](https://github.com/Rusty-Mill/rusty_mill/pull/1384#issuecomment-6614620497), including its source/confirmation reference.
+
+Repository rules in [AGENTS.md](../../../AGENTS.md) and [CONTRIBUTING.md](../../../CONTRIBUTING.md) govern contributions. Merged BBP and orch contracts govern their implemented behavior; this concept bundle and the mutable external doc cannot supersede them. Later decisions supersede earlier concept text only within that authority boundary. This documentation correction authorizes no implementation starts, live provider calls, spending, credentials, deployment or settings changes. Separately approved implementation work retains its own authorization and review gates.
+
+Precise contracts used by this guide:
+
+- [BBP claims addendum](../../../crates/libs/protocol/rusty_bbp/docs/spec/bbp-claims-addendum.md): C-R4 and **Runs and candidates** for authenticated executable evidence; **Reads, delta and subscriptions** for tool-read visibility; **Failing runs block**, C-R8 and **Action marks** for human overrides and fenced state changes; **Budget** for claim allowances. These are merged contracts, rather than new permission from this guide.
+- [Provider IDs, ADR-0019](../../../crates/apps/rusty_orch/docs/adr/0019-provider-ids.md): save-time conversion and rollback limits.
+- [Lens core, ADR-0021](../../../crates/apps/rusty_orch/docs/adr/0021-lens-runner-core.md) and [operator assertions](../../../crates/apps/rusty_orch/crates/rusty_orch/src/lens/assertions.rs): zero-rate v0 admission and operator-controlled no-overage/host-clearance checks.
+- [Inbox action planning](../../../crates/apps/rusty_mill_board/src/inbox.rs) (`plan`, `plan_task`, `Total::extend`) and [BBP CLI adapter](../../../crates/apps/rusty_mill_board/src/bbp_cli.rs): revision-fenced previews/actions, per-reason behavior and whole-task totals.
 
 | # | Decision | Status |
 | --- | --- | --- |
@@ -46,7 +59,7 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 | D40 | Build the slice before designing more | Agreed 2026-11-02 |
 | D41 | Gate on code erosion, not only behaviour | Agreed 2026-11-03 (#704) |
 | D42 | Erosion limits come from our own history | Agreed 2026-11-03 (#704) |
-| D43 | No erosion override; inbox Approve is the override | Agreed 2026-11-03 (#704) |
+| D43 | No erosion-specific override; budget approval is separate | Agreed 2026-11-03 (#704) |
 | D44 | Scheduled cleanups pay erosion down | Agreed 2026-11-03 (#704) |
 | D45 | Rust only; unmeasured code is reported, not failed | Agreed 2026-11-03 (#704) |
 
@@ -245,7 +258,7 @@ Storing a candidate that names a claim starts its run, which costs one unit and 
 
 ## D30. A failing test blocks acceptance
 
-**Decision.** A claim cannot be accepted while the current candidate's latest run in the epoch failed. Only a passing run that includes the failed profiles clears it. The host freezes the profile set when a task opens, in a host-only file, and records its hash in `task_opened`; the runner and the report check refuse any mismatch. A new candidate inherits the block until its own passing run includes those profiles. A reopened claim starts out blocked. A candidate whose diff changes or deletes listed test files cannot clear a block unless a different principal endorses the test change with cited support.
+**Decision.** Automatic acceptance is blocked while failed profiles remain for the current candidate in the epoch; explicit human `accept` or `choose` can override this block under C-R8. Only a passing run that includes the failed profiles clears it. The host freezes the profile set when a task opens, in a host-only file, and records its hash in `task_opened`; the runner and the report check refuse any mismatch. A new candidate inherits the block until its own passing run includes those profiles. A reopened claim starts out blocked. A candidate whose diff changes or deletes listed test files cannot clear a block unless a different principal endorses the test change with cited support.
 **Why.** Without the block, enough passes from other authors could accept a claim while a real failure stood. The rest closes the ways around it: dropping the test from the rerun, editing the profile, or editing the test.
 **Rejected.** Score-only treatment of failures. Tracking individual tests, which would need a report schema change.
 **Known limit.** Rust unit tests inside source files are not caught by the path check. The holdout suite (D37) covers this.
@@ -271,7 +284,7 @@ Storing a candidate that names a claim starts its run, which costs one unit and 
 ## D34. Lenses, providers and local models
 
 **Decision.**
-- **Providers in v0:** Claude, Codex and local. The hard-coded provider list in orch core becomes a config-driven registry. A new `orch-openai` crate (one crate per adapter, as orch already does) talks to llama-swap, and plain HTTP is allowed only to loopback and private addresses. Gemini joins later through the same adapter over HTTPS. Stored records keep old provider names; readers map them.
+- **Providers in v0:** Claude, Codex and local. The hard-coded provider list in orch core becomes a config-driven registry. A new `orch-openai` crate (one crate per adapter, as orch already does) talks to llama-swap, and plain HTTP is allowed only to loopback and private addresses. Gemini joins later through the same adapter over HTTPS. Per ADR-0019, old provider variants decode to IDs without rewriting stored history; new snapshots, including a resumed goal saved again, write `Id(String)` under schema v1. Older binaries cannot read those new snapshots and report them corrupt. Rollback therefore means not resuming, or discarding, goals saved by the newer version; read compatibility is not write/rollback compatibility.
 - **Lenses:** each new question gets three blind Architect proposals on three models (Claude, local, and a Codex rebel; which model is the rebel is config). Research, Adversary and Operator follow. The lens asked about a claim rotates across the eligible lenses and models, and is never the claim's author.
 - **Local models:** Operator on Qwen3.6-35B-A3B; gpt-oss-120b as the local high tier for sensitive or contested claims; 32k context to start.
 **Why.** The Gemini CLI was discontinued, and every existing adapter is a CLI. One OpenAI-compatible adapter covers llama-swap now and Gemini later. Rotation and author exclusion keep the old "the reviewer is never the builder" rule.
@@ -280,10 +293,13 @@ Storing a candidate that names a claim starts its run, which costs one unit and 
 ## D35. The inbox is a read view over BBP in Mill Board
 
 **Decision.** The inbox is a read view over BBP served by Mill Board. Nothing is copied into rusty_tick, because an escalation is a decision, not a task (ADR-0012). Mill Board reads only through the host's `bbp` command, never BBP's files, so in v0 it runs on the orch host. Each card shows the claim, confidence, budget, reason, the top two supporting and contrary evidence items, and a dry run computed by the pure engine. Actions:
-- **Approve:** accepts. On a budget escalation, or on a whole-task budget, it adds one base allowance for the claim's tier, never more. On an irreversible claim it adds no budget.
-- **Reject:** drops. If the claim was already acted on, it also creates a "Remediate" card carrying the dry-run diff.
-- **Choose:** for taste escalations, Nano picks one of several candidates; the chosen one is accepted and the rest dropped, in one step.
-- **Refine intent:** a human answer that the lenses see in their context. Recorded so it can become an intent version under #598.
+- **Approve:** behavior depends on the escalation reason, as `plan` and `plan_task` specify. A claim-budget approval adds one `base(c)` (stakes and reversibility included), then reopens the claim into a fresh epoch; it does not accept it or clear failed profiles. A held rerun approval adds one `base(c)` and starts that rerun. A whole-task approval adds each exhausted total's own opened allowance to its current limit, then resumes the task; it uses no claim-tier amount and accepts no claim. Totals already replenished on a partial retry are not extended again. An irreversible-action approval accepts without adding budget. An unconfirmed action's Approve records the mark's outcome as `done`.
+- **Reject:** drops a claim, withdraws a held rerun, records an unconfirmed action as `aborted`, or cancels a whole task with a required reason, according to the escalation. Dropping an acted-on claim also creates a "Remediate" card carrying the dry-run diff.
+- **Choose:** for a stuck question with candidates (including a taste call), Nano picks one; the chosen one is accepted and the rest dropped, in one step.
+- **Refine intent:** records a human clarification linked to the displayed brief, then reopens the claim; for a paused whole task it extends exhausted totals and resumes instead. Recorded so it can become an intent version under #598.
+
+Every preview and mutation uses the task revision read for the displayed escalation. The CLI adapter supplies `--rev` and advances the expected revision only after each committed step; stale work is refused and must be re-read/previewed. Approval concerns that exact claim/action snapshot and its displayed brief, candidates, evidence and dry-run result. It is not append-only confidence evidence or blanket permission for later actions or a refined intent. C-R8 human acceptance and C-R9 epoch-fenced action marks remain distinct from executing an external action. Formal intent versioning is still #598; this guide does not claim a new intent-version field or separate dry-run signature exists.
+
 No push notifications in v0. Sorting uses BBP facts: irreversible first, then oldest.
 **Why.** One source of truth, and Mill Board already has admin gates, MCP and a web UI.
 **Rejected.** Storing escalations in rusty_tick (this reverses the earlier recommendation in QUESTIONS Q21). Approve and Reject only.
@@ -297,17 +313,17 @@ No push notifications in v0. Sorting uses BBP facts: irreversible first, then ol
 ## D37. Holdouts, protected tests, golden sets, calibration
 
 **Decision.**
-- **Holdouts:** a second frozen profile suite, written from the intent alone by a holdout lens on a model no builder uses (config is refused otherwise). Only the holdout lens can run it, on the same base and diffs as the current candidate. Every claim with a candidate needs a passed holdout run to be accepted. Builders see only profile names and pass or fail counts.
+- **Holdouts:** a second frozen profile suite, written from the intent alone by a holdout lens on a model no builder uses (config is refused otherwise). Only the holdout lens can run it, on the same base and diffs as the current candidate. For a task opened with holdouts, automatic acceptance of a claim with a candidate also needs a passed holdout run bound to the current candidate tree and suite digest; explicit human accept/choose remains the override. Builders see only profile names and pass or fail counts.
 - **Protected test paths:** a candidate whose diff touches one is refused, with the paths named. A real test fix goes in as its own `tests` claim, which a different lens must support. This replaces the interim rule in D30.
 - **Holdout versions:** a new version needs Nano only when an existing holdout test is removed or changed; pure additions are adopted automatically.
-- **Golden sets:** in the Factory repo at `golden/<intent>/`, with a SIGNOFF file only Nano can commit (CODEOWNERS). The host refuses to open a task with an unsigned set. Private fixtures from Nano's drive are recorded as hashes only and mounted read-only. Golden cases run as `golden:` profiles inside the holdout suite.
+- **Golden sets:** in the Factory repo at `golden/<intent>/`, with a `MANIFEST` and `SIGNOFF` containing `digest`, `signer` and `date`. As **Golden sets** in the claims addendum specifies, the host checks the manifest's file hashes and the signoff's exact set digest, refusing `bad_golden` on mismatch. This is human digest-attestation: Nano's endorsement must be obtained through the human review process. CODEOWNERS routes reviews and may require them when branch protection is configured; it does not prevent another writer creating the file or authenticate its author. The host's digest check detects changed content or a stale mismatched signoff, but neither file presence nor a matching copied/forged signer label proves Nano's identity. Cryptographic signer authentication is not part of the accepted v0 contract. Private fixtures from Nano's drive are recorded as hashes only and mounted read-only. Golden cases run as `golden:` profiles inside the holdout suite.
 - **Calibration:** orch-store records each accepted claim as held, reversed or unknown, at a 14-day horizon, with a hold rate per score band and nothing proposed below 20 claims per band. It is informational in v0. `rusty_orch calibrate` proposes changes that Nano approves, and they apply only to tasks opened afterwards.
 **Why.** Agents that write and judge their own tests can be confidently wrong. Quietly restoring tests would hide the fact that an agent tried to change them.
 **Rejected.** Restoring protected paths from base. Using track records as weights in v0.
 
 ## D38. Phase B intents and spend
 
-**Decision.** The five Phase B intents are `dedup-lite`, `tick-lite`, `vt-grid`, `gate-board` and `frag-check`, each a cut-down version of an existing project. `dedup-lite` is a benchmark, not the #600 experiment. Acceptance lines describe observable behaviour, never method: for example, "two concurrent writers never corrupt the store and neither write is lost", not "temp file then rename". The `dedup-lite` timing target is 2 seconds on Nano's desktop, warm cache, median of 5, both arms on the same host. Taste domains: `cli-output` in tick-lite and `api-shape` in gate-board. Spend: $200 in total for Phase B, a $25 hard cap per run, and a pause to report if the first paired intent costs more than $40.
+**Decision.** The five Phase B intents are `dedup-lite`, `tick-lite`, `vt-grid`, `gate-board` and `frag-check`, each a cut-down version of an existing project. `dedup-lite` is a benchmark, not the #600 experiment. Acceptance lines describe observable behaviour, never method: for example, "two concurrent writers never corrupt the store and neither write is lost", not "temp file then rename". The `dedup-lite` timing target is 2 seconds on Nano's desktop, warm cache, median of 5, both arms on the same host. Taste domains: `cli-output` in tick-lite and `api-shape` in gate-board. Planning ceilings, pending separate spending authorization: $200 in total for Phase B, a $25 hard cap per run, and a pause to report if the first paired intent costs more than $40. These ceilings and BBP budget extensions authorize no billed provider use. ADR-0021 rejects any nonzero configured v0 rate; subscription calls also require the operator-controlled no-overage assertions and host admission checks linked above. A ceiling does not bypass admission, authorize a live call, or permit enabling credits/overages.
 **Why.** Small, checkable intents with exact reference implementations keep a five-sample comparison meaningful.
 **Rejected.** Method-prescribing acceptance lines. Swapping `vt-grid` for a fuzzier intent.
 
@@ -319,7 +335,7 @@ No push notifications in v0. Sorting uses BBP facts: irreversible first, then ol
 
 ## D40. Build the slice before designing more
 
-**Decision.** After #597, implementation starts: the #593 engine first, test-first from the claims traces, on its own PR. #598 and #599 are not designed yet.
+**Decision.** The reported build order after #597 was the #593 engine first, test-first from the claims traces, on its own PR. This is a historical sequence, not an instruction or permission to start implementation. Check current main and the separately approved per-card contracts before selecting work; #598 and #599 were not designed at this concept checkpoint.
 **Why.** They don't block v0 (D23), and the slice will show which gaps actually matter.
 **Rejected.** Designing every card before building any.
 
@@ -331,19 +347,30 @@ No push notifications in v0. Sorting uses BBP facts: irreversible first, then ol
 
 ## D42. Erosion limits come from our own history
 
-**Decision.** The limits are calibrated from erosion deltas on rusty_mill's merged human PRs. The gate is report-only until then: the profile always passes, and the deltas still go in the log. Report-only lasts 2 weeks or 10 tasks, whichever comes first. The numbers then go to Nano, who sets the limits.
+**Decision.** The limits are calibrated from erosion deltas on rusty_mill's merged human PRs. During report-only, the profile always passes and the deltas still go in the log. Report-only lasts 2 weeks or 10 tasks, whichever comes first. At expiry, if thresholds are not approved, pause opening new affected tasks and send the calibration numbers to Nano for approval; do not extend report-only indefinitely or invent limits. Tasks already open retain their settings, frozen profile definitions and profile digests, including report-only behavior if that is what they opened with. Approved thresholds apply to newly opened tasks. The expiry behavior is the recorded owner choice linked above.
 **Why.** Fixed numbers would be guesses. The repository's own human history is the fair baseline. The time box stops report-only from becoming permanent.
 **Rejected.** Starting with fixed limits.
 
-## D43. No erosion override; inbox Approve is the override
+## D43. No erosion-specific override; budget approval is separate
 
-**Decision.** v0 has no in-band override. A blocked claim follows the existing path: a better candidate, or a budget escalation to the inbox (D35), where Approve is the override. An erosion escalation shows the change in each metric and the three worst-affected functions.
-**Why.** This reuses the inbox and needs no BBP change. The deltas and the worst functions let Nano judge without opening the diff.
+**Decision.** v0 adds no erosion-specific override mechanism. A better candidate with a qualifying passing run can clear the failed profile. If its claim budget is exhausted, inbox budget Approve funds another attempt and reopens the claim (D35); the failed-profile block remains. Overriding the failure instead requires a separate explicit, revision-fenced human `accept` or `choose` under C-R8, with the failing profiles visible. Budget approval alone cannot do that. An erosion escalation shows the change in each metric and the three worst-affected functions.
+**Why.** The existing human acceptance override needs no BBP change; it is a different action from extending a budget. The deltas and the worst functions let Nano judge without opening the diff.
 **Rejected.** An `erosion` claim domain endorsed by another principal, like `tests` (D37). That stays available for v1 if overrides become common.
 
 ## D44. Scheduled cleanups pay erosion down
 
-**Decision.** orch writes a `consolidate` intent when the cumulative erosion since the last cleanup reaches half the limit, or after 5 accepted claims, whichever comes first. A cleanup must keep the frozen suite and the holdouts (D37) green. Its erosion limits are negative, so it is accepted only if erosion actually goes down.
+**Decision.** orch writes a `consolidate` intent when the cumulative erosion since the last cleanup reaches half the limit, or after 5 accepted claims, whichever comes first. A cleanup must keep the frozen suite and the holdouts (D37) green. The owner-approved cleanup predicate is `delta_concentration <= 0` and `delta_duplication <= 0`, with at least one delta strictly negative. One metric must improve and neither may worsen; requiring both deltas to be negative would be impossible at a zero floor. If both baseline metrics are already zero, skip the scheduled cleanup and record the reason rather than open an impossible task. This cleanup predicate is separate from ordinary calibrated erosion limits and does not change existing tasks' frozen profiles.
+
+Worked examples (concentration, duplication, in basis points):
+
+| Baseline | Candidate | Cleanup outcome |
+| --- | --- | --- |
+| (100, 0) | (80, 0) | Pass: concentration improves, duplication stays at zero |
+| (0, 100) | (0, 80) | Pass: duplication improves, concentration stays at zero |
+| (100, 100) | (80, 101) | Fail: duplication worsens |
+| (100, 0) | (100, 0) | Fail: neither improves |
+| (0, 0) | — | Skip cleanup; both are already zero |
+
 **Why.** Prompts don't slow the decay. Human repositories decay less because people refactor, so the schedule makes that habit explicit and gives it a budget.
 **Rejected.** Waiting until a gate blocks before cleaning up.
 
