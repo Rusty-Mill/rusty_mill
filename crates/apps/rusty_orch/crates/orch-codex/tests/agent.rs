@@ -35,7 +35,10 @@ fn success_reads_the_last_message_file_and_scrubs_the_api_key() {
     assert!(prompt.contains("OUTPUT FORMAT"));
     assert!(prompt.contains("Plan::start rejects the author."));
     let scrubbed = a.runner().inner.scrubbed.lock().expect("lock");
-    assert_eq!(scrubbed[0], ["OPENAI_API_KEY"]);
+    assert_eq!(
+        scrubbed[0],
+        ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"]
+    );
     // Scratch files are gone after the run.
     let reply_path = &argv[argv.len() - 2];
     assert!(!std::path::Path::new(reply_path).exists());

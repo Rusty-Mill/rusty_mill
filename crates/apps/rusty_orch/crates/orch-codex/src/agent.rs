@@ -18,8 +18,9 @@ use crate::render;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Removed from the child's environment on every run. A stray key would
-/// route Codex onto the paid API path instead of the subscription login.
-pub const SCRUBBED_ENV: &[&str] = &["OPENAI_API_KEY"];
+/// route Codex onto the paid API path instead of the subscription login,
+/// and a base URL would send it to another endpoint.
+pub const SCRUBBED_ENV: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"];
 
 pub(crate) static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 

@@ -7,11 +7,14 @@
 //! prerequisite while "rate limited" remains transient.
 //!
 //! Codex authenticates with the ChatGPT subscription login. The child never
-//! sees `OPENAI_API_KEY`: it is scrubbed from the environment on every run.
+//! sees `OPENAI_API_KEY`, `CODEX_API_KEY` or `OPENAI_BASE_URL`: they are
+//! scrubbed from the environment on every run.
 //!
 //! [`CodexAgent`] also serves the lens runner's [`orch_lens::Model`]
-//! (#594): prefix and body on stdin, usage from the `--json` events, the
-//! reply checked by [`orch_lens::parse`]. A lens question runs in an empty
+//! (#594), on a ChatGPT subscription login only ([`LOGIN_ARGV`]): prefix
+//! and body on stdin, measured usage from the `--json` events, the reply
+//! checked by [`orch_lens::parse`]. `codex exec` cannot bound its cost
+//! before the call, so it is never priced per token. A lens question runs in an empty
 //! scratch directory unless [`CodexAgent::lens_read_only`]; the read-only
 //! sandbox itself is unchanged.
 //!
@@ -25,6 +28,7 @@ mod lens;
 mod prompt;
 
 pub use agent::{CodexAgent, DEFAULT_TIMEOUT, ID, SCRUBBED_ENV};
+pub use lens::{LOGIN_ARGV, LOGIN_TIMEOUT};
 /// The reply schema handed to `--output-schema`; shared with the Claude
 /// adapter and kept in `orch-cli`.
 pub use orch_cli::output_schema;

@@ -39,7 +39,10 @@ fn argv_is_pinned() {
         .model("gpt-5-codex")
         .argv(Path::new("/s"), Path::new("/r"));
     assert_eq!(&pinned[9..11], ["-m", "gpt-5-codex"]);
-    assert_eq!(SCRUBBED_ENV, ["OPENAI_API_KEY"]);
+    assert_eq!(
+        SCRUBBED_ENV,
+        ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"]
+    );
     assert_eq!(orch_codex::DEFAULT_TIMEOUT, Duration::from_secs(600));
 }
 
