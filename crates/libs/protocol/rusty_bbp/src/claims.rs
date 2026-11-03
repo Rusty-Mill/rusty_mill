@@ -397,6 +397,9 @@ pub struct ClaimsBook {
     pub read_arts: BTreeSet<(PrincipalId, ArtId)>,
     /// SHA-256 of the task's frozen holdout suite, if it has one (#597).
     pub holdout_digest: Option<Sha256>,
+    /// Every holdout digest the task has left behind (#597). A retired suite
+    /// is never adopted again: its old passes would count once more.
+    pub holdout_retired: BTreeSet<Sha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -674,7 +677,13 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
         E::HoldoutExtended { digest } | E::HoldoutUpdated { digest } => {
             // Open claims now need a fresh holdout pass under `digest`;
             // accepted ones stay accepted (holdout_passed reads the digest).
-            book.holdout_digest = Some(*digest);
+            // Every claim with a candidate is due again, so it changed.
+            if let Some(old) = book.holdout_digest.replace(*digest) {
+                book.holdout_retired.insert(old);
+            }
+            for c in book.claims.values_mut().filter(|c| c.current.is_some()) {
+                c.changed = rev;
+            }
         }
         E::ClaimActionResult { mark, outcome } => {
             for c in book.claims.values_mut() {
