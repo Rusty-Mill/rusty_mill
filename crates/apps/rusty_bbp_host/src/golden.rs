@@ -451,6 +451,34 @@ mod tests {
         d
     }
 
+    /// A byte-exact `cat` on every CI platform: copies `file`, or stdin.
+    #[cfg(unix)]
+    fn cat(file: Option<&str>) -> (String, Vec<String>) {
+        (
+            "/bin/cat".into(),
+            file.into_iter().map(str::to_owned).collect(),
+        )
+    }
+
+    /// Windows has no `cat`; PowerShell copies raw bytes, with no newline
+    /// translation, so exact comparisons hold.
+    #[cfg(windows)]
+    fn cat(file: Option<&str>) -> (String, Vec<String>) {
+        let src = file.map_or("[Console]::OpenStandardInput()".to_owned(), |f| {
+            format!("[IO.File]::OpenRead('{f}')")
+        });
+        let script = format!("$o = [Console]::OpenStandardOutput(); {src}.CopyTo($o); $o.Flush()");
+        let args = ["-NoProfile", "-NonInteractive", "-Command", script.as_str()];
+        ("powershell".into(), args.map(str::to_owned).to_vec())
+    }
+
+    /// A case.toml running `cat` on `file` (or `stdin`), then `expect`.
+    fn cat_case(file: Option<&str>, stdin: Option<&str>, expect: &str) -> String {
+        let (cmd, args) = cat(file);
+        let stdin = stdin.map_or(String::new(), |s| format!("stdin = {s:?}\n"));
+        format!("cmd = {cmd:?}\nargs = {args:?}\n{stdin}[expect]\n{expect}")
+    }
+
     /// A golden set with two cases, manifested and signed.
     fn golden(tag: &str) -> PathBuf {
         let g = tmp(tag);
@@ -461,11 +489,15 @@ mod tests {
         };
         write(
             "cases/echo/case.toml",
-            "cmd = \"/bin/echo\"\nargs = [\"hi\"]\n[expect]\nexit = 0\nstdout = \"hi\\n\"\n",
+            &cat_case(None, Some("hi\n"), "exit = 0\nstdout = \"hi\\n\"\n"),
         );
         write(
             "cases/json/case.toml",
-            "cmd = \"/bin/cat\"\nargs = [\"{golden}/fixtures/a.json\"]\n[expect]\njson_file = \"want.json\"\n",
+            &cat_case(
+                Some("{golden}/fixtures/a.json"),
+                None,
+                "json_file = \"want.json\"\n",
+            ),
         );
         write("cases/json/want.json", "{\"b\": [1, 2], \"a\": true}");
         write("fixtures/a.json", "{\"a\": true, \"b\": [1, 2]}\n");
@@ -553,7 +585,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)] // runs /bin/echo and /bin/cat
     fn cases_compare_exactly_or_as_json() {
         let g = golden("run");
         let (report, all) = run_all(&g, &g).expect("run");
@@ -672,13 +703,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)] // runs /bin/echo and /bin/cat
     fn large_input_streams_through_a_case_without_deadlock() {
         let input: String = "line of input\n".repeat(64 * 1024);
+        let (cmd, args) = cat(None);
         let case = Case {
             name: "cat".into(),
-            cmd: "/bin/cat".into(),
-            args: vec![],
+            cmd,
+            args,
             stdin: Some(input.clone()),
             expect: Expect {
                 exit: 0,
@@ -686,7 +717,7 @@ mod tests {
                 stderr_contains: None,
             },
         };
-        let ran = run(&case, Path::new("/")).expect("run");
+        let ran = run(&case, &std::env::temp_dir()).expect("run");
         assert_eq!(judge(&case, &ran), Ok(()));
     }
 }
