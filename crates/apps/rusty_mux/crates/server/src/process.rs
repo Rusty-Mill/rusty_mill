@@ -63,14 +63,14 @@ pub(crate) fn chain(
 
 /// Whether a block's program `child` waits for input, by who has the
 /// terminal: `idle` while its own process group does, `busy` while another
-/// does (a job it started), `exited` once it is reaped, and `unknown` where
-/// the platform tells no foreground group, as on Windows.
-pub(crate) fn activity(child: Option<u32>, foreground: Option<u32>) -> &'static str {
-    match (child, foreground) {
-        (None, _) => "exited",
-        (Some(_), None) => "unknown",
-        (Some(child), Some(group)) if group == child => "idle",
-        (Some(_), Some(_)) => "busy",
+/// does (a job it started), and `unknown` where the platform tells no
+/// foreground group, as on Windows. A program that exits closes its block,
+/// so there is no state for that.
+pub(crate) fn activity(child: u32, foreground: Option<u32>) -> &'static str {
+    match foreground {
+        None => "unknown",
+        Some(group) if group == child => "idle",
+        Some(_) => "busy",
     }
 }
 
@@ -222,10 +222,9 @@ mod tests {
 
     #[test]
     fn activity_follows_who_has_the_terminal() {
-        assert_eq!(activity(Some(CHILD), Some(CHILD)), "idle");
-        assert_eq!(activity(Some(CHILD), Some(42)), "busy");
-        assert_eq!(activity(Some(CHILD), None), "unknown");
-        assert_eq!(activity(None, Some(CHILD)), "exited");
+        assert_eq!(activity(CHILD, Some(CHILD)), "idle");
+        assert_eq!(activity(CHILD, Some(42)), "busy");
+        assert_eq!(activity(CHILD, None), "unknown");
     }
 
     #[test]

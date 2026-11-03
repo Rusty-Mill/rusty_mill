@@ -444,6 +444,31 @@ fn shell_reports_the_program_its_activity_and_its_marks() {
 }
 
 #[test]
+fn shell_is_refused_once_the_program_exits_and_its_block_closes() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CONTROL, None);
+    let block = block_for(&mut client);
+    assert!(!shell_line(&mut client, block, "activity").is_empty());
+    client.input(block, b"exit\r");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match client.answer(call(block, "terminal.shell", &[])).as_slice() {
+            [Message::Failed { reason, .. }] => {
+                assert!(reason.contains("block"), "{reason}");
+                return;
+            }
+            [Message::Text { .. }] => {}
+            other => panic!("expected Text or Failed, got {other:?}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the block stayed open"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
 fn modes_follow_what_the_program_sets() {
     let path = start_server();
     let mut client = Client::connect_with(&path, CONTROL, None);

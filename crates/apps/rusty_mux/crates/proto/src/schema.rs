@@ -1273,8 +1273,9 @@ pub static CATALOG: &[Method] = &[
         name: "terminal.shell",
         doc: "Read what the block's shell is and does, one per line as `NAME<TAB>VALUE`: \
               `program` is the program the block started; `activity` is `idle` while it \
-              has the terminal, `busy` while a job it started does, `exited` once it \
-              ended, or `unknown` where the platform cannot tell, as on Windows; `phase` \
+              has the terminal, `busy` while a job it started does, or `unknown` where \
+              the platform cannot tell, as on Windows (a program that exits closes its \
+              block); `phase` \
               is `prompt`, `running` or `finished` by the last OSC 133 mark the shell \
               sent, and `exit` the code its last finished command reported, both \
               `unknown` until it sends them. Lines may be added; read them by name.",

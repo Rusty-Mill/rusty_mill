@@ -1073,7 +1073,8 @@ impl State {
             }
             "terminal.modes" => terminal::modes(&rt.grid),
             "terminal.shell" => {
-                let activity = process::activity(rt.process.pid(), rt.pty.foreground());
+                let pid = rt.process.pid().ok_or("the program has exited")?;
+                let activity = process::activity(pid, rt.pty.foreground());
                 terminal::shell(&rt.grid, &rt.program, activity)
             }
             "terminal.set-theme" | "terminal.clear" => {
