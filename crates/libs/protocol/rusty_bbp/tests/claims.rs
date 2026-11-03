@@ -3067,3 +3067,30 @@ fn cl_97_executed_holdout_evidence_uses_the_code_endorsement() {
     ));
     ok(cx.executed("a", x, Support, rep));
 }
+
+/// #597 re-review: `failing_from` keeps the first failure, so an endorsement
+/// compares a pass with the latest failure of the profile: fail, pass with a
+/// test change, fail again, endorse leaves the block.
+#[test]
+fn cl_99_an_endorsement_does_not_clear_a_profile_that_failed_again() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+    let h1 = stored(cx.holdout_of("h", k));
+    let run = cx.live_run(h1);
+    let secret = cx.st.secret_for(run);
+    let changed = vec![TestChange::modified("tests/core.rs")];
+    stored(cx.report_full(
+        h1,
+        run,
+        secret,
+        holdout_digest(),
+        &[("holdout:api", 0)],
+        changed,
+    ));
+    stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+    ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    assert!(card_of(&cx, x).holdout_due);
+}
