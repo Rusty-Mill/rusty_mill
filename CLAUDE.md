@@ -16,6 +16,9 @@ Call it with `subagent_type: "<expert>"`. **Fallback:** if that type isn't avail
 fail to load agents), read `.claude/agents/<expert>.md` fresh at call time and spawn a general-purpose
 Agent whose prompt is the file's body (everything after the frontmatter) followed by the question. That
 counts as the expert. Never answer without it, and never copy the file's text anywhere.
+**Missing expert:** if `.claude/agents/<expert>.md` doesn't exist either, use the next row that matches
+the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design questions go to
+`rusty-term-expert`, which escalates them to Nano rather than answering (its pack, D10).
 - ANSWER: act on it; the source is cited. An answer settles what to build, not permission: review,
   merge and owner gates still apply.
 - ESCALATE: ask Nano exactly that block: question, options, recommendation. Nothing more.
