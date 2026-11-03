@@ -106,19 +106,20 @@ fn refuse(e: String) -> ClassifiedError {
 /// "agent_message","text":...}}`), which is the run's final message.
 /// Missing or blank is an error. Lines that are not JSON events are skipped.
 pub(crate) fn last_message(events: &str) -> Result<String, String> {
-    let text = events
+    // The last completed message is the reply even when it is malformed:
+    // never fall back to an earlier one.
+    let last = events
         .lines()
         .rev()
         .filter_map(|l| Value::parse(l.trim()).ok())
         .filter(|v| v.get("type").and_then(Value::as_str) == Some("item.completed"))
-        .filter(|v| v.pointer("/item/type").and_then(Value::as_str) == Some("agent_message"))
-        .filter_map(|v| {
-            v.pointer("/item/text")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .next()
+        .find(|v| v.pointer("/item/type").and_then(Value::as_str) == Some("agent_message"))
         .ok_or("codex reported no final message")?;
+    let text = last
+        .pointer("/item/text")
+        .and_then(Value::as_str)
+        .ok_or("codex's final message has no text")?
+        .to_owned();
     if text.trim().is_empty() {
         return Err("codex reported an empty final message".to_owned());
     }
@@ -216,6 +217,19 @@ mod tests {
             "{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"after\"}}\n",
         );
         assert_eq!(last_message(events), Ok("final".to_owned()));
+    }
+
+    #[test]
+    fn a_malformed_final_message_never_falls_back_to_an_earlier_one() {
+        let earlier = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"earlier\"}}\n";
+        for last in [
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":7}}",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\" \"}}",
+        ] {
+            let events = format!("{earlier}{last}\n");
+            assert!(last_message(&events).is_err(), "{events}");
+        }
     }
 
     #[test]
