@@ -141,6 +141,18 @@ pub(crate) fn acting(
     }
 }
 
+/// The actor for an inbox op. These ops carry BBP's human authority (they lift
+/// its gates and budgets), so a caller-named actor and role are not enough: only
+/// an identity bound to the transport (a token or OAuth grant) may use them.
+fn bound_acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, BoardError> {
+    if identity.is_none() {
+        return Err(BoardError::Invalid(
+            "the inbox needs an authenticated admin credential; a named actor and role are not enough",
+        ));
+    }
+    acting(b, identity, who)
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct Nothing {}
 
@@ -658,17 +670,17 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "inbox_list",
-            "The decisions waiting for the owner (needs admin): open BBP escalations of the tasks linked from cards, irreversible first, then oldest. Each has an `id`, a `rev`, the `reason` (and `label` in plain words), the claim with its confidence and budget, the strongest evidence, and its card. Empty means nothing needs you.",
+            "The decisions waiting for the owner (needs an authenticated admin credential): open BBP escalations of the tasks linked from cards, irreversible first, then oldest. Each has an `id`, a `rev`, the `reason` (and `label` in plain words), the claim with its confidence and budget, the strongest evidence, and its card. Empty means nothing needs you.",
             |b, i, a: InboxListArgs| {
-                let who = acting(b, i, &a.who)?;
+                let who = bound_acting(b, i, &a.who)?;
                 Ok(json!(b.inbox(&who)?))
             },
         ),
         op(
             "inbox_act",
-            "Decide an escalation from `inbox_list` (needs admin). `action`: `approve` (do it, keep it, or spend exactly one more allowance), `reject` (drop it; a task total needs `reason`), `choose` with `chosen` (a stuck question's candidate id), or `refine` with `note` (clarify the intent, then the lenses judge again). Pass the `rev` you read; `dry_run: true` shows what BBP would write and writes nothing.",
+            "Decide an escalation from `inbox_list` (needs an authenticated admin credential). `action`: `approve` (do it, keep it, or spend exactly one more allowance), `reject` (drop it; a task total needs `reason`), `choose` with `chosen` (a stuck question's candidate id), or `refine` with `note` (clarify the intent, then the lenses judge again). Pass the `rev` you read; `dry_run: true` shows what BBP would write and writes nothing.",
             |b, i, a: InboxActArgs| {
-                let who = acting(b, i, &a.who)?;
+                let who = bound_acting(b, i, &a.who)?;
                 Ok(json!(
                     b.inbox_act(&who, &a.id, a.rev, &a.action, a.dry_run)?
                 ))
