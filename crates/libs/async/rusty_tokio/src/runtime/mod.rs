@@ -165,7 +165,7 @@ pub(crate) struct Shared {
     /// Every task spawned and not yet finished. The runtime owns its
     /// tasks through this, not only through their wakers, so a task with
     /// no stored waker stays alive until shutdown cancels it (#405).
-    pub(crate) owned: task::OwnedTasks,
+    pub(crate) owned: task::OwnedTasks<task::Task>,
     drain_lock: Mutex<()>,
     drain_condvar: Condvar,
     /// Per-worker counters backing [`RuntimeMetrics`] -- how many tasks
@@ -212,13 +212,13 @@ pub(crate) struct Shared {
     pub(crate) id: Id,
 }
 
-type PanicPayload = Box<dyn std::any::Any + Send>;
+pub(crate) type PanicPayload = Box<dyn std::any::Any + Send>;
 
 /// Keeps the first panic payload of a shutdown sweep. Later ones are
 /// leaked rather than dropped: a payload is arbitrary user data whose
 /// destructor could itself panic and cut the sweep short. Shutdown
 /// happens once per runtime, so the leak is bounded.
-fn keep_first_panic(first: &mut Option<PanicPayload>, payload: PanicPayload) {
+pub(crate) fn keep_first_panic(first: &mut Option<PanicPayload>, payload: PanicPayload) {
     if first.is_none() {
         *first = Some(payload);
     } else {

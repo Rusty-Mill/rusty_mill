@@ -282,7 +282,7 @@ where
     });
 
     shared.task_spawned();
-    if shared.owned.bind(&task) {
+    if shared.owned.bind(task.id, &task) {
         shared.schedule(task.clone());
     } else {
         // The runtime has shut down: nothing would ever run this task.
