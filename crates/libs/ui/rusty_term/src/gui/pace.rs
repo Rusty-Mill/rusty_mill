@@ -2,14 +2,17 @@
 //! display refresh.
 //!
 //! The GPU renderer's Fifo present already blocks to the refresh rate. The
-//! CPU renderer presents as fast as wakeups arrive, about 1150 fps on a
-//! flood. Each of those frames holds the grid lock that the parser needs, so
-//! unpaced repaint cost 6–8% of `type` throughput on Windows (Beast,
-//! 2026-11-03). Frames the display never shows are only lost work.
+//! CPU renderer presented as fast as wakeups arrived, 1100–1700 fps on a
+//! flood. Each of those frames held the grid lock the parser needs. On
+//! Windows (Beast, 240 Hz, 2026-11-03), pacing made 4 MB `type` floods
+//! 1.9–6.1% faster and cut the parser's lock wait 5–9x.
 //!
-//! Pacing applies only to output-driven repaints. Input, resize and timers
-//! still repaint at once, and any frame they paint also covers held output,
-//! because panes share the grid.
+//! Pacing applies only to output-driven repaints. Repaints that the UI
+//! requests itself (input that changes the view, resize, timers) still happen
+//! at once, and any frame they paint also covers held output. Output that
+//! answers input, such as a shell echoing a key, is paced like any other
+//! output: it can wait up to one frame interval (4.2 ms at 240 Hz, 16.7 ms
+//! at the 60 Hz fallback) plus scheduling.
 
 use std::time::{Duration, Instant};
 
