@@ -1306,3 +1306,20 @@ fn name_session_names_only_a_generated_name_and_only_once() {
         Err(Error::UnknownSession(gone))
     );
 }
+
+#[test]
+fn name_session_to_the_current_name_still_claims_it() {
+    let mut mux = Mux::new();
+    let made = mux.create_generated_session(7).unwrap();
+    let name = mux.session(made).unwrap().name().to_owned();
+    mux.take_events();
+
+    mux.name_session(made, name.clone()).unwrap();
+    assert!(!mux.session(made).unwrap().generated());
+    assert_eq!(
+        mux.name_session(made, "write-docs"),
+        Err(Error::NameChosen(made))
+    );
+    assert_eq!(mux.session(made).unwrap().name(), name);
+    assert_eq!(mux.take_events(), [], "the name never changed");
+}

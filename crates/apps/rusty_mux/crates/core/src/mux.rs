@@ -658,7 +658,9 @@ impl Mux {
     /// is generated ([`Session::generated`]); once somebody chose a name,
     /// it is refused with [`Error::NameChosen`] and the name stays. The
     /// check and the rename happen together, so of two such calls on one
-    /// generated session only the first takes effect.
+    /// generated session only the first takes effect. Naming it its current
+    /// name also ends the mark, though, as with [`Mux::rename`], nothing is
+    /// emitted.
     pub fn name_session(
         &mut self,
         session: SessionId,
@@ -671,7 +673,12 @@ impl Mux {
         if !found.generated {
             return Err(Error::NameChosen(session));
         }
-        self.rename(EntityId::Session(session), name)
+        self.rename(EntityId::Session(session), name)?;
+        // A rename to the same name keeps the mark; this one is a choice.
+        if let Some(named) = self.sessions.get_mut(&session) {
+            named.generated = false;
+        }
+        Ok(())
     }
 
     /// Names the entity `name`, replacing its old name. Renaming to the

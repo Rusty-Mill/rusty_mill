@@ -151,3 +151,15 @@ fn name_session_needs_its_feature() {
     assert!(refused.contains("requires feature"), "{refused}");
     assert!(listed(&mut client, session).1);
 }
+
+#[test]
+fn naming_a_session_its_generated_name_still_claims_it() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, NAMES.union(Features::NAME_SESSION), None);
+    let session = create(&mut client, "");
+    let (name, _) = listed(&mut client, session);
+
+    assert_eq!(name_session(&mut client, session, &name), None);
+    assert!(name_session(&mut client, session, "write-docs").is_some());
+    assert_eq!(listed(&mut client, session), (name, false));
+}
