@@ -1118,7 +1118,18 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
     // Held through the marker write, so an extend cannot land in between.
     let _admission = evidence_admission(&cfg.dir, &cfg.task)?;
     let file = evidence_marker_path(&cfg.dir, &cfg.task);
-    let recorded = std::fs::read_to_string(&file).ok();
+    // Only a specific not-found means no marker: an unreadable one must not
+    // be taken for a fresh task and overwritten.
+    let recorded = match std::fs::read_to_string(&file) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(format!(
+                "moderator: refusing to start: cannot read the evidence marker {}: {e}",
+                file.display()
+            ))
+        }
+    };
     let Some(cap) = &cfg.cost_cap else {
         return match recorded {
             None => Ok(()),
