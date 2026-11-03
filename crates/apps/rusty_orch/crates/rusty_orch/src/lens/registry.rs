@@ -24,6 +24,10 @@ use rusty_json::Map;
 /// local models answer a 32k prompt in minutes, not seconds.
 pub const HTTP_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// The longest `timeout_secs` a provider may set: one day. Larger values
+/// mean a typo, and an unbounded one could overflow a deadline.
+pub const MAX_TIMEOUT_SECS: u64 = 86_400;
+
 /// What the operator asserts about the hosts and accounts the CLI
 /// providers run on. The adapters cannot check either, so both default to
 /// false and the providers that need them stay `Unavailable`.
@@ -203,9 +207,9 @@ fn opt_secs(s: &Map) -> Result<Option<Duration>, String> {
         None => Ok(None),
         Some(v) => v
             .as_u64()
-            .filter(|n| *n > 0)
+            .filter(|n| (1..=MAX_TIMEOUT_SECS).contains(n))
             .map(|n| Some(Duration::from_secs(n)))
-            .ok_or_else(|| "timeout_secs: a whole number above 0 required".to_owned()),
+            .ok_or_else(|| format!("timeout_secs: a whole number from 1 to {MAX_TIMEOUT_SECS}")),
     }
 }
 
