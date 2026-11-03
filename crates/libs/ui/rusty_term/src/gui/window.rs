@@ -45,6 +45,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
+use super::pace::Pacer;
 use super::render::{CpuRenderer, PaneFrame, Renderer};
 use super::settings::{CATEGORIES, Field, Settings, Widget};
 use crate::backend::{Backend, BackendHandle};
@@ -662,6 +663,9 @@ struct WindowState<'a> {
     /// holding a synchronized update, so a tick that finds one of them
     /// released repaints.
     sync_held: Vec<u64>,
+    /// Paces output-driven repaints to the display refresh (CPU renderer);
+    /// set up by [`make_renderer`](Self::make_renderer).
+    pacer: Pacer,
     /// Active scrollback-search query (windowed front-end); `Some` means search
     /// mode is on, intercepting keys and showing the find bar in the chrome.
     searching: Option<String>,
@@ -1348,6 +1352,7 @@ impl WindowState<'_> {
 
     /// Paint the chrome bar + the active tab's panes through the renderer.
     fn redraw(&mut self) {
+        self.pacer.painted(Instant::now());
         let chrome = self.chrome_row();
         let status = self.status_row();
         let divider = mix(self.theme.bg, self.theme.fg, 60);
@@ -2151,7 +2156,21 @@ impl WindowState<'_> {
 
     /// Build the configured renderer for `window`: the GPU one when `--gpu` is
     /// passed and `gui-gpu` is built (falling back to CPU on failure), else CPU.
+    /// Also sets output repaint pacing to suit it.
     fn make_renderer(&mut self, window: Arc<Window>) -> Option<Box<dyn Renderer>> {
+        let renderer = self.build_renderer(window.clone())?;
+        if renderer.waits_for_vsync() {
+            self.pacer.disable();
+        } else {
+            let rate = window
+                .current_monitor()
+                .and_then(|m| m.refresh_rate_millihertz());
+            self.pacer.set_refresh(rate);
+        }
+        Some(renderer)
+    }
+
+    fn build_renderer(&mut self, window: Arc<Window>) -> Option<Box<dyn Renderer>> {
         #[cfg(feature = "gui-gpu")]
         if std::env::args().any(|a| a == "--gpu") {
             match super::gpu::GpuRenderer::new(window.clone(), &mut self.font) {
@@ -2311,6 +2330,7 @@ impl WindowState<'_> {
             };
             if let Some(((dx, dy), app_cursor)) = moves {
                 let bytes = arrow_presses(dx, dy, app_cursor);
+                self.pacer.input(Instant::now());
                 if let Some(p) = self.pane_mut() {
                     let _ = p.writer.write(&bytes);
                 }
@@ -3049,6 +3069,7 @@ impl WindowState<'_> {
     /// Write child input to the focused pane — or, while broadcast is on,
     /// to every pane in the active tab.
     fn write_child(&mut self, bytes: &[u8]) {
+        self.pacer.input(Instant::now());
         if !self.broadcast {
             if let Some(p) = self.pane_mut() {
                 let _ = p.writer.write(bytes);
@@ -3106,6 +3127,7 @@ impl WindowState<'_> {
         let Some(text) = self.primary_text().filter(|t| !t.is_empty()) else {
             return;
         };
+        self.pacer.input(Instant::now());
         if let Some(p) = self.pane_mut() {
             let bracketed = p.grid.lock().bracketed_paste;
             let _ = p.writer.write(&encode_paste(&text, bracketed));
@@ -3193,6 +3215,7 @@ impl WindowState<'_> {
         if out.is_empty() {
             return false;
         }
+        self.pacer.input(Instant::now());
         let Some(p) = self.pane_by_id_mut(id) else {
             return false;
         };
@@ -3312,6 +3335,7 @@ impl WindowState<'_> {
             (false, true) => b"\x1bOB",
             (false, false) => b"\x1b[B",
         };
+        self.pacer.input(Instant::now());
         if let Some(p) = self.pane_by_id_mut(id) {
             for _ in 0..lines.unsigned_abs() {
                 let _ = p.writer.write(seq);
@@ -4808,7 +4832,23 @@ impl WindowState<'_> {
         let cursor = self.tick_cursor(now);
         let sync = self.tick_sync();
         let compact = self.tick_compact(now);
-        cursor.into_iter().chain(sync).chain(compact).min()
+        let paced = self.tick_paced(now);
+        cursor
+            .into_iter()
+            .chain(sync)
+            .chain(compact)
+            .chain(paced)
+            .min()
+    }
+
+    /// Paint output held back by the [`Pacer`] once its frame is due; return
+    /// the deadline while it is still held.
+    fn tick_paced(&mut self, now: Instant) -> Option<Instant> {
+        let (due, next) = self.pacer.poll(now);
+        if due && let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        next
     }
 
     /// Run every pane's due compaction step, background tabs included, and
@@ -5310,6 +5350,7 @@ impl WindowState<'_> {
                             }
                         }
                         ImeCommitTarget::Pane => {
+                            self.pacer.input(Instant::now());
                             if let Some(p) = self.pane_mut() {
                                 let _ = p.writer.write(text.as_bytes());
                             }
@@ -5640,12 +5681,14 @@ impl WindowState<'_> {
             .pane_by_id_mut(id)
             .is_some_and(|p| p.grid.lock().sync_output_active());
         // Output on a background tab doesn't repaint; its bar label
-        // refreshes with the next frame the active tab causes.
+        // refreshes with the next frame the active tab causes. A flood
+        // repaints at most once per display refresh (`Pacer`).
         if !syncing
             && self
                 .tabs
                 .get(self.active)
                 .is_some_and(|t| t.panes.iter().any(|p| p.id == id))
+            && self.pacer.output(Instant::now())
             && let Some(window) = &self.window
         {
             window.request_redraw();
@@ -5742,6 +5785,7 @@ impl<'a> App<'a> {
             cursor_blink_on: true,
             last_blink: Instant::now(),
             sync_held: Vec::new(),
+            pacer: Pacer::unpaced(),
             searching: None,
             shells: self.shells.clone(),
             overlay: None,

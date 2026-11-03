@@ -1877,6 +1877,11 @@ impl Renderer for GpuRenderer {
     fn supports_opacity(&self) -> bool {
         true
     }
+
+    /// The surface presents with `PresentMode::Fifo`, which blocks to vsync.
+    fn waits_for_vsync(&self) -> bool {
+        true
+    }
 }
 #[cfg(test)]
 mod tests {

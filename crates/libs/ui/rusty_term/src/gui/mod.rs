@@ -11,6 +11,7 @@
 //! - [`cpu`] — software compositor: a [`crate::core::Grid`] into a pixel buffer
 //!   (presented via `softbuffer`); pure and headless-testable.
 //! - [`render`] — the `Renderer` trait + CPU (`softbuffer`) presenter.
+//! - [`pace`] — paces output-driven repaints to the display refresh.
 //! - [`settings`] — the in-app settings page model (values + persistence).
 //! - [`gpu`] — wgpu glyph-atlas renderer (behind `gui-gpu`).
 //! - [`input`] — native key encoding (winit key → terminal bytes).
@@ -30,6 +31,7 @@ mod hotkey;
 pub(crate) mod input;
 mod layout;
 mod mouse;
+mod pace;
 mod render;
 mod settings;
 mod shape;
