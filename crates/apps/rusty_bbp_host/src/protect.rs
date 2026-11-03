@@ -73,8 +73,7 @@ pub fn exempt(st: &TaskState, claim: Option<MsgId>) -> Exempt {
 /// Every path `patch` adds, modifies or deletes, both sides of a rename or
 /// copy included. `git apply --numstat -z`, the parser that will apply it,
 /// names each patched path but only the new side of a rename, so the old
-/// side is read from the `rename from` / `copy from` header lines, which can
-/// never be hunk content (a hunk line starts with ` `, `+`, `-` or `\`).
+/// side of every section is read from the patch itself ([`old_sides`]).
 /// Run in `scratch` with repository discovery stopped there: inside a
 /// repository's subdirectory `git apply` silently skips paths outside it.
 /// A path that is not UTF-8 or that git quotes fails closed, and so does a
@@ -86,7 +85,11 @@ pub fn patch_paths(scratch: &Path, patch: &[u8]) -> Result<Vec<String>, String> 
     if paths.is_empty() && !patch.iter().all(u8::is_ascii_whitespace) {
         return Err("git reads no path in this patch; refusing to guess".into());
     }
-    paths.extend(rename_sources(patch)?);
+    for old in old_sides(patch)? {
+        if !paths.contains(&old) {
+            paths.push(old);
+        }
+    }
     Ok(paths)
 }
 
@@ -125,25 +128,84 @@ fn numstat(scratch: &Path, patch: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
-/// The old side of every rename or copy in `patch`. Pure.
-fn rename_sources(patch: &[u8]) -> Result<Vec<String>, String> {
+/// The old side of every file section in `patch`. Pure. `--numstat`
+/// names only the new side, but git also renames a file whose `diff --git`
+/// header or `---` line names another old path, with or without `rename
+/// from`. So the old side is read from `rename from` / `copy from` lines
+/// and from every `---` line followed by a `+++` line (a hunk's removed
+/// line can look like one; that only adds a path, so it fails closed). A
+/// `diff --git` section showing neither, whose two header paths differ or
+/// cannot be told apart, is refused: its source is unknown.
+fn old_sides(patch: &[u8]) -> Result<Vec<String>, String> {
+    let lines: Vec<&[u8]> = patch.split(|b| *b == b'\n').collect();
     let mut out = Vec::new();
-    for line in patch.split(|b| *b == b'\n') {
-        let rest = [b"rename from ".as_slice(), b"copy from ".as_slice()]
+    let mut open: Option<&[u8]> = None; // a `diff --git` header without an old side yet
+    for (i, line) in lines.iter().enumerate() {
+        if let Some(rest) = line.strip_prefix(b"diff --git ".as_slice()) {
+            unknown_source(open)?;
+            open = Some(rest);
+            continue;
+        }
+        let renamed = [b"rename from ".as_slice(), b"copy from ".as_slice()]
             .iter()
             .find_map(|h| line.strip_prefix(*h));
-        let Some(rest) = rest else {
+        let old = match renamed {
+            Some(rest) => Some(text(rest, "renamed")?.to_owned()),
+            None => match line.strip_prefix(b"--- ".as_slice()) {
+                Some(rest) if lines.get(i + 1).is_some_and(|n| n.starts_with(b"+++ ")) => {
+                    let side = text(rest, "old")?;
+                    // `a/<path>[\t<date>]`; `/dev/null` is a new file: known, no path.
+                    let side = side.split('\t').next().unwrap_or_default();
+                    Some(match side {
+                        "/dev/null" => String::new(),
+                        s => s.split_once('/').map_or(s, |(_, p)| p).to_owned(),
+                    })
+                }
+                _ => None,
+            },
+        };
+        let Some(old) = old else {
             continue;
         };
-        let path = std::str::from_utf8(rest)
-            .map_err(|_| "a renamed path is not UTF-8".to_owned())?
-            .trim_end_matches('\r');
-        if path.starts_with('"') {
-            return Err(format!("quoted renamed path {path}; refusing to guess"));
+        open = None;
+        if !old.is_empty() {
+            out.push(old);
         }
-        out.push(path.to_owned());
     }
+    unknown_source(open)?;
     Ok(out)
+}
+
+/// A `diff --git a/X b/X` header names its old side; any other header left
+/// without `---` or `rename from` does not, and is refused.
+fn unknown_source(header: Option<&[u8]>) -> Result<(), String> {
+    let Some(h) = header else {
+        return Ok(());
+    };
+    let h = text(h, "header")?;
+    let mid = h.len() / 2;
+    let same = h.len() % 2 == 1
+        && h.is_char_boundary(mid)
+        && h.as_bytes()[mid] == b' '
+        && h.starts_with("a/")
+        && h[mid + 1..].starts_with("b/")
+        && h[2..mid] == h[mid + 3..];
+    match same {
+        true => Ok(()),
+        false => Err(format!(
+            "diff --git {h}: its source path is unknown; refusing to guess"
+        )),
+    }
+}
+
+fn text<'a>(raw: &'a [u8], what: &str) -> Result<&'a str, String> {
+    let t = std::str::from_utf8(raw)
+        .map_err(|_| format!("a {what} path is not UTF-8"))?
+        .trim_end_matches('\r');
+    if t.starts_with('"') {
+        return Err(format!("quoted {what} path {t}; refusing to guess"));
+    }
+    Ok(t)
 }
 
 /// Parse `--numstat -z`: `added\tdeleted\tpath\0`, or for a rename or copy
@@ -374,6 +436,25 @@ mod tests {
         assert!(numstat_paths("garbage\0").is_err());
     }
 
+    /// #597 review: git applies `diff --git a/tests/core.txt b/src/core.txt`
+    /// as a rename even without `rename from`, and `--numstat` names only
+    /// `src/core.txt`; the source is still found.
+    #[test]
+    fn an_implicit_rename_names_its_protected_source() {
+        let scratch = std::env::temp_dir().join(format!("protect-implicit-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        let patch = b"diff --git a/tests/core.txt b/src/core.txt\n\
+--- a/tests/core.txt\n\
++++ b/src/core.txt\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n";
+        let paths = patch_paths(&scratch, patch).expect("numstat");
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert!(paths.contains(&"tests/core.txt".to_owned()), "{paths:?}");
+        assert!(paths.contains(&"src/core.txt".to_owned()), "{paths:?}");
+    }
+
     #[test]
     fn git_lists_added_deleted_and_renamed_paths() {
         // Inside this repository on purpose: without the ceiling, git would
@@ -411,11 +492,25 @@ rename to src/a.rs\n";
     }
 
     #[test]
-    fn rename_sources_fail_closed_on_quoted_paths() {
+    fn old_sides_name_every_source_and_fail_closed() {
         assert_eq!(
-            rename_sources(b"copy from a/b\nrename from c\n+rename from d\n").expect("ok"),
+            old_sides(b"copy from a/b\nrename from c\n+rename from d\n").expect("ok"),
             ["a/b", "c"]
         );
-        assert!(rename_sources(b"rename from \"t\\tab\"\n").is_err());
+        assert!(old_sides(b"rename from \"t\\tab\"\n").is_err());
+        // #597 review: a rename without `rename from` still names its source.
+        let implicit = b"diff --git a/tests/core.txt b/src/core.txt\n--- a/tests/core.txt\n+++ b/src/core.txt\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(old_sides(implicit).expect("ok"), ["tests/core.txt"]);
+        let dated =
+            b"--- a/tests/x.rs\t2026-11-03 01:00:00\n+++ b/tests/x.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(old_sides(dated).expect("ok"), ["tests/x.rs"]);
+        let created = b"diff --git a/n.rs b/n.rs\nnew file mode 100644\n--- /dev/null\n+++ b/n.rs\n@@ -0,0 +1 @@\n+a\n";
+        assert!(old_sides(created).expect("ok").is_empty());
+        // A header alone names its source only when both sides are equal.
+        let mode = b"diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n";
+        assert!(old_sides(mode).expect("ok").is_empty());
+        let moved = b"diff --git a/tests/x b/src/x\nold mode 100644\nnew mode 100755\n";
+        assert!(old_sides(moved).unwrap_err().contains("unknown"));
+        assert!(old_sides(b"--- \"a/t\\tab\"\n+++ b/x\n").is_err());
     }
 }
