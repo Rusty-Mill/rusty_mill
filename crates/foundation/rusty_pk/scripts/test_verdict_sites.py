@@ -3,11 +3,13 @@
 Run: python3 -I crates/foundation/rusty_pk/scripts/test_verdict_sites.py
 """
 import contextlib
+import gc
 import io
 import os
 import sys
 import tempfile
 import unittest
+import warnings
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -138,6 +140,15 @@ class MappingTests(unittest.TestCase):
                            "==1== verdict_sites: load anchor rusty_pk_taint::main at 0x1\n"
                            "verdict_sites: load anchor rusty_pk_taint::main at 0x2 trailing\n")
         self.assertEqual(vs.anchors(path), [(MAIN, 0x401d700)])
+
+    def test_report_files_are_closed(self):
+        path = write(self, "verdict_sites: load anchor rusty_pk_taint::main at 0x401d700\n")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            vs.anchors(path)
+            vs.reports(path)
+            gc.collect()
+        self.assertEqual([w for w in caught if issubclass(w.category, ResourceWarning)], [])
 
     def test_disassembly_heads_record_every_start(self):
         out = ("000000000001d700 <rusty_pk_taint::main>:\n"
