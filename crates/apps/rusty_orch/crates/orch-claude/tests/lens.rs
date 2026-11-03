@@ -57,7 +57,9 @@ fn subscribed(stdout: &str) -> Scripted {
 }
 
 fn agent(fake: Scripted) -> ClaudeAgent<Scripted> {
-    ClaudeAgent::with_runner("/repo", fake).timeout(Duration::from_secs(30))
+    ClaudeAgent::with_runner("/repo", fake)
+        .timeout(Duration::from_secs(30))
+        .lens_no_overage()
 }
 
 fn arg_after<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
@@ -100,6 +102,14 @@ fn a_question_runs_without_tools_and_returns_posts_and_usage() {
     assert_eq!(scrubbed[1], SCRUBBED_ENV);
     let cwds = a.runner().inner.cwds.lock().expect("lock");
     assert_eq!(cwds[1], Some(PathBuf::from("/repo")));
+}
+
+#[test]
+fn without_the_no_overage_assertion_nothing_runs() {
+    let mut a = ClaudeAgent::with_runner("/repo", subscribed(&reply(r#"{"posts":[]}"#)));
+    let err = a.ask(&question()).expect_err("refused");
+    assert!(matches!(err, ClassifiedError::Unavailable(_)), "{err:?}");
+    assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
 
 #[test]

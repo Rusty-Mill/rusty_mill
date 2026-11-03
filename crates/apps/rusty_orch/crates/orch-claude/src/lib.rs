@@ -17,8 +17,10 @@
 //! (#594): the question's prefix is the system prompt, its body goes on
 //! stdin, and the reply text must pass [`orch_lens::parse`]. A lens
 //! question runs with no tools unless [`ClaudeAgent::lens_read_only`],
-//! and only on a subscription login ([`SUBSCRIPTION_AUTH`]): `claude -p`
-//! cannot bound an agent loop's cost before the call.
+//! and only with the operator's no-overage assertion
+//! ([`ClaudeAgent::lens_no_overage`]) and a subscription login
+//! ([`SUBSCRIPTION_AUTH`]): `claude -p` cannot bound an agent loop's cost
+//! before the call, and a login does not prove the account cannot be billed.
 #![cfg_attr(
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
