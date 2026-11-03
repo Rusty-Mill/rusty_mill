@@ -22,6 +22,7 @@ use orch_openai::{Config as HttpConfig, OpenAiHttp};
 use rusty_json::Map;
 
 use super::assertions::Grants;
+use super::container::ContainerSpec;
 
 /// A local model server's deadline when the config names none. Large
 /// local models answer a 32k prompt in minutes, not seconds.
@@ -39,8 +40,17 @@ pub struct Assertions {
     /// Credits and extra usage are disabled on this account, so a call can
     /// never be billed per token.
     pub no_overage: Option<NoOverage>,
-    /// Everything this host lets the provider read is cleared for it.
-    pub host_cleared: bool,
+    /// Everything the provider can read where it runs is cleared for it.
+    pub host_cleared: Option<Clearance>,
+}
+
+/// Where a host-cleared provider may run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Clearance {
+    /// On the runner's own host, whose machine id the operator named.
+    Host,
+    /// Only inside this container, checked before every call.
+    Container(ContainerSpec),
 }
 
 /// A no-overage assertion: the account it names, and whether it is bound
@@ -167,7 +177,9 @@ fn codex<C: CommandRunner + 'static>(
     if a.no_overage.as_ref().is_some_and(|n| n.machine_bound) {
         agent = agent.lens_no_overage();
     }
-    if a.host_cleared {
+    // A container clearance is not honoured until the container check and
+    // `podman exec` are wired in (next slice): it fails closed.
+    if a.host_cleared == Some(Clearance::Host) {
         agent = agent.lens_host_cleared();
     }
     Ok(Entry {
@@ -366,7 +378,7 @@ mod tests {
     fn codex_needs_both_assertions() {
         let only_overage = Assertions {
             no_overage: no_overage(ACCOUNT, true),
-            host_cleared: false,
+            host_cleared: None,
         };
         let (r, fake) = build(&config("", "", LOCAL), only_overage);
         let mut r = r.expect("builds");
@@ -383,7 +395,7 @@ mod tests {
     fn codex_no_overage_counts_only_when_bound_to_this_machine() {
         let unbound = Assertions {
             no_overage: no_overage(ACCOUNT, false),
-            host_cleared: true,
+            host_cleared: Some(Clearance::Host),
         };
         let (r, fake) = build(&config("", "", LOCAL), unbound);
         let e = r
@@ -397,10 +409,32 @@ mod tests {
     }
 
     #[test]
+    fn a_container_clearance_is_not_honoured_yet_and_nothing_runs() {
+        let spec = ContainerSpec {
+            name: "lel-codex".to_owned(),
+            machine_id: "lel-1".to_owned(),
+            mounts: Vec::new(),
+        };
+        let contained = Assertions {
+            no_overage: no_overage(ACCOUNT, true),
+            host_cleared: Some(Clearance::Container(spec)),
+        };
+        let (r, fake) = build(&config("", "", LOCAL), contained);
+        let e = r
+            .expect("builds")
+            .get(id("codex"), Tools::None)
+            .expect("configured")
+            .ask(&question())
+            .expect_err("no container check yet");
+        assert!(matches!(e, ClassifiedError::Unavailable(_)), "{e:?}");
+        assert!(calls(&fake).is_empty());
+    }
+
+    #[test]
     fn claude_logged_into_another_account_gets_no_grant() {
         let other = Assertions {
             no_overage: no_overage("someone@example.com", false),
-            host_cleared: false,
+            host_cleared: None,
         };
         let (r, fake) = build(&config("", "", LOCAL), other);
         let e = r
@@ -419,7 +453,7 @@ mod tests {
     fn asserted_claude_runs_with_settings_and_the_lens_tools() {
         let a = Assertions {
             no_overage: no_overage(ACCOUNT, true),
-            host_cleared: true,
+            host_cleared: Some(Clearance::Host),
         };
         let (r, fake) = build(
             &config(r#", "model": "opus", "timeout_secs": 90"#, "", LOCAL),
