@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Codex lens questions run only in the checked container
+**2026-11-03**
+
+- Before every Codex lens question the runner inspects the operator's
+  container on its own local podman and refuses anything but the asserted
+  mounts and machine id, an unprivileged container with no extra devices,
+  capabilities or shared namespaces, and no API key in its environment
+  (#594). A failed check is `Unavailable` and runs nothing.
+- The login probe and `codex exec` run with `podman exec` by the checked
+  container id.
+
 ## orch-lens: the lens runner's core
 **2026-11-03**
 
