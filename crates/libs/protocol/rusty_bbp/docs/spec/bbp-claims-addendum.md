@@ -395,6 +395,10 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-76 | (a) A stage task opens with `holdout_digest`. (b) A holdout task's log replays | (a) `bad_claims_config`. (b) The fold reproduces the claims book, `holdout_digest` included |
 | CL-91 | Holdout task. K's build report tested tree T1; support reaches 8; `h`'s holdout run of K passes on tree T2, then another on T1 | X stays `open` and `holdout_due` after the T2 pass; accepted at the T1 pass |
 | CL-92 | Holdout task. K's holdout run fails `holdout:api`; K2 stored; its holdout run passes listing `holdout:api` with a modified test; `c` endorses K2 before (or after) that report | Endorsed first: the report clears `holdout:api`. Endorsed after: the block stays until the endorsement, which clears it |
+| CL-95 | Holdout task. Support reaches 8 on K; the holdout run of K passes, with the build report, the holdout report or both naming no tree | X stays `open` and `holdout_due`: a report without a tree proves no tree |
+| CL-96 | Holdout task. H1's holdout run of K passes listing `holdout:api` with a modified test; a later holdout run of K fails `holdout:api`; `c` endorses K | The block stays: H1's pass is older than the failure. `holdout_due` stays: the latest holdout report failed |
+| CL-97 | Holdout task. `c` endorses K; H's holdout run of K passes with a modified test; `a` posts executed support citing that report | Accepted: K's endorsement covers H, which builds its code |
+| CL-98 | Holdout task. H's holdout run of K passes `holdout:api` with a modified test under v1; the host extends the suite to v2; H2's run fails `holdout:api` under v2; `c` endorses K | The block stays: H's pass belongs to the retired suite and is older than the v2 failure. `holdout_due` stays |
 | CL-44 | Host test (`rusty_bbp_host`): open a claims-mode task on a host with no sandbox configured; on a sandboxed host, inspect where a candidate's run executes | `bad_claims_config(sandbox)`, nothing written; the run's process is inside the `rusty_sandbox` profile |
 
 ## Owner answers (2026-11-02)

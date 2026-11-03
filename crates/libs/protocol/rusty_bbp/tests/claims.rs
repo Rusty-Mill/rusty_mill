@@ -63,7 +63,7 @@ struct Cx {
     now: Time,
     ops: u64,
     brief: ArtId,
-    /// The tree the runner reports; `None` unless a test sets it.
+    /// The tree the runner reports.
     tree: Option<Sha256>,
 }
 
@@ -79,7 +79,7 @@ impl Cx {
             now: Time(1_000),
             ops: 0,
             brief: ArtId(0),
-            tree: None,
+            tree: Some(Sha256::of(b"tree")),
         };
         let r = cx.run(Command::Open(open_task(Mode::Claims, Some(cfg), roster())));
         let Response::Stored(brief) = r else {
@@ -3109,4 +3109,105 @@ fn cl_93_suite_versions_reach_the_delta_and_never_return() {
     assert_eq!(cx.st.claims.holdout_digest, Some(v2));
     let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
     assert_eq!(replayed.claims, cx.st.claims);
+}
+
+/// #597 re-review: a report without a tree proves no tree, so a holdout pass
+/// counts only when both it and the build report name one.
+#[test]
+fn cl_95_a_holdout_pass_needs_a_tree_on_both_sides() {
+    for (build, holdout) in [
+        (None, None),
+        (Some(b"t".as_slice()), None),
+        (None, Some(b"t".as_slice())),
+    ] {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        cx.tree = build.map(Sha256::of);
+        let pass = stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        ok(cx.executed("a", x, Support, pass));
+        ok(cx.executed("b", x, Support, pass));
+        cx.tree = holdout.map(Sha256::of);
+        stored(cx.holdout_run(k, &[("holdout:api", 0)]));
+        assert_eq!(cx.status(x), ClaimStatus::Open, "{build:?} {holdout:?}");
+        assert!(card_of(&cx, x).holdout_due);
+    }
+}
+
+/// #597 re-review: an endorsement unlocks only a pass newer than the failure
+/// that blocks the profile, and a later holdout failure supersedes a pass.
+#[test]
+fn cl_96_a_pass_older_than_the_block_does_not_clear_it() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    let h1 = stored(cx.holdout_of("h", k));
+    let run = cx.live_run(h1);
+    let secret = cx.st.secret_for(run);
+    let changed = vec![TestChange::modified("tests/core.rs")];
+    stored(cx.report_full(
+        h1,
+        run,
+        secret,
+        holdout_digest(),
+        &[("holdout:api", 0)],
+        changed,
+    ));
+    stored(cx.holdout_run(k, &[("holdout:api", 1)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    assert!(card_of(&cx, x).holdout_due);
+}
+
+/// #597 re-review: the current candidate's endorsement also covers executed
+/// support citing a holdout report of the same code.
+#[test]
+fn cl_97_executed_holdout_evidence_uses_the_code_endorsement() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+    let h = stored(cx.holdout_of("h", k));
+    let run = cx.live_run(h);
+    let secret = cx.st.secret_for(run);
+    let changed = vec![TestChange::modified("tests/core.rs")];
+    let rep = stored(cx.report_full(
+        h,
+        run,
+        secret,
+        holdout_digest(),
+        &[("holdout:api", 0)],
+        changed,
+    ));
+    ok(cx.executed("a", x, Support, rep));
+}
+
+/// #597 re-review: after a suite version an endorsement does not unlock a
+/// holdout pass reported under the retired suite.
+#[test]
+fn cl_98_an_endorsement_ignores_passes_under_a_retired_suite() {
+    let v2 = Sha256::of(b"holdout suite v2");
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    let h = stored(cx.holdout_of("h", k));
+    let run = cx.live_run(h);
+    let secret = cx.st.secret_for(run);
+    let changed = vec![TestChange::modified("tests/core.rs")];
+    stored(cx.report_full(
+        h,
+        run,
+        secret,
+        holdout_digest(),
+        &[("holdout:api", 0)],
+        changed,
+    ));
+    ok(cx.host(HostAction::HoldoutExtended { digest: v2 }));
+    let h2 = stored(cx.holdout_of("h", k));
+    stored(cx.report_under(h2, v2, &[("holdout:api", 1)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    assert!(card_of(&cx, x).holdout_due);
 }
