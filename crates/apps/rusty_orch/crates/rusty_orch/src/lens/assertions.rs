@@ -11,7 +11,13 @@
 //!      "machine_id": "4c4c4544..."}
 //!   ],
 //!   "host_cleared": [
-//!     {"provider": "codex", "machine_id": "4c4c4544...", "checked": "2026-11-03"}
+//!     {"provider": "codex", "container": "lel-codex", "machine_id": "4c4c4544...",
+//!      "checked": "2026-11-03",
+//!      "mounts": [
+//!        {"source": "/srv/lel/machine-id", "destination": "/etc/machine-id", "rw": false},
+//!        {"source": "/srv/lel/experiment", "destination": "/work", "rw": true},
+//!        {"volume": "lel-codex-home", "destination": "/root"}
+//!      ]}
 //!   ]
 //! }
 //! ```
@@ -26,8 +32,12 @@
 //!   machine keeps the grant, so it is never account proof.
 //! - `host_cleared`: everything this host lets the provider read is cleared
 //!   for it, which in practice means a dedicated container or VM holding
-//!   only the experiment repository and synthetic data. It holds only on the
-//!   machine whose `/etc/machine-id` it names.
+//!   only the experiment repository and synthetic data. With `container`
+//!   and `mounts`, the provider runs only inside that container, whose
+//!   exact mounts and machine id are checked before every call
+//!   ([`super::container`]); a Codex no-overage entry may then be bound to
+//!   the container's machine id. Without them, it holds only on the
+//!   runner's own machine, the one whose `/etc/machine-id` it names.
 //!
 //! Everything fails closed: no file, an unreadable or malformed file, a file
 //! the runner could change, a lapsed or future date, or another machine
@@ -35,13 +45,14 @@
 //! only when the runner runs as a different user from the file's owner.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use orch_core::AgentId;
 use rusty_json::{Map, Value};
 use rusty_time::{Date, DateTime, Time};
 
-use super::registry::{Assertions, NoOverage};
+use super::container::{ContainerSpec, Mount, MACHINE_ID_PATH};
+use super::registry::{Assertions, Clearance, NoOverage};
 
 /// How long a no-overage check holds, in days.
 pub const NO_OVERAGE_DAYS: i64 = 30;
@@ -86,6 +97,26 @@ pub fn grants(text: &str, today: i64, machine_id: Option<&str>) -> Result<Grants
         return Err(format!("assertions.{k}: not an assertion"));
     }
     let mut g = Grants::none();
+    // Container ids first: a Codex no-overage entry may be bound to the
+    // container its host-cleared entry names.
+    let mut containers: BTreeMap<AgentId, String> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for (i, e) in entries(top, "host_cleared")?.iter().enumerate() {
+        let at = |m: String| format!("host_cleared[{i}].{m}");
+        let keys = ["provider", "machine_id", "checked", "container", "mounts"];
+        let (id, checked) = entry(e, &keys, &mut seen).map_err(at)?;
+        let named = text_field(e, "machine_id").map_err(at)?;
+        holds(checked, today, i64::MAX).map_err(at)?;
+        let clearance = match container(e, named).map_err(at)? {
+            Some(spec) => {
+                containers.insert(id, spec.machine_id.clone());
+                Clearance::Container(spec)
+            }
+            None if machine_id == Some(named) => Clearance::Host,
+            None => continue,
+        };
+        g.by_provider.entry(id).or_default().host_cleared = Some(clearance);
+    }
     let mut seen = BTreeSet::new();
     for (i, e) in entries(top, "no_overage")?.iter().enumerate() {
         let at = |m: String| format!("no_overage[{i}].{m}");
@@ -96,23 +127,18 @@ pub fn grants(text: &str, today: i64, machine_id: Option<&str>) -> Result<Grants
             None => None,
             Some(_) => Some(text_field(e, "machine_id").map_err(at)?),
         };
-        let here = bound.is_none_or(|m| machine_id == Some(m));
+        // Under a container clearance the provider runs only in that
+        // container, so a binding counts only to the container's id.
+        let here = match (bound, containers.get(&id)) {
+            (None, _) => true,
+            (Some(m), Some(c)) => m == c,
+            (Some(m), None) => machine_id == Some(m),
+        };
         if holds(checked, today, NO_OVERAGE_DAYS).map_err(at)? && here {
             g.by_provider.entry(id).or_default().no_overage = Some(NoOverage {
                 account,
                 machine_bound: bound.is_some(),
             });
-        }
-    }
-    let mut seen = BTreeSet::new();
-    for (i, e) in entries(top, "host_cleared")?.iter().enumerate() {
-        let at = |m: String| format!("host_cleared[{i}].{m}");
-        let keys = ["provider", "machine_id", "checked"];
-        let (id, checked) = entry(e, &keys, &mut seen).map_err(at)?;
-        let named = text_field(e, "machine_id").map_err(at)?;
-        holds(checked, today, i64::MAX).map_err(at)?;
-        if machine_id == Some(named) {
-            g.by_provider.entry(id).or_default().host_cleared = true;
         }
     }
     Ok(g)
@@ -131,6 +157,87 @@ fn entries<'a>(top: &'a Map, k: &str) -> Result<Vec<&'a Map>, String> {
                 .ok_or_else(|| format!("{k}[{i}]: object required"))
         })
         .collect()
+}
+
+/// The entry's container, when it names one: `container` and `mounts`
+/// come together, and the mounts must include the read-only bind of the
+/// container's machine id.
+fn container(e: &Map, machine_id: &str) -> Result<Option<ContainerSpec>, String> {
+    let (name, list) = match (e.get("container"), e.get("mounts")) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(m)) => (text_field(e, "container")?, m),
+        _ => return Err("container: names its mounts, and mounts name a container".to_owned()),
+    };
+    let list = list.as_array().ok_or("mounts: array required")?;
+    let mut mounts = Vec::new();
+    let mut dests = BTreeSet::new();
+    for (i, m) in list.iter().enumerate() {
+        let at = |e: String| format!("mounts[{i}].{e}");
+        let m = mount(m).map_err(at)?;
+        if !dests.insert(m.destination().to_owned()) {
+            return Err(at(format!(
+                "destination: {} is already mounted",
+                m.destination()
+            )));
+        }
+        mounts.push(m);
+    }
+    let spec = ContainerSpec {
+        name: name.to_owned(),
+        machine_id: machine_id.to_owned(),
+        mounts,
+    };
+    if spec.machine_id_source().is_none() {
+        return Err(format!(
+            "mounts: a read-only bind of {MACHINE_ID_PATH} required"
+        ));
+    }
+    Ok(Some(spec))
+}
+
+fn mount(v: &Value) -> Result<Mount, String> {
+    let m = v.as_object().ok_or("object required")?;
+    let destination = absolute(m, "destination")?.to_owned();
+    if m.contains_key("volume") {
+        if let Some(k) = m
+            .keys()
+            .find(|k| !["volume", "destination"].contains(&k.as_str()))
+        {
+            return Err(format!("{k}: not a field of a volume mount"));
+        }
+        let name = text_field(m, "volume")?.to_owned();
+        return Ok(Mount::Volume { name, destination });
+    }
+    if let Some(k) = m
+        .keys()
+        .find(|k| !["source", "destination", "rw"].contains(&k.as_str()))
+    {
+        return Err(format!("{k}: not a field of a bind mount"));
+    }
+    let rw = m
+        .get("rw")
+        .and_then(Value::as_bool)
+        .ok_or("rw: true or false required")?;
+    let source = PathBuf::from(absolute(m, "source")?);
+    Ok(Mount::Bind {
+        source,
+        destination,
+        rw,
+    })
+}
+
+fn absolute<'a>(m: &'a Map, k: &str) -> Result<&'a str, String> {
+    let p = text_field(m, k)?;
+    let normal = Path::new(p).components().all(|c| {
+        !matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::CurDir
+        )
+    });
+    if !p.starts_with('/') || !normal {
+        return Err(format!("{k}: an absolute path without . or .. required"));
+    }
+    Ok(p)
 }
 
 /// The entry's provider and check day, after refusing unknown keys and a
@@ -332,12 +439,177 @@ mod tests {
     #[test]
     fn host_cleared_holds_only_on_the_named_machine() {
         let here = grants(FILE, TODAY, Some("box-1")).expect("parses");
-        assert!(here.for_provider(id("codex")).host_cleared);
-        assert!(!here.for_provider(id("claude")).host_cleared);
+        assert_eq!(
+            here.for_provider(id("codex")).host_cleared,
+            Some(Clearance::Host)
+        );
+        assert_eq!(here.for_provider(id("claude")).host_cleared, None);
         for elsewhere in [Some("desktop"), None] {
             let g = grants(FILE, TODAY, elsewhere).expect("parses");
-            assert!(!g.for_provider(id("codex")).host_cleared, "{elsewhere:?}");
+            assert_eq!(
+                g.for_provider(id("codex")).host_cleared,
+                None,
+                "{elsewhere:?}"
+            );
         }
+    }
+
+    const CONTAINER: &str = r#"{
+      "no_overage": [
+        {"provider": "codex", "account": "nano@example.com", "checked": "2026-11-01",
+         "machine_id": "lel-1"}
+      ],
+      "host_cleared": [
+        {"provider": "codex", "container": "lel-codex", "machine_id": "lel-1",
+         "checked": "2026-11-03",
+         "mounts": [
+           {"source": "/srv/lel/machine-id", "destination": "/etc/machine-id", "rw": false},
+           {"source": "/srv/lel/experiment", "destination": "/work", "rw": true},
+           {"volume": "lel-codex-home", "destination": "/root"}
+         ]}
+      ]
+    }"#;
+
+    #[test]
+    fn a_container_clearance_holds_on_any_host_and_carries_its_mounts() {
+        for host in [Some("baileyai"), None] {
+            let a = grants(CONTAINER, TODAY, host)
+                .expect("parses")
+                .for_provider(id("codex"));
+            let Some(Clearance::Container(spec)) = &a.host_cleared else {
+                panic!("{host:?}: {a:?}");
+            };
+            assert_eq!(spec.name, "lel-codex");
+            assert_eq!(spec.machine_id, "lel-1");
+            assert_eq!(
+                spec.mounts,
+                [
+                    Mount::Bind {
+                        source: PathBuf::from("/srv/lel/machine-id"),
+                        destination: "/etc/machine-id".to_owned(),
+                        rw: false,
+                    },
+                    Mount::Bind {
+                        source: PathBuf::from("/srv/lel/experiment"),
+                        destination: "/work".to_owned(),
+                        rw: true,
+                    },
+                    Mount::Volume {
+                        name: "lel-codex-home".to_owned(),
+                        destination: "/root".to_owned(),
+                    },
+                ]
+            );
+            assert_eq!(
+                spec.machine_id_source(),
+                Some(&PathBuf::from("/srv/lel/machine-id"))
+            );
+            // Bound to the container's machine id, not the runner's host.
+            assert!(a.no_overage.is_some_and(|n| n.machine_bound), "{host:?}");
+        }
+    }
+
+    #[test]
+    fn a_no_overage_binding_to_another_machine_than_the_container_is_off() {
+        let text = CONTAINER.replacen(
+            "\"machine_id\": \"lel-1\"}",
+            "\"machine_id\": \"other\"}",
+            1,
+        );
+        assert_ne!(text, CONTAINER);
+        let a = grants(&text, TODAY, Some("baileyai"))
+            .expect("parses")
+            .for_provider(id("codex"));
+        assert!(a.no_overage.is_none());
+        assert!(matches!(a.host_cleared, Some(Clearance::Container(_))));
+    }
+
+    #[test]
+    fn under_a_container_clearance_only_a_container_binding_counts() {
+        // Runner host "baileyai"; the container is "lel-1".
+        let host_bound = CONTAINER.replacen(
+            "\"machine_id\": \"lel-1\"}",
+            "\"machine_id\": \"baileyai\"}",
+            1,
+        );
+        assert_ne!(host_bound, CONTAINER);
+        let a = grants(&host_bound, TODAY, Some("baileyai"))
+            .expect("parses")
+            .for_provider(id("codex"));
+        assert!(a.no_overage.is_none(), "a host binding is off: {a:?}");
+        let a = grants(CONTAINER, TODAY, Some("baileyai"))
+            .expect("parses")
+            .for_provider(id("codex"));
+        assert!(a.no_overage.is_some_and(|n| n.machine_bound));
+    }
+
+    #[test]
+    fn malformed_container_entries_are_refused_with_the_field_named() {
+        let entry = |extra: &str| {
+            format!(
+                r#"{{"host_cleared": [{{"provider": "codex", "machine_id": "m",
+                    "checked": "2026-11-01", {extra}}}]}}"#
+            )
+        };
+        let mid = r#"{"source": "/srv/m", "destination": "/etc/machine-id", "rw": false}"#;
+        let refused = |extra: String, expected: &str| {
+            let e = grants(&extra, TODAY, None).expect_err(expected);
+            assert!(e.contains(expected), "{expected:?} not in {e:?}");
+        };
+        refused(
+            entry(r#""container": "c""#),
+            "host_cleared[0].container: names its mounts",
+        );
+        refused(
+            entry(&format!(r#""mounts": [{mid}]"#)),
+            "host_cleared[0].container: names its mounts",
+        );
+        refused(
+            entry(r#""container": "c", "mounts": []"#),
+            "host_cleared[0].mounts: a read-only bind of /etc/machine-id required",
+        );
+        refused(
+            entry(
+                r#""container": "c", "mounts": [{"source": "/srv/m", "destination": "/etc/machine-id", "rw": true}]"#,
+            ),
+            "mounts: a read-only bind of /etc/machine-id required",
+        );
+        refused(
+            entry(&format!(
+                r#""container": "c", "mounts": [{mid}, {{"source": "/a", "destination": "/w"}}]"#
+            )),
+            "host_cleared[0].mounts[1].rw: true or false required",
+        );
+        refused(
+            entry(&format!(
+                r#""container": "c", "mounts": [{mid}, {{"source": "srv/a", "destination": "/w", "rw": true}}]"#
+            )),
+            "mounts[1].source: an absolute path",
+        );
+        refused(
+            entry(&format!(
+                r#""container": "c", "mounts": [{mid}, {{"source": "/srv/../home", "destination": "/w", "rw": true}}]"#
+            )),
+            "mounts[1].source: an absolute path",
+        );
+        refused(
+            entry(&format!(
+                r#""container": "c", "mounts": [{mid}, {{"volume": "v", "destination": "/etc/machine-id"}}]"#
+            )),
+            "mounts[1].destination: /etc/machine-id is already mounted",
+        );
+        refused(
+            entry(&format!(
+                r#""container": "c", "mounts": [{mid}, {{"volume": "v", "destination": "/r", "rw": true}}]"#
+            )),
+            "mounts[1].rw: not a field of a volume mount",
+        );
+        refused(
+            entry(&format!(
+                r#""container": "c", "mounts": [{mid}, {{"source": "/a", "destination": "/w", "rw": true, "options": "z"}}]"#
+            )),
+            "mounts[1].options: not a field of a bind mount",
+        );
     }
 
     #[test]
