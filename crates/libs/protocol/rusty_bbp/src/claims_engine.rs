@@ -333,32 +333,31 @@ fn builds_current(st: &TaskState, c: &ClaimRecord, k: ArtId) -> bool {
 }
 
 /// The holdout condition of the accept line (#597): with a holdout suite and
-/// a current candidate, a `passed` holdout report on the current code, under
+/// a current candidate, the latest holdout report on the current code under
 /// the task's holdout digest, stored after that candidate became current,
-/// whose tree is the one the current candidate's latest report tested. A
+/// `passed` on the tree the current candidate's latest report tested. A
 /// manifest names its base by any ref, so equal manifests alone do not prove
-/// that two checkouts built the same tree. True when the task has no holdout
-/// suite or the claim no candidate.
+/// that two checkouts built the same tree, and a report without a tree proves
+/// nothing. A later holdout failure supersedes an earlier pass. True when the
+/// task has no holdout suite or the claim no candidate.
 pub(crate) fn holdout_passed(st: &TaskState, c: &ClaimRecord) -> bool {
     let (Some(digest), Some(cur)) = (st.claims.holdout_digest, c.current) else {
         return true;
     };
-    let Some(tested) = latest_report(st, cur).map(|r| r.tree) else {
+    let Some(tested) = latest_report(st, cur).and_then(|r| r.tree) else {
         return false;
     };
-    st.claims
+    let latest = st
+        .claims
         .runs
         .values()
         .filter(|r| r.candidate != cur && builds_current(st, c, r.candidate))
         .filter_map(|r| r.report)
         .filter(|id| *id > cur)
-        .filter_map(|id| match &st.artifacts.get(&id)?.payload {
-            ArtifactPayload::TestReport(rep) => Some(rep),
-            _ => None,
-        })
-        .any(|rep| {
-            rep.status == RunStatus::Passed && rep.profile_digest == digest && rep.tree == tested
-        })
+        .filter_map(|id| Some((id, report_of(st, id)?)))
+        .filter(|(_, rep)| rep.profile_digest == digest)
+        .max_by_key(|(id, _)| *id);
+    latest.is_some_and(|(_, rep)| rep.status == RunStatus::Passed && rep.tree == Some(tested))
 }
 
 /// A run may start on an open claim or re-check a settled one.
@@ -567,7 +566,7 @@ fn check_executed(st: &TaskState, d: &Draft, e: &EvidenceBody) -> R<()> {
             Err(rej(Code::EvidenceUnbound, "counter needs a failed report"))
         }
         (Direction::Support, RunStatus::Passed)
-            if needs_endorsement(st, e.claim, r) && !endorsed(st, e.claim, r.candidate) =>
+            if needs_endorsement(st, e.claim, r) && !endorsed_code(st, e.claim, r.candidate) =>
         {
             let paths: Vec<&str> = r.tests_changed.iter().map(|t| t.path.as_str()).collect();
             Err(rej(
@@ -682,9 +681,11 @@ fn after_evidence(w: &mut Work, m: MsgId, c: MsgId, e: &EvidenceBody, d: &Draft)
     }
 }
 
-/// An endorsement unlocks the latest passing report of the current
-/// candidate, and of each holdout candidate building its code: their listed
-/// profiles leave `failing(c)` at this commit.
+/// An endorsement unlocks the latest report of the current candidate, and
+/// of each holdout candidate building its code, when it passed with a test
+/// change (a holdout report also under the task's current holdout digest):
+/// its listed profiles leave `failing(c)` at this commit, each only when the
+/// report is newer than the one that put the profile there.
 fn clear_if_endorsed(w: &mut Work, c: MsgId, d: &Draft) {
     let Some(rec) = w.st.claims.get(c) else {
         return;
@@ -699,35 +700,42 @@ fn clear_if_endorsed(w: &mut Work, c: MsgId, d: &Draft) {
     if !names_k || !endorsed(&w.st, c, k) {
         return;
     }
-    let code: Vec<ArtId> =
+    let passes: Vec<(ArtId, Vec<String>)> =
         w.st.claims
             .candidates
             .iter()
             .filter(|(id, claim)| **claim == c && builds_current(&w.st, rec, **id))
-            .map(|(id, _)| *id)
+            .filter_map(|(id, _)| unlockable(&w.st, *id))
             .collect();
-    let listed: Vec<String> = code
-        .into_iter()
-        .filter_map(|id| latest_report(&w.st, id))
-        .filter(|r| r.status == RunStatus::Passed && !r.tests_changed.is_empty())
-        .flat_map(|r| r.listed_profiles())
-        .collect();
-    if listed.is_empty() {
-        return;
+    let from = rec.failing_from.clone();
+    let cleared = |n: &String| {
+        passes
+            .iter()
+            .any(|(id, listed)| listed.contains(n) && from.get(n).is_none_or(|set| set < id))
+    };
+    set_failing(w, c, |f| f.retain(|n| !cleared(n)));
+}
+
+/// `k`'s latest report and its listed profiles, when it passed with a test
+/// change and, for a holdout candidate, under the current holdout digest.
+fn unlockable(st: &TaskState, k: ArtId) -> Option<(ArtId, Vec<String>)> {
+    let id = st.claims.latest_report(k)?;
+    let r = report_of(st, id)?;
+    let holdout = manifest(st, k).is_some_and(|m| m.suite == Suite::Holdout);
+    let current_suite = !holdout || Some(r.profile_digest) == st.claims.holdout_digest;
+    let ok = r.status == RunStatus::Passed && !r.tests_changed.is_empty() && current_suite;
+    ok.then(|| (id, r.listed_profiles()))
+}
+
+fn report_of(st: &TaskState, id: ArtId) -> Option<&Report> {
+    match &st.artifacts.get(&id)?.payload {
+        ArtifactPayload::TestReport(r) => Some(r),
+        _ => None,
     }
-    set_failing(w, c, |f| {
-        for n in &listed {
-            f.remove(n);
-        }
-    });
 }
 
 fn latest_report(st: &TaskState, k: ArtId) -> Option<Report> {
-    let id = st.claims.latest_report(k)?;
-    match &st.artifacts.get(&id)?.payload {
-        ArtifactPayload::TestReport(r) => Some(r.clone()),
-        _ => None,
-    }
+    report_of(st, st.claims.latest_report(k)?).cloned()
 }
 
 fn set_failing(w: &mut Work, c: MsgId, f: impl FnOnce(&mut std::collections::BTreeSet<String>)) {
