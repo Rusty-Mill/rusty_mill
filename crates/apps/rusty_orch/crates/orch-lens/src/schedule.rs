@@ -113,6 +113,8 @@ pub struct Proposals {
     pub settled: BTreeSet<u8>,
     /// The provider each in-flight proposal slot runs on.
     pub running: BTreeMap<Slot, AgentId>,
+    /// Providers that failed a slot; that slot does not ask them again.
+    pub tried: BTreeMap<Slot, BTreeSet<AgentId>>,
     pub rebel_landed: bool,
     pub rebel_failures: u32,
     /// Attack passes per candidate.
@@ -217,6 +219,7 @@ fn proposals(config: &LensConfig, lens: &Lens, question: &Card, state: &State) -
         }
     }
     let mut taken: BTreeSet<AgentId> = seen.running.values().copied().collect();
+    let none = BTreeSet::new();
     let mut wanted = Vec::new();
     for (slot, want, suffix) in slots {
         if seen.running.contains_key(&slot) {
@@ -225,7 +228,11 @@ fn proposals(config: &LensConfig, lens: &Lens, question: &Card, state: &State) -
         let eligible: Vec<AgentId> = std::iter::once(want)
             .chain(lens.proposers.iter().copied())
             .chain(lens.rebel)
-            .filter(|p| !seen.used.contains(p) && cleared_for(config, question, *p))
+            .filter(|p| {
+                !seen.used.contains(p)
+                    && !seen.tried.get(&slot).unwrap_or(&none).contains(p)
+                    && cleared_for(config, question, *p)
+            })
             .collect();
         if eligible.is_empty() {
             wanted.push((slot, Phase::Blind, Vec::new(), suffix));
@@ -401,8 +408,10 @@ impl State {
         }
     }
 
-    /// Record a job that no provider could answer. An ordinary proposal
-    /// slot is then settled without a candidate; the rebel may try again.
+    /// Record a job that no provider could answer. A proposal slot does
+    /// not ask that provider again: an ordinary slot moves to an unused
+    /// provider and settles only once none is left (see
+    /// [`State::unservable`]); the rebel also spends one of its tries.
     pub fn failed(&mut self, job: &Job) {
         self.in_flight.remove(&job.key);
         if matches!(job.key.slot, Slot::Review | Slot::LookHarder) {
@@ -410,12 +419,12 @@ impl State {
         }
         let q = self.questions.entry(job.key.claim).or_default();
         q.running.remove(&job.key.slot);
-        match job.key.slot {
-            Slot::Propose(n) => {
-                q.settled.insert(n);
-            }
-            Slot::Rebel => q.rebel_failures += 1,
-            Slot::Review | Slot::LookHarder => {}
+        q.tried
+            .entry(job.key.slot)
+            .or_default()
+            .extend(job.providers.iter().copied());
+        if job.key.slot == Slot::Rebel {
+            q.rebel_failures += 1;
         }
     }
 
@@ -728,16 +737,37 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_ordinary_slot_settles_without_a_candidate() {
+    fn a_failed_ordinary_slot_moves_on_then_settles() {
         let cfg = config();
+        let q = [question(3, &[])];
         let mut st = State::default();
-        let jobs = arch_jobs(&cfg, &[question(3, &[])], &st);
+        let jobs = arch_jobs(&cfg, &q, &st);
+        for j in &jobs {
+            st.start(j);
+        }
+        // local fails slot 1; claude (slot 0) and codex (rebel) still run.
         st.failed(&slot_job(&jobs, Slot::Propose(1)));
-        let slots: Vec<Slot> = arch_jobs(&cfg, &[question(3, &[])], &st)
+        assert!(
+            arch_jobs(&cfg, &q, &st).is_empty(),
+            "every other model is busy"
+        );
+
+        // claude proposes, so it is used; the rebel fails on codex.
+        st.answered(&slot_job(&jobs, Slot::Propose(0)), id("claude"), 1, 0);
+        st.failed(&slot_job(&jobs, Slot::Rebel));
+        let retry = slot_job(&arch_jobs(&cfg, &q, &st), Slot::Propose(1));
+        assert_eq!(retry.providers, [id("codex")], "an untried, unused model");
+
+        st.start(&retry);
+        st.failed(&retry);
+        let (jobs, skipped) = schedule(&cfg, &q, &st);
+        assert!(!jobs.iter().any(|j| j.key.slot == Slot::Propose(1)));
+        let slot1 = skipped
             .iter()
-            .map(|j| j.key.slot)
-            .collect();
-        assert_eq!(slots, [Slot::Propose(0), Slot::Rebel]);
+            .find(|s| s.key.slot == Slot::Propose(1))
+            .expect("slot 1 exhausted");
+        st.unservable(slot1);
+        assert!(st.questions[&MsgId(3)].settled.contains(&1));
     }
 
     #[test]
