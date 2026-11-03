@@ -63,8 +63,13 @@ the spelling alone is no proof, since a person may choose such a name.
 `name-session` renames only while the mark is set, checking and renaming in
 one step, so an instruction given before a person (or another agent) named
 the session is refused and their name stays. With no answer from the server
-within 2 s, or a server without `name-session`, the sentence is left out. `agent setup` without the flag puts the plain
-hook back; `agent status` checks for the form its flag names.
+within 2 s, or a server without `name-session`, the sentence is left out.
+On Linux 2 s bounds the whole lookup; elsewhere connecting is checked
+against it only once before a blocking connect, and on Windows writes are
+not timed out (`ctl/src/conn.rs`), so there the only hard bound is the
+host's: OpenCode's and Pi's scripts kill the hook after 5 s, and Claude
+Code and Codex apply their own hook timeouts. `agent setup` without the
+flag puts the plain hook back; `agent status` checks for the form its flag names.
 
 `agent setup --project` writes the same files under the current directory.
 Each hook names this machine's ctl by absolute path, so a hook committed to

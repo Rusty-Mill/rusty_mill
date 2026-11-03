@@ -554,7 +554,9 @@ fn follow(
 }
 
 /// How long the agent hook waits for the server to tell a session's name,
-/// well inside the 5 s the hook scripts give the whole hook.
+/// well inside the 5 s the OpenCode and Pi scripts give the whole hook.
+/// A hard bound only where [`conn::connect`] bounds connecting and writes
+/// (Linux); elsewhere the host's hook timeout is the bound.
 const HOOK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The name of `session` on the server at `socket` while it is one the
