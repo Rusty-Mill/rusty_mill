@@ -454,9 +454,11 @@ async function decide(item,action){
     if(d.response.Rejected){toast("BBP would refuse: "+d.response.Rejected.code+" "+d.response.Rejected.detail);return}
     const then=d.then.length?"\nThen: "+d.then.map(s=>s.verb+" "+s.args.join(" ")).join("; "):"";
     if(!confirm(d.step.verb+" "+d.step.args.join(" ")+"\nWould write: "+changes(d)+then))return;
-    const r=await api("inbox_act",args),out=r.outcome??r.remediated.outcome;
-    if(out.Refused)toast("Refused at step "+(out.Refused.step+1)+": "+out.Refused.code+" "+out.Refused.detail);
-    else if(r.remediated)toast("Filed "+(r.remediated.card.number?"#"+r.remediated.card.number+" ":"")+r.remediated.card.title);
+    const r=await api("inbox_act",args),out=r.outcome??r.remediated?.outcome,filed=(r.remediated??r.recorded)?.card;
+    const name=c=>(c.number?"#"+c.number+" ":"")+c.title;
+    if(out?.Refused)toast("Refused at step "+(out.Refused.step+1)+": "+out.Refused.code+" "+out.Refused.detail);
+    else if(r.recorded)toast("Already decided; its card is "+name(filed));
+    else if(filed)toast("Filed "+name(filed));
   }catch(e){toast(e.message)}
   await refresh().catch(()=>{});
 }

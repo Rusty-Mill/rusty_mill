@@ -400,15 +400,14 @@ impl<S: Store> Board<S> {
         dry_run: bool,
     ) -> Result<InboxAnswer, BoardError> {
         let source = self.inbox_source(by)?;
-        let InboxItem {
+        let Some(InboxItem {
             escalation: e,
             card: owner,
             ..
-        } = self
-            .inbox(by)?
-            .into_iter()
-            .find(|i| i.escalation.id == id)
-            .ok_or_else(|| BoardError::Refused(format!("no open escalation {id}")))?;
+        }) = self.inbox(by)?.into_iter().find(|i| i.escalation.id == id)
+        else {
+            return self.closed_escalation(by, id, dry_run);
+        };
         if e.rev != rev {
             return Err(BoardError::Refused(format!(
                 "stale_rev: {id} is at rev {}, not {rev}; re-read the inbox",
@@ -422,20 +421,65 @@ impl<S: Store> Board<S> {
                 .map_err(inbox_error);
         }
         let dropped = e.dropped_acted(action);
-        // The dry run goes on the Remediate card, so take it before acting.
-        let preview = (!dropped.is_empty())
-            .then(|| source.preview(&e, action))
-            .transpose()
-            .map_err(inbox_error)?;
-        let outcome = source
-            .act(&e, action, &answerer(&by.name))
-            .map_err(inbox_error)?;
-        let (Some(dry), Outcome::Done) = (preview, &outcome) else {
+        if dropped.is_empty() {
+            let outcome = source
+                .act(&e, action, &answerer(&by.name))
+                .map_err(inbox_error)?;
             return Ok(InboxAnswer::Outcome(outcome));
-        };
+        }
+        // Write ahead: the Remediate card is committed before BBP is asked to drop the
+        // work, so no drop sent from here can lose its card. A retry finds the card by
+        // its tag, whether BBP's answer was lost or the escalation is already gone.
+        let dry = source.preview(&e, action).map_err(inbox_error)?;
         let project = owner.map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project);
         let card = self.remediate(by, &project, &e, &dropped, &dry)?;
+        let outcome =
+            source
+                .act(&e, action, &answerer(&by.name))
+                .map_err(|err| match inbox_error(err) {
+                    BoardError::Storage(why) => BoardError::Storage(format!(
+                        "{why}; its Remediate card {} was written first, so retry to reconcile",
+                        card.label()
+                    )),
+                    other => other,
+                })?;
+        if let Outcome::Refused { step: 0, code, .. } = &outcome {
+            self.comment(
+                card.id,
+                by,
+                &format!(
+                    "BBP refused the decision ({code}), so nothing was dropped: close this card."
+                ),
+            )?;
+        }
         Ok(InboxAnswer::Remediated { outcome, card })
+    }
+
+    /// An escalation that is no longer open: a decision sent from here that dropped
+    /// acted-on work left its Remediate card, which is the answer to a retry.
+    fn closed_escalation(
+        &self,
+        by: &Actor,
+        id: &str,
+        dry_run: bool,
+    ) -> Result<InboxAnswer, BoardError> {
+        let closed = || BoardError::Refused(format!("no open escalation {id}"));
+        if dry_run {
+            return Err(closed());
+        }
+        self.remediation_card(by, id)?
+            .map(|card| InboxAnswer::Recorded { card })
+            .ok_or_else(closed)
+    }
+
+    /// The Remediate card written for escalation `id`, if `by` may see it.
+    fn remediation_card(&self, by: &Actor, id: &str) -> Result<Option<InboxCard>, BoardError> {
+        let tag = format!("remediate:{id}");
+        Ok(self
+            .cards()?
+            .iter()
+            .find(|c| by.may_work_in(&c.project) && c.tags.contains(&tag))
+            .map(InboxCard::of))
     }
 
     /// The one Backlog "Remediate" card for `e`'s dropped acted-on work (#595 §4).
@@ -448,10 +492,10 @@ impl<S: Store> Board<S> {
         dropped: &[&Acted],
         dry: &DryRun,
     ) -> Result<InboxCard, BoardError> {
-        let tag = format!("remediate:{}", e.id);
-        if let Some(c) = self.cards()?.iter().find(|c| c.tags.contains(&tag)) {
-            return Ok(InboxCard::of(c));
+        if let Some(card) = self.remediation_card(by, &e.id)? {
+            return Ok(card);
         }
+        let tag = format!("remediate:{}", e.id);
         let text = |id: u64| {
             e.candidates
                 .iter()
@@ -482,6 +526,7 @@ impl<S: Store> Board<S> {
             dry.step.args.join(" "),
             events.join(", ")
         ));
+        body.push_str("\nFiled before the decision was sent to BBP. If BBP's log shows it was not applied, close this card.\n");
         let title = format!(
             "Remediate: {}",
             text(dropped.first().map_or(0, |x| x.claim))
@@ -1204,6 +1249,14 @@ impl InboxCard {
             project: c.project.clone(),
         }
     }
+
+    /// `#N "title"`, or the quoted title alone while the card has no number.
+    fn label(&self) -> String {
+        match self.number {
+            Some(n) => format!("#{n} {:?}", self.title),
+            None => format!("{:?}", self.title),
+        }
+    }
 }
 
 /// What an inbox action returned.
@@ -1214,10 +1267,17 @@ pub enum InboxAnswer {
     DryRun(DryRun),
     /// What happened.
     Outcome(Outcome),
-    /// It was done, and it dropped acted-on work: the Remediate card made for it.
+    /// It dropped acted-on work: the Remediate card, written before BBP was asked.
+    /// On a refusal at the first step nothing was dropped, and the card says so.
     Remediated {
         /// What happened.
         outcome: Outcome,
+        /// The Backlog card to undo or reconcile the work.
+        card: InboxCard,
+    },
+    /// The escalation is closed and a decision sent from here had filed this Remediate
+    /// card for it: the answer to a retry, without sending anything to BBP again.
+    Recorded {
         /// The Backlog card to undo or reconcile the work.
         card: InboxCard,
     },
