@@ -3150,3 +3150,64 @@ fn cl_93_suite_versions_reach_the_delta_and_never_return() {
     let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
     assert_eq!(replayed.claims, cx.st.claims);
 }
+
+/// #597 review: a host rule passed to `dispatch_guarded` is judged against
+/// the state the commit lands on: after a revision conflict it is judged
+/// again on the reloaded state, and its refusal leaves the log alone.
+#[test]
+fn cl_94_a_dispatch_guard_is_rejudged_after_a_reload() {
+    let mut store = MemStore::new();
+    let brief = store.blob_put(b"brief");
+    let mut d = Driver::new(store, TaskId::from("t"));
+    let mut o = open_task(Mode::Claims, None, roster());
+    o.brief = brief;
+    let art = stored(d.dispatch(&Command::Open(o), Time(1_000)).expect("store"));
+    for who in ["a", "b"] {
+        let assign = Command::Assign {
+            role: RoleId::from(who),
+            principal: Principal {
+                id: pid(who),
+                kind: PrincipalKind::Agent {
+                    role: RoleId::from(who),
+                    vendor: "test".into(),
+                },
+            },
+        };
+        ok(d.dispatch(&assign, Time(1_000)).expect("store"));
+    }
+    let post = |d: &Driver<MemStore>, who: &str, op: &str, text: &str| Command::Agent {
+        principal: pid(who),
+        token: d.state.credential_for(&pid(who)),
+        op: OpId::from(op),
+        action: AgentAction::Post(Draft {
+            kind: MessageKind::Claim,
+            to: vec![Recipient::All],
+            body: Body::Claim(body(text)),
+            refs: vec![Ref::art(art)],
+            evidence: vec![],
+            reply_to: None,
+            yield_to: None,
+            gate: false,
+        }),
+    };
+    let stale = d.state.clone();
+    let first = post(&d, "a", "x", "x");
+    posted(d.dispatch(&first, Time(1_000)).expect("store"));
+    let committed = d.state.rev;
+    // b's server read the old revision; the rule only fails on the new one.
+    d.state = stale.clone();
+    let second = post(&d, "b", "y", "y");
+    let r = d
+        .dispatch_guarded(&second, Time(1_000), |st| {
+            (st.rev > stale.rev).then(|| Rejection::new(Code::ProtectedPath, "changed"))
+        })
+        .expect("store");
+    assert_eq!(rejected(r), Code::ProtectedPath);
+    assert_eq!(d.state.rev, committed, "nothing appended");
+    // A guard that holds on the reloaded state lets the command through.
+    d.state = stale;
+    posted(
+        d.dispatch_guarded(&second, Time(1_000), |_| None)
+            .expect("store"),
+    );
+}
