@@ -16,14 +16,17 @@
 //! - [`settings`]: admin changes (agents, repositories, projects, roles, GitHub) persisted to files and applied live.
 //! - [`tick`]: the rusty_tick adapter, where the cards live (ADR-0012).
 //! - [`drain`]: work in flight, so a stop can wait for it.
+//! - [`inbox`]: the decision inbox, open BBP escalations and the actions on them (#595); [`bbp_cli`] reads them from the host's `bbp`.
 
 pub mod api;
+pub mod bbp_cli;
 pub mod board;
 pub mod domain;
 pub mod drain;
 pub mod github;
 pub mod http;
 pub mod identities;
+pub mod inbox;
 pub mod mcp;
 pub mod metrics;
 pub mod projects;
