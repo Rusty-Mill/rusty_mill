@@ -108,6 +108,15 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
         "answer" => {
             HumanAction::Post(Draft::new(MessageKind::Answer, rest(1)).reply_to(msg(a(0)?)?))
         }
+        // Claims mode (C-R10): the human's clarification of the intent. It refs
+        // the brief; `task` targets the whole task, `msg:N` replies to a claim.
+        "refine" => {
+            let d = Draft::new(MessageKind::Answer, rest(2)).refs(vec![Ref::art(art(a(1)?)?)]);
+            HumanAction::Post(match a(0)? {
+                "task" => d,
+                target => d.reply_to(msg(target)?),
+            })
+        }
         "rerun" => HumanAction::Rerun {
             candidate: art(a(0)?)?,
             expected_rev: rev()?,

@@ -395,6 +395,9 @@ fn start_run(w: &mut Work, c: MsgId, k: ArtId) {
 
 /// `post` of a `claim` or `evidence`, by an agent (`role` set) or the human.
 fn post(w: &mut Work, p: &PrincipalId, role: Option<&Role>, d: &Draft) -> R<Response> {
+    if role.is_none() && d.kind == MessageKind::Answer {
+        return human_answer(w, p, d);
+    }
     if !matches!(d.kind, MessageKind::Claim | MessageKind::Evidence) {
         return Err(rej(
             Code::WrongMode,
@@ -437,6 +440,32 @@ fn post(w: &mut Work, p: &PrincipalId, role: Option<&Role>, d: &Draft) -> R<Resp
     if let (Some(c), Body::Evidence(e)) = (target, &d.body) {
         after_evidence(w, id, c, e, d);
     }
+    Ok(Response::Posted(id))
+}
+
+/// C-R10: the human's `answer` clarifies the intent (Refine, #595). It refs
+/// the brief, so #598 can turn it into an intent version, and replies to a
+/// claim if it is about one. It needs no turn, is not charged, changes no
+/// claim, and is taken while the task is open or escalated.
+fn human_answer(w: &mut Work, p: &PrincipalId, d: &Draft) -> R<Response> {
+    if w.st.state.terminal() {
+        return Err(rej(Code::WrongState, format!("task is {:?}", w.st.state)));
+    }
+    check_common(&w.st, d)?;
+    let brief = w.st.brief.map(Ref::art);
+    if brief.as_ref().is_none_or(|b| !d.refs.contains(b)) {
+        return Err(rej(Code::RefsRequired, "an answer refs the task's brief"));
+    }
+    if let Some(c) = d.reply_to {
+        claim_of(&w.st, c)?;
+    }
+    let id = w.st.next_msg_id();
+    w.emit(Event::MessageAppended(Message {
+        id,
+        from: p.clone(),
+        from_role: None,
+        draft: d.clone(),
+    }));
     Ok(Response::Posted(id))
 }
 
