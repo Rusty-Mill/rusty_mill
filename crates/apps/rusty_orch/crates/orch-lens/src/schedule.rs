@@ -773,6 +773,33 @@ mod tests {
     }
 
     #[test]
+    fn unservable_slots_open_attacks_on_two_sole_provider_candidates() {
+        let cfg = config();
+        let sensitive = |mut c: Card| {
+            c.class = DataClass::Sensitive;
+            c
+        };
+        let mut st = State::default();
+        let q = [sensitive(question(3, &[]))];
+        let first = arch_jobs(&cfg, &q, &st);
+        st.start(&first[0]);
+        st.answered(&first[0], id("local"), 2, 0);
+        let board = [
+            sensitive(question(3, &[10, 11])),
+            sensitive(candidate(10, 3)),
+            sensitive(candidate(11, 3)),
+        ];
+        let (jobs, skipped) = schedule(&cfg, &board, &st);
+        assert!(jobs.iter().all(|j| j.key.claim == MsgId(3)), "gate shut");
+        for s in &skipped {
+            st.unservable(s);
+        }
+        let (jobs, _) = schedule(&cfg, &board, &st);
+        assert!(jobs.iter().any(|j| j.key.claim == MsgId(10)));
+        assert!(jobs.iter().any(|j| j.key.claim == MsgId(11)));
+    }
+
+    #[test]
     fn attacks_stay_within_one_pass_of_each_other() {
         let cfg = config();
         let mut st = State::default();
