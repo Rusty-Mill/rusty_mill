@@ -51,6 +51,10 @@ pub struct NoOverage {
     /// The entry names this host's machine id. Codex cannot report which
     /// account it is logged into, so its assertion counts only when bound
     /// to the dedicated machine whose login the operator set up.
+    ///
+    /// This is a host binding, not proof of the account: a login changed
+    /// on that same machine keeps the grant. Never treat it as account
+    /// identity. Pending the owner's acceptance of that limit (#594).
     pub machine_bound: bool,
 }
 
@@ -156,6 +160,10 @@ fn codex<C: CommandRunner + 'static>(
     if let Some(t) = opt_secs(s)? {
         agent = agent.timeout(t);
     }
+    // Codex cannot report its account, so this is a machine binding, not
+    // an account check: switching the login on that same machine keeps the
+    // grant. It must never be read as account proof (pending owner
+    // acceptance, #594).
     if a.no_overage.as_ref().is_some_and(|n| n.machine_bound) {
         agent = agent.lens_no_overage();
     }

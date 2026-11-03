@@ -22,6 +22,8 @@
 //!   only when its login reports that same account. Codex cannot report
 //!   its account, so its entry must name the dedicated machine
 //!   (`machine_id`) whose login the operator set up, and holds only there.
+//!   That binds the host, not the account: a login switched on that same
+//!   machine keeps the grant, so it is never account proof.
 //! - `host_cleared`: everything this host lets the provider read is cleared
 //!   for it, which in practice means a dedicated container or VM holding
 //!   only the experiment repository and synthetic data. It holds only on the
