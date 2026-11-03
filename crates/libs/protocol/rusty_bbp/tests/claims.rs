@@ -3384,3 +3384,29 @@ fn cl_100_a_holdout_pass_on_another_tree_clears_no_failure() {
         assert!(cx.rec(x).failing.is_empty(), "endorsed: {endorsed}");
     }
 }
+
+/// #597 re-review: a holdout report of another claim's candidate of equal
+/// code neither blocks nor decides this claim.
+#[test]
+fn cl_101_another_claims_holdout_of_equal_code_does_not_count() {
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let y = cx.low();
+    let ka = cx.candidate("a", x);
+    stored(cx.report_profiles(ka, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(ka, &[("holdout:api", 0)]));
+    assert!(!card_of(&cx, x).holdout_due);
+    let same = Candidate {
+        claim: Some(y),
+        ..cx.manifest(ka)
+    };
+    let kb = stored(cx.put("b", "same-code", ArtifactPayload::Candidate(same)));
+    stored(cx.report_profiles(kb, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(kb, &[("holdout:api", 1)]));
+    assert!(cx.rec(y).failing.contains("holdout:api"));
+    assert!(cx.rec(x).failing.is_empty());
+    assert!(
+        !card_of(&cx, x).holdout_due,
+        "y's failure does not decide x"
+    );
+}
