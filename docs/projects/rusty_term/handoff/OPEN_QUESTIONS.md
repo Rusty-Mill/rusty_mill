@@ -1,0 +1,26 @@
+# Open questions — rusty_term (with rusty_mux)
+Claude Code: ask `rusty-term-expert`; it appends here when a question isn't blocking. Only the expert ticks items.
+Format: `- [ ] Q<n> (<date>, blocking? y/n): <question> — interim choice: <what was done>`
+Resolved items are checked and point to the D# that answers them.
+
+## Source conflicts found by the harvest (both sources listed; the D-row follows precedence)
+
+- [ ] Q1 (2026-11-03, n): Queueing. `docs/projects/term/HANDOFF.md` §4 (2026-10-23) says an agent queues a ready PR ("Whenever a pr is ready and not queued, you should queue it", reviewer-relayed). `AGENTS.md` (owner, 2026-10-27) and mem_2c9125b716654fbaa315f514b23cd42a say agents never queue or merge; Dottius does. — interim choice: AGENTS.md wins (newer, binding repo doc); HANDOFF §4 is stale and could be corrected in a docs PR.
+- [ ] Q2 (2026-11-03, n): Throughput floors. HANDOFF §3.1 and NOTES §3 Q1 (2026-10-23) say the #2 floors are not met. ROADMAP Phase 0 says they are met on the 4 MB workloads (#1019, #889 closed 2026-10-25); card 80 (2026-10-28) agrees. — interim choice: D16 (newer).
+- [ ] Q3 (2026-11-03, n): Clean room across the merged project. The mux handoff (2026-11-03 §1, owner 2026-10-25) says techniques from training are fine, copying code is not; project memory says MIT source such as microsoft/terminal may be read and copied with notice. mem_36bea0ec77a34f719dd6f5960b4de968 (2026-10-30) says clean-room contamination is not a concern for rusty_conhost and only licence compatibility matters. NOTES §3 Q8 still asks whether the perf backlog's source reading fits the mux rule. — interim choice: D58 for rusty_conhost only; the mux rule stays as the handoff states it. Does the 2026-10-30 ruling extend to the mux and terminal core?
+- [ ] Q4 (2026-11-03, y for GUI design questions): `rusty-term-design-expert` and `docs/projects/rusty_term/gui-design/`. Nano's harvest prompt calls them existing (D7), and mem_2b37261b8d8d45fcaabce9994a763c4e (2026-11-03) names that path. Neither is on main at 1417c404 or in any open PR, and no branch name matches. — interim choice: routing row kept per D7; until the file lands, design questions escalate (D10). Where does the GUI pack live?
+- [ ] Q5 (2026-11-03, n): Docs location. Nano set the pack root `docs/projects/rusty_term/handoff/` (D6). The project's existing docs are in `docs/projects/term/` (README there, PR #1164). The repo now has two folders for one project. — interim choice: pack where Nano said; `docs/projects/term/` untouched. Move one into the other later?
+- [ ] Q6 (2026-11-03, n): Stale Windows items. HANDOFF §3.5 and card 85 still list "ConPTY spike 1 and a Windows fidelity corpus" as owed, and card 465 (the #1222 spike) is still in Backlog, while rusty_conhost has been the default since #1403. The mux handoff lists "is card 283's ConPTY-convergence gate moot?" as an owner call. — interim choice: none moved; owner call.
+- [ ] Q7 (2026-11-03, n): Owner attribution without quotes. NOTES §1 marks D1–D16 "Owner confirmed: Yes", conhost design D2/D5 are "author-reported", and Dottius approvals say "owner explicitly accepted" (e.g. #1412, #1403) without Nano's words on GitHub. — interim choice: [default] (D4 rule). Quote them where Nano can to make them [stated].
+- [ ] Q8 (2026-11-03, n): Next free protocol numbers. The mux handoff (main c27934d5) says "feature bit 32, message type 0x21, event kind 33, field 52" next; `proto/src/message.rs` at 1417c404 already defines bit 32 (`TERMINAL_SHELL`, #1441). — interim choice: D27, read the file.
+- [ ] Q9 (2026-11-03, n): Project memory says mux crates link `rusty_term_core` "never rusty_term (except rusty_mux_server, rusty_mux_tui)". The manifests show no mux crate links `rusty_term`; server and tui link `rusty_term_core`. — interim choice: D22 (code).
+
+## Owner calls carried over (sourced as open)
+
+- [ ] Q10 (2026-10-31, n): FreeBSD as a server target. (mux handoff §5; mem_3ad9e90e2e784da98297a7b0f974d3d4)
+- [ ] Q11 (2026-10-31, y for C70): Scrollback budget beyond 10k rows (mux D14). `SCROLLBACK_MAX = 10_000` today (NOTES §2).
+- [ ] Q12 (2026-10-31, n): Version-mismatch errors, with C36.
+- [ ] Q13 (2026-10-28, y before shared mode): Restrict C33 force-disconnect (card 507, D35).
+- [ ] Q14 (2026-10-23, n): Is snapshot encode speed against libghostty a hard target? (NOTES §3 Q2; ROADMAP Phase 0 "Open: reliable ≤ 11.2 ms encode")
+- [ ] Q15 (2026-10-23, n): A config key to make mode 2027 clustering the default? (NOTES §3 Q7, D13)
+- [ ] Q16 (2026-10-29, n): After Phase B, unify rusty_term's ConPTY backend onto platform-windows, or retire it? (conhost design §13 Q2)
