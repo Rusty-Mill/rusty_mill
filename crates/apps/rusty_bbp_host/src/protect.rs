@@ -174,36 +174,77 @@ fn numstat_paths(out: &str) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
-/// The host check before a candidate reaches the core: `Some` rejection when
-/// `manifest` touches protected paths without an exemption. Diffs are read
-/// from `diffs`, a lookup by id that returns the stored patch bytes.
-pub fn check(
-    st: &TaskState,
-    protected: &[String],
+/// The rule for one candidate, computed once and judged per attempt.
+#[derive(Clone, Debug)]
+pub struct Guard {
+    pub protected: Vec<String>,
+    pub touched: Vec<Touched>,
+    pub claim: Option<MsgId>,
+    /// Set when the candidate leaves the task's baseline.
+    pub off_baseline: Option<Rejection>,
+}
+
+impl Guard {
+    /// `Some` rejection when the candidate may not be stored in `st`.
+    pub fn judge(&self, st: &TaskState) -> Option<Rejection> {
+        self.off_baseline
+            .clone()
+            .or_else(|| verdict(st, &self.protected, &self.touched, self.claim))
+    }
+}
+
+/// The paths each of `manifest`'s diffs touches. Diffs are read from
+/// `diffs`, a lookup by id that returns the stored patch bytes; patch
+/// content never changes, so this is computed once per call.
+pub fn touched(
     manifest: &Candidate,
     scratch: &Path,
     diffs: impl Fn(ArtId) -> Result<Vec<u8>, String>,
-) -> Result<Option<Rejection>, String> {
-    if protected.is_empty() {
-        return Ok(None);
-    }
-    let mut touched = Vec::new();
+) -> Result<Vec<Touched>, String> {
+    let mut out = Vec::new();
     for id in &manifest.diffs {
         let patch = diffs(*id)?;
         let paths = patch_paths(scratch, &patch).map_err(|e| format!("{id}: {e}"))?;
-        touched.push(Touched { diff: *id, paths });
+        out.push(Touched { diff: *id, paths });
     }
-    let hit = refused(protected, &touched, &exempt(st, manifest.claim));
+    Ok(out)
+}
+
+/// The rule against the state a dispatch attempt commits on: `Some`
+/// rejection when `touched` changes protected paths without an exemption
+/// that holds in `st`. Pure, so it is re-judged on every reload.
+pub fn verdict(
+    st: &TaskState,
+    protected: &[String],
+    touched: &[Touched],
+    claim: Option<MsgId>,
+) -> Option<Rejection> {
+    let hit = refused(protected, touched, &exempt(st, claim));
     if hit.is_empty() {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(Rejection::new(
+    Some(Rejection::new(
         Code::ProtectedPath,
         format!(
             "protected test paths: {}; change them through a claim in the `{TESTS_DOMAIN}` domain",
             hit.join(", ")
         ),
-    )))
+    ))
+}
+
+/// A candidate on a task with protected paths builds on its baseline: an
+/// older revision could carry weaker tests that no diff shows. Pure.
+pub fn off_baseline(baseline: Option<&str>, manifest: &Candidate) -> Option<Rejection> {
+    let b = baseline?;
+    (manifest.base != b).then(|| {
+        Rejection::new(
+            Code::ProtectedPath,
+            format!(
+                "candidates on this task build on its baseline {b}; base {} is another revision",
+                manifest.base
+            ),
+        )
+    })
 }
 
 #[cfg(test)]

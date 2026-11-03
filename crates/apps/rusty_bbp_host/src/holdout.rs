@@ -14,7 +14,7 @@ use crate::profiles::ProfileSet;
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// One file of the suite: its path below `root` and its SHA-256.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +177,26 @@ impl HoldoutSet {
         set
     }
 
+    /// #597 2.2: no build run can reach the suite. Its root shares no
+    /// directory with the build set's read roots or with `dirs` (the
+    /// repository, the work root): neither contains the other, compared after
+    /// resolving symlinks, so an alias counts as the directory it names.
+    pub fn isolated_from(&self, build: &ProfileSet, dirs: &[&Path]) -> Result<(), String> {
+        let root = canonical(Path::new(&self.root))?;
+        let roots = build.read_roots.iter().map(PathBuf::from);
+        for other in roots.chain(dirs.iter().map(|d| d.to_path_buf())) {
+            let resolved = canonical(&other)?;
+            if resolved.starts_with(&root) || root.starts_with(&resolved) {
+                return Err(format!(
+                    "holdout root {} overlaps {}, which build runs can read",
+                    self.root,
+                    other.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         rusty_serde::json::to_string(self)
             .map(String::into_bytes)
@@ -186,6 +206,28 @@ impl HoldoutSet {
     pub fn from_bytes(bytes: &[u8]) -> Result<HoldoutSet, String> {
         let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
         rusty_serde::json::from_str(text).map_err(|e| e.to_string())
+    }
+}
+
+/// `p` made absolute with its symlinks resolved. A path that does not exist
+/// yet resolves through its deepest existing ancestor, so a symlink above it
+/// still counts; `..` is refused rather than interpreted.
+fn canonical(p: &Path) -> Result<PathBuf, String> {
+    let abs = std::path::absolute(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    if abs.components().any(|c| c == Component::ParentDir) {
+        return Err(format!("{}: a path with .. cannot be checked", p.display()));
+    }
+    let mut rest = Vec::new();
+    let mut cur = abs.as_path();
+    loop {
+        if let Ok(found) = cur.canonicalize() {
+            return Ok(rest.iter().rev().fold(found, |acc, name| acc.join(name)));
+        }
+        let (Some(parent), Some(name)) = (cur.parent(), cur.file_name()) else {
+            return Err(format!("{}: cannot be resolved", p.display()));
+        };
+        rest.push(name.to_os_string());
+        cur = parent;
     }
 }
 
@@ -355,6 +397,41 @@ mod tests {
         assert!(load(&dir, &task, Sha256::of(b"other")).is_err());
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_root_any_build_run_can_read_is_refused() {
+        let root = suite("isolated");
+        let hs = HoldoutSet::scan(set(), &root).unwrap();
+        let build = ProfileSet::shell("test", "true");
+        hs.isolated_from(&build, &[Path::new("/nonexistent/work")])
+            .unwrap();
+        let parent = root.parent().unwrap().to_path_buf();
+        let mut wide = build.clone();
+        wide.read_roots.push(parent.to_str().unwrap().into());
+        assert!(hs
+            .isolated_from(&wide, &[])
+            .unwrap_err()
+            .contains("overlaps"));
+        let inner = root.join("api").join("not-yet");
+        assert!(
+            hs.isolated_from(&build, &[&inner]).is_err(),
+            "inside the root"
+        );
+        let alias = std::env::temp_dir().join(format!("bbp_holdout_alias_{}", std::process::id()));
+        let _ = std::fs::remove_file(&alias);
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        let mut aliased = build.clone();
+        aliased
+            .read_roots
+            .push(alias.join("api").to_str().unwrap().into());
+        assert!(hs.isolated_from(&aliased, &[]).is_err(), "a symlink alias");
+        let mut dotted = build;
+        dotted.read_roots.push("/usr/../tmp".into());
+        assert!(hs.isolated_from(&dotted, &[]).is_err(), "..");
+        let _ = std::fs::remove_file(&alias);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

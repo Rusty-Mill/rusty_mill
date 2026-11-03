@@ -185,6 +185,17 @@ pub fn open_claims_task(
     if set.test_paths.is_empty() {
         return refuse("test_paths: the profile set must name its test paths".into());
     }
+    if let Err(e) = set.check_protected() {
+        return refuse(format!("protected: {e}"));
+    }
+    let repo_dir = Path::new(repo);
+    let dirs: &[&Path] = match repo_dir.is_absolute() {
+        true => &[repo_dir],
+        false => &[],
+    };
+    if let Some(Err(e)) = holdout.map(|hs| hs.isolated_from(set, dirs)) {
+        return refuse(format!("holdout: {e}"));
+    }
     let holdout_digest = match holdout {
         Some(hs) => Some(crate::holdout::stage(dir, task, hs)?),
         None => None,
@@ -219,6 +230,13 @@ pub fn adopt_holdout(
         .holdout_digest
         .ok_or("the task has no holdout suite")?;
     let old = crate::holdout::load(dir, task, current)?;
+    let build = crate::profiles::load(dir, task, d.state.profile_digest)?;
+    if let Err(e) = next.isolated_from(&build, &[]) {
+        return Ok(Response::Rejected(Rejection::new(
+            Code::BadClaimsConfig,
+            format!("holdout: {e}"),
+        )));
+    }
     let digest = crate::holdout::stage(dir, task, next)?;
     if !next.extends(&old) {
         return Ok(Response::Rejected(Rejection::new(

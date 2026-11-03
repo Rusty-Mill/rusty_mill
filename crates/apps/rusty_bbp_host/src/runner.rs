@@ -607,12 +607,19 @@ where
         }
     };
     let holdout = suite.is_some();
+    let build = profiles::load(dir, task, st.profile_digest)?;
+    // #597 2.2: no run starts while a build run could read the suite, checked
+    // against this invocation's repository and work root as well.
+    if let Some(d) = st.claims.holdout_digest {
+        let current = match &suite {
+            Some((hs, _)) => hs.clone(),
+            None => crate::holdout::load(dir, task, d)?,
+        };
+        current.isolated_from(&build, &[repo, work_root])?;
+    }
     let (set, digest) = match &suite {
         Some((hs, d)) => (hs.run_set(), *d),
-        None => (
-            profiles::load(dir, task, st.profile_digest)?,
-            st.profile_digest,
-        ),
+        None => (build, st.profile_digest),
     };
     let mut diffs = Vec::new();
     for id in &manifest.diffs {
@@ -679,8 +686,9 @@ where
         }
     };
     // #597 2.2: a holdout run's artifact log is a summary; the output stays
-    // on the host, where no lens reads it.
-    let log_text = match holdout {
+    // on the host, where no lens reads it. A recovered run has no output of
+    // its own and leaves the host log of the run that died untouched.
+    let log_text = match holdout && !interrupted {
         true => {
             let full = crate::holdout::log_path(dir, task, run.id);
             if let Some(parent) = full.parent() {
