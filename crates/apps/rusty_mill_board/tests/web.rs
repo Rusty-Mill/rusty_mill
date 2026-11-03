@@ -328,6 +328,26 @@ fn mcp_calls_carry_the_callers_identity() {
     );
 }
 
+/// On an open board, `/api` and `/mcp` take the actor and role from the caller;
+/// the inbox refuses them however privileged the named role is.
+#[test]
+fn an_open_board_refuses_the_inbox_to_a_named_human() {
+    let addr = start(None);
+    let spoof = r#"{"actor":"nano","role":"human"}"#;
+    let (status, text) = send(addr, "POST", "/api/inbox_list", &[JSON], spoof);
+    assert_eq!(status, 422, "{text}");
+    assert!(text.contains("authenticated admin credential"), "{text}");
+
+    let body = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"inbox_list","arguments":{spoof}}}}}"#
+    );
+    let accept = ("Accept", "application/json, text/event-stream");
+    let (status, text) = send(addr, "POST", "/mcp", &[JSON, accept], &body);
+    assert_eq!(status, 200, "{text}");
+    assert!(text.contains(r#""isError":true"#), "{text}");
+    assert!(text.contains("authenticated admin credential"), "{text}");
+}
+
 // ---- OAuth ---------------------------------------------------------------
 
 const ISSUER: &str = "http://localhost:8787";
