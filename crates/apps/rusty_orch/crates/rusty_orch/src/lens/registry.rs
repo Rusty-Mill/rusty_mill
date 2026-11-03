@@ -22,7 +22,7 @@ use orch_openai::{Config as HttpConfig, OpenAiHttp};
 use rusty_json::Map;
 
 use super::assertions::Grants;
-use super::container::{read_machine_id, Contained, ContainerSpec, InContainer, Mount, Verified};
+use super::container::{read_machine_id, Contained, ContainerSpec, InContainer, Verified};
 
 /// A local model server's deadline when the config names none. Large
 /// local models answer a 32k prompt in minutes, not seconds.
@@ -170,7 +170,7 @@ fn codex<C: CommandRunner + 'static>(
     let bound = a.no_overage.as_ref().is_some_and(|n| n.machine_bound);
     let configure = |r| configure_codex(CodexAgent::with_runner(repo, r), model, timeout, bound);
     let plain: Box<dyn Model> = match &a.host_cleared {
-        Some(Clearance::Container(spec)) => match workdir(spec, repo) {
+        Some(Clearance::Container(spec)) => match spec.workdir_for(repo) {
             Some(dir) => {
                 let verified = Verified::default();
                 let exec = InContainer::new(runner(), dir, verified.clone());
@@ -212,19 +212,6 @@ fn configure_codex<R: CommandRunner>(
         agent = agent.lens_no_overage();
     }
     agent
-}
-
-/// Where `repo` appears inside the container: the destination of the bind
-/// mount whose source it is.
-fn workdir<'a>(spec: &'a ContainerSpec, repo: &Path) -> Option<&'a str> {
-    spec.mounts.iter().find_map(|m| match m {
-        Mount::Bind {
-            source,
-            destination,
-            ..
-        } if source == repo => Some(destination.as_str()),
-        _ => None,
-    })
 }
 
 fn http(s: &Map) -> Result<Entry, String> {
@@ -290,6 +277,7 @@ fn opt_secs(s: &Map) -> Result<Option<Duration>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lens::container::Mount;
 
     use std::path::PathBuf;
     use std::sync::Arc;
