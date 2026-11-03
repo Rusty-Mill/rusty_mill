@@ -11,14 +11,14 @@ use std::collections::HashSet;
 use std::fmt;
 use std::mem::discriminant;
 
-use crate::task::Agent;
+use crate::AgentId;
 use crate::{EntryId, GoalId, Ref, TaskId, Text};
 
 /// Who wrote an entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Author {
     Human,
-    Agent(Agent),
+    Agent(AgentId),
 }
 
 /// How well-supported a finding is.
@@ -256,10 +256,12 @@ impl Board {
 mod tests {
     use super::*;
 
+    const CODEX: crate::AgentId = crate::AgentId::from_static("codex");
+    const GEMINI: crate::AgentId = crate::AgentId::from_static("gemini");
     fn entry(kind: EntryKind) -> NewEntry {
         NewEntry {
             task: Some(TaskId::from_raw(1)),
-            author: Author::Agent(Agent::Gemini),
+            author: Author::Agent(GEMINI),
             kind,
             body: Text::new("note").expect("non-blank"),
             refs: vec![],
@@ -407,7 +409,7 @@ mod tests {
     /// A review by Codex, so the default Gemini author can cite it.
     fn review(verdict: Verdict) -> NewEntry {
         NewEntry {
-            author: Author::Agent(Agent::Codex),
+            author: Author::Agent(CODEX),
             ..entry(EntryKind::Review {
                 of: TaskId::from_raw(1),
                 verdict,

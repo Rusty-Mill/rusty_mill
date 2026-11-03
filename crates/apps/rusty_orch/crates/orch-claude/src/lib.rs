@@ -1,4 +1,4 @@
-//! `Agent::Claude` over the Claude Code CLI, read-only (ADR-0012).
+//! The `claude` provider over the Claude Code CLI, read-only (ADR-0012).
 //!
 //! A thin adapter on [`orch_cli`]. This crate adds the fixed `claude -p`
 //! argv: print mode, a JSON result envelope, the reply constrained to the
@@ -21,6 +21,6 @@ mod agent;
 mod prompt;
 
 pub use agent::{
-    ClaudeAgent, AUTH_TIMEOUT, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT, SCRUBBED_ENV, TOOLS,
+    ClaudeAgent, AUTH_TIMEOUT, DEFAULT_MAX_TURNS, DEFAULT_TIMEOUT, ID, SCRUBBED_ENV, TOOLS,
 };
 pub use prompt::render;

@@ -5,10 +5,13 @@ use std::time::Duration;
 use common::{exit, fixture, task, text, Call, FakeCommand, REPLY_ONE};
 use orch_cli::ExecError;
 use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
-use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec};
 use orch_core::GoalId;
 use orch_dispatch::AgentRunner;
 use orch_ollama::OllamaAgent;
+
+const CODEX: AgentId = AgentId::from_static("codex");
+const LOCAL: AgentId = AgentId::from_static("local");
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -21,7 +24,7 @@ fn success_path_runs_fixed_argv_with_prompt_on_stdin() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(FakeCommand::ok(REPLY_ONE));
 
-    let out = a.run(Agent::Local, task(&plan), &board).expect("ok");
+    let out = a.run(LOCAL, task(&plan), &board).expect("ok");
 
     assert_eq!(out.len(), 1);
     let calls = a_calls(&a);
@@ -44,14 +47,12 @@ fn wrong_agent_is_refused_without_running_anything() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(FakeCommand::ok(REPLY_ONE));
 
-    let err = a
-        .run(Agent::Codex, task(&plan), &board)
-        .expect_err("refused");
+    let err = a.run(CODEX, task(&plan), &board).expect_err("refused");
 
     assert!(err
         .0
         .as_str()
-        .contains("cannot serve Research through Codex"));
+        .contains("cannot serve Research through codex"));
     assert!(a_calls(&a).is_empty());
 }
 
@@ -72,13 +73,13 @@ fn implement_is_refused_without_running_anything() {
     let mut a = agent(FakeCommand::ok(REPLY_ONE));
 
     let err = a
-        .run(Agent::Local, plan.get(id).expect("task"), &board)
+        .run(LOCAL, plan.get(id).expect("task"), &board)
         .expect_err("unsupported");
 
     assert!(err
         .0
         .as_str()
-        .contains("cannot serve Implement through Local"));
+        .contains("cannot serve Implement through local"));
     assert!(a_calls(&a).is_empty());
 }
 
@@ -88,9 +89,7 @@ fn non_zero_exit_maps_to_agent_error_with_truncated_stderr() {
     let stderr = "model not found\n".repeat(50);
     let mut a = agent(FakeCommand::new(Ok(exit(1, "", &stderr))));
 
-    let err = a
-        .run(Agent::Local, task(&plan), &board)
-        .expect_err("exit 1");
+    let err = a.run(LOCAL, task(&plan), &board).expect_err("exit 1");
 
     assert!(err.0.as_str().starts_with("ollama exited with status 1"));
     assert!(err.0.as_str().contains("model not found"));
@@ -106,9 +105,7 @@ fn timeout_maps_to_agent_error() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(FakeCommand::new(Err(ExecError::Timeout(TIMEOUT))));
 
-    let err = a
-        .run(Agent::Local, task(&plan), &board)
-        .expect_err("timeout");
+    let err = a.run(LOCAL, task(&plan), &board).expect_err("timeout");
 
     assert!(err.0.as_str().contains("exceeded 30s"));
 }
@@ -118,7 +115,7 @@ fn overflow_and_spawn_failure_map_to_agent_errors() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(FakeCommand::new(Err(ExecError::StdoutOverflow)));
     assert!(a
-        .run(Agent::Local, task(&plan), &board)
+        .run(LOCAL, task(&plan), &board)
         .expect_err("overflow")
         .0
         .as_str()
@@ -128,7 +125,7 @@ fn overflow_and_spawn_failure_map_to_agent_errors() {
         "No such file".into(),
     ))));
     assert!(a
-        .run(Agent::Local, task(&plan), &board)
+        .run(LOCAL, task(&plan), &board)
         .expect_err("spawn")
         .0
         .as_str()
@@ -140,7 +137,7 @@ fn empty_stdout_is_an_error() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(FakeCommand::ok("  \n"));
 
-    let err = a.run(Agent::Local, task(&plan), &board).expect_err("empty");
+    let err = a.run(LOCAL, task(&plan), &board).expect_err("empty");
 
     assert!(err.0.as_str().contains("wrote nothing"));
 }
@@ -150,9 +147,7 @@ fn garbage_stdout_is_a_parse_error() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(FakeCommand::ok("I cannot help with that."));
 
-    let err = a
-        .run(Agent::Local, task(&plan), &board)
-        .expect_err("garbage");
+    let err = a.run(LOCAL, task(&plan), &board).expect_err("garbage");
 
     assert!(err.0.as_str().contains("not JSON"));
 }
@@ -182,7 +177,7 @@ fn resumed_card_prompt_carries_the_answer() {
     let question = board
         .append(NewEntry {
             task: Some(card.id()),
-            author: Author::Agent(Agent::Local),
+            author: Author::Agent(LOCAL),
             kind: EntryKind::Question,
             body: text("Which branch is the baseline?"),
             refs: vec![],
@@ -201,7 +196,7 @@ fn resumed_card_prompt_carries_the_answer() {
         .expect("answer");
     let mut a = agent(FakeCommand::ok(REPLY_ONE));
 
-    a.run(Agent::Local, card, &board).expect("ok");
+    a.run(LOCAL, card, &board).expect("ok");
 
     let calls = a_calls(&a);
     let prompt = String::from_utf8(calls[0].1.clone()).expect("utf8");
@@ -220,7 +215,7 @@ fn best_effort_rejects_a_question_reply_as_transient() {
     let mut a = agent(FakeCommand::ok(question)).with_stop_rule(StopRule::BestEffort);
 
     let err = a
-        .run_classified(Agent::Local, task(&plan), &board)
+        .run_classified(LOCAL, task(&plan), &board)
         .expect_err("questions are withdrawn under best effort");
     assert!(
         matches!(&err, ClassifiedError::Transient(e) if e.0.contains("question")),
@@ -232,8 +227,5 @@ fn best_effort_rejects_a_question_reply_as_transient() {
 
     // The same reply is a block-worthy question under checkpoint.
     let mut a = agent(FakeCommand::ok(question));
-    assert_eq!(
-        a.run(Agent::Local, task(&plan), &board).expect("ok").len(),
-        1
-    );
+    assert_eq!(a.run(LOCAL, task(&plan), &board).expect("ok").len(), 1);
 }

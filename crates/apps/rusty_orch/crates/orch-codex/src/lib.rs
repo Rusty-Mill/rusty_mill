@@ -1,4 +1,4 @@
-//! `Agent::Codex` over the Codex CLI, read-only (ADR-0006).
+//! The `codex` provider over the Codex CLI, read-only (ADR-0006).
 //!
 //! A thin adapter on [`orch_cli`]. This crate adds the fixed `codex exec`
 //! argv, the read-only sandbox, the shared output schema and last-message
@@ -17,7 +17,7 @@
 mod agent;
 mod prompt;
 
-pub use agent::{CodexAgent, DEFAULT_TIMEOUT, SCRUBBED_ENV};
+pub use agent::{CodexAgent, DEFAULT_TIMEOUT, ID, SCRUBBED_ENV};
 /// The reply schema handed to `--output-schema`; shared with the Claude
 /// adapter and kept in `orch-cli`.
 pub use orch_cli::output_schema;

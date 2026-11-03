@@ -4,6 +4,8 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- Providers are `AgentId` tokens instead of the closed `Agent` enum (ADR-0019). `orch-store` writes the id and reads the old variants; errors print the id (`codex`, not `Codex`).
 ### Fixed
 - A lease now bounds the BBP validator profile's `read_roots` (ADR-0017): at freeze each must be a system root or within the lease, and not beneath a confined member's write root, and it is frozen as the path it resolved to. A leased profile with a toolchain outside the system roots now needs that path in the lease. Cancel freezes a never-frozen task unleased, so a pool the lease cannot confine no longer blocks it.
 ### Added

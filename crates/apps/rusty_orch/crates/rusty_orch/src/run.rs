@@ -519,10 +519,10 @@ fn progress(outcome: &Result<Outcome, DispatchError>) -> String {
         Err(DispatchError::Plan(_)) => "stopped: plan error (see report)".to_owned(),
         Err(DispatchError::Board(_)) => "stopped: board refused an entry (see report)".to_owned(),
         Err(DispatchError::Agent { task, agent, .. }) => {
-            format!("stopped: {agent:?} failed {task} (see report)")
+            format!("stopped: {agent} failed {task} (see report)")
         }
         Err(DispatchError::UnsupportedRole { task, agent, role }) => {
-            format!("stopped: {agent:?} cannot serve {role:?} for {task}")
+            format!("stopped: {agent} cannot serve {role:?} for {task}")
         }
         Err(DispatchError::CeilingReached {
             ceiling,

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use orch_core::board::Board;
 use orch_core::goal::StopRule;
-use orch_core::task::{Agent, Role, Task};
+use orch_core::task::{AgentId, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 
 use orch_cli::{excerpt, output_schema, parse, CommandRunner, ExecError, StdCommand};
@@ -23,9 +23,12 @@ pub const SCRUBBED_ENV: &[&str] = &["OPENAI_API_KEY"];
 
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// [`Agent::Codex`] over `codex exec`, read-only, prompt on stdin.
+/// The id this adapter serves by default.
+pub const ID: AgentId = AgentId::from_static("codex");
+
+/// The provider [`ID`] over `codex exec`, read-only, prompt on stdin.
 ///
-/// Serves non-implementation roles through `Agent::Codex`; unsupported
+/// Serves non-implementation roles through [`ID`]; unsupported
 /// agent/role pairs are rejected before scratch files or processes. The
 /// argv is a fixed vector with no shell and no interpolation; the model is
 /// Codex's default unless [`CodexAgent::model`] sets one.
@@ -117,18 +120,23 @@ impl<C: CommandRunner> CodexAgent<C> {
 }
 
 impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
-    fn supports(&self, agent: Agent, role: Role) -> bool {
-        agent == Agent::Codex && !matches!(role, Role::Implement)
+    fn supports(&self, agent: AgentId, role: Role) -> bool {
+        agent == ID && !matches!(role, Role::Implement)
     }
 
-    fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
+    fn run(
+        &mut self,
+        agent: AgentId,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentError> {
         self.run_with_policy(agent, task, board)
             .map_err(ClassifiedError::into_error)
     }
 
     fn run_classified(
         &mut self,
-        agent: Agent,
+        agent: AgentId,
         task: &Task,
         board: &Board,
     ) -> Result<Vec<Output>, ClassifiedError> {
@@ -139,13 +147,13 @@ impl<C: CommandRunner> AgentRunner for CodexAgent<C> {
 impl<C: CommandRunner> CodexAgent<C> {
     fn run_with_policy(
         &mut self,
-        agent: Agent,
+        agent: AgentId,
         task: &Task,
         board: &Board,
     ) -> Result<Vec<Output>, ClassifiedError> {
         if !self.supports(agent, task.spec().role) {
             return Err(ClassifiedError::Permanent(AgentError(format!(
-                "codex adapter cannot serve {:?} through {agent:?}",
+                "codex adapter cannot serve {:?} through {agent}",
                 task.spec().role
             ))));
         }

@@ -5,12 +5,15 @@ use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use orch_core::board::{Author, Board, Confidence, EntryKind, NewEntry, Verdict};
-use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec};
 use orch_core::{EntryId, GoalId, Ref, TaskId, Text};
 use orch_dispatch::Ledger;
 use orch_store::{fingerprint, GoalState, Store, StoreError};
 use rusty_multimodal_db_engine::test_support::fresh_temp_dir;
 use rusty_multimodal_db_engine::test_support::{arm_fault, Fault};
+
+const CODEX: AgentId = AgentId::from_static("codex");
+const LOCAL: AgentId = AgentId::from_static("local");
 
 fn dir(label: &str) -> PathBuf {
     fresh_temp_dir(&format!("orch_store_{label}")).expect("temp dir")
@@ -61,7 +64,7 @@ fn full_state() -> GoalState {
     let _t6 = plan.add(spec(Role::Research, &[])).expect("add");
 
     let mut board = Board::new(goal);
-    let codex = Author::Agent(Agent::Codex);
+    let codex = Author::Agent(CODEX);
     let e1 = board
         .append(entry(
             Some(1),
@@ -91,7 +94,7 @@ fn full_state() -> GoalState {
     let e4 = board
         .append(entry(
             Some(5),
-            Author::Agent(Agent::Local),
+            Author::Agent(LOCAL),
             EntryKind::Review {
                 of: t1,
                 verdict: Verdict::Approve,
@@ -125,14 +128,14 @@ fn full_state() -> GoalState {
     board.append(superseding).expect("append");
     let _ = (e3, e5);
 
-    plan.start(t1, Agent::Codex).expect("start");
+    plan.start(t1, CODEX).expect("start");
     plan.complete(t1, vec![e1]).expect("complete");
-    plan.start(t2, Agent::Codex).expect("start");
+    plan.start(t2, CODEX).expect("start");
     plan.block(t2, e2).expect("block");
-    plan.start(t3, Agent::Local).expect("start");
-    plan.start(t4, Agent::Codex).expect("start");
+    plan.start(t3, LOCAL).expect("start");
+    plan.start(t4, CODEX).expect("start");
     plan.fail(t4, text("no adapter")).expect("fail");
-    plan.start(t5, Agent::Local).expect("start");
+    plan.start(t5, LOCAL).expect("start");
     plan.complete(t5, vec![e4]).expect("complete");
 
     let ledger = Ledger::from_counts(5, [(t1, 1), (t2, 2), (t4, 1), (t5, 1)]);
@@ -168,7 +171,7 @@ fn saving_again_replaces_the_snapshot_and_bumps_the_revision() {
     let mut store = Store::open(&dir).expect("open");
     store.save(&state).expect("first save");
     let t6 = TaskId::from_raw(6);
-    state.plan.start(t6, Agent::Codex).expect("start");
+    state.plan.start(t6, CODEX).expect("start");
     state.ledger = Ledger::from_counts(6, [(t6, 1)]);
     store.save(&state).expect("second save");
     assert_eq!(store.revision(state.goal()), 2);
@@ -188,7 +191,7 @@ fn failed_replace_can_recover_new_aggregate_with_previous_revision() {
     store.save(&before).expect("first save");
 
     let t6 = TaskId::from_raw(6);
-    before.plan.start(t6, Agent::Codex).expect("start");
+    before.plan.start(t6, CODEX).expect("start");
     before
         .board
         .append(entry(
@@ -406,11 +409,11 @@ fn hosted_handle_gate_fence_and_charge_survive_a_store_reopen() {
             ids: vec![text("art:2")],
         })));
     let route = Routing::try_from(RoutingConfig {
-        research: Agent::Codex,
-        design: Agent::Codex,
-        implement: Agent::Codex,
-        triage: Agent::Local,
-        reviewers: vec![Agent::Local, Agent::Codex],
+        research: CODEX,
+        design: CODEX,
+        implement: CODEX,
+        triage: LOCAL,
+        reviewers: vec![LOCAL, CODEX],
     })
     .unwrap();
     let make = || {

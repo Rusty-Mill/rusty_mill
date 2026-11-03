@@ -2,9 +2,12 @@
 
 use std::num::NonZeroU32;
 
-use orch_core::task::{Agent, Role, Status};
+use orch_core::task::{AgentId, Role, Status};
 use orch_core::{GoalId, Ref};
 use rusty_orch::input::{build_plan, parse, RoleDraft};
+
+const CODEX: AgentId = AgentId::from_static("codex");
+const LOCAL: AgentId = AgentId::from_static("local");
 
 const FULL: &str = include_str!("../examples/goal.json");
 
@@ -26,11 +29,11 @@ fn the_example_file_parses_and_builds_a_plan() {
     assert_eq!(spec.tasks[1].role, RoleDraft::Review { target: 0 });
     assert_eq!(spec.tasks[1].depends_on, vec![0]);
     assert!(matches!(spec.tasks[0].refs[0], Ref::Path(ref p) if p.as_str().ends_with("task.rs")));
-    assert_eq!(spec.routing.research, Agent::Codex);
-    assert_eq!(spec.routing.triage, Agent::Local);
-    assert_eq!(spec.routing.reviewers, vec![Agent::Local, Agent::Codex]);
+    assert_eq!(spec.routing.research, CODEX);
+    assert_eq!(spec.routing.triage, LOCAL);
+    assert_eq!(spec.routing.reviewers, vec![LOCAL, CODEX]);
     // Unspecified routing fields keep the defaults.
-    assert_eq!(spec.routing.implement, Agent::Codex);
+    assert_eq!(spec.routing.implement, CODEX);
 
     let plan = build_plan(&spec, GoalId::from_raw(1)).expect("plan");
     let tasks = plan.tasks();
@@ -157,6 +160,6 @@ fn routing_must_be_an_object_when_present() {
     let partial =
         minimal(ONE_TASK).replace("\"tasks\"", "\"routing\":{\"triage\":\"codex\"},\"tasks\"");
     let spec = parse(&partial).expect("partial routing");
-    assert_eq!(spec.routing.triage, Agent::Codex);
-    assert_eq!(spec.routing.research, Agent::Codex);
+    assert_eq!(spec.routing.triage, CODEX);
+    assert_eq!(spec.routing.research, CODEX);
 }

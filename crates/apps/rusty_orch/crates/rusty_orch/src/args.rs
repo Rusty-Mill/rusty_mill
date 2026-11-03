@@ -15,12 +15,12 @@ usage: rusty_orch run <goal.json> [options]
 Runs the goal file through the dispatcher and prints the board.
 
 options:
-  --ollama-model <name>   model for Agent::Local       [env ORCH_OLLAMA_MODEL, default llama3.2]
+  --ollama-model <name>   model for local              [env ORCH_OLLAMA_MODEL, default llama3.2]
   --repo <dir>            repository Codex and Claude may read
                                                        [env ORCH_REPO, default: current dir]
   --codex-repo <dir>      alias of --repo              [env ORCH_CODEX_REPO]
-  --codex-model <name>    model for Agent::Codex       [default: Codex's own]
-  --claude-model <name>   model for Agent::Claude      [default: Claude Code's own]
+  --codex-model <name>    model for codex              [default: Codex's own]
+  --claude-model <name>   model for claude             [default: Claude Code's own]
   --interactive           answer open questions from stdin and keep going
   --state <dir>           save the plan, board, and ledger there and resume
                           from it on the next run      [env RUSTY_ORCH_STATE]

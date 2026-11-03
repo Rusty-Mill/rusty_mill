@@ -2,9 +2,11 @@ use orch_cli::fake::{fixture, research_spec, task, text};
 use orch_cli::{format_spec, render, BEST_EFFORT_RULES};
 use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
 use orch_core::goal::StopRule;
-use orch_core::task::{Agent, Role};
+use orch_core::task::{AgentId, Role};
 use orch_core::{Ref, TaskId};
 
+const CODEX: AgentId = AgentId::from_static("codex");
+const LOCAL: AgentId = AgentId::from_static("local");
 #[test]
 fn render_includes_instruction_acceptance_refs_and_referenced_bodies() {
     let (plan, board, referenced, _) = fixture();
@@ -116,7 +118,7 @@ fn render_includes_the_cards_own_question_and_its_answer() {
     let question = board
         .append(NewEntry {
             task: Some(card.id()),
-            author: Author::Agent(Agent::Local),
+            author: Author::Agent(LOCAL),
             kind: EntryKind::Question,
             body: text("Which branch is the baseline?"),
             refs: vec![],
@@ -227,7 +229,7 @@ fn a_review_card_sees_the_targets_question_answer_and_resumed_finding() {
     let question = board
         .append(NewEntry {
             task: Some(research),
-            author: Author::Agent(Agent::Codex),
+            author: Author::Agent(CODEX),
             kind: EntryKind::Question,
             body: text("Which branch counts?"),
             refs: vec![],
