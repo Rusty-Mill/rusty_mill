@@ -2560,26 +2560,30 @@ impl WindowState<'_> {
         }
     }
 
-    /// Copy the selection, then clear it so the next Ctrl+C interrupts.
-    /// Returns whether there was anything to copy; when not, the caller lets
-    /// the key reach the child (Ctrl+C on Windows, [`Action::CopyOrSend`]).
+    /// [`Action::CopyOrSend`] (Ctrl+C on Windows): copy the selection and
+    /// clear it so the next press interrupts. Returns whether the key was
+    /// consumed; with nothing selected it was not, and the caller lets it
+    /// reach the child as ^C. A failed copy keeps the selection for a retry
+    /// and still consumes the key, so it never turns into a surprise ^C.
     fn copy_or_send(&mut self) -> bool {
-        if !self.copy_selection() {
-            return false;
+        let copied = self.copy_selection();
+        if copied.clears_selection() {
+            if let Some(p) = self.pane() {
+                p.grid.lock().selection = None;
+            }
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
         }
-        if let Some(p) = self.pane() {
-            p.grid.lock().selection = None;
-        }
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-        true
+        copied.consumes_key()
     }
 
     /// Copy the active tab's selection to the system clipboard (Ctrl+Shift+C).
-    /// Returns whether there was a selection to copy.
-    fn copy_selection(&mut self) -> bool {
-        let Some(p) = self.pane() else { return false };
+    /// A failed write is reported on stderr and leaves the selection alone.
+    fn copy_selection(&mut self) -> Copied {
+        let Some(p) = self.pane() else {
+            return Copied::NothingSelected;
+        };
         let (text, html) = {
             let g = p.grid.lock();
             let html = if self.config.copy_html.unwrap_or(true) {
@@ -2589,16 +2593,22 @@ impl WindowState<'_> {
             };
             (g.selected_text(), html)
         };
-        let Some(text) = text else { return false };
-        if let Some(cb) = self.clipboard.as_mut() {
-            // The HTML flavor carries the selection's colors/attributes for
-            // rich-paste targets (G29); plain editors read the text flavor.
-            let _ = match html {
-                Some(html) => cb.set_html(html, Some(text)),
-                None => cb.set_text(text),
-            };
+        // The HTML flavor carries the selection's colors/attributes for
+        // rich-paste targets (G29); plain editors read the text flavor.
+        let write = self.clipboard.as_mut().map(|cb| {
+            move |text: String| {
+                match html {
+                    Some(html) => cb.set_html(html, Some(text)),
+                    None => cb.set_text(text),
+                }
+                .map_err(|e| e.to_string())
+            }
+        });
+        let copied = copy_text(text, write);
+        if let Copied::Failed(e) = &copied {
+            eprintln!("rusty_term: copy: {e}");
         }
-        true
+        copied
     }
 
     /// Service a tab's pending OSC 52 clipboard request recorded by the parser.
@@ -5946,6 +5956,44 @@ impl ApplicationHandler<UserEvent> for App<'_> {
     }
 }
 
+/// What copying the selection achieved.
+#[derive(Debug, PartialEq, Eq)]
+enum Copied {
+    NothingSelected,
+    Done,
+    /// There was a selection but the clipboard is missing or refused it.
+    Failed(String),
+}
+
+impl Copied {
+    /// Whether a copy-or-send key press is used up (else it goes to the child).
+    fn consumes_key(&self) -> bool {
+        !matches!(self, Copied::NothingSelected)
+    }
+
+    /// Whether the selection should go: only once it is safely copied.
+    fn clears_selection(&self) -> bool {
+        matches!(self, Copied::Done)
+    }
+}
+
+/// Copy `text` (the selection, if any) with `write` (the clipboard, if any).
+fn copy_text<W>(text: Option<String>, write: Option<W>) -> Copied
+where
+    W: FnOnce(String) -> Result<(), String>,
+{
+    let Some(text) = text else {
+        return Copied::NothingSelected;
+    };
+    let Some(write) = write else {
+        return Copied::Failed("no system clipboard".to_string());
+    };
+    match write(text) {
+        Ok(()) => Copied::Done,
+        Err(e) => Copied::Failed(e),
+    }
+}
+
 /// Encode clipboard `text` for the child: normalize line endings to CR, and
 /// when `bracketed` wrap it in `ESC[200~`/`ESC[201~`, stripping any embedded
 /// end marker first so the payload can't close the bracket early (a
@@ -6480,11 +6528,11 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        Hit, ImeCommitTarget, MenuKind, SETTINGS_CARDS_TOP, SETTINGS_FOOTER_H, SETTINGS_ROW_H,
-        SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SettingsHit, Widget, Zoom, accumulate_scroll_lines,
-        arrow_presses, display_path, drag_scroll_direction, encode_paste, fmt_runtime,
-        ime_commit_target, ime_cursor_area_origin, is_openable_url, mix, osc52_reply,
-        pane_pixel_point, path_from_file_uri, put_text, read_git_branch, settings_hit,
+        Copied, Hit, ImeCommitTarget, MenuKind, SETTINGS_CARDS_TOP, SETTINGS_FOOTER_H,
+        SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SettingsHit, Widget, Zoom,
+        accumulate_scroll_lines, arrow_presses, copy_text, display_path, drag_scroll_direction,
+        encode_paste, fmt_runtime, ime_commit_target, ime_cursor_area_origin, is_openable_url, mix,
+        osc52_reply, pane_pixel_point, path_from_file_uri, put_text, read_git_branch, settings_hit,
         settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
         tab_widths, visible_tab_range, widget_text, zoom_px,
     };
@@ -6751,6 +6799,36 @@ mod tests {
         let (lines, remainder) = accumulate_scroll_lines(remainder, -0.7);
         assert_eq!(lines, -1);
         assert!((remainder + 0.4).abs() < 1e-9);
+    }
+
+    type Write = fn(String) -> Result<(), String>;
+
+    #[test]
+    fn copy_or_send_copies_then_clears_the_selection() {
+        let copied = copy_text(Some("ls".into()), Some((|_| Ok(())) as Write));
+        assert_eq!(copied, Copied::Done);
+        assert!(copied.consumes_key() && copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_with_no_selection_sends_the_key() {
+        let copied = copy_text(None, Some((|_| Ok(())) as Write));
+        assert_eq!(copied, Copied::NothingSelected);
+        assert!(!copied.consumes_key() && !copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_without_a_clipboard_keeps_selection_and_key() {
+        let copied = copy_text(Some("ls".into()), None::<Write>);
+        assert!(matches!(copied, Copied::Failed(_)));
+        assert!(copied.consumes_key() && !copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_on_write_failure_keeps_selection_and_key() {
+        let copied = copy_text(Some("ls".into()), Some((|_| Err("busy".into())) as Write));
+        assert_eq!(copied, Copied::Failed("busy".into()));
+        assert!(copied.consumes_key() && !copied.clears_selection());
     }
 
     #[test]
