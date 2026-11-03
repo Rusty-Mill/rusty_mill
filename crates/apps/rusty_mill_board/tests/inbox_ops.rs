@@ -143,6 +143,26 @@ fn a_model_token_is_forbidden() {
     assert!(fake.acted.lock().unwrap().is_empty());
 }
 
+/// Without a transport-bound credential (open board, shared token, stdio) the
+/// caller names its own actor and role; naming the owner must not reach BBP.
+#[test]
+fn a_caller_named_human_without_a_credential_is_refused() {
+    let (b, fake) = setup();
+    let unbound = |name: &str, args: Value| {
+        ops()
+            .iter()
+            .find(|o| o.name == name)
+            .expect("op")
+            .call(&b, None, args)
+    };
+    let spoof = json!({"actor": "nano", "role": "human"});
+    assert!(refused(unbound("inbox_list", spoof)).contains("authenticated admin credential"));
+    let act = json!({"actor": "nano", "role": "human", "id": "T1/msg:1/3", "rev": 7, "action": "approve"});
+    assert!(refused(unbound("inbox_act", act)).contains("authenticated admin credential"));
+    assert!(fake.asked.lock().unwrap().is_empty());
+    assert!(fake.acted.lock().unwrap().is_empty());
+}
+
 #[test]
 fn approve_at_the_read_rev_reaches_bbp_as_the_owner() {
     let (b, fake) = setup();

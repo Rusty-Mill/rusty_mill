@@ -456,7 +456,7 @@ async function decide(item,action){
 function renderDecisions(){
   mapSeq++;
   const b=$("board");b.classList.remove("roadmap","metrics");b.classList.add("decisions");b.replaceChildren();
-  if(pending===null){b.append(el("p","The inbox needs admin and a board started with --bbp-bin and --bbp-root.","meta"));renderSide();return}
+  if(pending===null){b.append(el("p","The inbox needs an admin token (sign in with one) and a board started with --bbp-bin and --bbp-root.","meta"));renderSide();return}
   if(!pending.length){b.append(el("p","Nothing needs you.","meta"));renderSide();return}
   for(const it of pending){
     const s=el("section",null,"col"),c=it.claim;
