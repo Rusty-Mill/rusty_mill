@@ -158,7 +158,8 @@ fn bash(spec: &Spec) -> String {
         r#"# rusty-mux-ctl completion for bash. Load it with:
 #   source <(rusty-mux-ctl completion bash)
 _rusty_mux_ctl() {{
-    local cur=${{COMP_WORDS[COMP_CWORD]}} prev=${{COMP_WORDS[COMP_CWORD-1]}} cmd= words i
+    local cur=${{COMP_WORDS[COMP_CWORD]}} prev=${{COMP_WORDS[COMP_CWORD-1]}} cmd= words i w
+    COMPREPLY=()
     for ((i = 1; i < COMP_CWORD; i++)); do
         case ${{COMP_WORDS[i]}} in
             --socket) ((i++)) ;;
@@ -168,14 +169,17 @@ _rusty_mux_ctl() {{
         esac
     done
     case $prev in
-        {path}) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+        {path})
+            compopt -o filenames 2>/dev/null
+            while IFS= read -r w; do COMPREPLY+=("$w"); done < <(compgen -f -- "$cur")
+            return ;;
         {value}) return ;;
     esac
     case $cmd in
         '') words='{top}' ;;
 {arms}        *) return ;;
     esac
-    COMPREPLY=($(compgen -W "$words" -- "$cur"))
+    while IFS= read -r w; do COMPREPLY+=("$w"); done < <(compgen -W "$words" -- "$cur")
 }}
 complete -F _rusty_mux_ctl rusty-mux-ctl
 "#,
@@ -300,7 +304,11 @@ fn nu(spec: &Spec) -> String {
         r#"# rusty-mux-ctl completion for Nushell. Save it and add to config.nu:
 #   use /path/to/rusty-mux-ctl.nu *
 def "nu-complete rusty-mux-ctl" [context: string] {{
-    let tokens = ($context | split row -r '\s+' | skip 1 | drop 1)
+    # Words as the shell splits them: a quoted value, closed or still being
+    # typed, is one word. The first is the command; the last is the word
+    # under the cursor unless the line ends in a space.
+    let words = ($context | parse -r r#'(?<w>"[^"]*"?|'[^']*'?|`[^`]*`?|\S+)'# | get w | skip 1)
+    let tokens = if ($context =~ '\s$') {{ $words }} else {{ $words | drop 1 }}
     mut cmd = ''
     mut skip = false
     for t in $tokens {{

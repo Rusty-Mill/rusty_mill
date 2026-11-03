@@ -1,7 +1,10 @@
 //! `completion SHELL` scripts run in the real shells: each script is asked
 //! to complete the same command lines. A shell that is not installed is
-//! skipped with a note; CI has bash on Linux and PowerShell on Windows.
+//! skipped with a note. PR CI has bash on Linux; PowerShell runs where
+//! Windows tests run.
 
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,6 +14,11 @@ const CASES: &[(&str, &[&str])] = &[
     ("rusty-mux-ctl terminal.fo", &["terminal.format"]),
     (
         "rusty-mux-ctl --socket s --json terminal.fo",
+        &["terminal.format"],
+    ),
+    // A quoted value with a space is one word, not two.
+    (
+        "rusty-mux-ctl --socket \"some path\" terminal.fo",
         &["terminal.format"],
     ),
     ("rusty-mux-ctl terminal.format --block x --tr", &["--trim"]),
@@ -36,25 +44,81 @@ fn ctl() -> &'static str {
     env!("CARGO_BIN_EXE_rusty-mux-ctl")
 }
 
-/// A fresh empty directory holding the script for `shell`.
-fn setup(shell: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!(
-        "rusty-mux-completion-{shell}-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("temp dir");
+/// A private directory this test created itself, removed when dropped.
+/// An existing path is never reused or cleared, however predictable its
+/// name.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    /// Creates `path` exclusively (mode 0700 on Unix); fails if anything
+    /// is there.
+    fn acquire(path: PathBuf) -> io::Result<Self> {
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&path)?;
+        Ok(Self(path))
+    }
+
+    /// A fresh directory under `base`, trying new names past any collision.
+    fn fresh_in(base: &Path, tag: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        for _ in 0..64 {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let name = format!(
+                "rusty-mux-completion-{}-{nanos}-{n}-{tag}",
+                std::process::id()
+            );
+            match Self::acquire(base.join(name)) {
+                Ok(dir) => return dir,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("scratch dir under {}: {e}", base.display()),
+            }
+        }
+        panic!("no free scratch name under {}", base.display());
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The script for `shell` and an empty working directory, both inside one
+/// scratch directory.
+struct Setup {
+    /// Holds the directory until the test ends.
+    _scratch: Scratch,
+    script: PathBuf,
+    work: PathBuf,
+}
+
+fn setup(shell: &str) -> Setup {
+    let scratch = Scratch::fresh_in(&std::env::temp_dir(), shell);
     let output = Command::new(ctl())
         .args(["completion", shell])
         .output()
         .expect("run rusty-mux-ctl");
     assert!(output.status.success(), "completion {shell}");
     let extension = if shell == "powershell" { "ps1" } else { shell };
-    let script = dir.join(format!("script.{extension}"));
-    std::fs::write(&script, &output.stdout).expect("write script");
-    let work = dir.join("work");
-    std::fs::create_dir_all(&work).expect("work dir");
-    (script, work)
+    let script = scratch.path().join(format!("script.{extension}"));
+    fs::write(&script, &output.stdout).expect("write script");
+    let work = scratch.path().join("work");
+    fs::create_dir(&work).expect("work dir");
+    Setup {
+        _scratch: scratch,
+        script,
+        work,
+    }
 }
 
 fn installed(program: &str) -> bool {
@@ -73,7 +137,7 @@ fn installed(program: &str) -> bool {
 }
 
 /// Runs `program` with `args` and the line in `$LINE`, in `work`, and
-/// returns the sorted words it printed.
+/// returns the sorted lines it printed, one completion each.
 fn complete(program: &str, args: &[&str], work: &Path, line: &str) -> Vec<String> {
     let output = Command::new(program)
         .args(args)
@@ -87,7 +151,12 @@ fn complete(program: &str, args: &[&str], work: &Path, line: &str) -> Vec<String
         "{program} {line:?}: {stdout}{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let mut words: Vec<String> = stdout.split_whitespace().map(str::to_owned).collect();
+    let mut words: Vec<String> = stdout
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
     words.sort();
     words
 }
@@ -106,21 +175,86 @@ fn check(program: &str, args: &[&str], work: &Path) {
     );
 }
 
+/// Bash, with `COMP_WORDS` split as readline splits the line: quotes kept
+/// together, and an empty word after a trailing space.
+fn bash_program(script: &Path) -> String {
+    format!(
+        "source '{}'; eval \"COMP_WORDS=($LINE)\"; \
+         [[ $LINE == *' ' ]] && COMP_WORDS+=(''); \
+         COMP_CWORD=$((${{#COMP_WORDS[@]}} - 1)); _rusty_mux_ctl; \
+         printf '%s\\n' \"${{COMPREPLY[@]}}\"",
+        script.display()
+    )
+}
+
+#[test]
+fn scratch_never_takes_or_clears_an_existing_path() {
+    let base = Scratch::fresh_in(&std::env::temp_dir(), "base");
+    let taken = base.path().join("taken");
+    fs::create_dir(&taken).expect("taken");
+    fs::write(taken.join("sentinel"), "keep").expect("sentinel");
+    let err = Scratch::acquire(taken.clone())
+        .err()
+        .expect("an existing path is refused");
+    assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(
+        fs::read_to_string(taken.join("sentinel")).ok().as_deref(),
+        Some("keep")
+    );
+
+    let fresh = Scratch::fresh_in(base.path(), "taken");
+    assert_ne!(fresh.path(), taken);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(fresh.path())
+            .expect("meta")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
+    }
+    let gone = fresh.path().to_path_buf();
+    drop(fresh);
+    assert!(!gone.exists(), "the acquired dir is removed");
+    assert_eq!(
+        fs::read_to_string(taken.join("sentinel")).ok().as_deref(),
+        Some("keep")
+    );
+}
+
 #[test]
 #[cfg(unix)]
 fn bash_completes() {
     if !installed("bash") {
         return;
     }
-    let (script, work) = setup("bash");
-    let program = format!(
-        "source '{}'; read -ra COMP_WORDS <<< \"$LINE\"; \
-         [[ $LINE == *' ' ]] && COMP_WORDS+=(''); \
-         COMP_CWORD=$((${{#COMP_WORDS[@]}} - 1)); _rusty_mux_ctl; \
-         printf '%s\\n' \"${{COMPREPLY[@]}}\"",
-        script.display()
+    let s = setup("bash");
+    check("bash", &["-c", &bash_program(&s.script)], &s.work);
+}
+
+#[test]
+#[cfg(unix)]
+fn bash_completes_a_path_with_spaces_and_glob_characters_as_one_word() {
+    if !installed("bash") {
+        return;
+    }
+    let s = setup("bash");
+    let program = bash_program(&s.script);
+    let dir = s.work.with_file_name("paths");
+    fs::create_dir(&dir).expect("paths");
+    fs::write(dir.join("my file.txt"), "").expect("spaced");
+    fs::write(dir.join("my*star"), "").expect("star");
+    fs::write(dir.join("other"), "").expect("other");
+    assert_eq!(
+        complete(
+            "bash",
+            &["-c", &program],
+            &dir,
+            "rusty-mux-ctl run --cwd my"
+        ),
+        ["my file.txt", "my*star"],
     );
-    check("bash", &["-c", &program], &work);
 }
 
 #[test]
@@ -129,18 +263,18 @@ fn zsh_completes() {
     if !installed("zsh") {
         return;
     }
-    let (script, work) = setup("zsh");
+    let s = setup("zsh");
     // zsh's completion system needs a terminal; stand in for the two
     // builtins the script calls, filtering by prefix as compadd does.
     let program = format!(
         "compdef() {{ :; }}; \
          compadd() {{ shift; local w; for w; do [[ $w == \"$PREFIX\"* ]] && print -r -- $w; done; }}; \
          _files() {{ print FILES; }}; \
-         source '{}'; words=(${{=LINE}}); [[ $LINE == *' ' ]] && words+=(''); \
+         source '{}'; words=(${{(z)LINE}}); [[ $LINE == *' ' ]] && words+=(''); \
          CURRENT=${{#words}}; PREFIX=$words[CURRENT]; _rusty_mux_ctl; true",
-        script.display()
+        s.script.display()
     );
-    check("zsh", &["-fc", &program], &work);
+    check("zsh", &["-fc", &program], &s.work);
 }
 
 #[test]
@@ -149,12 +283,12 @@ fn fish_completes() {
     if !installed("fish") {
         return;
     }
-    let (script, work) = setup("fish");
+    let s = setup("fish");
     let program = format!(
         "source '{}'; complete -C\"$LINE\" | string replace -r '\\t.*' ''; true",
-        script.display()
+        s.script.display()
     );
-    check("fish", &["--no-config", "-c", &program], &work);
+    check("fish", &["--no-config", "-c", &program], &s.work);
 }
 
 #[test]
@@ -162,7 +296,7 @@ fn nu_completes() {
     if !installed("nu") {
         return;
     }
-    let (script, work) = setup("nu");
+    let s = setup("nu");
     // A completer's words are filtered by Nushell's prompt; filter them
     // here by the word under the cursor.
     let program = format!(
@@ -170,9 +304,9 @@ fn nu_completes() {
          let word = ($line | split row ' ' | last); \
          let words = (nu-complete rusty-mux-ctl $line); \
          if $words != null {{ $words | where {{|w| $w | str starts-with $word }} | str join (char nl) }} else {{ '' }}",
-        script.display()
+        s.script.display()
     );
-    check("nu", &["--no-config-file", "-c", &program], &work);
+    check("nu", &["--no-config-file", "-c", &program], &s.work);
 }
 
 #[test]
@@ -182,19 +316,19 @@ fn powershell_completes() {
         .into_iter()
         .find(|p| installed(p))
         .expect("PowerShell on Windows");
-    let (script, work) = setup("powershell");
+    let s = setup("powershell");
     let bin = Path::new(ctl()).parent().expect("bin dir");
     let command = format!(
         "$env:PATH = '{};' + $env:PATH; . '{}'; \
          (TabExpansion2 $env:LINE $env:LINE.Length).CompletionMatches | \
          ForEach-Object {{ $_.CompletionText }}",
         bin.display(),
-        script.display()
+        s.script.display()
     );
     check(
         program,
         &["-NoProfile", "-NonInteractive", "-Command", &command],
-        &work,
+        &s.work,
     );
 }
 
