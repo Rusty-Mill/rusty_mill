@@ -1334,12 +1334,30 @@ mod client {
         /// The server's focus, from a server with [`Features::FOCUS`].
         focused: Option<BlockId>,
         session: Option<SessionId>,
+        /// The session's active window, from a server with
+        /// [`Features::ACTIVE_WINDOW`].
+        active: Option<WindowId>,
     }
 
     /// What `window` shows, from a List's `entries`; `None` when the window
     /// is gone.
     fn shape_of(entries: Vec<Message>, window: WindowId) -> Option<Shape> {
-        entries.into_iter().find_map(|m| match m {
+        let mut shape = window_shape(&entries, window)?;
+        shape.active = entries.into_iter().find_map(|m| match m {
+            Message::Entry {
+                entry: Entry::Session {
+                    session, active, ..
+                },
+                ..
+            } if Some(session) == shape.session => active,
+            _ => None,
+        });
+        Some(shape)
+    }
+
+    /// [`shape_of`], short of the session's active window.
+    fn window_shape(entries: &[Message], window: WindowId) -> Option<Shape> {
+        entries.iter().cloned().find_map(|m| match m {
             Message::Entry {
                 entry:
                     Entry::Window {
@@ -1356,6 +1374,7 @@ mod client {
                 zoomed,
                 focused,
                 session: Some(session),
+                active: None,
             }),
             _ => None,
         })
@@ -2353,6 +2372,11 @@ mod client {
                 // Blocks may have closed, or the window, unseen meanwhile.
                 if self.layout.is_none() && self.layouts && !self.gone {
                     self.wanted.add(Why::Blocks);
+                }
+                // So may the session's active window have moved.
+                let ours = self.session.is_some() && shape.session == self.session;
+                if let Some(active) = shape.active.filter(|w| ours && Some(*w) != self.window) {
+                    self.wanted.add(Why::Show(active));
                 }
             }
             self.joined += 1;
@@ -4090,6 +4114,80 @@ mod client {
                     .any(|m| matches!(m, Message::FocusBlock { block, .. } if *block == b)),
                 "{asked:?}"
             );
+        }
+
+        /// The session's active window moved while the path was away, its
+        /// event missed: the path's List tells it, and it is shown.
+        #[cfg(unix)]
+        #[test]
+        fn an_active_window_moved_while_the_path_was_away_is_shown() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            app.lose(false);
+            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+            back.layout = Some(Shape {
+                layout: app.layout.clone(),
+                session: Some(session_id(8)),
+                active: Some(window_id(9)),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert!(app.listing.is_some(), "no Show was pending before");
+            let req = app.next - 1;
+            listed_as(&control, req);
+            answer_windows(&mut app, req);
+            assert_eq!(app.window, Some(window_id(9)));
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_windows_shape_tells_its_sessions_active_window() {
+            let entry = |entry| Message::Entry { req: 1, entry };
+            let entries = vec![
+                entry(Entry::Session {
+                    session: session_id(5),
+                    name: String::new(),
+                    active: Some(window_id(5)),
+                }),
+                entry(Entry::Session {
+                    session: session_id(8),
+                    name: String::new(),
+                    active: Some(window_id(9)),
+                }),
+                entry(Entry::Window {
+                    window: window_id(7),
+                    session: session_id(8),
+                    name: String::new(),
+                    layout: None,
+                    zoomed: None,
+                    focused: None,
+                }),
+            ];
+            let shape = shape_of(entries, window_id(7)).expect("window 7");
+            assert_eq!(shape.session, Some(session_id(8)));
+            assert_eq!(shape.active, Some(window_id(9)));
+            assert!(shape_of(Vec::new(), window_id(7)).is_none());
+        }
+
+        /// An empty window with a block still detached in it stays open on
+        /// the path back.
+        #[cfg(unix)]
+        #[test]
+        fn an_empty_window_still_holding_a_block_stays_on_the_path_back() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            app.lose(false);
+            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+            back.panes.clear();
+            back.layout = Some(Shape {
+                session: Some(session_id(8)),
+                active: Some(window_id(7)),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            answer_list(&mut app, &control, &[block(1)]);
+            assert!(app.ended.is_none());
+            assert_eq!(app.window, Some(window_id(7)));
+            assert_eq!(app.layout, None);
+            assert!(app.listing.is_none(), "nothing more to ask");
         }
 
         /// An empty window whose last blocks closed while the path was away
