@@ -165,18 +165,81 @@ fn only_row(cli: &BbpCli, task: &str) -> Escalation {
     rows.remove(0)
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mill_real_bbp_{}_{tag}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+/// A private directory this test created itself, removed when dropped.
+/// Only a directory it acquired is ever deleted: an existing path is never
+/// reused or cleared, however predictable its name.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    /// Create `path` exclusively with mode 0700; fails if anything is there.
+    fn acquire(path: PathBuf) -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().mode(0o700).create(&path)?;
+        Ok(Self(path))
+    }
+
+    /// A fresh directory under `base`, trying new names past any collision.
+    fn fresh_in(base: &Path, tag: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        for _ in 0..64 {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let name = format!("mill_real_bbp_{}_{nanos}_{n}_{tag}", std::process::id());
+            match Self::acquire(base.join(name)) {
+                Ok(dir) => return dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("scratch dir under {}: {e}", base.display()),
+            }
+        }
+        panic!("no free scratch name under {}", base.display());
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn scratch_never_takes_or_clears_an_existing_path() {
+    let base = Scratch::fresh_in(&std::env::temp_dir(), "base");
+    let taken = base.path().join("taken");
+    fs::create_dir(&taken).unwrap();
+    fs::write(taken.join("sentinel"), "keep").unwrap();
+    let err = Scratch::acquire(taken.clone())
+        .err()
+        .expect("an existing path is refused");
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(fs::read_to_string(taken.join("sentinel")).unwrap(), "keep");
+
+    let fresh = Scratch::fresh_in(base.path(), "taken");
+    assert_ne!(fresh.path(), taken);
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(fresh.path()).unwrap().permissions().mode() & 0o777
+    };
+    assert_eq!(mode, 0o700);
+    let gone = fresh.path().to_path_buf();
+    drop(fresh);
+    assert!(!gone.exists(), "the acquired dir is removed");
+    assert_eq!(fs::read_to_string(taken.join("sentinel")).unwrap(), "keep");
 }
 
 #[test]
 #[ignore = "requires the built bbp at BBP_TEST_BIN and a working sandbox"]
 fn the_inbox_drives_a_real_bbp_host() {
     let bin = bbp();
-    let root = scratch("inbox");
+    let scratch = Scratch::fresh_in(&std::env::temp_dir(), "inbox");
+    let root = scratch.path().to_path_buf();
     let cli = BbpCli::new(bin.clone(), root.clone());
 
     // Approve on a task total: the row names the crossed total, the preview
@@ -238,6 +301,6 @@ fn the_inbox_drives_a_real_bbp_host() {
     let after = card(&bin, &root, "C2");
     assert!(after.contains(r#""state":"Open""#), "{after}");
 
-    let _ = fs::remove_dir_all(&root);
+    drop(scratch);
     println!("BBP_ACCEPTANCE PASS millboard-inbox");
 }
