@@ -47,7 +47,9 @@ pub const FRAMING_TOKENS: u64 = 1_024;
 /// The most a call can cost: every prompt byte as its own input token,
 /// plus [`FRAMING_TOKENS`], each at the dearer of the fresh and cached
 /// input rates, plus every output token allowed, plus one micro-dollar for
-/// [`cost`] rounding the fresh and cached buckets up separately. Byte-level
+/// [`cost`] rounding the fresh and cached buckets up separately when both
+/// are billed. A free price reserves 0, so free calls outlive the
+/// experiment ceiling. Byte-level
 /// tokenizers never emit more tokens than bytes, so this bounds [`cost`]
 /// for any split of the input into fresh and cached tokens; it is not the
 /// estimate context fitting uses.
@@ -56,7 +58,7 @@ pub fn worst_case(prompt_bytes: u64, max_output_tokens: u32, p: &Price) -> u64 {
     let rate = p.input.max(p.cached_input);
     charge(input, rate)
         .saturating_add(charge(u64::from(max_output_tokens), p.output))
-        .saturating_add(1)
+        .saturating_add(u64::from(p.input > 0 && p.cached_input > 0))
 }
 
 /// The ceilings, from Factory config.
@@ -313,6 +315,15 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_free_price_reserves_nothing_and_runs_past_the_experiment_ceiling() {
+        let free = Price::default();
+        assert_eq!(worst_case(120_000, 4_096, &free), 0);
+        let mut m = Meter::new(CEIL, CEIL.experiment);
+        assert_eq!(m.reserve(T, worst_case(1, 1, &PAID)), Err(Stop::Experiment));
+        assert!(m.reserve(T, worst_case(120_000, 4_096, &free)).is_ok());
     }
 
     #[test]
