@@ -1851,6 +1851,12 @@ mod client {
         fn is_empty(&self) -> bool {
             self.show.is_none() && !self.blocks
         }
+
+        /// Adds the reasons of `older`, asked before these.
+        fn merge(&mut self, older: Wants) {
+            self.show = self.show.or(older.show);
+            self.blocks |= older.blocks;
+        }
     }
 
     /// A layout change that drops shown blocks. The server tells it on the
@@ -2239,7 +2245,7 @@ mod client {
                 match action {
                     Action::Detach => return self.detach(),
                     Action::Focus(_) if self.visible().iter().any(|(b, _)| *b == at) => {
-                        self.focus = at;
+                        self.focus_on(at);
                         self.sync();
                     }
                     action if at == self.focus && !matches!(action, Action::Focus(_)) => {
@@ -2332,10 +2338,21 @@ mod client {
             self.me = Some(back.me);
             // Past any id the old path used meanwhile, as on a move.
             self.next = self.next.max(back.next);
+            // Requests on the old path are never answered: a List asked
+            // there is asked again here, and focus requests are forgotten,
+            // the server's focus being taken from the path's List.
+            self.follow = Follow::default();
+            if let Some(listing) = self.listing.take() {
+                self.wanted.merge(listing.wants);
+            }
             if let Some(shape) = back.layout {
                 (self.layout, self.zoomed) = (shape.layout, shape.zoomed);
                 if let Some(focused) = shape.focused.filter(|_| self.focusing) {
                     self.focus = focused;
+                }
+                // Blocks may have closed, or the window, unseen meanwhile.
+                if self.layout.is_none() && self.layouts && !self.gone {
+                    self.wanted.add(Why::Blocks);
                 }
             }
             self.joined += 1;
@@ -2372,6 +2389,7 @@ mod client {
             if let Some(rejoiner) = &self.rejoiner {
                 rejoiner.ask(Ask::Settle);
             }
+            self.list_wanted();
             let held = std::mem::take(&mut self.held);
             self.replay(held);
         }
@@ -2673,12 +2691,11 @@ mod client {
                     self.offered(Some(Onto::Offer(port, id, key.0)))
                 }
                 Message::Failed { req, .. } if self.asked(req) => self.offered(None),
+                Message::Done { req, .. } if self.follow.owns(req) => self.follow.done(req),
                 // A focus request refused (the block left meanwhile) needs
                 // no bell: the server's focus is taken all the same.
-                Message::Done { req, .. } | Message::Failed { req, .. }
-                    if self.follow.owns(req) =>
-                {
-                    let focus = self.follow.answered(req);
+                Message::Failed { req, .. } if self.follow.owns(req) => {
+                    let focus = self.follow.refused(req);
                     self.take_focus(focus.flatten());
                 }
                 Message::Entry { req, .. } if self.listing(req) => {
@@ -3974,6 +3991,121 @@ mod client {
             assert!(!matches!(app.ended, Some(Ended::Closed)));
             assert_eq!(app.window, Some(window_id(9)));
             assert_eq!(app.layout, Some(Layout::Block(block(9))));
+        }
+
+        /// The server answers each request before announcing what it did:
+        /// the first move's echo, arriving after its answer, must not pull
+        /// the focus back while the second is in flight, nor after.
+        #[cfg(unix)]
+        #[test]
+        fn quick_moves_hold_in_the_servers_order() {
+            let (mut app, _inbox, [_control, _a, _b]) = following();
+            let (a, b) = (block(1), block(2));
+            app.act(Action::Focus(Dir::Right));
+            let first = app.next - 1;
+            app.act(Action::Focus(Dir::Left));
+            let second = app.next - 1;
+            assert_eq!(app.focus, a);
+            for message in [
+                Message::Done {
+                    req: first,
+                    created: None,
+                },
+                focus_changed(Some(b)),
+                Message::Done {
+                    req: second,
+                    created: None,
+                },
+            ] {
+                app.on_control(message);
+                assert_eq!(app.focus, a);
+            }
+            app.on_control(focus_changed(Some(a)));
+            assert_eq!(app.focus, a);
+        }
+
+        /// [`following`], on a path that can be lost and brought back.
+        #[cfg(unix)]
+        fn following_on_a_path() -> (App, Inbox<Input>, [UnixStream; 3]) {
+            let (mut app, inbox, far) = app(Some(Box::new(Never)));
+            app.focusing = true;
+            app.inspect = true;
+            app.window = Some(window_id(7));
+            app.session = Some(session_id(8));
+            (app, inbox, far)
+        }
+
+        /// Requests asked on a path given up are never answered: following
+        /// and listing go on afresh on the path back.
+        #[cfg(unix)]
+        #[test]
+        fn requests_lost_with_the_path_do_not_stall_following() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            let (a, b) = (block(1), block(2));
+            app.act(Action::Focus(Dir::Right));
+            activate(&mut app, window_id(9));
+            assert!(app.listing.is_some());
+            app.lose(false);
+            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+            back.layout = Some(Shape {
+                layout: app.layout.clone(),
+                focused: Some(a),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert_eq!(app.focus, a, "the server's focus, from the path's List");
+            // The List is asked again on the path back.
+            let req = app.next - 1;
+            listed_as(&control, req);
+            // Another client's move is followed at once.
+            app.on_control(focus_changed(Some(b)));
+            assert_eq!(app.focus, b);
+            answer_windows(&mut app, req);
+            assert_eq!(app.window, Some(window_id(9)));
+        }
+
+        /// A focus key held while the path was away moves the shared focus
+        /// too, once it is back.
+        #[cfg(unix)]
+        #[test]
+        fn a_focus_key_held_through_a_lost_path_tells_the_server() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            let b = block(2);
+            // A move breaks, holding what is typed through the lost path.
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"kept"));
+            app.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            app.typed(Action::Focus(Dir::Right));
+            assert!(!app.held.is_empty(), "held for the path back");
+            let (back, control, _a_new, _b_new) = back(takeover(1));
+            app.take(Input::Rejoined(Ok(back)));
+            assert_eq!(app.focus, b);
+            let asked = sent(&control);
+            assert!(
+                asked
+                    .iter()
+                    .any(|m| matches!(m, Message::FocusBlock { block, .. } if *block == b)),
+                "{asked:?}"
+            );
+        }
+
+        /// An empty window whose last blocks closed while the path was away
+        /// ends the client once the path is back.
+        #[cfg(unix)]
+        #[test]
+        fn an_empty_window_emptied_for_good_meanwhile_ends_on_the_path_back() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            app.lose(false);
+            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+            back.panes.clear();
+            back.layout = Some(Shape::default());
+            app.take(Input::Rejoined(Ok(back)));
+            assert!(app.ended.is_none());
+            answer_list(&mut app, &control, &[]);
+            assert!(matches!(app.ended, Some(Ended::Closed)));
         }
 
         /// A passing program's OSC 12 reaches the terminal as it is, even

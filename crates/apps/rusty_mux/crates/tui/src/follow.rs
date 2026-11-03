@@ -3,11 +3,19 @@
 //!
 //! The client moves its own focus at once, so keys never wait on a round
 //! trip, and tells the server. The server announces each focus change,
-//! this client's own included. While a request of this client's is
-//! unanswered, an announcement may be stale (an echo of an earlier move)
-//! so it is only noted; once every request is answered, the last one
-//! noted is where the server's focus is, and the client takes it. Events
-//! and answers come in order on one connection, so nothing is missed.
+//! this client's own included, right after answering the request that made
+//! it. While a request of this client's is unanswered, an announcement may
+//! be stale (an echo of an earlier move) so it is only noted. Once the last
+//! request is answered:
+//!
+//! - done, the server's focus is the block asked for, which the client has
+//!   already: what was noted is older, and dropped. The request's own
+//!   announcement follows, and is taken like any other.
+//! - refused, the server's focus is the last one noted, which is taken.
+//!
+//! Events and answers come in order on one connection, so nothing is
+//! missed. Requests on a connection given up are never answered: the
+//! client starts afresh with each new one.
 
 use rusty_mux_core::BlockId;
 
@@ -40,14 +48,27 @@ impl Follow {
         None
     }
 
-    /// Request `req` was answered, done or failed: once none is left in
-    /// flight, the focus announced meanwhile, if any.
-    pub fn answered(&mut self, req: u64) -> Option<Option<BlockId>> {
-        self.asked.retain(|r| *r != req);
-        match self.asked.is_empty() {
+    /// Request `req` was done. Nothing to take: the last one done leaves
+    /// the focus where this client already put it.
+    pub fn done(&mut self, req: u64) {
+        if self.settled(req) {
+            self.noted = None;
+        }
+    }
+
+    /// Request `req` was refused: once none is left in flight, the focus
+    /// announced meanwhile, if any.
+    pub fn refused(&mut self, req: u64) -> Option<Option<BlockId>> {
+        match self.settled(req) {
             true => self.noted.take(),
             false => None,
         }
+    }
+
+    /// Drops `req`; whether none is left in flight.
+    fn settled(&mut self, req: u64) -> bool {
+        self.asked.retain(|r| *r != req);
+        self.asked.is_empty()
     }
 }
 
@@ -68,26 +89,49 @@ mod tests {
         assert_eq!(follow.told(None), Some(None));
     }
 
+    /// The server's order: each answer, then its announcement.
     #[test]
-    fn echoes_of_moves_in_flight_wait_for_the_last_answer() {
+    fn echoes_of_moves_in_flight_never_pull_back() {
         let mut follow = Follow::default();
         // Moved to 2 then 3 quickly; the echo of 2 must not pull back.
         follow.asked(10);
         follow.asked(11);
+        follow.done(10);
         assert_eq!(follow.told(Some(block(2))), None);
-        assert_eq!(follow.answered(10), None);
-        assert_eq!(follow.told(Some(block(3))), None);
-        assert_eq!(follow.answered(11), Some(Some(block(3))));
+        follow.done(11);
         assert!(!follow.owns(11));
+        assert_eq!(follow.told(Some(block(3))), Some(Some(block(3))));
     }
 
     #[test]
-    fn another_clients_later_move_wins_once_answered() {
+    fn another_clients_later_move_wins() {
         let mut follow = Follow::default();
         follow.asked(10);
-        assert_eq!(follow.told(Some(block(2))), None); // Our echo.
+        follow.done(10);
+        assert_eq!(follow.told(Some(block(2))), Some(Some(block(2)))); // Our echo.
+        assert_eq!(follow.told(Some(block(5))), Some(Some(block(5)))); // Someone else's.
+    }
+
+    #[test]
+    fn a_move_answered_before_another_clients_is_overtaken_by_it() {
+        let mut follow = Follow::default();
+        follow.asked(10);
+        follow.asked(11);
+        follow.done(10);
+        assert_eq!(follow.told(Some(block(2))), None); // Our first echo.
         assert_eq!(follow.told(Some(block(5))), None); // Someone else's.
-        assert_eq!(follow.answered(10), Some(Some(block(5))));
+        follow.done(11); // Ours again, after theirs: ours stands.
+        assert_eq!(follow.told(Some(block(3))), Some(Some(block(3))));
+    }
+
+    #[test]
+    fn a_refused_last_request_takes_what_was_announced_meanwhile() {
+        let mut follow = Follow::default();
+        follow.asked(10);
+        follow.asked(11);
+        follow.done(10);
+        assert_eq!(follow.told(Some(block(2))), None);
+        assert_eq!(follow.refused(11), Some(Some(block(2))));
     }
 
     #[test]
@@ -95,7 +139,7 @@ mod tests {
         let mut follow = Follow::default();
         follow.asked(10);
         assert!(follow.owns(10));
-        assert_eq!(follow.answered(10), None);
-        assert_eq!(follow.answered(99), None);
+        assert_eq!(follow.refused(10), None);
+        assert_eq!(follow.refused(99), None);
     }
 }
