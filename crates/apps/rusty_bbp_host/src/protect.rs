@@ -79,6 +79,11 @@ pub fn exempt(st: &TaskState, claim: Option<MsgId>) -> Exempt {
 /// A path that is not UTF-8 or that git quotes fails closed, and so does a
 /// non-empty patch in which git finds no path.
 pub fn patch_paths(scratch: &Path, patch: &[u8]) -> Result<Vec<String>, String> {
+    // git reads a header path only up to a NUL; no text patch carries one
+    // (binary hunks are base85), so its spellings could never be compared.
+    if patch.contains(&0) {
+        return Err("a NUL byte in the patch; refusing to guess its paths".into());
+    }
     let raw = numstat(scratch, patch)?;
     let out = String::from_utf8(raw).map_err(|_| "a patched path is not UTF-8".to_owned())?;
     let mut paths = numstat_paths(&out)?;
@@ -199,9 +204,15 @@ fn unknown_source(header: Option<&[u8]>) -> Result<(), String> {
 }
 
 /// `p` spelt as the index path git changes: repeated `/` squashed, as git
-/// does. A `.` or `..` segment is refused rather than resolved, so a glob
-/// never meets a spelling git would read as another path.
+/// does. A `.` or `..` segment or a control character (git stops at a NUL)
+/// is refused rather than interpreted, so a glob never meets a spelling git
+/// would read as another path.
 fn normal(p: &str) -> Result<String, String> {
+    if p.chars().any(char::is_control) {
+        return Err(format!(
+            "old path {p:?} holds a control character; refusing to guess"
+        ));
+    }
     let segs: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
     if segs.is_empty() || segs.iter().any(|s| *s == "." || *s == "..") {
         return Err(format!(
@@ -468,6 +479,23 @@ mod tests {
         assert!(paths.contains(&"src/core.txt".to_owned()), "{paths:?}");
     }
 
+    /// #597 review: git stops a header path at a NUL, so a patch with one
+    /// is refused before any path is compared.
+    #[test]
+    fn a_patch_with_a_nul_byte_is_refused() {
+        let scratch = std::env::temp_dir().join(format!("protect-nul-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        let patch = b"diff --git a/tests/core.txt\0x b/src/core.txt\n\
+--- a/tests/core.txt\0x\n\
++++ b/src/core.txt\n\
+@@ -1 +1 @@\n\
+-old\n\
++new\n";
+        let err = patch_paths(&scratch, patch).unwrap_err();
+        let _ = std::fs::remove_dir_all(&scratch);
+        assert!(err.contains("NUL"), "{err}");
+    }
+
     #[test]
     fn git_lists_added_deleted_and_renamed_paths() {
         // Inside this repository on purpose: without the ceiling, git would
@@ -532,7 +560,12 @@ rename to src/a.rs\n";
             old_sides(b"rename from tests//a.rs\nrename to b.rs\n").expect("ok"),
             ["tests/a.rs"]
         );
-        for odd in ["tests/./core.txt", "tests/../tests/core.txt"] {
+        for odd in [
+            "tests/./core.txt",
+            "tests/../tests/core.txt",
+            "tests/core.txt\0ignored",
+            "tests/core\u{1}.txt",
+        ] {
             let p = format!("--- a/{odd}\n+++ b/src/core.txt\n");
             assert!(old_sides(p.as_bytes()).is_err(), "{odd}");
         }
