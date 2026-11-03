@@ -170,6 +170,10 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
         "close" => HumanAction::Close {
             expected_rev: rev()?,
         },
+        // #597 G3: adopt a staged holdout suite that changes or removes tests.
+        "holdout-updated" => HumanAction::HoldoutUpdated {
+            digest: Sha256::from_hex(a(0)?).ok_or("holdout digest must be 64 hex digits")?,
+        },
         other => return Err(format!("unknown human action {other}")),
     })
 }

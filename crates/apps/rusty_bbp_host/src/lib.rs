@@ -32,6 +32,7 @@ pub mod clean_tree;
 pub mod confine;
 pub mod grade;
 pub mod groups;
+pub mod holdout;
 pub mod human;
 pub mod inbox;
 pub mod launchers;

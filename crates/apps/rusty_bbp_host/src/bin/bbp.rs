@@ -6,12 +6,14 @@
 //! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
 //! bbp open    --mode claims --dir D --task T --repo R --brief FILE --roster FILE --profiles FILE [--claims FILE] [--human ID] [--confine sandbox|none]
 //!                                          claims mode: the profile set names test_paths; a host that cannot sandbox refuses (bad_claims_config)
+//!                                          [--holdout-profiles FILE --holdout-root DIR] freezes a holdout suite (#597): holdout:/golden: profiles over the files under DIR
+//! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
 //! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
-//!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | close
+//!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | close | holdout-updated DIGEST
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
@@ -31,12 +33,24 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, admission, args::Args, broker, grade, human, inbox, mcp, moderator, pairs, pins,
-    profiles, report, response_json, runner, shadow, slots, tokens, why,
+    admin, admission, args::Args, broker, grade, holdout, human, inbox, mcp, moderator, pairs,
+    pins, profiles, report, response_json, runner, shadow, slots, tokens, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// `--holdout-profiles FILE --holdout-root DIR`, both or neither.
+fn holdout_set(a: &Args) -> Result<Option<holdout::HoldoutSet>, String> {
+    match (a.flags.get("holdout-profiles"), a.flags.get("holdout-root")) {
+        (None, None) => Ok(None),
+        (Some(p), Some(root)) => {
+            let set = profiles::read_file(&PathBuf::from(p))?;
+            holdout::HoldoutSet::scan(set, &PathBuf::from(root)).map(Some)
+        }
+        _ => Err("--holdout-profiles and --holdout-root go together".into()),
+    }
+}
 
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -179,6 +193,7 @@ fn run() -> Result<String, String> {
                     None | Some("sandbox") => runner::probe_host(),
                     Some(other) => Err(format!("--confine {other}")),
                 };
+                let holdout = holdout_set(&a)?;
                 return admin::open_claims_task(
                     &dir,
                     &task,
@@ -186,6 +201,7 @@ fn run() -> Result<String, String> {
                     &brief,
                     &human,
                     &set,
+                    holdout.as_ref(),
                     roster,
                     cfg,
                     probe,
@@ -211,6 +227,11 @@ fn run() -> Result<String, String> {
                 live,
                 policy,
             )?
+        }
+        "holdout" => {
+            let next =
+                holdout_set(&a)?.ok_or("--holdout-profiles and --holdout-root are required")?;
+            admin::adopt_holdout(&dir, &task, &next)?
         }
         "mod" => {
             let confinement = match a.flags.get("confine").map(String::as_str) {

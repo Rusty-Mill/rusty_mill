@@ -94,7 +94,7 @@ pub fn open_task_live(
         roster,
         max_live_turns,
         policy,
-        (Mode::Stages, None),
+        (Mode::Stages, None, None),
     )
 }
 
@@ -109,7 +109,7 @@ fn open_mode(
     roster: Vec<Role>,
     max_live_turns: u32,
     policy: SchedulingPolicy,
-    (mode, claims): (Mode, Option<ClaimsConfig>),
+    (mode, claims, holdout_digest): (Mode, Option<ClaimsConfig>, Option<Sha256>),
 ) -> Result<Response, String> {
     let master = crate::master::ensure(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
@@ -144,7 +144,7 @@ fn open_mode(
         brief: blob,
         human: human.clone(),
         policy,
-        holdout_digest: None,
+        holdout_digest,
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
@@ -156,6 +156,8 @@ fn open_mode(
 /// its sandbox) succeeds, and with `bad_claims_config(test_paths)` unless
 /// the profile set names its `test_paths`. Both checks come before anything
 /// is written. Claims mode grants no turns: one live turn, turn-based.
+/// `holdout`, if given, is staged and frozen as the task's holdout suite
+/// (#597); the core then waits for a holdout pass before acceptance.
 #[allow(clippy::too_many_arguments)]
 pub fn open_claims_task(
     dir: &Path,
@@ -164,6 +166,7 @@ pub fn open_claims_task(
     brief: &[u8],
     human: &PrincipalId,
     set: &ProfileSet,
+    holdout: Option<&crate::holdout::HoldoutSet>,
     roster: Vec<Role>,
     cfg: ClaimsConfig,
     sandbox: impl FnOnce() -> Result<(), String>,
@@ -182,6 +185,10 @@ pub fn open_claims_task(
     if set.test_paths.is_empty() {
         return refuse("test_paths: the profile set must name its test paths".into());
     }
+    let holdout_digest = match holdout {
+        Some(hs) => Some(crate::holdout::stage(dir, task, hs)?),
+        None => None,
+    };
     open_mode(
         dir,
         task,
@@ -192,8 +199,42 @@ pub fn open_claims_task(
         roster,
         1,
         SchedulingPolicy::TurnBased,
-        (Mode::Claims, Some(cfg)),
+        (Mode::Claims, Some(cfg), holdout_digest),
     )
+}
+
+/// Adopt `next` as `task`'s holdout suite (#597 G3). A pure addition to the
+/// current suite is written by the host (`holdout_extended`); anything that
+/// removes or changes a test is staged and refused `human_required`, naming
+/// the digest the human adopts with `bbp human holdout-updated`.
+pub fn adopt_holdout(
+    dir: &Path,
+    task: &TaskId,
+    next: &crate::holdout::HoldoutSet,
+) -> Result<Response, String> {
+    let mut d = open_driver(dir, task)?;
+    let current = d
+        .state
+        .claims
+        .holdout_digest
+        .ok_or("the task has no holdout suite")?;
+    let old = crate::holdout::load(dir, task, current)?;
+    let digest = crate::holdout::stage(dir, task, next)?;
+    if !next.extends(&old) {
+        return Ok(Response::Rejected(Rejection::new(
+            Code::HumanRequired,
+            format!(
+                "holdout {} removes or changes tests; the human adopts it with `bbp human holdout-updated {}`",
+                digest.hex(),
+                digest.hex()
+            ),
+        )));
+    }
+    let cmd = Command::Host {
+        op: crate::fresh_op(),
+        action: HostAction::HoldoutExtended { digest },
+    };
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
 
 pub fn assign(
