@@ -89,6 +89,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
         Ok(n)
     }
 
+    /// Resolves once the peer closes its side or the connection fails,
+    /// reading ahead meanwhile: a server waits on this while a handler runs,
+    /// to stop work for a client that has gone. Bytes that arrive (a
+    /// pipelined request) stay buffered for the next read. With
+    /// `max_buffered` unread bytes held it stops reading and never resolves,
+    /// so a peer cannot make it buffer without bound. Cancel-safe: dropping
+    /// it loses no data.
+    pub async fn closed(&mut self, max_buffered: usize) {
+        loop {
+            if self.end - self.start >= max_buffered {
+                return std::future::pending().await;
+            }
+            match self.fill_more().await {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
+    }
+
     /// Reads and parses a request head. See
     /// [`crate::sync::SyncTransport::read_request_head`].
     pub async fn read_request_head(&mut self, max_head_len: usize) -> Result<RequestHead> {
