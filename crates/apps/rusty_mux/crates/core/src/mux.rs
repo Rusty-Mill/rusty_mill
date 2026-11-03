@@ -87,8 +87,8 @@ impl Mux {
     }
 
     /// Creates a session with a generated name, such as `quiet-harbor`,
-    /// that no other session has; `seed` picks it ([`is_generated`] tells
-    /// such a name). The caller supplies the randomness, so the model stays
+    /// that no other session has; `seed` picks it ([`is_generated`]
+    /// recognises its shape). The caller supplies the randomness, so the model stays
     /// deterministic.
     ///
     /// [`is_generated`]: crate::is_generated

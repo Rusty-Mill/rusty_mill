@@ -2,8 +2,10 @@
 //!
 //! A session created without a name gets one, unlike every other session's,
 //! so a person or an agent can tell sessions apart and name one in a
-//! command. [`is_generated`] tells such a name from one someone chose, so an
-//! agent renames only a session nobody has named.
+//! command. [`is_generated`] tells whether a name has the shape of a
+//! generated one. It reads only the spelling: a person may choose such a
+//! name too (`create-session --name quiet-harbor`), so it is no proof that
+//! nobody named a session.
 
 /// Short, plain words in lowercase ASCII, without dashes.
 const ADJECTIVES: [&str; 64] = [
