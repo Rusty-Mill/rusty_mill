@@ -13,6 +13,8 @@ layer = "apps"
 orch-core = { workspace = true }
 orch-dispatch = { workspace = true }
 orch-cli = { workspace = true }
+# The `Model` port and reply parser this adapter serves (#594).
+orch-lens = { workspace = true }
 # Parses the one-line result envelope `claude -p --output-format json`
 # prints; the reply inside it goes to `orch_cli::parse`. Foundation crate,
 # serde off, as in orch-cli.

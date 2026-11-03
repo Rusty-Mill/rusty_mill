@@ -60,6 +60,7 @@ pub struct ClaudeAgent<C = StdCommand> {
     model: Option<String>,
     max_turns: u32,
     stop: StopRule,
+    pub(crate) lens_tools: &'static str,
     runner: C,
 }
 
@@ -79,6 +80,7 @@ impl<C: CommandRunner> ClaudeAgent<C> {
             model: None,
             max_turns: DEFAULT_MAX_TURNS,
             stop: StopRule::Checkpoint,
+            lens_tools: "",
             runner,
         }
     }
@@ -109,6 +111,14 @@ impl<C: CommandRunner> ClaudeAgent<C> {
         self
     }
 
+    /// Give lens questions the read-only [`TOOLS`] in the repository
+    /// root, for a lens configured `tools: read-only`. Without it a lens
+    /// question runs with no tools at all.
+    pub fn lens_read_only(mut self) -> Self {
+        self.lens_tools = TOOLS;
+        self
+    }
+
     /// The runner, e.g. to inspect a fake in tests.
     pub fn runner(&self) -> &C {
         &self.runner
@@ -122,13 +132,22 @@ impl<C: CommandRunner> ClaudeAgent<C> {
     /// The argv this agent runs. Public so tests and docs can pin it. The
     /// schema travels in the argv itself; `--json-schema` takes text.
     pub fn argv(&self) -> Vec<String> {
+        let mut argv = self.base_argv(TOOLS);
+        argv.push("--json-schema".to_owned());
+        argv.push(output_schema(self.stop));
+        argv
+    }
+
+    /// Everything but the reply contract: print mode, the envelope, the
+    /// given tool set, no prompts, settings, MCP, skills or session files.
+    pub(crate) fn base_argv(&self, tools: &str) -> Vec<String> {
         let mut argv: Vec<String> = [
             "claude",
             "-p",
             "--output-format",
             "json",
             "--tools",
-            TOOLS,
+            tools,
             "--permission-mode",
             "dontAsk",
             "--permission-prompts",
@@ -149,8 +168,6 @@ impl<C: CommandRunner> ClaudeAgent<C> {
             argv.push("--model".to_owned());
             argv.push(model.clone());
         }
-        argv.push("--json-schema".to_owned());
-        argv.push(output_schema(self.stop));
         argv
     }
 
@@ -203,25 +220,29 @@ impl<C: CommandRunner> ClaudeAgent<C> {
         }
         self.probe_login()?;
         let prompt = render(task, board, self.stop);
-        let exit = self
-            .runner
+        let exit = self.exec(&self.argv(), prompt.as_bytes())?;
+        let reply = extract(&exit)?;
+        parse(&reply, task.spec().role, self.stop).map_err(ClassifiedError::Transient)
+    }
+
+    /// One run in the repository root with [`SCRUBBED_ENV`] removed.
+    pub(crate) fn exec(&self, argv: &[String], stdin: &[u8]) -> Result<Exit, ClassifiedError> {
+        self.runner
             .run_in(
                 Some(&self.repo_root),
-                &self.argv(),
-                prompt.as_bytes(),
+                argv,
+                stdin,
                 self.timeout,
                 SCRUBBED_ENV,
             )
             .map_err(exec_error)
-            .map_err(ClassifiedError::Transient)?;
-        let reply = extract(&exit)?;
-        parse(&reply, task.spec().role, self.stop).map_err(ClassifiedError::Transient)
+            .map_err(ClassifiedError::Transient)
     }
 
     /// `claude auth status` exits non-zero when nobody is logged in. The
     /// probe runs with the same environment as the run, so a scrubbed key
     /// cannot make it report a login the run will not have.
-    fn probe_login(&self) -> Result<(), ClassifiedError> {
+    pub(crate) fn probe_login(&self) -> Result<(), ClassifiedError> {
         let exit = self
             .runner
             .run_in(
@@ -249,6 +270,19 @@ impl<C: CommandRunner> ClaudeAgent<C> {
 /// so the envelope is read before the exit status. Verified against Claude
 /// Code 2.1.289.
 fn extract(exit: &Exit) -> Result<String, ClassifiedError> {
+    let envelope = envelope(exit)?;
+    match envelope.get("structured_output") {
+        Some(reply) if !reply.is_null() => Ok(reply.to_json_string()),
+        _ => Err(ClassifiedError::Transient(AgentError(format!(
+            "claude returned no structured output ({}): {}",
+            subtype(&envelope),
+            excerpt(result(&envelope).as_bytes())
+        )))),
+    }
+}
+
+/// The run's result envelope, once no failure is reported in or around it.
+pub(crate) fn envelope(exit: &Exit) -> Result<Value, ClassifiedError> {
     let stdout = String::from_utf8_lossy(&exit.stdout);
     let Ok(envelope) = Value::parse(stdout.trim()) else {
         if exit.status != 0 {
@@ -267,27 +301,29 @@ fn extract(exit: &Exit) -> Result<String, ClassifiedError> {
             excerpt(&exit.stdout)
         ))));
     };
-    let subtype = envelope
-        .get("subtype")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let result = envelope.get("result").and_then(Value::as_str).unwrap_or("");
     let is_error = envelope.get("is_error").and_then(Value::as_bool) == Some(true);
     if exit.status != 0 || is_error {
+        let result = result(&envelope);
         let detail = if result.is_empty() {
             excerpt(&exit.stderr)
         } else {
             excerpt(result.as_bytes())
         };
-        return Err(classify(exit.status, subtype, &detail));
+        return Err(classify(exit.status, subtype(&envelope), &detail));
     }
-    match envelope.get("structured_output") {
-        Some(reply) if !reply.is_null() => Ok(reply.to_json_string()),
-        _ => Err(ClassifiedError::Transient(AgentError(format!(
-            "claude returned no structured output ({subtype}): {}",
-            excerpt(result.as_bytes())
-        )))),
-    }
+    Ok(envelope)
+}
+
+/// The envelope's final text, or empty.
+pub(crate) fn result(envelope: &Value) -> &str {
+    envelope.get("result").and_then(Value::as_str).unwrap_or("")
+}
+
+fn subtype(envelope: &Value) -> &str {
+    envelope
+        .get("subtype")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
 }
 
 /// Auth failures name a login; quota failures name a limit. Anything else

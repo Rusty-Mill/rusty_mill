@@ -7119,6 +7119,7 @@ dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
  "rusty_json",
 ]
 
