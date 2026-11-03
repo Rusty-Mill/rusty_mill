@@ -1233,3 +1233,21 @@ fn focus_moves_by_side_and_by_order() {
         Err(Error::UnknownWindow(gone))
     );
 }
+
+#[test]
+fn a_generated_session_name_is_one_no_other_session_has() {
+    let mut mux = Mux::new();
+    let taken = mux.create_session("amber-acorn").unwrap();
+    let first = mux.create_generated_session(0).unwrap();
+    let second = mux.create_generated_session(0).unwrap();
+
+    let name = |id| mux.session(id).unwrap().name().to_owned();
+    assert_eq!(name(taken), "amber-acorn");
+    assert_eq!(name(first), "amber-anchor");
+    assert_eq!(name(second), "amber-aspen");
+    assert!(crate::is_generated(&name(second)));
+    assert_eq!(
+        mux.take_events(),
+        [taken, first, second].map(|session| Event::SessionCreated { session })
+    );
+}

@@ -149,6 +149,31 @@ fn a_request_prints_its_new_id() {
 }
 
 #[test]
+fn a_session_created_without_a_name_gets_a_generated_one() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session"]);
+    let listing = ok(&socket, &["--json", "list"]);
+    let name = listing
+        .lines()
+        .find_map(|line| {
+            let rusty_json::Value::Object(map) =
+                rusty_json::Value::from_json_str(line).expect("json")
+            else {
+                panic!("object")
+            };
+            let is_it = map.get("session") == Some(&rusty_json::Value::String(session.clone()));
+            match (is_it, map.get("name")) {
+                (true, Some(rusty_json::Value::String(name))) => Some(name.clone()),
+                _ => None,
+            }
+        })
+        .expect("the session is listed");
+    assert!(rusty_mux_core::is_generated(&name), "{name}");
+    let help = ok(&socket, &["help", "create-session"]);
+    assert!(help.contains("[--name <text>]"), "{help}");
+}
+
+#[test]
 fn a_chain_takes_the_lease_and_types() {
     let socket = start_server();
     let block = block(&socket);
@@ -732,7 +757,7 @@ fn a_bad_command_line_exits_2() {
     let socket = start_server();
     for args in [
         &["frobnicate"][..],
-        &["create-session"],
+        &["create-window"],
         &["resize", "--block", "x"],
     ] {
         assert_eq!(ctl(&socket, args).status.code(), Some(2), "{args:?}");

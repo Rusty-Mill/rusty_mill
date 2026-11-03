@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::names;
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Layout, MAX_DEPTH,
     Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Toward, Transport,
@@ -83,6 +84,17 @@ impl Mux {
         self.session_order.push(id);
         self.events.push(Event::SessionCreated { session: id });
         Ok(id)
+    }
+
+    /// Creates a session with a generated name, such as `quiet-harbor`,
+    /// that no other session has; `seed` picks it ([`is_generated`]
+    /// recognises its shape). The caller supplies the randomness, so the model stays
+    /// deterministic.
+    ///
+    /// [`is_generated`]: crate::is_generated
+    pub fn create_generated_session(&mut self, seed: u64) -> Result<SessionId, Error> {
+        let name = names::generate(seed, |name| self.sessions.values().any(|s| s.name == name));
+        self.create_session(name)
     }
 
     pub fn create_window(

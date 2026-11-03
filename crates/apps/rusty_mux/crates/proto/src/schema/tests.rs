@@ -285,7 +285,7 @@ fn optional_parameters_add_their_features_only_when_given() {
     let optional: Vec<&str> = CATALOG
         .iter()
         .flat_map(|m| m.params)
-        .filter(|p| p.presence != Presence::Required)
+        .filter(|p| matches!(p.presence, Presence::Optional { .. }))
         .map(|p| p.name)
         .collect();
     assert_eq!(
@@ -547,4 +547,28 @@ fn layout_edits_check_their_axis_share_and_neighbour() {
             side: Side::Up,
         })
     );
+}
+
+#[test]
+fn a_defaulted_parameter_adds_its_features_only_when_left_out() {
+    let create = method("create-session").expect("create-session");
+    let defaulted: Vec<&str> = CATALOG
+        .iter()
+        .flat_map(|m| m.params)
+        .filter(|p| matches!(p.presence, Presence::Defaulted { .. }))
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(defaulted, ["name"]);
+    assert_eq!(create.needs_for(["name"]), Features::NONE);
+    assert_eq!(create.needs_for([]), Features::SESSION_NAMES);
+    assert_eq!(create.all_needs(), Features::SESSION_NAMES);
+    assert_eq!(
+        create.request(4, &[]),
+        Ok(Message::CreateSession {
+            req: 4,
+            name: String::new()
+        })
+    );
+    let launch = method("create-block").expect("create-block");
+    assert_eq!(launch.all_needs(), Features::LAUNCH);
 }

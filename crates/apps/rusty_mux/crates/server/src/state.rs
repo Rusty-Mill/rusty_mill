@@ -79,7 +79,16 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::CONFIG_RELOAD)
     .union(Features::TERMINAL_CONTROL)
     .union(Features::LAYOUT_EDIT)
-    .union(Features::FOCUS);
+    .union(Features::FOCUS)
+    .union(Features::SESSION_NAMES);
+
+/// Fresh randomness to pick a generated session name with.
+fn name_seed() -> u64 {
+    let bytes = Uuid::new_v4();
+    let mut seed = [0; 8];
+    seed.copy_from_slice(&bytes.as_bytes()[..8]);
+    u64::from_le_bytes(seed)
+}
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -724,7 +733,10 @@ impl State {
         };
         match message {
             M::CreateSession { req, name } => {
-                let result = self.mux.create_session(name);
+                let result = match name.is_empty() && self.has(client, Features::SESSION_NAMES) {
+                    true => self.mux.create_generated_session(name_seed()),
+                    false => self.mux.create_session(name),
+                };
                 (
                     req,
                     result
@@ -949,12 +961,15 @@ impl State {
             })
     }
 
-    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), Refusal> {
-        if self
-            .features
+    /// Whether `client` negotiated `feature`.
+    fn has(&self, client: ClientId, feature: Features) -> bool {
+        self.features
             .get(&client)
             .is_some_and(|f| f.contains(feature))
-        {
+    }
+
+    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), Refusal> {
+        if self.has(client, feature) {
             return Ok(());
         }
         Err(format!("{what} requires feature bits {:#x}", feature.bits()).into())
