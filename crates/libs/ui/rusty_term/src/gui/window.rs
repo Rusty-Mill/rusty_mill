@@ -2330,6 +2330,7 @@ impl WindowState<'_> {
             };
             if let Some(((dx, dy), app_cursor)) = moves {
                 let bytes = arrow_presses(dx, dy, app_cursor);
+                self.pacer.input(Instant::now());
                 if let Some(p) = self.pane_mut() {
                     let _ = p.writer.write(&bytes);
                 }
@@ -3021,6 +3022,7 @@ impl WindowState<'_> {
     /// Write child input to the focused pane — or, while broadcast is on,
     /// to every pane in the active tab.
     fn write_child(&mut self, bytes: &[u8]) {
+        self.pacer.input(Instant::now());
         if !self.broadcast {
             if let Some(p) = self.pane_mut() {
                 let _ = p.writer.write(bytes);
@@ -3078,6 +3080,7 @@ impl WindowState<'_> {
         let Some(text) = self.primary_text().filter(|t| !t.is_empty()) else {
             return;
         };
+        self.pacer.input(Instant::now());
         if let Some(p) = self.pane_mut() {
             let bracketed = p.grid.lock().bracketed_paste;
             let _ = p.writer.write(&encode_paste(&text, bracketed));
@@ -3164,6 +3167,7 @@ impl WindowState<'_> {
         if out.is_empty() {
             return false;
         }
+        self.pacer.input(Instant::now());
         let Some(p) = self.pane_by_id_mut(id) else {
             return false;
         };
@@ -3283,6 +3287,7 @@ impl WindowState<'_> {
             (false, true) => b"\x1bOB",
             (false, false) => b"\x1b[B",
         };
+        self.pacer.input(Instant::now());
         if let Some(p) = self.pane_by_id_mut(id) {
             for _ in 0..lines.unsigned_abs() {
                 let _ = p.writer.write(seq);
@@ -5306,6 +5311,7 @@ impl WindowState<'_> {
                             }
                         }
                         ImeCommitTarget::Pane => {
+                            self.pacer.input(Instant::now());
                             if let Some(p) = self.pane_mut() {
                                 let _ = p.writer.write(text.as_bytes());
                             }

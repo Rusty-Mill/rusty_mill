@@ -9,15 +9,20 @@
 //!
 //! Pacing applies only to output-driven repaints. Repaints that the UI
 //! requests itself (input that changes the view, resize, timers) still happen
-//! at once, and any frame they paint also covers held output. Output that
-//! answers input, such as a shell echoing a key, is paced like any other
-//! output: it can wait up to one frame interval (4.2 ms at 240 Hz, 16.7 ms
-//! at the 60 Hz fallback) plus scheduling.
+//! at once, and any frame they paint also covers held output. The first
+//! output after input to the child, such as a shell echoing a key, also
+//! repaints at once if it arrives within [`INPUT_GRACE`]. Typing never waits
+//! for a frame; a flood that input starts is paced from its second wakeup.
 
 use std::time::{Duration, Instant};
 
 /// Refresh rate assumed when the monitor does not report one, in mHz.
 const FALLBACK_MILLIHERTZ: u32 = 60_000;
+
+/// How long after input to the child its first output still repaints at
+/// once. This is well above a local echo's round trip, and short enough that
+/// unrelated output rarely uses it up.
+const INPUT_GRACE: Duration = Duration::from_millis(100);
 
 /// Paces output-driven repaints to one per `interval`.
 #[derive(Debug)]
@@ -28,6 +33,8 @@ pub(crate) struct Pacer {
     last: Option<Instant>,
     /// A held output repaint, due at this time.
     due: Option<Instant>,
+    /// Until when the next output answers input and repaints at once.
+    input_until: Option<Instant>,
 }
 
 impl Pacer {
@@ -37,6 +44,7 @@ impl Pacer {
             interval: Duration::ZERO,
             last: None,
             due: None,
+            input_until: None,
         }
     }
 
@@ -53,9 +61,19 @@ impl Pacer {
         self.due = None;
     }
 
+    /// Input was sent to the child at `now`: its first output within
+    /// [`INPUT_GRACE`] repaints at once, so echo never waits for a frame.
+    pub(crate) fn input(&mut self, now: Instant) {
+        self.input_until = Some(now + INPUT_GRACE);
+    }
+
     /// Output arrived at `now`. Returns `true` to repaint now; otherwise the
     /// repaint is held until [`poll`](Self::poll) says it is due.
     pub(crate) fn output(&mut self, now: Instant) -> bool {
+        if self.input_until.take().is_some_and(|until| now <= until) {
+            self.due = None;
+            return true;
+        }
         if self.due.is_some() {
             return false;
         }
@@ -151,6 +169,37 @@ mod tests {
             "disable drops the held repaint"
         );
         assert!(p.output(t0 + MS));
+    }
+
+    #[test]
+    fn the_first_output_after_input_repaints_at_once() {
+        let t0 = Instant::now();
+        let mut p = paced(60);
+        p.painted(t0);
+        p.input(t0 + MS);
+        assert!(p.output(t0 + 2 * MS), "the echo skips the frame wait");
+        p.painted(t0 + 2 * MS);
+        assert!(!p.output(t0 + 3 * MS), "the rest of a flood is paced");
+    }
+
+    #[test]
+    fn input_releases_a_held_repaint_with_its_answer() {
+        let t0 = Instant::now();
+        let mut p = paced(60);
+        p.painted(t0);
+        assert!(!p.output(t0 + MS));
+        p.input(t0 + 2 * MS);
+        assert!(p.output(t0 + 3 * MS));
+        assert_eq!(p.poll(t0 + 3 * MS), (false, None), "nothing left held");
+    }
+
+    #[test]
+    fn output_long_after_input_is_paced() {
+        let t0 = Instant::now();
+        let mut p = paced(60);
+        p.input(t0);
+        p.painted(t0 + 200 * MS);
+        assert!(!p.output(t0 + 201 * MS), "the grace has lapsed");
     }
 
     #[test]
