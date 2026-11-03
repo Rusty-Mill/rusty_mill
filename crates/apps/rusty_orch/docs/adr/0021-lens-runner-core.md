@@ -14,7 +14,8 @@ providers and posts.
 - **Rules are checks.** Blind first, look harder once, two proposers plus
   a rebel before any attack, no jobs on a sole candidate, fair attacks and
   "agreement costs evidence" are enforced by the scheduler and by `parse`,
-  not by prompt text.
+  not by prompt text. Proposal state is per question, so config refuses
+  more than one proposing lens.
 - **Data classes replace `sensitive_domains`** (#598 2.2). Providers declare
   `max_class`; CLI (cloud) providers default to and cannot exceed
   `internal`, the HTTP adapter (local only) defaults to `sensitive`. Items

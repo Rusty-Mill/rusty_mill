@@ -117,6 +117,7 @@ impl LensConfig {
             .map(|(i, l)| lens(l, &providers).map_err(|e| format!("lenses[{i}].{e}")))
             .collect::<Result<Vec<_>, _>>()?;
         check_unique_lenses(&lenses)?;
+        check_one_proposer(&lenses)?;
         check_diversity(&lenses)?;
         Ok(Self {
             providers,
@@ -372,6 +373,20 @@ fn check_unique_lenses(lenses: &[Lens]) -> Result<(), String> {
     }
 }
 
+/// Proposal state is kept per question, so at most one lens proposes.
+fn check_one_proposer(lenses: &[Lens]) -> Result<(), String> {
+    let mut proposing = lenses
+        .iter()
+        .filter(|l| !l.proposers.is_empty() || l.rebel.is_some());
+    match (proposing.next(), proposing.next()) {
+        (Some(a), Some(b)) => Err(format!(
+            "lenses: only one lens may propose, and both {:?} and {:?} do",
+            a.id, b.id
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Lenses in one group must lead with different providers.
 fn check_diversity(lenses: &[Lens]) -> Result<(), String> {
     let mut first: BTreeMap<(&str, AgentId), &str> = BTreeMap::new();
@@ -547,6 +562,21 @@ pub(crate) mod tests {
             r#""claude": {"kind""#,
             r#""Claude": {"kind""#,
             "providers.Claude",
+        );
+    }
+
+    #[test]
+    fn a_second_proposing_lens_is_refused() {
+        // The starter Architect again under another id, following every
+        // domain: its proposal jobs would collide with the first one's.
+        refused(
+            r#"{"id": "research","#,
+            r#"{"id": "architect-2", "prompt": "lenses/architect.md", "domains": ["*"],
+         "may_post": {"claim": true},
+         "proposers": ["claude", "local"], "rebel": "codex",
+         "models": {"routine": ["claude", "local", "codex"], "contested": ["claude"]}},
+        {"id": "research","#,
+            "lenses: only one lens may propose, and both \"architect\" and \"architect-2\" do",
         );
     }
 
