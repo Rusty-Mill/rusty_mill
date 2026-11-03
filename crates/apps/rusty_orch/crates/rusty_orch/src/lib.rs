@@ -11,6 +11,8 @@
 //! - [`input`]: the goal file, parsed with `rusty_json` into `orch-core`
 //!   drafts and specs.
 //! - [`agents`]: the composite runner over the two real adapters.
+//! - [`lens`]: the `rusty_orch lens` shell's parts (#594): the provider
+//!   registry built from the lens config.
 //! - [`millboard`]: the hosting card's execution link, over Millboard's
 //!   HTTP API.
 //! - [`run`]: the loop around the dispatcher: wall clock, blocked questions,
@@ -29,6 +31,7 @@ pub mod args;
 pub mod cli;
 pub mod input;
 pub mod inspect;
+pub mod lens;
 pub mod maintenance;
 pub mod millboard;
 pub mod report;
