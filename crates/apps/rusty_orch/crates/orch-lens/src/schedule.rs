@@ -9,8 +9,9 @@
 //!   re-ask, on a different provider. Its answer stands.
 //! - **Several candidates, one rebel.** A question gets blind proposals from
 //!   the Architect's first two proposers and its rebel before any attack on
-//!   its candidates. Attacks wait for two candidates and for the rebel's
-//!   candidate (or two rebel failures).
+//!   its candidates. Attacks wait for both ordinary proposal slots to
+//!   settle, for two candidates, and for the rebel's candidate (or two
+//!   rebel failures; an empty rebel answer is a failure).
 //! - **Single candidate.** While a question has fewer than two candidates,
 //!   none of them gets a job: proposing goes on, support does not.
 //! - **Fair attacks.** A candidate is attacked only while it has no more
@@ -37,6 +38,9 @@ pub const REBEL: &str =
     "You are the rebel proposer: propose an approach that departs from the obvious prior art.";
 /// A rebel that failed this often no longer holds attacks back.
 pub const REBEL_TRIES: u32 = 2;
+/// Ordinary proposal slots per question; config requires this many
+/// distinct proposers on a proposing lens.
+const ORDINARY: usize = 2;
 
 /// What a job is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -100,8 +104,11 @@ pub struct Progress {
 /// What the runner remembers about one question.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Proposals {
-    /// Providers that answered, in order.
+    /// Providers that proposed a candidate, in order. A fallback never
+    /// reuses one.
     pub used: Vec<AgentId>,
+    /// Ordinary proposal slots that answered or failed for good.
+    pub settled: BTreeSet<u8>,
     pub rebel_landed: bool,
     pub rebel_failures: u32,
     /// Attack passes per candidate.
@@ -203,13 +210,10 @@ fn proposals(config: &LensConfig, lens: &Lens, question: &Card, state: &State) -
             })
     };
     let mut wanted = Vec::new();
-    let ordinary = seen
-        .used
-        .len()
-        .saturating_sub(usize::from(seen.rebel_landed));
-    for (n, want) in lens.proposers.iter().take(2).enumerate().skip(ordinary) {
-        // `n` < 2, so the cast is lossless.
-        wanted.push((Slot::Propose(n as u8), Phase::Blind, fresh(*want), None));
+    for (n, want) in (0u8..).zip(lens.proposers.iter().take(ORDINARY)) {
+        if !seen.settled.contains(&n) {
+            wanted.push((Slot::Propose(n), Phase::Blind, fresh(*want), None));
+        }
     }
     if let Some(rebel) = lens.rebel {
         if !seen.rebel_landed && seen.rebel_failures < REBEL_TRIES {
@@ -270,6 +274,9 @@ fn attack_ready(card: &Card, q: MsgId, by_id: &BTreeMap<MsgId, &Card>, state: &S
     };
     let seen = state.questions.get(&q).cloned().unwrap_or_default();
     let rebel_settled = seen.rebel_landed || seen.rebel_failures >= REBEL_TRIES;
+    if seen.settled.len() < ORDINARY {
+        return false;
+    }
     let open: Vec<MsgId> = question
         .candidates
         .iter()
@@ -335,24 +342,45 @@ impl State {
                 }
                 p.foreign_seen = job.foreign_seen;
             }
-            Slot::Propose(_) | Slot::Rebel => {
+            Slot::Propose(n) => {
                 let q = self.questions.entry(key.claim).or_default();
-                q.used.push(provider);
-                if key.slot == Slot::Rebel && posts > 0 {
+                q.settled.insert(n);
+                if posts > 0 {
+                    q.used.push(provider);
+                }
+            }
+            Slot::Rebel => {
+                let q = self.questions.entry(key.claim).or_default();
+                if posts > 0 {
+                    q.used.push(provider);
                     q.rebel_landed = true;
+                } else {
+                    // No candidate: a failed try, retried within REBEL_TRIES.
+                    q.rebel_failures += 1;
                 }
             }
         }
     }
 
-    /// Record a job that no provider could answer.
+    /// Record a job that no provider could answer. An ordinary proposal
+    /// slot is then settled without a candidate; the rebel may try again.
     pub fn failed(&mut self, job: &Job) {
         self.in_flight.remove(&job.key);
-        if job.key.slot == Slot::Rebel {
-            self.questions
-                .entry(job.key.claim)
-                .or_default()
-                .rebel_failures += 1;
+        match job.key.slot {
+            Slot::Propose(n) => {
+                self.questions
+                    .entry(job.key.claim)
+                    .or_default()
+                    .settled
+                    .insert(n);
+            }
+            Slot::Rebel => {
+                self.questions
+                    .entry(job.key.claim)
+                    .or_default()
+                    .rebel_failures += 1;
+            }
+            Slot::Review | Slot::LookHarder => {}
         }
     }
 
@@ -541,7 +569,9 @@ mod tests {
     #[test]
     fn a_proposal_fallback_never_reuses_a_model() {
         let mut st = State::default();
-        st.questions.entry(MsgId(3)).or_default().used = vec![id("claude")];
+        let q = st.questions.entry(MsgId(3)).or_default();
+        q.used = vec![id("claude")];
+        q.settled = [0].into();
         let (jobs, _) = schedule(&config(), &[question(3, &[10])], &st);
         let arch = jobs_for(&jobs, "architect");
         let slots: Vec<Slot> = arch.iter().map(|j| j.key.slot).collect();
@@ -569,16 +599,119 @@ mod tests {
 
         let q = st.questions.entry(MsgId(3)).or_default();
         q.rebel_failures = REBEL_TRIES;
+        q.settled = [0].into();
+        let (jobs, _) = schedule(&cfg, &two, &st);
+        assert!(
+            jobs.iter().all(|j| j.key.claim == MsgId(3)),
+            "ordinary slot 1 has not settled"
+        );
+
+        st.questions.entry(MsgId(3)).or_default().settled = [0, 1].into();
+        let (jobs, _) = schedule(&cfg, &two, &st);
+        assert!(jobs.iter().any(|j| j.key.claim == MsgId(10)));
+        assert!(jobs.iter().any(|j| j.key.claim == MsgId(11)));
+    }
+
+    fn arch_jobs(cfg: &LensConfig, cards: &[Card], st: &State) -> Vec<Job> {
+        schedule(cfg, cards, st)
+            .0
+            .into_iter()
+            .filter(|j| j.key.lens == "architect")
+            .collect()
+    }
+
+    fn slot_job(jobs: &[Job], slot: Slot) -> Job {
+        jobs.iter()
+            .find(|j| j.key.slot == slot)
+            .cloned()
+            .expect("job for slot")
+    }
+
+    #[test]
+    fn an_answered_slot_is_not_asked_again_out_of_order() {
+        let cfg = config();
+        let q = [question(3, &[])];
+        let mut st = State::default();
+        let jobs = arch_jobs(&cfg, &q, &st);
+        for j in &jobs {
+            st.start(j);
+        }
+        st.answered(&slot_job(&jobs, Slot::Propose(1)), id("local"), 1, 0);
+        for j in &jobs {
+            if j.key.slot != Slot::Propose(1) {
+                st.in_flight.remove(&j.key);
+            }
+        }
+        let again = arch_jobs(&cfg, &q, &st);
+        let slots: Vec<Slot> = again.iter().map(|j| j.key.slot).collect();
+        assert_eq!(slots, [Slot::Propose(0), Slot::Rebel]);
+    }
+
+    #[test]
+    fn attacks_wait_for_the_second_ordinary_proposer() {
+        let cfg = config();
+        let mut st = State::default();
+        let jobs = arch_jobs(&cfg, &[question(3, &[])], &st);
+        st.answered(&slot_job(&jobs, Slot::Propose(0)), id("claude"), 1, 0);
+        st.answered(&slot_job(&jobs, Slot::Rebel), id("codex"), 1, 0);
+        let two = [question(3, &[10, 11]), candidate(10, 3), candidate(11, 3)];
+        let (jobs, _) = schedule(&cfg, &two, &st);
+        assert!(
+            jobs.iter().all(|j| j.key.claim == MsgId(3)),
+            "ordinary 1 is still out"
+        );
+        st.answered(
+            &slot_job(&arch_jobs(&cfg, &two, &st), Slot::Propose(1)),
+            id("local"),
+            1,
+            0,
+        );
+        let (jobs, _) = schedule(&cfg, &two, &st);
+        assert!(jobs.iter().any(|j| j.key.claim == MsgId(10)));
+    }
+
+    #[test]
+    fn an_empty_rebel_answer_is_a_failed_try_and_cannot_strand_the_question() {
+        let cfg = config();
+        let mut st = State::default();
+        let q = [question(3, &[])];
+        let jobs = arch_jobs(&cfg, &q, &st);
+        st.answered(&slot_job(&jobs, Slot::Propose(0)), id("claude"), 1, 0);
+        st.answered(&slot_job(&jobs, Slot::Propose(1)), id("local"), 1, 0);
+        st.answered(&slot_job(&jobs, Slot::Rebel), id("codex"), 0, 0);
+        let seen = &st.questions[&MsgId(3)];
+        assert_eq!(seen.rebel_failures, 1);
+        assert!(!seen.used.contains(&id("codex")), "no candidate, no use");
+
+        let retry = slot_job(&arch_jobs(&cfg, &q, &st), Slot::Rebel);
+        assert_eq!(retry.providers[0], id("codex"));
+        st.answered(&retry, id("codex"), 0, 0);
+        let two = [question(3, &[10, 11]), candidate(10, 3), candidate(11, 3)];
         let (jobs, _) = schedule(&cfg, &two, &st);
         assert!(jobs.iter().any(|j| j.key.claim == MsgId(10)));
         assert!(jobs.iter().any(|j| j.key.claim == MsgId(11)));
     }
 
     #[test]
+    fn a_failed_ordinary_slot_settles_without_a_candidate() {
+        let cfg = config();
+        let mut st = State::default();
+        let jobs = arch_jobs(&cfg, &[question(3, &[])], &st);
+        st.failed(&slot_job(&jobs, Slot::Propose(1)));
+        let slots: Vec<Slot> = arch_jobs(&cfg, &[question(3, &[])], &st)
+            .iter()
+            .map(|j| j.key.slot)
+            .collect();
+        assert_eq!(slots, [Slot::Propose(0), Slot::Rebel]);
+    }
+
+    #[test]
     fn attacks_stay_within_one_pass_of_each_other() {
         let cfg = config();
         let mut st = State::default();
-        st.questions.entry(MsgId(3)).or_default().rebel_landed = true;
+        let q = st.questions.entry(MsgId(3)).or_default();
+        q.rebel_landed = true;
+        q.settled = [0, 1].into();
         st.attacked(MsgId(3), MsgId(10));
         let two = [question(3, &[10, 11]), candidate(10, 3), candidate(11, 3)];
         let (jobs, _) = schedule(&cfg, &two, &st);

@@ -110,6 +110,14 @@ fn post(v: &Value, allowed: &Allowed) -> Result<Post, String> {
     }
 }
 
+/// The BBP host's domain rule, checked here so a bad reply is refused at
+/// the protocol boundary rather than at posting.
+fn domain_ok(d: &str) -> bool {
+    (1..=DOMAIN_CAP).contains(&d.len())
+        && d.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_' || c == b'-')
+}
+
 const CLAIM_KEYS: &[&str] = &[
     "kind",
     "text",
@@ -134,11 +142,10 @@ fn claim(m: &Map, rule: &ClaimRule) -> Result<Post, String> {
     if domains.is_empty() || domains.len() > MAX_DOMAINS {
         return Err(format!("domains: 1 to {MAX_DOMAINS} required"));
     }
-    if let Some(d) = domains
-        .iter()
-        .find(|d| d.trim().is_empty() || d.len() > DOMAIN_CAP)
-    {
-        return Err(format!("domain {d:?} is blank or over {DOMAIN_CAP} bytes"));
+    if let Some(d) = domains.iter().find(|d| !domain_ok(d)) {
+        return Err(format!(
+            "domain {d:?} must be 1 to {DOMAIN_CAP} bytes of [a-z0-9_-]"
+        ));
     }
     let deps = msgs(m, "deps")?;
     if deps.len() > MAX_DEPS {
@@ -477,6 +484,31 @@ mod tests {
                 e.contains(expected),
                 "{expected:?} not in {e:?} for {reply}"
             );
+        }
+    }
+
+    #[test]
+    fn domains_follow_the_host_rule() {
+        let claim = |d: &str| {
+            format!(
+                r#"{{"posts":[{{"kind":"claim","text":"x","domains":["{d}"],"stakes":"low","reversible":true,"answers":3}}]}}"#
+            )
+        };
+        let long = "a".repeat(DOMAIN_CAP + 1);
+        for bad in [
+            "Real Data",
+            "real data",
+            "UPPER",
+            "a.b",
+            "a/b",
+            "",
+            long.as_str(),
+        ] {
+            let e = parse(&claim(bad), &propose(3)).expect_err(bad);
+            assert!(e.contains("[a-z0-9_-]"), "{bad:?}: {e}");
+        }
+        for good in ["real_data", "dedup-lite", "x9"] {
+            assert!(parse(&claim(good), &propose(3)).is_ok(), "{good}");
         }
     }
 

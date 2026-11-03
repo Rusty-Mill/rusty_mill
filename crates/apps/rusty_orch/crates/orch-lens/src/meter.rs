@@ -40,10 +40,16 @@ pub fn cost(u: &Usage, p: &Price) -> u64 {
         .saturating_add(charge(u.output_tokens, p.output))
 }
 
-/// The most a call can cost: the whole prompt at the uncached rate, at
-/// `bytes_per_token` bytes a token, plus every output token allowed.
+/// Input tokens a provider may add around a prompt: roles, message
+/// separators, a system preamble.
+pub const FRAMING_TOKENS: u64 = 1_024;
+
+/// The most a call can cost: every prompt byte as its own input token at
+/// the uncached rate, plus [`FRAMING_TOKENS`], plus every output token
+/// allowed. Byte-level tokenizers never emit more tokens than bytes, so
+/// this is an upper bound, not the estimate context fitting uses.
 pub fn worst_case(prompt_bytes: u64, max_output_tokens: u32, p: &Price) -> u64 {
-    let input = prompt_bytes.div_ceil(crate::context::BYTES_PER_TOKEN);
+    let input = prompt_bytes.saturating_add(FRAMING_TOKENS);
     charge(input, p.input).saturating_add(charge(u64::from(max_output_tokens), p.output))
 }
 
@@ -110,12 +116,16 @@ impl Meter {
     }
 
     /// Hold `amount` for a call about to start, or say why it may not.
-    /// A free call is still counted against `task_calls`.
+    /// A free call is still counted against `task_calls` and stopped by a
+    /// spent task; only the experiment ceiling lets free calls go on.
     pub fn reserve(&mut self, amount: u64) -> Result<Ticket, Stop> {
         let held: u64 = self.reserved.values().sum();
         let in_flight = u32::try_from(self.reserved.len()).unwrap_or(u32::MAX);
         if self.calls.saturating_add(in_flight) >= self.ceilings.task_calls {
             return Err(Stop::TaskCalls);
+        }
+        if self.task_spent >= self.ceilings.task {
+            return Err(Stop::TaskSpend);
         }
         if amount > 0 {
             let over = |spent: u64, ceiling: u64| {
@@ -213,8 +223,44 @@ mod tests {
     #[test]
     fn worst_case_counts_every_byte_and_output_token() {
         // 4,000 bytes = 1,000 tokens × $3/M = 3,000 µ$; 1,000 out × $15/M = 15,000 µ$.
-        assert_eq!(worst_case(4_000, 1_000, &PAID), 18_000);
-        assert_eq!(worst_case(4_001, 0, &PAID), charge(1_001, PAID.input));
+        // (4,000 + 1,024) × $3/M = 15,072 µ$; 1,000 × $15/M = 15,000 µ$.
+        assert_eq!(worst_case(4_000, 1_000, &PAID), 30_072);
+        assert_eq!(
+            worst_case(4_001, 0, &PAID),
+            charge(4_001 + FRAMING_TOKENS, PAID.input)
+        );
+    }
+
+    #[test]
+    fn worst_case_covers_dense_prompts_and_framing() {
+        // A prompt billed at one token per byte plus framing, with every
+        // output token used, never costs more than was reserved.
+        for bytes in [0, 1, 999, 4_000, 120_000] {
+            let billed = Usage {
+                input_tokens: bytes + FRAMING_TOKENS,
+                output_tokens: 2_048,
+                cached_input_tokens: 0,
+            };
+            assert!(
+                cost(&billed, &PAID) <= worst_case(bytes, 2_048, &PAID),
+                "{bytes}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spent_task_stops_free_calls_too() {
+        let mut m = Meter::new(
+            Ceilings {
+                experiment: 100,
+                task: 10,
+                task_calls: 50,
+            },
+            0,
+        );
+        let t = m.reserve(10).expect("fits");
+        m.settle(t, 10);
+        assert_eq!(m.reserve(0), Err(Stop::TaskSpend));
     }
 
     #[test]
