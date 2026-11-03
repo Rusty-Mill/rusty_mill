@@ -127,8 +127,13 @@ pub fn grants(text: &str, today: i64, machine_id: Option<&str>) -> Result<Grants
             None => None,
             Some(_) => Some(text_field(e, "machine_id").map_err(at)?),
         };
-        let here = bound
-            .is_none_or(|m| machine_id == Some(m) || containers.get(&id).is_some_and(|c| c == m));
+        // Under a container clearance the provider runs only in that
+        // container, so a binding counts only to the container's id.
+        let here = match (bound, containers.get(&id)) {
+            (None, _) => true,
+            (Some(m), Some(c)) => m == c,
+            (Some(m), None) => machine_id == Some(m),
+        };
         if holds(checked, today, NO_OVERAGE_DAYS).map_err(at)? && here {
             g.by_provider.entry(id).or_default().no_overage = Some(NoOverage {
                 account,
@@ -517,6 +522,25 @@ mod tests {
             .for_provider(id("codex"));
         assert!(a.no_overage.is_none());
         assert!(matches!(a.host_cleared, Some(Clearance::Container(_))));
+    }
+
+    #[test]
+    fn under_a_container_clearance_only_a_container_binding_counts() {
+        // Runner host "baileyai"; the container is "lel-1".
+        let host_bound = CONTAINER.replacen(
+            "\"machine_id\": \"lel-1\"}",
+            "\"machine_id\": \"baileyai\"}",
+            1,
+        );
+        assert_ne!(host_bound, CONTAINER);
+        let a = grants(&host_bound, TODAY, Some("baileyai"))
+            .expect("parses")
+            .for_provider(id("codex"));
+        assert!(a.no_overage.is_none(), "a host binding is off: {a:?}");
+        let a = grants(CONTAINER, TODAY, Some("baileyai"))
+            .expect("parses")
+            .for_provider(id("codex"));
+        assert!(a.no_overage.is_some_and(|n| n.machine_bound));
     }
 
     #[test]

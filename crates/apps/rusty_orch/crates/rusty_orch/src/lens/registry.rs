@@ -145,7 +145,11 @@ fn claude<C: CommandRunner + 'static>(
         if let Some(t) = timeout {
             agent = agent.timeout(t);
         }
-        if let Some(n) = &a.no_overage {
+        // Claude runs on the runner's host. A container clearance naming
+        // it would authorise a boundary this adapter cannot enter, so it
+        // withholds the grant and Claude stays `Unavailable`.
+        let contained = matches!(a.host_cleared, Some(Clearance::Container(_)));
+        if let (Some(n), false) = (&a.no_overage, contained) {
             agent = agent.lens_no_overage(n.account.clone());
         }
         agent
@@ -427,6 +431,30 @@ mod tests {
             .ask(&question())
             .expect_err("no container check yet");
         assert!(matches!(e, ClassifiedError::Unavailable(_)), "{e:?}");
+        assert!(calls(&fake).is_empty());
+    }
+
+    #[test]
+    fn a_container_clearance_never_grants_claude_on_the_host() {
+        let spec = ContainerSpec {
+            name: "lel-codex".to_owned(),
+            machine_id: "lel-1".to_owned(),
+            mounts: Vec::new(),
+        };
+        let contained = Assertions {
+            no_overage: no_overage(ACCOUNT, true),
+            host_cleared: Some(Clearance::Container(spec)),
+        };
+        let (r, fake) = build(&config("", "", LOCAL), contained);
+        let mut r = r.expect("builds");
+        for tools in [Tools::None, Tools::ReadOnly] {
+            let e = r
+                .get(id("claude"), tools)
+                .expect("configured")
+                .ask(&question())
+                .expect_err("container clearance on a host adapter");
+            assert!(matches!(e, ClassifiedError::Unavailable(_)), "{e:?}");
+        }
         assert!(calls(&fake).is_empty());
     }
 
