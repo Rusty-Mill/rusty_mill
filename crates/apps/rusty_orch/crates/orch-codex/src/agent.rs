@@ -205,22 +205,15 @@ impl<C: CommandRunner> CodexAgent<C> {
         parse(&reply, task.spec().role, self.stop).map_err(ClassifiedError::Transient)
     }
 
-    /// One run with [`SCRUBBED_ENV`] removed: its exit and the non-empty
-    /// last message it wrote to `reply`.
-    pub(crate) fn exec(
+    /// [`Self::run_checked`], then the non-empty last message it wrote to
+    /// `reply`.
+    fn exec(
         &self,
         argv: &[String],
         stdin: &[u8],
         reply: &Path,
     ) -> Result<(Exit, String), ClassifiedError> {
-        let exit = self
-            .runner
-            .run_scrubbed(argv, stdin, self.timeout, SCRUBBED_ENV)
-            .map_err(exec_error)
-            .map_err(ClassifiedError::Transient)?;
-        if exit.status != 0 {
-            return Err(classify(exit.status, &exit.stderr));
-        }
+        let exit = self.run_checked(argv, stdin)?;
         let text = fs::read_to_string(reply).map_err(|e| {
             ClassifiedError::Transient(AgentError(format!(
                 "codex wrote no last message ({e}): {}",
@@ -233,6 +226,23 @@ impl<C: CommandRunner> CodexAgent<C> {
             )));
         }
         Ok((exit, text))
+    }
+
+    /// One run with [`SCRUBBED_ENV`] removed; a nonzero exit is classified.
+    pub(crate) fn run_checked(
+        &self,
+        argv: &[String],
+        stdin: &[u8],
+    ) -> Result<Exit, ClassifiedError> {
+        let exit = self
+            .runner
+            .run_scrubbed(argv, stdin, self.timeout, SCRUBBED_ENV)
+            .map_err(exec_error)
+            .map_err(ClassifiedError::Transient)?;
+        if exit.status != 0 {
+            return Err(classify(exit.status, &exit.stderr));
+        }
+        Ok(exit)
     }
 }
 

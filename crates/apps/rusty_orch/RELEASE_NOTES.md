@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## orch-codex: lens replies from the JSON events
+**2026-11-03**
+
+- A lens question now reads Codex's reply from the `--json` event stream
+  it already reads for usage, so no reply file is written on the host and
+  Codex can run inside the `lel-codex` container (#594).
+- `CodexAgent::lens_argv()` no longer takes a reply path.
+
 ## orch-lens: the lens runner's core
 **2026-11-03**
 

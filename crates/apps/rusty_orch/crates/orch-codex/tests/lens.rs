@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use common::{exit, FakeCommand, ReplyFile};
+use common::{exit, FakeCommand};
 use orch_cli::{CommandRunner, ExecError, Exit};
 use orch_codex::{CodexAgent, LOGIN_ARGV, SCRUBBED_ENV};
 use orch_dispatch::ClassifiedError;
@@ -18,7 +18,7 @@ const EVENTS: &str = "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1
 struct Probed {
     probe: Exit,
     probes: Mutex<Vec<Vec<String>>>,
-    run: ReplyFile,
+    run: FakeCommand,
 }
 
 impl CommandRunner for Probed {
@@ -53,7 +53,7 @@ fn question() -> Question {
 
 const CHATGPT: &str = "Logged in using ChatGPT\n";
 
-fn runner(probe: Exit, run: ReplyFile) -> Probed {
+fn runner(probe: Exit, run: FakeCommand) -> Probed {
     Probed {
         probe,
         probes: Mutex::new(Vec::new()),
@@ -61,14 +61,15 @@ fn runner(probe: Exit, run: ReplyFile) -> Probed {
     }
 }
 
+/// The `item.completed` event carrying `reply` as the final message.
+fn message(reply: &str) -> String {
+    let text = reply.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"{text}\"}}}}\n")
+}
+
 fn replying(reply: &str, events: &str) -> Probed {
-    runner(
-        exit(0, "", CHATGPT),
-        ReplyFile {
-            inner: FakeCommand::ok(events),
-            reply: Some(reply.to_owned()),
-        },
-    )
+    let stdout = format!("{}{events}", message(reply));
+    runner(exit(0, "", CHATGPT), FakeCommand::ok(&stdout))
 }
 
 fn agent(fake: Probed) -> CodexAgent<Probed> {
@@ -84,7 +85,7 @@ fn arg_after<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn runs(a: &CodexAgent<Probed>) -> usize {
-    a.runner().run.inner.calls.lock().expect("lock").len()
+    a.runner().run.calls.lock().expect("lock").len()
 }
 
 #[test]
@@ -103,22 +104,18 @@ fn a_question_runs_in_the_repo_and_returns_posts_and_usage() {
         }
     );
     assert_eq!(a.runner().probes.lock().expect("lock").len(), 1);
-    let calls = a.runner().run.inner.calls.lock().expect("lock");
+    let calls = a.runner().run.calls.lock().expect("lock");
     let (argv, stdin, timeout) = &calls[0];
     assert_eq!(argv[0..4], ["codex", "exec", "--sandbox", "read-only"]);
     assert_eq!(arg_after(argv, "-C"), Some("/repo"));
     assert!(argv.iter().any(|a| a == "--json"));
     assert!(!argv.iter().any(|a| a == "--skip-git-repo-check"));
     assert!(!argv.iter().any(|a| a == "--output-schema"));
-    let reply = Path::new(arg_after(argv, "--output-last-message").expect("reply"));
-    assert!(
-        !reply.parent().expect("dir").exists(),
-        "scratch dir removed"
-    );
+    assert!(!argv.iter().any(|a| a == "--output-last-message"));
     assert_eq!(argv.last().map(String::as_str), Some("-"));
     assert_eq!(stdin, b"intent and rules\n\nclaim C-1");
     assert_eq!(*timeout, Duration::from_secs(30));
-    let scrubbed = a.runner().run.inner.scrubbed.lock().expect("lock");
+    let scrubbed = a.runner().run.scrubbed.lock().expect("lock");
     assert_eq!(scrubbed[0], SCRUBBED_ENV);
 }
 
@@ -150,7 +147,10 @@ fn a_non_subscription_login_is_unavailable_and_nothing_runs() {
         exit(0, "", "something new\n"),
         exit(1, "", CHATGPT),
     ] {
-        let mut a = agent(runner(probe.clone(), ReplyFile::ok(r#"{"posts":[]}"#)));
+        let mut a = agent(runner(
+            probe.clone(),
+            FakeCommand::ok(&message(r#"{"posts":[]}"#)),
+        ));
         let err = a.ask(&question()).expect_err("refused");
         let ClassifiedError::Unavailable(m) = &err else {
             panic!("{probe:?}: {err:?}");
@@ -191,7 +191,7 @@ fn unmeasured_usage_is_permanent() {
 fn a_rate_limit_is_transient() {
     let mut a = agent(runner(
         exit(0, "", CHATGPT),
-        ReplyFile::failing(Ok(exit(1, "", "429 Too Many Requests"))),
+        FakeCommand::new(Ok(exit(1, "", "429 Too Many Requests"))),
     ));
     let err = a.ask(&question()).expect_err("refused");
     assert!(matches!(err, ClassifiedError::Transient(_)), "{err:?}");
@@ -199,7 +199,7 @@ fn a_rate_limit_is_transient() {
 
 #[test]
 fn no_last_message_is_transient() {
-    let mut a = agent(runner(exit(0, "", CHATGPT), ReplyFile::silent()));
+    let mut a = agent(runner(exit(0, "", CHATGPT), FakeCommand::ok(EVENTS)));
     let err = a.ask(&question()).expect_err("refused");
     assert!(matches!(err, ClassifiedError::Transient(_)), "{err:?}");
 }

@@ -10,9 +10,6 @@
 //! and a ChatGPT login on every question. The login check establishes the
 //! auth method, not billing.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use orch_cli::{excerpt, CommandRunner};
@@ -20,7 +17,7 @@ use orch_dispatch::{AgentError, ClassifiedError};
 use orch_lens::{parse, Answer, Model, Question, Usage};
 use rusty_json::Value;
 
-use crate::agent::{CodexAgent, RUN_SEQ, SCRUBBED_ENV};
+use crate::agent::{CodexAgent, SCRUBBED_ENV};
 
 /// The login probe run before every lens question.
 pub const LOGIN_ARGV: &[&str] = &["codex", "login", "status"];
@@ -35,14 +32,13 @@ const SUBSCRIPTION_LOGIN: &str = "Logged in using ChatGPT";
 
 impl<C: CommandRunner> CodexAgent<C> {
     /// The argv for one lens question: the base argv in the repository
-    /// root, JSONL events on stdout (for usage), the last message to
-    /// `reply`, the prompt on stdin. No schema: the reply is checked by
+    /// root, JSONL events on stdout (the reply and usage both come from
+    /// them, so nothing is written to disk and the run can happen in a
+    /// container), the prompt on stdin. No schema: the reply is checked by
     /// [`orch_lens::parse`]. Public so tests and docs can pin it.
-    pub fn lens_argv(&self, reply: &Path) -> Vec<String> {
+    pub fn lens_argv(&self) -> Vec<String> {
         let mut argv = self.base_argv(self.repo_root());
         argv.push("--json".to_owned());
-        argv.push("--output-last-message".to_owned());
-        argv.push(reply.display().to_string());
         argv.push("-".to_owned());
         argv
     }
@@ -62,17 +58,15 @@ impl<C: CommandRunner> Model for CodexAgent<C> {
             ));
         }
         self.probe_subscription()?;
-        let scratch = LensScratch::create().map_err(ClassifiedError::Transient)?;
         let prompt = format!("{}\n\n{}", q.prefix, q.body);
-        let (exit, text) = self.exec(
-            &self.lens_argv(&scratch.reply),
-            prompt.as_bytes(),
-            &scratch.reply,
-        )?;
-        let posts = parse(&text, &q.allowed)
-            .map_err(|e| refuse(format!("{e}: {}", excerpt(text.as_bytes()))))?;
+        let exit = self.run_checked(&self.lens_argv(), prompt.as_bytes())?;
         let events = std::str::from_utf8(&exit.stdout)
             .map_err(|e| refuse(format!("events are not UTF-8: {e}")))?;
+        let text = last_message(events).map_err(|e| {
+            ClassifiedError::Transient(AgentError(format!("codex: {e}: {}", excerpt(&exit.stderr))))
+        })?;
+        let posts = parse(&text, &q.allowed)
+            .map_err(|e| refuse(format!("{e}: {}", excerpt(text.as_bytes()))))?;
         let usage = usage(events).map_err(refuse)?;
         Ok(Answer { posts, usage })
     }
@@ -105,6 +99,31 @@ fn unavailable(what: &str) -> ClassifiedError {
 
 fn refuse(e: String) -> ClassifiedError {
     ClassifiedError::Permanent(AgentError(format!("codex reply: {e}")))
+}
+
+/// The text of the last completed `agent_message` item in `codex exec
+/// --json` output (`{"type":"item.completed","item":{"type":
+/// "agent_message","text":...}}`), which is the run's final message.
+/// Missing or blank is an error. Lines that are not JSON events are skipped.
+pub(crate) fn last_message(events: &str) -> Result<String, String> {
+    // The last completed message is the reply even when it is malformed:
+    // never fall back to an earlier one.
+    let last = events
+        .lines()
+        .rev()
+        .filter_map(|l| Value::parse(l.trim()).ok())
+        .filter(|v| v.get("type").and_then(Value::as_str) == Some("item.completed"))
+        .find(|v| v.pointer("/item/type").and_then(Value::as_str) == Some("agent_message"))
+        .ok_or("codex reported no final message")?;
+    let text = last
+        .pointer("/item/text")
+        .and_then(Value::as_str)
+        .ok_or("codex's final message has no text")?
+        .to_owned();
+    if text.trim().is_empty() {
+        return Err("codex reported an empty final message".to_owned());
+    }
+    Ok(text)
 }
 
 /// The sum of the `turn.completed` usage events in `codex exec --json`
@@ -151,53 +170,6 @@ fn turn_usage(v: &Value) -> Result<Usage, String> {
     })
 }
 
-/// A private scratch directory holding the last-message file, removed on
-/// drop. The directory is created exclusively (an existing path of that
-/// name, symlink or not, fails the call) and, on Unix, readable by this
-/// user only, so nobody else can plant or swap the reply file inside it.
-struct LensScratch {
-    dir: PathBuf,
-    reply: PathBuf,
-}
-
-impl LensScratch {
-    fn create() -> Result<Self, AgentError> {
-        let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        let stem = format!("orch-codex-lens-{}-{seq}-{nanos}", std::process::id());
-        Self::create_in(&std::env::temp_dir(), &stem)
-    }
-
-    fn create_in(base: &Path, stem: &str) -> Result<Self, AgentError> {
-        let dir = base.join(stem);
-        private_dir(&dir)
-            .map_err(|e| AgentError(format!("codex: cannot create scratch dir: {e}")))?;
-        Ok(Self {
-            reply: dir.join("reply.txt"),
-            dir,
-        })
-    }
-}
-
-#[cfg(unix)]
-fn private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new().mode(0o700).create(dir)
-}
-
-#[cfg(not(unix))]
-fn private_dir(dir: &Path) -> std::io::Result<()> {
-    fs::DirBuilder::new().create(dir)
-}
-
-impl Drop for LensScratch {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,32 +207,40 @@ mod tests {
     }
 
     #[test]
-    fn a_scratch_name_already_taken_is_refused_and_left_alone() {
-        let base =
-            std::env::temp_dir().join(format!("orch-codex-scratch-test-{}", std::process::id()));
-        fs::create_dir_all(&base).unwrap();
-        let victim = base.join("victim.txt");
-        fs::write(&victim, "keep").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&base, base.join("taken")).unwrap();
-        #[cfg(not(unix))]
-        fs::create_dir(base.join("taken")).unwrap();
+    fn the_last_agent_message_is_the_reply() {
+        let events = concat!(
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"first\"}}\n",
+            "not json\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"thinking\"}}\n",
+            "{\"type\":\"item.started\",\"item\":{\"type\":\"agent_message\",\"text\":\"partial\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"final\"}}\n",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"after\"}}\n",
+        );
+        assert_eq!(last_message(events), Ok("final".to_owned()));
+    }
 
-        assert!(LensScratch::create_in(&base, "taken").is_err());
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
-
-        let fresh = LensScratch::create_in(&base, "fresh").unwrap();
-        assert_eq!(fresh.reply.parent(), Some(fresh.dir.as_path()));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&fresh.dir).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o700);
+    #[test]
+    fn a_malformed_final_message_never_falls_back_to_an_earlier_one() {
+        let earlier = "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"earlier\"}}\n";
+        for last in [
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":7}}",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\" \"}}",
+        ] {
+            let events = format!("{earlier}{last}\n");
+            assert!(last_message(&events).is_err(), "{events}");
         }
-        let dir = fresh.dir.clone();
-        drop(fresh);
-        assert!(!dir.exists());
-        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
-        fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn no_or_a_blank_final_message_is_refused() {
+        for events in [
+            "",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"reasoning\",\"text\":\"x\"}}",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\"}}",
+            "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"  \"}}",
+        ] {
+            assert!(last_message(events).is_err(), "{events}");
+        }
     }
 }
