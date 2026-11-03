@@ -2749,6 +2749,35 @@ fn osc_133_not_recorded_on_alt_screen() {
 }
 
 #[test]
+fn osc_133_marks_drive_the_shell_phase_and_exit() {
+    let mut g = Grid::new(10, 3);
+    let mut p = AnsiParser::new();
+    assert_eq!(g.shell_phase(), None);
+    assert_eq!(g.last_command_exit(), None);
+    p.advance(&mut g, b"\x1b]133;A\x07$ ");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
+    p.advance(&mut g, b"\x1b]133;C\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Running));
+    p.advance(&mut g, b"\x1b]133;D;2\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Finished));
+    assert_eq!(g.last_command_exit(), Some(2));
+    // A new prompt keeps the last exit code; a `D` without one clears it.
+    p.advance(&mut g, b"\x1b]633;A\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
+    assert_eq!(g.last_command_exit(), Some(2));
+    p.advance(&mut g, b"\x1b]133;D\x07");
+    assert_eq!(g.last_command_exit(), None);
+}
+
+#[test]
+fn shell_phase_survives_ris() {
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b]133;A\x07\x1bc");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
+}
+
+#[test]
 fn osc_133_marks_cleared_on_ris() {
     let mut g = Grid::new(4, 2);
     let mut p = AnsiParser::new();

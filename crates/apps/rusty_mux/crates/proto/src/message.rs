@@ -160,6 +160,10 @@ impl Features {
     /// only says the server knows them.
     pub const TERMINAL_MORE: Self = Self(1 << 31);
 
+    /// The block method `terminal.shell`. It travels as
+    /// [`Message::BlockCall`], so the bit only says the server knows it.
+    pub const TERMINAL_SHELL: Self = Self(1 << 32);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }

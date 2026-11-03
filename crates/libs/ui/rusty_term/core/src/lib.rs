@@ -64,8 +64,8 @@ pub use grid::StyleStats;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::View;
 pub use grid::{
-    CursorShape, DirtyFrame, Grid, LineAttr, PROGRAM_STATUS_MAX, SCROLLBACK_MAX, SnapshotError,
-    StatusSignal,
+    CursorShape, DirtyFrame, Grid, LineAttr, PROGRAM_STATUS_MAX, SCROLLBACK_MAX, ShellPhase,
+    SnapshotError, StatusSignal,
 };
 #[cfg(any(test, feature = "gui"))]
 pub use grid::{FrameImage, FrameView, RowKey};

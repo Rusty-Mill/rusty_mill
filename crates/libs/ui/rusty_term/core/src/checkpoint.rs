@@ -742,6 +742,10 @@ mod tests {
             ("bidi", "renderer configuration; VT bdsm state is encoded"),
             ("command_began", "GUI command notification timer"),
             ("finished_commands", "pending GUI notifications"),
+            (
+                "shell_phase",
+                "the host's live shell state; the next OSC 133 mark sets it",
+            ),
             ("clipboard_set", "pending host clipboard action"),
             ("clipboard_set_primary", "pending host clipboard action"),
             ("clipboard_query", "pending host clipboard query"),

@@ -1,6 +1,6 @@
 //! Changing and measuring a block's terminal: `terminal.size`,
-//! `terminal.reset` and `terminal.set-theme` (C40), `terminal.modes` and
-//! `terminal.clear` (C71).
+//! `terminal.reset` and `terminal.set-theme` (C40), `terminal.modes`,
+//! `terminal.clear` and `terminal.shell` (C71).
 
 #![cfg(target_os = "linux")]
 
@@ -15,7 +15,8 @@ const CONTROL: Features = Features::CHECKPOINT_V6
     .union(Features::INSPECT)
     .union(Features::BLOCK_CALL)
     .union(Features::TERMINAL_CONTROL)
-    .union(Features::TERMINAL_MORE);
+    .union(Features::TERMINAL_MORE)
+    .union(Features::TERMINAL_SHELL);
 
 /// What a clear feeds the terminal.
 const CLEAR: &str = "\x1b[H\x1b[2J\x1b[3J";
@@ -345,6 +346,7 @@ fn changes_need_the_lease_and_reads_do_not() {
         }
         assert_eq!(text(&mut other, block, "terminal.size"), "80x24");
         assert!(text(&mut other, block, "terminal.modes").contains("mouse\toff"));
+        assert!(text(&mut other, block, "terminal.shell").contains("program\t"));
     }
 }
 
@@ -377,6 +379,68 @@ fn a_client_without_the_feature_is_refused() {
             "{method}: {reason}"
         );
     }
+
+    // Nor does part 1's bring `terminal.shell`.
+    let part1 = older
+        .union(Features::TERMINAL_CONTROL)
+        .union(Features::TERMINAL_MORE);
+    let mut client = Client::connect_with(&path, part1, None);
+    let block = block_for(&mut client);
+    let reason = refusal(&mut client, block, "terminal.shell", &[]);
+    assert!(reason.contains("requires feature bits"), "{reason}");
+}
+
+/// The value of `terminal.shell`'s line `name`.
+fn shell_line(client: &mut Client, block: BlockId, name: &str) -> String {
+    let text = text(client, block, "terminal.shell");
+    let found = text
+        .lines()
+        .find_map(|l| l.strip_prefix(&format!("{name}\t")));
+    found
+        .unwrap_or_else(|| panic!("no {name} in {text:?}"))
+        .to_owned()
+}
+
+/// Asks until `terminal.shell`'s `activity` is `want`: the shell hands the
+/// terminal to a job a moment after it reads the command.
+fn wait_activity(client: &mut Client, block: BlockId, want: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let activity = shell_line(client, block, "activity");
+        if activity == want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "still {activity}, not {want}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn shell_reports_the_program_its_activity_and_its_marks() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CONTROL, None);
+    let block = block_for(&mut client);
+    assert_eq!(shell_line(&mut client, block, "program"), "/bin/sh");
+    wait_activity(&mut client, block, "idle");
+    assert_eq!(shell_line(&mut client, block, "phase"), "unknown");
+    assert_eq!(shell_line(&mut client, block, "exit"), "unknown");
+
+    client.input(block, b"sleep 30\r");
+    wait_activity(&mut client, block, "busy");
+    client.input(block, b"\x03");
+    wait_activity(&mut client, block, "idle");
+
+    // A shell with OSC 133 integration marks its command's end.
+    client.input(
+        block,
+        b"printf '\\033]133;C\\007\\033]133;D;3\\007DONE%s\\n' 1\r",
+    );
+    client.wait_for(block, "DONE1");
+    assert_eq!(shell_line(&mut client, block, "phase"), "finished");
+    assert_eq!(shell_line(&mut client, block, "exit"), "3");
 }
 
 #[test]

@@ -125,7 +125,8 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.reset",
             "terminal.set-theme",
             "terminal.modes",
-            "terminal.clear"
+            "terminal.clear",
+            "terminal.shell"
         ]
     );
     let control = ["terminal.size", "terminal.reset", "terminal.set-theme"];
@@ -133,9 +134,10 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
     for name in block_methods {
         let method = block_method(name).expect(name);
         assert_eq!(method.params[0].ty, Ty::Id(Entity::Block), "{name}");
-        let needs = match (control.contains(&name), more.contains(&name)) {
-            (true, _) => Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL),
-            (_, true) => Features::BLOCK_CALL.union(Features::TERMINAL_MORE),
+        let needs = match (control.contains(&name), more.contains(&name), name) {
+            (true, _, _) => Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL),
+            (_, true, _) => Features::BLOCK_CALL.union(Features::TERMINAL_MORE),
+            (_, _, "terminal.shell") => Features::BLOCK_CALL.union(Features::TERMINAL_SHELL),
             _ => Features::BLOCK_CALL,
         };
         assert_eq!(method.needs, needs, "{name}");
