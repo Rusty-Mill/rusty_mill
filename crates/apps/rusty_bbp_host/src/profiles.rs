@@ -226,10 +226,21 @@ fn segment_matches(p: &[char], s: &[char]) -> bool {
 
 /// `glob` is in the grammar of [`path_matches`]: relative `/`-separated
 /// segments, none empty, `.` or `..`, with `**` only as a whole segment and
-/// no syntax it does not implement (`[`, `]`, `{`, `}`, `\`, `!`).
+/// no syntax it does not implement (`[`, `]`, `{`, `}`, `\`, `!`). A
+/// control character or a Windows drive prefix (`C:`) is refused too: such
+/// a pattern looks absolute or unprintable and never matches a repository
+/// path, so it would protect nothing. `!` is refused, not read literally.
 pub fn check_glob(glob: &str) -> Result<(), String> {
     if glob.is_empty() {
         return Err("empty".into());
+    }
+    if glob.chars().any(char::is_control) {
+        return Err("a control character".into());
+    }
+    if let [d, b':', ..] = glob.as_bytes() {
+        if d.is_ascii_alphabetic() {
+            return Err("a drive prefix makes it absolute".into());
+        }
     }
     if let Some(c) = glob.chars().find(|c| "[]{}\\!".contains(*c)) {
         return Err(format!("{c:?} is not supported; only *, ** and ? are"));
@@ -304,6 +315,11 @@ mod tests {
             "!tests/a.rs",
             "tests\\a.rs",
             "tests/a**",
+            "C:/tests/**",
+            "c:tests/**",
+            "tests/\u{7f}a.rs",
+            "tests/a\n.rs",
+            "tests/\ta.rs",
         ] {
             assert!(check_glob(bad).is_err(), "{bad:?}");
         }
