@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty_orch lens check <config> [--assertions <file>] [--repo <dir>]`: loads the lens config and the operator's assertions, builds every provider and reports which would be admitted, including an HTTP provider whose key variable is unset, without calling a model or inspecting a container.
 - `orch-lens`: the lens runner's pure core: `Model` port, reply protocol, config checks, context assembly, data classes, tiering, money meter and scheduler (ADR-0021).
 - `orch-openai`: one OpenAI-compatible chat completion over plain HTTP/1.1 to loopback and private addresses only, for llama-swap (ADR-0020).
 ### Changed

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use orch_lens::config::ProviderKind;
 use orch_lens::LensConfig;
+use rusty_json::{Map, Value};
 
 use super::assertions::{self, Grants};
 use super::registry::{Assertions, Clearance, Registry};
@@ -76,12 +77,21 @@ pub fn run(o: &Options) -> Result<String, String> {
         Err(e) => (Grants::none(), Some(e)),
     };
     Registry::build(&config, &o.repo, &grants)?;
-    Ok(report(&config, &grants, &o.repo, note.as_deref()))
+    let env = |k: &str| std::env::var(k).ok();
+    Ok(report(&config, &grants, &o.repo, note.as_deref(), &env))
 }
 
 /// One line per provider: its kind, what the operator asserts for it, and
-/// whether it would be admitted. `note` explains ignored assertions.
-pub fn report(config: &LensConfig, grants: &Grants, repo: &Path, note: Option<&str>) -> String {
+/// whether it would be admitted. `note` explains ignored assertions; `env`
+/// reads the environment, only to tell whether an HTTP provider's key
+/// variable is set (its value is never printed).
+pub fn report(
+    config: &LensConfig,
+    grants: &Grants,
+    repo: &Path,
+    note: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> String {
     let mut out = String::new();
     if let Some(n) = note {
         let _ = writeln!(out, "assertions ignored: {n}");
@@ -94,11 +104,23 @@ pub fn report(config: &LensConfig, grants: &Grants, repo: &Path, note: Option<&s
         let (kind, verdict) = match p.kind {
             ProviderKind::ClaudeCli => ("claude-cli", claude(&a)),
             ProviderKind::CodexCli => ("codex-cli", codex(&a, repo)),
-            ProviderKind::OpenAiHttp => ("openai-http", "ready".to_owned()),
+            ProviderKind::OpenAiHttp => ("openai-http", http(&p.settings, env)),
         };
         let _ = writeln!(out, "{id}\t{kind}\t{verdict}");
     }
     out
+}
+
+/// Ready unless its `api_key_env` names a variable that is unset or empty,
+/// which the adapter refuses before connecting.
+fn http(settings: &Map, env: &dyn Fn(&str) -> Option<String>) -> String {
+    let Some(name) = settings.get("api_key_env").and_then(Value::as_str) else {
+        return "ready".to_owned();
+    };
+    match env(name) {
+        Some(v) if !v.is_empty() => "ready".to_owned(),
+        _ => format!("unavailable: {name} is not set"),
+    }
 }
 
 fn claude(a: &Assertions) -> String {
@@ -200,6 +222,10 @@ mod tests {
         AgentId::new(s).expect("id")
     }
 
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
     fn config() -> LensConfig {
         LensConfig::parse(CONFIG).expect("config")
     }
@@ -211,6 +237,7 @@ mod tests {
             &Grants::none(),
             Path::new("/repo"),
             Some("no file"),
+            &no_env,
         );
         assert_eq!(
             r,
@@ -256,7 +283,13 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let r = report(&config(), &grants, Path::new("/srv/lel/experiment"), None);
+        let r = report(
+            &config(),
+            &grants,
+            Path::new("/srv/lel/experiment"),
+            None,
+            &no_env,
+        );
         assert!(
             r.contains("claude\tclaude-cli\tready if logged in as nano@example.com\n"),
             "{r}"
@@ -265,11 +298,45 @@ mod tests {
             r.contains("codex\tcodex-cli\tready in container lel-codex at /work if it checks out at each call\n"),
             "{r}"
         );
-        let r = report(&config(), &grants, Path::new("/home/nano/repo"), None);
+        let r = report(
+            &config(),
+            &grants,
+            Path::new("/home/nano/repo"),
+            None,
+            &no_env,
+        );
         assert!(
             r.contains("codex\tcodex-cli\tunavailable: /home/nano/repo is not mounted in container lel-codex\n"),
             "{r}"
         );
+    }
+
+    #[test]
+    fn an_http_key_variable_must_be_set_and_is_never_printed() {
+        let text = CONFIG.replace(
+            r#""model": "qwen""#,
+            r#""model": "qwen", "api_key_env": "LLAMA_KEY""#,
+        );
+        assert_ne!(text, CONFIG);
+        let config = LensConfig::parse(&text).expect("config");
+        let line = |env: &dyn Fn(&str) -> Option<String>| {
+            report(&config, &Grants::none(), Path::new("/repo"), None, env)
+                .lines()
+                .find(|l| l.starts_with("local"))
+                .map(str::to_owned)
+                .expect("local line")
+        };
+        assert_eq!(
+            line(&no_env),
+            "local\topenai-http\tunavailable: LLAMA_KEY is not set"
+        );
+        assert_eq!(
+            line(&|_| Some(String::new())),
+            "local\topenai-http\tunavailable: LLAMA_KEY is not set"
+        );
+        let set = line(&|k| (k == "LLAMA_KEY").then(|| "sk-secret".to_owned()));
+        assert_eq!(set, "local\topenai-http\tready");
+        assert!(!set.contains("sk-secret"));
     }
 
     #[test]
@@ -294,10 +361,7 @@ mod tests {
     impl Scratch {
         fn create_in(base: &Path, stem: &str) -> std::io::Result<Self> {
             let dir = base.join(stem);
-            let mut b = std::fs::DirBuilder::new();
-            #[cfg(unix)]
-            std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-            b.create(&dir)?;
+            private_builder().create(&dir)?;
             Ok(Self {
                 dir,
                 files: Vec::new(),
@@ -324,6 +388,19 @@ mod tests {
             f.write_all(text.as_bytes())?;
             Ok(path)
         }
+    }
+
+    #[cfg(unix)]
+    fn private_builder() -> std::fs::DirBuilder {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut b = std::fs::DirBuilder::new();
+        b.mode(0o700);
+        b
+    }
+
+    #[cfg(not(unix))]
+    fn private_builder() -> std::fs::DirBuilder {
+        std::fs::DirBuilder::new()
     }
 
     impl Drop for Scratch {
