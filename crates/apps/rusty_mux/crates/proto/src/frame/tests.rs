@@ -153,14 +153,16 @@ fn every_message_round_trips() {
                 session,
                 name: "main".into(),
                 active: None,
+                generated: false,
             },
         },
         Message::Entry {
             req: 18,
             entry: Entry::Session {
                 session,
-                name: String::new(),
+                name: "quiet-harbor".into(),
                 active: Some(window),
+                generated: true,
             },
         },
         Message::Entry {

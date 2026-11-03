@@ -53,6 +53,17 @@ nothing outside rusty_mux. Codex runs a new hook only after it is trusted
 (`/hooks` in Codex), and a project's hook only in a project whose `.codex`
 layer is trusted.
 
+`agent setup --name-session` (C50, opt-in) installs the hook as
+`rusty-mux-ctl agent hook --name-session`. When the agent starts, the
+hook asks the server about its session. Only while the server made up the
+name (such as `quiet-harbor`) and nobody has renamed the session since does
+it add one sentence asking the agent to name the session after its task,
+once, with `rename-session`. The server remembers that mark per session;
+the spelling alone is no proof, since a person may choose such a name. A
+name a person chose is never touched, and with no answer from the server within
+2 s the sentence is left out. `agent setup` without the flag puts the plain
+hook back; `agent status` checks for the form its flag names.
+
 `agent setup --project` writes the same files under the current directory.
 Each hook names this machine's ctl by absolute path, so a hook committed to
 a repository fails quietly (prints nothing) for anyone whose ctl is

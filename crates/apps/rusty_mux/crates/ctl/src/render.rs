@@ -178,6 +178,7 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             session,
             name,
             active,
+            ..
         } => (
             "session",
             session.uuid(),
@@ -772,6 +773,7 @@ mod tests {
             session: SessionId::from_uuid(id(1)),
             name: name.into(),
             active: None,
+            generated: false,
         };
         let text = entry_line(&session, false);
         assert_eq!(

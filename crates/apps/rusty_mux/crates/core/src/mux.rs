@@ -71,7 +71,10 @@ impl Mux {
     }
 
     pub fn create_session(&mut self, name: impl Into<String>) -> Result<SessionId, Error> {
-        let name = name.into();
+        self.add_session(name.into(), false)
+    }
+
+    fn add_session(&mut self, name: String, generated: bool) -> Result<SessionId, Error> {
         check_name(&name)?;
         let id = SessionId::random();
         let session = Session {
@@ -79,6 +82,7 @@ impl Mux {
             name,
             windows: Vec::new(),
             active: None,
+            generated,
         };
         self.sessions.insert(id, session);
         self.session_order.push(id);
@@ -94,7 +98,7 @@ impl Mux {
     /// [`is_generated`]: crate::is_generated
     pub fn create_generated_session(&mut self, seed: u64) -> Result<SessionId, Error> {
         let name = names::generate(seed, |name| self.sessions.values().any(|s| s.name == name));
-        self.create_session(name)
+        self.add_session(name, true)
     }
 
     pub fn create_window(
@@ -652,7 +656,8 @@ impl Mux {
 
     /// Names the entity `name`, replacing its old name. Renaming to the
     /// same name changes nothing and emits nothing; a name over
-    /// [`MAX_NAME`] is refused.
+    /// [`MAX_NAME`] is refused. Renaming a session ends its generated mark
+    /// ([`Session::generated`]).
     pub fn rename(&mut self, id: EntityId, name: impl Into<String>) -> Result<(), Error> {
         let name = name.into();
         check_name(&name)?;
@@ -702,6 +707,12 @@ impl Mux {
             return Ok(());
         }
         *slot = name;
+        // A session renamed has a name somebody chose.
+        if let EntityId::Session(session) = id
+            && let Some(renamed) = self.sessions.get_mut(&session)
+        {
+            renamed.generated = false;
+        }
         self.events.push(event);
         Ok(())
     }

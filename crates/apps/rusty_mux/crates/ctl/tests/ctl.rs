@@ -174,6 +174,59 @@ fn a_session_created_without_a_name_gets_a_generated_one() {
 }
 
 #[test]
+fn the_naming_hook_asks_only_while_the_name_is_generated() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session"]);
+    let block = "00000000-0000-0000-0000-00000000000b";
+    let hook = |flag: &[&str]| {
+        let mut args = vec!["agent", "hook"];
+        args.extend(flag);
+        let output = ctl_command(&socket, &args)
+            .env("RUSTY_MUX_SESSION", &session)
+            .env("RUSTY_MUX_BLOCK", block)
+            .output()
+            .expect("run rusty-mux-ctl");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        stdout(&output)
+    };
+    let asked = hook(&["--name-session"]);
+    assert!(
+        asked.contains(&format!("rename-session --session {session} --name NAME")),
+        "{asked}"
+    );
+    assert!(!hook(&[]).contains("rename-session"), "not opted in");
+
+    ok(
+        &socket,
+        &[
+            "rename-session",
+            "--session",
+            &session,
+            "--name",
+            "fix-login",
+        ],
+    );
+    let named = hook(&["--name-session"]);
+    assert!(
+        named.contains(block) && !named.contains("rename-session"),
+        "{named}"
+    );
+
+    // A name chosen in the generated shape is still chosen.
+    let chosen = ok(&socket, &["create-session", "--name", "quiet-harbor"]);
+    let output = ctl_command(&socket, &["agent", "hook", "--name-session"])
+        .env("RUSTY_MUX_SESSION", &chosen)
+        .env("RUSTY_MUX_BLOCK", block)
+        .output()
+        .expect("run rusty-mux-ctl");
+    let text = stdout(&output);
+    assert!(
+        text.contains(block) && !text.contains("rename-session"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_chain_takes_the_lease_and_types() {
     let socket = start_server();
     let block = block(&socket);

@@ -252,6 +252,10 @@ pub enum Entry {
         /// `None` while it has no windows, or from a server without
         /// [`Features::ACTIVE_WINDOW`].
         active: Option<WindowId>,
+        /// The server made up `name` and nobody has renamed the session
+        /// since ([`Features::SESSION_NAMES`]); `false` from an older
+        /// server.
+        generated: bool,
     },
     Window {
         window: WindowId,
@@ -648,8 +652,10 @@ const INDEX: u32 = 48;
 const TOWARD: u32 = 49;
 /// A window's focused block.
 const FOCUSED: u32 = 50;
-// IDs 1..=FOCUSED are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = FOCUSED as usize;
+/// A session entry's mark that the server made up its name: 1, or absent.
+const GENERATED: u32 = 51;
+// IDs 1..=GENERATED are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = GENERATED as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1779,12 +1785,16 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             session,
             name,
             active,
+            generated,
         } => {
             out.varint(KIND, entry::SESSION)
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
             if let Some(window) = active {
                 out.uuid(WINDOW, window.uuid());
+            }
+            if *generated {
+                out.varint(GENERATED, 1);
             }
         }
         Entry::Window {
@@ -1854,6 +1864,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             session: session(f, SESSION)?,
             name: f.string(NAME)?,
             active: f.opt(WINDOW, window)?,
+            generated: f.opt(GENERATED, In::varint)? == Some(1),
         },
         entry::WINDOW => Entry::Window {
             window: window(f, WINDOW)?,

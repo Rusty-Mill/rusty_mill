@@ -1251,3 +1251,24 @@ fn a_generated_session_name_is_one_no_other_session_has() {
         [taken, first, second].map(|session| Event::SessionCreated { session })
     );
 }
+
+#[test]
+fn a_session_keeps_its_generated_mark_until_renamed() {
+    let mut mux = Mux::new();
+    let chosen = mux.create_session("quiet-harbor").unwrap();
+    let made = mux.create_generated_session(7).unwrap();
+    assert!(
+        !mux.session(chosen).unwrap().generated(),
+        "chosen, whatever its spelling"
+    );
+    assert!(mux.session(made).unwrap().generated());
+
+    let name = mux.session(made).unwrap().name().to_owned();
+    mux.rename(EntityId::Session(made), name).unwrap();
+    assert!(
+        mux.session(made).unwrap().generated(),
+        "a no-op rename keeps it"
+    );
+    mux.rename(EntityId::Session(made), "fix-login").unwrap();
+    assert!(!mux.session(made).unwrap().generated());
+}

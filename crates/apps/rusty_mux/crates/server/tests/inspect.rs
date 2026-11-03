@@ -74,6 +74,7 @@ fn list_gives_each_parent_before_its_children() {
             session,
             name,
             active,
+            ..
         },
         Entry::Window {
             window: w,

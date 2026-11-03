@@ -37,6 +37,8 @@ pub struct Session {
     pub(crate) windows: Vec<WindowId>,
     /// One of `windows`; `None` only while there are none.
     pub(crate) active: Option<WindowId>,
+    /// Whether the server made up `name` and nobody has renamed it since.
+    pub(crate) generated: bool,
 }
 
 impl Session {
@@ -46,6 +48,13 @@ impl Session {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Whether the name is one the server made up and nobody has renamed
+    /// the session since: unlike [`crate::is_generated`], which reads only
+    /// the spelling, this knows where the name came from.
+    pub fn generated(&self) -> bool {
+        self.generated
     }
 
     /// Windows in creation order.

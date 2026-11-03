@@ -1109,6 +1109,7 @@ impl State {
                 session: session.id(),
                 name: session.name().to_owned(),
                 active: session.active(),
+                generated: session.generated(),
             });
             for window in session.windows().iter().filter_map(|w| self.mux.window(*w)) {
                 entries.push(Entry::Window {
