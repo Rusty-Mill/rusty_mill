@@ -165,6 +165,16 @@ fn a_missing_key_is_unavailable_before_connecting() {
 }
 
 #[test]
+fn a_timeout_too_large_for_a_deadline_is_permanent_before_connecting() {
+    let (addr, seen) = serve_once(Some(response("200 OK", OK_BODY)));
+    let e = client(addr, None, Duration::MAX)
+        .complete(&PROMPT)
+        .expect_err("no deadline");
+    assert!(matches!(&e, ClassifiedError::Permanent(m) if m.0.contains("timeout: too large")));
+    assert!(seen.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+#[test]
 fn the_key_never_appears_in_an_error() {
     let echo = response(
         "500 Internal Server Error",

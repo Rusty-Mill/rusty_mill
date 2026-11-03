@@ -120,7 +120,9 @@ impl<R: Resolve> OpenAiHttp<R> {
         prompt: &Prompt<'_>,
         key: Option<&str>,
     ) -> Result<Completion, ClassifiedError> {
-        let end = Instant::now() + self.config.timeout();
+        let end = Instant::now()
+            .checked_add(self.config.timeout())
+            .ok_or_else(|| permanent("timeout: too large for a deadline".to_owned()))?;
         let addrs = self.checked_addrs(end)?;
         let stream = connect(&addrs, end)?;
         let mut transport = SyncTransport::new(Deadline { stream, end });
