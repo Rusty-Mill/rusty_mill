@@ -6062,10 +6062,14 @@ impl ConsumedKeys {
 
 /// Route a keydown the keymap resolved to `action` (None: unbound). `exec`
 /// runs an action and returns whether it consumed the key. Returns whether
-/// the key is consumed; if not, it goes on to the child. A repeat of a
-/// consumed press never reaches the child: a held Ctrl+C that copied must
-/// not turn into ^C once the selection is gone, and the child would see
-/// repeats with no press. Other actions still repeat (zoom, scrolling).
+/// the key is consumed; if not, it goes on to the child. Who owns a held key
+/// is settled by its first press, so the child always sees whole
+/// down/repeat/up runs:
+/// - A repeat of a consumed press never reaches the child: a held Ctrl+C
+///   that copied must not turn into ^C once the selection is gone. Other
+///   actions still repeat (zoom, scrolling); a held copy does not re-copy.
+/// - A repeat of a press the child got stays the child's, even if the chord
+///   or the selection changed meanwhile, or its release would be swallowed.
 fn route_key_down(
     consumed: &mut ConsumedKeys,
     key: PhysicalKey,
@@ -6074,6 +6078,9 @@ fn route_key_down(
     exec: impl FnOnce(Action) -> bool,
 ) -> bool {
     let held = consumed.press(key, repeat);
+    if repeat && !held {
+        return false;
+    }
     let taken = match action {
         Some(Action::CopyOrSend) if held => true,
         Some(action) => exec(action),
@@ -6994,12 +7001,51 @@ mod tests {
                 ctrl_c_down(&mut consumed, false, &mut selected),
                 (false, true)
             );
+            // Its repeat is the child's too, without re-running the copy.
             assert_eq!(
                 ctrl_c_down(&mut consumed, true, &mut selected),
-                (false, true)
+                (false, false)
             );
             assert!(up(&mut consumed, C, win32).is_some(), "win32={win32}");
         }
+    }
+
+    #[test]
+    fn a_key_the_child_got_stays_the_childs_while_held() {
+        for win32 in [true, false] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = false;
+            // Unselected Ctrl+C goes to the child.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (false, true)
+            );
+            // Text gets selected while C is held: repeats stay the child's
+            // and do not copy, so its release is not swallowed either.
+            selected = true;
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (false, false)
+            );
+            assert!(selected);
+            assert!(up(&mut consumed, C, win32).is_some(), "win32={win32}");
+            // The next fresh press copies as usual.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (true, true)
+            );
+        }
+        // Same for a chord that appears mid-hold (C held, then Ctrl).
+        let mut consumed = ConsumedKeys::default();
+        assert!(!route_key_down(&mut consumed, V, false, None, |_| true));
+        assert!(!route_key_down(
+            &mut consumed,
+            V,
+            true,
+            Some(KeyAction::Paste),
+            |_| { panic!("a repeat of the child's key must not run a shortcut") }
+        ));
+        assert!(up(&mut consumed, V, true).is_some());
     }
 
     #[test]
