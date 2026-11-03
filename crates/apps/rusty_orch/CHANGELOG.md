@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `rusty_orch::lens::container`: under a container clearance, every Codex lens question first inspects the container through the runner's local rootless podman (`--remote=false`, remote-engine variables removed). It requires the exact asserted mounts, a read-only machine-id from a file the runner cannot change, no privilege, devices, added capabilities, shared namespaces or API-key environment. Codex then runs via `podman exec` by the checked id.
 - `rusty_orch::lens`: a `host_cleared` assertion may name the dedicated container a provider runs in, with its exact mounts. A machine-bound no-overage entry then counts only against the container's id, and a container clearance never grants Claude, which runs on the host. Codex stays unavailable under it until the container check lands.
 - `orch-lens`: the lens runner's pure core: `Model` port, reply protocol, config checks, context assembly, data classes, tiering, money meter and scheduler (ADR-0021).
 - `orch-openai`: one OpenAI-compatible chat completion over plain HTTP/1.1 to loopback and private addresses only, for llama-swap (ADR-0020).

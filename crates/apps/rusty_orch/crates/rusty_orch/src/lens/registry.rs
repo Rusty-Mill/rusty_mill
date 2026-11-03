@@ -22,7 +22,7 @@ use orch_openai::{Config as HttpConfig, OpenAiHttp};
 use rusty_json::Map;
 
 use super::assertions::Grants;
-use super::container::ContainerSpec;
+use super::container::{read_machine_id, Contained, ContainerSpec, InContainer, Mount, Verified};
 
 /// A local model server's deadline when the config names none. Large
 /// local models answer a 32k prompt in minutes, not seconds.
@@ -167,28 +167,67 @@ fn codex<C: CommandRunner + 'static>(
     runner: &impl Fn() -> C,
 ) -> Result<Entry, String> {
     only(s, &["model", "timeout_secs"])?;
-    let mut agent = CodexAgent::with_runner(repo, runner());
-    if let Some(m) = opt_str(s, "model")? {
+    let (model, timeout) = (opt_str(s, "model")?, opt_secs(s)?);
+    // Codex cannot report its account, so this is a machine binding, not
+    // an account check: switching the login on that same machine keeps
+    // the grant. It must never be read as account proof.
+    let bound = a.no_overage.as_ref().is_some_and(|n| n.machine_bound);
+    let configure = |r| configure_codex(CodexAgent::with_runner(repo, r), model, timeout, bound);
+    let plain: Box<dyn Model> = match &a.host_cleared {
+        Some(Clearance::Container(spec)) => match workdir(spec, repo) {
+            Some(dir) => {
+                let verified = Verified::default();
+                let exec = InContainer::new(runner(), dir, verified.clone());
+                let agent = CodexAgent::with_runner(dir, exec);
+                let agent = configure_codex(agent, model, timeout, bound).lens_host_cleared();
+                Box::new(Contained::new(
+                    Box::new(agent),
+                    runner(),
+                    spec.clone(),
+                    verified,
+                    read_machine_id,
+                ))
+            }
+            // The repository is not mounted in the cleared container.
+            None => Box::new(configure(runner())),
+        },
+        Some(Clearance::Host) => Box::new(configure(runner()).lens_host_cleared()),
+        None => Box::new(configure(runner())),
+    };
+    Ok(Entry {
+        plain,
+        read_only: None,
+    })
+}
+
+fn configure_codex<R: CommandRunner>(
+    mut agent: CodexAgent<R>,
+    model: Option<&str>,
+    timeout: Option<Duration>,
+    no_overage: bool,
+) -> CodexAgent<R> {
+    if let Some(m) = model {
         agent = agent.model(m);
     }
-    if let Some(t) = opt_secs(s)? {
+    if let Some(t) = timeout {
         agent = agent.timeout(t);
     }
-    // Codex cannot report its account, so this is a machine binding, not
-    // an account check: switching the login on that same machine keeps the
-    // grant. It must never be read as account proof (pending owner
-    // acceptance, #594).
-    if a.no_overage.as_ref().is_some_and(|n| n.machine_bound) {
+    if no_overage {
         agent = agent.lens_no_overage();
     }
-    // A container clearance is not honoured until the container check and
-    // `podman exec` are wired in (next slice): it fails closed.
-    if a.host_cleared == Some(Clearance::Host) {
-        agent = agent.lens_host_cleared();
-    }
-    Ok(Entry {
-        plain: Box::new(agent),
-        read_only: None,
+    agent
+}
+
+/// Where `repo` appears inside the container: the destination of the bind
+/// mount whose source it is.
+fn workdir<'a>(spec: &'a ContainerSpec, repo: &Path) -> Option<&'a str> {
+    spec.mounts.iter().find_map(|m| match m {
+        Mount::Bind {
+            source,
+            destination,
+            ..
+        } if source == repo => Some(destination.as_str()),
+        _ => None,
     })
 }
 
@@ -412,24 +451,54 @@ mod tests {
         assert!(calls(&fake).is_empty());
     }
 
-    #[test]
-    fn a_container_clearance_is_not_honoured_yet_and_nothing_runs() {
+    fn contained(source: &str) -> Assertions {
         let spec = ContainerSpec {
             name: "lel-codex".to_owned(),
             machine_id: "lel-1".to_owned(),
-            mounts: Vec::new(),
+            mounts: vec![Mount::Bind {
+                source: PathBuf::from(source),
+                destination: "/work".to_owned(),
+                rw: true,
+            }],
         };
-        let contained = Assertions {
+        Assertions {
             no_overage: no_overage(ACCOUNT, true),
             host_cleared: Some(Clearance::Container(spec)),
-        };
-        let (r, fake) = build(&config("", "", LOCAL), contained);
+        }
+    }
+
+    #[test]
+    fn a_contained_codex_inspects_its_container_first_and_runs_nothing_on_failure() {
+        let (r, fake) = build(&config("", "", LOCAL), contained("/repo"));
         let e = r
             .expect("builds")
             .get(id("codex"), Tools::None)
             .expect("configured")
             .ask(&question())
-            .expect_err("no container check yet");
+            .expect_err("the fake's reply is no inspect output");
+        assert!(matches!(e, ClassifiedError::Unavailable(_)), "{e:?}");
+        assert_eq!(
+            calls(&fake),
+            [[
+                "/usr/bin/podman",
+                "--remote=false",
+                "container",
+                "inspect",
+                "--",
+                "lel-codex"
+            ]]
+        );
+    }
+
+    #[test]
+    fn a_container_without_the_repository_mounted_gets_no_grant() {
+        let (r, fake) = build(&config("", "", LOCAL), contained("/elsewhere"));
+        let e = r
+            .expect("builds")
+            .get(id("codex"), Tools::None)
+            .expect("configured")
+            .ask(&question())
+            .expect_err("repo not in the container");
         assert!(matches!(e, ClassifiedError::Unavailable(_)), "{e:?}");
         assert!(calls(&fake).is_empty());
     }

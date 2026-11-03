@@ -304,32 +304,64 @@ pub fn changeable(euid: u32, owner: u32, mode: u32, sticky_dir: bool) -> bool {
 /// `Ok(Grants::none())` when there is no file.
 #[cfg(unix)]
 pub fn load(path: &Path) -> Result<Grants, String> {
-    use std::os::unix::fs::MetadataExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let full = match std::fs::canonicalize(path) {
-        Ok(p) => p,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Grants::none()),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
+    let text = match guarded_read(path) {
+        Ok(text) => text,
+        Err(Unread::Missing) => return Ok(Grants::none()),
+        Err(Unread::Refused(e)) => return Err(e),
     };
-    let euid = euid()?;
-    for p in full.ancestors() {
-        let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        let sticky = p != full && m.mode() & 0o1000 != 0;
-        if changeable(euid, m.uid(), m.mode(), sticky) {
-            return Err(format!(
-                "{}: the runner's user could change it, so its assertions are ignored",
-                p.display()
-            ));
-        }
-    }
-    let text = std::fs::read_to_string(&full).map_err(|e| format!("{}: {e}", full.display()))?;
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("clock: {e}"))?
         .as_secs();
     let today = i64::try_from(secs / 86_400).map_err(|_| "clock: out of range".to_owned())?;
-    grants(&text, today, machine_id().as_deref()).map_err(|e| format!("{}: {e}", full.display()))
+    grants(&text, today, machine_id().as_deref()).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Why [`guarded_read`] returned no text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unread {
+    /// No file at that path.
+    Missing,
+    /// The file could not be read, or the runner's user could change it.
+    Refused(String),
+}
+
+/// The text of the operator's file at `path`, refused when the runner's
+/// user could change it or any directory above it, so an agent running as
+/// that user cannot have written it.
+#[cfg(unix)]
+pub fn guarded_read(path: &Path) -> Result<String, Unread> {
+    use std::os::unix::fs::MetadataExt;
+
+    let full = match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Unread::Missing),
+        Err(e) => return Err(Unread::Refused(format!("{}: {e}", path.display()))),
+    };
+    let euid = euid().map_err(Unread::Refused)?;
+    for p in full.ancestors() {
+        let m =
+            std::fs::metadata(p).map_err(|e| Unread::Refused(format!("{}: {e}", p.display())))?;
+        let sticky = p != full && m.mode() & 0o1000 != 0;
+        if changeable(euid, m.uid(), m.mode(), sticky) {
+            return Err(Unread::Refused(format!(
+                "{}: the runner's user could change it, so it is ignored",
+                p.display()
+            )));
+        }
+    }
+    std::fs::read_to_string(&full).map_err(|e| Unread::Refused(format!("{}: {e}", full.display())))
+}
+
+/// Without Unix ownership no file can be checked, so none is trusted.
+#[cfg(not(unix))]
+pub fn guarded_read(path: &Path) -> Result<String, Unread> {
+    Err(Unread::Refused(format!(
+        "{}: operator files need Unix file ownership",
+        path.display()
+    )))
 }
 
 /// Without Unix ownership the file cannot be checked, so nothing holds:
@@ -690,6 +722,7 @@ mod tests {
         std::fs::write(&path, FILE).expect("write");
         let e = load(&path).expect_err("runner owns it");
         assert!(e.contains("the runner's user could change it"), "{e}");
+        assert_eq!(guarded_read(&dir.join("absent")), Err(Unread::Missing));
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
