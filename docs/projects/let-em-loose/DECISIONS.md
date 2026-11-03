@@ -44,6 +44,11 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 | D38 | Phase B intents and spend | Agreed 2026-11-02 (#596) |
 | D39 | remind-me gets an explicit project parameter | Agreed 2026-11-02 (#592) |
 | D40 | Build the slice before designing more | Agreed 2026-11-02 |
+| D41 | Gate on code erosion, not only behaviour | Agreed 2026-11-03 (#704) |
+| D42 | Erosion limits come from our own history | Agreed 2026-11-03 (#704) |
+| D43 | No erosion override; inbox Approve is the override | Agreed 2026-11-03 (#704) |
+| D44 | Scheduled cleanups pay erosion down | Agreed 2026-11-03 (#704) |
+| D45 | Rust only; unmeasured code is reported, not failed | Agreed 2026-11-03 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -317,3 +322,33 @@ No push notifications in v0. Sorting uses BBP facts: irreversible first, then ol
 **Decision.** After #597, implementation starts: the #593 engine first, test-first from the claims traces, on its own PR. #598 and #599 are not designed yet.
 **Why.** They don't block v0 (D23), and the slice will show which gaps actually matter.
 **Rejected.** Designing every card before building any.
+
+## D41. Gate on code erosion, not only behaviour
+
+**Decision.** A small, pure metric, `rusty_erosion`, scores two things in basis points: how much cyclomatic complexity sits in functions above CC 10 (concentration) and how many tokens sit in repeated, normalized 50-token windows (duplication). It runs as an `erosion` profile in the task's frozen profile set and compares the candidate with the pinned baseline, not the absolute level. A candidate over the limit fails that profile, so the existing failing-test block (D30) stops acceptance. There is no BBP schema change. A claims task opens only with an erosion profile or a recorded opt-out, both covered by the profile digest.
+**Why.** Every other gate checks behaviour, so a candidate could pass them all while the code got worse. SlopCodeBench (arXiv 2603.24755) found that happens in about 3 of 4 agent trajectories, and that quality prompts lower the starting point but not the rate of decay. Measuring against the baseline means existing code is not punished for mess it already had.
+**Rejected.** Relying on the Architect lens prompt alone. A new BBP evidence kind for erosion.
+
+## D42. Erosion limits come from our own history
+
+**Decision.** The limits are calibrated from erosion deltas on rusty_mill's merged human PRs. The gate is report-only until then: the profile always passes, and the deltas still go in the log. Report-only lasts 2 weeks or 10 tasks, whichever comes first. The numbers then go to Nano, who sets the limits.
+**Why.** Fixed numbers would be guesses. The repository's own human history is the fair baseline. The time box stops report-only from becoming permanent.
+**Rejected.** Starting with fixed limits.
+
+## D43. No erosion override; inbox Approve is the override
+
+**Decision.** v0 has no in-band override. A blocked claim follows the existing path: a better candidate, or a budget escalation to the inbox (D35), where Approve is the override. An erosion escalation shows the change in each metric and the three worst-affected functions.
+**Why.** This reuses the inbox and needs no BBP change. The deltas and the worst functions let Nano judge without opening the diff.
+**Rejected.** An `erosion` claim domain endorsed by another principal, like `tests` (D37). That stays available for v1 if overrides become common.
+
+## D44. Scheduled cleanups pay erosion down
+
+**Decision.** orch writes a `consolidate` intent when the cumulative erosion since the last cleanup reaches half the limit, or after 5 accepted claims, whichever comes first. A cleanup must keep the frozen suite and the holdouts (D37) green. Its erosion limits are negative, so it is accepted only if erosion actually goes down.
+**Why.** Prompts don't slow the decay. Human repositories decay less because people refactor, so the schedule makes that habit explicit and gives it a budget.
+**Rejected.** Waiting until a gate blocks before cleaning up.
+
+## D45. Rust only; unmeasured code is reported, not failed
+
+**Decision.** v0 measures Rust only. Other languages are added when a real task needs them. Non-code files (md, toml, yaml, json and similar) are ignored. Code in an unsupported language is marked `unmeasured` on the claim and in the report, and counted in calibration, but it does not fail the profile or escalate. Known limit: the metric can be gamed, for example by splitting functions or renaming. It is a heuristic, and calibration watches for gaming, such as function count or total CC rising while concentration falls.
+**Why.** No speculative language support. Recording `unmeasured` keeps the blind spot visible without sending every mixed-language change to Nano.
+**Rejected.** Treating unmeasured code as a failure. Supporting Python before a task needs it.
