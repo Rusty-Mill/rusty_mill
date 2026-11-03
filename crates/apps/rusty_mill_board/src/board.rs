@@ -449,15 +449,34 @@ impl<S: Store> Board<S> {
                     other => other,
                 })?;
         if let Outcome::Refused { step: 0, code, .. } = &outcome {
-            self.comment(
-                card.id,
-                by,
-                &format!(
-                    "BBP refused the decision ({code}), so nothing was dropped: close this card."
-                ),
-            )?;
+            self.comment(card.id, by, &self.refusal_note(by, id, rev, code)?)?;
         }
         Ok(InboxAnswer::Remediated { outcome, card })
+    }
+
+    /// What a refusal at the first step means for the card. A concurrent send of the
+    /// same decision shares it, so "nothing was dropped" holds only while the
+    /// escalation is still open at the rev this request read: then no write landed.
+    fn refusal_note(
+        &self,
+        by: &Actor,
+        id: &str,
+        rev: u64,
+        code: &str,
+    ) -> Result<String, BoardError> {
+        let untouched = self
+            .inbox(by)?
+            .iter()
+            .any(|i| i.escalation.id == id && i.escalation.rev == rev);
+        Ok(if untouched {
+            format!(
+                "BBP refused the decision ({code}) and the escalation is unchanged, so nothing was dropped: close this card."
+            )
+        } else {
+            format!(
+                "BBP refused this send ({code}), but the escalation has moved on, so another send may have applied the decision. Check BBP's log before closing this card."
+            )
+        })
     }
 
     /// An escalation that is no longer open: if this exact decision was sent from here

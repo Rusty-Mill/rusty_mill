@@ -77,6 +77,10 @@ impl Escalations for Fake {
             .lock()
             .unwrap()
             .push((e.id.clone(), a.clone(), by.to_owned()));
+        if self.consume && self.refuse_at.is_some() {
+            // Another send of the decision won the fence first.
+            self.rows.lock().unwrap().retain(|r| r.id != e.id);
+        }
         if let Some(step) = self.refuse_at {
             return Ok(Outcome::Refused {
                 step,
@@ -659,4 +663,25 @@ fn conflicting_choices_each_record_their_own_dropped_work() {
         "a retry finds its own"
     );
     assert_eq!(remediate_cards(&board).len(), 2);
+}
+
+/// Two sends of one decision share its card. The one that loses the fence must not
+/// tell the operator to close the card the winner's drop needs.
+#[test]
+fn a_losing_send_does_not_close_the_winners_card() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        refuse_at: Some(0),
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = (
+        Arc::new(MemStore::default()),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let board = board_over(&store, &down, &fake, true);
+    call(&board, &owner(), "inbox_act", reject()).unwrap();
+    let card = &remediate_cards(&board)[0];
+    let said = card.comments.last().map(|c| c.text.as_str()).unwrap_or("");
+    assert!(said.contains("Check BBP's log"), "{said}");
+    assert!(!said.contains("close this card."), "{said}");
 }
