@@ -2937,6 +2937,81 @@ fn cl_76_holdout_suite_needs_claims_mode_and_replays() {
     assert_eq!(replayed.claims.holdout_digest, Some(holdout_digest()));
 }
 
+#[test]
+fn cl_77_suite_versions_need_a_fresh_holdout_pass() {
+    let v2 = Sha256::of(b"holdout suite v2");
+    let v3 = Sha256::of(b"holdout suite v3");
+    let mut cx = holdout_cx();
+    // Accepted on v1.
+    let x = cx.low();
+    let kx = cx.candidate("a", x);
+    let px = stored(cx.report_profiles(kx, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(kx, &[("holdout:api", 0)]));
+    ok(cx.executed("a", x, Support, px));
+    ok(cx.executed("b", x, Support, px));
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+    // Open, passed on v1 but short of support; another open claim blocked by
+    // a v1 holdout failure.
+    let y = cx.low();
+    let ky = cx.candidate("a", y);
+    let py = stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(ky, &[("holdout:api", 0)]));
+    let z = cx.low();
+    let kz = cx.candidate("a", z);
+    stored(cx.holdout_run(kz, &[("holdout:api", 1)]));
+    assert!(!cx.rec(z).failing.is_empty());
+
+    // (a) The host adopts a pure addition.
+    ok(cx.host(HostAction::HoldoutExtended { digest: v2 }));
+    assert_eq!(cx.st.claims.holdout_digest, Some(v2));
+    assert_eq!(
+        cx.status(x),
+        ClaimStatus::Accepted,
+        "accepted stays accepted"
+    );
+    assert!(cx.rec(z).failing.is_empty(), "v1 holdout failures retire");
+    // Y's v1 pass no longer counts: support alone does not accept it.
+    ok(cx.executed("a", y, Support, py));
+    ok(cx.executed("b", y, Support, py));
+    assert_eq!(cx.status(y), ClaimStatus::Open);
+    assert!(card_of(&cx, y).holdout_due);
+    // A report under the old digest is refused; a v2 pass accepts.
+    let h = stored(cx.holdout_of("h", ky));
+    assert_eq!(
+        rejected(cx.report_under(h, holdout_digest(), &[("holdout:api", 0)])),
+        Code::ProfileMismatch
+    );
+    let h = stored(cx.holdout_of("h", ky));
+    stored(cx.report_under(h, v2, &[("holdout:api", 0), ("holdout:new", 0)]));
+    assert_eq!(cx.status(y), ClaimStatus::Accepted);
+
+    // (b) A change to existing tests is the human's: the same digest twice
+    // is a duplicate, an agent has no such write, the human adopts it.
+    assert_eq!(
+        rejected(cx.host(HostAction::HoldoutExtended { digest: v2 })),
+        Code::Duplicate
+    );
+    ok(cx.human(HumanAction::HoldoutUpdated { digest: v3 }));
+    assert_eq!(cx.st.claims.holdout_digest, Some(v3));
+    assert_eq!(
+        cx.count(|e| matches!(e, Event::HoldoutUpdated { digest } if *digest == v3)),
+        1
+    );
+    let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
+    assert_eq!(replayed.claims, cx.st.claims);
+
+    // (c) A task without a holdout suite has no versions.
+    let mut plain = holdout_cx_with(None);
+    assert_eq!(
+        rejected(plain.host(HostAction::HoldoutExtended { digest: v2 })),
+        Code::HoldoutMismatch
+    );
+    assert_eq!(
+        rejected(plain.human(HumanAction::HoldoutUpdated { digest: v2 })),
+        Code::HoldoutMismatch
+    );
+}
+
 /// #597 review: a manifest names its base by any ref, so a holdout pass
 /// counts only on the tree the current candidate's latest report tested.
 #[test]
@@ -2996,6 +3071,46 @@ fn cl_92_an_endorsement_unlocks_holdout_reports_of_the_same_code() {
             assert!(cx.rec(x).failing.is_empty());
         }
     }
+}
+
+/// #597 review: a suite version makes every claim with a candidate due
+/// again, so the delta shows them; a retired suite is never adopted again,
+/// or its old passes would count once more.
+#[test]
+fn cl_93_suite_versions_reach_the_delta_and_never_return() {
+    let v2 = Sha256::of(b"holdout suite v2");
+    let mut cx = holdout_cx();
+    let y = cx.low();
+    let ky = cx.candidate("a", y);
+    stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(ky, &[("holdout:api", 0)]));
+    let bare = cx.low();
+    let before = cx.st.rev;
+    ok(cx.host(HostAction::HoldoutExtended { digest: v2 }));
+    let delta = rusty_bbp::claims::delta_ids(
+        &cx.st.claims,
+        before,
+        &["http".into()],
+        &rusty_bbp::claims::Sight::all(),
+    );
+    assert!(delta.contains(&y), "{delta:?}");
+    assert!(
+        !delta.contains(&bare),
+        "no candidate, nothing due: {delta:?}"
+    );
+    // Back to v1, by the host or the human: refused.
+    let v1 = holdout_digest();
+    assert_eq!(
+        rejected(cx.host(HostAction::HoldoutExtended { digest: v1 })),
+        Code::Duplicate
+    );
+    assert_eq!(
+        rejected(cx.human(HumanAction::HoldoutUpdated { digest: v1 })),
+        Code::Duplicate
+    );
+    assert_eq!(cx.st.claims.holdout_digest, Some(v2));
+    let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
+    assert_eq!(replayed.claims, cx.st.claims);
 }
 
 /// #597 re-review: a report without a tree proves no tree, so a holdout pass
@@ -3068,6 +3183,35 @@ fn cl_97_executed_holdout_evidence_uses_the_code_endorsement() {
         changed,
     ));
     ok(cx.executed("a", x, Support, rep));
+}
+
+/// #597 re-review: after a suite version an endorsement does not unlock a
+/// holdout pass reported under the retired suite.
+#[test]
+fn cl_98_an_endorsement_ignores_passes_under_a_retired_suite() {
+    let v2 = Sha256::of(b"holdout suite v2");
+    let mut cx = holdout_cx();
+    let x = cx.low();
+    let k = cx.candidate("a", x);
+    let h = stored(cx.holdout_of("h", k));
+    let run = cx.live_run(h);
+    let secret = cx.st.secret_for(run);
+    let changed = vec![TestChange::modified("tests/core.rs")];
+    stored(cx.report_full(
+        h,
+        run,
+        secret,
+        holdout_digest(),
+        &[("holdout:api", 0)],
+        changed,
+    ));
+    ok(cx.host(HostAction::HoldoutExtended { digest: v2 }));
+    let h2 = stored(cx.holdout_of("h", k));
+    stored(cx.report_under(h2, v2, &[("holdout:api", 1)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    ok(cx.ev("c", x, Support, EvidenceKind::Cited, 1, vec![Ref::art(k)]));
+    assert!(cx.rec(x).failing.contains("holdout:api"));
+    assert!(card_of(&cx, x).holdout_due);
 }
 
 /// #597 re-review: `failing_from` keeps the first failure, so an endorsement

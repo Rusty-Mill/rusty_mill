@@ -316,6 +316,16 @@ pub enum Event {
         mark: u64,
         outcome: MarkOutcome,
     },
+    /// #597: the task's holdout suite moved to `digest`, written by the host
+    /// for pure additions.
+    HoldoutExtended {
+        digest: Sha256,
+    },
+    /// #597: the human adopted holdout suite `digest`, which removes or
+    /// changes existing tests.
+    HoldoutUpdated {
+        digest: Sha256,
+    },
 }
 
 fn is_false(b: &bool) -> bool {
