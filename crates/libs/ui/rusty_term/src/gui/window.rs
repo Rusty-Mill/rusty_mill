@@ -25,9 +25,10 @@
 //! Note: this drives a live window and so cannot be exercised in a headless
 //! environment — the render, input-encoding, and font layers it composes are
 //! unit-tested independently. Wired here: mouse drag-selection, clipboard
-//! copy/paste (Ctrl+Shift+C / Ctrl+Shift+V, plus Ctrl+V on Windows), OSC 52
-//! get/set, SGR/1006 mouse reporting, Ctrl+click to open OSC 8 hyperlinks, DECSCUSR cursor styles +
-//! blink, and a Windows child-exit watcher.
+//! copy/paste (Ctrl+Shift+C / Ctrl+Shift+V, plus Ctrl+C / Ctrl+V on
+//! Windows), OSC 52 get/set, SGR/1006 mouse reporting, Ctrl+click to open
+//! OSC 8 hyperlinks, DECSCUSR cursor styles + blink, and a Windows
+//! child-exit watcher.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -603,17 +604,16 @@ struct WindowState<'a> {
     /// floor and slow scrolling didn't move anything. Accumulating instead
     /// means every bit of delta eventually turns into a scrolled line.
     scroll_accum: f64,
-    /// Whether the left button is held (a drag-selection is in progress).
-    selecting: bool,
+    /// The left-button drag selection, live while the button is held.
+    drag: SelectionDrag,
     /// Physical button currently held, if any — drives `?1002` drag-motion
     /// reporting (which button to report) and whether `?1002` reports motion
     /// at all (only while a button is down; `?1003` reports regardless).
     mouse_button_down: Option<MouseButtonKind>,
-    /// Cell where the current drag-selection began.
-    /// Cell where the current drag-selection began, in **absolute**
-    /// coordinates (`(col, abs_row)`) so the anchor survives scrolling
-    /// mid-drag.
-    sel_anchor: Option<(usize, usize)>,
+    /// Keys held down whose press a window shortcut consumed. Their repeats
+    /// and releases never reach the child, so one reading key-ups
+    /// (win32-input-mode, Kitty event types) sees no unpaired events.
+    consumed_keys: ConsumedKeys,
     /// Per-cell click actions for the chrome bar, rebuilt with each layout.
     hits: Vec<Hit>,
     /// An in-progress tab drag (press on a tab arms it; releasing clears).
@@ -2327,7 +2327,7 @@ impl WindowState<'_> {
             _ => 1,
         };
         self.last_grid_click = Some((now, cell));
-        self.sel_anchor = self
+        let anchor = self
             .pane()
             .map(|p| (cell.0, p.grid.lock().abs_of_view_row(cell.1)));
         // Every streak arms a drag now, not just a plain click: dragging
@@ -2335,7 +2335,7 @@ impl WindowState<'_> {
         // word/line (`CursorMoved` below reads `click_streak` to pick the
         // granularity), instead of the drag being inert past the initial
         // word/line as it was before.
-        self.selecting = true;
+        self.drag.start(anchor);
         if let Some(p) = self.pane() {
             let mut g = p.grid.lock();
             match self.click_streak {
@@ -2416,7 +2416,7 @@ impl WindowState<'_> {
     /// tick below, which re-applies it each scroll step at the pointer's
     /// last known (off-pane) position.
     fn update_drag_selection_head(&mut self, hx: f64, hy: f64) -> bool {
-        let (Some(anchor), Some(p)) = (self.sel_anchor, self.pane()) else {
+        let (Some(anchor), Some(p)) = (self.drag.live_anchor(), self.pane()) else {
             return false;
         };
         let (hc, hr) = self.cell_in_focused(hx, hy);
@@ -2439,7 +2439,7 @@ impl WindowState<'_> {
     /// the edge with the pointer stationary should keep scrolling, not just
     /// scroll once per `CursorMoved`.
     fn drag_edge_autoscroll(&mut self) -> bool {
-        if !self.selecting {
+        if !self.drag.is_live() {
             return false;
         }
         let Some(r) = self.focused_pane_rect() else {
@@ -2559,9 +2559,33 @@ impl WindowState<'_> {
         }
     }
 
+    /// [`Action::CopyOrSend`] (Ctrl+C on Windows): copy the selection and
+    /// clear it so the next press interrupts. Returns whether the key was
+    /// consumed; with nothing selected it was not, and the caller lets it
+    /// reach the child as ^C. A failed copy keeps the selection for a retry
+    /// and still consumes the key, so it never turns into a surprise ^C.
+    fn copy_or_send(&mut self) -> bool {
+        let copied = self.copy_selection();
+        if copied.clears_selection() {
+            if let Some(p) = self.pane() {
+                p.grid.lock().selection = None;
+            }
+            // End a drag still in progress, or the next pointer move or
+            // edge auto-scroll tick would rebuild the selection.
+            self.drag.cancel();
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        copied.consumes_key()
+    }
+
     /// Copy the active tab's selection to the system clipboard (Ctrl+Shift+C).
-    fn copy_selection(&mut self) {
-        let Some(p) = self.pane() else { return };
+    /// A failed write is reported on stderr and leaves the selection alone.
+    fn copy_selection(&mut self) -> Copied {
+        let Some(p) = self.pane() else {
+            return Copied::NothingSelected;
+        };
         let (text, html) = {
             let g = p.grid.lock();
             let html = if self.config.copy_html.unwrap_or(true) {
@@ -2571,14 +2595,22 @@ impl WindowState<'_> {
             };
             (g.selected_text(), html)
         };
-        if let (Some(text), Some(cb)) = (text, self.clipboard.as_mut()) {
-            // The HTML flavor carries the selection's colors/attributes for
-            // rich-paste targets (G29); plain editors read the text flavor.
-            let _ = match html {
-                Some(html) => cb.set_html(html, Some(text)),
-                None => cb.set_text(text),
-            };
+        // The HTML flavor carries the selection's colors/attributes for
+        // rich-paste targets (G29); plain editors read the text flavor.
+        let write = self.clipboard.as_mut().map(|cb| {
+            move |text: String| {
+                match html {
+                    Some(html) => cb.set_html(html, Some(text)),
+                    None => cb.set_text(text),
+                }
+                .map_err(|e| e.to_string())
+            }
+        });
+        let copied = copy_text(text, write);
+        if let Copied::Failed(e) = &copied {
+            eprintln!("rusty_term: copy: {e}");
         }
+        copied
     }
 
     /// Service a tab's pending OSC 52 clipboard request recorded by the parser.
@@ -2739,10 +2771,25 @@ impl WindowState<'_> {
         }
     }
 
+    /// Run a key's action; returns whether it consumed the key. Only
+    /// [`Action::CopyOrSend`] with nothing selected leaves it for the child.
+    fn exec_action(&mut self, action: Action) -> bool {
+        if action == Action::CopyOrSend {
+            return self.copy_or_send();
+        }
+        self.run_action(action);
+        true
+    }
+
     /// Dispatch a terminal-owned [`Action`] resolved from the keymap.
     fn run_action(&mut self, action: Action) {
         match action {
-            Action::Copy => self.copy_selection(),
+            Action::Copy => {
+                self.copy_selection();
+            }
+            Action::CopyOrSend => {
+                self.copy_or_send();
+            }
             Action::Paste => self.paste(),
             Action::NewTab => {
                 if let Err(e) = self.spawn_tab() {
@@ -5068,10 +5115,6 @@ impl WindowState<'_> {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
-                    // Key releases are terminal input only under win32-input-
-                    // mode (?9001) or Kitty keyboard flag 2 (report event
-                    // types); the UI layers (chords, search, copy mode) never
-                    // see them.
                     let (app_cursor, kitty_flags, win32_input) = self
                         .pane()
                         .map(|p| {
@@ -5079,33 +5122,19 @@ impl WindowState<'_> {
                             (g.app_cursor_keys, g.kitty_keyboard_flags(), g.win32_input)
                         })
                         .unwrap_or_default();
-                    if self.overlay.is_some()
+                    let ui_owns_keys = self.overlay.is_some()
                         || self.searching.is_some()
-                        || self.copy_mode.is_some()
-                    {
-                        return;
-                    }
-                    if win32_input {
-                        if let Some(bytes) = super::input::encode_win32(
-                            event.physical_key,
-                            &event.logical_key,
-                            self.mods,
-                            false,
-                        ) {
-                            self.write_child(&bytes);
-                        }
-                        return;
-                    }
-                    if kitty_flags & 2 != 0
-                        && let Some(bytes) = super::input::encode_full(
-                            &event.logical_key,
-                            self.mods,
-                            app_cursor,
-                            kitty_flags,
-                            super::input::KeyPhase::Release,
-                            kitty_alternate(&event.logical_key, self.mods),
-                            None,
-                        )
+                        || self.copy_mode.is_some();
+                    let release = KeyRelease {
+                        physical: event.physical_key,
+                        logical: &event.logical_key,
+                        mods: self.mods,
+                        app_cursor,
+                        kitty_flags,
+                        win32_input,
+                    };
+                    if let Some(bytes) =
+                        release_input(&mut self.consumed_keys, ui_owns_keys, &release)
                     {
                         self.write_child(&bytes);
                     }
@@ -5128,19 +5157,28 @@ impl WindowState<'_> {
                 // Terminal-owned shortcuts (configurable via the `[keys]` config
                 // section) are looked up before native encoding, so a bound chord
                 // never reaches the child.
-                if let PhysicalKey::Code(code) = event.physical_key
-                    && let Some(key) = chord_key(code)
-                {
-                    let chord = Chord::new(
-                        self.mods.control_key(),
-                        self.mods.shift_key(),
-                        self.mods.alt_key(),
-                        key,
-                    );
-                    if let Some(action) = self.config.keys.action(chord) {
-                        self.run_action(action);
-                        return;
-                    }
+                let action = match event.physical_key {
+                    PhysicalKey::Code(code) => chord_key(code).and_then(|key| {
+                        self.config.keys.action(Chord::new(
+                            self.mods.control_key(),
+                            self.mods.shift_key(),
+                            self.mods.alt_key(),
+                            key,
+                        ))
+                    }),
+                    PhysicalKey::Unidentified(_) => None,
+                };
+                let mut consumed = std::mem::take(&mut self.consumed_keys);
+                let taken = route_key_down(
+                    &mut consumed,
+                    event.physical_key,
+                    event.repeat,
+                    action,
+                    |a| self.exec_action(a),
+                );
+                self.consumed_keys = consumed;
+                if taken {
+                    return;
                 }
                 // Ctrl+Alt+1..9 jump straight to that tab (the Windows
                 // Terminal convention; 9 = last tab, browser-style). After
@@ -5417,7 +5455,7 @@ impl WindowState<'_> {
                 if let Some(window) = &self.window {
                     window.set_cursor(icon);
                 }
-                if self.selecting
+                if self.drag.is_live()
                     && self.update_drag_selection_head(position.x, position.y)
                     && let Some(window) = &self.window
                 {
@@ -5502,10 +5540,9 @@ impl WindowState<'_> {
                     }
                     ElementState::Released => {
                         if kind == MouseButtonKind::Left {
-                            if self.selecting {
+                            if self.drag.release() {
                                 self.copy_selection_primary(); // copy-on-select
                             }
-                            self.selecting = false;
                             self.tab_drag = None; // a reorder drag ends with the button
                         }
                         if self.mouse_button_down == Some(kind) {
@@ -5687,7 +5724,7 @@ impl<'a> App<'a> {
             clipboard: arboard::Clipboard::new().ok(),
             mouse_pos: (0.0, 0.0),
             scroll_accum: 0.0,
-            selecting: false,
+            drag: SelectionDrag::default(),
             hover: None,
             hover_link: None,
             focused: true,
@@ -5698,7 +5735,7 @@ impl<'a> App<'a> {
             last_grid_click: None,
             click_streak: 0,
             mouse_button_down: None,
-            sel_anchor: None,
+            consumed_keys: ConsumedKeys::default(),
             hits: Vec::new(),
             tab_drag: None,
             last_strip_click: None,
@@ -5909,6 +5946,187 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             }
         }
         self.reap_and_spawn(event_loop);
+    }
+}
+
+/// A left-button drag selection. A press arms it at `anchor` (absolute
+/// `(col, abs_row)`, so it survives scrolling mid-drag); while live, pointer
+/// moves and edge auto-scroll extend the selection from it. Releasing the
+/// button or copying with Ctrl+C ends it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SelectionDrag {
+    anchor: Option<(usize, usize)>,
+    live: bool,
+}
+
+impl SelectionDrag {
+    fn start(&mut self, anchor: Option<(usize, usize)>) {
+        *self = Self { anchor, live: true };
+    }
+
+    fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// The anchor to extend from; `None` once the drag has ended.
+    fn live_anchor(&self) -> Option<(usize, usize)> {
+        self.anchor.filter(|_| self.live)
+    }
+
+    /// The button went up. Returns whether a drag was live (copy-on-select).
+    fn release(&mut self) -> bool {
+        std::mem::replace(&mut self.live, false)
+    }
+
+    /// End the drag without a release, so nothing can rebuild the selection.
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// A key release and the focused pane's keyboard reporting modes.
+struct KeyRelease<'a> {
+    physical: PhysicalKey,
+    logical: &'a winit::keyboard::Key,
+    mods: ModifiersState,
+    app_cursor: bool,
+    kitty_flags: u8,
+    win32_input: bool,
+}
+
+/// The bytes a key release sends the child, if any. Releases are terminal
+/// input only under win32-input-mode (?9001) or Kitty keyboard flag 2 (report
+/// event types). None when a window shortcut consumed the press (its release
+/// would arrive unpaired) or a UI layer (overlay, search, copy mode) owns the
+/// keyboard. The swallowed key is cleared first, whatever owns the keys.
+fn release_input(
+    consumed: &mut ConsumedKeys,
+    ui_owns_keys: bool,
+    r: &KeyRelease,
+) -> Option<Vec<u8>> {
+    if consumed.release(r.physical) || ui_owns_keys {
+        return None;
+    }
+    if r.win32_input {
+        return super::input::encode_win32(r.physical, r.logical, r.mods, false);
+    }
+    if r.kitty_flags & 2 == 0 {
+        return None;
+    }
+    super::input::encode_full(
+        r.logical,
+        r.mods,
+        r.app_cursor,
+        r.kitty_flags,
+        super::input::KeyPhase::Release,
+        kitty_alternate(r.logical, r.mods),
+        None,
+    )
+}
+
+/// Physical keys held down whose press a window shortcut consumed. Each
+/// stays until its own release, so overlapping shortcuts are independent.
+#[derive(Debug, Default)]
+struct ConsumedKeys(Vec<PhysicalKey>);
+
+impl ConsumedKeys {
+    /// A keydown of `key`. Returns whether it repeats a consumed press. A
+    /// fresh press of a key still listed means its release was lost (focus
+    /// change), so the stale entry is dropped and the press is new.
+    fn press(&mut self, key: PhysicalKey, repeat: bool) -> bool {
+        if !self.0.contains(&key) {
+            return false;
+        }
+        if repeat {
+            return true;
+        }
+        self.release(key);
+        false
+    }
+
+    fn consume(&mut self, key: PhysicalKey) {
+        if !self.0.contains(&key) {
+            self.0.push(key);
+        }
+    }
+
+    /// A key-up of `key`. Returns whether its press was consumed.
+    fn release(&mut self, key: PhysicalKey) -> bool {
+        let Some(i) = self.0.iter().position(|k| *k == key) else {
+            return false;
+        };
+        self.0.swap_remove(i);
+        true
+    }
+}
+
+/// Route a keydown the keymap resolved to `action` (None: unbound). `exec`
+/// runs an action and returns whether it consumed the key. Returns whether
+/// the key is consumed; if not, it goes on to the child. Who owns a held key
+/// is settled by its first press, so the child always sees whole
+/// down/repeat/up runs:
+/// - A repeat of a consumed press never reaches the child: a held Ctrl+C
+///   that copied must not turn into ^C once the selection is gone. Other
+///   actions still repeat (zoom, scrolling); a held copy does not re-copy.
+/// - A repeat of a press the child got stays the child's, even if the chord
+///   or the selection changed meanwhile, or its release would be swallowed.
+fn route_key_down(
+    consumed: &mut ConsumedKeys,
+    key: PhysicalKey,
+    repeat: bool,
+    action: Option<Action>,
+    exec: impl FnOnce(Action) -> bool,
+) -> bool {
+    let held = consumed.press(key, repeat);
+    if repeat && !held {
+        return false;
+    }
+    let taken = match action {
+        Some(Action::CopyOrSend) if held => true,
+        Some(action) => exec(action),
+        None => held,
+    };
+    if taken {
+        consumed.consume(key);
+    }
+    taken
+}
+
+/// What copying the selection achieved.
+#[derive(Debug, PartialEq, Eq)]
+enum Copied {
+    NothingSelected,
+    Done,
+    /// There was a selection but the clipboard is missing or refused it.
+    Failed(String),
+}
+
+impl Copied {
+    /// Whether a copy-or-send key press is used up (else it goes to the child).
+    fn consumes_key(&self) -> bool {
+        !matches!(self, Copied::NothingSelected)
+    }
+
+    /// Whether the selection should go: only once it is safely copied.
+    fn clears_selection(&self) -> bool {
+        matches!(self, Copied::Done)
+    }
+}
+
+/// Copy `text` (the selection, if any) with `write` (the clipboard, if any).
+fn copy_text<W>(text: Option<String>, write: Option<W>) -> Copied
+where
+    W: FnOnce(String) -> Result<(), String>,
+{
+    let Some(text) = text else {
+        return Copied::NothingSelected;
+    };
+    let Some(write) = write else {
+        return Copied::Failed("no system clipboard".to_string());
+    };
+    match write(text) {
+        Ok(()) => Copied::Done,
+        Err(e) => Copied::Failed(e),
     }
 }
 
@@ -6446,11 +6664,12 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        Hit, ImeCommitTarget, MenuKind, SETTINGS_CARDS_TOP, SETTINGS_FOOTER_H, SETTINGS_ROW_H,
-        SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SettingsHit, Widget, Zoom, accumulate_scroll_lines,
-        arrow_presses, display_path, drag_scroll_direction, encode_paste, fmt_runtime,
-        ime_commit_target, ime_cursor_area_origin, is_openable_url, mix, osc52_reply,
-        pane_pixel_point, path_from_file_uri, put_text, read_git_branch, settings_hit,
+        ConsumedKeys, Copied, Hit, ImeCommitTarget, KeyRelease, MenuKind, SETTINGS_CARDS_TOP,
+        SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
+        SettingsHit, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text, display_path,
+        drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
+        ime_cursor_area_origin, is_openable_url, mix, osc52_reply, pane_pixel_point,
+        path_from_file_uri, put_text, read_git_branch, release_input, route_key_down, settings_hit,
         settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
         tab_widths, visible_tab_range, widget_text, zoom_px,
     };
@@ -6717,6 +6936,245 @@ mod tests {
         let (lines, remainder) = accumulate_scroll_lines(remainder, -0.7);
         assert_eq!(lines, -1);
         assert!((remainder + 0.4).abs() < 1e-9);
+    }
+
+    type Write = fn(String) -> Result<(), String>;
+
+    use crate::keymap::Action as KeyAction;
+    use winit::keyboard::{Key as WKey, KeyCode, ModifiersState, PhysicalKey};
+
+    const C: PhysicalKey = PhysicalKey::Code(KeyCode::KeyC);
+    const V: PhysicalKey = PhysicalKey::Code(KeyCode::KeyV);
+
+    /// Bytes a release of `key` sends under win32-input-mode or Kitty
+    /// event types (`win32` picks which).
+    fn up(consumed: &mut ConsumedKeys, key: PhysicalKey, win32: bool) -> Option<Vec<u8>> {
+        let ch = if key == C { "c" } else { "v" };
+        let logical = WKey::Character(ch.into());
+        let release = KeyRelease {
+            physical: key,
+            logical: &logical,
+            mods: ModifiersState::CONTROL,
+            app_cursor: false,
+            kitty_flags: if win32 { 0 } else { 2 | 1 },
+            win32_input: win32,
+        };
+        release_input(consumed, false, &release)
+    }
+
+    /// A keydown of plain Ctrl+C bound to CopyOrSend, with `selected`
+    /// standing in for the pane selection. Returns whether it was consumed
+    /// and whether the copy ran.
+    fn ctrl_c_down(consumed: &mut ConsumedKeys, repeat: bool, selected: &mut bool) -> (bool, bool) {
+        let mut ran = false;
+        let taken = route_key_down(consumed, C, repeat, Some(KeyAction::CopyOrSend), |_| {
+            ran = true;
+            std::mem::replace(selected, false)
+        });
+        (taken, ran)
+    }
+
+    #[test]
+    fn a_held_copy_never_interrupts_and_stays_paired() {
+        for win32 in [true, false] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = true;
+            // Selected Ctrl+C: copies, consumed.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (true, true)
+            );
+            // Held: repeats are swallowed and do not re-run the copy, so
+            // they never become ^C now the selection is gone.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (true, false)
+            );
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (true, false)
+            );
+            // Its release is swallowed too.
+            assert_eq!(up(&mut consumed, C, win32), None, "win32={win32}");
+            // A later, unselected Ctrl+C reaches the child down and up.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (false, true)
+            );
+            // Its repeat is the child's too, without re-running the copy.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (false, false)
+            );
+            assert!(up(&mut consumed, C, win32).is_some(), "win32={win32}");
+        }
+    }
+
+    #[test]
+    fn a_key_the_child_got_stays_the_childs_while_held() {
+        for win32 in [true, false] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = false;
+            // Unselected Ctrl+C goes to the child.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (false, true)
+            );
+            // Text gets selected while C is held: repeats stay the child's
+            // and do not copy, so its release is not swallowed either.
+            selected = true;
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (false, false)
+            );
+            assert!(selected);
+            assert!(up(&mut consumed, C, win32).is_some(), "win32={win32}");
+            // The next fresh press copies as usual.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (true, true)
+            );
+        }
+        // Same for a chord that appears mid-hold (C held, then Ctrl).
+        let mut consumed = ConsumedKeys::default();
+        assert!(!route_key_down(&mut consumed, V, false, None, |_| true));
+        assert!(!route_key_down(
+            &mut consumed,
+            V,
+            true,
+            Some(KeyAction::Paste),
+            |_| { panic!("a repeat of the child's key must not run a shortcut") }
+        ));
+        assert!(up(&mut consumed, V, true).is_some());
+    }
+
+    #[test]
+    fn overlapping_consumed_shortcuts_release_in_either_order() {
+        for (first, second) in [(C, V), (V, C)] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = true;
+            assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+            assert!(route_key_down(
+                &mut consumed,
+                V,
+                false,
+                Some(KeyAction::Paste),
+                |_| true
+            ));
+            assert_eq!(up(&mut consumed, first, true), None);
+            assert_eq!(up(&mut consumed, second, true), None);
+            // Both cleared: the next releases are ordinary input again.
+            assert!(up(&mut consumed, C, true).is_some());
+            assert!(up(&mut consumed, V, true).is_some());
+        }
+    }
+
+    #[test]
+    fn other_shortcuts_still_repeat() {
+        let mut consumed = ConsumedKeys::default();
+        let mut runs = 0;
+        for repeat in [false, true, true] {
+            assert!(route_key_down(
+                &mut consumed,
+                V,
+                repeat,
+                Some(KeyAction::Paste),
+                |_| {
+                    runs += 1;
+                    true
+                }
+            ));
+        }
+        assert_eq!(runs, 3);
+    }
+
+    #[test]
+    fn a_held_consumed_key_stays_swallowed_after_its_modifier_lifts() {
+        let mut consumed = ConsumedKeys::default();
+        let mut selected = true;
+        assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+        // Ctrl released first: C now repeats as an unbound key.
+        assert!(route_key_down(&mut consumed, C, true, None, |_| false));
+        assert_eq!(up(&mut consumed, C, true), None);
+    }
+
+    #[test]
+    fn a_lost_release_does_not_eat_the_next_press() {
+        let mut consumed = ConsumedKeys::default();
+        let mut selected = true;
+        assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+        // The key-up never came (focus moved). A fresh, unbound press of
+        // the same key is ordinary input, and so is its release.
+        assert!(!route_key_down(&mut consumed, C, false, None, |_| false));
+        assert!(up(&mut consumed, C, true).is_some());
+    }
+
+    #[test]
+    fn a_swallowed_release_clears_even_while_the_ui_owns_keys() {
+        let mut consumed = ConsumedKeys::default();
+        consumed.consume(C);
+        let logical = WKey::Character("c".into());
+        let release = KeyRelease {
+            physical: C,
+            logical: &logical,
+            mods: ModifiersState::CONTROL,
+            app_cursor: false,
+            kitty_flags: 0,
+            win32_input: true,
+        };
+        assert_eq!(release_input(&mut consumed, true, &release), None);
+        assert!(up(&mut consumed, C, true).is_some());
+    }
+
+    #[test]
+    fn a_cancelled_drag_cannot_extend_the_selection() {
+        let mut drag = SelectionDrag::default();
+        drag.start(Some((3, 7)));
+        // Pointer moves and edge auto-scroll extend only from a live anchor.
+        assert!(drag.is_live());
+        assert_eq!(drag.live_anchor(), Some((3, 7)));
+        drag.cancel(); // Ctrl+C copied mid-drag
+        assert!(!drag.is_live());
+        assert_eq!(drag.live_anchor(), None);
+        // The later button-up is not a copy-on-select.
+        assert!(!drag.release());
+    }
+
+    #[test]
+    fn releasing_a_drag_copies_on_select_once() {
+        let mut drag = SelectionDrag::default();
+        drag.start(Some((0, 0)));
+        assert!(drag.release());
+        assert!(!drag.release());
+        assert_eq!(drag.live_anchor(), None);
+    }
+
+    #[test]
+    fn copy_or_send_copies_then_clears_the_selection() {
+        let copied = copy_text(Some("ls".into()), Some((|_| Ok(())) as Write));
+        assert_eq!(copied, Copied::Done);
+        assert!(copied.consumes_key() && copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_with_no_selection_sends_the_key() {
+        let copied = copy_text(None, Some((|_| Ok(())) as Write));
+        assert_eq!(copied, Copied::NothingSelected);
+        assert!(!copied.consumes_key() && !copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_without_a_clipboard_keeps_selection_and_key() {
+        let copied = copy_text(Some("ls".into()), None::<Write>);
+        assert!(matches!(copied, Copied::Failed(_)));
+        assert!(copied.consumes_key() && !copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_on_write_failure_keeps_selection_and_key() {
+        let copied = copy_text(Some("ls".into()), Some((|_| Err("busy".into())) as Write));
+        assert_eq!(copied, Copied::Failed("busy".into()));
+        assert!(copied.consumes_key() && !copied.clears_selection());
     }
 
     #[test]
