@@ -55,6 +55,7 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 | D49 | The handoff pack is scoped to the project folder | [default] 2026-11-03 (handoff) |
 | D50 | One decision log, D-numbering continues | [default] 2026-11-03 (handoff) |
 | D51 | The expert is the single writer of settled answers | [default] 2026-11-03 (handoff) |
+| D52 | rusty_erosion location and core/adapter module split | [default] 2026-11-03 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -403,3 +404,11 @@ No push notifications in v0. Sorting uses BBP facts: irreversible first, then ol
 **Why.** One writer keeps each answer recorded exactly once.
 **Rejected.** Each thread recording its own answers.
 **Tag.** [default] · remind-me: mem_df536a0f908b40db9fdb87196ba62e35
+
+## D52. rusty_erosion location and core/adapter module split
+
+**Decision.** The crate lives at `crates/tools/rusty_erosion` (`[package.metadata.rusty_mill] layer = "tools"`, added to the workspace `members` next to `crates/tools/rusty_baseline`). `src/core/` is the pure domain core: no I/O and no `tree_sitter` import. `core/mod.rs` holds the input types (functions with path, name and CC; token streams) and the integer basis-point results, `core/concentration.rs` the CC-above-10 share, `core/duplication.rs` the normalized 50-token-window share. `src/adapter/` is the tree-sitter side: `adapter/mod.rs` classifies files (Rust, non-code ignored, other code `unmeasured`) and skips `#[cfg(test)]` and `tests/`; `adapter/rust.rs` parses with `tree-sitter-rust` into the core's types (CC per function, identifier- and literal-normalized tokens). The `erosion` bin (`src/main.rs`: `git cat-file` reads and the baseline compare) comes with the profile slice, not slice 1.
+**Why.** `rusty_baseline` is the nearest analog, a measurement lib plus bin under `crates/tools`. The split mirrors the design's "pure core plus a tree-sitter adapter" (erosion-gate-design §2), keeps the core testable on fixed fixtures (§10), and lets #705 add `adapter/python.rs` without touching the core. A path or module move is cheap to reverse.
+**Rejected.** `crates/libs/` (no existing family fits; it is a tool run as a profile). Two crates for core and adapter (more workspace churn for no consumer). Putting it under `rusty_bbp_host` (the metric is independent of the host).
+**Tag.** [default] · remind-me: mem_9d2be473f22f458a89532eac5e3b6363
+**Source.** Caller question from the #704 slice 1 build thread, 2026-11-03; erosion-gate-design §2, §9, §10; card #704 Build 1.
