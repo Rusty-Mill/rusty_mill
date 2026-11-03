@@ -3009,11 +3009,11 @@ fn cl_77_suite_versions_need_a_fresh_holdout_pass() {
     );
 }
 
-/// CL-78: the human's `answer` (Refine, #595) refs the brief, replies to a
+/// CL-81: the human's `answer` (Refine, #595) refs the brief, replies to a
 /// claim or to no message, needs no turn, is not charged, changes no claim,
 /// and is taken while the task is escalated. An agent's `answer` stays refused.
 #[test]
-fn cl_78_human_answer_clarifies_the_intent() {
+fn cl_81_human_answer_clarifies_the_intent() {
     let mut o = open_task(Mode::Claims, None, roster());
     o.budget.messages = 2;
     let mut cx = Cx::new();

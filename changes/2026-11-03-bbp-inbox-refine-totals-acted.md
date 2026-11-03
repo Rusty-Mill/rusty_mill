@@ -4,7 +4,7 @@ changelog: BBP claims mode accepts the human's Refine answer (C-R10), and bbp in
 ---
 ## 2026-11-03 - BBP inbox follow-up: Refine, task totals, acted-on
 
-- **Added:** C-R10. In claims mode the human channel may post an `answer`, which is the human's clarification of the intent (the inbox's Refine). It must ref the task's brief, so #598 can migrate it into an intent version. Its `reply_to` is a claim on the task, or absent for the whole task. It needs no turn, is not charged, changes no claim, and is accepted while the task is open or escalated. An agent's `answer` is still `wrong_mode`. Trace CL-78.
+- **Added:** C-R10. In claims mode the human channel may post an `answer`, which is the human's clarification of the intent (the inbox's Refine). It must ref the task's brief, so #598 can migrate it into an intent version. Its `reply_to` is a claim on the task, or absent for the whole task. It needs no turn, is not charged, changes no claim, and is accepted while the task is open or escalated. An agent's `answer` is still `wrong_mode`. Trace CL-81.
 - **Added:** `bbp human refine MSG|task BRIEF TEXT` builds that answer.
 - **Added:** `bbp inbox` rows gain three fields:
   - `brief`: the task's brief.
