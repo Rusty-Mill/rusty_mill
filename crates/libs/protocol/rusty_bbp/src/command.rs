@@ -62,6 +62,9 @@ pub enum HostAction {
         mark: u64,
         outcome: crate::claims::MarkOutcome,
     },
+    /// #597 G3: a new holdout suite version that only adds files to the
+    /// current one. The host checks that before writing it.
+    HoldoutExtended { digest: Sha256 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +205,11 @@ pub enum HumanAction {
     /// Claims mode: end the task.
     Close {
         expected_rev: Rev,
+    },
+    /// Claims mode (#597 G3): adopt a holdout suite version that removes or
+    /// changes existing tests. Only the human may.
+    HoldoutUpdated {
+        digest: Sha256,
     },
 }
 

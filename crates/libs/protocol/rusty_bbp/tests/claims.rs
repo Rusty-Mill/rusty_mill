@@ -2933,3 +2933,78 @@ fn cl_76_holdout_suite_needs_claims_mode_and_replays() {
     assert_eq!(replayed.claims, cx.st.claims);
     assert_eq!(replayed.claims.holdout_digest, Some(holdout_digest()));
 }
+
+#[test]
+fn cl_77_suite_versions_need_a_fresh_holdout_pass() {
+    let v2 = Sha256::of(b"holdout suite v2");
+    let v3 = Sha256::of(b"holdout suite v3");
+    let mut cx = holdout_cx();
+    // Accepted on v1.
+    let x = cx.low();
+    let kx = cx.candidate("a", x);
+    let px = stored(cx.report_profiles(kx, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(kx, &[("holdout:api", 0)]));
+    ok(cx.executed("a", x, Support, px));
+    ok(cx.executed("b", x, Support, px));
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+    // Open, passed on v1 but short of support; another open claim blocked by
+    // a v1 holdout failure.
+    let y = cx.low();
+    let ky = cx.candidate("a", y);
+    let py = stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+    stored(cx.holdout_run(ky, &[("holdout:api", 0)]));
+    let z = cx.low();
+    let kz = cx.candidate("a", z);
+    stored(cx.holdout_run(kz, &[("holdout:api", 1)]));
+    assert!(!cx.rec(z).failing.is_empty());
+
+    // (a) The host adopts a pure addition.
+    ok(cx.host(HostAction::HoldoutExtended { digest: v2 }));
+    assert_eq!(cx.st.claims.holdout_digest, Some(v2));
+    assert_eq!(
+        cx.status(x),
+        ClaimStatus::Accepted,
+        "accepted stays accepted"
+    );
+    assert!(cx.rec(z).failing.is_empty(), "v1 holdout failures retire");
+    // Y's v1 pass no longer counts: support alone does not accept it.
+    ok(cx.executed("a", y, Support, py));
+    ok(cx.executed("b", y, Support, py));
+    assert_eq!(cx.status(y), ClaimStatus::Open);
+    assert!(card_of(&cx, y).holdout_due);
+    // A report under the old digest is refused; a v2 pass accepts.
+    let h = stored(cx.holdout_of("h", ky));
+    assert_eq!(
+        rejected(cx.report_under(h, holdout_digest(), &[("holdout:api", 0)])),
+        Code::ProfileMismatch
+    );
+    let h = stored(cx.holdout_of("h", ky));
+    stored(cx.report_under(h, v2, &[("holdout:api", 0), ("holdout:new", 0)]));
+    assert_eq!(cx.status(y), ClaimStatus::Accepted);
+
+    // (b) A change to existing tests is the human's: the same digest twice
+    // is a duplicate, an agent has no such write, the human adopts it.
+    assert_eq!(
+        rejected(cx.host(HostAction::HoldoutExtended { digest: v2 })),
+        Code::Duplicate
+    );
+    ok(cx.human(HumanAction::HoldoutUpdated { digest: v3 }));
+    assert_eq!(cx.st.claims.holdout_digest, Some(v3));
+    assert_eq!(
+        cx.count(|e| matches!(e, Event::HoldoutUpdated { digest } if *digest == v3)),
+        1
+    );
+    let replayed = TaskState::fold(TaskId::from("t"), &cx.log);
+    assert_eq!(replayed.claims, cx.st.claims);
+
+    // (c) A task without a holdout suite has no versions.
+    let mut plain = holdout_cx_with(None);
+    assert_eq!(
+        rejected(plain.host(HostAction::HoldoutExtended { digest: v2 })),
+        Code::HoldoutMismatch
+    );
+    assert_eq!(
+        rejected(plain.human(HumanAction::HoldoutUpdated { digest: v2 })),
+        Code::HoldoutMismatch
+    );
+}

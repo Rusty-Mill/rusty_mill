@@ -667,6 +667,11 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
                 })
             });
         }
+        E::HoldoutExtended { digest } | E::HoldoutUpdated { digest } => {
+            // Open claims now need a fresh holdout pass under `digest`;
+            // accepted ones stay accepted (holdout_passed reads the digest).
+            book.holdout_digest = Some(*digest);
+        }
         E::ClaimActionResult { mark, outcome } => {
             for c in book.claims.values_mut() {
                 if let Some(m) = c.marks.iter_mut().find(|m| m.id == *mark) {

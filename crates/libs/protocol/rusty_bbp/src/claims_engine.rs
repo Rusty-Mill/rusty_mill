@@ -1083,6 +1083,9 @@ pub(crate) fn human(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
             Ok(Response::Ok)
         }
         HumanAction::ClaimActionResult { mark, outcome } => action_result(w, *mark, *outcome),
+        HumanAction::HoldoutUpdated { digest } => {
+            new_holdout(w, *digest, Event::HoldoutUpdated { digest: *digest })
+        }
         HumanAction::Close { expected_rev } => {
             check_rev(&w.st, *expected_rev)?;
             transition(w, State::Closed, now);
@@ -1293,7 +1296,38 @@ pub(crate) fn host(w: &mut Work, a: &HostAction, now: Time) -> R<Response> {
             Ok(Response::Marked(mark))
         }
         HostAction::ActionResult { mark, outcome } => action_result(w, *mark, *outcome),
+        HostAction::HoldoutExtended { digest } => {
+            new_holdout(w, *digest, Event::HoldoutExtended { digest: *digest })
+        }
     }
+}
+
+/// A new holdout suite version (#597 G3). Holdout failures of the old one are
+/// retired: every open claim with a candidate needs a fresh holdout pass under
+/// the new digest anyway, which re-runs whatever the new suite keeps.
+fn new_holdout(w: &mut Work, digest: Sha256, e: Event) -> R<Response> {
+    match w.st.claims.holdout_digest {
+        None => return Err(rej(Code::HoldoutMismatch, "the task has no holdout suite")),
+        Some(d) if d == digest => {
+            return Err(rej(
+                Code::Duplicate,
+                "that holdout suite is already current",
+            ))
+        }
+        Some(_) => {}
+    }
+    w.emit(e);
+    let blocked: Vec<MsgId> =
+        w.st.claims
+            .claims
+            .values()
+            .filter(|c| c.failing.iter().any(|p| Suite::Holdout.owns_profile(p)))
+            .map(|c| c.id)
+            .collect();
+    for c in blocked {
+        set_failing(w, c, |f| f.retain(|p| !Suite::Holdout.owns_profile(p)));
+    }
+    Ok(Response::Ok)
 }
 
 fn action_result(w: &mut Work, mark: u64, outcome: MarkOutcome) -> R<Response> {
