@@ -64,8 +64,7 @@ The design chat share link in `LEL/handoff/SPEC.md` doesn't render; never cite i
    - anything that would reverse or bypass a `[stated]` or `[agreed]` entry
      (every "Agreed" entry D1–D45 counts as `[agreed]`), e.g. adding an
      erosion override against D43;
-   - a conflict the precedence rules don't settle, and design gaps on the
-     disputed list (OPEN_QUESTIONS Q10, Q11);
+   - a conflict the precedence rules don't settle;
    - Nano's ask-first list: schema migrations, BBP schema bumps, public API
      changes, dependency or toolchain bumps, deletions, adding or removing an
      executor, irreversible actions, paid model calls;
