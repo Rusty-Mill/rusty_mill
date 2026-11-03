@@ -60,6 +60,8 @@ CASES = (
          "a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone"),
     Case("session-confined", "rusty_bbp_host", ("--test", "confined_harness"),
          "a_confined_session_keeps_its_home_and_one_fresh_workspace_across_turns"),
+    Case("holdout-confined", "rusty_bbp_host", ("--test", "claims_host"),
+         "confined_holdout_run_passes_and_builds_cannot_read_the_suite"),
     Case("rust-lld", "rusty_bbp_host", ("--test", "rust_lld_profile"),
          "confined_rust_lld_profile_passes_under_one_gib"),
     Case("maintenance", "rusty_orch", ("--lib",),

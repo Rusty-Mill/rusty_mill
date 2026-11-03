@@ -225,10 +225,31 @@ pub fn perform_as(
     by: &str,
 ) -> Result<Response, String> {
     let act = action(verb, args, rev)?;
+    if let Some(rej) = unstaged(dir, task, &act) {
+        return Ok(Response::Rejected(rej));
+    }
     let op = labelled_op(by)?;
     let mut d = open_driver(dir, task)?;
     d.dispatch(&Command::Human { op, action: act }, now())
         .map_err(|e| format!("{e:?}"))
+}
+
+/// #597 G3: `holdout-updated` adopts only a suite staged for this task and
+/// intact on disk; the core sees just a digest, so a typo or another task's
+/// digest would otherwise retire the current suite for one no run can load.
+fn unstaged(dir: &Path, task: &TaskId, act: &HumanAction) -> Option<Rejection> {
+    let digest = match act {
+        HumanAction::HoldoutUpdated { digest } => *digest,
+        HumanAction::Fenced { action, .. } => return unstaged(dir, task, action),
+        _ => return None,
+    };
+    let loaded = crate::holdout::load(dir, task, digest).and_then(|hs| hs.verify_files());
+    loaded.err().map(|e| {
+        Rejection::new(
+            Code::HoldoutMismatch,
+            format!("holdout {}: {e}", digest.hex()),
+        )
+    })
 }
 
 /// What `bbp human … --dry-run` prints: the events the action would append
@@ -296,6 +317,15 @@ pub fn preview_fenced(
             })
         }
     };
+    if let Command::Human { action, .. } = &cmd {
+        if let Some(rej) = unstaged(dir, task, action) {
+            return Ok(Preview {
+                rev: rev_now,
+                response: Response::Rejected(rej),
+                events: vec![],
+            });
+        }
+    }
     let out = handle(&d.state, &cmd, now());
     Ok(Preview {
         rev: rev_now,
@@ -321,6 +351,11 @@ pub fn perform_fenced(
         Ok(cmd) => cmd,
         Err(rej) => return Ok(Response::Rejected(rej)),
     };
+    if let Command::Human { action, .. } = &cmd {
+        if let Some(rej) = unstaged(dir, task, action) {
+            return Ok(Response::Rejected(rej));
+        }
+    }
     open_driver(dir, task)?
         .dispatch(&cmd, now())
         .map_err(|e| format!("{e:?}"))

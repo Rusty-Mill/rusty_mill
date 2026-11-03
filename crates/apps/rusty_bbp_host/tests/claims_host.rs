@@ -820,29 +820,91 @@ fn holdout_suite(dir: &Path) -> rusty_bbp_host::holdout::HoldoutSet {
 }
 
 fn holdout_task(dir: &Path, hs: &rusty_bbp_host::holdout::HoldoutSet) {
-    let r = admin::open_claims_task(
-        dir,
-        &task(),
-        "local",
-        b"Make the flag say ok.",
-        &PrincipalId("human".into()),
-        &profiles(),
-        Some(hs),
-        vec![lens("a", 0), lens("b", 1), holdout_lens()],
-        ClaimsConfig::default(),
-        || Ok(()),
-    )
-    .expect("open");
+    holdout_task_with(dir, &profiles(), hs);
+}
+
+fn holdout_task_with(dir: &Path, set: &ProfileSet, hs: &rusty_bbp_host::holdout::HoldoutSet) {
+    let r = open_holdout(dir, set, hs);
     assert!(matches!(r, Response::Stored(_)), "{r:?}");
     for who in ["a", "b", "h"] {
         reassign(dir, who, who);
     }
 }
 
-/// #597 2.2: a holdout run executes the frozen suite against the current
-/// code, reports under the holdout digest, and stores only a summary as its
-/// log; the full output stays on the host. A changed suite file fails the
-/// next holdout run before anything executes.
+fn open_holdout(
+    dir: &Path,
+    set: &ProfileSet,
+    hs: &rusty_bbp_host::holdout::HoldoutSet,
+) -> Response {
+    admin::open_claims_task(
+        dir,
+        &task(),
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        set,
+        Some(hs),
+        vec![lens("a", 0), lens("b", 1), holdout_lens()],
+        ClaimsConfig::default(),
+        || Ok(()),
+    )
+    .expect("open")
+}
+
+fn sandbox(dir: &Path) -> runner::Sandboxed {
+    runner::Sandboxed::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
+        &dir.join("sandbox-state"),
+    )
+}
+
+/// Store a build candidate for the flag fix and a holdout candidate of the
+/// same code; their ids and the holdout candidate's JSON.
+fn build_and_holdout(dir: &Path, base: &str) -> (u64, u64, String) {
+    let c = claim(dir, "a", "flag", true);
+    let mut s = server(dir, "a");
+    let (text, err) = put_candidate(&mut s, "k", base, FLAG_ONLY, c);
+    assert!(!err, "{text}");
+    let k = id_of(&text);
+    let diffs = match &state(dir).artifacts[&ArtId(k)].payload {
+        ArtifactPayload::Candidate(m) => m.diffs[0].0,
+        _ => panic!("not a candidate"),
+    };
+    let holdout = format!(
+        r#"{{"op":"h1","kind":"candidate","base":"{base}","diffs":[{diffs}],"claim":{c},"suite":"holdout"}}"#
+    );
+    // A builder cannot store a holdout candidate; the holdout lens can.
+    let (text, err) = call(&mut s, "put_artifact", &holdout);
+    assert!(err && text.contains("KindForbidden"), "{text}");
+    let mut h = server(dir, "h");
+    let h1 = id_of(&ok(&mut h, "put_artifact", &holdout));
+    (k, h1, holdout)
+}
+
+/// The run of candidate `k`, its report and the log artifact's text.
+fn run_of(dir: &Path, k: u64) -> (RunId, Report, String) {
+    let d = open_driver(dir, &task()).unwrap();
+    let (id, run) = d
+        .state
+        .claims
+        .runs
+        .iter()
+        .find(|(_, r)| r.candidate == ArtId(k))
+        .map(|(id, r)| (*id, r.clone()))
+        .expect("run");
+    let ArtifactPayload::TestReport(rep) = &d.state.artifacts[&run.report.expect("report")].payload
+    else {
+        panic!("not a report")
+    };
+    let log = &d.state.artifacts[&run.log.expect("log")];
+    let shown = String::from_utf8(d.store.blob_get(&log.blob.sha).unwrap()).unwrap();
+    (id, rep.clone(), shown)
+}
+
+/// #597 2.2: a holdout run reports under the holdout digest and stores only
+/// a summary as its log, whatever the sandbox here did; a changed suite file
+/// fails the next holdout run before anything executes. That the suite
+/// really runs, confined, is `confined_holdout_run_passes_and_builds_cannot_read_the_suite`.
 #[test]
 fn a_holdout_run_shows_builders_only_a_summary() {
     let dir = tempdir("holdout");
@@ -850,34 +912,116 @@ fn a_holdout_run_shows_builders_only_a_summary() {
     let hs = holdout_suite(&dir);
     holdout_task(&dir, &hs);
     let digest = state(&dir).claims.holdout_digest.expect("holdout digest");
-    let c = claim(&dir, "a", "flag", true);
-    let mut s = server(&dir, "a");
-    let (text, err) = put_candidate(&mut s, "k", &base, FLAG_ONLY, c);
-    assert!(!err, "{text}");
-    let k = id_of(&text);
-    let diffs = match &state(&dir).artifacts[&ArtId(k)].payload {
-        ArtifactPayload::Candidate(m) => m.diffs[0].0,
-        _ => panic!("not a candidate"),
-    };
     let work = dir.join("work");
-    let exec = runner::Sandboxed::new(
-        PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
-        &dir.join("sandbox-state"),
-    );
+    let exec = sandbox(&dir);
+    let (_, h1, holdout) = build_and_holdout(&dir, &base);
     runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("build");
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("holdout");
+    let (_, rep, shown) = run_of(&dir, h1);
+    assert_eq!(rep.profile_digest, digest);
+    assert!(shown.starts_with("holdout run: "), "{shown}");
+    assert!(!shown.contains("HOLDOUT-SECRET-OUTPUT"), "{shown}");
 
-    // A builder cannot store a holdout candidate; the holdout lens can.
-    let holdout = format!(
-        r#"{{"op":"h1","kind":"candidate","base":"{base}","diffs":[{diffs}],"claim":{c},"suite":"holdout"}}"#
+    // A planted file in the suite fails the next holdout run before it runs.
+    std::fs::write(Path::new(&hs.root).join("conftest.py"), "skip").unwrap();
+    let again = holdout.replace("\"h1\"", "\"h2\"");
+    let h2 = id_of(&ok(&mut server(&dir, "h"), "put_artifact", &again));
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("planted");
+    let (_, rep, shown) = run_of(&dir, h2);
+    assert_eq!(rep.status, RunStatus::Error);
+    assert!(!shown.contains("conftest"), "{shown}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #597 2.2, Linux acceptance lane: on a host whose sandbox works, a build
+/// run cannot read the suite and the holdout run executes it, passing, with
+/// its output on the host only. Refuses to pass where the sandbox does not.
+#[test]
+#[ignore = "needs a working sandbox; run by the confined acceptance lane"]
+fn confined_holdout_run_passes_and_builds_cannot_read_the_suite() {
+    let dir = tempdir("holdout_confined");
+    runner::probe(&sandbox(&dir), &dir.join("probe")).expect("a working sandbox");
+    let (repo, base) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    let marker = Path::new(&hs.root).join("api/test.sh");
+    let mut set = profiles();
+    set.profiles[0].args[1] = format!(
+        "sh ./test.sh && ! cat {} && echo SUITE-UNREADABLE",
+        marker.display()
     );
-    let (text, err) = call(&mut s, "put_artifact", &holdout);
-    assert!(err && text.contains("KindForbidden"), "{text}");
-    let mut h = server(&dir, "h");
-    let h1 = id_of(&ok(&mut h, "put_artifact", &holdout));
+    holdout_task_with(&dir, &set, &hs);
+    let work = dir.join("work");
+    let exec = sandbox(&dir);
+    let (k, h1, _) = build_and_holdout(&dir, &base);
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("build");
     runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("holdout");
 
-    let d = open_driver(&dir, &task()).unwrap();
-    let run = d
+    let (_, rep, log) = run_of(&dir, k);
+    assert_eq!(rep.status, RunStatus::Passed, "{log}");
+    assert_eq!(rep.sandbox, runner::Sandboxed::LABEL);
+    assert!(log.contains("SUITE-UNREADABLE"), "{log}");
+    assert!(!log.contains("HOLDOUT-SECRET-OUTPUT"), "{log}");
+
+    let (run, rep, shown) = run_of(&dir, h1);
+    let full = std::fs::read_to_string(rusty_bbp_host::holdout::log_path(&dir, &task(), run))
+        .expect("host-only log");
+    assert_eq!(rep.status, RunStatus::Passed, "{full}");
+    assert!(shown.contains("holdout:api: exit 0"), "{shown}");
+    assert!(!shown.contains("HOLDOUT-SECRET-OUTPUT"), "{shown}");
+    assert!(full.contains("HOLDOUT-SECRET-OUTPUT"), "{full}");
+    println!("BBP_ACCEPTANCE PASS holdout-confined");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #597 2.2: a suite any build run could read is refused at open, and a run
+/// whose repository or work root overlaps the suite never starts.
+#[test]
+fn a_holdout_suite_build_runs_could_read_is_refused() {
+    let dir = tempdir("holdout_overlap");
+    let (repo, _) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    let mut wide = profiles();
+    wide.read_roots.push(dir.to_str().unwrap().into());
+    match open_holdout(&dir, &wide, &hs) {
+        Response::Rejected(r) => {
+            assert_eq!(r.code, Code::BadClaimsConfig);
+            assert!(r.detail.contains("overlaps"), "{}", r.detail);
+        }
+        other => panic!("{other:?}"),
+    }
+    holdout_task(&dir, &hs);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    build_and_holdout(&dir, &base);
+    let inside = Path::new(&hs.root).join("work");
+    let err = runner::run_once(
+        &dir,
+        &task(),
+        &repo,
+        &inside,
+        &sandbox(&dir),
+        Confinement::Sandboxed,
+    )
+    .unwrap_err();
+    assert!(err.contains("overlaps"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #597 2.2: a holdout run whose log was stored before the runner died is
+/// reported `error` against that log, and the host-only full output of the
+/// run that died is kept, not overwritten by the recovery.
+#[test]
+fn a_recovered_holdout_run_keeps_its_host_only_log() {
+    let dir = tempdir("holdout_recover");
+    let (repo, base) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    holdout_task(&dir, &hs);
+    let work = dir.join("work");
+    let exec = sandbox(&dir);
+    let (_, h1, _) = build_and_holdout(&dir, &base);
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("build");
+    // The holdout runner wrote both logs and died before the report.
+    let mut d = open_driver(&dir, &task()).unwrap();
+    let (run, _) = d
         .state
         .claims
         .runs
@@ -885,43 +1029,34 @@ fn a_holdout_run_shows_builders_only_a_summary() {
         .find(|(_, r)| r.candidate == ArtId(h1))
         .map(|(id, r)| (*id, r.clone()))
         .expect("holdout run");
-    let rec = &d.state.artifacts[&run.1.report.expect("report")];
-    let ArtifactPayload::TestReport(rep) = &rec.payload else {
-        panic!("not a report")
-    };
-    assert_eq!(rep.profile_digest, digest);
-    let log = &d.state.artifacts[&run.1.log.expect("log")];
-    let shown = String::from_utf8(d.store.blob_get(&log.blob.sha).unwrap()).unwrap();
-    assert!(!shown.contains("HOLDOUT-SECRET-OUTPUT"), "{shown}");
-    let full = std::fs::read_to_string(rusty_bbp_host::holdout::log_path(&dir, &task(), run.0))
-        .expect("host-only log");
-    match rep.status {
-        RunStatus::Passed => {
-            assert!(shown.contains("holdout:api: exit 0"), "{shown}");
-            assert!(full.contains("HOLDOUT-SECRET-OUTPUT"), "{full}");
-        }
-        RunStatus::Error => eprintln!("sandbox unavailable here: {full}"),
-        RunStatus::Failed => panic!("holdout failed: {full}"),
-    }
-
-    // A planted file in the suite fails the next holdout run before it runs.
-    std::fs::write(Path::new(&hs.root).join("conftest.py"), "skip").unwrap();
-    let again = holdout.replace("\"h1\"", "\"h2\"");
-    let h2 = id_of(&ok(&mut h, "put_artifact", &again));
-    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("planted");
-    let d = open_driver(&dir, &task()).unwrap();
-    let r2 = d
-        .state
-        .claims
-        .runs
-        .values()
-        .find(|r| r.candidate == ArtId(h2))
-        .expect("run");
-    let rec = &d.state.artifacts[&r2.report.expect("report")];
-    let ArtifactPayload::TestReport(rep) = &rec.payload else {
-        panic!("not a report")
-    };
+    let full = rusty_bbp_host::holdout::log_path(&dir, &task(), run);
+    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+    std::fs::write(&full, "HOLDOUT-SECRET-OUTPUT from the run that died\n").unwrap();
+    let blob = d
+        .store
+        .blob_put(b"holdout run: Passed (full output is host-only)\n");
+    let r = d
+        .dispatch(
+            &Command::Runner {
+                op: rusty_bbp_host::fresh_op(),
+                run,
+                secret: d.state.secret_for(run),
+                blob,
+                payload: ArtifactPayload::Log,
+            },
+            rusty_bbp_host::now(),
+        )
+        .expect("dispatch");
+    assert!(matches!(r, Response::Stored(_)), "{r:?}");
+    drop(d);
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("recover");
+    let (_, rep, shown) = run_of(&dir, h1);
     assert_eq!(rep.status, RunStatus::Error);
+    assert!(shown.starts_with("holdout run: Passed"), "{shown}");
+    assert_eq!(
+        std::fs::read_to_string(&full).unwrap(),
+        "HOLDOUT-SECRET-OUTPUT from the run that died\n"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -954,6 +1089,12 @@ fn holdout_versions_add_freely_and_change_only_with_the_human() {
         .expect("digest named")
         .to_owned();
     let rev = state(&dir).rev;
+    // A digest staged for no suite of this task is refused before the core.
+    let typo = "ab".repeat(32);
+    let (code, _) =
+        rejected(human::perform(&dir, &task(), "holdout-updated", &[&typo], Some(rev)).unwrap());
+    assert_eq!(code, Code::HoldoutMismatch);
+    assert_eq!(state(&dir).claims.holdout_digest, Some(v2));
     let r = human::perform(&dir, &task(), "holdout-updated", &[&v3], Some(rev)).expect("update");
     assert_eq!(r, Response::Ok);
     assert_eq!(state(&dir).claims.holdout_digest.map(|d| d.hex()), Some(v3));
