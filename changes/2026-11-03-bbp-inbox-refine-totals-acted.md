@@ -8,7 +8,7 @@ changelog: BBP claims mode accepts the human's Refine answer (C-R10), and bbp in
 - **Added:** `bbp human refine MSG|task BRIEF TEXT` builds that answer.
 - **Added:** `bbp inbox` rows gain three fields:
   - `brief`: the task's brief.
-  - `acted`: the shown claim and candidates that were acted on, with the references of their marks that were not aborted. A Reject or Choose that drops one creates a Remediate card.
+  - `acted`: the shown claim and candidates that were acted on, with the references of their marks that were not aborted. This is metadata only: the host creates no card.
   - `totals`: for a task-total row, each exhausted field with its spent amount, its limit and one allowance, which is the limit the task opened with.
 - **Changed:** `rusty_bbp::engine::exhausted_fields` is now public.
-- **Known limitations:** no diffstat of the acted-on candidate is reported yet; the Remediate card carries the dry-run events and the action references.
+- **Known limitations:** this change is host metadata and the `refine` verb only. Mill Board's planner in #1413 to #1417 does not use them yet, so Refine and task-total decisions stay unsupported there until the board wiring in #1422 (Refine through `refine` with the brief, task-total Approve as one allowance, and the Remediate card). No diffstat of the acted-on candidate is reported yet.
