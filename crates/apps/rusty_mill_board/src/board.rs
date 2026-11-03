@@ -420,7 +420,7 @@ impl<S: Store> Board<S> {
                 .map(InboxAnswer::DryRun)
                 .map_err(inbox_error);
         }
-        let dropped = e.dropped_acted(action);
+        let dropped = e.dropped_acted(action).map_err(inbox_error)?;
         if dropped.is_empty() {
             let outcome = source
                 .act(&e, action, &answerer(&by.name))
@@ -429,7 +429,7 @@ impl<S: Store> Board<S> {
         }
         // Write ahead: the Remediate card is committed before BBP is asked to drop the
         // work, so no drop sent from here can lose its card. A retry finds the card by
-        // its tag, whether BBP's answer was lost or the escalation is already gone.
+        // its derived id, whether BBP's answer was lost or the escalation is already gone.
         let dry = source.preview(&e, action).map_err(inbox_error)?;
         let project = owner.map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project);
         let card = self.remediate(by, &project, &e, &dropped, &dry)?;
@@ -467,23 +467,44 @@ impl<S: Store> Board<S> {
         if dry_run {
             return Err(closed());
         }
-        self.remediation_card(by, id)?
+        let task = id.split('/').next().unwrap_or_default();
+        let project = self.owning_project(by, task)?;
+        self.remediation_card(by, &project, id)?
+            .map(|card| InboxCard::of(&card))
             .map(|card| InboxAnswer::Recorded { card })
             .ok_or_else(closed)
     }
 
-    /// The Remediate card written for escalation `id`, if `by` may see it.
-    fn remediation_card(&self, by: &Actor, id: &str) -> Result<Option<InboxCard>, BoardError> {
-        let tag = format!("remediate:{id}");
+    /// The project of the card linked to BBP task `task`, as `inbox` attaches it.
+    fn owning_project(&self, by: &Actor, task: &str) -> Result<String, BoardError> {
         Ok(self
             .cards()?
-            .iter()
-            .find(|c| by.may_work_in(&c.project) && c.tags.contains(&tag))
-            .map(InboxCard::of))
+            .into_iter()
+            .filter(|c| by.may_work_in(&c.project))
+            .find(|c| c.execution.as_ref().is_some_and(|x| x.bbp_task == task))
+            .map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project))
     }
 
-    /// The one Backlog "Remediate" card for `e`'s dropped acted-on work (#595 §4).
-    /// Tagged with the escalation id, so a retry finds it rather than adding a second.
+    /// The Remediate card written for escalation `id` in `project`. It is found by its
+    /// derived id, never by its tag: a tag anyone can add to any card is no record.
+    fn remediation_card(
+        &self,
+        by: &Actor,
+        project: &str,
+        id: &str,
+    ) -> Result<Option<Card>, BoardError> {
+        if !by.may_work_in(project) {
+            return Ok(None);
+        }
+        Ok(self
+            .store
+            .get(remediation_id(project, id))?
+            .filter(|c| c.project == project))
+    }
+
+    /// The one Backlog "Remediate" card for `e`'s dropped acted-on work (#595 §4), at
+    /// the id derived from `project` and the escalation, so a retry finds it rather
+    /// than adding a second. Its `remediate:` tag is for people only.
     fn remediate(
         &self,
         by: &Actor,
@@ -492,8 +513,8 @@ impl<S: Store> Board<S> {
         dropped: &[&Acted],
         dry: &DryRun,
     ) -> Result<InboxCard, BoardError> {
-        if let Some(card) = self.remediation_card(by, &e.id)? {
-            return Ok(card);
+        if let Some(card) = self.remediation_card(by, project, &e.id)? {
+            return Ok(InboxCard::of(&card));
         }
         let tag = format!("remediate:{}", e.id);
         let text = |id: u64| {
@@ -531,8 +552,19 @@ impl<S: Store> Board<S> {
             "Remediate: {}",
             text(dropped.first().map_or(0, |x| x.claim))
         );
-        let card = self.add_in(by, project, &title, &body, vec![tag])?;
-        Ok(InboxCard::of(&card))
+        let card = Card {
+            id: remediation_id(project, &e.id),
+            ..Card::new(&title, &body, vec![tag], (self.clock)())?
+        };
+        match self.create(by, project, card) {
+            Ok(card) => Ok(InboxCard::of(&card)),
+            // A concurrent decision on the same escalation wrote it first.
+            Err(BoardError::Conflict) => self
+                .remediation_card(by, project, &e.id)?
+                .map(|c| InboxCard::of(&c))
+                .ok_or(BoardError::Conflict),
+            Err(other) => Err(other),
+        }
     }
 
     fn inbox_source(&self, by: &Actor) -> Result<&Arc<dyn Escalations>, BoardError> {
@@ -1281,6 +1313,18 @@ pub enum InboxAnswer {
         /// The Backlog card to undo or reconcile the work.
         card: InboxCard,
     },
+}
+
+/// Namespace of the Remediate card ids (UUIDv5).
+const REMEDIATION_NS: Uuid = Uuid::from_u128(0x6d69_6c6c_2d72_656d_6564_6961_7465_0595);
+
+/// The id of the Remediate card for escalation `escalation` in `project`. Every other
+/// card id is random, so a card at this id was written by [`Board::inbox_act`].
+fn remediation_id(project: &str, escalation: &str) -> Uuid {
+    Uuid::new_v5(
+        &REMEDIATION_NS,
+        format!("{project}\n{escalation}").as_bytes(),
+    )
 }
 
 fn inbox_error(e: InboxError) -> BoardError {

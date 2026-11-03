@@ -15,6 +15,7 @@ use rusty_mill_board::domain::{BoardError, Card, Event};
 use rusty_mill_board::inbox::{
     Action, DryRun, Escalation, Escalations, InboxError, Outcome, Response, plan,
 };
+use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::{MemStore, Store};
 use uuid::Uuid;
 
@@ -26,7 +27,10 @@ struct Fake {
     rows: Mutex<Vec<Escalation>>,
     consume: bool,
     lose_answer: AtomicBool,
-    refuse: bool,
+    /// Refuse the command at this step; the ones before it commit.
+    refuse_at: Option<usize>,
+    /// The `verb args` of every command each act sent.
+    planned: Mutex<Vec<Vec<String>>>,
     asked: Mutex<Vec<Vec<String>>>,
     acted: Mutex<Vec<(String, Action, String)>>,
 }
@@ -62,14 +66,20 @@ impl Escalations for Fake {
         })
     }
     fn act(&self, e: &Escalation, a: &Action, by: &str) -> Result<Outcome, InboxError> {
-        plan(e, a)?;
+        let steps = plan(e, a)?;
+        self.planned.lock().unwrap().push(
+            steps
+                .iter()
+                .map(|s| format!("{} {}", s.verb, s.args.join(" ")))
+                .collect(),
+        );
         self.acted
             .lock()
             .unwrap()
             .push((e.id.clone(), a.clone(), by.to_owned()));
-        if self.refuse {
+        if let Some(step) = self.refuse_at {
             return Ok(Outcome::Refused {
-                step: 0,
+                step,
                 code: "dep_closed".into(),
                 detail: "a dependency closed".into(),
             });
@@ -86,7 +96,7 @@ impl Escalations for Fake {
 
 fn escalation(task: &str, rev: u64) -> Escalation {
     serde_json::from_value(json!({
-        "id": format!("{task}/msg:1/3"), "task": task, "brief": 2, "rev": rev, "seq": 3,
+        "id": format!("{task}/msg:1/3"), "task": task, "brief": 2, "rev": rev, "seq": 3, "acted": [], "totals": [],
         "reason": "Irreversible",
         "claim": {"id": 1, "text": "ship it", "status": "Escalated", "score": 12,
                   "confidence": 96, "epoch": 0, "spent": 2, "budget": 16},
@@ -314,10 +324,10 @@ impl Store for Flaky {
 fn shipped() -> Escalation {
     let mut e = escalation("T1", 7);
     e.reason = rusty_mill_board::inbox::Reason::ReopenedAfterAction;
-    e.acted = vec![rusty_mill_board::inbox::Acted {
+    e.acted = Some(vec![rusty_mill_board::inbox::Acted {
         claim: 1,
         marks: vec!["pr-7".into()],
-    }];
+    }]);
     e
 }
 
@@ -334,6 +344,7 @@ fn board_over(
         down: Arc::clone(down),
     };
     let board: Shared = Board::new(Box::new(flaky) as Box<dyn Store>, Roles::default())
+        .with_projects(Projects::parse(r#"{"other": ["crates/other"]}"#).unwrap())
         .with_escalations(Arc::clone(fake) as Arc<dyn Escalations>);
     if link_t1 {
         let nano = board.roles().actor("nano", "human").unwrap();
@@ -484,7 +495,7 @@ fn refused_storage(r: Result<Value, CallError>) -> String {
 #[test]
 fn a_refused_drop_marks_its_card_as_nothing_to_remediate() {
     let fake = Arc::new(Fake {
-        refuse: true,
+        refuse_at: Some(0),
         ..Fake::with(vec![shipped()])
     });
     let (store, down) = (
@@ -497,4 +508,100 @@ fn a_refused_drop_marks_its_card_as_nothing_to_remediate() {
     let card = &remediate_cards(&board)[0];
     let said = card.comments.last().map(|c| c.text.as_str()).unwrap_or("");
     assert!(said.contains("nothing was dropped"), "{said}");
+}
+
+/// The record of a remediation is the card at its derived id, never a tag: a card
+/// someone tagged `remediate:<id>` by hand, here or in another project, is no record.
+#[test]
+fn a_forged_remediate_tag_is_no_record() {
+    let fake = Arc::new(Fake {
+        consume: true,
+        ..Fake::with(vec![shipped()])
+    });
+    let (store, down) = (
+        Arc::new(MemStore::default()),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let board = board_over(&store, &down, &fake, true);
+    let nano = board.roles().actor("nano", "human").unwrap();
+    let tag = vec!["remediate:T1/msg:1/3".to_owned()];
+    let forged = board.add(&nano, "forged here", "", tag.clone()).unwrap();
+    let elsewhere = board
+        .add_in(&nano, "other", "secret elsewhere", "", tag)
+        .unwrap();
+    let scoped = Identity {
+        projects: Some(vec!["default".into()]),
+        ..owner()
+    };
+
+    let out = call(&board, &scoped, "inbox_act", reject()).unwrap();
+    let card = &out["remediated"]["card"];
+    assert_eq!(card["title"], "Remediate: ship it", "{out}");
+    assert_eq!(card["project"], "default");
+    assert_ne!(card["id"], json!(forged.id));
+    assert_ne!(card["id"], json!(elsewhere.id));
+    assert_eq!(fake.acted.lock().unwrap().len(), 1);
+
+    let again = call(&board, &scoped, "inbox_act", reject()).unwrap();
+    assert_eq!(again["recorded"]["card"], *card, "{again}");
+    assert!(!again.to_string().contains("secret elsewhere"));
+}
+
+/// A host older than #1420 does not say what was acted on: a drop fails closed.
+#[test]
+fn an_old_host_without_acted_on_metadata_cannot_drop() {
+    let mut old = shipped();
+    old.acted = None;
+    let fake = Arc::new(Fake::with(vec![old]));
+    let (store, down) = (
+        Arc::new(MemStore::default()),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let board = board_over(&store, &down, &fake, true);
+    assert!(refused(call(&board, &owner(), "inbox_act", reject())).contains("predates #1420"));
+    assert!(fake.acted.lock().unwrap().is_empty());
+    assert!(remediate_cards(&board).is_empty());
+}
+
+/// Approve's extends committed and its resume did not: the host now reports every
+/// total funded, and a retry only resumes, without a second allowance.
+#[test]
+fn a_task_total_whose_resume_failed_resumes_on_retry_without_more_allowance() {
+    let mut paused: Escalation = serde_json::from_value(json!({
+        "id": "T1/task/9", "task": "T1", "brief": 2, "rev": 7, "seq": 9, "reason": "TaskTotal",
+        "claim": null, "stakes": null, "reversible": null, "mark": null, "candidate": null,
+        "acted": [], "totals": [{"field": "Messages", "spent": 41, "limit": 40, "allowance": 40}]
+    }))
+    .unwrap();
+    let fake = Arc::new(Fake {
+        refuse_at: Some(1),
+        ..Fake::with(vec![paused.clone()])
+    });
+    let (store, down) = (
+        Arc::new(MemStore::default()),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let board = board_over(&store, &down, &fake, true);
+    let approve = |rev: u64| json!({"id": "T1/task/9", "rev": rev, "action": "approve"});
+    let out = call(&board, &owner(), "inbox_act", approve(7)).unwrap();
+    assert_eq!(out["outcome"]["Refused"]["step"], 1, "{out}");
+    assert_eq!(
+        *fake.planned.lock().unwrap(),
+        [vec![
+            "extend messages 80".to_owned(),
+            "resume open".to_owned()
+        ]]
+    );
+
+    // The extend committed (rev 8) and the host reports the total funded again.
+    paused.rev = 8;
+    paused.totals = Some(vec![]);
+    let fake = Arc::new(Fake::with(vec![paused]));
+    let board = board_over(&store, &down, &fake, false);
+    let out = call(&board, &owner(), "inbox_act", approve(8)).unwrap();
+    assert_eq!(out, json!({"outcome": "Done"}));
+    assert_eq!(
+        *fake.planned.lock().unwrap(),
+        [vec!["resume open".to_owned()]]
+    );
 }
