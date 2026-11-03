@@ -30,6 +30,7 @@ orch-claude = { workspace = true }
 orch-store = { workspace = true }
 orch-lens = { workspace = true }
 orch-openai = { workspace = true }
+rusty_time = { workspace = true }
 rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
 
 [dev-dependencies]

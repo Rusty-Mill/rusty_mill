@@ -3,9 +3,10 @@
 //!
 //! Each provider's adapter-specific `settings` are checked here, at load,
 //! with the field named, so a typo never waits for the first call. The
-//! operator's billing and host assertions are passed through to the CLI
-//! adapters, which fail closed without them: building a registry never
-//! makes a call, and an unasserted provider is `Unavailable` when asked.
+//! operator's billing and host assertions ([`super::assertions`]) are passed
+//! per provider to the CLI adapters, which fail closed without them:
+//! building a registry never makes a call, and an unasserted provider is
+//! `Unavailable` when asked.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -19,6 +20,8 @@ use orch_lens::config::{ProviderKind, Tools};
 use orch_lens::{LensConfig, Model};
 use orch_openai::{Config as HttpConfig, OpenAiHttp};
 use rusty_json::Map;
+
+use super::assertions::Grants;
 
 /// A local model server's deadline when the config names none. Large
 /// local models answer a 32k prompt in minutes, not seconds.
@@ -55,8 +58,8 @@ pub struct Registry {
 
 impl Registry {
     /// Adapters over the real CLIs and network, working in `repo`.
-    pub fn build(config: &LensConfig, repo: &Path, a: Assertions) -> Result<Self, String> {
-        Self::build_with(config, repo, a, || StdCommand)
+    pub fn build(config: &LensConfig, repo: &Path, grants: &Grants) -> Result<Self, String> {
+        Self::build_with(config, repo, grants, || StdCommand)
     }
 
     /// As [`Registry::build`], with each CLI adapter's process runner made
@@ -64,7 +67,7 @@ impl Registry {
     pub fn build_with<C, F>(
         config: &LensConfig,
         repo: &Path,
-        a: Assertions,
+        grants: &Grants,
         runner: F,
     ) -> Result<Self, String>
     where
@@ -74,6 +77,7 @@ impl Registry {
         let mut entries = BTreeMap::new();
         for (id, p) in &config.providers {
             let at = |e: String| format!("providers.{id}.{e}");
+            let a = grants.for_provider(*id);
             let entry = match p.kind {
                 ProviderKind::ClaudeCli => claude(&p.settings, repo, a, &runner).map_err(at)?,
                 ProviderKind::CodexCli => codex(&p.settings, repo, a, &runner).map_err(at)?,
@@ -274,10 +278,14 @@ mod tests {
     }
 
     fn build(c: &LensConfig, a: Assertions) -> (Result<Registry, String>, Arc<FakeCommand>) {
+        let grants: Grants = ["claude", "codex", "local"]
+            .into_iter()
+            .map(|p| (id(p), a))
+            .collect();
         // Passes the subscription probe, then is not a valid reply.
         let fake = Arc::new(FakeCommand::ok(r#"{"authMethod":"claude.ai"}"#));
         let shared = Shared(Arc::clone(&fake));
-        let r = Registry::build_with(c, &PathBuf::from("/repo"), a, || shared.clone());
+        let r = Registry::build_with(c, &PathBuf::from("/repo"), &grants, || shared.clone());
         (r, fake)
     }
 
