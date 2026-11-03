@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Lens assertions can name a container
+**2026-11-03**
+
+- The operator's `host_cleared` entry may name a container and its exact
+  mounts, including a read-only bind of `/etc/machine-id` (#594). Nothing
+  runs under it yet; the per-call container check follows.
+- Under a container clearance, a machine-bound no-overage entry must name
+  the container's id, and Claude gets no grant.
+
 ## orch-lens: the lens runner's core
 **2026-11-03**
 
