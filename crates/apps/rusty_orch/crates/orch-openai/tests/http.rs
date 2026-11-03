@@ -27,6 +27,11 @@ struct Seen {
 /// Serve one connection: read a request, then answer with `reply` (raw
 /// bytes), or never answer when `reply` is `None`.
 fn serve_once(reply: Option<String>) -> (SocketAddr, mpsc::Receiver<Seen>) {
+    serve_raw(reply.map(String::into_bytes))
+}
+
+/// [`serve_once`] with a reply that need not be UTF-8.
+fn serve_raw(reply: Option<Vec<u8>>) -> (SocketAddr, mpsc::Receiver<Seen>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("addr");
     let (tx, rx) = mpsc::channel();
@@ -40,7 +45,7 @@ fn serve_once(reply: Option<String>) -> (SocketAddr, mpsc::Receiver<Seen>) {
         match reply {
             Some(raw) => {
                 let mut out = stream;
-                let _ = out.write_all(raw.as_bytes());
+                let _ = out.write_all(&raw);
             }
             None => thread::sleep(Duration::from_secs(5)),
         }
@@ -251,4 +256,104 @@ fn it_connects_to_the_address_it_checked() {
         .expect("completes");
     let seen = seen.recv().expect("seen");
     assert!(seen.head.contains(&"Host: llama.lan:9".to_owned()));
+}
+
+#[test]
+fn interim_responses_are_read_past() {
+    let reply = format!(
+        "HTTP/1.1 103 Early Hints\r\nLink: </x>; rel=preload\r\n\r\n{}",
+        response("200 OK", OK_BODY)
+    );
+    let (addr, _seen) = serve_once(Some(reply));
+    let c = client(addr, None, SECS)
+        .complete(&PROMPT)
+        .expect("completes");
+    assert_eq!(c.text, r#"{"posts":[]}"#);
+}
+
+#[test]
+fn a_protocol_switch_is_permanent() {
+    let reply = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: x\r\n\r\n".to_owned();
+    let (addr, _seen) = serve_once(Some(reply));
+    let e = client(addr, None, SECS).complete(&PROMPT).expect_err("101");
+    assert!(
+        matches!(&e, ClassifiedError::Permanent(m) if m.0.contains("101")),
+        "{e:?}"
+    );
+}
+
+#[test]
+fn the_key_never_appears_in_a_framing_or_parse_error() {
+    let replies = [
+        "HTTP/1.1 200 OK\r\nContent-Length: sk-test-secret\r\n\r\n",
+        "HTTP/1.1 200 sk-test-secret\r\nTransfer-Encoding: chunked\r\n\r\nsk-test-secret\r\n",
+        "HTTP/1.1 2sk-test-secret OK\r\n\r\n",
+        "sk-test-secret\r\n\r\n",
+    ];
+    for reply in replies {
+        let (addr, _seen) = serve_once(Some(reply.to_owned()));
+        let e = client(addr, Some("LLAMA_KEY"), SECS)
+            .with_env(test_key)
+            .complete(&PROMPT)
+            .expect_err(reply);
+        assert!(
+            !format!("{e:?}").contains("sk-test-secret"),
+            "{reply}: {e:?}"
+        );
+    }
+}
+
+#[test]
+fn invalid_utf8_in_a_reply_is_permanent() {
+    let mut raw = br#"{"choices":[{"message":{"content":"a"#.to_vec();
+    raw.push(0xff);
+    raw.extend_from_slice(br#"b"}}]}"#);
+    let mut reply =
+        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", raw.len()).into_bytes();
+    reply.extend_from_slice(&raw);
+    let (addr, _seen) = serve_raw(Some(reply));
+    let e = client(addr, None, SECS)
+        .complete(&PROMPT)
+        .expect_err("utf8");
+    assert!(
+        matches!(&e, ClassifiedError::Permanent(m) if m.0.contains("UTF-8")),
+        "{e:?}"
+    );
+}
+
+/// A resolver that hangs, as an unresponsive DNS server would.
+struct SlowDns;
+
+impl Resolve for SlowDns {
+    fn resolve(&self, _: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+        thread::sleep(Duration::from_secs(2));
+        Ok(vec![SocketAddr::from(([127, 0, 0, 1], port))])
+    }
+}
+
+#[test]
+fn the_deadline_bounds_name_resolution() {
+    let start = Instant::now();
+    let e = OpenAiHttp::new(
+        Config::new(
+            "http://llama.lan:8080/v1",
+            "m",
+            None,
+            Duration::from_millis(50),
+            false,
+        )
+        .expect("config"),
+    )
+    .with_resolver(SlowDns)
+    .complete(&PROMPT)
+    .expect_err("times out");
+    assert!(
+        matches!(&e, ClassifiedError::Transient(m) if m.0.contains("timed out")),
+        "{e:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "{:?}",
+        start.elapsed()
+    );
 }
