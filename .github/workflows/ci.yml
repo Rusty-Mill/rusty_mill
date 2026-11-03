@@ -1944,6 +1944,7 @@ jobs:
           cargo test --locked -p orch-bbp --lib --no-run
           cargo test --locked -p rusty_orch --lib --no-run
           cargo test --locked -p rusty_bbp_host --test moderator_e2e --test rust_lld_profile --test claims_host --no-run
+          cargo test --locked -p rusty_mill_board --test inbox_real_bbp --no-run
       - name: Confined execution, lifecycle and durable pause/adoption recovery
         shell: bash
         run: |
