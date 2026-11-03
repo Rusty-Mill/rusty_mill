@@ -54,6 +54,13 @@ pub enum Action {
     Unknown,
 }
 
+impl Action {
+    /// Whether this acts on the focused block, which must then be shown.
+    pub fn on_focused_block(&self) -> bool {
+        !matches!(self, Action::Detach | Action::Focus(_) | Action::Unknown)
+    }
+}
+
 /// Where the parser is in a prefix command, which may span reads.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum State {

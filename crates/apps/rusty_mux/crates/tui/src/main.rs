@@ -2593,6 +2593,11 @@ mod client {
 
         fn act(&mut self, action: Action) {
             let focus = self.focus;
+            // An empty window keeps the last focus for want of another: no
+            // block of its to act on, nor one detached or of a window left.
+            if action.on_focused_block() && !self.shows(focus) {
+                return bell();
+            }
             match action {
                 Action::Input(data) => {
                     if let Some(pane) = self.panes.get_mut(&focus) {
@@ -2641,6 +2646,13 @@ mod client {
                 }
                 Action::Unknown => bell(),
             }
+        }
+
+        /// Whether `block` is in the layout shown.
+        fn shows(&self, block: BlockId) -> bool {
+            self.layout
+                .as_ref()
+                .is_some_and(|l| l.blocks().contains(&block))
         }
 
         /// Focuses `block` here at once and, on a server that keeps the
@@ -4254,6 +4266,85 @@ mod client {
             app.take(Input::Rejoined(Ok(back)));
             assert!(app.listing.is_none(), "7 shows already: nothing to ask");
             assert_eq!(app.window, Some(window_id(7)));
+        }
+
+        /// In an empty window the focus left over is no block to act on:
+        /// keys for it ring the bell and nothing is sent.
+        #[cfg(unix)]
+        #[test]
+        fn keys_in_an_empty_window_touch_no_block() {
+            let (mut app, _inbox, [control, a_far, _b_far]) = following();
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::LayoutChanged {
+                    window: window_id(7),
+                    layout: None,
+                    zoomed: None,
+                },
+            });
+            app.settle();
+            answer_list(&mut app, &control, &[block(1)]);
+            assert_eq!(app.focus, block(1), "the stale focus");
+            for action in [
+                input(b"x"),
+                Action::Close,
+                Action::DetachBlock,
+                Action::ToggleZoom,
+                Action::Split { beside: true },
+                Action::Swap { next: true },
+                Action::Resize(Dir::Right),
+            ] {
+                app.act(action);
+            }
+            let asked = sent(&control);
+            assert!(
+                !asked.iter().any(|m| matches!(
+                    m,
+                    Message::CloseBlock { .. }
+                        | Message::DetachBlock { .. }
+                        | Message::Zoom { .. }
+                        | Message::Split { .. }
+                        | Message::SwapBlocks { .. }
+                        | Message::ResizeSplit { .. }
+                )),
+                "{asked:?}"
+            );
+            assert!(typed_in(&sent(&a_far)).is_empty());
+        }
+
+        /// A Close held for a block of the window left behind, on the path
+        /// back into an empty active window, closes nothing.
+        #[cfg(unix)]
+        #[test]
+        fn a_held_close_for_the_window_left_behind_closes_nothing() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"kept"));
+            app.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            app.typed(Action::Close);
+            app.typed(input(b"held"));
+            let (mut back, control, a_new, b_new) = back(takeover(1));
+            back.window = Some(window_id(9));
+            back.layout = Some(Shape {
+                session: Some(session_id(8)),
+                active: Some(window_id(9)),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert_eq!(app.window, Some(window_id(9)));
+            let asked = sent(&control);
+            assert!(
+                !asked
+                    .iter()
+                    .any(|m| matches!(m, Message::CloseBlock { .. })),
+                "{asked:?}"
+            );
+            for far in [&a_new, &b_new, &control] {
+                assert!(typed_in(&sent(far)).is_empty());
+            }
         }
 
         /// An empty window with a block still detached in it stays open on
