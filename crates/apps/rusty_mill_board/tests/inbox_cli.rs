@@ -7,16 +7,23 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::inbox::{Action, Escalations, InboxError, Outcome, Reason, Response};
 
 const INBOX: &str = r#"[{"id":"C1/msg:1/14","task":"C1","rev":16,"seq":14,"reason":"Budget","claim":{"id":1,"text":"ship it","domains":["d"],"status":"Escalated","score":4,"confidence":70,"epoch":0,"spent":8,"budget":8,"evidence":[],"deps":[],"candidates":[],"sole_candidate":false,"current":null,"failing":[],"tests_changed":[],"endorsement":null},"stakes":"Low","reversible":true,"evidence":[],"candidates":[],"mark":null,"candidate":null}]"#;
 
+/// Held by each test for its whole run. Writing an executable while another
+/// thread forks can leak the write fd into the child, and exec then fails
+/// with ETXTBSY; one test at a time avoids it.
+static SERIAL: Mutex<()> = Mutex::new(());
+
 /// A fake `bbp` in a fresh dir. Every call appends its argv to `calls`.
 /// A dry run previews two events; a commit answers `Ok`, unless its
 /// fence is listed in `stale`, then it answers `StaleRev`.
-fn fake(tag: &str, stale: &[u64]) -> (PathBuf, PathBuf) {
+fn fake(tag: &str, stale: &[u64]) -> (PathBuf, PathBuf, MutexGuard<'static, ()>) {
+    let serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let dir = std::env::temp_dir().join(format!("mill_inbox_{}_{tag}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
@@ -44,7 +51,7 @@ echo '"Ok"'
     let bin = dir.join("bbp");
     fs::write(&bin, script).unwrap();
     fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-    (bin, calls)
+    (bin, calls, serial)
 }
 
 fn calls(path: &Path) -> Vec<String> {
@@ -57,7 +64,7 @@ fn calls(path: &Path) -> Vec<String> {
 
 #[test]
 fn open_reads_the_inbox_of_the_given_tasks() {
-    let (bin, log) = fake("open", &[]);
+    let (bin, log, _serial) = fake("open", &[]);
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let rows = cli.open(&["C1".into(), "C2".into()]).unwrap();
     assert_eq!(rows.len(), 1);
@@ -70,7 +77,7 @@ fn open_reads_the_inbox_of_the_given_tasks() {
 
 #[test]
 fn no_tasks_runs_nothing_and_a_bad_task_id_is_refused() {
-    let (bin, log) = fake("none", &[]);
+    let (bin, log, _serial) = fake("none", &[]);
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     assert!(cli.open(&[]).unwrap().is_empty());
     assert!(matches!(
@@ -82,7 +89,7 @@ fn no_tasks_runs_nothing_and_a_bad_task_id_is_refused() {
 
 #[test]
 fn approve_on_budget_extends_then_reopens_with_chained_fences() {
-    let (bin, log) = fake("chain", &[]);
+    let (bin, log, _serial) = fake("chain", &[]);
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
     assert_eq!(
@@ -105,7 +112,7 @@ fn approve_on_budget_extends_then_reopens_with_chained_fences() {
 
 #[test]
 fn a_stale_commit_stops_the_sequence_and_says_where() {
-    let (bin, log) = fake("stale", &[18]);
+    let (bin, log, _serial) = fake("stale", &[18]);
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
     let out = cli.act(&e, &Action::Approve, "nano").unwrap();
@@ -122,7 +129,7 @@ fn a_stale_commit_stops_the_sequence_and_says_where() {
 
 #[test]
 fn preview_dry_runs_only_the_first_command_and_lists_the_rest() {
-    let (bin, log) = fake("preview", &[]);
+    let (bin, log, _serial) = fake("preview", &[]);
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
     let dry = cli.preview(&e, &Action::Approve).unwrap();
@@ -136,7 +143,7 @@ fn preview_dry_runs_only_the_first_command_and_lists_the_rest() {
 
 #[test]
 fn an_invalid_action_sends_nothing() {
-    let (bin, log) = fake("invalid", &[]);
+    let (bin, log, _serial) = fake("invalid", &[]);
     let cli = BbpCli::new(bin, "/srv/bbp".into());
     let e = cli.open(&["C1".into()]).unwrap().remove(0);
     let n = calls(&log).len();
@@ -156,6 +163,7 @@ fn an_invalid_action_sends_nothing() {
 
 #[test]
 fn a_failing_host_is_an_error_not_an_outcome() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
     let cli = BbpCli::new("/nonexistent/bbp".into(), "/srv/bbp".into());
     assert!(matches!(cli.open(&["C1".into()]), Err(InboxError::Host(_))));
 }
