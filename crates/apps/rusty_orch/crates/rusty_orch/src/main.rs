@@ -17,6 +17,7 @@ fn main() -> ExitCode {
     match argv.next().as_deref() {
         Some("inspect") => return inspect(argv),
         Some("maintain") => return maintain(argv),
+        Some("lens") => return lens(argv),
         _ => {}
     }
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -130,6 +131,38 @@ fn maintain(argv: impl IntoIterator<Item = String>) -> ExitCode {
     match maintenance::run(&options) {
         Ok(report) => {
             println!("{report}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("rusty_orch: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
+    use rusty_orch::lens::check;
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(error) => {
+            eprintln!("rusty_orch: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let options = match check::options(argv, cwd) {
+        Ok(options) => options,
+        Err(ArgsError::Help) => {
+            println!("{}", check::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        Err(ArgsError::Usage(message)) => {
+            eprintln!("rusty_orch: {message}\n{}", check::USAGE);
+            return ExitCode::from(2);
+        }
+    };
+    match check::run(&options) {
+        Ok(report) => {
+            print!("{report}");
             ExitCode::SUCCESS
         }
         Err(error) => {

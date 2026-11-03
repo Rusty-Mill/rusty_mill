@@ -5,8 +5,10 @@
 //! - [`registry`]: one [`orch_lens::Model`] per configured provider, with
 //!   the operator's assertions passed to the CLI adapters.
 //! - [`assertions`]: the operator's assertions file, read fail-closed.
+//! - [`check`]: `rusty_orch lens check`, a dry run of the above.
 //! - [`container`]: the dedicated container a host-cleared provider runs in.
 
 pub mod assertions;
+pub mod check;
 pub mod container;
 pub mod registry;

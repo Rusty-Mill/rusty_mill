@@ -120,6 +120,19 @@ impl ContainerSpec {
             _ => None,
         })
     }
+
+    /// Where `repo` appears inside the container: the destination of the
+    /// bind mount whose source it is, if any.
+    pub fn workdir_for(&self, repo: &Path) -> Option<&str> {
+        self.mounts.iter().find_map(|m| match m {
+            Mount::Bind {
+                source,
+                destination,
+                ..
+            } if source == repo => Some(destination.as_str()),
+            _ => None,
+        })
+    }
 }
 
 /// Check `inspect` (the output of `podman container inspect <name>`)

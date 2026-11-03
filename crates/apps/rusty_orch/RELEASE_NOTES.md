@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## `rusty_orch lens check`
+**2026-11-03**
+
+- A dry run of the lens provider setup (#594): it loads the config and the
+  operator's assertions file (default `/etc/let-em-loose/assertions.json`),
+  builds every provider and prints one line each saying whether it would
+  be admitted and what is still checked at call time. No model is called
+  and no container is inspected.
+
 ## Codex lens questions run only in the checked container
 **2026-11-03**
 
