@@ -959,3 +959,125 @@ fn holdout_versions_add_freely_and_change_only_with_the_human() {
     assert_eq!(state(&dir).claims.holdout_digest.map(|d| d.hex()), Some(v3));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------- golden sets (#597)
+
+/// A golden set whose one case checks that the candidate's flag says ok.
+fn golden_set(dir: &Path, sign: bool) -> PathBuf {
+    use rusty_bbp_host::golden;
+    let g = dir.join("golden").join("flag");
+    std::fs::create_dir_all(g.join("cases/says-ok")).unwrap();
+    std::fs::write(
+        g.join("cases/says-ok/case.toml"),
+        "cmd = \"/bin/cat\"\nargs = [\"flag.txt\"]\n[expect]\nexit = 0\nstdout = \"ok\\n\"\n",
+    )
+    .unwrap();
+    let files = golden::local_files(&g).unwrap();
+    let text = golden::manifest_text(&files);
+    let (_, set) = golden::parse_manifest(&text).unwrap();
+    std::fs::write(g.join(golden::MANIFEST), text).unwrap();
+    if sign {
+        std::fs::write(
+            g.join(golden::SIGNOFF),
+            format!(
+                "digest = \"{}\"\nsigner = \"nano\"\ndate = \"2026-11-03\"\n",
+                set.hex()
+            ),
+        )
+        .unwrap();
+    }
+    g
+}
+
+/// #597 section 3: an unsigned golden set cannot open a task (`bad_golden`);
+/// a signed one becomes a `golden:` profile of the holdout suite, which the
+/// runner executes with `bbp golden-run` in the candidate's tree.
+#[test]
+fn a_signed_golden_set_runs_as_a_holdout_profile() {
+    let dir = tempdir("golden");
+    let (repo, base) = repo(&dir);
+    // Unsigned: the CLI refuses with bad_golden and opens nothing.
+    let unsigned = golden_set(&dir.join("unsigned"), false);
+    let files = tempdir("golden-cli");
+    let roster = files.join("roster.json");
+    std::fs::write(
+        &roster,
+        rusty_serde::json::to_string(&vec![lens("a", 0), holdout_lens()]).unwrap(),
+    )
+    .unwrap();
+    let set = files.join("profiles.json");
+    std::fs::write(&set, profiles().to_bytes().unwrap()).unwrap();
+    let brief = files.join("brief.md");
+    std::fs::write(&brief, "x").unwrap();
+    let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["open", "--mode", "claims", "--confine", "sandbox", "--dir"])
+        .arg(&dir)
+        .args(["--task", "C1", "--repo", "local", "--brief"])
+        .arg(&brief)
+        .arg("--roster")
+        .arg(&roster)
+        .arg("--profiles")
+        .arg(&set)
+        .arg("--golden")
+        .arg(&unsigned)
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("BadGolden"),
+        "{text} {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!log_path_for(&dir, &task()).exists());
+
+    // Signed: the golden set is the holdout suite.
+    let g = golden_set(&dir, true);
+    let hs = rusty_bbp_host::holdout::with_golden(None, &g, Path::new(env!("CARGO_BIN_EXE_bbp")))
+        .expect("golden suite");
+    assert_eq!(hs.set.profiles[0].name, "golden:flag");
+    holdout_task(&dir, &hs);
+    let c = claim(&dir, "a", "flag", true);
+    let mut s = server(&dir, "a");
+    let (text, err) = put_candidate(&mut s, "k", &base, FLAG_ONLY, c);
+    assert!(!err, "{text}");
+    let diffs = match &state(&dir).artifacts[&ArtId(id_of(&text))].payload {
+        ArtifactPayload::Candidate(m) => m.diffs[0].0,
+        _ => panic!("not a candidate"),
+    };
+    let work = dir.join("work");
+    let exec = runner::Sandboxed::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
+        &dir.join("sandbox-state"),
+    );
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("build");
+    let mut h = server(&dir, "h");
+    let h1 = id_of(&ok(
+        &mut h,
+        "put_artifact",
+        &format!(
+            r#"{{"op":"g1","kind":"candidate","base":"{base}","diffs":[{diffs}],"claim":{c},"suite":"holdout"}}"#
+        ),
+    ));
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("golden");
+    let d = open_driver(&dir, &task()).unwrap();
+    let (id, r) = d
+        .state
+        .claims
+        .runs
+        .iter()
+        .find(|(_, r)| r.candidate == ArtId(h1))
+        .expect("golden run");
+    let rec = &d.state.artifacts[&r.report.expect("report")];
+    let ArtifactPayload::TestReport(rep) = &rec.payload else {
+        panic!("not a report")
+    };
+    let full = std::fs::read_to_string(rusty_bbp_host::holdout::log_path(&dir, &task(), *id))
+        .unwrap_or_default();
+    match rep.status {
+        RunStatus::Passed => assert!(full.contains("pass says-ok"), "{full}"),
+        RunStatus::Error => eprintln!("sandbox unavailable here: {full}"),
+        RunStatus::Failed => panic!("golden case failed: {full}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&files);
+}

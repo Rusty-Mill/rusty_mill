@@ -339,4 +339,7 @@ pub enum Code {
     /// Host (#597): a candidate's diff adds, modifies or deletes a protected
     /// test path outside an accepted `tests` claim.
     ProtectedPath,
+    /// Host (#597): a golden set's files do not match its MANIFEST, or its
+    /// SIGNOFF does not name the set digest.
+    BadGolden,
 }

@@ -35,6 +35,46 @@ pub struct HoldoutSet {
     pub files: Vec<SuiteFile>,
 }
 
+/// Add the signed golden set at `golden` as a `golden:<dir name>` profile
+/// that `bbp golden-run` (the binary at `exe`) executes. With `base`, the set
+/// must lie inside its root, so its files are part of the suite's manifest;
+/// without, the golden set is the whole suite. The caller checks the
+/// sign-off first (`bad_golden`).
+pub fn with_golden(
+    base: Option<HoldoutSet>,
+    golden: &Path,
+    exe: &Path,
+) -> Result<HoldoutSet, String> {
+    let golden = golden
+        .canonicalize()
+        .map_err(|e| format!("golden {}: {e}", golden.display()))?;
+    let name = golden
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("golden directory has no UTF-8 name")?;
+    let text = |p: &Path| p.to_str().map(str::to_owned).ok_or("path is not UTF-8");
+    let (mut set, root) = match base {
+        Some(h) if golden.starts_with(&h.root) => (h.set, PathBuf::from(h.root)),
+        Some(_) => return Err("the golden set must lie inside the holdout root".into()),
+        None => {
+            let mut set = ProfileSet::shell("unused", "unused");
+            set.profiles.clear();
+            (set, golden.clone())
+        }
+    };
+    set.profiles.push(crate::profiles::Profile {
+        name: format!("golden:{name}"),
+        program: text(exe)?,
+        args: vec!["golden-run".into(), text(&golden)?],
+    });
+    if let Some(bin) = exe.parent() {
+        set.read_roots.push(text(bin)?);
+    }
+    set.read_roots
+        .extend(crate::golden::fixture_roots(&golden)?);
+    HoldoutSet::scan(set, &root)
+}
+
 /// The environment variable a holdout profile finds the suite under.
 pub const ROOT_ENV: &str = "BBP_HOLDOUT";
 
