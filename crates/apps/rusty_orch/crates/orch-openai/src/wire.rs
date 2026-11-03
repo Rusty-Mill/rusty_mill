@@ -16,8 +16,10 @@ pub struct Prompt<'a> {
 /// Token counts as the server reported them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Usage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
+    /// `None` when the server did not report it as an integer.
+    pub input_tokens: Option<u64>,
+    /// `None` when the server did not report it as an integer.
+    pub output_tokens: Option<u64>,
     /// Prompt tokens served from the server's cache, when it says.
     pub cached_input_tokens: Option<u64>,
 }
@@ -57,8 +59,8 @@ fn message(role: &str, content: &str) -> Value {
     m.into()
 }
 
-/// The first choice's text and the usage block. A missing `usage` reads as
-/// zero, since some servers omit it; a missing reply is an error.
+/// The first choice's text and the usage block. A count the server omits
+/// stays unknown (`None`), never zero; a missing reply is an error.
 pub fn parse_response(raw: &str) -> Result<Completion, String> {
     let v = Value::parse(raw).map_err(|e| format!("response is not JSON: {e}"))?;
     let text = v
@@ -69,8 +71,8 @@ pub fn parse_response(raw: &str) -> Result<Completion, String> {
     Ok(Completion {
         text: text.to_owned(),
         usage: Usage {
-            input_tokens: count("/usage/prompt_tokens").unwrap_or(0),
-            output_tokens: count("/usage/completion_tokens").unwrap_or(0),
+            input_tokens: count("/usage/prompt_tokens"),
+            output_tokens: count("/usage/completion_tokens"),
             cached_input_tokens: count("/usage/prompt_tokens_details/cached_tokens"),
         },
     })
@@ -124,17 +126,22 @@ mod tests {
         assert_eq!(
             c.usage,
             Usage {
-                input_tokens: 120,
-                output_tokens: 9,
+                input_tokens: Some(120),
+                output_tokens: Some(9),
                 cached_input_tokens: Some(100)
             }
         );
     }
 
     #[test]
-    fn missing_usage_is_zero_and_missing_content_is_refused() {
+    fn missing_usage_is_unknown_and_missing_content_is_refused() {
         let c = parse_response(r#"{"choices":[{"message":{"content":"x"}}]}"#).expect("parses");
         assert_eq!(c.usage, Usage::default());
+        let c = parse_response(
+            r#"{"choices":[{"message":{"content":"x"}}],"usage":{"prompt_tokens":"9","completion_tokens":-1}}"#,
+        )
+        .expect("parses");
+        assert_eq!((c.usage.input_tokens, c.usage.output_tokens), (None, None));
         assert!(parse_response(r#"{"choices":[]}"#).is_err());
         assert!(parse_response("not json").is_err());
     }

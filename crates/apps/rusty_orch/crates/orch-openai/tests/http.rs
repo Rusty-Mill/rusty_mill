@@ -106,8 +106,8 @@ fn posts_one_completion_and_reads_text_and_usage() {
     assert_eq!(
         c.usage,
         Usage {
-            input_tokens: 40,
-            output_tokens: 5,
+            input_tokens: Some(40),
+            output_tokens: Some(5),
             cached_input_tokens: None
         }
     );
@@ -140,7 +140,7 @@ fn a_chunked_reply_is_read() {
     let c = client(addr, None, SECS)
         .complete(&PROMPT)
         .expect("completes");
-    assert_eq!(c.usage.output_tokens, 5);
+    assert_eq!(c.usage.output_tokens, Some(5));
 }
 
 #[test]
@@ -492,4 +492,64 @@ fn a_lens_question_is_asked_through_the_model_port() {
         body.pointer("/max_tokens").and_then(Value::as_u64),
         Some(256)
     );
+}
+
+fn lens_question() -> orch_lens::Question {
+    orch_lens::Question {
+        prefix: "intent and rules".to_owned(),
+        body: "claim C-1".to_owned(),
+        allowed: orch_lens::Allowed {
+            evidence: None,
+            claims: None,
+        },
+        max_output_tokens: 256,
+    }
+}
+
+/// A 200 reply whose completion text is `content`, with `usage` verbatim.
+fn completion_reply(content: &str, usage: &str) -> String {
+    let content = content.replace('"', "\\\"");
+    response(
+        "200 OK",
+        &format!(r#"{{"choices":[{{"message":{{"content":"{content}"}}}}]{usage}}}"#),
+    )
+}
+
+#[test]
+fn a_key_echoed_into_a_lens_reply_never_reaches_the_error() {
+    use orch_lens::Model;
+    let reply = completion_reply(
+        r#"{"posts":[],"sk-test-secret":1}"#,
+        r#","usage":{"prompt_tokens":4,"completion_tokens":2}"#,
+    );
+    let (addr, _seen) = serve_once(Some(reply));
+    let err = client(addr, Some("LLAMA_KEY"), SECS)
+        .with_env(test_key)
+        .ask(&lens_question())
+        .expect_err("refused");
+    assert!(matches!(err, ClassifiedError::Permanent(_)), "{err:?}");
+    let ClassifiedError::Permanent(m) = err else {
+        unreachable!()
+    };
+    assert!(!m.0.contains("sk-test-secret"), "{}", m.0);
+}
+
+#[test]
+fn a_lens_reply_without_measured_usage_is_permanent() {
+    use orch_lens::Model;
+    for usage in [
+        "",
+        r#","usage":{"prompt_tokens":4}"#,
+        r#","usage":{"prompt_tokens":"4","completion_tokens":2}"#,
+        r#","usage":{"prompt_tokens":4,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":5}}"#,
+    ] {
+        let (addr, _seen) = serve_once(Some(completion_reply(r#"{"posts":[]}"#, usage)));
+        let err = client(addr, None, SECS)
+            .ask(&lens_question())
+            .expect_err("refused");
+        assert!(
+            matches!(err, ClassifiedError::Permanent(_)),
+            "{usage}: {err:?}"
+        );
+    }
 }
