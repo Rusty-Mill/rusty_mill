@@ -64,6 +64,7 @@ pub struct ClaudeAgent<C = StdCommand> {
     max_turns: u32,
     stop: StopRule,
     pub(crate) lens_tools: &'static str,
+    pub(crate) lens_no_overage: bool,
     runner: C,
 }
 
@@ -84,6 +85,7 @@ impl<C: CommandRunner> ClaudeAgent<C> {
             max_turns: DEFAULT_MAX_TURNS,
             stop: StopRule::Checkpoint,
             lens_tools: "",
+            lens_no_overage: false,
             runner,
         }
     }
@@ -119,6 +121,15 @@ impl<C: CommandRunner> ClaudeAgent<C> {
     /// question runs with no tools at all.
     pub fn lens_read_only(mut self) -> Self {
         self.lens_tools = TOOLS;
+        self
+    }
+
+    /// Admit lens questions. The operator asserts, after checking the
+    /// account, that usage beyond the plan (usage credits, extra usage)
+    /// is disabled, so a call can add no charge. Nothing here can verify
+    /// that; without it every lens question is `Unavailable`.
+    pub fn lens_no_overage(mut self) -> Self {
+        self.lens_no_overage = true;
         self
     }
 

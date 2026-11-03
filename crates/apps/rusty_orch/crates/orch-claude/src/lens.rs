@@ -1,9 +1,13 @@
 //! The lens runner's [`Model`] port over `claude -p` (#594).
 //!
-//! Admitted only as a flat-rate subscription provider: the lens config
-//! refuses any nonzero price, and every question first proves the
-//! subscription login. `claude -p` has no before-call bound on an agent
-//! loop's tokens, so this adapter must never be priced per token.
+//! `claude -p` has no before-call bound on an agent loop's tokens, so this
+//! adapter is admitted only at zero price, and only where no call can add a
+//! charge. Two separate gates, both fail closed: the operator's assertion
+//! that the account cannot bill beyond its plan
+//! ([`ClaudeAgent::lens_no_overage`]), and a subscription login on every
+//! question. The login check establishes the auth method, not billing: a
+//! subscription with usage credits enabled can still be charged, which is
+//! why the first gate exists.
 
 use orch_cli::{excerpt, CommandRunner, Exit};
 use orch_dispatch::{AgentError, ClassifiedError};
@@ -52,10 +56,17 @@ impl<C: CommandRunner> ClaudeAgent<C> {
 }
 
 impl<C: CommandRunner> Model for ClaudeAgent<C> {
-    /// Prove the subscription login, then ask with the body on stdin. A
+    /// Refuse without the no-overage assertion, check the subscription
+    /// login, then ask with the body on stdin. A
     /// reply that is not UTF-8, does not pass [`parse`], or does not report
     /// its usage is `Permanent`.
     fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
+        if !self.lens_no_overage {
+            return Err(ClassifiedError::Unavailable(AgentError(
+                "claude: lens questions need the operator's no-overage assertion (lens_no_overage)"
+                    .to_owned(),
+            )));
+        }
         self.probe_subscription()?;
         let exit = self.exec(&self.lens_argv(&q.prefix), q.body.as_bytes())?;
         strict_utf8(&exit)?;
