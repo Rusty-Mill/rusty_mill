@@ -10,7 +10,7 @@ use orch_core::goal::StopRule;
 use orch_core::task::{AgentId, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 
-use orch_cli::{excerpt, output_schema, parse, CommandRunner, ExecError, StdCommand};
+use orch_cli::{excerpt, output_schema, parse, CommandRunner, ExecError, Exit, StdCommand};
 
 use crate::render;
 
@@ -18,10 +18,11 @@ use crate::render;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Removed from the child's environment on every run. A stray key would
-/// route Codex onto the paid API path instead of the subscription login.
-pub const SCRUBBED_ENV: &[&str] = &["OPENAI_API_KEY"];
+/// route Codex onto the paid API path instead of the subscription login,
+/// and a base URL would send it to another endpoint.
+pub const SCRUBBED_ENV: &[&str] = &["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"];
 
-static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+pub(crate) static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The id this adapter serves by default.
 pub const ID: AgentId = AgentId::from_static("codex");
@@ -42,6 +43,8 @@ pub struct CodexAgent<C = StdCommand> {
     timeout: Duration,
     model: Option<String>,
     stop: StopRule,
+    pub(crate) lens_host_cleared: bool,
+    pub(crate) lens_no_overage: bool,
     runner: C,
 }
 
@@ -60,6 +63,8 @@ impl<C: CommandRunner> CodexAgent<C> {
             timeout: DEFAULT_TIMEOUT,
             model: None,
             stop: StopRule::Checkpoint,
+            lens_host_cleared: false,
+            lens_no_overage: false,
             runner,
         }
     }
@@ -84,6 +89,31 @@ impl<C: CommandRunner> CodexAgent<C> {
         self
     }
 
+    /// Admit lens questions. The operator asserts that everything this
+    /// host lets `codex exec` read (its read-only sandbox can read the
+    /// whole filesystem, not just the repository) is cleared for this
+    /// provider, e.g. because it runs in a dedicated container holding only
+    /// cleared data. Codex has no tool-less mode and nothing here can
+    /// confine its reads; without it every lens question is `Unavailable`.
+    pub fn lens_host_cleared(mut self) -> Self {
+        self.lens_host_cleared = true;
+        self
+    }
+
+    /// Admit lens questions. The operator asserts, after checking the
+    /// account, that usage beyond the plan (credits) is disabled, so a
+    /// call can add no charge. Nothing here can verify that; without it
+    /// every lens question is `Unavailable`.
+    pub fn lens_no_overage(mut self) -> Self {
+        self.lens_no_overage = true;
+        self
+    }
+
+    /// The repository root lens questions may read.
+    pub(crate) fn repo_root(&self) -> &Path {
+        &self.repo_root
+    }
+
     /// The runner, e.g. to inspect a fake in tests.
     pub fn runner(&self) -> &C {
         &self.runner
@@ -92,6 +122,18 @@ impl<C: CommandRunner> CodexAgent<C> {
     /// The argv this agent runs for the given scratch files. Public so tests
     /// and docs can pin it.
     pub fn argv(&self, schema: &Path, reply: &Path) -> Vec<String> {
+        let mut argv = self.base_argv(&self.repo_root);
+        argv.push("--output-schema".to_owned());
+        argv.push(schema.display().to_string());
+        argv.push("--output-last-message".to_owned());
+        argv.push(reply.display().to_string());
+        argv.push("-".to_owned());
+        argv
+    }
+
+    /// `codex exec`, read-only, ephemeral, no user config or rules, in
+    /// `cwd`, with the pinned model if any.
+    pub(crate) fn base_argv(&self, cwd: &Path) -> Vec<String> {
         let mut argv: Vec<String> = [
             "codex",
             "exec",
@@ -105,16 +147,11 @@ impl<C: CommandRunner> CodexAgent<C> {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        argv.push(self.repo_root.display().to_string());
+        argv.push(cwd.display().to_string());
         if let Some(model) = &self.model {
             argv.push("-m".to_owned());
             argv.push(model.clone());
         }
-        argv.push("--output-schema".to_owned());
-        argv.push(schema.display().to_string());
-        argv.push("--output-last-message".to_owned());
-        argv.push(reply.display().to_string());
-        argv.push("-".to_owned());
         argv
     }
 }
@@ -160,31 +197,42 @@ impl<C: CommandRunner> CodexAgent<C> {
         let scratch =
             Scratch::create(&output_schema(self.stop)).map_err(ClassifiedError::Transient)?;
         let prompt = render(task, board, self.stop);
+        let (_, reply) = self.exec(
+            &self.argv(&scratch.schema, &scratch.reply),
+            prompt.as_bytes(),
+            &scratch.reply,
+        )?;
+        parse(&reply, task.spec().role, self.stop).map_err(ClassifiedError::Transient)
+    }
+
+    /// One run with [`SCRUBBED_ENV`] removed: its exit and the non-empty
+    /// last message it wrote to `reply`.
+    pub(crate) fn exec(
+        &self,
+        argv: &[String],
+        stdin: &[u8],
+        reply: &Path,
+    ) -> Result<(Exit, String), ClassifiedError> {
         let exit = self
             .runner
-            .run_scrubbed(
-                &self.argv(&scratch.schema, &scratch.reply),
-                prompt.as_bytes(),
-                self.timeout,
-                SCRUBBED_ENV,
-            )
+            .run_scrubbed(argv, stdin, self.timeout, SCRUBBED_ENV)
             .map_err(exec_error)
             .map_err(ClassifiedError::Transient)?;
         if exit.status != 0 {
             return Err(classify(exit.status, &exit.stderr));
         }
-        let reply = fs::read_to_string(&scratch.reply).map_err(|e| {
+        let text = fs::read_to_string(reply).map_err(|e| {
             ClassifiedError::Transient(AgentError(format!(
                 "codex wrote no last message ({e}): {}",
                 excerpt(&exit.stderr)
             )))
         })?;
-        if reply.trim().is_empty() {
+        if text.trim().is_empty() {
             return Err(ClassifiedError::Transient(AgentError(
                 "codex wrote an empty last message".to_owned(),
             )));
         }
-        parse(&reply, task.spec().role, self.stop).map_err(ClassifiedError::Transient)
+        Ok((exit, text))
     }
 }
 

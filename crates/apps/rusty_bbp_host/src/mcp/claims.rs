@@ -73,7 +73,7 @@ pub fn tools() -> Value {
         ),
         tool(
             "put_artifact",
-            "Store an artifact. kind diff: {body}; candidate: {base, diffs[], claim} (submits a run, debits the claim's budget); source: {origin, retrieved_at, excerpt} (outside material for cited evidence, excerpt at most 4,000 characters).",
+            "Store an artifact. kind diff: {body}; candidate: {base, diffs[], claim, suite?} (submits a run, debits the claim's budget; suite holdout re-runs the claim's current code against the holdout suite, holdout roles only); source: {origin, retrieved_at, excerpt} (outside material for cited evidence, excerpt at most 4,000 characters).",
             schema(
                 vec![
                     ("op", "string", "Operation id"),
@@ -82,6 +82,7 @@ pub fn tools() -> Value {
                     ("base", "string", "candidate: full base commit id"),
                     ("diffs", "array", "candidate: diff artifact ids in apply order"),
                     ("claim", "integer", "candidate: the claim it tests"),
+                    ("suite", "string", "candidate: build (default) or holdout"),
                     ("origin", "string", "source: where it came from (a URL or citation)"),
                     ("retrieved_at", "string", "source: when it was retrieved"),
                     ("excerpt", "string", "source: the quoted material"),
@@ -250,7 +251,13 @@ fn put(a: &Value) -> Result<Translated, String> {
                     .map(ArtId)
                     .collect(),
                 claim: Some(MsgId(u64_of(a.get("claim"), "claim")?)),
-                suite: Suite::Build,
+                suite: match a.get("suite").and_then(Value::as_str) {
+                    None | Some("build") => Suite::Build,
+                    Some("holdout") => Suite::Holdout,
+                    Some(other) => {
+                        return Err(format!("suite must be build or holdout, got {other}"))
+                    }
+                },
             }),
             vec![],
         ),

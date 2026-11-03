@@ -790,16 +790,68 @@ impl Server {
     /// core refuses the call with `bad_credential`.
     fn call_claims(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         let Translated { op, action, bytes } = claims::action(name, args)?;
+        let key = (self.binding.principal.clone(), op.clone());
+        let guard = match &action {
+            AgentAction::PutArtifact {
+                payload: ArtifactPayload::Candidate(m),
+                ..
+            } => self.protected(m)?,
+            _ => None,
+        };
+        // An op the core already committed replays its stored answer: the
+        // exemptions of today never re-judge it. Otherwise the rule holds at
+        // the commit, re-judged on every reload, and a refusal stores nothing.
+        let judge = |st: &TaskState| match st.ops.contains_key(&key) {
+            true => None,
+            false => guard.as_ref().and_then(|g| g.judge(st)),
+        };
+        if let Some(refused) = judge(&self.driver.state) {
+            return Ok(Response::Rejected(refused));
+        }
         let action = self.stored(action, bytes)?;
         let cmd = Command::Agent {
-            principal: self.binding.principal.clone(),
+            principal: key.0.clone(),
             token: self.credential,
             op,
             action,
         };
         self.driver
-            .dispatch(&cmd, now())
+            .dispatch_guarded(&cmd, now(), judge)
             .map_err(|e| format!("{e:?}"))
+    }
+
+    /// #597: the protected-path rule for candidate `m`, when the task has
+    /// protected paths: its baseline and the paths its diffs touch.
+    fn protected(&self, m: &Candidate) -> Result<Option<crate::protect::Guard>, String> {
+        let st = &self.driver.state;
+        let set = crate::profiles::load(&self.binding.dir, &self.binding.task, st.profile_digest)?;
+        if set.protected.is_empty() {
+            return Ok(None);
+        }
+        set.check_protected()?;
+        let scratch = self.binding.dir.join("scratch").join("protect");
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
+        let store = &self.driver.store;
+        let touched = crate::protect::touched(m, &scratch, |id| {
+            // An id that is no diff reads as an empty patch; the core then
+            // refuses the candidate with its own code. A missing id is
+            // refused below, since another session may store it later.
+            match st
+                .artifacts
+                .get(&id)
+                .filter(|a| a.kind == ArtifactKind::Diff)
+            {
+                Some(a) => store.blob_get(&a.blob.sha).map_err(|e| format!("{e:?}")),
+                None => Ok(Vec::new()),
+            }
+        })?;
+        Ok(Some(crate::protect::Guard {
+            refused: crate::protect::off_baseline(set.baseline.as_deref(), m)
+                .or_else(|| crate::protect::unresolved(st, m)),
+            protected: set.protected,
+            touched,
+            claim: m.claim,
+        }))
     }
 
     /// Run one tool call end to end.

@@ -52,6 +52,7 @@ fn open_as(dir: &Path, t: &TaskId, set: &ProfileSet, probe: Result<(), String>) 
         b"Make the flag say ok.",
         &PrincipalId("human".into()),
         set,
+        None,
         vec![lens("a", 0), lens("b", 1)],
         ClaimsConfig::default(),
         || probe,
@@ -820,5 +821,431 @@ fn a_task_total_row_names_the_field_its_limit_and_one_allowance() {
         .unwrap()
         .iter()
         .all(|r| r.reason != inbox::Reason::TaskTotal));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- protected paths (#597)
+
+/// Store `diff` as `who` and a candidate of it naming claim `c`.
+fn put_candidate(s: &mut Server, op: &str, base: &str, diff: &str, c: u64) -> (String, bool) {
+    let body = rusty_serde::json::to_string(&diff.to_owned()).unwrap();
+    let d = id_of(&ok(
+        s,
+        "put_artifact",
+        &format!(r#"{{"op":"{op}-d","kind":"diff","body":{body}}}"#),
+    ));
+    call(
+        s,
+        "put_artifact",
+        &format!(
+            r#"{{"op":"{op}-k","kind":"candidate","base":"{base}","diffs":[{d}],"claim":{c}}}"#
+        ),
+    )
+}
+
+const TESTS_ONLY: &str = "--- a/tests/core.txt\n+++ b/tests/core.txt\n@@ -1 +1 @@\n-one\n+two\n";
+const FLAG_ONLY: &str = "--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
+
+/// #597 G2: a candidate touching a protected path is refused before the core
+/// sees it, naming each path, with nothing stored or debited; a `tests`
+/// claim's candidate may touch only protected paths, and once that claim is
+/// accepted its diff may be reused while any other change is still refused.
+#[test]
+fn protected_paths_are_refused_outside_an_accepted_tests_claim() {
+    let dir = tempdir("protected");
+    let base = "a".repeat(40);
+    let mut set = profiles();
+    set.protected = vec!["tests/**".into()];
+    // Protected paths need a baseline, and globs a matcher reads literally
+    // (protecting nothing) are refused.
+    for (globs, baseline) in [
+        (vec!["tests/**"], None),
+        (vec!["tests/[ab].rs"], Some(base.clone())),
+        (vec!["/tests/**"], Some(base.clone())),
+    ] {
+        let mut bad = set.clone();
+        bad.protected = globs.into_iter().map(str::to_owned).collect();
+        bad.baseline = baseline;
+        let (code, detail) = rejected(open(&dir, &bad, Ok(())));
+        assert_eq!(code, Code::BadClaimsConfig, "{detail}");
+        assert!(detail.starts_with("protected:"), "{detail}");
+    }
+    set.baseline = Some(base.clone());
+    assert!(matches!(open(&dir, &set, Ok(())), Response::Stored(_)));
+    for who in ["a", "b"] {
+        admin::assign(
+            &dir,
+            &task(),
+            &RoleId::from(who),
+            &PrincipalId(who.into()),
+            "v",
+        )
+        .expect("assign");
+    }
+    let c = claim(&dir, "a", "flag", true);
+    let mut s = server(&dir, "a");
+    // Another base could carry weaker tests that no diff shows.
+    let (text, err) = put_candidate(&mut s, "old", &"b".repeat(40), FLAG_ONLY, c);
+    assert!(err && text.contains("baseline"), "{text}");
+
+    let (text, err) = put_candidate(&mut s, "all", &base, DIFF, c);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    for p in ["tests/core.txt", "tests/new.txt", "tests/old.txt"] {
+        assert!(text.contains(p), "{p} not named: {text}");
+    }
+    assert!(!text.contains("flag.txt"), "{text}");
+    let st = state(&dir);
+    assert!(st.claims.runs.is_empty(), "nothing debited");
+    assert_eq!(st.claims.get(MsgId(c)).unwrap().current, None);
+
+    let (text, err) = put_candidate(&mut s, "flag", &base, FLAG_ONLY, c);
+    assert!(!err, "{text}");
+
+    // A `tests` claim may carry a test-only candidate, not a mixed one.
+    let b = brief(&dir);
+    let t = id_of(&ok(
+        &mut s,
+        "post",
+        &format!(
+            r#"{{"op":"tests","kind":"claim","text":"fix core","domains":["tests"],"stakes":"low","reversible":true,"refs":["art:{b}"]}}"#
+        ),
+    ));
+    let (text, err) = put_candidate(&mut s, "mixed", &base, DIFF, t);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    let (text, err) = put_candidate(&mut s, "fix", &base, TESTS_ONLY, t);
+    assert!(!err, "{text}");
+    let fix = match &state(&dir).artifacts[&ArtId(id_of(&text))].payload {
+        ArtifactPayload::Candidate(m) => m.diffs[0].0,
+        _ => panic!("not a candidate"),
+    };
+
+    // Before acceptance its diff cannot be reused.
+    let reuse = format!(
+        r#"{{"op":"reuse","kind":"candidate","base":"{base}","diffs":[{fix}],"claim":{c}}}"#
+    );
+    let (text, err) = call(&mut s, "put_artifact", &reuse);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    let rev = state(&dir).rev;
+    let arg = format!("msg:{t}");
+    let r = human::perform(&dir, &task(), "claim", &[&arg, "accept"], Some(rev)).expect("accept");
+    assert_eq!(r, Response::Ok);
+    let reuse = reuse.replace("\"reuse\"", "\"reuse2\"");
+    let (text, err) = call(&mut s, "put_artifact", &reuse);
+    assert!(!err, "{text}");
+    // Once T is dropped its diff is no longer exempt, but the committed op
+    // still replays its stored answer.
+    let rev = state(&dir).rev;
+    let r = human::perform(&dir, &task(), "claim", &[&arg, "drop"], Some(rev)).expect("drop");
+    assert_eq!(r, Response::Ok);
+    let (again, err) = call(&mut s, "put_artifact", &reuse);
+    assert!(!err && again == text, "{again}");
+    let fresh = reuse.replace("\"reuse2\"", "\"reuse3\"");
+    let (text, err) = call(&mut s, "put_artifact", &fresh);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    // A fresh diff to the same path is still refused.
+    let (text, err) = put_candidate(&mut s, "again", &base, TESTS_ONLY, c);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- holdout suites (#597)
+
+fn holdout_lens() -> Role {
+    lens("h", 2).holdout()
+}
+
+/// A suite whose one test passes when the candidate's `flag.txt` says `ok`
+/// and prints something builders must never see.
+fn holdout_suite(dir: &Path) -> rusty_bbp_host::holdout::HoldoutSet {
+    let root = dir.join("suite");
+    std::fs::create_dir_all(root.join("api")).unwrap();
+    std::fs::write(
+        root.join("api/test.sh"),
+        "echo HOLDOUT-SECRET-OUTPUT\ngrep -q '^ok$' flag.txt\n",
+    )
+    .unwrap();
+    let set = ProfileSet::shell("holdout:api", "sh \"$BBP_HOLDOUT/api/test.sh\"");
+    rusty_bbp_host::holdout::HoldoutSet::scan(set, &root).expect("scan")
+}
+
+fn holdout_task(dir: &Path, hs: &rusty_bbp_host::holdout::HoldoutSet) {
+    holdout_task_with(dir, &profiles(), hs);
+}
+
+fn holdout_task_with(dir: &Path, set: &ProfileSet, hs: &rusty_bbp_host::holdout::HoldoutSet) {
+    let r = open_holdout(dir, set, hs);
+    assert!(matches!(r, Response::Stored(_)), "{r:?}");
+    for who in ["a", "b", "h"] {
+        reassign(dir, who, who);
+    }
+}
+
+fn open_holdout(
+    dir: &Path,
+    set: &ProfileSet,
+    hs: &rusty_bbp_host::holdout::HoldoutSet,
+) -> Response {
+    admin::open_claims_task(
+        dir,
+        &task(),
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        set,
+        Some(hs),
+        vec![lens("a", 0), lens("b", 1), holdout_lens()],
+        ClaimsConfig::default(),
+        || Ok(()),
+    )
+    .expect("open")
+}
+
+fn sandbox(dir: &Path) -> runner::Sandboxed {
+    runner::Sandboxed::new(
+        PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
+        &dir.join("sandbox-state"),
+    )
+}
+
+/// Store a build candidate for the flag fix and a holdout candidate of the
+/// same code; their ids and the holdout candidate's JSON.
+fn build_and_holdout(dir: &Path, base: &str) -> (u64, u64, String) {
+    let c = claim(dir, "a", "flag", true);
+    let mut s = server(dir, "a");
+    let (text, err) = put_candidate(&mut s, "k", base, FLAG_ONLY, c);
+    assert!(!err, "{text}");
+    let k = id_of(&text);
+    let diffs = match &state(dir).artifacts[&ArtId(k)].payload {
+        ArtifactPayload::Candidate(m) => m.diffs[0].0,
+        _ => panic!("not a candidate"),
+    };
+    let holdout = format!(
+        r#"{{"op":"h1","kind":"candidate","base":"{base}","diffs":[{diffs}],"claim":{c},"suite":"holdout"}}"#
+    );
+    // A builder cannot store a holdout candidate; the holdout lens can.
+    let (text, err) = call(&mut s, "put_artifact", &holdout);
+    assert!(err && text.contains("KindForbidden"), "{text}");
+    let mut h = server(dir, "h");
+    let h1 = id_of(&ok(&mut h, "put_artifact", &holdout));
+    (k, h1, holdout)
+}
+
+/// The run of candidate `k`, its report and the log artifact's text.
+fn run_of(dir: &Path, k: u64) -> (RunId, Report, String) {
+    let d = open_driver(dir, &task()).unwrap();
+    let (id, run) = d
+        .state
+        .claims
+        .runs
+        .iter()
+        .find(|(_, r)| r.candidate == ArtId(k))
+        .map(|(id, r)| (*id, r.clone()))
+        .expect("run");
+    let ArtifactPayload::TestReport(rep) = &d.state.artifacts[&run.report.expect("report")].payload
+    else {
+        panic!("not a report")
+    };
+    let log = &d.state.artifacts[&run.log.expect("log")];
+    let shown = String::from_utf8(d.store.blob_get(&log.blob.sha).unwrap()).unwrap();
+    (id, rep.clone(), shown)
+}
+
+/// #597 2.2: a holdout run reports under the holdout digest and stores only
+/// a summary as its log, whatever the sandbox here did; a changed suite file
+/// fails the next holdout run before anything executes. That the suite
+/// really runs, confined, is `confined_holdout_run_passes_and_builds_cannot_read_the_suite`.
+#[test]
+fn a_holdout_run_shows_builders_only_a_summary() {
+    let dir = tempdir("holdout");
+    let (repo, base) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    holdout_task(&dir, &hs);
+    let digest = state(&dir).claims.holdout_digest.expect("holdout digest");
+    let work = dir.join("work");
+    let exec = sandbox(&dir);
+    let (_, h1, holdout) = build_and_holdout(&dir, &base);
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("build");
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("holdout");
+    let (_, rep, shown) = run_of(&dir, h1);
+    assert_eq!(rep.profile_digest, digest);
+    assert!(shown.starts_with("holdout run: "), "{shown}");
+    assert!(!shown.contains("HOLDOUT-SECRET-OUTPUT"), "{shown}");
+
+    // A planted file in the suite fails the next holdout run before it runs.
+    std::fs::write(Path::new(&hs.root).join("conftest.py"), "skip").unwrap();
+    let again = holdout.replace("\"h1\"", "\"h2\"");
+    let h2 = id_of(&ok(&mut server(&dir, "h"), "put_artifact", &again));
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("planted");
+    let (_, rep, shown) = run_of(&dir, h2);
+    assert_eq!(rep.status, RunStatus::Error);
+    assert!(!shown.contains("conftest"), "{shown}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #597 2.2, Linux acceptance lane: on a host whose sandbox works, a build
+/// run cannot read the suite and the holdout run executes it, passing, with
+/// its output on the host only. Refuses to pass where the sandbox does not.
+#[test]
+#[ignore = "needs a working sandbox; run by the confined acceptance lane"]
+fn confined_holdout_run_passes_and_builds_cannot_read_the_suite() {
+    let dir = tempdir("holdout_confined");
+    runner::probe(&sandbox(&dir), &dir.join("probe")).expect("a working sandbox");
+    let (repo, base) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    let marker = Path::new(&hs.root).join("api/test.sh");
+    let mut set = profiles();
+    set.profiles[0].args[1] = format!(
+        "sh ./test.sh && ! cat {} && echo SUITE-UNREADABLE",
+        marker.display()
+    );
+    holdout_task_with(&dir, &set, &hs);
+    let work = dir.join("work");
+    let exec = sandbox(&dir);
+    let (k, h1, _) = build_and_holdout(&dir, &base);
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("build");
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("holdout");
+
+    let (_, rep, log) = run_of(&dir, k);
+    assert_eq!(rep.status, RunStatus::Passed, "{log}");
+    assert_eq!(rep.sandbox, runner::Sandboxed::LABEL);
+    assert!(log.contains("SUITE-UNREADABLE"), "{log}");
+    assert!(!log.contains("HOLDOUT-SECRET-OUTPUT"), "{log}");
+
+    let (run, rep, shown) = run_of(&dir, h1);
+    let full = std::fs::read_to_string(rusty_bbp_host::holdout::log_path(&dir, &task(), run))
+        .expect("host-only log");
+    assert_eq!(rep.status, RunStatus::Passed, "{full}");
+    assert!(shown.contains("holdout:api: exit 0"), "{shown}");
+    assert!(!shown.contains("HOLDOUT-SECRET-OUTPUT"), "{shown}");
+    assert!(full.contains("HOLDOUT-SECRET-OUTPUT"), "{full}");
+    println!("BBP_ACCEPTANCE PASS holdout-confined");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #597 2.2: a suite any build run could read is refused at open, and a run
+/// whose repository or work root overlaps the suite never starts.
+#[test]
+fn a_holdout_suite_build_runs_could_read_is_refused() {
+    let dir = tempdir("holdout_overlap");
+    let (repo, _) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    let mut wide = profiles();
+    wide.read_roots.push(dir.to_str().unwrap().into());
+    match open_holdout(&dir, &wide, &hs) {
+        Response::Rejected(r) => {
+            assert_eq!(r.code, Code::BadClaimsConfig);
+            assert!(r.detail.contains("overlaps"), "{}", r.detail);
+        }
+        other => panic!("{other:?}"),
+    }
+    holdout_task(&dir, &hs);
+    let base = git(&repo, &["rev-parse", "HEAD"]);
+    build_and_holdout(&dir, &base);
+    let inside = Path::new(&hs.root).join("work");
+    let err = runner::run_once(
+        &dir,
+        &task(),
+        &repo,
+        &inside,
+        &sandbox(&dir),
+        Confinement::Sandboxed,
+    )
+    .unwrap_err();
+    assert!(err.contains("overlaps"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #597 2.2: a holdout run whose log was stored before the runner died is
+/// reported `error` against that log, and the host-only full output of the
+/// run that died is kept, not overwritten by the recovery.
+#[test]
+fn a_recovered_holdout_run_keeps_its_host_only_log() {
+    let dir = tempdir("holdout_recover");
+    let (repo, base) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    holdout_task(&dir, &hs);
+    let work = dir.join("work");
+    let exec = sandbox(&dir);
+    let (_, h1, _) = build_and_holdout(&dir, &base);
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("build");
+    // The holdout runner wrote both logs and died before the report.
+    let mut d = open_driver(&dir, &task()).unwrap();
+    let (run, _) = d
+        .state
+        .claims
+        .runs
+        .iter()
+        .find(|(_, r)| r.candidate == ArtId(h1))
+        .map(|(id, r)| (*id, r.clone()))
+        .expect("holdout run");
+    let full = rusty_bbp_host::holdout::log_path(&dir, &task(), run);
+    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+    std::fs::write(&full, "HOLDOUT-SECRET-OUTPUT from the run that died\n").unwrap();
+    let blob = d
+        .store
+        .blob_put(b"holdout run: Passed (full output is host-only)\n");
+    let r = d
+        .dispatch(
+            &Command::Runner {
+                op: rusty_bbp_host::fresh_op(),
+                run,
+                secret: d.state.secret_for(run),
+                blob,
+                payload: ArtifactPayload::Log,
+            },
+            rusty_bbp_host::now(),
+        )
+        .expect("dispatch");
+    assert!(matches!(r, Response::Stored(_)), "{r:?}");
+    drop(d);
+    runner::run_once(&dir, &task(), &repo, &work, &exec, Confinement::Sandboxed).expect("recover");
+    let (_, rep, shown) = run_of(&dir, h1);
+    assert_eq!(rep.status, RunStatus::Error);
+    assert!(shown.starts_with("holdout run: Passed"), "{shown}");
+    assert_eq!(
+        std::fs::read_to_string(&full).unwrap(),
+        "HOLDOUT-SECRET-OUTPUT from the run that died\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #597 G3: a suite that only adds is adopted by the host; one that changes
+/// a test is staged and needs the human, who adopts it by digest.
+#[test]
+fn holdout_versions_add_freely_and_change_only_with_the_human() {
+    let dir = tempdir("holdout-versions");
+    let hs = holdout_suite(&dir);
+    holdout_task(&dir, &hs);
+    let v1 = state(&dir).claims.holdout_digest.expect("v1");
+    let root = PathBuf::from(&hs.root);
+    std::fs::write(root.join("api/more.sh"), "true\n").unwrap();
+    let v2_set = rusty_bbp_host::holdout::HoldoutSet::scan(hs.set.clone(), &root).unwrap();
+    assert_eq!(
+        admin::adopt_holdout(&dir, &task(), &v2_set).unwrap(),
+        Response::Ok
+    );
+    let v2 = state(&dir).claims.holdout_digest.expect("v2");
+    assert_ne!(v1, v2);
+
+    std::fs::write(root.join("api/test.sh"), "true\n").unwrap();
+    let v3_set = rusty_bbp_host::holdout::HoldoutSet::scan(hs.set.clone(), &root).unwrap();
+    let (code, detail) = rejected(admin::adopt_holdout(&dir, &task(), &v3_set).unwrap());
+    assert_eq!(code, Code::HumanRequired);
+    assert_eq!(state(&dir).claims.holdout_digest, Some(v2));
+    let v3 = detail
+        .split_whitespace()
+        .find(|w| w.len() == 64)
+        .expect("digest named")
+        .to_owned();
+    let rev = state(&dir).rev;
+    // A digest staged for no suite of this task is refused before the core.
+    let typo = "ab".repeat(32);
+    let (code, _) =
+        rejected(human::perform(&dir, &task(), "holdout-updated", &[&typo], Some(rev)).unwrap());
+    assert_eq!(code, Code::HoldoutMismatch);
+    assert_eq!(state(&dir).claims.holdout_digest, Some(v2));
+    let r = human::perform(&dir, &task(), "holdout-updated", &[&v3], Some(rev)).expect("update");
+    assert_eq!(r, Response::Ok);
+    assert_eq!(state(&dir).claims.holdout_digest.map(|d| d.hex()), Some(v3));
     let _ = std::fs::remove_dir_all(&dir);
 }

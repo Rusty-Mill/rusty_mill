@@ -598,14 +598,29 @@ where
     let ArtifactPayload::Candidate(manifest) = &cand.payload else {
         return Err("candidate payload is not a manifest".into());
     };
-    if !manifest.suite.is_build() {
-        // No `bbp open` path sets a holdout digest yet, so the core admits
-        // no holdout candidate; running one needs the holdout set file (#597).
-        return Err(
-            "holdout runs need the task's holdout suite, which this host does not load yet".into(),
-        );
+    // A holdout candidate runs the task's current holdout suite (#597).
+    let suite = match (manifest.suite, st.claims.holdout_digest) {
+        (Suite::Build, _) => None,
+        (Suite::Holdout, Some(d)) => Some((crate::holdout::load(dir, task, d)?, d)),
+        (Suite::Holdout, None) => {
+            return Err("a holdout run on a task without a holdout suite".into())
+        }
+    };
+    let holdout = suite.is_some();
+    let build = profiles::load(dir, task, st.profile_digest)?;
+    // #597 2.2: no run starts while a build run could read the suite, checked
+    // against this invocation's repository and work root as well.
+    if let Some(d) = st.claims.holdout_digest {
+        let current = match &suite {
+            Some((hs, _)) => hs.clone(),
+            None => crate::holdout::load(dir, task, d)?,
+        };
+        current.isolated_from(&build, &[repo, work_root])?;
     }
-    let set = profiles::load(dir, task, st.profile_digest)?;
+    let (set, digest) = match &suite {
+        Some((hs, d)) => (hs.run_set(), *d),
+        None => (build, st.profile_digest),
+    };
     let mut diffs = Vec::new();
     for id in &manifest.diffs {
         let a = st
@@ -637,13 +652,21 @@ where
             },
         )
     } else {
-        let prepared = prepare(repo, &work, &manifest.base, &diffs).and_then(|tree| {
-            let changed = match claims {
-                true => tests_changed(&work, &manifest.base, &set.test_paths)?,
-                false => vec![],
-            };
-            Ok((tree, changed))
-        });
+        // A holdout run checks the suite's files first: a changed or
+        // planted file fails it before anything executes.
+        let suite_ok = match &suite {
+            Some((hs, _)) => hs.verify_files(),
+            None => Ok(()),
+        };
+        let prepared = suite_ok
+            .and_then(|()| prepare(repo, &work, &manifest.base, &diffs))
+            .and_then(|tree| {
+                let changed = match claims && !holdout {
+                    true => tests_changed(&work, &manifest.base, &set.test_paths)?,
+                    false => vec![],
+                };
+                Ok((tree, changed))
+            });
         match prepared {
             Ok((tree, changed)) => {
                 tests = changed;
@@ -662,10 +685,25 @@ where
             ),
         }
     };
+    // #597 2.2: a holdout run's artifact log is a summary; the output stays
+    // on the host, where no lens reads it. A recovered run has no output of
+    // its own and leaves the host log of the run that died untouched.
+    let log_text = match holdout && !interrupted {
+        true => {
+            let full = crate::holdout::log_path(dir, task, run.id);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("holdout log: {e}"))?;
+            }
+            rusty_atomic_file::write(&full, outcome.log.as_bytes())
+                .map_err(|e| format!("holdout log: {e}"))?;
+            crate::holdout::summary(outcome.status, &outcome.profiles)
+        }
+        false => outcome.log.clone(),
+    };
     let log_id = match run.log {
         Some(id) => id,
         None => {
-            let log_blob = d.store.blob_put(outcome.log.as_bytes());
+            let log_blob = d.store.blob_put(log_text.as_bytes());
             let logged = d
                 .dispatch(
                     &Command::Runner {
@@ -688,7 +726,7 @@ where
         tests_changed: tests,
         candidate: run.candidate,
         run: run.id,
-        profile_digest: d.state.profile_digest,
+        profile_digest: digest,
         status: outcome.status,
         profiles: outcome.profiles,
         tree,

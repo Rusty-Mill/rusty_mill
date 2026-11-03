@@ -141,6 +141,10 @@ pub struct EvidenceBody {
 }
 
 pub const MAX_DOMAINS: usize = 8;
+/// The domain of a claim that changes protected tests (#597 G2). Its
+/// candidate may touch protected paths, and it accepts only with support
+/// from a principal who authored neither its candidate nor its diffs.
+pub const TESTS_DOMAIN: &str = "tests";
 pub const MAX_DEPS: usize = 16;
 pub const DOMAIN_CAP: usize = 32;
 
