@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use orch_dispatch::ClassifiedError;
-use orch_openai::{Config, OpenAiHttp, Prompt, Resolve, Usage};
+use orch_openai::{Config, OpenAiHttp, Prompt, Resolve, Usage, MAX_PENDING_LOOKUPS};
 use rusty_json::Value;
 
 const PROMPT: Prompt<'static> = Prompt {
@@ -356,5 +356,44 @@ fn the_deadline_bounds_name_resolution() {
         start.elapsed() < Duration::from_secs(1),
         "{:?}",
         start.elapsed()
+    );
+}
+
+#[test]
+fn a_key_cut_by_the_excerpt_is_still_redacted() {
+    let body = format!("{}sk-test-secret", "x".repeat(190));
+    let (addr, _seen) = serve_once(Some(response("500 Internal Server Error", &body)));
+    let e = client(addr, Some("LLAMA_KEY"), SECS)
+        .with_env(test_key)
+        .complete(&PROMPT)
+        .expect_err("500");
+    let text = format!("{e:?}");
+    assert!(!text.contains("sk-test"), "{text}");
+}
+
+#[test]
+fn abandoned_lookups_are_bounded_across_calls() {
+    let client = OpenAiHttp::new(
+        Config::new(
+            "http://llama.lan:8080/v1",
+            "m",
+            None,
+            Duration::from_millis(20),
+            false,
+        )
+        .expect("config"),
+    )
+    .with_resolver(SlowDns);
+    let errors: Vec<String> = (0..MAX_PENDING_LOOKUPS + 3)
+        .map(|_| format!("{:?}", client.complete(&PROMPT).expect_err("stalled")))
+        .collect();
+    let (timed_out, refused) = errors.split_at(MAX_PENDING_LOOKUPS);
+    assert!(
+        timed_out.iter().all(|e| e.contains("timed out")),
+        "{errors:?}"
+    );
+    assert!(
+        refused.iter().all(|e| e.contains("lookups still pending")),
+        "{errors:?}"
     );
 }

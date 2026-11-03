@@ -25,6 +25,6 @@ mod config;
 mod wire;
 
 pub use address::{all_private, is_private};
-pub use client::{EnvLookup, OpenAiHttp, Resolve, SystemResolver};
+pub use client::{EnvLookup, OpenAiHttp, Resolve, SystemResolver, MAX_PENDING_LOOKUPS};
 pub use config::{Config, ConfigError};
 pub use wire::{parse_response, request_body, Completion, Prompt, Usage};
