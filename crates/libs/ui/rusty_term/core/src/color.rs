@@ -333,7 +333,7 @@ pub(crate) fn luminance(c: u32) -> f32 {
 
 /// WCAG contrast ratio between two colors, `1.0` (identical) to `21.0`.
 #[cfg_attr(not(feature = "gui"), allow(dead_code))]
-pub(crate) fn contrast_ratio(a: u32, b: u32) -> f32 {
+pub fn contrast_ratio(a: u32, b: u32) -> f32 {
     let (la, lb) = (luminance(a), luminance(b));
     let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
     (hi + 0.05) / (lo + 0.05)

@@ -11,7 +11,7 @@ use winit::window::Window;
 
 use crate::core::{
     ATTR_DIM, ATTR_HIDDEN, ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, BidiRow, Cell,
-    FrameView, char_width,
+    FrameView, Theme, char_width, contrast_ratio, ensure_contrast,
 };
 
 use super::cpu;
@@ -38,11 +38,78 @@ pub(super) fn grid_top(chrome: &[Cell], pad: usize, bar_h: usize) -> usize {
     }
 }
 
-/// Search-match highlight, shared by both renderers: amber for a match, orange
-/// for the active one, with a dark glyph so text stays legible on either.
-pub(super) const SEARCH_BG: u32 = 0xFFD24A;
-pub(super) const SEARCH_CUR_BG: u32 = 0xFF7A1A;
-pub(super) const SEARCH_FG: u32 = 0x101010;
+/// The theme-independent search highlight: amber for a match, orange for the
+/// active one. [`SearchColors::from_theme`] keeps it when the theme's own
+/// colour would stand out less from the background.
+const FIXED_HIT: u32 = 0xFFD24A;
+const FIXED_CURRENT: u32 = 0xFF7A1A;
+
+/// A dark glyph, the starting point for text on a highlight.
+const SEARCH_GLYPH: u32 = 0x101010;
+
+/// Contrast a glyph must keep against its highlight (WCAG AA text).
+const GLYPH_MIN_CONTRAST: f32 = 4.5;
+
+/// Search-match colours, shared by both renderers: `hit` for a match and
+/// `current` for the active one, each a `(background, glyph)` pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SearchColors {
+    pub hit: (u32, u32),
+    pub current: (u32, u32),
+}
+
+impl Default for SearchColors {
+    /// The fixed amber and orange, for pages with no theme of their own.
+    fn default() -> Self {
+        Self {
+            hit: (FIXED_HIT, glyph_on(FIXED_HIT)),
+            current: (FIXED_CURRENT, glyph_on(FIXED_CURRENT)),
+        }
+    }
+}
+
+impl SearchColors {
+    /// Derive the highlight from `theme`: for a match, whichever of the
+    /// theme's yellow and the fixed amber stands out more from the theme's
+    /// background; for the active match, the same between a red-yellow orange
+    /// from the theme and the fixed orange. So a theme never makes a match
+    /// harder to see than the fixed colours do, and a light theme, where the
+    /// amber barely shows, gets its own darker yellow. Each glyph keeps
+    /// [`GLYPH_MIN_CONTRAST`] against its highlight.
+    pub(crate) fn from_theme(theme: &Theme) -> Self {
+        let yellow = theme.palette16[3];
+        let orange = blend(theme.palette16[1], yellow, 128);
+        let hit = pick(yellow, FIXED_HIT, theme.bg);
+        let mut current = pick(orange, FIXED_CURRENT, theme.bg);
+        if current == hit {
+            current = FIXED_CURRENT;
+        }
+        Self {
+            hit: (hit, glyph_on(hit)),
+            current: (current, glyph_on(current)),
+        }
+    }
+
+    /// The `(background, glyph)` pair for a match, `current` or not.
+    pub(super) fn pair(&self, current: bool) -> (u32, u32) {
+        if current { self.current } else { self.hit }
+    }
+}
+
+/// Whichever of `themed` and `fixed` stands out more from `bg` (WCAG
+/// contrast), `themed` on a tie.
+fn pick(themed: u32, fixed: u32, bg: u32) -> u32 {
+    if contrast_ratio(themed, bg) >= contrast_ratio(fixed, bg) {
+        themed
+    } else {
+        fixed
+    }
+}
+
+/// A legible glyph colour on highlight `bg`.
+fn glyph_on(bg: u32) -> u32 {
+    ensure_contrast(SEARCH_GLYPH, bg, GLYPH_MIN_CONTRAST)
+}
 
 /// How much of a dim (SGR 2) cell's foreground survives its fade toward the
 /// background: two thirds.
@@ -136,6 +203,8 @@ pub(crate) struct PaneFrame<'a> {
     /// pane's text (green success / red failure / accent while running).
     /// Empty when the feature is off or nothing is marked.
     pub marks: Vec<(usize, u32)>,
+    /// Search-match colours for this pane.
+    pub search: SearchColors,
 }
 
 /// A present target: paint one frame of the tab's `panes` at the given pixel
@@ -312,6 +381,7 @@ pub(super) fn composite(
                 p.focused,
                 p.cursor_on,
                 p.hover_link,
+                &p.search,
                 font,
                 Some(rows),
             );
@@ -359,6 +429,7 @@ pub(super) fn composite(
             p.focused,
             p.cursor_on,
             p.hover_link,
+            &p.search,
             font,
             None,
         );
@@ -425,6 +496,7 @@ mod tests {
             trail: Vec::new(),
             hover_link: None,
             marks: Vec::new(),
+            search: SearchColors::default(),
         };
         // A zoomed-in grid font (20×30) under a 6×12 UI font.
         let (mut font, mut ui) = (Blank((20, 30)), Blank((6, 12)));
@@ -522,6 +594,63 @@ mod tests {
         let view = g.frame_view();
         let row = view.bidi_row(0).expect("an RTL row");
         assert_ne!(glyph_char(&view.cell(0, 0), Some(row), 0), '\u{628}');
+    }
+
+    /// Every built-in theme's search colours keep their glyphs legible and the
+    /// active match distinct, and a highlight never stands out from the
+    /// background less than the fixed colours would.
+    #[test]
+    fn search_colours_stay_legible_on_every_preset() {
+        for name in crate::config::PRESETS {
+            let theme = crate::config::preset(name).expect("a preset");
+            let c = SearchColors::from_theme(&theme);
+            assert_ne!(c.hit.0, c.current.0, "{name}: current differs from a match");
+            for ((bg, fg), fixed) in [(c.hit, FIXED_HIT), (c.current, FIXED_CURRENT)] {
+                assert!(
+                    contrast_ratio(fg, bg) >= GLYPH_MIN_CONTRAST,
+                    "{name}: glyph {fg:06x} on {bg:06x}"
+                );
+                let ratio = contrast_ratio(bg, theme.bg);
+                let floor = contrast_ratio(fixed, theme.bg);
+                assert!(
+                    ratio >= floor,
+                    "{name}: {bg:06x} on {:06x} is {ratio}",
+                    theme.bg
+                );
+            }
+        }
+    }
+
+    /// On a light theme the fixed amber barely shows (about 1.3:1 on
+    /// solarized-light), so the theme's own yellow takes over.
+    #[test]
+    fn a_light_theme_uses_its_own_search_colours() {
+        let theme = crate::config::preset("solarized-light").expect("a preset");
+        let c = SearchColors::from_theme(&theme);
+        assert_eq!(c.hit.0, theme.palette16[3]);
+        assert!(contrast_ratio(c.hit.0, theme.bg) > contrast_ratio(FIXED_HIT, theme.bg));
+    }
+
+    /// A theme whose yellow is the background itself falls back to the fixed
+    /// colours, and one whose red and yellow match still gets a distinct
+    /// active match.
+    #[test]
+    fn unusable_theme_colours_fall_back_to_the_fixed_ones() {
+        let mut theme = Theme::default();
+        theme.palette16[3] = theme.bg;
+        theme.palette16[1] = theme.bg;
+        let c = SearchColors::from_theme(&theme);
+        assert_eq!((c.hit.0, c.current.0), (FIXED_HIT, FIXED_CURRENT));
+    }
+
+    /// Pages without a theme of their own keep today's amber and orange, with
+    /// the dark glyph.
+    #[test]
+    fn default_search_colours_are_the_fixed_ones() {
+        let c = SearchColors::default();
+        assert_eq!(c.hit, (FIXED_HIT, SEARCH_GLYPH));
+        assert_eq!(c.current, (FIXED_CURRENT, SEARCH_GLYPH));
+        assert!(c.pair(true) == c.current && c.pair(false) == c.hit);
     }
 
     #[test]

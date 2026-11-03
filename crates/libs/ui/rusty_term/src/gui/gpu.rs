@@ -41,8 +41,7 @@ use crate::core::{
 use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
 use super::render::{
-    PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, concealed, drawn, glyph_char,
-    is_overlay_mark,
+    PaneFrame, Renderer, SearchColors, concealed, drawn, glyph_char, is_overlay_mark,
 };
 
 /// The part of atlas tile `rect` (`x, y, w, h`) a row of size `attr` shows:
@@ -355,6 +354,7 @@ struct RowContext {
     font: u64,
     cursor_color: u32,
     min_contrast: u32,
+    search: SearchColors,
     status: Option<Vec<Cell>>,
 }
 
@@ -959,6 +959,7 @@ impl GpuCore {
             trail: Vec::new(),
             hover_link: None,
             marks: Vec::new(),
+            search: SearchColors::default(),
         };
         self.append_grid(&mut frame, &pane, &mut PaneRows::default(), font);
         self.draw_frame(view, &frame, 0x000000);
@@ -1023,6 +1024,7 @@ impl GpuCore {
             font: font.id(),
             cursor_color: grid.cursor_color,
             min_contrast: grid.min_contrast.to_bits(),
+            search: p.search,
             status: grid.status_row().map(<[Cell]>::to_vec),
         };
         if cache.context.as_ref() != Some(&context) {
@@ -1110,13 +1112,8 @@ impl GpuCore {
                     };
                     (fg, bg, curs, ccol, false)
                 } else if !on_status && let Some(cur) = grid.search_highlight(col, row) {
-                    (
-                        SEARCH_FG,
-                        if cur { SEARCH_CUR_BG } else { SEARCH_BG },
-                        0,
-                        0,
-                        false,
-                    )
+                    let (bg, fg) = p.search.pair(cur);
+                    (fg, bg, 0, 0, false)
                 } else if !on_status && grid.is_selected(col, row) {
                     (cell.bg, cell.fg, 0, 0, false)
                 } else {
@@ -2290,6 +2287,7 @@ mod tests {
             trail: Vec::new(),
             hover_link: None,
             marks: Vec::new(),
+            search: SearchColors::default(),
         };
         let frame = core.frame_lists(&[pane], font, 1);
         frame.base.into_iter().filter(|i| i.row == 0).collect()
@@ -2362,6 +2360,7 @@ mod tests {
                 trail: Vec::new(),
                 hover_link: None,
                 marks: Vec::new(),
+                search: SearchColors::default(),
             };
             let frame = core.frame_lists(&[pane], font, 1);
             frame
@@ -2439,6 +2438,7 @@ mod tests {
             trail: Vec::new(),
             hover_link: None,
             marks: Vec::new(),
+            search: SearchColors::default(),
         };
         let v = g.frame_view();
         core.frame_lists(&[pane(&v)], &mut font, 1);

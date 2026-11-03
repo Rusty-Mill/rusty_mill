@@ -14,9 +14,7 @@ use crate::core::{
 };
 
 use super::font::{Glyph, GlyphSource, Style};
-use super::render::{
-    SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, blend, concealed, drawn, glyph_char, is_overlay_mark,
-};
+use super::render::{SearchColors, blend, concealed, drawn, glyph_char, is_overlay_mark};
 
 /// Composite the grid's visible cells into `buf` (`width × height` pixels,
 /// `len() == width * height`). Each cell is filled with its background, then its
@@ -58,6 +56,7 @@ pub(crate) fn render(
         true,
         cursor_on,
         None,
+        &SearchColors::default(),
         font,
         None,
     );
@@ -180,6 +179,7 @@ pub(crate) fn draw_grid(
     focused: bool,
     cursor_on: bool,
     hover_link: Option<(usize, usize, usize)>,
+    search: &SearchColors,
     font: &mut dyn GlyphSource,
     repaint: Option<&[bool]>,
 ) {
@@ -252,7 +252,7 @@ pub(crate) fn draw_grid(
         let bg = if !on_status && block_cursor(col, row) {
             grid.cursor_color
         } else if !on_status && let Some(cur) = search_hl(col, row) {
-            if cur { SEARCH_CUR_BG } else { SEARCH_BG }
+            search.pair(cur).0
         } else if !on_status && inverted(col, row) {
             cell.fg
         } else {
@@ -359,7 +359,8 @@ pub(crate) fn draw_grid(
         } else if !on_status && inverted(col, row) {
             (cell.bg, cell.fg)
         } else if !on_status && let Some(cur) = search_hl(col, row) {
-            (SEARCH_FG, if cur { SEARCH_CUR_BG } else { SEARCH_BG })
+            let (bg, fg) = search.pair(cur);
+            (fg, bg)
         } else {
             (cell.fg, cell.bg)
         };
@@ -453,8 +454,8 @@ pub(crate) fn draw_grid(
         let swapped = !on_status && (block_cursor(col, row) || inverted(col, row));
         let base_fg = if swapped {
             cell.bg
-        } else if !on_status && search_hl(col, row).is_some() {
-            SEARCH_FG
+        } else if !on_status && let Some(cur) = search_hl(col, row) {
+            search.pair(cur).1
         } else {
             cell.fg
         };
@@ -1230,6 +1231,7 @@ mod tests {
             true,
             false,
             Some((0, 0, 1)),
+            &SearchColors::default(),
             &mut MockFont,
             None,
         );
@@ -1264,6 +1266,7 @@ mod tests {
             true,
             false,
             Some((0, 0, 0)),
+            &SearchColors::default(),
             &mut MockFont,
             None,
         );
@@ -1503,6 +1506,7 @@ mod tests {
             false,
             false,
             None,
+            &SearchColors::default(),
             &mut MockFont,
             None,
         );
@@ -1533,6 +1537,7 @@ mod tests {
             false,
             false,
             None,
+            &SearchColors::default(),
             &mut MockFont,
             None,
         );
@@ -1575,6 +1580,7 @@ mod tests {
             false,
             false,
             None,
+            &SearchColors::default(),
             &mut MockFont,
             None,
         );
@@ -1596,6 +1602,7 @@ mod tests {
             false,
             false,
             None,
+            &SearchColors::default(),
             &mut MockFont,
             None,
         );
@@ -1709,6 +1716,7 @@ mod tests {
                 false,
                 false,
                 None,
+                &SearchColors::default(),
                 &mut fc,
                 None,
             );
