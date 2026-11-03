@@ -3008,3 +3008,43 @@ fn cl_77_suite_versions_need_a_fresh_holdout_pass() {
         Code::HoldoutMismatch
     );
 }
+
+#[test]
+fn cl_78_a_tests_claim_needs_support_from_outside_its_authors() {
+    let mut cx = Cx::new();
+    let x = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec![rusty_bbp::claims::TESTS_DOMAIN.into()],
+            ..body("fix the wrong assertion in tests/core.rs")
+        },
+    );
+    // `b` writes the diff, `a` the candidate: both are its authors.
+    let diff = stored(cx.put("b", "test-diff", ArtifactPayload::Diff));
+    let k = stored(cx.put(
+        "a",
+        "test-cand",
+        ArtifactPayload::Candidate(Candidate {
+            base: "a".repeat(40),
+            diffs: vec![diff],
+            claim: Some(x),
+            suite: Suite::Build,
+        }),
+    ));
+    let pass = stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+    ok(cx.executed("a", x, Support, pass));
+    ok(cx.executed("b", x, Support, pass));
+    assert_eq!(
+        cx.status(x),
+        ClaimStatus::Open,
+        "only its authors support it"
+    );
+    ok(cx.opinion("c", x, Support));
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+    // Any other claim accepts on its authors' support as before.
+    let y = cx.low();
+    let r = cx.tested("a", y, true);
+    ok(cx.executed("a", y, Support, r));
+    ok(cx.executed("b", y, Support, r));
+    assert_eq!(cx.status(y), ClaimStatus::Accepted);
+}

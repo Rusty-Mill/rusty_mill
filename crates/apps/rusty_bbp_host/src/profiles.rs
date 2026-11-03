@@ -42,6 +42,11 @@ pub struct ProfileSet {
     /// digests are unchanged.
     #[rusty_serde(default, skip_serializing_if = "no_paths")]
     pub test_paths: Vec<String>,
+    /// Claims mode (#597): globs no candidate diff may add, modify or delete,
+    /// except through an accepted `tests` claim. Covered by the digest; never
+    /// written when empty.
+    #[rusty_serde(default, skip_serializing_if = "no_paths")]
+    pub protected: Vec<String>,
 }
 
 impl ProfileSet {
@@ -69,6 +74,7 @@ impl ProfileSet {
             },
             tree: "sha256(git write-tree id)".into(),
             test_paths: vec![],
+            protected: vec![],
         }
     }
 

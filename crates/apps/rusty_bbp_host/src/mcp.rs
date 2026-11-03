@@ -790,6 +790,15 @@ impl Server {
     /// core refuses the call with `bad_credential`.
     fn call_claims(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         let Translated { op, action, bytes } = claims::action(name, args)?;
+        if let AgentAction::PutArtifact {
+            payload: ArtifactPayload::Candidate(m),
+            ..
+        } = &action
+        {
+            if let Some(refused) = self.protected(m)? {
+                return Ok(Response::Rejected(refused));
+            }
+        }
         let action = self.stored(action, bytes)?;
         let cmd = Command::Agent {
             principal: self.binding.principal.clone(),
@@ -800,6 +809,31 @@ impl Server {
         self.driver
             .dispatch(&cmd, now())
             .map_err(|e| format!("{e:?}"))
+    }
+
+    /// #597: refuse a candidate whose diffs touch the task's protected test
+    /// paths, before the core sees it, so nothing is stored or debited.
+    fn protected(&self, m: &Candidate) -> Result<Option<Rejection>, String> {
+        let st = &self.driver.state;
+        let set = crate::profiles::load(&self.binding.dir, &self.binding.task, st.profile_digest)?;
+        if set.protected.is_empty() {
+            return Ok(None);
+        }
+        let scratch = self.binding.dir.join("scratch").join("protect");
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
+        let store = &self.driver.store;
+        crate::protect::check(st, &set.protected, m, &scratch, |id| {
+            // An id that is no diff reads as an empty patch; the core then
+            // refuses the candidate with its own code.
+            match st
+                .artifacts
+                .get(&id)
+                .filter(|a| a.kind == ArtifactKind::Diff)
+            {
+                Some(a) => store.blob_get(&a.blob.sha).map_err(|e| format!("{e:?}")),
+                None => Ok(Vec::new()),
+            }
+        })
     }
 
     /// Run one tool call end to end.

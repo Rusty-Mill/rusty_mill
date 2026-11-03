@@ -701,3 +701,99 @@ fn the_host_probe_passes_where_the_sandbox_works() {
     assert!(runner::probe(&Broken, &base.join("work")).is_err());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------- protected paths (#597)
+
+/// Store `diff` as `who` and a candidate of it naming claim `c`.
+fn put_candidate(s: &mut Server, op: &str, base: &str, diff: &str, c: u64) -> (String, bool) {
+    let body = rusty_serde::json::to_string(&diff.to_owned()).unwrap();
+    let d = id_of(&ok(
+        s,
+        "put_artifact",
+        &format!(r#"{{"op":"{op}-d","kind":"diff","body":{body}}}"#),
+    ));
+    call(
+        s,
+        "put_artifact",
+        &format!(
+            r#"{{"op":"{op}-k","kind":"candidate","base":"{base}","diffs":[{d}],"claim":{c}}}"#
+        ),
+    )
+}
+
+const TESTS_ONLY: &str = "--- a/tests/core.txt\n+++ b/tests/core.txt\n@@ -1 +1 @@\n-one\n+two\n";
+const FLAG_ONLY: &str = "--- a/flag.txt\n+++ b/flag.txt\n@@ -1 +1 @@\n-no\n+ok\n";
+
+/// #597 G2: a candidate touching a protected path is refused before the core
+/// sees it, naming each path, with nothing stored or debited; a `tests`
+/// claim's candidate may touch only protected paths, and once that claim is
+/// accepted its diff may be reused while any other change is still refused.
+#[test]
+fn protected_paths_are_refused_outside_an_accepted_tests_claim() {
+    let dir = tempdir("protected");
+    let mut set = profiles();
+    set.protected = vec!["tests/**".into()];
+    assert!(matches!(open(&dir, &set, Ok(())), Response::Stored(_)));
+    for who in ["a", "b"] {
+        admin::assign(
+            &dir,
+            &task(),
+            &RoleId::from(who),
+            &PrincipalId(who.into()),
+            "v",
+        )
+        .expect("assign");
+    }
+    let base = "a".repeat(40);
+    let c = claim(&dir, "a", "flag", true);
+    let mut s = server(&dir, "a");
+
+    let (text, err) = put_candidate(&mut s, "all", &base, DIFF, c);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    for p in ["tests/core.txt", "tests/new.txt", "tests/old.txt"] {
+        assert!(text.contains(p), "{p} not named: {text}");
+    }
+    assert!(!text.contains("flag.txt"), "{text}");
+    let st = state(&dir);
+    assert!(st.claims.runs.is_empty(), "nothing debited");
+    assert_eq!(st.claims.get(MsgId(c)).unwrap().current, None);
+
+    let (text, err) = put_candidate(&mut s, "flag", &base, FLAG_ONLY, c);
+    assert!(!err, "{text}");
+
+    // A `tests` claim may carry a test-only candidate, not a mixed one.
+    let b = brief(&dir);
+    let t = id_of(&ok(
+        &mut s,
+        "post",
+        &format!(
+            r#"{{"op":"tests","kind":"claim","text":"fix core","domains":["tests"],"stakes":"low","reversible":true,"refs":["art:{b}"]}}"#
+        ),
+    ));
+    let (text, err) = put_candidate(&mut s, "mixed", &base, DIFF, t);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    let (text, err) = put_candidate(&mut s, "fix", &base, TESTS_ONLY, t);
+    assert!(!err, "{text}");
+    let fix = match &state(&dir).artifacts[&ArtId(id_of(&text))].payload {
+        ArtifactPayload::Candidate(m) => m.diffs[0].0,
+        _ => panic!("not a candidate"),
+    };
+
+    // Before acceptance its diff cannot be reused.
+    let reuse = format!(
+        r#"{{"op":"reuse","kind":"candidate","base":"{base}","diffs":[{fix}],"claim":{c}}}"#
+    );
+    let (text, err) = call(&mut s, "put_artifact", &reuse);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    let rev = state(&dir).rev;
+    let arg = format!("msg:{t}");
+    let r = human::perform(&dir, &task(), "claim", &[&arg, "accept"], Some(rev)).expect("accept");
+    assert_eq!(r, Response::Ok);
+    let reuse = reuse.replace("\"reuse\"", "\"reuse2\"");
+    let (text, err) = call(&mut s, "put_artifact", &reuse);
+    assert!(!err, "{text}");
+    // A fresh diff to the same path is still refused.
+    let (text, err) = put_candidate(&mut s, "again", &base, TESTS_ONLY, c);
+    assert!(err && text.contains("ProtectedPath"), "{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -336,4 +336,7 @@ pub enum Code {
     /// A holdout candidate does not build the claim's current code, or the
     /// task has no holdout suite.
     HoldoutMismatch,
+    /// Host (#597): a candidate's diff adds, modifies or deletes a protected
+    /// test path outside an accepted `tests` claim.
+    ProtectedPath,
 }

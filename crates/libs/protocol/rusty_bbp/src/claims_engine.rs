@@ -604,6 +604,25 @@ pub(crate) fn endorsement(st: &TaskState, c: MsgId, k: ArtId) -> Option<MsgId> {
         .map(|i| i.msg)
 }
 
+/// A `tests` claim with a candidate accepts only with scoring support from a
+/// principal who authored neither the candidate nor its diffs (#597 G2): a
+/// builder never weakens protected tests on its own word.
+fn tests_supported(st: &TaskState, c: &ClaimRecord) -> bool {
+    let Some(k) = c.current else {
+        return true;
+    };
+    if !c.body.domains.iter().any(|d| d == TESTS_DOMAIN) {
+        return true;
+    }
+    let authors = authors_of(st, k);
+    c.items.iter().any(|i| {
+        i.scoring
+            && i.epoch == c.epoch
+            && i.direction == Direction::Support
+            && !authors.contains(&i.author)
+    })
+}
+
 /// The author of candidate `k` and of each of its diffs.
 fn authors_of(st: &TaskState, k: ArtId) -> Vec<PrincipalId> {
     let Some(a) = st.artifacts.get(&k) else {
@@ -749,6 +768,7 @@ fn accept_line(st: &TaskState, c: &ClaimRecord) -> bool {
         && c.grounded(Direction::Support)
         && c.failing.is_empty()
         && holdout_passed(st, c)
+        && tests_supported(st, c)
         && c.body
             .deps
             .iter()
