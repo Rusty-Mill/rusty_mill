@@ -177,24 +177,52 @@ impl HoldoutSet {
         set
     }
 
-    /// #597 2.2: no build run can reach the suite. Its root shares no
-    /// directory with the build set's read roots or with `dirs` (the
-    /// repository, the work root): neither contains the other, compared after
-    /// resolving symlinks, so an alias counts as the directory it names.
+    /// #597 2.2: no build run can reach the suite. Its root and every
+    /// private fixture of its golden sets share no directory with the build
+    /// set's read roots or with `dirs` (the repository, the work root):
+    /// neither contains the other, compared after resolving symlinks, so an
+    /// alias counts as the directory it names.
     pub fn isolated_from(&self, build: &ProfileSet, dirs: &[&Path]) -> Result<(), String> {
-        let root = canonical(Path::new(&self.root))?;
-        let roots = build.read_roots.iter().map(PathBuf::from);
-        for other in roots.chain(dirs.iter().map(|d| d.to_path_buf())) {
-            let resolved = canonical(&other)?;
-            if resolved.starts_with(&root) || root.starts_with(&resolved) {
-                return Err(format!(
-                    "holdout root {} overlaps {}, which build runs can read",
-                    self.root,
-                    other.display()
-                ));
+        let others: Vec<PathBuf> = build
+            .read_roots
+            .iter()
+            .map(PathBuf::from)
+            .chain(dirs.iter().map(|d| d.to_path_buf()))
+            .collect();
+        for private in self.private()? {
+            let mine = canonical(&private)?;
+            for other in &others {
+                let resolved = canonical(other)?;
+                if resolved.starts_with(&mine) || mine.starts_with(&resolved) {
+                    return Err(format!(
+                        "holdout path {} overlaps {}, which build runs can read",
+                        private.display(),
+                        other.display()
+                    ));
+                }
             }
         }
         Ok(())
+    }
+
+    /// What build runs must never reach: the suite root and the absolute
+    /// fixture files of each golden set, which may lie outside the root.
+    fn private(&self) -> Result<Vec<PathBuf>, String> {
+        let mut out = vec![PathBuf::from(&self.root)];
+        let golden = self
+            .set
+            .profiles
+            .iter()
+            .filter(|p| p.name.starts_with("golden:"))
+            .filter_map(|p| p.args.get(1));
+        for dir in golden {
+            out.extend(
+                crate::golden::fixture_files(Path::new(dir))?
+                    .into_iter()
+                    .map(PathBuf::from),
+            );
+        }
+        Ok(out)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
@@ -431,6 +459,42 @@ mod tests {
         dotted.read_roots.push("/usr/../tmp".into());
         assert!(hs.isolated_from(&dotted, &[]).is_err(), "..");
         let _ = std::fs::remove_file(&alias);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// #597 review: a golden fixture outside the suite root is as private
+    /// as the root, so one a build run could read is refused.
+    #[test]
+    fn a_golden_fixture_any_build_run_can_read_is_refused() {
+        let root = suite("fixture");
+        let repo = std::env::temp_dir().join(format!("bbp_holdout_repo_{}", std::process::id()));
+        std::fs::create_dir_all(&repo).unwrap();
+        let fixture = repo.join("secret.txt");
+        std::fs::write(&fixture, "expected\n").unwrap();
+        let golden = root.join("golden");
+        std::fs::create_dir_all(&golden).unwrap();
+        let files = BTreeMap::from([(
+            fixture.to_str().unwrap().to_owned(),
+            Sha256::of(b"expected\n"),
+        )]);
+        let manifest = crate::golden::manifest_text(&files);
+        std::fs::write(golden.join(crate::golden::MANIFEST), manifest).unwrap();
+        let mut with = set();
+        with.profiles.push(crate::profiles::Profile {
+            name: "golden:golden".into(),
+            program: "/bin/bbp".into(),
+            args: vec!["golden-run".into(), golden.to_str().unwrap().into()],
+        });
+        let hs = HoldoutSet::scan(with, &root).unwrap();
+        let build = ProfileSet::shell("test", "true");
+        hs.isolated_from(&build, &[Path::new("/nonexistent/work")])
+            .unwrap();
+        let err = hs.isolated_from(&build, &[&repo]).unwrap_err();
+        assert!(err.contains("secret.txt"), "{err}");
+        let mut wide = build;
+        wide.read_roots.push(repo.to_str().unwrap().into());
+        assert!(hs.isolated_from(&wide, &[]).is_err(), "a build read root");
+        let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&root);
     }
 
