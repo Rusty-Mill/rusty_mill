@@ -1,0 +1,23 @@
+[package]
+name = "orch-lens"
+version = "0.1.0"
+edition = "2021"
+# rusty_bbp's floor.
+rust-version = "1.89"
+description = "Orchestrator lens runner core: critic lenses over a BBP claims board. Reply protocol, context assembly, tiering, data classes and the money meter. Pure, no I/O."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+# `AgentId`, the provider token.
+orch-core = { workspace = true }
+# `ClassifiedError`, shared with the dispatcher's adapters.
+orch-dispatch = { workspace = true }
+# `unfence`, the one-fence tolerance every reply parser shares.
+orch-cli = { workspace = true }
+# Claim and evidence types, ids and limits. A lib, so ADR-0003 allows it.
+rusty_bbp = { workspace = true }
+# Replies and config. Foundation crate, serde off, as in orch-cli.
+rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
