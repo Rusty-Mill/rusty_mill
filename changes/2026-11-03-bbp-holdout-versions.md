@@ -9,3 +9,4 @@ changelog: rusty_bbp holdout suite versions (#597 slice 2) - host holdout_extend
 - **Changed (review):** a retired digest is never adopted again (`duplicate`), so an earlier suite's passes cannot count once more; and every claim with a candidate is marked changed at a version event, so `claims_delta` subscribers see that it is due (CL-93).
 - **Added:** traces CL-77 and CL-93.
 - **Known limitations:** the file-level "only additions" check and a CLI to write either action come with the host's holdout set file (a later slice).
+- **Fixed (re-review):** after a suite version, an endorsement never unlocks a holdout pass reported under the retired suite (CL-98).
