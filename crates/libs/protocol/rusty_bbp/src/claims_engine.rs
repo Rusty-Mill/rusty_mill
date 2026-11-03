@@ -318,11 +318,15 @@ fn manifest(st: &TaskState, k: ArtId) -> Option<&Candidate> {
 }
 
 /// Does `k` build the code of `c`'s current candidate? True for the current
-/// candidate itself and for a holdout candidate of the same manifest.
+/// candidate itself and for a holdout candidate of the same manifest naming
+/// `c`: another claim's candidate of equal code never speaks for `c`.
 fn builds_current(st: &TaskState, c: &ClaimRecord, k: ArtId) -> bool {
     let Some(cur) = c.current else {
         return false;
     };
+    if st.claims.candidates.get(&k) != Some(&c.id) {
+        return false;
+    }
     if cur == k {
         return true;
     }
