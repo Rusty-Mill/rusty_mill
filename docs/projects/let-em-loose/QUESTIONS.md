@@ -6,10 +6,9 @@ These are the questions an implementer would ask while building v0 ([SPEC.md](SP
 
 | Q | Decision needed |
 | --- | --- |
-| 26 | When the intent interview for the #600 experiment happens |
-| 27 | The #600 experiment's own targets (Phase B targets are settled) |
 | 28 | Signing off the golden sets |
-| 31 | The write to existing remind-me records |
+
+Q26, Q27 and Q31 were settled after this list was written; see [handoff/QA.md](handoff/QA.md) (§ Dedup experiment, § remind-me).
 
 ## Claims model (BBP, #593)
 

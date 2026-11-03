@@ -1,6 +1,6 @@
 # Let Em Loose: decisions
 
-Each entry gives the decision, why it was made, and what was rejected. **Agreed** means Nano has approved it. **Proposed** means it is the working direction but still awaits a design or confirmation. Dates are when the decision was made. Where an earlier entry and a later one conflict, the later one wins. The detailed BBP rules are in the claims addendum, `crates/libs/protocol/rusty_bbp/docs/spec/bbp-claims-addendum.md` (PR #1386).
+Each entry gives the decision, why it was made, and what was rejected. **Agreed** means Nano has approved it. **Proposed** means it is the working direction but still awaits a design or confirmation. From D46 on, entries carry a project-handoff tag instead ([handoff/DECISIONS.md](handoff/DECISIONS.md)): `[stated]` or `[agreed]` (Nano's; ask before changing) or `[default]` (an agent's choice; revise with a new entry saying why), plus the remind-me id. Only the `let-em-loose-expert` subagent appends entries. Dates are when the decision was made. Where an earlier entry and a later one conflict, the later one wins. The detailed BBP rules are in the claims addendum, `crates/libs/protocol/rusty_bbp/docs/spec/bbp-claims-addendum.md` (PR #1386).
 
 | # | Decision | Status |
 | --- | --- | --- |
@@ -49,6 +49,12 @@ Each entry gives the decision, why it was made, and what was rejected. **Agreed*
 | D43 | No erosion override; inbox Approve is the override | Agreed 2026-11-03 (#704) |
 | D44 | Scheduled cleanups pay erosion down | Agreed 2026-11-03 (#704) |
 | D45 | Rust only; unmeasured code is reported, not failed | Agreed 2026-11-03 (#704) |
+| D46 | Three-tier escalation for design questions | [stated] 2026-11-03 (handoff) |
+| D47 | Ask the project expert before Nano | [stated] 2026-11-03 (handoff) |
+| D48 | Never invent a decision; unsourced goes to OPEN_QUESTIONS | [stated] 2026-11-03 (handoff) |
+| D49 | The handoff pack is scoped to the project folder | [default] 2026-11-03 (handoff) |
+| D50 | One decision log, D-numbering continues | [default] 2026-11-03 (handoff) |
+| D51 | The expert is the single writer of settled answers | [default] 2026-11-03 (handoff) |
 
 ## D1. Lenses, not stages
 
@@ -352,3 +358,48 @@ No push notifications in v0. Sorting uses BBP facts: irreversible first, then ol
 **Decision.** v0 measures Rust only. Other languages are added when a real task needs them. Non-code files (md, toml, yaml, json and similar) are ignored. Code in an unsupported language is marked `unmeasured` on the claim and in the report, and counted in calibration, but it does not fail the profile or escalate. Known limit: the metric can be gamed, for example by splitting functions or renaming. It is a heuristic, and calibration watches for gaming, such as function count or total CC rising while concentration falls.
 **Why.** No speculative language support. Recording `unmeasured` keeps the blind spot visible without sending every mixed-language change to Nano.
 **Rejected.** Treating unmeasured code as a failure. Supporting Python before a task needs it.
+
+## D46. Three-tier escalation for design questions
+
+**Decision.** A design question is answered when the record (this file, the handoff pack, remind-me, Nano's standing principles) settles it; implementation detail gets a logged `[default]`; only intent, scope or taste, or anything that would reverse a `[stated]` or `[agreed]` decision, goes to Nano.
+**Why.** Nano was relaying design questions between Claude sessions by hand.
+**Rejected.** Asking Nano whenever a thread is unsure.
+**Tag.** [stated] · remind-me: mem_8d9722c4207840afa0df9e187897055d
+**Source.** Nano's handoff prompt, 2026-11-03.
+
+## D47. Ask the project expert before Nano
+
+**Decision.** Threads and the orchestrator consult the `let-em-loose-expert` subagent before asking Nano any Let Em Loose design question.
+**Why.** The expert holds the design context; Nano only sees what it can't answer.
+**Rejected.** Threads asking Nano directly.
+**Tag.** [stated] · remind-me: mem_9645385181204711adf0e4bb1b035c4d
+**Source.** Nano's handoff prompt, 2026-11-03.
+
+## D48. Never invent a decision
+
+**Decision.** Anything that can't be sourced goes in `handoff/OPEN_QUESTIONS.md`, not into an answer or a decision.
+**Why.** A made-up decision looks settled and is worse than an honest gap.
+**Rejected.** Filling gaps with plausible answers.
+**Tag.** [stated] · remind-me: mem_6c172130fa684069ba0f11f1cca63916
+**Source.** Nano's handoff prompt, 2026-11-03.
+
+## D49. The handoff pack is scoped to the project folder
+
+**Decision.** The pack lives in `docs/projects/let-em-loose/handoff/`, the subagent in `.claude/agents/let-em-loose-expert.md`, and the CLAUDE.md rule applies only to Let Em Loose paths and cards.
+**Why.** rusty_mill is a monorepo hosting many projects; the v1.2 template assumes one project per repo.
+**Rejected.** `docs/handoff/` at the repo root, and a generic `project-expert` name.
+**Tag.** [default] · remind-me: mem_5eae422a1d394844951db4a0446cf92c
+
+## D50. One decision log, D-numbering continues
+
+**Decision.** This file stays the only decision log. `handoff/DECISIONS.md` points here and new entries continue at D46.
+**Why.** Two logs would drift.
+**Rejected.** Copying D1–D45 into the pack.
+**Tag.** [default] · remind-me: mem_7c60a2deca2b4004a90a58f221fb518d
+
+## D51. The expert is the single writer of settled answers
+
+**Decision.** Callers pass Nano's answers back to `let-em-loose-expert`, which writes one entry here and one `remind_me_add`, and ticks `handoff/OPEN_QUESTIONS.md`. Callers never write either.
+**Why.** One writer keeps each answer recorded exactly once.
+**Rejected.** Each thread recording its own answers.
+**Tag.** [default] · remind-me: mem_df536a0f908b40db9fdb87196ba62e35
