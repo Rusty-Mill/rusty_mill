@@ -13,6 +13,34 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   be admitted and what is still checked at call time. No model is called
   and no container is inspected.
 
+## Codex lens questions run only in the checked container
+**2026-11-03**
+
+- Before every Codex lens question the runner inspects the operator's
+  container on its own local podman and refuses anything but the asserted
+  mounts and machine id, an unprivileged container with no extra devices,
+  capabilities or shared namespaces, and no API key in its environment
+  (#594). A failed check is `Unavailable` and runs nothing.
+- The login probe and `codex exec` run with `podman exec` by the checked
+  container id.
+
+## Lens assertions can name a container
+**2026-11-03**
+
+- The operator's `host_cleared` entry may name a container and its exact
+  mounts, including a read-only bind of `/etc/machine-id` (#594). Nothing
+  runs under it yet; the per-call container check follows.
+- Under a container clearance, a machine-bound no-overage entry must name
+  the container's id, and Claude gets no grant.
+
+## orch-codex: lens replies from the JSON events
+**2026-11-03**
+
+- A lens question now reads Codex's reply from the `--json` event stream
+  it already reads for usage, so no reply file is written on the host and
+  Codex can run inside the `lel-codex` container (#594).
+- `CodexAgent::lens_argv()` no longer takes a reply path.
+
 ## orch-lens: the lens runner's core
 **2026-11-03**
 
