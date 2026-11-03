@@ -834,7 +834,8 @@ impl Server {
         let store = &self.driver.store;
         let touched = crate::protect::touched(m, &scratch, |id| {
             // An id that is no diff reads as an empty patch; the core then
-            // refuses the candidate with its own code.
+            // refuses the candidate with its own code. A missing id is
+            // refused below, since another session may store it later.
             match st
                 .artifacts
                 .get(&id)
@@ -845,7 +846,8 @@ impl Server {
             }
         })?;
         Ok(Some(crate::protect::Guard {
-            off_baseline: crate::protect::off_baseline(set.baseline.as_deref(), m),
+            refused: crate::protect::off_baseline(set.baseline.as_deref(), m)
+                .or_else(|| crate::protect::unresolved(st, m)),
             protected: set.protected,
             touched,
             claim: m.claim,

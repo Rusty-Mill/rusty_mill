@@ -407,6 +407,7 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-96 | Holdout task. H1's holdout run of K passes listing `holdout:api` with a modified test; a later holdout run of K fails `holdout:api`; `c` endorses K | The block stays: H1's pass is older than the failure. `holdout_due` stays: the latest holdout report failed |
 | CL-97 | Holdout task. `c` endorses K; H's holdout run of K passes with a modified test; `a` posts executed support citing that report | Accepted: K's endorsement covers H, which builds its code |
 | CL-98 | Holdout task. H's holdout run of K passes `holdout:api` with a modified test under v1; the host extends the suite to v2; H2's run fails `holdout:api` under v2; `c` endorses K | The block stays: H's pass belongs to the retired suite and is older than the v2 failure. `holdout_due` stays |
+| CL-99 | Holdout task. A holdout run of K fails `holdout:api`; H1's holdout run passes it with a modified test; another holdout run fails it again; `c` endorses K | The block stays: H1's pass is older than the latest failure of `holdout:api`, though `failing_from` names the first |
 | CL-44 | Host test (`rusty_bbp_host`): open a claims-mode task on a host with no sandbox configured; on a sandboxed host, inspect where a candidate's run executes | `bad_claims_config(sandbox)`, nothing written; the run's process is inside the `rusty_sandbox` profile |
 
 ## Owner answers (2026-11-02)

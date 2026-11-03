@@ -704,7 +704,7 @@ fn after_evidence(w: &mut Work, m: MsgId, c: MsgId, e: &EvidenceBody, d: &Draft)
 /// of each holdout candidate building its code, when it passed with a test
 /// change (a holdout report also under the task's current holdout digest):
 /// its listed profiles leave `failing(c)` at this commit, each only when the
-/// report is newer than the one that put the profile there.
+/// report is newer than the latest failure of that profile on the code.
 fn clear_if_endorsed(w: &mut Work, c: MsgId, d: &Draft) {
     let Some(rec) = w.st.claims.get(c) else {
         return;
@@ -726,13 +726,39 @@ fn clear_if_endorsed(w: &mut Work, c: MsgId, d: &Draft) {
             .filter(|(id, claim)| **claim == c && builds_current(&w.st, rec, **id))
             .filter_map(|(id, _)| unlockable(&w.st, *id))
             .collect();
-    let from = rec.failing_from.clone();
-    let cleared = |n: &String| {
-        passes
-            .iter()
-            .any(|(id, listed)| listed.contains(n) && from.get(n).is_none_or(|set| set < id))
-    };
-    set_failing(w, c, |f| f.retain(|n| !cleared(n)));
+    let st = &w.st;
+    let cleared: Vec<String> = rec
+        .failing
+        .iter()
+        .filter(|n| {
+            let failed = last_failure(st, rec, n);
+            passes
+                .iter()
+                .any(|(id, listed)| listed.contains(n) && failed.is_none_or(|f| f < *id))
+        })
+        .cloned()
+        .collect();
+    set_failing(w, c, |f| {
+        for n in &cleared {
+            f.remove(n);
+        }
+    });
+}
+
+/// The latest failed report on `c`'s current code that failed profile `n`.
+/// Derived from the runs, since `failing_from` keeps the first failure.
+fn last_failure(st: &TaskState, c: &ClaimRecord, n: &str) -> Option<ArtId> {
+    st.claims
+        .runs
+        .values()
+        .filter(|r| builds_current(st, c, r.candidate))
+        .filter_map(|r| r.report)
+        .filter(|id| {
+            report_of(st, *id).is_some_and(|rep| {
+                rep.status == RunStatus::Failed && rep.failed_profiles().iter().any(|p| p == n)
+            })
+        })
+        .max()
 }
 
 /// `k`'s latest report and its listed profiles, when it passed with a test
