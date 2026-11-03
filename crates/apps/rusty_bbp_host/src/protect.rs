@@ -169,7 +169,7 @@ fn old_sides(patch: &[u8]) -> Result<Vec<String>, String> {
         };
         open = None;
         if !old.is_empty() {
-            out.push(old);
+            out.push(normal(&old)?);
         }
     }
     unknown_source(open)?;
@@ -196,6 +196,19 @@ fn unknown_source(header: Option<&[u8]>) -> Result<(), String> {
             "diff --git {h}: its source path is unknown; refusing to guess"
         )),
     }
+}
+
+/// `p` spelt as the index path git changes: repeated `/` squashed, as git
+/// does. A `.` or `..` segment is refused rather than resolved, so a glob
+/// never meets a spelling git would read as another path.
+fn normal(p: &str) -> Result<String, String> {
+    let segs: Vec<&str> = p.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() || segs.iter().any(|s| *s == "." || *s == "..") {
+        return Err(format!(
+            "old path {p:?} is not a plain repository path; refusing to guess"
+        ));
+    }
+    Ok(segs.join("/"))
 }
 
 fn text<'a>(raw: &'a [u8], what: &str) -> Result<&'a str, String> {
@@ -512,5 +525,16 @@ rename to src/a.rs\n";
         let moved = b"diff --git a/tests/x b/src/x\nold mode 100644\nnew mode 100755\n";
         assert!(old_sides(moved).unwrap_err().contains("unknown"));
         assert!(old_sides(b"--- \"a/t\\tab\"\n+++ b/x\n").is_err());
+        // #597 review: git squashes `//`, so the spelling it changes is read.
+        let doubled = b"diff --git a/tests//core.txt b/src/core.txt\n--- a/tests//core.txt\n+++ b/src/core.txt\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(old_sides(doubled).expect("ok"), ["tests/core.txt"]);
+        assert_eq!(
+            old_sides(b"rename from tests//a.rs\nrename to b.rs\n").expect("ok"),
+            ["tests/a.rs"]
+        );
+        for odd in ["tests/./core.txt", "tests/../tests/core.txt"] {
+            let p = format!("--- a/{odd}\n+++ b/src/core.txt\n");
+            assert!(old_sides(p.as_bytes()).is_err(), "{odd}");
+        }
     }
 }
