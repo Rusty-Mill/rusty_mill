@@ -7119,6 +7119,7 @@ dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
  "rusty_json",
 ]
 
@@ -7156,12 +7157,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-lens"
+version = "0.1.0"
+dependencies = [
+ "orch-cli",
+ "orch-core",
+ "orch-dispatch",
+ "rusty_bbp",
+ "rusty_json",
+]
+
+[[package]]
 name = "orch-ollama"
 version = "0.1.0"
 dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+]
+
+[[package]]
+name = "orch-openai"
+version = "0.1.0"
+dependencies = [
+ "orch-dispatch",
+ "orch-lens",
+ "rusty_http",
+ "rusty_json",
 ]
 
 [[package]]

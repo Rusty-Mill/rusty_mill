@@ -145,6 +145,16 @@ impl Features {
     /// skip the field.
     pub const FOCUS: Self = Self(1 << 28);
 
+    /// Generated session names: a [`Message::CreateSession`] with an empty
+    /// name from a client with this bit gets a name no other session has,
+    /// such as `quiet-harbor` ([`rusty_mux_core::is_generated`]). From a
+    /// client without it an empty name stays empty, as before.
+    pub const SESSION_NAMES: Self = Self(1 << 29);
+
+    /// Naming a session only while its name is generated:
+    /// [`Message::NameSession`], refused once somebody chose a name.
+    pub const NAME_SESSION: Self = Self(1 << 30);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -246,6 +256,10 @@ pub enum Entry {
         /// `None` while it has no windows, or from a server without
         /// [`Features::ACTIVE_WINDOW`].
         active: Option<WindowId>,
+        /// The server made up `name` and nobody has renamed the session
+        /// since ([`Features::SESSION_NAMES`]); `false` from an older
+        /// server.
+        generated: bool,
     },
     Window {
         window: WindowId,
@@ -477,6 +491,16 @@ pub enum Message {
         window: WindowId,
         toward: Toward,
     },
+    /// Renames `session` as [`Message::Rename`] does, but only while its
+    /// name is generated; once somebody chose one, refused and the name
+    /// stays. The server checks and renames in one step, so of two such
+    /// requests only the first can take effect. Negotiated with
+    /// [`Features::NAME_SESSION`].
+    NameSession {
+        req: u64,
+        session: SessionId,
+        name: String,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -642,8 +666,10 @@ const INDEX: u32 = 48;
 const TOWARD: u32 = 49;
 /// A window's focused block.
 const FOCUSED: u32 = 50;
-// IDs 1..=FOCUSED are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = FOCUSED as usize;
+/// A session entry's mark that the server made up its name: 1, or absent.
+const GENERATED: u32 = 51;
+// IDs 1..=GENERATED are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = GENERATED as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -677,6 +703,7 @@ mod ty {
     pub const MOVE_WINDOW: u8 = 0x1d;
     pub const FOCUS_BLOCK: u8 = 0x1e;
     pub const MOVE_FOCUS: u8 = 0x1f;
+    pub const NAME_SESSION: u8 = 0x20;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -864,6 +891,12 @@ impl Message {
                     .uuid(WINDOW, window.uuid())
                     .varint(TOWARD, toward_wire(*toward));
                 ty::MOVE_FOCUS
+            }
+            M::NameSession { req, session, name } => {
+                out.varint(REQ, *req)
+                    .uuid(SESSION, session.uuid())
+                    .bytes(NAME, name.as_bytes());
+                ty::NAME_SESSION
             }
             M::Welcome {
                 features,
@@ -1091,6 +1124,11 @@ impl Message {
                 req: f.varint(REQ)?,
                 window: window(&f, WINDOW)?,
                 toward: get_toward(&f)?,
+            },
+            ty::NAME_SESSION => M::NameSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                name: f.string(NAME)?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
@@ -1773,12 +1811,16 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             session,
             name,
             active,
+            generated,
         } => {
             out.varint(KIND, entry::SESSION)
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
             if let Some(window) = active {
                 out.uuid(WINDOW, window.uuid());
+            }
+            if *generated {
+                out.varint(GENERATED, 1);
             }
         }
         Entry::Window {
@@ -1848,6 +1890,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             session: session(f, SESSION)?,
             name: f.string(NAME)?,
             active: f.opt(WINDOW, window)?,
+            generated: f.opt(GENERATED, In::varint)? == Some(1),
         },
         entry::WINDOW => Entry::Window {
             window: window(f, WINDOW)?,

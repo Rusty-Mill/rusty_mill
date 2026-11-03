@@ -71,6 +71,9 @@ pub enum Error {
     /// A [`Principal`](crate::Principal) with an empty id, or a field
     /// longer than [`MAX_NAME`](crate::MAX_NAME) bytes.
     BadPrincipal,
+    /// The session's name was chosen, not generated, so
+    /// [`Mux::name_session`](crate::Mux::name_session) leaves it.
+    NameChosen(SessionId),
 }
 
 impl fmt::Display for Error {
@@ -122,6 +125,9 @@ impl fmt::Display for Error {
             Self::SameBlock(block) => write!(f, "block {block} cannot go beside itself"),
             Self::Placed(window) => {
                 write!(f, "window {window} shows blocks: name one to go beside")
+            }
+            Self::NameChosen(id) => {
+                write!(f, "session {id} already has a chosen name")
             }
             Self::NoPlace { window, index } => {
                 write!(f, "no place {index} for window {window} in its session")

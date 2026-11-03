@@ -28,7 +28,7 @@ use rusty_json::{Map, Value};
 
 use crate::cli::{AgentArgs, AgentCommand, AgentKind, AgentScope, Defaults};
 use crate::{Env, Exit};
-use layout::{Hook, Layout};
+use layout::{Ctl, Hook, Layout};
 
 /// The skill, our own text.
 const SKILL: &str = include_str!("agent/SKILL.md");
@@ -77,15 +77,25 @@ struct Line {
 }
 
 /// Runs an `agent` command, printing one line per file to `out`.
+/// `generated_name` asks the server for the name of the session the hook
+/// runs in while that name is one the server made up and nobody has
+/// renamed it since, `None` otherwise or if it cannot tell; only
+/// `hook --name-session` calls it.
 pub(crate) fn run(
     command: &AgentCommand,
     env: &Env,
     json: bool,
     out: &mut dyn io::Write,
+    generated_name: &dyn Fn() -> Option<String>,
 ) -> Result<Exit, String> {
     let (args, lines, exit) = match command {
-        AgentCommand::Hook => {
-            let text = hook_text(&env.here, env.ctl.as_deref()).unwrap_or_default();
+        AgentCommand::Hook { name_session } => {
+            let generated = match name_session {
+                true => generated_name(),
+                false => None,
+            };
+            let text =
+                hook_text(&env.here, env.ctl.as_deref(), generated.as_deref()).unwrap_or_default();
             return print(out, &text);
         }
         AgentCommand::Setup(args) => (args, setup(&layouts(args, env)?, args.dry_run)?, Exit::Ok),
@@ -123,7 +133,10 @@ fn layouts(args: &AgentArgs, env: &Env) -> Result<Vec<Layout>, String> {
                 &args.scope,
                 &env.agent_homes,
                 env.here.dir.as_deref(),
-                ctl,
+                Ctl {
+                    path: ctl,
+                    name_session: args.name_session,
+                },
             )
         })
         .collect()
@@ -149,7 +162,13 @@ fn neighbours(env: &Env) -> Result<Vec<Layout>, String> {
     Ok(roots
         .into_iter()
         .flat_map(|(scope, root)| AgentKind::ALL.map(|agent| (agent, scope.clone(), root)))
-        .filter_map(|(agent, scope, root)| layout::layout(agent, &scope, homes, root, ctl).ok())
+        .filter_map(|(agent, scope, root)| {
+            let ctl = Ctl {
+                path: ctl,
+                name_session: false,
+            };
+            layout::layout(agent, &scope, homes, root, ctl).ok()
+        })
         .collect())
 }
 
@@ -171,7 +190,9 @@ fn print(out: &mut dyn io::Write, text: &str) -> Result<Exit, String> {
 }
 
 /// What the hook tells an agent that starts in a block; nothing elsewhere.
-fn hook_text(here: &Defaults, ctl: Option<&Path>) -> Option<String> {
+/// `generated` is the session's name when it is still a generated one and
+/// the agent is to name it after its task.
+fn hook_text(here: &Defaults, ctl: Option<&Path>, generated: Option<&str>) -> Option<String> {
     let block = here.block?;
     let mut text = format!("This shell runs in rusty_mux block {block}");
     if let (Some(window), Some(session)) = (here.window, here.session) {
@@ -183,6 +204,15 @@ fn hook_text(here: &Defaults, ctl: Option<&Path>) -> Option<String> {
     );
     if let Some(ctl) = ctl {
         text.push_str(&format!(" rusty-mux-ctl is {}.", ctl.display()));
+    }
+    if let (Some(name), Some(session)) = (generated, here.session) {
+        text.push_str(&format!(
+            " The session's name, `{name}`, was made up when it started: once you know your \
+             task, name the session after it, once, with `rusty-mux-ctl name-session \
+             --session {session} --name NAME`, NAME being a few lowercase words joined by \
+             dashes. If that is refused, somebody has named the session already: leave \
+             its name alone."
+        ));
     }
     Some(text)
 }

@@ -24,6 +24,7 @@ fn listing() -> Vec<Entry> {
         session: SessionId::from_uuid(id(s)),
         name: name.into(),
         active: None,
+        generated: false,
     };
     let window = |w: &str, s: &str| Entry::Window {
         window: WindowId::from_uuid(id(w)),

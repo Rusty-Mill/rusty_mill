@@ -176,6 +176,12 @@ pub(crate) trait Renderer {
     fn supports_opacity(&self) -> bool {
         false
     }
+
+    /// Whether presenting already waits for the display refresh (vsync), so
+    /// the window need not pace output repaints itself (see `pace`).
+    fn waits_for_vsync(&self) -> bool {
+        false
+    }
 }
 
 /// CPU compositor presented through `softbuffer`. It repaints only the pane

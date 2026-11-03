@@ -22,10 +22,15 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .card b{display:block}
 .num{float:right;margin-left:6px;color:var(--mute);font-size:12px}
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
+.meta.stale{color:var(--err)}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
 .tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
-#view[aria-pressed=true],#metrics[aria-pressed=true]{background:var(--acc);color:#fff}
+main.decisions{grid-auto-flow:row;grid-template-columns:minmax(0,760px);justify-content:center;align-content:start}
+.decisions .col p{margin:6px 4px}.decisions .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.decisions a{color:var(--acc)}
+.decisions .cand{border:1px solid var(--line);border-radius:6px;padding:6px;margin:6px 4px}
+#view[aria-pressed=true],#metrics[aria-pressed=true],#decide[aria-pressed=true]{background:var(--acc);color:#fff}
 main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
 .roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
 @media (max-width:640px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
@@ -94,6 +99,7 @@ dialog form{display:grid;gap:8px}
   <h1>Mill Board</h1>
   <button id="view" aria-pressed="false" title="Show the chosen project's roadmap">Roadmap</button>
   <button id="metrics" aria-pressed="false" title="Show metrics for the chosen repository or project, or the whole board">Metrics</button>
+  <button id="decide" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions<span id="decide-n"></span></button>
   <input id="actor" placeholder="your name" size="12" aria-label="actor name">
   <select id="role" aria-label="role"></select>
   <input id="title" placeholder="New card title" size="26" aria-label="new card title">
@@ -195,10 +201,11 @@ const PRIORITY={5:"High",3:"Medium",1:"Low",0:"None"};
 const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priority)]:[];
 
 function render(){
+  if(view==="decisions"){renderDecisions();return}
   if(view==="roadmap"){renderRoadmap();return}
   if(view==="metrics"){renderMetrics();return}
   mapSeq++;   // drop any roadmap or metrics still loading
-  const b=$("board");b.classList.remove("roadmap","metrics");b.replaceChildren();
+  const b=$("board");b.classList.remove("roadmap","metrics","decisions");b.replaceChildren();
   for(const {id:c,label:name} of FLOW.columns){
     const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",name));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
@@ -214,6 +221,8 @@ function render(){
         d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
         const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
       }
+      const waiting=pending?.filter(p=>p.card?.id===k.id).length;
+      if(waiting){const t=el("span","⚑ "+waiting,"tag p5");t.title="decisions waiting for you";m.append(t)}
       if(k.issue)m.append(el("span","issue #"+k.issue));
       if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
       d.append(m);
@@ -228,11 +237,11 @@ function render(){
 
 /* The roadmap: the chosen project's cards in lanes (now, next, later, blocked, shipped), laid out
    by the server's board_roadmap so the rules live in one place. Re-read whenever the board is. */
-let view=["roadmap","metrics"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
+let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
 // Each lane's columns, from the workflow's kinds (the server's Lane::of).
 const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipped:"done"};
 const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
-const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics")};
+const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions")};
 function setView(v){view=v;pref("view",v);pressed();render()}
 // The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
 const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
@@ -243,9 +252,9 @@ async function renderRoadmap(){
   try{
     if(!project)throw new Error("No project to show a roadmap for.");
     map=await api("board_roadmap",{project});
-  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  b.classList.remove("metrics");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
+  b.classList.remove("metrics","decisions");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
     const h=el("h2",l.lane+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);
@@ -285,7 +294,7 @@ async function renderMetrics(){
   const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
   let m;
   try{m=await api("board_metrics",args)}
-  catch(e){if(!stale()){b.classList.remove("roadmap","metrics");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
   const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
   const kpis=el("div",null,"kpis");
@@ -301,7 +310,7 @@ async function renderMetrics(){
     d.onclick=()=>show(k.id);idle.append(d);
   }
   if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
-  b.classList.remove("roadmap");b.classList.add("metrics");
+  b.classList.remove("roadmap","decisions");b.classList.add("metrics");
   b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
     bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
     bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
@@ -418,7 +427,63 @@ async function snapshot(){
   const list=(await api("board_list")).cards;
   cursor=at;cards=byPriority(list);
 }
-async function refresh(){await snapshot();render()}
+async function refresh(){await snapshot();await loadPending();render()}
+
+/* Decisions (#595): the open BBP escalations of the tasks linked from cards, read through inbox_list
+   (admin only; Mill Board stores none of it). `pending` is null when this credential or board has no
+   inbox (a 403 or 422), which hides the button. Any other failure is a read failure: `pendingErr` says
+   so, and the decisions last read stay shown, marked stale, so a host hiccup never hides one.
+   Each action is dry-run first, and BBP's answer is shown before it is taken. */
+let pending=null,pendingAt=0,pendingRead=0,pendingErr=null;
+async function loadPending(){
+  pendingAt=Date.now();
+  try{pending=await api("inbox_list",who());pendingRead=pendingAt;pendingErr=null}
+  catch(e){
+    if(e.status===403||e.status===422){pending=null;pendingErr=null}
+    else pendingErr=e.message||"no answer";
+  }
+  $("decide").hidden=pending===null&&pendingErr===null&&view!=="decisions";
+  $("decide-n").textContent=(pending?.length?" · "+pending.length:"")+(pendingErr?" · ⚠":"");
+}
+const pct=c=>c.confidence+"% · score "+c.score+" · budget "+c.spent+"/"+c.budget+(c.epoch?" · epoch "+c.epoch:"");
+const changes=d=>d.events.map(e=>Object.keys(e)[0]).join(", ")||"nothing";
+async function decide(item,action){
+  const args={...who(),id:item.id,rev:item.rev,...action};
+  try{
+    const d=(await api("inbox_act",{...args,dry_run:true})).dry_run;
+    if(d.response.Rejected){toast("BBP would refuse: "+d.response.Rejected.code+" "+d.response.Rejected.detail);return}
+    const then=d.then.length?"\nThen: "+d.then.map(s=>s.verb+" "+s.args.join(" ")).join("; "):"";
+    if(!confirm(d.step.verb+" "+d.step.args.join(" ")+"\nWould write: "+changes(d)+then))return;
+    const out=(await api("inbox_act",args)).outcome;
+    if(out.Refused)toast("Refused at step "+(out.Refused.step+1)+": "+out.Refused.code+" "+out.Refused.detail);
+  }catch(e){toast(e.message)}
+  await refresh().catch(()=>{});
+}
+function renderDecisions(){
+  mapSeq++;
+  const b=$("board");b.classList.remove("roadmap","metrics");b.classList.add("decisions");b.replaceChildren();
+  if(pendingErr)b.append(el("p","Could not read the inbox: "+pendingErr+(pending?". Showing what was read at "+new Date(pendingRead).toLocaleTimeString()+", which may be stale.":"."),"meta stale"));
+  if(pending===null&&pendingErr){renderSide();return}
+  if(pending===null){b.append(el("p","The inbox needs an admin token (sign in with one) and a board started with --bbp-bin and --bbp-root.","meta"));renderSide();return}
+  if(!pending.length){b.append(el("p","Nothing needs you.","meta"));renderSide();return}
+  for(const it of pending){
+    const s=el("section",null,"col"),c=it.claim;
+    s.append(el("h2",it.label+(it.reversible===false?" · irreversible":"")+(it.stakes?" · "+it.stakes+" stakes":"")));
+    if(it.card){const h=el("p",null,"meta");h.append(el("a",(it.card.number?"#"+it.card.number+" ":"")+it.card.title));h.firstChild.href="#";h.firstChild.onclick=e=>{e.preventDefault();show(it.card.id)};s.append(h)}
+    if(c){s.append(el("p",c.text),el("p",pct(c),"meta"))}else s.append(el("p","Task "+it.task+" crossed a budget total and paused."));
+    for(const e of it.evidence)s.append(el("p",(e.delta>0?"+":"")+e.delta+" "+e.kind.toLowerCase()+" "+e.direction.toLowerCase()+" by "+e.author+" (msg:"+e.msg+")","meta"));
+    for(const k of it.candidates){
+      const d=el("div",null,"cand");d.append(el("b",k.text),el("p",pct(k),"meta"));
+      const pick=el("button","Choose this");pick.onclick=()=>decide(it,{action:"choose",chosen:k.id});d.append(pick);s.append(d);
+    }
+    const acts=el("div",null,"acts"),btn=(t,f)=>{const x=el("button",t);x.onclick=f;acts.append(x)};
+    btn("Approve",()=>decide(it,{action:"approve"}));
+    btn("Reject",()=>{const reason=it.reason==="TaskTotal"?prompt("Why cancel this task?"):null;if(it.reason!=="TaskTotal"||reason)decide(it,{action:"reject",...(reason&&{reason})})});
+    btn("Refine intent",()=>{const note=prompt("What should the lenses know? (1 to 1200 characters)");if(note)decide(it,{action:"refine",note})});
+    s.append(acts);b.append(s);
+  }
+  renderSide();syncDialog();
+}
 /* Columns change without a card event (an admin's edit elsewhere), so they are re-read on every
    poll; a changed set redraws the board even when no card moved. */
 async function pollColumns(){
@@ -429,6 +494,7 @@ async function pollColumns(){
 async function poll(){
   try{
     let redraw=await pollColumns();
+    if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
       const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
@@ -709,6 +775,7 @@ async function loadMeta(){
   $("gear").onclick=openSettings;
   $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
   $("metrics").onclick=()=>setView(view==="metrics"?"board":"metrics");pressed();
+  $("decide").onclick=()=>setView(view==="decisions"?"board":"decisions");
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
   // New cards go to the chosen project, else to the chosen repository's own project.

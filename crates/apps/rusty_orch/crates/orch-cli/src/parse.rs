@@ -87,7 +87,8 @@ fn exactly_one_review(role: Role, outputs: Vec<Output>) -> Result<Vec<Output>, A
     }
 }
 
-fn unfence(s: &str) -> &str {
+/// The text inside one ``` fence, or `s` trimmed when it has none.
+pub fn unfence(s: &str) -> &str {
     let s = s.trim();
     let Some(rest) = s.strip_prefix("```") else {
         return s;

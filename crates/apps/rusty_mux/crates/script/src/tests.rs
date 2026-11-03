@@ -193,7 +193,7 @@ fn values_must_suit_the_catalog_as_ctl_would_check_them() {
     let text = r#"{
       "actions": [
         {"name": "bad", "run": [
-          {"call": "create-session"},
+          {"call": "create-window"},
           {"call": "input"},
           {"call": "resize", "args": {"cols": 0, "rows": "wide"}},
           {"call": "resize", "args": {"cols": 65536, "rows": 24}}
@@ -207,21 +207,21 @@ fn values_must_suit_the_catalog_as_ctl_would_check_them() {
         {"keys": "a", "action": "size", "args": {"cols": "0"}},
         {"keys": "b", "action": "size", "args": {"cols": "120"}},
         {"keys": "c", "action": "resize", "args": {"cols": "80", "rows": "x"}},
-        {"keys": "d", "action": "create-session"},
+        {"keys": "d", "action": "create-window"},
         {"keys": "e", "action": "create-window", "args": {"name": "w"}}
       ]
     }"#;
     assert_eq!(
         problems(text),
         [
-            "actions[0].run[0]: `create-session` needs parameter `name`",
+            "actions[0].run[0]: `create-window` needs parameter `name`",
             "actions[0].run[1]: `input` needs parameter `data`",
             "actions[0].run[2].args.cols: `cols`: `0` is not a valid cell count",
             "actions[0].run[2].args.rows: `rows`: `wide` is not a valid cell count",
             "actions[0].run[3].args.cols: `cols`: `65536` is not a valid cell count",
             "binds[0]: `cols`: `0` is not a valid cell count",
             "binds[2]: `rows`: `x` is not a valid cell count",
-            "binds[3]: `create-session` needs parameter `name`",
+            "binds[3]: `create-window` needs parameter `name`",
         ]
     );
 }

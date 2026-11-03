@@ -71,7 +71,7 @@ From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3'
 3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did. Done (#1372): the owner said go on 2026-11-01 and confirmed the paths in DECISIONS.md on the PR. Skill text read from the installed binary (Rex delta D1) is not part of this step.
 4. Block methods `terminal.reset`, `terminal.set-theme`, `terminal.size` (C40). Done: behind `Features::TERMINAL_CONTROL`; reset and theme are bytes the server feeds the block's terminal and every attached client, so all copies stay alike. The owner said go on 2026-11-02.
 5. Layout editing: resize splits, swap blocks, move a block into a new split, detach a block from the layout while it keeps running, reorder windows, server-side focus (C41). Done: the server and ctl edits (#1393), server-side focus (#1406), then the attach client following the focus and the active window, with keys for the edits, one PR each (the owner chose this split on 2026-11-02).
-6. Generated session names, and agents that name their session after their task, opt-in through C39's setup (C50). From the Rex app check.
+6. Generated session names, and agents that name their session after their task, opt-in through C39's setup (C50). From the Rex app check. The owner said go on 2026-11-03. Two PRs: the server's generated names, used by ctl and the attach client, then the opt-in agent setup.
 7. LLM-readable API help and shell completion, both generated from the catalog (C51, C52). From the Rex app check.
 8. Block methods `terminal.clear`, `terminal.modes`, `terminal.shell` (C71). From the Rex app check.
 

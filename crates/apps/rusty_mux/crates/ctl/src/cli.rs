@@ -57,8 +57,12 @@ pub enum AgentCommand {
     /// Exits 0 only when every item is installed and current.
     Status(AgentArgs),
     Remove(AgentArgs),
-    /// What the session-start hook runs.
-    Hook,
+    /// What the session-start hook runs; with `name_session`, it also asks
+    /// the agent to name a session that still has a generated name after
+    /// its task.
+    Hook {
+        name_session: bool,
+    },
 }
 
 /// Which agents an `agent` verb acts on, and where.
@@ -68,6 +72,10 @@ pub struct AgentArgs {
     pub agents: Vec<AgentKind>,
     pub scope: AgentScope,
     pub dry_run: bool,
+    /// The hook asks the agent to name its session after its task (C50):
+    /// setup installs that hook, status checks for it, and setup without
+    /// it turns it off again.
+    pub name_session: bool,
 }
 
 /// A coding agent `agent setup` knows.
@@ -317,7 +325,7 @@ fn watch(args: &[String]) -> Result<Command, String> {
 }
 
 const AGENT_USAGE: &str = "usage: agent setup|status|remove [--agent claude|codex|opencode|pi|all]... \
-     [--project | --dir DIR] [--dry-run] | agent hook";
+     [--project | --dir DIR] [--dry-run] [--name-session] | agent hook [--name-session]";
 
 fn agent(args: &[String]) -> Result<AgentCommand, String> {
     let (verb, rest) = args.split_first().ok_or(AGENT_USAGE)?;
@@ -325,18 +333,28 @@ fn agent(args: &[String]) -> Result<AgentCommand, String> {
         "setup" => AgentCommand::Setup,
         "status" => AgentCommand::Status,
         "remove" => AgentCommand::Remove,
-        "hook" if rest.is_empty() => return Ok(AgentCommand::Hook),
+        "hook" => {
+            let name_session = match rest {
+                [] => false,
+                [flag] if flag == "--name-session" => true,
+                _ => return Err(AGENT_USAGE.into()),
+            };
+            return Ok(AgentCommand::Hook { name_session });
+        }
         _ => return Err(AGENT_USAGE.into()),
     };
     let mut agents = Vec::new();
     let mut scope = AgentScope::User;
     let mut dry_run = false;
-    for (key, text) in flags("agent", rest, |f| matches!(f, "project" | "dry-run"))? {
+    let mut name_session = false;
+    let bare = |f: &str| matches!(f, "project" | "dry-run" | "name-session");
+    for (key, text) in flags("agent", rest, bare)? {
         match (key, &scope) {
             ("agent", _) => agents.extend(agent_kinds(text)?),
             ("project", AgentScope::User) if text == "true" => scope = AgentScope::Project,
             ("dir", AgentScope::User) => scope = AgentScope::Dir(PathBuf::from(text)),
             ("dry-run", _) if text == "true" && verb != "status" => dry_run = true,
+            ("name-session", _) if text == "true" => name_session = true,
             _ => return Err(AGENT_USAGE.into()),
         }
     }
@@ -354,6 +372,7 @@ fn agent(args: &[String]) -> Result<AgentCommand, String> {
         agents,
         scope,
         dry_run,
+        name_session,
     }))
 }
 
@@ -675,8 +694,10 @@ pub fn usage(method: Option<&Method>) -> String {
             text.push_str(
                 "  agent            Set up coding agents to use rusty_mux: a skill and a session-start\n\
                  \x20                  hook: agent setup|status|remove [--agent claude|codex|opencode|\n\
-                 \x20                  pi|all]... [--project | --dir DIR] [--dry-run]; Claude Code when\n\
-                 \x20                  no --agent; status exits 0 only when every item is current\n",
+                 \x20                  pi|all]... [--project | --dir DIR] [--dry-run] [--name-session];\n\
+                 \x20                  Claude Code when no --agent; status exits 0 only when every\n\
+                 \x20                  item is current; --name-session has the agent name a session\n\
+                 \x20                  that still has a generated name after its task\n",
             );
             text.push_str(
                 "  bridge           Join stdin and stdout to the socket, for a client that runs\n\
@@ -692,7 +713,9 @@ pub fn usage(method: Option<&Method>) -> String {
                 text.push_str(&match (p.presence, p.ty) {
                     (Presence::Optional { .. }, Ty::Flag) => format!(" [--{}]", p.name),
                     (Presence::Required, _) => format!(" --{} <{}>", p.name, p.ty),
-                    (Presence::Optional { .. }, _) => format!(" [--{} <{}>]", p.name, p.ty),
+                    (Presence::Optional { .. } | Presence::Defaulted { .. }, _) => {
+                        format!(" [--{} <{}>]", p.name, p.ty)
+                    }
                 });
             }
             text.push_str(&format!("\n{}\n", m.doc));
