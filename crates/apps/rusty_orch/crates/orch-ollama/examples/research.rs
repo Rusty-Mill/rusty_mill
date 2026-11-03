@@ -9,10 +9,13 @@ use std::time::Duration;
 
 use orch_core::board::Board;
 use orch_core::goal::{Goal, GoalDraft, StopRule};
-use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec};
 use orch_core::{GoalId, Text};
 use orch_dispatch::{Dispatcher, Ledger, Routing, RoutingConfig};
 use orch_ollama::OllamaAgent;
+
+const CLAUDE: AgentId = AgentId::from_static("claude");
+const LOCAL: AgentId = AgentId::from_static("local");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let question = std::env::args()
@@ -43,11 +46,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger = Ledger::new();
 
     let routing = Routing::try_from(RoutingConfig {
-        research: Agent::Local,
-        design: Agent::Local,
-        implement: Agent::Local,
-        triage: Agent::Local,
-        reviewers: vec![Agent::Local, Agent::Claude],
+        research: LOCAL,
+        design: LOCAL,
+        implement: LOCAL,
+        triage: LOCAL,
+        reviewers: vec![LOCAL, CLAUDE],
     })?;
     let mut dispatcher =
         Dispatcher::new(routing, OllamaAgent::new(model, Duration::from_secs(180)));

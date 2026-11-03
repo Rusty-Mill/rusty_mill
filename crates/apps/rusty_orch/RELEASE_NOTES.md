@@ -4,6 +4,16 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Providers are ids, not an enum
+**2026-11-03**
+
+- `orch_core::task::Agent` is now `AgentId`, a validated token, so a new
+  model backend is configuration rather than a core change (ADR-0019).
+- Snapshots write the id; the four old variants still load as `claude`,
+  `codex`, `gemini` and `local`. An older binary cannot read a snapshot
+  saved by this one.
+- Errors and progress lines print the id (`codex failed T-1`).
+
 ## Leases bound validator roots; leased cancel
 **2026-11-02**
 

@@ -26,9 +26,11 @@ use std::fmt;
 use std::num::NonZeroU32;
 
 use orch_core::goal::{Goal, GoalDraft, GoalError, StopRule};
-use orch_core::task::{Agent, Plan, PlanError, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, PlanError, Role, TaskSpec};
 use orch_core::{GoalId, Ref, Text};
 use orch_dispatch::RoutingConfig;
+
+use crate::agents::KNOWN;
 use rusty_json::Value;
 
 /// Everything the file said, validated as far as the domain allows without
@@ -156,11 +158,11 @@ pub fn build_plan(spec: &Spec, goal: GoalId) -> Result<Plan, InputError> {
 /// first; Codex reviews what the local model wrote. Matches the examples.
 pub fn default_routing() -> RoutingConfig {
     RoutingConfig {
-        research: Agent::Codex,
-        design: Agent::Codex,
-        implement: Agent::Codex,
-        triage: Agent::Local,
-        reviewers: vec![Agent::Local, Agent::Codex],
+        research: orch_codex::ID,
+        design: orch_codex::ID,
+        implement: orch_codex::ID,
+        triage: orch_ollama::ID,
+        reviewers: vec![orch_ollama::ID, orch_codex::ID],
     }
 }
 
@@ -274,7 +276,7 @@ fn routing(v: &Value) -> Result<RoutingConfig, InputError> {
         return Err(InputError("routing: expected an object".to_owned()));
     }
     let base = default_routing();
-    let one = |field: &str, fallback: Agent| match v.get(field) {
+    let one = |field: &str, fallback: AgentId| match v.get(field) {
         None => Ok(fallback),
         Some(a) => agent(a).map_err(|m| InputError(format!("routing.{field}: {m}"))),
     };
@@ -296,16 +298,13 @@ fn routing(v: &Value) -> Result<RoutingConfig, InputError> {
     })
 }
 
-/// Agent names as the user writes them.
-pub fn agent(v: &Value) -> Result<Agent, String> {
-    match v.as_str() {
-        Some("claude") => Ok(Agent::Claude),
-        Some("codex") => Ok(Agent::Codex),
-        Some("gemini") => Ok(Agent::Gemini),
-        Some("local") => Ok(Agent::Local),
-        Some(other) => Err(format!("unknown agent {other:?}")),
-        None => Err("expected an agent name".to_owned()),
-    }
+/// An agent name as the user writes it: a valid id this binary can route.
+pub fn agent(v: &Value) -> Result<AgentId, String> {
+    let name = v.as_str().ok_or("expected an agent name")?;
+    AgentId::new(name)
+        .ok()
+        .filter(|id| KNOWN.contains(id))
+        .ok_or_else(|| format!("unknown agent {name:?}"))
 }
 
 fn index(v: &Value, field: &str) -> Result<usize, String> {

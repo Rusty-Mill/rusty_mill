@@ -292,7 +292,7 @@ fn progress_notes_name_the_category_and_never_the_agents_message() {
     ));
     assert_eq!(
         console.notes,
-        vec!["run: stopped: Codex failed T-1 (see report) after 1 call(s)"]
+        vec!["run: stopped: codex failed T-1 (see report) after 1 call(s)"]
     );
     assert!(
         report::text(&s).contains(SENTINEL),

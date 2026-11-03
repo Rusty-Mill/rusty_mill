@@ -3,7 +3,7 @@
 //! carry no serialisation of their own.
 
 use orch_core::board::{Author, Confidence, Entry, EntryKind, Verdict};
-use orch_core::task::{Agent, Role, Status, Task, TaskState};
+use orch_core::task::{Role, Status, Task, TaskState};
 use orch_core::Ref;
 use rusty_json::{Map, Value};
 
@@ -130,14 +130,14 @@ fn task_json(t: &Task) -> Value {
     match t.state() {
         TaskState::Pending => {}
         TaskState::Running { agent } => {
-            m.insert("agent".into(), agent_name(*agent).into());
+            m.insert("agent".into(), agent.to_string().into());
         }
         TaskState::Blocked { agent, question } => {
-            m.insert("agent".into(), agent_name(*agent).into());
+            m.insert("agent".into(), agent.to_string().into());
             m.insert("question".into(), question.to_string().into());
         }
         TaskState::Done { agent, outputs } => {
-            m.insert("agent".into(), agent_name(*agent).into());
+            m.insert("agent".into(), agent.to_string().into());
             m.insert(
                 "outputs".into(),
                 outputs
@@ -148,7 +148,7 @@ fn task_json(t: &Task) -> Value {
             );
         }
         TaskState::Failed { agent, reason } => {
-            m.insert("agent".into(), agent_name(*agent).into());
+            m.insert("agent".into(), agent.to_string().into());
             m.insert("reason".into(), reason.as_str().into());
         }
     }
@@ -197,15 +197,15 @@ fn entry_json(e: &Entry, superseded: bool) -> Value {
 fn state_detail(t: &Task) -> String {
     match t.state() {
         TaskState::Pending => String::new(),
-        TaskState::Running { agent } => agent_name(*agent).to_owned(),
+        TaskState::Running { agent } => agent.to_string(),
         TaskState::Blocked { agent, question } => {
-            format!("{} waits on {question}", agent_name(*agent))
+            format!("{} waits on {question}", agent)
         }
         TaskState::Done { agent, outputs } => {
             let ids: Vec<String> = outputs.iter().map(ToString::to_string).collect();
-            format!("{} -> {}", agent_name(*agent), ids.join(", "))
+            format!("{} -> {}", agent, ids.join(", "))
         }
-        TaskState::Failed { agent, reason } => format!("{}: {reason}", agent_name(*agent)),
+        TaskState::Failed { agent, reason } => format!("{}: {reason}", agent),
     }
 }
 
@@ -240,19 +240,10 @@ pub fn status_name(s: Status) -> &'static str {
     }
 }
 
-pub fn agent_name(a: Agent) -> &'static str {
+fn author_name(a: Author) -> String {
     match a {
-        Agent::Claude => "claude",
-        Agent::Codex => "codex",
-        Agent::Gemini => "gemini",
-        Agent::Local => "local",
-    }
-}
-
-fn author_name(a: Author) -> &'static str {
-    match a {
-        Author::Human => "human",
-        Author::Agent(agent) => agent_name(agent),
+        Author::Human => "human".to_owned(),
+        Author::Agent(agent) => agent.to_string(),
     }
 }
 

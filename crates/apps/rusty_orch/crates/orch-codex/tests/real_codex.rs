@@ -11,9 +11,11 @@ use std::num::NonZeroU32;
 
 use orch_codex::CodexAgent;
 use orch_core::board::Board;
-use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec};
 use orch_core::{GoalId, Ref, Text};
 use orch_dispatch::AgentRunner;
+
+const CODEX: AgentId = AgentId::from_static("codex");
 
 #[test]
 #[ignore = "needs the codex binary, a ChatGPT login, and ORCH_CODEX_REPO"]
@@ -49,7 +51,7 @@ fn codex_reads_the_prompt_from_stdin_and_echoes_the_nonce() {
     // on stdin, so a body containing the nonce proves stdin delivery, the
     // schema + last-message path, -C, and the subscription login at once.
     let out = agent
-        .run(Agent::Codex, plan.tasks().first().expect("card"), &board)
+        .run(CODEX, plan.tasks().first().expect("card"), &board)
         .expect("codex produced parseable entries");
 
     assert!(

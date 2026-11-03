@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use orch_core::board::Board;
 use orch_core::goal::StopRule;
-use orch_core::task::{Agent, Role, Task};
+use orch_core::task::{AgentId, Role, Task};
 use orch_dispatch::{AgentError, AgentRunner, ClassifiedError, Output};
 use rusty_json::Value;
 
@@ -39,9 +39,12 @@ pub const SCRUBBED_ENV: &[&str] = &[
     "CLAUDE_CODE_USE_VERTEX",
 ];
 
-/// [`Agent::Claude`] over `claude -p`, read-only tools, prompt on stdin.
+/// The id this adapter serves by default.
+pub const ID: AgentId = AgentId::from_static("claude");
+
+/// The provider [`ID`] over `claude -p`, read-only tools, prompt on stdin.
 ///
-/// Serves non-implementation roles through `Agent::Claude`; unsupported
+/// Serves non-implementation roles through [`ID`]; unsupported
 /// agent/role pairs are rejected before any process is spawned. The argv is
 /// a fixed vector with no shell and no interpolation; the model is Claude
 /// Code's default unless [`ClaudeAgent::model`] sets one. The child runs
@@ -161,18 +164,23 @@ impl<C: CommandRunner> ClaudeAgent<C> {
 }
 
 impl<C: CommandRunner> AgentRunner for ClaudeAgent<C> {
-    fn supports(&self, agent: Agent, role: Role) -> bool {
-        agent == Agent::Claude && !matches!(role, Role::Implement)
+    fn supports(&self, agent: AgentId, role: Role) -> bool {
+        agent == ID && !matches!(role, Role::Implement)
     }
 
-    fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
+    fn run(
+        &mut self,
+        agent: AgentId,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentError> {
         self.run_with_policy(agent, task, board)
             .map_err(ClassifiedError::into_error)
     }
 
     fn run_classified(
         &mut self,
-        agent: Agent,
+        agent: AgentId,
         task: &Task,
         board: &Board,
     ) -> Result<Vec<Output>, ClassifiedError> {
@@ -183,13 +191,13 @@ impl<C: CommandRunner> AgentRunner for ClaudeAgent<C> {
 impl<C: CommandRunner> ClaudeAgent<C> {
     fn run_with_policy(
         &mut self,
-        agent: Agent,
+        agent: AgentId,
         task: &Task,
         board: &Board,
     ) -> Result<Vec<Output>, ClassifiedError> {
         if !self.supports(agent, task.spec().role) {
             return Err(ClassifiedError::Permanent(AgentError(format!(
-                "claude adapter cannot serve {:?} through {agent:?}",
+                "claude adapter cannot serve {:?} through {agent}",
                 task.spec().role
             ))));
         }

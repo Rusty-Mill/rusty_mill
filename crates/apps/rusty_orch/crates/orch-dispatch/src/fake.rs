@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 
 use orch_core::board::{Board, EntryKind};
-use orch_core::task::{Agent, Task};
+use orch_core::task::{AgentId, Task};
 use orch_core::{TaskId, Text};
 
 use crate::{AgentError, AgentRunner, Output};
@@ -23,7 +23,7 @@ pub enum Reply {
 #[derive(Debug, Default)]
 pub struct FakeAgent {
     script: VecDeque<Reply>,
-    calls: Vec<(Agent, TaskId)>,
+    calls: Vec<(AgentId, TaskId)>,
 }
 
 impl FakeAgent {
@@ -36,13 +36,13 @@ impl FakeAgent {
     }
 
     /// Every `(agent, task)` pair the dispatcher asked for, in order.
-    pub fn calls(&self) -> &[(Agent, TaskId)] {
+    pub fn calls(&self) -> &[(AgentId, TaskId)] {
         &self.calls
     }
 }
 
 impl AgentRunner for FakeAgent {
-    fn run(&mut self, agent: Agent, task: &Task, _: &Board) -> Result<Vec<Output>, AgentError> {
+    fn run(&mut self, agent: AgentId, task: &Task, _: &Board) -> Result<Vec<Output>, AgentError> {
         self.calls.push((agent, task.id()));
         match self.script.pop_front() {
             None => Err(AgentError("fake agent: script exhausted".to_owned())),
