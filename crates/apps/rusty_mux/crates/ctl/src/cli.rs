@@ -168,6 +168,9 @@ pub enum Api {
     List,
     /// One method, with its parameters as a JSON Schema.
     Describe(&'static Method),
+    /// Every method and command as one Markdown document for a language
+    /// model.
+    Llms,
 }
 
 /// One request with its checked arguments.
@@ -285,7 +288,8 @@ fn api(args: &[String]) -> Result<Command, String> {
     match args {
         [verb] if verb == "list" => Ok(Command::Api(Api::List)),
         [verb, name] if verb == "describe" => known(name).map(|m| Command::Api(Api::Describe(m))),
-        _ => Err("usage: api list | api describe METHOD".into()),
+        [verb] if verb == "llms" => Ok(Command::Api(Api::Llms)),
+        _ => Err("usage: api list | api describe METHOD | api llms".into()),
     }
 }
 
@@ -652,79 +656,100 @@ fn reason(method: &str, error: &CallError) -> String {
     format!("{method}: {error}")
 }
 
-/// The usage text: every method, or one method's flags.
+/// The commands that are not catalog methods, with their help as [`usage`]
+/// prints it: wrapped, each further line indented to the text.
+pub(crate) const COMMANDS: &[(&str, &str)] = &[
+    (
+        "events",
+        "Print missed events: [--after EPOCH:SEQ] [--follow]",
+    ),
+    ("do", "Run a configured action: do ACTION [--ARG VALUE]..."),
+    (
+        "config",
+        "Check or list the config: config check [PATH] | config list",
+    ),
+    (
+        "watch",
+        "Run the config's rules on events: watch [--after EPOCH:SEQ]",
+    ),
+    (
+        "wait",
+        "Wait for a block's program to exit, exiting with its status;\n\
+         \x20                  for every block in a window or session to end, exiting with\n\
+         \x20                  the last failure; or for an event whose fields match:\n\
+         \x20                  wait --block BLOCK | --window WINDOW | --session SESSION |\n\
+         \x20                  wait --event KIND [--FIELD VALUE]...; [--timeout SECS] exits 124",
+    ),
+    (
+        "run",
+        "Start a program in a new block; with --wait, exit with its status:\n\
+         \x20                  run [--window W] [--cols N] [--rows N] [--cwd DIR] [--wait\n\
+         \x20                  [--timeout SECS]] [--] COMMAND [ARG]...",
+    ),
+    (
+        "agent",
+        "Set up coding agents to use rusty_mux: a skill and a session-start\n\
+         \x20                  hook: agent setup|status|remove\n\
+         \x20                  [--agent claude|codex|opencode|pi|all]... [--project | --dir DIR]\n\
+         \x20                  [--dry-run] [--name-session];\n\
+         \x20                  Claude Code when no --agent; status exits 0 only when every\n\
+         \x20                  item is current; --name-session has the agent name a session\n\
+         \x20                  that still has a generated name after its task",
+    ),
+    (
+        "bridge",
+        "Join stdin and stdout to the socket, for a client that runs\n\
+         \x20                  `ssh HOST rusty-mux-ctl bridge`",
+    ),
+    (
+        "api",
+        "List methods, describe one as JSON, or print the whole API as\n\
+         \x20                  Markdown for a language model: api list | api describe METHOD |\n\
+         \x20                  api llms",
+    ),
+    ("help", "Show a command's flags: help COMMAND"),
+];
+
+/// The usage text: every command, or one method's flags.
 pub fn usage(method: Option<&Method>) -> String {
-    match method {
-        None => {
-            let mut text = String::from(
-                "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
-                 The socket defaults to $RUSTY_MUX_SOCKET. An id flag also takes a name, a\n\
-                 position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
-                 defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\
-                 Actions come from $RUSTY_MUX_CONFIG, or rusty_mux/config.json in the\n\
-                 config directory.\n\ncommands:\n",
-            );
-            for m in schema::CATALOG {
-                text.push_str(&format!("  {:<16} {}\n", m.name, m.doc));
-            }
-            text.push_str(
-                "  events           Print missed events: [--after EPOCH:SEQ] [--follow]\n",
-            );
-            text.push_str(
-                "  do               Run a configured action: do ACTION [--ARG VALUE]...\n",
-            );
-            text.push_str(
-                "  config           Check or list the config: config check [PATH] | config list\n",
-            );
-            text.push_str(
-                "  watch            Run the config's rules on events: watch [--after EPOCH:SEQ]\n",
-            );
-            text.push_str(
-                "  wait             Wait for a block's program to exit, exiting with its status;\n\
-                 \x20                  for every block in a window or session to end, exiting with\n\
-                 \x20                  the last failure; or for an event whose fields match:\n\
-                 \x20                  wait --block BLOCK | --window WINDOW | --session SESSION |\n\
-                 \x20                  wait --event KIND [--FIELD VALUE]...; [--timeout SECS] exits 124\n",
-            );
-            text.push_str(
-                "  run              Start a program in a new block; with --wait, exit with its status:\n\
-                 \x20                  run [--window W] [--cols N] [--rows N] [--cwd DIR] [--wait\n\
-                 \x20                  [--timeout SECS]] [--] COMMAND [ARG]...\n",
-            );
-            text.push_str(
-                "  agent            Set up coding agents to use rusty_mux: a skill and a session-start\n\
-                 \x20                  hook: agent setup|status|remove [--agent claude|codex|opencode|\n\
-                 \x20                  pi|all]... [--project | --dir DIR] [--dry-run] [--name-session];\n\
-                 \x20                  Claude Code when no --agent; status exits 0 only when every\n\
-                 \x20                  item is current; --name-session has the agent name a session\n\
-                 \x20                  that still has a generated name after its task\n",
-            );
-            text.push_str(
-                "  bridge           Join stdin and stdout to the socket, for a client that runs\n\
-                 \x20                  `ssh HOST rusty-mux-ctl bridge`\n",
-            );
-            text.push_str("  api              List methods, or describe one as JSON: api list | api describe METHOD\n");
-            text.push_str("  help             Show a command's flags: help COMMAND\n");
-            text
+    let Some(m) = method else {
+        let mut text = String::from(
+            "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
+             The socket defaults to $RUSTY_MUX_SOCKET. An id flag also takes a name, a\n\
+             position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
+             defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\
+             Actions come from $RUSTY_MUX_CONFIG, or rusty_mux/config.json in the\n\
+             config directory.\n\ncommands:\n",
+        );
+        for m in schema::CATALOG {
+            text.push_str(&format!("  {:<16} {}\n", m.name, m.doc));
         }
-        Some(m) => {
-            let mut text = format!("usage: rusty-mux-ctl {}", m.name);
-            for p in m.params {
-                text.push_str(&match (p.presence, p.ty) {
-                    (Presence::Optional { .. }, Ty::Flag) => format!(" [--{}]", p.name),
-                    (Presence::Required, _) => format!(" --{} <{}>", p.name, p.ty),
-                    (Presence::Optional { .. } | Presence::Defaulted { .. }, _) => {
-                        format!(" [--{} <{}>]", p.name, p.ty)
-                    }
-                });
-            }
-            text.push_str(&format!("\n{}\n", m.doc));
-            for p in m.params {
-                text.push_str(&format!("  --{:<10} {}\n", p.name, p.doc));
-            }
-            text
+        for (name, help) in COMMANDS {
+            text.push_str(&format!("  {name:<16} {help}\n"));
         }
+        return text;
+    };
+    let mut text = format!("usage: {}\n{}\n", synopsis(m), m.doc);
+    for p in m.params {
+        text.push_str(&format!("  --{:<10} {}\n", p.name, p.doc));
     }
+    text
+}
+
+/// `m` as a command line: `rusty-mux-ctl NAME` and its flags, optional
+/// ones in brackets.
+pub(crate) fn synopsis(m: &Method) -> String {
+    let mut text = format!("rusty-mux-ctl {}", m.name);
+    for p in m.params {
+        text.push_str(&match (p.presence, p.ty) {
+            (Presence::Optional { .. }, Ty::Flag) => format!(" [--{}]", p.name),
+            (Presence::Required, _) => format!(" --{} <{}>", p.name, p.ty),
+            (Presence::Optional { .. } | Presence::Defaulted { .. }, _) => {
+                format!(" [--{} <{}>]", p.name, p.ty)
+            }
+        });
+    }
+    text
 }
 
 #[cfg(test)]

@@ -284,6 +284,7 @@ pub fn run_until(
         Command::Help(method) => return write_line(out, cli::usage(method).trim_end()),
         Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
         Command::Api(Api::Describe(method)) => return write_line(out, &api::describe(method)),
+        Command::Api(Api::Llms) => return write_line(out, api::llms().trim_end()),
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
         Command::Agent(command) => {
             let generated_name = || {

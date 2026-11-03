@@ -532,7 +532,15 @@ fn api_lists_and_describes_methods_without_a_server() {
         panic!("{described}");
     };
     assert_eq!(map.get("name"), Some(&"resize".into()));
-    for args in [&["api", "describe", "nope"][..], &["api"], &["api", "call"]] {
+    let llms = ok(nowhere, &["api", "llms"]);
+    assert!(llms.starts_with("# rusty_mux API\n"), "{llms}");
+    assert!(llms.contains("\n### `terminal.format`\n"), "{llms}");
+    for args in [
+        &["api", "describe", "nope"][..],
+        &["api"],
+        &["api", "call"],
+        &["api", "llms", "extra"],
+    ] {
         assert_eq!(ctl(nowhere, args).status.code(), Some(2), "{args:?}");
     }
 }
