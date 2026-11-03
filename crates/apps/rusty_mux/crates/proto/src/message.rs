@@ -145,6 +145,12 @@ impl Features {
     /// skip the field.
     pub const FOCUS: Self = Self(1 << 28);
 
+    /// Generated session names: a [`Message::CreateSession`] with an empty
+    /// name from a client with this bit gets a name no other session has,
+    /// such as `quiet-harbor` ([`rusty_mux_core::is_generated`]). From a
+    /// client without it an empty name stays empty, as before.
+    pub const SESSION_NAMES: Self = Self(1 << 29);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }

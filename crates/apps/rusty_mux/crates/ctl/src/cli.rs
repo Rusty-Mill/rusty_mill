@@ -692,7 +692,9 @@ pub fn usage(method: Option<&Method>) -> String {
                 text.push_str(&match (p.presence, p.ty) {
                     (Presence::Optional { .. }, Ty::Flag) => format!(" [--{}]", p.name),
                     (Presence::Required, _) => format!(" --{} <{}>", p.name, p.ty),
-                    (Presence::Optional { .. }, _) => format!(" [--{} <{}>]", p.name, p.ty),
+                    (Presence::Optional { .. } | Presence::Defaulted { .. }, _) => {
+                        format!(" [--{} <{}>]", p.name, p.ty)
+                    }
                 });
             }
             text.push_str(&format!("\n{}\n", m.doc));

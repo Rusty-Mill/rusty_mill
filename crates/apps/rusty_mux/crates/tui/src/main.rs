@@ -108,7 +108,8 @@ mod client {
         .union(Features::TAKEOVER)
         .union(Features::LAYOUT_EDIT)
         .union(Features::FOCUS)
-        .union(Features::ACTIVE_WINDOW);
+        .union(Features::ACTIVE_WINDOW)
+        .union(Features::SESSION_NAMES);
 
     /// What a block's connection asks for. `TERMINAL_CONTROL` tells the
     /// server this client's copy of the terminal can be reset safely.
@@ -878,7 +879,7 @@ mod client {
         let Welcomed { features, takeover } = req.welcome()?;
         let block = match block {
             Some(id) => BlockId::from_uuid(parse_uuid(id)?),
-            None => req.create(area)?,
+            None => req.create(area, first_session_name(features))?,
         };
         let (window, shape) = match features.contains(Features::INSPECT) {
             true => req.place(block)?,
@@ -1212,6 +1213,15 @@ mod client {
         }
     }
 
+    /// The name to ask for a new session by: none, for a generated one, from
+    /// a server that makes them up; else `main`.
+    fn first_session_name(features: Features) -> &'static str {
+        match features.contains(Features::SESSION_NAMES) {
+            true => "",
+            false => "main",
+        }
+    }
+
     /// Requests answered before the main loop starts, or on a fresh path,
     /// each answer due `by`, if given, unless `cancel` is set first.
     struct Requests<'a> {
@@ -1287,10 +1297,11 @@ mod client {
             }
         }
 
-        fn create(&mut self, size: Size) -> Result<BlockId, String> {
+        /// Creates a session named `name`, a window and a block of `size`.
+        fn create(&mut self, size: Size, name: &str) -> Result<BlockId, String> {
             let session = SessionId::from_uuid(self.create_id(|req| Message::CreateSession {
                 req,
-                name: "main".into(),
+                name: name.into(),
             })?);
             let window = WindowId::from_uuid(self.create_id(|req| Message::CreateWindow {
                 req,
@@ -3969,6 +3980,12 @@ mod client {
         }
 
         #[cfg(unix)]
+        #[test]
+        fn a_new_session_gets_a_generated_name_where_the_server_makes_them() {
+            assert_eq!(first_session_name(CONTROL), "");
+            assert_eq!(first_session_name(Features::CHECKPOINT_V6), "main");
+        }
+
         #[test]
         fn the_sessions_active_window_is_followed() {
             let (mut app, _inbox, [control, _a, _b]) = following();

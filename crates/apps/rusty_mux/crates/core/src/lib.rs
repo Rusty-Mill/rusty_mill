@@ -32,6 +32,7 @@ mod id;
 mod identity;
 mod layout;
 mod mux;
+mod names;
 
 pub use entity::{Block, Client, Session, Size, Window};
 pub use error::Error;
@@ -40,3 +41,4 @@ pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};
 pub use identity::{Principal, Transport};
 pub use layout::{Axis, Layout, MAX_DEPTH, ParseError, Rect, Share, Side, Toward};
 pub use mux::{MAX_NAME, Mux};
+pub use names::is_generated;

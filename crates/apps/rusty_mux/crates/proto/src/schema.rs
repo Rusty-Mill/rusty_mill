@@ -161,6 +161,19 @@ pub struct Param {
     pub presence: Presence,
 }
 
+impl Param {
+    /// The features this parameter adds to a call whose arguments are
+    /// named `given`, if any.
+    pub fn extra_needs(&self, given: &[&str]) -> Option<Features> {
+        let present = given.contains(&self.name);
+        match self.presence {
+            Presence::Optional { needs } if present => Some(needs),
+            Presence::Defaulted { needs } if !present => Some(needs),
+            _ => None,
+        }
+    }
+}
+
 /// Whether a request must carry a parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presence {
@@ -168,6 +181,12 @@ pub enum Presence {
     /// May be left out; when given, the connection must also have
     /// negotiated `needs`, since a server without it would ignore it.
     Optional {
+        needs: Features,
+    },
+    /// May be left out, and the server then picks the value; leaving it
+    /// out needs `needs`, since a server without it would take the gap as
+    /// an empty value.
+    Defaulted {
         needs: Features,
     },
 }
@@ -230,14 +249,25 @@ impl Method {
 
     /// The features a connection needs to send this method with arguments
     /// named `given`: the method's own, plus those of each optional
-    /// parameter given.
+    /// parameter given and of each defaulted one left out.
     pub fn needs_for<'a>(&self, given: impl IntoIterator<Item = &'a str>) -> Features {
-        given
-            .into_iter()
-            .filter_map(|name| self.params.iter().find(|p| p.name == name))
+        let given: Vec<&str> = given.into_iter().collect();
+        self.params
+            .iter()
+            .fold(self.needs, |all, param| match param.extra_needs(&given) {
+                Some(needs) => all.union(needs),
+                None => all,
+            })
+    }
+
+    /// Every feature some form of this call can need: what a client asks
+    /// for to send it in any form.
+    pub fn all_needs(&self) -> Features {
+        self.params
+            .iter()
             .fold(self.needs, |all, param| match param.presence {
                 Presence::Required => all,
-                Presence::Optional { needs } => all.union(needs),
+                Presence::Optional { needs } | Presence::Defaulted { needs } => all.union(needs),
             })
     }
 
@@ -566,18 +596,21 @@ const ROWS: Param = required("rows", Ty::Cells, "Height in cells.");
 pub static CATALOG: &[Method] = &[
     Method {
         name: "create-session",
-        doc: "Create a named session.",
-        params: &[required(
-            "name",
-            Ty::Text,
-            "The session's name, at most 256 bytes.",
-        )],
+        doc: "Create a session, named `name` or else a generated name such as `quiet-harbor`.",
+        params: &[Param {
+            name: "name",
+            ty: Ty::Text,
+            doc: "The session's name, at most 256 bytes; left out, the server makes one up that no other session has.",
+            presence: Presence::Defaulted {
+                needs: Features::SESSION_NAMES,
+            },
+        }],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Session),
         build: |req, a| {
             Ok(Message::CreateSession {
                 req,
-                name: a.text("name")?,
+                name: a.opt_text("name")?.unwrap_or_default(),
             })
         },
     },

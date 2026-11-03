@@ -610,9 +610,9 @@ impl<S: io::Read + Write> Session<'_, S> {
     fn calls(&mut self, calls: &[Call]) -> Result<(), Failure> {
         // Everything any method needs, and sync to confirm unanswered ones.
         // The screen an attach sends is ignored.
-        let wanted = CATALOG.iter().fold(Features::SYNC, |all, m| {
-            all.union(m.needs_for(m.params.iter().map(|p| p.name)))
-        });
+        let wanted = CATALOG
+            .iter()
+            .fold(Features::SYNC, |all, m| all.union(m.all_needs()));
         let (features, _) = self.hello(wanted, None)?;
         // Refuse a chain the server cannot run before any of it runs.
         for call in calls {
@@ -819,21 +819,25 @@ fn require(features: Features, call: &Call) -> Result<(), Failure> {
             method.name
         )));
     }
-    let given = call.args.iter().map(|(name, _)| *name);
-    if !features.contains(method.needs_for(given)) {
-        let optional: Vec<String> = call
-            .args
-            .iter()
-            .filter(|(name, _)| method.needs_for([*name]) != method.needs)
-            .map(|(name, _)| format!("--{name}"))
-            .collect();
-        return Err(Failure::Failed(format!(
-            "the server does not support {} with {}",
-            method.name,
-            optional.join(", ")
-        )));
+    let given: Vec<&str> = call.args.iter().map(|(name, _)| *name).collect();
+    if features.contains(method.needs_for(given.iter().copied())) {
+        return Ok(());
     }
-    Ok(())
+    // Each parameter whose presence or absence the server cannot handle.
+    let unsupported: Vec<String> = method
+        .params
+        .iter()
+        .filter(|p| p.extra_needs(&given).is_some_and(|n| !features.contains(n)))
+        .map(|p| match given.contains(&p.name) {
+            true => format!("with --{}", p.name),
+            false => format!("without --{}", p.name),
+        })
+        .collect();
+    Err(Failure::Failed(format!(
+        "the server does not support {} {}",
+        method.name,
+        unsupported.join(", ")
+    )))
 }
 
 fn require_sync(features: Features) -> Result<(), Failure> {
@@ -849,7 +853,7 @@ fn require_sync(features: Features) -> Result<(), Failure> {
 mod tests {
     use super::*;
 
-    fn create_block(line: &str) -> Call {
+    fn parsed(line: &str) -> Call {
         let args: Vec<String> = line.split_whitespace().map(String::from).collect();
         match cli::parse(&args, &Defaults::default()) {
             Ok(Invocation {
@@ -891,11 +895,11 @@ mod tests {
 
     #[test]
     fn only_launch_arguments_need_the_launch_feature() {
-        let plain = create_block(
+        let plain = parsed(
             "create-block --window 00000000-0000-0000-0000-000000000001 --cols 80 --rows 24",
         );
         assert!(require(Features::NONE, &plain).is_ok());
-        let launched = create_block(
+        let launched = parsed(
             "create-block --window 00000000-0000-0000-0000-000000000001 --cols 80 --rows 24 \
              --cwd /tmp",
         );
@@ -904,5 +908,17 @@ mod tests {
             Err(Failure::Failed(why)) if why.ends_with("with --cwd")
         ));
         assert!(require(Features::LAUNCH, &launched).is_ok());
+    }
+
+    #[test]
+    fn leaving_out_a_session_name_needs_the_server_to_make_one_up() {
+        let named = parsed("create-session --name work");
+        assert!(require(Features::NONE, &named).is_ok());
+        let unnamed = parsed("create-session");
+        assert!(matches!(
+            require(Features::NONE, &unnamed),
+            Err(Failure::Failed(why)) if why == "the server does not support create-session without --name"
+        ));
+        assert!(require(Features::SESSION_NAMES, &unnamed).is_ok());
     }
 }

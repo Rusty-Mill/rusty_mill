@@ -56,7 +56,10 @@ fn plus_chains_requests() {
 fn bad_calls_fail_before_sending() {
     for (line, want) in [
         ("frobnicate", "unknown command `frobnicate`"),
-        ("create-session", "create-session: missing parameter `name`"),
+        (
+            "create-window --session 00000000-0000-0000-0000-000000000009",
+            "create-window: missing parameter `name`",
+        ),
         ("create-session --nme x", "unknown parameter `nme`"),
         ("create-session --name", "--name needs a value"),
         ("create-session name", "expected a --flag"),
