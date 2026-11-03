@@ -98,8 +98,20 @@ impl<R: Resolve> OpenAiHttp<R> {
     /// reply or any other client error is `Permanent`. No error carries
     /// the API key, whatever the server sends back.
     pub fn complete(&self, prompt: &Prompt<'_>) -> Result<Completion, ClassifiedError> {
+        self.complete_then(prompt, Ok)
+    }
+
+    /// [`OpenAiHttp::complete`], then `check` on the completion, with the
+    /// key redacted from every error either step returns: a check that
+    /// quotes the reply cannot leak a key the server echoed.
+    pub(crate) fn complete_then<T>(
+        &self,
+        prompt: &Prompt<'_>,
+        check: impl FnOnce(Completion) -> Result<T, ClassifiedError>,
+    ) -> Result<T, ClassifiedError> {
         let key = self.api_key()?;
         self.exchange(prompt, key.as_deref())
+            .and_then(check)
             .map_err(|e| scrub(e, key.as_deref()))
     }
 

@@ -2,7 +2,7 @@
 name = "orch-openai"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "Orchestrator adapter: one OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only (llama-swap in v0)."
 license = "MIT"
 
@@ -10,6 +10,8 @@ license = "MIT"
 layer = "apps"
 
 [dependencies]
+# The `Model` port and reply parser this adapter serves (#594).
+orch-lens = { workspace = true }
 # `ClassifiedError`, so a down server falls back instead of failing the job.
 orch-dispatch = { workspace = true }
 # The workspace's one sans-IO HTTP/1.1 message layer and `Url`, driven over a
