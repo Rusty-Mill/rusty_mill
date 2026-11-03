@@ -1153,7 +1153,7 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
                 return Err("moderator: refusing to start: this task already ran without a cap, so it is not an evidence run; open a new task for the run".into());
             }
             // An evidence run runs under the budget it was opened with: a run
-            // on an extended task would be void in `bbp pairs`, so refuse it
+            // on an extended task would be a failed run in `bbp pairs`, so refuse it
             // before anything is spent.
             if events
                 .iter()

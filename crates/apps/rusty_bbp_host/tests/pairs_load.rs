@@ -503,38 +503,38 @@ fn extended_facts(tag: &str, field: &str, limit: &str) -> Result<pairs::RunFacts
 }
 
 #[test]
-fn a_run_whose_reads_per_turn_was_extended_is_refused() {
-    // Opened at 30 and extended to 60: the final card says 60 and the opened
-    // task 30. Neither may stand for the run, whatever the manifest says.
-    let err = extended_facts("extended-rpt", "reads_per_turn", "60").unwrap_err();
-    assert!(
-        err.contains("reads_per_turn") && err.contains("30") && err.contains("60"),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_run_extended_back_to_its_opened_reads_per_turn_is_still_refused() {
-    // Guard: comparing only the final card with the opened task would pass
-    // this run, which ran some turns at another limit before the second
-    // extension restored 30. Here one extension to 30 stands for that history.
-    let err = extended_facts("extended-same", "reads_per_turn", "30").unwrap_err();
-    assert!(
-        err.contains("reads_per_turn") && err.contains("extended"),
-        "{err}"
-    );
-}
-
-#[test]
-fn a_run_extended_in_any_budget_field_is_refused() {
-    // Owner decision 2026-11-01: an evidence run runs under the budget its
-    // task was opened with. An extended `messages` or `bytes` limit would also
-    // hide an earlier overshoot, which is checked against the folded budget.
-    for field in ["messages", "bytes", "reads", "turns", "iterations"] {
-        let err = extended_facts(&format!("extended-{field}"), field, "100000").unwrap_err();
+fn a_run_extended_in_any_budget_field_loads_as_a_failed_run() {
+    // Owner decision 2026-11-03: an evidence run extended anyway is a failed
+    // run, its costs kept, with no replacement. It loads (the manifest is not
+    // dropped), keeps the budget it was opened with, and says why it failed.
+    // Extending `reads_per_turn` back to its opened 30 still counts: the log
+    // shows the run ran under more than one budget.
+    for (field, limit) in [
+        ("messages", "100000"),
+        ("bytes", "100000"),
+        ("reads", "100000"),
+        ("reads_per_turn", "60"),
+        ("reads_per_turn", "30"),
+        ("turns", "100000"),
+        ("iterations", "100000"),
+    ] {
+        let f = extended_facts(&format!("extended-{field}-{limit}"), field, limit)
+            .unwrap_or_else(|e| panic!("{field}={limit}: {e}"));
+        assert!(!f.succeeded(), "{field}={limit}: {f:?}");
+        assert!(f.stopped, "{field}={limit}: {f:?}");
+        let stop = f.stop.clone().unwrap_or_default();
         assert!(
-            err.starts_with(&format!("{field} was opened at ")) && err.contains("100000"),
-            "{field}: {err}"
+            stop.starts_with(&format!("budget extended: {field} opened at "))
+                && stop.ends_with(&format!("extended to {limit}")),
+            "{field}={limit}: {stop}"
+        );
+        assert_eq!(
+            f.reads_per_turn, 30,
+            "{field}={limit}: the opened reads_per_turn"
+        );
+        assert!(
+            f.usd_floor.is_some_and(|u| u > 0.0),
+            "{field}={limit}: its recorded spend is kept: {f:?}"
         );
     }
 }

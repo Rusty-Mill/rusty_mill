@@ -249,10 +249,10 @@ pub fn perform_as(
 /// that carries an evidence marker: `Ok(Err(..))`, a `BadHumanInput`
 /// rejection. Only a specific not-found means there is no marker; any other
 /// error reading it, or taking the admission lock, is `Err`, a host error
-/// that refuses too but is not the human's fault. `bbp pairs` refuses a
-/// run whose log holds an extension anyway (one logged before the marker was
-/// written, or by an older `bbp`), so this check is the early, operator-facing
-/// half and not the only one.
+/// that refuses too but is not the human's fault. `bbp pairs` counts a
+/// run whose log holds an extension anyway (one logged by an older `bbp`) as
+/// a failed run, so this check is the early, operator-facing half and not the
+/// only one.
 ///
 /// An extend that may go ahead returns `Ok(Ok(Some(..)))`, the evidence admission lock (see
 /// [`crate::moderator::evidence_admission`]); the caller holds it through its

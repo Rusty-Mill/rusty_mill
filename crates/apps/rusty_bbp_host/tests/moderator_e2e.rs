@@ -1911,7 +1911,7 @@ fn agents_check_as_a_binary_accepts_a_matched_pair_and_refuses_the_rest() {
 #[test]
 fn a_capped_first_start_on_an_extended_task_is_refused_and_leaves_no_marker() {
     // An extension before the marker is allowed (the task is not an evidence
-    // run yet), but a run started on it would be void in `bbp pairs`, so the
+    // run yet), but a run started on it would be a failed run in `bbp pairs`, so the
     // first capped start refuses before anything is spent.
     let (dir, task, repo) = opened("extended-first-start");
     rusty_bbp_host::human::perform(&dir, &task, "extend", &["messages", "1000"], None)
