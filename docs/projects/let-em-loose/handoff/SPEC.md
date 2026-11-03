@@ -41,4 +41,5 @@ Nano writes intent; critic lenses on different models post claims and evidence t
 - [ ] The expert answers erosion-gate questions from D41–D45 with a cited source.
 - [ ] Implementation detail gets a logged `[default]`, not an escalation.
 - [ ] Anything reversing a `[stated]`/`[agreed]` row escalates to Nano.
-- [ ] Each settled answer lands once in ../DECISIONS.md and once in remind-me.
+- [ ] Each settled answer lands once in ../DECISIONS.md and once in remind-me, best effort: a stable key reconciles duplicates from concurrent sessions or a crash between the two writes.
+- [ ] A conflict between sources is settled by date and provenance (newest attributable Nano decision; merged contract for behaviour), or escalated.

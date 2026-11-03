@@ -13,8 +13,11 @@ Threads and the orchestrator: before asking Nano any design, scope or behaviour 
 work, consult the `let-em-loose-expert` subagent. Never ask Nano first.
 - ANSWER: act on it; the source is cited.
 - ESCALATE: ask Nano exactly that block: question, options, recommendation. Nothing more.
-- When Nano answers, pass the answer (quoted, with its date) to `let-em-loose-expert` to record.
-  Don't write `docs/projects/let-em-loose/DECISIONS.md` or remind-me decisions yourself; one
-  writer keeps each answer recorded exactly once.
+- An ANSWER settles what to build, not permission: design approval, ask-first gates, spending,
+  deployment and review/merge rules still apply.
+- When Nano answers, pass the answer to `let-em-loose-expert` to record, quoted, with its date and
+  where he said it (message link or id, card comment, or remind-me id). Don't write
+  `docs/projects/let-em-loose/DECISIONS.md` or remind-me decisions yourself; a single keyed
+  writer keeps each answer recorded once.
 - Non-blocking? Take the expert's recommendation, keep going, and let the expert add the question
   to `docs/projects/let-em-loose/handoff/OPEN_QUESTIONS.md`.

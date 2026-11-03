@@ -400,8 +400,8 @@ No push notifications in v0. Sorting uses BBP facts: irreversible first, then ol
 
 ## D51. The expert is the single writer of settled answers
 
-**Decision.** Callers pass Nano's answers back to `let-em-loose-expert`, which writes one entry here and one `remind_me_add`, and ticks `handoff/OPEN_QUESTIONS.md`. Callers never write either.
-**Why.** One writer keeps each answer recorded exactly once.
+**Decision.** Callers pass Nano's answers back to `let-em-loose-expert`, together with where he said them. The expert writes one `remind_me_add` and then one entry here, both carrying a stable key, and ticks `handoff/OPEN_QUESTIONS.md`. Callers never write either.
+**Why.** A single writer with a key keeps each answer recorded once. This is best effort: concurrent sessions or a crash between the two writes can still duplicate an answer, and the key is how the next run reconciles it (#1445 review).
 **Rejected.** Each thread recording its own answers.
 **Tag.** [default] · remind-me: mem_df536a0f908b40db9fdb87196ba62e35
 
@@ -411,4 +411,5 @@ No push notifications in v0. Sorting uses BBP facts: irreversible first, then ol
 **Why.** `rusty_baseline` is the nearest analog, a measurement lib plus bin under `crates/tools`. The split mirrors the design's "pure core plus a tree-sitter adapter" (erosion-gate-design §2), keeps the core testable on fixed fixtures (§10), and lets #705 add `adapter/python.rs` without touching the core. A path or module move is cheap to reverse.
 **Rejected.** `crates/libs/` (no existing family fits; it is a tool run as a profile). Two crates for core and adapter (more workspace churn for no consumer). Putting it under `rusty_bbp_host` (the metric is independent of the host).
 **Tag.** [default] · remind-me: mem_9d2be473f22f458a89532eac5e3b6363
+**Key.** lel:704:rusty-erosion-layout
 **Source.** Caller question from the #704 slice 1 build thread, 2026-11-03; erosion-gate-design §2, §9, §10; card #704 Build 1.
