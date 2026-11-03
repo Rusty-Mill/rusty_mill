@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use rusty_mcp_client::proto::ContentBlock;
 use rusty_mcp_client::{McpClient as Connection, McpServerSpec, McpTransport};
 use serde_json::Value;
-use tokio::sync::Mutex;
+use rusty_tokio::sync::Mutex;
 
 use crate::endpoint::{require_tls_for_non_loopback, resolve_bearer_token};
 use crate::{McpClient, McpError, McpToolInfo, ServerSpec, Transport};
