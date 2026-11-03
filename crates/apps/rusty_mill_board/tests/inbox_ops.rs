@@ -605,3 +605,58 @@ fn a_task_total_whose_resume_failed_resumes_on_retry_without_more_allowance() {
         [vec!["resume open".to_owned()]]
     );
 }
+
+/// Each record belongs to one exact decision: Choose 5 and Choose 6 on the same stuck
+/// question, even at one rev (two tabs racing), file two cards, each listing what
+/// its own choice drops, and a retry of either finds its own.
+#[test]
+fn conflicting_choices_each_record_their_own_dropped_work() {
+    let stuck: Escalation = serde_json::from_value(json!({
+        "id": "T1/msg:1/3", "task": "T1", "brief": 2, "rev": 7, "seq": 3, "reason": "Stuck",
+        "claim": {"id": 1, "text": "which cache?", "status": "Escalated", "score": 0,
+                  "confidence": 50, "epoch": 0, "spent": 2, "budget": 8},
+        "candidates": [
+            {"id": 5, "text": "use an LRU", "status": "Open", "score": 4, "confidence": 70, "epoch": 0, "spent": 2, "budget": 8},
+            {"id": 6, "text": "use redis", "status": "Open", "score": 4, "confidence": 70, "epoch": 0, "spent": 2, "budget": 8}
+        ],
+        "stakes": "Low", "reversible": true, "evidence": [], "mark": null, "candidate": null,
+        "acted": [{"claim": 5, "marks": ["pr-5"]}, {"claim": 6, "marks": ["pr-6"]}],
+        "totals": []
+    }))
+    .unwrap();
+    let fake = Arc::new(Fake::with(vec![stuck]));
+    let (store, down) = (
+        Arc::new(MemStore::default()),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let board = board_over(&store, &down, &fake, true);
+    let choose = |k: u64| json!({"id": "T1/msg:1/3", "rev": 7, "action": "choose", "chosen": k});
+
+    let a = call(&board, &owner(), "inbox_act", choose(5)).unwrap();
+    let b = call(&board, &owner(), "inbox_act", choose(6)).unwrap();
+    let (a, b) = (&a["remediated"]["card"], &b["remediated"]["card"]);
+    assert_ne!(a["id"], b["id"], "one record per decision");
+    assert_eq!(a["title"], "Remediate: use redis");
+    assert_eq!(b["title"], "Remediate: use an LRU");
+    let body = |c: &Value| {
+        let id: Uuid = serde_json::from_value(c["id"].clone()).unwrap();
+        board.get(id).unwrap().body
+    };
+    assert!(
+        body(a).contains("pr-6") && !body(a).contains("pr-5"),
+        "{}",
+        body(a)
+    );
+    assert!(
+        body(b).contains("pr-5") && !body(b).contains("pr-6"),
+        "{}",
+        body(b)
+    );
+
+    let again = call(&board, &owner(), "inbox_act", choose(5)).unwrap();
+    assert_eq!(
+        again["remediated"]["card"]["id"], a["id"],
+        "a retry finds its own"
+    );
+    assert_eq!(remediate_cards(&board).len(), 2);
+}

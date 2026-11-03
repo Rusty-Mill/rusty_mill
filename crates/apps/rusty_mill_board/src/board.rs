@@ -406,7 +406,7 @@ impl<S: Store> Board<S> {
             ..
         }) = self.inbox(by)?.into_iter().find(|i| i.escalation.id == id)
         else {
-            return self.closed_escalation(by, id, dry_run);
+            return self.closed_escalation(by, id, rev, action, dry_run);
         };
         if e.rev != rev {
             return Err(BoardError::Refused(format!(
@@ -432,7 +432,12 @@ impl<S: Store> Board<S> {
         // its derived id, whether BBP's answer was lost or the escalation is already gone.
         let dry = source.preview(&e, action).map_err(inbox_error)?;
         let project = owner.map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project);
-        let card = self.remediate(by, &project, &e, &dropped, &dry)?;
+        let decision = Decision {
+            escalation: id,
+            rev,
+            action,
+        };
+        let card = self.remediate(by, &project, &e, &decision, &dropped, &dry)?;
         let outcome =
             source
                 .act(&e, action, &answerer(&by.name))
@@ -455,12 +460,14 @@ impl<S: Store> Board<S> {
         Ok(InboxAnswer::Remediated { outcome, card })
     }
 
-    /// An escalation that is no longer open: a decision sent from here that dropped
-    /// acted-on work left its Remediate card, which is the answer to a retry.
+    /// An escalation that is no longer open: if this exact decision was sent from here
+    /// and dropped acted-on work, its Remediate card is the answer to a retry.
     fn closed_escalation(
         &self,
         by: &Actor,
         id: &str,
+        rev: u64,
+        action: &Action,
         dry_run: bool,
     ) -> Result<InboxAnswer, BoardError> {
         let closed = || BoardError::Refused(format!("no open escalation {id}"));
@@ -469,7 +476,12 @@ impl<S: Store> Board<S> {
         }
         let task = id.split('/').next().unwrap_or_default();
         let project = self.owning_project(by, task)?;
-        self.remediation_card(by, &project, id)?
+        let decision = Decision {
+            escalation: id,
+            rev,
+            action,
+        };
+        self.remediation_card(by, &project, &decision)?
             .map(|card| InboxCard::of(&card))
             .map(|card| InboxAnswer::Recorded { card })
             .ok_or_else(closed)
@@ -485,35 +497,37 @@ impl<S: Store> Board<S> {
             .map_or_else(|| DEFAULT_PROJECT.to_owned(), |c| c.project))
     }
 
-    /// The Remediate card written for escalation `id` in `project`. It is found by its
+    /// The Remediate card written for `decision` in `project`. It is found by its
     /// derived id, never by its tag: a tag anyone can add to any card is no record.
     fn remediation_card(
         &self,
         by: &Actor,
         project: &str,
-        id: &str,
+        decision: &Decision<'_>,
     ) -> Result<Option<Card>, BoardError> {
         if !by.may_work_in(project) {
             return Ok(None);
         }
         Ok(self
             .store
-            .get(remediation_id(project, id))?
+            .get(decision.card_id(project)?)?
             .filter(|c| c.project == project))
     }
 
-    /// The one Backlog "Remediate" card for `e`'s dropped acted-on work (#595 §4), at
-    /// the id derived from `project` and the escalation, so a retry finds it rather
-    /// than adding a second. Its `remediate:` tag is for people only.
+    /// The one Backlog "Remediate" card for `decision`'s dropped acted-on work (#595 §4),
+    /// at the id derived from `project` and the exact decision, so a retry of it finds
+    /// the card rather than adding a second, and a different decision never reuses it.
+    /// Its `remediate:` tag is for people only.
     fn remediate(
         &self,
         by: &Actor,
         project: &str,
         e: &Escalation,
+        decision: &Decision<'_>,
         dropped: &[&Acted],
         dry: &DryRun,
     ) -> Result<InboxCard, BoardError> {
-        if let Some(card) = self.remediation_card(by, project, &e.id)? {
+        if let Some(card) = self.remediation_card(by, project, decision)? {
             return Ok(InboxCard::of(&card));
         }
         let tag = format!("remediate:{}", e.id);
@@ -553,14 +567,14 @@ impl<S: Store> Board<S> {
             text(dropped.first().map_or(0, |x| x.claim))
         );
         let card = Card {
-            id: remediation_id(project, &e.id),
+            id: decision.card_id(project)?,
             ..Card::new(&title, &body, vec![tag], (self.clock)())?
         };
         match self.create(by, project, card) {
             Ok(card) => Ok(InboxCard::of(&card)),
-            // A concurrent decision on the same escalation wrote it first.
+            // A concurrent retry of the same decision wrote it first.
             Err(BoardError::Conflict) => self
-                .remediation_card(by, project, &e.id)?
+                .remediation_card(by, project, decision)?
                 .map(|c| InboxCard::of(&c))
                 .ok_or(BoardError::Conflict),
             Err(other) => Err(other),
@@ -1318,13 +1332,23 @@ pub enum InboxAnswer {
 /// Namespace of the Remediate card ids (UUIDv5).
 const REMEDIATION_NS: Uuid = Uuid::from_u128(0x6d69_6c6c_2d72_656d_6564_6961_7465_0595);
 
-/// The id of the Remediate card for escalation `escalation` in `project`. Every other
-/// card id is random, so a card at this id was written by [`Board::inbox_act`].
-fn remediation_id(project: &str, escalation: &str) -> Uuid {
-    Uuid::new_v5(
-        &REMEDIATION_NS,
-        format!("{project}\n{escalation}").as_bytes(),
-    )
+/// One exact inbox decision: the escalation, the rev it was read at, and the action.
+/// Two decisions on one escalation (Choose A, Choose B) are two records.
+struct Decision<'a> {
+    escalation: &'a str,
+    rev: u64,
+    action: &'a Action,
+}
+
+impl Decision<'_> {
+    /// The id of this decision's Remediate card in `project`. Every other card id is
+    /// random, so a card at this id was written by [`Board::inbox_act`] for it.
+    fn card_id(&self, project: &str) -> Result<Uuid, BoardError> {
+        let action =
+            serde_json::to_string(self.action).map_err(|e| BoardError::Storage(e.to_string()))?;
+        let key = format!("{project}\n{}\n{}\n{action}", self.escalation, self.rev);
+        Ok(Uuid::new_v5(&REMEDIATION_NS, key.as_bytes()))
+    }
 }
 
 fn inbox_error(e: InboxError) -> BoardError {
