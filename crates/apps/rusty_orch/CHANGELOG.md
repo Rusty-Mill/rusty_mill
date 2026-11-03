@@ -6,9 +6,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ## [Unreleased]
 ### Added
 - `rusty_orch::lens::container`: under a container clearance, every Codex lens question first inspects the container through the runner's local rootless podman (`--remote=false`, remote-engine variables removed). It requires the exact asserted mounts, a read-only machine-id from a file the runner cannot change, no privilege, devices, added capabilities, shared namespaces or API-key environment. Codex then runs via `podman exec` by the checked id.
+- `rusty_orch::lens`: a `host_cleared` assertion may name the dedicated container a provider runs in, with its exact mounts. A machine-bound no-overage entry then counts only against the container's id, and a container clearance never grants Claude, which runs on the host. Codex stays unavailable under it until the container check lands.
 - `orch-lens`: the lens runner's pure core: `Model` port, reply protocol, config checks, context assembly, data classes, tiering, money meter and scheduler (ADR-0021).
 - `orch-openai`: one OpenAI-compatible chat completion over plain HTTP/1.1 to loopback and private addresses only, for llama-swap (ADR-0020).
 ### Changed
+- `orch-codex`: a lens question takes its reply from the last completed `agent_message` in the `codex exec --json` events instead of a last-message file, so nothing is written to disk and Codex can run in a container. `CodexAgent::lens_argv` no longer takes a reply path. A missing, textless or blank final message is refused, never replaced by an earlier one.
 - Providers are `AgentId` tokens instead of the closed `Agent` enum (ADR-0019). `orch-store` writes the id and reads the old variants; errors print the id (`codex`, not `Codex`).
 ### Fixed
 - A lease now bounds the BBP validator profile's `read_roots` (ADR-0017): at freeze each must be a system root or within the lease, and not beneath a confined member's write root, and it is frozen as the path it resolved to. A leased profile with a toolchain outside the system roots now needs that path in the lease. Cancel freezes a never-frozen task unleased, so a pool the lease cannot confine no longer blocks it.

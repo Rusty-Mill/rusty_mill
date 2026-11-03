@@ -2,6 +2,7 @@
 //! come from [`schema::CATALOG`].
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use rusty_mux_proto::Cursor;
@@ -47,6 +48,8 @@ pub enum Command {
     /// Joins stdin and stdout to the socket, for a client that runs this
     /// over SSH.
     Bridge,
+    /// Prints a completion script for a shell.
+    Completion(Shell),
 }
 
 /// `agent`: each verb but `hook` acts on the chosen agents in one scope.
@@ -173,6 +176,33 @@ pub enum Api {
     Llms,
 }
 
+/// A shell `completion` writes a script for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+    Nu,
+    PowerShell,
+}
+
+impl FromStr for Shell {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, String> {
+        match name {
+            "bash" => Ok(Self::Bash),
+            "zsh" => Ok(Self::Zsh),
+            "fish" => Ok(Self::Fish),
+            "nu" => Ok(Self::Nu),
+            "powershell" | "pwsh" => Ok(Self::PowerShell),
+            _ => Err(format!(
+                "completion: unknown shell `{name}`; expected bash, zsh, fish, nu or powershell"
+            )),
+        }
+    }
+}
+
 /// One request with its checked arguments.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Call {
@@ -268,6 +298,10 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "agent" => agent(rest).map(Command::Agent),
         "bridge" if rest.is_empty() => Ok(Command::Bridge),
         "bridge" => Err("bridge takes no arguments".into()),
+        "completion" => match rest {
+            [shell] => shell.parse().map(Command::Completion),
+            _ => Err("usage: completion bash|zsh|fish|nu|powershell".into()),
+        },
         _ => args
             .split(|a| a == "+")
             .map(|args| call(args, defaults))
@@ -708,6 +742,10 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  api llms",
     ),
     ("help", "Show a command's flags: help COMMAND"),
+    (
+        "completion",
+        "Print a shell completion script: completion bash|zsh|fish|nu|powershell",
+    ),
 ];
 
 /// The usage text: every command, or one method's flags.
