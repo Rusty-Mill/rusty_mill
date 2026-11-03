@@ -223,10 +223,17 @@ pub fn load(path: &Path) -> Result<Grants, String> {
     grants(&text, today, machine_id().as_deref()).map_err(|e| format!("{}: {e}", full.display()))
 }
 
-/// Without Unix ownership the file cannot be checked, so nothing holds.
+/// Without Unix ownership the file cannot be checked, so nothing holds:
+/// no file is no assertions, as on Unix, and any file is refused.
 #[cfg(not(unix))]
-pub fn load(_path: &Path) -> Result<Grants, String> {
-    Err("operator assertions need Unix file ownership; none hold".to_owned())
+pub fn load(path: &Path) -> Result<Grants, String> {
+    if !path.exists() {
+        return Ok(Grants::none());
+    }
+    Err(format!(
+        "{}: operator assertions need Unix file ownership; none hold",
+        path.display()
+    ))
 }
 
 /// The runner's effective user, from `/proc/self/status` (Linux).
