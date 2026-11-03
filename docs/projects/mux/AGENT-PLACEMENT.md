@@ -58,10 +58,12 @@ layer is trusted.
 hook asks the server about its session. Only while the server made up the
 name (such as `quiet-harbor`) and nobody has renamed the session since does
 it add one sentence asking the agent to name the session after its task,
-once, with `rename-session`. The server remembers that mark per session;
-the spelling alone is no proof, since a person may choose such a name. A
-name a person chose is never touched, and with no answer from the server within
-2 s the sentence is left out. `agent setup` without the flag puts the plain
+once, with `name-session`. The server remembers that mark per session;
+the spelling alone is no proof, since a person may choose such a name.
+`name-session` renames only while the mark is set, checking and renaming in
+one step, so an instruction given before a person (or another agent) named
+the session is refused and their name stays. With no answer from the server
+within 2 s, or a server without `name-session`, the sentence is left out. `agent setup` without the flag puts the plain
 hook back; `agent status` checks for the form its flag names.
 
 `agent setup --project` writes the same files under the current directory.

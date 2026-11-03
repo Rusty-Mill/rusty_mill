@@ -88,3 +88,66 @@ fn the_generated_mark_lasts_until_a_rename() {
     });
     assert_eq!(listed(&mut client, made), ("fix-login".into(), false));
 }
+
+/// Sends `name-session` and returns the failure reason, if refused.
+fn name_session(client: &mut Client, session: SessionId, name: &str) -> Option<String> {
+    let answer = client.answer(|req| Message::NameSession {
+        req,
+        session,
+        name: name.into(),
+    });
+    match answer.last() {
+        Some(Message::Done { .. }) => None,
+        Some(Message::Failed { reason, .. }) => Some(reason.clone()),
+        other => panic!("unexpected answer {other:?}"),
+    }
+}
+
+#[test]
+fn a_stale_naming_attempt_keeps_a_name_chosen_after_it_was_issued() {
+    let path = start_server();
+    let both = NAMES.union(Features::LABELS).union(Features::NAME_SESSION);
+    let mut person = Client::connect_with(&path, both, None);
+    let mut agent = Client::connect_with(&path, both, None);
+    let session = create(&mut person, "");
+    // The hook saw a generated name and told the agent to name it later.
+    assert!(listed(&mut agent, session).1);
+
+    person.request(|req| Message::Rename {
+        req,
+        target: EntityId::Session(session),
+        name: "release-notes".into(),
+    });
+    let refused = name_session(&mut agent, session, "fix-login").expect("refused");
+    assert!(refused.contains("chosen name"), "{refused}");
+    assert_eq!(
+        listed(&mut person, session),
+        ("release-notes".into(), false)
+    );
+}
+
+#[test]
+fn of_two_stale_naming_attempts_only_the_first_takes_effect() {
+    let path = start_server();
+    let features = NAMES.union(Features::NAME_SESSION);
+    let mut first = Client::connect_with(&path, features, None);
+    let mut second = Client::connect_with(&path, features, None);
+    let session = create(&mut first, "");
+    // Both agents' hooks saw the generated name.
+    assert!(listed(&mut first, session).1);
+    assert!(listed(&mut second, session).1);
+
+    assert_eq!(name_session(&mut first, session, "fix-login"), None);
+    assert!(name_session(&mut second, session, "write-docs").is_some());
+    assert_eq!(listed(&mut second, session), ("fix-login".into(), false));
+}
+
+#[test]
+fn name_session_needs_its_feature() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, NAMES, None);
+    let session = create(&mut client, "");
+    let refused = name_session(&mut client, session, "fix-login").expect("refused");
+    assert!(refused.contains("requires feature"), "{refused}");
+    assert!(listed(&mut client, session).1);
+}

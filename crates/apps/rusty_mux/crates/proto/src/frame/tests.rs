@@ -320,6 +320,11 @@ fn every_message_round_trips() {
             window,
             toward: Toward::Previous,
         },
+        Message::NameSession {
+            req: 35,
+            session,
+            name: "fix-login".into(),
+        },
         Message::Welcome {
             features: Features::NONE,
             client,

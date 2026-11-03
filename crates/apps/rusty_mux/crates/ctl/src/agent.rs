@@ -208,9 +208,10 @@ fn hook_text(here: &Defaults, ctl: Option<&Path>, generated: Option<&str>) -> Op
     if let (Some(name), Some(session)) = (generated, here.session) {
         text.push_str(&format!(
             " The session's name, `{name}`, was made up when it started: once you know your \
-             task, name the session after it, once, with `rusty-mux-ctl rename-session \
+             task, name the session after it, once, with `rusty-mux-ctl name-session \
              --session {session} --name NAME`, NAME being a few lowercase words joined by \
-             dashes."
+             dashes. If that is refused, somebody has named the session already: leave \
+             its name alone."
         ));
     }
     Some(text)

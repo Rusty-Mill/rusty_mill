@@ -559,6 +559,8 @@ const HOOK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The name of `session` on the server at `socket` while it is one the
 /// server made up and nobody has renamed it since, for the agent hook.
+/// `None` from a server without [`Features::NAME_SESSION`], which could
+/// not keep a name chosen after the hook ran.
 #[cfg(any(unix, windows))]
 fn hook_generated_name(
     socket: &Path,
@@ -574,7 +576,10 @@ fn hook_generated_name(
         json: false,
         here: None,
     };
-    let (features, _) = client.hello(Features::INSPECT, None)?;
+    let (features, _) = client.hello(Features::INSPECT.union(Features::NAME_SESSION), None)?;
+    if !features.contains(Features::NAME_SESSION) {
+        return Ok(None);
+    }
     client
         .list(features, 1)?
         .into_iter()

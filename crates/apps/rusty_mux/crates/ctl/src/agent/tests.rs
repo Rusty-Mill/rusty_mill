@@ -313,7 +313,7 @@ fn the_naming_hook_asks_only_about_a_generated_name() {
     let text = hook_text(&here, None, Some("quiet-harbor")).expect("text");
     assert!(
         text.contains("`quiet-harbor`")
-            && text.contains(&format!("rename-session --session {} --name NAME", id(1))),
+            && text.contains(&format!("name-session --session {} --name NAME", id(1))),
         "{text}"
     );
     // Without a session to name, it says nothing about naming.
@@ -322,7 +322,7 @@ fn the_naming_hook_asks_only_about_a_generated_name() {
         ..here.clone()
     };
     let text = hook_text(&no_session, None, Some("quiet-harbor")).expect("text");
-    assert!(!text.contains("rename-session"), "{text}");
+    assert!(!text.contains("name-session"), "{text}");
 
     let env = Env {
         here,
@@ -350,11 +350,11 @@ fn the_naming_hook_asks_only_about_a_generated_name() {
     assert!(asked && text.contains("`quiet-harbor-2`"), "{text}");
     let (text, asked) = hook(true, None);
     assert!(
-        asked && !text.contains("rename-session"),
+        asked && !text.contains("name-session"),
         "a chosen name is kept: {text}"
     );
     let (text, asked) = hook(false, Some("quiet-harbor"));
-    assert!(!asked && !text.contains("rename-session"), "{text}");
+    assert!(!asked && !text.contains("name-session"), "{text}");
 }
 
 #[test]

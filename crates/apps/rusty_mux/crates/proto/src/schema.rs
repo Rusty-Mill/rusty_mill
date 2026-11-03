@@ -756,6 +756,24 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| rename(req, a, Entity::Session),
     },
     Method {
+        name: "name-session",
+        doc: "Rename a session only while its name is generated, such as `quiet-harbor`; \
+              refused once somebody chose a name, which stays.",
+        params: &[
+            required("session", Ty::Id(Entity::Session), "The session to name."),
+            NEW_NAME,
+        ],
+        needs: Features::NAME_SESSION,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::NameSession {
+                req,
+                session: SessionId::from_uuid(a.uuid("session", Entity::Session)?),
+                name: a.text("name")?,
+            })
+        },
+    },
+    Method {
         name: "rename-window",
         doc: "Rename a window.",
         params: &[

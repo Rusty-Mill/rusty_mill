@@ -654,6 +654,26 @@ impl Mux {
         self.note(block, Event::ProcessChanged { block, pid, name })
     }
 
+    /// Renames the session as [`Mux::rename`] does, but only while its name
+    /// is generated ([`Session::generated`]); once somebody chose a name,
+    /// it is refused with [`Error::NameChosen`] and the name stays. The
+    /// check and the rename happen together, so of two such calls on one
+    /// generated session only the first takes effect.
+    pub fn name_session(
+        &mut self,
+        session: SessionId,
+        name: impl Into<String>,
+    ) -> Result<(), Error> {
+        let found = self
+            .sessions
+            .get(&session)
+            .ok_or(Error::UnknownSession(session))?;
+        if !found.generated {
+            return Err(Error::NameChosen(session));
+        }
+        self.rename(EntityId::Session(session), name)
+    }
+
     /// Names the entity `name`, replacing its old name. Renaming to the
     /// same name changes nothing and emits nothing; a name over
     /// [`MAX_NAME`] is refused. Renaming a session ends its generated mark

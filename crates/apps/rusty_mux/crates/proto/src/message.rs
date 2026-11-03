@@ -151,6 +151,10 @@ impl Features {
     /// client without it an empty name stays empty, as before.
     pub const SESSION_NAMES: Self = Self(1 << 29);
 
+    /// Naming a session only while its name is generated:
+    /// [`Message::NameSession`], refused once somebody chose a name.
+    pub const NAME_SESSION: Self = Self(1 << 30);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -487,6 +491,16 @@ pub enum Message {
         window: WindowId,
         toward: Toward,
     },
+    /// Renames `session` as [`Message::Rename`] does, but only while its
+    /// name is generated; once somebody chose one, refused and the name
+    /// stays. The server checks and renames in one step, so of two such
+    /// requests only the first can take effect. Negotiated with
+    /// [`Features::NAME_SESSION`].
+    NameSession {
+        req: u64,
+        session: SessionId,
+        name: String,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -689,6 +703,7 @@ mod ty {
     pub const MOVE_WINDOW: u8 = 0x1d;
     pub const FOCUS_BLOCK: u8 = 0x1e;
     pub const MOVE_FOCUS: u8 = 0x1f;
+    pub const NAME_SESSION: u8 = 0x20;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -876,6 +891,12 @@ impl Message {
                     .uuid(WINDOW, window.uuid())
                     .varint(TOWARD, toward_wire(*toward));
                 ty::MOVE_FOCUS
+            }
+            M::NameSession { req, session, name } => {
+                out.varint(REQ, *req)
+                    .uuid(SESSION, session.uuid())
+                    .bytes(NAME, name.as_bytes());
+                ty::NAME_SESSION
             }
             M::Welcome {
                 features,
@@ -1103,6 +1124,11 @@ impl Message {
                 req: f.varint(REQ)?,
                 window: window(&f, WINDOW)?,
                 toward: get_toward(&f)?,
+            },
+            ty::NAME_SESSION => M::NameSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                name: f.string(NAME)?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
