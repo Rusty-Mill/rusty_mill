@@ -29,6 +29,10 @@
 //! - `control`: a deliberate branch on the secret; must be caught.
 //! - `ecdh-control`: a deliberate branch on the ECDH shared secret; must be caught.
 //!
+//! Every mode first prints `verdict_sites: load anchor rusty_pk_taint::main at 0x...`, the
+//! runtime address of `main`, so `scripts/verdict_sites.py` can derive the load base from
+//! the binary instead of assuming valgrind's placement.
+//!
 //! See `scripts/ct_check.sh`.
 
 use rusty_ct_check::taint::mark_secret;
@@ -40,6 +44,10 @@ use rusty_pk::x25519::{agree, public_key, x25519};
 use std::hint::black_box;
 
 fn main() {
+    eprintln!(
+        "verdict_sites: load anchor rusty_pk_taint::main at {:#x}",
+        main as fn() as usize
+    );
     let mode = std::env::args().nth(1).unwrap_or_default();
     let scalar = black_box([0x77u8; 32]);
     mark_secret(&scalar);

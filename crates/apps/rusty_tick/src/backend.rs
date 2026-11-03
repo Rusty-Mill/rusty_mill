@@ -120,6 +120,17 @@ impl Backend {
         })
     }
 
+    /// Also accept the access tokens `provider` issues; see [`Api::set_oauth`].
+    pub fn set_oauth(&mut self, provider: std::sync::Arc<rusty_oauth_server::Provider>) {
+        self.api.set_oauth(provider);
+    }
+
+    /// The user a pasted token of the server's own belongs to; see
+    /// [`Api::verify`].
+    pub fn verify(&mut self, token: &str) -> Option<crate::users::UserKey> {
+        self.api.verify(token)
+    }
+
     /// How many users' stores are open now: one in single-user mode.
     pub fn open_stores(&self) -> usize {
         match &self.data {

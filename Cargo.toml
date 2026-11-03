@@ -37,6 +37,7 @@ members = [
     "crates/libs/ui/rusty_term",
     "crates/libs/ui/rusty_term/l13",
     "crates/libs/ui/rusty_term/core",
+    "crates/libs/ui/rusty_conhost",
     "crates/libs/ui/rusty_gpu",
     "crates/libs/ui/rusty_gui",
     "crates/libs/ui/rusty_font",
@@ -44,6 +45,7 @@ members = [
     "crates/foundation/rusty_regx",
     "crates/foundation/rusty_win32",
     "crates/foundation/rpath",
+    "crates/foundation/rusty_crdt",
     "crates/foundation/rusty_diff",
     "crates/foundation/rusty_compress",
     "crates/libs/rusty_git",
@@ -66,7 +68,7 @@ members = [
     "crates/libs/protocol/rusty_mcp_server",
     "crates/libs/protocol/rusty_mcp_client_native",
     "crates/libs/protocol/rusty_a2a",
-    "crates/libs/protocol/rusty_mcp/crates/rusty-mcp",
+    "crates/libs/protocol/rusty_mcp_middleware",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client",
     "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo",
     "crates/libs/async/rusty_journal",
@@ -79,6 +81,7 @@ members = [
     "crates/foundation/rusty_json_patch",
     "crates/foundation/rusty_json/rusty_json-derive",
     "crates/libs/net/rusty_oauth",
+    "crates/libs/net/rusty_oauth_server",
     "crates/libs/protocol/rusty_channel",
     "crates/libs/protocol/rusty_routine",
     "crates/libs/protocol/rusty_bbp",
@@ -104,16 +107,13 @@ members = [
     "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_mux/crates/core",
     "crates/apps/rusty_mux/crates/ctl",
+    "crates/apps/rusty_mux/crates/mcp",
     "crates/apps/rusty_mux/crates/proto",
+    "crates/apps/rusty_mux/crates/script",
     "crates/apps/rusty_mux/crates/server",
     "crates/apps/rusty_mux/crates/status",
+    "crates/apps/rusty_mux/crates/transport",
     "crates/apps/rusty_mux/crates/tui",
-    "crates/apps/rusty_remind_me/crates/remind_me_core",
-    "crates/apps/rusty_remind_me/crates/remind_me_mcp",
-    "crates/apps/rusty_remind_me/crates/remind_me_api",
-    "crates/apps/rusty_remind_me/crates/remind_me_cli",
-    "crates/apps/rusty_remind_me/crates/remind_me_remote",
-    "crates/apps/rusty_remind_me/crates/remind_me_hub",
     "crates/apps/rusty_hister/crates/rusty-hister-core",
     "crates/apps/rusty_hister/crates/rusty-hister-model",
     "crates/apps/rusty_hister/crates/rusty-hister-extractor",
@@ -223,6 +223,8 @@ members = [
     "crates/apps/rusty_orch/crates/orch-ollama",
     "crates/apps/rusty_orch/crates/orch-codex",
     "crates/apps/rusty_orch/crates/orch-claude",
+    "crates/apps/rusty_orch/crates/orch-lens",
+    "crates/apps/rusty_orch/crates/orch-openai",
     "crates/apps/rusty_orch/crates/orch-store",
     "crates/apps/rusty_orch/crates/rusty_orch",
     "crates/apps/rusty_key/crates/config",
@@ -303,10 +305,10 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
-    # Temporary, pinned upstream crypto patches; not first-party members.
-    "vendor/aws-sigv4",
+    # Temporary, pinned upstream crypto patch; not a first-party member.
     "vendor/jsonwebtoken",
     "crates/libs/ui/rusty_term/fuzz",
+    "crates/libs/ui/rusty_conhost/fuzz",
     "crates/apps/rush/fuzz",
     "crates/libs/ui/rusty_lines/bench",
     "crates/foundation/rusty_libc/bench",
@@ -413,7 +415,6 @@ ignored = [
     "r2d2_sqlite",
     "regex-lite",
     "rush",
-    "rusty_aead",
     "rusty_bot",
     "rusty_pk",
     "rusty_routine",
@@ -546,7 +547,7 @@ tokio = { version = "1", features = [
     # hidden in one member manifest.
     "full",
 ] }
-tantivy = "0.26"
+tantivy = "0.27"
 
 # rusty_db's own five crates (path deps, mirroring rusty-search-* above).
 rusty-db-core = { path = "crates/libs/storage/rusty_db/crates/rusty-db-core", version = "0.1.0" }
@@ -576,6 +577,7 @@ rusty_sandbox = { path = "crates/libs/rusty_sandbox" }
 rusty_worktree = { path = "crates/libs/rusty_worktree" }
 rusty_bot = { path = "crates/libs/rusty_bot" }
 rusty_oauth = { path = "crates/libs/net/rusty_oauth" }
+rusty_oauth_server = { path = "crates/libs/net/rusty_oauth_server" }
 rusty_std = { path = "crates/foundation/rusty_std" }
 thiserror = "1"
 futures-core = "0.3"
@@ -679,6 +681,8 @@ orch-ollama = { path = "crates/apps/rusty_orch/crates/orch-ollama" }
 orch-codex = { path = "crates/apps/rusty_orch/crates/orch-codex" }
 orch-claude = { path = "crates/apps/rusty_orch/crates/orch-claude" }
 orch-store = { path = "crates/apps/rusty_orch/crates/orch-store" }
+orch-lens = { path = "crates/apps/rusty_orch/crates/orch-lens" }
+orch-openai = { path = "crates/apps/rusty_orch/crates/orch-openai" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = [
@@ -687,7 +691,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     # reqwest 0.13 renamed the 0.12-era "rustls-tls"/"rustls-tls-native-roots"
     # features to a single "rustls" feature (native-cert loading is no
     # longer a separate opt-in); the workspace's other direct 0.13
-    # consumers (agentgateway*, rusty_acp, rusty-mcp) already use this name.
+    # consumers (agentgateway*, rusty_acp, rusty_mcp_middleware) already use this name.
     "rustls",
     "http2",
     # 0.13 also split RequestBuilder::query()/form() out from the
@@ -756,7 +760,6 @@ rusty_axum_tokio = { path = "crates/libs/net/rusty_axum_tokio" }
 rusty_crypto_key = { path = "crates/foundation/rusty_crypto_key" }
 rusty_ansi = { path = "crates/libs/ui/rusty_ansi" }
 hyper = { version = "1", default-features = false }
-hyper-util = { version = "0.1", default-features = false }
 http-body-util = "0.1"
 bytes = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -806,18 +809,17 @@ rusty_a2a = { path = "crates/libs/protocol/rusty_a2a", default-features = false 
 
 # Hoisted from rusty_provider's own former `[workspace.dependencies]`. Its
 # `[workspace.package]` collided on `license` ("MIT"), so its six crates
-# carry literal `[package]` fields -- rusty_db treatment. `rusty-mcp` is a
-# merged sibling here, retiring rusty_provider's branch-tracking git
-# dependency on it.
+# carry literal `[package]` fields -- rusty_db treatment.
 rp-core = { path = "crates/apps/rusty_provider/crates/core" }
 rp-mcp = { path = "crates/apps/rusty_provider/crates/mcp" }
 rp-providers = { path = "crates/apps/rusty_provider/crates/providers" }
 rp-router = { path = "crates/apps/rusty_provider/crates/router" }
 # `default-features = false` because rusty_agent_gateway's crates ask for it
 # explicitly and an inheriting member may not override the root's choice.
-# A no-op for rusty_provider, which inherits this entry as-is: rusty-mcp's
-# own `default` feature is empty.
-rusty-mcp = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp", default-features = false }
+# Was `rusty-mcp` until 0.13.0 (#876).
+# HTTP/2 server for agentgateway-mcp's scripted gRPC processor (tests).
+rusty_hyper = { path = "crates/libs/net/rusty_hyper" }
+rusty_mcp_middleware = { path = "crates/libs/protocol/rusty_mcp_middleware", default-features = false }
 rusty-mcp-client = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client" }
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", features = ["json"] }
@@ -931,29 +933,18 @@ windows-sys = { version = "0.59", features = [
 nexus-plugin-api = { path = "crates/apps/nexus/crates/nexus-plugin-api" }
 nexus-hashline = { path = "crates/apps/nexus/crates/nexus-hashline" }
 
-# Hoisted from rusty_remind_me's own former `[workspace.dependencies]` (a
-# six-crate Cargo workspace before this merge). Only its intra-family path
-# entries move here, so its members' `remind_me_core.workspace = true` lines
-# keep working unchanged. Its `[workspace.package]` collided with this root's
-# on version (0.2.0), license ("MIT") and rust-version (1.94), so -- like
-# rusty_db -- its crates carry literal `[package]` fields instead. Its
-# external dependencies are literal in the member manifests too: `thiserror`
-# ("2.0") and `dirs` ("5.0") are the same splits nexus keeps literal, and
-# `rusqlite` moved 0.31 -> 0.39 (its `links = "sqlite3"` allows one version
-# per graph) with the `functions` feature this root's entry lacks.
-remind_me_core = { path = "crates/apps/rusty_remind_me/crates/remind_me_core" }
-remind_me_mcp = { path = "crates/apps/rusty_remind_me/crates/remind_me_mcp" }
-remind_me_api = { path = "crates/apps/rusty_remind_me/crates/remind_me_api" }
-remind_me_remote = { path = "crates/apps/rusty_remind_me/crates/remind_me_remote" }
-remind_me_hub = { path = "crates/apps/rusty_remind_me/crates/remind_me_hub" }
-
 # rusty_mux family (docs/projects/mux/).
 rusty_mux_core = { path = "crates/apps/rusty_mux/crates/core" }
+rusty_mux_ctl = { path = "crates/apps/rusty_mux/crates/ctl" }
 rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }
+rusty_mux_script = { path = "crates/apps/rusty_mux/crates/script" }
 rusty_mux_server = { path = "crates/apps/rusty_mux/crates/server" }
 rusty_mux_status = { path = "crates/apps/rusty_mux/crates/status" }
+rusty_mux_transport = { path = "crates/apps/rusty_mux/crates/transport" }
 # rusty_term's headless engine, for consumers that must not link its tokio front end.
 rusty_term_core = { path = "crates/libs/ui/rusty_term/core" }
+# Our own Windows console host (docs/projects/term/conhost/).
+rusty_conhost = { path = "crates/libs/ui/rusty_conhost" }
 tracing-appender = "0.2"
 # Markdown parsing
 comrak = { version = "0.52", default-features = false, features = [] }
@@ -1044,7 +1035,6 @@ unsafe_code = "warn"
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"
 
-# RUSTSEC-2026-0387: pinned source patches, provenance/removal in vendor/README.md.
+# RUSTSEC-2026-0387: pinned source patch, provenance/removal in vendor/README.md.
 [patch.crates-io]
-aws-sigv4 = { path = "vendor/aws-sigv4" }
 jsonwebtoken = { path = "vendor/jsonwebtoken" }

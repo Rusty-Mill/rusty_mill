@@ -68,14 +68,15 @@ impl UdpSocket {
     /// `async` and how to bind synchronously ([`from_std`](Self::from_std)).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<UdpSocket> {
         super::addr::first_ok(addr, UdpSocket::bind_addr).await
     }
 
     /// Binds one concrete address, synchronously.
     fn bind_addr(addr: SocketAddr) -> io::Result<UdpSocket> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUdpSocket::bind(addr).map_err(from_platform_err)?;
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;
@@ -515,9 +516,10 @@ impl UdpSocket {
     /// syscall.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_std(socket: std::net::UdpSocket) -> io::Result<UdpSocket> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let inner = PlatformUdpSocket::from(OwnedIo::from(socket));
         inner.set_nonblocking(true).map_err(from_platform_err)?;
         let io = reactor.register(inner.as_raw_io())?;

@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -29,33 +28,22 @@ struct Seen {
 
 /// A provider that answers with `reply`, recording what it was asked.
 async fn provider(reply: Value, sse: Option<String>) -> (u16, Arc<Mutex<Seen>>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let seen = Arc::new(Mutex::new(Seen::default()));
     let recorder = Arc::clone(&seen);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         let reply = reply.clone();
         let sse = sse.clone();
         async move {
-            let path = request.uri().path().to_string();
-            let query = request.uri().query().map(str::to_string);
-            let headers: Vec<(String, String)> = request
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        v.to_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect();
+            let path = request.path().to_string();
+            let query = request.query().map(str::to_string);
+            let headers: Vec<(String, String)> = common::header_pairs(request.headers());
 
-            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
-                .await
-                .unwrap_or_default();
+            let bytes = request.body().to_vec();
 
             if let Ok(mut seen) = recorder.lock() {
                 seen.body = serde_json::from_slice(&bytes).ok();
@@ -65,24 +53,15 @@ async fn provider(reply: Value, sse: Option<String>) -> (u16, Arc<Mutex<Seen>>) 
             }
 
             match sse {
-                Some(stream) => axum::response::Response::builder()
-                    .header("content-type", "text/event-stream")
-                    .body(axum::body::Body::from(stream))
-                    .expect("response should build"),
-                None => axum::response::Response::builder()
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(reply.to_string()))
-                    .expect("response should build"),
+                Some(stream) => rusty_axum::Response::new(rusty_axum::StatusCode::OK, stream)
+                    .with_header("content-type", "text/event-stream"),
+                None => rusty_axum::Response::new(rusty_axum::StatusCode::OK, reply.to_string())
+                    .with_header("content-type", "application/json"),
             }
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("provider should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, seen)
 }
@@ -126,13 +105,13 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -323,18 +302,13 @@ async fn a_provider_error_is_passed_through_rather_than_reshaped() {
     // "invalid api key" is the useful part; rewriting it as "bad gateway"
     // costs an afternoon.
     let port = free_port().await;
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("should bind");
-    tokio::spawn(async move {
-        let app = axum::Router::new().fallback(axum::routing::any(|| async {
-            (
-                axum::http::StatusCode::UNAUTHORIZED,
-                axum::Json(json!({"error": {"message": "invalid api key"}})),
-            )
-        }));
-        let _ = axum::serve(listener, app).await;
+    let app = rusty_axum::Router::new().fallback(|| async {
+        (
+            rusty_axum::StatusCode::UNAUTHORIZED,
+            rusty_axum::Json(json!({"error": {"message": "invalid api key"}})),
+        )
     });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     let (url, shutdown) = start("openAI", port, "").await;
     let response = post(&url, &chat_request()).await;
@@ -471,7 +445,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("bedrock is not served by this build");
@@ -663,7 +637,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("an unrepresentable header name should not start");
@@ -731,12 +705,12 @@ binds:
         "one `pathPrefix` is exactly what a prefix rewrite needs: {:?}",
         config.lint()
     );
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -806,7 +780,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("an unusable authority should not start");
@@ -836,7 +810,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("userinfo in an upstream address should not start");
@@ -849,39 +823,29 @@ binds:
 /// A provider that answers `status` for its first `failures` calls, then
 /// succeeds, counting every call it received.
 async fn flaky_provider(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::Router;
 
     let port = free_port().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&calls);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move || {
         let counter = Arc::clone(&counter);
         async move {
-            let _ = axum::body::to_bytes(request.into_body(), 1 << 20).await;
             let seen = counter.fetch_add(1, Ordering::Relaxed);
             if seen < failures {
-                return axum::response::Response::builder()
-                    .status(status)
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        json!({"error": {"message": "try again"}}).to_string(),
-                    ))
-                    .expect("response should build");
+                return rusty_axum::Response::new(
+                    rusty_axum::StatusCode::from_u16(status),
+                    json!({"error": {"message": "try again"}}).to_string(),
+                )
+                .with_header("content-type", "application/json");
             }
-            axum::response::Response::builder()
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(openai_reply().to_string()))
-                .expect("response should build")
+            rusty_axum::Response::new(rusty_axum::StatusCode::OK, openai_reply().to_string())
+                .with_header("content-type", "application/json")
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("provider should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, calls)
 }
@@ -1131,7 +1095,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("a bucket that drains once and never refills should not start");
@@ -1145,13 +1109,8 @@ async fn a_body_buffered_for_ext_authz_still_reaches_the_provider() {
     // the same bytes it would have.
     let (provider_port, seen) = provider(openai_reply(), None).await;
     let authz_port = free_port().await;
-    let allow = axum::Router::new().fallback(axum::routing::any(|| async { "" }));
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{authz_port}"))
-        .await
-        .expect("authorizer should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, allow).await;
-    });
+    let allow = rusty_axum::Router::new().fallback(|| async { "" });
+    common::upstream(format!("127.0.0.1:{authz_port}"), allow).await;
 
     let (url, shutdown) = start_with(
         "openAI",
@@ -1906,7 +1865,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("a rule that can never fire should not start");
@@ -1952,31 +1911,20 @@ async fn guard_webhook(
     request_action: Value,
     response_action: Value,
 ) -> (u16, Arc<Mutex<Vec<(String, Value, Vec<(String, String)>)>>>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let seen = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         let request_action = request_action.clone();
         let response_action = response_action.clone();
         async move {
-            let path = request.uri().path().to_string();
-            let headers: Vec<(String, String)> = request
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        v.to_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect();
-            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
-                .await
-                .unwrap_or_default();
+            let path = request.path().to_string();
+            let headers: Vec<(String, String)> = common::header_pairs(request.headers());
+            let bytes = request.body().to_vec();
             let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
             if let Ok(mut seen) = recorder.lock() {
                 seen.push((path.clone(), body, headers));
@@ -1987,16 +1935,11 @@ async fn guard_webhook(
             } else {
                 request_action
             };
-            axum::Json(json!({"action": action}))
+            rusty_axum::Json(json!({"action": action}))
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("webhook should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, seen)
 }
@@ -2338,59 +2281,42 @@ async fn moderating_provider(
     flagged: bool,
     moderation_status: u16,
 ) -> (u16, Arc<Mutex<Vec<(Value, Vec<(String, String)>)>>>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let seen = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         async move {
-            let path = request.uri().path().to_string();
-            let headers: Vec<(String, String)> = request
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        v.to_str().unwrap_or_default().to_string(),
-                    )
-                })
-                .collect();
-            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
-                .await
-                .unwrap_or_default();
+            let path = request.path().to_string();
+            let headers: Vec<(String, String)> = common::header_pairs(request.headers());
+            let bytes = request.body().to_vec();
             let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
 
             if !path.contains("moderations") {
-                return axum::response::Response::builder()
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(openai_reply().to_string()))
-                    .expect("response should build");
+                return rusty_axum::Response::new(
+                    rusty_axum::StatusCode::OK,
+                    openai_reply().to_string(),
+                )
+                .with_header("content-type", "application/json");
             }
 
             if let Ok(mut seen) = recorder.lock() {
                 seen.push((body, headers));
             }
-            axum::response::Response::builder()
-                .status(moderation_status)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({"id": "modr-1", "model": "omni-moderation-latest",
+            rusty_axum::Response::new(
+                rusty_axum::StatusCode::from_u16(moderation_status),
+                json!({"id": "modr-1", "model": "omni-moderation-latest",
                            "results": [{"flagged": flagged, "categories": {"violence": flagged}}]})
-                    .to_string(),
-                ))
-                .expect("response should build")
+                .to_string(),
+            )
+            .with_header("content-type", "application/json")
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("provider should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, seen)
 }
@@ -2547,7 +2473,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("an Anthropic key must not be lent to OpenAI");
@@ -2584,7 +2510,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    Gateway::build(&config, None)
+    common::build(&config, None)
         .await
         .map(|_| ())
         .expect("a rule with its own OpenAI key should start");

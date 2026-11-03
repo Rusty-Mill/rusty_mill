@@ -1,6 +1,6 @@
 [package]
 name = "sessionmgr-pty"
-description = "PTY adapter for sessionmgr: hosts a session's process on a real terminal (ConPTY on Windows) via rustils' platform Pty capability."
+description = "PTY adapter for sessionmgr: hosts a session's process on a real terminal (ConPTY or our own console host on Windows) via rustils' platform Pty capability."
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
@@ -33,3 +33,6 @@ platform-linux = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 platform-windows = { workspace = true }
+# Our own console host (design `docs/projects/term/conhost/`, host PR 12),
+# picked per session by `RUSTY_CONSOLE_HOST`.
+rusty_conhost = { workspace = true }

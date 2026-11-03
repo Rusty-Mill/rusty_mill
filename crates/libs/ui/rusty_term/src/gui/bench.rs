@@ -17,6 +17,8 @@ use super::render::{self, PaneFrame};
 /// An offscreen frame target with a loaded font.
 pub struct FrameBench {
     font: FontCache,
+    /// The bars' font; the bench draws no bars, but the frame path takes one.
+    ui: FontCache,
     buf: Vec<u32>,
     width: usize,
     height: usize,
@@ -30,11 +32,13 @@ impl FrameBench {
     /// `cols`×`rows` pane. `None` when no usable font is found.
     pub fn new(cols: usize, rows: usize, px: f32) -> Option<Self> {
         let set = font::load_set(None, None, None, None, None)?;
+        let ui = FontCache::new(set.clone(), px, false)?;
         let font = FontCache::new(set, px, false)?;
         let (cw, ch) = font.cell_size();
         let (width, height) = (cols * cw, rows * ch);
         Some(FrameBench {
             font,
+            ui,
             buf: vec![0; width * height],
             width,
             height,
@@ -70,7 +74,15 @@ impl FrameBench {
         let colors = [0x202020, 0x000000, 0x101010];
         let panes = [pane];
         let size = (self.width, self.height);
-        let frame = Frame::capture(&panes, &[], &[], self.font.id(), size, colors, 0);
+        let frame = Frame::capture(
+            &panes,
+            &[],
+            &[],
+            [self.font.id(), self.ui.id()],
+            size,
+            colors,
+            0,
+        );
         // The buffer persists, so it always holds the last frame (age 1).
         let plan = self
             .damage
@@ -82,6 +94,7 @@ impl FrameBench {
             &[],
             &[],
             &mut self.font,
+            &mut self.ui,
             self.width,
             self.height,
             colors[0],

@@ -163,6 +163,9 @@ fn a_disarmed_drop_guard_does_not_cancel() {
 async fn select_loop_on_cancelled_exits_once_cancelled() {
     let token = CancellationToken::new();
     let (tx, mut rx) = rusty_tokio::sync::mpsc::unbounded_channel::<u32>();
+    // The consumer says when it has all 50, so cancelling cannot race them.
+    let (all_in, all_in_rx) = rusty_tokio::sync::oneshot::channel::<()>();
+    let mut all_in = Some(all_in);
     let loop_token = token.clone();
     let task = rusty_tokio::spawn(async move {
         let mut received = 0;
@@ -177,12 +180,21 @@ async fn select_loop_on_cancelled_exits_once_cancelled() {
                 return received;
             }
             received += 1;
+            if received != 50 {
+                continue;
+            }
+            if let Some(all_in) = all_in.take() {
+                all_in.send(()).expect("the test is waiting");
+            }
         }
     });
     for i in 0..50 {
         tx.send(i).unwrap();
     }
-    sleep(Duration::from_millis(20)).await;
+    timeout(Duration::from_secs(5), all_in_rx)
+        .await
+        .unwrap()
+        .unwrap();
     token.cancel();
     let received = timeout(Duration::from_secs(5), task)
         .await

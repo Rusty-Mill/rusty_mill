@@ -68,6 +68,25 @@ def gen_unicode_heavy(target_bytes, seed):
     return bytes(out)
 
 
+def gen_unicode_2027(target_bytes, seed):
+    """`unicode_heavy` text under mode 2027 (grapheme clustering), plus ZWJ,
+    skin-tone, flag, VS16 and keycap clusters: the cluster-joining path."""
+    rng = random.Random(seed)
+    pool = (
+        list("日本語漢字あいうえおカタカナ")
+        + list("한국어테스트문자")
+        + list("😀😁😂🤣😃😄😅😆👍🎉")
+        + ["e\u0301", "a\u0308", "n\u0303"]
+        + ["👨\u200d👩\u200d👧", "👍\U0001f3fd", "🇯🇵", "❤\ufe0f", "1\ufe0f\u20e3"]
+        + list("Ω≈ç√∫˜µ≤≥÷")
+    )
+    out = bytearray(CSI + b"?2027h" + CSI + b"2J" + CSI + b"H")
+    while len(out) < target_bytes:
+        line = "".join(rng.choice(pool) for _ in range(rng.randint(20, 60)))
+        out += line.encode("utf-8") + b"\r\n"
+    return bytes(out)
+
+
 def gen_sgr_churn(target_bytes, seed):
     """Every line changes fg/bg/bold/italic/underline: style-run pressure."""
     rng = random.Random(seed)
@@ -134,6 +153,7 @@ def gen_alt_screen_flicker(target_bytes, seed):
 WORKLOADS = {
     "ascii_throughput": gen_ascii_throughput,
     "unicode_heavy": gen_unicode_heavy,
+    "unicode_2027": gen_unicode_2027,
     "sgr_churn": gen_sgr_churn,
     "sgr_alternate": gen_sgr_alternate,
     "cursor_thrash": gen_cursor_thrash,
@@ -152,7 +172,7 @@ SIZES = {
     "xlarge": 150_000_000,
 }
 SEED_BASE = 1337
-ADDED_LATER = ("sgr_alternate",)
+ADDED_LATER = ("sgr_alternate", "unicode_2027")
 
 
 def main():

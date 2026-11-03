@@ -1,6 +1,6 @@
 //! Changes to the model, in the order they happened.
 
-use crate::{BlockId, ClientId, SessionId, Size, WindowId};
+use crate::{BlockId, ClientId, Layout, Principal, SessionId, Size, Transport, WindowId};
 
 /// One change made by [`Mux`](crate::Mux).
 ///
@@ -21,6 +21,26 @@ pub enum Event {
     WindowClosed {
         window: WindowId,
     },
+    /// The session's active window changed: its first window was made,
+    /// a client selected one, or the active one closed. `None` once the
+    /// session has no windows.
+    ActiveWindowChanged {
+        session: SessionId,
+        window: Option<WindowId>,
+    },
+    /// The window's focus moved to `block`: a client focused or zoomed it,
+    /// or the focused block left the layout and the block that took its
+    /// place has it. `None` once no block is placed.
+    FocusChanged {
+        window: WindowId,
+        block: Option<BlockId>,
+    },
+    /// A client moved the window to place `index` among its session's
+    /// windows, counted from 0; the windows between shifted by one.
+    WindowMoved {
+        window: WindowId,
+        index: usize,
+    },
     BlockCreated {
         block: BlockId,
         window: WindowId,
@@ -33,11 +53,22 @@ pub enum Event {
     BlockClosed {
         block: BlockId,
     },
+    /// A new client, with the principal the server verified; `None` only
+    /// when decoded from a server older than `Features::IDENTITY`.
     ClientConnected {
         client: ClientId,
+        principal: Option<Principal>,
     },
     ClientDisconnected {
         client: ClientId,
+    },
+    /// The client is reached another way, by `transport`: a new connection
+    /// took it over, or its UDP association moved to a new address. It
+    /// keeps its id, name, attachment and lease.
+    ClientConnectionChanged {
+        client: ClientId,
+        principal: Principal,
+        transport: Transport,
     },
     Attached {
         client: ClientId,
@@ -57,4 +88,129 @@ pub enum Event {
     BlockStatus {
         block: BlockId,
     },
+    /// The block's program reported a new working directory (OSC 7); the
+    /// `terminal.pwd` block method reads it.
+    PwdChanged {
+        block: BlockId,
+    },
+    /// The block's title changed; the `terminal.title` block method reads it.
+    TitleChanged {
+        block: BlockId,
+    },
+    /// The block's program exited by itself; [`Event::BlockClosed`] follows.
+    ProgramExited {
+        block: BlockId,
+        status: ExitStatus,
+    },
+    /// The block's program rang the bell. A burst read at once is one event.
+    Bell {
+        block: BlockId,
+    },
+    /// The progress the block's program shows changed (OSC 9;4).
+    ProgressChanged {
+        block: BlockId,
+        progress: Progress,
+    },
+    /// The block's program asked for a desktop notification (OSC 9 or 777);
+    /// an empty title leaves it to the client.
+    Notification {
+        block: BlockId,
+        title: String,
+        body: String,
+    },
+    /// Another process group took the block's terminal: a job started in
+    /// the foreground, or the shell got it back. `pid` is the group's
+    /// leader and `name` its program, empty when unknown; the
+    /// `terminal.process` block method reads the rest.
+    ProcessChanged {
+        block: BlockId,
+        pid: u32,
+        name: String,
+    },
+    /// The session's name changed to `name`.
+    SessionRenamed {
+        session: SessionId,
+        name: String,
+    },
+    WindowRenamed {
+        window: WindowId,
+        name: String,
+    },
+    BlockRenamed {
+        block: BlockId,
+        name: String,
+    },
+    ClientRenamed {
+        client: ClientId,
+        name: String,
+    },
+    /// The window's layout or zoom changed: a block was added or closed,
+    /// or a block was zoomed or unzoomed. It follows the
+    /// [`Event::BlockCreated`] or [`Event::BlockClosed`] that caused it;
+    /// closing the whole window sends none.
+    LayoutChanged {
+        window: WindowId,
+        /// `None` once the window has no blocks.
+        layout: Option<Layout>,
+        zoomed: Option<BlockId>,
+    },
+    /// The server read its config again and now starts new blocks as it
+    /// says.
+    ConfigReloaded,
+    /// The block's program set a selection (OSC 52). The text is not in
+    /// the event: it may be a secret, and clients attached to the block
+    /// already received it in the output. Several writes read at once are
+    /// one event per selection.
+    ClipboardWritten {
+        block: BlockId,
+        selection: Selection,
+    },
+    /// A status record the block's program reported ended: cleared, ended
+    /// by a prompt or reset, or evicted by a newer one. `id` is its path,
+    /// empty for the root; [`Event::BlockStatus`] follows.
+    StatusRemoved {
+        block: BlockId,
+        id: String,
+    },
+}
+
+/// Which selection a program wrote with OSC 52.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    /// The clipboard, also what an empty or unknown target means.
+    Clipboard,
+    /// The X11 primary selection.
+    Primary,
+}
+
+impl Selection {
+    /// The name ctl and MCP print.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clipboard => "clipboard",
+            Self::Primary => "primary",
+        }
+    }
+}
+
+/// How a block's program ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExitStatus {
+    /// It exited with this code.
+    Code(i32),
+    /// This signal ended it (Unix only).
+    Signal(i32),
+}
+
+/// The progress a program shows, as ConEmu's OSC 9;4 reports it; the
+/// numbers are percentages, at most 100.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// None shown.
+    Cleared,
+    Normal(u8),
+    Error(u8),
+    /// Busy, with no known amount.
+    Indeterminate,
+    Paused(u8),
 }

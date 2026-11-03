@@ -1,4 +1,3 @@
 # Preserve the exact published bytes, especially CRLF PEM and signing fixtures.
 # These rules do not suppress diffs or whitespace diagnostics.
-aws-sigv4/** -text
 jsonwebtoken/** -text

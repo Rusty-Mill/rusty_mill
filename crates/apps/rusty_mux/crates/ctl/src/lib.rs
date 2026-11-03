@@ -11,44 +11,98 @@
 //! [`target`]), and a missing one defaults to the block, window or session
 //! the command runs in, from `$RUSTY_MUX_BLOCK` and the like.
 //!
+//! `do ACTION --ARG VALUE` runs an action from the config file, a named
+//! chain of requests (see [`rusty_mux_script`]); `config check` and
+//! `config list` check and list it. `watch` follows events and runs the
+//! config's `on` rules for each.
+//!
+//! `agent setup|status|remove` installs, checks and removes a skill and a
+//! session-start hook for Claude Code.
+//!
+//! `bridge` joins stdin and stdout to the socket, byte for byte, so a client
+//! on another machine reaches the server with `ssh host rusty-mux-ctl
+//! bridge`.
+//!
+//! `wait --block B` blocks until the block's program exits and exits with
+//! its status; `wait --event KIND --FIELD VALUE` until a matching event.
+//! `run -- COMMAND ARG...` starts a program in a new block, in ctl's
+//! directory, and with `--wait` waits for it the same way. Both give up
+//! after `--timeout SECS` with exit code 124.
+//!
 //! Output is text, or one JSON object per line with `--json`. The exit code
 //! is an [`Exit`]; an interrupt ends the process with the signal, which a
-//! shell reports as 130.
+//! shell reports as 130. An embedder bounds a command with [`run_until`].
 
-// Off Unix the connection code compiles but `execute` never reaches it.
-#![cfg_attr(not(unix), allow(dead_code))]
+// Off Unix and Windows the connection code compiles but `execute` never
+// reaches it.
+#![cfg_attr(not(any(unix, windows)), allow(dead_code))]
 
+mod agent;
 mod api;
+#[cfg(any(unix, windows))]
+mod bridge;
 pub mod cli;
+mod completion;
+mod config;
 mod conn;
 mod render;
+mod stop;
 pub mod target;
+mod wait;
+mod watch;
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::num::NonZeroU8;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use rusty_mux_proto::schema::{CATALOG, Method, Returns, Value};
+use rusty_mux_core::Event;
+use rusty_mux_proto::schema::{CATALOG, Returns, Value};
 use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
-use crate::cli::{Api, Arg, Call, Command, Defaults, Invocation};
+pub use crate::api::input_schema;
+use crate::cli::{Api, Arg, Call, Command, ConfigCommand, Defaults, Invocation};
 use crate::conn::Conn;
+pub use crate::stop::Stop;
 use crate::target::Miss;
 
-/// The process exit code.
+/// The process exit code; see [`Exit::code`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
 pub enum Exit {
-    Ok = 0,
-    /// A request was refused, a stream could not be resumed, or the server
-    /// sent something this client cannot follow.
-    Failed = 1,
+    Ok,
+    /// A request was refused, a stream could not be resumed, the server
+    /// sent something this client cannot follow, or a waited-for block
+    /// closed before its program exited.
+    Failed,
     /// The command line is wrong.
-    Usage = 2,
+    Usage,
     /// A target names nothing, or more than one thing.
-    Target = 3,
+    Target,
     /// No server at the socket, or the connection broke.
-    Unreachable = 4,
+    Unreachable,
+    /// `wait` or `run --wait` gave up at its `--timeout`.
+    TimedOut,
+    /// The status of the program `wait` or `run --wait` waited for (see
+    /// [`Exit::of_program`]), which may coincide with one of the codes
+    /// above.
+    Program(NonZeroU8),
+}
+
+impl Exit {
+    /// 0 to 4 in the order above, 124 for a timeout as `timeout(1)` exits,
+    /// or the program's own status.
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Ok => 0,
+            Self::Failed => 1,
+            Self::Usage => 2,
+            Self::Target => 3,
+            Self::Unreachable => 4,
+            Self::TimedOut => 124,
+            Self::Program(code) => code.get(),
+        }
+    }
 }
 
 /// Where the command runs: the environment a block's program gets.
@@ -56,8 +110,80 @@ pub enum Exit {
 pub struct Env {
     /// `$RUSTY_MUX_SOCKET`.
     pub socket: Option<PathBuf>,
-    /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW` and `$RUSTY_MUX_BLOCK`.
+    /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW`, `$RUSTY_MUX_BLOCK` and
+    /// the current directory.
     pub here: Defaults,
+    /// The config file `do` and `config` read: `$RUSTY_MUX_CONFIG`, else
+    /// `rusty_mux/config.json` in the config directory.
+    pub config: Option<PathBuf>,
+    /// Where `agent` finds each agent's config directory.
+    pub agent_homes: AgentHomes,
+    /// This program, which the agent's session-start hook runs.
+    pub ctl: Option<PathBuf>,
+}
+
+impl Env {
+    /// This process's environment. A malformed id is ignored, with a warning
+    /// on stderr.
+    pub fn from_process() -> Self {
+        Self {
+            socket: std::env::var_os("RUSTY_MUX_SOCKET").map(Into::into),
+            here: Defaults {
+                session: id_var("RUSTY_MUX_SESSION"),
+                window: id_var("RUSTY_MUX_WINDOW"),
+                block: id_var("RUSTY_MUX_BLOCK"),
+                dir: std::env::current_dir().ok(),
+            },
+            config: config::default_path(),
+            agent_homes: AgentHomes::from_process(),
+            ctl: std::env::current_exe().ok(),
+        }
+    }
+}
+
+/// The environment that says where coding agents keep their config. An
+/// empty variable counts as unset.
+#[derive(Debug, Clone, Default)]
+pub struct AgentHomes {
+    /// `$HOME`, else `%USERPROFILE%`.
+    pub home: Option<PathBuf>,
+    /// `$CLAUDE_CONFIG_DIR`: Claude Code's directory, else `~/.claude`.
+    pub claude: Option<PathBuf>,
+    /// `$CODEX_HOME`: Codex's directory, else `~/.codex`.
+    pub codex: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME` when absolute: holds OpenCode's `opencode`, else
+    /// `~/.config` does.
+    pub config: Option<PathBuf>,
+    /// `$PI_CODING_AGENT_DIR`: Pi's directory, else `~/.pi/agent`.
+    pub pi: Option<PathBuf>,
+}
+
+impl AgentHomes {
+    fn from_process() -> Self {
+        let var = |name: &str| {
+            std::env::var_os(name)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            home: var("HOME").or_else(|| var("USERPROFILE")),
+            claude: var("CLAUDE_CONFIG_DIR"),
+            codex: var("CODEX_HOME"),
+            config: var("XDG_CONFIG_HOME").filter(|dir| dir.is_absolute()),
+            pi: var("PI_CODING_AGENT_DIR"),
+        }
+    }
+}
+
+fn id_var(name: &str) -> Option<Uuid> {
+    let value = std::env::var(name).ok()?;
+    match value.parse() {
+        Ok(id) => Some(id),
+        Err(_) => {
+            eprintln!("rusty-mux: ignoring ${name}: `{value}` is not an id");
+            None
+        }
+    }
 }
 
 /// What a request answered with.
@@ -73,6 +199,8 @@ enum Reply {
 /// Why a command stopped early.
 enum Failure {
     Failed(String),
+    /// A wait ran past its `--timeout`.
+    TimedOut,
     /// A target names nothing, or more than one thing.
     Missing(String),
     Unreachable(io::Error),
@@ -99,35 +227,232 @@ impl From<Miss> for Failure {
     }
 }
 
+/// Why [`run`] refuses `bridge`.
+const BRIDGE_ONLY: &str =
+    "bridge runs only as the rusty-mux-ctl program: it takes over the process's stdin and stdout";
+
 /// Runs a command line (without the program name) in `env`; output goes to
-/// `out`, diagnostics to `err`.
+/// `out`, diagnostics to `err`. `bridge` is refused: see [`run_process`].
 pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
-    let invocation = match cli::parse(args, &env.here) {
+    run_until(args, env, &Stop::default(), out, err)
+}
+
+/// [`run`] as the `rusty-mux-ctl` program, with this process's stdout and
+/// stderr; it alone runs `bridge`, which joins this process's stdin and
+/// stdout to the server's socket until the server closes it, and is
+/// bounded by nothing but that.
+pub fn run_process(args: &[String], env: &Env) -> Exit {
+    let mut err = io::stderr();
+    let bridged = match cli::parse(args, &env.here) {
+        Ok(invocation) if matches!(invocation.command, Command::Bridge) => invocation,
+        _ => return run(args, env, &mut io::stdout(), &mut err),
+    };
+    match socket(&bridged, env) {
+        Ok(socket) => finish(bridge(&socket), &socket, &mut err),
+        Err(reason) => report(&mut err, Exit::Usage, reason),
+    }
+}
+
+/// The socket `invocation` names, else `$RUSTY_MUX_SOCKET`.
+fn socket(invocation: &Invocation, env: &Env) -> Result<PathBuf, &'static str> {
+    invocation
+        .socket
+        .clone()
+        .or_else(|| env.socket.clone())
+        .ok_or("no socket: pass --socket or set RUSTY_MUX_SOCKET")
+}
+
+/// [`run`], giving up on the server once `stop` says so (past its deadline,
+/// or cancelled) with [`Exit::Unreachable`]. Requests already sent stand.
+///
+/// `stop` bounds reads everywhere. It bounds connecting only on Linux, and
+/// writes only on Unix: on Windows a connect or a write blocked on a server
+/// that stopped reading runs past the deadline.
+pub fn run_until(
+    args: &[String],
+    env: &Env,
+    stop: &Stop,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let mut invocation = match cli::parse(args, &env.here) {
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
     };
+    // Where the agent hook asks for its session's name.
+    let hook_socket = socket(&invocation, env).ok();
     match invocation.command {
         Command::Help(method) => return write_line(out, cli::usage(method).trim_end()),
         Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
         Command::Api(Api::Describe(method)) => return write_line(out, &api::describe(method)),
-        Command::Calls(_) | Command::Events { .. } => {}
+        Command::Api(Api::Llms) => return write_line(out, api::llms().trim_end()),
+        Command::Completion(shell) => {
+            return write_line(out, completion::script(shell).trim_end());
+        }
+        Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
+        Command::Agent(command) => {
+            let generated_name = || {
+                let (socket, session) = (hook_socket.as_deref()?, env.here.session?);
+                hook_generated_name(socket, session, stop).ok().flatten()
+            };
+            return agent::run(&command, env, invocation.json, out, &generated_name)
+                .unwrap_or_else(|reason| report(err, Exit::Failed, &reason));
+        }
+        Command::Do { action, args } => match action_calls(&action, &args, env) {
+            Ok(calls) => invocation.command = Command::Calls(calls),
+            Err((exit, reason)) => return report(err, exit, &reason),
+        },
+        // Unbounded, and on the process's own stdin and stdout, so never
+        // through `stop` and `out`.
+        Command::Bridge => return report(err, Exit::Usage, BRIDGE_ONLY),
+        Command::Calls(_)
+        | Command::Events { .. }
+        | Command::Watch { .. }
+        | Command::Wait(_)
+        | Command::Run(_) => {}
     }
-    let Some(socket) = invocation.socket.clone().or_else(|| env.socket.clone()) else {
-        return report(
-            err,
-            Exit::Usage,
-            "no socket: pass --socket or set RUSTY_MUX_SOCKET",
-        );
+    let socket = match socket(&invocation, env) {
+        Ok(socket) => socket,
+        Err(reason) => return report(err, Exit::Usage, reason),
     };
-    match execute(&invocation, &socket, env.here.session, out) {
-        Ok(()) => Exit::Ok,
+    if let Command::Watch { after } = invocation.command {
+        return run_watch(after, &socket, env, invocation.json, stop, out, err);
+    }
+    let deadline = timeout(&invocation.command).and_then(|t| Instant::now().checked_add(t));
+    let stop = deadline.map_or_else(|| stop.clone(), |d| stop.sooner(d));
+    let result = execute(&invocation, &socket, env.here.session, &stop, out);
+    finish(timed_out(result, deadline), &socket, err)
+}
+
+/// How long a `wait` or `run --wait` may wait.
+fn timeout(command: &Command) -> Option<std::time::Duration> {
+    match command {
+        Command::Wait(wait) => wait.timeout,
+        Command::Run(run) => run.wait.flatten(),
+        _ => None,
+    }
+}
+
+/// `result`, with running out of time at `deadline` as a timeout rather
+/// than an unreachable server.
+fn timed_out(result: Result<Exit, Failure>, deadline: Option<Instant>) -> Result<Exit, Failure> {
+    match result {
+        Err(Failure::Unreachable(e))
+            if e.kind() == io::ErrorKind::TimedOut
+                && deadline.is_some_and(|d| Instant::now() >= d) =>
+        {
+            Err(Failure::TimedOut)
+        }
+        other => other,
+    }
+}
+
+/// `watch`: follows events and runs the config's rules for each, until
+/// the server goes away.
+fn run_watch(
+    after: Option<Cursor>,
+    socket: &Path,
+    env: &Env,
+    json: bool,
+    stop: &Stop,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let config = match config::load(env.config.as_deref()) {
+        Ok(config) => config,
+        Err(problems) => return report(err, Exit::Failed, &problems),
+    };
+    if config.rules.is_empty() {
+        return report(err, Exit::Failed, "no `on` rules in the config");
+    }
+    let env = Env {
+        socket: Some(socket.to_path_buf()),
+        ..env.clone()
+    };
+    let watcher = watch::Watcher {
+        config: &config,
+        env: &env,
+        json,
+        stop,
+    };
+    let needs: Vec<(&str, Features)> = config
+        .rules
+        .iter()
+        .map(|rule| (rule.event, watch::needs(rule.event)))
+        .collect();
+    let how = Follow {
+        after,
+        needs: &needs,
+        json,
+        here: env.here.session,
+    };
+    let result = follow(socket, &how, stop, out, &mut |seq, event, out| {
+        watcher
+            .event(seq, event, out, &mut *err)
+            .map_err(Failure::from)
+    });
+    finish(result.map(|()| Exit::Ok), socket, err)
+}
+
+/// The exit code for a command's `result`, its reason reported on `err`.
+fn finish(result: Result<Exit, Failure>, socket: &Path, err: &mut dyn Write) -> Exit {
+    match result {
+        Ok(exit) => exit,
         Err(Failure::Failed(reason)) => report(err, Exit::Failed, &reason),
+        Err(Failure::TimedOut) => report(err, Exit::TimedOut, "timed out"),
         Err(Failure::Missing(reason)) => report(err, Exit::Target, &reason),
         Err(Failure::Unreachable(e)) => report(
             err,
             Exit::Unreachable,
             &format!("{}: {e}", socket.display()),
         ),
+    }
+}
+
+/// The requests `do ACTION` sends: the action expanded with `args`, parsed
+/// like a typed chain so ids resolve and default the same way.
+fn action_calls(
+    action: &str,
+    args: &[(String, String)],
+    env: &Env,
+) -> Result<Vec<Call>, (Exit, String)> {
+    let config = config::load(env.config.as_deref()).map_err(|e| (Exit::Failed, e))?;
+    let action = config
+        .action(action)
+        .ok_or_else(|| (Exit::Usage, format!("no action `{action}` in the config")))?;
+    let calls = action.expand(args).map_err(|e| (Exit::Usage, e))?;
+    let chain = config::chain(&calls);
+    match cli::parse(&chain, &env.here) {
+        Ok(Invocation {
+            command: Command::Calls(calls),
+            ..
+        }) => Ok(calls),
+        Ok(_) => Err((
+            Exit::Failed,
+            format!("{}: not a chain of requests", action.name),
+        )),
+        Err(reason) => Err((Exit::Usage, format!("{}: {reason}", action.name))),
+    }
+}
+
+fn run_config(
+    command: &ConfigCommand,
+    env: &Env,
+    json: bool,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> Exit {
+    let path = match command {
+        ConfigCommand::Check(Some(path)) => Some(path.as_path()),
+        ConfigCommand::Check(None) | ConfigCommand::List => env.config.as_deref(),
+    };
+    let config = match config::load(path) {
+        Ok(config) => config,
+        Err(problems) => return report(err, Exit::Failed, &problems),
+    };
+    match command {
+        ConfigCommand::Check(_) => write_line(out, &config::summary(&config)),
+        ConfigCommand::List => write_line(out, &config::list(&config, json)),
     }
 }
 
@@ -144,33 +469,165 @@ fn write_line(out: &mut dyn Write, line: &str) -> Exit {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn execute(
     invocation: &Invocation,
-    socket: &PathBuf,
+    socket: &Path,
     here: Option<Uuid>,
+    stop: &Stop,
     out: &mut dyn Write,
-) -> Result<(), Failure> {
-    let mut conn = Conn::new(std::os::unix::net::UnixStream::connect(socket)?);
+) -> Result<Exit, Failure> {
+    let mut conn = Conn::new(conn::connect(socket, stop)?, stop.clone());
     let mut session = Session {
         conn: &mut conn,
         out,
         json: invocation.json,
         here,
     };
+    let json = invocation.json;
     match &invocation.command {
-        Command::Calls(calls) => session.calls(calls),
-        Command::Events { after, follow } => session.events(*after, *follow),
-        Command::Help(_) | Command::Api(_) => Ok(()),
+        Command::Calls(calls) => session.calls(calls).map(|()| Exit::Ok),
+        Command::Events { after, follow } => session
+            .events(*after, *follow, &[], &mut |seq, event, out| {
+                writeln!(out, "{}", render::event_line(seq, event, json)).map_err(Failure::from)
+            })
+            .map(|()| Exit::Ok),
+        Command::Wait(wait) => session.wait(&wait.until),
+        Command::Run(run) => session.run(run),
+        Command::Help(_)
+        | Command::Api(_)
+        | Command::Do { .. }
+        | Command::Config(_)
+        | Command::Agent(_)
+        | Command::Watch { .. }
+        | Command::Bridge
+        | Command::Completion(_) => Ok(Exit::Ok),
     }
 }
 
-#[cfg(not(unix))]
-fn execute(_: &Invocation, _: &PathBuf, _: Option<Uuid>, _: &mut dyn Write) -> Result<(), Failure> {
-    Err(Failure::Unreachable(io::Error::new(
+/// `bridge`, for [`run_process`] only: until the server closes the
+/// connection.
+#[cfg(any(unix, windows))]
+fn bridge(socket: &Path) -> Result<Exit, Failure> {
+    bridge::run(socket)?;
+    Ok(Exit::Ok)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn bridge(_: &Path) -> Result<Exit, Failure> {
+    Err(unsupported())
+}
+
+/// What [`follow`] follows, and how it prints.
+struct Follow<'a> {
+    after: Option<Cursor>,
+    /// Event kinds the follower needs, each with the feature it takes.
+    needs: &'a [(&'a str, Features)],
+    json: bool,
+    here: Option<Uuid>,
+}
+
+/// Follows the events after `how.after` on a connection of its own,
+/// passing each to `on_event`; fails first unless the server sends every
+/// event kind `how.needs`.
+#[cfg(any(unix, windows))]
+fn follow(
+    socket: &Path,
+    how: &Follow<'_>,
+    stop: &Stop,
+    out: &mut dyn Write,
+    on_event: &mut OnEvent<'_>,
+) -> Result<(), Failure> {
+    let mut conn = Conn::new(conn::connect(socket, stop)?, stop.clone());
+    let mut session = Session {
+        conn: &mut conn,
+        out,
+        json: how.json,
+        here: how.here,
+    };
+    session.events(how.after, true, how.needs, on_event)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn follow(
+    _: &Path,
+    _: &Follow<'_>,
+    _: &Stop,
+    _: &mut dyn Write,
+    _: &mut OnEvent<'_>,
+) -> Result<(), Failure> {
+    Err(unsupported())
+}
+
+/// How long the agent hook waits for the server to tell a session's name,
+/// well inside the 5 s the OpenCode and Pi scripts give the whole hook.
+/// A hard bound only where [`conn::connect`] bounds connecting and writes
+/// (Linux); elsewhere the host's hook timeout is the bound.
+const HOOK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The name of `session` on the server at `socket` while it is one the
+/// server made up and nobody has renamed it since, for the agent hook.
+/// `None` from a server without [`Features::NAME_SESSION`], which could
+/// not keep a name chosen after the hook ran.
+#[cfg(any(unix, windows))]
+fn hook_generated_name(
+    socket: &Path,
+    session: Uuid,
+    stop: &Stop,
+) -> Result<Option<String>, Failure> {
+    let stop = stop.sooner(Instant::now() + HOOK_PATIENCE);
+    let mut conn = Conn::new(conn::connect(socket, &stop)?, stop);
+    let mut sink = io::sink();
+    let mut client = Session {
+        conn: &mut conn,
+        out: &mut sink,
+        json: false,
+        here: None,
+    };
+    let (features, _) = client.hello(Features::INSPECT.union(Features::NAME_SESSION), None)?;
+    if !features.contains(Features::NAME_SESSION) {
+        return Ok(None);
+    }
+    client
+        .list(features, 1)?
+        .into_iter()
+        .find_map(|entry| match entry {
+            Entry::Session {
+                session: s,
+                name,
+                generated,
+                ..
+            } if s.uuid() == session => Some(generated.then_some(name)),
+            _ => None,
+        })
+        .ok_or_else(|| Failure::Failed(format!("no session {session}")))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hook_generated_name(_: &Path, _: Uuid, _: &Stop) -> Result<Option<String>, Failure> {
+    Err(unsupported())
+}
+
+/// What happens to each numbered event that is followed.
+type OnEvent<'a> = dyn FnMut(u64, &Event, &mut dyn Write) -> Result<(), Failure> + 'a;
+
+#[cfg(not(any(unix, windows)))]
+fn execute(
+    _: &Invocation,
+    _: &Path,
+    _: Option<Uuid>,
+    _: &Stop,
+    _: &mut dyn Write,
+) -> Result<Exit, Failure> {
+    Err(unsupported())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unsupported() -> Failure {
+    Failure::Unreachable(io::Error::new(
         io::ErrorKind::Unsupported,
-        "rusty-mux-ctl connects over a Unix socket",
-    )))
+        "rusty-mux-ctl connects over a Unix socket (Unix or Windows)",
+    ))
 }
 
 struct Session<'a, S> {
@@ -192,7 +649,11 @@ impl<S: io::Read + Write> Session<'_, S> {
         features: Features,
         resume: Option<Cursor>,
     ) -> Result<(Features, Option<Cursor>), Failure> {
-        self.conn.send(&Message::Hello { features, resume })?;
+        self.conn.send(&Message::Hello {
+            features,
+            resume,
+            takeover: None,
+        })?;
         match self.conn.recv()? {
             Message::Welcome {
                 features, cursor, ..
@@ -212,19 +673,20 @@ impl<S: io::Read + Write> Session<'_, S> {
         // The screen an attach sends is ignored.
         let wanted = CATALOG
             .iter()
-            .fold(Features::SYNC, |all, m| all.union(m.needs));
+            .fold(Features::SYNC, |all, m| all.union(m.all_needs()));
         let (features, _) = self.hello(wanted, None)?;
         // Refuse a chain the server cannot run before any of it runs.
         for call in calls {
-            require(features, call.method)?;
+            require(features, call)?;
         }
         let mut reqs = 1..;
-        let entries = if calls.iter().any(Call::has_target) {
-            self.list(features, reqs.next().unwrap_or(u64::MAX))?
-        } else {
-            Vec::new()
-        };
         for call in calls {
+            // Listed afresh for each call that names a target, so it can
+            // name what an earlier call in the chain created or renamed.
+            let entries = match call.has_target() {
+                true => self.list(features, reqs.next().unwrap_or(u64::MAX))?,
+                false => Vec::new(),
+            };
             let args = self.resolve(call, &entries)?;
             let req = reqs.next().unwrap_or(u64::MAX);
             let message = call
@@ -282,9 +744,29 @@ impl<S: io::Read + Write> Session<'_, S> {
     /// Waits for the reply to `wait`, collecting its entries, and fails if
     /// it or request `call` (the method `name`) is refused.
     fn reply(&mut self, wait: u64, call: u64, name: &str) -> Result<Reply, Failure> {
+        self.reply_keeping(wait, call, name, None)
+    }
+
+    /// [`Session::reply`], keeping the numbered events that arrive before
+    /// it in `kept`.
+    fn reply_keeping(
+        &mut self,
+        wait: u64,
+        call: u64,
+        name: &str,
+        mut kept: Option<&mut wait::Kept>,
+    ) -> Result<Reply, Failure> {
         let mut entries = Vec::new();
         loop {
             match self.conn.recv()? {
+                Message::Event {
+                    seq: Some(seq),
+                    event,
+                } => {
+                    if let Some(kept) = kept.as_deref_mut() {
+                        kept.push((seq, event));
+                    }
+                }
                 Message::Entry { req, entry } if req == wait => entries.push(entry),
                 Message::Done { req, created } if req == wait => {
                     return Ok(Reply::Done { created, entries });
@@ -320,11 +802,33 @@ impl<S: io::Read + Write> Session<'_, S> {
         lines.iter().try_for_each(|line| self.line(line))
     }
 
-    fn events(&mut self, after: Option<Cursor>, follow: bool) -> Result<(), Failure> {
+    fn events(
+        &mut self,
+        after: Option<Cursor>,
+        follow: bool,
+        needs: &[(&str, Features)],
+        on_event: &mut OnEvent<'_>,
+    ) -> Result<(), Failure> {
         let wanted = Features::EVENT_SEQ
             .union(Features::SYNC)
-            .union(Features::STATUS);
+            .union(Features::STATUS)
+            .union(Features::TERMINAL_EVENTS)
+            .union(Features::PROGRAM_EVENTS)
+            .union(Features::PROCESS)
+            .union(Features::LABELS)
+            .union(Features::LAYOUT)
+            .union(Features::IDENTITY)
+            .union(Features::MORE_PROGRAM_EVENTS)
+            .union(Features::ACTIVE_WINDOW)
+            .union(Features::CONFIG_RELOAD)
+            .union(Features::LAYOUT_EDIT)
+            .union(Features::FOCUS);
         let (features, start) = self.hello(wanted, after)?;
+        if let Some((kind, _)) = needs.iter().find(|(_, need)| !features.contains(*need)) {
+            return Err(Failure::Failed(format!(
+                "the server does not send `{kind}` events, which a rule needs"
+            )));
+        }
         let start =
             start.ok_or_else(|| Failure::Failed("the server does not number events".into()))?;
         self.line(&render::cursor_line(start, self.json))?;
@@ -347,7 +851,7 @@ impl<S: io::Read + Write> Session<'_, S> {
                     seq: Some(seq),
                     event,
                 } => {
-                    self.line(&render::event_line(seq, &event, self.json))?;
+                    on_event(seq, &event, &mut *self.out)?;
                     last.seq = seq;
                 }
                 Message::Event { seq: None, .. } => {
@@ -362,17 +866,38 @@ impl<S: io::Read + Write> Session<'_, S> {
     }
 }
 
-/// Fails unless the server can run `method` as ctl sends it.
-fn require(features: Features, method: &Method) -> Result<(), Failure> {
+/// Fails unless the server can run `call` as ctl sends it, with every
+/// argument it is given: a server would ignore an optional one it lacks
+/// the feature for.
+fn require(features: Features, call: &Call) -> Result<(), Failure> {
+    let method = call.method;
     if method.returns == Returns::Unanswered {
         require_sync(features)?;
     }
-    if features.contains(method.needs) {
+    if !features.contains(method.needs) {
+        return Err(Failure::Failed(format!(
+            "the server does not support {}",
+            method.name
+        )));
+    }
+    let given: Vec<&str> = call.args.iter().map(|(name, _)| *name).collect();
+    if features.contains(method.needs_for(given.iter().copied())) {
         return Ok(());
     }
+    // Each parameter whose presence or absence the server cannot handle.
+    let unsupported: Vec<String> = method
+        .params
+        .iter()
+        .filter(|p| p.extra_needs(&given).is_some_and(|n| !features.contains(n)))
+        .map(|p| match given.contains(&p.name) {
+            true => format!("with --{}", p.name),
+            false => format!("without --{}", p.name),
+        })
+        .collect();
     Err(Failure::Failed(format!(
-        "the server does not support {}",
-        method.name
+        "the server does not support {} {}",
+        method.name,
+        unsupported.join(", ")
     )))
 }
 
@@ -383,4 +908,78 @@ fn require_sync(features: Features) -> Result<(), Failure> {
     Err(Failure::Failed(
         "the server does not support sync, needed to confirm input".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parsed(line: &str) -> Call {
+        let args: Vec<String> = line.split_whitespace().map(String::from).collect();
+        match cli::parse(&args, &Defaults::default()) {
+            Ok(Invocation {
+                command: Command::Calls(mut calls),
+                ..
+            }) => calls.remove(0),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `bridge` would ignore `stop` and `out` and take over the process's
+    /// stdin, so the library refuses it before connecting, even with a
+    /// stop already passed and a server that would never answer.
+    #[cfg(unix)]
+    #[test]
+    fn the_library_refuses_bridge_without_connecting() {
+        let socket =
+            std::env::temp_dir().join(format!("rusty-mux-ctl-silent-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let env = Env {
+            socket: Some(socket.clone()),
+            here: Defaults::default(),
+            config: None,
+            agent_homes: AgentHomes::default(),
+            ctl: None,
+        };
+        let stop = Stop::after(std::time::Duration::ZERO);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let exit = run_until(&["bridge".to_owned()], &env, &stop, &mut out, &mut err);
+        let connected = listener.accept().is_ok();
+        std::fs::remove_file(&socket).unwrap();
+        assert_eq!(exit, Exit::Usage);
+        assert!(out.is_empty(), "{out:?}");
+        assert!(String::from_utf8_lossy(&err).contains("only as the rusty-mux-ctl program"));
+        assert!(!connected, "the library connected for bridge");
+    }
+
+    #[test]
+    fn only_launch_arguments_need_the_launch_feature() {
+        let plain = parsed(
+            "create-block --window 00000000-0000-0000-0000-000000000001 --cols 80 --rows 24",
+        );
+        assert!(require(Features::NONE, &plain).is_ok());
+        let launched = parsed(
+            "create-block --window 00000000-0000-0000-0000-000000000001 --cols 80 --rows 24 \
+             --cwd /tmp",
+        );
+        assert!(matches!(
+            require(Features::NONE, &launched),
+            Err(Failure::Failed(why)) if why.ends_with("with --cwd")
+        ));
+        assert!(require(Features::LAUNCH, &launched).is_ok());
+    }
+
+    #[test]
+    fn leaving_out_a_session_name_needs_the_server_to_make_one_up() {
+        let named = parsed("create-session --name work");
+        assert!(require(Features::NONE, &named).is_ok());
+        let unnamed = parsed("create-session");
+        assert!(matches!(
+            require(Features::NONE, &unnamed),
+            Err(Failure::Failed(why)) if why == "the server does not support create-session without --name"
+        ));
+        assert!(require(Features::SESSION_NAMES, &unnamed).is_ok());
+    }
 }

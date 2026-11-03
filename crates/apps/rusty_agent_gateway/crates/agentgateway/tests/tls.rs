@@ -10,7 +10,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -39,36 +38,25 @@ fn certificate() -> Certificate {
 
 /// An upstream that echoes the headers it saw.
 async fn upstream() -> (u16, Arc<AtomicUsize>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&hits);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let counter = Arc::clone(&counter);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
-            let headers: serde_json::Map<String, Value> = request
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        Value::String(v.to_str().unwrap_or_default().to_string()),
-                    )
-                })
+            let headers: serde_json::Map<String, Value> = common::header_pairs(request.headers())
+                .into_iter()
+                .map(|(k, v)| (k, Value::String(v)))
                 .collect();
-            axum::Json(json!({"path": request.uri().path(), "headers": headers}))
+            rusty_axum::Json(json!({"path": request.path(), "headers": headers}))
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("upstream should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, hits)
 }
@@ -96,13 +84,13 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -268,7 +256,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("a missing certificate must not boot");
@@ -294,7 +282,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("HTTPS without a certificate cannot serve");
@@ -340,7 +328,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    Gateway::build(&config, None)
+    common::build(&config, None)
         .await
         .map(|_| ())
         .expect("two named certificates on one port are told apart by SNI");
@@ -420,13 +408,13 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -580,7 +568,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("neither certificate can be chosen");
@@ -614,7 +602,7 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let err = Gateway::build(&config, None)
+    let err = common::build(&config, None)
         .await
         .map(|_| ())
         .expect_err("one name cannot choose between two certificates");
@@ -649,13 +637,13 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("one certificate twice should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -695,13 +683,13 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("the upstream gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("the upstream should bind");
 
@@ -710,18 +698,12 @@ binds:
 
 /// A plain HTTP echo reporting `label`, behind the TLS upstream above.
 async fn upstream_for(label: &'static str) -> u16 {
-    use axum::{Router, routing::any};
+    use rusty_axum::Router;
 
     let port = free_port().await;
-    let app = Router::new().fallback(any(
-        move || async move { axum::Json(json!({"who": label})) },
-    ));
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("echo should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    let app =
+        Router::new().fallback(move || async move { rusty_axum::Json(json!({"who": label})) });
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
     port
 }
 
@@ -745,13 +727,13 @@ async fn start_passthrough(routes: &[(&str, u16)]) -> (u16, CancellationToken) {
     }
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 

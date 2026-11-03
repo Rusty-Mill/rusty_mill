@@ -1,6 +1,7 @@
 //! End to end over a real socket: framing, keep-alive, limits, shutdown.
 
 use rusty_tick::backend::Backend;
+use rusty_tick::oauth::OAuth;
 use rusty_tick::server::{bind, ShutdownHandle, MAX_BODY_BYTES};
 use rusty_tick::service::system_clock;
 use std::io::{Read, Write};
@@ -25,15 +26,16 @@ impl Running {
     fn start_with(web_dir: Option<std::path::PathBuf>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let backend = Backend::single(dir.path(), TOKEN.into(), system_clock()).unwrap();
-        Self::serve(backend, dir, web_dir)
+        Self::serve(backend, dir, web_dir, None)
     }
 
     fn serve(
         backend: Backend,
         dir: tempfile::TempDir,
         web_dir: Option<std::path::PathBuf>,
+        oauth: Option<OAuth>,
     ) -> Self {
-        let mut server = bind("127.0.0.1:0".parse().unwrap(), backend).unwrap();
+        let mut server = bind("127.0.0.1:0".parse().unwrap(), backend, oauth).unwrap();
         if let Some(web) = web_dir {
             server = server.with_web_dir(web);
         }
@@ -513,7 +515,7 @@ fn mcp_keeps_each_users_tasks_to_their_own_token() {
         Box::new(system_clock),
     )
     .unwrap();
-    let server = Running::serve(backend, dir, None);
+    let server = Running::serve(backend, dir, None, None);
 
     let alice_session = open_session(&server, &alice_token);
     call_as(
@@ -558,4 +560,300 @@ fn mcp_keeps_each_users_tasks_to_their_own_token() {
         &format!(r#"{{"id":"{id}"}}"#),
     );
     assert!(!borrowed.contains("Alice secret"), "{borrowed}");
+}
+
+// ---- OAuth ---------------------------------------------------------------
+
+const ISSUER: &str = "http://localhost:8788";
+
+/// Alice and Bob, each with a token, served with OAuth on and a web UI (so
+/// the OAuth paths are shown not to be shadowed by it). Alice's token, and
+/// the users file for changing her later.
+fn oauth_server() -> (Running, String, std::path::PathBuf, tempfile::TempDir) {
+    let (server, tokens, users, web) = oauth_server_for(&["alice", "bob"]);
+    (server, tokens[0].clone(), users, web)
+}
+
+/// As [`oauth_server`], with a token for each of `names`.
+fn oauth_server_for(
+    names: &[&str],
+) -> (Running, Vec<String>, std::path::PathBuf, tempfile::TempDir) {
+    use rusty_tick::backend::USERS_FILE;
+    use rusty_tick::users::{Registry, UserKey};
+    let dir = tempfile::tempdir().unwrap();
+    let mut registry = Registry::default();
+    let mut tokens = Vec::new();
+    for name in names {
+        let key = UserKey::parse(name).unwrap();
+        registry.add_user(&key).unwrap();
+        tokens.push(registry.add_token(&key, "phone", 1).unwrap());
+    }
+    let users = dir.path().join(USERS_FILE);
+    registry.save(&users).unwrap();
+    let backend = Backend::multi(
+        dir.path(),
+        std::num::NonZeroUsize::new(4).unwrap(),
+        Box::new(system_clock),
+    )
+    .unwrap();
+    let oauth = OAuth {
+        issuer: rusty_oauth_server::validate_issuer(ISSUER).unwrap(),
+        state_file: dir.path().join(rusty_tick::oauth::STATE_FILE),
+    };
+    let web = tempfile::tempdir().unwrap();
+    std::fs::write(web.path().join("index.html"), "<html>ui</html>").unwrap();
+    let server = Running::serve(backend, dir, Some(web.path().to_path_buf()), Some(oauth));
+    (server, tokens, users, web)
+}
+
+fn post_form(server: &Running, path: &str, form: &str, content_type: &str) -> String {
+    exchange(
+        server,
+        &format!(
+            "POST {path} HTTP/1.1\r\nHost: t\r\nContent-Type: {content_type}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{form}",
+            form.len()
+        ),
+    )
+}
+
+/// `name`'s value in the query of a redirect's `Location`.
+fn location_param(response: &str, name: &str) -> String {
+    let location = header(response, "location").expect("a redirect");
+    let query = location.split_once('?').map_or("", |(_, q)| q);
+    rusty_url::form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_else(|| panic!("{name} in {location}"))
+}
+
+/// A sign-in up to the consent page: what the client holds by then.
+struct Flow {
+    client_id: String,
+    redirect: String,
+    verifier: String,
+    txn: String,
+}
+
+const CALLBACK: &str = "https://claude.ai/api/mcp/auth_callback";
+
+/// A fresh client registration: its id.
+fn register(server: &Running) -> String {
+    let registered = post_form(
+        server,
+        "/register",
+        &format!(r#"{{"redirect_uris":["{CALLBACK}"],"client_name":"test"}}"#),
+        "application/json",
+    );
+    assert_eq!(status(&registered), 201, "{registered}");
+    let client: rusty_json::Value = rusty_json::from_str(body(&registered)).unwrap();
+    client["client_id"].as_str().unwrap().to_string()
+}
+
+fn begin(server: &Running) -> Flow {
+    begin_for(server, register(server))
+}
+
+fn begin_for(server: &Running, client_id: String) -> Flow {
+    use rusty_oauth::pkce::{CodeChallengeMethod, Pkce};
+    let cb = CALLBACK;
+
+    let verifier = "v".repeat(64);
+    let challenge = Pkce::from_verifier(verifier.clone(), CodeChallengeMethod::S256)
+        .unwrap()
+        .code_challenge;
+    let redirect: String = rusty_url::form_urlencoded::byte_serialize(cb.as_bytes()).collect();
+    let authorize = exchange(
+        server,
+        &format!(
+            "GET /authorize?response_type=code&client_id={client_id}&redirect_uri={redirect}&code_challenge={challenge}&code_challenge_method=S256 HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert_eq!(status(&authorize), 302, "{authorize}");
+    let txn = location_param(&authorize, "txn");
+    let page = exchange(
+        server,
+        &format!("GET /consent?txn={txn} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"),
+    );
+    assert!(
+        body(&page).contains("rusty_tick"),
+        "the consent page, not the UI: {page}"
+    );
+    Flow {
+        client_id,
+        redirect,
+        verifier,
+        txn,
+    }
+}
+
+/// The consent page's answer to `token`: a redirect back to the client.
+fn approve(server: &Running, flow: &Flow, token: &str) -> String {
+    let token: String = rusty_url::form_urlencoded::byte_serialize(token.as_bytes()).collect();
+    let approved = post_form(
+        server,
+        "/consent",
+        &format!("txn={}&owner_token={token}&action=approve", flow.txn),
+        "application/x-www-form-urlencoded",
+    );
+    assert_eq!(status(&approved), 302, "{approved}");
+    approved
+}
+
+/// The whole sign-in, approved with `token`: an OAuth access token.
+fn sign_in(server: &Running, token: &str) -> String {
+    sign_in_as(server, begin(server), token)["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The sign-in `flow` approved with `token`: the token response.
+fn sign_in_as(server: &Running, flow: Flow, token: &str) -> rusty_json::Value {
+    let code = location_param(&approve(server, &flow, token), "code");
+    let issued = post_form(
+        server,
+        "/token",
+        &format!(
+            "grant_type=authorization_code&code={code}&client_id={}&redirect_uri={}&code_verifier={}",
+            flow.client_id, flow.redirect, flow.verifier
+        ),
+        "application/x-www-form-urlencoded",
+    );
+    assert_eq!(status(&issued), 200, "{issued}");
+    rusty_json::from_str(body(&issued)).unwrap()
+}
+
+#[test]
+fn oauth_metadata_and_the_mcp_challenge_are_served_beside_the_ui() {
+    let (server, _, _, _web) = oauth_server();
+    let get = |path: &str| {
+        exchange(
+            &server,
+            &format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"),
+        )
+    };
+    let metadata = get("/.well-known/oauth-authorization-server");
+    assert_eq!(status(&metadata), 200, "{metadata}");
+    assert!(
+        body(&metadata).contains(&format!(r#""issuer":"{ISSUER}""#)),
+        "{metadata}"
+    );
+    assert!(body(&get("/.well-known/oauth-protected-resource/mcp")).contains("rusty_tick"));
+    assert_eq!(
+        body(&get("/")),
+        "<html>ui</html>",
+        "the UI still has the rest"
+    );
+
+    let refused = mcp(&server, None, None, "{}");
+    assert_eq!(status(&refused), 401);
+    let challenge = header(&refused, "www-authenticate").unwrap();
+    assert!(
+        challenge.contains(&format!(
+            r#"resource_metadata="{ISSUER}/.well-known/oauth-protected-resource/mcp""#
+        )),
+        "{challenge}"
+    );
+}
+
+#[test]
+fn an_oauth_token_acts_as_the_user_who_approved_it_until_they_are_disabled() {
+    use rusty_tick::users::{Registry, UserKey};
+    let (server, alice, users, _web) = oauth_server();
+    let access = sign_in(&server, &alice);
+    assert_ne!(access, alice);
+    let session = open_session(&server, &access);
+    call_as(
+        &server,
+        &access,
+        &session,
+        2,
+        "add_task",
+        r#"{"title":"Signed in"}"#,
+    );
+    // The task is Alice's: her own token finds it.
+    task_id(&server, &alice, "Signed in");
+
+    let mut registry = Registry::load(&users).unwrap();
+    registry
+        .set_disabled(&UserKey::parse("alice").unwrap(), true)
+        .unwrap();
+    registry.save(&users).unwrap();
+    // The running server looks at the file at most once a second.
+    std::thread::sleep(Duration::from_millis(1_200));
+    let api = exchange(
+        &server,
+        &format!("GET /api/v1/lists HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {access}\r\nConnection: close\r\n\r\n"),
+    );
+    assert_eq!(status(&api), 401, "{api}");
+    assert_eq!(
+        status(&mcp(&server, Some(&access), Some(&session), "{}")),
+        401
+    );
+}
+
+#[test]
+fn consent_takes_only_the_servers_own_tokens() {
+    let (server, alice, _, _web) = oauth_server();
+    let access = sign_in(&server, &alice);
+    for token in [access.as_str(), "not-a-token-at-all-0123"] {
+        let denied = approve(&server, &begin(&server), token);
+        assert_eq!(location_param(&denied, "error"), "access_denied", "{token}");
+    }
+}
+
+#[test]
+fn revoking_one_users_grant_leaves_another_users_grant_on_the_same_client() {
+    let (server, tokens, _, _web) = oauth_server_for(&["alice", "bob"]);
+    let client_id = register(&server);
+    let alice = sign_in_as(&server, begin_for(&server, client_id.clone()), &tokens[0]);
+    let bob = sign_in_as(&server, begin_for(&server, client_id.clone()), &tokens[1]);
+    let token = |v: &rusty_json::Value, k: &str| v[k].as_str().unwrap().to_string();
+    let lists = |access: &str| {
+        status(&exchange(
+            &server,
+            &format!("GET /api/v1/lists HTTP/1.1\r\nHost: t\r\nAuthorization: Bearer {access}\r\nConnection: close\r\n\r\n"),
+        ))
+    };
+
+    let revoked = post_form(
+        &server,
+        "/revoke",
+        &format!(
+            "token={}&client_id={client_id}",
+            token(&bob, "access_token")
+        ),
+        "application/x-www-form-urlencoded",
+    );
+    assert_eq!(status(&revoked), 200, "{revoked}");
+    assert_eq!(
+        lists(&token(&bob, "access_token")),
+        401,
+        "Bob's grant is gone"
+    );
+    assert_eq!(lists(&token(&alice, "access_token")), 200, "Alice's is not");
+    let refreshed = post_form(
+        &server,
+        "/token",
+        &format!(
+            "grant_type=refresh_token&refresh_token={}&client_id={client_id}",
+            token(&alice, "refresh_token")
+        ),
+        "application/x-www-form-urlencoded",
+    );
+    assert_eq!(
+        status(&refreshed),
+        200,
+        "Alice can still refresh: {refreshed}"
+    );
+    let bob_refresh = post_form(
+        &server,
+        "/token",
+        &format!(
+            "grant_type=refresh_token&refresh_token={}&client_id={client_id}",
+            token(&bob, "refresh_token")
+        ),
+        "application/x-www-form-urlencoded",
+    );
+    assert_eq!(status(&bob_refresh), 400, "Bob's refresh went with it");
 }

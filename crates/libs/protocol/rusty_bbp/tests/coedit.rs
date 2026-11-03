@@ -218,6 +218,123 @@ fn the_plan_gate_binds_one_co_edited_version() {
 }
 
 #[test]
+fn the_plan_gate_refuses_a_version_that_is_not_the_head() {
+    let mut fx = fx();
+    let v1 = seed(&mut fx);
+    let a = line(&fx, v1, "a");
+    let v2 = stored(edit(
+        &mut fx,
+        "planner2",
+        Some(v1),
+        vec![ins(Some(a), &["more"])],
+    ));
+    let gate_on = |v: ArtId| {
+        let mut d = Draft::new(MessageKind::RequestDecision, "Please approve.")
+            .to(Recipient::Human)
+            .refs(vec![Ref::art(v)]);
+        d.gate = true;
+        d
+    };
+    assert_eq!(
+        rejected(fx.post("planner", gate_on(v1))),
+        Code::StaleSubject,
+        "approving v1 would drop v2's line"
+    );
+    assert_eq!(fx.st().state, State::Planning);
+    posted(fx.post("planner", gate_on(v2)));
+    assert_eq!(fx.st().state, State::PlanGate);
+}
+
+/// Append a co-edited version the engine never admitted, as a foreign or
+/// damaged log would hold it, and reload.
+fn foreign_edit(fx: &mut Fx, e: SpecEdit) -> ArtId {
+    let st = fx.st();
+    let (task, rev, id) = (st.task.clone(), st.rev, st.next_art_id());
+    let blob = fx.d.store.blob_put(b"");
+    let rec = ArtifactRecord {
+        id,
+        author: pid("planner"),
+        kind: ArtifactKind::Spec,
+        blob,
+        payload: ArtifactPayload::SpecEdit(e),
+        spec: None,
+        candidate: None,
+        run: None,
+    };
+    fx.d.store
+        .append(&task, rev, &[Event::ArtifactStored(rec)])
+        .unwrap();
+    fx.d.reload().unwrap();
+    id
+}
+
+#[test]
+fn a_version_that_does_not_apply_is_recorded_not_skipped() {
+    let mut fx = fx();
+    let v1 = seed(&mut fx);
+    let a = line(&fx, v1, "a");
+    let brief = fx.st().brief.unwrap();
+    let ghost = LineId { art: v1, n: 99 };
+    let bad = foreign_edit(
+        &mut fx,
+        SpecEdit {
+            brief,
+            base: Some(v1),
+            ops: vec![LineOp::Delete { line: ghost }],
+        },
+    );
+    assert_eq!(fx.st().unapplied.get(&bad), Some(&Missing::Line(ghost)));
+    assert_eq!(fx.st().head(v1), Some(v1), "the head did not move");
+    let on_bad = edit(&mut fx, "planner", Some(bad), vec![ins(Some(a), &["x"])]);
+    assert_eq!(rejected(on_bad), Code::RefUnresolved);
+    let later = foreign_edit(
+        &mut fx,
+        SpecEdit {
+            brief,
+            base: Some(bad),
+            ops: vec![ins(None, &["y"])],
+        },
+    );
+    assert_eq!(fx.st().unapplied.get(&later), Some(&Missing::Base(bad)));
+    assert_eq!(fx.st().head(later), None, "not a new spec of its own");
+}
+
+#[test]
+fn a_version_s_snapshot_is_the_hash_of_its_text() {
+    let mut fx = fx();
+    let v1 = seed(&mut fx);
+    let a = line(&fx, v1, "a");
+    let v2 = stored(edit(
+        &mut fx,
+        "planner2",
+        Some(v1),
+        vec![ins(Some(a), &["more"])],
+    ));
+    let text = |fx: &Fx, v: ArtId| fx.st().doc(v).unwrap().text();
+    let snap = |fx: &Fx, v: ArtId| fx.st().versions[&v].snapshot;
+    assert_eq!(snap(&fx, v2), Sha256::of(text(&fx, v2).as_bytes()));
+    assert_ne!(snap(&fx, v1), snap(&fx, v2));
+    let more = line(&fx, v2, "more");
+    let v3 = stored(edit(
+        &mut fx,
+        "planner3",
+        Some(v2),
+        vec![LineOp::Delete { line: more }],
+    ));
+    assert_eq!(snap(&fx, v3), snap(&fx, v1), "same text, same snapshot");
+
+    let mut d = Draft::new(MessageKind::RequestDecision, "Please approve.")
+        .to(Recipient::Human)
+        .refs(vec![Ref::art(v3)]);
+    d.gate = true;
+    posted(fx.post("planner", d));
+    let task = fx.st().task.clone();
+    let view = TaskView::from_events(task.clone(), &fx.d.store.events(&task, 0).unwrap());
+    assert_eq!(view.proposal, Some(v3));
+    assert_eq!(view.proposal_snapshot, Some(snap(&fx, v3)));
+}
+
+#[test]
 fn a_replayed_log_rebuilds_every_version() {
     let mut fx = fx();
     let v1 = seed(&mut fx);

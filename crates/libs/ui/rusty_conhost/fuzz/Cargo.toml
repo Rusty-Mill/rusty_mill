@@ -1,0 +1,41 @@
+# Coverage-guided fuzzing of hostile ConDrv traffic (design
+# docs/projects/term/conhost/design.md §6.1, §8.1, PR 13):
+#
+#   cargo +nightly fuzz run packet_sequence
+#
+# from crates/libs/ui/rusty_conhost. Excluded from the main workspace, as
+# libFuzzer needs nightly. The driver lives in rusty_conhost's hidden `fuzz`
+# module, whose seeded sample runs with the crate's tests on every PR.
+[package]
+name = "rusty_conhost-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rusty_conhost = { path = "..", features = ["fuzz"] }
+
+[[bin]]
+name = "msg_decode"
+path = "fuzz_targets/msg_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet_sequence"
+path = "fuzz_targets/packet_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+# Its own workspace, with its own lockfile: the root `exclude` keeps
+# ordinary builds off it, and this table keeps cargo from looking up.
+[workspace]

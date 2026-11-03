@@ -4,56 +4,114 @@ Mill Board: a kanban board that humans and agents share, over MCP and a web UI.
 The board is the only state; it enforces who may move a card where.
 
 ```text
-rusty_mill_board --store board.mmap                                  # MCP over stdio
-rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
-# UI: http://127.0.0.1:8787/#token=S   API: POST /api/<op>   MCP: /mcp
+RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788                          # MCP over stdio
+RUSTY_TICK_TOKEN=T rusty_mill_board --tick-url http://127.0.0.1:8788 --http 127.0.0.1:8787 --auth-token S
+rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone when it stops
+# UI: http://127.0.0.1:8787 (asks for the token; #token=S also works)   API: POST /api/<op>   MCP: /mcp
 ```
 
-- **Columns:** backlog, ready, building, qa, review, done, blocked.
-- **Rules:** each move needs a capability (triage, build, qa, review, merge); leaving
-  building/qa/review needs your claim. A role is a set of capabilities; roles are
+`--issuer https://board.example.com` adds OAuth sign-in for `/mcp`, so a claude.ai connector can
+"Sign in now" with one of the board's own tokens; see
+[deploy/README.md](deploy/README.md#signing-in-from-claudeai-oauth).
+
+- **Columns:** set by an admin (Settings > Columns, kept in `workflow.json`); `board_columns` lists them and
+  the moves between them. The default is backlog, ready, building, qa, review, done, blocked. Each column has a
+  kind: `queue` (waits to be taken; `card_take` enters it into the first work column it moves to), `work`
+  (claimed; leaving needs the claim), or one of the fixed `backlog`, `done` and `blocked`, which can be relabelled
+  and reordered but not removed. A column id is what cards store (`board:<id>` in rusty_tick) and never changes;
+  its label is what people see. A column that still holds cards cannot be removed, and a card whose column the
+  workflow lacks reads as backlog. A move may be a **gate** (a human approval): it needs its capability and
+  `admin`, even with movement rules off.
+- **Factory workflow:** [`deploy/factory.workflow.json`](deploy/factory.workflow.json) is the software factory's
+  stages: Backlog, Ready, Planning, Architecting, Building, V&Ving, Done, Blocked. Its gates (Backlog to Ready,
+  Architecting to Building, V&Ving to Done by `merge`, and every move out of Blocked, so blocking is no way around
+  an approval) need `admin`; `close` may still record V&Ving to Done for a PR already merged on the forge. With
+  movement rules off, a move that jumps over a gate still needs `admin`, and V&Ving to Done still needs `close`
+  or the gated `merge`. Each work column names its `takers`, so `card_take` gives a planner
+  Ready and Planning, an architect Architecting, a tester Planning to V&Ving, a builder Building, and a reviewer
+  every work column. A move may list more than one capability (one transition each); holding any one is enough.
+  Install it by copying it to `workflow.json`, after re-filing the cards of columns it drops (below).
+- **Re-filing cards:** `rusty_mill_board --tick-url URL --retag-columns qa=v_and_ving,review=v_and_ving` prints
+  the plan as JSON (each card's id, revision, from and to). `--apply --retag-record FILE` (board stopped) creates
+  FILE exclusively and syncs the plan into it, then, for each card still at its planned revision, records `begin`,
+  retags it (keeping its claim) and records `done`, each line synced. `--undo-retag FILE` puts back each card
+  recorded `done` that is in the new column at the very next revision; a card changed since, never reached, or
+  whose write's outcome is unknown is left alone and reported. Unix only: elsewhere the record's directory entry
+  cannot be synced, so `--apply` refuses.
+- **Rules:** each move needs the capability the workflow gives it (by default triage, build, test, review, merge,
+  close; `plan` and `architect` serve the factory workflow; `test` was `qa`, which stored roles may still say); any open card may be moved to blocked; leaving a work column needs your claim. `close` moves a card from building or qa straight to done when
+  its work already merged on the forge, and lets `card_add` with `done: true` record merged work that never
+  had a card (bookkeeping, not a review: it never makes a card someone's work in `card_take`). The default
+  `builder` role holds it, and `project`: `project_add` adds a project (or a repository) whose paths overlap no
+  other project's. It never changes or removes one, so no credential's reach widens; it needs the board's
+  projects file (`--projects` or `--settings-dir`). A role is a set of capabilities; roles are
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
+- **Order:** `card_take` looks in the queue and work columns nearest Done first (by default Review, QA, Building,
+  then Ready); within one, the highest `priority` (0, 1, 3, 5)
+  first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
+  holds nothing up); naming it explicitly says why. `card_plan` sets both and needs Triage. The tags `agent`,
+  `board:…` and `claim:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
+  carry them, and the GitHub sync drops such labels when it imports an issue.
 - **Projects:** one board serves several applications of a monorepo, and several repositories.
   `--projects FILE` names the projects and the repository paths each may change
   (`{"rocket_league": ["crates/apps/rocket_league"]}`, or `{"repos": {"rusty_mill": {...}, "other": {...}}}`
   for several repositories; project names are unique across them). Every repository also has a project named
-  like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (old cards to
-  `default`; `card_add` takes `project`, `card_assign` moves one and needs Triage). A credential in
+  like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (one that names none, and old cards, to
+  `default`, shown in the web UI as the Inbox, first in the side panel; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed; a Done card stays Done and needs Triage or `close`). A credential in
   `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
-  `board_list` and `card_take` take a `project` filter. The UI has a two-pane side panel: repositories with card counts, and for the chosen one
-  its projects; both filter the board, and new cards go to the chosen project (else the repository's own). An
+  `board_list` and `card_take` take a `project` filter. The UI's side panel lists repositories and then every project
+  (a repository's only project is the repository itself), with card counts; both filter the board, and new cards go to the chosen project (else the repository's own). An
   Agents list under the repositories (everyone holding a claim, with their count) filters by claimant. Each agent
   has its own colour (twelve hues; two agents never share one), shown in the list and on every card it holds:
   a coloured edge, a tint and a chip, whose dot pulses while the card is in building, qa or review. The runner
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
-  `card_get`, `card_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_comment`. The web API
+  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`, `inbox_list`, `inbox_act`. The web API
   exposes the same table, so the two cannot drift.
+- **Decision inbox (#595).** `inbox_list` and `inbox_act` (admin only, and only through a token or OAuth credential, never a caller-named actor) show and decide the open BBP escalations
+  of the tasks linked from cards. Mill Board stores none of it: run with `--bbp-bin PATH --bbp-root DIR` on the
+  orch host and it runs `bbp inbox` and fenced `bbp human` commands, so the host stays the only writer of the log.
 - **Settings.** The ⚙ button opens a view to add and remove agents (credentials: name, role, project limit; a
   token is shown once; "New token" replaces it), edit repositories and their projects, edit roles, and configure
   the GitHub sync. It needs the `admin` capability (the default `human` role has it). Run with
-  `--settings-dir DIR`: it keeps `identities.json`, `projects.json`, `roles.json` and `github.json` there
+  `--settings-dir DIR`: it keeps `identities.json`, `projects.json`, `roles.json`, `github.json`, `rules.json` and `workflow.json` there
   (secrets owner-only), changes take effect at once, and a first start creates an `admin` credential and
   prints its token once. Without files the view is read-only. A change that would lock everyone out, or drop a
-  project that still has cards, is refused. Not available over MCP. ADR-0004.
+  project that still has cards, is refused. Roles explain each capability. **Apps** lists the apps signed in
+  through OAuth (with `--issuer`) and revokes one (it can sign in again); **Columns** adds, relabels, reorders and removes columns and edits the moves between them;
+  **Rules** turns card movement
+  rules off and on (off: any move but out of Done, by anyone holding a capability, each logged; on by
+  default); **Server** shows, read-only, where
+  the cards live, the issuer, the accepted hosts and the settings files. Not available over MCP. ADR-0004.
 - **Models connect themselves.** Run one HTTP server with `--identities FILE` (a token per model, bound to an
   actor and role) and register `/mcp` in each model's own client; a model then pulls work with `card_take`,
   comments, and moves it on, using its own subscription session. See
   [`docs/connecting-models.md`](docs/connecting-models.md) for setup and the paste-in working loop.
-- **As a service:** `GET /health` (200, or 503 when the store must be reopened), SIGTERM stops accepting, waits for running requests and a backup, then exits, a second
-  process on the same `--store` is refused (`<store>.lock`), and `--backup-dir DIR` keeps pruned, consistent backups
-  of the store and settings (`--backup-secs`, `--backup-keep`; none while the store needs a restart), compacting the store after each. A systemd unit, an
-  env example and the install, restore and rollback steps are in [`deploy/`](deploy/README.md). ADR-0005.
-- **Storage:** `rusty_multimodal_db_engine` (one durable record per commit holds the event and the card after it,
-  so a commit is atomic; state is rebuilt from those records at open), or in memory when `--store` is omitted.
-  Event ids are UUIDv7 assigned inside the commit, so id order is commit order and doubles as the polling
+- **As a service:** `GET /health` (200, or 503 while rusty_tick is unreachable); SIGTERM stops accepting, waits
+  for running requests, then exits. A systemd unit, an env example and the install and rollback steps are in
+  [`deploy/`](deploy/README.md). ADR-0005.
+- **Event ids** are UUIDv7 assigned inside the commit, so id order is commit order and doubles as the polling
   cursor (`board_events` returns a `cursor`; `tail: true` starts a watcher at the current end).
-  A failed append is *unknown*, not "nothing happened" (the engine can fail after the record is durable): the store
-  then refuses writes until reopened, and a reopen replays the log and shows what really committed.
+- **Storage: rusty_tick** (`--tick-url`, token only from the `RUSTY_TICK_TOKEN` environment variable; [ADR-0012](../../../docs/adr/0012-one-task-store.md)):
+  the board is the rusty_tick tasks tagged `agent`, so the owner reads and edits the same tasks on the phone or web.
+  Column and claim are `board:`/`claim:` tags, the project is the task's list (the Inbox is `default`), comments are
+  rusty_tick comments with their author, and dependencies, the forge link and the execution link are one `board`
+  document per task. Every write is one request fenced on the task version the board read, and every write moves
+  it (rusty_tick moves it for a board document or comment written with `If-Task-Match`), so the version names the
+  whole card. A comment is an explicit append, so one the owner adds meanwhile is kept. Only `card_plan` with both a
+  priority and dependencies takes two requests; if the second fails it reports an error, and the same plan again
+  completes it.
+  Tags come back lowercase, so actor names must be lowercase. Events are kept in memory only: the board's own
+  writes plus an `edited` event (actor `tick`) when a task changes in rusty_tick. `/health` is 503 while rusty_tick
+  is down. rusty_tick keeps the data, so back up its data directory. Without `--tick-url` the board lives in
+  memory (tests, demos).
+  [`tools/migrate_artifact_board.py`](tools/migrate_artifact_board.py) moves the Mill Board artifact's cards
+  into rusty_tick once (dry run by default, safe to re-run, `--rollback --yes` trashes what it wrote). The
+  board's own `--store` file and `--backup-dir` were removed once that migration had run.
 
 - **GitHub sync** (`--github-repo owner/name`, token in `GITHUB_TOKEN`, every
   `--github-secs`, default 60): stateless reconcile between cards and issues.
@@ -64,7 +122,9 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
   was saved adopts that issue instead of creating a duplicate; the marker also records the text the issue was created
   with, so an edit made on GitHub in that window is merged, not overwritten. Only the marker is stripped from a pulled
   body. A pull is applied only if the card is unchanged since the run read it; otherwise it waits for the next run.
-  Unlinked open issues become Backlog cards (closed ones are not imported). An issue
+  Unlinked open issues become Backlog cards (closed ones are not imported). An imported card's id is derived from
+  the issue number, so an import interrupted before its link is relinked, not repeated or exported as a new issue;
+  the id ignores the repository, so give each repository its own board. An issue
   closed on GitHub while its card is not Done is logged as drift, not reopened or
   moved. The sync actor holds no capabilities, so it cannot move cards. Needs
   issues read/write on the repo; `--github-api` points at GitHub Enterprise Server.
@@ -72,8 +132,10 @@ rusty_mill_board --store board.mmap --http 127.0.0.1:8787 --auth-token S
 UI: the card dialog is kept in step with the board without touching unsaved text; a change to the text under an
 unsaved edit raises a conflict (keep mine / take theirs), and `card_update` takes the `rev` you last saw and refuses a
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
+Cards show their priority (High 5, Medium 3, Low 1; none shows nothing), sort highest first in each column, and
+the dialog sets it through `card_plan` (`tests/ui/priority.mjs`).
 
-Layout: `domain` (pure) / `store` + `mmdb` (port and adapters) / `board` (service) /
+Layout: `domain` (pure) / `store` + `tick` (port and adapters) / `board` (service) /
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +
 `github` (adapter).
 

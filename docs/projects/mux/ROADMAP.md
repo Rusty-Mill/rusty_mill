@@ -2,9 +2,9 @@
 
 Phases from the design brief §9. Each exit criterion is a test or a measured number. Phase N+1 starts only after the owner accepts phase N's go/no-go.
 
-## Phase 0: engine prerequisites (done 2026-10-23, two targets open)
+## Phase 0: engine prerequisites (done 2026-10-23, one target open)
 
-Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #936. Open: the MB/s floors (#889) and reliable ≤ 11.2 ms encode (#939). See CAPABILITIES.
+Status: items 1, 2 and 4 landed (#872, #894, #939); item 3 landed as #930 plus #936. The MB/s floors (#889) are met on the 4 MB workloads (#1019; #889 closed 2026-10-25). Open: reliable ≤ 11.2 ms encode (#939). See CAPABILITIES.
 
 1. #872 lands: instruction-count gate in `required-gate`.
 2. #855 lands: per-code-point widths by default, mode 2027 opt-in; `vim_edit` matches the oracle.
@@ -25,7 +25,7 @@ Exit criteria:
 - An output flood does not starve input: a keystroke round-trips within a bound while the PTY floods (integration test; bound set in the PR).
 - Fidelity gate and benchmark gate green.
 
-## Phase 2: API and automation
+## Phase 2: API and automation (done 2026-10-27)
 
 Schema-first API, CLI, resumable events, block methods, program status, MCP. Exit: CLI and MCP are generated from one schema catalog (test); CLI exit codes 0/1/2/3/4/130 covered by tests; events resume after a disconnect without loss or duplication (test); status OSC round-trips server to client (test).
 
@@ -36,18 +36,51 @@ Started 2026-10-25 (owner go-ahead). One PR per step, in order:
 4. Block methods and screen capture (C06, C18). Done (#1072): read-only `list` and `capture`, negotiated with `Features::INSPECT`.
 4a. Rex parity, CLI: exit codes 3 (target) and 4 (unreachable), failure codes on the wire, targets by name, position, id suffix or path, ids from the block's environment (C04). Done (#1089).
 4b. Rex parity, API: per-block-type methods `terminal.format`, `terminal.pwd` and `terminal.title` through one `BlockCall` (`Features::BLOCK_CALL`), replacing `capture`; `api list/describe` (C06, C17, C18). Done (#1091).
-5. Program status OSC, `rusty_mux_status` (C20): OSC 7501 reports kept per block, a `BlockStatus` event when a state changes, and `terminal.status`. In progress.
-6. `rusty_mux_mcp` on `rusty_mcp_server`, generated from the same catalog (C07).
-7. Scripting (C19), last.
+5. Program status OSC, `rusty_mux_status` (C20): OSC 7501 reports kept per block, a `BlockStatus` event when a state changes, and `terminal.status`. Done (#1092).
+6. `rusty_mux_mcp` on `rusty_mcp_server`, generated from the same catalog (C07): `rusty-mux-mcp` over stdio, one tool per method that works on a connection of its own. Done (#1100).
+7. Actions and key bindings from a JSON config, `rusty_mux_script` (C19): named chains of catalog requests with `${arg}` placeholders, run by `rusty-mux-ctl do`, checked by `config check`; `on` rules that `rusty-mux-ctl watch` runs when an event happens, including new `pwd-changed` and `title-changed` events. No language: logic lives in programs driving ctl or MCP. Done (#1128, #1138).
+
+## Phase 2b: agent parity (done 2026-10-28)
+
+From the [Rex gap check](REX-GAP-CHECK.md) §5 (owner, 2026-10-27). Started 2026-10-27, when the owner accepted Phase 2. One PR per step, in order. All seven steps merged by 2026-10-28, and the owner accepted the exit evidence the same day, with the gaps below still open. The manual Windows check ([WINDOWS-MANUAL-CHECK](WINDOWS-MANUAL-CHECK-2026-10-28.md), #1212) passed its scripted checks but failed the Ctrl-] prefix (row 12), so the layout keys (row 14) were not run. After #1214, a retest in Windows Terminal showed Ctrl-] then `d` detaching and Ctrl-] then `|` splitting ([#1214 retest](https://github.com/Rusty-Mill/rusty_mill/pull/1214#issuecomment-6480548774)). Not run on Windows: the other layout keys (`-`, arrows, `z`, `x`), reattach after a clean detach, and the two-account check (R10), which the owner skipped. Exit: each step's behaviour has a server or ctl test, on Linux and on CI's Windows leg where the step does not depend on ConPTY pass-through (R1).
+
+1. Terminal events (C29): program exited with its exit code, bell, progress, notification, behind a new feature bit; reply to the OSC 7501 query. Done (#1174).
+2. Wait primitives (C30): `rusty-mux-ctl wait` on a block closing or its program exiting, with a timeout, exiting with the program's status; `create-block` takes an optional command, arguments and working directory per request (proto and server), so run-and-wait starts a program in a new block and exits with its status; wait for an event matching fields, with a timeout. Done (#1178): `wait --block`, `wait --event KIND --FIELD VALUE`, `run --wait`, `create-block --command --arg --cwd` behind `Features::LAUNCH`; a timeout exits 124.
+3. Process info (C31): a `terminal.process` block method (child, foreground process, ancestors) and a process-changed event, using existing platform crates or `rusty_libc`. Done (#1183): `terminal.process` and `process-changed` behind `Features::PROCESS`, from `/proc` and `tcgetpgrp` (`rusty_libc`); on Windows the program's pid only, and no event.
+4. Input and capture (C32): named keys encoded over `input`; `terminal.format` gains trim, unwrap and a VT format. Done (#1186): `terminal.send-keys` and `terminal.format --trim --unwrap --vt` behind `Features::CAPTURE`.
+5. Labels and clients (C33): rename methods for all four kinds, block and client labels, label-changed events, client list and force-disconnect. Done (#1189): `rename-session|window|block|client`, `*-renamed` events, clients in `list` and `disconnect-client` behind `Features::LABELS`.
+6. Agent setup (C34): `rusty-mux-ctl agent setup|status|remove` for Claude Code first, plus a placement-rules doc. Our own skill text; merges into settings without clobbering them. Done (#1190): the owner approved the writes (gap check K4) on 2026-10-27; skill, `SessionStart` hook and `agent hook`, with [AGENT-PLACEMENT.md](AGENT-PLACEMENT.md).
+7. Window layout (C12): a split tree per window in core, split, zoom and close-pane methods, layout events; the attach client renders it. Server side done: `split-block`, `zoom-block`, `unzoom-window`, `close-block` closing the pane, `layout-changed` events and layouts in `list`, behind `Features::LAYOUT`. Done: server side in #1196; the attach client (#1200) draws the layout, with Ctrl-] commands for focus, split, zoom and close.
 
 ## Phase 3: identity and remote
 
-Identity, login server mode, roaming transport, sharing. Exit: a remote session survives a client IP change (test, after spike 4); login mode maps peer credentials or Tailscale identity to an account (test); a shared session enforces input leases (test).
+Identity, login server mode, roaming transport, sharing, several servers per client (C35). Tailscale identity uses first-party `rusty_tail`, after the owner approves moving its library crates to `crates/libs/` (ADR-0003). Exit: a remote session survives a client IP change (test, after spike 4); login mode maps peer credentials or Tailscale identity to an account (test); a shared session enforces input leases (test).
+
+Identity scope from the [Rex delta check](REX-DELTA.md) (owner, 2026-10-31): every client entry, `client-connected` and `client-connection-changed` carry the client's principal, with a `whoami` method (C25, D8; the owner narrowed it from every client event on 2026-11-01); login mode maps principals, the SSH user included, to accounts from a file that starts empty, and per-account servers outlive the front door (C26, C27, D9); a saved host holds several addresses tried in order (C35, D10).
+
+From the [Rex app check](REX-APP.md) (owner, 2026-11-02): block ownership for shared mode (C46), remote terminfo install (C47), SSH config setup and diagnosis (C48), and hosts declared in config, a home server and host sync (C49). Remote writes in C47 and C48 need the owner's approval.
+
+Login mode for local peers (C26): `rusty-mux-server --login MAP` maps each peer's uid, the SSH user included, to an account and relays it to that account's own server, which outlives the front door; `server/tests/login.rs` is the exit test for peer credentials. Not yet: PAM checks, shared mode, Tailscale principals and a `tailscale-status-changed` event (C27).
+
+## Phase 3b: Rex parity follow-ups
+
+From the [Rex delta check](REX-DELTA.md) §4 (owner, 2026-10-31). After Phase 3's identity steps; starting it still needs the owner's go. One PR per step, in order. Each extends a done capability; no new crate and no new third-party dependency.
+
+1. Wait on a window or a session (C37). Done: `wait --window`, `wait --session`, exiting with the last failure. Started ahead of Phase 3 identity at the owner's call, confirmed on #1348 (2026-11-01).
+2. Events: clipboard written, program status removed, active window changed, config reloaded (C38). Done: `clipboard-written` and `status-removed` (#1364), `active-window-changed` with `select-window` (#1368), and `config-reloaded` with `reload-config` and the config file's `server` section. The owner chose all four on 2026-11-01.
+3. Agent setup for Codex, OpenCode and Pi, per-repository setup, dry run, per-item status (C39). Each new agent's settings path is a write outside the repo and needs the owner's approval, as K4 did. Done (#1372): the owner said go on 2026-11-01 and confirmed the paths in DECISIONS.md on the PR. Skill text read from the installed binary (Rex delta D1) is not part of this step.
+4. Block methods `terminal.reset`, `terminal.set-theme`, `terminal.size` (C40). Done: behind `Features::TERMINAL_CONTROL`; reset and theme are bytes the server feeds the block's terminal and every attached client, so all copies stay alike. The owner said go on 2026-11-02.
+5. Layout editing: resize splits, swap blocks, move a block into a new split, detach a block from the layout while it keeps running, reorder windows, server-side focus (C41). Done: the server and ctl edits (#1393), server-side focus (#1406), then the attach client following the focus and the active window, with keys for the edits, one PR each (the owner chose this split on 2026-11-02).
+6. Generated session names, and agents that name their session after their task, opt-in through C39's setup (C50). From the Rex app check. The owner said go on 2026-11-03. Two PRs: the server's generated names, used by ctl and the attach client, then the opt-in agent setup. Done: #1412 (generated names, `Features::SESSION_NAMES` bit 29) and #1424 (`agent setup --name-session`, the server's generated mark, guarded `name-session` bit 30), both merged 2026-11-03. Untested with live agents and on Windows.
+7. LLM-readable API help and shell completion, both generated from the catalog (C51, C52). From the Rex app check. The owner said go on 2026-11-03. Done: `api llms` (#1432) and `completion SHELL` for bash, zsh, fish, Nushell and PowerShell (#1434), both merged 2026-11-03, with no protocol change.
+8. Block methods `terminal.clear`, `terminal.modes`, `terminal.shell` (C71). From the Rex app check. The owner said go on 2026-11-03. Two PRs: `terminal.modes` and `terminal.clear` (`Features::TERMINAL_MORE` bit 31), then `terminal.shell` (`Features::TERMINAL_SHELL` bit 32): the owner chose on 2026-11-03 that it reports both the process table's answer and, when the shell sends them, its OSC 133 marks. Done: #1440 and #1441, both merged 2026-11-03. Not validated with live clients or on Windows, where `terminal.shell`'s `activity` reads `unknown`.
 
 ## Phase 4: clients and Windows
 
-Web and native clients, ConPTY server and client. Exit: the Phase 1 acceptance suite passes on Windows; web and native clients pass the convergence test.
+Web and native clients, ConPTY server and client; floating layers (C42), key sequences and modes (C43), client actions (C44) and directory browse with `terminal.list-dir` (C08), from the Rex delta check. From the [Rex app check](REX-APP.md) (owner, 2026-11-02): kitty graphics through the mux, with a method to read an image's bytes (C53), clipboard and selection on the server (C54), prompt marks and find in scrollback (C55), a WebSocket API transport for the web client (C56), QR device pairing (C57), a hub of several servers (C58), a client settings overlay (C59), config migration from eight tools (C60, outside-the-repo access needs the owner's approval), client themes and typography (C61), pane focus and gestures (C62), link safety (C63), sessions across client windows (C64), named layouts (C65), and a theme kept through a reset (C72; C40 stays as shipped). Exit: the Phase 1 acceptance suite passes on Windows; web and native clients pass the convergence test.
+
+Windows, ahead of the phase (owner, 2026-10-26): the server, `rusty-mux-ctl`, `rusty-mux-mcp` and the attach client run on Windows (#1109, #1136, #1142, #1148). `server/tests/phase1.rs` passes on CI's Windows leg except `reattach_after_more_than_four_mib_of_real_pty_output`, which stays Linux-only because ConPTY re-renders output. Still Linux-only: the attach client's lifecycle tests, `rusty-mux-mcp`'s stdio tests, and the ctl interrupt, `terminal.pwd`/`title` and `watch` rules tests. Open: spike 1 (R1) and the two-account check (R10).
 
 ## Phase 5: scale and hardening
 
-Parking, encryption at rest, audit. Exit: idle-terminal memory measured with and without parking (spike 5 numbers, ours); parked snapshots are encrypted and round-trip to the same grid (test); an outbound-connection audit of the release finds no egress.
+Parking, encryption at rest, audit, upgrade without losing sessions (C36: running servers keep their sessions while a new version installs; live re-exec only if measured worth it). From the [Rex app check](REX-APP.md) (owner, 2026-11-02): sessions whose state survives a server restart, programs excepted (C45), block plugins and a block SDK (C66, a new crate the owner must approve), API call history (C67), developer diagnostics (C68), service units, socket activation, idle exit and utmp (C69), and scrollback spooled to disk (C70, after the owner's call on the scrollback budget). Exit: idle-terminal memory measured with and without parking (spike 5 numbers, ours); parked snapshots are encrypted and round-trip to the same grid (test); an outbound-connection audit of the release finds no egress.

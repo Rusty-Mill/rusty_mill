@@ -1,7 +1,15 @@
-//! RTCP v3: a headless terminal continuation checkpoint, independent of RTSN.
+//! RTCP v6: a headless terminal continuation checkpoint, independent of RTSN.
 //! Durable parser/Grid state is included; front-end view state and pending
 //! host side effects are excluded. L13 channels are outside this profile.
 //! Lines are run-encoded (see `grid/line.rs`); v3 differs from v2 only there.
+//! v4 keeps v3's layout but changes what cell and pen flags mean: a colour
+//! without `ATTR_FG_DEFAULT` / `ATTR_BG_DEFAULT` is explicit, so a v3 image
+//! (whose default colours carry no bit) would restore with them baked in. v3
+//! is therefore rejected rather than reinterpreted. v5 adds palette tags to
+//! line styles, the pen and the erase colour, the DECSC pen and charsets,
+//! and status-line colours that may follow the defaults; v4 is rejected too.
+//! v6 widens cell, style and pen flags from 16 to 32 bits for
+//! `ATTR_OVERLINE`; v5 is rejected like the versions before it.
 
 use crate::{
     AnsiParser, Grid,
@@ -30,10 +38,11 @@ impl std::error::Error for Error {}
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 /// Magic and version byte that open every checkpoint.
-const HEADER: &[u8; 5] = b"RTCP\x03";
+const HEADER: &[u8; 5] = b"RTCP\x06";
 
 /// Encode a consistent headless Grid and parser. No output log is retained.
 pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
+    // Cell style ids are checked per run as the lines are written.
     grid.validate_checkpoint()?;
     parser.validate_checkpoint()?;
     let mut w = Writer::new(MAX_DECODED, Some(grid.styles()));
@@ -43,7 +52,7 @@ pub fn encode(grid: &Grid, parser: &AnsiParser) -> Result<Vec<u8>> {
     Ok(w.bytes)
 }
 
-/// Decode untrusted RTCP v3, validating allocation budgets and internal indices
+/// Decode untrusted RTCP v6, validating allocation budgets and internal indices
 /// before returning objects that can safely continue parsing. No host actions
 /// or terminal responses are replayed while restoring.
 pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
@@ -54,6 +63,7 @@ pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
     let grid = Grid::read(&mut r)?;
     let parser = AnsiParser::read(&mut r)?;
     grid.validate_checkpoint()?;
+    grid.validate_cell_styles()?;
     parser.validate_checkpoint()?;
     if !r.bytes.is_empty() {
         return Err(Error("trailing checkpoint data"));
@@ -69,9 +79,14 @@ pub(crate) struct Writer<'a> {
     /// `None` only for writers that never see a `Line`.
     table: Option<&'a StyleTable>,
     /// Line run styles already defined, by index (see [`Writer::style`]).
-    styles: HashMap<Cell, usize>,
-    /// The last style referenced and its index, checked before hashing.
-    last: Option<(Cell, usize)>,
+    styles: HashMap<RunStyle, usize>,
+    /// `1 + index` of each run style already defined, by grid style id and
+    /// layout bits ([`layout_slot`]); 0 until first referenced. Spares
+    /// resolving and hashing a style for every run. A cache only: grown on
+    /// use, fallibly, to at most `ids_max` entries; a style it does not
+    /// hold falls back to `styles`, with the same bytes and charges.
+    ids: Vec<u32>,
+    ids_max: usize,
 }
 impl<'a> Writer<'a> {
     pub(crate) fn new(budget: usize, table: Option<&'a StyleTable>) -> Self {
@@ -81,7 +96,8 @@ impl<'a> Writer<'a> {
             budget,
             table,
             styles: HashMap::new(),
-            last: None,
+            ids: Vec::new(),
+            ids_max: IDS_MAX,
         }
     }
     /// LEB128 varint: 7 bits per byte, low group first, high bit = more.
@@ -102,46 +118,83 @@ impl<'a> Writer<'a> {
     pub(crate) fn utf8(&mut self, ch: char) -> Result<()> {
         self.put(ch.encode_utf8(&mut [0; 4]).as_bytes())
     }
-    /// Scalars as UTF-8, with one budget check for all of them.
-    pub(crate) fn text(&mut self, chars: impl Iterator<Item = char> + Clone) -> Result<()> {
-        self.reserve(chars.clone().map(char::len_utf8).sum())?;
+    /// Scalars as UTF-8, in one pass. ASCII goes straight into spare
+    /// capacity, which [`Writer::reserve`] keeps within [`MAX_ENCODED`].
+    pub(crate) fn text(&mut self, chars: impl Iterator<Item = char>) -> Result<()> {
         for ch in chars {
-            if ch.is_ascii() {
+            if ch.is_ascii() && self.bytes.len() < self.bytes.capacity().min(MAX_ENCODED) {
                 self.bytes.push(ch as u8);
             } else {
-                let mut buf = [0; 4];
-                self.bytes
-                    .extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                self.utf8(ch)?;
             }
         }
         Ok(())
     }
-    /// The full cell behind `cell`, through the borrowed style table.
-    pub(crate) fn resolve(&self, cell: PackedCell) -> Result<Cell> {
+    /// Reference the style of the run `cell` starts (see [`Writer::style`]).
+    /// Every cell of a run shares its style id, so checking that the id is
+    /// live here checks every cell written.
+    pub(crate) fn run_style(&mut self, cell: PackedCell) -> Result<()> {
         let table = self.table.ok_or(Error("line without style table"))?;
-        Ok(cell.resolve(&table.get(cell.style())))
+        let id = cell.style();
+        if table.free_mask().get(id.0 as usize) != Some(&false) {
+            return Err(Error("cell bounds"));
+        }
+        let slot = layout_slot(cell);
+        if let Some(&i) = slot.and_then(|s| self.ids.get(s))
+            && i > 0
+        {
+            return self.varint(u64::from(i));
+        }
+        let style = table.get(id);
+        let index = self.style(RunStyle {
+            cell: cell.resolve(&style),
+            index: [style.fg_index, style.bg_index],
+        })?;
+        if let Some(s) = slot {
+            self.cache(s, u32::try_from(index + 1).unwrap_or(0));
+        }
+        Ok(())
+    }
+    /// Remember `entry` at `slot` of [`Writer::ids`], growing it by doubling
+    /// up to `ids_max`. Past the cap, or if growing fails, the slot stays
+    /// uncached.
+    fn cache(&mut self, slot: usize, entry: u32) {
+        if slot >= self.ids_max {
+            return;
+        }
+        if slot >= self.ids.len() {
+            let len = (slot + 1).next_power_of_two().min(self.ids_max);
+            if self.ids.try_reserve_exact(len - self.ids.len()).is_err() {
+                return;
+            }
+            self.ids.resize(len, 0);
+        }
+        if let Some(e) = self.ids.get_mut(slot) {
+            *e = entry;
+        }
     }
     /// Reference a run style (a cell whose `ch` is ignored): `0` followed by
     /// its definition the first time, then `1 + index` of that definition.
     /// A new definition is charged for both the decoder's wire table and the
     /// grid style it may intern (every grid style arrives with a new wire
     /// style, so the grid table never outgrows the wire table plus id 0).
-    pub(crate) fn style(&mut self, cell: Cell) -> Result<()> {
-        let key = Cell { ch: '\0', ..cell };
-        let hit = match self.last {
-            Some((last, i)) if last == key => Some(i),
-            _ => self.styles.get(&key).copied(),
+    /// Returns the style's index.
+    pub(crate) fn style(&mut self, style: RunStyle) -> Result<usize> {
+        let cell = Cell {
+            ch: '\0',
+            ..style.cell
         };
-        if let Some(i) = hit {
-            self.last = Some((key, i));
-            return self.varint(i as u64 + 1);
+        let key = RunStyle { cell, ..style };
+        if let Some(&i) = self.styles.get(&key) {
+            self.varint(i as u64 + 1)?;
+            return Ok(i);
         }
-        self.charge(style_growth(self.styles.len()) * STYLE_COST)?;
+        let i = self.styles.len();
+        self.charge(style_growth(i) * STYLE_COST)?;
         self.varint(0)?;
         write_style(&key, self)?;
-        self.last = Some((key, self.styles.len()));
-        self.styles.insert(key, self.styles.len());
-        Ok(())
+        self.styles.insert(key, i);
+        Ok(i)
     }
     pub(crate) fn charge(&mut self, n: usize) -> Result<()> {
         self.budget = self
@@ -246,8 +299,12 @@ impl<'a> Reader<'a> {
                     .try_reserve(grow)
                     .map_err(|_| Error("allocation failed"))?;
             }
-            let style = read_style(self)?;
-            let id = self.table.intern(CellStyle::of(&style));
+            let RunStyle { cell: style, index } = read_style(self)?;
+            let id = self.table.intern(CellStyle {
+                fg_index: index[0],
+                bg_index: index[1],
+                ..CellStyle::of(&style)
+            });
             self.styles.push((style, id));
             return Ok((style, id));
         }
@@ -469,6 +526,16 @@ impl Wire for Instant {
             .ok_or(Error("time origin"))
     }
 }
+/// Layout-bit combinations of a [`PackedCell`] (wide trailer, protected).
+const LAYOUTS: usize = 4;
+/// Most [`Writer::ids`] entries: 4 MiB, the first 262,144 grid styles.
+const IDS_MAX: usize = 1 << 20;
+/// Where `cell`'s run style sits in [`Writer::ids`]: one entry per grid
+/// style and layout combination. `None` for layout bits it does not know.
+fn layout_slot(cell: PackedCell) -> Option<usize> {
+    let layout = cell.layout_index();
+    (layout < LAYOUTS).then(|| cell.style().0 as usize * LAYOUTS + layout)
+}
 /// Budget bytes per reserved style: the decoder's wire entry plus the grid
 /// style it may intern.
 const STYLE_COST: usize = size_of::<Cell>() + GRID_STYLE_BYTES;
@@ -483,17 +550,28 @@ fn style_growth(len: usize) -> usize {
         _ => 0,
     }
 }
-/// A run style: every [`Cell`] field but `ch`, in `Cell`'s v2 field order.
-fn write_style(c: &Cell, w: &mut Writer) -> Result<()> {
+/// A line run's style: the resolved cell (its `ch` ignored) and the palette
+/// tags ([`crate::cell::Source::tag`]) of its foreground and background.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RunStyle {
+    pub(crate) cell: Cell,
+    pub(crate) index: [u16; 2],
+}
+/// A run style: every [`Cell`] field but `ch`, in `Cell`'s v2 field order,
+/// then the two palette tags.
+fn write_style(s: &RunStyle, w: &mut Writer) -> Result<()> {
+    let c = &s.cell;
     c.fg.write(w)?;
     c.bg.write(w)?;
     c.flags.write(w)?;
     c.link.write(w)?;
     c.cluster.write(w)?;
-    c.underline_color.write(w)
+    c.underline_color.write(w)?;
+    s.index[0].write(w)?;
+    s.index[1].write(w)
 }
-fn read_style(r: &mut Reader<'_>) -> Result<Cell> {
-    Ok(Cell {
+fn read_style(r: &mut Reader<'_>) -> Result<RunStyle> {
+    let cell = Cell {
         ch: '\0',
         fg: Wire::read(r)?,
         bg: Wire::read(r)?,
@@ -501,13 +579,24 @@ fn read_style(r: &mut Reader<'_>) -> Result<Cell> {
         link: Wire::read(r)?,
         cluster: Wire::read(r)?,
         underline_color: Wire::read(r)?,
-    })
+    };
+    let index: [u16; 2] = [Wire::read(r)?, Wire::read(r)?];
+    if index.iter().any(|&tag| tag > 256) {
+        return Err(Error("palette tag"));
+    }
+    Ok(RunStyle { cell, index })
 }
+/// `Wire` for a struct, field by field in the order given. Fields after
+/// `skip` are not on the wire: they read back as their `Default`, so they
+/// must be transient (consumed between `advance` calls), never state.
 macro_rules! fields {
     ($t:ty, [$($field:ident),* $(,)?]) => {
+        crate::checkpoint::fields!($t, [$($field),*], skip []);
+    };
+    ($t:ty, [$($field:ident),* $(,)?], skip [$($skip:ident),* $(,)?]) => {
         impl crate::checkpoint::Wire for $t {
             fn write(&self, w: &mut crate::checkpoint::Writer) -> crate::checkpoint::Result<()> { $(crate::checkpoint::Wire::write(&self.$field,w)?;)* Ok(()) }
-            fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> { Ok(Self { $($field: crate::checkpoint::Wire::read(r)?,)* }) }
+            fn read(r: &mut crate::checkpoint::Reader<'_>) -> crate::checkpoint::Result<Self> { Ok(Self { $($field: crate::checkpoint::Wire::read(r)?,)* $($skip: Default::default(),)* }) }
         }
     };
 }
@@ -634,6 +723,10 @@ mod tests {
             ("id", "fresh per-grid renderer cache key"),
             ("spare_screen", "recycled blank allocation"),
             ("blank_row", "rebuilt blank-row template"),
+            (
+                "untrimmed",
+                "memory compaction progress; restored lines are all untrimmed",
+            ),
             ("styles", "rebuilt from the line run styles"),
             ("epoch", "renderer freshness counter"),
             ("view_offset", "client viewport"),
@@ -649,6 +742,10 @@ mod tests {
             ("bidi", "renderer configuration; VT bdsm state is encoded"),
             ("command_began", "GUI command notification timer"),
             ("finished_commands", "pending GUI notifications"),
+            (
+                "shell_phase",
+                "the host's live shell state; the next OSC 133 mark sets it",
+            ),
             ("clipboard_set", "pending host clipboard action"),
             ("clipboard_set_primary", "pending host clipboard action"),
             ("clipboard_query", "pending host clipboard query"),
@@ -891,6 +988,7 @@ mod tests {
         }
     }
 
+    use crate::cell::{ATTR_PROTECTED, WIDE_TRAILER};
     use crate::grid::{Line, LineAttr};
 
     /// A line of `cells`, its styles interned in `table`.
@@ -971,10 +1069,110 @@ mod tests {
         assert!(two.len() <= line_bytes(t, &[red_row]).len() + 8);
     }
 
+    /// Encoding checks cell style ids per run, not in a pass over every cell
+    /// beforehand: a freed or unknown id still fails cleanly, mid-line too.
+    #[test]
+    fn runs_naming_a_dead_style_fail_to_encode() {
+        let mut table = StyleTable::default();
+        let red = Cell {
+            fg: 1,
+            ..Cell::blank()
+        };
+        let line = line_in(&mut table, &[Cell::blank(), red], false, LineAttr::Single);
+        let write = |table: &StyleTable, line: &Line| {
+            line.write(&mut Writer::new(MAX_DECODED, Some(table)))
+        };
+        assert!(write(&table, &line).is_ok());
+        let unknown = PackedCell::new(&red, StyleId(table.len() as u32));
+        let cells = vec![line.cells()[0], unknown];
+        let bad = Line::new(cells, false, LineAttr::Single);
+        assert_eq!(write(&table, &bad), Err(Error("cell bounds")));
+        table.sweep(std::iter::empty());
+        assert_eq!(write(&table, &line), Err(Error("cell bounds")));
+    }
+
+    /// Lines over styles 0..n, two cells each in style `i` then `i + 1`,
+    /// the second run cycling through plain, wide, protected, and wide and
+    /// protected, so every [`LAYOUTS`] combination is cached.
+    fn styled_lines(table: &mut StyleTable, ids: impl Iterator<Item = u32>) -> Vec<Line> {
+        ids.map(|i| {
+            let a = Cell {
+                fg: i,
+                ..Cell::blank()
+            };
+            let b = Cell {
+                ch: 'x',
+                fg: i + 1,
+                flags: [
+                    0,
+                    WIDE_TRAILER,
+                    ATTR_PROTECTED,
+                    WIDE_TRAILER | ATTR_PROTECTED,
+                ][i as usize % LAYOUTS],
+                ..Cell::blank()
+            };
+            line_in(table, &[a, a, b, a], false, LineAttr::Single)
+        })
+        .collect()
+    }
+
+    /// Bytes, the budget left, and the cache length after writing `lines`
+    /// with at most `ids_max` cache entries.
+    fn cached_write(table: &StyleTable, lines: &[Line], ids_max: usize) -> (Vec<u8>, usize, usize) {
+        let mut w = Writer::new(MAX_DECODED, Some(table));
+        w.ids_max = ids_max;
+        lines.iter().for_each(|l| l.write(&mut w).unwrap());
+        (w.bytes, w.budget, w.ids.len())
+    }
+
+    /// The style cache changes neither the bytes nor the charges, whether
+    /// it holds every style, some, or none.
+    #[test]
+    fn a_capped_style_cache_writes_the_same_bytes() {
+        let mut table = StyleTable::default();
+        let lines = styled_lines(&mut table, (0..300).chain(0..300));
+        let layouts: std::collections::BTreeSet<usize> = lines
+            .iter()
+            .flat_map(|l| l.cells().iter().map(|c| c.layout_index()))
+            .collect();
+        assert_eq!(layouts, (0..LAYOUTS).collect());
+        let full = cached_write(&table, &lines, IDS_MAX);
+        for cap in [0, 1, 7, 64, 513] {
+            let capped = cached_write(&table, &lines, cap);
+            assert_eq!((&capped.0, capped.1), (&full.0, full.1), "cap {cap}");
+            assert!(capped.2 <= cap);
+        }
+        let (read, styles) = read_lines(&full.0, lines.len()).unwrap();
+        assert_eq!(resolved(&styles, &read), resolved(&table, &lines));
+    }
+
+    /// The cache grows with the styles written, not the table's high-water
+    /// length: freed slots past the last live style cost nothing.
+    #[test]
+    fn the_style_cache_ignores_dead_high_water_slots() {
+        let mut table = StyleTable::default();
+        let _dead = styled_lines(&mut table, 0..5000);
+        let live = styled_lines(&mut table, 0..2);
+        table.sweep(live.iter().map(|l| l.cells()));
+        assert!(table.len() > 5000);
+        let (bytes, budget, len) = cached_write(&table, &live, IDS_MAX);
+        assert!(len <= 4 * LAYOUTS, "cache of {len}");
+        assert_eq!((bytes, budget), {
+            let (b, r, _) = cached_write(&table, &live, 0);
+            (b, r)
+        });
+    }
+
     #[test]
     fn hostile_line_runs_fail_cleanly() {
         type Build<'a> = &'a dyn Fn(&mut Writer);
-        let define = |w: &mut Writer| w.style(Cell::blank()).unwrap();
+        let define = |w: &mut Writer| {
+            w.style(RunStyle {
+                cell: Cell::blank(),
+                index: [0; 2],
+            })
+            .unwrap()
+        };
         let case = |build: Build| {
             let mut w = Writer::new(MAX_DECODED, None);
             build(&mut w);

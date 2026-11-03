@@ -166,6 +166,22 @@ class ReverseDependencyTests(unittest.TestCase):
         md = metadata({"a": ("crates/a", ["serde"]), "b": ("crates/b", ["serde"])}, external=["serde"])
         self.assertEqual(affected_packages(md, ["crates/a/src/lib.rs"]), ["a"])
 
+    def test_local_patched_package_selects_its_workspace_consumers(self) -> None:
+        # A [patch]ed vendor crate is in the resolve graph but not a member.
+        md = metadata(
+            {"app": ("crates/app", ["auth"]), "auth": ("crates/auth", ["jwt"]), "cli": ("crates/cli", ["app"]),
+             "other": ("crates/other", [])}
+        )
+        md["packages"].append({"id": "jwt", "name": "jwt", "manifest_path": f"{ROOT}/vendor/jwt/Cargo.toml"})
+        md["resolve"]["nodes"].append({"id": "jwt", "deps": []})
+        self.assertEqual(affected_packages(md, ["vendor/jwt/Cargo.toml"]), ["app", "auth", "cli"])
+        self.assertEqual(affected_packages(md, ["vendor/jwt/src/lib.rs"]), ["app", "auth", "cli"])
+        # Reached only through a registry crate.
+        md["resolve"]["nodes"][-1:] = [{"id": "jwt", "deps": []}, {"id": "oauth", "deps": [{"name": "jwt", "pkg": "jwt"}]}]
+        md["resolve"]["nodes"][3]["deps"] = [{"name": "oauth", "pkg": "oauth"}]
+        md["packages"].append({"id": "oauth", "name": "oauth", "manifest_path": "/registry/oauth/Cargo.toml"})
+        self.assertEqual(affected_packages(md, ["vendor/jwt/Cargo.toml"]), ["app", "auth", "cli", "other"])
+
     def test_dependency_cycles_terminate(self) -> None:
         # A dev-dependency back-edge makes the resolve graph cyclic.
         md = metadata({"a": ("crates/a", ["b"]), "b": ("crates/b", ["a"])})

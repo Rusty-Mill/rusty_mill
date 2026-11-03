@@ -20,6 +20,11 @@ use rk_constrain::PlanDecision;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // The MCP client's OAuth token fetch runs on rusty_tokio; on this tokio
+    // runtime it needs the fallback runtime.
+    #[cfg(feature = "mcp-server")]
+    rusty_tokio::runtime::install_fallback()
+        .context("starting the rusty_tokio fallback runtime")?;
     let config = Config::from_env().context("resolving configuration")?;
 
     let base_url = std::env::var("RUSTYKEYS_BASE_URL")

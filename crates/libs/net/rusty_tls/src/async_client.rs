@@ -150,6 +150,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncTlsStream<S> {
         self.conn.alpn_protocol()
     }
 
+    /// The DER-encoded end-entity certificate the server presented during
+    /// the handshake, if any. See
+    /// [`TlsStream::peer_certificate_der`](crate::TlsStream::peer_certificate_der)'s
+    /// docs for when this is (and isn't) populated.
+    pub fn peer_certificate_der(&self) -> Option<&[u8]> {
+        self.conn
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .map(|cert| cert.as_ref())
+    }
+
     /// Whether this connection resumed a previous TLS session rather than
     /// performing a full handshake. See
     /// [`TlsStream::resumed_session`](crate::TlsStream::resumed_session)'s

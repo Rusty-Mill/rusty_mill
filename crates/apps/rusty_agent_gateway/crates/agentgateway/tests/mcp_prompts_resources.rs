@@ -9,7 +9,6 @@
 
 use std::net::SocketAddr;
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use rmcp::{
     ServiceExt,
@@ -63,13 +62,13 @@ binds:
 
         let config = Config::from_yaml(&yaml).expect("config should parse");
         config.validate().expect("config should validate");
-        let gateway = Gateway::build(&config, None)
+        let gateway = common::build(&config, None)
             .await
             .expect("gateway should build");
 
         let shutdown = CancellationToken::new();
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-        let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        let _serving = common::serve(gateway, vec![addr], shutdown.clone())
             .await
             .expect("gateway should bind");
 

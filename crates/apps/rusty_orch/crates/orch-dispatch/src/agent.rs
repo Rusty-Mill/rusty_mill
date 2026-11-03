@@ -3,7 +3,7 @@
 use std::fmt;
 
 use orch_core::board::{Board, EntryKind};
-use orch_core::task::{Agent, Role, Task};
+use orch_core::task::{AgentId, Role, Task};
 use orch_core::{EntryId, Ref, Text};
 
 /// One entry an agent wants on the board. The dispatcher stamps the task
@@ -65,12 +65,17 @@ pub trait AgentRunner {
     /// route. Adapters with narrower capabilities must override it so the
     /// dispatcher can reject unsupported cards before counting or invoking a
     /// call.
-    fn supports(&self, _agent: Agent, _role: Role) -> bool {
+    fn supports(&self, _agent: AgentId, _role: Role) -> bool {
         true
     }
 
     /// Run `task` on `agent` and return the entries it produced.
-    fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError>;
+    fn run(
+        &mut self,
+        agent: AgentId,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentError>;
 
     /// Run with explicit dispatcher policy for failures.
     ///
@@ -78,7 +83,7 @@ pub trait AgentRunner {
     /// their historical transient, counted behavior.
     fn run_classified(
         &mut self,
-        agent: Agent,
+        agent: AgentId,
         task: &Task,
         board: &Board,
     ) -> Result<Vec<Output>, ClassifiedError> {

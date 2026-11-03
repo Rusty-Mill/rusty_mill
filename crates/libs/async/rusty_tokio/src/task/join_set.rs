@@ -37,8 +37,8 @@ impl<T> JoinSet<T> {
     /// this set.
     ///
     /// # Panics
-    /// Panics if called from a thread with no ambient runtime -- same as
-    /// [`crate::spawn`].
+    /// Panics if called from a thread with no ambient runtime and no
+    /// [fallback](crate::runtime::install_fallback) installed -- same as [`crate::spawn`].
     pub fn spawn<F>(&mut self, future: F)
     where
         F: Future<Output = T> + Send + 'static,

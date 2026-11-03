@@ -53,6 +53,7 @@ impl Http {
             let mut req = match method {
                 "POST" => self.client.post(url),
                 "PATCH" => self.client.patch(url),
+                "PUT" => self.client.put(url),
                 _ => self.client.get(url),
             }
             .map_err(text)?;

@@ -70,30 +70,21 @@ worked example implementing a custom domain from scratch, and
 for a larger real reference domain with a directed relation
 (`Order belongs_to Customer`).
 
-### The `research` feature: seeing the alternatives this recommendation is built on
+### The `research` feature: reference fixtures and harnesses
 
-`ProductionStore`/`GenericProductionStore` are the *recommended* defaults,
-not the only backends in this repo — they're the winners of a long
-empirical comparison against other storage layouts, durability
-strategies, and concurrency strategies. That comparison code is real and
-kept, but off by default so a normal build doesn't compile it in. Enable
-it with the `research` Cargo feature:
+`research` compiles in the reference domains (`Order`/`Customer` from the
+engine, `Employee`), the dataset builders, and the crash-safety and
+multi-process harnesses the durability tests drive:
 
 ```sh
-cargo build --features research
-cargo test --all-features
-cargo bench --features research          # or just `cargo bench` — see below
+cargo test --features server,research
 ```
 
-This unlocks: the other three `Dog` storage backends (row-oriented,
-column-oriented, and the plain non-durable canonical store), the other
-seven durability variants (WAL/snapshot combinations, an embedded
-transactional store, `redb`), the other three concurrency strategies
-(sharded, `dashmap`, an actor-style channel), the `Order`/`Customer`
-reference domain (`generic::order_customer`), and every historical
-spike/comparison module. See `src/lib.rs`'s own top-level doc comment for
-the full front-door/research split, and `RESULTS.md` for the numbers that
-justified each pick.
+The benchmarked alternatives `ProductionStore` won against (three other
+`Dog` backends, seven durability variants, three concurrency strategies,
+the spikes and the external-database comparison) were removed by
+`ADR-0138`. `RESULTS.md` keeps the numbers; the commit `ADR-0138` names
+keeps the code.
 
 ### The `server` feature: a network server/query layer
 
@@ -211,10 +202,7 @@ cargo bench --features server,research --bench server   # real-socket round-trip
 
 ```sh
 cargo test --all-features            # unit tests, including ProductionStore's and GenericProductionStore's flagship integration tests
-cargo bench                          # wall-clock Criterion suite (cross-platform), ProductionStore listed first in every workload
-cargo bench --bench concurrency      # concurrency throughput sweep, ProductionStore included alongside every strategy
-cargo bench --bench generic_production   # GenericProductionStore (Order/Customer) get/scan/filter/parent/children sweep
-cargo bench --features perf-events --bench cache_events   # cache-miss counts, Linux bare-metal only — see ADR-0002
+cargo bench --features research --bench generic_production   # GenericProductionStore (Order/Customer) get/scan/filter/parent/children sweep
 ```
 
 See `AGENTS.md` for the full canonical command set and change rules.

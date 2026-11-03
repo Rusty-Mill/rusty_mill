@@ -6,11 +6,12 @@
 //! copies its stdin into the `mcp.in` named pipe and the `mcp.out` pipe to
 //! its stdout. The broker, which the moderator starts outside the sandbox
 //! with the turn's binding, serves each connection on those pipes with the
-//! ordinary per-turn [`Server`]. The harness is granted the two pipes and
-//! nothing else of the directory that holds them, so it can neither replace
-//! them nor reach the broker any other way.
+//! ordinary [`Server`] bound to that one turn; a broker never serves a
+//! session. The harness is granted the two pipes and nothing else of the
+//! directory that holds them, so it can neither replace them nor reach the
+//! broker any other way.
 
-use crate::mcp::{Binding, Server};
+use crate::mcp::{Binding, HangUp, Server};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
@@ -89,7 +90,9 @@ pub fn broker(dir: &Path, binding: Binding, harness: u32) -> Result<(), String> 
         }
         // A relay that goes away mid-reply is a closed connection, not an
         // error of the broker's.
-        if let Err(e) = Server::new(binding.clone())?.serve_on(BufReader::new(input), output) {
+        let hangup = HangUp::of(&input);
+        let served = Server::new(binding.clone())?.serve_on(BufReader::new(input), hangup, output);
+        if let Err(e) = served {
             eprintln!("bbp mcp-broker: connection ended: {e}");
         }
     }

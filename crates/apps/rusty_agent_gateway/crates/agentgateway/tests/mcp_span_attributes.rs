@@ -15,15 +15,16 @@
 //! serves requests on. So this file holds exactly one test, and `cargo test`
 //! gives it a binary of its own.
 
+mod common;
+
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use agentgateway_mcp::{McpRequest, McpRequestResult, McpResponseResult, request_result};
 use rmcp::{ServiceExt, model::CallToolRequestParams, transport::StreamableHttpClientTransport};
-use rusty_mcp::otel::OtelConfig;
+use rusty_mcp_middleware::otel::OtelConfig;
 use rusty_prost::Message as _;
 use rusty_prost::wkt::Value;
 use tokio_util::sync::CancellationToken;
@@ -97,76 +98,32 @@ fn request_is_complete(raw: &[u8]) -> bool {
 
 /// A gRPC `ExtMcp` processor that passes every call and annotates it.
 async fn processor() -> (String, CancellationToken) {
-    use axum::body::Body;
-    use http_body_util::BodyExt;
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("processor should bind");
-    let addr: SocketAddr = listener.local_addr().expect("should have an address");
-    let shutdown = CancellationToken::new();
-    let stopping = shutdown.clone();
-
-    let app = axum::Router::new().fallback(axum::routing::any(
-        |request: axum::extract::Request| async move {
-            let is_request = request.uri().path().ends_with("CheckRequest");
-            let body = request
-                .into_body()
-                .collect()
-                .await
-                .map(|b| b.to_bytes())
-                .unwrap_or_default();
-            let _ = McpRequest::decode(&body[5..]);
-
-            let payload = if is_request {
-                let bag = serde_json::json!({
-                    "classification": CLASSIFICATION,
-                    "rule": RULE_ID,
-                    "score": 0.75,
-                    "blocked": false,
-                });
-                McpRequestResult {
-                    result: Some(request_result::Result::Pass(Default::default())),
-                    metadata: match agentgateway_mcp::to_proto_value(bag) {
-                        Value::Struct(s) => Some(s),
-                        _ => None,
-                    },
-                    ..Default::default()
-                }
+    let (addr, shutdown) = common::grpc_upstream(|path, message| {
+        let _ = McpRequest::decode(message);
+        if path.ends_with("CheckRequest") {
+            let bag = serde_json::json!({
+                "classification": CLASSIFICATION,
+                "rule": RULE_ID,
+                "score": 0.75,
+                "blocked": false,
+            });
+            McpRequestResult {
+                result: Some(request_result::Result::Pass(Default::default())),
+                metadata: match agentgateway_mcp::to_proto_value(bag) {
+                    Value::Struct(s) => Some(s),
+                    _ => None,
+                },
+                ..Default::default()
+            }
+            .encode_to_vec()
+            .expect("should encode")
+        } else {
+            McpResponseResult::default()
                 .encode_to_vec()
                 .expect("should encode")
-            } else {
-                McpResponseResult::default()
-                    .encode_to_vec()
-                    .expect("should encode")
-            };
-
-            let mut framed = Vec::with_capacity(payload.len() + 5);
-            framed.push(0);
-            framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-            framed.extend_from_slice(&payload);
-
-            // gRPC sends the status as a trailer, after the message.
-            let mut trailers = http::HeaderMap::new();
-            trailers.insert("grpc-status", "0".parse().expect("valid"));
-            let body = http_body_util::BodyExt::with_trailers(
-                http_body_util::Full::new(bytes::Bytes::from(framed)),
-                async move { Some(Ok::<_, std::convert::Infallible>(trailers)) },
-            );
-            http::Response::builder()
-                .status(200)
-                .header("content-type", "application/grpc")
-                .body(Body::new(body))
-                .expect("response should build")
-        },
-    ));
-
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(async move { stopping.cancelled().await })
-            .await;
-    });
-
+        }
+    })
+    .await;
     (addr.to_string(), shutdown)
 }
 
@@ -200,7 +157,7 @@ async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
 
     // `pipeline` rather than `init`, so this test brings its own subscriber
     // instead of racing for the process-wide one.
-    let (guard, layer) = rusty_mcp::otel::pipeline(
+    let (guard, layer) = rusty_mcp_middleware::otel::pipeline(
         OtelConfig::new("span-attribute-test")
             .with_endpoint(format!("http://{collector_addr}"))
             .without_metrics()
@@ -220,12 +177,7 @@ async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
 
     let (processor_host, stop_processor) = processor().await;
 
-    let port = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("should bind");
-        listener.local_addr().expect("addr").port()
-    };
+    let port = common::free_port().await;
     let yaml = format!(
         r#"
 binds:
@@ -255,12 +207,12 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 

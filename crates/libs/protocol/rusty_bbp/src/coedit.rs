@@ -13,7 +13,7 @@
 //! ([`overlap`]); a CRDT accepts it.
 
 use crate::command::{Code, Rejection};
-use crate::ids::ArtId;
+use crate::ids::{ArtId, Sha256};
 use rusty_serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -168,6 +168,24 @@ pub fn overlap(ops: &[LineOp], since: &[Option<LineId>]) -> Vec<Option<LineId>> 
     out
 }
 
+/// What a logged co-edited version needed and its fold did not find.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    /// An op's anchor is in no earlier version.
+    Line(LineId),
+    /// Its base is not an indexed version.
+    Base(ArtId),
+}
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Missing::Line(l) => write!(f, "line {}#{}", l.art, l.n),
+            Missing::Base(b) => write!(f, "base {b}"),
+        }
+    }
+}
+
 /// One accepted version of a co-edited spec, as the task state indexes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Version {
@@ -177,6 +195,9 @@ pub struct Version {
     /// which is its author's base or a later version.
     pub prev: Option<ArtId>,
     pub doc: Arc<Doc>,
+    /// SHA-256 of `doc`'s visible text: the bytes an approval of this
+    /// version judged (2b, d). Equal text gives an equal snapshot.
+    pub snapshot: Sha256,
     /// The anchors of this version's ops.
     pub anchors: Arc<[Option<LineId>]>,
 }

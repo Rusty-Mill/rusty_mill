@@ -1,17 +1,17 @@
 # Running Mill Board as a service
 
-One process owns the board file and serves the UI, the web API and MCP over HTTP. It is
-supervised by systemd the way `rusty_remind_me`'s units are: a system unit, `Restart=always`,
+One process serves the UI, the web API and MCP over HTTP. The cards live in rusty_tick
+(`MILL_BOARD_TICK_URL`, ADR-0012), so run rusty_tick first. It is supervised by systemd the way `rusty_remind_me`'s units are: a system unit, `Restart=always`,
 loopback bind, bearer tokens in owner-only files.
 
 | | |
 |---|---|
 | Unit | [`mill-board.service`](mill-board.service) |
 | Settings | [`board.env.example`](board.env.example), copied to `~/.mill-board/board.env` (mode 600) |
-| Data | `~/.mill-board/board.mmap` (+ `.records`, `.inserts`, `.lock`), `settings/`, `backups/` |
+| Data | the cards in rusty_tick; `~/.mill-board/settings/` here |
 | Port | 8787, loopback by default |
-| Health | `GET /health`: 200 while the store can commit, 503 once it needs a restart |
-| Stop | SIGTERM (`systemctl stop`) stops accepting, waits up to 10 s for running requests and a backup, then exits 0 |
+| Health | `GET /health`: 200 while rusty_tick answers, 503 while it does not |
+| Stop | SIGTERM (`systemctl stop`) stops accepting, waits up to 10 s for running requests, then exits 0 |
 
 ## Install
 
@@ -21,7 +21,7 @@ sudo install -m 755 target/release/rusty_mill_board /usr/local/bin/
 
 mkdir -p ~/.mill-board && chmod 700 ~/.mill-board
 install -m 600 crates/apps/rusty_mill_board/deploy/board.env.example ~/.mill-board/board.env
-$EDITOR ~/.mill-board/board.env      # user, paths, bind address, allowed hosts
+$EDITOR ~/.mill-board/board.env      # user, rusty_tick URL and token, bind address, allowed hosts
 
 sudo install -m 644 crates/apps/rusty_mill_board/deploy/mill-board.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -40,55 +40,47 @@ journalctl -u mill-board -f
 
 Register the board in each model's client as in [`../docs/connecting-models.md`](../docs/connecting-models.md).
 
-## Restarts
+## Signing in from claude.ai (OAuth)
 
-Every commit is one durable record, and the board's state is rebuilt from the records at open, so
-cards, claims and the event cursor survive any restart or crash. `StartLimitIntervalSec=0` keeps
-systemd retrying forever. A second process on the same `--store` is refused ("in use by another
-process"), so a stray stdio instance cannot diverge from the service.
+A claude.ai custom connector signs in with OAuth instead of a pasted bearer token. Publish the
+board at an https origin through TLS in front (it can still bind loopback), set
+`MILL_BOARD_ISSUER` in `board.env` to that origin, e.g. `https://board.baileyfam.us`, and restart.
+Its host is accepted as a `Host` name without adding it to `MILL_BOARD_ALLOWED_HOSTS`. Add
+`https://board.baileyfam.us/mcp` as the connector's URL; "Sign in now" opens a consent page that
+asks for one of the board's own tokens. The grant then acts as that token's agent, with the
+agent's role and projects as they are at each request.
 
-A failed write whose outcome is unknown puts the store in a refuse-writes state until it is
-reopened. `/health` then answers 503. Run `sudo systemctl restart mill-board`: the reopen settles
-what really committed.
+- Existing bearer tokens keep working, OAuth on or off.
+- Grants are kept in `settings/oauth.json` (owner-only), which is bound to the issuer on first
+  start: a board started with another issuer on the same file refuses to start, and so does one
+  pointed at an existing file that names no issuer (even an empty one) — give it a new file
+  instead. A running board checks the binding on every access,
+  so a file replaced or claimed by another board meanwhile serves no grants and takes no writes. Removing an agent in settings suspends
+  their grants; adding an agent of the same name again restores them. Rotating an agent's token
+  does not affect their grants. To end every grant, stop the board, delete `oauth.json` and start
+  it again; a connector's own disconnect revokes just its grant.
+- An open board (no identities, no `--auth-token`) refuses to start with an issuer: there is no
+  token to approve with.
 
-## Backups and restore
+## Restarts and backups
 
-With `MILL_BOARD_BACKUP_DIR` set the service writes `backups/board-<unix ms>/` every
-`MILL_BOARD_BACKUP_SECS` and keeps the newest `MILL_BOARD_BACKUP_KEEP`:
+The board keeps no card state of its own: cards, claims, comments and dependencies are in rusty_tick,
+so a restart or crash loses none of them. Events (`board_events`) live in the process and start over
+after a restart. `StartLimitIntervalSec=0` keeps systemd retrying forever.
 
-```text
-board-<unix ms>/
-  store/      board.mmap, board.mmap.records, board.mmap.inserts   (the store's files)
-  settings/   identities.json, projects.json, roles.json, github.json   (fixed names; owner-only)
-```
-
-No commit lands while the store files are copied, so the store copy is the board at one moment. The
-settings are copied together under the lock every settings change takes and loaded back to check they
-fit, so a restore never meets an agent whose role is missing. A backup is renamed into place only when
-complete and synced before older ones are removed; one that died part way is swept at the next run. The
-store is compacted after each backup.
-
-While the store reports an append of unknown outcome (`/health` is 503) no backup is taken and nothing
-is rotated out or compacted, so the copies from before the failure stay put. Restart the service.
-
-Copy `backups/` off the host so a lost disk does not take both.
-
-Restore (the settings files go where `--settings-dir`, or each file's own flag, points):
-
-```sh
-sudo systemctl stop mill-board
-cd ~/.mill-board && mkdir -p replaced && mv board.mmap* replaced/
-cp -p backups/board-<time>/store/board.mmap* .
-# only if the settings were lost:
-cp -p backups/board-<time>/settings/*.json settings/
-sudo systemctl start mill-board
-```
+Back up rusty_tick's data directory, and `settings/` here (owner-only: it holds tokens and, with
+OAuth, the connectors' grants). Copy both
+off the host so a lost disk does not take them all.
 
 ## Upgrade and rollback
 
+Upgrading from a board file (`MILL_BOARD_STORE`): move the cards into rusty_tick first
+(`tools/migrate_artifact_board.py` for the artifact board), then replace `MILL_BOARD_STORE` and any
+`MILL_BOARD_BACKUP_*` lines in `board.env` with `MILL_BOARD_TICK_URL` and `RUSTY_TICK_TOKEN`. The
+service refuses to start while a retired line is present, rather than coming up empty in memory.
+
 Replace `/usr/local/bin/rusty_mill_board` and `systemctl restart mill-board`. Keep the previous
-binary beside it (`rusty_mill_board.prev`) to roll back; the on-disk format is versioned by the
-row schema tag, so a rollback across a format change needs the backup taken before it.
+binary beside it (`rusty_mill_board.prev`) to roll back.
 
 ## Not covered
 

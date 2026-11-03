@@ -1,5 +1,8 @@
 //! Events: the append-only log. `TaskState` is a fold over these.
 
+use crate::claims::{
+    ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimsConfig, MarkOutcome, Mode, ReopenCause,
+};
 use crate::command::Response;
 use crate::ids::*;
 use crate::policy::SchedulingPolicy;
@@ -23,6 +26,10 @@ pub const LOG_SCHEMA_CONCURRENT: u32 = 3;
 /// that keeps it from doing so. Written only for `EventDriven`.
 pub const LOG_SCHEMA_EVENT_DRIVEN: u32 = 4;
 
+/// The log schema of a claims-mode task (claims addendum). A build that
+/// predates claims refuses it rather than replaying it as a stage task.
+pub const LOG_SCHEMA_CLAIMS: u32 = 5;
+
 /// The schema `open` records for a task with this cap and policy.
 pub fn schema_for(max_live_turns: u32, policy: SchedulingPolicy) -> u32 {
     if policy == SchedulingPolicy::EventDriven {
@@ -38,7 +45,7 @@ pub fn schema_for(max_live_turns: u32, policy: SchedulingPolicy) -> u32 {
 pub fn schema_supported(schema: u32) -> bool {
     matches!(
         schema,
-        LOG_SCHEMA | LOG_SCHEMA_CONCURRENT | LOG_SCHEMA_EVENT_DRIVEN
+        LOG_SCHEMA | LOG_SCHEMA_CONCURRENT | LOG_SCHEMA_EVENT_DRIVEN | LOG_SCHEMA_CLAIMS
     )
 }
 
@@ -49,6 +56,10 @@ fn one_turn() -> u32 {
 // Skipped when serialized so a one-turn task's log is byte-identical to schema 2.
 fn serialized_cap(cap: &u32) -> bool {
     *cap <= 1
+}
+
+fn is_stages(m: &Mode) -> bool {
+    m.is_stages()
 }
 
 // Skipped when serialized so a turn-based task's log is byte-identical to schema 2.
@@ -108,6 +119,15 @@ pub enum Event {
         /// the one the golden in `tests/schema.rs` pins.
         #[rusty_serde(default, skip_serializing_if = "is_turn_based")]
         policy: SchedulingPolicy,
+        /// Claims addendum. Written only in claims mode (schema 5).
+        #[rusty_serde(default, skip_serializing_if = "is_stages")]
+        mode: Mode,
+        #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+        claims: Option<ClaimsConfig>,
+        /// Claims mode (#597): SHA-256 of the frozen holdout suite. Written
+        /// only when present.
+        #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+        holdout_digest: Option<Sha256>,
     },
     Assigned {
         role: RoleId,
@@ -221,4 +241,93 @@ pub enum Event {
     VerdictsStaled {
         candidate: ArtId,
     },
+    // ---- claims mode (schema 5 only)
+    /// The session credential for an assignment; the secret is never logged.
+    CredentialIssued {
+        role: RoleId,
+        principal: PrincipalId,
+        digest: Sha256,
+    },
+    ClaimAccepted {
+        claim: MsgId,
+        score: i64,
+        evidence: u64,
+        #[rusty_serde(default, skip_serializing_if = "is_false")]
+        sole_candidate: bool,
+        #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+        supersedes_lapsed: Option<MsgId>,
+    },
+    ClaimDropped {
+        claim: MsgId,
+        score: i64,
+        evidence: u64,
+    },
+    ClaimVoided {
+        claim: MsgId,
+        by: MsgId,
+    },
+    ClaimEscalated {
+        claim: MsgId,
+        reason: ClaimEscalation,
+    },
+    ClaimReopened {
+        claim: MsgId,
+        by: ReopenCause,
+        epoch: u32,
+    },
+    ClaimSuperseded {
+        claim: MsgId,
+        by: MsgId,
+        prior: ClaimStatus,
+    },
+    /// A human decision on a claim, before its effects.
+    ClaimDecided {
+        claim: MsgId,
+        outcome: ClaimOutcome,
+    },
+    ClaimBudgetExtended {
+        claim: MsgId,
+    },
+    /// One run debited from a claim (candidate stored or human rerun).
+    ClaimRunDebited {
+        claim: MsgId,
+        candidate: ArtId,
+    },
+    RerunHeld {
+        claim: MsgId,
+        candidate: ArtId,
+    },
+    RerunWithdrawn {
+        candidate: ArtId,
+    },
+    /// `failing(c)` after a report or an endorsement.
+    ClaimFailing {
+        claim: MsgId,
+        failing: Vec<String>,
+    },
+    ClaimActing {
+        claim: MsgId,
+        epoch: u32,
+        mark: u64,
+        reference: String,
+        at: Time,
+    },
+    ClaimActionResult {
+        mark: u64,
+        outcome: MarkOutcome,
+    },
+    /// #597: the task's holdout suite moved to `digest`, written by the host
+    /// for pure additions.
+    HoldoutExtended {
+        digest: Sha256,
+    },
+    /// #597: the human adopted holdout suite `digest`, which removes or
+    /// changes existing tests.
+    HoldoutUpdated {
+        digest: Sha256,
+    },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }

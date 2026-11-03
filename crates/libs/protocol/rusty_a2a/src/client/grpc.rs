@@ -111,9 +111,21 @@ pub struct GrpcClient {
     extensions: Vec<String>,
 }
 
+/// `endpoint` with a scheme: an address with none (`host:port`, the form the A2A spec gives for a
+/// gRPC interface) is read as `https://`, so a request is never sent in the clear unless the
+/// caller wrote `http://`.
+fn with_scheme(endpoint: &str) -> String {
+    if endpoint.contains("://") {
+        endpoint.to_string()
+    } else {
+        format!("https://{endpoint}")
+    }
+}
+
 impl GrpcClient {
-    /// Builds a client targeting the given gRPC endpoint (e.g.
-    /// `"http://127.0.0.1:50051"`) directly. Prefer [`GrpcClient::discover`]
+    /// Builds a client targeting the given gRPC endpoint directly: `"https://agent.example.com"`,
+    /// `"http://127.0.0.1:50051"` for plaintext, or, as the A2A spec writes a gRPC interface,
+    /// `"agent.example.com:443"` with no scheme, which is TLS like `https://`. Prefer [`GrpcClient::discover`]
     /// or [`GrpcClient::from_agent_card`] when you have (or can fetch) the
     /// agent's `AgentCard`.
     ///
@@ -130,7 +142,12 @@ impl GrpcClient {
     /// call, message size limits, and so on.
     pub fn with_channel_options(endpoint: impl Into<String>, options: ChannelOptions) -> Result<Self> {
         let endpoint = endpoint.into();
-        let channel = Channel::new(&endpoint, options).map_err(|e| {
+        if endpoint.trim().is_empty() {
+            return Err(ClientError::GrpcConfig(format!(
+                "invalid gRPC endpoint {endpoint:?}: it is empty"
+            )));
+        }
+        let channel = Channel::new(&with_scheme(endpoint.trim()), options).map_err(|e| {
             ClientError::GrpcConfig(format!("invalid gRPC endpoint {endpoint:?}: {}", e.message()))
         })?;
         Ok(GrpcClient {

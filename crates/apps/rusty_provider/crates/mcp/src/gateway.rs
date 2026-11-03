@@ -34,8 +34,8 @@ use rusty_mcp_client::{
 use rusty_mcp_server::proto::{CallToolParams, CallToolResult, ErrorCode, ErrorData, Tool};
 use rusty_mcp_server::{CallContext, ToolSource};
 use rusty_retry::Backoff;
+use rusty_tokio::runtime::Handle;
 use rusty_tokio::sync::RwLock;
-use tokio::runtime::Handle;
 
 use rp_router::{McpConfig, McpUpstreamConfig, McpUpstreamTransport};
 
@@ -231,7 +231,7 @@ impl McpGateway {
         let mut tools = Vec::new();
         for (name, pool) in peers.iter() {
             let lease = pool.lease();
-            match tokio::time::timeout(self.timeout, lease.client().list_tools()).await {
+            match rusty_tokio::time::timeout(self.timeout, lease.client().list_tools()).await {
                 Ok(Ok(listed)) => {
                     for mut tool in listed {
                         tool.name = format!("{name}/{}", tool.name);
@@ -270,7 +270,7 @@ impl McpGateway {
                 .ok_or_else(|| GatewayError::UnknownUpstream(upstream.to_string()))?
         };
         let lease = pool.lease();
-        tokio::time::timeout(self.timeout, lease.client().call_tool(tool, arguments))
+        rusty_tokio::time::timeout(self.timeout, lease.client().call_tool(tool, arguments))
             .await
             .map_err(|_elapsed| GatewayError::Timeout(upstream.to_string()))?
             .map_err(GatewayError::Service)
@@ -380,9 +380,9 @@ fn spawn_supervisor(
     policy: ReconnectPolicy,
     call_timeout: Duration,
 ) {
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         loop {
-            tokio::time::sleep(LIVENESS_POLL).await;
+            rusty_tokio::time::sleep(LIVENESS_POLL).await;
             if pool.is_alive().await {
                 continue;
             }
@@ -403,7 +403,7 @@ fn spawn_supervisor(
                     );
                     break None;
                 }
-                tokio::time::sleep(backoff.delay_for(attempts)).await;
+                rusty_tokio::time::sleep(backoff.delay_for(attempts)).await;
                 attempts += 1;
                 match Pool::connect(&upstream, size, call_timeout).await {
                     Ok(new_pool) => {

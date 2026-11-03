@@ -38,7 +38,7 @@ use sessionmgr_core::ports::{worker_ref, AgentAdapterPort, AgentSignal};
 use sessionmgr_core::{SessionId, SessionStatus};
 use sessionmgr_proc::SystemProcessPort;
 use sessionmgr_protocol::{ErrorKind, Request, Response, SessionEvent};
-use sessionmgr_pty::{PtyOptions, PtySession, TerminalSize};
+use sessionmgr_pty::{ConsoleHost, PtyOptions, PtySession, TerminalSize};
 
 use crate::error::{Error, Result};
 use crate::{catalog, paths, transport};
@@ -218,26 +218,16 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
         }
     };
 
-    // Bound **before** the record below leaves `Created`, and that
-    // ordering is load-bearing. The daemon treats a record past `Created`
-    // as "this session is ready to attach to", so publishing `Running`
-    // first would open a window where a client that attached immediately
-    // found no socket and silently fell back to replaying a transcript
-    // instead of streaming.
-    let listener = transport::Listener::bind(
-        "binding the worker socket",
-        &paths::worker_socket(&root, &id),
-    )?;
-
-    // The worker records **itself**, rather than the daemon recording it.
-    // That is what keeps `state.json` single-writer while a worker is
-    // alive: the daemon writes the record at creation and then never
-    // touches it again until it has established that this process is
-    // dead. See `catalog`'s ownership table.
-    session.worker = Some(worker_ref(&port, me));
-    session.child = Some(worker_ref(&port, child_pid));
-    session.transition_to(SessionStatus::Running)?;
-    catalog::write_session(&root, &session)?;
+    let listener = match publish(&root, &id, &mut session, &port, me, child_pid) {
+        Ok(listener) => listener,
+        Err(e) => {
+            // Nothing records the child as live yet, so nothing else can
+            // ever stop it: end it here, and let the terminal end
+            // whatever it started, before this process exits.
+            abandon(&backend, child_pid).await;
+            return Err(e);
+        }
+    };
 
     // Every agent-backed session gets an `AgentState`, PTY or not --
     // tier 1 (hooks) needs no terminal. Tier 3's `vt100` screen is
@@ -320,7 +310,65 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
     });
 
     worker.shutdown.notified().await;
+    shut_down_terminal(&worker.backend).await;
     Ok(())
+}
+
+/// Binds the worker socket, then records this worker and its child as
+/// `Running`. The session's process has already started.
+fn publish(
+    root: &Path,
+    id: &SessionId,
+    session: &mut sessionmgr_core::Session,
+    port: &SystemProcessPort,
+    me: u32,
+    child_pid: u32,
+) -> Result<transport::Listener> {
+    // Bound **before** the record below leaves `Created`, and that
+    // ordering is load-bearing. The daemon treats a record past `Created`
+    // as "this session is ready to attach to", so publishing `Running`
+    // first would open a window where a client that attached immediately
+    // found no socket and silently fell back to replaying a transcript
+    // instead of streaming.
+    let listener =
+        transport::Listener::bind("binding the worker socket", &paths::worker_socket(root, id))?;
+
+    // The worker records **itself**, rather than the daemon recording it.
+    // That is what keeps `state.json` single-writer while a worker is
+    // alive: the daemon writes the record at creation and then never
+    // touches it again until it has established that this process is
+    // dead. See `catalog`'s ownership table.
+    session.worker = Some(worker_ref(port, me));
+    session.child = Some(worker_ref(port, child_pid));
+    session.transition_to(SessionStatus::Running)?;
+    catalog::write_session(root, session)?;
+    Ok(listener)
+}
+
+/// Ends a started session that could not be published.
+async fn abandon(backend: &Backend, child_pid: u32) {
+    if let Err(e) = sessionmgr_proc::terminate(child_pid) {
+        eprintln!("sessionmgr worker: could not terminate the session's process: {e}");
+    }
+    shut_down_terminal(backend).await;
+}
+
+/// Lets the session's terminal end what the session left attached before
+/// this process exits. Only our own Windows console host needs the time
+/// (see [`PtySession::shut_down`]); it never takes more than 6 s.
+async fn shut_down_terminal(backend: &Backend) {
+    let Backend::Pty(pty) = backend else {
+        return;
+    };
+    let pty = Arc::clone(pty);
+    match rusty_tokio::spawn_blocking(move || pty.shut_down()).await {
+        Ok(true) => {}
+        Ok(false) => eprintln!(
+            "sessionmgr worker: the console host did not shut down in time; \
+             processes the session left attached may still run"
+        ),
+        Err(e) => eprintln!("sessionmgr worker: shutting the terminal down failed: {e}"),
+    }
 }
 
 /// Starts the session's process on a real terminal.
@@ -332,6 +380,9 @@ fn start_pty(program: &str, args: &[String], cwd: &Path) -> std::io::Result<PtyS
         // The creating client usually has no terminal of its own, so this
         // is a placeholder an attaching UI corrects with a resize.
         size: TerminalSize::default(),
+        // Read per session, so a bad value fails this session's start
+        // (recorded as its exit) rather than the daemon's.
+        console_host: ConsoleHost::from_env()?,
     })
 }
 

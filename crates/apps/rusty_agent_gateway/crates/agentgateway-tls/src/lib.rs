@@ -1,10 +1,8 @@
 //! TLS termination, over [`rusty_tls`].
 //!
 //! [`rusty_tls`] is the ecosystem's one TLS implementation — a `rustls` 0.23
-//! wrapper — so the gateway does not roll its own. Its async server adapter is
-//! written against `rusty_tokio`'s I/O traits rather than `tokio`'s, which is
-//! what [`bridge`] exists to reconcile; that adaptation is copy-free, so the
-//! choice costs dependency weight rather than throughput.
+//! wrapper — so the gateway does not roll its own. Its async server adapter
+//! runs on `rusty_tokio`'s sockets, which are the gateway's own.
 //!
 //! # One certificate per hostname
 //!
@@ -15,7 +13,6 @@
 //! ClientHello before the handshake starts and the matching acceptor does the
 //! rest. See [`hello`] for why that is the safe half of the trade.
 
-mod bridge;
 mod hello;
 mod passthrough;
 
@@ -29,19 +26,18 @@ use agentgateway_core::HostnamePattern;
 use rustls_pki_types::pem::{self, PemObject};
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use rusty_tls::TlsAcceptor;
-use tokio::net::TcpStream;
+use rusty_tokio::io::TcpStream;
 
-pub use bridge::{ToRusty, ToTokio};
 pub use passthrough::{Passthrough, PassthroughError};
 
-/// The decrypted stream handed back to `hyper`.
-pub type TlsStream = ToTokio<rusty_tls::AsyncTlsServerStream<ToRusty<TcpStream>>>;
+/// The decrypted stream handed to the HTTP server.
+pub type TlsStream = rusty_tls::AsyncTlsServerStream<TcpStream>;
 
 /// Protocols advertised over ALPN, most preferred first.
 ///
-/// `hyper`'s auto builder serves either, and a client that negotiates `h2`
-/// here gets HTTP/2 rather than falling back — which is the whole reason to
-/// advertise it, since over TLS ALPN is how the version is chosen.
+/// The server speaks either, and a client that negotiates `h2` here gets
+/// HTTP/2 rather than falling back — which is the whole reason to advertise
+/// it, since over TLS ALPN is how the version is chosen.
 const ALPN: [&[u8]; 2] = [b"h2", b"http/1.1"];
 
 /// Select the crypto provider, once per process.
@@ -211,12 +207,12 @@ impl TlsTerminator {
             _ => self.choose(peek_server_name(&stream).await.as_deref()),
         };
 
-        let mut tls = acceptor.accept_async(ToRusty(stream))?;
+        let mut tls = acceptor.accept_async(stream)?;
         // Drive the handshake here rather than letting the first read do it,
         // so a failed handshake is reported as one instead of surfacing as a
         // confusing empty request.
         tls.complete_handshake().await?;
-        Ok(ToTokio(tls))
+        Ok(tls)
     }
 
     /// The only certificate, when there is one to be had.
@@ -274,7 +270,7 @@ impl TlsTerminator {
 /// sends the first half and stops would otherwise be waited on forever. The
 /// budget is the one this spends looking, not a handshake timeout.
 pub(crate) async fn peek_server_name(stream: &TcpStream) -> Option<String> {
-    tokio::time::timeout(PEEK_BUDGET, async {
+    rusty_tokio::time::timeout(PEEK_BUDGET, async {
         let mut buffer = vec![0u8; hello::MAX_HELLO];
         let mut filled = 0;
 
@@ -297,7 +293,7 @@ pub(crate) async fn peek_server_name(stream: &TcpStream) -> Option<String> {
             // No new bytes. `peek` is readable-triggered and the buffered
             // bytes keep it readable, so polling again immediately would spin
             // rather than wait -- hence a pause between looks.
-            tokio::time::sleep(PEEK_POLL).await;
+            rusty_tokio::time::sleep(PEEK_POLL).await;
         }
     })
     .await

@@ -13,8 +13,9 @@
 //! size, idle time and connection count keep a slow or hostile client
 //! from holding resources.
 //!
-//! Paths outside `/api` and `/health` serve the built web UI from a
-//! directory when one is set ([`Server::with_web_dir`]), with a strict
+//! Paths outside `/api`, `/health` and any [`Server::with_handler_paths`]
+//! serve the built web UI from a directory when one is set
+//! ([`Server::with_web_dir`]), with a strict
 //! `Content-Security-Policy`; see [`static_files`] for the path rules.
 
 pub mod static_files;
@@ -270,6 +271,8 @@ struct App {
     handler: Box<dyn Dispatch>,
     /// Built web UI to serve at `/`, if any.
     web_dir: Option<PathBuf>,
+    /// Paths a `GET` of reaches the handler even with a web UI set.
+    handler_paths: Vec<String>,
 }
 
 /// A bound server. `H` is the handler type for a server made with
@@ -360,6 +363,7 @@ impl<H> Server<H> {
             app: Arc::new(App {
                 handler,
                 web_dir: None,
+                handler_paths: Vec::new(),
             }),
             stop: Arc::new(AtomicBool::new(false)),
             busy: Arc::new(AtomicUsize::new(0)),
@@ -368,13 +372,26 @@ impl<H> Server<H> {
         })
     }
 
-    /// Serve the built web UI in `dir` for every `GET` outside `/api` and
-    /// `/health`.
+    /// Serve the built web UI in `dir` for every `GET` outside `/api`,
+    /// `/health` and the [`Server::with_handler_paths`].
     #[must_use]
     pub fn with_web_dir(mut self, dir: PathBuf) -> Self {
         // No other handle exists before `run`, so this never clones.
         if let Some(app) = Arc::get_mut(&mut self.app) {
             app.web_dir = Some(dir);
+        }
+        self
+    }
+
+    /// Send a `GET` of any of `paths` (exact, without the query) to the
+    /// handler rather than the web UI: an endpoint outside `/api`, such as
+    /// OAuth's `/authorize` or `/.well-known/...` metadata.
+    #[must_use]
+    pub fn with_handler_paths(mut self, paths: &[&str]) -> Self {
+        // No other handle exists before `run`, so this never clones.
+        if let Some(app) = Arc::get_mut(&mut self.app) {
+            app.handler_paths
+                .extend(paths.iter().map(|path| (*path).to_owned()));
         }
         self
     }
@@ -605,6 +622,9 @@ fn static_asset(app: &App, method: &Method, target: &str) -> Option<static_files
     if path == "/health" || path == "/api" || path.starts_with("/api/") {
         return None;
     }
+    if app.handler_paths.iter().any(|p| p == path) {
+        return None;
+    }
     static_files::load(root, path)
 }
 
@@ -743,7 +763,9 @@ mod tests {
     }
 
     fn start(web_dir: Option<PathBuf>) -> (SocketAddr, ShutdownHandle) {
-        let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), Echo).unwrap();
+        let mut server = Server::bind("127.0.0.1:0".parse().unwrap(), Echo)
+            .unwrap()
+            .with_handler_paths(&["/.well-known/oauth-authorization-server"]);
         if let Some(dir) = web_dir {
             server = server.with_web_dir(dir);
         }
@@ -795,6 +817,12 @@ mod tests {
             assert!(page.contains("Content-Security-Policy"), "{path}");
             assert!(page.ends_with("<html>ui</html>"), "{path}");
         }
+        // A handler path is the handler's, even for a GET; its query is ignored.
+        let claimed = exchange(
+            addr,
+            "GET /.well-known/oauth-authorization-server?x=1 HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+        );
+        assert!(claimed.contains(r#""method":"Get""#), "{claimed}");
         // A non-GET outside the API still reaches the handler.
         let post = exchange(
             addr,

@@ -1,7 +1,7 @@
 // Browser check of the settings view, against a board started with a settings directory:
 //
 //   D=$(mktemp -d); rusty_mill_board --settings-dir $D --http 127.0.0.1:8798 2>$D/log &
-//   TOKEN=$(grep -o 'shown once: .*' $D/log | cut -d' ' -f3)
+//   TOKEN=$(cat $D/first-admin.token)
 //   node tests/ui/settings.mjs "$(npm root -g)/playwright" http://127.0.0.1:8798 "$TOKEN"
 import { createRequire } from "node:module";
 const { chromium } = createRequire(import.meta.url)(process.argv[2]);
@@ -18,7 +18,8 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? 
 const page = await browser.newPage({ viewport: { width: 1300, height: 900 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
-page.on("dialog", (d) => d.accept());
+let promptAnswer;
+page.on("dialog", (d) => d.accept(d.type() === "prompt" ? promptAnswer : undefined));
 await page.goto(`${BASE}/#token=${TOKEN}`);
 await page.waitForSelector("#gear");
 await page.waitForFunction(() => document.querySelector("#actor").value);
@@ -65,20 +66,81 @@ const listed = (await api(rotated, "board_projects")).body.repos;
 check(listed.rusty_mill?.rocket_league?.[0] === "crates/apps/rocket_league", "a repository with a project is saved");
 await dialog.getByRole("button", { name: "Close" }).click();
 await page.locator("#nav1 .item", { hasText: "rusty_mill" }).waitFor({ timeout: 3000 }).catch(() => {});
-check((await page.locator("#nav1 .item", { hasText: "rusty_mill" }).count()) === 1, "and appears in the side panel at once");
+check((await page.locator("#nav1 .item", { hasText: "rusty_mill" }).count()) >= 1, "and appears in the side panel at once");
+
+// A credential limited to some projects sees each repository with just those: a repository's one visible
+// project that is not its own stays in the Projects list, and cards added under it land there.
+check((await api(TOKEN, "settings_projects_set", { repos: { rusty_mill: { rocket_league: ["crates/apps/rocket_league"] }, super_board: { skills: ["skills"] } } })).status === 200, "(setup) two repositories");
+const scoped = await api(TOKEN, "settings_agent_add", { agent: { name: "scoped", role: "builder", projects: ["rocket_league", "skills"] } });
+check(scoped.status === 200, "(setup) an agent limited to rocket_league and skills");
+const limited = await browser.newPage({ viewport: { width: 1300, height: 900 } });
+limited.on("pageerror", (e) => errors.push(String(e)));
+await limited.goto(`${BASE}/#token=${scoped.body.token}`);
+await limited.waitForFunction(() => document.querySelector("#actor").value === "scoped" && document.querySelectorAll("#nav1 .item").length > 0);
+const sideItems = async () => (await limited.locator("#nav1 .item").allInnerTexts()).map((t) => t.split("\n")[0].trim());
+const sideItem = (name) => limited.locator("#nav1 .item").filter({ hasText: new RegExp(`^${name}\\d`) });
+check(JSON.stringify(await sideItems()) === JSON.stringify(["All repositories", "rusty_mill", "super_board", "rocket_league", "skills"]), `a limited agent sees its projects listed (${await sideItems()})`);
+await sideItem("super_board").click();
+check(JSON.stringify((await sideItems()).slice(3)) === '["skills"]', "choosing a repository keeps its one visible project");
+await sideItem("skills").click();
+await limited.fill("#title", "scoped card");
+await limited.click("#add");
+await limited.locator(".card", { hasText: "scoped card" }).waitFor();
+check((await api(scoped.body.token, "board_list", { project: "skills" })).body.cards.some((c) => c.title === "scoped card"), "and a card added under it lands in that project");
+await limited.close();
 
 // Roles.
 await page.click("#gear");
 await dialog.getByRole("button", { name: "Roles" }).click();
-await dialog.locator("input[placeholder^='new role']").fill("tester");
+await dialog.locator("input[placeholder^='new role']").fill("checker");
 await dialog.getByRole("button", { name: "Add role" }).click();
-await dialog.locator("tr", { hasText: "tester" }).waitFor();
-check((await api(rotated, "board_roles")).body.roles.tester !== undefined, "a role is added");
+await dialog.locator("tr", { hasText: "checker" }).waitFor();
+check((await api(rotated, "board_roles")).body.roles.checker !== undefined, "a role is added");
 await page.waitForTimeout(200);
-await dialog.locator("tr", { hasText: "tester" }).locator("input[type=checkbox]").nth(2).check();
+await dialog.locator("tr", { hasText: "checker" }).locator("input[type=checkbox]").nth(4).check();
 await dialog.getByRole("button", { name: "Save roles" }).click();
 await page.waitForTimeout(400);
-check(JSON.stringify((await api(rotated, "board_roles")).body.roles.tester) === '["qa"]', "its capabilities are saved");
+check(JSON.stringify((await api(rotated, "board_roles")).body.roles.checker) === '["test"]', "its capabilities are saved");
+check((await dialog.innerText()).includes("write tests first"), "each capability is explained");
+
+// Rules: turning movement rules off and on is saved at once.
+await dialog.getByRole("button", { name: "Rules" }).click();
+const enforce = dialog.getByLabel("Enforce card movement rules");
+check(await enforce.isChecked(), "movement rules start on");
+await enforce.uncheck();
+await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("except out of Done"));
+check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "unticking turns them off");
+await dialog.getByLabel("Enforce card movement rules").check();
+await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("along the Columns tab's moves"));
+check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "ticking turns them back on");
+// A failed save, either way, shows the error and puts the checkbox and its note back to what the server holds.
+const rulesShown = (on, note) => page.waitForFunction(([on, note]) => {
+  const box = [...document.querySelectorAll("#settings input[type=checkbox]")].find((b) => b.parentElement.textContent.includes("Enforce card movement rules"));
+  return box && box.checked === on && !box.disabled && document.querySelector("#settings").innerText.includes(note);
+}, [on, note]);
+const refuse = () => page.route("**/api/settings_rules_set", (r) => r.fulfill({ status: 422, contentType: "application/json", body: JSON.stringify({ error: "disk full" }) }));
+await refuse();
+await dialog.getByLabel("Enforce card movement rules").uncheck();
+await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("disk full"));
+await rulesShown(true, "along the Columns tab's moves");
+check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "a failed turn-off leaves the checkbox, its note and the server on");
+await page.unroute("**/api/settings_rules_set");
+await dialog.getByLabel("Enforce card movement rules").uncheck();
+await rulesShown(false, "except out of Done");
+await refuse();
+await dialog.getByLabel("Enforce card movement rules").check();
+await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("disk full"));
+await rulesShown(false, "except out of Done");
+check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "a failed turn-on leaves the checkbox, its note and the server off");
+await page.unroute("**/api/settings_rules_set");
+await dialog.getByLabel("Enforce card movement rules").check();
+await rulesShown(true, "along the Columns tab's moves");
+
+// Apps and Server: read-only views of sign-in and how the board was started.
+await dialog.getByRole("button", { name: "Apps" }).click();
+check((await dialog.innerText()).includes("OAuth sign-in is off"), "the Apps tab says when sign-in is off");
+await dialog.getByRole("button", { name: "Server" }).click();
+check((await dialog.innerText()).includes("roles.json"), "the Server tab shows the settings files");
 
 // GitHub: a bad repository is refused; the token is not shown again.
 await dialog.getByRole("button", { name: "GitHub" }).click();
@@ -106,13 +168,31 @@ check(adminToken !== TOKEN && adminToken.length === 48, "rotating your own token
 check((await api(TOKEN, "board_whoami")).status === 401, "the old admin token stops working");
 check((await api(adminToken, "settings_get")).status === 200, "the new admin token works");
 check((await dialog.locator("table tr").count()) >= 3, "the settings view refreshed with the new token");
-check((await page.evaluate(() => location.hash)).includes(adminToken), "and a reload would keep working");
+check((await page.evaluate(() => localStorage.getItem("token"))) === adminToken, "and a reload would keep working");
 const before = await page.locator(".card").count();
 await dialog.getByRole("button", { name: "Close" }).click();
 await page.fill("#title", "after rotation");
 await page.click("#add");
 await page.waitForFunction((n) => document.querySelectorAll(".card").length === n + 1, before);
 check(true, "card calls succeed after self-rotation");
+
+// Renaming your own role: the page follows without a reload, and settings and card calls keep working.
+await page.click("#gear");
+await page.waitForSelector("#settings[open]");
+await dialog.getByRole("button", { name: "Roles" }).click();
+promptAnswer = "owner";
+await dialog.locator("tr", { has: page.locator("td", { hasText: /^human$/ }) }).getByRole("button", { name: "Rename" }).click();
+await dialog.locator("td", { hasText: /^owner$/ }).waitFor();
+check((await page.inputValue("#role")) === "owner", "the header follows the renamed role");
+check((await api(adminToken, "board_whoami")).body.role === "owner", "renaming your own role moves you with it");
+check((await dialog.locator(".err").first().innerText()) === "", "and the settings view refreshes without an error");
+check((await dialog.locator("td", { hasText: /^human$/ }).count()) === 0, "and the old name is gone");
+await dialog.getByRole("button", { name: "Close" }).click();
+const n = await page.locator(".card").count();
+await page.fill("#title", "after renaming my role");
+await page.click("#add");
+await page.waitForFunction((k) => document.querySelectorAll(".card").length === k + 1, n);
+check(true, "card calls succeed after renaming your own role");
 
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);
 await browser.close();

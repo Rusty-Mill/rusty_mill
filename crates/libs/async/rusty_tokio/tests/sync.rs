@@ -596,6 +596,20 @@ fn semaphore_const_new_is_usable_in_a_static() {
     });
 }
 
+/// #1305 follow-up: `const_new` makes `new`'s `MAX_PERMITS` assertion, as
+/// tokio's does, instead of accepting a count every later permit drop
+/// would panic on.
+#[test]
+fn semaphore_const_new_past_max_permits_panics() {
+    let over = Semaphore::MAX_PERMITS + 1;
+    let result = std::panic::catch_unwind(|| Semaphore::const_new(over));
+    assert!(result.is_err(), "const_new above MAX_PERMITS must panic");
+    assert_eq!(
+        Semaphore::const_new(Semaphore::MAX_PERMITS).available_permits(),
+        Semaphore::MAX_PERMITS
+    );
+}
+
 #[test]
 fn semaphore_max_permits_is_usize_max_shifted_by_three() {
     assert_eq!(Semaphore::MAX_PERMITS, usize::MAX >> 3);
@@ -605,6 +619,160 @@ fn semaphore_max_permits_is_usize_max_shifted_by_three() {
 #[should_panic(expected = "MAX_PERMITS")]
 fn semaphore_new_panics_past_max_permits() {
     let _ = Semaphore::new(Semaphore::MAX_PERMITS + 1);
+}
+
+/// #1305: runs `f`, which must panic with a message containing `expected`
+/// (tokio's wording); a different panic (a debug build's `attempt to add
+/// with overflow`) or none (a release build's wrap) fails.
+fn assert_overflow_panic(expected: &str, f: impl FnOnce()) {
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+        .expect_err("adding past MAX_PERMITS must panic");
+    let msg = err
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| err.downcast_ref::<&str>().copied())
+        .unwrap_or_default();
+    assert!(msg.contains(expected), "unexpected panic message: {msg:?}");
+}
+
+/// #1305: the issue's repro. Base: a debug build panics with
+/// `attempt to add with overflow` under the state lock; a release build
+/// wraps the count to 0. tokio 1.53.3 panics with this message.
+#[test]
+fn semaphore_add_permits_past_usize_panics_and_leaves_the_count_unchanged() {
+    let semaphore = Semaphore::new(1);
+    assert_overflow_panic("cannot add more than MAX_PERMITS permits", || {
+        semaphore.add_permits(usize::MAX)
+    });
+    assert_eq!(semaphore.available_permits(), 1);
+    // Still usable afterwards.
+    semaphore.add_permits(1);
+    assert!(semaphore.try_acquire_many(2).is_ok());
+}
+
+/// #1305: tokio's bound is `MAX_PERMITS`, not `usize::MAX`: the count
+/// may reach it exactly, never pass it.
+#[test]
+fn semaphore_add_permits_reaches_max_permits_and_never_passes_it() {
+    let semaphore = Semaphore::new(0);
+    semaphore.add_permits(Semaphore::MAX_PERMITS);
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+    assert_overflow_panic(
+        "number of added permits (1) would overflow MAX_PERMITS",
+        || semaphore.add_permits(1),
+    );
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+}
+
+/// #1305: as in tokio, the bound applies to the count left once queued
+/// waiters are granted, so permits a waiter takes count against nothing.
+#[test]
+fn semaphore_add_permits_bound_applies_after_queued_waiters_are_granted() {
+    let semaphore = Semaphore::new(0);
+    let mut waiter = Box::pin(semaphore.acquire_many(5));
+    assert!(poll_once(waiter.as_mut(), std::task::Waker::noop()).is_pending());
+    semaphore.add_permits(Semaphore::MAX_PERMITS + 5);
+    let std::task::Poll::Ready(Ok(permit)) = poll_once(waiter.as_mut(), std::task::Waker::noop())
+    else {
+        panic!("the waiter must have been granted");
+    };
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+    // Make room, so returning the permit stays within the bound.
+    assert_eq!(semaphore.forget_permits(5), 5);
+    drop(permit);
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+}
+
+/// #1305: a rejected addition grants no queued waiter, even one the
+/// added permits would have covered.
+#[test]
+fn semaphore_rejected_add_permits_leaves_queued_waiters_queued() {
+    let semaphore = Semaphore::new(0);
+    let mut waiter = Box::pin(semaphore.acquire_many(5));
+    assert!(poll_once(waiter.as_mut(), std::task::Waker::noop()).is_pending());
+    assert_overflow_panic("cannot add more than MAX_PERMITS permits", || {
+        semaphore.add_permits(usize::MAX)
+    });
+    assert_eq!(semaphore.available_permits(), 0);
+    assert!(poll_once(waiter.as_mut(), std::task::Waker::noop()).is_pending());
+    // The waiter is still queued, and a later in-range release grants it.
+    semaphore.add_permits(5);
+    assert!(matches!(
+        poll_once(waiter.as_mut(), std::task::Waker::noop()),
+        std::task::Poll::Ready(Ok(_))
+    ));
+}
+
+/// #1305: the bound is checked in the same critical section as the
+/// update, so two releases that each fit alone but not together cannot
+/// both pass it. Four threads behind a barrier each add just over half
+/// of `MAX_PERMITS`: exactly one may succeed (more than two contenders
+/// make a release build hit the window far more often). Not comparable with the base,
+/// which has no bound at all; it guards against checking under one lock
+/// and updating under another (a mutant that does so goes red here).
+/// From the #1305 review's probe.
+#[test]
+fn semaphore_concurrent_add_permits_cannot_both_pass_the_bound() {
+    let half = Semaphore::MAX_PERMITS / 2 + 1;
+    const THREADS: usize = 4;
+    for _ in 0..2000 {
+        let semaphore = Arc::new(Semaphore::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let (semaphore, barrier) = (semaphore.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        semaphore.add_permits(half)
+                    }))
+                    .is_ok()
+                })
+            })
+            .collect();
+        let passed = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|&ok| ok)
+            .count();
+        assert_eq!(passed, 1, "exactly one release may pass the bound");
+        assert_eq!(semaphore.available_permits(), half);
+    }
+}
+
+/// #1305: a dropped permit returns its permits through the same check,
+/// as tokio's does. Base: the count silently passes `MAX_PERMITS`.
+#[test]
+fn semaphore_permit_drop_past_max_permits_panics_and_leaves_the_count_unchanged() {
+    let semaphore = Arc::new(Semaphore::new(2));
+    let borrowed = semaphore.try_acquire().unwrap();
+    let owned = semaphore.clone().try_acquire_owned().unwrap();
+    semaphore.add_permits(Semaphore::MAX_PERMITS);
+    assert_overflow_panic(
+        "number of added permits (1) would overflow MAX_PERMITS",
+        || drop(borrowed),
+    );
+    assert_overflow_panic(
+        "number of added permits (1) would overflow MAX_PERMITS",
+        || drop(owned),
+    );
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
+}
+
+/// #1305: an `acquire` future dropped after it was granted, but before
+/// it observed the grant, hands its permits back through the same check.
+#[test]
+fn semaphore_granted_acquire_dropped_past_max_permits_panics_and_leaves_the_count_unchanged() {
+    let semaphore = Semaphore::new(0);
+    let mut waiter = Box::pin(semaphore.acquire());
+    assert!(poll_once(waiter.as_mut(), std::task::Waker::noop()).is_pending());
+    semaphore.add_permits(1); // granted, not yet observed
+    semaphore.add_permits(Semaphore::MAX_PERMITS);
+    assert_overflow_panic(
+        "number of added permits (1) would overflow MAX_PERMITS",
+        || drop(waiter),
+    );
+    assert_eq!(semaphore.available_permits(), Semaphore::MAX_PERMITS);
 }
 
 #[test]
@@ -2230,4 +2398,236 @@ fn watch_wait_for_inspects_each_version_once() {
             .is_err());
         assert_eq!(calls, 1, "the pre-sent version is inspected once");
     });
+}
+
+// #1303: `Notify` parity with tokio when a notified waiter is dropped. Each
+// case runs the same hand-polled call sequence on `tokio::sync::Notify` (the
+// contract) and on ours, and asserts the same results and wake counts.
+
+/// A waker that counts its wakes.
+struct WakeCount(AtomicUsize);
+
+impl std::task::Wake for WakeCount {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn wake_count() -> (Arc<WakeCount>, std::task::Waker) {
+    let count = Arc::new(WakeCount(AtomicUsize::new(0)));
+    (count.clone(), std::task::Waker::from(count))
+}
+
+fn is_ready<F: std::future::Future>(fut: std::pin::Pin<&mut F>) -> bool {
+    poll_once(fut, std::task::Waker::noop()).is_ready()
+}
+
+/// `enable` takes the banked permit, the waiter is dropped: is a fresh
+/// `notified()` ready?
+macro_rules! enable_permit_then_drop {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        notify.notify_one();
+        {
+            let enabled = std::pin::pin!(notify.notified());
+            assert!(enabled.enable(), "enable takes the permit");
+        }
+        let ready = is_ready(std::pin::pin!(notify.notified()));
+        ready
+    }};
+}
+
+#[test]
+fn notify_permit_taken_by_enable_stays_taken_when_the_waiter_drops() {
+    assert!(!enable_permit_then_drop!(tokio::sync::Notify), "tokio");
+    assert!(!enable_permit_then_drop!(Notify), "rusty_tokio");
+}
+
+/// `notify_one` reaches the first of two waiters, `enable` then reports it
+/// and the waiter is dropped: does the second waiter get the wakeup?
+macro_rules! enable_wakeup_then_drop {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        let mut first = Box::pin(notify.notified());
+        let mut second = Box::pin(notify.notified());
+        assert!(!first.as_mut().enable());
+        assert!(!second.as_mut().enable());
+        notify.notify_one();
+        assert!(first.as_mut().enable(), "enable reports the wakeup");
+        drop(first);
+        is_ready(second.as_mut())
+    }};
+}
+
+#[test]
+fn notify_wakeup_reported_by_enable_is_not_passed_on_when_the_waiter_drops() {
+    assert!(!enable_wakeup_then_drop!(tokio::sync::Notify), "tokio");
+    assert!(!enable_wakeup_then_drop!(Notify), "rusty_tokio");
+}
+
+/// Waiters a, b, c are queued, `notify_last` fires c, c is dropped
+/// unresolved: (a woken, b woken, a ready, b ready).
+macro_rules! notify_last_then_drop {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        let (a_wakes, a_waker) = wake_count();
+        let (b_wakes, b_waker) = wake_count();
+        let mut a = Box::pin(notify.notified());
+        let mut b = Box::pin(notify.notified());
+        let mut c = Box::pin(notify.notified());
+        assert!(poll_once(a.as_mut(), &a_waker).is_pending());
+        assert!(poll_once(b.as_mut(), &b_waker).is_pending());
+        assert!(!is_ready(c.as_mut()));
+        notify.notify_last();
+        drop(c);
+        (
+            a_wakes.0.load(Ordering::SeqCst),
+            b_wakes.0.load(Ordering::SeqCst),
+            is_ready(a.as_mut()),
+            is_ready(b.as_mut()),
+        )
+    }};
+}
+
+#[test]
+fn notify_last_reaching_a_dropped_waiter_passes_to_the_next_newest() {
+    assert_eq!(
+        notify_last_then_drop!(tokio::sync::Notify),
+        (0, 1, false, true),
+        "tokio"
+    );
+    assert_eq!(
+        notify_last_then_drop!(Notify),
+        (0, 1, false, true),
+        "rusty_tokio"
+    );
+}
+
+/// A waiter takes a permit and returns `Ready`, a second permit is banked
+/// and the waiter is polled again: is a fresh `notified()` still ready?
+macro_rules! repoll_after_permit {
+    ($notify:ty) => {{
+        let notify = <$notify>::new();
+        let mut waiter = Box::pin(notify.notified());
+        notify.notify_one();
+        assert!(is_ready(waiter.as_mut()));
+        notify.notify_one();
+        assert!(is_ready(waiter.as_mut()), "stays ready");
+        let ready = is_ready(std::pin::pin!(notify.notified()));
+        ready
+    }};
+}
+
+#[test]
+fn notify_ready_waiter_repolled_leaves_a_banked_permit() {
+    assert!(repoll_after_permit!(tokio::sync::Notify), "tokio");
+    assert!(repoll_after_permit!(Notify), "rusty_tokio");
+}
+
+/// One thread fires `notify_one` (or `notify_last`) while another drops the
+/// waiter it targets, `ROUNDS` times, so both orders and the window between
+/// them occur. Whatever the order, exactly one wakeup reaches the expected
+/// survivor (`b`), once, and none is left banked.
+macro_rules! notify_races_drop {
+    ($notify:ty, $last:expr) => {{
+        const ROUNDS: usize = 2_000;
+        for round in 0..ROUNDS {
+            let notify = <$notify>::new();
+            let barrier = std::sync::Barrier::new(2);
+            let (a_wakes, a_waker) = wake_count();
+            let (b_wakes, b_waker) = wake_count();
+            let mut a = Box::pin(notify.notified());
+            let mut b = Box::pin(notify.notified());
+            let mut target = Box::pin(notify.notified());
+            // `notify_one` takes the oldest and `notify_last` the newest, so
+            // the queue is `target, b, a` or `a, b, target`: `b`, in the
+            // middle, is next in line either way.
+            if $last {
+                assert!(poll_once(a.as_mut(), &a_waker).is_pending());
+                assert!(poll_once(b.as_mut(), &b_waker).is_pending());
+                assert!(!is_ready(target.as_mut()));
+            } else {
+                assert!(!is_ready(target.as_mut()));
+                assert!(poll_once(b.as_mut(), &b_waker).is_pending());
+                assert!(poll_once(a.as_mut(), &a_waker).is_pending());
+            }
+            std::thread::scope(|s| {
+                s.spawn(|| {
+                    barrier.wait();
+                    if $last {
+                        notify.notify_last();
+                    } else {
+                        notify.notify_one();
+                    }
+                });
+                barrier.wait();
+                drop(target);
+            });
+            let outcome = (
+                a_wakes.0.load(Ordering::SeqCst),
+                b_wakes.0.load(Ordering::SeqCst),
+                is_ready(a.as_mut()),
+                is_ready(b.as_mut()),
+                is_ready(std::pin::pin!(notify.notified())),
+            );
+            assert_eq!(outcome, (0, 1, false, true, false), "round {round}");
+        }
+    }};
+}
+
+#[test]
+fn notify_one_racing_a_drop_of_its_target_reaches_the_next_waiter_once() {
+    notify_races_drop!(tokio::sync::Notify, false);
+    notify_races_drop!(Notify, false);
+}
+
+#[test]
+fn notify_last_racing_a_drop_of_its_target_reaches_the_next_newest_once() {
+    notify_races_drop!(tokio::sync::Notify, true);
+    notify_races_drop!(Notify, true);
+}
+
+/// #1304: `wait_for` runs its predicate under the channel's lock, so a
+/// predicate that reached for that lock again (`receiver_count`, cloning or
+/// dropping a `Receiver`) re-locked a std mutex on its own thread and hung.
+/// tokio keeps the receiver count in an atomic outside the lock, so the same
+/// code works there and reports the same counts. Hand-polled on its own thread
+/// so a deadlock fails the bounded wait below instead of hanging the suite.
+#[test]
+fn watch_wait_for_predicate_may_count_and_clone_receivers() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (tx, mut rx) = rusty_tokio::sync::watch::channel(0);
+        let other = rx.clone();
+        let mut counts = Vec::new();
+        let value = {
+            let predicate = |v: &i32| {
+                counts.push(tx.receiver_count());
+                let clone = other.clone();
+                counts.push(tx.receiver_count());
+                drop(clone);
+                *v == 1
+            };
+            let mut fut = std::pin::pin!(rx.wait_for(predicate));
+            let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+            let mut poll = || std::future::Future::poll(fut.as_mut(), &mut cx);
+            assert!(poll().is_pending(), "0 does not match");
+            tx.send(1).unwrap();
+            match poll() {
+                std::task::Poll::Ready(Ok(value)) => *value,
+                _ => panic!("the sent 1 matches"),
+            }
+        };
+        assert_eq!(tx.receiver_count(), 2, "the predicate's clones dropped");
+        done_tx.send((value, counts)).unwrap();
+    });
+    let (value, counts) = done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("wait_for's predicate deadlocked on the channel lock");
+    assert_eq!(value, 1);
+    assert_eq!(
+        counts,
+        [2, 3, 2, 3],
+        "one call per version, as tokio counts"
+    );
 }

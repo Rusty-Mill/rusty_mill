@@ -10,6 +10,9 @@ pub struct TaskView {
     pub roster: Vec<Role>,
     pub principals: Vec<Principal>,
     pub proposal: Option<ArtId>,
+    /// The snapshot of `proposal` when it is a co-edited version.
+    #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal_snapshot: Option<Sha256>,
     pub request: Option<Message>,
     pub receipt: Option<(ArtId, String)>,
     pub cancelled: Option<String>,
@@ -31,6 +34,10 @@ impl TaskView {
             roster: st.roster.roles().to_vec(),
             principals,
             proposal: st.gate_request.map(|(_, art)| art),
+            proposal_snapshot: st
+                .gate_request
+                .and_then(|(_, art)| st.versions.get(&art))
+                .map(|v| v.snapshot),
             request: st
                 .pending_request
                 .as_ref()

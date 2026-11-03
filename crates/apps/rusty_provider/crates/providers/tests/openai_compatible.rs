@@ -12,6 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
 async fn chat_success_parses_response_and_sends_correct_request() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -60,6 +61,7 @@ async fn chat_success_parses_response_and_sends_correct_request() {
 
 #[tokio::test]
 async fn chat_uses_the_byok_override_key_instead_of_the_configured_one() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -92,6 +94,7 @@ async fn chat_uses_the_byok_override_key_instead_of_the_configured_one() {
 
 #[tokio::test]
 async fn chat_parses_tool_calls_in_response() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -139,6 +142,7 @@ async fn chat_parses_tool_calls_in_response() {
 
 #[tokio::test]
 async fn chat_stream_parses_delta_chunks_and_stops_at_done() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
@@ -179,6 +183,7 @@ async fn chat_stream_parses_delta_chunks_and_stops_at_done() {
 
 #[tokio::test]
 async fn chat_stream_ignores_unrecognized_extra_fields_in_a_frame() {
+    common::install_fallback();
     // Relies on serde's default "unknown fields are ignored" behavior for
     // WireChunk/WireChunkChoice/WireDelta, unlike anthropic.rs's explicit
     // `_ => None` dispatch on an unrecognized event `"type"` -- there's no
@@ -219,6 +224,7 @@ async fn chat_stream_ignores_unrecognized_extra_fields_in_a_frame() {
 
 #[tokio::test]
 async fn chat_stream_yields_a_decode_error_for_malformed_event_json() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
@@ -254,6 +260,7 @@ async fn chat_stream_yields_a_decode_error_for_malformed_event_json() {
 
 #[tokio::test]
 async fn chat_stream_yields_no_chunks_for_an_immediately_done_stream() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -276,6 +283,7 @@ async fn chat_stream_yields_no_chunks_for_an_immediately_done_stream() {
 
 #[tokio::test]
 async fn chat_maps_429_to_retryable_rate_limited() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -303,6 +311,7 @@ async fn chat_maps_429_to_retryable_rate_limited() {
 
 #[tokio::test]
 async fn chat_forwards_tools_and_tool_choice_verbatim_in_request_body() {
+    common::install_fallback();
     // Unlike Anthropic/Gemini, this adapter does no translation -- "tools"
     // and "tool_choice" are the OpenAI wire shape already, so they should
     // pass through byte-for-byte.
@@ -351,6 +360,7 @@ async fn chat_forwards_tools_and_tool_choice_verbatim_in_request_body() {
 
 #[tokio::test]
 async fn chat_forwards_json_schema_response_format_verbatim_in_request_body() {
+    common::install_fallback();
     // Matches the OpenAI wire shape already, so this adapter does no
     // translation -- straight passthrough.
     let server = MockServer::start().await;
@@ -400,6 +410,7 @@ async fn chat_forwards_json_schema_response_format_verbatim_in_request_body() {
 
 #[tokio::test]
 async fn chat_forwards_json_object_response_format_verbatim_in_request_body() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -432,6 +443,7 @@ async fn chat_forwards_json_object_response_format_verbatim_in_request_body() {
 
 #[tokio::test]
 async fn chat_forwards_all_sampling_params_verbatim_in_request_body() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -471,6 +483,7 @@ async fn chat_forwards_all_sampling_params_verbatim_in_request_body() {
 
 #[tokio::test]
 async fn chat_forwards_logprobs_request_fields_and_parses_the_response() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -526,6 +539,7 @@ async fn chat_forwards_logprobs_request_fields_and_parses_the_response() {
 
 #[tokio::test]
 async fn chat_forwards_image_content_verbatim_in_request_body() {
+    common::install_fallback();
     // Since this adapter's WireRequest holds `&[ChatMessage]` directly,
     // MessageContent's untagged serialization should pass a parts array
     // through byte-for-byte with no translation.
@@ -566,6 +580,7 @@ async fn chat_forwards_image_content_verbatim_in_request_body() {
 
 #[tokio::test]
 async fn chat_forwards_file_content_verbatim_in_request_body() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -603,6 +618,7 @@ async fn chat_forwards_file_content_verbatim_in_request_body() {
 
 #[tokio::test]
 async fn chat_forwards_remote_file_content_verbatim_in_request_body() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -640,6 +656,7 @@ async fn chat_forwards_remote_file_content_verbatim_in_request_body() {
 
 #[tokio::test]
 async fn chat_forwards_audio_content_verbatim_in_request_body() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -677,6 +694,7 @@ async fn chat_forwards_audio_content_verbatim_in_request_body() {
 
 #[tokio::test]
 async fn chat_stream_parses_tool_call_deltas() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_123\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
@@ -737,6 +755,7 @@ async fn chat_stream_parses_tool_call_deltas() {
 
 #[tokio::test]
 async fn chat_maps_400_to_non_retryable_invalid_request() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -759,6 +778,7 @@ async fn chat_maps_400_to_non_retryable_invalid_request() {
 
 #[tokio::test]
 async fn chat_maps_401_and_403_to_non_retryable_auth_errors() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -785,6 +805,7 @@ async fn chat_maps_401_and_403_to_non_retryable_auth_errors() {
 
 #[tokio::test]
 async fn chat_maps_404_and_422_to_non_retryable_invalid_request() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -808,6 +829,7 @@ async fn chat_maps_404_and_422_to_non_retryable_invalid_request() {
 
 #[tokio::test]
 async fn chat_maps_an_unclassified_5xx_to_a_retryable_upstream_error() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -837,6 +859,7 @@ async fn chat_maps_an_unclassified_5xx_to_a_retryable_upstream_error() {
 
 #[tokio::test]
 async fn chat_falls_back_to_the_raw_body_when_the_error_response_is_not_json() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -863,6 +886,7 @@ async fn chat_falls_back_to_the_raw_body_when_the_error_response_is_not_json() {
 
 #[tokio::test]
 async fn chat_sends_reasoning_effort_and_parses_reasoning_content() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -905,6 +929,7 @@ async fn chat_sends_reasoning_effort_and_parses_reasoning_content() {
 
 #[tokio::test]
 async fn chat_sends_an_inbound_assistant_messages_reasoning_as_reasoning_content_on_the_wire() {
+    common::install_fallback();
     // A prior assistant turn's `ChatMessage.reasoning` -- whether the
     // client echoed it back itself, or `Router::maybe_apply_reasoning_replay`
     // re-injected it -- must reach the wire under the `reasoning_content`
@@ -979,6 +1004,7 @@ async fn chat_sends_an_inbound_assistant_messages_reasoning_as_reasoning_content
 
 #[tokio::test]
 async fn chat_omits_reasoning_content_when_the_client_asked_to_exclude_it() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -1017,6 +1043,7 @@ async fn chat_omits_reasoning_content_when_the_client_asked_to_exclude_it() {
 
 #[tokio::test]
 async fn chat_stream_parses_reasoning_content_deltas() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n",
@@ -1069,6 +1096,7 @@ async fn chat_stream_parses_reasoning_content_deltas() {
 
 #[tokio::test]
 async fn chat_parses_prompt_tokens_details_cached_tokens_into_usage() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -1105,6 +1133,7 @@ async fn chat_parses_prompt_tokens_details_cached_tokens_into_usage() {
 
 #[tokio::test]
 async fn chat_leaves_cached_tokens_none_without_prompt_tokens_details() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -1143,6 +1172,7 @@ fn embeddings_request(input: EmbeddingsInput) -> EmbeddingsRequest {
 
 #[tokio::test]
 async fn embeddings_success_sends_correct_request_and_parses_response() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/embeddings"))
@@ -1178,6 +1208,7 @@ async fn embeddings_success_sends_correct_request_and_parses_response() {
 
 #[tokio::test]
 async fn embeddings_forwards_a_batch_input_and_encoding_format_dimensions_verbatim() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/embeddings"))
@@ -1216,6 +1247,7 @@ async fn embeddings_forwards_a_batch_input_and_encoding_format_dimensions_verbat
 
 #[tokio::test]
 async fn embeddings_maps_a_non_success_status_to_a_classified_error() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/embeddings"))
@@ -1237,6 +1269,7 @@ async fn embeddings_maps_a_non_success_status_to_a_classified_error() {
 
 #[tokio::test]
 async fn embeddings_uses_the_byok_override_key_instead_of_the_configured_one() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/embeddings"))
@@ -1262,6 +1295,7 @@ async fn embeddings_uses_the_byok_override_key_instead_of_the_configured_one() {
 
 #[tokio::test]
 async fn chat_rejects_oversized_response_instead_of_buffering_it() {
+    common::install_fallback();
     let (addr, server) = common::oversized_content_length_server("HTTP/1.1 200 OK");
 
     let provider = OpenAiCompatibleProvider::new("openai", format!("http://{addr}"), "test-key");
@@ -1280,6 +1314,7 @@ async fn chat_rejects_oversized_response_instead_of_buffering_it() {
 
 #[tokio::test]
 async fn embeddings_rejects_oversized_response_instead_of_buffering_it() {
+    common::install_fallback();
     let (addr, server) = common::oversized_content_length_server("HTTP/1.1 200 OK");
 
     let provider = OpenAiCompatibleProvider::new("openai", format!("http://{addr}"), "test-key");

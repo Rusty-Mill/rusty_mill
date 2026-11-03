@@ -10,6 +10,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
 async fn chat_success_sends_correct_headers_and_body() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -50,6 +51,7 @@ async fn chat_success_sends_correct_headers_and_body() {
 
 #[tokio::test]
 async fn chat_uses_the_byok_override_key_instead_of_the_configured_one() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -79,6 +81,7 @@ async fn chat_uses_the_byok_override_key_instead_of_the_configured_one() {
 
 #[tokio::test]
 async fn chat_uses_default_max_tokens_when_request_leaves_it_unset() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -105,6 +108,7 @@ async fn chat_uses_default_max_tokens_when_request_leaves_it_unset() {
 
 #[tokio::test]
 async fn chat_parses_tool_use_block_and_maps_finish_reason() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -147,6 +151,7 @@ async fn chat_parses_tool_use_block_and_maps_finish_reason() {
 
 #[tokio::test]
 async fn chat_sends_json_schema_response_format_as_a_forced_tool_call() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -204,6 +209,7 @@ async fn chat_sends_json_schema_response_format_as_a_forced_tool_call() {
 
 #[tokio::test]
 async fn chat_rejects_json_object_response_format_without_contacting_the_server() {
+    common::install_fallback();
     // No mock server is started -- if this somehow tried to make a real
     // HTTP call it would fail with a connection error, not
     // UnsupportedFeature, proving the check happens before any request.
@@ -219,6 +225,7 @@ async fn chat_rejects_json_object_response_format_without_contacting_the_server(
 
 #[tokio::test]
 async fn chat_maps_tool_call_request_into_tool_use_and_tool_result_blocks() {
+    common::install_fallback();
     let server = MockServer::start().await;
     // A prior assistant tool call plus its result, as a real multi-turn
     // conversation would send back. Confirms the request-side translation
@@ -270,6 +277,7 @@ async fn chat_maps_tool_call_request_into_tool_use_and_tool_result_blocks() {
 
 #[tokio::test]
 async fn chat_sends_image_content_as_a_base64_image_block() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -299,6 +307,7 @@ async fn chat_sends_image_content_as_a_base64_image_block() {
 
 #[tokio::test]
 async fn chat_sends_inline_file_content_as_a_base64_document_block() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -328,6 +337,7 @@ async fn chat_sends_inline_file_content_as_a_base64_document_block() {
 
 #[tokio::test]
 async fn chat_sends_remote_file_content_as_a_url_document_block() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -357,6 +367,7 @@ async fn chat_sends_remote_file_content_as_a_url_document_block() {
 
 #[tokio::test]
 async fn chat_rejects_audio_content_without_contacting_the_server() {
+    common::install_fallback();
     // No Mock is registered on this server at all -- if the adapter tried
     // to make an HTTP request it would get a 404 from wiremock's default
     // "no matching mock" response, not this specific error, proving the
@@ -374,6 +385,7 @@ async fn chat_rejects_audio_content_without_contacting_the_server() {
 
 #[tokio::test]
 async fn chat_sends_tools_and_tool_choice_translated_to_wire_format() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -414,6 +426,7 @@ async fn chat_sends_tools_and_tool_choice_translated_to_wire_format() {
 
 #[tokio::test]
 async fn chat_forwards_top_k_but_has_no_field_for_the_rest_of_the_sampling_params() {
+    common::install_fallback();
     // Anthropic's native API only has an equivalent for `top_k` among the
     // sampling params exercised by `request_with_sampling_params`; the
     // other 7 (min_p, top_a, frequency_penalty, presence_penalty,
@@ -443,6 +456,7 @@ async fn chat_forwards_top_k_but_has_no_field_for_the_rest_of_the_sampling_param
 
 #[tokio::test]
 async fn chat_has_no_wire_field_for_logprobs_and_never_returns_any() {
+    common::install_fallback();
     // Anthropic's Messages API has no logprobs equivalent at all -- there's
     // no field on this adapter's WireRequest to serialize `logprobs`/
     // `top_logprobs` into (compile-time guarantee, same as the unsupported
@@ -470,6 +484,7 @@ async fn chat_has_no_wire_field_for_logprobs_and_never_returns_any() {
 
 #[tokio::test]
 async fn chat_stream_parses_text_deltas_and_final_usage() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":7}}}\n\n",
@@ -511,6 +526,7 @@ async fn chat_stream_parses_text_deltas_and_final_usage() {
 
 #[tokio::test]
 async fn chat_stream_parses_tool_call_deltas_by_index() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n",
@@ -575,6 +591,7 @@ async fn chat_stream_parses_tool_call_deltas_by_index() {
 
 #[tokio::test]
 async fn chat_stream_unwraps_a_forced_structured_output_tool_call_into_content_deltas() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n",
@@ -625,6 +642,7 @@ async fn chat_stream_unwraps_a_forced_structured_output_tool_call_into_content_d
 
 #[tokio::test]
 async fn chat_stream_filters_out_ping_and_content_block_stop_events() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n",
@@ -660,6 +678,7 @@ async fn chat_stream_filters_out_ping_and_content_block_stop_events() {
 
 #[tokio::test]
 async fn chat_stream_filters_out_an_unrecognized_future_event_type() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
@@ -690,6 +709,7 @@ async fn chat_stream_filters_out_an_unrecognized_future_event_type() {
 
 #[tokio::test]
 async fn chat_stream_maps_an_error_event_to_an_upstream_error() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
@@ -728,6 +748,7 @@ async fn chat_stream_maps_an_error_event_to_an_upstream_error() {
 
 #[tokio::test]
 async fn chat_stream_yields_a_decode_error_for_malformed_event_json() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
@@ -763,6 +784,7 @@ async fn chat_stream_yields_a_decode_error_for_malformed_event_json() {
 
 #[tokio::test]
 async fn chat_stream_yields_no_chunks_for_an_empty_stream() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -783,6 +805,7 @@ async fn chat_stream_yields_no_chunks_for_an_empty_stream() {
 
 #[tokio::test]
 async fn chat_maps_429_to_retryable_rate_limited() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -814,6 +837,7 @@ async fn chat_maps_429_to_retryable_rate_limited() {
 
 #[tokio::test]
 async fn chat_sends_extended_thinking_config_derived_from_effort() {
+    common::install_fallback();
     let server = MockServer::start().await;
     // effort "high" with no client `max_tokens` falls back to the flat
     // default (24_576); since that exceeds the request's own default
@@ -850,6 +874,7 @@ async fn chat_sends_extended_thinking_config_derived_from_effort() {
 
 #[tokio::test]
 async fn chat_clamps_thinking_budget_to_the_anthropic_minimum() {
+    common::install_fallback();
     let server = MockServer::start().await;
     // An explicit `reasoning.max_tokens` below Anthropic's 1024 floor gets
     // clamped up; the request's own max_tokens (unset -> default 4096)
@@ -886,6 +911,7 @@ async fn chat_clamps_thinking_budget_to_the_anthropic_minimum() {
 
 #[tokio::test]
 async fn chat_bumps_max_tokens_when_thinking_budget_would_exceed_it() {
+    common::install_fallback();
     let server = MockServer::start().await;
     // The client's own max_tokens (500) is below the requested thinking
     // budget (2000) -- Anthropic requires max_tokens > budget_tokens, so
@@ -922,6 +948,7 @@ async fn chat_bumps_max_tokens_when_thinking_budget_would_exceed_it() {
 
 #[tokio::test]
 async fn chat_parses_thinking_blocks_into_the_reasoning_field() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -962,6 +989,7 @@ async fn chat_parses_thinking_blocks_into_the_reasoning_field() {
 
 #[tokio::test]
 async fn chat_omits_reasoning_when_the_client_asked_to_exclude_it() {
+    common::install_fallback();
     let server = MockServer::start().await;
     // Anthropic has no server-side toggle to suppress `thinking` blocks --
     // it still sends one -- so `exclude` has to be enforced client-side.
@@ -997,6 +1025,7 @@ async fn chat_omits_reasoning_when_the_client_asked_to_exclude_it() {
 
 #[tokio::test]
 async fn chat_stream_emits_thinking_delta_as_reasoning_deltas() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n",
@@ -1049,6 +1078,7 @@ async fn chat_stream_emits_thinking_delta_as_reasoning_deltas() {
 
 #[tokio::test]
 async fn chat_stream_omits_reasoning_deltas_when_excluded() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5}}}\n\n",
@@ -1092,6 +1122,7 @@ async fn chat_stream_omits_reasoning_deltas_when_excluded() {
 
 #[tokio::test]
 async fn chat_sends_system_as_a_cache_control_block_array_when_requested() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -1123,6 +1154,7 @@ async fn chat_sends_system_as_a_cache_control_block_array_when_requested() {
 
 #[tokio::test]
 async fn chat_parses_cache_creation_and_cache_read_tokens_into_usage() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -1155,6 +1187,7 @@ async fn chat_parses_cache_creation_and_cache_read_tokens_into_usage() {
 
 #[tokio::test]
 async fn chat_leaves_cache_usage_fields_none_without_any_caching() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
@@ -1181,6 +1214,7 @@ async fn chat_leaves_cache_usage_fields_none_without_any_caching() {
 
 #[tokio::test]
 async fn chat_stream_reports_cache_tokens_from_message_start_in_the_final_usage() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":500,\"cache_read_input_tokens\":1000}}}\n\n",
@@ -1218,6 +1252,7 @@ async fn chat_stream_reports_cache_tokens_from_message_start_in_the_final_usage(
 
 #[tokio::test]
 async fn chat_rejects_oversized_response_instead_of_buffering_it() {
+    common::install_fallback();
     let (addr, server) = common::oversized_content_length_server("HTTP/1.1 200 OK");
 
     let provider = AnthropicProvider::new(format!("http://{addr}"), "test-key");

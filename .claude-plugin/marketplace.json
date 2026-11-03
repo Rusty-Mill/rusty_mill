@@ -1,6 +1,6 @@
 {
   "name": "rusty-mill",
-  "description": "Claude Code plugins built in the Rusty Mill monorepo.",
+  "description": "Claude Code plugins from the Rusty Mill organization.",
   "owner": {
     "name": "Rusty Mill contributors",
     "url": "https://github.com/Rusty-Mill/rusty_mill"
@@ -8,7 +8,10 @@
   "plugins": [
     {
       "name": "rusty-remind-me",
-      "source": "./crates/apps/rusty_remind_me",
+      "source": {
+        "source": "github",
+        "repo": "Rusty-Mill/rusty-remind-me"
+      },
       "description": "Persistent long-term memory for Claude Code: MCP tools for search/recall, a SessionStart hook that surfaces recent memories automatically, and /remember + /recall slash commands for direct CLI-backed writes and searches."
     }
   ]

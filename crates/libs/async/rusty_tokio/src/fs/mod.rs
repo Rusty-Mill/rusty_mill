@@ -97,7 +97,8 @@ impl File {
     /// Opens an existing file for reading. See `std::fs::File::open`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn open(path: impl AsRef<Path>) -> io::Result<File> {
         let path = path.as_ref().to_path_buf();
         Self::spawn_open(move || std::fs::File::open(path)).await
@@ -107,7 +108,8 @@ impl File {
     /// truncating it if it does. See `std::fs::File::create`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn create(path: impl AsRef<Path>) -> io::Result<File> {
         let path = path.as_ref().to_path_buf();
         Self::spawn_open(move || std::fs::File::create(path)).await
@@ -117,7 +119,8 @@ impl File {
     /// a file already exists at `path`. See `std::fs::File::create_new`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn create_new(path: impl AsRef<Path>) -> io::Result<File> {
         let path = path.as_ref().to_path_buf();
         Self::spawn_open(move || std::fs::File::create_new(path)).await
@@ -174,7 +177,8 @@ impl File {
     /// `std::fs::File::set_len`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn set_len(&mut self, size: u64) -> io::Result<()> {
         std::future::poll_fn(|cx| {
             self.poll_dispatch(cx, move |f| {
@@ -188,7 +192,8 @@ impl File {
     /// Changes the file's permissions. See `std::fs::File::set_permissions`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn set_permissions(&mut self, perm: std::fs::Permissions) -> io::Result<()> {
         std::future::poll_fn(|cx| {
             // `poll_fn`'s closure is `FnMut` (may run more than once if
@@ -210,7 +215,8 @@ impl File {
     /// `std::fs::File::sync_all`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn sync_all(&mut self) -> io::Result<()> {
         std::future::poll_fn(|cx| {
             self.poll_dispatch(cx, |f| {
@@ -227,7 +233,8 @@ impl File {
     /// distinction exists. See `std::fs::File::sync_data`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn sync_data(&mut self) -> io::Result<()> {
         std::future::poll_fn(|cx| {
             self.poll_dispatch(cx, |f| {
@@ -244,7 +251,8 @@ impl File {
     /// blocking pool the same way every other operation here does.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn try_clone(&mut self) -> io::Result<File> {
         let cloned = std::future::poll_fn(|cx| self.poll_try_clone(cx)).await?;
         Ok(File {
@@ -625,7 +633,8 @@ impl OpenOptions {
     /// `std::fs::OpenOptions::open`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn open(&self, path: impl AsRef<Path>) -> io::Result<File> {
         let opts = self.inner.clone();
         let path = path.as_ref().to_path_buf();
@@ -638,7 +647,8 @@ impl OpenOptions {
 /// [`create_dir_all`] for the recursive version.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::create_dir(path))
@@ -652,7 +662,8 @@ pub async fn create_dir(path: impl AsRef<Path>) -> io::Result<()> {
 /// directory.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::create_dir_all(path))
@@ -665,7 +676,8 @@ pub async fn create_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 /// recursive version.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::remove_dir(path))
@@ -677,7 +689,8 @@ pub async fn remove_dir(path: impl AsRef<Path>) -> io::Result<()> {
 /// `std::fs::remove_dir_all`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::remove_dir_all(path))
@@ -689,7 +702,8 @@ pub async fn remove_dir_all(path: impl AsRef<Path>) -> io::Result<()> {
 /// `.`/`..` resolved). See `std::fs::canonicalize`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn canonicalize(path: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::canonicalize(path))
@@ -701,7 +715,8 @@ pub async fn canonicalize(path: impl AsRef<Path>) -> io::Result<std::path::PathB
 /// symlink at `path` itself. See `std::fs::metadata`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn metadata(path: impl AsRef<Path>) -> io::Result<std::fs::Metadata> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::metadata(path))
@@ -713,7 +728,8 @@ pub async fn metadata(path: impl AsRef<Path>) -> io::Result<std::fs::Metadata> {
 /// see `std::fs::symlink_metadata`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<std::fs::Metadata> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::symlink_metadata(path))
@@ -727,7 +743,8 @@ pub async fn symlink_metadata(path: impl AsRef<Path>) -> io::Result<std::fs::Met
 /// `std::path::Path::try_exists`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn try_exists(path: impl AsRef<Path>) -> io::Result<bool> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || path.try_exists())
@@ -740,7 +757,8 @@ pub async fn try_exists(path: impl AsRef<Path>) -> io::Result<bool> {
 /// avoids a second path lookup.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn set_permissions(path: impl AsRef<Path>, perm: std::fs::Permissions) -> io::Result<()> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::set_permissions(path, perm))
@@ -752,7 +770,8 @@ pub async fn set_permissions(path: impl AsRef<Path>, perm: std::fs::Permissions)
 /// it already exists. See `std::fs::rename`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
     let from = from.as_ref().to_path_buf();
     let to = to.as_ref().to_path_buf();
@@ -765,7 +784,8 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
 /// `std::fs::hard_link`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn hard_link(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_path_buf();
     let link = link.as_ref().to_path_buf();
@@ -778,7 +798,8 @@ pub async fn hard_link(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io
 /// it further. See `std::fs::read_link`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn read_link(path: impl AsRef<Path>) -> io::Result<std::path::PathBuf> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::read_link(path))
@@ -790,7 +811,8 @@ pub async fn read_link(path: impl AsRef<Path>) -> io::Result<std::path::PathBuf>
 /// instead. See `std::fs::remove_file`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::remove_file(path))
@@ -806,7 +828,8 @@ pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
 /// between two paths.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u64> {
     let from = from.as_ref().to_path_buf();
     let to = to.as_ref().to_path_buf();
@@ -822,7 +845,8 @@ pub async fn copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<u6
 /// form is Unix-only.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 #[cfg(unix)]
 pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_path_buf();
@@ -838,7 +862,8 @@ pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::
 /// there.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 #[cfg(windows)]
 pub async fn symlink_file(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_path_buf();
@@ -853,7 +878,8 @@ pub async fn symlink_file(original: impl AsRef<Path>, link: impl AsRef<Path>) ->
 /// [`symlink_file`] for the file counterpart.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 #[cfg(windows)]
 pub async fn symlink_dir(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let original = original.as_ref().to_path_buf();
@@ -869,7 +895,8 @@ pub async fn symlink_dir(original: impl AsRef<Path>, link: impl AsRef<Path>) -> 
 /// need an already-open [`File`] to read from incrementally).
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::read(path))
@@ -882,7 +909,8 @@ pub async fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
 /// `std::fs::read_to_string`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     let path = path.as_ref().to_path_buf();
     crate::spawn_blocking(move || std::fs::read_to_string(path))
@@ -898,7 +926,8 @@ pub async fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
 /// already-open [`File`] to write to incrementally).
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let path = path.as_ref().to_path_buf();
     let contents = contents.as_ref().to_vec();
@@ -957,7 +986,8 @@ impl DirBuilder {
     /// options. See `std::fs::DirBuilder::create`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn create(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref().to_path_buf();
         let recursive = self.recursive;

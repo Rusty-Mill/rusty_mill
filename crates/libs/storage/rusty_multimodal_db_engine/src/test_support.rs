@@ -12,6 +12,10 @@ pub enum Fault {
     JournalWritePrefix(usize),
     JournalSync,
     InsertWritePrefix(usize),
+    /// A partial insert-log write whose rollback then fails too.
+    InsertWritePrefixUnrecoverable(usize),
+    /// Fail the insert log's rollback truncate (armed by the variant above).
+    InsertRollback,
     InsertSync,
     CheckpointAfterRename,
     BatchApply(usize),

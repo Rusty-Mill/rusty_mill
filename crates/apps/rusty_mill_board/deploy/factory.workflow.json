@@ -1,0 +1,30 @@
+{
+  "columns": [
+    { "id": "backlog", "label": "Backlog", "kind": "backlog" },
+    { "id": "ready", "label": "Ready", "kind": "queue", "takers": ["plan"] },
+    { "id": "planning", "label": "Planning", "kind": "work", "takers": ["plan", "test", "review"] },
+    { "id": "architecting", "label": "Architecting", "kind": "work", "takers": ["architect", "test", "review"] },
+    { "id": "building", "label": "Building", "kind": "work", "takers": ["test", "build", "review"] },
+    { "id": "v_and_ving", "label": "V&Ving", "kind": "work", "takers": ["test", "review"] },
+    { "id": "done", "label": "Done", "kind": "done" },
+    { "id": "blocked", "label": "Blocked", "kind": "blocked" }
+  ],
+  "transitions": [
+    { "from": "backlog", "to": "ready", "cap": "triage", "gate": true },
+    { "from": "ready", "to": "planning", "cap": "plan" },
+    { "from": "planning", "to": "architecting", "cap": "review" },
+    { "from": "architecting", "to": "planning", "cap": "review" },
+    { "from": "architecting", "to": "building", "cap": "triage", "gate": true },
+    { "from": "building", "to": "v_and_ving", "cap": "review" },
+    { "from": "v_and_ving", "to": "building", "cap": "test" },
+    { "from": "v_and_ving", "to": "building", "cap": "review" },
+    { "from": "v_and_ving", "to": "done", "cap": "merge", "gate": true },
+    { "from": "v_and_ving", "to": "done", "cap": "close" },
+    { "from": "building", "to": "done", "cap": "close" },
+    { "from": "blocked", "to": "ready", "cap": "triage", "gate": true },
+    { "from": "blocked", "to": "planning", "cap": "triage", "gate": true },
+    { "from": "blocked", "to": "architecting", "cap": "triage", "gate": true },
+    { "from": "blocked", "to": "building", "cap": "triage", "gate": true },
+    { "from": "blocked", "to": "v_and_ving", "cap": "triage", "gate": true }
+  ]
+}

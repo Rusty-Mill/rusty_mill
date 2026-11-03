@@ -16,24 +16,48 @@
 //! lookup that finds a freed id revives it, since no cell holds it.
 
 use std::collections::{HashMap, TryReserveError};
+use std::hash::{Hash, Hasher};
 
-use crate::cell::{ATTR_PROTECTED, Cell, PackedCell, WIDE_TRAILER};
+use crate::cell::{
+    ATTR_BG_DEFAULT, ATTR_FG_DEFAULT, ATTR_PROTECTED, Cell, CellColors, DEFAULT_BG, DEFAULT_FG,
+    PackedCell, Pen, Source, WIDE_TRAILER,
+};
 
 /// Everything a [`Cell`] holds except its character and the two layout bits
 /// ([`WIDE_TRAILER`], [`ATTR_PROTECTED`]), which live in [`PackedCell`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CellStyle {
     pub fg: u32,
     pub bg: u32,
     pub underline_color: u32,
     /// `Cell::flags` without the two layout bits.
-    pub attrs: u16,
+    pub attrs: u32,
     pub link: u16,
     pub cluster: u16,
+    /// [`crate::cell::Source::tag`] of `fg`: `1 + n` while it is palette
+    /// entry `n`, so OSC 4 recolours it ([`StyleTable::repaint`]).
+    pub fg_index: u16,
+    /// [`crate::cell::Source::tag`] of `bg`.
+    pub bg_index: u16,
+}
+
+/// Every field, packed into three words: one hasher write each instead of
+/// one per field, on the intern path every uncached write takes.
+impl Hash for CellStyle {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(u64::from(self.fg) | u64::from(self.bg) << 32);
+        state.write_u64(u64::from(self.underline_color) | u64::from(self.attrs) << 32);
+        state.write_u64(
+            u64::from(self.link)
+                | u64::from(self.cluster) << 16
+                | u64::from(self.fg_index) << 32
+                | u64::from(self.bg_index) << 48,
+        );
+    }
 }
 
 impl CellStyle {
-    /// The style of `cell`, layout bits dropped.
+    /// The style of `cell`, layout bits dropped, in canonical form.
     pub(crate) fn of(cell: &Cell) -> Self {
         CellStyle {
             fg: cell.fg,
@@ -42,6 +66,73 @@ impl CellStyle {
             attrs: cell.flags & !(WIDE_TRAILER | ATTR_PROTECTED),
             link: cell.link,
             cluster: cell.cluster,
+            fg_index: 0,
+            bg_index: 0,
+        }
+        .canonical()
+    }
+
+    /// The style of a glyph written in `pen` under `link`. The pen's DECSCA
+    /// bit is a layout bit and does not reach the style.
+    #[inline]
+    pub(crate) fn of_pen(pen: &Pen, link: u16) -> Self {
+        CellStyle {
+            fg: pen.fg,
+            bg: pen.bg,
+            underline_color: pen.underline_color,
+            attrs: pen.attrs & !ATTR_PROTECTED,
+            link,
+            cluster: 0,
+            fg_index: pen.fg_index,
+            bg_index: pen.bg_index,
+        }
+    }
+
+    /// A colour marked default ([`ATTR_FG_DEFAULT`] / [`ATTR_BG_DEFAULT`])
+    /// stored as `0`: the table resolves it on read, so styles that differ
+    /// only in the default in force when they were written are one entry.
+    #[inline]
+    pub(crate) fn canonical(mut self) -> Self {
+        if self.attrs & ATTR_FG_DEFAULT != 0 {
+            self.fg = 0;
+        }
+        if self.attrs & ATTR_BG_DEFAULT != 0 {
+            self.bg = 0;
+        }
+        self
+    }
+
+    /// The style's colours and attributes as a host reads them.
+    pub(crate) fn colors(&self) -> CellColors {
+        CellColors::new(self.fg, self.fg_index, self.bg, self.bg_index, self.attrs)
+    }
+
+    /// This style with its default colours filled in from `defaults`.
+    #[inline]
+    fn resolved(mut self, defaults: Defaults) -> Self {
+        if self.attrs & ATTR_FG_DEFAULT != 0 {
+            self.fg = defaults.fg;
+        }
+        if self.attrs & ATTR_BG_DEFAULT != 0 {
+            self.bg = defaults.bg;
+        }
+        self
+    }
+}
+
+/// The default foreground and background (OSC 10 / 11) that styles marked
+/// default resolve to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Defaults {
+    pub fg: u32,
+    pub bg: u32,
+}
+
+impl Default for Defaults {
+    fn default() -> Self {
+        Defaults {
+            fg: DEFAULT_FG,
+            bg: DEFAULT_BG,
         }
     }
 }
@@ -82,10 +173,10 @@ impl Remap {
 pub(crate) const SWEEP_MIN: usize = 4096;
 /// Fewest entries before a compaction is worth its full rewrite.
 const COMPACT_MIN: usize = 65_536;
-/// Bytes a decoder charges per reserved grid style: 20 B entry, 1 B free
-/// flag, and two 25 B index buckets (hashbrown gives a power-of-two capacity
-/// `c` exactly `2c` buckets), rounded up from 71.
-pub(crate) const GRID_STYLE_BYTES: usize = 74;
+/// Bytes a decoder charges per reserved grid style: 24 B entry, 1 B free
+/// flag, and two 29 B index buckets (hashbrown gives a power-of-two capacity
+/// `c` exactly `2c` buckets), rounded up from 83.
+pub(crate) const GRID_STYLE_BYTES: usize = 86;
 
 /// A direct-mapped cache in front of the hash index. Output repeats a few
 /// hundred pens at most (every write interns its pen), and a hit skips
@@ -96,7 +187,7 @@ struct Recent(Box<[(CellStyle, StyleId)]>);
 
 impl Default for Recent {
     fn default() -> Self {
-        let empty = (CellStyle::of(&Cell::blank()), Recent::EMPTY);
+        let empty = (CellStyle::of(&Cell::default_blank()), Recent::EMPTY);
         Recent(vec![empty; Recent::SLOTS].into_boxed_slice())
     }
 }
@@ -107,7 +198,10 @@ impl Recent {
     const EMPTY: StyleId = StyleId(u32::MAX);
 
     fn slot(style: &CellStyle) -> usize {
-        let rest = u32::from(style.attrs) << 16 | u32::from(style.link ^ style.cluster);
+        let rest = style.attrs.rotate_left(16)
+            | u32::from(
+                style.link ^ style.cluster ^ style.fg_index ^ style.bg_index.rotate_left(8),
+            );
         let mix =
             (style.fg ^ style.bg.rotate_left(8) ^ style.underline_color.rotate_left(16) ^ rest)
                 .wrapping_mul(0x9e37_79b9);
@@ -124,7 +218,8 @@ impl Recent {
     }
 
     fn clear(&mut self) {
-        self.0.fill((CellStyle::of(&Cell::blank()), Self::EMPTY));
+        self.0
+            .fill((CellStyle::of(&Cell::default_blank()), Self::EMPTY));
     }
 }
 
@@ -155,11 +250,13 @@ pub(crate) struct StyleTable {
     marked: usize,
     /// Cells evicted from history since the last sweep.
     turnover: usize,
+    /// What colours marked default resolve to on [`StyleTable::get`].
+    defaults: Defaults,
 }
 
 impl Default for StyleTable {
     fn default() -> Self {
-        let blank = CellStyle::of(&Cell::blank());
+        let blank = CellStyle::of(&Cell::default_blank());
         StyleTable {
             entries: vec![blank],
             index: HashMap::from([(blank, StyleId::DEFAULT)]),
@@ -172,6 +269,7 @@ impl Default for StyleTable {
             live_after_sweep: 1,
             marked: 0,
             turnover: 0,
+            defaults: Defaults::default(),
         }
     }
 }
@@ -181,6 +279,7 @@ impl StyleTable {
     /// available). A freed id still indexed under `style` is revived.
     #[inline]
     pub(crate) fn intern(&mut self, style: CellStyle) -> StyleId {
+        let style = style.canonical();
         if self.last.1 != Recent::EMPTY && self.last.0 == style {
             return self.last.1;
         }
@@ -191,6 +290,7 @@ impl StyleTable {
     /// its own so other interns between two writes do not evict the pen.
     #[inline]
     pub(crate) fn intern_pen(&mut self, style: CellStyle) -> StyleId {
+        let style = style.canonical();
         if self.last_pen.1 != Recent::EMPTY && self.last_pen.0 == style {
             return self.last_pen.1;
         }
@@ -254,8 +354,9 @@ impl StyleTable {
         None
     }
 
-    /// The style behind `id`. An id this table never issued reads as the
-    /// default style (a debug build asserts instead).
+    /// The style behind `id`, its default colours resolved to the current
+    /// [`Defaults`]. An id this table never issued reads as the default style
+    /// (a debug build asserts instead).
     pub(crate) fn get(&self, id: StyleId) -> CellStyle {
         debug_assert!(
             id.index() < self.entries.len(),
@@ -265,6 +366,18 @@ impl StyleTable {
             .get(id.index())
             .copied()
             .unwrap_or(self.entries[0])
+            .resolved(self.defaults)
+    }
+
+    /// The colours that styles marked default resolve to.
+    pub(crate) fn defaults(&self) -> Defaults {
+        self.defaults
+    }
+
+    /// Change what styles marked default resolve to (OSC 10 / 11 and their
+    /// resets). No entry changes: every cell in a default colour follows.
+    pub(crate) fn set_defaults(&mut self, defaults: Defaults) {
+        self.defaults = defaults;
     }
 
     /// Entries ever allocated, freed slots included: ids are below this.
@@ -363,18 +476,55 @@ impl StyleTable {
         Some(self.rebuild(|i| !is_free[i], |i| i))
     }
 
-    /// Map every entry's colours through `map` (a theme change). Entries that
+    /// Map every entry's explicit colours through `map` and its palette
+    /// colours through `entry` (a theme change). Entries that
     /// become equal merge into the lowest id; the returned remap, when some
     /// merged, must be applied to every cell.
-    pub(crate) fn retheme(&mut self, map: impl Fn(u32) -> u32) -> Option<Remap> {
+    pub(crate) fn retheme(
+        &mut self,
+        map: impl Fn(u32) -> u32,
+        entry: impl Fn(u8, u32) -> u32,
+    ) -> Option<Remap> {
+        // A default colour is stored as 0 and resolved on read: only the
+        // colours the child chose are remapped. A palette colour goes
+        // through `entry` with its entry, so it follows the palette rather
+        // than whatever RGB it happens to equal.
+        let colour = |c: u32, tag: u16, default: bool| match Source::entry(tag) {
+            _ if default => c,
+            Some(n) => entry(n, c),
+            None => map(c),
+        };
+        self.restyle(|style| {
+            style.fg = colour(style.fg, style.fg_index, style.attrs & ATTR_FG_DEFAULT != 0);
+            style.bg = colour(style.bg, style.bg_index, style.attrs & ATTR_BG_DEFAULT != 0);
+        })
+    }
+
+    /// Recolour every entry in a palette colour from `palette` (OSC 4 and
+    /// its resets): a colour tagged `1 + n` becomes `palette(n)`. Merges as
+    /// [`StyleTable::retheme`] does.
+    pub(crate) fn repaint(&mut self, palette: impl Fn(u8) -> u32) -> Option<Remap> {
+        self.restyle(|style| {
+            if let Some(n) = Source::entry(style.fg_index) {
+                style.fg = palette(n);
+            }
+            if let Some(n) = Source::entry(style.bg_index) {
+                style.bg = palette(n);
+            }
+        })
+    }
+
+    /// Apply `edit` to every live entry, merging entries that become equal
+    /// into the lowest id; the returned remap, when some merged, must be
+    /// applied to every cell.
+    fn restyle(&mut self, edit: impl Fn(&mut CellStyle)) -> Option<Remap> {
         self.recent.clear();
         self.last.1 = Recent::EMPTY;
         self.last_pen.1 = Recent::EMPTY;
         let is_free = self.is_free.clone();
         for (i, style) in self.entries.iter_mut().enumerate() {
             if !is_free[i] {
-                style.fg = map(style.fg);
-                style.bg = map(style.bg);
+                edit(style);
             }
         }
         let mut first: HashMap<CellStyle, usize> = HashMap::new();
@@ -449,7 +599,10 @@ mod tests {
     #[test]
     fn equal_styles_share_one_id_and_id_0_is_blank() {
         let mut t = StyleTable::default();
-        assert_eq!(t.intern(CellStyle::of(&Cell::blank())), StyleId::DEFAULT);
+        assert_eq!(
+            t.intern(CellStyle::of(&Cell::default_blank())),
+            StyleId::DEFAULT
+        );
         let a = t.intern(fg(1));
         assert_eq!(t.intern(fg(1)), a);
         assert_ne!(t.intern(fg(2)), a);
@@ -521,18 +674,39 @@ mod tests {
         let mut t = StyleTable::default();
         let [a, b, c] = [1, 2, 3].map(|n| t.intern(fg(n)));
         // 2 becomes 1: b merges into a; 3 is untouched.
-        let remap = t.retheme(|v| if v == 2 { 1 } else { v }).expect("a merge");
+        let remap = t
+            .retheme(|v| if v == 2 { 1 } else { v }, |_, c| c)
+            .expect("a merge");
         assert_eq!(remap.get(b), remap.get(a));
         assert_eq!(t.get(remap.get(c)), fg(3));
         assert_eq!(t.len(), 3);
         assert_eq!(t.intern(fg(1)), remap.get(a), "one id for the merged style");
         // A retheme that merges nothing keeps every id.
-        assert!(t.retheme(|v| v + 10).is_none());
+        assert!(t.retheme(|v| v + 10, |_, c| c).is_none());
         let moved = CellStyle {
             bg: fg(3).bg + 10,
             ..fg(13)
         };
         assert_eq!(t.get(remap.get(c)), moved);
         assert_eq!(t.intern(moved), remap.get(c), "index follows the new keys");
+    }
+
+    #[test]
+    fn default_colours_resolve_at_read_and_survive_retheme() {
+        let mut t = StyleTable::default();
+        let blank = t.intern(CellStyle::of(&Cell::default_blank()));
+        // An explicit colour equal to the default is a different style.
+        let explicit = t.intern(fg(DEFAULT_FG));
+        assert_ne!(blank, explicit);
+        t.set_defaults(Defaults { fg: 7, bg: 9 });
+        assert_eq!((t.get(blank).fg, t.get(blank).bg), (7, 9));
+        assert_eq!(
+            (t.get(explicit).fg, t.get(explicit).bg),
+            (DEFAULT_FG, DEFAULT_BG)
+        );
+        // A retheme maps explicit colours only; the defaults are set apart.
+        assert!(t.retheme(|v| v + 1, |_, c| c).is_none());
+        assert_eq!(t.get(blank).fg, 7);
+        assert_eq!(t.get(explicit).fg, DEFAULT_FG + 1);
     }
 }

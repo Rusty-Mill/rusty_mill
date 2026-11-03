@@ -50,6 +50,7 @@ impl TestCa {
 /// that requires client certificates from the client CA and offers `h2`.
 struct Fixture {
     server_ca: TestCa,
+    server_leaf: Vec<u8>,
     client_ca: TestCa,
     client_leaf: (Vec<u8>, Vec<u8>),
     acceptor: TlsAcceptor,
@@ -61,7 +62,7 @@ fn fixture(alpn: Vec<Vec<u8>>) -> Fixture {
     let client_ca = TestCa::generate("rusty_tls mTLS+ALPN test client CA");
     let client_leaf = client_ca.issue_leaf("test-client");
     let acceptor = TlsAcceptor::new_with_client_auth_and_alpn(
-        vec![server_leaf_der],
+        vec![server_leaf_der.clone()],
         server_leaf_key,
         vec![client_ca.root_der()],
         alpn,
@@ -69,6 +70,7 @@ fn fixture(alpn: Vec<Vec<u8>>) -> Fixture {
     .unwrap();
     Fixture {
         server_ca,
+        server_leaf: server_leaf_der,
         client_ca,
         client_leaf,
         acceptor,
@@ -130,6 +132,7 @@ fn the_server_sees_both_the_negotiated_protocol_and_the_client_certificate() {
     .unwrap();
     echo(&mut tls).unwrap();
     assert_eq!(tls.negotiated_alpn_protocol(), Some(&b"h2"[..]));
+    assert_eq!(tls.peer_certificate_der(), Some(f.server_leaf.as_slice()));
 
     let seen = server.join().unwrap().expect("handshake succeeds");
     assert_eq!(seen.alpn.as_deref(), Some(&b"h2"[..]));
@@ -274,7 +277,7 @@ mod asynchronous {
     use rusty_tokio::io::{AsyncReadExt, AsyncWriteExt, TcpListener, TcpStream};
 
     #[rusty_tokio::test]
-    async fn the_async_server_negotiates_the_protocol_while_requiring_a_client_certificate() {
+    async fn the_async_pair_see_the_protocol_and_each_others_certificate() {
         let f = fixture(vec![b"h2".to_vec()]);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -283,16 +286,18 @@ mod asynchronous {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut tls: AsyncTlsServerStream<TcpStream> = acceptor.accept_async(tcp).unwrap();
             tls.complete_handshake().await.unwrap();
-            // `AsyncTlsServerStream` has no `peer_certificate_der`; that the
-            // handshake completes at all shows the certificate was accepted.
-            let alpn = tls.negotiated_alpn_protocol().map(<[u8]>::to_vec);
+            let seen = Seen {
+                alpn: tls.negotiated_alpn_protocol().map(<[u8]>::to_vec),
+                client_cert: tls.peer_certificate_der().map(<[u8]>::to_vec),
+            };
             let mut buf = [0u8; 4];
             tls.read_exact(&mut buf).await.unwrap();
             tls.write_all(&buf).await.unwrap();
-            alpn
+            seen
         });
 
         let (cert, key) = f.client_leaf.clone();
+        let cert_der = cert.clone();
         let mut tls = AsyncTlsStream::new_with_client_identity_and_alpn(
             TcpStream::connect(addr).await.unwrap(),
             "localhost",
@@ -307,7 +312,10 @@ mod asynchronous {
         tls.read_exact(&mut buf).await.unwrap();
         assert_eq!(&buf, b"ping");
         assert_eq!(tls.negotiated_alpn_protocol(), Some(&b"h2"[..]));
+        assert_eq!(tls.peer_certificate_der(), Some(f.server_leaf.as_slice()));
 
-        assert_eq!(server.await.unwrap().as_deref(), Some(&b"h2"[..]));
+        let seen = server.await.unwrap();
+        assert_eq!(seen.alpn.as_deref(), Some(&b"h2"[..]));
+        assert_eq!(seen.client_cert, Some(cert_der));
     }
 }

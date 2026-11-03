@@ -30,7 +30,7 @@ agentgateway-core = { workspace = true }
 rusty_json = { workspace = true }
 rusty_mcp_server = { workspace = true }
 rusty_mcp_client_native = { workspace = true, features = ["http"] }
-tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+rusty_tokio = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
 cel = { workspace = true }
@@ -41,16 +41,14 @@ http = { workspace = true }
 rusty_prost = { workspace = true }
 rusty_tonic = { workspace = true, features = ["rusty-tokio"] }
 # Spans for MCP requests, and the attributes a guardrail writes on them.
-rusty-mcp = { workspace = true, default-features = false, features = ["otel"] }
+rusty_mcp_middleware = { workspace = true, default-features = false, features = ["otel"] }
 thiserror = "2"
 rusty_log = { workspace = true }
 
 [dev-dependencies]
 rusty_mcp_server = { workspace = true, features = ["http"] }
 rusty_serve = { workspace = true }
-# `http2` is dev-only on purpose: the gateway speaks gRPC as a *client*, and
-# the scripted processor in the tests is the only thing here that serves it.
-axum = { workspace = true, features = ["http2"] }
-http-body-util = { workspace = true }
-tokio-util = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# Serves HTTP/2 for the scripted processor in the tests. Dev-only on purpose:
+# the gateway speaks gRPC as a *client*; the processor is the only thing here
+# that serves it.
+rusty_hyper = { workspace = true, features = ["rusty-tokio"] }

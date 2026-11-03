@@ -1,11 +1,14 @@
-use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
+use rusty_mux_core::{
+    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
+    SessionId, Share, Side, Size, Toward, Transport, WindowId,
+};
 use rusty_uuid::Uuid;
 use rusty_wire::Writer;
 
 use super::*;
 use crate::field::Out;
 use crate::schema::Value;
-use crate::{Code, Cursor, Entry, Features};
+use crate::{Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Program, Takeover};
 
 const REQ_ID: u32 = 1;
 
@@ -46,12 +49,17 @@ fn every_message_round_trips() {
         Message::Hello {
             features: Features::from_bits(0b101),
             resume: None,
+            takeover: None,
         },
         Message::Hello {
             features: Features::EVENT_SEQ,
             resume: Some(Cursor {
                 epoch: block.uuid(),
                 seq: u64::MAX,
+            }),
+            takeover: Some(Takeover {
+                client,
+                token: block.uuid(),
             }),
         },
         Message::CreateSession {
@@ -67,6 +75,31 @@ fn every_message_round_trips() {
             req: 3,
             window,
             size: size(80, 24),
+            launch: Launch::default(),
+        },
+        Message::CreateBlock {
+            req: 3,
+            window,
+            size: size(80, 24),
+            launch: Launch {
+                program: Some(Program {
+                    command: "sh".into(),
+                    args: vec!["-c".into(), String::new(), "exit 3".into()],
+                }),
+                cwd: Some("/tmp/wörk".into()),
+            },
+        },
+        Message::CreateBlock {
+            req: 3,
+            window,
+            size: size(80, 24),
+            launch: Launch {
+                program: Some(Program {
+                    command: "true".into(),
+                    args: Vec::new(),
+                }),
+                cwd: None,
+            },
         },
         Message::Attach { req: 4, block },
         Message::Detach { req: 5 },
@@ -84,6 +117,13 @@ fn every_message_round_trips() {
         },
         Message::CloseBlock { req: 10, block },
         Message::Sync { req: 14 },
+        Message::OpenDatagram { req: 16 },
+        Message::Datagram {
+            req: 16,
+            port: u16::MAX,
+            id: [9; 8],
+            key: DatagramKey([0xa5; 32]),
+        },
         Message::BlockCall {
             req: 15,
             block,
@@ -112,6 +152,17 @@ fn every_message_round_trips() {
             entry: Entry::Session {
                 session,
                 name: "main".into(),
+                active: None,
+                generated: false,
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Session {
+                session,
+                name: "quiet-harbor".into(),
+                active: Some(window),
+                generated: true,
             },
         },
         Message::Entry {
@@ -120,6 +171,20 @@ fn every_message_round_trips() {
                 window,
                 session,
                 name: String::new(),
+                layout: None,
+                zoomed: None,
+                focused: None,
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Window {
+                window,
+                session,
+                name: "w".into(),
+                layout: Some(split_layout(block)),
+                zoomed: Some(block),
+                focused: Some(block),
             },
         },
         Message::Entry {
@@ -130,6 +195,7 @@ fn every_message_round_trips() {
                 size: size(80, 24),
                 holder: Some(client),
                 title: "vim".into(),
+                name: "editor".into(),
             },
         },
         Message::Entry {
@@ -140,12 +206,130 @@ fn every_message_round_trips() {
                 size: size(1, 1),
                 holder: None,
                 title: String::new(),
+                name: String::new(),
             },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Client {
+                client,
+                name: "laptop".into(),
+                attached: Some(block),
+                principal: Some(Principal::unix(1000, Some("alice".into())).expect("valid")),
+                transport: Some(Transport::Datagram),
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Client {
+                client,
+                name: String::new(),
+                attached: None,
+                principal: None,
+                transport: None,
+            },
+        },
+        Message::Entry {
+            req: 18,
+            entry: Entry::Client {
+                client,
+                name: String::new(),
+                attached: None,
+                principal: Some(Principal::new("sid:S-1-5-21-1", "").expect("valid")),
+                transport: Some(Transport::Socket),
+            },
+        },
+        Message::Whoami { req: 18 },
+        Message::Rename {
+            req: 19,
+            target: EntityId::Session(session),
+            name: "work".into(),
+        },
+        Message::Rename {
+            req: 19,
+            target: EntityId::Window(window),
+            name: String::new(),
+        },
+        Message::Rename {
+            req: 19,
+            target: EntityId::Block(block),
+            name: "build".into(),
+        },
+        Message::Rename {
+            req: 19,
+            target: EntityId::Client(client),
+            name: "laptop".into(),
+        },
+        Message::Disconnect { req: 20, client },
+        Message::Split {
+            req: 21,
+            block,
+            side: Side::Down,
+            launch: Launch::default(),
+        },
+        Message::Split {
+            req: 21,
+            block,
+            side: Side::Left,
+            launch: Launch {
+                program: None,
+                cwd: Some("/tmp".into()),
+            },
+        },
+        Message::Zoom { req: 22, block },
+        Message::Unzoom { req: 23, window },
+        Message::SelectWindow { req: 24, window },
+        Message::ReloadConfig { req: 25 },
+        Message::ResizeSplit {
+            req: 26,
+            block,
+            axis: Axis::Rows,
+            share: Share::new(99).expect("in range"),
+        },
+        Message::SwapBlocks {
+            req: 27,
+            block,
+            other: block,
+        },
+        Message::MoveBlock {
+            req: 28,
+            block,
+            beside: Some(block),
+            side: Side::Down,
+        },
+        Message::MoveBlock {
+            req: 29,
+            block,
+            beside: None,
+            side: Side::Left,
+        },
+        Message::DetachBlock { req: 30, block },
+        Message::MoveWindow {
+            req: 31,
+            window,
+            index: 7,
+        },
+        Message::FocusBlock { req: 32, block },
+        Message::MoveFocus {
+            req: 33,
+            window,
+            toward: Toward::Side(Side::Up),
+        },
+        Message::MoveFocus {
+            req: 34,
+            window,
+            toward: Toward::Previous,
+        },
+        Message::NameSession {
+            req: 35,
+            session,
+            name: "fix-login".into(),
         },
         Message::Welcome {
             features: Features::NONE,
             client,
             cursor: None,
+            token: None,
         },
         Message::Welcome {
             features: Features::EVENT_SEQ,
@@ -154,6 +338,7 @@ fn every_message_round_trips() {
                 epoch: client.uuid(),
                 seq: 0,
             }),
+            token: Some(block.uuid()),
         },
         Message::Done {
             req: 11,
@@ -187,6 +372,23 @@ fn every_message_round_trips() {
             block,
             data: Vec::new(),
         },
+        Message::EchoAck { block, req: 14 },
+        Message::EchoMode {
+            block,
+            mode: Echo::Kernel,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Hidden,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Program,
+        },
+        Message::EchoMode {
+            block,
+            mode: Echo::Unknown,
+        },
     ];
     for message in messages {
         round_trip(message);
@@ -204,6 +406,24 @@ fn every_event_round_trips() {
         Event::SessionClosed { session },
         Event::WindowCreated { window, session },
         Event::WindowClosed { window },
+        Event::WindowMoved { window, index: 0 },
+        Event::FocusChanged {
+            window,
+            block: Some(block),
+        },
+        Event::FocusChanged {
+            window,
+            block: None,
+        },
+        Event::ActiveWindowChanged {
+            session,
+            window: Some(window),
+        },
+        Event::ActiveWindowChanged {
+            session,
+            window: None,
+        },
+        Event::ConfigReloaded,
         Event::BlockCreated {
             block,
             window,
@@ -214,8 +434,25 @@ fn every_event_round_trips() {
             size: size(100, 30),
         },
         Event::BlockClosed { block },
-        Event::ClientConnected { client },
+        Event::ClientConnected {
+            client,
+            principal: None,
+        },
+        Event::ClientConnected {
+            client,
+            principal: Some(Principal::unix(0, Some("root".into())).expect("valid")),
+        },
         Event::ClientDisconnected { client },
+        Event::ClientConnectionChanged {
+            client,
+            principal: Principal::new("sid:S-1-5-21-1", "").expect("valid"),
+            transport: Transport::Socket,
+        },
+        Event::ClientConnectionChanged {
+            client,
+            principal: Principal::unix(1000, None).expect("valid"),
+            transport: Transport::Datagram,
+        },
         Event::Attached { client, block },
         Event::Detached { client, block },
         Event::LeaseChanged {
@@ -227,6 +464,94 @@ fn every_event_round_trips() {
             holder: None,
         },
         Event::BlockStatus { block },
+        Event::PwdChanged { block },
+        Event::TitleChanged { block },
+        Event::ProgramExited {
+            block,
+            status: ExitStatus::Code(-1),
+        },
+        Event::ProgramExited {
+            block,
+            status: ExitStatus::Signal(9),
+        },
+        Event::Bell { block },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Cleared,
+        },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Normal(100),
+        },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Error(5),
+        },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Indeterminate,
+        },
+        Event::ProgressChanged {
+            block,
+            progress: Progress::Paused(0),
+        },
+        Event::Notification {
+            block,
+            title: String::new(),
+            body: "done; ok".into(),
+        },
+        Event::ProcessChanged {
+            block,
+            pid: u32::MAX,
+            name: "vim".into(),
+        },
+        Event::ProcessChanged {
+            block,
+            pid: 1,
+            name: String::new(),
+        },
+        Event::SessionRenamed {
+            session,
+            name: "work".into(),
+        },
+        Event::WindowRenamed {
+            window,
+            name: String::new(),
+        },
+        Event::BlockRenamed {
+            block,
+            name: "build".into(),
+        },
+        Event::ClientRenamed {
+            client,
+            name: "laptop".into(),
+        },
+        Event::LayoutChanged {
+            window,
+            layout: Some(split_layout(block)),
+            zoomed: Some(block),
+        },
+        Event::LayoutChanged {
+            window,
+            layout: None,
+            zoomed: None,
+        },
+        Event::ClipboardWritten {
+            block,
+            selection: Selection::Clipboard,
+        },
+        Event::ClipboardWritten {
+            block,
+            selection: Selection::Primary,
+        },
+        Event::StatusRemoved {
+            block,
+            id: "build/test".into(),
+        },
+        Event::StatusRemoved {
+            block,
+            id: String::new(),
+        },
     ];
     for event in events {
         round_trip(Message::Event {
@@ -283,7 +608,8 @@ const FEATURES_ID: u32 = 10;
 fn decode_state_is_bounded_by_ids_not_by_field_count() {
     // `In` owns nothing to free, so it cannot grow with the frame.
     assert!(!std::mem::needs_drop::<crate::field::In<'static>>());
-    assert!(std::mem::size_of::<crate::field::In<'static>>() <= 1024);
+    // One slot per known id (FIELD_COUNT of them), whatever the frame holds.
+    assert!(std::mem::size_of::<crate::field::In<'static>>() <= 2048);
     // Unknown ids, both below and above the kept range.
     let unknown = raw_frame(0x01, |o| {
         for i in 0..REPEATS {
@@ -296,6 +622,7 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
         Message::Hello {
             features: Features::NONE,
             resume: None,
+            takeover: None,
         }
     );
     // A known id repeated: the last occurrence wins.
@@ -309,6 +636,7 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
         Message::Hello {
             features: Features::from_bits(REPEATS),
             resume: None,
+            takeover: None,
         }
     );
 }
@@ -444,6 +772,92 @@ fn invalid_values_are_rejected() {
 }
 
 #[test]
+fn program_event_values_are_checked() {
+    let block = BlockId::from_uuid(Uuid::nil());
+    let event = |kind: u64, fields: &dyn Fn(&mut Out)| {
+        decode(&raw_frame(0x84, |o| {
+            o.varint(13, kind).uuid(4, block.uuid());
+            fields(o);
+        }))
+    };
+    let invalid = |field| {
+        Err(Error::InvalidField {
+            message: 0x84,
+            field,
+        })
+    };
+    assert_eq!(
+        event(18, &|o| {
+            o.varint(26, 1).varint(27, 101);
+        }),
+        invalid(27),
+        "over 100%"
+    );
+    assert_eq!(
+        event(18, &|o| {
+            o.varint(26, 5);
+        }),
+        invalid(26),
+        "unknown state"
+    );
+    assert_eq!(
+        event(18, &|o| {
+            o.varint(26, 4);
+        }),
+        Err(Error::MissingField {
+            message: 0x84,
+            field: 27
+        }),
+        "paused needs a percentage"
+    );
+    assert_eq!(
+        event(16, &|o| {
+            o.varint(24, 1 << 32);
+        }),
+        invalid(24),
+        "wider than 32 bits"
+    );
+    assert_eq!(
+        event(16, &|_| {}),
+        Err(Error::MissingField {
+            message: 0x84,
+            field: 25
+        }),
+        "neither a code nor a signal"
+    );
+    assert_eq!(
+        event(27, &|o| {
+            o.varint(44, 3);
+        }),
+        invalid(44),
+        "an unknown selection"
+    );
+    assert_eq!(
+        event(27, &|_| {}),
+        Err(Error::MissingField {
+            message: 0x84,
+            field: 44
+        }),
+        "a clipboard write names its selection"
+    );
+    assert_eq!(
+        event(28, &|_| {}),
+        Err(Error::MissingField {
+            message: 0x84,
+            field: 45
+        }),
+        "a removal names its record"
+    );
+    assert_eq!(
+        event(20, &|o| {
+            o.varint(32, 1 << 32).bytes(6, b"vim");
+        }),
+        invalid(32),
+        "a pid wider than 32 bits"
+    );
+}
+
+#[test]
 fn features_intersect() {
     let ours = Features::from_bits(0b0110);
     let theirs = Features::from_bits(0b0011);
@@ -470,6 +884,7 @@ fn near_limit_unknown_and_duplicate_fields_decode_last_value() {
                 Message::Hello {
                     features: Features::from_bits(42),
                     resume: None,
+                    takeover: None,
                 },
                 frame.len()
             )))
@@ -565,6 +980,20 @@ fn feature_bits_are_distinct() {
         Features::INSPECT,
         Features::BLOCK_CALL,
         Features::STATUS,
+        Features::TERMINAL_EVENTS,
+        Features::PROGRAM_EVENTS,
+        Features::LAUNCH,
+        Features::PROCESS,
+        Features::CAPTURE,
+        Features::LABELS,
+        Features::LAYOUT,
+        Features::CHECKPOINT_V4,
+        Features::CHECKPOINT_V5,
+        Features::CHECKPOINT_V6,
+        Features::TAKEOVER,
+        Features::ECHO_ACK,
+        Features::DATAGRAM,
+        Features::IDENTITY,
     ];
     let mut seen = 0u64;
     for feature in all {
@@ -572,6 +1001,39 @@ fn feature_bits_are_distinct() {
         assert_eq!(seen & feature.bits(), 0, "{feature:?} reuses a bit");
         seen |= feature.bits();
     }
+}
+
+/// An unknown transport, or a principal without an id, is refused rather
+/// than guessed.
+#[test]
+fn a_bad_transport_or_principal_is_rejected() {
+    let client = Uuid::new_v4();
+    let entry = |transport: u64, principal: &[u8]| {
+        raw_frame(0x8a, |o| {
+            o.varint(REQ_ID, 1)
+                .uuid(5, client)
+                .bytes(6, b"")
+                .varint(13, 4)
+                .varint(41, transport)
+                .bytes(42, principal)
+                .bytes(43, b"");
+        })
+    };
+    assert!(decode(&entry(1, b"uid:1")).is_ok());
+    assert_eq!(
+        decode(&entry(3, b"uid:1")),
+        Err(Error::InvalidField {
+            message: 0x8a,
+            field: 41
+        })
+    );
+    assert_eq!(
+        decode(&entry(1, b"")),
+        Err(Error::InvalidField {
+            message: 0x8a,
+            field: 42
+        })
+    );
 }
 
 #[test]
@@ -652,4 +1114,228 @@ fn block_call_args_are_bounded_in_count() {
             "{count}"
         );
     }
+}
+
+#[test]
+fn launch_arguments_need_a_command_and_well_formed_texts() {
+    let window = [9u8; 16];
+    let create = |body: &dyn Fn(&mut Out)| {
+        raw_frame(0x04, |out| {
+            out.varint(REQ_ID, 1)
+                .bytes(3, &window)
+                .varint(7, 80)
+                .varint(8, 24);
+            body(out);
+        })
+    };
+    // Arguments without a command; one running past the end; one not UTF-8.
+    let cases: [&dyn Fn(&mut Out); 3] = [
+        &|out| {
+            out.bytes(30, b"\x01a");
+        },
+        &|out| {
+            out.bytes(29, b"sh").bytes(30, b"\x05ab");
+        },
+        &|out| {
+            out.bytes(29, b"sh").bytes(30, b"\x01\xff");
+        },
+    ];
+    for body in cases {
+        assert!(matches!(
+            decode(&create(body)),
+            Err(Error::InvalidField { field: 30, .. })
+        ));
+    }
+    // A command alone runs with no arguments.
+    let Ok(Some((Message::CreateBlock { launch, .. }, _))) = decode(&create(&|out| {
+        out.bytes(29, b"true");
+    })) else {
+        panic!("a command alone decodes");
+    };
+    assert_eq!(
+        launch.program,
+        Some(Program {
+            command: "true".into(),
+            args: Vec::new()
+        })
+    );
+}
+
+#[test]
+fn block_call_words_round_trip_and_are_bounded() {
+    round_trip(Message::BlockCall {
+        req: 1,
+        block: BlockId::from_uuid(Uuid::nil()),
+        method: "terminal.format".into(),
+        args: vec![(
+            "words".into(),
+            Value::Words(vec!["a".into(), String::new()]),
+        )],
+    });
+    // A count larger than the bytes left is refused before reading.
+    let frame = raw_frame(0x0f, |out| {
+        out.varint(REQ_ID, 1)
+            .bytes(4, &[9; 16])
+            .bytes(22, b"terminal.format")
+            .bytes(23, b"\x01a\x06\xff\xff\xff\x0f");
+    });
+    assert!(matches!(
+        decode(&frame),
+        Err(Error::InvalidField { field: 23, .. })
+    ));
+}
+
+#[test]
+fn block_call_flags_round_trip_and_are_one_bit() {
+    round_trip(Message::BlockCall {
+        req: 1,
+        block: BlockId::from_uuid(Uuid::nil()),
+        method: "terminal.format".into(),
+        args: vec![
+            ("trim".into(), Value::Flag(true)),
+            ("vt".into(), Value::Flag(false)),
+        ],
+    });
+    let frame = raw_frame(0x0f, |out| {
+        out.varint(REQ_ID, 1)
+            .bytes(4, &[9; 16])
+            .bytes(22, b"terminal.format")
+            .bytes(23, b"\x02vt\x07\x02");
+    });
+    assert!(matches!(
+        decode(&frame),
+        Err(Error::InvalidField { field: 23, .. })
+    ));
+}
+
+#[test]
+fn a_rename_names_exactly_one_entity() {
+    const RENAME: u8 = 0x10;
+    let (session, block) = (Uuid::new_v4(), Uuid::new_v4());
+    let none = raw_frame(RENAME, |out| {
+        out.varint(REQ_ID, 1).bytes(6, b"x");
+    });
+    let two = raw_frame(RENAME, |out| {
+        out.varint(REQ_ID, 1)
+            .uuid(2, session)
+            .uuid(4, block)
+            .bytes(6, b"x");
+    });
+    for frame in [none, two] {
+        assert!(matches!(
+            decode(&frame),
+            Err(Error::InvalidField {
+                message: RENAME,
+                ..
+            })
+        ));
+    }
+}
+
+#[test]
+fn a_block_entry_from_an_older_server_has_an_empty_name() {
+    const ENTRY: u8 = 0x8a;
+    let frame = raw_frame(ENTRY, |out| {
+        out.varint(REQ_ID, 1)
+            .varint(13, 3)
+            .uuid(4, Uuid::nil())
+            .uuid(3, Uuid::nil())
+            .bytes(20, b"")
+            .varint(7, 80)
+            .varint(8, 24);
+    });
+    let Ok(Some((Message::Entry { entry, .. }, _))) = decode(&frame) else {
+        panic!("a block entry");
+    };
+    assert!(matches!(entry, Entry::Block { name, .. } if name.is_empty()));
+}
+
+/// `block` beside a second block.
+fn split_layout(block: BlockId) -> Layout {
+    let other = BlockId::from_uuid(Uuid::new_v4());
+    format!("cols50({block},{other})")
+        .parse()
+        .expect("a layout")
+}
+
+#[test]
+fn a_bad_side_or_layout_is_refused() {
+    const SPLIT: u8 = 0x12;
+    let side = raw_frame(SPLIT, |out| {
+        out.varint(REQ_ID, 1).uuid(4, Uuid::nil()).varint(33, 4);
+    });
+    assert!(matches!(
+        decode(&side),
+        Err(Error::InvalidField { field: 33, .. })
+    ));
+    const EVENT: u8 = 0x84;
+    let layout = raw_frame(EVENT, |out| {
+        out.varint(13, 25)
+            .uuid(3, Uuid::nil())
+            .bytes(34, b"cols50(");
+    });
+    assert!(matches!(
+        decode(&layout),
+        Err(Error::InvalidField { field: 34, .. })
+    ));
+}
+
+#[test]
+fn a_window_entry_from_an_older_server_has_no_layout() {
+    const ENTRY: u8 = 0x8a;
+    let frame = raw_frame(ENTRY, |out| {
+        out.varint(REQ_ID, 1)
+            .varint(13, 2)
+            .uuid(3, Uuid::nil())
+            .uuid(2, Uuid::nil())
+            .bytes(6, b"w");
+    });
+    let Ok(Some((Message::Entry { entry, .. }, _))) = decode(&frame) else {
+        panic!("a window entry");
+    };
+    assert!(matches!(
+        entry,
+        Entry::Window {
+            layout: None,
+            zoomed: None,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn an_unknown_echo_mode_decodes_as_unknown() {
+    let block = Uuid::new_v4();
+    let frame = raw_frame(0x8c, |out| {
+        out.uuid(4, block).varint(37, 9);
+    });
+    assert_eq!(
+        decode(&frame).expect("decode").map(|(m, _)| m),
+        Some(Message::EchoMode {
+            block: BlockId::from_uuid(block),
+            mode: Echo::Unknown,
+        })
+    );
+}
+
+#[test]
+fn a_datagram_key_never_shows_in_debug_and_a_short_one_is_refused() {
+    let message = Message::Datagram {
+        req: 1,
+        port: 60001,
+        id: [1; 8],
+        key: DatagramKey([0xab; 32]),
+    };
+    let shown = format!("{message:?}");
+    assert!(
+        shown.contains("DatagramKey(..)") && !shown.contains("171"),
+        "{shown}"
+    );
+    let short = raw_frame(0x8d, |out| {
+        out.varint(1, 1)
+            .varint(38, 60001)
+            .bytes(39, &[1; 8])
+            .bytes(40, &[0xab; 31]);
+    });
+    assert!(decode(&short).is_err());
 }

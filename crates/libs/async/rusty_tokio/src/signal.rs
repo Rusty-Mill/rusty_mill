@@ -314,7 +314,7 @@ fn dispatch(signum: c_int) {
 #[cfg(unix)]
 fn global() -> io::Result<&'static Global> {
     let result = GLOBAL.get_or_init(|| -> io::Result<Global> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let (read_fd, write_fd) = make_pipe()?;
         PIPE_WRITE_FD.store(write_fd.as_raw_fd(), Ordering::Relaxed);
         let io = reactor.register(read_fd.as_raw_fd())?;
@@ -411,7 +411,8 @@ impl SignalKind {
 ///
 /// # Panics
 /// [`signal`] (which every `Signal` is created through) panics if
-/// called outside a running [`crate::Runtime`].
+/// called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 #[cfg(unix)]
 pub struct Signal {
     listener: Arc<ListenerState>,
@@ -455,7 +456,8 @@ fn poll_listener(listener: &ListenerState, cx: &mut Context<'_>) -> Poll<()> {
 /// that gets woken on every occurrence from here on. Unix-only.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 #[cfg(unix)]
 pub fn signal(kind: SignalKind) -> io::Result<Signal> {
     let global = global()?;
@@ -488,7 +490,8 @@ pub fn signal(kind: SignalKind) -> io::Result<Signal> {
 /// for the common case of only ever caring about one occurrence.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 #[cfg(unix)]
 pub async fn ctrl_c() -> io::Result<()> {
     signal(SignalKind::interrupt())?.recv().await;
@@ -690,7 +693,7 @@ fn dispatch(ctrl_type: u32) {
 #[cfg(windows)]
 fn global() -> io::Result<&'static WindowsGlobal> {
     let result = WINDOWS_GLOBAL.get_or_init(|| -> io::Result<WindowsGlobal> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let (read_sock, write_sock) = windows_socket_pair()?;
         PIPE_WRITE_SOCKET.store(write_sock.as_raw_socket(), Ordering::Relaxed);
         read_sock
@@ -758,7 +761,8 @@ fn listen_for(ctrl_type: u32) -> io::Result<Arc<ListenerState>> {
 /// docs.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 #[cfg(windows)]
 pub async fn ctrl_c() -> io::Result<()> {
     let listener = listen_for(CTRL_C_EVENT)?;
@@ -802,7 +806,8 @@ pub mod windows {
     /// Listens for `CTRL_BREAK_EVENT`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn ctrl_break() -> io::Result<CtrlBreak> {
         listen_for(CTRL_BREAK_EVENT).map(CtrlBreak)
     }
@@ -827,7 +832,8 @@ pub mod windows {
     /// Listens for `CTRL_CLOSE_EVENT`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn ctrl_close() -> io::Result<CtrlClose> {
         listen_for(CTRL_CLOSE_EVENT).map(CtrlClose)
     }
@@ -848,7 +854,8 @@ pub mod windows {
     /// Listens for `CTRL_LOGOFF_EVENT`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn ctrl_logoff() -> io::Result<CtrlLogoff> {
         listen_for(CTRL_LOGOFF_EVENT).map(CtrlLogoff)
     }
@@ -869,7 +876,8 @@ pub mod windows {
     /// Listens for `CTRL_SHUTDOWN_EVENT`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn ctrl_shutdown() -> io::Result<CtrlShutdown> {
         listen_for(CTRL_SHUTDOWN_EVENT).map(CtrlShutdown)
     }

@@ -1,0 +1,231 @@
+//! Requests made from tasks a real tokio runtime drives, with no
+//! `rusty_tokio` runtime of their own: `rusty_tokio`'s fallback runtime
+//! (`runtime::install_fallback`) serves their sockets, timers and DNS. Covers
+//! `http://`, `https://` and connection pooling; `tests/client.rs` and
+//! `tests/https.rs` cover the client itself in depth on `rusty_tokio`.
+//!
+//! Each server here is a blocking `std::net::TcpListener` on its own OS
+//! thread: only the client side runs on tokio.
+
+use rusty_request::Client;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener};
+use std::sync::mpsc;
+
+/// Reads one full request (head, then exactly `Content-Length` body
+/// bytes, if any -- so the client is never left writing into a socket
+/// that's already been closed), sends the raw request bytes back through
+/// the returned channel for a test that wants to inspect them, and
+/// writes back a fixed 200 response with `body` -- once, then closes.
+fn serve_one_http_response(listener: TcpListener, body: &'static [u8]) -> mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept failed");
+        let mut buf = [0u8; 4096];
+        let mut seen = Vec::new();
+        let head_end = loop {
+            let n = stream.read(&mut buf).expect("read failed");
+            assert_ne!(n, 0, "connection closed before the request head arrived");
+            seen.extend_from_slice(&buf[..n]);
+            if let Some(i) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+        };
+        let head = String::from_utf8_lossy(&seen[..head_end]).to_string();
+        let content_length: usize = head
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.eq_ignore_ascii_case("content-length")
+                    .then(|| v.trim().parse().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        while seen.len() < head_end + content_length {
+            let n = stream.read(&mut buf).expect("read failed");
+            assert_ne!(n, 0, "connection closed before the request body arrived");
+            seen.extend_from_slice(&buf[..n]);
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        let _ = tx.send(seen);
+    });
+    rx
+}
+
+#[tokio::test]
+async fn http_request_completes_on_a_real_tokio_runtime() {
+    fallback();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test server");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    serve_one_http_response(listener, b"hello from real tokio");
+
+    let resp = rusty_request::get(&format!("http://{addr}/"))
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.text().unwrap(), "hello from real tokio");
+}
+
+/// Serves this test's `rusty_tokio` I/O from the fallback runtime; the
+/// test's own task runs on tokio.
+fn fallback() {
+    rusty_tokio::runtime::install_fallback().expect("fallback runtime");
+}
+
+/// A self-signed CA + leaf cert for `127.0.0.1`, and a server that
+/// terminates TLS for exactly one connection -- same shape as
+/// `tests/common::start_tls_test_server`, inlined so this file has no
+/// dependency on the `rusty_tokio`-flavored `tests/common` module.
+fn serve_one_https_response(listener: TcpListener, body: &'static [u8]) -> Vec<u8> {
+    use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
+    use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use rustls::{ServerConfig, ServerConnection, StreamOwned};
+
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, "rusty_request foreign-executor test CA");
+    ca_params.distinguished_name = dn;
+    let ca_key = KeyPair::generate().unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+
+    let leaf_params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+    let leaf_key = KeyPair::generate().unwrap();
+    let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
+    let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
+
+    // Explicit provider for the same reason as `tests/common`'s TLS
+    // server: a workspace-wide `--all-features` build compiles both
+    // `ring` and `aws-lc-rs` into rustls, which makes the ambient
+    // auto-detection in `ServerConfig::builder()` panic.
+    let config = std::sync::Arc::new(
+        ServerConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports rustls's default protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![leaf_cert.der().clone()], key_der)
+        .expect("valid test cert/key"),
+    );
+
+    std::thread::spawn(move || {
+        let (tcp, _) = listener.accept().expect("accept failed");
+        let conn = ServerConnection::new(config).expect("valid server config");
+        let mut tls = StreamOwned::new(conn, tcp);
+        let mut buf = [0u8; 4096];
+        let mut seen = Vec::new();
+        loop {
+            let n = tls.read(&mut buf).expect("tls read failed");
+            assert_ne!(n, 0, "connection closed before the request head arrived");
+            seen.extend_from_slice(&buf[..n]);
+            if seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        tls.write_all(response.as_bytes()).unwrap();
+        tls.write_all(body).unwrap();
+    });
+
+    ca_cert.der().to_vec()
+}
+
+#[tokio::test]
+async fn https_request_completes_on_a_real_tokio_runtime() {
+    fallback();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test server");
+    let addr: SocketAddr = listener.local_addr().unwrap();
+    let ca_der = serve_one_https_response(listener, b"hello over tls, over real tokio");
+
+    let client = Client::builder()
+        .trust_policy(rusty_request::pinned_anchors([ca_der]))
+        .build();
+    let resp = client
+        .get(&format!("https://{addr}/"))
+        .expect("failed to build request")
+        .send()
+        .await
+        .expect("request failed");
+    assert_eq!(resp.status().as_u16(), 200);
+    assert_eq!(resp.text().unwrap(), "hello over tls, over real tokio");
+}
+
+/// A blocking server that answers bodiless GETs with `ok`, keeping each
+/// connection open for more unless `one_per_connection`, in which case it
+/// hangs up after the first answer. Returns its address and how many
+/// connections it has accepted.
+fn serve_keep_alive(
+    one_per_connection: bool,
+) -> (SocketAddr, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test server");
+    let addr = listener.local_addr().unwrap();
+    let accepted = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            counter.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || {
+                let mut seen = Vec::new();
+                let mut buf = [0u8; 4096];
+                loop {
+                    while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match stream.read(&mut buf) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => seen.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    seen.clear();
+                    let reply = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+                    if stream.write_all(reply).is_err() || one_per_connection {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (addr, accepted)
+}
+
+/// Two streamed GETs on one client, each body read to its end.
+async fn two_drained_gets(addr: SocketAddr) {
+    let client = Client::new();
+    for path in ["/a", "/b"] {
+        let mut resp = client
+            .get(&format!("http://{addr}{path}"))
+            .unwrap()
+            .send_streaming()
+            .await
+            .expect("request failed");
+        assert_eq!(resp.status().as_u16(), 200);
+        while resp.chunk().await.unwrap().is_some() {}
+        // Long enough for a one-request server to have hung up.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn streamed_responses_reuse_a_pooled_connection_on_real_tokio() {
+    fallback();
+    let (addr, accepted) = serve_keep_alive(false);
+    two_drained_gets(addr).await;
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_connection_closed_while_idle_is_redialed_on_real_tokio() {
+    fallback();
+    let (addr, accepted) = serve_keep_alive(true);
+    two_drained_gets(addr).await;
+    assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 2);
+}

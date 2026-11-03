@@ -13,7 +13,7 @@
 //! | GET, PATCH, DELETE | `/lists/{id}` | delete sends its tasks to the trash; the Inbox is permanent |
 //! | GET | `/lists/{id}/tasks?status=open\|done\|wontdo&sort=manual\|due` | |
 //! | POST | `/tasks` | accepts a client-chosen `id` |
-//! | GET, PATCH, DELETE | `/tasks/{id}` | DELETE trashes; `?permanent=true` purges |
+//! | GET, PATCH, DELETE | `/tasks/{id}` | DELETE trashes (with its subtasks; `?leaf=true` refuses with 409 if it has any); `?permanent=true` purges |
 //! | POST | `/tasks/{id}/complete`, `/reopen`, `/restore` | |
 //! | PUT | `/tasks/{id}/order` | `{"sortOrder": n}` |
 //! | DELETE | `/trash` | purge everything in the trash |
@@ -24,14 +24,19 @@
 //! | GET | `/search?q=` | whole-word match on title and notes |
 //! | GET | `/smart/{today,next7,overdue}?utcOffsetMin=` | |
 //! | GET | `/docs/{kind}` | client-owned JSON: habits, focus records, prefs |
-//! | PUT, DELETE | `/docs/{kind}/{id}` | |
+//! | GET, PUT, DELETE | `/docs/{kind}/{id}` | PUT also takes `If-None-Match: *` (only if absent); a `board` document's PUT requires `If-Task-Match: <task etag>` |
+//! | GET | `/moves?since=<ms>&after=<seq>&limit=<n>` | board column history, oldest first; `next` is the following page's `after` |
+//! | GET | `/tasks/{id}/moves` | one task's column history, oldest first |
 //!
 //! Writes accept `If-Match: "<etag>"`; a stale one is refused with 412 and
-//! the current entity in `current`.
+//! the current entity in `current`. Writes that can move a task's board column
+//! (task writes, tag rename and delete) accept `X-Actor: <name>`, who the move is
+//! recorded as ([`crate::moves`]).
 
 use crate::auth::{Authenticator, Denied};
+use crate::docs::{comment_owner, BOARD_KIND};
 use crate::dto::{
-    CreateList, CreateTag, CreateTask, DocDto, Docs, ListDto, Lists, PatchList, PatchTag,
+    CreateList, CreateTag, CreateTask, DocDto, Docs, ListDto, Lists, Moves, PatchList, PatchTag,
     PatchTask, Purged, RenameTag, SetOrder, SnapshotDto, TagDto, Tags, TaskDto, Tasks,
 };
 use crate::service::{
@@ -40,10 +45,13 @@ use crate::service::{
 use crate::task::{Priority, Status};
 use crate::users::{RegistryFile, UserKey};
 use rusty_http::{Method, StatusCode};
+use rusty_oauth_server::{now_unix, Provider};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub use crate::auth::MIN_TOKEN_LEN;
+use crate::moves::MAX_PAGE;
 const MAX_UTC_OFFSET_MIN: i32 = 14 * 60;
 
 /// A parsed request, as the router sees it.
@@ -53,6 +61,12 @@ pub struct Request<'a> {
     pub target: &'a str,
     pub authorization: Option<&'a str>,
     pub if_match: Option<&'a str>,
+    /// `If-None-Match`; only `*` is understood, on a document write.
+    pub if_none_match: Option<&'a str>,
+    /// `If-Task-Match`: the version of the task a `board` document belongs to.
+    pub if_task_match: Option<&'a str>,
+    /// `X-Actor`: who a task write's column move is recorded as.
+    pub actor: Option<&'a str>,
     pub body: &'a [u8],
 }
 
@@ -198,6 +212,9 @@ type Result<T> = std::result::Result<T, ApiError>;
 /// ([`Api::serve`]).
 pub struct Api {
     auth: Authenticator,
+    /// The OAuth grants whose access tokens are accepted beside the server's
+    /// own tokens, when OAuth is on ([`crate::oauth`]).
+    oauth: Option<Arc<Provider>>,
 }
 
 impl Api {
@@ -206,6 +223,7 @@ impl Api {
     pub fn new(token: String) -> std::result::Result<Self, String> {
         Ok(Self {
             auth: Authenticator::single(token)?,
+            oauth: None,
         })
     }
 
@@ -213,6 +231,7 @@ impl Api {
     pub fn multi_user(users: RegistryFile) -> Self {
         Self {
             auth: Authenticator::multi(users),
+            oauth: None,
         }
     }
 
@@ -224,13 +243,40 @@ impl Api {
             .then(|| Response::json(StatusCode::OK, &Health { status: "ok" }))
     }
 
-    /// The user behind the request's credential.
+    /// Also accept the access tokens `provider` issued, as the user each
+    /// grant was approved for.
+    pub fn set_oauth(&mut self, provider: Arc<Provider>) {
+        self.oauth = Some(provider);
+    }
+
+    /// The user behind the request's credential: one of the server's own
+    /// tokens, or an OAuth access token whose user is still live.
     ///
     /// # Errors
     ///
     /// [`Denied`] when there is none; [`Response::unauthorized`] is its answer.
     pub fn authenticate(&mut self, request: &Request<'_>) -> std::result::Result<UserKey, Denied> {
-        self.auth.authenticate(request.authorization)
+        let denied = match self.auth.authenticate(request.authorization) {
+            Ok(user) => return Ok(user),
+            Err(denied) => denied,
+        };
+        let Some(provider) = &self.oauth else {
+            return Err(denied);
+        };
+        request
+            .authorization
+            .and_then(rusty_oauth::bearer::token_from_authorization)
+            .and_then(|token| provider.subject_of(token, now_unix()))
+            .and_then(|subject| self.auth.resolve(subject.as_str()))
+            .ok_or(denied)
+    }
+
+    /// The user a pasted token of the server's own belongs to (OAuth access
+    /// tokens are not accepted): what the consent page checks.
+    pub fn verify(&mut self, token: &str) -> Option<UserKey> {
+        self.auth
+            .authenticate(Some(&format!("Bearer {token}")))
+            .ok()
     }
 
     /// `POST /api/v1/fetch-ics {"url"}`: the calendar feed at `url`, as
@@ -278,6 +324,9 @@ impl Api {
             query: &query,
             body: request.body,
             if_match: request.if_match,
+            if_none_match: request.if_none_match,
+            if_task_match: request.if_task_match,
+            actor: request.actor,
         };
         match segments.as_slice() {
             ["api", "v1", rest @ ..] => route(service, &cx, rest),
@@ -309,9 +358,16 @@ struct Cx<'a> {
     query: &'a Query,
     body: &'a [u8],
     if_match: Option<&'a str>,
+    if_none_match: Option<&'a str>,
+    if_task_match: Option<&'a str>,
+    actor: Option<&'a str>,
 }
 
 impl Cx<'_> {
+    fn actor(&self) -> Option<String> {
+        self.actor.map(str::to_string)
+    }
+
     fn body<T: for<'de> Deserialize<'de>>(&self) -> Result<T> {
         rusty_json::from_slice(self.body)
             .map_err(|e| ApiError::BadRequest(format!("invalid JSON body: {e}")))
@@ -319,35 +375,37 @@ impl Cx<'_> {
 
     /// `Some(response)` when `If-Match` is present and does not name `current`.
     fn stale<T: Serialize>(&self, current: &str, entity: impl FnOnce() -> T) -> Option<Response> {
-        let presented = self
-            .if_match?
-            .trim()
-            .trim_start_matches("W/")
-            .trim_matches('"');
-        if presented == current {
-            return None;
-        }
-        #[derive(Serialize)]
-        struct Stale<'a, T> {
-            error: StaleError<'a>,
-            current: T,
-        }
-        #[derive(Serialize)]
-        struct StaleError<'a> {
-            code: &'a str,
-            message: &'a str,
-        }
-        Some(Response::json(
-            StatusCode::PRECONDITION_FAILED,
-            &Stale {
-                error: StaleError {
-                    code: "precondition_failed",
-                    message: "the record changed since you read it",
-                },
-                current: entity(),
-            },
-        ))
+        stale_against(self.if_match?, current).then(|| precondition_failed(entity()))
     }
+}
+
+/// Whether an `If-Match`-style header names something other than `current`.
+fn stale_against(presented: &str, current: &str) -> bool {
+    presented.trim().trim_start_matches("W/").trim_matches('"') != current
+}
+
+/// 412, with what the caller should have read in `current`.
+fn precondition_failed<T: Serialize>(current: T) -> Response {
+    #[derive(Serialize)]
+    struct Stale<'a, T> {
+        error: StaleError<'a>,
+        current: T,
+    }
+    #[derive(Serialize)]
+    struct StaleError<'a> {
+        code: &'a str,
+        message: &'a str,
+    }
+    Response::json(
+        StatusCode::PRECONDITION_FAILED,
+        &Stale {
+            error: StaleError {
+                code: "precondition_failed",
+                message: "the record changed since you read it",
+            },
+            current,
+        },
+    )
 }
 
 fn split_target(target: &str) -> (&str, Query) {
@@ -376,6 +434,25 @@ fn route(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> 
         ["tasks", rest @ ..] => route_tasks(service, cx, rest),
         ["tags", rest @ ..] => route_tags(service, cx, rest),
         ["docs", rest @ ..] => route_docs(service, cx, rest),
+        ["moves"] if cx.method == &Method::Get => {
+            let since = query_number(cx.query, "since")?.unwrap_or(0);
+            let after = query_number(cx.query, "after")?.unwrap_or(0);
+            let limit = match query_number::<usize>(cx.query, "limit")? {
+                None => MAX_PAGE,
+                Some(n) if (1..=MAX_PAGE).contains(&n) => n,
+                Some(_) => {
+                    return Err(ApiError::BadRequest(format!(
+                        "limit must be 1 to {MAX_PAGE}"
+                    )))
+                }
+            };
+            let mut moves = service.moves(since, after, limit + 1);
+            let next = (moves.len() > limit).then(|| {
+                moves.truncate(limit);
+                moves.last().map_or(after, |m| m.seq)
+            });
+            Ok(Response::json(StatusCode::OK, &Moves::new(moves, next)))
+        }
         ["trash"] if cx.method == &Method::Delete => {
             let purged = service.empty_trash()?;
             Ok(Response::json(StatusCode::OK, &Purged { purged }))
@@ -494,6 +571,8 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 items: input.items,
                 tags: input.tags,
                 sort_order: input.sort_order,
+                status: input.status,
+                actor: cx.actor(),
             })?;
             Ok(Response::json(StatusCode::CREATED, &TaskDto::from(task)))
         }
@@ -507,16 +586,29 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
                 return Ok(stale);
             }
             let input: PatchTask = cx.body()?;
-            let task = service.patch_task(id, task_patch(input)?)?;
+            let task = service.patch_task(id, task_patch(input, cx.actor())?)?;
             Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
         }
         (Method::Delete, [id]) => {
             let id = parse_id(id)?;
+            let leaf = match cx.query.get("leaf") {
+                None | Some("false") => false,
+                Some("true") => true,
+                Some(_) => return Err(ApiError::BadRequest("leaf must be true or false".into())),
+            };
             if let Some(stale) = stale_task(service, cx, id)? {
                 return Ok(stale);
             }
             match cx.query.get("permanent") {
+                Some("true") if leaf => {
+                    return Err(ApiError::BadRequest(
+                        "leaf applies to trashing, not to permanent".into(),
+                    ))
+                }
                 Some("true") => service.purge_task(id)?,
+                None | Some("false") if leaf => {
+                    service.trash_leaf_task(id)?;
+                }
                 None | Some("false") => {
                     service.trash_task(id)?;
                 }
@@ -529,16 +621,20 @@ fn route_tasks(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Resp
             Ok(Response::empty(StatusCode::NO_CONTENT))
         }
         (Method::Post, [id, "complete"]) => {
-            let task = service.set_status(parse_id(id)?, Status::Done)?;
+            let task = service.set_status(parse_id(id)?, Status::Done, cx.actor())?;
             Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
         }
         (Method::Post, [id, "reopen"]) => {
-            let task = service.set_status(parse_id(id)?, Status::Open)?;
+            let task = service.set_status(parse_id(id)?, Status::Open, cx.actor())?;
             Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
         }
         (Method::Post, [id, "restore"]) => {
             let task = service.restore_task(parse_id(id)?)?;
             Ok(Response::json(StatusCode::OK, &TaskDto::from(task)))
+        }
+        (Method::Get, [id, "moves"]) => {
+            let moves = service.task_moves(parse_id(id)?)?;
+            Ok(Response::json(StatusCode::OK, &Moves::new(moves, None)))
         }
         (Method::Put, [id, "order"]) => {
             let input: SetOrder = cx.body()?;
@@ -557,7 +653,7 @@ fn stale_task(service: &Service, cx: &Cx<'_>, id: Uuid) -> Result<Option<Respons
     }))
 }
 
-fn task_patch(input: PatchTask) -> Result<TaskPatch> {
+fn task_patch(input: PatchTask, actor: Option<String>) -> Result<TaskPatch> {
     Ok(TaskPatch {
         title: input.title,
         notes: input.notes,
@@ -575,6 +671,7 @@ fn task_patch(input: PatchTask) -> Result<TaskPatch> {
         tags: input.tags,
         list_id: input.list_id,
         sort_order: input.sort_order,
+        actor,
     })
 }
 
@@ -609,11 +706,11 @@ fn route_tags(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
         }
         (Method::Post, [name, "rename"]) => {
             let input: RenameTag = cx.body()?;
-            let tag = service.rename_tag(name, &input.label)?;
+            let tag = service.rename_tag(name, &input.label, cx.actor())?;
             Ok(Response::json(StatusCode::OK, &TagDto::from(tag)))
         }
         (Method::Delete, [name]) => {
-            service.delete_tag(name)?;
+            service.delete_tag(name, cx.actor())?;
             Ok(Response::empty(StatusCode::NO_CONTENT))
         }
         (Method::Get, [name, "tasks"]) => Ok(Response::json(
@@ -634,10 +731,20 @@ fn route_docs(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
                 .collect();
             Ok(Response::json(StatusCode::OK, &Docs { docs }))
         }
+        (Method::Get, [kind, id]) => {
+            let doc = service.doc(kind, parse_id(id)?)?;
+            let dto = DocDto::from_doc(doc).ok_or(ApiError::Internal)?;
+            Ok(Response::json(StatusCode::OK, &dto))
+        }
         (Method::Put, [kind, id]) => {
+            let id = parse_id(id)?;
             let body = std::str::from_utf8(cx.body)
                 .map_err(|_| ApiError::BadRequest("body must be UTF-8 JSON".into()))?;
-            let doc = service.put_doc(kind, parse_id(id)?, body)?;
+            let task = fenced_task(cx, kind, id, body)?;
+            if let Some(stale) = stale_doc(service, cx, kind, id, task)? {
+                return Ok(stale);
+            }
+            let doc = service.put_doc_for(kind, id, body, task)?;
             let dto = DocDto::from_doc(doc).ok_or(ApiError::Internal)?;
             Ok(Response::json(StatusCode::OK, &dto))
         }
@@ -649,12 +756,82 @@ fn route_docs(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
     }
 }
 
+/// The task a document write is fenced to, which `If-Task-Match` names and the
+/// write moves: a `board` document's own id (the header is required), or the
+/// `taskId` of a comment written with the header.
+fn fenced_task(cx: &Cx<'_>, kind: &str, id: Uuid, body: &str) -> Result<Option<Uuid>> {
+    match (kind, cx.if_task_match) {
+        (BOARD_KIND, None) => Err(ApiError::BadRequest(
+            "a board document is written with If-Task-Match".into(),
+        )),
+        (BOARD_KIND, Some(_)) => Ok(Some(id)),
+        ("comment", Some(_)) => comment_owner(body).map(Some).ok_or_else(|| {
+            ApiError::BadRequest("a comment written with If-Task-Match names its taskId".into())
+        }),
+        (_, Some(_)) => Err(ApiError::BadRequest(
+            "If-Task-Match applies to board documents and comments".into(),
+        )),
+        (_, None) => Ok(None),
+    }
+}
+
+/// A 412 when a document write's preconditions fail, checked under the same
+/// lock as the write: `If-Task-Match` against the fenced `task`, then
+/// `If-None-Match: *` and `If-Match`.
+fn stale_doc(
+    service: &Service,
+    cx: &Cx<'_>,
+    kind: &str,
+    id: Uuid,
+    task: Option<Uuid>,
+) -> Result<Option<Response>> {
+    if let (Some(task), Some(presented)) = (task, cx.if_task_match) {
+        let task = service.task(task)?;
+        if stale_against(presented, &task.version.to_string()) {
+            return Ok(Some(precondition_failed(TaskDto::from(task))));
+        }
+    }
+    let current = service.doc(kind, id).ok();
+    match cx.if_none_match.map(str::trim) {
+        None => {}
+        Some("*") => {
+            if let Some(doc) = current {
+                return Ok(Some(precondition_failed(DocDto::from_doc(doc))));
+            }
+        }
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "If-None-Match on a document must be *".into(),
+            ))
+        }
+    }
+    let Some(presented) = cx.if_match else {
+        return Ok(None);
+    };
+    Ok(match current {
+        None => Some(precondition_failed(rusty_json::Value::Null)),
+        Some(doc) => stale_against(presented, &doc.updated_ms.to_string())
+            .then(|| precondition_failed(DocDto::from_doc(doc))),
+    })
+}
+
 fn not_found() -> ApiError {
     ApiError::NotFound("no such route".into())
 }
 
 fn parse_id(text: &str) -> Result<Uuid> {
     Uuid::parse_str(text).map_err(|_| ApiError::BadRequest("malformed id".into()))
+}
+
+/// An optional numeric query parameter.
+fn query_number<T: std::str::FromStr>(query: &Query, key: &str) -> Result<Option<T>> {
+    query
+        .get(key)
+        .map(|text| {
+            text.parse()
+                .map_err(|_| ApiError::BadRequest(format!("{key} must be a number")))
+        })
+        .transpose()
 }
 
 fn parse_priority(value: u8) -> Result<Priority> {

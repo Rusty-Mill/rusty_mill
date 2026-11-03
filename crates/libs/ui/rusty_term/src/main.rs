@@ -11,7 +11,7 @@ use backend::Backend;
 #[cfg(unix)]
 use backend::UnixBackend;
 #[cfg(windows)]
-use backend::WindowsBackend;
+use backend::{OwnBackend, WindowsBackend};
 use config::{Config, LaunchMode, flag_value};
 use core::Grid;
 
@@ -259,8 +259,13 @@ fn main() -> Result<(), std::io::Error> {
 
     #[cfg(unix)]
     let backend: Box<dyn Backend> = Box::new(UnixBackend);
+    // `[console] host` picks who serves the shell's console; `own` failing
+    // to start is shown, never swapped for ConPTY.
     #[cfg(windows)]
-    let backend: Box<dyn Backend> = Box::new(WindowsBackend);
+    let backend: Box<dyn Backend> = match config.console_host.unwrap_or_default() {
+        config::ConsoleHost::ConPty => Box::new(WindowsBackend),
+        config::ConsoleHost::Own => Box::new(OwnBackend::new()),
+    };
 
     // `--gui` launches the native window backend (the tcore-app fork) instead of
     // rendering into the host terminal. Requires the `gui` feature.

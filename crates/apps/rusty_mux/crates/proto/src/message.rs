@@ -1,11 +1,15 @@
 //! The messages and their field layouts.
 
-use rusty_mux_core::{BlockId, ClientId, Event, SessionId, Size, WindowId};
+use rusty_mux_core::{
+    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
+    SessionId, Share, Side, Size, Toward, Transport, WindowId,
+};
 use rusty_uuid::Uuid;
+use rusty_wire::{Reader, Writer};
 
 use crate::field::{In, Out};
 use crate::schema::Value;
-use crate::{Error, args};
+use crate::{Error, args, varint};
 
 /// Optional protocol capabilities. Each peer sends its own; the session uses
 /// the intersection. Continuation checkpoints require explicit opt-in.
@@ -24,8 +28,8 @@ impl Features {
     /// Reserved: superseded fixed-width RTCP v2 checkpoint capability.
     pub const CHECKPOINT_V2: Self = Self(1 << 2);
 
-    /// RTCP v3 (run-encoded) headless checkpoints transferred in ordered
-    /// Checkpoint chunks.
+    /// Reserved: superseded RTCP v3 checkpoint capability (colours without
+    /// default/explicit provenance).
     pub const CHECKPOINT_V3: Self = Self(1 << 3);
 
     /// Numbered events and resuming the stream after a reconnect: a
@@ -38,11 +42,127 @@ impl Features {
     /// [`Message::List`], which reads the server's state without changing
     /// it.
     pub const INSPECT: Self = Self(1 << 6);
-    /// [`Message::BlockCall`], answered with [`Message::Text`].
+    /// [`Message::BlockCall`], answered with [`Message::Text`], or, for a
+    /// method that writes to the block, only if it fails.
     pub const BLOCK_CALL: Self = Self(1 << 7);
     /// [`Event::BlockStatus`] events. A client without it never receives
     /// one, so its event numbers skip them.
     pub const STATUS: Self = Self(1 << 8);
+    /// [`Event::PwdChanged`] and [`Event::TitleChanged`] events, likewise
+    /// skipped for a client without it.
+    pub const TERMINAL_EVENTS: Self = Self(1 << 9);
+    /// [`Event::ProgramExited`], [`Event::Bell`], [`Event::ProgressChanged`]
+    /// and [`Event::Notification`] events, likewise skipped for a client
+    /// without it.
+    pub const PROGRAM_EVENTS: Self = Self(1 << 10);
+    /// [`Message::CreateBlock`]'s [`Launch`]: the program and working
+    /// directory of the new block. A server without it ignores them and
+    /// starts its default program, so a client must not send them then.
+    pub const LAUNCH: Self = Self(1 << 11);
+    /// [`Event::ProcessChanged`] events, skipped for a client without it
+    /// as the other optional kinds are.
+    pub const PROCESS: Self = Self(1 << 12);
+    /// `terminal.format`'s `trim`, `unwrap` and `vt` options. A server
+    /// without it refuses them as unknown parameters.
+    pub const CAPTURE: Self = Self(1 << 13);
+    /// Names for every kind: [`Message::Rename`] and the `*Renamed`
+    /// events (skipped for a client without it); clients in the reply to
+    /// [`Message::List`]; and [`Message::Disconnect`].
+    pub const LABELS: Self = Self(1 << 14);
+    /// Window layouts: [`Message::Split`], [`Message::Zoom`],
+    /// [`Message::Unzoom`] and [`Event::LayoutChanged`] (skipped for a
+    /// client without it). A window entry carries its layout regardless,
+    /// since older decoders skip the fields.
+    pub const LAYOUT: Self = Self(1 << 15);
+
+    /// Reserved: superseded RTCP v4 checkpoint capability (no palette tags,
+    /// DECSC pen or theme-following status line).
+    pub const CHECKPOINT_V4: Self = Self(1 << 16);
+
+    /// Reserved: superseded RTCP v6 checkpoint capability (16-bit cell
+    /// flags, no overline).
+    pub const CHECKPOINT_V5: Self = Self(1 << 17);
+
+    /// RTCP v6 headless checkpoints (cell colours carry default, palette or
+    /// explicit provenance; 32-bit cell flags) transferred in ordered
+    /// Checkpoint chunks.
+    pub const CHECKPOINT_V6: Self = Self(1 << 18);
+
+    /// A [`Takeover`] token in Welcome, and taking over a client with one in
+    /// Hello: a client that reconnects keeps its id, name, attachment and
+    /// input lease, and its old connection is closed.
+    pub const TAKEOVER: Self = Self(1 << 19);
+
+    /// [`Message::EchoAck`] and [`Message::EchoMode`] on a block's
+    /// connection, for a client that predicts the echo of its typing.
+    pub const ECHO_ACK: Self = Self(1 << 20);
+
+    /// [`Message::OpenDatagram`] and its [`Message::Datagram`] reply: a
+    /// server started with a UDP port hands out associations
+    /// (`docs/projects/mux/UDP-TRANSPORT.md`).
+    pub const DATAGRAM: Self = Self(1 << 21);
+
+    /// Who each client is: [`Message::Whoami`] and
+    /// [`Event::ClientConnectionChanged`] (skipped for a client without
+    /// it). A client entry carries its principal and transport regardless,
+    /// since older decoders skip the fields.
+    pub const IDENTITY: Self = Self(1 << 22);
+
+    /// [`Event::ClipboardWritten`] and [`Event::StatusRemoved`] events,
+    /// skipped for a client without it as the other optional kinds are.
+    pub const MORE_PROGRAM_EVENTS: Self = Self(1 << 23);
+
+    /// Each session's active window: [`Message::SelectWindow`] and
+    /// [`Event::ActiveWindowChanged`] (skipped for a client without it). A
+    /// session entry carries its active window regardless, since older
+    /// decoders skip the field.
+    pub const ACTIVE_WINDOW: Self = Self(1 << 24);
+
+    /// [`Message::ReloadConfig`] and [`Event::ConfigReloaded`] (skipped
+    /// for a client without it).
+    pub const CONFIG_RELOAD: Self = Self(1 << 25);
+
+    /// The block methods that measure and change a block's terminal:
+    /// `terminal.size`, `terminal.reset` and `terminal.set-theme`. They
+    /// travel as [`Message::BlockCall`], so from a server the bit only says
+    /// it knows them. From a client it also says its copy of a block's
+    /// terminal ends a string on CAN without acting on it, as a reset needs:
+    /// the server refuses a reset while a client without it is attached.
+    pub const TERMINAL_CONTROL: Self = Self(1 << 26);
+
+    /// Editing layouts and the order of windows: [`Message::ResizeSplit`],
+    /// [`Message::SwapBlocks`], [`Message::MoveBlock`],
+    /// [`Message::DetachBlock`], [`Message::MoveWindow`] and
+    /// [`Event::WindowMoved`] (skipped for a client without it). The edits
+    /// of a layout are announced by [`Event::LayoutChanged`], whose layout
+    /// leaves detached blocks out.
+    pub const LAYOUT_EDIT: Self = Self(1 << 27);
+
+    /// Each window's focused block, held by the server:
+    /// [`Message::FocusBlock`], [`Message::MoveFocus`] and
+    /// [`Event::FocusChanged`] (skipped for a client without it). A window
+    /// entry carries its focused block regardless, since older decoders
+    /// skip the field.
+    pub const FOCUS: Self = Self(1 << 28);
+
+    /// Generated session names: a [`Message::CreateSession`] with an empty
+    /// name from a client with this bit gets a name no other session has,
+    /// such as `quiet-harbor` ([`rusty_mux_core::is_generated`]). From a
+    /// client without it an empty name stays empty, as before.
+    pub const SESSION_NAMES: Self = Self(1 << 29);
+
+    /// Naming a session only while its name is generated:
+    /// [`Message::NameSession`], refused once somebody chose a name.
+    pub const NAME_SESSION: Self = Self(1 << 30);
+
+    /// More block methods on a block's terminal: `terminal.modes` and
+    /// `terminal.clear`. They travel as [`Message::BlockCall`], so the bit
+    /// only says the server knows them.
+    pub const TERMINAL_MORE: Self = Self(1 << 31);
+
+    /// The block method `terminal.shell`. It travels as
+    /// [`Message::BlockCall`], so the bit only says the server knows it.
+    pub const TERMINAL_SHELL: Self = Self(1 << 32);
 
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
@@ -75,6 +195,25 @@ pub struct Cursor {
     pub seq: u64,
 }
 
+/// An association's 32-byte key. Its `Debug` never shows the bytes, so a
+/// message logged whole does not leak it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DatagramKey(pub [u8; 32]);
+
+impl std::fmt::Debug for DatagramKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DatagramKey(..)")
+    }
+}
+
+/// Proof, in a Hello, that this connection continues `client`: the `token`
+/// the server last gave that client in its Welcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Takeover {
+    pub client: ClientId,
+    pub token: Uuid,
+}
+
 /// What kind of failure a [`Message::Failed`] reports, for callers that act
 /// on it. A code this peer does not know decodes as no code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,17 +224,63 @@ pub enum Code {
     MethodNotFound,
 }
 
+/// Who echoes typed characters on a block's terminal, read from its termios.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Echo {
+    /// `ICANON` and `ECHO` on: the line discipline echoes.
+    Kernel,
+    /// `ICANON` on, `ECHO` off: nothing echoes, as for a password.
+    Hidden,
+    /// `ICANON` off: the program draws its own echo, if any.
+    Program,
+    /// No termios to read (Windows ConPTY), the read failed, or a mode this
+    /// peer does not know.
+    Unknown,
+}
+
+/// What a new block runs: the server's default program unless `program`
+/// names one, in the server's default directory unless `cwd` names one.
+/// Negotiated with [`Features::LAUNCH`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Launch {
+    pub program: Option<Program>,
+    /// An absolute path; the server refuses a relative one.
+    pub cwd: Option<String>,
+}
+
+/// A program to run and its arguments, without the program's own name.
+/// The server looks a bare `command` up in its `PATH`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
 /// One entity in the reply to [`Message::List`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     Session {
         session: SessionId,
         name: String,
+        /// `None` while it has no windows, or from a server without
+        /// [`Features::ACTIVE_WINDOW`].
+        active: Option<WindowId>,
+        /// The server made up `name` and nobody has renamed the session
+        /// since ([`Features::SESSION_NAMES`]); `false` from an older
+        /// server.
+        generated: bool,
     },
     Window {
         window: WindowId,
         session: SessionId,
         name: String,
+        /// `None` while it has no blocks, or from a server without
+        /// [`Features::LAYOUT`].
+        layout: Option<Layout>,
+        zoomed: Option<BlockId>,
+        /// `None` while no block is placed, or from a server without
+        /// [`Features::FOCUS`].
+        focused: Option<BlockId>,
     },
     Block {
         block: BlockId,
@@ -105,6 +290,19 @@ pub enum Entry {
         holder: Option<ClientId>,
         /// The title the program last set; empty if it never set one.
         title: String,
+        /// Empty until a client names the block.
+        name: String,
+    },
+    /// Sent only with [`Features::LABELS`].
+    Client {
+        client: ClientId,
+        name: String,
+        /// The block whose output it receives, if any.
+        attached: Option<BlockId>,
+        /// Who the server verified it to be; `None` from an older server.
+        principal: Option<Principal>,
+        /// How it is connected; `None` from an older server.
+        transport: Option<Transport>,
     },
 }
 
@@ -121,6 +319,8 @@ pub enum Message {
         /// With [`Features::EVENT_SEQ`]: the last event this client saw
         /// before reconnecting, to continue from there.
         resume: Option<Cursor>,
+        /// With [`Features::TAKEOVER`]: the client this connection continues.
+        takeover: Option<Takeover>,
     },
     CreateSession {
         req: u64,
@@ -135,6 +335,7 @@ pub enum Message {
         req: u64,
         window: WindowId,
         size: Size,
+        launch: Launch,
     },
     Attach {
         req: u64,
@@ -170,15 +371,27 @@ pub enum Message {
     Sync {
         req: u64,
     },
-    /// Every session, window and block. Answered with one
-    /// [`Message::Entry`] per entity, each parent before its children, then
-    /// [`Message::Done`]. Negotiated with [`Features::INSPECT`].
+    /// Asks for a UDP association for this client process. Answered with
+    /// [`Message::Datagram`], or [`Message::Failed`] when the server has no
+    /// UDP port or no room. Negotiated with [`Features::DATAGRAM`].
+    OpenDatagram {
+        req: u64,
+    },
+    /// Every session, window and block, then, with [`Features::LABELS`],
+    /// every client. Answered with one [`Message::Entry`] per entity, each
+    /// parent before its children, then [`Message::Done`]. Negotiated with [`Features::INSPECT`].
     List {
+        req: u64,
+    },
+    /// The caller's own client: answered with one [`Message::Entry`] for
+    /// it, then [`Message::Done`]. Negotiated with [`Features::IDENTITY`].
+    Whoami {
         req: u64,
     },
     /// Runs `method`, one of the methods of the block's type such as
     /// `terminal.format`, with named arguments. Answered with
-    /// [`Message::Text`], or [`Message::Failed`] with
+    /// [`Message::Text`], nothing for a method that writes to the block
+    /// (as [`Message::Input`] is), or [`Message::Failed`] with
     /// [`Code::MethodNotFound`] if the type has no such method. Negotiated
     /// with [`Features::BLOCK_CALL`]; [`crate::schema`] lists the methods.
     /// At most [`crate::args::MAX_ARGS`] arguments decode.
@@ -187,6 +400,115 @@ pub enum Message {
         block: BlockId,
         method: String,
         args: Vec<(String, Value)>,
+    },
+    /// Names any entity, replacing its old name. Negotiated with
+    /// [`Features::LABELS`].
+    Rename {
+        req: u64,
+        target: EntityId,
+        name: String,
+    },
+    /// Ends another client's connection, as if it had closed it: it is
+    /// detached and loses its leases. It may connect again. Negotiated
+    /// with [`Features::LABELS`].
+    Disconnect {
+        req: u64,
+        client: ClientId,
+    },
+    /// Starts a block beside `block` in its window, splitting its place in
+    /// half, and unzooms the window. Answered with the new block's id.
+    /// Negotiated with [`Features::LAYOUT`]; `launch` as for
+    /// [`Message::CreateBlock`].
+    Split {
+        req: u64,
+        block: BlockId,
+        side: Side,
+        launch: Launch,
+    },
+    /// Shows `block` alone over its window. Negotiated with
+    /// [`Features::LAYOUT`].
+    Zoom {
+        req: u64,
+        block: BlockId,
+    },
+    /// Shows every block of `window` again. Negotiated with
+    /// [`Features::LAYOUT`].
+    Unzoom {
+        req: u64,
+        window: WindowId,
+    },
+    /// Makes `window` its session's active window. Negotiated with
+    /// [`Features::ACTIVE_WINDOW`].
+    SelectWindow {
+        req: u64,
+        window: WindowId,
+    },
+    /// Has the server read its config file again. Negotiated with
+    /// [`Features::CONFIG_RELOAD`].
+    ReloadConfig {
+        req: u64,
+    },
+    /// Gives `block` `share` of the innermost split along `axis` that
+    /// holds it. Negotiated with [`Features::LAYOUT_EDIT`].
+    ResizeSplit {
+        req: u64,
+        block: BlockId,
+        axis: Axis,
+        share: Share,
+    },
+    /// Puts each block where the other was, in their shared window; one
+    /// may be detached, and the other then is. Negotiated with
+    /// [`Features::LAYOUT_EDIT`].
+    SwapBlocks {
+        req: u64,
+        block: BlockId,
+        other: BlockId,
+    },
+    /// Takes `block` from its place and splits `beside`'s, in the same
+    /// window, to put it on `side`, unzooming the window; without `beside`
+    /// it fills a window that shows no block. Negotiated with
+    /// [`Features::LAYOUT_EDIT`].
+    MoveBlock {
+        req: u64,
+        block: BlockId,
+        beside: Option<BlockId>,
+        side: Side,
+    },
+    /// Takes `block` out of its window's layout; it keeps running, listed
+    /// in the window. Negotiated with [`Features::LAYOUT_EDIT`].
+    DetachBlock {
+        req: u64,
+        block: BlockId,
+    },
+    /// Moves `window` to place `index`, from 0, among its session's
+    /// windows. Negotiated with [`Features::LAYOUT_EDIT`].
+    MoveWindow {
+        req: u64,
+        window: WindowId,
+        index: usize,
+    },
+    /// Focuses `block` in its window, ending a zoom on another block.
+    /// Negotiated with [`Features::FOCUS`].
+    FocusBlock {
+        req: u64,
+        block: BlockId,
+    },
+    /// Moves `window`'s focus from its focused block toward a side, or to
+    /// the next or previous block. Negotiated with [`Features::FOCUS`].
+    MoveFocus {
+        req: u64,
+        window: WindowId,
+        toward: Toward,
+    },
+    /// Renames `session` as [`Message::Rename`] does, but only while its
+    /// name is generated; once somebody chose one, refused and the name
+    /// stays. The server checks and renames in one step, so of two such
+    /// requests only the first can take effect. Negotiated with
+    /// [`Features::NAME_SESSION`].
+    NameSession {
+        req: u64,
+        session: SessionId,
+        name: String,
     },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
@@ -197,6 +519,9 @@ pub enum Message {
         features: Features,
         client: ClientId,
         cursor: Option<Cursor>,
+        /// With [`Features::TAKEOVER`]: the secret a later connection
+        /// presents to take this client over. Each Welcome replaces it.
+        token: Option<Uuid>,
     },
     /// The request succeeded; `created` is the new entity's id, if it made one.
     Done {
@@ -207,6 +532,15 @@ pub enum Message {
         req: u64,
         reason: String,
         code: Option<Code>,
+    },
+    /// The reply to [`Message::OpenDatagram`]: the server's UDP `port`,
+    /// the association's `id` and its `key`. Only ever sent over a channel
+    /// already authenticated and encrypted, such as an SSH forward.
+    Datagram {
+        req: u64,
+        port: u16,
+        id: [u8; 8],
+        key: DatagramKey,
     },
     /// The reply to [`Message::BlockCall`].
     Text {
@@ -229,7 +563,7 @@ pub enum Message {
         block: BlockId,
         data: Vec<u8>,
     },
-    /// A chunk of RTCP v3, negotiated with CHECKPOINT_V3. Offsets must be
+    /// A chunk of RTCP v6, negotiated with CHECKPOINT_V6. Offsets must be
     /// contiguous from zero and total is constant throughout one transfer.
     Checkpoint {
         block: BlockId,
@@ -246,7 +580,27 @@ pub enum Message {
         block: BlockId,
         data: Vec<u8>,
     },
+    /// Every byte the block's program wrote by [`ECHO_GRACE`] after `req`,
+    /// this connection's newest [`Message::Input`] it covers, is in the
+    /// Output frames before this. It never says that output is the echo.
+    /// Acks on a connection only increase. Negotiated with
+    /// [`Features::ECHO_ACK`].
+    EchoAck {
+        block: BlockId,
+        req: u64,
+    },
+    /// The block's [`Echo`] changed, or the client just attached; it
+    /// precedes the Output read after the change. Negotiated with
+    /// [`Features::ECHO_ACK`].
+    EchoMode {
+        block: BlockId,
+        mode: Echo,
+    },
 }
+
+/// How long after writing a key the server waits for its echo before
+/// acking it: [`Message::EchoAck`]'s grace.
+pub const ECHO_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
 
 // Field ids share one space across messages, so a field means the same thing everywhere.
 const REQ: u32 = 1;
@@ -272,8 +626,59 @@ const TITLE: u32 = 20;
 const CODE: u32 = 21;
 const METHOD: u32 = 22;
 const ARGS: u32 = 23;
-// IDs 1..=ARGS are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = ARGS as usize;
+/// A program's exit code, its two's-complement bits.
+const EXIT: u32 = 24;
+const SIGNAL: u32 = 25;
+/// A progress state, numbered as OSC 9;4 numbers them.
+const PROGRESS: u32 = 26;
+const PERCENT: u32 = 27;
+const BODY: u32 = 28;
+const COMMAND: u32 = 29;
+/// A program's arguments: each a varint length, then its UTF-8 bytes.
+const ARGV: u32 = 30;
+const CWD: u32 = 31;
+/// A process id.
+const PID: u32 = 32;
+/// A [`Side`]: 0 left, 1 right, 2 up, 3 down.
+const SIDE: u32 = 33;
+/// A [`Layout`] in its text form; empty for none.
+const LAYOUT: u32 = 34;
+const ZOOMED: u32 = 35;
+// Hello and Welcome, with `Features::TAKEOVER`.
+const TOKEN: u32 = 36;
+/// An [`Echo`]: 1 kernel, 2 hidden, 3 program, anything else unknown.
+const MODE: u32 = 37;
+/// A UDP port.
+const PORT: u32 = 38;
+/// An association's id, 8 bytes.
+const ASSOCIATION: u32 = 39;
+/// An association's key, 32 bytes.
+const KEY: u32 = 40;
+/// A [`Transport`]: 1 socket, 2 datagram.
+const TRANSPORT: u32 = 41;
+/// A [`Principal`]'s id, such as `uid:1000`.
+const PRINCIPAL: u32 = 42;
+/// A [`Principal`]'s account name.
+const USER: u32 = 43;
+/// A [`Selection`]: 1 clipboard, 2 primary.
+const SELECTION: u32 = 44;
+/// A status record's id, its path; empty for the root.
+const STATUS: u32 = 45;
+/// An [`Axis`]: 0 columns, 1 rows.
+const AXIS: u32 = 46;
+/// A second block: the one to swap with, or to go beside.
+const OTHER: u32 = 47;
+/// A place in a list, from 0.
+const INDEX: u32 = 48;
+/// A [`Toward`]: 0 to 3 a side as [`SIDE`] numbers them, 4 next, 5
+/// previous.
+const TOWARD: u32 = 49;
+/// A window's focused block.
+const FOCUSED: u32 = 50;
+/// A session entry's mark that the server made up its name: 1, or absent.
+const GENERATED: u32 = 51;
+// IDs 1..=GENERATED are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = GENERATED as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -291,6 +696,23 @@ mod ty {
     // 0x0d was Capture, replaced by BlockCall's `terminal.format`.
     pub const LIST: u8 = 0x0e;
     pub const BLOCK_CALL: u8 = 0x0f;
+    pub const RENAME: u8 = 0x10;
+    pub const DISCONNECT: u8 = 0x11;
+    pub const SPLIT: u8 = 0x12;
+    pub const ZOOM: u8 = 0x13;
+    pub const UNZOOM: u8 = 0x14;
+    pub const OPEN_DATAGRAM: u8 = 0x15;
+    pub const WHOAMI: u8 = 0x16;
+    pub const SELECT_WINDOW: u8 = 0x17;
+    pub const RELOAD_CONFIG: u8 = 0x18;
+    pub const RESIZE_SPLIT: u8 = 0x19;
+    pub const SWAP_BLOCKS: u8 = 0x1a;
+    pub const MOVE_BLOCK: u8 = 0x1b;
+    pub const DETACH_BLOCK: u8 = 0x1c;
+    pub const MOVE_WINDOW: u8 = 0x1d;
+    pub const FOCUS_BLOCK: u8 = 0x1e;
+    pub const MOVE_FOCUS: u8 = 0x1f;
+    pub const NAME_SESSION: u8 = 0x20;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -301,14 +723,24 @@ mod ty {
     pub const CHECKPOINT: u8 = 0x88;
     pub const TEXT: u8 = 0x89;
     pub const ENTRY: u8 = 0x8a;
+    pub const ECHO_ACK: u8 = 0x8b;
+    pub const ECHO_MODE: u8 = 0x8c;
+    pub const DATAGRAM: u8 = 0x8d;
 }
 
 impl Message {
     pub(crate) fn encode_body(&self, out: &mut Out) -> u8 {
         use Message as M;
         match self {
-            M::Hello { features, resume } => {
+            M::Hello {
+                features,
+                resume,
+                takeover,
+            } => {
                 put_cursor(out.varint(FEATURES, features.bits()), *resume);
+                if let Some(Takeover { client, token }) = takeover {
+                    out.uuid(CLIENT, client.uuid()).uuid(TOKEN, *token);
+                }
                 ty::HELLO
             }
             M::CreateSession { req, name } => {
@@ -321,8 +753,15 @@ impl Message {
                     .bytes(NAME, name.as_bytes());
                 ty::CREATE_WINDOW
             }
-            M::CreateBlock { req, window, size } => {
-                put_size(out.varint(REQ, *req).uuid(WINDOW, window.uuid()), *size);
+            M::CreateBlock {
+                req,
+                window,
+                size,
+                launch,
+            } => {
+                let out = out.varint(REQ, *req).uuid(WINDOW, window.uuid());
+                put_size(out, *size);
+                put_launch(out, launch);
                 ty::CREATE_BLOCK
             }
             M::Attach { req, block } => req_block(out, *req, *block, ty::ATTACH),
@@ -347,9 +786,24 @@ impl Message {
                 out.varint(REQ, *req);
                 ty::SYNC
             }
+            M::OpenDatagram { req } => {
+                out.varint(REQ, *req);
+                ty::OPEN_DATAGRAM
+            }
+            M::Datagram { req, port, id, key } => {
+                out.varint(REQ, *req)
+                    .varint(PORT, (*port).into())
+                    .bytes(ASSOCIATION, id)
+                    .bytes(KEY, &key.0);
+                ty::DATAGRAM
+            }
             M::List { req } => {
                 out.varint(REQ, *req);
                 ty::LIST
+            }
+            M::Whoami { req } => {
+                out.varint(REQ, *req);
+                ty::WHOAMI
             }
             M::BlockCall {
                 req,
@@ -363,14 +817,108 @@ impl Message {
                     .bytes(ARGS, &args::encode(args));
                 ty::BLOCK_CALL
             }
+            M::Rename { req, target, name } => {
+                put_target(out.varint(REQ, *req), *target).bytes(NAME, name.as_bytes());
+                ty::RENAME
+            }
+            M::Disconnect { req, client } => {
+                out.varint(REQ, *req).uuid(CLIENT, client.uuid());
+                ty::DISCONNECT
+            }
+            M::Split {
+                req,
+                block,
+                side,
+                launch,
+            } => {
+                let out = out
+                    .varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .varint(SIDE, side_wire(*side));
+                put_launch(out, launch);
+                ty::SPLIT
+            }
+            M::Zoom { req, block } => req_block(out, *req, *block, ty::ZOOM),
+            M::Unzoom { req, window } => {
+                out.varint(REQ, *req).uuid(WINDOW, window.uuid());
+                ty::UNZOOM
+            }
+            M::SelectWindow { req, window } => {
+                out.varint(REQ, *req).uuid(WINDOW, window.uuid());
+                ty::SELECT_WINDOW
+            }
+            M::ReloadConfig { req } => {
+                out.varint(REQ, *req);
+                ty::RELOAD_CONFIG
+            }
+            M::ResizeSplit {
+                req,
+                block,
+                axis,
+                share,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .varint(AXIS, axis_wire(*axis))
+                    .varint(PERCENT, share.percent().into());
+                ty::RESIZE_SPLIT
+            }
+            M::SwapBlocks { req, block, other } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .uuid(OTHER, other.uuid());
+                ty::SWAP_BLOCKS
+            }
+            M::MoveBlock {
+                req,
+                block,
+                beside,
+                side,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .varint(SIDE, side_wire(*side));
+                if let Some(beside) = beside {
+                    out.uuid(OTHER, beside.uuid());
+                }
+                ty::MOVE_BLOCK
+            }
+            M::DetachBlock { req, block } => req_block(out, *req, *block, ty::DETACH_BLOCK),
+            M::MoveWindow { req, window, index } => {
+                out.varint(REQ, *req)
+                    .uuid(WINDOW, window.uuid())
+                    .varint(INDEX, index_wire(*index));
+                ty::MOVE_WINDOW
+            }
+            M::FocusBlock { req, block } => req_block(out, *req, *block, ty::FOCUS_BLOCK),
+            M::MoveFocus {
+                req,
+                window,
+                toward,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(WINDOW, window.uuid())
+                    .varint(TOWARD, toward_wire(*toward));
+                ty::MOVE_FOCUS
+            }
+            M::NameSession { req, session, name } => {
+                out.varint(REQ, *req)
+                    .uuid(SESSION, session.uuid())
+                    .bytes(NAME, name.as_bytes());
+                ty::NAME_SESSION
+            }
             M::Welcome {
                 features,
                 client,
                 cursor,
+                token,
             } => {
                 let out = out
                     .varint(FEATURES, features.bits())
                     .uuid(CLIENT, client.uuid());
+                if let Some(token) = token {
+                    out.uuid(TOKEN, *token);
+                }
                 put_cursor(out, *cursor);
                 ty::WELCOME
             }
@@ -427,6 +975,14 @@ impl Message {
                 out.uuid(BLOCK, block.uuid()).bytes(DATA, data);
                 ty::OUTPUT
             }
+            M::EchoAck { block, req } => {
+                out.uuid(BLOCK, block.uuid()).varint(REQ, *req);
+                ty::ECHO_ACK
+            }
+            M::EchoMode { block, mode } => {
+                out.uuid(BLOCK, block.uuid()).varint(MODE, mode.wire());
+                ty::ECHO_MODE
+            }
         }
     }
 
@@ -437,6 +993,7 @@ impl Message {
             ty::HELLO => M::Hello {
                 features: Features(f.varint(FEATURES)?),
                 resume: get_cursor(&f)?,
+                takeover: get_takeover(&f)?,
             },
             ty::CREATE_SESSION => M::CreateSession {
                 req: f.varint(REQ)?,
@@ -451,6 +1008,7 @@ impl Message {
                 req: f.varint(REQ)?,
                 window: window(&f, WINDOW)?,
                 size: get_size(&f)?,
+                launch: get_launch(&f)?,
             },
             ty::ATTACH => M::Attach {
                 req: f.varint(REQ)?,
@@ -480,11 +1038,26 @@ impl Message {
             ty::SYNC => M::Sync {
                 req: f.varint(REQ)?,
             },
+            ty::OPEN_DATAGRAM => M::OpenDatagram {
+                req: f.varint(REQ)?,
+            },
+            ty::DATAGRAM => M::Datagram {
+                req: f.varint(REQ)?,
+                port: f.u16(PORT)?,
+                id: f
+                    .bytes(ASSOCIATION)?
+                    .try_into()
+                    .map_err(|_| f.invalid(ASSOCIATION))?,
+                key: DatagramKey(f.bytes(KEY)?.try_into().map_err(|_| f.invalid(KEY))?),
+            },
             ty::CLOSE_BLOCK => M::CloseBlock {
                 req: f.varint(REQ)?,
                 block: block(&f, BLOCK)?,
             },
             ty::LIST => M::List {
+                req: f.varint(REQ)?,
+            },
+            ty::WHOAMI => M::Whoami {
                 req: f.varint(REQ)?,
             },
             ty::BLOCK_CALL => M::BlockCall {
@@ -493,10 +1066,84 @@ impl Message {
                 method: f.string(METHOD)?,
                 args: args::decode(f.bytes(ARGS)?).ok_or_else(|| f.invalid(ARGS))?,
             },
+            ty::RENAME => M::Rename {
+                req: f.varint(REQ)?,
+                target: get_target(&f)?,
+                name: f.string(NAME)?,
+            },
+            ty::DISCONNECT => M::Disconnect {
+                req: f.varint(REQ)?,
+                client: client(&f, CLIENT)?,
+            },
+            ty::SPLIT => M::Split {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                side: get_side(&f)?,
+                launch: get_launch(&f)?,
+            },
+            ty::ZOOM => M::Zoom {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+            },
+            ty::UNZOOM => M::Unzoom {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
+            },
+            ty::SELECT_WINDOW => M::SelectWindow {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
+            },
+            ty::RELOAD_CONFIG => M::ReloadConfig {
+                req: f.varint(REQ)?,
+            },
+            ty::RESIZE_SPLIT => M::ResizeSplit {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                axis: get_axis(&f)?,
+                share: u8::try_from(f.varint(PERCENT)?)
+                    .ok()
+                    .and_then(Share::new)
+                    .ok_or_else(|| f.invalid(PERCENT))?,
+            },
+            ty::SWAP_BLOCKS => M::SwapBlocks {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                other: block(&f, OTHER)?,
+            },
+            ty::MOVE_BLOCK => M::MoveBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                beside: f.opt(OTHER, block)?,
+                side: get_side(&f)?,
+            },
+            ty::DETACH_BLOCK => M::DetachBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+            },
+            ty::MOVE_WINDOW => M::MoveWindow {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
+                index: get_index(&f)?,
+            },
+            ty::FOCUS_BLOCK => M::FocusBlock {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+            },
+            ty::MOVE_FOCUS => M::MoveFocus {
+                req: f.varint(REQ)?,
+                window: window(&f, WINDOW)?,
+                toward: get_toward(&f)?,
+            },
+            ty::NAME_SESSION => M::NameSession {
+                req: f.varint(REQ)?,
+                session: session(&f, SESSION)?,
+                name: f.string(NAME)?,
+            },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
                 client: client(&f, CLIENT)?,
                 cursor: get_cursor(&f)?,
+                token: f.opt(TOKEN, In::uuid)?,
             },
             ty::DONE => M::Done {
                 req: f.varint(REQ)?,
@@ -536,6 +1183,14 @@ impl Message {
                 block: block(&f, BLOCK)?,
                 data: f.bytes(DATA)?.to_vec(),
             },
+            ty::ECHO_ACK => M::EchoAck {
+                block: block(&f, BLOCK)?,
+                req: f.varint(REQ)?,
+            },
+            ty::ECHO_MODE => M::EchoMode {
+                block: block(&f, BLOCK)?,
+                mode: Echo::from_wire(f.varint(MODE)?),
+            },
             other => return Err(Error::UnknownType(other)),
         })
     }
@@ -555,6 +1210,49 @@ fn get_size(f: &In<'_>) -> Result<Size, Error> {
     Size::new(f.u16(COLS)?, f.u16(ROWS)?).map_err(|_| f.invalid(COLS))
 }
 
+fn put_launch(out: &mut Out, launch: &Launch) {
+    if let Some(Program { command, args }) = &launch.program {
+        let mut argv = Writer::new();
+        for arg in args {
+            varint::write(&mut argv, arg.len() as u64);
+            argv.write_bytes(arg.as_bytes());
+        }
+        out.bytes(COMMAND, command.as_bytes())
+            .bytes(ARGV, &argv.into_vec());
+    }
+    if let Some(cwd) = &launch.cwd {
+        out.bytes(CWD, cwd.as_bytes());
+    }
+}
+
+/// Arguments only with a command.
+fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
+    let command = f.opt(COMMAND, In::string)?;
+    let argv = f.opt(ARGV, In::bytes)?;
+    let program = match (command, argv) {
+        (None, None) => None,
+        (None, Some(_)) => return Err(f.invalid(ARGV)),
+        (Some(command), argv) => Some(Program {
+            command,
+            args: get_argv(argv.unwrap_or_default()).ok_or_else(|| f.invalid(ARGV))?,
+        }),
+    };
+    Ok(Launch {
+        program,
+        cwd: f.opt(CWD, In::string)?,
+    })
+}
+
+fn get_argv(bytes: &[u8]) -> Option<Vec<String>> {
+    let mut r = Reader::new(bytes);
+    let mut args = Vec::new();
+    while !r.is_empty() {
+        let len = usize::try_from(varint::read(&mut r).ok()?).ok()?;
+        args.push(String::from_utf8(r.read_bytes(len).ok()?.to_vec()).ok()?);
+    }
+    Some(args)
+}
+
 fn put_cursor(out: &mut Out, cursor: Option<Cursor>) {
     if let Some(Cursor { epoch, seq }) = cursor {
         out.uuid(EPOCH, epoch).varint(SEQ, seq);
@@ -569,6 +1267,17 @@ fn get_cursor(f: &In<'_>) -> Result<Option<Cursor>, Error> {
     Ok(Some(Cursor {
         epoch: f.uuid(EPOCH)?,
         seq: f.varint(SEQ)?,
+    }))
+}
+
+/// Both takeover fields or neither.
+fn get_takeover(f: &In<'_>) -> Result<Option<Takeover>, Error> {
+    if f.opt(CLIENT, In::uuid)?.is_none() && f.opt(TOKEN, In::uuid)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Takeover {
+        client: client(f, CLIENT)?,
+        token: f.uuid(TOKEN)?,
     }))
 }
 
@@ -588,6 +1297,110 @@ fn client(f: &In<'_>, id: u32) -> Result<ClientId, Error> {
     f.uuid(id).map(ClientId::from_uuid)
 }
 
+/// An entity of any kind, by the field its id travels in.
+fn put_target(out: &mut Out, target: EntityId) -> &mut Out {
+    match target {
+        EntityId::Session(id) => out.uuid(SESSION, id.uuid()),
+        EntityId::Window(id) => out.uuid(WINDOW, id.uuid()),
+        EntityId::Block(id) => out.uuid(BLOCK, id.uuid()),
+        EntityId::Client(id) => out.uuid(CLIENT, id.uuid()),
+    }
+}
+
+/// Exactly one of the four id fields.
+fn get_target(f: &In<'_>) -> Result<EntityId, Error> {
+    let found = [
+        f.opt(SESSION, session)?.map(EntityId::Session),
+        f.opt(WINDOW, window)?.map(EntityId::Window),
+        f.opt(BLOCK, block)?.map(EntityId::Block),
+        f.opt(CLIENT, client)?.map(EntityId::Client),
+    ];
+    let mut present = found.into_iter().flatten();
+    match (present.next(), present.next()) {
+        (Some(target), None) => Ok(target),
+        _ => Err(f.invalid(SESSION)),
+    }
+}
+
+const SIDES: [Side; 4] = [Side::Left, Side::Right, Side::Up, Side::Down];
+
+fn side_wire(side: Side) -> u64 {
+    match side {
+        Side::Left => 0,
+        Side::Right => 1,
+        Side::Up => 2,
+        Side::Down => 3,
+    }
+}
+
+fn get_side(f: &In<'_>) -> Result<Side, Error> {
+    usize::try_from(f.varint(SIDE)?)
+        .ok()
+        .and_then(|i| SIDES.get(i).copied())
+        .ok_or_else(|| f.invalid(SIDE))
+}
+
+fn axis_wire(axis: Axis) -> u64 {
+    match axis {
+        Axis::Columns => 0,
+        Axis::Rows => 1,
+    }
+}
+
+fn get_axis(f: &In<'_>) -> Result<Axis, Error> {
+    match f.varint(AXIS)? {
+        0 => Ok(Axis::Columns),
+        1 => Ok(Axis::Rows),
+        _ => Err(f.invalid(AXIS)),
+    }
+}
+
+fn toward_wire(toward: Toward) -> u64 {
+    match toward {
+        Toward::Side(side) => side_wire(side),
+        Toward::Next => 4,
+        Toward::Previous => 5,
+    }
+}
+
+fn get_toward(f: &In<'_>) -> Result<Toward, Error> {
+    match f.varint(TOWARD)? {
+        4 => Ok(Toward::Next),
+        5 => Ok(Toward::Previous),
+        n => usize::try_from(n)
+            .ok()
+            .and_then(|i| SIDES.get(i).copied())
+            .map(Toward::Side)
+            .ok_or_else(|| f.invalid(TOWARD)),
+    }
+}
+
+fn index_wire(index: usize) -> u64 {
+    u64::try_from(index).unwrap_or(u64::MAX)
+}
+
+fn get_index(f: &In<'_>) -> Result<usize, Error> {
+    usize::try_from(f.varint(INDEX)?).map_err(|_| f.invalid(INDEX))
+}
+
+/// A layout and zoom, the layout as text, empty for none.
+fn put_layout(out: &mut Out, layout: Option<&Layout>, zoomed: Option<BlockId>) {
+    let text = layout.map(Layout::to_string).unwrap_or_default();
+    out.bytes(LAYOUT, text.as_bytes());
+    if let Some(block) = zoomed {
+        out.uuid(ZOOMED, block.uuid());
+    }
+}
+
+/// The layout field; `None` when empty.
+fn get_layout(f: &In<'_>) -> Result<Option<Layout>, Error> {
+    let text = f.string(LAYOUT)?;
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse().map(Some).map_err(|_| f.invalid(LAYOUT))
+}
+
 mod kind {
     pub const SESSION_CREATED: u64 = 1;
     pub const SESSION_CLOSED: u64 = 2;
@@ -602,6 +1415,25 @@ mod kind {
     pub const DETACHED: u64 = 11;
     pub const LEASE_CHANGED: u64 = 12;
     pub const BLOCK_STATUS: u64 = 13;
+    pub const PWD_CHANGED: u64 = 14;
+    pub const TITLE_CHANGED: u64 = 15;
+    pub const PROGRAM_EXITED: u64 = 16;
+    pub const BELL: u64 = 17;
+    pub const PROGRESS_CHANGED: u64 = 18;
+    pub const NOTIFICATION: u64 = 19;
+    pub const PROCESS_CHANGED: u64 = 20;
+    pub const SESSION_RENAMED: u64 = 21;
+    pub const WINDOW_RENAMED: u64 = 22;
+    pub const BLOCK_RENAMED: u64 = 23;
+    pub const CLIENT_RENAMED: u64 = 24;
+    pub const LAYOUT_CHANGED: u64 = 25;
+    pub const CLIENT_CONNECTION_CHANGED: u64 = 26;
+    pub const CLIPBOARD_WRITTEN: u64 = 27;
+    pub const STATUS_REMOVED: u64 = 28;
+    pub const ACTIVE_WINDOW_CHANGED: u64 = 29;
+    pub const CONFIG_RELOADED: u64 = 30;
+    pub const WINDOW_MOVED: u64 = 31;
+    pub const FOCUS_CHANGED: u64 = 32;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -623,6 +1455,25 @@ fn put_event(out: &mut Out, event: &Event) {
         E::WindowClosed { window } => {
             out.varint(KIND, kind::WINDOW_CLOSED)
                 .uuid(WINDOW, window.uuid());
+        }
+        E::FocusChanged { window, block } => {
+            out.varint(KIND, kind::FOCUS_CHANGED)
+                .uuid(WINDOW, window.uuid());
+            if let Some(block) = block {
+                out.uuid(BLOCK, block.uuid());
+            }
+        }
+        E::WindowMoved { window, index } => {
+            out.varint(KIND, kind::WINDOW_MOVED)
+                .uuid(WINDOW, window.uuid())
+                .varint(INDEX, index_wire(index));
+        }
+        E::ActiveWindowChanged { session, window } => {
+            out.varint(KIND, kind::ACTIVE_WINDOW_CHANGED)
+                .uuid(SESSION, session.uuid());
+            if let Some(window) = window {
+                out.uuid(WINDOW, window.uuid());
+            }
         }
         E::BlockCreated {
             block,
@@ -646,13 +1497,31 @@ fn put_event(out: &mut Out, event: &Event) {
             out.varint(KIND, kind::BLOCK_CLOSED)
                 .uuid(BLOCK, block.uuid());
         }
-        E::ClientConnected { client } => {
-            out.varint(KIND, kind::CLIENT_CONNECTED)
+        E::ClientConnected {
+            client,
+            ref principal,
+        } => {
+            let o = out
+                .varint(KIND, kind::CLIENT_CONNECTED)
                 .uuid(CLIENT, client.uuid());
+            if let Some(principal) = principal {
+                put_principal(o, principal);
+            }
         }
         E::ClientDisconnected { client } => {
             out.varint(KIND, kind::CLIENT_DISCONNECTED)
                 .uuid(CLIENT, client.uuid());
+        }
+        E::ClientConnectionChanged {
+            client,
+            ref principal,
+            transport,
+        } => {
+            let o = out
+                .varint(KIND, kind::CLIENT_CONNECTION_CHANGED)
+                .uuid(CLIENT, client.uuid())
+                .varint(TRANSPORT, transport_wire(transport));
+            put_principal(o, principal);
         }
         E::Attached { client, block } => {
             out.varint(KIND, kind::ATTACHED)
@@ -675,6 +1544,137 @@ fn put_event(out: &mut Out, event: &Event) {
             out.varint(KIND, kind::BLOCK_STATUS)
                 .uuid(BLOCK, block.uuid());
         }
+        E::PwdChanged { block } => {
+            out.varint(KIND, kind::PWD_CHANGED)
+                .uuid(BLOCK, block.uuid());
+        }
+        E::TitleChanged { block } => {
+            out.varint(KIND, kind::TITLE_CHANGED)
+                .uuid(BLOCK, block.uuid());
+        }
+        E::ProgramExited { block, status } => {
+            let o = out
+                .varint(KIND, kind::PROGRAM_EXITED)
+                .uuid(BLOCK, block.uuid());
+            match status {
+                ExitStatus::Code(code) => o.varint(EXIT, code.cast_unsigned().into()),
+                ExitStatus::Signal(signal) => o.varint(SIGNAL, signal.cast_unsigned().into()),
+            };
+        }
+        E::Bell { block } => {
+            out.varint(KIND, kind::BELL).uuid(BLOCK, block.uuid());
+        }
+        E::ProgressChanged { block, progress } => {
+            put_progress(
+                out.varint(KIND, kind::PROGRESS_CHANGED)
+                    .uuid(BLOCK, block.uuid()),
+                progress,
+            );
+        }
+        E::Notification {
+            block,
+            ref title,
+            ref body,
+        } => {
+            out.varint(KIND, kind::NOTIFICATION)
+                .uuid(BLOCK, block.uuid())
+                .bytes(TITLE, title.as_bytes())
+                .bytes(BODY, body.as_bytes());
+        }
+        E::ConfigReloaded => {
+            out.varint(KIND, kind::CONFIG_RELOADED);
+        }
+        E::ClipboardWritten { block, selection } => {
+            out.varint(KIND, kind::CLIPBOARD_WRITTEN)
+                .uuid(BLOCK, block.uuid())
+                .varint(SELECTION, selection_wire(selection));
+        }
+        E::StatusRemoved { block, ref id } => {
+            out.varint(KIND, kind::STATUS_REMOVED)
+                .uuid(BLOCK, block.uuid())
+                .bytes(STATUS, id.as_bytes());
+        }
+        E::ProcessChanged {
+            block,
+            pid,
+            ref name,
+        } => {
+            out.varint(KIND, kind::PROCESS_CHANGED)
+                .uuid(BLOCK, block.uuid())
+                .varint(PID, pid.into())
+                .bytes(NAME, name.as_bytes());
+        }
+        E::SessionRenamed { session, ref name } => {
+            renamed(out, kind::SESSION_RENAMED, EntityId::Session(session), name);
+        }
+        E::WindowRenamed { window, ref name } => {
+            renamed(out, kind::WINDOW_RENAMED, EntityId::Window(window), name);
+        }
+        E::BlockRenamed { block, ref name } => {
+            renamed(out, kind::BLOCK_RENAMED, EntityId::Block(block), name);
+        }
+        E::ClientRenamed { client, ref name } => {
+            renamed(out, kind::CLIENT_RENAMED, EntityId::Client(client), name);
+        }
+        E::LayoutChanged {
+            window,
+            ref layout,
+            zoomed,
+        } => {
+            let out = out
+                .varint(KIND, kind::LAYOUT_CHANGED)
+                .uuid(WINDOW, window.uuid());
+            put_layout(out, layout.as_ref(), zoomed);
+        }
+    }
+}
+
+fn renamed(out: &mut Out, kind: u64, target: EntityId, name: &str) {
+    put_target(out.varint(KIND, kind), target).bytes(NAME, name.as_bytes());
+}
+
+fn put_progress(out: &mut Out, progress: Progress) {
+    let (state, percent) = match progress {
+        Progress::Cleared => (0, None),
+        Progress::Normal(p) => (1, Some(p)),
+        Progress::Error(p) => (2, Some(p)),
+        Progress::Indeterminate => (3, None),
+        Progress::Paused(p) => (4, Some(p)),
+    };
+    out.varint(PROGRESS, state);
+    if let Some(percent) = percent {
+        out.varint(PERCENT, percent.into());
+    }
+}
+
+/// A percentage is at most 100; a state that has one needs it.
+fn get_progress(f: &In<'_>) -> Result<Progress, Error> {
+    let percent = || {
+        u8::try_from(f.varint(PERCENT)?)
+            .ok()
+            .filter(|p| *p <= 100)
+            .ok_or_else(|| f.invalid(PERCENT))
+    };
+    Ok(match f.varint(PROGRESS)? {
+        0 => Progress::Cleared,
+        1 => Progress::Normal(percent()?),
+        2 => Progress::Error(percent()?),
+        3 => Progress::Indeterminate,
+        4 => Progress::Paused(percent()?),
+        _ => return Err(f.invalid(PROGRESS)),
+    })
+}
+
+/// An exit code or a signal, whichever is present; a value is 32 bits.
+fn get_exit(f: &In<'_>) -> Result<ExitStatus, Error> {
+    let bits = |id| {
+        u32::try_from(f.varint(id)?)
+            .map(u32::cast_signed)
+            .map_err(|_| f.invalid(id))
+    };
+    match f.opt(EXIT, |_, id| bits(id))? {
+        Some(code) => Ok(ExitStatus::Code(code)),
+        None => bits(SIGNAL).map(ExitStatus::Signal),
     }
 }
 
@@ -694,6 +1694,18 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::WINDOW_CLOSED => E::WindowClosed {
             window: window(f, WINDOW)?,
         },
+        kind::FOCUS_CHANGED => E::FocusChanged {
+            window: window(f, WINDOW)?,
+            block: f.opt(BLOCK, block)?,
+        },
+        kind::WINDOW_MOVED => E::WindowMoved {
+            window: window(f, WINDOW)?,
+            index: get_index(f)?,
+        },
+        kind::ACTIVE_WINDOW_CHANGED => E::ActiveWindowChanged {
+            session: session(f, SESSION)?,
+            window: f.opt(WINDOW, window)?,
+        },
         kind::BLOCK_CREATED => E::BlockCreated {
             block: block(f, BLOCK)?,
             window: window(f, WINDOW)?,
@@ -708,9 +1720,25 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         },
         kind::CLIENT_CONNECTED => E::ClientConnected {
             client: client(f, CLIENT)?,
+            // An older server sends none.
+            principal: f.opt(PRINCIPAL, principal)?,
         },
         kind::CLIENT_DISCONNECTED => E::ClientDisconnected {
             client: client(f, CLIENT)?,
+        },
+        kind::CONFIG_RELOADED => E::ConfigReloaded,
+        kind::CLIPBOARD_WRITTEN => E::ClipboardWritten {
+            block: block(f, BLOCK)?,
+            selection: selection(f)?,
+        },
+        kind::STATUS_REMOVED => E::StatusRemoved {
+            block: block(f, BLOCK)?,
+            id: f.string(STATUS)?,
+        },
+        kind::CLIENT_CONNECTION_CHANGED => E::ClientConnectionChanged {
+            client: client(f, CLIENT)?,
+            principal: principal(f, PRINCIPAL)?,
+            transport: transport(f, TRANSPORT)?,
         },
         kind::ATTACHED => E::Attached {
             client: client(f, CLIENT)?,
@@ -727,6 +1755,54 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
         kind::BLOCK_STATUS => E::BlockStatus {
             block: block(f, BLOCK)?,
         },
+        kind::PWD_CHANGED => E::PwdChanged {
+            block: block(f, BLOCK)?,
+        },
+        kind::TITLE_CHANGED => E::TitleChanged {
+            block: block(f, BLOCK)?,
+        },
+        kind::PROGRAM_EXITED => E::ProgramExited {
+            block: block(f, BLOCK)?,
+            status: get_exit(f)?,
+        },
+        kind::BELL => E::Bell {
+            block: block(f, BLOCK)?,
+        },
+        kind::PROGRESS_CHANGED => E::ProgressChanged {
+            block: block(f, BLOCK)?,
+            progress: get_progress(f)?,
+        },
+        kind::NOTIFICATION => E::Notification {
+            block: block(f, BLOCK)?,
+            title: f.string(TITLE)?,
+            body: f.string(BODY)?,
+        },
+        kind::PROCESS_CHANGED => E::ProcessChanged {
+            block: block(f, BLOCK)?,
+            pid: u32::try_from(f.varint(PID)?).map_err(|_| f.invalid(PID))?,
+            name: f.string(NAME)?,
+        },
+        kind::SESSION_RENAMED => E::SessionRenamed {
+            session: session(f, SESSION)?,
+            name: f.string(NAME)?,
+        },
+        kind::WINDOW_RENAMED => E::WindowRenamed {
+            window: window(f, WINDOW)?,
+            name: f.string(NAME)?,
+        },
+        kind::BLOCK_RENAMED => E::BlockRenamed {
+            block: block(f, BLOCK)?,
+            name: f.string(NAME)?,
+        },
+        kind::CLIENT_RENAMED => E::ClientRenamed {
+            client: client(f, CLIENT)?,
+            name: f.string(NAME)?,
+        },
+        kind::LAYOUT_CHANGED => E::LayoutChanged {
+            window: window(f, WINDOW)?,
+            layout: get_layout(f)?,
+            zoomed: f.opt(ZOOMED, block)?,
+        },
         _ => return Err(f.invalid(KIND)),
     })
 }
@@ -735,24 +1811,44 @@ mod entry {
     pub const SESSION: u64 = 1;
     pub const WINDOW: u64 = 2;
     pub const BLOCK: u64 = 3;
+    pub const CLIENT: u64 = 4;
 }
 
 fn put_entry(out: &mut Out, entry: &Entry) {
     match entry {
-        Entry::Session { session, name } => {
+        Entry::Session {
+            session,
+            name,
+            active,
+            generated,
+        } => {
             out.varint(KIND, entry::SESSION)
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
+            if let Some(window) = active {
+                out.uuid(WINDOW, window.uuid());
+            }
+            if *generated {
+                out.varint(GENERATED, 1);
+            }
         }
         Entry::Window {
             window,
             session,
             name,
+            layout,
+            zoomed,
+            focused,
         } => {
-            out.varint(KIND, entry::WINDOW)
+            let out = out
+                .varint(KIND, entry::WINDOW)
                 .uuid(WINDOW, window.uuid())
                 .uuid(SESSION, session.uuid())
                 .bytes(NAME, name.as_bytes());
+            put_layout(out, layout.as_ref(), *zoomed);
+            if let Some(block) = focused {
+                out.uuid(FOCUSED, block.uuid());
+            }
         }
         Entry::Block {
             block,
@@ -760,16 +1856,39 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             size,
             holder,
             title,
+            name,
         } => {
             let o = out
                 .varint(KIND, entry::BLOCK)
                 .uuid(BLOCK, block.uuid())
                 .uuid(WINDOW, window.uuid())
-                .bytes(TITLE, title.as_bytes());
+                .bytes(TITLE, title.as_bytes())
+                .bytes(NAME, name.as_bytes());
             if let Some(holder) = holder {
                 o.uuid(HOLDER, holder.uuid());
             }
             put_size(o, *size);
+        }
+        Entry::Client {
+            client,
+            name,
+            attached,
+            principal,
+            transport,
+        } => {
+            let o = out
+                .varint(KIND, entry::CLIENT)
+                .uuid(CLIENT, client.uuid())
+                .bytes(NAME, name.as_bytes());
+            if let Some(block) = attached {
+                o.uuid(BLOCK, block.uuid());
+            }
+            if let Some(principal) = principal {
+                put_principal(o, principal);
+            }
+            if let Some(transport) = transport {
+                o.varint(TRANSPORT, transport_wire(*transport));
+            }
         }
     }
 }
@@ -779,11 +1898,17 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
         entry::SESSION => Entry::Session {
             session: session(f, SESSION)?,
             name: f.string(NAME)?,
+            active: f.opt(WINDOW, window)?,
+            generated: f.opt(GENERATED, In::varint)? == Some(1),
         },
         entry::WINDOW => Entry::Window {
             window: window(f, WINDOW)?,
             session: session(f, SESSION)?,
             name: f.string(NAME)?,
+            // An older server sends no layout.
+            layout: f.opt(LAYOUT, |_, _| get_layout(f))?.flatten(),
+            zoomed: f.opt(ZOOMED, block)?,
+            focused: f.opt(FOCUSED, block)?,
         },
         entry::BLOCK => Entry::Block {
             block: block(f, BLOCK)?,
@@ -791,9 +1916,59 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             size: get_size(f)?,
             holder: f.opt(HOLDER, client)?,
             title: f.string(TITLE)?,
+            // An older server sends no name.
+            name: f.opt(NAME, In::string)?.unwrap_or_default(),
+        },
+        entry::CLIENT => Entry::Client {
+            client: client(f, CLIENT)?,
+            name: f.string(NAME)?,
+            attached: f.opt(BLOCK, block)?,
+            principal: f.opt(PRINCIPAL, principal)?,
+            transport: f.opt(TRANSPORT, transport)?,
         },
         _ => return Err(f.invalid(KIND)),
     })
+}
+
+const fn transport_wire(transport: Transport) -> u64 {
+    match transport {
+        Transport::Socket => 1,
+        Transport::Datagram => 2,
+    }
+}
+
+fn transport(f: &In<'_>, id: u32) -> Result<Transport, Error> {
+    match f.varint(id)? {
+        1 => Ok(Transport::Socket),
+        2 => Ok(Transport::Datagram),
+        _ => Err(f.invalid(id)),
+    }
+}
+
+const fn selection_wire(selection: Selection) -> u64 {
+    match selection {
+        Selection::Clipboard => 1,
+        Selection::Primary => 2,
+    }
+}
+
+fn selection(f: &In<'_>) -> Result<Selection, Error> {
+    match f.varint(SELECTION)? {
+        1 => Ok(Selection::Clipboard),
+        2 => Ok(Selection::Primary),
+        _ => Err(f.invalid(SELECTION)),
+    }
+}
+
+fn put_principal(out: &mut Out, principal: &Principal) {
+    out.bytes(PRINCIPAL, principal.id().as_bytes())
+        .bytes(USER, principal.user().as_bytes());
+}
+
+/// A principal's id at `id`, with its account name, which is always sent
+/// beside it.
+fn principal(f: &In<'_>, id: u32) -> Result<Principal, Error> {
+    Principal::new(f.string(id)?, f.string(USER)?).map_err(|_| f.invalid(id))
 }
 
 impl Code {
@@ -809,6 +1984,28 @@ impl Code {
             1 => Some(Self::NotFound),
             2 => Some(Self::MethodNotFound),
             _ => None,
+        }
+    }
+}
+
+impl Echo {
+    const fn wire(self) -> u64 {
+        match self {
+            Self::Unknown => 0,
+            Self::Kernel => 1,
+            Self::Hidden => 2,
+            Self::Program => 3,
+        }
+    }
+
+    /// An unknown value is [`Echo::Unknown`], under which a client does not
+    /// predict.
+    const fn from_wire(value: u64) -> Self {
+        match value {
+            1 => Self::Kernel,
+            2 => Self::Hidden,
+            3 => Self::Program,
+            _ => Self::Unknown,
         }
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproduce pinned crypto source patches from authenticated crate archives.
+"""Reproduce the pinned crypto source patch from authenticated crate archives.
 
 Run from any directory: python3 vendor/verify.py. Requires network and git.
 Downloads only the URLs/checksums in sources.json and writes only to a temporary
@@ -32,12 +32,7 @@ def verify_manifest_alignment(root: Path) -> None:
     original = tomllib.loads((root / "Cargo.toml.orig").read_text())
     normalized = tomllib.loads((root / "Cargo.toml").read_text())
     name = normalized["package"]["name"]
-    dependencies = (
-        ["p256", "crypto-bigint"]
-        if name == "aws-sigv4"
-        else ["p256", "p384", "signature-v3"]
-    )
-    for dependency in dependencies:
+    for dependency in ["p256", "p384", "signature-v3"]:
         source = original.get("dependencies", {}).get(dependency)
         resolved = normalized.get("dependencies", {}).get(dependency)
         if source is None or source != resolved:
@@ -47,13 +42,12 @@ def verify_manifest_alignment(root: Path) -> None:
             for target in original.get("target", {}).values()
         ):
             raise SystemExit(f"{name}: patched dependency {dependency} unexpectedly target-scoped")
-    if name == "jsonwebtoken":
-        features = original.get("features", {}).get("rust_crypto")
-        if (
-            features != normalized.get("features", {}).get("rust_crypto")
-            or "dep:signature-v3" not in (features or [])
-        ):
-            raise SystemExit("jsonwebtoken: rust_crypto must enable the same global signature-v3 alias")
+    features = original.get("features", {}).get("rust_crypto")
+    if (
+        features != normalized.get("features", {}).get("rust_crypto")
+        or "dep:signature-v3" not in (features or [])
+    ):
+        raise SystemExit(f"{name}: rust_crypto must enable the same global signature-v3 alias")
 
 
 def main() -> None:

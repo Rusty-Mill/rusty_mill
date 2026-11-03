@@ -30,14 +30,14 @@ use agentgateway_proxy::{Headers, HostProxy, Rewrite, Scheme};
 use agentgateway_tls::{Passthrough, TlsBinds, TlsTerminator};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Request, StatusCode, header};
-use http_body_util::BodyExt as _;
-use rusty_mcp::otel::metrics::{Instruments, McpMetricsLayer};
+use http_body_util::Full;
+use rusty_mcp_middleware::otel::metrics::{
+    HEADER_MCP_METHOD, HEADER_MCP_NAME, Instruments, McpMetrics,
+};
 use rusty_mcp_server::{HttpConfig, HttpHandler};
 
-use crate::body::{Body, RequestBody};
+use crate::body::Body;
 use crate::mcp_service::McpService;
-use tower_layer::Layer as _;
-use tower_service::Service as _;
 
 /// What the data plane answers with.
 type Response = http::Response<Body>;
@@ -66,6 +66,9 @@ pub struct Gateway {
     /// Largest request body a proxied backend is sent: the proxy reads a
     /// body whole before forwarding it. `limits.maxRequestBodyBytes`.
     max_proxied_body: usize,
+    /// Largest request body any route reads: the server's own cap, since it
+    /// reads every body whole before routing.
+    max_request_body: usize,
 }
 
 /// [`Gateway`]'s `max_proxied_body` when `limits.maxRequestBodyBytes` is not
@@ -228,7 +231,7 @@ enum BackendState {
     /// A federated MCP server, optionally instrumented.
     Mcp {
         service: McpService,
-        metrics: Option<McpMetricsLayer>,
+        metrics: Option<McpMetrics>,
     },
     /// One or more `host` upstreams, proxied over HTTP.
     ///
@@ -383,7 +386,7 @@ impl Gateway {
                     // a client invents would mint a new time series -- which is
                     // how a metrics backend gets taken down from the outside.
                     let metrics = instruments.as_ref().map(|instruments| {
-                        McpMetricsLayer::new(Arc::clone(instruments))
+                        McpMetrics::new(Arc::clone(instruments))
                             .with_known_names(federation.tool_names())
                     });
 
@@ -556,13 +559,32 @@ impl Gateway {
             };
         }
 
+        // Every cap a route may apply, so the server's own never refuses a
+        // body a route would accept.
+        let max_request_body = routes
+            .iter()
+            .filter_map(|route| route.ext_authz.as_ref()?.include_body())
+            .chain([
+                max_proxied_body,
+                MAX_MCP_BODY,
+                agentgateway_llm::MAX_REQUEST_BYTES as usize,
+            ])
+            .max()
+            .unwrap_or(max_proxied_body);
+
         Ok(Gateway {
             router,
             routes,
             tls,
             passthrough,
             max_proxied_body,
+            max_request_body,
         })
+    }
+
+    /// The largest request body any route reads.
+    pub fn max_request_body(&self) -> usize {
+        self.max_request_body
     }
 
     /// The TLS terminator for `port`, if that bind terminates TLS.
@@ -596,7 +618,7 @@ impl Gateway {
         port: u16,
         peer: Option<IpAddr>,
         scheme: Scheme,
-        request: Request<hyper::body::Incoming>,
+        request: Request<Bytes>,
     ) -> Result<Response, Infallible> {
         let Some(selection) = self.router.select(port, &request) else {
             return Ok(status(
@@ -674,7 +696,7 @@ impl Gateway {
         // authorizer can see the identity `jwtAuth` just verified.
         let (parts, body) = request.into_parts();
         let mut parts = parts;
-        let mut body = RequestBody::Stream(body);
+        let mut body = body;
 
         if let Some(authz) = &state.ext_authz {
             // Read the body only when the route asked for it. `includeBody` is
@@ -682,9 +704,9 @@ impl Gateway {
             // fragment of JSON does not parse, so the authorizer would answer
             // about something that was never the request.
             let buffered = match authz.include_body() {
-                Some(limit) => match collect_limited(body, limit).await {
+                Some(limit) => match collect_limited(body, limit) {
                     Ok(bytes) => {
-                        body = RequestBody::Buffered(bytes.clone());
+                        body = bytes.clone();
                         Some(bytes)
                     }
                     Err(()) => {
@@ -739,7 +761,7 @@ impl Gateway {
         let call = self.dispatch(state, &selection, peer, scheme, request);
 
         let mut response = match state.timeout {
-            Some(budget) => match tokio::time::timeout(budget, call).await {
+            Some(budget) => match rusty_tokio::time::timeout(budget, call).await {
                 Ok(response) => response,
                 Err(_) => {
                     rusty_log::warn!(
@@ -768,30 +790,26 @@ impl Gateway {
         selection: &agentgateway_core::Selection<'_>,
         peer: Option<IpAddr>,
         scheme: Scheme,
-        request: Request<RequestBody>,
+        request: Request<Bytes>,
     ) -> Response {
         match &state.backend {
-            // `call` takes &mut self, but the service is cheap to clone and
-            // clones share the session manager -- which is what makes an
+            // One service per route: its session manager is what makes an
             // Mcp-Session-Id issued on one request usable on the next.
-            BackendState::Mcp { service, metrics } => match metrics {
-                // Layering per request is just a struct wrap; the instruments
-                // behind it are shared, which is what makes the counts add up.
-                Some(metrics) => {
-                    let mut service = metrics.layer(service.clone());
-                    match service.call(request).await {
-                        Ok(response) => response,
-                        Err(never) => match never {},
-                    }
-                }
-                None => {
-                    let mut service = service.clone();
-                    match service.call(request).await {
-                        Ok(response) => response,
-                        Err(never) => match never {},
-                    }
-                }
-            },
+            BackendState::Mcp { service, metrics } => {
+                let Some(metrics) = metrics else {
+                    return service.call(request).await;
+                };
+                let header = |name| {
+                    request
+                        .headers()
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                };
+                let timer = metrics.start(header(HEADER_MCP_METHOD), header(HEADER_MCP_NAME));
+                let response = service.call(request).await;
+                timer.finish(rusty_http::StatusCode::from_u16(response.status().as_u16()));
+                response
+            }
             BackendState::Host { proxy, a2a, agui } => {
                 let (parts, body) = request.into_parts();
                 let prefix = selection.matched_prefix.as_deref();
@@ -825,7 +843,7 @@ impl Gateway {
                 // the body has to be read. It is handed to the proxy already
                 // buffered rather than re-read, within the protocol cap.
                 let limit = self.protocol_body_cap();
-                let bytes = match collect_limited(body, limit).await {
+                let bytes = match collect_limited(body, limit) {
                     Ok(bytes) => bytes,
                     Err(()) => {
                         rusty_log::info!(
@@ -865,7 +883,9 @@ impl Gateway {
                     .await
                     .map(Body::new)
             }
-            BackendState::Ai(backend) => backend.handle(request).await.map(Body::new),
+            BackendState::Ai(backend) => {
+                backend.handle(request.map(Full::new)).await.map(Body::new)
+            }
             BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),
         }
     }
@@ -888,7 +908,7 @@ impl Gateway {
         peer: Option<IpAddr>,
         scheme: Scheme,
         parts: http::request::Parts,
-        body: RequestBody,
+        body: Bytes,
     ) -> Response {
         let prefix = selection.matched_prefix.as_deref();
         let route = selection.route.name.clone().unwrap_or_default();
@@ -899,7 +919,7 @@ impl Gateway {
                 .await;
         }
 
-        let bytes = match collect_limited(body, self.protocol_body_cap()).await {
+        let bytes = match collect_limited(body, self.protocol_body_cap()) {
             Ok(bytes) => bytes,
             Err(()) => {
                 audit::record_decision(&route, None, false, "run input too large");
@@ -968,9 +988,9 @@ impl Gateway {
         peer: Option<IpAddr>,
         scheme: Scheme,
         parts: http::request::Parts,
-        body: RequestBody,
+        body: Bytes,
     ) -> Response {
-        let Ok(bytes) = collect_limited(body, self.max_proxied_body).await else {
+        let Ok(bytes) = collect_limited(body, self.max_proxied_body) else {
             rusty_log::info!(
                 route = ?selection.route.name,
                 limit = self.max_proxied_body,
@@ -989,16 +1009,15 @@ impl Gateway {
     }
 }
 
-/// Read a body, refusing rather than truncating once it passes `limit`.
+/// A body within `limit`, refused rather than truncated past it.
 ///
-/// `Err` means it was too large. Nothing partially read is handed back: the
-/// caller either gets the whole body, which it can forward, or a refusal.
-async fn collect_limited(body: RequestBody, limit: usize) -> Result<Bytes, ()> {
-    http_body_util::Limited::new(body, limit)
-        .collect()
-        .await
-        .map(|collected| collected.to_bytes())
-        .map_err(|_| ())
+/// `Err` means it was too large. The caller either gets the whole body, which
+/// it can forward, or a refusal.
+fn collect_limited(body: Bytes, limit: usize) -> Result<Bytes, ()> {
+    if body.len() > limit {
+        return Err(());
+    }
+    Ok(body)
 }
 
 fn with_cors(mut response: Response, headers: Option<HeaderMap>) -> Response {

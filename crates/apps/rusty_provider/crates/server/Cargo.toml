@@ -15,7 +15,7 @@ rp-mcp.workspace = true
 rp-router.workspace = true
 rusty_mcp_server = { workspace = true, features = ["rusty-axum"] }
 # The HTTP server (#875): rusty_axum on rusty_tokio. Handlers still call
-# tokio libraries (reqwest via rp-router, tokio::sync), so the router's
+# tokio libraries (reqwest for the JWKS fetch, tokio::sync), so the router's
 # outermost layer is rusty_axum_tokio's bridge.
 rusty_axum.workspace = true
 rusty_axum_tokio.workspace = true

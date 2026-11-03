@@ -145,7 +145,10 @@ async fn keepalive_closes_a_connection_whose_pings_go_unanswered() {
     let ended = timeout(FIVE, conn.closed())
         .await
         .expect("keepalive must end the connection");
-    assert!(ended.is_err());
+    assert!(
+        matches!(ended, Err(Error::Timeout("keepalive"))),
+        "{ended:?}"
+    );
     assert!(call(conn.client(), "http", &[], b"x".to_vec())
         .await
         .is_err());
@@ -412,9 +415,11 @@ async fn closed_can_be_awaited_again_and_then_closed() {
         ..ConnectOptions::default()
     };
     let mut conn = connect(&format!("http://{addr}"), o).await.unwrap();
-    assert!(timeout(FIVE, conn.closed()).await.unwrap().is_err());
-    assert!(timeout(FIVE, conn.closed()).await.unwrap().is_err());
-    assert!(timeout(FIVE, conn.close()).await.unwrap().is_err());
+    let keepalive = |r: Result<(), &Error>| matches!(r, Err(Error::Timeout("keepalive")));
+    assert!(keepalive(timeout(FIVE, conn.closed()).await.unwrap()));
+    assert!(keepalive(timeout(FIVE, conn.closed()).await.unwrap()));
+    let last = timeout(FIVE, conn.close()).await.unwrap();
+    assert!(matches!(last, Err(Error::Timeout("keepalive"))), "{last:?}");
 }
 
 #[rusty_tokio::test]

@@ -20,9 +20,31 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .col h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:2px 4px 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:8px;cursor:grab}
 .card b{display:block}
+.num{float:right;margin-left:6px;color:var(--mute);font-size:12px}
 .meta{color:var(--mute);font-size:12px;margin-top:4px}
+.meta.stale{color:var(--err)}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
+.tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
+main.decisions{grid-auto-flow:row;grid-template-columns:minmax(0,760px);justify-content:center;align-content:start}
+.decisions .col p{margin:6px 4px}.decisions .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.decisions a{color:var(--acc)}
+.decisions .cand{border:1px solid var(--line);border-radius:6px;padding:6px;margin:6px 4px}
+#view[aria-pressed=true],#metrics[aria-pressed=true],#decide[aria-pressed=true]{background:var(--acc);color:#fff}
+main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
+.roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
+@media (max-width:640px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
+.roadmap .card{cursor:pointer}
+main.metrics{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-content:start}
+.metrics h3,.kpis{grid-column:1/-1;margin:0;font-size:15px}
+.kpis{display:flex;flex-wrap:wrap;gap:10px}
+.kpi{background:var(--panel);border-radius:8px;padding:8px 12px;min-width:120px;color:var(--mute);font-size:12px}
+.kpi b{display:block;color:var(--ink);font-size:22px;font-variant-numeric:tabular-nums}
+.bar{display:grid;grid-template-columns:minmax(0,8em) 1fr 2.5em;gap:6px;align-items:center;margin:4px}
+.bar>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar>span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.bar i{display:block;height:10px;min-width:1px;border-radius:3px;background:var(--fill,var(--acc))}
+.metrics .card{cursor:pointer}
 :root{--al:40%}
 @media (prefers-color-scheme:dark){:root:not([data-theme=light]){--al:66%}}
 .card.claimed{border-left:4px solid var(--ag);background:color-mix(in srgb,var(--ag) 9%,var(--card))}
@@ -35,7 +57,6 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .shell.noside{grid-template-columns:minmax(0,1fr)}.shell.noside #side{display:none}
 #side{display:flex;background:var(--panel);border-right:1px solid var(--line)}
 #side nav{width:220px;padding:12px 8px;overflow-y:auto;min-height:100%}
-#side nav+nav{width:210px;border-left:1px solid var(--line)}
 #side h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute);margin:4px 8px 8px}
 #side h2.sep{margin-top:18px}
 #side .item{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 8px;margin-top:2px;overflow-wrap:anywhere}
@@ -44,6 +65,7 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 #side .item .n{opacity:.75;font-variant-numeric:tabular-nums;white-space:nowrap}
 #side .item .name{display:flex;align-items:center}
 #toggle,#gear{padding:4px 9px}
+#signin form{display:grid;gap:8px}#signin .err{color:var(--err);min-height:1.2em;margin:0}
 #settings{width:min(860px,94vw);max-height:90vh}
 #settings .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:10px}
 #settings .tabs button{border:0;border-radius:6px 6px 0 0;background:none}
@@ -59,7 +81,7 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 #settings .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
 #settings details{display:inline-block}
 #settings details label{display:block}
-@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}#side nav,#side nav+nav{width:100%;min-height:0;border-left:0}}
+@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}#side nav{width:100%;min-height:0}}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
 dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
 dialog form{display:grid;gap:8px}
@@ -70,29 +92,46 @@ dialog form{display:grid;gap:8px}
 </head>
 <body>
 <div class="shell" id="shell">
-<aside id="side" aria-label="repositories, projects and agents"><nav id="nav1" aria-label="repositories"></nav><nav id="nav2" aria-label="projects" hidden></nav></aside>
+<aside id="side" aria-label="repositories, projects and agents"><nav id="nav1" aria-label="repositories, projects and agents"></nav></aside>
 <div>
 <header>
   <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
   <h1>Mill Board</h1>
+  <button id="view" aria-pressed="false" title="Show the chosen project's roadmap">Roadmap</button>
+  <button id="metrics" aria-pressed="false" title="Show metrics for the chosen repository or project, or the whole board">Metrics</button>
+  <button id="decide" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions<span id="decide-n"></span></button>
   <input id="actor" placeholder="your name" size="12" aria-label="actor name">
   <select id="role" aria-label="role"></select>
   <input id="title" placeholder="New card title" size="26" aria-label="new card title">
   <button id="add">Add</button>
   <button id="gear" title="Settings" aria-label="settings">&#9881;</button>
+  <button id="signout" hidden>Sign out</button>
 </header>
 <main id="board"></main>
 </div>
 </div>
 <dialog id="dlg"></dialog>
 <dialog id="settings" aria-label="settings"></dialog>
+<dialog id="signin" aria-label="sign in"><form method="dialog">
+  <h2>Sign in to Mill Board</h2>
+  <p id="signin-why" class="err" role="alert"></p>
+  <input id="signin-token" type="password" placeholder="board token" autocomplete="current-password" aria-label="board token" required>
+  <button>Sign in</button>
+</form></dialog>
 <div id="toast" role="alert"></div>
 <script>
-const COLS=["backlog","ready","building","qa","review","done","blocked"];
-let tok=new URLSearchParams(location.hash.slice(1)).get("token");
+/* The board's columns and the moves between them, as an admin set them (board_columns).
+   Until read, the original seven, so the board draws at once. */
+let FLOW={columns:[["backlog","Backlog","backlog"],["ready","Ready","queue"],["building","Building","work"],["qa","QA","work"],
+  ["review","Review","work"],["done","Done","done"],["blocked","Blocked","blocked"]].map(([id,label,kind])=>({id,label,kind})),transitions:[]};
+const colLabel=id=>FLOW.columns.find(c=>c.id===id)?.label??id;
+const working=()=>FLOW.columns.filter(c=>c.kind==="work").map(c=>c.id);
+let tok=null;
 const $=id=>document.getElementById(id);
 let cards=[],cursor=null,dlg=null,repos={},sel={repo:"",project:"",agent:""};
 const projects=()=>Object.values(repos).flat();
+/* `default` is the Inbox: where a card that names no project lands (rusty_tick's Inbox list). Shown by that name only. */
+const INBOX="default",label=p=>p===INBOX?"Inbox":p;
 const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
@@ -112,16 +151,42 @@ function agentColor(n){
   if(!(n in slotOf)){known=[...new Set([...known,n])].sort();pref("agents",JSON.stringify(known));assignSlots()}
   return "hsl("+(slotOf[n]*30+8)+" 62% var(--al))";
 }
-const RUNNING=["building","qa","review"];
 const pref=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch{}};
+/* The token: a #token= in the address is kept in this browser and dropped from the address bar;
+   otherwise the one kept from before. With none, or a refused one, the first call asks for it. */
+let signing=null,resume=()=>{};   // the open sign-in box, and how to let its waiting calls go
+function setToken(t){tok=t;pref("token",t);$("signout").hidden=false;resume()}
+{const h=new URLSearchParams(location.hash.slice(1)).get("token");
+  if(h){setToken(h);try{history.replaceState(null,"",location.pathname+location.search)}catch{}}
+  else if(pref("token"))setToken(pref("token"))}
+/* Signing in reloads the page: the new token may be another agent, with its own role, projects
+   and view of the board, so everything is read again and no refused write is replayed as someone else.
+   Until then the refused calls wait, and every one shares the one box. If the token is replaced
+   meanwhile (your own rotation answering late), the box closes and the waiting calls retry with it. */
+function signIn(why){
+  return signing??=new Promise(done=>{
+    const d=$("signin"),f=$("signin-token");$("signin-why").textContent=why;f.value="";
+    d.oncancel=e=>e.preventDefault();   // nothing works without a token, so Escape does not dismiss it
+    d.querySelector("form").onsubmit=()=>{pref("token",f.value.trim());location.reload()};
+    resume=()=>{resume=()=>{};signing=null;d.close();done()};
+    d.showModal();f.focus();
+  });
+}
 
 async function api(op,args={}){
-  const r=await fetch("/api/"+op,{method:"POST",headers:{"content-type":"application/json",...(tok&&{authorization:"Bearer "+tok})},body:JSON.stringify(args)});
+  let r;
+  for(;;){
+    const sent=tok;   // a 401 for a token since replaced (own rotation) is retried with the current one
+    r=await fetch("/api/"+op,{method:"POST",headers:{"content-type":"application/json",...(sent&&{authorization:"Bearer "+sent})},body:JSON.stringify(args)});
+    if(r.status!==401)break;
+    if(sent===tok)await signIn(tok?"That token was refused. Enter a current one.":"This board needs a token.");
+  }
   const j=await r.json().catch(()=>({error:r.statusText}));
   if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
   return j;
 }
-const who=()=>({actor:$("actor").value.trim(),role:$("role").value});
+/* A per-model token fixes who you are: send nothing, so a role renamed under you never disagrees. */
+const who=()=>$("actor").disabled?{}:{actor:$("actor").value.trim(),role:$("role").value};
 function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
 // Run a write as the current actor, then re-read the board. Resolves to the reply, or null after showing the error.
 async function act(op,args){
@@ -129,24 +194,36 @@ async function act(op,args){
   catch(e){toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
 }
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
+// A card's heading: its board number in the corner, if it has one, then its title.
+const heading=k=>[...(k.number?[el("span","#"+k.number,"num")]:[]),el("b",k.title)];
+// rusty_tick's priority scale; 0 (none) shows no badge.
+const PRIORITY={5:"High",3:"Medium",1:"Low",0:"None"};
+const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priority)]:[];
 
 function render(){
-  const b=$("board");b.replaceChildren();
-  for(const c of COLS){
-    const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",c));
+  if(view==="decisions"){renderDecisions();return}
+  if(view==="roadmap"){renderRoadmap();return}
+  if(view==="metrics"){renderMetrics();return}
+  mapSeq++;   // drop any roadmap or metrics still loading
+  const b=$("board");b.classList.remove("roadmap","metrics","decisions");b.replaceChildren();
+  for(const {id:c,label:name} of FLOW.columns){
+    const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",name));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
     col.ondragleave=()=>col.classList.remove("over");
     col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
     for(const k of cards.filter(k=>k.column===c&&shown(k))){
-      const d=el("div",null,"card");d.draggable=true;d.append(el("b",k.title));
+      const d=el("div",null,"card");d.draggable=true;d.append(...heading(k));
       const m=el("div",null,"meta");
-      if(projects().length>1&&!sel.project){const t=el("span",k.project,"tag proj");t.title=repoOf(k.project);m.append(t)}
-      k.tags.forEach(t=>m.append(el("span",t,"tag")));
+      if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
+      m.append(...priorityTag(k));
+      k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
       if(k.claim){
         d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
-        const t=el("span",null,"tag agent"+(RUNNING.includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
+        const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
       }
-      if(k.issue)m.append(el("span","#"+k.issue));
+      const waiting=pending?.filter(p=>p.card?.id===k.id).length;
+      if(waiting){const t=el("span","⚑ "+waiting,"tag p5");t.title="decisions waiting for you";m.append(t)}
+      if(k.issue)m.append(el("span","issue #"+k.issue));
       if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
       d.append(m);
       d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
@@ -158,11 +235,99 @@ function render(){
   renderSide();syncDialog();
 }
 
+/* The roadmap: the chosen project's cards in lanes (now, next, later, blocked, shipped), laid out
+   by the server's board_roadmap so the rules live in one place. Re-read whenever the board is. */
+let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
+// Each lane's columns, from the workflow's kinds (the server's Lane::of).
+const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipped:"done"};
+const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
+const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions")};
+function setView(v){view=v;pref("view",v);pressed();render()}
+// The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
+const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
+async function renderRoadmap(){
+  const project=roadmapProject(),seq=++mapSeq,b=$("board");
+  const stale=()=>seq!==mapSeq||view!=="roadmap";   // a newer render, or the board, won
+  let map;
+  try{
+    if(!project)throw new Error("No project to show a roadmap for.");
+    map=await api("board_roadmap",{project});
+  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  if(stale())return;
+  b.classList.remove("metrics","decisions");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
+  for(const l of map.lanes){
+    const col=el("section",null,"col");col.dataset.lane=l.lane;
+    const h=el("h2",l.lane+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);
+    for(const k of l.cards){
+      const d=el("div",null,"card");d.append(...heading(k));
+      const m=el("div",null,"meta");
+      if(l.lane==="now")m.append(el("span",colLabel(k.column),"tag"));
+      m.append(...priorityTag(k));
+      k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
+      if(k.claim)m.append(el("span",k.claim,"tag"));
+      if(k.waits_on.length)m.append(el("span","waits on "+k.waits_on.length));
+      if(k.done_ms)m.append(el("span","shipped "+new Date(k.done_ms).toLocaleDateString()));
+      d.append(m);d.onclick=()=>show(k.id);col.append(d);
+    }
+    b.append(col);
+  }
+  renderSide();syncDialog();
+}
+
+/* Metrics: counts, flow and lead time for the chosen project, else the chosen repository, else everything
+   this credential may see, computed by the server's board_metrics. Re-read whenever the board is. */
+const DAY=864e5,dur=ms=>ms==null?"–":ms<DAY?Math.round(ms/36e5)+"h":(ms/DAY).toFixed(ms<10*DAY?1:0)+"d";
+const day=ms=>new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"});
+// A panel of labelled bars: rows are {label, n, title?, fill?}; `max` lets two panels share a scale.
+function bars(title,rows,hint,max=Math.max(1,...rows.map(r=>r.n))){
+  const s=el("section",null,"col"),h=el("h2",title);if(hint)h.title=hint;s.append(h);
+  for(const r of rows){
+    const row=el("div",null,"bar"),f=el("i"),t=el("span");f.style.width=(r.n/max*100)+"%";
+    if(r.fill)f.style.setProperty("--fill",r.fill);if(r.title)row.title=r.title;
+    t.append(f);row.append(el("span",r.label),t,el("span",String(r.n)));s.append(row);
+  }
+  if(!rows.length)s.append(el("p","None.","meta"));
+  return s;
+}
+async function renderMetrics(){
+  const seq=++mapSeq,b=$("board"),stale=()=>seq!==mapSeq||view!=="metrics";
+  const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
+  let m;
+  try{m=await api("board_metrics",args)}
+  catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  if(stale())return;
+  const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
+  const kpis=el("div",null,"kpis");
+  for(const [v,l,t] of [[m.open,"open"],[working().reduce((a,c)=>a+n(c),0),"in progress",working().map(colLabel).join(", ")],[n("blocked"),"blocked"],
+    [lt.shipped,"shipped, 30 days"],[dur(lt.median_ms),"median lead time","created to shipped, last 30 days"],[dur(lt.p85_ms),"85% within","created to shipped, last 30 days"]]){
+    const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
+  }
+  const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done]));
+  const idle=el("section",null,"col");idle.append(el("h2","idle longest"));
+  for(const k of m.idle){
+    const d=el("div",null,"card");d.append(...heading(k));
+    d.append(el("div",[colLabel(k.column),"idle "+dur(k.idle_ms),...(k.claim?[k.claim]:[]),...(sel.project?[]:[label(k.project)])].join(" · "),"meta"));
+    d.onclick=()=>show(k.id);idle.append(d);
+  }
+  if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
+  b.classList.remove("roadmap","decisions");b.classList.add("metrics");
+  b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
+    bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
+    bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
+    bars("open by column",m.by_column.map(t=>({label:colLabel(t.key),n:t.count}))),
+    bars("open by priority",m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count}))),
+    ...(sel.project?[]:[bars("open by project",m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"})))]),
+    bars("in progress by agent",m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)})),"claimed cards in work columns"),
+    idle);
+  renderSide();syncDialog();
+}
+
 /* The side panel: repositories (and the agents holding claims) on the left; the chosen
    repository's projects in a second pane. Everything here only narrows what the board shows. */
 function renderSide(){
-  // An empty repository is listed (you may be about to add its first card); only the unused `default` hides.
-  const names=Object.keys(repos).filter(r=>Object.keys(repos).length===1||r!=="default"||count(k=>repoOf(k.project)===r)>0||r===sel.repo);
+  // Every repository is listed, an empty one too (you may be about to add its first card), except the
+  // `default` repository when the Inbox is all it holds: the Inbox row below is it.
+  const names=Object.keys(repos).filter(r=>r!==INBOX||repos[r].length>1);
   $("shell").classList.toggle("noside",(projects().length<2&&!cards.some(k=>k.claim))||pref("side")==="0");
   const item=(label,n,on,fn,agent)=>{
     const b=el("button",null,"item"+(on?" on":""));b.type="button";
@@ -172,7 +337,17 @@ function renderSide(){
   const n1=$("nav1");n1.replaceChildren();
   if(projects().length>1){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
+    // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
+    // Listed only when this credential may see it, like every other entry here.
+    if(projects().includes(INBOX))n1.append(item("Inbox",count(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
     for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
+    // The projects of the chosen repository, or of every repository, so one project's cards are a click
+    // away. A repository whose only project is its own is left out: it is the repository, listed above.
+    // (A credential limited to some projects may see a repository with one other project: that one stays.)
+    const named=Object.entries(repos).filter(([r])=>!sel.repo||r===sel.repo)
+      .flatMap(([r,ps])=>ps.length===1&&ps[0]===r?[]:ps).filter(p=>p!==INBOX).sort();
+    if(named.length)n1.append(el("h2","Projects","sep"));
+    for(const p of named)n1.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
   }
   // Agents: whoever holds a claim, with how many cards. A second filter, independent of the repository.
   const claims={};cards.forEach(k=>{if(k.claim)claims[k.claim]=(claims[k.claim]||0)+1});
@@ -180,11 +355,6 @@ function renderSide(){
   if(agents.length){
     n1.append(el("h2","Agents","sep"),item("Everyone",cards.filter(k=>k.claim).length,!sel.agent,()=>pickAgent("")));
     for(const a of agents)n1.append(item(a,claims[a],sel.agent===a,()=>pickAgent(a),a));
-  }
-  const n2=$("nav2");n2.hidden=!sel.repo;n2.replaceChildren();
-  if(sel.repo){
-    n2.append(el("h2",sel.repo),item("All projects",count(k=>repoOf(k.project)===sel.repo),!sel.project,()=>pick(sel.repo,"")));
-    for(const p of repos[sel.repo]||[])n2.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(sel.repo,p)));
   }
 }
 function pick(repo,project){sel={...sel,repo,project};pref("repo",repo);pref("project",project);render()}
@@ -199,10 +369,13 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select")};
-  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(p,p)));f.p.append(g)}
+  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select")};
+  for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
+  [5,3,1,0].forEach(v=>f.pr.append(new Option("Priority: "+PRIORITY[v],v)));
+  f.pr.setAttribute("aria-label","priority");f.pr.value=k.priority;
+  f.pr.onchange=()=>act("card_plan",{id,priority:+f.pr.value});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   dlg={id,base:snap(k),f};setFields(dlg.base);
   const row=el("div");
@@ -210,7 +383,7 @@ function show(id){
   btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
-  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
+  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -224,10 +397,11 @@ function syncDialog(){
   const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
   if(!k){f.banner.textContent="This card no longer exists.";return}
   // Display-only parts follow the board; the inputs are never rebuilt.
-  f.meta.textContent=k.column+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+colLabel(k.column)+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);
+  if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
   const dirty=!sameText(typed(),dlg.base);
   if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
@@ -246,43 +420,115 @@ $("dlg").onclose=()=>{dlg=null};
 /* Read the cursor first, then the cards: anything committed in between is in the list
    AND comes back from the next poll (a harmless extra refresh); nothing can be skipped.
    Both reads must succeed before either is kept. */
+// Highest priority first in each column, as card_take takes them; stable, so the store's order follows.
+const byPriority=list=>list.sort((a,b)=>b.priority-a.priority);
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
   const list=(await api("board_list")).cards;
-  cursor=at;cards=list;
+  cursor=at;cards=byPriority(list);
 }
-async function refresh(){await snapshot();render()}
+async function refresh(){await snapshot();await loadPending();render()}
+
+/* Decisions (#595): the open BBP escalations of the tasks linked from cards, read through inbox_list
+   (admin only; Mill Board stores none of it). `pending` is null when this credential or board has no
+   inbox (a 403 or 422), which hides the button. Any other failure is a read failure: `pendingErr` says
+   so, and the decisions last read stay shown, marked stale, so a host hiccup never hides one.
+   Each action is dry-run first, and BBP's answer is shown before it is taken. */
+let pending=null,pendingAt=0,pendingRead=0,pendingErr=null;
+async function loadPending(){
+  pendingAt=Date.now();
+  try{pending=await api("inbox_list",who());pendingRead=pendingAt;pendingErr=null}
+  catch(e){
+    if(e.status===403||e.status===422){pending=null;pendingErr=null}
+    else pendingErr=e.message||"no answer";
+  }
+  $("decide").hidden=pending===null&&pendingErr===null&&view!=="decisions";
+  $("decide-n").textContent=(pending?.length?" · "+pending.length:"")+(pendingErr?" · ⚠":"");
+}
+const pct=c=>c.confidence+"% · score "+c.score+" · budget "+c.spent+"/"+c.budget+(c.epoch?" · epoch "+c.epoch:"");
+const changes=d=>d.events.map(e=>Object.keys(e)[0]).join(", ")||"nothing";
+async function decide(item,action){
+  const args={...who(),id:item.id,rev:item.rev,...action};
+  try{
+    const d=(await api("inbox_act",{...args,dry_run:true})).dry_run;
+    if(d.response.Rejected){toast("BBP would refuse: "+d.response.Rejected.code+" "+d.response.Rejected.detail);return}
+    const then=d.then.length?"\nThen: "+d.then.map(s=>s.verb+" "+s.args.join(" ")).join("; "):"";
+    if(!confirm(d.step.verb+" "+d.step.args.join(" ")+"\nWould write: "+changes(d)+then))return;
+    const r=await api("inbox_act",args),out=r.outcome??r.remediated?.outcome,filed=(r.remediated??r.recorded)?.card;
+    const name=c=>(c.number?"#"+c.number+" ":"")+c.title;
+    if(out?.Refused)toast("Refused at step "+(out.Refused.step+1)+": "+out.Refused.code+" "+out.Refused.detail);
+    else if(r.recorded)toast("Already decided; its card is "+name(filed));
+    else if(filed)toast("Filed "+name(filed));
+  }catch(e){toast(e.message)}
+  await refresh().catch(()=>{});
+}
+function renderDecisions(){
+  mapSeq++;
+  const b=$("board");b.classList.remove("roadmap","metrics");b.classList.add("decisions");b.replaceChildren();
+  if(pendingErr)b.append(el("p","Could not read the inbox: "+pendingErr+(pending?". Showing what was read at "+new Date(pendingRead).toLocaleTimeString()+", which may be stale.":"."),"meta stale"));
+  if(pending===null&&pendingErr){renderSide();return}
+  if(pending===null){b.append(el("p","The inbox needs an admin token (sign in with one) and a board started with --bbp-bin and --bbp-root.","meta"));renderSide();return}
+  if(!pending.length){b.append(el("p","Nothing needs you.","meta"));renderSide();return}
+  for(const it of pending){
+    const s=el("section",null,"col"),c=it.claim;
+    s.append(el("h2",it.label+(it.reversible===false?" · irreversible":"")+(it.stakes?" · "+it.stakes+" stakes":"")));
+    if(it.card){const h=el("p",null,"meta");h.append(el("a",(it.card.number?"#"+it.card.number+" ":"")+it.card.title));h.firstChild.href="#";h.firstChild.onclick=e=>{e.preventDefault();show(it.card.id)};s.append(h)}
+    if(c){s.append(el("p",c.text),el("p",pct(c),"meta"))}else s.append(el("p","Task "+it.task+" paused."));
+    for(const t of it.totals||[])s.append(el("p",t.field+": spent "+t.spent+" of "+t.limit+"; Approve adds "+t.allowance,"meta"));
+    for(const a of it.acted||[])s.append(el("p","Already acted on: msg:"+a.claim+(a.marks.length?" ("+a.marks.join(", ")+")":"")+". Dropping it files a Remediate card.","meta"));
+    for(const e of it.evidence)s.append(el("p",(e.delta>0?"+":"")+e.delta+" "+e.kind.toLowerCase()+" "+e.direction.toLowerCase()+" by "+e.author+" (msg:"+e.msg+")","meta"));
+    for(const k of it.candidates){
+      const d=el("div",null,"cand");d.append(el("b",k.text),el("p",pct(k),"meta"));
+      const pick=el("button","Choose this");pick.onclick=()=>decide(it,{action:"choose",chosen:k.id});d.append(pick);s.append(d);
+    }
+    const acts=el("div",null,"acts"),btn=(t,f)=>{const x=el("button",t);x.onclick=f;acts.append(x)};
+    btn("Approve",()=>decide(it,{action:"approve"}));
+    btn("Reject",()=>{const reason=it.reason==="TaskTotal"?prompt("Why cancel this task?"):null;if(it.reason!=="TaskTotal"||reason)decide(it,{action:"reject",...(reason&&{reason})})});
+    btn("Refine intent",()=>{const note=prompt("What should the lenses know? (1 to 1200 characters)");if(note)decide(it,{action:"refine",note})});
+    s.append(acts);b.append(s);
+  }
+  renderSide();syncDialog();
+}
+/* Columns change without a card event (an admin's edit elsewhere), so they are re-read on every
+   poll; a changed set redraws the board even when no card moved. */
+async function pollColumns(){
+  const flow=await api("board_columns");
+  if(JSON.stringify(flow)===JSON.stringify(FLOW))return false;
+  FLOW=flow;return true;
+}
 async function poll(){
   try{
+    let redraw=await pollColumns();
+    if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
       const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
-      cursor=r.cursor;cards=list;render();
+      cursor=r.cursor;cards=byPriority(list);redraw=true;
     }
+    if(redraw)render();
   }catch(e){}
   setTimeout(poll,1500);
 }
-/* ---- Settings: agents, repositories and projects, roles, GitHub. Each tab edits one thing and sends
-   the whole of it; the server validates, writes its file, and applies it. ---- */
-const CAPS=["triage","build","qa","review","merge","admin"];
+/* ---- Settings: agents, repositories and projects, roles, GitHub, signed-in apps, and the server (read-only).
+   Each tab edits one thing and sends the whole of it; the server validates, writes its file, and applies it. ---- */
 let cfg=null,secret=null,tab="agents";
 async function setting(op,args){return api(op,{...who(),...args})}
 async function openSettings(){
   try{cfg=await setting("settings_get")}
   catch(e){toast(e.status===403?"Settings need the admin capability.":e.message);return}
-  secret=null;reposDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
+  secret=null;reposDraft=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
 }
 function drawSettings(){
   const d=$("settings"),box=el("div");
   const tabs=el("div",null,"tabs");
-  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["github","GitHub"]]){
-    const b=el("button",label,tab===id?"on":"");b.type="button";b.onclick=()=>{tab=id;secret=null;reposDraft=null;drawSettings()};tabs.append(b)}
+  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["columns","Columns"],["rules","Rules"],["github","GitHub"],["apps","Apps"],["server","Server"]]){
+    const b=el("button",label,tab===id?"on":"");b.type="button";b.onclick=()=>{tab=id;secret=null;reposDraft=null;flowDraft=null;drawSettings()};tabs.append(b)}
   const close=el("button","Close");close.type="button";close.onclick=()=>d.close();close.style.marginLeft="auto";tabs.append(close);
-  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,github:githubTab}[tab]());
+  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
   d.replaceChildren(box);
 }
-/* After a change: re-read the settings, the board's roles and projects, and redraw. */
-async function changed(){try{cfg=await setting("settings_get");await loadMeta()}catch(e){toast(e.message)}drawSettings();render()}
+/* After a change: re-read the board's roles and projects (who you are may have changed), then the settings, and redraw. */
+async function changed(){try{await loadMeta();cfg=await setting("settings_get")}catch(e){toast(e.message)}drawSettings();render()}
 function guard(errBox,fn){return async()=>{errBox.textContent="";try{await fn();await changed()}catch(e){errBox.textContent=e.message;errBox.scrollIntoView?.({block:"nearest"})}}}
 const field=(tag,props={})=>Object.assign(el(tag),props);
 const unwritable=what=>el("p","This is not kept in a file, so it is read-only here. Start the board with --settings-dir DIR (or "+what+") to manage it from this view.","note");
@@ -293,7 +539,7 @@ function projectPicker(current){
   const boxes={};
   for(const r of Object.keys(all))for(const p of Object.keys(all[r])){
     const c=field("input",{type:"checkbox",checked:!!current&&current.includes(p),disabled:!current});boxes[p]=c;
-    const l=el("label");l.append(c," "+p+"  ("+r+")");d.append(l)}
+    const l=el("label");l.append(c," "+label(p)+"  ("+r+")");d.append(l)}
   const show=()=>{sum.textContent=none.checked?"all projects":Object.keys(boxes).filter(p=>boxes[p].checked).length+" project(s)"};
   none.onchange=()=>{for(const c of Object.values(boxes))c.disabled=none.checked;show()};
   d.addEventListener("change",show);show();
@@ -318,7 +564,7 @@ function agentsTab(){
     const save=el("button","Save"),rot=el("button","New token"),del=el("button","Remove");[save,rot,del].forEach(b=>{b.type="button"});
     save.onclick=guard(err,()=>setting("settings_agent_update",{agent:{name:a.actor,role:role.value,projects:pick.value()}}));
     rot.onclick=guard(err,async()=>{const r=await setting("settings_agent_rotate",{name:a.actor});secret={name:a.actor,token:r.token};
-      if(a.actor===who().actor){tok=r.token;try{history.replaceState(null,"","#token="+r.token)}catch(e){}}});
+      if(a.actor===$("actor").value)setToken(r.token)});
     del.onclick=guard(err,async()=>{if(!confirm("Remove "+a.actor+"? Its token stops working."))return;await setting("settings_agent_remove",{name:a.actor});secret=null});
     acts.append(save," ",rot," ",del);
     const r=el("td"),p=el("td");r.append(role);p.append(pick);tr.append(name,r,p,acts);tbl.append(tr);
@@ -366,19 +612,129 @@ function reposTab(){
 function rolesTab(){
   const t=el("div"),err=el("div",null,"err");
   if(!cfg.files.roles)t.append(unwritable("--roles FILE"));
+  const CAPS=cfg.capabilities,about=cfg.capability_about||{};
   const draft=JSON.parse(JSON.stringify(cfg.roles)),tbl=el("table"),head=el("tr");
-  head.append(el("th","Role"));CAPS.forEach(c=>head.append(el("th",c)));head.append(el("th",""));tbl.append(head);
+  head.append(el("th","Role"));CAPS.forEach(c=>{const th=el("th",c);th.title=about[c]||"";head.append(th)});head.append(el("th",""));tbl.append(head);
+  const holders=r=>cfg.agents.filter(a=>a.role===r).map(a=>a.actor);
   for(const r of Object.keys(draft)){
-    const tr=el("tr");tr.append(el("td",r));
+    const held=holders(r),name=el("td",r);name.title=held.length?"held by "+held.join(", "):"held by no agent";
+    const tr=el("tr");tr.append(name);
     CAPS.forEach(c=>{const b=field("input",{type:"checkbox",checked:draft[r].includes(c)});b.onchange=()=>{draft[r]=CAPS.filter(x=>x===c?b.checked:draft[r].includes(x))};const td=el("td");td.append(b);tr.append(td)});
-    const rm=el("button","Remove");rm.type="button";rm.onclick=guard(err,async()=>{const next={...draft};delete next[r];await setting("settings_roles_set",{roles:next})});
-    const td=el("td");td.append(rm);tr.append(td);tbl.append(tr);
+    const mv=el("button","Rename");mv.type="button";mv.onclick=guard(err,async()=>{const to=prompt("New name for role "+r+" (its agents move with it):",r)?.trim();if(to&&to!==r)await setting("settings_role_rename",{from:r,to})});
+    const rm=el("button","Remove");rm.type="button";rm.disabled=held.length>0;rm.title=held.length?"Held by "+held.join(", ")+": give them another role first":"";
+    rm.onclick=guard(err,async()=>{if(!confirm("Remove role "+r+"?"))return;const next={...draft};delete next[r];await setting("settings_roles_set",{roles:next})});
+    const td=el("td");td.append(mv," ",rm);tr.append(td);tbl.append(tr);
   }
   const nm=field("input",{placeholder:"new role, e.g. tester",size:20}),add=el("button","Add role");add.type="button";
   add.onclick=guard(err,async()=>{const n=nm.value.trim();await setting("settings_roles_set",{roles:{...draft,[n]:[]}})});
   const save=el("button","Save roles");save.type="button";save.onclick=guard(err,()=>setting("settings_roles_set",{roles:draft}));
   const row=el("div",null,"row");row.append(nm,add);
-  t.append(tbl,row,save,err,el("p","admin lets a role change these settings. At least one agent must keep a role with admin.","note"));
+  const help=el("table");for(const c of CAPS){const tr=el("tr");tr.append(el("td",c),el("td",about[c]||""));help.append(tr)}
+  t.append(tbl,row,save,err,help,el("p","Roles are yours to define; capabilities are built in. A role held by an agent cannot be removed, and at least one agent must keep a role with admin.","note"));
+  return t;
+}
+
+/* Columns and the moves between them. Edited as a draft and saved whole: the server checks it
+   (Backlog, Done and Blocked stay; a column that still holds cards cannot be removed). */
+let flowDraft=null;
+const KINDS={queue:"Queue: waits to be taken",work:"Work: claimed; leaving needs the claim",backlog:"Backlog",done:"Done",blocked:"Blocked"};
+function columnsTab(){
+  const t=el("div"),err=el("div",null,"err"),ro=!cfg.files.workflow;
+  if(ro)t.append(unwritable("--settings-dir DIR"));
+  const d=flowDraft??=JSON.parse(JSON.stringify(cfg.workflow)),redraw=()=>drawSettings();
+  const btn=(text,fn,title)=>{const b=el("button",text);b.type="button";b.disabled=ro;if(title)b.title=title;b.onclick=()=>{fn();redraw()};return b};
+  const held=id=>count(k=>k.column===id);
+  const cols=el("table"),ch=el("tr");["Column","Label","Kind","Cards",""].forEach(h=>ch.append(el("th",h)));cols.append(ch);
+  d.columns.forEach((c,i)=>{
+    const tr=el("tr"),anchor=["backlog","done","blocked"].includes(c.kind);
+    const lb=field("input",{value:c.label,size:18,disabled:ro});lb.setAttribute("aria-label","label of "+c.id);lb.oninput=()=>{c.label=lb.value};
+    const kind=anchor?el("span",KINDS[c.kind]):field("select",{disabled:ro});
+    if(!anchor){for(const k of ["queue","work"])kind.append(new Option(KINDS[k],k));kind.value=c.kind;kind.onchange=()=>{c.kind=kind.value}}
+    const ops=el("td");
+    ops.append(btn("↑",()=>{if(i)[d.columns[i-1],d.columns[i]]=[d.columns[i],d.columns[i-1]]},"move left"),
+      btn("↓",()=>{if(i<d.columns.length-1)[d.columns[i+1],d.columns[i]]=[d.columns[i],d.columns[i+1]]},"move right"));
+    if(!anchor)ops.append(btn("Remove",()=>{d.columns.splice(i,1);d.transitions=d.transitions.filter(m=>m.from!==c.id&&m.to!==c.id)},
+      held(c.id)?"move its cards out first":"remove this column and its moves"));
+    const k=el("td");k.append(kind);
+    tr.append(el("td",c.id),(()=>{const td=el("td");td.append(lb);return td})(),k,el("td",String(held(c.id))),ops);cols.append(tr);
+  });
+  const id=field("input",{placeholder:"new column id, e.g. design",size:20,disabled:ro}),nl=field("input",{placeholder:"label",size:14,disabled:ro});
+  const nk=field("select",{disabled:ro});for(const k of ["queue","work"])nk.append(new Option(KINDS[k],k));nk.value="work";
+  const add=btn("Add column",()=>{const v=id.value.trim();if(!v)return;
+    const at=d.columns.findIndex(c=>c.kind==="done");d.columns.splice(at<0?d.columns.length:at,0,{id:v,label:nl.value.trim()||v,kind:nk.value})});
+  const addRow=el("div",null,"row");addRow.append(id,nl,nk,add);
+  const ids=d.columns.map(c=>c.id),caps=cfg.capabilities;
+  const pick=(opts,v,on,lbl,name=o=>o)=>{const s=field("select",{disabled:ro});s.setAttribute("aria-label",lbl);for(const o of opts)s.append(new Option(name(o),o));s.value=v;s.onchange=()=>on(s.value);return s};
+  const colName=o=>d.columns.find(c=>c.id===o)?.label??o;
+  const moves=el("table"),mh=el("tr");["From","To","Needs","Gate",""].forEach(h=>mh.append(el("th",h)));moves.append(mh);
+  d.transitions.forEach((m,i)=>{
+    const tr=el("tr"),cell=x=>{const td=el("td");td.append(x);return td};
+    const gate=field("input",{type:"checkbox",checked:!!m.gate,disabled:ro});gate.title="a human approval: also needs admin, even with movement rules off";
+    gate.onchange=()=>{m.gate=gate.checked};
+    tr.append(cell(pick(ids,m.from,v=>{m.from=v},"from",colName)),cell(pick(ids,m.to,v=>{m.to=v},"to",colName)),cell(pick(caps,m.cap,v=>{m.cap=v},"capability")),cell(gate),
+      cell(btn("Remove",()=>d.transitions.splice(i,1))));
+    moves.append(tr);
+  });
+  const addMove=btn("Add move",()=>d.transitions.push({from:ids[0],to:ids[1]??ids[0],cap:caps[0]}));
+  const save=el("button","Save columns");save.type="button";save.disabled=ro;
+  save.onclick=guard(err,async()=>{await setting("settings_workflow_set",{workflow:d});flowDraft=null});
+  const reset=btn("Discard changes",()=>{flowDraft=null});
+  const bar=el("div",null,"row");bar.append(save,reset);
+  t.append(cols,addRow,el("h4","Moves"),moves,addMove,bar,err,
+    el("p","A column's id is fixed once cards use it; its label is what people see. Any open card may always be moved to Blocked, so that move is not listed. A gate is a human approval: it needs its capability and admin.","note"));
+  return t;
+}
+
+/* Card movement rules: on, moves follow the column table and each role's capabilities; off, any move but out of Done. */
+function rulesTab(){
+  const t=el("div"),err=el("div",null,"err"),note=el("p",null,"note");
+  if(!cfg.files.rules)t.append(unwritable("--settings-dir DIR"));
+  const box=field("input",{type:"checkbox"});
+  // Always show what the server holds: after a save, and after a failed one too.
+  const show=()=>{const on=(cfg.rules||{}).movement!=="open";box.checked=on;box.disabled=!cfg.files.rules;
+    note.textContent=on
+      ?"On: a card moves only along the Columns tab's moves, by a role holding that move's capability, and leaving a work column needs the claim."
+      :"Off: anyone signed in with any capability may move any card to any column, except out of Done and through a gate. Each such move is logged."};
+  box.onchange=async()=>{
+    const movement=box.checked?"enforced":"open";err.textContent="";box.disabled=true;
+    try{await setting("settings_rules_set",{movement});await changed();return}
+    catch(e){err.textContent=e.message}
+    try{cfg=await setting("settings_get")}catch(e){err.textContent+=" (and the current setting could not be re-read: "+e.message+")"}
+    show();
+  };
+  show();
+  const l=el("label");l.append(box," Enforce card movement rules");
+  t.append(l,err,note);
+  return t;
+}
+
+/* Apps signed in through OAuth (e.g. a claude.ai connector). Revoking one drops its tokens; it can sign in again. */
+function appsTab(){
+  const t=el("div"),err=el("div",null,"err");
+  if(!cfg.apps){t.append(el("p","OAuth sign-in is off. Start the board with --issuer URL to let apps such as claude.ai sign in.","note"));return t}
+  if(!cfg.apps.length){t.append(el("p","No app has signed in.","note"));return t}
+  const tbl=el("table"),head=el("tr");["App","Registered","Tokens",""].forEach(h=>head.append(el("th",h)));tbl.append(head);
+  for(const a of cfg.apps){
+    const tr=el("tr"),when=a.client_id_issued_at?new Date(a.client_id_issued_at*1000).toLocaleString():"";
+    const name=el("td");name.append(el("div",a.client_name||"(unnamed)"),el("code",a.client_id));
+    const rv=el("button","Revoke");rv.type="button";
+    rv.onclick=guard(err,async()=>{if(!confirm("Sign "+(a.client_name||a.client_id)+" out? It must sign in again."))return;await setting("settings_app_revoke",{client_id:a.client_id})});
+    const td=el("td");td.append(rv);tr.append(name,el("td",when),el("td",a.access_tokens+" access, "+a.refresh_tokens+" refresh"),td);tbl.append(tr);
+  }
+  t.append(tbl,err,el("p","Removing an agent also stops the apps it signed in.","note"));
+  return t;
+}
+
+/* How the server was started. Changed with its flags or board.env, then a restart. */
+function serverTab(){
+  const t=el("div"),s=cfg.server||{},p=cfg.paths||{},tbl=el("table");
+  const row=(k,v)=>{const tr=el("tr");tr.append(el("td",k),el("td",v));tbl.append(tr)};
+  row("Cards",s.tick?"rusty_tick at "+s.tick:"in memory (lost on restart)");
+  row("OAuth sign-in",s.issuer||"off");
+  row("Accepted hosts",(s.hosts||[]).join(", "));
+  for(const [k,label] of [["agents","Agents file"],["projects","Projects file"],["roles","Roles file"],["rules","Rules file"],["workflow","Columns file"],["github","GitHub file"]])
+    row(label,p[k]||"none (read-only here)");
+  t.append(tbl,el("p","These come from the server's flags or its environment file and change with a restart.","note"));
   return t;
 }
 
@@ -399,15 +755,18 @@ function githubTab(){
   return t;
 }
 
+// Board metadata: on failure carry on with a fallback, but say why, so a refusal is not an empty panel.
+const meta=(op,fallback)=>api(op).catch(e=>{toast(op+" failed: "+e.message);return fallback});
 async function loadMeta(){
-  const roles=Object.keys((await api("board_roles").catch(()=>({roles:{human:1}}))).roles);
+  const roles=Object.keys((await meta("board_roles",{roles:{human:1}})).roles);
   const cur=$("role").value;$("role").replaceChildren(...roles.map(r=>new Option(r,r)));
   $("role").value=roles.includes(cur)?cur:(pref("role")&&roles.includes(pref("role"))?pref("role"):(roles.includes("human")?"human":roles[0]));
+  FLOW=await meta("board_columns",FLOW);
   // With a per-model token, who you are is fixed by the token: show it, do not ask.
-  const me=await api("board_whoami").catch(()=>({}));
+  const me=await meta("board_whoami",{});
   if(me.authenticated){$("actor").value=me.actor;$("actor").disabled=true;$("role").value=me.role;$("role").disabled=true}
   // repo -> its projects. A credential limited to some projects hears only of those.
-  const listed=(await api("board_projects").catch(()=>({repos:{}}))).repos;
+  const listed=(await meta("board_projects",{repos:{}})).repos;
   repos=Object.fromEntries(Object.entries(listed).map(([r,p])=>[r,Object.keys(p)]));
   if(sel.repo&&!(sel.repo in repos))sel={repo:"",project:"",agent:sel.agent};
   if(sel.project&&!projects().includes(sel.project))sel={...sel,project:""};
@@ -419,6 +778,10 @@ async function loadMeta(){
   if(r in repos&&(!p||repos[r].includes(p)))sel={repo:r,project:p||"",agent:""};
   $("actor").onchange=()=>pref("actor",$("actor").value);$("role").onchange=()=>pref("role",$("role").value);
   $("gear").onclick=openSettings;
+  $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
+  $("metrics").onclick=()=>setView(view==="metrics"?"board":"metrics");pressed();
+  $("decide").onclick=()=>setView(view==="decisions"?"board":"decisions");
+  $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
   // New cards go to the chosen project, else to the chosen repository's own project.
   $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(t){$("title").value="";act("card_add",{title:t,...(project&&{project})})}};

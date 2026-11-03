@@ -7,7 +7,6 @@
 
 use std::net::SocketAddr;
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use rmcp::{
     ServiceExt, model::CallToolRequestParams, service::RunningService,
@@ -61,7 +60,7 @@ impl Harness {
         let config = Config::from_yaml(&yaml).expect("config should parse");
         config.validate().expect("config should validate");
 
-        let gateway = Gateway::build(&config, None)
+        let gateway = common::build(&config, None)
             .await
             .expect("gateway should build and reach its targets");
 
@@ -71,7 +70,7 @@ impl Harness {
             .expect("address should parse");
         // The returned future only joins the accept loops; these tests drive
         // the gateway over MCP and cancel it directly.
-        let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        let _serving = common::serve(gateway, vec![addr], shutdown.clone())
             .await
             .expect("gateway should bind");
 
@@ -298,7 +297,7 @@ async fn a_route_that_does_not_match_is_a_404() {
         .replace("{server}", &mock_server())
         .replace("{port}", &port.to_string());
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
@@ -306,7 +305,7 @@ async fn a_route_that_does_not_match_is_a_404() {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
     // The returned future only joins the accept loops; the tests drive the
     // gateway over HTTP and cancel it directly, so it is deliberately dropped.
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 

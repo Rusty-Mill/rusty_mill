@@ -31,8 +31,6 @@ PLAN_KEYS = {
     "tick",
     "fair_play",
     "agui",
-    "remind_me",
-    "remind_me_legacy_import",
     "win32",
     "multimodal_db",
     "rusty_config_no_std",
@@ -44,15 +42,43 @@ PLAN_KEYS = {
     "rleval_image",
     "crypto_ct",
     "rand_platforms",
+    "msrv_manifests",
     "shards",
     "components",
 }
-SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "shards", "components"}
+SPECIALIZED_KEYS = PLAN_KEYS - {"full", "packages", "ci_only", "msrv_manifests", "shards", "components"}
 
 
 class CiWorkflowSchedulingTests(unittest.TestCase):
     def setUp(self) -> None:
         self.workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    def test_win32_cross_check_needs_no_native_compiler_and_stays_gated(self) -> None:
+        start = self.workflow.index("  win32-cross-compile-check:\n")
+        end = self.workflow.index("\n  rusty-rand-platforms:", start)
+        job = self.workflow[start:end]
+        self.assertIn("needs: plan", job)
+        self.assertIn("if: needs.plan.outputs.win32 == 'true' && needs.plan.outputs.linux == 'true'", job)
+        self.assertIn("runs-on: ubuntu-latest", job)
+        self.assertIn("targets: x86_64-pc-windows-gnu", job)
+        self.assertIn("components: clippy", job)
+        self.assertIn("run: cargo check -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std\n", job)
+        self.assertIn("run: cargo clippy -p rusty_win32 --target x86_64-pc-windows-gnu --all-targets --features std -- -D warnings\n", job)
+        self.assertNotIn("apt-get", job)
+        self.assertNotIn("continue-on-error", job)
+        gate = self.workflow[self.workflow.index("  required-gate:\n"):]
+        self.assertIn("      - win32-cross-compile-check\n", gate)
+
+    def test_win32_check_runs_for_ci_edits_and_affected_package_only(self) -> None:
+        for path in (".github/workflows/ci.yml", ".github/scripts/ci_plan.py",
+                     ".github/scripts/test_ci_workflow.py"):
+            with self.subTest(path=path):
+                self.assertTrue(specialized_job_flags([path], [])["win32"])
+                smoke = self._planner_map("--emit-ci-smoke", input=path + "\n")
+                self.assertEqual(smoke["win32"], "true")
+        self.assertTrue(specialized_job_flags([], ["rusty_win32"])["win32"])
+        self.assertFalse(specialized_job_flags([], ["rusty_tick"])["win32"])
+        self.assertFalse(specialized_job_flags(["changes/2026-10-27-other.md"], [])["win32"])
 
     def test_build_environment_setup_has_a_blocking_step_timeout(self) -> None:
         steps = re.findall(
@@ -130,6 +156,24 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # Blocking: no continue-on-error on a finding.
         self.assertNotIn("continue-on-error", job)
         self.assertIn("      - rusty-tls-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])
+
+    def test_the_conhost_fuzz_job_runs_only_on_sweeps_and_cannot_pass_vacuously(self) -> None:
+        # Design PR 13 (D2): scheduled and manual runs only, never a PR or the queue.
+        start = self.workflow.index("  rusty-conhost-fuzz:\n")
+        end = self.workflow.find("\n  # ----", start)
+        job = self.workflow[start : end if end != -1 else None]
+        self.assertIn(
+            "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'\n", job
+        )
+        self.assertRegex(job, r"FUZZ_TOOLCHAIN: nightly-\d{4}-\d{2}-\d{2}\n")
+        self.assertIn("toolchain: ${{ env.FUZZ_TOOLCHAIN }}", job)
+        self.assertIn("tool: cargo-fuzz@0.13.2", job)
+        # Both targets, through the tested script.
+        self.assertIn("FUZZ_ROOT: crates/libs/ui/rusty_conhost", job)
+        self.assertRegex(job, r"bash \.github/scripts/tls_fuzz_smoke\.sh 30 2\n")
+        self.assertIn("FUZZ_TARGET_TRIPLE: x86_64-unknown-linux-gnu", job)
+        self.assertNotIn("continue-on-error", job)
+        self.assertIn("      - rusty-conhost-fuzz\n", self.workflow[self.workflow.index("required-gate:") :])
 
     # Both engine jobs, `ring` and native (ADR-0002 Amendment 2), carry the same
     # limbo and live steps; each is checked with the same rules.
@@ -256,21 +300,50 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn('checksums.txt "$base/actionlint_${version}_checksums.txt"', self.workflow)
         self.assertIn("sha256sum --check --status", self.workflow)
 
+    def test_ci_change_with_no_affected_crate_still_runs_smoke(self) -> None:
+        # Every PR adds a change fragment, so a real CI PR is never CI-only.
+        # Without this fallback it selected no crate and so built nothing at
+        # all: no smoke, no test, no clippy (#928, #1010, #1073, #1081).
+        for extra in ("changes/2026-10-26-ci-fix.md", "docs/agents/review-router.md"):
+            with self.subTest(extra=extra):
+                changed = f".github/actions/setup-build-env/action.yml\n{extra}\n"
+                self.assertNotEqual(self._planner("--is-ci-only", input=changed).returncode, 0)
+                self.assertEqual(
+                    self._planner("--needs-ci-smoke", "--packages", "", input=changed).returncode, 0
+                )
+        # A crate lane already runs setup-build-env, and prose alone needs no smoke.
+        self.assertEqual(
+            self._planner(
+                "--needs-ci-smoke", "--packages", "rusty_tick",
+                input=".github/workflows/ci.yml\ncrates/apps/rusty_tick/src/lib.rs\n",
+            ).returncode,
+            1,
+        )
+        self.assertEqual(
+            self._planner("--needs-ci-smoke", "--packages", "", input="docs/README.md\n").returncode, 1
+        )
+        self.assertIn(
+            'printf \'%s\\n\' "$changed" | python3 .github/scripts/ci_plan.py --needs-ci-smoke --packages "$packages"',
+            self.workflow,
+        )
+
     def test_lockfile_is_not_an_unconditional_global_fallback(self) -> None:
         self.assertEqual(self._planner("--requires-full", input="Cargo.lock\n").returncode, 1)
         self.assertIn("lockfile_diff.py", self.workflow)
-        self.assertIn("Cargo.lock changed with a manifest", self.workflow)
+        self.assertNotIn("Cargo.lock changed with a manifest", self.workflow)
         self.assertIn("Unable to establish Cargo.lock impact", self.workflow)
 
     def test_lanes_spanning_most_components_fall_back_to_the_full_sweep(self) -> None:
         self.assertIn('--packages "$packages" --full-if-most)" || components_status=$?', self.workflow)
         self.assertIn('emit_full "Affected crates span most of the workspace\'s components"', self.workflow)
 
-    def test_member_dependency_edits_keep_the_full_sweep(self) -> None:
-        # Feature unification can reach crates that never depend on the edited member.
-        self.assertIn("cargo_toml_diff.py --members /tmp/metadata.json \"$base\"", self.workflow)
-        self.assertIn('emit_full "Member dependency declarations changed ($dependency_edits)"', self.workflow)
-        self.assertIn('emit_full "Unable to compare member manifests with the event base"', self.workflow)
+    def test_member_dependency_edits_are_scoped(self) -> None:
+        # The edited member and its reverse dependencies are path-selected; the
+        # daily full sweep covers feature unification in unrelated crates.
+        self.assertNotIn("cargo_toml_diff.py --members", self.workflow)
+        self.assertNotIn("Member dependency declarations changed", self.workflow)
+        # A lock change beside a manifest edit adds its consumers to the path selection.
+        self.assertIn('packages="$(printf \'%s\\n\' "$packages" "$lockfile_packages"', self.workflow)
 
     def test_unrelated_base_falls_back_after_fetch_verification(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -302,7 +375,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         outputs = self._planner_map(
             "--packages", "rk-app rusty_term rusty-meshed-core rusty_tick"
         )
-        self.assertEqual(set(outputs), SPECIALIZED_KEYS)
+        self.assertEqual(set(outputs), SPECIALIZED_KEYS | {"msrv_manifests"})
         self.assertEqual(outputs["key_desktop"], "true")
         self.assertEqual(outputs["term_web"], "true")
         self.assertEqual(outputs["dashboard"], "true")
@@ -342,7 +415,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_fair_play_only_change_does_not_select_an_unrelated_app(self) -> None:
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_fair_play/web/src/App.tsx"], []),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": False, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
 
     def test_rleval_jobs_follow_cargo_impact_and_the_viewer_fixture(self) -> None:
@@ -479,11 +552,11 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 ],
                 [],
             ),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": True, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
         self.assertEqual(
             specialized_job_flags(["crates/apps/rusty_tick/src/lib.rs"], ["rusty_tick"]),
-            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False, "remind_me": False, "remind_me_legacy_import": False},
+            {"dashboard": False, "term_web": False, "term_bench": False, "key_desktop": False, "tick": True, "fair_play": False, "agui": False, "win32": False, "multimodal_db": False, "rusty_config_no_std": False, "tls_engine": False, "rleval_viewer": False, "rleval_app": False, "rleval_service": False, "rleval_image": False, "crypto_ct": False, "rand_platforms": False},
         )
 
     def test_agui_package_change_selects_tick_web_too(self) -> None:
@@ -498,44 +571,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_shared_and_specialized_package_rules(self) -> None:
         flags = specialized_job_flags(
-            [], ["rusty_win32", "rusty_multimodal_db", "rusty_config", "rusty_tls", "remind_me_hub"]
+            [], ["rusty_win32", "rusty_multimodal_db", "rusty_config", "rusty_tls"]
         )
         self.assertTrue(flags["win32"])
         self.assertTrue(flags["multimodal_db"])
         self.assertTrue(flags["rusty_config_no_std"])
         self.assertTrue(flags["tls_engine"])
-        self.assertTrue(flags["remind_me"])
-
-    def test_legacy_import_routes_sources_contracts_and_dependencies(self) -> None:
-        hub = "crates/apps/rusty_remind_me/crates/remind_me_hub/"
-        for path in ("src/import/postgres.rs", "src/record.rs", "src/store/multimodal/rows.rs",
-                     "tests/fixtures/postgres_hub.sql", "tests/suite/recorded.rs",
-                     "Cargo.toml", "Containerfile", "setup.sh"):
-            with self.subTest(path=path):
-                self.assertTrue(specialized_job_flags([hub + path], [])["remind_me_legacy_import"])
-        self.assertTrue(specialized_job_flags(["Cargo.lock"], [])["remind_me_legacy_import"])
-        self.assertTrue(specialized_job_flags([], ["remind_me_hub"])["remind_me_legacy_import"])
-        flags = specialized_job_flags(
-            ["crates/apps/rusty_remind_me/crates/remind_me_core/src/lib.rs"], ["remind_me_core"]
-        )
-        self.assertTrue(flags["remind_me"])
-        self.assertFalse(flags["remind_me_legacy_import"])
-
-    def test_node_wire_contract_selects_import_even_without_hub_cargo_impact(self) -> None:
-        core = "crates/apps/rusty_remind_me/crates/remind_me_core/src/"
-        for path in ("sync/record.rs", "sync/push.rs", "db/engine/rows.rs", "models.rs"):
-            with self.subTest(path=path):
-                flags = specialized_job_flags([core + path], ["remind_me_core"])
-                self.assertTrue(flags["remind_me_legacy_import"])
-
-    def test_engine_checks_do_not_need_a_postgres_service(self) -> None:
-        engine = self.workflow.split("  remind-me-hub:\n")[1].split("  remind-me-legacy-import:\n")[0]
-        self.assertNotIn("services:", engine)
-        self.assertIn("--no-default-features", engine)
-        legacy = self.workflow.split("  remind-me-legacy-import:\n")[1].split("  remind-me-windows:\n")[0]
-        self.assertIn("if: needs.plan.outputs.remind_me_legacy_import == 'true'", legacy)
-        self.assertIn('REMIND_ME_HUB_REQUIRE_POSTGRES: "1"', legacy)
-        self.assertIn("--features postgres-import --test hub_postgres_copy_test", legacy)
 
     def test_pr_runs_cancel_but_main_and_manual_runs_are_isolated(self) -> None:
         self.assertIn(
@@ -551,7 +592,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         jobs = re.split(r"^  ([a-z][a-z0-9-]+):\n", self.workflow.split("\njobs:\n", 1)[1], flags=re.M)
         groups = []
         for job, body in zip(jobs[1::2], jobs[2::2]):
-            if job in {"fmt", "plan-tests", "library-tests", "workflow-lint", "dependency-policy", "cargo-deny", "cargo-shear", "plan", "required-gate"}:
+            if job in {"fmt", "plan-tests", "library-tests", "claude-hooks", "workflow-lint", "dependency-policy", "cargo-deny", "cargo-shear", "plan", "required-gate"}:
                 self.assertNotIn("    concurrency:", body)
                 continue  # These start for every SHA, without a coalescing lock.
             with self.subTest(job=job):
@@ -592,11 +633,12 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         # Without this trigger the queue waits forever for required-gate.
         self.assertRegex(self.workflow, r"(?m)^  merge_group:\n    types: \[checks_requested\]\n")
         self.assertIn('--merge-base "${{ github.event.merge_group.base_sha }}"', self.workflow)
-        # ci.yml is the only workflow that feeds the required check.
+        # ci.yml is the only workflow the queue triggers, so the only one that
+        # feeds the required check (the reaper reads merge_group runs, it is not one).
         for path in sorted(REPO.glob(".github/workflows/*.yml")):
             if path != WORKFLOW:
                 with self.subTest(workflow=path.name):
-                    self.assertNotIn("merge_group", path.read_text(encoding="utf-8"))
+                    self.assertNotRegex(path.read_text(encoding="utf-8"), r"(?m)^  merge_group:")
 
     def test_merge_group_runs_never_share_a_concurrency_key_with_pull_requests(self) -> None:
         group = re.search(r"(?m)^concurrency:\n(?:  #.*\n)*  group: (.+)\n  cancel-in-progress: (.+)\n", self.workflow)
@@ -651,7 +693,9 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
     def test_msrv_compile_job_builds_at_declared_floors_and_gates(self) -> None:
         job = self.workflow.split("  msrv-compile:\n")[1].split("  rusty-config-no-std-check:\n")[0]
         self.assertIn("needs: plan", job)
-        self.assertIn("needs.plan.outputs.full == 'true' || needs.plan.outputs.packages != ''", job)
+        self.assertIn("(needs.plan.outputs.full == 'true' || needs.plan.outputs.msrv_manifests != '')", job)
+        self.assertIn('scope=(--manifests "$PLAN_MANIFESTS")', job)
+        self.assertIn("msrv_manifests: ${{ steps.plan.outputs.msrv_manifests }}", self.workflow)
         self.assertIn("check_msrv_compile.py", job)
         # The pinned toolchain's own versions are covered elsewhere (compared as full versions); builds stay
         # out of the cached target dir; metadata is locked and Cargo.lock must come out unchanged.
@@ -674,6 +718,22 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         self.assertIn("shell: bash", job)
         self.assertIn("      - msrv-compile\n", self.workflow.split("  required-gate:\n", 1)[1])
 
+    def test_msrv_scope_is_the_crates_whose_own_manifest_changed(self) -> None:
+        changed = (
+            "crates/libs/net/rusty_axum/Cargo.toml\n"
+            "crates/libs/net/rusty_axum/src/lib.rs\n"
+            "crates/libs/a/Cargo.toml\n"
+            "Cargo.toml\n"
+            "Cargo.lock\n"
+            "crates/libs/b/NotCargo.toml\n"
+        )
+        outputs = self._planner_map("--packages", "rusty_axum a dependent", input=changed)
+        self.assertEqual(outputs["msrv_manifests"], "crates/libs/a/Cargo.toml crates/libs/net/rusty_axum/Cargo.toml")
+        # Code-only, lockfile-only and root-manifest changes leave it to the scheduled sweep.
+        code_only = self._planner_map("--packages", "rusty_axum", input="Cargo.toml\nCargo.lock\nsrc/lib.rs\n")
+        self.assertEqual(code_only["msrv_manifests"], "")
+        self.assertEqual(self._planner_map("--emit-full")["msrv_manifests"], "")
+
     def test_rusty_axum_floors_match_the_manifests(self) -> None:
         # The default build is held to rusty_axum's own rust-version; the all-features floor is exactly
         # what its `http2` dependencies declare, so neither check can drift above or below its manifest.
@@ -688,7 +748,7 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
 
     def test_every_workflow_pin_matches_rust_toolchain_file(self) -> None:
         channel = tomllib.loads((REPO / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
-        for path in (WORKFLOW, BASELINE_WORKFLOW, WORKFLOW.with_name("remind-me-release.yml")):
+        for path in (WORKFLOW, BASELINE_WORKFLOW):
             with self.subTest(workflow=path.name):
                 pin = re.search(r'(?m)^  RUST_TOOLCHAIN: "([^"]+)"', path.read_text(encoding="utf-8"))
                 self.assertEqual(pin and pin.group(1), channel)
@@ -730,6 +790,78 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
         script = alert.split("        run: |\n", 1)[1]
         self.assertNotIn("${{", script)
 
+    def test_libs_tags_are_cut_by_hand_from_main(self) -> None:
+        tagger = (WORKFLOW.parent / "libs-tag.yml").read_text(encoding="utf-8")
+        # Run by hand only, on main's head, which reached main through the queue (ADR-0013).
+        self.assertIn("on:\n  workflow_dispatch:\n\n", tagger)
+        self.assertIn("          ref: main\n", tagger)
+        self.assertRegex(tagger, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", tagger), ["      contents: write"])
+        # The tag logic lives in libs_tag.sh, which test_libs_tag runs against scratch repositories.
+        self.assertIn("        run: bash .github/scripts/libs_tag.sh\n", tagger)
+
+    def test_merge_queue_reaper_is_narrow(self) -> None:
+        reaper = (WORKFLOW.parent / "merge-queue-reaper.yml").read_text(encoding="utf-8")
+        # Main's copy runs on every CI request; no PR or queue check of its own.
+        self.assertIn("on:\n  workflow_run:\n    workflows: [CI]\n    types: [requested]\n", reaper)
+        self.assertNotRegex(reaper, r"(?m)^  (pull_request|pull_request_target|merge_group|push):")
+        self.assertIn("    if: github.event.workflow_run.event == 'merge_group'\n", reaper)
+        # A skipped (non-merge_group) run must not share, and so cancel, the sweep's group.
+        self.assertIn("  group: merge-queue-reaper-${{ github.event.workflow_run.event }}\n", reaper)
+        # Read-only by default; the sweep may only cancel runs.
+        self.assertRegex(reaper, r"(?m)^permissions:\n  contents: read$")
+        self.assertEqual(re.findall(r"(?m)^\s+[a-z-]+: write$", reaper), ["      actions: write"])
+        self.assertNotRegex(reaper, r"(?m)^\s*-?\s*uses:")
+        self.assertIn("timeout-minutes: 5", reaper)
+        script = reaper.split("        run: |\n", 1)[1]
+        self.assertNotIn("${{", script)
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("grep"), "bash is needed to run the sweep")
+    def test_merge_queue_reaper_cancels_only_runs_whose_ref_is_gone(self) -> None:
+        reaper = (WORKFLOW.parent / "merge-queue-reaper.yml").read_text(encoding="utf-8")
+        script = textwrap.dedent(reaper.split("        run: |\n", 1)[1])
+        fake_gh = textwrap.dedent("""\
+            #!/usr/bin/env bash
+            # Answers the three calls the sweep makes; --jq output is pre-shaped.
+            # Run listings have a second page that only --paginate returns.
+            args="$*"
+            case "$args" in
+              *"-X POST"*"/cancel"*) id="${args##*/runs/}"; echo "${id%%/*}" >> "$STATE/cancelled" ;;
+              *"/matching-refs/"*) [ -z "${FAIL_REFS:-}" ] || exit 1; cat "$STATE/refs" ;;
+              *"--paginate"*"status=in_progress"*) cat "$STATE/runs" "$STATE/runs2" ;;
+              *"status=in_progress"*) cat "$STATE/runs" ;;
+            esac
+            """)
+
+        def sweep(runs: str, refs: str, fail_refs: bool = False, runs2: str = "") -> tuple[int, list[str]]:
+            with tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp)
+                (state / "gh").write_text(fake_gh)
+                (state / "gh").chmod(0o755)
+                (state / "runs").write_text(runs)
+                (state / "runs2").write_text(runs2)
+                (state / "refs").write_text(refs)
+                env = dict(os.environ, PATH=f"{state}:{os.environ['PATH']}", STATE=str(state), GH_REPO="o/r")
+                if fail_refs:
+                    env["FAIL_REFS"] = "1"
+                code = subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True).returncode
+                cancelled = state / "cancelled"
+                return code, cancelled.read_text().split() if cancelled.exists() else []
+
+        live = "gh-readonly-queue/main/pr-7-aaa"
+        dead = "gh-readonly-queue/main/pr-8-bbb"
+        runs = f"101 {live}\n102 {dead}\n"
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\n"), (0, ["102"]))
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\nrefs/heads/{dead}\n"), (0, []))
+        # A prefix of a live ref is not that ref.
+        self.assertEqual(sweep("103 gh-readonly-queue/main/pr-7\n", f"refs/heads/{live}\n"), (0, ["103"]))
+        self.assertEqual(sweep("", f"refs/heads/{live}\n"), (0, []), "nothing in flight, nothing to do")
+        # A stale run past the first 100 of its status is still swept.
+        self.assertEqual(sweep(runs, f"refs/heads/{live}\n", runs2="104 gh-readonly-queue/main/pr-9-ccc\n"), (0, ["102", "104"]))
+        code, cancelled = sweep(runs, "", fail_refs=True)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(cancelled, [], "an unreadable queue must never cancel anything")
+
     def test_dependabot_tracks_github_actions(self) -> None:
         text = (REPO / ".github" / "dependabot.yml").read_text(encoding="utf-8")
         self.assertIn("package-ecosystem: github-actions", text)
@@ -743,60 +875,6 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             if path != WORKFLOW and re.search(r"(?m)^  pull_request(_target)?:", path.read_text(encoding="utf-8"))
         ]
         self.assertEqual(outside, [], "PR checks outside ci.yml bypass required-gate")
-
-    def test_plugin_version_check_is_a_gated_planner_job(self) -> None:
-        job = self.workflow.split("  remind-me-plugin-version:\n")[1].split("  remind-me-hub:\n")[0]
-        self.assertIn("if: needs.plan.outputs.remind_me == 'true'", job)
-        self.assertIn("crates/apps/rusty_remind_me/scripts/check_plugin_version.sh", job)
-        gate = self.workflow.split("  required-gate:\n")[1]
-        self.assertIn("      - remind-me-plugin-version\n", gate.split("runs-on:")[0])
-
-    def test_plugin_version_job_runs_for_product_changes_and_not_for_unrelated_ones(self) -> None:
-        def flag(paths: list[str]) -> bool:
-            return specialized_job_flags(paths, [])["remind_me"]
-
-        self.assertTrue(flag(["crates/apps/rusty_remind_me/.claude-plugin/plugin.json"]))
-        self.assertTrue(flag(["crates/apps/rusty_remind_me/crates/remind_me_core/Cargo.toml"]))
-        self.assertFalse(flag(["crates/libs/net/rusty_http/src/lib.rs", "README.md"]))
-        # Sweeps that run everything (manual, scheduled, no usable base) include it.
-        self.assertEqual(self._planner_map("--emit-full")["remind_me"], "true")
-
-    @unittest.skipUnless(shutil.which("bash") and shutil.which("jq"), "bash and jq are needed to run the check")
-    def test_plugin_version_drift_fails_the_check_and_agreement_passes(self) -> None:
-        product = Path(__file__).parents[2] / "crates" / "apps" / "rusty_remind_me"
-        members = "remind_me_core remind_me_mcp remind_me_api remind_me_cli remind_me_remote remind_me_hub".split()
-
-        def run(edit=None) -> subprocess.CompletedProcess[str]:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                shutil.copytree(product / "scripts", root / "scripts")
-                (root / ".claude-plugin").mkdir()
-                shutil.copy(product / ".claude-plugin" / "plugin.json", root / ".claude-plugin" / "plugin.json")
-                for member in members:
-                    (root / "crates" / member).mkdir(parents=True)
-                    shutil.copy(product / "crates" / member / "Cargo.toml", root / "crates" / member / "Cargo.toml")
-                if edit:
-                    edit(root)
-                return subprocess.run(
-                    ["bash", str(root / "scripts" / "check_plugin_version.sh")],
-                    capture_output=True, text=True, check=False,
-                )
-
-        self.assertEqual(run().returncode, 0, "the repo as committed must agree")
-
-        def bump_plugin(root: Path) -> None:
-            manifest = root / ".claude-plugin" / "plugin.json"
-            manifest.write_text(re.sub(r'("version"\s*:\s*")[^"]+', r"\g<1>99.0.0", manifest.read_text()))
-
-        drifted = run(bump_plugin)
-        self.assertEqual(drifted.returncode, 1, drifted.stderr)
-        self.assertIn("Plugin version drift", drifted.stderr)
-
-        def bump_one_crate(root: Path) -> None:
-            manifest = root / "crates" / "remind_me_hub" / "Cargo.toml"
-            manifest.write_text(re.sub(r'(?m)^version = "[^"]+"', 'version = "99.0.0"', manifest.read_text(), count=1))
-
-        self.assertEqual(run(bump_one_crate).returncode, 1, "crates disagreeing also fails")
 
     @unittest.skipUnless(shutil.which("bash"), "bash is needed to run the gate step")
     def test_required_gate_fails_when_any_needed_job_fails_and_passes_when_skipped(self) -> None:
@@ -957,11 +1035,13 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
                 own = path in {".github/workflows/ci.yml", ".github/scripts/ci_plan.py"}
                 for key in ("tls_engine", "rleval_service", "rleval_image"):
                     self.assertEqual(outputs[key], "true" if own else "false", key)
+                win32 = own or path == ".github/scripts/test_ci_workflow.py"
+                self.assertEqual(outputs["win32"], "true" if win32 else "false")
                 self.assertTrue(
                     all(
                         outputs[key] == "false"
                         for key in SPECIALIZED_KEYS
-                        - {"rand_platforms", "tls_engine", "rleval_service", "rleval_image"}
+                        - {"rand_platforms", "tls_engine", "rleval_service", "rleval_image", "win32"}
                     )
                 )
         self.assertIn(
@@ -994,6 +1074,60 @@ class CiWorkflowSchedulingTests(unittest.TestCase):
             with self.subTest(script=script):
                 self.assertIn(f"run: sh {script}", self.workflow)
                 self.assertTrue((WORKFLOW.parents[2] / script).is_file())
+
+    def _crypto_valgrind_step(self) -> str:
+        job = self.workflow.split("  crypto-constant-time:\n", 1)[1]
+        return job.split("      - name: Install valgrind\n", 1)[1].split("      - name:", 1)[0]
+
+    def test_crypto_valgrind_setup_has_blocking_time_and_acquisition_bounds(self) -> None:
+        step = self._crypto_valgrind_step()
+        self.assertIn("        timeout-minutes: 10\n", step)
+        self.assertIn("        shell: bash\n", step)
+        self.assertNotIn("continue-on-error", step)
+        self.assertIn("Acquire::Retries=3", step)
+        self.assertIn("Acquire::http::Timeout=30", step)
+        self.assertIn("Acquire::https::Timeout=30", step)
+        self.assertIn("--error-on=any update", step)
+        self.assertIn("install -y --no-install-recommends valgrind", step)
+        self.assertIn("valgrind --version", step)
+        self.assertIn("objdump --version | head -1", step)
+
+    @unittest.skipUnless(shutil.which("bash"), "bash is needed to run valgrind setup")
+    def test_crypto_valgrind_setup_propagates_apt_failures(self) -> None:
+        script = textwrap.dedent(self._crypto_valgrind_step().split("        run: |\n", 1)[1])
+        # Execute the real workflow body with shell functions at the sudo/tool
+        # boundary: no root access, network, or package installation is needed.
+        mocks = r'''
+sudo() {
+  printf '%s\n' "$*"
+  case " $* " in
+    *" update "*) return "$UPDATE_STATUS" ;;
+    *" install "*) return "$INSTALL_STATUS" ;;
+    *) return 99 ;;
+  esac
+}
+valgrind() { echo valgrind-diagnostic; }
+objdump() { echo objdump-diagnostic; }
+'''
+        # Include a timeout exit status as well as apt's usual error status.
+        for update_status, install_status in ((0, 0), (100, 0), (0, 100), (124, 0), (0, 124)):
+            with self.subTest(update=update_status, install=install_status):
+                result = subprocess.run(
+                    ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", mocks + script],
+                    env={**os.environ, "UPDATE_STATUS": str(update_status), "INSTALL_STATUS": str(install_status)},
+                    capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, update_status or install_status)
+                self.assertEqual(" install " in result.stdout, update_status == 0)
+                self.assertEqual("valgrind-diagnostic" in result.stdout, result.returncode == 0)
+                self.assertEqual("objdump-diagnostic" in result.stdout, result.returncode == 0)
+                for call in result.stdout.splitlines():
+                    if call.startswith("apt-get "):
+                        self.assertIn("-o Acquire::Retries=3", call)
+                        self.assertIn("-o Acquire::http::Timeout=30", call)
+                        self.assertIn("-o Acquire::https::Timeout=30", call)
+                        if " update" in call:
+                            self.assertIn("--error-on=any update", call)
 
 
 if __name__ == "__main__":

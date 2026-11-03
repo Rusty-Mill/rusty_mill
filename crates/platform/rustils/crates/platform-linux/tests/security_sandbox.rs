@@ -69,6 +69,71 @@ fn block_inet_sockets_blocks_inet_allows_unix() {
     assert!(status.success(), "child exited with {status:?}");
 }
 
+#[test]
+fn confine_filesystem_and_signals_refuses_outside_processes_but_not_own_children() {
+    if env::var(REEXEC_ENV).as_deref() == Ok("signals") {
+        run_signals_child();
+        return;
+    }
+    let status = reexec(
+        "confine_filesystem_and_signals_refuses_outside_processes_but_not_own_children",
+        "signals",
+    );
+    assert!(status.success(), "child exited with {status:?}");
+}
+
+/// `kill(pid, 0)`: whether a signal to `pid` would be delivered.
+fn may_signal(pid: i32) -> std::io::Result<()> {
+    // SAFETY: signal 0 delivers nothing; `kill` reads no memory.
+    if unsafe { libc::kill(pid, 0) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+fn run_signals_child() {
+    // SAFETY: `getppid` takes no arguments and cannot fail.
+    let parent = unsafe { libc::getppid() };
+    assert!(
+        may_signal(parent).is_ok(),
+        "control: parent signalable before"
+    );
+    let base = env::temp_dir().join(format!("rustils-sandbox-sig-{}", std::process::id()));
+    let writable = base.join("writable");
+    fs::create_dir_all(writable.join("a")).unwrap();
+    fs::create_dir_all(writable.join("b")).unwrap();
+    fs::write(writable.join("a/f"), b"x").unwrap();
+    let (files, signals) = platform_linux::LinuxSandbox
+        .confine_filesystem_and_signals(&[Path::new("/")], &[writable.as_path()])
+        .unwrap();
+    let abi = landlock_abi();
+    if abi < 1 {
+        assert_eq!(files, SandboxStatus::NotEnforced);
+        eprintln!("Landlock unavailable in this environment; degrade path only");
+        return;
+    }
+    assert_eq!(files, SandboxStatus::Enforced);
+    if abi >= 2 {
+        // The scope shares the filesystem ruleset; a scope-only layer would
+        // not handle REFER and so turn this rename into EXDEV.
+        fs::rename(writable.join("a/f"), writable.join("b/f")).expect("rename across dirs");
+    }
+    if abi < 6 {
+        assert_eq!(signals, SandboxStatus::NotEnforced);
+        eprintln!("Landlock ABI below 6; signal degrade path only");
+        return;
+    }
+    assert_eq!(signals, SandboxStatus::Enforced);
+    let denied = may_signal(parent).expect_err("parent is outside the domain");
+    assert_eq!(denied.raw_os_error(), Some(libc::EPERM));
+    let mut child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = i32::try_from(child.id()).expect("pid");
+    assert!(may_signal(pid).is_ok(), "a child stays inside the domain");
+    child.kill().expect("kill own child");
+    child.wait().expect("reap");
+}
+
 fn reexec(test_name: &str, mode: &str) -> std::process::ExitStatus {
     let exe = env::current_exe().expect("current_exe");
     Command::new(exe)

@@ -29,6 +29,7 @@ if cat "$d/master" >/dev/null 2>&1; then echo "master: read"; else echo "master:
 if ls "$d" >/dev/null 2>&1; then echo "dir: listed"; else echo "dir: denied"; fi
 if "$BBP_BIN" card --dir "$d" --task "$BBP_TASK" >/dev/null 2>&1; then echo "log: read"; else echo "log: denied"; fi
 if echo forged >> "$d/forged" 2>/dev/null; then echo "write: done"; else echo "write: denied"; fi
+if kill -0 "$PPID" 2>/dev/null; then echo "signal: sent"; else echo "signal: denied"; fi
 "$BBP_BIN" mcp <<'EOF'
 {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1 flag says ok."}}}
@@ -149,7 +150,13 @@ fn planner_log(dir: &Path, task: &TaskId) -> String {
 fn an_unconfined_harness_reaches_the_task_directory() {
     let root = root("open");
     let said = plan(probe(&root, None));
-    for line in ["master: read", "dir: listed", "log: read", "write: done"] {
+    for line in [
+        "master: read",
+        "dir: listed",
+        "log: read",
+        "write: done",
+        "signal: sent",
+    ] {
         assert!(said.contains(line), "{line}:\n{said}");
     }
     let _ = std::fs::remove_dir_all(&root);
@@ -169,6 +176,14 @@ fn a_confined_harness_cannot_reach_the_task_directory_yet_plans_through_its_rela
     ] {
         assert!(said.contains(line), "{line}:\n{said}");
     }
+    // Below Landlock ABI v6 a confined harness can still signal its user's
+    // processes; from v6 on it cannot reach the moderator that started it.
+    let signal = if rusty_sandbox::signals_scoped() {
+        "signal: denied"
+    } else {
+        "signal: sent"
+    };
+    assert!(said.contains(signal), "{signal}:\n{said}");
     assert!(!root.join("T1/forged").exists());
     let _ = std::fs::remove_dir_all(&root);
     println!("BBP_ACCEPTANCE PASS bbp-confined");

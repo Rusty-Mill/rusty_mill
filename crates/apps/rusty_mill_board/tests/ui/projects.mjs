@@ -42,18 +42,27 @@ const repoButtons = () => items("#nav1");
 
 check((await titles()).length === 4, "all repositories show every card");
 const rows = await repoButtons();
-check(rows.slice(0, 3).join("|") === "All repositories 4|rusty_mill 3|super_board 1", `the panel lists repositories with counts (${rows.join("|")}); an empty default repository is hidden`);
-check(rows.slice(3).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(3).join("|")})`);
-check(await page.locator("#nav2").isHidden(), "no project pane until a repository is chosen");
+check(rows.slice(0, 4).join("|") === "All repositories 4|Inbox 0|rusty_mill 3|super_board 1", `the panel lists repositories with counts, the Inbox first even when empty (${rows.join("|")})`);
+check(rows.slice(4, 9).join("|") === "orch 1|rl 1|rusty_mill 1|skills 1|super_board 0", `every project of a repository with several is listed (${rows.slice(4, 9).join("|")})`);
+check(rows.slice(9).join("|") === "Everyone 1|claude 1", `agents holding claims are listed with their counts (${rows.slice(9).join("|")})`);
+check((await page.locator("#side nav").count()) === 1, "one panel: no second column of projects");
 
-await page.locator("#nav1 .item", { hasText: "super_board" }).click();
+const project = (name) => page.locator("#nav1 .item").filter({ hasText: new RegExp(`^${name}\\d`) });
+await project("skills").click();
+check((await titles()).join() === "Skills card", "choosing a project shows only its cards");
+await page.locator("#nav1 .item", { hasText: "All repositories" }).click();
+check((await titles()).length === 4, "All repositories clears it");
+
+
+await page.locator("#nav1 .item", { hasText: "super_board" }).first().click();
 check((await titles()).join() === "Skills card", "choosing a repository filters the board");
-await page.locator("#nav1 .item", { hasText: "rusty_mill" }).click();
+await page.locator("#nav1 .item", { hasText: "rusty_mill" }).first().click();
 check((await titles()).join() === "Mill loose card,Orch card,RL card", "another repository, its three cards");
-const options = await items("#nav2");
-check(options.join("|") === "All projects 3|orch 1|rl 1|rusty_mill 1", `the second pane lists that repository's projects (${options.join("|")})`);
+check((await page.locator("#side nav").count()) === 1, "choosing a repository opens no second column");
+const listed = (await repoButtons()).slice(4, -2).join("|");
+check(listed === "orch 1|rl 1|rusty_mill 1", `and the Projects list narrows to that repository's projects (${listed})`);
 
-await page.locator("#nav2 .item", { hasText: "rl" }).click();
+await project("rl").click();
 check((await titles()).join() === "RL card", "choosing a project narrows further");
 check((await page.locator(".card .tag.proj").count()) === 0, "no project chip when one project is chosen");
 
@@ -62,7 +71,7 @@ await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].some((b) => b.textContent === "Added under rl"));
 check((await api("board_list", { project: "rl" })).cards.some((c) => c.title === "Added under rl"), "a card added while a project is chosen belongs to it");
 
-await page.locator("#nav2 .item", { hasText: "All projects" }).click();
+await page.locator("#nav1 .item", { hasText: "rusty_mill" }).first().click();
 await page.fill("#title", "Added under repo");
 await page.click("#add");
 await page.waitForFunction(() => [...document.querySelectorAll(".card b")].some((b) => b.textContent === "Added under repo"));
@@ -71,8 +80,9 @@ check(own.includes("Added under repo"), "with only a repository chosen, it goes 
 check((await page.locator(".card .tag.proj").count()) === 5, "chips name each card's project when several are shown");
 
 await page.locator(".card", { hasText: "Added under rl" }).click();
-check((await page.locator("dialog optgroup").count()) === 3, "the dialog groups projects by repository");
-await page.locator("dialog select").selectOption("skills");
+check((await page.locator("#dlg optgroup").count()) === 3, "the dialog groups projects by repository");
+check((await page.locator("#dlg option[value=default]").innerText()) === "Inbox", "the default project is offered as the Inbox");
+await page.locator('#dlg select[aria-label="project"]').selectOption("skills");
 await sleep(600);
 const moved = (await api("board_list", { project: "skills" })).cards.map((c) => c.title);
 check(moved.includes("Added under rl"), "the dialog moves a card to a project of another repository");
@@ -109,6 +119,30 @@ await page.click("#toggle");
 check(!(await page.locator("#side").isVisible()), "the toggle hides the panel");
 await page.click("#toggle");
 check(await page.locator("#side").isVisible(), "and shows it again");
+
+await api("card_add", { title: "Migrated card", project: "orch", tags: ["migrated:mill-board", "kept"] });
+await page.reload();
+await page.waitForSelector(".card");
+const chips = await page.locator(".card", { hasText: "Migrated card" }).locator(".tag:not(.proj)").allInnerTexts();
+check(chips.join() === "kept", `the migration marker is not shown as a chip (${chips.join()})`);
+
+check(!(await page.locator("#toast").isVisible()), "a normal load shows no error");
+
+// The Inbox: the default project, where a card that names none lands.
+await page.locator("#nav1 .item", { hasText: "Inbox" }).click();
+await page.fill("#title", "Unsorted idea");
+await page.click("#add");
+await page.waitForFunction(() => [...document.querySelectorAll(".card b")].map((b) => b.textContent).join() === "Unsorted idea");
+check((await api("board_list", { project: "default" })).cards.some((c) => c.title === "Unsorted idea"), "a card added in the Inbox has the default project");
+check((await page.locator("#nav1 .item.on", { hasText: "Inbox" }).innerText()).replace(/\s+/g, " ").trim() === "Inbox 1", "and the Inbox counts it");
+
+// A refused project list is said so, not shown as an empty panel.
+const refused = await browser.newPage({ viewport: { width: 1300, height: 700 } });
+await refused.route("**/api/board_projects", (route) => route.fulfill({ status: 403, contentType: "application/json", body: '{"error":"not allowed"}' }));
+await refused.goto(BASE);
+await refused.waitForFunction(() => document.querySelector("#toast").textContent.includes("board_projects failed: not allowed"));
+check(true, "a failed project list shows why");
+await refused.close();
 
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);
 await browser.close();

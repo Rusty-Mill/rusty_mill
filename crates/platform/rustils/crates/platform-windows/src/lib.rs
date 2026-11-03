@@ -58,6 +58,11 @@
 
 #![deny(unsafe_code)] // opted back in, narrowly, inside sys/ modules only
 
+pub mod close_guard;
+#[cfg(any(windows, test))]
+mod cmdline;
+#[cfg(windows)]
+pub mod condrv;
 #[cfg(windows)]
 pub mod ffi;
 #[cfg(windows)]
@@ -90,7 +95,7 @@ pub use net::{
     WindowsUnixStream,
 };
 #[cfg(windows)]
-pub use process::{WindowsChild, WindowsSpawner};
+pub use process::{is_current_user, WindowsChild, WindowsSpawner};
 #[cfg(windows)]
 pub use pty::{WindowsPty, WindowsPtyMaster};
 #[cfg(windows)]

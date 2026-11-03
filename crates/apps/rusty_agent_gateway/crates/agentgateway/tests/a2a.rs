@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -54,7 +53,7 @@ async fn agent(
     streaming: bool,
     valid_card: bool,
 ) -> Agent {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -67,14 +66,14 @@ async fn agent(
     let path_recorder = Arc::clone(&seen_path);
     let counter = Arc::clone(&hits);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         let header_recorder = Arc::clone(&header_recorder);
         let path_recorder = Arc::clone(&path_recorder);
         let counter = Arc::clone(&counter);
         async move {
-            let path = request.uri().path().to_string();
-            let is_get = request.method() == axum::http::Method::GET;
+            let path = request.path().to_string();
+            let is_get = *request.method() == rusty_axum::Method::Get;
 
             if is_get && path.ends_with("/.well-known/agent-card.json") {
                 let body = if valid_card {
@@ -84,10 +83,8 @@ async fn agent(
                     // Missing every required field but `name`.
                     json!({"name": name}).to_string()
                 };
-                return axum::response::Response::builder()
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(body))
-                    .expect("response should build");
+                return rusty_axum::Response::new(rusty_axum::StatusCode::OK, body)
+                    .with_header("content-type", "application/json");
             }
 
             counter.fetch_add(1, Ordering::Relaxed);
@@ -95,41 +92,24 @@ async fn agent(
                 seen.clone_from(&path);
             }
             if let Ok(mut seen) = header_recorder.lock() {
-                *seen = request
-                    .headers()
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.as_str().to_string(),
-                            v.to_str().unwrap_or_default().to_string(),
-                        )
-                    })
-                    .collect();
+                *seen = common::header_pairs(request.headers());
             }
-            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
-                .await
-                .unwrap_or_default();
+            let bytes = request.body().to_vec();
             if let Ok(call) = serde_json::from_slice::<Value>(&bytes)
                 && let Ok(mut calls) = recorder.lock()
             {
                 calls.push(call);
             }
 
-            axum::response::Response::builder()
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}}).to_string(),
-                ))
-                .expect("response should build")
+            rusty_axum::Response::new(
+                rusty_axum::StatusCode::OK,
+                json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}}).to_string(),
+            )
+            .with_header("content-type", "application/json")
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("agent should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     Agent {
         port,
@@ -207,13 +187,13 @@ binds:
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
@@ -788,42 +768,39 @@ async fn a_path_rewrite_does_not_move_agent_card_discovery() {
 /// An agent that answers `status` for its first `failures` JSON-RPC calls,
 /// then succeeds. Its card is always served.
 async fn flaky_agent(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>) {
-    use axum::{Router, extract::Request, routing::any};
+    use rusty_axum::{Request, Router};
 
     let port = free_port().await;
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&calls);
 
-    let app = Router::new().fallback(any(move |request: Request| {
+    let app = Router::new().fallback(move |request: Request| {
         let counter = Arc::clone(&counter);
         async move {
-            let path = request.uri().path().to_string();
-            if request.method() == axum::http::Method::GET
+            let path = request.path().to_string();
+            if *request.method() == rusty_axum::Method::Get
                 && path.ends_with("/.well-known/agent-card.json")
             {
-                return axum::response::Response::builder()
-                    .header("content-type", "application/json")
-                    .body(axum::body::Body::from(
-                        agent_card(
-                            "Flaky",
-                            &format!("http://127.0.0.1:{port}"),
-                            &["echo"],
-                            true,
-                        )
-                        .to_string(),
-                    ))
-                    .expect("response should build");
+                return rusty_axum::Response::new(
+                    rusty_axum::StatusCode::OK,
+                    agent_card(
+                        "Flaky",
+                        &format!("http://127.0.0.1:{port}"),
+                        &["echo"],
+                        true,
+                    )
+                    .to_string(),
+                )
+                .with_header("content-type", "application/json");
             }
 
-            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
-                .await
-                .unwrap_or_default();
+            let bytes = request.body().to_vec();
             let seen = counter.fetch_add(1, Ordering::Relaxed);
             if seen < failures {
-                return axum::response::Response::builder()
-                    .status(status)
-                    .body(axum::body::Body::from("upstream is unwell"))
-                    .expect("response should build");
+                return rusty_axum::Response::new(
+                    rusty_axum::StatusCode::from_u16(status),
+                    "upstream is unwell",
+                );
             }
 
             // Echo the method back so a replayed body can be checked.
@@ -831,22 +808,16 @@ async fn flaky_agent(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>) {
                 .ok()
                 .and_then(|call| call["method"].as_str().map(str::to_string))
                 .unwrap_or_default();
-            axum::response::Response::builder()
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true, "saw": method}})
-                        .to_string(),
-                ))
-                .expect("response should build")
+            rusty_axum::Response::new(
+                rusty_axum::StatusCode::OK,
+                json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true, "saw": method}})
+                    .to_string(),
+            )
+            .with_header("content-type", "application/json")
         }
-    }));
-
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
-        .await
-        .expect("agent should bind");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
     });
+
+    common::upstream(format!("127.0.0.1:{port}"), app).await;
 
     (port, calls)
 }

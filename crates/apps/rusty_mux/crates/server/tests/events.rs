@@ -5,9 +5,9 @@
 
 mod common;
 
-use common::{Client, block_for, start_server};
-use rusty_mux_core::{Event, SessionId};
-use rusty_mux_proto::{Cursor, Features, Message};
+use common::{Client, block_for, start_server, window_for};
+use rusty_mux_core::{BlockId, Event, ExitStatus, Progress, Selection, SessionId, Size};
+use rusty_mux_proto::{Cursor, Features, Launch, Message, Program};
 use rusty_uuid::Uuid;
 
 const SEQ: Features = Features::EVENT_SEQ;
@@ -111,9 +111,15 @@ fn a_client_without_the_feature_gets_unnumbered_events() {
 #[test]
 fn status_changes_reach_only_clients_that_asked() {
     let path = start_server();
-    let wanted = SEQ.union(Features::STATUS).union(Features::CHECKPOINT_V3);
+    let wanted = SEQ.union(Features::STATUS).union(Features::CHECKPOINT_V6);
     let mut watcher = Client::connect_with(&path, wanted, None);
-    let mut plain = Client::connect_with(&path, SEQ, None);
+    // With layout, active-window and focus events, so its only gap is the
+    // status event.
+    let others = SEQ
+        .union(Features::LAYOUT)
+        .union(Features::ACTIVE_WINDOW)
+        .union(Features::FOCUS);
+    let mut plain = Client::connect_with(&path, others, None);
     let block = block_for(&mut watcher);
     watcher.input(block, b"printf '\\033]7501;state=working\\007'\r");
     let status = Event::BlockStatus { block };
@@ -146,7 +152,7 @@ fn replay_sends_status_events_only_to_clients_that_asked() {
     }
 
     // While both are away: a status change, then a later event.
-    let mut writer = Client::connect_with(&path, status.union(Features::CHECKPOINT_V3), None);
+    let mut writer = Client::connect_with(&path, status.union(Features::CHECKPOINT_V6), None);
     let block = block_for(&mut writer);
     writer.input(block, b"printf '\\033]7501;state=working\\007'\r");
     let changed = Event::BlockStatus { block };
@@ -166,4 +172,342 @@ fn replay_sends_status_events_only_to_clients_that_asked() {
             "{features:?}"
         );
     }
+}
+
+#[test]
+fn pwd_and_title_changes_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ
+        .union(Features::TERMINAL_EVENTS)
+        .union(Features::CHECKPOINT_V6);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ.union(Features::STATUS), None);
+    let block = block_for(&mut watcher);
+    watcher.input(
+        block,
+        b"printf '\\033]7;file://host/tmp\\007\\033]2;job\\007'\r",
+    );
+    let changes = [Event::PwdChanged { block }, Event::TitleChanged { block }];
+    while !changes
+        .iter()
+        .all(|c| watcher.events.iter().any(|(_, e)| e == c))
+    {
+        watcher.recv();
+    }
+
+    let later = create_session(&mut watcher, "later");
+    wait_for_session(&mut plain, later);
+    assert!(!plain.events.iter().any(|(_, e)| changes.contains(e)));
+}
+
+#[test]
+fn program_events_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ
+        .union(Features::PROGRAM_EVENTS)
+        .union(Features::CHECKPOINT_V6);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ.union(Features::TERMINAL_EVENTS), None);
+    let block = block_for(&mut watcher);
+    watcher.input(
+        block,
+        b"printf '\\a\\033]9;4;1;40\\a\\033]777;notify;T;B\\a'; exit 3\r",
+    );
+    let closed = Event::BlockClosed { block };
+    while !watcher.events.iter().any(|(_, e)| *e == closed) {
+        watcher.recv();
+    }
+    let program: Vec<&Event> = watcher
+        .events
+        .iter()
+        .map(|(_, e)| e)
+        .skip_while(|e| !matches!(e, Event::Bell { .. }))
+        .collect();
+    // Closing the block then lets go of its lease and clients.
+    assert_eq!(program.last(), Some(&&closed));
+    assert_eq!(
+        program[..4],
+        [
+            &Event::Bell { block },
+            &Event::ProgressChanged {
+                block,
+                progress: Progress::Normal(40)
+            },
+            &Event::Notification {
+                block,
+                title: "T".into(),
+                body: "B".into()
+            },
+            &Event::ProgramExited {
+                block,
+                status: ExitStatus::Code(3)
+            },
+        ]
+    );
+
+    while !plain.events.iter().any(|(_, e)| *e == closed) {
+        plain.recv();
+    }
+    assert!(!plain.events.iter().any(|(_, e)| matches!(
+        e,
+        Event::Bell { .. }
+            | Event::ProgressChanged { .. }
+            | Event::Notification { .. }
+            | Event::ProgramExited { .. }
+    )));
+}
+
+/// A clipboard write and an ended status record, each announced after the
+/// output that made it, the removal ahead of the status change; only
+/// clients that asked hear of either.
+#[test]
+fn clipboard_writes_and_status_removals_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ
+        .union(Features::MORE_PROGRAM_EVENTS)
+        .union(Features::STATUS)
+        .union(Features::CHECKPOINT_V6);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ.union(Features::STATUS), None);
+    let block = block_for(&mut watcher);
+    // The record is set first, so the clear ends it. "aGk=" is "hi".
+    watcher.input(block, b"printf '\\033]7501;state=working:id=job\\007'\r");
+    let status = Event::BlockStatus { block };
+    while !watcher.events.iter().any(|(_, e)| *e == status) {
+        watcher.recv();
+    }
+    watcher.input(
+        block,
+        b"printf '\\033]52;p;aGk=\\007\\033]7501;state=clear:id=job\\007'\r",
+    );
+    let removed = Event::StatusRemoved {
+        block,
+        id: "job".into(),
+    };
+    let written = Event::ClipboardWritten {
+        block,
+        selection: Selection::Primary,
+    };
+    while ![&removed, &written]
+        .iter()
+        .all(|w| watcher.events.iter().any(|(_, e)| e == *w))
+    {
+        watcher.recv();
+    }
+    let after_removal: Vec<&Event> = watcher
+        .events
+        .iter()
+        .map(|(_, e)| e)
+        .skip_while(|e| **e != removed)
+        .collect();
+    assert_eq!(
+        after_removal.get(1),
+        Some(&&status),
+        "the status change follows the removal"
+    );
+
+    let later = create_session(&mut watcher, "later");
+    wait_for_session(&mut plain, later);
+    assert!(plain.events.iter().any(|(_, e)| *e == status));
+    assert!(!plain.events.iter().any(|(_, e)| matches!(
+        e,
+        Event::ClipboardWritten { .. } | Event::StatusRemoved { .. }
+    )));
+}
+
+/// A job that starts in the foreground without writing anything is seen by
+/// the poll, and the shell taking the terminal back by its prompt; only
+/// clients that asked hear of either.
+#[test]
+fn process_changes_reach_only_clients_that_asked() {
+    let path = start_server();
+    let wanted = SEQ.union(Features::PROCESS).union(Features::CHECKPOINT_V6);
+    let mut watcher = Client::connect_with(&path, wanted, None);
+    let mut plain = Client::connect_with(&path, SEQ.union(Features::PROGRAM_EVENTS), None);
+    let block = block_for(&mut watcher);
+    let changed_to = |client: &Client, program: &str| {
+        client.events.iter().any(|(_, e)| {
+            matches!(e, Event::ProcessChanged { block: b, name, .. } if *b == block && name == program)
+        })
+    };
+    watcher.input(block, b"sleep 30\r");
+    while !changed_to(&watcher, "sleep") {
+        watcher.recv();
+    }
+    watcher.input(block, b"\x03");
+    while !changed_to(&watcher, "sh") {
+        watcher.recv();
+    }
+
+    let later = create_session(&mut watcher, "later");
+    wait_for_session(&mut plain, later);
+    assert!(
+        !plain
+            .events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::ProcessChanged { .. }))
+    );
+}
+
+#[test]
+fn a_closed_block_reports_no_exit() {
+    let path = start_server();
+    let wanted = SEQ
+        .union(Features::PROGRAM_EVENTS)
+        .union(Features::CHECKPOINT_V6);
+    let mut client = Client::connect_with(&path, wanted, None);
+    let block = block_for(&mut client);
+    client.request(|req| Message::CloseBlock { req, block });
+    let closed = Event::BlockClosed { block };
+    while !client.events.iter().any(|(_, e)| *e == closed) {
+        client.recv();
+    }
+    // Anything after the close would follow it on the stream.
+    let later = create_session(&mut client, "later");
+    wait_for_session(&mut client, later);
+    assert!(
+        !client
+            .events
+            .iter()
+            .any(|(_, e)| matches!(e, Event::ProgramExited { .. }))
+    );
+}
+
+/// The answer and DA1's, in the order the program asked, even when both
+/// questions arrive in one write.
+#[test]
+fn a_status_query_is_answered_in_order() {
+    let path = start_server();
+    let mut client = Client::connect(&path);
+    let block = block_for(&mut client);
+    // Each round ends by printing its own marker after `stty sane`, and the
+    // next is typed only once that marker is out: a line typed while the
+    // terminal is still raw keeps its `\r`, so the shell never sees it end.
+    let ask = |first: &str, second: &str, round: u32| {
+        format!(
+            "stty raw -echo; printf '{first}{second}'; \
+             dd bs=1 count=19 2>/dev/null | od -An -tx1; stty sane; echo END$(({round}*2))\r"
+        )
+    };
+    let (query, da1) = ("\\033]7501;?\\033\\\\", "\\033[c");
+    client.input(block, ask(query, da1, 1).as_bytes());
+    client.wait_for(block, "END2");
+    client.wait_for(block, "1b 5d 37 35 30 31 3b 3f 1b 5c 1b 5b 3f 31 3b 32");
+    client.input(block, ask(da1, query, 2).as_bytes());
+    client.wait_for(block, "END4");
+    client.wait_for(block, "1b 5b 3f 31 3b 32 3b 34 63 1b 5d 37 35 30 31 3b");
+}
+
+/// A block can run a given program in a given directory instead of the
+/// shell, and its exit code comes back as an event.
+#[test]
+fn a_launched_program_reports_its_exit_code() {
+    let path = start_server();
+    let wanted = SEQ.union(Features::PROGRAM_EVENTS);
+    let mut client = Client::connect_with(&path, wanted.union(Features::LAUNCH), None);
+    let window = window_for(&mut client);
+    let launch = Launch {
+        program: Some(Program {
+            command: "sh".into(),
+            args: vec!["-c".into(), r#"[ "$(pwd)" = /tmp ] && exit 3"#.into()],
+        }),
+        cwd: Some("/tmp".into()),
+    };
+    let size = Size::new(80, 24).expect("size");
+    let block = BlockId::from_uuid(
+        client
+            .request(|req| Message::CreateBlock {
+                req,
+                window,
+                size,
+                launch: launch.clone(),
+            })
+            .expect("id"),
+    );
+    let exited = Event::ProgramExited {
+        block,
+        status: ExitStatus::Code(3),
+    };
+    while !client.events.iter().any(|(_, e)| *e == exited) {
+        client.recv();
+    }
+
+    for (cwd, why) in [
+        ("tmp", "not an absolute path"),
+        ("/no/such/dir", "not a directory"),
+    ] {
+        let launch = Launch {
+            cwd: Some(cwd.into()),
+            ..launch.clone()
+        };
+        let answer = client.answer(|req| Message::CreateBlock {
+            req,
+            window,
+            size,
+            launch,
+        });
+        assert!(
+            matches!(answer.last(), Some(Message::Failed { reason, .. }) if reason.contains(why)),
+            "{cwd}: {answer:?}"
+        );
+    }
+}
+
+/// A launch on a connection that did not negotiate it is refused before
+/// anything starts; a plain block still works there.
+#[test]
+fn a_launch_needs_the_negotiated_feature() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, SEQ, None);
+    let window = window_for(&mut client);
+    let size = Size::new(80, 24).expect("size");
+    let launches = [
+        Launch {
+            program: Some(Program {
+                command: "true".into(),
+                args: Vec::new(),
+            }),
+            cwd: None,
+        },
+        Launch {
+            program: None,
+            cwd: Some("/tmp".into()),
+        },
+    ];
+    for launch in launches {
+        let answer = client.answer(|req| Message::CreateBlock {
+            req,
+            window,
+            size,
+            launch: launch.clone(),
+        });
+        assert!(
+            matches!(answer.last(), Some(Message::Failed { reason, .. }) if reason.contains("a launch requires")),
+            "{launch:?}: {answer:?}"
+        );
+    }
+    let plain = BlockId::from_uuid(
+        client
+            .request(|req| Message::CreateBlock {
+                req,
+                window,
+                size,
+                launch: Launch::default(),
+            })
+            .expect("id"),
+    );
+    // Events arrive in order: the plain block's is the only one created.
+    while !client
+        .events
+        .iter()
+        .any(|(_, e)| matches!(e, Event::BlockCreated { block, .. } if *block == plain))
+    {
+        client.recv();
+    }
+    let created = client
+        .events
+        .iter()
+        .filter(|(_, e)| matches!(e, Event::BlockCreated { .. }))
+        .count();
+    assert_eq!(created, 1);
 }

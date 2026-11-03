@@ -15,6 +15,9 @@
 //! non-loopback address unless `--allow-remote` says it sits behind
 //! something that terminates TLS.
 //!
+//! `RUSTY_TICK_ISSUER=https://tick.example.com` turns on OAuth sign-in for
+//! `/mcp` ([`rusty_tick::oauth`]), with grants kept in `DIR/oauth.json`.
+//!
 //! If `DIR/users.json` exists the server runs for several users instead
 //! (ADR-0002): each has tokens of the form `<user key>.<secret>` and a store
 //! under `DIR/users/`, and `RUSTY_TICK_TOKEN` must not be set, so nobody
@@ -22,6 +25,7 @@
 
 use rusty_tick::admin;
 use rusty_tick::backend::Backend;
+use rusty_tick::oauth::{self, OAuth};
 use rusty_tick::pool::DEFAULT_MAX_OPEN_USERS;
 use rusty_tick::server;
 use rusty_tick::service::system_clock;
@@ -85,6 +89,19 @@ fn open_backend(data_dir: &std::path::Path) -> Result<Backend, String> {
     Backend::single(data_dir, token, system_clock()).map_err(opening)
 }
 
+/// OAuth's setup, if `RUSTY_TICK_ISSUER` is set.
+fn open_oauth(data_dir: &std::path::Path) -> Result<Option<OAuth>, String> {
+    let Ok(raw) = std::env::var(oauth::ISSUER_ENV) else {
+        return Ok(None);
+    };
+    let issuer = rusty_oauth_server::validate_issuer(&raw)
+        .map_err(|e| format!("{} {raw:?}: {e}", oauth::ISSUER_ENV))?;
+    Ok(Some(OAuth {
+        issuer,
+        state_file: data_dir.join(oauth::STATE_FILE),
+    }))
+}
+
 fn run() -> Result<(), String> {
     let options = parse_args(std::env::args().skip(1))?;
     match options.command.split_first() {
@@ -109,8 +126,9 @@ fn run() -> Result<(), String> {
             options.addr
         ));
     }
+    let oauth = open_oauth(&options.data_dir)?;
     let backend = open_backend(&options.data_dir)?;
-    let mut server = server::bind(options.addr, backend)
+    let mut server = server::bind(options.addr, backend, oauth)
         .map_err(|e| format!("binding {}: {e}", options.addr))?;
     if let Some(dir) = options.web_dir {
         if !dir.join("index.html").is_file() {

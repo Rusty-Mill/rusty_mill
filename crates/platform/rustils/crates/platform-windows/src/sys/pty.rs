@@ -42,13 +42,13 @@
 #![allow(unsafe_code)]
 
 use std::ffi::OsStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::process::EnvSpec;
 use platform::term::WinSize;
 
+use crate::close_guard::CloseGuard;
 use crate::ffi::win32_surface as w;
 use crate::sys::errmap;
 use crate::sys::handle::{self, OwnedWinHandle};
@@ -605,13 +605,12 @@ pub fn wait_readable(output: &OwnedWinHandle, budget: std::time::Duration) -> bo
 /// exits, and it isn't on any path a test or a caller's own `read`
 /// blocks behind.
 ///
-/// `closed` is a shared "the real close already ran" guard — this
-/// function and [`WindowsPtyMaster::drop`](crate::pty::WindowsPtyMaster)
-/// both may reach `ClosePseudoConsole` (whichever of "the child exits"
-/// or "the caller drops the master first" happens first), and it must
-/// run exactly once: a second call on an already-closed `HPCON` is not
-/// something to risk. Whichever side loses the compare-exchange does
-/// nothing further.
+/// `closed` is the shared "the real close already ran" guard (see
+/// [`hang_up`]): this thread, [`WindowsPtyMaster::hang_up`] and
+/// [`WindowsPtyMaster::drop`](crate::pty::WindowsPtyMaster) may all reach
+/// `ClosePseudoConsole`, and it must run exactly once.
+///
+/// [`WindowsPtyMaster::hang_up`]: crate::pty::WindowsPtyMaster::hang_up
 ///
 /// `process` is duplicated internally (`sys::handle::duplicate`) rather
 /// than requiring the caller to hand over a handle this thread would
@@ -622,7 +621,7 @@ pub fn wait_readable(output: &OwnedWinHandle, budget: std::time::Duration) -> bo
 /// then only surfaces once the caller drops the master, the pre-fix
 /// behavior), rather than failing the whole spawn over a best-effort
 /// convenience.
-pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<AtomicBool>) {
+pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<CloseGuard>) {
     let Ok(dup) = handle::duplicate(process, false) else {
         return;
     };
@@ -639,17 +638,26 @@ pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<A
         // console *input* handle, not a process handle; there never was
         // a fit.)
         let _ = proc::wait(&dup);
-        if closed
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-        {
-            // SAFETY: `hpc` is a valid, live pseudo console handle;
-            // `closed`'s compare-exchange above guarantees this runs at
-            // most once across both this thread and `WindowsPtyMaster`'s
-            // own `Drop`.
-            unsafe {
-                close_pseudo_console(hpc);
-            }
+        hang_up(hpc, &closed);
+    });
+}
+
+/// Bare (non-draining) `ClosePseudoConsole`, at most once per console
+/// ([`CloseGuard::close_once`]).
+///
+/// The guard is held across the call, so a [`resize`] run under the same
+/// guard can never reach a console that is closing or closed, and a
+/// `WindowsPtyMaster::drop` that finds it busy knows a close is already
+/// running. On Windows builds where `ClosePseudoConsole` blocks, this
+/// blocks while conhost's writer is stuck behind a full, unread output
+/// pipe, until a reader drains it or the master's handles are released.
+pub fn hang_up(hpc: w::HPCON, closed: &CloseGuard) {
+    closed.close_once(|| {
+        // SAFETY: `hpc` is a valid pseudo console handle that has not been
+        // closed: every close in this crate runs under `closed`, which
+        // runs this closure only while no close has completed.
+        unsafe {
+            close_pseudo_console(hpc);
         }
     });
 }

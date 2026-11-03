@@ -30,7 +30,8 @@ use std::fmt;
 use std::future::{poll_fn, Future};
 use std::mem::MaybeUninit;
 use std::sync::Mutex as StdMutex;
-use std::task::{Poll, Waker};
+
+use super::wait_list::{HasWaitList, WaitList, Waiting};
 
 /// What [`OnceCell::try_claim`] found -- see that method's docs.
 enum Claim {
@@ -52,7 +53,14 @@ struct Inner {
     /// leave `Initializing` (whether that ends in `Initialized`, or back
     /// in `Uninit` after a panic -- either way, every waiter wakes and
     /// re-checks). Woken and cleared all at once on either transition.
-    wakers: Vec<Waker>,
+    /// One slot per waiting future, removed if the future is dropped.
+    waiters: WaitList,
+}
+
+impl HasWaitList for Inner {
+    fn wait_list(&mut self) -> &mut WaitList {
+        &mut self.waiters
+    }
 }
 
 /// A cell that's initialized at most once. See the module docs for the
@@ -80,7 +88,7 @@ impl<T> OnceCell<T> {
         OnceCell {
             inner: StdMutex::new(Inner {
                 state: State::Uninit,
-                wakers: Vec::new(),
+                waiters: WaitList::new(),
             }),
             value: UnsafeCell::new(MaybeUninit::uninit()),
         }
@@ -91,7 +99,7 @@ impl<T> OnceCell<T> {
         OnceCell {
             inner: StdMutex::new(Inner {
                 state: State::Initialized,
-                wakers: Vec::new(),
+                waiters: WaitList::new(),
             }),
             value: UnsafeCell::new(MaybeUninit::new(value)),
         }
@@ -129,7 +137,7 @@ impl<T> OnceCell<T> {
                 // read `value` yet.
                 unsafe { (*self.value.get()).write(value) };
                 guard.state = State::Initialized;
-                let wakers = std::mem::take(&mut guard.wakers);
+                let wakers = guard.waiters.take();
                 drop(guard);
                 for waker in wakers {
                     waker.wake();
@@ -175,13 +183,9 @@ impl<T> OnceCell<T> {
                     // resolves immediately instead of registering a
                     // waker nothing will ever wake. See the module docs
                     // for the two-lock race this avoids.
+                    let mut waiting = Waiting::new(&self.inner);
                     poll_fn(|cx| {
-                        let mut guard = self.inner.lock().unwrap();
-                        if guard.state != State::Initializing {
-                            return Poll::Ready(());
-                        }
-                        guard.wakers.push(cx.waker().clone());
-                        Poll::Pending
+                        waiting.poll_until(cx, |inner| inner.state != State::Initializing)
                     })
                     .await;
                     continue;
@@ -206,7 +210,7 @@ impl<T> OnceCell<T> {
         let wakers = {
             let mut guard = self.inner.lock().unwrap();
             guard.state = State::Initialized;
-            std::mem::take(&mut guard.wakers)
+            guard.waiters.take()
         };
         reset_on_incomplete.armed = false;
         for waker in wakers {
@@ -266,7 +270,7 @@ impl<T> Drop for ResetGuard<'_, T> {
             let wakers = {
                 let mut guard = self.cell.inner.lock().unwrap();
                 guard.state = State::Uninit;
-                std::mem::take(&mut guard.wakers)
+                guard.waiters.take()
             };
             for waker in wakers {
                 waker.wake();

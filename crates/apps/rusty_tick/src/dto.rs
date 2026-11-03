@@ -3,6 +3,7 @@
 
 use crate::docs::Doc;
 use crate::lists::{TaskList, ViewMode};
+use crate::moves::Move;
 use crate::service::Snapshot;
 use crate::tags::Tag;
 use crate::task::{ChecklistItem, Status, Task, TaskKind};
@@ -175,6 +176,8 @@ pub struct DocDto {
     pub kind: String,
     pub body: rusty_json::Value,
     pub updated_ms: i64,
+    /// `updated_ms` as text: what `If-Match` names on a document write.
+    pub etag: String,
 }
 
 impl DocDto {
@@ -185,6 +188,7 @@ impl DocDto {
             kind: doc.kind,
             body: rusty_json::from_str(&doc.body).ok()?,
             updated_ms: doc.updated_ms,
+            etag: doc.updated_ms.to_string(),
         })
     }
 }
@@ -197,6 +201,47 @@ pub struct Docs {
 #[derive(Serialize)]
 pub struct Purged {
     pub purged: usize,
+}
+
+/// One column move.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveDto {
+    pub seq: u64,
+    pub task_id: Uuid,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub at_ms: i64,
+    pub actor: String,
+}
+
+impl From<Move> for MoveDto {
+    fn from(m: Move) -> Self {
+        Self {
+            seq: m.seq,
+            task_id: m.task_id,
+            from: m.from,
+            to: m.to,
+            at_ms: m.at_ms,
+            actor: m.actor,
+        }
+    }
+}
+
+/// A page of moves; `next` is the `after` for the following page, `None` on the last.
+#[derive(Serialize)]
+pub struct Moves {
+    pub moves: Vec<MoveDto>,
+    pub next: Option<u64>,
+}
+
+impl Moves {
+    pub fn new(moves: Vec<Move>, next: Option<u64>) -> Self {
+        Self {
+            moves: moves.into_iter().map(MoveDto::from).collect(),
+            next,
+        }
+    }
 }
 
 // ---- requests ----------------------------------------------------------
@@ -227,6 +272,7 @@ pub struct CreateTask {
     #[serde(default)]
     pub tags: Vec<String>,
     pub sort_order: Option<i64>,
+    pub status: Option<Status>,
 }
 
 #[derive(Deserialize)]

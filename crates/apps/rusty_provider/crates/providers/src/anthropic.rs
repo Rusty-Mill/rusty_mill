@@ -18,7 +18,7 @@ use rp_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::http::{map_error_response, map_reqwest_error};
+use crate::http::map_error_response;
 use crate::util::{chat_stream, effort_thinking_budget, gen_id, now};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -38,7 +38,7 @@ const MAX_THINKING_BUDGET: u32 = 128_000;
 pub struct AnthropicProvider {
     base_url: String,
     api_key: String,
-    client: reqwest::Client,
+    client: crate::http::HttpClient,
 }
 
 impl AnthropicProvider {
@@ -46,7 +46,7 @@ impl AnthropicProvider {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
-            client: crate::http::build_client(crate::http::DEFAULT_TIMEOUT),
+            client: crate::http::HttpClient::new(crate::http::DEFAULT_TIMEOUT),
         }
     }
 
@@ -54,7 +54,7 @@ impl AnthropicProvider {
     /// `http::DEFAULT_TIMEOUT`) -- used by `rp-router` to apply
     /// `[[providers]].timeout_secs`.
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
-        self.client = crate::http::build_client(timeout);
+        self.client = crate::http::HttpClient::new(timeout);
         self
     }
 
@@ -517,17 +517,16 @@ impl Provider for AnthropicProvider {
         let forced_output_tool_name = body.forced_output_tool_name.clone();
         let exclude_reasoning = body.exclude_reasoning;
 
+        let headers = [
+            ("x-api-key", api_key_override.unwrap_or(&self.api_key)),
+            ("anthropic-version", ANTHROPIC_VERSION),
+        ];
         let resp = self
             .client
-            .post(self.endpoint())
-            .header("x-api-key", api_key_override.unwrap_or(&self.api_key))
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .post_json(&self.endpoint(), &[], &headers, &body)
+            .await?;
 
-        if !resp.status().is_success() {
+        if !resp.is_success() {
             return Err(map_error_response(resp).await);
         }
 
@@ -622,17 +621,16 @@ impl Provider for AnthropicProvider {
         let is_forced_structured_output = body.forced_output_tool_name.is_some();
         let exclude_reasoning = body.exclude_reasoning;
 
+        let headers = [
+            ("x-api-key", api_key_override.unwrap_or(&self.api_key)),
+            ("anthropic-version", ANTHROPIC_VERSION),
+        ];
         let resp = self
             .client
-            .post(self.endpoint())
-            .header("x-api-key", api_key_override.unwrap_or(&self.api_key))
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .json(&body)
-            .send()
-            .await
-            .map_err(map_reqwest_error)?;
+            .post_json(&self.endpoint(), &[], &headers, &body)
+            .await?;
 
-        if !resp.status().is_success() {
+        if !resp.is_success() {
             return Err(map_error_response(resp).await);
         }
 
@@ -641,7 +639,7 @@ impl Provider for AnthropicProvider {
         let mut cache_creation_tokens: u32 = 0;
         let mut cached_tokens: u32 = 0;
 
-        let stream = resp.bytes_stream().eventsource().filter_map(move |ev| {
+        let stream = resp.into_byte_stream().eventsource().filter_map(move |ev| {
             let full_model = full_model.clone();
             let result = (|| -> Option<Result<ChatChunk, ProviderError>> {
                 let ev = match ev {

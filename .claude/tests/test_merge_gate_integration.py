@@ -47,6 +47,16 @@ else:
 '''
 
 
+APPROVAL_STUB = r'''
+import json, os, sys
+open(os.environ['FAKE_APPROVAL_LOG'], 'a').write(' '.join(sys.argv[1:]) + '\n')
+if '--request' in sys.argv:
+    print('approval-request: stub')
+else:
+    print(json.dumps({'approved': os.environ['FAKE_APPROVED'] == '1'}))
+'''
+
+
 def sh(*cmd, cwd=None):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
 
@@ -88,7 +98,7 @@ class Gate(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_gate(self, base='staging', ci=None, settings=None, cfg=None, dry=False):
+    def run_gate(self, base='staging', ci=None, settings=None, cfg=None, dry=False, gate=GATE, env_extra=None):
         cfgfile = self.tmp / 'cfg.json'
         cfgfile.write_text(json.dumps({**self.cfg, **(cfg or {})}))
         green = {'headRefOid': self.sha, 'statusCheckRollup': [{'name': 'ci', 'status': 'COMPLETED', 'conclusion': 'SUCCESS'}]}
@@ -98,8 +108,9 @@ class Gate(unittest.TestCase):
                'FAKE_SETTINGS': json.dumps(settings or {'mergeCommitAllowed': True, 'squashMergeAllowed': False,
                                                          'rebaseMergeAllowed': False}),
                'SB_GH': shlex.join([pathlib.Path(sys.executable).as_posix(), (self.bindir / 'fake_gh.py').as_posix()]),
-               'SB_GITHUB_HALT_FILE': str(self.tmp / 'halt.json'), 'SB_GITHUB_RETRY_DELAY': '0'}
-        args = ['bash', str(GATE), '--config', str(cfgfile), '--pr', '7', '--expect-head', self.sha, '--lock-timeout', '5']
+               'SB_GITHUB_HALT_FILE': str(self.tmp / 'halt.json'), 'SB_GITHUB_RETRY_DELAY': '0',
+               **(env_extra or {})}
+        args = ['bash', str(gate), '--config', str(cfgfile), '--pr', '7', '--expect-head', self.sha, '--lock-timeout', '5']
         if dry:
             args.append('--dry-run')
         r = subprocess.run(args, env=env, capture_output=True, text=True, timeout=120)
@@ -152,6 +163,52 @@ class Gate(unittest.TestCase):
         r, calls = self.run_gate(dry=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn('--merge', r.stderr)
+        self.assertNotIn('pr merge', calls)
+
+    # merge_policy.handoff_to: the robot never merges, approved or not.
+    def run_handoff(self, approved, handoff):
+        # A copy of the gate whose approval helper is a stub, so "a valid trusted
+        # approval exists" is a test input rather than forged GitHub comments.
+        bin_copy = self.tmp / 'gate-bin'
+        if not bin_copy.exists():
+            shutil.copytree(GATE.parent, bin_copy)
+            (bin_copy / 'super-board-approval.py').write_text(APPROVAL_STUB)
+        policy = {'default': 'human', **({'handoff_to': 'dottiusmaximus'} if handoff else {})}
+        r, calls = self.run_gate(cfg={'merge_policy': policy}, gate=bin_copy / GATE.name,
+                                 env_extra={'FAKE_APPROVED': '1' if approved else '0',
+                                            'FAKE_APPROVAL_LOG': str(self.approval_log)})
+        asked = self.approval_log.read_text() if self.approval_log.exists() else ''
+        return r, calls, asked
+
+    @property
+    def approval_log(self):
+        return self.tmp / 'approval.log'
+
+    def test_approved_pr_on_handoff_board_is_not_merged(self):
+        r, calls, asked = self.run_handoff(approved=True, handoff=True)
+        self.assertEqual(r.returncode, 13, r.stderr)
+        self.assertIn('handoff: @dottiusmaximus reviews and merges PR #7', r.stdout)
+        self.assertNotIn('pr merge', calls)
+        self.assertEqual(asked, '')
+
+    def test_unapproved_pr_on_handoff_board_is_handed_off_without_a_request(self):
+        r, calls, asked = self.run_handoff(approved=False, handoff=True)
+        self.assertEqual(r.returncode, 13, r.stderr)
+        self.assertNotIn('approval-request', r.stdout)
+        self.assertNotIn('pr merge', calls)
+        self.assertEqual(asked, '')
+
+    def test_without_handoff_an_approved_human_hold_still_merges(self):
+        # Control: the stub really unlocks the generic path, so the two tests above
+        # fail because of handoff_to and nothing else.
+        r, calls, _ = self.run_handoff(approved=True, handoff=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('pr merge', calls)
+
+    def test_without_handoff_an_unapproved_human_hold_waits(self):
+        r, calls, _ = self.run_handoff(approved=False, handoff=False)
+        self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertIn('approval-request: stub', r.stdout)
         self.assertNotIn('pr merge', calls)
 
 

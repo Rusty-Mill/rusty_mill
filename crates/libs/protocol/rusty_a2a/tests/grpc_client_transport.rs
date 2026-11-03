@@ -420,14 +420,65 @@ async fn an_agent_that_is_not_there_is_unavailable_and_not_a_hang() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
+// ---- an address with no scheme --------------------------------------------------------------
+
 #[tokio::test]
-async fn an_endpoint_without_a_scheme_is_refused_up_front_with_a_clear_error() {
-    // The `tonic` client parsed `host:port` and then failed its first call with "transport error".
-    // Whether a scheme-less endpoint means plaintext or TLS is a choice this client does not make.
-    match GrpcClient::new("127.0.0.1:50051") {
-        Err(ClientError::GrpcConfig(message)) => {
-            assert!(message.contains("invalid gRPC endpoint"), "{message}");
+async fn an_address_with_no_scheme_is_dialled_over_tls() {
+    // The A2A spec writes a gRPC interface as `hostname:port`. That is TLS, verified like `https://`.
+    let pki = Pki::new();
+    let served = serve_router(get_task_router(), Some(pki.acceptor()), ServeOptions::default());
+    let client =
+        GrpcClient::with_channel_options(format!("localhost:{}", served.addr().port()), pki.trusting())
+            .unwrap();
+    assert_eq!(client.get_task("t-bare", None).await.unwrap().id, "t-bare");
+    // An IP literal, with the port, is read the same way.
+    let client = GrpcClient::with_channel_options(served.addr().to_string(), pki.trusting()).unwrap();
+    assert_eq!(client.get_task("t-ip", None).await.unwrap().id, "t-ip");
+}
+
+#[tokio::test]
+async fn an_address_with_no_scheme_is_never_sent_in_plaintext() {
+    // A plaintext server, reached by an address with no scheme: the TLS handshake fails, and the
+    // request (which would carry the caller's credentials) never arrives.
+    let arrived = Arc::new(AtomicBool::new(false));
+    let seen = arrived.clone();
+    let router = Router::new().unary(GET_TASK, move |req: Request<pb::GetTaskRequest>| {
+        let seen = seen.clone();
+        async move {
+            seen.store(true, Ordering::SeqCst);
+            Ok(Response::new(task(&req.message.id)))
         }
-        other => panic!("expected a configuration error, got {:?}", other.err()),
+    });
+    let served = serve_router(router, None, ServeOptions::default());
+    let client = GrpcClient::new(served.addr().to_string()).unwrap();
+    match client.get_task("t", None).await {
+        Err(ClientError::Grpc(status)) => assert_eq!(status.code(), Code::Unavailable),
+        other => panic!("expected an unavailable agent, got {other:?}"),
+    }
+    assert!(
+        !arrived.load(Ordering::SeqCst),
+        "the request reached a plaintext server"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_http_scheme_is_still_plaintext() {
+    let served = serve_router(get_task_router(), None, ServeOptions::default());
+    let client = GrpcClient::new(format!("http://{}", served.addr())).unwrap();
+    assert_eq!(client.get_task("t-http", None).await.unwrap().id, "t-http");
+}
+
+#[tokio::test]
+async fn an_empty_endpoint_is_still_refused_up_front() {
+    for endpoint in ["", "   ", ":50051"] {
+        match GrpcClient::new(endpoint) {
+            Err(ClientError::GrpcConfig(message)) => {
+                assert!(message.contains("invalid gRPC endpoint"), "{message}");
+            }
+            other => panic!(
+                "{endpoint:?}: expected a configuration error, got {:?}",
+                other.err()
+            ),
+        }
     }
 }

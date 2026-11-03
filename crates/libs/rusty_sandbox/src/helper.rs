@@ -232,6 +232,15 @@ pub fn require_enforced(
     }
 }
 
+/// Whether this kernel confines a job's signals to the job: Landlock ABI
+/// v6 (Linux 6.12) or later. Without it a job can signal any process of
+/// its user, though it still cannot trace or read one.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn signals_scoped() -> bool {
+    matches!(platform_linux::sys::security::landlock_abi(), Ok(Some(abi)) if abi >= 6)
+}
+
 /// The helper's entry point: confine this process and `exec` the program.
 ///
 /// Returns only on failure; the caller reports the error and exits with
@@ -338,8 +347,11 @@ fn confine(request: &HelperRequest) -> Result<(), Error> {
     let sandbox = platform_linux::LinuxSandbox;
     let read: Vec<&std::path::Path> = request.read.iter().map(PathBuf::as_path).collect();
     let write: Vec<&std::path::Path> = request.write.iter().map(PathBuf::as_path).collect();
-    let fs = sandbox
-        .confine_filesystem(&read, &write)
+    // The signal scope is best effort, unlike every other step: it needs
+    // Landlock ABI v6 (Linux 6.12), and refusing to run on every older kernel
+    // would turn a narrower boundary into none. `signals_scoped` tells callers.
+    let (fs, _signals) = sandbox
+        .confine_filesystem_and_signals(&read, &write)
         .map_err(|error| Error::Sandbox(format!("Landlock: {error}")))?;
     require_enforced("Landlock filesystem confinement", fs)?;
     if !matches!(request.sockets, Sockets::Internet | Sockets::InternetOnly) {

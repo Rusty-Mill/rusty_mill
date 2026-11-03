@@ -30,7 +30,7 @@ See [`RELEASE_NOTES.md`](RELEASE_NOTES.md) for what shipped and when.
 > (build 26200): shell spawn, child `TERM`/`COLORTERM` env, bidirectional relay,
 > and OSC window-title capture all work; host resize is handled by polling the
 > console size (there is no `SIGWINCH` equivalent — see `resize_poll` in
-> `src/runtime/tokio_rt.rs`). The optional window
+> `src/runtime/reactor.rs`). The optional window
 > backend has likewise been run on Windows (CPU and GPU), including a maximized
 > window past the 2048px GPU texture limit; it can't be exercised in a headless
 > CI environment, so there its font, compositor, input, and GPU-pipeline layers
@@ -67,13 +67,14 @@ The VT engine (parser, grid, scrollback, OSC, image decoders) is its own crate,
 dependencies are `rusty_base64`, `rusty_hex`, `unicode-width` and
 `unicode-segmentation`. A headless consumer such as a mux server depends on it
 directly; this crate re-exports it as `rusty_term::core`. The `gui`, `l13` and
-`web-bridge` features above forward to the core features of the same names. Only
-`l13` brings tokio into the core's tree, through `rusty_lsp`.
+`web-bridge` features above forward to the core features of the same names. No
+feature brings tokio into the tree.
 
-The runtime is always **tokio** — a single async reactor. On Unix it registers
-the PTY master + `/dev/tty` with the reactor (`AsyncFd` → mio → epoll) and takes
+The runtime is always **rusty_tokio**, the workspace's own async runtime: a
+single reactor. On Unix it registers the PTY master + `/dev/tty` with the
+reactor (`rusty_tokio::io::AsyncFd`) and takes
 `SIGWINCH` from a signal stream; on Windows, where ConPTY's pipes aren't
-pollable, blocking reader/writer/stdin threads bridge into tokio channels and a
+pollable, blocking reader/writer/stdin threads bridge into async channels and a
 timer polls the console size for resizes.
 
 ```sh
@@ -89,6 +90,12 @@ cargo run --features l13
 # WebSocket PTY bridge for the web frontend prototype (see web/README.md).
 cargo run --features web-bridge --bin rusty_term_web_bridge
 ```
+
+On Linux the window (`--gui`) loads `libxkbcommon` at runtime, and on X11 also
+`libxkbcommon-x11` (Debian/Ubuntu: `libxkbcommon0`, `libxkbcommon-x11-0`;
+Fedora: `libxkbcommon`, `libxkbcommon-x11`). Neither is needed to build, and
+the TUI mode never loads them. If one is missing, `--gui` exits with
+`cannot open a window: …` naming the library.
 
 ### Command-line flags & environment
 
@@ -133,10 +140,21 @@ theme = "gruvbox-dark"   # preset: default, gruvbox-dark, dracula,
 On Windows, `shell` accepts a bare name resolved through the standard search
 path — `"powershell"`, `"pwsh"`, `"wsl"`, `"cmd"` all work — as well as a full
 path (quoted automatically if it contains spaces) and trailing arguments
-(`"wsl -d Ubuntu"`, `"cmd /K clink inject"`):
+(`"wsl -d Ubuntu"`, `"cmd /K clink inject"`). Arguments after `--` are quoted
+for the program that reads them. When that is cmd.exe or a batch file, cmd's
+rules apply on both hosts, so an argument can't run a command: a plain word
+goes bare, anything else in quotes. An argument with `%` or a line break, and
+one holding `/c`, `/k` or `/r` before cmd has its switch (other than the
+switch itself, as in `-- cmd /c dir`), are refused with an error. Only plain
+words may follow a shell whose own text leaves a quote open, holds a `%`, or
+is written for cmd's quote stripping (`/s`, or a command starting `""`), and
+`!` is refused after `/v:on`:
 
 ```toml
 shell = "pwsh"           # or "wsl", "powershell", "C:\\tools\\nu.exe", ...
+
+[console]                # Windows only
+host = "conpty"          # own (default) | conpty
 
 [window]                 # windowed (--gui) front-end only
 cols = 120               # initial size in cells; default 80x24
@@ -165,6 +183,17 @@ cursor = "#aeafad"
 color0 = "#282a2e"       # ANSI palette, color0..color15
 color1 = "#cc6666"
 ```
+
+On Windows, `[console] host` chooses who serves the shell's console:
+`"own"` (the default) is rusty_conhost, our own console host, and `"conpty"`
+is Windows' ConPTY, kept as the rollback. It is read at launch. If `own`
+can't start (an older Windows without a usable ConDrv, for example), the
+error is shown and the terminal does not fall back to ConPTY; set
+`host = "conpty"` there. With `own`, the program is found in
+`shell` by the rules `CreateProcessW` uses, and the rest of the line reaches
+it as written, as under ConPTY. Only the program token differs: the child
+sees it as a quoted full path, followed by one space (cmd's `%CMDCMDLINE%`
+shows this). A batch file runs through cmd.exe `/c`, as `CreateProcessW` runs it. The web bridge always uses ConPTY.
 
 The `[colors]` theme is what every reset path (`RIS`, `DECSTR`, OSC
 104/110/111/112) restores, so a configured look survives a `reset` exactly
@@ -210,7 +239,8 @@ area re-tiles around the dock, and it auto-hides on windows too narrow to
 fit it beside a usable terminal.
 
 The `[keys]` section rebinds any window shortcut as `action = "chord"`. The
-actions are `copy`, `paste`, `new_tab`, `new_window`, `fold_output`,
+actions are `copy`, `copy_or_send` (copy if there is a selection, else pass
+the key to the shell), `paste`, `new_tab`, `new_window`, `fold_output`,
 `close_tab`, `next_tab`, `prev_tab`, `open_config`, `open_settings`, `search`,
 `open_links`, `copy_mode`, `broadcast`, `split_right`, `split_down`,
 `focus_next`, `focus_left`, `focus_right`, `focus_up`, `focus_down`,
@@ -249,8 +279,8 @@ window edges to resize.
 |-------|--------|
 | Left-drag | Select text (highlighted by inversion); double/triple-click first to extend by word/line as you drag, and drag past a pane's top/bottom edge to auto-scroll. |
 | Ctrl+hover / Ctrl+click | Underline + pointer cursor over a hyperlink (OSC 8 or a detected plain-text URL), Ctrl+click opens it. |
-| Ctrl+Shift+C | Copy the selection to the system clipboard. |
-| Ctrl+Shift+V | Paste the clipboard into the shell (bracketed-paste aware). |
+| Ctrl+Shift+C (and Ctrl+C on Windows) | Copy the selection to the system clipboard. On Windows, plain Ctrl+C copies and clears the selection when there is one, and otherwise sends ^C to the shell as usual, as in Windows Terminal. |
+| Ctrl+Shift+V (and Ctrl+V on Windows) | Paste the clipboard into the shell (bracketed-paste aware). Plain Ctrl+V pastes on Windows only, as in Windows Terminal; to send a raw ^V there instead, set `paste = "Ctrl+Shift+V"` under `[keys]`. |
 | Ctrl+Shift+F | Open the in-window search bar (incremental match highlighting; Ctrl+R toggles regex, Alt+C toggles case sensitivity, Ctrl+V/middle-click pastes into the query). |
 | Ctrl+Shift+, | Open the config file in your editor (created from a template on first use). |
 | Ctrl+, / `▾` menu | Toggle the in-app **settings page** (it opens as its own tab in the strip): an Appearance / Terminal / Window sidebar covering theme, font, cursor, contrast, shell, scrollback, clipboard, padding, opacity, launch size, and more, each with a one-line description. `Tab` switches category, `↑`/`↓` pick a row, `←`/`→` (or a click on the value) change it — `Shift` steps numbers ×10, `Home`/`End` jump to the bound, `Enter` (or a typed digit) edits a number directly — type (or `/` / `Ctrl+F`) to search across every category, the wheel scrolls, `Esc` saves & closes; changes apply live. |
@@ -324,6 +354,22 @@ sees `xterm-256color`):
 tic -x extra/rusty_term.terminfo
 ```
 
+## Capability tour
+
+[`extra/rt-caps.sh`](extra/rt-caps.sh) walks through what rusty_term supports:
+probes, colors, SGR, glyphs, widths, mode 2027, cursor, screen editing, sync
+output, OSC, images, input and throughput. Run it from the shell inside
+rusty_term (TUI or `--gui`). Width, grapheme and probe rows check themselves
+and print PASS/FAIL; the rest say what you should see. Interrupting it restores
+the tty and any mode a section turned on. The OSC 52 clipboard demo runs only
+with `RT_CLIPBOARD=1`, since it overwrites the clipboard.
+
+```sh
+sh extra/rt-caps.sh              # every non-interactive section
+sh extra/rt-caps.sh widths sync  # just those sections
+sh extra/rt-caps.sh list         # section names
+```
+
 ## Structured side-channel (`l13`)
 
 The `l13` feature adds a full-duplex JSON-RPC 2.0 transport over a private OSC
@@ -369,8 +415,9 @@ src/
   backend/           OS interface: PTY spawn, raw mode, resize
     unix.rs            openpty + fork/exec (libc)
     windows.rs         ConPTY (windows-sys)
-  runtime/           the tokio I/O loop
-    tokio_rt.rs        async reactor: Unix AsyncFd / Windows ConPTY bridge
+  runtime/           the rusty_tokio I/O loop
+    reactor.rs         async reactor: Unix AsyncFd / Windows ConPTY bridge
+    fair.rs            fair_select (rusty_tokio's select! is not fair)
   render.rs          TUI-mode ANSI re-emission
   input.rs           TUI-mode input handling + scrollback keys
   term.rs            TERM probe-and-fallback selection
@@ -387,7 +434,7 @@ src/
   bin/bench_metrics.rs   grid-handoff microbenchmark
   bin/bench_vt_throughput.rs  parser+grid throughput bench (see bench/)
 core/                the `rusty_term_core` crate: the headless VT engine, no
-                     tokio/PTY/renderer; re-exported as `rusty_term::core`
+                     async runtime/PTY/renderer; re-exported as `rusty_term::core`
   src/
     parser.rs          VT/ANSI state machine
     grid.rs            cells, scrollback, reflow, image + ligature plumbing
@@ -403,6 +450,7 @@ l13/                 the `rusty_term_l13` workspace crate (feature `l13`)
   src/lib.rs           L13 structured side-channel, against a TerminalState trait
 extra/
   rusty_term.terminfo
+  rt-caps.sh           guided capability tour, partly self-checking
   shell-integration/   bash / zsh / fish / pwsh OSC 133 emitters
   gen_ligtest_font.py  regenerates the GSUB shaper test fixture
 bench/                benchmark harness: rusty_term-only + cross-terminal (see bench/README.md)

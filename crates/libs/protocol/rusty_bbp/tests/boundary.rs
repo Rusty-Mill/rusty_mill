@@ -26,12 +26,16 @@ fn payload_must_match_the_stored_bytes() {
     fx.reach_build();
     let diff = stored(fx.put(Who::Coder, ArtifactPayload::Diff, b"--- a\n+++ b\n"));
     let a = Candidate {
+        claim: None,
         base: "a".repeat(40),
         diffs: vec![diff],
+        suite: Suite::Build,
     };
     let b = Candidate {
+        claim: None,
         base: "b".repeat(40),
         diffs: vec![diff],
+        suite: Suite::Build,
     };
     let bytes_of_a = encode_artifact(&ArtifactPayload::Candidate(a), b"").expect("encode");
     let blob = fx.d.store.blob_put(&bytes_of_a);
@@ -73,8 +77,10 @@ fn undecodable_bytes_and_wrong_length_are_rejected() {
     fx.reach_build();
     let garbage = fx.d.store.blob_put(b"not json");
     let c = Candidate {
+        claim: None,
         base: "a".repeat(40),
         diffs: vec![],
+        suite: Suite::Build,
     };
     assert_eq!(
         rejected(fx.put_raw(Who::Coder, ArtifactPayload::Candidate(c), garbage)),
@@ -101,13 +107,16 @@ fn codec_round_trips_every_kind() {
         (ArtifactPayload::Spec { brief }, b"# md".as_slice()),
         (
             ArtifactPayload::Candidate(Candidate {
+                claim: None,
                 base: "c".repeat(40),
                 diffs: vec![ArtId(2), ArtId(3)],
+                suite: Suite::Build,
             }),
             b"".as_slice(),
         ),
         (
             ArtifactPayload::TestReport(Report {
+                tests_changed: vec![],
                 candidate: ArtId(4),
                 run: RunId(1),
                 profile_digest: Sha256([7; 32]),

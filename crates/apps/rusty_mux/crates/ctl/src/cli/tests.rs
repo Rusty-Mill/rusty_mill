@@ -56,7 +56,10 @@ fn plus_chains_requests() {
 fn bad_calls_fail_before_sending() {
     for (line, want) in [
         ("frobnicate", "unknown command `frobnicate`"),
-        ("create-session", "create-session: missing parameter `name`"),
+        (
+            "create-window --session 00000000-0000-0000-0000-000000000009",
+            "create-window: missing parameter `name`",
+        ),
         ("create-session --nme x", "unknown parameter `nme`"),
         ("create-session --name", "--name needs a value"),
         ("create-session name", "expected a --flag"),
@@ -99,6 +102,29 @@ fn help_and_nothing_show_usage() {
     assert_eq!(parsed.command, Command::Help(schema::method("input")));
     assert!(usage(None).contains("create-block"));
     assert!(usage(schema::method("input")).contains("--data <bytes>"));
+}
+
+#[test]
+fn a_flag_alone_is_on() {
+    let line = format!("terminal.format --block {ID} --trim --history 0 --vt=false --unwrap");
+    let [call] = calls(&line).try_into().expect("one call");
+    let flags: Vec<_> = call.args[1..].iter().collect();
+    assert_eq!(
+        flags,
+        [
+            &("trim", Arg::Value(Value::Flag(true))),
+            &("history", Arg::Value(Value::Lines(0))),
+            &("vt", Arg::Value(Value::Flag(false))),
+            &("unwrap", Arg::Value(Value::Flag(true))),
+        ]
+    );
+    let refused = parse(&args(&format!("terminal.format --block {ID} --history")));
+    assert!(refused.is_err(), "only a flag stands alone");
+    let help = usage(schema::method("terminal.format"));
+    assert!(
+        help.contains("--history <line count> [--trim] [--unwrap] [--vt]"),
+        "{help}"
+    );
 }
 
 #[test]
@@ -171,4 +197,250 @@ fn uuid_shaped_text_is_an_id_never_a_name() {
         ("session", Arg::Value(Value::Id(ID.parse().unwrap())))
     );
     assert!(!call.has_target());
+}
+
+fn wait_of(line: &str) -> Wait {
+    match parse(&args(line)).expect("parses").command {
+        Command::Wait(wait) => wait,
+        other => panic!("expected wait, got {other:?}"),
+    }
+}
+
+#[test]
+fn wait_takes_a_block_or_an_event_filter_and_a_timeout() {
+    assert_eq!(
+        wait_of("wait --block build --timeout 1.5"),
+        Wait {
+            until: Until::Exit {
+                block: "build".into()
+            },
+            timeout: Some(Duration::from_millis(1500)),
+        }
+    );
+    // With --event, --block is one of the fields to match, in any order.
+    assert_eq!(
+        wait_of("wait --block build --event program-exited --code 0"),
+        Wait {
+            until: Until::Event {
+                kind: "program-exited",
+                fields: vec![("block", "build".into()), ("code", "0".into())],
+            },
+            timeout: None,
+        }
+    );
+    // A window or a session alone waits for every block in it to end.
+    for (line, scope, target) in [
+        ("wait --window logs", Scope::Window, "logs"),
+        ("wait --session main --timeout 2", Scope::Session, "main"),
+    ] {
+        assert_eq!(
+            wait_of(line).until,
+            Until::Ended {
+                scope,
+                target: target.into()
+            },
+            "{line}"
+        );
+    }
+    for (line, want) in [
+        ("wait", "usage: wait"),
+        ("wait --block a --block b", "usage: wait"),
+        ("wait --block a --window w", "usage: wait"),
+        ("wait --window w --session s", "usage: wait"),
+        ("wait --client c", "usage: wait"),
+        ("wait --event nope", "unknown event `nope`"),
+        ("wait --event bell --code 1", "has no field `code`"),
+        ("wait --block a --timeout -1", "not a timeout"),
+        ("wait --block a --timeout soon", "not a timeout"),
+    ] {
+        let err = parse(&args(line)).expect_err(line);
+        assert!(err.contains(want), "{line}: {err}");
+    }
+}
+
+fn run_of(line: &str, here: &Defaults) -> Run {
+    match super::parse(&args(line), here).expect("parses").command {
+        Command::Run(run) => run,
+        other => panic!("expected run, got {other:?}"),
+    }
+}
+
+fn arg_of<'a>(call: &'a Call, name: &str) -> Option<&'a Arg> {
+    call.args.iter().find(|(n, _)| *n == name).map(|(_, a)| a)
+}
+
+#[test]
+fn run_builds_a_create_block_request_in_the_current_directory() {
+    fn text(s: &str) -> Option<Arg> {
+        Some(Arg::Value(Value::Text(s.into())))
+    }
+    // Absolute on every platform.
+    let work = std::env::temp_dir().join("work");
+    let here = Defaults {
+        window: Some(ID.parse().unwrap()),
+        dir: Some(work.clone()),
+        ..Defaults::default()
+    };
+    let native = |path: PathBuf| text(path.to_str().expect("UTF-8"));
+    let run = run_of("run --wait -- make -j 4 --keep-going", &here);
+    assert_eq!(run.wait, Some(None));
+    assert_eq!(arg_of(&run.create, "command").cloned(), text("make"));
+    assert_eq!(
+        arg_of(&run.create, "arg").cloned(),
+        Some(Arg::Value(Value::Words(
+            ["-j", "4", "--keep-going"].map(String::from).to_vec()
+        )))
+    );
+    assert_eq!(arg_of(&run.create, "cwd").cloned(), native(work.clone()));
+    assert_eq!(
+        arg_of(&run.create, "cols").cloned(),
+        Some(Arg::Value(Value::Cells(80)))
+    );
+    assert_eq!(
+        arg_of(&run.create, "window").cloned(),
+        Some(Arg::Value(Value::Id(ID.parse().unwrap())))
+    );
+
+    // Flags end at the first argument that is not one; a relative --cwd is
+    // taken from the current directory.
+    let run = run_of(
+        "run --window w --cols 100 --cwd sub --wait --timeout 2 true",
+        &here,
+    );
+    assert_eq!(run.wait, Some(Some(Duration::from_secs(2))));
+    assert_eq!(
+        arg_of(&run.create, "cwd").cloned(),
+        native(work.join("sub"))
+    );
+    assert_eq!(arg_of(&run.create, "arg"), None);
+    assert!(run.create.has_target());
+    // An absolute --cwd is kept as given.
+    let elsewhere = std::env::temp_dir().join("elsewhere");
+    let line = ["run", "--cwd", elsewhere.to_str().expect("UTF-8"), "true"].map(String::from);
+    let Command::Run(run) = super::parse(&line, &here).expect("parses").command else {
+        panic!("run");
+    };
+    assert_eq!(arg_of(&run.create, "cwd").cloned(), native(elsewhere));
+
+    let nowhere = Defaults::default();
+    assert_eq!(
+        arg_of(&run_of("run --window w true", &nowhere).create, "cwd"),
+        None
+    );
+    for (line, want) in [
+        ("run", "usage: run"),
+        ("run --wait --", "usage: run"),
+        ("run --timeout 1 true", "--timeout needs --wait"),
+        ("run --colour red true", "unknown flag `--colour`"),
+        ("run --cols", "--cols needs a value"),
+        ("run --cols 0 true", "not a valid cell count"),
+        ("run --window w --cwd rel true", "is relative"),
+    ] {
+        let err = super::parse(&args(line), &nowhere).expect_err(line);
+        assert!(err.contains(want), "{line}: {err}");
+    }
+}
+
+#[test]
+fn a_repeated_list_flag_gathers_its_values() {
+    let line =
+        format!("create-block --window {ID} --cols 80 --rows 24 --command sh --arg -c --arg x");
+    let [call] = calls(&line).try_into().expect("one call");
+    assert_eq!(
+        arg_of(&call, "arg").cloned(),
+        Some(Arg::Value(Value::Words(vec!["-c".into(), "x".into()])))
+    );
+    let line = format!("create-block --window {ID} --cols 80 --rows 24 --arg x");
+    let err = parse(&args(&line)).expect_err("arguments without a command");
+    assert!(err.contains("need a `command`"), "{err}");
+}
+
+#[test]
+fn agent_verbs_take_agents_a_scope_and_dry_run() {
+    let agent = |line: &str| parse(&args(line)).map(|i| i.command);
+    let with = |agents: &[AgentKind], scope: AgentScope, dry_run: bool| AgentArgs {
+        agents: agents.to_vec(),
+        scope,
+        dry_run,
+        name_session: false,
+    };
+    assert_eq!(
+        agent("agent setup"),
+        Ok(Command::Agent(AgentCommand::Setup(with(
+            &[AgentKind::Claude],
+            AgentScope::User,
+            false
+        ))))
+    );
+    assert_eq!(
+        agent("agent remove --dir .claude"),
+        Ok(Command::Agent(AgentCommand::Remove(with(
+            &[AgentKind::Claude],
+            AgentScope::Dir(".claude".into()),
+            false
+        ))))
+    );
+    assert_eq!(
+        agent("agent status --dir=x --agent claude"),
+        Ok(Command::Agent(AgentCommand::Status(with(
+            &[AgentKind::Claude],
+            AgentScope::Dir("x".into()),
+            false
+        ))))
+    );
+    // Named in any order and more than once, each is kept once, in order.
+    assert_eq!(
+        agent("agent setup --agent pi --agent codex --project --agent pi --dry-run"),
+        Ok(Command::Agent(AgentCommand::Setup(with(
+            &[AgentKind::Codex, AgentKind::Pi],
+            AgentScope::Project,
+            true
+        ))))
+    );
+    assert_eq!(
+        agent("agent remove --agent all --dry-run"),
+        Ok(Command::Agent(AgentCommand::Remove(with(
+            &AgentKind::ALL,
+            AgentScope::User,
+            true
+        ))))
+    );
+    let naming = |name_session| Ok(Command::Agent(AgentCommand::Hook { name_session }));
+    assert_eq!(agent("agent hook"), naming(false));
+    assert_eq!(agent("agent hook --name-session"), naming(true));
+    assert_eq!(
+        agent("agent setup --name-session --agent codex"),
+        Ok(Command::Agent(AgentCommand::Setup(AgentArgs {
+            name_session: true,
+            ..with(&[AgentKind::Codex], AgentScope::User, false)
+        })))
+    );
+    for bad in [
+        "agent hook --name-session --name-session",
+        "agent hook --name-session=true",
+        "agent setup --name-session=yes",
+        "agent",
+        "agent install",
+        "agent hook --dir x",
+        "agent hook --agent codex",
+        "agent setup --to x",
+        "agent setup x",
+        "agent setup --agent cursor",
+        "agent setup --agent codex --dir x",
+        "agent setup --project --dir x",
+        "agent setup --dir x --project",
+        "agent setup --project=yes",
+        "agent status --dry-run",
+        "agent setup --dry-run=no",
+    ] {
+        assert!(agent(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn bridge_takes_only_the_socket() {
+    let parsed = parse(&args("--socket /tmp/s bridge")).unwrap();
+    assert_eq!(parsed.command, Command::Bridge);
+    assert_eq!(parsed.socket, Some("/tmp/s".into()));
+    assert!(parse(&args("bridge now")).is_err());
 }

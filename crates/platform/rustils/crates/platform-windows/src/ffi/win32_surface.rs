@@ -104,8 +104,22 @@ pub use windows_sys::Win32::System::Threading::{
 // `AssignProcessToJobObject` (already admitted below) and
 // `TerminateProcess` (already admitted above) each require — no broader
 // access than the two calls this handle is actually used for.
+// `condrv::ClientProcess` (#1259) opens a console client by the pid its
+// CONNECT carries with `PROCESS_TERMINATE | SYNCHRONIZE` (both admitted),
+// to end it after the close grace with `TerminateProcess` unless a
+// zero-timeout `WaitForSingleObject` shows it has already exited.
 pub use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+};
+// `condrv::ClientProcess::open` (#1259, D2 admission proposed on #1286):
+// ConDrv doesn't keep a client waiting on its CONNECT referenced, so its
+// pid can be freed and reused before the host opens it. The CONNECT also
+// carries the client's thread id; `OpenThread` with
+// `THREAD_QUERY_LIMITED_INFORMATION`, the least access
+// `GetProcessIdOfThread` needs, pins that thread and its process while
+// the host checks the thread belongs to the pid, then opens the pid.
+pub use windows_sys::Win32::System::Threading::{
+    GetProcessIdOfThread, OpenThread, THREAD_QUERY_LIMITED_INFORMATION,
 };
 // `Spawner::is_alive` (`docs/decision-request-detach-liveness.md`):
 // `PROCESS_QUERY_LIMITED_INFORMATION` is the least-privileged access
@@ -176,6 +190,36 @@ pub use windows_sys::Win32::Networking::WinSock::SO_RCVTIMEO;
 // (`rusty_tokio#6`), the same consumer #41/#48 already served on
 // Linux/macOS.
 pub use windows_sys::Win32::Networking::WinSock::{ioctlsocket, FIONBIO};
+// `WindowsUnixStream::{try_clone, shutdown}` (rusty_mux's attach client,
+// which reads and writes one connection from two threads and ends the
+// reading one on detach): std's own `Socket::duplicate` recipe
+// (`WSADuplicateSocketW` for this process, then `WSASocketW` from the
+// protocol info) and `shutdown`.
+pub use windows_sys::Win32::Networking::WinSock::{
+    shutdown, WSADuplicateSocketW, WSASocketW, FROM_PROTOCOL_INFO, SD_BOTH, SD_RECEIVE, SD_SEND,
+    WSAPROTOCOL_INFOW, WSA_FLAG_NO_HANDLE_INHERIT, WSA_FLAG_OVERLAPPED,
+};
+pub use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+// `console::poll_readable` drops queued input records that carry no
+// character (key-ups, bare modifier presses, focus and size events), so
+// "readable" means a read will return a byte; `VkKeyScanW(0)` names the
+// key that types NUL, as conhost decides it. `console::read_chunk` reads
+// a console with `ReadConsoleW` and encodes UTF-8 itself, so the input
+// code page never applies. `WriteConsoleInputW` and the code-page pair
+// are how its tests queue records under a non-UTF-8 code page.
+pub use windows_sys::Win32::System::Console::{
+    GetConsoleCP, PeekConsoleInputW, ReadConsoleInputW, ReadConsoleW, SetConsoleCP,
+    WriteConsoleInputW, INPUT_RECORD, INPUT_RECORD_0, KEY_EVENT, KEY_EVENT_RECORD,
+    KEY_EVENT_RECORD_0, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED,
+    SHIFT_PRESSED,
+};
+pub use windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW;
+// `condrv::{is_valid_code_page, decode, encode}`: our console host's
+// code pages (#1222 PR 9). conhost converts the `A` APIs' text with the
+// same three calls, without `MB_ERR_INVALID_CHARS`.
+pub use windows_sys::Win32::Globalization::{
+    IsValidCodePage, MultiByteToWideChar, WideCharToMultiByte,
+};
 
 // Security surface, CSPRNG slice (RFC v2 R5+, D15, first slice) —
 // rusty_rdp's five hand-rolled `/dev/urandom` reads. `BCryptGenRandom`
@@ -255,3 +299,72 @@ pub use windows_sys::Win32::System::Threading::{
 // specifically so a genuinely different failure there isn't silently
 // papered over).
 pub use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+
+// Peer identity and owner-only socket files (rusty_mux on Windows):
+// `sys::security::UserSid`, `sys::security::restrict_to_owner` and
+// `sys::net::unix_peer_pid`, plus the DACL read-back the tests use.
+pub use windows_sys::Win32::Networking::WinSock::{WSAIoctl, SIO_AF_UNIX_GETPEERPID};
+pub use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+    SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+};
+pub use windows_sys::Win32::Security::{
+    AclSizeInformation, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+    GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACL,
+    ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
+};
+pub use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ALL_ACCESS, FILE_FLAG_OPEN_REPARSE_POINT, READ_CONTROL, WRITE_DAC,
+};
+pub use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+pub use windows_sys::Win32::System::Threading::OpenProcessToken;
+
+// Console host surface (`sys::condrv`, #1222 PR 1; design
+// `docs/projects/term/conhost/design.md` §11.1). Our own host serves the
+// console driver (ConDrv) directly instead of going through ConPTY:
+// - `LoadLibraryExW` with `LOAD_LIBRARY_SEARCH_SYSTEM32` and
+//   `GetProcAddress` resolve the undocumented `user32!ConsoleControl` at
+//   runtime, from System32 only, so a build without it degrades to
+//   `ErrorKind::Unsupported` instead of failing to load. It is never
+//   linked statically.
+// - The server handle is asynchronous: every IOCTL on it is overlapped
+//   (`OVERLAPPED`, `GetOverlappedResult`), each with its own event
+//   (`CreateEventW`, `ResetEvent`), and `CancelIoEx` requests
+//   cancellation of the one in-flight READ_IO. `SetEvent` drives the
+//   waker and the input-available event clients wait on.
+// - `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` limits what the attached child
+//   inherits to its three std handles.
+// - The `ERROR_*` and `WAIT_FAILED` constants are those calls' documented
+//   results: a pending overlapped call, a cancelled one, and a driver
+//   that has dropped the server.
+pub use windows_sys::Win32::Foundation::{
+    ERROR_IO_PENDING, ERROR_OPERATION_ABORTED, ERROR_PIPE_NOT_CONNECTED, FARPROC, WAIT_FAILED,
+};
+pub use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
+pub use windows_sys::Win32::System::Threading::{
+    CreateEventW, ResetEvent, SetEvent, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+};
+pub use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+
+// Console client calls for the console host's parity probes
+// (`rusty_conhost`'s `conhost_probe` example; design
+// `docs/projects/term/conhost/design.md` §8.1, Phase B in §9.2). A probe
+// is a real console client: it calls each API through kernelbase, as
+// the programs a console serves do, so the same call can be compared
+// under ConPTY and under our host. No backend module calls these; the
+// feature (`Win32_System_Console`) is already enabled.
+pub use windows_sys::Win32::System::Console::{
+    FillConsoleOutputAttribute, FillConsoleOutputCharacterW, FlushConsoleInputBuffer,
+    GenerateConsoleCtrlEvent, GetConsoleCursorInfo, GetConsoleOutputCP, GetConsoleProcessList,
+    GetConsoleScreenBufferInfoEx, GetConsoleTitleW, GetConsoleWindow, GetCurrentConsoleFont,
+    GetLargestConsoleWindowSize, GetNumberOfConsoleInputEvents, ReadConsoleOutputAttribute,
+    ReadConsoleOutputCharacterW, ReadConsoleOutputW, ScrollConsoleScreenBufferW,
+    SetConsoleCursorInfo, SetConsoleCursorPosition, SetConsoleOutputCP, SetConsoleScreenBufferSize,
+    SetConsoleTextAttribute, SetConsoleTitleW, SetConsoleWindowInfo, WriteConsoleA,
+    WriteConsoleOutputAttribute, WriteConsoleOutputCharacterW, WriteConsoleOutputW, WriteConsoleW,
+    CHAR_INFO, CHAR_INFO_0, CONSOLE_CURSOR_INFO, CONSOLE_FONT_INFO, CONSOLE_SCREEN_BUFFER_INFOEX,
+    SMALL_RECT,
+};

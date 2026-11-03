@@ -32,7 +32,7 @@ yanked = "deny"
 ignore = [
     # rsa 0.9.x (Marvin Attack timing side-channel): present in the shared
     # workspace Cargo.lock via jsonwebtoken's `rust_crypto` feature in
-    # agentgateway-auth (rusty_agent_gateway) and rusty-mcp's `jwt`
+    # agentgateway-auth (rusty_agent_gateway) and rusty_mcp_middleware's `jwt`
     # feature, not a rush dependency itself -- cargo-deny resolves the
     # whole workspace graph regardless of which crate's config invokes it.
     # Reviewed: both crates' production code only calls

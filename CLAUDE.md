@@ -1,36 +1,72 @@
-# Memory: rusty-remind-me (required)
-remind-me is the shared memory across all Claude surfaces (claude.ai, voice, Claude Code). Treat it as the source of truth for prior decisions and context.
+@AGENTS.md
 
-Tools load on demand. If remind_me_* tools are not visible, run a tool search for remind_me before doing anything else.
+Follow the current CONTRIBUTING workflow in AGENTS.md. The super-board robot is active under
+`docs/super-board/autonomy-policy.md`; `/super-review` is part of its lanes, not of the human workflow.
 
-## 1. Search first
+## Project experts
+Before asking Nano any design, scope or behaviour question, ask the expert for the paths involved.
+Never ask Nano first. Most specific row first; paths not listed have no expert yet.
 
-• Before answering or acting on anything about Nano, this repo, a past decision, or a named crate/PR/issue, call remind_me_search.
+| Paths | Expert |
+|---|---|
+| `crates/libs/ui/rusty_term/src/gui/**` and GUI visual design (`docs/projects/rusty_term/gui-design/**`) | `rusty-term-design-expert`. Needs the Paper MCP server, which runs locally on Nano's Windows machine; in a cloud session it answers from its pack only and can't edit designs. Code behaviour of the GUI goes to `rusty-term-expert`. |
+| `crates/libs/ui/rusty_term/**`, `crates/libs/ui/rusty_conhost/**`, `crates/apps/rusty_mux/**`, `crates/platform/rustils/crates/platform-windows/**` (condrv), `docs/projects/rusty_term/**`, `docs/projects/term/**`, `docs/projects/mux/**` | `rusty-term-expert` |
 
-• Use the project name, crate, or PR number in the query (e.g. rusty_mux phase 1, #686 T6).
+Call it with `subagent_type: "<expert>"`. **Fallback:** if that type isn't available (cloud sessions can
+fail to load agents), read `.claude/agents/<expert>.md` fresh at call time and spawn a general-purpose
+Agent whose prompt is the file's body (everything after the frontmatter) followed by the question. That
+counts as the expert. Never answer without it, and never copy the file's text anywhere.
+**Missing expert:** if `.claude/agents/<expert>.md` doesn't exist either, use the next row that matches
+the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design questions go to
+`rusty-term-expert`, which escalates them to Nano rather than answering (its pack, D10).
+- ANSWER: act on it; the source is cited. An answer settles what to build, not permission: review,
+  merge and owner gates still apply.
+- ESCALATE: ask Nano exactly that block: question, options, recommendation. Nothing more.
+- When Nano answers, pass the answer to the expert with his words and where he said them. Don't write
+  the pack's DECISIONS.md or remind-me decisions yourself; one writer keeps each answer recorded once.
+- Non-blocking? Take the expert's recommendation, keep going, and let the expert add the question to
+  the pack's OPEN_QUESTIONS.md.
 
-• Ground the work in what it returns. If results conflict with the repo, the repo wins; note the drift.
+## Memory: rusty-remind-me
 
-## 2. Save as you go
+Use RemindMe for relevant prior decisions and context when it is available through
+configured connections. Cross-surface access depends on those connections and any
+opt-in sync; this file does not enable sharing. Current repository instructions,
+source and review/merge safeguards take precedence over memory. Note conflicting
+or stale entries rather than treating them as authority.
 
-• When a decision is made or a durable fact is learned, call remind_me_add immediately — do not batch to the end.
+### Search first
 
-• category: fact or preference. memory_type: decision for decisions.
+- Before work about Nano, this repository, a past decision or a named crate, PR or
+  issue, search available RemindMe tools with the relevant project, crate or ID.
+- If the tools are not visible, search for `remind_me` tools when tool discovery is
+  available. If the connection or tools remain unavailable, continue unrelated
+  work using repository evidence and report the missing context or unsaved checkpoint.
 
-• Always set tags (project, crate, PR/issue ids) and entities (e.g. {kind: project, name: rusty_mux}).
+### Save relevant decisions and facts
 
-• Put the why in metadata.rationale.
+- When a relevant durable fact or decision is learned, save a terse entry with
+  `remind_me_add` if available and permitted by the user's instructions. Use one
+  fact per entry; set category (`fact` or `preference`), `memory_type: decision`
+  for decisions, tags (project, crate, PR/issue IDs), entities and
+  `metadata.rationale` explaining why.
+- Include relevant PR activity (opened, merged, blocked and why), subject to the
+  same privacy and availability rules. Verify the saved result before reporting
+  a checkpoint as recorded.
 
-## 3. Capture at the end
+### Capture at the end
 
-• At the end of any substantive session, call remind_me_auto_capture with a descriptive title, tags, the full dialog, and a terse summary: topics, decisions, facts, action items, PRs opened/merged.
-
-• If the call fails, tool-search remind_me_auto_capture and retry once.
-
-## Rules
-
-• Never store secrets, tokens, or credentials.
-
-• Keep entries terse. One fact per remind_me_add.
-
-• PR and merge activity (opened, merged, blocked, why) always gets saved — other surfaces rely on it to know current state.
+- For a substantive session, use `remind_me_auto_capture` when available and
+  permitted, with a descriptive title, tags, available relevant dialogue and a
+  terse summary of topics, decisions, facts, action items and PR activity.
+- Honor explicit do-not-save requests. Exclude secrets, tokens, credentials and
+  unrelated sensitive personal information from all memory writes. Do not rely
+  on credential scrubbing to remove other sensitive details. Never reconstruct
+  unavailable dialogue or submit a blanket full conversation.
+- For any mutating memory call, including capture, verify the saved result. If
+  a timeout or connection failure leaves the outcome uncertain, check for the
+  saved entry before retrying. Retry once only when the write is known not to
+  have succeeded and the failure has been addressed. If success cannot be
+  determined, report the uncertainty and do not risk a duplicate write.
+- If saving is unavailable, continue unrelated work and report the unsaved
+  checkpoint without claiming it was captured.

@@ -10,9 +10,17 @@
 //! With the `http2` feature and [`ServeOptions::http2`], a TLS connection
 //! that negotiates ALPN `h2` is served as HTTP/2 instead, with the same
 //! limits and the same shutdown (GOAWAY, then drain).
+//!
+//! [`serve`] terminates TLS with one acceptor. [`serve_with`] hands each
+//! accepted socket to an [`Accept`] first, for a server that picks a
+//! certificate per connection (by SNI) or takes some connections over
+//! itself (TLS passthrough).
 
+mod admission;
 #[cfg(feature = "http2")]
 mod h2;
+
+pub use admission::Admission;
 
 use std::future::{poll_fn, Future};
 use std::io;
@@ -35,6 +43,7 @@ use crate::request::Request;
 use crate::response::Response;
 use crate::routing::Router;
 use crate::stop::Stop;
+use crate::BoxFuture;
 
 /// How [`serve`] runs.
 #[derive(Debug, Clone)]
@@ -118,6 +127,54 @@ impl Server {
     }
 }
 
+/// What an [`Accept`] made of an accepted socket.
+pub enum Accepted {
+    /// Serve it as cleartext HTTP/1.1.
+    Plain(TcpStream),
+    /// Serve it over this completed TLS handshake: HTTP/2 when it
+    /// negotiated ALPN `h2` and [`ServeOptions::http2`] is on, otherwise
+    /// HTTP/1.1.
+    Tls(Box<AsyncTlsServerStream<TcpStream>>),
+    /// Nothing to serve: the acceptor refused the connection or took it over
+    /// (a passthrough it forwards on its own task).
+    Done,
+}
+
+/// Decides, per accepted socket, how [`serve_with`] serves it.
+///
+/// The returned future runs on the connection's own task and must finish
+/// within [`ServeOptions::handshake_timeout`], or the connection is closed.
+/// A connection taken over ([`Accepted::Done`]) belongs to the acceptor from
+/// then on: it holds no connection slot and is not part of the server's
+/// graceful shutdown.
+pub trait Accept: Send + Sync + 'static {
+    /// Turns `tcp`, accepted from `peer`, into a connection to serve.
+    fn accept(&self, tcp: TcpStream, peer: SocketAddr) -> BoxFuture<'static, Accepted>;
+
+    /// The limits every request on this server is admitted under, checked
+    /// when its head arrives and before its body is read. None by default.
+    fn admission(&self) -> Option<&Admission> {
+        None
+    }
+}
+
+/// [`serve`]'s acceptor: plain, or one TLS acceptor for every connection.
+struct Fixed(Option<TlsAcceptor>);
+
+impl Accept for Fixed {
+    fn accept(&self, tcp: TcpStream, _peer: SocketAddr) -> BoxFuture<'static, Accepted> {
+        let Some(acceptor) = self.0.clone() else {
+            return Box::pin(async move { Accepted::Plain(tcp) });
+        };
+        Box::pin(async move {
+            match handshake(acceptor, tcp).await {
+                Ok(tls) => Accepted::Tls(Box::new(tls)),
+                Err(_) => Accepted::Done,
+            }
+        })
+    }
+}
+
 /// Serves `router` on `listener`: plain HTTP/1.1 when `tls` is `None`,
 /// otherwise HTTP/1.1 over TLS. Must be called inside a `rusty_tokio`
 /// runtime; the server runs on its tasks.
@@ -131,12 +188,27 @@ pub fn serve(
     options: ServeOptions,
     router: Router,
 ) -> io::Result<Server> {
+    serve_with(listener, Fixed(tls), options, router)
+}
+
+/// Serves `router` on `listener`, each accepted socket first passed to
+/// `accept`. Must be called inside a `rusty_tokio` runtime.
+///
+/// # Errors
+///
+/// When the listener's address cannot be read.
+pub fn serve_with(
+    listener: TcpListener,
+    accept: impl Accept,
+    options: ServeOptions,
+    router: Router,
+) -> io::Result<Server> {
     let local_addr = listener.local_addr()?;
     let stop = Arc::new(Stop::default());
     let max = options.max_connections.clamp(1, u32::MAX as usize);
     let shared = Arc::new(Shared {
         router,
-        tls,
+        accept: Box::new(accept),
         options,
     });
     Ok(Server {
@@ -153,8 +225,18 @@ pub fn serve(
 
 struct Shared {
     router: Router,
-    tls: Option<TlsAcceptor>,
+    accept: Box<dyn Accept>,
     options: ServeOptions,
+}
+
+impl Shared {
+    /// Admits a request whose head just arrived, under the acceptor's limits.
+    fn admit(&self) -> Result<admission::Ticket, Response> {
+        match self.accept.admission() {
+            Some(admission) => admission.admit(),
+            None => Ok(admission::Ticket::unlimited()),
+        }
+    }
 }
 
 /// Waits for `work`, or for the stop signal: `None` once stopped. The
@@ -195,8 +277,8 @@ async fn accept_loop(listener: TcpListener, shared: Arc<Shared>, stop: Arc<Stop>
     let _ = permits.acquire_many(max as u32).await;
 }
 
-/// One accepted connection: the TLS handshake if any, then HTTP/1.1, or
-/// HTTP/2 when enabled and negotiated.
+/// One accepted connection: the acceptor (a TLS handshake, if any), then
+/// HTTP/1.1, or HTTP/2 when enabled and negotiated.
 async fn connection(
     tcp: TcpStream,
     peer: SocketAddr,
@@ -205,12 +287,11 @@ async fn connection(
     _permit: OwnedSemaphorePermit,
 ) {
     let _ = tcp.set_nodelay(true);
-    let Some(acceptor) = shared.tls.clone() else {
-        return run(tcp, peer, &shared, &stop).await;
-    };
     let deadline = Instant::now() + shared.options.handshake_timeout;
-    let Ok(Ok(io)) = timeout_at(deadline, handshake(acceptor, tcp)).await else {
-        return;
+    let io = match timeout_at(deadline, shared.accept.accept(tcp, peer)).await {
+        Ok(Accepted::Plain(tcp)) => return run(tcp, peer, &shared, &stop).await,
+        Ok(Accepted::Tls(io)) => *io,
+        Ok(Accepted::Done) | Err(_) => return,
     };
     #[cfg(feature = "http2")]
     if shared.options.http2 && io.negotiated_alpn_protocol() == Some(&b"h2"[..]) {
@@ -247,16 +328,36 @@ where
             // Stopped between requests, or idle too long.
             None | Some(Err(_)) => return,
         };
-        let reply = Reply {
+        let mut reply = Reply {
             head_only: head.method == Method::Head,
             keep_alive: wants_keep_alive(&head),
             chunked: head.version == Version::Http11,
         };
-        let req = match conn.read_request(head, options).await {
-            Ok(req) => req.with_peer_addr(peer),
-            Err(e) => return conn.refuse(&e).await,
+        let ticket = match shared.admit() {
+            Ok(ticket) => ticket,
+            // The body is never read, so the connection cannot be reused.
+            Err(refused) => {
+                reply.keep_alive = false;
+                conn.respond(refused, reply, stop).await;
+                return;
+            }
         };
-        let response = shared.router.call(req).await;
+        let work = async {
+            let req = conn.read_request(head, options).await?;
+            Ok(shared.router.call(req.with_peer_addr(peer)).await)
+        };
+        let response = match ticket.within(work).await {
+            Some(Ok(response)) => response,
+            Some(Err(e)) => return conn.refuse(&e).await,
+            // The body may be partly read: answer, then close.
+            None => {
+                reply.keep_alive = false;
+                admission::timed_out()
+            }
+        };
+        // The place is held until the response head is ready, not while a
+        // streamed body is sent.
+        drop(ticket);
         let reusable = conn.respond(response, reply, stop).await;
         if !reusable {
             return;

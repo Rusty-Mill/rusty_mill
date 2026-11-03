@@ -1,20 +1,25 @@
 //! CSPRNG (RFC v2 R5+, D15, first Security surface slice): `BCryptGenRandom`
 //! with the system preferred RNG, Windows' equivalent of Linux's
 //! `getrandom(2)` (see `platform::security`'s module doc comment).
+//!
+//! Also the user identity of a process's token ([`UserSid`]) and the
+//! owner-only DACL ([`restrict_to_owner`]) that together stand in for
+//! Unix's `SO_PEERCRED` uid check and `0600` socket file. Neither has a
+//! `rusty_win32` binding, so both stay on windows-sys under `track-w`.
 
 #![allow(unsafe_code)]
 
 use std::ffi::OsStr;
+use std::path::Path;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 
-// Fully migrated under `track-w` (D-15): with every family in this
-// module routed through `rusty_win32`, the windows-sys surface is
-// genuinely unreferenced here rather than merely unused-by-accident.
-#[cfg(not(feature = "track-w"))]
+// The CSPRNG, credential and trust-anchor families route through
+// `rusty_win32` under `track-w`; the identity and DACL calls below do
+// not, so the windows-sys surface stays referenced in both arms.
 use crate::ffi::win32_surface as w;
 use crate::sys::errmap::{self, nt_err};
-#[cfg(not(feature = "track-w"))]
+use crate::sys::handle::OwnedWinHandle;
 use crate::util::wide::to_wide_nul;
 
 /// Fill `buf` with `BCryptGenRandom(NULL, buf, buf.len(), BCRYPT_USE_SYSTEM_PREFERRED_RNG)`.
@@ -317,4 +322,245 @@ pub fn load_anchors() -> Result<Vec<Vec<u8>>> {
         ));
     }
     Ok(anchors)
+}
+
+/// The user SID from a process token's `TokenUser`, in its own buffer.
+///
+/// The buffer is `u64`s so the `TOKEN_USER` header at its start (which
+/// holds a pointer) is aligned; the SID it points to lives later in the
+/// same buffer, so the pointer stays valid as long as `self` does.
+pub struct UserSid {
+    buf: Vec<u64>,
+}
+
+impl UserSid {
+    /// The SID of the user this process runs as.
+    pub fn current() -> Result<Self> {
+        // SAFETY: `GetCurrentProcess` takes no arguments and returns a
+        // pseudo handle that is always valid in this process and needs
+        // no close.
+        let process = unsafe { w::GetCurrentProcess() };
+        // SAFETY: the pseudo handle above is valid for the whole call.
+        unsafe { Self::of_process(process) }
+    }
+
+    /// The SID of the user process `pid` runs as. Fails if the process
+    /// does not exist or this process may not query it.
+    pub fn of_pid(pid: u32) -> Result<Self> {
+        // SAFETY: `pid` may name no process; `OpenProcess` reports that
+        // as a null return, checked below.
+        let raw = unsafe { w::OpenProcess(w::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        // SAFETY: `raw` is a failure sentinel or a fresh handle that
+        // nothing else owns.
+        let process = unsafe { OwnedWinHandle::from_raw(raw) }
+            .ok_or_else(|| errmap::last_win32_err("OpenProcess", OsStr::new("")))?;
+        // SAFETY: `process` is open for the whole call.
+        unsafe { Self::of_process(process.as_raw()) }
+    }
+
+    /// # Safety
+    /// `process` must be a valid process handle (or the current-process
+    /// pseudo handle) with `PROCESS_QUERY_LIMITED_INFORMATION` access.
+    unsafe fn of_process(process: w::HANDLE) -> Result<Self> {
+        let mut raw: w::HANDLE = std::ptr::null_mut();
+        // SAFETY: `process` is valid per this function's contract; `raw`
+        // is a valid out-pointer.
+        if unsafe { w::OpenProcessToken(process, w::TOKEN_QUERY, &mut raw) } == 0 {
+            return Err(errmap::last_win32_err("OpenProcessToken", OsStr::new("")));
+        }
+        // SAFETY: the call succeeded, so `raw` is a fresh token handle
+        // that nothing else owns.
+        let token = unsafe { OwnedWinHandle::from_raw(raw) }
+            .ok_or_else(|| errmap::last_win32_err("OpenProcessToken", OsStr::new("")))?;
+
+        let mut len: u32 = 0;
+        // SAFETY: a null buffer of length 0 asks only for the size,
+        // written to `len`; the expected failure is checked below.
+        let ok = unsafe {
+            w::GetTokenInformation(
+                token.as_raw(),
+                w::TokenUser,
+                std::ptr::null_mut(),
+                0,
+                &mut len,
+            )
+        };
+        // SAFETY: `GetLastError` has no preconditions.
+        if ok != 0 || unsafe { w::GetLastError() } != w::ERROR_INSUFFICIENT_BUFFER {
+            return Err(errmap::last_win32_err(
+                "GetTokenInformation",
+                OsStr::new(""),
+            ));
+        }
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        // SAFETY: `buf` is writable for at least `len` bytes and outlives
+        // the call; `len` is a valid out-pointer.
+        let ok = unsafe {
+            w::GetTokenInformation(
+                token.as_raw(),
+                w::TokenUser,
+                buf.as_mut_ptr().cast(),
+                len,
+                &mut len,
+            )
+        };
+        if ok == 0 {
+            return Err(errmap::last_win32_err(
+                "GetTokenInformation",
+                OsStr::new(""),
+            ));
+        }
+        Ok(Self { buf })
+    }
+
+    fn as_psid(&self) -> w::PSID {
+        // SAFETY: `buf` was filled by a successful `TokenUser` query, so
+        // it starts with an aligned, initialized `TOKEN_USER`.
+        unsafe { (*self.buf.as_ptr().cast::<w::TOKEN_USER>()).User.Sid }
+    }
+
+    /// The SID in string form (`S-1-5-21-...`).
+    pub fn to_sid_string(&self) -> Result<String> {
+        let mut raw: windows_sys::core::PWSTR = std::ptr::null_mut();
+        // SAFETY: `as_psid` points at a valid SID inside `self.buf`;
+        // `raw` is a valid out-pointer for the `LocalAlloc`ed string.
+        if unsafe { w::ConvertSidToStringSidW(self.as_psid(), &mut raw) } == 0 {
+            return Err(errmap::last_win32_err(
+                "ConvertSidToStringSidW",
+                OsStr::new(""),
+            ));
+        }
+        // SAFETY: on success `raw` is a NUL-terminated UTF-16 string;
+        // the length scan stops at that NUL, and the slice is copied
+        // before the string is freed.
+        let text = unsafe {
+            let mut n = 0;
+            while *raw.add(n) != 0 {
+                n += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(raw, n))
+        };
+        // SAFETY: `raw` was allocated by `ConvertSidToStringSidW`, whose
+        // contract is a single `LocalFree`.
+        unsafe {
+            w::LocalFree(raw.cast());
+        }
+        Ok(text)
+    }
+}
+
+impl PartialEq for UserSid {
+    fn eq(&self, other: &Self) -> bool {
+        // SAFETY: both pointers name valid SIDs inside their buffers,
+        // which outlive the call.
+        unsafe { w::EqualSid(self.as_psid(), other.as_psid()) != 0 }
+    }
+}
+
+/// A security descriptor allocated by
+/// `ConvertStringSecurityDescriptorToSecurityDescriptorW`, freed on drop.
+struct LocalSecurityDescriptor(w::PSECURITY_DESCRIPTOR);
+
+impl Drop for LocalSecurityDescriptor {
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from a successful conversion, whose
+        // contract is a single `LocalFree`.
+        unsafe {
+            w::LocalFree(self.0);
+        }
+    }
+}
+
+/// Replace `path`'s DACL with one protected entry granting full access
+/// to the current user's SID, so the DACL grants no other account any
+/// access.
+///
+/// This is not full isolation from administrators: the file's owner keeps
+/// its implicit `READ_CONTROL` and `WRITE_DAC` whatever the DACL says, so
+/// an owner other than the current user (an elevated process's files are
+/// owned by the Administrators group) can rewrite the DACL, and an
+/// administrator can take ownership. The SID is the user's, not the `OW`
+/// owner-rights alias, for the same reason: `OW` would name that group.
+///
+/// Applied with `SetSecurityInfo(SE_FILE_OBJECT)` on a handle opened with
+/// `FILE_FLAG_OPEN_REPARSE_POINT`: an `AF_UNIX` socket file is a reparse
+/// point, and path-based calls that follow it fail.
+pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    let sid = UserSid::current()?.to_sid_string()?;
+    let sddl = to_wide_nul(OsStr::new(&format!("D:P(A;;FA;;;{sid})")));
+    let mut raw: w::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated and outlives the call; `raw` is a
+    // valid out-pointer; the size out-pointer is optional.
+    let ok = unsafe {
+        w::ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            w::SDDL_REVISION_1,
+            &mut raw,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 || raw.is_null() {
+        return Err(errmap::last_win32_err(
+            "ConvertStringSecurityDescriptorToSecurityDescriptorW",
+            OsStr::new(""),
+        ));
+    }
+    let descriptor = LocalSecurityDescriptor(raw);
+
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut dacl: *mut w::ACL = std::ptr::null_mut();
+    // SAFETY: `descriptor` holds a valid descriptor; the out-pointers are
+    // valid. `dacl` points into `descriptor`, which outlives its use below.
+    let ok = unsafe {
+        w::GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted)
+    };
+    if ok == 0 || present == 0 || dacl.is_null() {
+        return Err(errmap::last_win32_err(
+            "GetSecurityDescriptorDacl",
+            OsStr::new(""),
+        ));
+    }
+
+    let wide = to_wide_nul(path.as_os_str());
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the
+    // security attributes and template are optional and null.
+    let raw = unsafe {
+        w::CreateFileW(
+            wide.as_ptr(),
+            w::WRITE_DAC | w::READ_CONTROL,
+            w::FILE_SHARE_READ | w::FILE_SHARE_WRITE | w::FILE_SHARE_DELETE,
+            std::ptr::null(),
+            w::OPEN_EXISTING,
+            w::FILE_FLAG_OPEN_REPARSE_POINT | w::FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: `raw` is a failure sentinel or a fresh handle that nothing
+    // else owns.
+    let file = unsafe { OwnedWinHandle::from_raw(raw) }
+        .ok_or_else(|| errmap::last_win32_err("CreateFileW", path.as_os_str()))?;
+    // SAFETY: `file` is open with `WRITE_DAC | READ_CONTROL`; `dacl` is a
+    // valid ACL inside `descriptor`, which outlives the call; the owner,
+    // group and SACL are not being set, so their pointers are null.
+    let code = unsafe {
+        w::SetSecurityInfo(
+            file.as_raw(),
+            w::SE_FILE_OBJECT,
+            w::DACL_SECURITY_INFORMATION | w::PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null(),
+        )
+    };
+    if code != 0 {
+        return Err(PlatformError::new(
+            errmap::kind_of_win32(code),
+            OsCode::Win32(code),
+            "SetSecurityInfo",
+        )
+        .with_path(path.as_os_str()));
+    }
+    Ok(())
 }

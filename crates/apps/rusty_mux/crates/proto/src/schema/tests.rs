@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use rusty_mux_core::{BlockId, Size};
+use rusty_mux_core::{BlockId, ClientId, EntityId, SessionId, Size, WindowId};
 use rusty_uuid::Uuid;
 
 use super::*;
@@ -18,6 +18,8 @@ fn sample(ty: Ty) -> Value {
         Ty::Bytes => Value::Bytes(b"ls\r".to_vec()),
         Ty::Cells => Value::Cells(80),
         Ty::Lines => Value::Lines(0),
+        Ty::Words => Value::Words(vec!["-c".into(), "exit 3".into()]),
+        Ty::Flag => Value::Flag(true),
     }
 }
 
@@ -25,7 +27,18 @@ fn samples(method: &Method) -> Vec<(&'static str, Value)> {
     method
         .params
         .iter()
-        .map(|p| (p.name, sample(p.ty)))
+        .map(|p| match p.name {
+            // Text, but one of four words.
+            "side" => (p.name, Value::Text("right".into())),
+            "axis" => (p.name, Value::Text("rows".into())),
+            "toward" => (p.name, Value::Text("next".into())),
+            // A number, but a share from 1 to 99.
+            "percent" => (p.name, Value::Lines(30)),
+            // Text, but a colour.
+            "foreground" | "background" | "cursor" => (p.name, Value::Text("#102030".into())),
+            "palette" => (p.name, Value::Words(vec!["1=#cc0000".into()])),
+            _ => (p.name, sample(p.ty)),
+        })
         .collect()
 }
 
@@ -73,12 +86,23 @@ fn catalog_covers_each_request_type_once() {
     let ty = |m: &Method| encode(&m.request(1, &samples(m)).expect(m.name)).expect("encode")[4];
     let (block, other): (Vec<&Method>, Vec<&Method>) =
         CATALOG.iter().partition(|m| m.is_block_method());
+    let (renames, other): (Vec<&Method>, Vec<&Method>) = other
+        .into_iter()
+        .partition(|m| m.name.starts_with("rename-"));
     let types: Vec<u8> = other.iter().map(|m| ty(m)).collect();
     let unique: BTreeSet<u8> = types.iter().copied().collect();
     assert_eq!(unique.len(), types.len(), "two methods build one type");
-    // 0x0d was Capture; 0x0f is BlockCall.
-    assert_eq!(unique, (0x02..=0x0e).filter(|t| *t != 0x0d).collect());
+    // 0x0d was Capture; 0x0f is BlockCall, 0x10 Rename. 0x15, OpenDatagram,
+    // is the attach client's own, not an agent's; 0x16 is Whoami, 0x17
+    // SelectWindow, 0x18 ReloadConfig, 0x19 to 0x1d the layout edits,
+    // 0x1e and 0x1f focus, 0x20 NameSession.
+    let expected = (0x02..=0x14)
+        .filter(|t| ![0x0d, 0x0f, 0x10].contains(t))
+        .chain(0x16..=0x20);
+    assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
+    assert_eq!(renames.len(), 4);
+    assert!(renames.iter().all(|m| ty(m) == 0x10));
 }
 
 #[test]
@@ -92,17 +116,55 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
         block_methods,
         [
             "terminal.format",
+            "terminal.send-keys",
             "terminal.pwd",
             "terminal.title",
-            "terminal.status"
+            "terminal.status",
+            "terminal.process",
+            "terminal.size",
+            "terminal.reset",
+            "terminal.set-theme",
+            "terminal.modes",
+            "terminal.clear",
+            "terminal.shell"
         ]
     );
+    let control = ["terminal.size", "terminal.reset", "terminal.set-theme"];
+    let more = ["terminal.modes", "terminal.clear"];
     for name in block_methods {
         let method = block_method(name).expect(name);
         assert_eq!(method.params[0].ty, Ty::Id(Entity::Block), "{name}");
-        assert_eq!(method.needs, Features::BLOCK_CALL, "{name}");
-        assert_eq!(method.returns, Returns::Text, "{name}");
+        let needs = match (control.contains(&name), more.contains(&name), name) {
+            (true, _, _) => Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL),
+            (_, true, _) => Features::BLOCK_CALL.union(Features::TERMINAL_MORE),
+            (_, _, "terminal.shell") => Features::BLOCK_CALL.union(Features::TERMINAL_SHELL),
+            _ => Features::BLOCK_CALL,
+        };
+        assert_eq!(method.needs, needs, "{name}");
+        let returns = match name {
+            "terminal.send-keys" => Returns::Unanswered,
+            "terminal.reset" | "terminal.set-theme" | "terminal.clear" => Returns::Nothing,
+            _ => Returns::Text,
+        };
+        assert_eq!(method.returns, returns, "{name}");
     }
+    // A theme is checked whole before anything is sent.
+    let theme = method("terminal.set-theme").expect("set-theme");
+    let block = ("block", Value::Id(id(1)));
+    assert!(matches!(
+        theme.request(1, std::slice::from_ref(&block)),
+        Err(CallError::Invalid {
+            param: "palette",
+            ..
+        })
+    ));
+    assert!(matches!(
+        theme.request(1, &[block, ("background", Value::Text("red".into()))]),
+        Err(CallError::Invalid {
+            param: "background",
+            ..
+        })
+    ));
     let format = method("terminal.format").expect("format");
     let args = [("history", Value::Lines(3)), ("block", Value::Id(id(1)))];
     assert_eq!(
@@ -129,7 +191,7 @@ fn only_create_methods_return_an_id() {
         let creates = matches!(method.returns, Returns::Created(_));
         assert_eq!(
             creates,
-            method.name.starts_with("create-"),
+            method.name.starts_with("create-") || method.name == "split-block",
             "{}",
             method.name
         );
@@ -137,23 +199,168 @@ fn only_create_methods_return_an_id() {
 }
 
 #[test]
-fn only_input_goes_unanswered() {
+fn only_writes_go_unanswered() {
     let unanswered: Vec<&str> = CATALOG
         .iter()
         .filter(|m| m.returns == Returns::Unanswered)
         .map(|m| m.name)
         .collect();
-    assert_eq!(unanswered, ["input"]);
+    assert_eq!(unanswered, ["input", "terminal.send-keys"]);
 }
 
 #[test]
 fn methods_need_the_features_their_messages_are_gated_by() {
     let needs = |name| method(name).expect(name).needs;
-    assert_eq!(needs("attach"), Features::CHECKPOINT_V3);
+    assert_eq!(needs("attach"), Features::CHECKPOINT_V6);
     assert_eq!(needs("sync"), Features::SYNC);
     assert_eq!(needs("terminal.format"), Features::BLOCK_CALL);
     assert_eq!(needs("list"), Features::INSPECT);
+    assert_eq!(needs("whoami"), Features::IDENTITY);
     assert_eq!(needs("create-session"), Features::NONE);
+    assert_eq!(needs("create-block"), Features::NONE);
+    for name in [
+        "rename-session",
+        "rename-window",
+        "rename-block",
+        "rename-client",
+        "disconnect-client",
+    ] {
+        assert_eq!(needs(name), Features::LABELS, "{name}");
+    }
+    for name in ["split-block", "zoom-block", "unzoom-window"] {
+        assert_eq!(needs(name), Features::LAYOUT, "{name}");
+    }
+    assert_eq!(needs("select-window"), Features::ACTIVE_WINDOW);
+    for name in [
+        "resize-split",
+        "swap-blocks",
+        "move-block",
+        "detach-block",
+        "move-window",
+    ] {
+        assert_eq!(needs(name), Features::LAYOUT_EDIT, "{name}");
+    }
+    for name in ["focus-block", "move-focus"] {
+        assert_eq!(needs(name), Features::FOCUS, "{name}");
+    }
+    assert_eq!(needs("reload-config"), Features::CONFIG_RELOAD);
+    assert_eq!(needs("name-session"), Features::NAME_SESSION);
+}
+
+#[test]
+fn each_rename_names_its_own_kind() {
+    let cases = [
+        (
+            "rename-session",
+            EntityId::Session(SessionId::from_uuid(id(1))),
+        ),
+        (
+            "rename-window",
+            EntityId::Window(WindowId::from_uuid(id(1))),
+        ),
+        ("rename-block", EntityId::Block(BlockId::from_uuid(id(1)))),
+        (
+            "rename-client",
+            EntityId::Client(ClientId::from_uuid(id(1))),
+        ),
+    ];
+    for (name, target) in cases {
+        let method = method(name).expect(name);
+        let entity = method.params[0].name;
+        let args = [
+            ("name", Value::Text("x".into())),
+            (entity, Value::Id(id(1))),
+        ];
+        assert_eq!(
+            method.request(4, &args),
+            Ok(Message::Rename {
+                req: 4,
+                target,
+                name: "x".into()
+            }),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn optional_parameters_add_their_features_only_when_given() {
+    let create = method("create-block").expect("create-block");
+    assert_eq!(create.needs_for(["window", "cols", "rows"]), Features::NONE);
+    assert_eq!(create.needs_for(["window", "cwd"]), Features::LAUNCH);
+    assert_eq!(create.needs_for(["command", "arg"]), Features::LAUNCH);
+    let optional: Vec<&str> = CATALOG
+        .iter()
+        .flat_map(|m| m.params)
+        .filter(|p| matches!(p.presence, Presence::Optional { .. }))
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(
+        optional,
+        [
+            "command",
+            "arg",
+            "cwd",
+            "command",
+            "arg",
+            "cwd",
+            "beside",
+            "trim",
+            "unwrap",
+            "vt",
+            "foreground",
+            "background",
+            "cursor",
+            "palette"
+        ]
+    );
+    let format = method("terminal.format").expect("format");
+    assert_eq!(format.needs_for(["block", "history"]), Features::BLOCK_CALL);
+    assert_eq!(
+        format.needs_for(["history", "vt"]),
+        Features::BLOCK_CALL.union(Features::CAPTURE)
+    );
+}
+
+#[test]
+fn create_block_launches_a_program_only_with_a_command() {
+    let create = method("create-block").expect("create-block");
+    let base = || {
+        vec![
+            ("window", Value::Id(id(1))),
+            ("cols", Value::Cells(80)),
+            ("rows", Value::Cells(24)),
+        ]
+    };
+    let launch = |extra: Vec<(&'static str, Value)>| {
+        let mut args = base();
+        args.extend(extra);
+        match create.request(1, &args) {
+            Ok(Message::CreateBlock { launch, .. }) => Ok(launch),
+            Ok(other) => panic!("{other:?}"),
+            Err(e) => Err(e),
+        }
+    };
+    assert_eq!(launch(Vec::new()), Ok(Launch::default()));
+    assert_eq!(
+        launch(vec![
+            ("cwd", Value::Text("/srv".into())),
+            ("command", Value::Text("make".into())),
+            ("arg", Value::Words(vec!["-j".into(), "4".into()])),
+        ]),
+        Ok(Launch {
+            program: Some(Program {
+                command: "make".into(),
+                args: vec!["-j".into(), "4".into()],
+            }),
+            cwd: Some("/srv".into()),
+        })
+    );
+    assert!(matches!(
+        launch(vec![("arg", Value::Words(vec!["x".into()]))]),
+        Err(CallError::Invalid { param: "arg", .. })
+    ));
+    assert_eq!(Ty::Words.parse("a b"), Ok(Value::Words(vec!["a b".into()])));
 }
 
 #[test]
@@ -181,6 +388,8 @@ fn parses_text_arguments() {
     assert_eq!(Ty::Bytes.parse("é"), Ok(Value::Bytes("é".into())));
     assert_eq!(Ty::Cells.parse("65535"), Ok(Value::Cells(u16::MAX)));
     assert_eq!(Ty::Lines.parse("0"), Ok(Value::Lines(0)));
+    assert_eq!(Ty::Flag.parse("true"), Ok(Value::Flag(true)));
+    assert_eq!(Ty::Flag.parse("false"), Ok(Value::Flag(false)));
     for (ty, text) in [
         (block, "not-a-uuid"),
         (Ty::Cells, "0"),
@@ -189,6 +398,8 @@ fn parses_text_arguments() {
         (Ty::Cells, ""),
         (Ty::Lines, "-1"),
         (Ty::Lines, "4294967296"),
+        (Ty::Flag, "yes"),
+        (Ty::Flag, ""),
     ] {
         assert_eq!(
             ty.parse(text),
@@ -248,4 +459,123 @@ fn rejects_a_zero_size_naming_the_zero_side() {
 fn unknown_method_is_none() {
     assert!(method("hello").is_none());
     assert!(method("").is_none());
+}
+
+#[test]
+fn split_names_its_side_and_launch() {
+    let method = method("split-block").expect("split-block");
+    let args = [
+        ("block", Value::Id(id(1))),
+        ("side", Value::Text("up".into())),
+        ("command", Value::Text("top".into())),
+    ];
+    assert_eq!(
+        method.request(3, &args),
+        Ok(Message::Split {
+            req: 3,
+            block: BlockId::from_uuid(id(1)),
+            side: rusty_mux_core::Side::Up,
+            launch: Launch {
+                program: Some(Program {
+                    command: "top".into(),
+                    args: Vec::new()
+                }),
+                cwd: None
+            },
+        })
+    );
+    let bad = [
+        ("block", Value::Id(id(1))),
+        ("side", Value::Text("north".into())),
+    ];
+    assert!(matches!(
+        method.request(3, &bad),
+        Err(CallError::Invalid { param: "side", .. })
+    ));
+    assert_eq!(
+        method.needs_for(["block", "side", "cwd"]),
+        Features::LAYOUT.union(Features::LAUNCH)
+    );
+}
+
+#[test]
+fn layout_edits_check_their_axis_share_and_neighbour() {
+    let block = ("block", Value::Id(id(1)));
+    let resize = method("resize-split").expect("resize-split");
+    let args = |axis: &str, percent| {
+        [
+            block.clone(),
+            ("axis", Value::Text(axis.into())),
+            ("percent", Value::Lines(percent)),
+        ]
+    };
+    assert_eq!(
+        resize.request(1, &args("cols", 25)),
+        Ok(Message::ResizeSplit {
+            req: 1,
+            block: BlockId::from_uuid(id(1)),
+            axis: Axis::Columns,
+            share: Share::new(25).expect("in range"),
+        })
+    );
+    for percent in [0, 100, 256] {
+        assert!(
+            matches!(
+                resize.request(1, &args("rows", percent)),
+                Err(CallError::Invalid {
+                    param: "percent",
+                    ..
+                })
+            ),
+            "{percent}"
+        );
+    }
+    assert!(matches!(
+        resize.request(1, &args("left", 50)),
+        Err(CallError::Invalid { param: "axis", .. })
+    ));
+    let move_block = method("move-block").expect("move-block");
+    let side = ("side", Value::Text("up".into()));
+    assert_eq!(
+        move_block.request(2, &[block.clone(), side.clone()]),
+        Ok(Message::MoveBlock {
+            req: 2,
+            block: BlockId::from_uuid(id(1)),
+            beside: None,
+            side: Side::Up,
+        })
+    );
+    assert_eq!(
+        move_block.request(2, &[block, ("beside", Value::Id(id(2))), side]),
+        Ok(Message::MoveBlock {
+            req: 2,
+            block: BlockId::from_uuid(id(1)),
+            beside: Some(BlockId::from_uuid(id(2))),
+            side: Side::Up,
+        })
+    );
+}
+
+#[test]
+fn a_defaulted_parameter_adds_its_features_only_when_left_out() {
+    let create = method("create-session").expect("create-session");
+    let defaulted: Vec<&str> = CATALOG
+        .iter()
+        .flat_map(|m| m.params)
+        .filter(|p| matches!(p.presence, Presence::Defaulted { .. }))
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(defaulted, ["name"]);
+    assert_eq!(create.needs_for(["name"]), Features::NONE);
+    assert_eq!(create.needs_for([]), Features::SESSION_NAMES);
+    assert_eq!(create.all_needs(), Features::SESSION_NAMES);
+    assert_eq!(
+        create.request(4, &[]),
+        Ok(Message::CreateSession {
+            req: 4,
+            name: String::new()
+        })
+    );
+    let launch = method("create-block").expect("create-block");
+    assert_eq!(launch.all_needs(), Features::LAUNCH);
 }

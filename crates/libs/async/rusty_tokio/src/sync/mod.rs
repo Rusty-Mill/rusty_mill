@@ -15,6 +15,7 @@ mod once_cell;
 mod rwlock;
 mod semaphore;
 mod set_once;
+mod wait_list;
 
 pub use barrier::{Barrier, BarrierWaitResult};
 // tokio-util's, not tokio's (#901): here so a migration needs no second crate.

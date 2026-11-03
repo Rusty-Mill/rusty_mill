@@ -1,0 +1,25 @@
+[package]
+name = "rusty_crdt"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "Sequence CRDT (RGA): sync, no I/O, no dependencies, generic over id and element"
+
+[package.metadata.rusty_mill]
+layer = "foundation"
+
+# ADR-0002 Tier S: no normal or build dependencies.
+[dependencies]
+
+[dev-dependencies]
+# Independent test oracle for the CRDT laws (dev-only, allowed in Tier S).
+proptest = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

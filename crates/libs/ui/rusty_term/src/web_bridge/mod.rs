@@ -442,8 +442,8 @@ mod tests {
     }
 
     impl BackendHandle for MockHandle {
-        fn read(&mut self) -> Result<Vec<u8>, Error> {
-            Ok(Vec::new())
+        fn read_into(&mut self, _buf: &mut [u8]) -> Result<usize, Error> {
+            Ok(0)
         }
         fn write(&mut self, data: &[u8]) -> Result<(), Error> {
             std::thread::sleep(self.write_delay);

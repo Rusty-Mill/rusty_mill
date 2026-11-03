@@ -205,6 +205,11 @@ pub use libc::F_DUPFD_CLOEXEC;
 // own `LAST_ERRNO` thread-local commentary elsewhere already flags).
 pub use libc::{getgrgid_r, getpwuid_r, group, passwd, ERANGE};
 
+// name → account and its groups (rusty_mux C26 login mode): starting a
+// server as an account needs its uid, gid, home, shell and supplementary
+// groups, from the same NSS lookups as above.
+pub use libc::{getgrouplist, getpwnam_r};
+
 // D-Bus transport (RFC v2 R5+, D15, Phase 6 item 2, rustils#77): `getuid`
 // is SASL `EXTERNAL`'s own credential — the ASCII decimal UID, hex-
 // encoded, is the entire authentication payload for a local unix-socket

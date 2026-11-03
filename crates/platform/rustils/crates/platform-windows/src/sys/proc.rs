@@ -904,3 +904,13 @@ pub fn is_alive(pid: u32) -> Result<bool> {
     }
     Ok(code == w::STILL_ACTIVE as u32)
 }
+
+/// Whether process `pid` runs as the same user as this process: the
+/// `TokenUser` SIDs of both tokens compared with `EqualSid`. `Err` when
+/// the process does not exist or its token cannot be read (for example
+/// a protected system process), which a caller deciding access should
+/// treat as "no".
+pub fn is_current_user(pid: u32) -> Result<bool> {
+    use crate::sys::security::UserSid;
+    Ok(UserSid::of_pid(pid)? == UserSid::current()?)
+}

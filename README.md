@@ -62,21 +62,16 @@ their arrival is placed here, alongside the broader crate build-out,
 without a specific date.
 
 A ninth merge brought in `baileyrd/rusty_remind_me`, a persistent-memory
-MCP server and Claude Code plugin (six crates: `remind_me_core`,
-`remind_me_mcp`, `remind_me_api`, `remind_me_remote`, `remind_me_hub`, and
-the `rusty-remind-me` binary), under `crates/apps/rusty_remind_me/`, by the
-same `git subtree` process. It is the first merged product that *ships*
-releases, so it brought its distribution with it:
-`.github/workflows/remind-me-release.yml` publishes
-`rusty-remind-me-vX.Y.Z` releases from here, and this repository's root
-`.claude-plugin/marketplace.json` lists its plugin
-(`claude plugin marketplace add Rusty-Mill/rusty_mill`) — see ADR-0004.
-Its `[workspace.package]` collided with this root's (version, license), so
-its crates carry literal fields like `rusty_db`'s; `rusqlite` moved
-`0.31` → `0.39` (`links = "sqlite3"` again) and `rmcp` `3.0.1` → `3.1.4`.
-Its `--all-features` build (whisper.cpp, usearch, the AWS SDK, libunwind)
-is excluded from the generic clippy/test jobs in favour of dedicated
-`remind-me*` jobs running the feature matrix it was verified with.
+MCP server and Claude Code plugin, under `crates/apps/rusty_remind_me/`, by
+the same `git subtree` process, and released it from here as
+`rusty-remind-me-vX.Y.Z` (ADR-0004). It was the one product split back out:
+since 2026-10-28 it lives in
+[`Rusty-Mill/rusty-remind-me`](https://github.com/Rusty-Mill/rusty-remind-me)
+with its history, releases bare `vX.Y.Z` tags from there, and builds against
+this repository's crates pinned to a `libs-*` tag (ADR-0013). This root's
+`.claude-plugin/marketplace.json` still lists its plugin, sourced from that
+repository, and `.claude/hooks/remind-me-capture.py` stays here as this
+repository's cloud session capture hook.
 
 ## Crates
 
@@ -116,8 +111,8 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`rusty_routine`](crates/libs/protocol/rusty_routine) | `crates/libs/protocol/rusty_routine` | Routines for AG-UI agents: five-field cron in UTC, a `Routine` that builds each firing's `RunAgentInput` and is disabled after too many consecutive failures, a JSON routines file, and a runner on `rusty_agui`'s client (ADR-0007 follow-ons step 6) |
 | [`rusty_channel`](crates/libs/protocol/rusty_channel) | `crates/libs/protocol/rusty_channel` | Chat channels for AG-UI agents: a sans-IO `Channel` trait (inbound message to `RunAgentInput`, reply events back), a `Thread` per conversation, Slack, Microsoft Teams and SMS (Twilio) adapters, and a bot runner on `rusty_serve` (ADR-0007 follow-ons step 5) |
 | [`rusty_a2a`](crates/libs/protocol/rusty_a2a) | `crates/libs/protocol/rusty_a2a` | Reusable implementation of the Agent2Agent (A2A) protocol: JSON-RPC/REST/gRPC transports, client and server |
-| [`rusty-mcp`](crates/libs/protocol/rusty_mcp/crates/rusty-mcp) | `crates/libs/protocol/rusty_mcp/crates/rusty-mcp` | Reusable scaffold for building Model Context Protocol servers, built on `rmcp` |
-| [`rusty-mcp-demo`](crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo) | `crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on the `rusty-mcp` scaffold |
+| [`rusty_mcp_middleware`](crates/libs/protocol/rusty_mcp_middleware) | `crates/libs/protocol/rusty_mcp_middleware` | Transport-level building blocks in front of an MCP endpoint: OAuth resource-server auth, W3C trace context, OpenTelemetry, and blocking `rusty_serve` adapters (was `rusty-mcp`) |
+| [`rusty-mcp-demo`](crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo) | `crates/libs/protocol/rusty_mcp/crates/rusty-mcp-demo` | Example MCP server built on `rusty_mcp_server` |
 | [`rusty_journal`](crates/libs/async/rusty_journal) | `crates/libs/async/rusty_journal` | Single-node durable log, built on `rusty_wire` and `rusty_tokio` |
 | [`rusty_url`](crates/foundation/rusty_url) | `crates/foundation/rusty_url` | From-scratch WHATWG URL Standard implementation, aiming for parity with the `url` crate |
 | [`rusty_http`](crates/libs/net/rusty_http) | `crates/libs/net/rusty_http` | Sans-IO HTTP/1.1 message layer and `Url` type, with optional sync/`rusty_tokio`/real-tokio async adapters |
@@ -268,7 +263,7 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`sessionmgr-desktop`](crates/apps/rusty_yirp/crates/sessionmgr-desktop/src-tauri) | `crates/apps/rusty_yirp/crates/sessionmgr-desktop/src-tauri` | sessionmgr's Tauri 2 desktop shell over the daemon socket |
 | [`agentgateway-config`](crates/apps/rusty_agent_gateway/crates/agentgateway-config) | `crates/apps/rusty_agent_gateway/crates/agentgateway-config` | Configuration model, wire-compatible with agentgateway's own `config.yaml` |
 | [`agentgateway-core`](crates/apps/rusty_agent_gateway/crates/agentgateway-core) | `crates/apps/rusty_agent_gateway/crates/agentgateway-core` | Route matching and policy evaluation |
-| [`agentgateway-auth`](crates/apps/rusty_agent_gateway/crates/agentgateway-auth) | `crates/apps/rusty_agent_gateway/crates/agentgateway-auth` | JWT authentication policy, over `rusty-mcp`'s JWKS validator |
+| [`agentgateway-auth`](crates/apps/rusty_agent_gateway/crates/agentgateway-auth) | `crates/apps/rusty_agent_gateway/crates/agentgateway-auth` | JWT authentication policy, over `rusty_mcp_middleware`'s JWKS validator |
 | [`agentgateway-a2a`](crates/apps/rusty_agent_gateway/crates/agentgateway-a2a) | `crates/apps/rusty_agent_gateway/crates/agentgateway-a2a` | A2A method gating and agent-card discovery |
 | [`agentgateway-agui`](crates/apps/rusty_agent_gateway/crates/agentgateway-agui) | `crates/apps/rusty_agent_gateway/crates/agentgateway-agui` | AG-UI run gating (CEL, deny by default) and run audit records |
 | [`agentgateway-llm`](crates/apps/rusty_agent_gateway/crates/agentgateway-llm) | `crates/apps/rusty_agent_gateway/crates/agentgateway-llm` | OpenAI-compatible LLM gateway pillar |
@@ -319,12 +314,6 @@ is excluded from the generic clippy/test jobs in favour of dedicated
 | [`nexus-context`](crates/apps/nexus/crates/nexus-context) | `crates/apps/nexus/crates/nexus-context` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 | [`nexus-protocol`](crates/apps/nexus/crates/nexus-protocol) | `crates/apps/nexus/crates/nexus-protocol` | Nexus: staging library, not yet wired into `nexus-bootstrap` (tracked upstream by nexus#188) |
 | [`rusty_multimodal_db`](crates/apps/rusty_multimodal_db) | `crates/apps/rusty_multimodal_db` | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends, plus a production store, network server, and schema-driven client built on the winning design |
-| [`remind_me_core`](crates/apps/rusty_remind_me/crates/remind_me_core) | `crates/apps/rusty_remind_me/crates/remind_me_core` | rusty_remind_me: memory store, hybrid FTS5/vector search, ACT-R vitality, knowledge graph, wiki, sync client |
-| [`remind_me_mcp`](crates/apps/rusty_remind_me/crates/remind_me_mcp) | `crates/apps/rusty_remind_me/crates/remind_me_mcp` | rusty_remind_me: stdio MCP server exposing the `remind_me_*` tools |
-| [`remind_me_api`](crates/apps/rusty_remind_me/crates/remind_me_api) | `crates/apps/rusty_remind_me/crates/remind_me_api` | rusty_remind_me: REST API and web dashboard |
-| [`remind_me_remote`](crates/apps/rusty_remind_me/crates/remind_me_remote) | `crates/apps/rusty_remind_me/crates/remind_me_remote` | rusty_remind_me: remote MCP connector over Streamable HTTP (`rmcp`), secret-path/bearer or OAuth 2.1 |
-| [`remind_me_hub`](crates/apps/rusty_remind_me/crates/remind_me_hub) | `crates/apps/rusty_remind_me/crates/remind_me_hub` | rusty_remind_me: multi-node sync hub (`rusty-remind-me-hub`), SQLite or Postgres storage |
-| [`rusty-remind-me`](crates/apps/rusty_remind_me/crates/remind_me_cli) | `crates/apps/rusty_remind_me/crates/remind_me_cli` | rusty_remind_me: the `rusty-remind-me` CLI/server binary; also a Claude Code plugin (root `.claude-plugin/marketplace.json`) |
 | [`rusty_sha1`](crates/foundation/rusty_sha1) | `crates/foundation/rusty_sha1` | Zero-dependency SHA-1 (FIPS 180-1) implementation, shared by `rusty_git`'s object hashing and `rusty_term`'s WebSocket handshake |
 | [`rusty_dirs`](crates/foundation/rusty_dirs) | `crates/foundation/rusty_dirs` | Dependency-free per-user config directory lookup (`%APPDATA%`, `$XDG_CONFIG_HOME`, `~/.config`); used by `rusty_term` and `rusty-croc` |
 | [`rusty_percent`](crates/foundation/rusty_percent) | `crates/foundation/rusty_percent` | Hand-rolled, dependency-free percent-encoding for URL components and query strings (RFC 3986 unreserved encode; lenient, form and UTF-8-checked decode); the one copy behind the HTTP servers, gateways and MCP/LSP URI handling |

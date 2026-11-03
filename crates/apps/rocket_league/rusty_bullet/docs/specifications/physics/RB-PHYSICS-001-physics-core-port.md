@@ -1,6 +1,6 @@
 # RB-PHYSICS-001 — Physics Core Port
 
-- Version: 0.162.0
+- Version: 0.163.0
 - Status: In Progress (sphere-vs-plane, box-vs-plane, sphere-vs-box
   (ball-vs-car), box-vs-box (car-vs-car), body-vs-arena-wall, and
   ball-and-car-vs-curved-fillet collision all implemented, tested, and wired into a
@@ -8317,6 +8317,34 @@ See [docs/traceability/TRACEABILITY.md](../../traceability/TRACEABILITY.md).
     packets), the ball's missing drag while it falls (a tenth of a unit by tick 15).
   - **Verification**: `flow` tests (goal line, both goals, the phase lengths), `Env` tests (a goal shot
     through all phases, the ball's fall against the recorded heights); 18 tests in `rb_env`.
+
+- `RB-PHYSICS-001-FR-161` (the ball spins about its 91.25 uu sphere; implemented and verified on
+  `probe_ball_fast_6500`, board #197): the standard ball's inertia is that of RocketSim's 91.25 uu
+  sphere (`btSphereShape::calculateLocalInertia`, 0.4 m r^2), and its combined world contact's lever arm
+  (FR-108) runs to that sphere's surface, Bullet's `rel_pos1`, not to the `BALL_RADIUS` contact sphere
+  1.9 uu further out. Its contacts, rest height and the car-ball and wheel paths (FR-125, FR-129) are
+  unchanged.
+  - Why: a sliding ball gains 2.5 x dv / 91.25 of spin for the speed dv friction takes off it. The game
+    spins one up at 0.05190 rad/s a tick for 1.8999 uu/s a tick of friction (`probe_ball_fast_6500`
+    ticks 1 to 100; `PHYSICS-PARITY-VS-ROCKETSIM.md`: 6.228 rad/s^2). About the 93.15 uu sphere the port
+    gained 0.05088, 2% slow; now 0.05195 for its 1.8962 uu/s of friction.
+  - Golden captures (ball mean / max, uu): `probe_ball_rest_40` 6.49 / 11.07 -> 0.29 / 0.36, `rest_80`
+    2.88 / 8.65 -> 2.13 / 6.40, `probe_ball_roll` 1.38 / 6.85 -> 1.20 / 3.43, `probe_ball_wall` 2.22 / 8.35
+    -> 1.48 / 4.69, `ballfuzz_203` 10.27 / 30.78 -> 7.72 / 22.97, `probe_nose_hit_glancing` 1.40 / 4.54 ->
+    1.04 / 2.55; their bounds were lowered. Worse: `ballfuzz_218` max 10.89 -> 13.24 (mean 4.95 -> 4.69),
+    `probe_hit_offset` car max 0.62 -> 1.50 (bound raised to 1.9), `wob_100_200` ball 92.20 / 201.98 ->
+    93.15 / 204.24. `probe_ball_fast_6500` is unchanged (5.68 / 56.84): both balls reach the 6 rad/s cap
+    before the side ramp. Human captures (`human_captures.rs`): `wall-climb-crest` ball 12.09 / 28.03 ->
+    5.03 / 14.16 (bound lowered), `goal-shot-net-entry` ball mean 6.01 -> 4.81 but car max 2.00 -> 2.30,
+    `hit-tick-jump` car max 7.51 -> 12.43 after its hit, whose ball flight is already 1 000 uu off (open;
+    bound raised to 15.5). Car-ball hits move both ways (`airborne-hit` car max 8.61 -> 8.26,
+    `probe_hit_offset` 0.62 -> 1.50): the inertia is RocketSim's, but no capture yet isolates the car's
+    reaction to a hit.
+  - Not changed: a rolling ball still slows 2.1%/s where the game's slows 3.0%/s (`probe_ball_rest_80`),
+    and a sliding one loses 1.8962 uu/s a tick to friction where the game's loses 1.8999.
+  - **Verification**: `world` test `a_sliding_ball_spins_up_about_its_91_25_uu_sphere`; `rb_verify_cli`
+    golden test `a_sliding_ball_spins_up_as_the_games_does` (spin within 0.02 rad/s for 100 ticks from
+    the game's state; 0.0041 now, 0.1019 before).
 
 - `RB-PHYSICS-001-FR-153` (the air bump is for two airborne cars; implemented and
   verified on `bumpag_*` and `tri_chain`; refines FR-143): an airborne bumper on a grounded

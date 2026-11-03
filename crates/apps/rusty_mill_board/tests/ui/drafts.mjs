@@ -28,7 +28,7 @@ await page.goto(BASE);
 await page.waitForSelector(".card");
 await page.fill("#actor", "tester"); // an open board has no credential, so the UI needs a name
 await page.locator(".card", { hasText: "Draft test" }).click();
-const dialog = page.locator("dialog");
+const dialog = page.locator("#dlg");
 const [title, body, tags] = [dialog.locator("input").nth(0), dialog.locator("textarea"), dialog.locator("input").nth(1)];
 const commentBox = dialog.locator("input").nth(2);
 

@@ -8,7 +8,6 @@ mod common;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use common::tonic_oracle as pb;
@@ -54,12 +53,11 @@ impl AuthVerifier for KeyVerifier {
     }
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// A listener on a port of its own, bound before serving so no other test can take the port.
+fn listen() -> (std::net::TcpListener, u16) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
 }
 
 /// An agent with no security.
@@ -105,19 +103,12 @@ async fn start_with_api_key() -> String {
     .await
 }
 
-/// Serves the agent `make` builds for a free port, and returns its URL. A port taken between
-/// being picked and being bound (other tests are picking too) is tried again with another.
+/// Serves the agent `make` builds for a port of its own, and returns its URL.
 async fn serve(make: impl Fn(u16) -> AgentServer) -> String {
-    for _ in 0..20 {
-        let port = free_port();
-        let services = make(port).build();
-        let task = tokio::spawn(async move { services.serve_grpc(([127, 0, 0, 1], port)).await });
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        if !task.is_finished() {
-            return format!("http://127.0.0.1:{port}");
-        }
-    }
-    panic!("no free port to serve on");
+    let (listener, port) = listen();
+    let services = make(port).build();
+    tokio::spawn(async move { services.serve_grpc_on(listener).await.unwrap() });
+    format!("http://127.0.0.1:{port}")
 }
 
 async fn connect(url: String) -> pb::a2a_service_client::A2aServiceClient<Channel> {

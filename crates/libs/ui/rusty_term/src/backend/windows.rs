@@ -13,8 +13,10 @@
 //! wire, so `resize_poll` in `src/runtime/reactor.rs` polls the console size
 //! on a timer and calls [`BackendHandle::set_winsize`] on change.
 
+use crate::backend::cmdline::{self, CmdRules, Reader, locate, split_program};
 use crate::backend::{Backend, BackendHandle};
 use crate::sync::Mutex;
+use platform_windows::winargv;
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, HANDLE,
@@ -29,8 +31,8 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
     GetExitCodeProcess, InitializeProcThreadAttributeList, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-    PROCESS_INFORMATION, STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject,
+    PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    UpdateProcThreadAttribute, WaitForSingleObject,
 };
 
 /// Unit type implementing [`Backend`](crate::backend::Backend) for Windows.
@@ -85,6 +87,8 @@ impl Backend for WindowsBackend {
     ) -> Result<Box<dyn BackendHandle>, std::io::Error> {
         use std::os::windows::ffi::OsStrExt;
 
+        // Built first: a refused argument leaves nothing to clean up.
+        let mut cmdline = command_line(shell, args)?;
         unsafe {
             // Two anonymous pipes. The child reads its input from `input_read`
             // and writes its output to `output_write`; we keep the opposite ends.
@@ -122,6 +126,12 @@ impl Backend for WindowsBackend {
             // Build STARTUPINFOEXW carrying the pseudoconsole attribute.
             let mut si: STARTUPINFOEXW = std::mem::zeroed();
             si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+            // Without this, a parent whose own std handles are redirected
+            // (any `cargo test` or CI run) has them duplicated into the
+            // child, which then writes there instead of the pseudo console.
+            // Null std handles plus this flag stop that; platform-windows'
+            // `sys::pty::spawn_attached` carries the full history.
+            si.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
             let mut attr_size: usize = 0;
             // First call "fails" by design, only to report the required size.
             InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attr_size);
@@ -151,38 +161,6 @@ impl Backend for WindowsBackend {
                 CloseHandle(output_read);
                 return Err(e);
             }
-
-            // The configured shell wins; else honor %COMSPEC%, default cmd.exe.
-            // Bare names (`powershell`, `pwsh`, `wsl`) resolve through the
-            // standard CreateProcessW search path, and arguments pass through
-            // (`wsl -d Ubuntu`, `cmd /K ...`). An unquoted path containing
-            // spaces is ambiguous to CreateProcessW (it would try
-            // `C:\Program.exe` first), so when the whole string names an
-            // existing file we quote it.
-            let shell = shell
-                .map(str::to_owned)
-                .or_else(|| std::env::var("COMSPEC").ok())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "cmd.exe".to_string());
-            let shell = if shell.contains(' ')
-                && !shell.starts_with('"')
-                && std::path::Path::new(&shell).is_file()
-            {
-                format!("\"{shell}\"")
-            } else {
-                shell
-            };
-            // CreateProcessW needs a mutable, null-terminated wide command line.
-            // `shell` may already carry its own args (CreateProcessW parses the
-            // whole string itself); explicit `args` — the caller's pre-split
-            // argv, e.g. a trailing `-- prog arg...` — are appended, each
-            // quoted so the child's argv parser splits them back out unchanged.
-            let mut cmdline: Vec<u16> = std::ffi::OsStr::new(&shell).encode_wide().collect();
-            for arg in args {
-                cmdline.push(' ' as u16);
-                push_quoted_arg(arg, &mut cmdline);
-            }
-            cmdline.push(0);
 
             let cwd_wide: Option<Vec<u16>> = cwd.map(|p| {
                 p.as_os_str()
@@ -278,11 +256,125 @@ impl Backend for WindowsBackend {
     }
 }
 
+/// The NUL-terminated command line ConPTY's `CreateProcessW` gets for
+/// `shell` and the launcher `args`.
+fn command_line(shell: Option<&str>, args: &[String]) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    // Bare names (`powershell`, `pwsh`, `wsl`) resolve through the
+    // standard CreateProcessW search path, and arguments pass through
+    // (`wsl -d Ubuntu`, `cmd /K ...`). An unquoted path containing
+    // spaces is ambiguous to CreateProcessW (it would try
+    // `C:\Program.exe` first), so when the whole string names an
+    // existing file we quote it.
+    let shell = shell_or_default(shell);
+    let (reader, rest_len) = match split_program(&shell, |p| locate(p).is_some()) {
+        Some((program, rest)) => (cmdline::reader(program), rest.encode_utf16().count()),
+        None => (Reader::Crt, 0),
+    };
+    let shell =
+        if shell.contains(' ') && !shell.starts_with('"') && std::path::Path::new(&shell).is_file()
+        {
+            format!("\"{shell}\"")
+        } else {
+            shell
+        };
+    // CreateProcessW needs a mutable, null-terminated wide command line.
+    // `shell` may already carry its own args (CreateProcessW parses the
+    // whole string itself); explicit `args` — the caller's pre-split
+    // argv, e.g. a trailing `-- prog arg...` — are appended, each
+    // quoted for whoever reads them.
+    let mut line: Vec<u16> = std::ffi::OsStr::new(&shell).encode_wide().collect();
+    let params = line.len() - rest_len;
+    push_launcher_args(&mut line, params, reader, args)?;
+    line.push(0);
+    Ok(line)
+}
+
+/// The configured shell, else `%COMSPEC%`, else `cmd.exe`. Shared with the
+/// own-host backend.
+pub(super) fn shell_or_default(shell: Option<&str>) -> String {
+    shell
+        .map(str::to_owned)
+        .or_else(|| std::env::var("COMSPEC").ok())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "cmd.exe".to_string())
+}
+
+/// Appends the launcher `args` to `line`, the command line of a program
+/// read by `reader` whose own parameters start at `params`, each after a
+/// space and quoted for that reader (see `cmdline`'s module doc). For
+/// cmd.exe and batch files an argument cmd can't take safely is refused
+/// with `InvalidInput`: a `%`, CR, LF or NUL, a switch before cmd's own,
+/// or what the shell's [`CmdRules`] rule out.
+pub(super) fn push_launcher_args(
+    line: &mut Vec<u16>,
+    params: usize,
+    reader: Reader,
+    args: &[String],
+) -> std::io::Result<()> {
+    if reader == Reader::Crt {
+        for arg in args {
+            line.push(u16::from(b' '));
+            push_quoted_arg(arg, line);
+        }
+        return Ok(());
+    }
+    let mut rules = cmdline::cmd_rules(line, params, reader);
+    let mut switched = rules.switched;
+    for arg in args {
+        let wide: Vec<u16> = arg.encode_utf16().collect();
+        if !switched && reader == Reader::Cmd {
+            // An option before the switch is cmd's own, as `/v:on` is.
+            rules.delayed |= cmdline::delayed_expansion(&wide);
+        }
+        if !switched && cmdline::is_command_switch(arg) {
+            switched = true;
+        } else if !switched && cmdline::has_command_switch(&wide) {
+            return Err(cmd_refused(
+                arg,
+                &"it holds a switch that would start a command",
+            ));
+        }
+        line.push(u16::from(b' '));
+        push_cmd_arg(arg, rules, line)?;
+    }
+    if rules.wrap && !args.is_empty() {
+        cmdline::keep_command_quotes(line, params);
+    }
+    Ok(())
+}
+
+/// Appends `arg` for cmd.exe: bare when it is one plain word, else by
+/// cmd's rules, as the shell's `rules` allow.
+fn push_cmd_arg(arg: &str, rules: CmdRules, out: &mut Vec<u16>) -> std::io::Result<()> {
+    if rules.delayed && arg.contains('!') {
+        return Err(cmd_refused(arg, &"the shell's /v expands `!`"));
+    }
+    if cmdline::plain_for_cmd(arg) {
+        out.extend(arg.encode_utf16());
+        return Ok(());
+    }
+    if let Some(why) = rules.plain_only {
+        return Err(cmd_refused(arg, &why));
+    }
+    let wide: Vec<u16> = arg.encode_utf16().collect();
+    winargv::quote_batch_arg_into(&wide, out).map_err(|e| cmd_refused(arg, &e))
+}
+
+/// The error for an argument cmd.exe can't take safely.
+fn cmd_refused(arg: &str, why: &dyn std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("rusty_term: cmd.exe can't take the argument {arg:?} safely: {why}"),
+    )
+}
+
 /// Appends `arg` to `out` (a wide command-line buffer), quoted per the
 /// MSVCRT/`CreateProcessW` argument rules — backslashes only escape when
 /// immediately followed by a quote — so the child's argv parser splits it
 /// back out unchanged. Mirrors the algorithm Windows itself documents.
-fn push_quoted_arg(arg: &str, out: &mut Vec<u16>) {
+pub(super) fn push_quoted_arg(arg: &str, out: &mut Vec<u16>) {
     use std::os::windows::ffi::OsStrExt;
     let needs_quotes = arg.is_empty() || arg.chars().any(|c| c == ' ' || c == '\t' || c == '"');
     if !needs_quotes {
@@ -335,14 +427,13 @@ struct WindowsHandle {
 unsafe impl Send for WindowsHandle {}
 
 impl BackendHandle for WindowsHandle {
-    fn read(&mut self) -> Result<Vec<u8>, std::io::Error> {
-        let mut buf = vec![0u8; 4096];
+    fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         let mut read: u32 = 0;
         let ok = unsafe {
             ReadFile(
                 self.output_read,
                 buf.as_mut_ptr() as *mut _,
-                buf.len() as u32,
+                buf.len().min(u32::MAX as usize) as u32,
                 &mut read,
                 std::ptr::null_mut(),
             )
@@ -350,14 +441,13 @@ impl BackendHandle for WindowsHandle {
         if ok == 0 {
             let err = std::io::Error::last_os_error();
             // The child closing its end surfaces as a broken pipe; treat it as a
-            // clean EOF (the contract's empty-slice signal).
+            // clean EOF (the contract's `Ok(0)`).
             if err.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
-                return Ok(Vec::new());
+                return Ok(0);
             }
             return Err(err);
         }
-        buf.truncate(read as usize);
-        Ok(buf)
+        Ok(read as usize)
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
@@ -527,7 +617,115 @@ impl Drop for WindowsHandle {
 
 #[cfg(test)]
 mod tests {
-    use super::push_quoted_arg;
+    use super::{command_line, push_quoted_arg};
+    use std::io::ErrorKind;
+
+    /// ConPTY's command line for `shell` and `args`, without its NUL.
+    fn line(shell: &str, args: &[&str]) -> std::io::Result<String> {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let mut line = command_line(Some(shell), &args)?;
+        assert_eq!(line.pop(), Some(0));
+        Ok(String::from_utf16(&line).expect("utf-16"))
+    }
+
+    fn refused(shell: &str, args: &[&str]) -> Option<ErrorKind> {
+        line(shell, args).err().map(|e| e.kind())
+    }
+
+    /// #1279: cmd.exe gets its launcher arguments by cmd's rules.
+    #[test]
+    fn launcher_args_for_cmd_are_quoted_by_cmds_rules() {
+        let injected = r#"x\" & calc & \"y"#;
+        assert_eq!(
+            line("cmd.exe /c echo", &[injected]).expect("quoted"),
+            r#"cmd.exe /c echo "x\"" & calc & \""y""#
+        );
+        assert_eq!(
+            line("cmd.exe /c echo", &["tail one", "/q"]).expect("quoted"),
+            r#"cmd.exe /c echo "tail one" /q"#
+        );
+        assert_eq!(
+            line("cmd", &["/c", "x y", "a&b"]).expect("quoted"),
+            r#"cmd /c ""x y" "a&b"""#
+        );
+        assert_eq!(
+            refused("cmd /c echo", &["%PATH%"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            refused("cmd /c echo", &["a\nb"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        // After a shell that leaves a quote open, only plain words go on.
+        assert_eq!(
+            refused(r#"cmd /c echo ""#, &["a b"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            line(r#"cmd /c echo ""#, &["ab"]).expect("plain"),
+            r#"cmd /c echo " ab"#
+        );
+        // Before cmd's own switch, an argument holding one is refused, even
+        // quoted (cmd finds it there); the bare switch itself is taken.
+        assert_eq!(
+            refused("cmd", &["x /c calc"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(refused("cmd /q", &["a/k"]), Some(ErrorKind::InvalidInput));
+        assert_eq!(
+            line("cmd", &["/K", "x/c"]).expect("after the switch"),
+            "cmd /K x/c"
+        );
+        assert_eq!(
+            line("cmd /c echo", &["a/c"]).expect("after it"),
+            "cmd /c echo a/c"
+        );
+        // A shell written for cmd's quote stripping keeps its text and takes
+        // plain words only (review of 3fcd0d4d, P2 1).
+        assert_eq!(
+            line(r#"cmd /c ""C:\a b\x.exe" -v""#, &["y"]).expect("plain"),
+            r#"cmd /c ""C:\a b\x.exe" -v" y"#
+        );
+        assert_eq!(
+            line(r#"cmd /s /c "prog a""#, &["y"]).expect("plain"),
+            r#"cmd /s /c "prog a" y"#
+        );
+        assert_eq!(
+            refused(r#"cmd /s /c "prog a""#, &["a&b"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        // %X% may hold a quote (P2 2); /v expands `!` (P2 3).
+        assert_eq!(
+            refused("cmd /c echo %X%", &["a & calc"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            refused("cmd /v:on /c echo", &["a!PATH!b"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        // Options from the launcher count too (review of d21ea929, P2).
+        assert_eq!(
+            refused("cmd", &["/v:on", "/c", "echo", "!SECRET!"]),
+            Some(ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            line("cmd", &["/v:off", "/c", "echo", "a!b"]).expect("off"),
+            r#"cmd /v:off /c echo "a!b""#
+        );
+        // A drive-relative cmd is cmd (review of d21ea929, P1).
+        assert_eq!(
+            line("C:cmd.exe /c echo", &[r#"x\" & calc & \"y"#]).expect("quoted"),
+            r#"C:cmd.exe /c echo "x\"" & calc & \""y""#
+        );
+    }
+
+    #[test]
+    fn launcher_args_for_other_programs_keep_msvcrt_quoting() {
+        assert_eq!(
+            line("pwsh -NoLogo", &[r#"a\"b"#, "%x%"]).expect("quoted"),
+            r#"pwsh -NoLogo "a\\\"b" %x%"#
+        );
+    }
 
     fn quote(arg: &str) -> String {
         let mut out = Vec::new();
@@ -566,13 +764,10 @@ mod tests {
     ///
     /// The pipe read is a blocking `ReadFile`, so the reads happen on a
     /// detached thread and the deadline is enforced by polling the shared
-    /// buffer; a hung read can never wedge the test harness.
-    /// ConPTY child attach silently fails on Insider build 26200.8737: conhost
-    /// runs (its `?9001h`/`?1004h` mode requests arrive) but the spawned
-    /// child's output never does. Believed an OS regression, not ours — see
-    /// docs/research/conpty-attach-2026-07.md. Run with `--ignored` to recheck.
+    /// buffer; a hung read can never wedge the test harness. It fails without
+    /// `STARTF_USESTDHANDLES` in `spawn_shell` whenever the test runner's own
+    /// std handles are redirected (docs/research/conpty-attach-2026-07.md).
     #[test]
-    #[ignore = "ConPTY attach broken on Insider 26200.8737; see docs/research/conpty-attach-2026-07.md"]
     fn conpty_child_output_reaches_the_reader() {
         use crate::backend::Backend as _;
         use std::sync::{Arc, Mutex};
@@ -609,7 +804,6 @@ mod tests {
     /// round-trips through cmd.exe.
     #[cfg(feature = "gui")]
     #[test]
-    #[ignore = "ConPTY attach broken on Insider 26200.8737; see docs/research/conpty-attach-2026-07.md"]
     fn win32_input_records_round_trip_through_a_real_conpty_child() {
         use crate::backend::{Backend as _, BackendHandle};
         use crate::gui::input::encode_win32;

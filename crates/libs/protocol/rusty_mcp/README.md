@@ -1,31 +1,9 @@
 # rusty_mcp
 
-Transport-level building blocks for MCP servers and gateways, in the `rusty-mcp`
-crate. It no longer depends on `rmcp` (ADR-0002, Amendment 1).
+What is left of the standalone `rusty_mcp` repository:
 
-| Module | What it is |
-|---|---|
-| `auth` | OAuth 2.1 resource-server authorization: RFC 9728 Protected Resource Metadata, `WWW-Authenticate` challenges, audience-bound bearer tokens as a `tower` layer (`RequireAuthLayer`). JWT validation with the `jwt` feature. |
-| `limits` | `LimitsLayer`: bounded concurrency and a response timeout that shed load with `503` and `Retry-After` instead of queueing. |
-| `trace` | Strict W3C trace-context parsing over MCP `_meta` (SEP-414), a `tracing` span carrying the ids, and writing a context back onto an outbound request. |
-| `otel` (feature `otel`) | An OTLP trace and metrics pipeline, and `McpMetricsLayer` for per-request metrics. |
+- `crates/rusty-mcp-client`: a protocol-only MCP client (stdio and Streamable HTTP).
+- `crates/rusty-mcp-demo`: an example MCP server on `rusty_mcp_server`.
 
-The MCP server and client are separate crates: `rusty_mcp_server` and
-`rusty-mcp-client`. The layers here are `tower` layers that go in front of a
-`tower` service wrapping the server's HTTP handler, as `agentgateway`'s
-`McpService` does; the tests in `crates/rusty-mcp/tests` run them against a
-real `rusty_mcp_server` through a test-only adapter of the same shape.
-
-```rust,ignore
-let mcp = ServiceBuilder::new()
-    .layer(LimitsLayer::new().with_max_concurrent(256)) // outer: shed first
-    .layer(RequireAuthLayer::new(auth))                 // inner: authorization
-    .service(mcp_service);
-```
-
-## History
-
-Before 0.6.0 this crate was also an `rmcp`-based server scaffold (`run`, `serve`,
-a CLI and config, resources, tasks, subscriptions, completion, and a
-`cargo generate` template). Every consumer moved to `rusty_mcp_server`, and the
-scaffold was deleted; it is in git history before that change.
+The middleware crate that used to live here as `rusty-mcp` is now
+[`rusty_mcp_middleware`](../rusty_mcp_middleware) (#876).

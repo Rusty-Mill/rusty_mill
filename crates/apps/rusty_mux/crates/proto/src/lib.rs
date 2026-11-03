@@ -12,9 +12,9 @@
 //! ```
 //! use rusty_mux_proto::{Features, Message, decode, encode};
 //!
-//! let frame = encode(&Message::Hello { features: Features::NONE, resume: None })?;
+//! let frame = encode(&Message::Hello { features: Features::NONE, resume: None, takeover: None })?;
 //! let (message, used) = decode(&frame)?.expect("a whole frame");
-//! assert_eq!(message, Message::Hello { features: Features::NONE, resume: None });
+//! assert_eq!(message, Message::Hello { features: Features::NONE, resume: None, takeover: None });
 //! assert_eq!(used, frame.len());
 //! # Ok::<(), rusty_mux_proto::Error>(())
 //! ```
@@ -25,8 +25,12 @@ mod field;
 mod frame;
 mod message;
 pub mod schema;
+pub mod theme;
 mod varint;
 
 pub use error::Error;
 pub use frame::{MAX_FRAME, decode, encode};
-pub use message::{Code, Cursor, Entry, Features, Message};
+pub use message::{
+    Code, Cursor, DatagramKey, ECHO_GRACE, Echo, Entry, Features, Launch, Message, Program,
+    Takeover,
+};

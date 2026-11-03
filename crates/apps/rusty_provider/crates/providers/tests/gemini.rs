@@ -12,6 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
 async fn chat_success_sends_api_key_as_query_param() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -46,6 +47,7 @@ async fn chat_success_sends_api_key_as_query_param() {
 
 #[tokio::test]
 async fn chat_uses_the_byok_override_key_instead_of_the_configured_one() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -73,6 +75,7 @@ async fn chat_uses_the_byok_override_key_instead_of_the_configured_one() {
 
 #[tokio::test]
 async fn chat_parses_function_call_and_overrides_finish_reason() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -112,6 +115,7 @@ async fn chat_parses_function_call_and_overrides_finish_reason() {
 
 #[tokio::test]
 async fn chat_sends_tools_and_tool_choice_translated_to_function_declarations() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -153,6 +157,7 @@ async fn chat_sends_tools_and_tool_choice_translated_to_function_declarations() 
 
 #[tokio::test]
 async fn chat_sends_json_schema_response_format_as_response_schema() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -190,6 +195,7 @@ async fn chat_sends_json_schema_response_format_as_response_schema() {
 
 #[tokio::test]
 async fn chat_sends_json_object_response_format_with_no_schema() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -221,6 +227,7 @@ async fn chat_sends_json_object_response_format_with_no_schema() {
 
 #[tokio::test]
 async fn chat_forwards_its_native_sampling_params_camel_cased_but_has_no_field_for_the_rest() {
+    common::install_fallback();
     // Gemini's native API has an equivalent for top_k, frequency_penalty,
     // presence_penalty, and seed among the sampling params exercised by
     // `request_with_sampling_params`; the other 4 (min_p, top_a,
@@ -259,6 +266,7 @@ async fn chat_forwards_its_native_sampling_params_camel_cased_but_has_no_field_f
 
 #[tokio::test]
 async fn chat_has_no_wire_field_for_logprobs_and_never_returns_any() {
+    common::install_fallback();
     // Gemini's generateContent API has no logprobs equivalent wired up in
     // this adapter -- no field on GenerationConfig to serialize
     // `logprobs`/`top_logprobs` into, and the response never populates
@@ -288,6 +296,7 @@ async fn chat_has_no_wire_field_for_logprobs_and_never_returns_any() {
 
 #[tokio::test]
 async fn chat_stream_parses_function_call_delta() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"city\":\"Boston\"}}}]},\"finishReason\":\"STOP\"}],",
@@ -343,6 +352,7 @@ async fn chat_stream_parses_function_call_delta() {
 
 #[tokio::test]
 async fn chat_tracks_call_id_to_function_name_across_turns_for_tool_result() {
+    common::install_fallback();
     let server = MockServer::start().await;
     // The Role::Tool message only carries a call id (OpenAI-shaped, like
     // every other adapter's input) but Gemini's functionResponse needs the
@@ -395,6 +405,7 @@ async fn chat_tracks_call_id_to_function_name_across_turns_for_tool_result() {
 
 #[tokio::test]
 async fn chat_sends_image_content_as_inline_data() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -423,6 +434,7 @@ async fn chat_sends_image_content_as_inline_data() {
 
 #[tokio::test]
 async fn chat_sends_audio_content_as_inline_data() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -451,6 +463,7 @@ async fn chat_sends_audio_content_as_inline_data() {
 
 #[tokio::test]
 async fn chat_sends_inline_file_content_as_inline_data() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -479,6 +492,7 @@ async fn chat_sends_inline_file_content_as_inline_data() {
 
 #[tokio::test]
 async fn chat_sends_remote_file_content_as_file_data() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -507,6 +521,7 @@ async fn chat_sends_remote_file_content_as_file_data() {
 
 #[tokio::test]
 async fn chat_stream_parses_text_parts() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n",
@@ -550,6 +565,7 @@ async fn chat_stream_parses_text_parts() {
 
 #[tokio::test]
 async fn chat_stream_handles_a_candidate_with_no_parts_gracefully() {
+    common::install_fallback();
     let server = MockServer::start().await;
     // No "candidates" key at all -- the adapter must not panic when there's
     // nothing to translate for an event.
@@ -584,6 +600,7 @@ async fn chat_stream_handles_a_candidate_with_no_parts_gracefully() {
 
 #[tokio::test]
 async fn chat_stream_ignores_unrecognized_extra_fields_in_a_frame() {
+    common::install_fallback();
     // Relies on serde's default "unknown fields are ignored" behavior for
     // WireResponse/WireCandidate/WirePart, unlike anthropic.rs's explicit
     // `_ => None` dispatch on an unrecognized event `"type"` -- there's no
@@ -620,6 +637,7 @@ async fn chat_stream_ignores_unrecognized_extra_fields_in_a_frame() {
 
 #[tokio::test]
 async fn chat_stream_yields_a_decode_error_for_malformed_event_json() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}]}}]}\n\n",
@@ -657,6 +675,7 @@ async fn chat_stream_yields_a_decode_error_for_malformed_event_json() {
 
 #[tokio::test]
 async fn chat_stream_yields_no_chunks_for_an_empty_stream() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path(
@@ -679,6 +698,7 @@ async fn chat_stream_yields_no_chunks_for_an_empty_stream() {
 
 #[tokio::test]
 async fn chat_maps_429_to_retryable_rate_limited() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -703,6 +723,7 @@ async fn chat_maps_429_to_retryable_rate_limited() {
 
 #[tokio::test]
 async fn chat_sends_thinking_config_derived_from_reasoning_effort() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -739,6 +760,7 @@ async fn chat_sends_thinking_config_derived_from_reasoning_effort() {
 
 #[tokio::test]
 async fn chat_sets_include_thoughts_false_when_excluded() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -774,6 +796,7 @@ async fn chat_sets_include_thoughts_false_when_excluded() {
 
 #[tokio::test]
 async fn chat_parses_thought_marked_parts_into_the_reasoning_field() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -819,6 +842,7 @@ async fn chat_parses_thought_marked_parts_into_the_reasoning_field() {
 
 #[tokio::test]
 async fn chat_stream_emits_thought_parts_as_reasoning_deltas() {
+    common::install_fallback();
     let server = MockServer::start().await;
     let sse_body = concat!(
         "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"thinking...\",\"thought\":true}],\"role\":\"model\"}}]}\n\n",
@@ -870,6 +894,7 @@ async fn chat_stream_emits_thought_parts_as_reasoning_deltas() {
 
 #[tokio::test]
 async fn chat_parses_cached_content_token_count_into_usage() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -904,6 +929,7 @@ async fn chat_parses_cached_content_token_count_into_usage() {
 
 #[tokio::test]
 async fn chat_leaves_cached_tokens_none_without_any_cache_hit() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/gemini-2.0-flash:generateContent"))
@@ -940,6 +966,7 @@ fn embeddings_request(input: EmbeddingsInput) -> EmbeddingsRequest {
 
 #[tokio::test]
 async fn embeddings_single_input_uses_batchembedcontents_with_one_request() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/text-embedding-004:batchEmbedContents"))
@@ -971,6 +998,7 @@ async fn embeddings_single_input_uses_batchembedcontents_with_one_request() {
 
 #[tokio::test]
 async fn embeddings_batch_input_sends_one_request_per_text_and_preserves_order() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/text-embedding-004:batchEmbedContents"))
@@ -1004,6 +1032,7 @@ async fn embeddings_batch_input_sends_one_request_per_text_and_preserves_order()
 
 #[tokio::test]
 async fn embeddings_response_reports_no_usage_at_all() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/text-embedding-004:batchEmbedContents"))
@@ -1025,6 +1054,7 @@ async fn embeddings_response_reports_no_usage_at_all() {
 
 #[tokio::test]
 async fn embeddings_maps_a_non_success_status_to_a_classified_error() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/text-embedding-004:batchEmbedContents"))
@@ -1046,6 +1076,7 @@ async fn embeddings_maps_a_non_success_status_to_a_classified_error() {
 
 #[tokio::test]
 async fn embeddings_uses_the_byok_override_key_instead_of_the_configured_one() {
+    common::install_fallback();
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1beta/models/text-embedding-004:batchEmbedContents"))
@@ -1068,6 +1099,7 @@ async fn embeddings_uses_the_byok_override_key_instead_of_the_configured_one() {
 
 #[tokio::test]
 async fn chat_rejects_oversized_response_instead_of_buffering_it() {
+    common::install_fallback();
     let (addr, server) = common::oversized_content_length_server("HTTP/1.1 200 OK");
 
     let provider = GeminiProvider::new(format!("http://{addr}"), "test-key");
@@ -1086,6 +1118,7 @@ async fn chat_rejects_oversized_response_instead_of_buffering_it() {
 
 #[tokio::test]
 async fn embeddings_rejects_oversized_response_instead_of_buffering_it() {
+    common::install_fallback();
     let (addr, server) = common::oversized_content_length_server("HTTP/1.1 200 OK");
 
     let provider = GeminiProvider::new(format!("http://{addr}"), "test-key");

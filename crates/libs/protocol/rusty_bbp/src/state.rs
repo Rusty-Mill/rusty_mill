@@ -1,6 +1,6 @@
 //! `TaskState`: the indexed fold over events that rules consult. `Card` is its projection.
 
-use crate::coedit::{Doc, LineId, Version};
+use crate::coedit::{Doc, LineId, Missing, Version};
 use crate::command::Response;
 use crate::event::{EscalateReason, Event};
 use crate::ids::*;
@@ -23,9 +23,12 @@ pub enum State {
     Escalated,
     Closed,
     Cancelled,
+    /// Claims mode: the task takes claims and evidence.
+    Open,
 }
 
 impl State {
+    /// The stage-mode states.
     pub const ALL: [State; 10] = [
         State::Planning,
         State::PlanGate,
@@ -232,6 +235,9 @@ pub struct TaskState {
     pub versions: BTreeMap<ArtId, Version>,
     /// Each co-edited spec's latest version, keyed by its first.
     pub heads: HashMap<ArtId, ArtId>,
+    /// Logged co-edited versions that did not apply, with what they lacked.
+    /// The engine never writes one; a foreign or damaged log can.
+    pub unapplied: BTreeMap<ArtId, Missing>,
     pub messages: Vec<Message>,
     /// Live turns in grant order, at most one per role and `max_live_turns` in all.
     pub turns: Vec<Turn>,
@@ -260,6 +266,12 @@ pub struct TaskState {
     pub entered_rev: Rev,
     /// The rev at which each role was assigned its principal.
     pub assigned_rev: HashMap<RoleId, Rev>,
+    /// Stage pipeline or claims mode, from `task_opened`.
+    pub mode: crate::claims::Mode,
+    /// Claims mode: every claim and its evidence.
+    pub claims: crate::claims::ClaimsBook,
+    /// Claims mode: assignments per role, which keys the session credential.
+    pub assignments: HashMap<RoleId, u64>,
 }
 
 impl TaskState {
@@ -300,6 +312,7 @@ impl TaskState {
             artifacts: BTreeMap::new(),
             versions: BTreeMap::new(),
             heads: HashMap::new(),
+            unapplied: BTreeMap::new(),
             messages: Vec::new(),
             turns: Vec::new(),
             next_turn: 1,
@@ -317,6 +330,9 @@ impl TaskState {
             ready_rev: Rev(0),
             entered_rev: Rev(0),
             assigned_rev: HashMap::new(),
+            mode: crate::claims::Mode::Stages,
+            claims: crate::claims::ClaimsBook::default(),
+            assignments: HashMap::new(),
         }
     }
 
@@ -466,6 +482,7 @@ impl TaskState {
             .iter()
             .map(|t| t.deadline)
             .chain(self.request_deadline())
+            .chain(self.claims.next_mark_deadline())
             .min()
     }
 
@@ -523,10 +540,15 @@ impl TaskState {
         self.versions.get(&id).map(|v| &*v.doc)
     }
 
+    /// The latest version of the co-edited spec `version` belongs to.
+    pub fn head(&self, version: ArtId) -> Option<ArtId> {
+        self.heads.get(&self.versions.get(&version)?.root).copied()
+    }
+
     /// The latest version of the co-edited spec `base` belongs to, and the
     /// anchors of every version accepted after `base`, oldest first.
     pub fn since(&self, base: ArtId) -> Option<(ArtId, Vec<Option<LineId>>)> {
-        let head = *self.heads.get(&self.versions.get(&base)?.root)?;
+        let head = self.head(base)?;
         let mut chain = Vec::new();
         let mut at = head;
         while at != base {
@@ -539,24 +561,36 @@ impl TaskState {
     }
 
     /// Index a co-edited version: applied on its spec's head, or on nothing
-    /// when it starts a spec. The engine admits only edits whose anchors
-    /// exist, so a log it wrote always applies; one that does not is left
-    /// unindexed rather than guessed at, and any edit on it is then refused.
+    /// when it starts a spec. The engine admits only edits whose base and
+    /// anchors exist, so a log it wrote always applies. One that does not is
+    /// recorded in `unapplied` with what it lacked, never guessed at, so an
+    /// edit or gate on it is refused by name (decision 3, `ref_unresolved`).
     fn add_version(&mut self, id: ArtId, e: &crate::coedit::SpecEdit) {
-        let (root, prev) = match e.base.and_then(|b| self.versions.get(&b)) {
-            Some(b) => (b.root, self.heads.get(&b.root).copied()),
+        let (root, prev) = match e.base {
             None => (id, None),
+            Some(b) => match self.versions.get(&b) {
+                Some(v) => (v.root, self.heads.get(&v.root).copied()),
+                None => {
+                    self.unapplied.insert(id, Missing::Base(b));
+                    return;
+                }
+            },
         };
         let empty = Doc::default();
         let on = prev.and_then(|p| self.doc(p)).unwrap_or(&empty);
-        let Ok(doc) = on.apply(id, &e.ops) else {
-            return;
+        let doc = match on.apply(id, &e.ops) {
+            Ok(doc) => doc,
+            Err(line) => {
+                self.unapplied.insert(id, Missing::Line(line));
+                return;
+            }
         };
         self.versions.insert(
             id,
             Version {
                 root,
                 prev,
+                snapshot: Sha256::of(doc.text().as_bytes()),
                 doc: Arc::new(doc),
                 anchors: e.ops.iter().map(|op| op.anchor()).collect(),
             },
@@ -616,6 +650,17 @@ impl TaskState {
         Token(self.keyed(format!("token|{}|{}|{}", self.task, principal, turn.0)))
     }
 
+    /// Claims mode: the session credential of `principal` in its current
+    /// assignment (C-R1). Reassigning the role changes it.
+    pub fn credential_for(&self, principal: &PrincipalId) -> Option<Token> {
+        let role = self.role_of(principal)?;
+        let n = self.assignments.get(&role).copied().unwrap_or(0);
+        Some(Token(self.keyed(format!(
+            "session|{}|{}|{}|{}",
+            self.task, role, principal, n
+        ))))
+    }
+
     /// Run secret for `run`, keyed like [`Self::token_for`].
     pub fn secret_for(&self, run: RunId) -> RunSecret {
         RunSecret(self.keyed(format!("run|{}|{}", self.task, run.0)))
@@ -666,12 +711,26 @@ impl TaskState {
                 max_live_turns,
                 human,
                 policy,
+                mode,
+                claims,
+                holdout_digest,
             } => {
                 self.task = task.clone();
                 self.schema = *schema;
+                // Only schema 5 is claims mode; below it the field is ignored.
+                self.mode = if *schema == crate::event::LOG_SCHEMA_CLAIMS {
+                    *mode
+                } else {
+                    crate::claims::Mode::Stages
+                };
+                if self.mode == crate::claims::Mode::Claims {
+                    self.claims.config = claims.unwrap_or_default();
+                    self.claims.holdout_digest = *holdout_digest;
+                    self.state = State::Open;
+                }
                 // The engine validated this roster before logging it; a log
                 // that carries an invalid one folds to an unservable task.
-                self.roster = Roster::new(roster.clone()).unwrap_or_default();
+                self.roster = Roster::for_mode(roster.clone(), self.mode).unwrap_or_default();
                 self.repo = repo.clone();
                 self.profile_digest = *profile_digest;
                 self.budget = *budget;
@@ -703,6 +762,7 @@ impl TaskState {
                 self.principals.insert(human.clone(), h);
             }
             Event::Assigned { role, principal } => {
+                *self.assignments.entry(role.clone()).or_insert(0) += 1;
                 self.assigned.insert(role.clone(), principal.id.clone());
                 self.assigned_rev.insert(role.clone(), self.rev);
                 self.principals
@@ -745,11 +805,17 @@ impl TaskState {
             Event::MessageAppended(m) => {
                 self.messages.push(m.clone());
                 self.msg_rev.push(self.rev);
+                if self.mode == crate::claims::Mode::Claims {
+                    crate::claims::on_message(self, m);
+                }
                 self.note_unseen(Unseen::Message(m.id), &m.from, |st, role| {
                     crate::engine::visible(st, role, m)
                 });
             }
             Event::ArtifactStored(a) => {
+                if self.mode == crate::claims::Mode::Claims {
+                    crate::claims::on_artifact(self, a);
+                }
                 if a.kind == ArtifactKind::Brief {
                     self.brief = Some(a.id);
                 }
@@ -777,6 +843,20 @@ impl TaskState {
                 self.candidate = Some(*candidate);
                 self.merge_approval = None;
             }
+            Event::RunStarted { candidate, run } if self.mode == crate::claims::Mode::Claims => {
+                self.claims.runs.insert(
+                    *run,
+                    crate::claims::ClaimRun {
+                        candidate: *candidate,
+                        revoked: false,
+                        report: None,
+                        log: None,
+                    },
+                );
+                // A run starting for a candidate settles any rerun held on it.
+                self.claims.held.remove(candidate);
+                self.next_run = run.0 + 1;
+            }
             Event::RunStarted { candidate, run } => {
                 self.run = Some(Run {
                     id: *run,
@@ -788,9 +868,19 @@ impl TaskState {
                 self.next_run = run.0 + 1;
             }
             Event::RunRevoked { run } => {
+                if let Some(r) = self.claims.runs.get_mut(run) {
+                    r.revoked = true;
+                }
                 self.revoked_runs.insert(*run);
                 if self.run.as_ref().map(|r| r.id) == Some(*run) {
                     self.run = None;
+                }
+            }
+            Event::TestReportStored { run, report, .. }
+                if self.mode == crate::claims::Mode::Claims =>
+            {
+                if let Some(r) = self.claims.runs.get_mut(run) {
+                    r.report = Some(*report);
                 }
             }
             Event::TestReportStored { status, .. } => {
@@ -920,12 +1010,17 @@ impl TaskState {
                     (principal.clone(), op.clone()),
                     (*payload, response.clone()),
                 );
+                if let (crate::claims::Mode::Claims, Response::Artifact(a)) = (self.mode, response)
+                {
+                    self.claims.read_arts.insert((principal.clone(), a.id));
+                }
                 self.mark_seen(principal, response);
             }
             Event::VerdictsStaled { candidate } => {
                 self.verdicts.retain(|v| v.candidate != *candidate);
                 self.merge_approval = None;
             }
+            other => crate::claims::apply(self, other),
         }
         if let Event::MessageAppended(m) = e {
             if let (Body::Verdict(v), Some(role), Some(stage)) =

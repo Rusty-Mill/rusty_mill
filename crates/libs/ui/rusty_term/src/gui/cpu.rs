@@ -9,12 +9,14 @@ use std::rc::Rc;
 #[cfg(test)]
 use crate::core::Grid;
 use crate::core::{
-    ATTR_BOLD, ATTR_ITALIC, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, CursorShape,
-    FrameView, UnderlineStyle, WIDE_TRAILER, char_width,
+    ATTR_BOLD, ATTR_ITALIC, ATTR_OVERLINE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell,
+    CursorShape, FrameView, LineAttr, UnderlineStyle, WIDE_TRAILER, char_width,
 };
 
 use super::font::{Glyph, GlyphSource, Style};
-use super::render::{SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG};
+use super::render::{
+    SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, blend, concealed, drawn, glyph_char, is_overlay_mark,
+};
 
 /// Composite the grid's visible cells into `buf` (`width × height` pixels,
 /// `len() == width * height`). Each cell is filled with its background, then its
@@ -22,8 +24,8 @@ use super::render::{SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG};
 /// font's cell size; cells past the buffer edge are clipped.
 ///
 /// A non-empty `chrome` row (the window's own tab/caption bar) is painted as
-/// the first cell row and pushes the grid one row down; empty paints the grid
-/// at the top, unchanged.
+/// the first cell row (in the same font) and pushes the grid one row down;
+/// empty paints the grid at the top, unchanged.
 #[cfg(test)]
 pub(crate) fn render(
     grid: &Grid,
@@ -43,16 +45,16 @@ pub(crate) fn render(
         // exercised through the real `CpuRenderer::render` path.
         draw_chrome(buf, width, height, chrome, font, cw, ch, 0, 0);
     }
-    let row0 = if chrome.is_empty() { 0 } else { 1 };
+    let oy = if chrome.is_empty() { 0 } else { ch };
     draw_grid(
         buf,
         width,
         height,
         &grid.frame_view(),
         0,
-        row0,
         0,
         0,
+        oy,
         true,
         cursor_on,
         None,
@@ -209,6 +211,13 @@ pub(crate) fn draw_grid(
     let search_hl = |col: usize, row: usize| grid.search_highlight(col, row);
     let status = grid.status_row();
     let last_row = grid.rows.saturating_sub(1);
+    // Every cell as drawn: its SGR renditions resolved (`drawn`).
+    let cell_at = |col: usize, row: usize| {
+        drawn(match status {
+            Some(s) if row == last_row => s[col],
+            _ => grid.cell(col, row),
+        })
+    };
     // Bidi (implicit mode): per-row visual/logical permutations. `None` for
     // pure-LTR rows, status rows, and when `bidi` is off — the common case,
     // costing one flag check. Cell *state* stays keyed by logical position;
@@ -218,6 +227,19 @@ pub(crate) fn draw_grid(
             .and_then(|b| b.log2vis.get(col))
             .map_or(col, |&v| v as usize)
     };
+    // DECDWL/DECDHL rows draw every cell twice as wide (and DECDHL twice as
+    // tall, one half per row), so only their left half of the columns shows.
+    let scale = |row: usize| match grid.line_attr(row) {
+        LineAttr::Single => 1,
+        _ => 2,
+    };
+    // A cell's left pixel and drawn width, `None` when a double-width row
+    // pushes it past the pane.
+    let cell_x = |col: usize, row: usize| -> Option<(usize, usize)> {
+        let (s, v) = (scale(row), vis(col, row));
+        let x0 = ox + (col0 + s * v) * cw;
+        (s * v < grid.cols).then(|| (x0, (s * cw).min(pane_x.1.saturating_sub(x0))))
+    };
 
     // Pass 1: backgrounds (every cell, incl. wide trailers, before glyphs).
     for i in 0..grid.cols * grid.rows {
@@ -226,11 +248,7 @@ pub(crate) fn draw_grid(
             continue;
         }
         let on_status = status.is_some() && row == last_row;
-        let cell = if on_status {
-            status.unwrap()[col]
-        } else {
-            grid.cell(col, row)
-        };
+        let cell = cell_at(col, row);
         let bg = if !on_status && block_cursor(col, row) {
             grid.cursor_color
         } else if !on_status && let Some(cur) = search_hl(col, row) {
@@ -240,10 +258,13 @@ pub(crate) fn draw_grid(
         } else {
             cell.bg
         };
-        let (x0, y0) = (ox + (col0 + vis(col, row)) * cw, oy + (row0 + row) * ch);
+        let Some((x0, w)) = cell_x(col, row) else {
+            continue;
+        };
+        let y0 = oy + (row0 + row) * ch;
         for y in y0..(y0 + ch).min(height) {
             let base = y * width;
-            for x in x0..(x0 + cw).min(width) {
+            for x in x0..(x0 + w).min(width) {
                 buf[base + x] = bg;
             }
         }
@@ -262,17 +283,12 @@ pub(crate) fn draw_grid(
             continue;
         }
         let on_status = status.is_some() && row == last_row;
-        let cell_at = |col: usize| {
-            if on_status {
-                status.unwrap()[col]
-            } else {
-                grid.cell(col, row)
-            }
-        };
+        let cell_at = |col: usize| cell_at(col, row);
         let eligible = |col: usize, cell: &Cell| {
             let special = !on_status
                 && (block_cursor(col, row) || inverted(col, row) || search_hl(col, row).is_some());
             !special
+                && !concealed(cell)
                 && cell.flags & WIDE_TRAILER == 0
                 && cell.cluster == 0
                 && cell.ch != ' '
@@ -284,36 +300,25 @@ pub(crate) fn draw_grid(
                 && !crate::gui::boxdraw::is_synthesized(cell.ch)
                 && cell.ch != '\u{10EEEE}'
                 // A reordered (bidi) row draws cell-by-cell; shaping a run
-                // across visually non-adjacent cells would garble it.
+                // across visually non-adjacent cells would garble it. So
+                // does a scaled (double-width) row.
                 && grid.bidi_row(row).is_none()
+                && scale(row) == 1
         };
         let mut col = 0;
         while col < grid.cols {
             let cell = cell_at(col);
             if !eligible(col, &cell) {
                 // Kitty Unicode placeholders draw image content (the pass
-                // below), never a font glyph.
+                // below), never a font glyph; concealed cells draw none.
                 let blank = cell.flags & WIDE_TRAILER != 0
+                    || concealed(&cell)
                     || (cell.ch == ' ' && cell.cluster == 0)
                     || cell.ch == '\u{10EEEE}';
                 plan[row * grid.cols + col] = (!blank).then(|| {
                     let style =
                         Style::new(cell.flags & ATTR_BOLD != 0, cell.flags & ATTR_ITALIC != 0);
-                    // Arabic contextual form first (phase 3), then rule L4
-                    // mirroring for RTL-run chars (Arabic never mirrors, so
-                    // the order can't double-substitute).
-                    let ch = match grid.bidi_row(row) {
-                        Some(b) => {
-                            let ch = b.shaped.as_ref().and_then(|s| s[col]).unwrap_or(cell.ch);
-                            if b.rtl[col] {
-                                crate::core::bidi_mirrored(ch).unwrap_or(ch)
-                            } else {
-                                ch
-                            }
-                        }
-                        None => cell.ch,
-                    };
-                    font.glyph(ch, style)
+                    font.glyph(glyph_char(&cell, grid.bidi_row(row), col), style)
                 });
                 col += 1;
                 continue;
@@ -348,11 +353,7 @@ pub(crate) fn draw_grid(
         }
         let (col, row) = (i % grid.cols, i / grid.cols);
         let on_status = status.is_some() && row == last_row;
-        let cell = if on_status {
-            status.unwrap()[col]
-        } else {
-            grid.cell(col, row)
-        };
+        let cell = cell_at(col, row);
         let (fg, under_bg) = if !on_status && block_cursor(col, row) {
             (cell.bg, grid.cursor_color)
         } else if !on_status && inverted(col, row) {
@@ -365,25 +366,76 @@ pub(crate) fn draw_grid(
         // Minimum-contrast enforcement (`minimum_contrast` config): nudge the
         // glyph color against the background this cell actually painted.
         let fg = crate::core::ensure_contrast(fg, under_bg, grid.min_contrast);
-        let pen_x = (ox + (col0 + vis(col, row)) * cw) as i32 + glyph.left;
-        let pen_y = (oy + (row0 + row) * ch) as i32 + baseline + glyph.top;
-        blit(buf, width, pane_x, glyph_y(row), glyph, pen_x, pen_y, fg);
+        let Some((x0, _)) = cell_x(col, row) else {
+            continue;
+        };
+        let y0 = oy + (row0 + row) * ch;
+        // The glyph's top edge: a DECDHL bottom half draws the lower half of
+        // a glyph that starts one row up, above the pane at its top row.
+        let (sx, sy, top) = match grid.line_attr(row) {
+            LineAttr::Single => (1, 1, y0 as i32),
+            LineAttr::DoubleWidth => (2, 1, y0 as i32),
+            LineAttr::DoubleTop => (2, 2, y0 as i32),
+            LineAttr::DoubleBottom => (2, 2, y0 as i32 - ch as i32),
+        };
+        // A double-height half shows only its own row band of the glyph.
+        let own_band = move |py: usize| py >= y0 && py < (y0 + ch).min(height) && band_on(py);
+        let rows = |py: usize| {
+            if sy == 1 {
+                glyph_y(row)(py)
+            } else {
+                own_band(py)
+            }
+        };
+        let pen = |g: &Glyph, x: usize| {
+            let pen_x = x as i32 + sx as i32 * g.left;
+            (pen_x, top + sy as i32 * (baseline + g.top))
+        };
+        let (pen_x, pen_y) = pen(glyph, x0);
+        blit_scaled(
+            buf,
+            width,
+            pane_x,
+            rows,
+            glyph,
+            (pen_x, pen_y),
+            (sx, sy),
+            fg,
+        );
+        // Combining marks of the cell's cluster overlay the base, their ink
+        // centered over its columns (#1160).
+        // The glyph's columns as stored: a mode 2027 VS16 cluster on a
+        // narrow base is two wide.
+        let wide = col + 1 < grid.cols && cell_at(col + 1, row).flags & WIDE_TRAILER != 0;
+        let span = sx * cw * if wide { 2 } else { 1 };
+        for mark in grid
+            .cluster_suffix(&cell)
+            .chars()
+            .filter(|&c| is_overlay_mark(c))
+        {
+            let m = font.glyph(
+                mark,
+                Style::new(cell.flags & ATTR_BOLD != 0, cell.flags & ATTR_ITALIC != 0),
+            );
+            if m.width == 0 {
+                continue;
+            }
+            let (_, pen_y) = pen(&m, x0);
+            let pen_x = (x0 + span.saturating_sub(sx * m.width) / 2) as i32;
+            blit_scaled(buf, width, pane_x, rows, &m, (pen_x, pen_y), (sx, sy), fg);
+        }
     }
 
-    // Pass 2.5: underline / strikethrough decorations (SGR 4/9). Neither is a
-    // glyph, so they're drawn as thin pixel stripes here rather than through
-    // the font. A colored underline (SGR 58, or `4:2`.."4:5"` undercurl/
+    // Pass 2.5: underline / strikethrough / overline decorations (SGR 4/9/53).
+    // None is a glyph, so they're drawn as thin pixel stripes here rather than
+    // through the font. A colored underline (SGR 58, or `4:2`.."4:5"` undercurl/
     // dotted/dashed styles) follows `cell.underline_color`; otherwise it
     // follows whatever color the glyph pass used (fg, or bg under a
     // cursor/selection swap) so the line matches the text it decorates.
     for i in 0..grid.cols * grid.rows {
         let (col, row) = (i % grid.cols, i / grid.cols);
         let on_status = status.is_some() && row == last_row;
-        let cell = if on_status {
-            status.unwrap()[col]
-        } else {
-            grid.cell(col, row)
-        };
+        let cell = cell_at(col, row);
         if cell.flags & WIDE_TRAILER != 0 || !on(row) {
             continue;
         }
@@ -394,7 +446,8 @@ pub(crate) fn draw_grid(
             !on_status && hover_link.is_some_and(|(hr, s, e)| row == hr && col >= s && col <= e);
         let underline = cell.flags & ATTR_UNDERLINE != 0 || hovered;
         let strike = cell.flags & ATTR_STRIKE != 0;
-        if !underline && !strike {
+        let overline = cell.flags & ATTR_OVERLINE != 0;
+        if !underline && !strike && !overline {
             continue;
         }
         let swapped = !on_status && (block_cursor(col, row) || inverted(col, row));
@@ -405,7 +458,20 @@ pub(crate) fn draw_grid(
         } else {
             cell.fg
         };
-        let (x0, y0) = (ox + (col0 + vis(col, row)) * cw, oy + (row0 + row) * ch);
+        let Some((x0, cw)) = cell_x(col, row) else {
+            continue;
+        };
+        let y0 = oy + (row0 + row) * ch;
+        // A double-height line's decorations sit on the half they belong to:
+        // underline on the bottom, overline and strike (its middle) on the top.
+        let attr = grid.line_attr(row);
+        let underline = underline && attr != LineAttr::DoubleTop;
+        let overline = overline && attr != LineAttr::DoubleBottom;
+        let strike_y = match attr {
+            LineAttr::DoubleTop => Some(y0 + ch / 2),
+            LineAttr::DoubleBottom => None,
+            _ => Some(y0),
+        };
         if underline {
             let color = if !swapped && !hovered && cell.flags & ATTR_UNDERLINE_COLOR != 0 {
                 cell.underline_color
@@ -419,8 +485,11 @@ pub(crate) fn draw_grid(
             };
             draw_underline(buf, width, height, x0, y0, cw, ch, color, style);
         }
-        if strike {
-            draw_strike(buf, width, height, x0, y0, cw, ch, base_fg);
+        if strike && let Some(sy0) = strike_y {
+            draw_strike(buf, width, height, x0, sy0, cw, ch, base_fg);
+        }
+        if overline {
+            hline(buf, width, height, x0, cw, y0, (ch / 12).max(1), base_fg);
         }
     }
 
@@ -466,8 +535,10 @@ pub(crate) fn draw_grid(
     {
         // A pending wrap leaves the cursor one past the last column; draw
         // it on that column, never outside the pane.
-        let ccol = ccol.min(grid.cols.saturating_sub(1));
-        let (x0, y0) = (ox + (col0 + vis(ccol, crow)) * cw, oy + (row0 + crow) * ch);
+        // On a double-width row the pending wrap sits at the half it shows.
+        let ccol = ccol.min(grid.cols.div_ceil(scale(crow)).saturating_sub(1));
+        let (x0, cw) = cell_x(ccol, crow).unwrap_or((ox + (col0 + vis(ccol, crow)) * cw, cw));
+        let y0 = oy + (row0 + crow) * ch;
         let color = grid.cursor_color;
         match shape {
             CursorShape::Underline => {
@@ -718,18 +789,34 @@ fn blit(
     pen_y: i32,
     fg: u32,
 ) {
-    for gy in 0..glyph.height {
-        let py = pen_y + gy as i32;
+    blit_scaled(buf, width, clip_x, rows, glyph, (pen_x, pen_y), (1, 1), fg);
+}
+
+/// [`blit`] with each glyph pixel drawn as an `sx × sy` block (nearest
+/// neighbor), for DECDWL/DECDHL lines.
+#[allow(clippy::too_many_arguments)]
+fn blit_scaled(
+    buf: &mut [u32],
+    width: usize,
+    clip_x: (usize, usize),
+    rows: impl Fn(usize) -> bool,
+    glyph: &Glyph,
+    (pen_x, pen_y): (i32, i32),
+    (sx, sy): (usize, usize),
+    fg: u32,
+) {
+    for dy in 0..glyph.height * sy {
+        let py = pen_y + dy as i32;
         if py < 0 || !rows(py as usize) {
             continue;
         }
         let row = py as usize * width;
-        for gx in 0..glyph.width {
-            let px = pen_x + gx as i32;
+        for dx in 0..glyph.width * sx {
+            let px = pen_x + dx as i32;
             if px < 0 || px as usize >= clip_x.1.min(width) || (px as usize) < clip_x.0 {
                 continue;
             }
-            let gi = gy * glyph.width + gx;
+            let gi = dy / sy * glyph.width + dx / sx;
             let idx = row + px as usize;
             // Color glyphs (emoji bitmap strikes) carry their own pixels and
             // ignore the pen color; ordinary glyphs tint coverage with `fg`.
@@ -748,18 +835,6 @@ fn blit(
             buf[idx] = blend(buf[idx], fg, a);
         }
     }
-}
-
-/// Blend `fg` over `bg` by 8-bit coverage `a` (per channel, `0x00RRGGBB`).
-fn blend(bg: u32, fg: u32, a: u8) -> u32 {
-    let a = a as u32;
-    let inv = 255 - a;
-    let chan = |shift: u32| {
-        let f = (fg >> shift) & 0xff;
-        let b = (bg >> shift) & 0xff;
-        (f * a + b * inv) / 255
-    };
-    (chan(16) << 16) | (chan(8) << 8) | chan(0)
 }
 
 /// Paint the command gutter marks: a 3px vertical stripe one pixel left of
@@ -1077,6 +1152,63 @@ mod tests {
         assert_eq!(buf[6 * w], 0x0000FF);
     }
 
+    /// A 4x8 render of a 1x1 grid after `bytes`.
+    fn render_one(bytes: &[u8]) -> Vec<u32> {
+        let mut g = Grid::new(1, 1);
+        AnsiParser::new().advance(&mut g, bytes);
+        g.cursor_visible = false;
+        let mut buf = vec![0u32; 4 * 8];
+        render(&g, &[], &mut MockFont, &mut buf, 4, 8, true);
+        buf
+    }
+
+    #[test]
+    fn indexed_underline_color_paints_straight_and_double_underlines() {
+        // 58;5;33 is xterm cube entry 33, 0x0087FF.
+        let straight = render_one(b"\x1b[38;2;255;255;255;4;58;5;33mX");
+        assert_eq!(straight[6 * 4], 0x0087FF);
+        let double = render_one(b"\x1b[38;2;255;255;255;21;58;5;33mX");
+        assert_eq!((double[4 * 4], double[6 * 4]), (0x0087FF, 0x0087FF));
+    }
+
+    #[test]
+    fn reverse_cell_paints_fg_and_bg_swapped() {
+        let buf = render_one(b"\x1b[38;2;255;0;0;48;2;0;0;255;7mX");
+        assert_eq!(buf[0], 0x0000FF, "glyph in the old bg");
+        assert_eq!(buf[3], 0xFF0000, "background in the old fg");
+    }
+
+    #[test]
+    fn dim_cell_glyph_is_darker_than_plain() {
+        let plain = render_one(b"\x1b[38;2;255;255;255mX");
+        let dim = render_one(b"\x1b[38;2;255;255;255;2mX");
+        assert_eq!(plain[0], 0xFFFFFF);
+        assert!(dim[0] & 0xFF < 0xFF && dim[0] != 0, "{:06x}", dim[0]);
+    }
+
+    #[test]
+    fn hidden_cell_paints_only_its_background() {
+        let buf = render_one(b"\x1b[38;2;255;0;0;48;2;0;0;255;8;4;9mX");
+        assert!(buf.iter().all(|&px| px == 0x0000FF));
+    }
+
+    #[test]
+    fn hidden_wide_glyph_paints_both_columns_background_only() {
+        let mut g = Grid::new(2, 1);
+        AnsiParser::new().advance(&mut g, "\x1b[48;2;0;0;255;8m\u{754c}".as_bytes());
+        g.cursor_visible = false;
+        let mut buf = vec![0u32; 8 * 8];
+        render(&g, &[], &mut MockFont, &mut buf, 8, 8, true);
+        assert!(buf.iter().all(|&px| px == 0x0000FF));
+    }
+
+    #[test]
+    fn overline_draws_a_stripe_along_the_top() {
+        let buf = render_one(b"\x1b[38;2;0;255;0;53m ");
+        assert_eq!((buf[0], buf[3]), (0x00FF00, 0x00FF00));
+        assert_eq!(buf[4 * 4], 0x000000, "only the top edge");
+    }
+
     #[test]
     fn hovered_link_span_draws_a_stripe_even_without_sgr_underline() {
         let mut g = Grid::new(3, 1);
@@ -1156,13 +1288,6 @@ mod tests {
         );
         // A non-cursor top-row cell (col 1) is untouched: default black background.
         assert_eq!(buf[cw], 0x000000, "top row not overlaid");
-    }
-
-    #[test]
-    fn blend_endpoints() {
-        assert_eq!(blend(0x000000, 0xFFFFFF, 255), 0xFFFFFF); // full coverage = fg
-        assert_eq!(blend(0x0000FF, 0xFF0000, 0), 0x0000FF); // zero coverage = bg
-        assert_eq!(blend(0x000000, 0xFFFFFF, 128), 0x808080); // half = mid-gray
     }
 
     #[test]
@@ -1617,6 +1742,203 @@ mod tests {
         assert!(
             nonbg(&off, cw, chh, 1) > 0,
             "no ligature: second cell renders"
+        );
+    }
+
+    /// A test font with a 4x8 cell: base glyphs are a solid `w x h` block
+    /// whose top row sits `top` px below the cell top; zero-width marks are
+    /// a 2x1 bar on the cell's top row.
+    struct BoxFont {
+        w: usize,
+        h: usize,
+        top: i32,
+    }
+    impl GlyphSource for BoxFont {
+        fn cell_size(&self) -> (usize, usize) {
+            (4, 8)
+        }
+        fn baseline(&self) -> i32 {
+            6
+        }
+        fn glyph(&mut self, ch: char, _style: Style) -> Rc<Glyph> {
+            let (w, h, top) = if char_width(ch) == 0 {
+                (2, 1, 0)
+            } else {
+                (self.w, self.h, self.top)
+            };
+            Rc::new(Glyph {
+                width: w,
+                height: h,
+                left: 0,
+                top: top - 6,
+                coverage: vec![255; w * h],
+                color: None,
+            })
+        }
+    }
+
+    /// Render `bytes` on a `cols x rows` grid with `font`, white on black.
+    fn render_with(bytes: &str, cols: usize, rows: usize, font: &mut BoxFont) -> Vec<u32> {
+        let mut g = Grid::new(cols, rows);
+        AnsiParser::new().advance(&mut g, b"\x1b[38;2;255;255;255m\x1b[48;2;0;0;0m");
+        AnsiParser::new().advance(&mut g, bytes.as_bytes());
+        g.cursor_visible = false;
+        let (w, h) = (cols * 4, rows * 8);
+        let mut buf = vec![0u32; w * h];
+        render(&g, &[], font, &mut buf, w, h, true);
+        buf
+    }
+
+    /// Lit pixels of `buf` (`w` wide) in rows `y0..y1`, columns `x0..x1`.
+    fn lit(buf: &[u32], w: usize, (x0, x1): (usize, usize), (y0, y1): (usize, usize)) -> usize {
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| y * w + x))
+            .filter(|&i| buf[i] != 0)
+            .count()
+    }
+
+    #[test]
+    fn combining_mark_paints_above_its_base() {
+        // The base glyph fills rows 4..6; the mark draws on row 0 (#1160).
+        let font = || BoxFont { w: 2, h: 2, top: 4 };
+        let bare = render_with("e", 1, 1, &mut font());
+        let marked = render_with("e\u{301}", 1, 1, &mut font());
+        assert_eq!(
+            lit(&bare, 4, (0, 4), (0, 4)),
+            0,
+            "bare e has nothing up top"
+        );
+        assert_eq!(
+            lit(&marked, 4, (0, 4), (0, 1)),
+            2,
+            "the acute's bar, centered"
+        );
+        assert_eq!(marked[1..3], [0xFFFFFF, 0xFFFFFF], "centered over the cell");
+        assert_eq!(lit(&marked, 4, (0, 4), (4, 6)), 4, "the base still draws");
+    }
+
+    #[test]
+    fn joiners_and_variation_selectors_draw_nothing() {
+        let font = || BoxFont { w: 2, h: 2, top: 4 };
+        let bare = render_with("a", 1, 1, &mut font());
+        assert_eq!(render_with("a\u{fe0f}", 1, 1, &mut font()), bare);
+        assert_eq!(render_with("a\u{200d}", 1, 1, &mut font()), bare);
+    }
+
+    #[test]
+    fn double_width_row_draws_glyphs_twice_as_wide() {
+        // A 2x2 glyph at the cell's top-left becomes 4x2; the second cell
+        // starts two columns over, and only half the columns show (#1159).
+        let font = || BoxFont { w: 2, h: 2, top: 0 };
+        let single = render_with("XY", 4, 1, &mut font());
+        assert_eq!(lit(&single, 16, (0, 4), (0, 2)), 4);
+        let double = render_with("\x1b#6XY", 4, 1, &mut font());
+        assert_eq!(lit(&double, 16, (0, 4), (0, 2)), 8, "X at twice the width");
+        assert_eq!(lit(&double, 16, (8, 12), (0, 2)), 8, "Y in columns 2-3");
+        assert_eq!(lit(&double, 16, (0, 16), (2, 8)), 0, "single height");
+    }
+
+    #[test]
+    fn double_height_halves_together_show_one_tall_glyph() {
+        // A glyph filling its 4x8 cell becomes 8x16 across the two rows.
+        let font = || BoxFont { w: 4, h: 8, top: 0 };
+        let buf = render_with("\x1b#3X\r\n\x1b#4X", 2, 2, &mut font());
+        assert_eq!(lit(&buf, 8, (0, 8), (0, 8)), 64, "top half");
+        assert_eq!(lit(&buf, 8, (0, 8), (8, 16)), 64, "bottom half");
+        // A top half alone shows only the top of the glyph.
+        let buf = render_with("\x1b#3X\r\nX", 2, 2, &mut font());
+        assert_eq!(lit(&buf, 8, (0, 8), (0, 8)), 64);
+        assert_eq!(lit(&buf, 8, (0, 8), (8, 16)), 32, "the plain X below");
+    }
+
+    #[test]
+    fn concealed_cell_hides_its_combining_marks() {
+        let font = || BoxFont { w: 2, h: 2, top: 4 };
+        let blank = render_with("\x1b[8me", 1, 1, &mut font());
+        assert_eq!(render_with("\x1b[8me\u{301}", 1, 1, &mut font()), blank);
+        assert!(blank.iter().all(|&px| px == 0), "background only");
+    }
+
+    #[test]
+    fn widened_vs16_cluster_paints_two_columns_and_centers_marks_over_both() {
+        // Mode 2027: 1 + VS16 + keycap is two columns. Both take the blue
+        // background, and the keycap mark centers over all 8 pixels.
+        let font = || BoxFont { w: 2, h: 2, top: 4 };
+        let text = "\x1b[?2027h\x1b[48;2;0;0;255m1\u{fe0f}\u{20e3}";
+        let buf = render_with(text, 2, 1, &mut font());
+        assert_eq!(
+            (buf[7 * 8], buf[7 * 8 + 7]),
+            (0x0000FF, 0x0000FF),
+            "both columns"
+        );
+        let top: Vec<usize> = (0..8).filter(|&x| buf[x] == 0xFFFFFF).collect();
+        assert_eq!(top, [3, 4], "the mark centered over two columns");
+    }
+
+    #[test]
+    fn double_height_bottom_half_at_the_top_row_draws_the_glyph_bottom() {
+        // Only the bottom half of a DECDHL glyph shows on a bottom-half row,
+        // even at the pane's top (its glyph starts above the pane).
+        let upper = render_with("\x1b#4X", 2, 1, &mut BoxFont { w: 4, h: 4, top: 0 });
+        assert_eq!(
+            lit(&upper, 8, (0, 8), (0, 8)),
+            0,
+            "upper-half ink stays above"
+        );
+        let lower = render_with("\x1b#4X", 2, 1, &mut BoxFont { w: 4, h: 4, top: 4 });
+        assert_eq!(
+            lit(&lower, 8, (0, 8), (0, 8)),
+            64,
+            "lower-half ink fills the row"
+        );
+    }
+
+    #[test]
+    fn pending_wrap_cursor_on_a_full_double_row_draws_on_the_last_shown_cell() {
+        let mut g = Grid::new(4, 1);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b]12;#00ff00\x07\x1b[4 q\x1b#6AB");
+        assert_eq!(g.cursor, (2, 0), "pending wrap at the half");
+        let (w, h) = (16, 8);
+        let mut buf = vec![0u32; w * h];
+        render(&g, &[], &mut MockFont, &mut buf, w, h, true);
+        let bottom = &buf[(h - 1) * w..];
+        assert!(
+            bottom[8..16].iter().all(|&px| px == 0x00FF00),
+            "{bottom:x?}"
+        );
+        assert!(bottom[..8].iter().all(|&px| px != 0x00FF00));
+    }
+
+    #[test]
+    fn real_font_draws_a_combining_acute_above_e() {
+        let Some(bytes) = super::super::font::load_default_font(None) else {
+            eprintln!("no system font; skipping real-font render");
+            return;
+        };
+        let set = super::super::font::FontSet {
+            regular: bytes,
+            ..Default::default()
+        };
+        let mut fc = super::super::font::FontCache::new(set, 24.0, false).unwrap();
+        let (cw, chh) = fc.cell_size();
+        let mut paint = |text: &str| {
+            let mut g = Grid::new(1, 1);
+            AnsiParser::new().advance(&mut g, text.as_bytes());
+            g.cursor_visible = false;
+            let mut buf = vec![0u32; cw * chh];
+            render(&g, &[], &mut fc, &mut buf, cw, chh, true);
+            buf
+        };
+        let (bare, marked) = (paint("e"), paint("e\u{301}"));
+        let top_ink = |buf: &[u32]| buf.iter().position(|&px| px != 0).map(|i| i / cw);
+        let Some(e_top) = top_ink(&bare) else {
+            panic!("e drew no pixels");
+        };
+        let mark_top = top_ink(&marked).expect("é drew pixels");
+        assert!(
+            mark_top < e_top,
+            "acute ink starts above e: {mark_top} vs {e_top}"
         );
     }
 

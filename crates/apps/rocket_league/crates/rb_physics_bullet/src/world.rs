@@ -67,6 +67,9 @@ fn ball_world_material(ball: &RigidBody) -> solver::StaticMaterial {
 /// only (position correction runs per raw point, FR-118). A ball on two
 /// ramp facets, or a ramp and the floor, then bounces once instead of once
 /// per contact: `test2.jsonl` 13.892 s went from 1072 uu/s to under 20.
+/// The distance runs to the 91.25 uu sphere's surface, Bullet's `rel_pos1`
+/// on RocketSim's ball, not to the `BALL_RADIUS` contact sphere 1.9 uu
+/// further out (`RB-PHYSICS-001-FR-161`).
 fn combined_ball_world_contact(
     ball: &RigidBody,
     manifolds: Vec<(solver::StaticMaterial, Vec<collision::Contact>)>,
@@ -83,8 +86,10 @@ fn combined_ball_world_contact(
     let mut distance = 0.0;
     for contact in &contacts {
         normal += contact.normal * share;
-        // Bullet's `rel_pos1`: from the centre to the ball's own contact point.
-        let on_ball = contact.point - contact.normal * contact.penetration_depth;
+        // Bullet's `rel_pos1`: from the centre to the ball's own contact
+        // point, on its 91.25 uu sphere.
+        let band = crate::body::BALL_RADIUS - crate::body::BALL_COLLISION_RADIUS;
+        let on_ball = contact.point - contact.normal * (contact.penetration_depth - band);
         distance += (on_ball - ball.position).length() * share;
     }
     // Opposite contacts cancel: no direction left to push along. The
@@ -5955,9 +5960,10 @@ mod tests {
         // The average normal, renormalized (RB-PHYSICS-001-FR-119).
         let diagonal = Vec3::new(1.0, 0.0, 1.0).normalize().expect("nonzero");
         assert!((combined.normal - diagonal).length() < 1e-6);
-        // Average distance from the centre to the ball's own contact points
-        // (each `point - normal * depth`: 95 and 85) = 90, back along it.
-        assert!((combined.point - (ball.position - diagonal * 90.0)).length() < 1e-4);
+        // Average distance from the centre to the ball's own contact points,
+        // on its 91.25 uu sphere (FR-161): each `point - normal * depth`
+        // (95 and 85) less the 1.9 uu band = 88.1, back along it.
+        assert!((combined.point - (ball.position - diagonal * 88.1)).length() < 1e-4);
         // Velocity only: no position correction.
         assert_eq!(combined.penetration_depth, 0.0);
     }
@@ -6284,6 +6290,35 @@ mod tests {
         assert!(
             (v.y - 2862.8).abs() < 20.0 && (v.z - 958.7).abs() < 25.0,
             "{v:?}"
+        );
+    }
+
+    /// A ball sliding on the floor spins up about RocketSim's 91.25 uu
+    /// sphere (`btSphereShape`): its lever arm and its inertia are that
+    /// sphere's, so friction that takes `dv` off its speed adds
+    /// `2.5 * dv / 91.25` to its spin. The game's ball does that
+    /// (`probe_ball_fast_6500`: 0.05190 rad/s and 1.8999 uu/s a tick;
+    /// `PHYSICS-PARITY-VS-ROCKETSIM.md`: 6.228 rad/s^2). About the 93.15 uu
+    /// contact sphere it spun up 2% slower, 0.05088 rad/s a tick.
+    #[test]
+    fn a_sliding_ball_spins_up_about_its_91_25_uu_sphere() {
+        let speed = 2000.0;
+        let mut ball = RigidBody::standard_ball(Vec3::new(0.0, 0.0, crate::body::BALL_RADIUS));
+        ball.linear_velocity = Vec3::new(speed, 0.0, 0.0);
+        let mut world = PhysicsWorld::standard_arena(ball);
+        let dt = 1.0 / 120.0;
+        world.step(dt);
+        let drag = speed * (1.0 - 0.97f32.powf(dt));
+        let friction = speed - drag - world.ball.linear_velocity.x;
+        let spin = world.ball.angular_velocity.y;
+        let expected = 2.5 * friction / crate::body::BALL_COLLISION_RADIUS;
+        assert!(
+            (friction - 0.35 * 650.0 * dt).abs() < 0.01,
+            "friction {friction} uu/s"
+        );
+        assert!(
+            (spin - expected).abs() < 0.001 * expected,
+            "spin {spin} rad/s, expected {expected}"
         );
     }
 }

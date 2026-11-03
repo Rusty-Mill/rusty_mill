@@ -156,12 +156,11 @@ They move when `adk-models` or `adk-mcp` moves.
 #911 tier A (2026-10-25): `skillopt-core`, `agentgateway-agui` and
 `rusty_mill_board` are on `rusty_tokio`, and `rk-mcp`'s tests are. `rk-mcp`
 keeps `tokio::sync::Mutex` for its connection lock, which is held across
-remote awaits, until #1064 makes `rusty_tokio`'s mutex cancellation-safe. Four tier A rows stay on tokio because
-of the runtime boundary: `rusty_tokio`'s timers, I/O and processes need a
+remote awaits, until #1064 makes `rusty_tokio`'s mutex cancellation-safe. Three tier A rows stay on tokio because
+of the runtime boundary (a fourth, `agentgateway-tls`, moved with the gateway in #885): `rusty_tokio`'s timers, I/O and processes need a
 `rusty_tokio` runtime, and these crates run on a tokio one. `rk-compose`'s
 checks (`tokio::process`, `time::timeout`) run inside `rk-app` (tier C);
-`skillopt-cli` drives `skillopt-model`'s `reqwest`; `agentgateway-tls` is the
-tokio-to-`rusty_tokio` I/O bridge for `agentgateway`; and
+`skillopt-cli` drives `skillopt-model`'s `reqwest`; and
 `rusty-hister-model`'s tests drive `sqlx` through `rusty-db`. Each moves with
 the tier C crate that holds it.
 `rusty_tonic` (tier B) builds its tonic-oracle test streams with
@@ -174,11 +173,36 @@ dev-dependency only to host the tonic oracle server.
 
 #910 (in part): `rp-core`'s `ChatStream` is a `rusty_stream::BoxStream`, so
 `rp-core` has no async dependency and `rp-router` drops `futures`. The
-`futures-core` edges are `rp-providers` (reqwest's SSE body) and `rp-server`
-(`rusty_axum`'s `Sse`), each through `rusty_stream::Compat`. `rp-mcp` is tier
-C: its tools block on `rp-router` (reqwest) and its gateway drives
-`rusty-mcp-client`'s tokio transport, both on the tokio runtime `build` runs
-in. Only its `RwLock` moved; the rest moves with #906 (T7).
+`futures-core` edges are `rp-providers` (the `eventsource-stream` SSE decoder)
+and `rp-server` (`rusty_axum`'s `Sse`), each through `rusty_stream::Compat`.
+`rp-mcp` is off tokio (#910): its native tools and gateway block on a
+`rusty_tokio` handle, the caller's runtime or the fallback.
+
+#687 (rusty_provider, 2026-10-29): `rp-router` (moderation, web search,
+webhooks) and `rp-providers` send on `rusty_request` instead of reqwest, so
+they need `install_fallback()` under tokio, which `rp-server` calls. A
+provider's timeout still bounds the whole exchange, streamed body included,
+through a `rusty_tokio::time::timeout_at` deadline per chunk. Since #910
+`rp-router`'s timers, spawns and `spawn_blocking` are `rusty_tokio` too; only
+the `tokio-postgres` connection task runs on the tokio runtime that connects
+it. `rp-server` keeps reqwest for its JWKS fetch.
+
+#906 (T7): the rusty_mcp library code is off tokio. `rusty_mcp_middleware`'s
+JWKS fetch runs on the caller's `rusty_tokio` runtime, since all of its
+consumers (`agentgateway`, `-auth`, `-mcp`) now run one, and its tests drop
+tokio and reqwest. `rusty-mcp-client` runs only on `rusty_tokio`, and its
+OAuth tests do too.
+
+Runtime boundary, opt-in fallback (2026-10-29): `rusty_tokio::runtime::install_fallback()`
+starts one process-wide `rusty_tokio` runtime. After it runs, I/O, timers,
+`spawn` and `spawn_blocking` on a thread with no `rusty_tokio` runtime (a tokio
+worker, say) use the fallback runtime instead of panicking. A tokio application
+that calls it at startup can depend on crates that moved to `rusty_tokio`, so
+the boundary above no longer forces a library to wait for its consumers.
+`Handle::current`/`try_current` are unchanged. `rp-server` and `rk-app` (with
+`mcp-server`) call it at startup, so `rusty_request`'s real-tokio backend,
+`Body::streaming_tokio` and `rusty-mcp-client`'s `tokio` feature are gone
+(#906). `adk-mcp`'s client is stdio-only and makes no HTTP call.
 
 ## 4. Per-crate table
 
@@ -201,13 +225,13 @@ through `Cargo.lock`. The counts are not a vetted audit.
 
 | Crate | Path | Deps | Files | API used (top 6, count) | Tokio-bound deps | Uses (in-house, async) | Gaps | Tier |
 |---|---|---|---|---|---|---|---|---|
-| `agentgateway` | `apps/rusty_agent_gateway/crates/agentgateway` | t tu | 21 | t::test×292, t::spawn×27, t::net::TcpListener::bind×26, tu::sync::CancellationToken×16, t::time::sleep×8, t::select!×3, +11 | axum, hyper, hyper-util, tower | agentgateway-agui, agentgateway-auth, agentgateway-llm, agentgateway-mcp, agentgateway-proxy, agentgateway-tls, rusty-mcp, rusty_mcp_axum, rusty_mcp_server | G1 G4 G6 G8 G9 | C |
+| `agentgateway` | `apps/rusty_agent_gateway/crates/agentgateway` | t(dev) tu(dev) | — | — (server on `rusty_axum`, `#[rusty_tokio::main]`, #885; integration tests keep tokio for their rmcp/reqwest clients; mock upstreams on `rusty_axum`/`rusty_hyper`) | — (tower gone, #886) | rusty_mcp_middleware | — | done |
 | `agentgateway-agui` | `apps/rusty_agent_gateway/crates/agentgateway-agui` | t(dev) | 1 | t::test×2 | — | — | — | A |
-| `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | t | 1 | t::test×16, t::time::timeout_at×1 | — (client on rusty_request) | rusty-mcp | — | A |
-| `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as t | 2 | t::test×3, t::time::sleep×1, t::time::timeout_at×1, as::stream!×1 | — (clients on rusty_request) | — | G7 | B |
-| `agentgateway-mcp` | `apps/rusty_agent_gateway/crates/agentgateway-mcp` | t tu(dev) | 3 | t::test×28, t::task::spawn_blocking×2, t::time::timeout×2, t::runtime::Handle×1, t::net::TcpListener×1, tu::sync::CancellationToken×1, +2 | tonic, tonic-prost | rusty-mcp, rusty_mcp_client_native, rusty_mcp_server | G1 G8 G9 | C |
-| `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | t | 1 | t::time::sleep×1, t::time::timeout×1 | — (client on rusty_request, #885) | — | — | C |
-| `agentgateway-tls` | `apps/rusty_agent_gateway/crates/agentgateway-tls` | t | 3 | t::test×3, t::io::duplex×3, t::net::TcpStream×2, t::io::AsyncRead×2, t::io::AsyncWrite×2, t::time::timeout×1, +7 | — | — | G1 | A |
+| `agentgateway-auth` | `apps/rusty_agent_gateway/crates/agentgateway-auth` | — | 0 | — (moved to `rusty_tokio`, #885) | — | rusty_mcp_middleware | — | done |
+| `agentgateway-llm` | `apps/rusty_agent_gateway/crates/agentgateway-llm` | as | 1 | — (moved to `rusty_tokio`, #885; `async-stream` stays) | — | — | G7 | B |
+| `agentgateway-mcp` | `apps/rusty_agent_gateway/crates/agentgateway-mcp` | — | — | — (moved to `rusty_tokio`, #885; tests host the scripted gRPC processor on `rusty_hyper`) | tonic, tonic-prost | rusty_mcp_middleware, rusty_mcp_client_native, rusty_mcp_server | — | done |
+| `agentgateway-proxy` | `apps/rusty_agent_gateway/crates/agentgateway-proxy` | — | 0 | — (moved to `rusty_tokio`, #885) | — | — | — | done |
+| `agentgateway-tls` | `apps/rusty_agent_gateway/crates/agentgateway-tls` | — | 0 | — (moved to `rusty_tokio`, the I/O bridge is gone, #885) | — | — | — | done |
 | `rusty-hister-model` | `apps/rusty_hister/crates/rusty-hister-model` | t(dev) | 7 | t::test×120 | — | rusty-db | — | A |
 | `rusty_homelab_mcp` | `apps/rusty_homelab_mcp` | t | 7 | t::test×23, t::runtime::Handle×5, t::runtime::Handle::current×2, t::main×1, t::task::spawn_blocking×1 | — | rusty_fedora, rusty_http, rusty_mcp_server, rusty_opnsense, rusty_proxmox | G1 G4 | B |
 | `rk-agui` | `apps/rusty_key/crates/agui` | t | 2 | t::runtime::Handle×1, t::sync::mpsc×1, t::sync::oneshot×1, t::task::JoinHandle×1, t::spawn×1, t::select!×1, +1 | aisdk | rk-app, rk-constrain | G1 G6 G9 | C |
@@ -219,9 +243,9 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `rk-mcp` | `apps/rusty_key/crates/mcp` | t | 3 | t::test×4, t::sync::Mutex×1 | — | rk-constrain, rk-feed, rusty-mcp-client | — | A |
 | `rusty_mill_board` | `apps/rusty_mill_board` | t | 2 | t::signal::ctrl_c×2, t::runtime::Builder::new_current_thread×1, t::signal::unix::signal×1, t::signal::unix::SignalKind::terminate×1, t::select!×1, t::runtime::Builder×1, +1 | — | rusty_http, rusty_mcp_server, rusty_request | G1 | A |
 | `rp-core` | `apps/rusty_provider/crates/core` | — | 0 | — (moved to `rusty_stream`, #910) | — | — | — | done |
-| `rp-mcp` | `apps/rusty_provider/crates/mcp` | t | 4 | t::test×9, t::time::sleep×4, t::spawn×3, t::runtime::Handle×2, t::time::timeout×2, +1 | reqwest (via rp-router) | rp-core, rp-router, rusty-mcp-client, rusty_mcp_server | G1 G4 G9 | C |
-| `rp-providers` | `apps/rusty_provider/crates/providers` | fu t(dev) | 7 | t::test×110, fu::StreamExt×6 | reqwest | rp-core | G7 G9 | C |
-| `rp-router` | `apps/rusty_provider/crates/router` | f t | 5 | t::test×156, t::time::sleep×33, t::spawn×7, t::task::spawn_blocking×4, f::stream::StreamExt×1, f::stream×1, +2 | reqwest, tokio-postgres, tokio-postgres-rustls | rp-core, rp-providers | G1 G5 G7 G9 | C |
+| `rp-mcp` | `apps/rusty_provider/crates/mcp` | — | — | — (on `rusty_tokio`, #910) | — | rp-core, rp-router, rusty-mcp-client, rusty_mcp_server | — | done |
+| `rp-providers` | `apps/rusty_provider/crates/providers` | fu t(dev) | 7 | t::test×110, fu::StreamExt×6 | — (rusty_request, #687) | rp-core | G7 | B |
+| `rp-router` | `apps/rusty_provider/crates/router` | f t | 5 | t::test×156, t::time::sleep×33, t::spawn×7, t::task::spawn_blocking×4, f::stream::StreamExt×1, f::stream×1, +2 | tokio-postgres, tokio-postgres-rustls | rp-core, rp-providers | G1 G5 G7 G9 | C |
 | `rp-server` | `apps/rusty_provider/crates/server` | fu t | 6 | t::test×133, t::time::timeout×3, fu::StreamExt×2, t::sync::Semaphore::new×2, t::net::TcpListener::bind×2, t::spawn×2, +5 | axum, reqwest, tower-http | rp-core, rp-mcp, rp-router, rusty_mcp_axum, rusty_mcp_server | G1 G4 G7 G9 | C |
 | `remind_me_core` | `apps/rusty_remind_me/crates/remind_me_core` | t | 1 | t::runtime::Builder::new_current_thread×1 | aws-config, aws-sdk-s3, sha256 | — | G1 G9 | C |
 | `remind_me_remote` | `apps/rusty_remind_me/crates/remind_me_remote` | t | 4 | t::test×29, t::net::TcpListener::bind×4, t::spawn×3, t::runtime::Builder::new_multi_thread×1, t::sync::Mutex×1, t::sync::Mutex::const_new×1, +2 | axum, sha256 | remind_me_core, rusty_mcp_axum, rusty_mcp_server | G1 G2 G9 | C |
@@ -244,12 +268,12 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `rusty_h2` | `libs/net/rusty_h2` | t(dev) | 1 | t::net::TcpListener::bind×5, t::spawn×5, t::runtime::Runtime×4, t::time::sleep×2, t::runtime::Builder::new_multi_thread×1, t::time::timeout×1, +1 | — | — | G1 | A |
 | `rusty_http` | `libs/net/rusty_http` | t | 1 | t::test×24, t::io::AsyncRead×1, t::io::AsyncReadExt×1, t::io::AsyncWrite×1, t::io::AsyncWriteExt×1, t::io::ReadBuf×1, +2 | — | — | — | A |
 | `rusty_hyper` | `libs/net/rusty_hyper` | t(dev) | 1 | t::spawn×3, t::runtime::Runtime×2, t::net::TcpListener::bind×1, t::runtime::Builder::new_multi_thread×1, t::net::TcpStream::connect×1 | — | rusty_h2, rusty_http | G1 | A |
-| `rusty_request` | `libs/net/rusty_request` | t | 6 | t::io::AsyncRead×4, t::test×3, t::io::AsyncWrite×2, t::runtime::Handle::try_current×1, t::time::timeout×1, t::time::sleep×1, +6 | — | rusty_http | G1 | A |
+| `rusty_request` | `libs/net/rusty_request` | t(dev) | 1 | t::test×4 | — | rusty_http | — | done (tokio is the oracle for `tests/foreign_executor.rs`) |
 | `rusty_a2a` | `libs/protocol/rusty_a2a` | as fc fu t ts tu | 44 | t::test×139, t::time::sleep×64, t::spawn×52, t::net::TcpListener::bind×41, fu::StreamExt×14, fc::Stream×9, +14 | axum, reqwest, tonic | — | G1 G7 G8 G9 | C |
 | `rusty-acp` | `libs/protocol/rusty_acp` | fu t tu | 49 | t::test×219, t::spawn×51, t::net::TcpListener::bind×46, t::time::sleep×40, fu::StreamExt×15, t::time::timeout×7, +30 | axum, redis, reqwest, sqlx | — | G1 G3 G4 G6 G7 G8 G9 | C |
 | `rusty_lsp` | `libs/protocol/rusty_lsp` | t | 12 | t::test×103, t::time::timeout×25, t::spawn×9, t::io::duplex×6, t::time::sleep×5, t::io::AsyncWriteExt×3, +35 | — | — | G1 G4 | B |
-| `rusty-mcp` | `libs/protocol/rusty_mcp/crates/rusty-mcp` | t | 11 | t::test×84, t::spawn×14, t::time::sleep×9, t::net::TcpListener::bind×6, t::time::timeout×4, t::io::AsyncReadExt×2, +2 | — | rusty_http, rusty_request | G1 G4 | B |
-| `rusty-mcp-client` | `libs/protocol/rusty_mcp/crates/rusty-mcp-client` | t(dev) | 5 | t::test×27, t::time::timeout×10, t::spawn×4, t::time::sleep×3, t::io::AsyncReadExt×2, t::io::AsyncWriteExt×2, +4 | — | rusty_mcp_client_native, rusty_request | G1 G4 | B |
+| `rusty_mcp_middleware` | `libs/protocol/rusty_mcp_middleware` | — | 0 | — (moved to `rusty_tokio`, #906) | — | rusty_http, rusty_request | — | done |
+| `rusty-mcp-client` | `libs/protocol/rusty_mcp/crates/rusty-mcp-client` | — | 0 | — (moved to `rusty_tokio`, #906) | — | rusty_mcp_client_native, rusty_request | — | done |
 | `rusty-mcp-demo` | `libs/protocol/rusty_mcp/crates/rusty-mcp-demo` | t(dev) | 1 | t::test×43, t::time::timeout×4, t::time::sleep×1 | — | rusty_mcp_server | — | A |
 | `rusty_mcp_axum` | `libs/protocol/rusty_mcp_axum` | f t | 2 | t::task::spawn_blocking×7, t::test×6, t::net::TcpListener::bind×3, t::spawn×3, t::sync::mpsc×1, t::sync::oneshot×1, +1 | axum | rusty_http, rusty_mcp_server | G1 G4 G7 G9 | removed (#875) |
 | `rusty_mcp_client_native` | `libs/protocol/rusty_mcp_client_native` | t(dev) | 2 | t::test×8, t::time::timeout×2, t::runtime::Runtime::new×1, t::net::TcpListener::bind×1, t::spawn×1, t::time::sleep×1, +1 | — | rusty_request | G1 G4 | B |

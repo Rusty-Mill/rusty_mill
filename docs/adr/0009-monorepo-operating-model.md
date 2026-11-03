@@ -41,6 +41,12 @@ closure, products release independently.
   editing the planner.
 - Escalation inputs that always force a broad run: toolchain, `Cargo.lock`
   with unprovable impact, non-additive root `Cargo.toml` edits, CI files.
+- One deliberate exception (2026-10-27): a member's dependency or
+  `[features]` edit runs the edited crate's closure, not the full sweep.
+  Feature unification can change how an unrelated crate builds in a
+  workspace-wide build; the daily scheduled sweep catches that. A `[patch]`ed
+  in-repo package (`vendor/*`) is not an exception: its edits select every
+  workspace crate that depends on it through the full graph.
 - Branch protection requires **one** stable check, `required-gate`, an
   `if: always()` job that `needs:` every CI job and fails on any failure or
   cancellation (skipped-by-plan counts as pass). Individual dynamic matrix

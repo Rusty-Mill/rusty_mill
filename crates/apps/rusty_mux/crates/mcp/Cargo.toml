@@ -1,0 +1,27 @@
+[package]
+name = "rusty_mux_mcp"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+description = "rusty-mux-mcp: the rusty_mux request catalog as MCP tools over stdio, each call run as rusty-mux-ctl would run it."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[[bin]]
+name = "rusty-mux-mcp"
+path = "src/main.rs"
+
+[dependencies]
+rusty_mcp_server = { workspace = true }
+rusty_mux_ctl = { workspace = true }
+rusty_mux_proto = { workspace = true }
+
+[dev-dependencies]
+rusty_libc = { workspace = true }
+rusty_mux_server = { workspace = true }
+rusty_tokio = { workspace = true }
+rusty_uuid = { workspace = true }

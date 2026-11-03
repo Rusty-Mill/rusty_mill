@@ -8,9 +8,11 @@ use std::num::NonZeroU32;
 
 use orch_claude::ClaudeAgent;
 use orch_core::board::Board;
-use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec};
 use orch_core::{GoalId, Ref, Text};
 use orch_dispatch::AgentRunner;
+
+const CLAUDE: AgentId = AgentId::from_static("claude");
 
 #[test]
 #[ignore = "needs the claude binary, a Claude login, and ORCH_REPO"]
@@ -42,7 +44,7 @@ fn claude_reads_the_prompt_from_stdin_and_echoes_the_nonce() {
     let board = Board::new(plan.goal());
 
     let out = ClaudeAgent::new(repo)
-        .run(Agent::Claude, plan.tasks().first().expect("card"), &board)
+        .run(CLAUDE, plan.tasks().first().expect("card"), &board)
         .expect("claude answers");
 
     assert!(

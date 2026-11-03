@@ -24,7 +24,7 @@ inputs:
     description: >
       space-separated package names to leave out on every runner -- for
       crates whose --all-features build is covered by dedicated jobs of
-      their own instead (see ci.yml's rusty_remind_me jobs)
+      their own instead
     required: false
     default: ''
 outputs:

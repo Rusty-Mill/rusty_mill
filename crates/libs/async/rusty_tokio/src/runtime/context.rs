@@ -35,6 +35,38 @@ impl Handle {
         CURRENT.with(|c| c.borrow().clone())
     }
 
+    /// The thread's own runtime, else the one [`install_fallback`] started:
+    /// what I/O registration, timers and `spawn` use, so they also work on a
+    /// thread another executor drives.
+    ///
+    /// [`install_fallback`]: super::install_fallback
+    ///
+    /// # Panics
+    /// Panics if there is neither.
+    #[track_caller]
+    pub(crate) fn current_or_fallback() -> Handle {
+        if let Some(handle) = Self::try_current_or_fallback() {
+            return handle;
+        }
+        panic!(
+            "there is no rusty_tokio runtime running on this thread -- \
+             call this from within Runtime::block_on or a spawned task, or \
+             call rusty_tokio::runtime::install_fallback() first"
+        )
+    }
+
+    /// [`current_or_fallback`](Self::current_or_fallback) without the
+    /// panic: `None` if there is neither a runtime on this thread nor an
+    /// installed fallback. For callers, such as a `Drop`, that must not
+    /// panic and can skip their work instead. Built on
+    /// [`try_current_no_panic`](Self::try_current_no_panic), so a value
+    /// dropped by a thread-local destructor after this thread's runtime
+    /// context is torn down gets the fallback (or `None`), not a panic
+    /// that would abort the process.
+    pub(crate) fn try_current_or_fallback() -> Option<Handle> {
+        Self::try_current_no_panic().or_else(super::fallback::get)
+    }
+
     /// Like [`try_current`](Self::try_current), but `None` instead of a
     /// panic once this thread's thread-locals are being torn down --
     /// for `time::Instant::now`, which falls back to real time without
@@ -273,9 +305,22 @@ pub(crate) fn enter(shared: Arc<Shared>) -> EnterGuard {
     EnterGuard { previous }
 }
 
+/// Like [`enter`], but `None` once this thread's thread-local storage
+/// for the ambient runtime has been destroyed, as when a runtime kept in
+/// another thread-local is dropped during thread exit.
+pub(crate) fn try_enter(shared: Arc<Shared>) -> Option<EnterGuard> {
+    let previous = CURRENT
+        .try_with(|c| c.borrow_mut().replace(Handle { shared }))
+        .ok()?;
+    Some(EnterGuard { previous })
+}
+
 impl Drop for EnterGuard {
     fn drop(&mut self) {
-        CURRENT.with(|c| *c.borrow_mut() = self.previous.take());
+        // `try_with`: the storage may be gone by now during thread exit,
+        // and a panic from a thread-local destructor aborts the process.
+        let previous = self.previous.take();
+        let _ = CURRENT.try_with(|c| *c.borrow_mut() = previous);
     }
 }
 

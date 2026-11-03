@@ -125,7 +125,9 @@ impl AsyncRead for DuplexStream {
                 // EOF: report a successful zero-byte read.
                 return Poll::Ready(Ok(()));
             }
-            pipe.read_waker = Some(cx.waker().clone());
+            let replaced = pipe.read_waker.replace(cx.waker().clone());
+            drop(pipe);
+            drop(replaced);
             return Poll::Pending;
         }
         let n = buf.remaining().min(pipe.buf.len());
@@ -133,9 +135,9 @@ impl AsyncRead for DuplexStream {
             *byte = pipe.buf.pop_front().expect("checked non-empty above");
         }
         buf.advance(n);
-        if let Some(waker) = pipe.write_waker.take() {
-            waker.wake();
-        }
+        let writer = pipe.write_waker.take();
+        drop(pipe);
+        wake(writer);
         Poll::Ready(Ok(()))
     }
 }
@@ -154,14 +156,16 @@ impl AsyncWrite for DuplexStream {
             )));
         }
         if pipe.buf.len() >= pipe.capacity {
-            pipe.write_waker = Some(cx.waker().clone());
+            let replaced = pipe.write_waker.replace(cx.waker().clone());
+            drop(pipe);
+            drop(replaced);
             return Poll::Pending;
         }
         let n = (pipe.capacity - pipe.buf.len()).min(buf.len());
         pipe.buf.extend(&buf[..n]);
-        if let Some(waker) = pipe.read_waker.take() {
-            waker.wake();
-        }
+        let reader = pipe.read_waker.take();
+        drop(pipe);
+        wake(reader);
         Poll::Ready(Ok(n))
     }
 
@@ -179,12 +183,29 @@ impl AsyncWrite for DuplexStream {
     /// direction closes independently" shape
     /// [`TcpStream::shutdown`](crate::io::AsyncWriteExt::shutdown) has.
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        wake(self.close_write());
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl DuplexStream {
+    /// Marks this half's write direction closed (the peer's reads see
+    /// EOF) and returns the peer's parked read waker, for the caller to
+    /// wake once the lock is released.
+    fn close_write(&self) -> Option<Waker> {
         let mut pipe = self.write_pipe().lock().unwrap();
         pipe.write_half_closed = true;
-        if let Some(waker) = pipe.read_waker.take() {
-            waker.wake();
-        }
-        Poll::Ready(Ok(()))
+        pipe.read_waker.take()
+    }
+}
+
+/// Wakes `waker`, if any. Called only with no pipe lock held: a waker
+/// may own the other half of this pair (a task holding both does), and
+/// waking or dropping it can run that half's `Drop`, which takes the
+/// pipe locks.
+fn wake(waker: Option<Waker>) {
+    if let Some(waker) = waker {
+        waker.wake();
     }
 }
 
@@ -192,22 +213,16 @@ impl Drop for DuplexStream {
     fn drop(&mut self) {
         // The pipe this half writes into: mark write-closed (peer's
         // reads see EOF), same as an explicit `shutdown`.
-        {
-            let mut write_pipe = self.write_pipe().lock().unwrap();
-            write_pipe.write_half_closed = true;
-            if let Some(waker) = write_pipe.read_waker.take() {
-                waker.wake();
-            }
-        }
+        let reader = self.close_write();
         // The pipe this half reads from: mark read-dropped, so the
         // peer's writes fail fast instead of endlessly buffering into a
         // pipe nobody's left to drain.
-        {
-            let mut read_pipe = self.read_pipe().lock().unwrap();
-            read_pipe.read_half_dropped = true;
-            if let Some(waker) = read_pipe.write_waker.take() {
-                waker.wake();
-            }
-        }
+        let writer = {
+            let mut pipe = self.read_pipe().lock().unwrap();
+            pipe.read_half_dropped = true;
+            pipe.write_waker.take()
+        };
+        wake(reader);
+        wake(writer);
     }
 }

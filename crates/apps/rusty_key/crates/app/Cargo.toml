@@ -41,8 +41,9 @@ futures = { workspace = true, optional = true }
 # MCP server mode (`rusty-keys --mcp`): expose Session::send() over JSON-RPC
 # (ADR-0029) on `rusty_mcp_server`'s stdio transport. Off by default; enable
 # for IDE integration. `rk-mcp/rmcp` is the client side, for connecting the
-# servers declared in the config.
-mcp-server = ["dep:rusty_mcp_server", "rk-mcp/rmcp"]
+# servers declared in the config; its OAuth fetch runs on rusty_tokio's
+# fallback runtime, which `main` installs.
+mcp-server = ["dep:rusty_mcp_server", "rk-mcp/rmcp", "dep:rusty_tokio"]
 # Web gateway (`rusty-keys --gateway`): HTTP/SSE over Session::send()
 # (PRD 06). Off by default; enable for web/desktop clients.
 gateway = ["dep:rusty_axum", "dep:rusty_axum_tokio", "dep:rusty_tokio", "dep:futures"]

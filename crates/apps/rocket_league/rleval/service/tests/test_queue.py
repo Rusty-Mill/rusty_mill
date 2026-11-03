@@ -17,18 +17,28 @@ from app.queue import CeleryJobQueue  # noqa: E402
 from app.service import ingest  # noqa: E402
 
 
-def test_celery_eager_executes_scoring(engine, session, scorer, make_account, monkeypatch):
+@pytest.mark.parametrize("initial_eager", [False, True])
+def test_celery_eager_executes_scoring(
+    engine, session, scorer, make_account, monkeypatch, initial_eager: bool
+):
     # Worker-side scorer is built (not injected), so swap in the fake there.
     monkeypatch.setattr(ca, "build_scorer", lambda: scorer)
-    monkeypatch.setattr(ca.celery_app.conf, "task_always_eager", True)
+    conf = ca.celery_app.conf
+    monkeypatch.setitem(conf, "task_always_eager", initial_eager)
+    with monkeypatch.context() as eager_patch:
+        # Celery forwards attributes to this mapping; patch its public item API
+        # so cleanup restores the value rather than deleting a proxy attribute.
+        eager_patch.setitem(conf, "task_always_eager", True)
 
-    account = make_account(credits_n=5)
-    replay = ingest(session, account, b"celery-eager-blob", "ranked")
-    assert replay.status == "queued"
+        account = make_account(credits_n=5)
+        replay = ingest(session, account, b"celery-eager-blob", "ranked")
+        assert replay.status == "queued"
 
-    # Real Celery dispatch (.delay), run synchronously by eager mode.
-    CeleryJobQueue().enqueue_scoring(replay.id)
+        # Real Celery dispatch (.delay), run synchronously by eager mode.
+        CeleryJobQueue().enqueue_scoring(replay.id)
 
-    session.expire_all()
-    assert session.get(Replay, replay.id).status == "done"
-    assert scorer.calls == 1 and scorer.last_method == "score"
+        session.expire_all()
+        assert session.get(Replay, replay.id).status == "done"
+        assert scorer.calls == 1 and scorer.last_method == "score"
+
+    assert conf.task_always_eager is initial_eager

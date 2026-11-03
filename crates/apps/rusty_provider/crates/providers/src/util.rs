@@ -44,7 +44,7 @@ pub fn gen_id(prefix: &str) -> String {
     format!("{prefix}-{nanos:x}")
 }
 
-/// Adapts a `futures` stream (reqwest's SSE body) into the `rusty_stream`
+/// Adapts a `futures` stream (the decoded SSE body) into the `rusty_stream`
 /// [`ChatStream`] the router consumes -- the provider-side `futures-core` interop edge.
 pub fn chat_stream<S>(stream: S) -> ChatStream
 where

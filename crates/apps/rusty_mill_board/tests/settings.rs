@@ -9,14 +9,21 @@ use std::sync::Arc;
 use rusty_mcp_server::{HttpConfig, HttpHandler};
 use rusty_mill_board::api::Shared;
 use rusty_mill_board::board::{Board, Roles};
+use rusty_mill_board::domain::MoveRules;
 use rusty_mill_board::identities::Credentials;
 use rusty_mill_board::mcp;
 use rusty_mill_board::projects::Projects;
-use rusty_mill_board::settings::{Files, Settings, load_github, load_roles, open_credentials};
+use rusty_mill_board::settings::{
+    Files, ServerInfo, Settings, load_github, load_roles, load_rules, load_workflow,
+    open_credentials,
+};
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::syncer::Syncer;
 use rusty_mill_board::web::{Auth, Web};
+use rusty_mill_board::workflow::Workflow;
 use serde_json::{Value, json};
+
+const ISSUER: &str = "http://localhost:8787";
 
 struct Fixture {
     addr: SocketAddr,
@@ -32,6 +39,11 @@ impl Drop for Fixture {
 
 /// A board wired as `main` wires it, settings kept in a fresh directory.
 fn start(name: &str) -> Fixture {
+    start_with(name, false)
+}
+
+/// [`start`], with OAuth sign-in on when `oauth`, its grants beside the settings.
+fn start_with(name: &str, oauth: bool) -> Fixture {
     let dir = std::env::temp_dir().join(format!("mill_settings_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let files = Files::in_dir(&dir);
@@ -51,13 +63,20 @@ fn start(name: &str) -> Fixture {
     )
     .expect("credentials");
     let creds = creds.shared();
-    let settings = Arc::new(Settings::new(
-        board.clone(),
-        files,
-        Some(Arc::clone(&creds)),
-        Syncer::new(board.clone()),
-        None,
-    ));
+    let settings = Arc::new(
+        Settings::new(
+            board.clone(),
+            files,
+            Some(Arc::clone(&creds)),
+            Syncer::new(board.clone()),
+            None,
+        )
+        .with_server(ServerInfo {
+            tick: None,
+            issuer: oauth.then(|| ISSUER.to_owned()),
+            hosts: vec!["127.0.0.1".into()],
+        }),
+    );
     let config = HttpConfig {
         allowed_hosts: vec!["127.0.0.1".into()],
         ..HttpConfig::default()
@@ -72,6 +91,13 @@ fn start(name: &str) -> Fixture {
         Auth::Credentials(creds),
     )
     .with_settings(settings);
+    let web = if oauth {
+        let issuer = rusty_oauth_server::validate_issuer(ISSUER).expect("issuer");
+        web.with_oauth(issuer, dir.join("oauth.json"))
+            .expect("oauth")
+    } else {
+        web
+    };
     let server =
         rusty_serve::Server::bind_shared("127.0.0.1:0".parse().expect("addr"), web).expect("bind");
     let addr = server.local_addr().expect("addr");
@@ -167,8 +193,10 @@ fn only_an_admin_may_change_settings() {
         "settings_agent_rotate",
         "settings_projects_set",
         "settings_roles_set",
+        "settings_role_rename",
         "settings_github_set",
         "settings_github_clear",
+        "settings_rules_set",
     ] {
         let (status, _, text) = call(f.addr, &builder, op, &json!({}));
         assert_eq!(status, 403, "{op}: {text}");
@@ -335,16 +363,28 @@ fn roles_are_edited_live_and_written_to_their_file() {
     let (_, out, _) = f.admin("settings_get", &json!({}));
     assert_eq!(
         out["capabilities"],
-        json!(["triage", "build", "qa", "review", "merge", "admin"])
+        json!([
+            "triage",
+            "plan",
+            "architect",
+            "build",
+            "test",
+            "review",
+            "merge",
+            "close",
+            "project",
+            "admin"
+        ])
     );
     let mut roles = out["roles"].clone();
+    // `qa` is the old name of `test`, still accepted from stored and sent roles.
     roles["tester"] = json!(["qa"]);
     let (status, _, text) = f.admin("settings_roles_set", &json!({"roles": roles}));
     assert_eq!(status, 200, "{text}");
     // The new role can be given to an agent straight away, and is on disk.
     let token = f.add_agent("gemini", "tester");
     let (_, me, _) = call(f.addr, &token, "board_whoami", &json!({}));
-    assert_eq!(me["capabilities"], json!(["qa"]));
+    assert_eq!(me["capabilities"], json!(["test"]));
     assert!(
         load_roles(&f.file("roles.json"))
             .expect("file")
@@ -361,6 +401,221 @@ fn roles_are_edited_live_and_written_to_their_file() {
         f.admin("settings_roles_set", &json!({"roles": roles})).0,
         422
     );
+}
+
+#[test]
+fn a_role_is_renamed_with_its_agents() {
+    let f = start("rename");
+    let builder = f.add_agent("claude", "builder");
+    let (_, before, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    let (status, out, text) = f.admin(
+        "settings_role_rename",
+        &json!({"from": "builder", "to": "maker"}),
+    );
+    assert_eq!(status, 200, "{text}");
+    assert!(out["roles"].get("builder").is_none(), "{out}");
+    // The agent moved with it, keeps its token and its capabilities, live and on disk.
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "maker");
+    assert_eq!(me["capabilities"], before["capabilities"]);
+    let roles = load_roles(&f.file("roles.json")).expect("file");
+    assert!(roles.0.contains_key("maker") && !roles.0.contains_key("builder"));
+    let (_, got, _) = f.admin("settings_get", &json!({}));
+    assert!(
+        got["agents"]
+            .as_array()
+            .expect("agents")
+            .iter()
+            .any(|a| a["actor"] == "claude" && a["role"] == "maker"),
+        "{got}"
+    );
+    // The admin's own role renames too, and the admin can still change settings afterwards.
+    assert_eq!(
+        f.admin(
+            "settings_role_rename",
+            &json!({"from": "human", "to": "owner"})
+        )
+        .0,
+        200
+    );
+    assert_eq!(f.admin("settings_get", &json!({})).0, 200);
+    // Refused: an unknown role, a taken name, a bad name; nothing changes.
+    for (from, to, why) in [
+        ("ghost", "spirit", "no role"),
+        ("maker", "qa", "already a role"),
+        ("maker", "Bad Name", "a-z"),
+    ] {
+        let (status, _, text) = f.admin("settings_role_rename", &json!({"from": from, "to": to}));
+        assert_eq!(
+            (status, text.contains(why)),
+            (422, true),
+            "{from}->{to}: {text}"
+        );
+    }
+    let (_, after, _) = f.admin("settings_get", &json!({}));
+    let mut expected = got["roles"].clone();
+    let roles = expected.as_object_mut().expect("roles");
+    let human = roles.remove("human").expect("human");
+    roles.insert("owner".into(), human);
+    assert_eq!(after["roles"], expected);
+}
+
+/// The files reload as a restart would (no roles file: the defaults): every agent's role
+/// exists and an admin remains.
+fn restarts(f: &Fixture) -> Roles {
+    let path = f.file("roles.json");
+    let roles = if path.exists() {
+        load_roles(&path).expect("roles file")
+    } else {
+        Roles::default()
+    };
+    open_credentials(&f.file("identities.json"), &roles, &Projects::default()).expect("restart");
+    roles
+}
+
+/// Finish a rename by hand, as a partial one's error says: move the agent, drop the old role.
+fn finish_rename(f: &Fixture, agent: &str, from: &str, to: &str) {
+    let (status, _, text) = f.admin(
+        "settings_agent_update",
+        &json!({"agent": {"name": agent, "role": to}}),
+    );
+    assert_eq!(status, 200, "{text}");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut roles = out["roles"].clone();
+    roles.as_object_mut().expect("roles").remove(from);
+    let (status, _, text) = f.admin("settings_roles_set", &json!({"roles": roles}));
+    assert_eq!(status, 200, "{text}");
+}
+
+#[test]
+fn a_rename_is_refused_untouched_while_the_saved_credentials_cannot_be_read() {
+    let f = start("rename_fail");
+    let builder = f.add_agent("claude", "builder");
+    let creds = f.file("identities.json");
+    let saved = std::fs::read(&creds).expect("credentials");
+    std::fs::remove_file(&creds).expect("remove");
+    std::fs::create_dir(&creds).expect("block");
+    let (status, _, text) = f.admin(
+        "settings_role_rename",
+        &json!({"from": "builder", "to": "maker"}),
+    );
+    assert_eq!(
+        (status, text.contains("saved credentials")),
+        (422, true),
+        "{text}"
+    );
+    std::fs::remove_dir(&creds).expect("unblock");
+    std::fs::write(&creds, saved).expect("restore");
+    #[cfg(unix)]
+    std::fs::set_permissions(&creds, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("owner-only");
+    // Nothing changed, and the same rename then goes through.
+    assert!(!restarts(&f).0.contains_key("maker"));
+    assert_eq!(
+        f.admin(
+            "settings_role_rename",
+            &json!({"from": "builder", "to": "maker"})
+        )
+        .0,
+        200
+    );
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "maker");
+    assert!(!restarts(&f).0.contains_key("builder"));
+}
+
+#[test]
+fn a_role_the_saved_credentials_still_use_is_not_dropped() {
+    // A credentials save can fail after the file was replaced: then the file holds the new
+    // role while the live set still holds the old. Simulate that end state directly.
+    let f = start("saved_creds");
+    let builder = f.add_agent("claude", "builder");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut roles = out["roles"].clone();
+    roles["maker"] = roles["builder"].clone();
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": roles})).0,
+        200
+    );
+    let creds = f.file("identities.json");
+    let on_disk = std::fs::read_to_string(&creds).expect("credentials");
+    let landed = on_disk.replace(r#""role": "builder""#, r#""role": "maker""#);
+    assert_ne!(on_disk, landed, "the agent's role is in the file");
+    std::fs::write(&creds, landed).expect("simulate a save that landed");
+    // Dropping either name is refused: live needs builder, the saved file needs maker.
+    for drop in ["maker", "builder"] {
+        let mut without = roles.clone();
+        without.as_object_mut().expect("roles").remove(drop);
+        let (status, _, text) = f.admin("settings_roles_set", &json!({"roles": without}));
+        assert_eq!(status, 422, "dropping {drop}: {text}");
+    }
+    let (_, _, text) = {
+        let mut without = roles.clone();
+        without.as_object_mut().expect("roles").remove("maker");
+        f.admin("settings_roles_set", &json!({"roles": without}))
+    };
+    assert!(text.contains("saved credentials"), "{text}");
+    restarts(&f);
+    // Saving the agent makes live and disk agree; then the old name can go.
+    finish_rename(&f, "claude", "builder", "maker");
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "maker");
+    assert!(!restarts(&f).0.contains_key("builder"));
+}
+
+#[test]
+fn an_agent_is_not_given_a_role_the_saved_roles_file_lacks() {
+    // A rename's last roles write can fail after replacing the file: agents hold the new name,
+    // the file lacks the old one, the live set still has both. Simulate that end state.
+    let f = start("saved_roles");
+    let builder = f.add_agent("claude", "builder");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut both = out["roles"].clone();
+    both["maker"] = both["builder"].clone();
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": both})).0,
+        200
+    );
+    let to_maker = json!({"agent": {"name": "claude", "role": "maker"}});
+    assert_eq!(f.admin("settings_agent_update", &to_maker).0, 200);
+    let mut landed = both.clone();
+    landed.as_object_mut().expect("roles").remove("builder");
+    std::fs::write(
+        f.file("roles.json"),
+        serde_json::to_string_pretty(&landed).expect("json"),
+    )
+    .expect("simulate a roles write that landed");
+    // Giving an agent the role the file lacks is refused (live alone would allow it), and so
+    // is a new agent with it; a restart still loads.
+    let back = json!({"agent": {"name": "claude", "role": "builder"}});
+    let (status, _, text) = f.admin("settings_agent_update", &back);
+    assert_eq!(
+        (status, text.contains("saved roles file")),
+        (422, true),
+        "{text}"
+    );
+    let (status, _, _) = f.admin(
+        "settings_agent_add",
+        &json!({"agent": {"name": "codex", "role": "builder"}}),
+    );
+    assert_eq!(status, 422);
+    restarts(&f);
+    // Recovery either way: re-save the live roles, then the update goes through ...
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": both})).0,
+        200
+    );
+    assert_eq!(f.admin("settings_agent_update", &back).0, 200);
+    let (_, me, _) = call(f.addr, &builder, "board_whoami", &json!({}));
+    assert_eq!(me["role"], "builder");
+    restarts(&f);
+    // ... or, as the rename's error says, remove the old name.
+    assert_eq!(f.admin("settings_agent_update", &to_maker).0, 200);
+    assert_eq!(
+        f.admin("settings_roles_set", &json!({"roles": landed})).0,
+        200
+    );
+    assert!(!restarts(&f).0.contains_key("builder"));
 }
 
 #[test]
@@ -532,7 +787,7 @@ fn without_files_settings_can_be_read_but_not_changed() {
         .expect("ok");
     assert_eq!(
         get["files"],
-        json!({"agents": false, "projects": false, "roles": false, "github": false})
+        json!({"agents": false, "projects": false, "roles": false, "github": false, "rules": false, "workflow": false})
     );
     for (op, body) in [
         (
@@ -542,6 +797,11 @@ fn without_files_settings_can_be_read_but_not_changed() {
         ("settings_projects_set", json!({"repos": {}})),
         ("settings_roles_set", json!({"roles": {"human": ["admin"]}})),
         ("settings_github_set", json!({"repo": "o/n", "token": "t"})),
+        ("settings_rules_set", json!({"movement": "open"})),
+        (
+            "settings_workflow_set",
+            json!({"workflow": Workflow::default()}),
+        ),
     ] {
         let err = settings
             .call(op, Some(&human), body)
@@ -558,6 +818,130 @@ fn without_files_settings_can_be_read_but_not_changed() {
             .is_none(),
         "other operations are not its"
     );
+}
+
+#[test]
+fn an_admin_turns_movement_rules_off_and_on_and_the_choice_is_kept() {
+    let f = start("rules");
+    let builder = f.add_agent("claude-cloud", "builder");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(out["rules"], json!({"movement": "enforced"}));
+    let (_, card, _) = call(f.addr, &builder, "card_add", &json!({"title": "t"}));
+    let id = card["card"]["id"].as_str().expect("id").to_owned();
+    let to = |column: &str| json!({"id": id, "to": column});
+    // Enforced: a builder may not move into Ready, and Backlog -> Done is no move at all.
+    assert_eq!(call(f.addr, &builder, "card_move", &to("ready")).0, 403);
+    assert_eq!(call(f.addr, &f.admin, "card_move", &to("done")).0, 422);
+
+    let (status, _, text) = f.admin("settings_rules_set", &json!({"movement": "open"}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(load_rules(&f.file("rules.json")), Ok(MoveRules::Open));
+    let (status, moved, text) = call(f.addr, &builder, "card_move", &to("ready"));
+    assert_eq!(
+        (status, moved["card"]["column"].as_str()),
+        (200, Some("ready")),
+        "{text}"
+    );
+    let (status, _, text) = call(f.addr, &builder, "card_move", &to("review"));
+    assert_eq!(status, 200, "{text}");
+
+    f.admin("settings_rules_set", &json!({"movement": "enforced"}));
+    assert_eq!(load_rules(&f.file("rules.json")), Ok(MoveRules::Enforced));
+    assert_eq!(call(f.addr, &builder, "card_move", &to("backlog")).0, 422);
+    assert_eq!(
+        f.admin("settings_rules_set", &json!({"movement": "sometimes"}))
+            .0,
+        422,
+        "an unknown setting is refused"
+    );
+}
+
+#[test]
+fn an_admin_adds_renames_reorders_and_removes_columns() {
+    let f = start("columns");
+    let builder = f.add_agent("claude-cloud", "builder");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    let mut flow = out["workflow"].clone();
+    assert_eq!(flow, json!(Workflow::default()));
+
+    // Add a queue column "Design" after Backlog, relabel Ready, and route Backlog through it.
+    let columns = flow["columns"].as_array_mut().expect("columns");
+    columns.insert(
+        1,
+        json!({"id": "design", "label": "Design", "kind": "work"}),
+    );
+    columns[2]["label"] = json!("Approved");
+    flow["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .push(json!({"from": "backlog", "to": "design", "cap": "build"}));
+    let (status, set, text) = f.admin("settings_workflow_set", &json!({"workflow": flow}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(set["workflow"]["columns"][2]["label"], "Approved");
+    assert_eq!(
+        load_workflow(&f.file("workflow.json")).map(|w| json!(w)),
+        Ok(set["workflow"].clone())
+    );
+    let (_, listed, _) = call(f.addr, &builder, "board_columns", &json!({}));
+    assert_eq!(listed["columns"][1]["id"], "design");
+
+    // Cards move through it, under the capability the admin gave the move.
+    let (_, card, _) = call(f.addr, &builder, "card_add", &json!({"title": "t"}));
+    let id = card["card"]["id"].as_str().expect("id").to_owned();
+    let (status, moved, text) = call(
+        f.addr,
+        &builder,
+        "card_move",
+        &json!({"id": id, "to": "design"}),
+    );
+    assert_eq!(
+        (status, moved["card"]["column"].as_str()),
+        (200, Some("design")),
+        "{text}"
+    );
+
+    // A column holding cards cannot be removed; once empty it can.
+    let mut without = set["workflow"].clone();
+    without["columns"]
+        .as_array_mut()
+        .expect("columns")
+        .remove(1);
+    without["transitions"]
+        .as_array_mut()
+        .expect("transitions")
+        .retain(|t| t["to"] != "design");
+    let (status, _, text) = f.admin("settings_workflow_set", &json!({"workflow": without}));
+    assert_eq!(status, 422, "{text}");
+    assert!(text.contains("design still has cards"), "{text}");
+    assert_eq!(
+        load_workflow(&f.file("workflow.json")).map(|w| json!(w)),
+        Ok(set["workflow"].clone())
+    );
+    call(
+        f.addr,
+        &f.admin,
+        "card_move",
+        &json!({"id": id, "to": "blocked"}),
+    );
+    let (status, _, text) = f.admin("settings_workflow_set", &json!({"workflow": without}));
+    assert_eq!(status, 200, "{text}");
+
+    // The anchors stay, and an inconsistent workflow is refused with the reason.
+    let mut no_done = without.clone();
+    no_done["columns"]
+        .as_array_mut()
+        .expect("columns")
+        .retain(|c| c["id"] != "done");
+    let (status, _, text) = f.admin("settings_workflow_set", &json!({"workflow": no_done}));
+    assert_eq!(status, 422);
+    assert!(text.contains("done cannot be removed"), "{text}");
+    let (status, _, _) = call(
+        f.addr,
+        &builder,
+        "settings_workflow_set",
+        &json!({"workflow": without}),
+    );
+    assert_eq!(status, 403, "only an admin");
 }
 
 #[test]
@@ -578,4 +962,91 @@ fn everything_survives_a_restart() {
     let projects = Projects::load(&f.file("projects.json")).expect("projects");
     let creds = Credentials::load(&f.file("identities.json"), &roles, &projects).expect("creds");
     assert!(roles.0.contains_key("tester") && projects.contains("rl") && creds.contains("claude"));
+}
+
+/// POST `body` to `path` with no credential (OAuth's own endpoints): the status and JSON.
+fn post_open(addr: SocketAddr, path: &str, body: &str) -> (u16, Value) {
+    let raw = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let mut sock = TcpStream::connect(addr).expect("connect");
+    sock.write_all(raw.as_bytes()).expect("write");
+    let mut out = String::new();
+    sock.read_to_string(&mut out).expect("read");
+    let status = out
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .expect("status");
+    let text = out.split("\r\n\r\n").nth(1).unwrap_or("");
+    (status, serde_json::from_str(text).unwrap_or(Value::Null))
+}
+
+#[test]
+fn settings_describe_each_capability_and_the_server() {
+    let f = start("about");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    for cap in out["capabilities"].as_array().expect("caps") {
+        let about = out["capability_about"][cap.as_str().expect("name")]
+            .as_str()
+            .unwrap_or("");
+        assert!(!about.is_empty(), "{cap} is described");
+    }
+    assert_eq!(out["server"]["tick"], Value::Null);
+    assert_eq!(out["server"]["issuer"], Value::Null);
+    assert_eq!(out["server"]["hosts"], json!(["127.0.0.1"]));
+    assert!(
+        out["paths"]["roles"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("roles.json"))
+    );
+}
+
+#[test]
+fn with_oauth_off_there_are_no_apps_to_revoke() {
+    let f = start("apps_off");
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(out["apps"], Value::Null);
+    let (status, _, text) = f.admin("settings_app_revoke", &json!({"client_id": "x"}));
+    assert_eq!(status, 422, "{text}");
+    assert!(text.contains("--issuer"), "{text}");
+}
+
+#[test]
+fn an_admin_lists_and_revokes_signed_in_apps() {
+    let f = start_with("apps", true);
+    let (status, client) = post_open(
+        f.addr,
+        "/register",
+        r#"{"client_name":"claude.ai","redirect_uris":["https://claude.ai/cb"]}"#,
+    );
+    assert_eq!(status, 201, "{client}");
+    let id = client["client_id"].as_str().expect("id").to_owned();
+
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(out["server"]["issuer"], ISSUER);
+    let apps = out["apps"].as_array().expect("apps");
+    assert_eq!(apps.len(), 1);
+    assert_eq!(
+        (&apps[0]["client_id"], &apps[0]["client_name"]),
+        (&json!(id), &json!("claude.ai"))
+    );
+
+    let token = f.add_agent("gemini", "builder");
+    let (status, _, _) = call(
+        f.addr,
+        &token,
+        "settings_app_revoke",
+        &json!({"client_id": id}),
+    );
+    assert_eq!(status, 403, "revoking needs admin");
+
+    let (status, gone, text) = f.admin("settings_app_revoke", &json!({"client_id": id}));
+    assert_eq!(status, 200, "{text}");
+    assert_eq!(gone["client_id"], json!(id));
+    let (_, out, _) = f.admin("settings_get", &json!({}));
+    assert_eq!(out["apps"], json!([]));
+    let (status, _, _) = f.admin("settings_app_revoke", &json!({"client_id": id}));
+    assert_eq!(status, 422, "an unknown app is refused");
 }

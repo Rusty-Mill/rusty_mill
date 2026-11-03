@@ -100,8 +100,10 @@ fn a_candidate_revokes_every_other_live_turn() {
     stored(fx.put(
         "coder",
         ArtifactPayload::Candidate(Candidate {
+            claim: None,
             base: "a".repeat(40),
             diffs: vec![diff],
+            suite: Suite::Build,
         }),
         b"{}",
     ));
@@ -888,8 +890,10 @@ mod model {
                     .map(|a| a.id);
                 if let Some(diff) = diff {
                     let c = ArtifactPayload::Candidate(Candidate {
+                        claim: None,
                         base: "a".repeat(40),
                         diffs: vec![diff],
+                        suite: Suite::Build,
                     });
                     drop(fx.put(BUILDERS[*i], c, b"{}"));
                 }

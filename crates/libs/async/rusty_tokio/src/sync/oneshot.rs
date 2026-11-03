@@ -1,6 +1,12 @@
 //! A single-value, single-use channel: exactly one [`Sender::send`],
 //! exactly one `.await` on the [`Receiver`] to get it back (or find out
 //! the sender was dropped without sending).
+//!
+//! A waker's clone or drop, and a value's drop, may run code that
+//! re-enters the channel (a waker that owns the `Sender`, say), so none
+//! happens with `state` locked: the receiver clones its waker before
+//! locking, and a waker or value taken out of `state` is dropped after
+//! unlocking (#578).
 
 use std::fmt;
 use std::future::Future;
@@ -83,7 +89,10 @@ impl<T> Drop for Sender<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        *self.shared.state.lock().unwrap() = State::Closed;
+        // The stored waker or unreceived value is dropped once unlocked:
+        // the guard is a temporary of this statement.
+        let old = std::mem::replace(&mut *self.shared.state.lock().unwrap(), State::Closed);
+        drop(old);
     }
 }
 
@@ -94,20 +103,30 @@ impl<T> Future for Receiver<T> {
         if crate::coop::poll_proceed(cx).is_pending() {
             return Poll::Pending;
         }
+        // Cloned before locking: cloning a waker runs arbitrary code.
+        let waker = cx.waker().clone();
         let mut guard = self.shared.state.lock().unwrap();
-        match &*guard {
-            State::Value(_) => {
-                let State::Value(v) = std::mem::replace(&mut *guard, State::Closed) else {
-                    unreachable!()
+        let (poll, stale) = match std::mem::replace(&mut *guard, State::Closed) {
+            State::Value(value) => (Poll::Ready(Ok(value)), Some(waker)),
+            State::Closed => (Poll::Ready(Err(RecvError)), Some(waker)),
+            State::Empty => {
+                *guard = State::Waiting(waker);
+                (Poll::Pending, None)
+            }
+            State::Waiting(stored) => {
+                let (keep, stale) = if stored.will_wake(&waker) {
+                    (stored, waker)
+                } else {
+                    (waker, stored)
                 };
-                Poll::Ready(Ok(v))
+                *guard = State::Waiting(keep);
+                (Poll::Pending, Some(stale))
             }
-            State::Closed => Poll::Ready(Err(RecvError)),
-            State::Empty | State::Waiting(_) => {
-                *guard = State::Waiting(cx.waker().clone());
-                Poll::Pending
-            }
-        }
+        };
+        drop(guard);
+        // Dropped outside the lock: a waker's destructor may re-enter.
+        drop(stale);
+        poll
     }
 }
 

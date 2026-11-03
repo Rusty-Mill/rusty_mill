@@ -17,15 +17,20 @@ use std::io::Write;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use crate::sync::Mutex;
 use rusty_tokio::sync::Notify;
 
 use super::fair::fair_select;
 use crate::backend::Backend;
+use crate::compact::Compactor;
 use crate::core::{AnsiParser, Grid};
 use crate::input::{Scroll, split_input};
-use crate::render::{FRAME_BUDGET, RawModeGuard, RenderState, render_once, restore_host_modes};
+use crate::render::{
+    FRAME_BUDGET, RawModeGuard, RenderState, render_final, render_once, resize_grid,
+    restore_host_modes,
+};
 
 #[cfg(unix)]
 use rusty_tokio::io::AsyncFd;
@@ -36,8 +41,12 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 #[cfg(windows)]
 use std::io::Read;
-#[cfg(windows)]
 use std::time::Duration;
+
+/// How long shutdown waits for the child's last output after the loop stops,
+/// so it is parsed and painted before the TUI exits. Bounded, because a
+/// grandchild that inherited the PTY can hold its EOF off indefinitely.
+const DRAIN_LIMIT: Duration = Duration::from_millis(250);
 
 /// Signals the render loop to stop when a task ends — on its own, the task's
 /// `running.store(false)` + `frame.notify_one()` only run after the loop body,
@@ -60,13 +69,35 @@ impl Drop for ShutdownOnDrop {
     }
 }
 
-/// What woke the render loop: a repaint request, a size change, or (Windows,
-/// where output arrives over a channel) a chunk of PTY output or its EOF.
+/// What woke the render loop: a repaint request, a size change, a due
+/// history compaction step, or (Windows, where output arrives over a
+/// channel) a chunk of PTY output or its EOF.
 enum Wake {
     Frame,
     Resize,
+    Compact,
     #[cfg(windows)]
     Output(Option<Vec<u8>>),
+}
+
+/// Wake at `due` for a compaction step, or never when none is due. Built
+/// fresh each loop turn, so dropping it on another wake loses nothing.
+async fn compact_when_due(due: Option<Instant>) -> Wake {
+    let Some(at) = due else {
+        return std::future::pending().await;
+    };
+    rusty_tokio::time::sleep(at.saturating_duration_since(Instant::now())).await;
+    Wake::Compact
+}
+
+/// Notify `frame` at `until`: a synchronized update that times out with no
+/// more output still gets its repaint.
+fn notify_at(frame: &Arc<Notify>, until: std::time::Instant) {
+    let frame = Arc::clone(frame);
+    rusty_tokio::spawn(async move {
+        rusty_tokio::time::sleep(until.saturating_duration_since(std::time::Instant::now())).await;
+        frame.notify_one();
+    });
 }
 
 /// Duplicate `fd` into a descriptor this runtime owns (close-on-exec), for
@@ -195,6 +226,29 @@ async fn write_all(afd: &AsyncFd<OwnedFd>, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// Build a small multi-threaded runtime and drive the terminal on it.
+/// Wait for child `pid` to exit and reap it, returning its exit code; `None`
+/// when SIGCHLD cannot be watched.
+///
+/// The child is spawned before the runtime (and so before this subscription)
+/// exists, and a SIGCHLD delivered before subscribing is not replayed. So the
+/// child is polled once right after subscribing, then after every signal.
+#[cfg(unix)]
+async fn reap_child(pid: libc::pid_t) -> Option<i32> {
+    let mut sigchld = signal(SignalKind::child()).ok()?;
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: WNOHANG never blocks; `pid` is a plain pid_t value (not an
+        // owned resource), so reaping it here is sound even though the caller
+        // doesn't hold the owning `BackendHandle`.
+        if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } == pid {
+            return Some(crate::backend::unix::exit_code_from_wait_status(status));
+        }
+        // Still running, or some *other* child exited (e.g. a background
+        // process the shell spawned and detached): keep watching for ours.
+        sigchld.recv().await?;
+    }
+}
+
 /// Runs the TUI to completion and returns the child shell's exit status as a
 /// `std::process::exit`-compatible value (the caller is expected to exit the
 /// process with it) — its own exit code on a normal exit, 128+signal on a
@@ -334,27 +388,10 @@ async fn run_async(
         let pid = reader.child_pid();
         rusty_tokio::spawn(async move {
             let Some(pid) = pid else { return };
-            let Ok(mut sigchld) = signal(SignalKind::child()) else {
-                return;
-            };
-            loop {
-                if sigchld.recv().await.is_none() {
-                    break;
-                }
-                let mut status: libc::c_int = 0;
-                // SAFETY: WNOHANG never blocks; `pid` is a plain pid_t value
-                // (not an owned resource), so reaping it here is sound even
-                // though this task doesn't hold the owning `BackendHandle`.
-                let r = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
-                if r == pid {
-                    *exit_status.lock() =
-                        Some(crate::backend::unix::exit_code_from_wait_status(status));
-                    running.store(false, Ordering::Relaxed);
-                    frame.notify_one();
-                    break;
-                }
-                // Some *other* child was reaped (e.g. a background process
-                // the shell spawned and detached) — keep watching for ours.
+            if let Some(code) = reap_child(pid).await {
+                *exit_status.lock() = Some(code);
+                running.store(false, Ordering::Relaxed);
+                frame.notify_one();
             }
         })
     };
@@ -383,19 +420,18 @@ async fn run_async(
                 };
                 match guard.try_io(|inner| read_nonblocking(inner.as_raw_fd())) {
                     Ok(Ok(data)) if !data.is_empty() => {
-                        let (responses, should_notify) = {
+                        let responses = {
                             // Bulk: step aside for the render loop between chunks.
                             let mut g = grid.lock_bulk();
                             let mut parser = parser.lock();
                             parser.advance(&mut g, &data);
                             g.epoch += 1;
-                            (parser.take_responses(), !g.sync_output_active())
+                            parser.take_responses()
                         };
-                        // New output landed in the grid — ask for a repaint,
-                        // unless a synchronized-output window is suppressing it.
-                        if should_notify {
-                            frame.notify_one();
-                        }
+                        // New output landed in the grid: ask for a repaint.
+                        // During a synchronized update `render_once` holds it
+                        // and sets a wakeup for the update's timeout.
+                        frame.notify_one();
                         if !responses.is_empty() && write_all(&master, &responses).await.is_err() {
                             break;
                         }
@@ -484,6 +520,7 @@ async fn run_async(
     // and the `sigwinch` branch never drops a pending notification.
     let mut notified = pin!(frame.notified());
     let mut turn = 0;
+    let mut compactor = Compactor::default();
 
     loop {
         // Round-robin, not `select!`'s fixed order: sustained output keeps
@@ -497,35 +534,39 @@ async fn run_async(
                 sigwinch.recv().await;
                 Wake::Resize
             });
-            fair_select(&mut turn, &mut [frame_arm, resize_arm]).await
+            let compact_arm = pin!(compact_when_due(compactor.due()));
+            fair_select(&mut turn, &mut [frame_arm, resize_arm, compact_arm]).await
         };
         match woke {
+            Wake::Compact => compactor.run(&mut grid.lock(), Instant::now()),
             Wake::Frame => {
                 notified.set(frame.notified());
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
+                compactor.on_change(Instant::now());
                 // Coalesce bursts: hold off until the frame budget since the
                 // last paint has elapsed, so a flood repaints at ~60 Hz.
                 let since = render_state.last_frame.elapsed();
                 if since < FRAME_BUDGET {
                     rusty_tokio::time::sleep(FRAME_BUDGET - since).await;
                 }
-                render_once(&grid, &mut render_state);
+                if let Some(until) = render_once(&grid, &mut render_state) {
+                    notify_at(&frame, until);
+                }
             }
             Wake::Resize => {
                 // Reflow the grid, tell the child its new size, and clear the
                 // screen for a clean full repaint. Only act on a real change so a
                 // spurious SIGWINCH doesn't blank the screen.
                 if let Some((cols, rows)) = backend.terminal_size() {
-                    let changed = {
-                        let mut g = grid.lock();
-                        let changed = g.cols != cols as usize || g.rows != rows as usize;
-                        if changed {
-                            g.resize(cols as usize, rows as usize);
-                        }
-                        changed
-                    };
+                    let changed = resize_grid(
+                        &grid,
+                        &mut render_state,
+                        &mut compactor,
+                        cols as usize,
+                        rows as usize,
+                    );
                     if changed {
                         let _ = resizer.set_winsize(cols, rows);
                         // Tell a subscribed structured client the size changed
@@ -539,10 +580,7 @@ async fn run_async(
                                 let _ = resizer.write(&bytes);
                             }
                         }
-                        let mut out = std::io::stdout();
-                        let _ = out.write_all(b"\x1b[2J");
-                        let _ = out.flush();
-                        // Repaint the reflowed grid on the next render wake.
+                        // The next frame clears and repaints (see `resize_grid`).
                         frame.notify_one();
                     }
                 }
@@ -554,9 +592,18 @@ async fn run_async(
     // scope) reaps the child (if the SIGCHLD watcher didn't already win that
     // race) on the explicit call below and on drop; `_raw_guard` restores
     // cooked mode on return.
-    parser_task.abort();
     input_task.abort();
     sigchld_task.abort();
+    // SIGCHLD usually beats the child's last output through the PTY: let the
+    // parser task read on to EOF (bounded) and paint what it parsed.
+    let parser_abort = parser_task.abort_handle();
+    if rusty_tokio::time::timeout(DRAIN_LIMIT, parser_task)
+        .await
+        .is_err()
+    {
+        parser_abort.abort();
+    }
+    render_final(&grid, &mut render_state);
     restore_host_modes();
     let code = exit_status
         .lock()
@@ -564,6 +611,22 @@ async fn run_async(
         .or_else(|| reader.reap_exit_status())
         .unwrap_or(0);
     Ok(code)
+}
+
+/// A quiet gap this long ends the Windows shutdown drain: ConPTY gives no EOF
+/// to wait for, only the end of the child's output.
+#[cfg(windows)]
+const DRAIN_IDLE: Duration = Duration::from_millis(50);
+
+/// Feed one chunk of PTY output to the parser; returns its replies (DA/DSR)
+/// for the child.
+#[cfg(windows)]
+fn parse_chunk(parser: &Mutex<AnsiParser>, grid: &Mutex<Grid>, data: &[u8]) -> Vec<u8> {
+    let mut g = grid.lock();
+    let mut parser = parser.lock();
+    parser.advance(&mut g, data);
+    g.epoch += 1;
+    parser.take_responses()
 }
 
 /// Windows ConPTY driver: the pipes are synchronous (no readiness-pollable fd),
@@ -718,6 +781,7 @@ async fn run_async(
     let mut resize_poll = rusty_tokio::time::interval(Duration::from_millis(150));
     let mut notified = pin!(frame.notified());
     let mut turn = 0;
+    let mut compactor = Compactor::default();
 
     loop {
         // Round-robin, not `select!`'s fixed order: a never-empty output
@@ -732,22 +796,21 @@ async fn run_async(
                 resize_poll.tick().await;
                 Wake::Resize
             });
-            fair_select(&mut turn, &mut [output_arm, frame_arm, resize_arm]).await
+            let compact_arm = pin!(compact_when_due(compactor.due()));
+            fair_select(
+                &mut turn,
+                &mut [output_arm, frame_arm, resize_arm, compact_arm],
+            )
+            .await
         };
         match woke {
+            Wake::Compact => compactor.run(&mut grid.lock(), Instant::now()),
             Wake::Output(data) => {
                 match data {
                     Some(data) => {
-                        let (responses, should_notify) = {
-                            let mut g = grid.lock();
-                            let mut parser = parser.lock();
-                            parser.advance(&mut g, &data);
-                            g.epoch += 1;
-                            (parser.take_responses(), !g.sync_output_active())
-                        };
-                        if should_notify {
-                            frame.notify_one();
-                        }
+                        let responses = parse_chunk(&parser, &grid, &data);
+                        frame.notify_one();
+                        compactor.on_change(Instant::now());
                         if !responses.is_empty() {
                             let _ = in_tx.send(responses);
                         }
@@ -764,7 +827,9 @@ async fn run_async(
                 if since < FRAME_BUDGET {
                     rusty_tokio::time::sleep(FRAME_BUDGET - since).await;
                 }
-                render_once(&grid, &mut render_state);
+                if let Some(until) = render_once(&grid, &mut render_state) {
+                    notify_at(&frame, until);
+                }
             }
             Wake::Resize => {
                 if !running.load(Ordering::Relaxed) {
@@ -772,14 +837,13 @@ async fn run_async(
                 }
                 // No SIGWINCH on Windows: poll the console size and act on change.
                 if let Some((cols, rows)) = backend.terminal_size() {
-                    let changed = {
-                        let mut g = grid.lock();
-                        let changed = g.cols != cols as usize || g.rows != rows as usize;
-                        if changed {
-                            g.resize(cols as usize, rows as usize);
-                        }
-                        changed
-                    };
+                    let changed = resize_grid(
+                        &grid,
+                        &mut render_state,
+                        &mut compactor,
+                        cols as usize,
+                        rows as usize,
+                    );
                     if changed {
                         let _ = resizer.set_winsize(cols, rows);
                         // Notify a subscribed structured client; routed through the
@@ -791,9 +855,7 @@ async fn run_async(
                                 let _ = in_tx.send(bytes);
                             }
                         }
-                        let mut out = std::io::stdout();
-                        let _ = out.write_all(b"\x1b[2J");
-                        let _ = out.flush();
+                        // The next frame clears and repaints (see `resize_grid`).
                         frame.notify_one();
                     }
                 }
@@ -801,6 +863,19 @@ async fn run_async(
         }
     }
 
+    // The exit watcher usually beats the child's last output through ConPTY,
+    // whose pipe only EOFs on our teardown: parse until it goes quiet
+    // (bounded) and paint what arrived.
+    let drain = async {
+        while let Ok(Some(data)) = rusty_tokio::time::timeout(DRAIN_IDLE, out_rx.recv()).await {
+            let responses = parse_chunk(&parser, &grid, &data);
+            if !responses.is_empty() {
+                let _ = in_tx.send(responses);
+            }
+        }
+    };
+    let _ = rusty_tokio::time::timeout(DRAIN_LIMIT, drain).await;
+    render_final(&grid, &mut render_state);
     restore_host_modes();
     // The `exit_token` watcher thread above only stops the event loop; it
     // doesn't fetch the exit code (`WaitForSingleObject` isn't
@@ -897,5 +972,34 @@ mod tests {
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(is_open(src));
+    }
+
+    /// A child that exited before the SIGCHLD subscription existed (its
+    /// signal already spent) is still reaped, rather than waited on forever.
+    #[rusty_tokio::test]
+    async fn reap_child_finds_a_child_that_exited_before_subscribing() {
+        // `reap_child` is what waits on it.
+        #[allow(clippy::zombie_processes)]
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 7"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        // Block until it has exited, leaving it a zombie (WNOWAIT) for
+        // `reap_child` to collect.
+        // SAFETY: a zeroed siginfo_t is a valid out-parameter.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` outlives the call; waitid only writes to it.
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(r, 0, "waitid: {}", std::io::Error::last_os_error());
+        let reaped = rusty_tokio::time::timeout(Duration::from_secs(2), reap_child(pid)).await;
+        assert_eq!(reaped.ok(), Some(Some(7)), "missed an already-exited child");
     }
 }

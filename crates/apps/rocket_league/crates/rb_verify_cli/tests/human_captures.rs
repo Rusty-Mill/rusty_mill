@@ -56,10 +56,12 @@ const CASES: &[Case] = &[
         ball: Some((7.6, 26.2)),
     },
     // The ball bound is today's error, not parity: after the wheels-down hit-tick jump the
-    // ball's flight leaves the recording by 1 000 uu at worst (open).
+    // ball's flight leaves the recording by 1 000 uu at worst (open). The car's max rose
+    // from 7.51 to 12.43 uu, after that hit, when the ball's inertia moved to its 91.25 uu
+    // sphere (RB-PHYSICS-001-FR-161); raised by a quarter.
     Case {
         fixture: "hit-tick-jump.capture.jsonl",
-        car: (2.0, 9.4),
+        car: (2.0, 15.5),
         ball: Some((235.8, 1279.8)),
     },
     Case {
@@ -70,7 +72,8 @@ const CASES: &[Case] = &[
     Case {
         fixture: "wall-climb-crest.capture.jsonl",
         car: (21.2, 113.8),
-        ball: Some((15.2, 35.1)),
+        // 12.09 / 28.03 -> 5.03 / 14.16 uu with RB-PHYSICS-001-FR-161.
+        ball: Some((6.3, 17.7)),
     },
 ];
 

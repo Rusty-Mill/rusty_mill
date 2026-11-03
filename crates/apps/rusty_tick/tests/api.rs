@@ -14,6 +14,15 @@ const NOW: i64 = 1_790_596_800_000;
 const HOUR: i64 = 3_600_000;
 const DAY: i64 = 24 * HOUR;
 
+/// A request's precondition headers.
+#[derive(Default)]
+struct Conditions<'a> {
+    if_match: Option<&'a str>,
+    if_none_match: Option<&'a str>,
+    if_task_match: Option<&'a str>,
+    actor: Option<&'a str>,
+}
+
 struct Harness {
     backend: Backend,
     clock: Arc<AtomicI64>,
@@ -48,12 +57,35 @@ impl Harness {
         auth: Option<&str>,
         if_match: Option<&str>,
     ) -> (u16, Value) {
+        self.send_conditional(
+            method,
+            target,
+            body,
+            auth,
+            Conditions {
+                if_match,
+                ..Conditions::default()
+            },
+        )
+    }
+
+    fn send_conditional(
+        &mut self,
+        method: Method,
+        target: &str,
+        body: &str,
+        auth: Option<&str>,
+        when: Conditions<'_>,
+    ) -> (u16, Value) {
         let header = auth.map(|t| format!("Bearer {t}"));
         let request = Request {
             method: &method,
             target,
             authorization: header.as_deref(),
-            if_match,
+            if_match: when.if_match,
+            if_none_match: when.if_none_match,
+            if_task_match: when.if_task_match,
+            actor: when.actor,
             body: body.as_bytes(),
         };
         let response = self.backend.handle(&request);
@@ -1137,4 +1169,524 @@ fn a_task_can_be_created_at_an_explicit_position() {
     h.task(&list, r#""title":"on top","sortOrder":-5000"#);
     let (_, v) = h.call(Method::Get, &format!("/api/v1/lists/{list}/tasks"), "");
     assert_eq!(titles(&v), ["on top", "appended"]);
+}
+
+#[test]
+fn a_board_number_is_reserved_once() {
+    let (_d, mut h) = harness();
+    let path = format!("/api/v1/docs/board_number/{}", uuid::Uuid::now_v7());
+    let create = Conditions {
+        if_none_match: Some("*"),
+        ..Conditions::default()
+    };
+    let body = r#"{"v":1,"number":1}"#;
+    let (s, doc) = h.send_conditional(Method::Put, &path, body, Some(TOKEN), create);
+    assert_eq!(s, 200, "{doc:?}");
+    let again = Conditions {
+        if_none_match: Some("*"),
+        ..Conditions::default()
+    };
+    let (s, _) = h.send_conditional(Method::Put, &path, body, Some(TOKEN), again);
+    assert_eq!(s, 412, "a reserved number is not reserved twice");
+    let (s, v) = h.call(Method::Get, "/api/v1/docs/board_number", "");
+    assert_eq!((s, v["docs"].as_array().map(Vec::len)), (200, Some(1)));
+}
+
+#[test]
+fn a_board_document_is_fenced_by_its_task_and_moves_it() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"card""#);
+    let id = t["id"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/docs/board/{id}");
+    let version = |h: &mut Harness| {
+        let (_, t) = h.call(Method::Get, &format!("/api/v1/tasks/{id}"), "");
+        t["etag"].as_str().unwrap().to_string()
+    };
+    let put = |h: &mut Harness, when: Conditions<'_>, gen: u32| {
+        let body = format!(r#"{{"v":1,"generation":{gen}}}"#);
+        h.send_conditional(Method::Put, &path, &body, Some(TOKEN), when)
+    };
+
+    let (s, _) = put(&mut h, Conditions::default(), 1);
+    assert_eq!(s, 400, "a board document needs If-Task-Match");
+
+    let v1 = version(&mut h);
+    let create = Conditions {
+        if_none_match: Some("*"),
+        if_task_match: Some(&v1),
+        ..Conditions::default()
+    };
+    let (s, doc) = put(&mut h, create, 1);
+    assert_eq!(s, 200, "{doc:?}");
+    let e1 = doc["etag"].as_str().unwrap().to_string();
+    let v2 = version(&mut h);
+    assert_ne!(v1, v2, "the write moves the task's version");
+
+    let replayed = Conditions {
+        if_none_match: Some("*"),
+        if_task_match: Some(&v1),
+        ..Conditions::default()
+    };
+    let (s, v) = put(&mut h, replayed, 9);
+    assert_eq!(s, 412, "the version before the write no longer matches");
+    assert_eq!(v["current"]["etag"], v2.as_str());
+    let create = Conditions {
+        if_none_match: Some("*"),
+        if_task_match: Some(&v2),
+        ..Conditions::default()
+    };
+    let (s, v) = put(&mut h, create, 9);
+    assert_eq!(s, 412, "If-None-Match: * refuses an existing document");
+    assert_eq!(v["current"]["body"]["generation"], 1);
+
+    let next = Conditions {
+        if_match: Some(&e1),
+        if_task_match: Some(&v2),
+        ..Conditions::default()
+    };
+    let (s, doc) = put(&mut h, next, 2);
+    assert_eq!(s, 200);
+    let e2 = doc["etag"].as_str().unwrap().to_string();
+    assert_ne!(e1, e2, "the etag moves even within one millisecond");
+    let v3 = version(&mut h);
+    let stale = Conditions {
+        if_match: Some(&e1),
+        if_task_match: Some(&v3),
+        ..Conditions::default()
+    };
+    assert_eq!(
+        put(&mut h, stale, 3).0,
+        412,
+        "a stale document etag is refused"
+    );
+
+    h.call(
+        Method::Patch,
+        &format!("/api/v1/tasks/{id}"),
+        r#"{"title":"moved"}"#,
+    );
+    let fenced = Conditions {
+        if_match: Some(&e2),
+        if_task_match: Some(&v3),
+        ..Conditions::default()
+    };
+    let (s, v) = put(&mut h, fenced, 3);
+    assert_eq!(
+        s, 412,
+        "a write authorized against an older task is refused"
+    );
+    assert_eq!(
+        v["current"]["title"], "moved",
+        "and the response carries the task"
+    );
+
+    let (s, v) = h.call(Method::Get, &path, "");
+    assert_eq!((s, v["body"]["generation"].as_i64()), (200, Some(2)));
+    assert_eq!(v["etag"], e2.as_str());
+}
+
+#[test]
+fn a_comment_written_with_if_task_match_is_fenced_by_its_task_and_moves_it() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"card""#);
+    let id = t["id"].as_str().unwrap().to_string();
+    let v1 = t["etag"].as_str().unwrap().to_string();
+    let comment = |h: &mut Harness, task: &str, version: &str| {
+        let path = format!("/api/v1/docs/comment/{}", uuid::Uuid::now_v7());
+        let body = format!(r#"{{"v":1,"taskId":"{task}","text":"x","createdMs":1}}"#);
+        let when = Conditions {
+            if_none_match: Some("*"),
+            if_task_match: Some(version),
+            ..Conditions::default()
+        };
+        h.send_conditional(Method::Put, &path, &body, Some(TOKEN), when)
+            .0
+    };
+
+    assert_eq!(comment(&mut h, &id, &v1), 200);
+    let (_, now) = h.call(Method::Get, &format!("/api/v1/tasks/{id}"), "");
+    assert_ne!(
+        now["etag"].as_str(),
+        Some(v1.as_str()),
+        "it moves the version"
+    );
+    assert_eq!(
+        comment(&mut h, &id, &v1),
+        412,
+        "a second append from the same read is refused"
+    );
+    assert_eq!(comment(&mut h, "not-a-task", &v1), 400);
+    let (_, docs) = h.call(Method::Get, "/api/v1/docs/comment", "");
+    assert_eq!(docs["docs"].as_array().unwrap().len(), 1);
+
+    // Without the header a comment is written as before and the task is untouched.
+    let path = format!("/api/v1/docs/comment/{}", uuid::Uuid::now_v7());
+    let body = format!(r#"{{"v":1,"taskId":"{id}","text":"owner","createdMs":2}}"#);
+    let (s, _) = h.call(Method::Put, &path, &body);
+    assert_eq!(s, 200);
+    let (_, after) = h.call(Method::Get, &format!("/api/v1/tasks/{id}"), "");
+    assert_eq!(after["etag"], now["etag"]);
+}
+
+#[test]
+fn a_board_document_needs_a_task_that_is_not_in_the_trash() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let when = Conditions {
+        if_task_match: Some("1"),
+        ..Conditions::default()
+    };
+    let nowhere = format!("/api/v1/docs/board/{}", uuid::Uuid::now_v7());
+    assert_eq!(
+        h.send_conditional(Method::Put, &nowhere, "{}", Some(TOKEN), when)
+            .0,
+        404
+    );
+
+    let t = h.task(&list, r#""title":"binned""#);
+    let id = t["id"].as_str().unwrap();
+    h.call(Method::Delete, &format!("/api/v1/tasks/{id}"), "");
+    let version = h.call(Method::Get, &format!("/api/v1/tasks/{id}"), "").1["etag"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let when = Conditions {
+        if_task_match: Some(&version),
+        ..Conditions::default()
+    };
+    let path = format!("/api/v1/docs/board/{id}");
+    assert_eq!(
+        h.send_conditional(Method::Put, &path, "{}", Some(TOKEN), when)
+            .0,
+        422
+    );
+}
+
+#[test]
+fn a_purge_takes_the_task_board_document_with_it() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let board_doc = |h: &mut Harness| {
+        let t = h.task(&list, r#""title":"card""#);
+        let id = t["id"].as_str().unwrap().to_string();
+        let when = Conditions {
+            if_task_match: t["etag"].as_str(),
+            ..Conditions::default()
+        };
+        let path = format!("/api/v1/docs/board/{id}");
+        let (s, _) = h.send_conditional(Method::Put, &path, "{}", Some(TOKEN), when);
+        assert_eq!(s, 200);
+        (id, path)
+    };
+    let (purged, purged_doc) = board_doc(&mut h);
+    let (binned, binned_doc) = board_doc(&mut h);
+
+    h.call(Method::Delete, &format!("/api/v1/tasks/{purged}"), "");
+    assert_eq!(
+        h.call(Method::Get, &purged_doc, "").0,
+        200,
+        "the trash keeps it"
+    );
+    h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{purged}?permanent=true"),
+        "",
+    );
+    assert_eq!(h.call(Method::Get, &purged_doc, "").0, 404);
+
+    h.call(Method::Delete, &format!("/api/v1/tasks/{binned}"), "");
+    h.call(Method::Delete, "/api/v1/trash", "");
+    assert_eq!(
+        h.call(Method::Get, &binned_doc, "").0,
+        404,
+        "emptying the trash does too"
+    );
+}
+
+#[test]
+fn document_preconditions_and_single_reads() {
+    let (_d, mut h) = harness();
+    let id = uuid::Uuid::now_v7();
+    let path = format!("/api/v1/docs/habit/{id}");
+    assert_eq!(h.call(Method::Get, &path, "").0, 404);
+
+    let when = Conditions {
+        if_match: Some("123"),
+        ..Conditions::default()
+    };
+    let (s, v) = h.send_conditional(Method::Put, &path, "{}", Some(TOKEN), when);
+    assert_eq!(s, 412, "If-Match on a missing document");
+    assert!(v["current"].is_null());
+
+    let when = Conditions {
+        if_none_match: Some("\"5\""),
+        ..Conditions::default()
+    };
+    let (s, _) = h.send_conditional(Method::Put, &path, "{}", Some(TOKEN), when);
+    assert_eq!(s, 400, "only If-None-Match: * is understood");
+
+    assert_eq!(h.call(Method::Put, &path, r#"{"name":"Read"}"#).0, 200);
+    let (s, v) = h.call(Method::Get, &path, "");
+    assert_eq!((s, v["body"]["name"].as_str()), (200, Some("Read")));
+    assert_eq!(
+        h.call(Method::Get, &format!("/api/v1/docs/focus/{id}"), "")
+            .0,
+        404,
+        "a document is read under its own kind"
+    );
+}
+
+#[test]
+fn a_leaf_delete_refuses_a_task_with_subtasks() {
+    let (_dir, mut h) = harness();
+    let list = h.list("L");
+    let parent = h.task(&list, r#""title":"parent""#)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let child = h.task(&list, &format!(r#""title":"child","parentId":"{parent}""#))["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (status, _) = h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{parent}?leaf=true"),
+        "",
+    );
+    assert_eq!(status, 409);
+    let (_, v) = h.call(Method::Get, &format!("/api/v1/tasks/{child}"), "");
+    assert!(v["deletedMs"].is_null(), "the subtask is untouched");
+    let (status, _) = h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{parent}?leaf=true&permanent=true"),
+        "",
+    );
+    assert_eq!(status, 400, "a purge cannot be a leaf delete");
+
+    let (status, _) = h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{child}?leaf=true"),
+        "",
+    );
+    assert_eq!(status, 204);
+    let (status, _) = h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{parent}?leaf=true"),
+        "",
+    );
+    assert_eq!(status, 409, "a trashed subtask is still its subtask");
+
+    let (status, _) = h.call(
+        Method::Delete,
+        "/api/v1/tasks/00000000-0000-0000-0000-000000000000?leaf=probe",
+        "",
+    );
+    assert_eq!(
+        status, 400,
+        "an unknown leaf value is refused before the task is looked up"
+    );
+}
+
+/// `(from, to, actor)` of each move in a `moves` response.
+fn moves(v: &Value) -> Vec<(Value, Value, String)> {
+    v["moves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| {
+            (
+                m["from"].clone(),
+                m["to"].clone(),
+                m["actor"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn every_column_change_is_recorded_with_its_actor_and_time() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let actor = |name| Conditions {
+        actor: Some(name),
+        ..Conditions::default()
+    };
+    let (s, card) = h.send_conditional(
+        Method::Post,
+        "/api/v1/tasks",
+        &format!(r#"{{"listId":"{list}","title":"card","tags":["agent","board:ready"]}}"#),
+        Some(TOKEN),
+        actor("planner"),
+    );
+    assert_eq!(s, 201);
+    let id = card["id"].as_str().unwrap().to_string();
+    let path = format!("/api/v1/tasks/{id}");
+    h.task(&list, r#""title":"not on the board""#);
+
+    h.clock.store(NOW + HOUR, Ordering::SeqCst);
+    let (s, _) = h.send_conditional(
+        Method::Patch,
+        &path,
+        r#"{"tags":["agent","board:building","claim:builder"]}"#,
+        Some(TOKEN),
+        actor("builder"),
+    );
+    assert_eq!(s, 200);
+    // Not a column change: nothing recorded.
+    h.call(Method::Patch, &path, r#"{"title":"renamed"}"#);
+    h.clock.store(NOW + 2 * HOUR, Ordering::SeqCst);
+    // Completing in tick's own UI moves the card to done.
+    h.call(Method::Post, &format!("{path}/complete"), "");
+
+    let (s, all) = h.call(Method::Get, &format!("{path}/moves"), "");
+    assert_eq!(s, 200);
+    let ready = Value::from("ready");
+    let building = Value::from("building");
+    assert_eq!(
+        moves(&all),
+        [
+            (Value::Null, ready.clone(), "planner".to_string()),
+            (ready, building.clone(), "builder".to_string()),
+            (building, Value::from("done"), "tick".to_string()),
+        ]
+    );
+    let at: Vec<i64> = all["moves"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["atMs"].as_i64().unwrap())
+        .collect();
+    assert_eq!(at, [NOW, NOW + HOUR, NOW + 2 * HOUR]);
+    assert_eq!(all["moves"][0]["taskId"].as_str(), Some(id.as_str()));
+}
+
+#[test]
+fn moves_page_by_time_and_seq_and_survive_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::open(dir.path());
+    let list = h.list("L");
+    for (hour, column) in [(0, "ready"), (1, "qa"), (2, "review")] {
+        h.clock.store(NOW + hour * HOUR, Ordering::SeqCst);
+        h.task(
+            &list,
+            &format!(r#""title":"c","tags":["agent","board:{column}"]"#),
+        );
+    }
+    drop(h);
+    let mut h = Harness::open(dir.path());
+
+    let since = NOW + HOUR;
+    let (s, page) = h.call(
+        Method::Get,
+        &format!("/api/v1/moves?since={since}&limit=1"),
+        "",
+    );
+    assert_eq!(s, 200);
+    assert_eq!(page["moves"][0]["to"].as_str(), Some("qa"));
+    let next = page["next"].as_u64().unwrap();
+    let (_, rest) = h.call(
+        Method::Get,
+        &format!("/api/v1/moves?since={since}&after={next}&limit=1"),
+        "",
+    );
+    assert_eq!(rest["moves"][0]["to"].as_str(), Some("review"));
+    assert_eq!(rest["next"], Value::Null, "the last page");
+    let (_, everything) = h.call(Method::Get, "/api/v1/moves", "");
+    assert_eq!(everything["moves"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn bad_actors_and_paging_arguments_are_refused() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let (s, _) = h.send_conditional(
+        Method::Post,
+        "/api/v1/tasks",
+        &format!(r#"{{"listId":"{list}","title":"c"}}"#),
+        Some(TOKEN),
+        Conditions {
+            actor: Some("two words"),
+            ..Conditions::default()
+        },
+    );
+    assert_eq!(s, 422);
+    assert_eq!(h.call(Method::Get, "/api/v1/moves?limit=0", "").0, 400);
+    assert_eq!(h.call(Method::Get, "/api/v1/moves?limit=1001", "").0, 400);
+    assert_eq!(h.call(Method::Get, "/api/v1/moves?since=soon", "").0, 400);
+    assert_eq!(
+        h.call(
+            Method::Get,
+            "/api/v1/tasks/00000000-0000-0000-0000-000000000000/moves",
+            ""
+        )
+        .0,
+        404
+    );
+}
+
+#[test]
+fn history_outlives_a_purge_so_a_seq_is_never_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::open(dir.path());
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"c","tags":["agent","board:ready"]"#);
+    let id = t["id"].as_str().unwrap();
+    h.call(
+        Method::Delete,
+        &format!("/api/v1/tasks/{id}?permanent=true"),
+        "",
+    );
+    drop(h);
+
+    let mut h = Harness::open(dir.path());
+    let (_, kept) = h.call(Method::Get, "/api/v1/moves", "");
+    assert_eq!(kept["moves"][0]["seq"].as_u64(), Some(1));
+    h.task(&list, r#""title":"d","tags":["agent"]"#);
+    let (_, after) = h.call(Method::Get, "/api/v1/moves?after=1", "");
+    assert_eq!(after["moves"][0]["seq"].as_u64(), Some(2));
+    assert_eq!(after["moves"][0]["to"].as_str(), Some("backlog"));
+}
+
+#[test]
+fn tag_renames_carry_the_actor_and_columns_match_the_board() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let t = h.task(&list, r#""title":"c","tags":["agent","board:ready"]"#);
+    let id = t["id"].as_str().unwrap().to_string();
+    let as_owner = || Conditions {
+        actor: Some("owner"),
+        ..Conditions::default()
+    };
+    let (s, _) = h.send_conditional(
+        Method::Post,
+        "/api/v1/tags/board:ready/rename",
+        r#"{"label":"board:review"}"#,
+        Some(TOKEN),
+        as_owner(),
+    );
+    assert_eq!(s, 200);
+    let (s, _) = h.send_conditional(
+        Method::Delete,
+        "/api/v1/tags/board:review",
+        "",
+        Some(TOKEN),
+        as_owner(),
+    );
+    assert_eq!(s, 204);
+
+    let (_, all) = h.call(Method::Get, &format!("/api/v1/tasks/{id}/moves"), "");
+    let ready = Value::from("ready");
+    let review = Value::from("review");
+    assert_eq!(
+        moves(&all),
+        [
+            (Value::Null, ready.clone(), "tick".to_string()),
+            (ready, review.clone(), "owner".to_string()),
+            // An agent card without a column tag is in backlog on the board.
+            (review, Value::from("backlog"), "owner".to_string()),
+        ]
+    );
 }

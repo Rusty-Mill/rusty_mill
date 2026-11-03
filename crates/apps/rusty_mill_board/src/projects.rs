@@ -152,6 +152,35 @@ impl Projects {
         Ok(Self { repos })
     }
 
+    /// This registry plus project `name` owning `paths` in repository `repo` (a new repository
+    /// if `repo` is not one yet). Purely additive: it takes no path any project already names,
+    /// so it never changes what an existing project owns beyond its repository's own project.
+    ///
+    /// # Errors
+    /// If `name` exists, a path overlaps (equals, contains or sits inside) another project's
+    /// path in `repo`, or the result fails [`Projects::parse`]'s validation.
+    pub fn with_project(&self, repo: &str, name: &str, paths: &[String]) -> Result<Self, String> {
+        if self.contains(name) {
+            return Err(format!("projects: {name:?} already exists"));
+        }
+        let mut listed = self.repos.clone();
+        let projects = listed.entry(repo.to_owned()).or_default();
+        let nested = |a: &str, b: &str| a.strip_prefix(b).is_some_and(|r| r.starts_with('/'));
+        for raw in paths {
+            let p = clean_path(raw).map_err(|e| format!("projects: {name:?}: {e}"))?;
+            let taken = projects.iter().find(|(_, theirs)| {
+                theirs
+                    .iter()
+                    .any(|q| p == *q || nested(&p, q) || nested(q, &p))
+            });
+            if let Some((other, _)) = taken {
+                return Err(format!("projects: {p:?} overlaps project {other:?}"));
+            }
+        }
+        projects.insert(name.to_owned(), paths.to_vec());
+        Self::from_listing(listed)
+    }
+
     /// Read a projects file.
     ///
     /// # Errors

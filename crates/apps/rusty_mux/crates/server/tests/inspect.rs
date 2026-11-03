@@ -5,12 +5,14 @@
 
 mod common;
 
+use std::time::{Duration, Instant};
+
 use common::{Client, block_for, new_block, start_server, window_for};
 use rusty_mux_core::BlockId;
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Code, Entry, Features, Message};
 
-const INSPECT: Features = Features::CHECKPOINT_V3
+const INSPECT: Features = Features::CHECKPOINT_V6
     .union(Features::INSPECT)
     .union(Features::BLOCK_CALL);
 
@@ -68,11 +70,17 @@ fn list_gives_each_parent_before_its_children() {
         })
         .collect();
     let [
-        Entry::Session { session, name },
+        Entry::Session {
+            session,
+            name,
+            active,
+            ..
+        },
         Entry::Window {
             window: w,
             session: ws,
             name: wname,
+            ..
         },
         Entry::Block {
             block: b1,
@@ -80,6 +88,7 @@ fn list_gives_each_parent_before_its_children() {
             holder: Some(holder),
             size,
             title,
+            name: bname,
         },
         Entry::Block {
             block: b2,
@@ -93,8 +102,12 @@ fn list_gives_each_parent_before_its_children() {
     };
     assert_eq!((name.as_str(), wname.as_str()), ("s", "w"));
     assert_eq!((ws, *w, *bw1, *bw2), (session, window, window, window));
+    assert_eq!(*active, Some(window), "a session's first window is active");
     assert_eq!((*b1, *holder, *b2), (leased, client.id(), idle));
     assert_eq!((size.cols(), size.rows(), title.as_str()), (80, 24, ""));
+    assert_eq!(bname, "");
+    // Clients are listed only with the labels feature.
+    assert_eq!(entries.len(), 4);
 }
 
 #[test]
@@ -109,14 +122,16 @@ fn capture_reads_the_screen_after_the_history_asked_for() {
     let screen = capture(&mut client, block, 0);
     assert_eq!(screen.lines().count(), 24, "{screen}");
     assert!(screen.contains("\n160\n") && screen.contains("DONE2"));
-    assert!(!screen.lines().any(|l| l == "101"));
+    // A prompt printed after the echo can share the first number's line.
+    let first = |l: &str| l.ends_with("101");
+    assert!(!screen.lines().any(first));
 
     let more = capture(&mut client, block, 5);
     assert_eq!(more.lines().count(), 29);
     assert!(more.ends_with(&screen));
 
     let all = capture(&mut client, block, u32::MAX);
-    assert!(all.lines().any(|l| l == "101"), "{all}");
+    assert!(all.lines().any(first), "{all}");
     assert!(all.ends_with(&screen));
 }
 
@@ -178,6 +193,36 @@ fn terminal_status_reads_the_programs_reports() {
     );
 }
 
+/// The shell is listed alone while idle; a job it runs comes first, above
+/// it, once the job has the terminal.
+#[test]
+fn terminal_process_lists_the_foreground_and_its_ancestors() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let block = block_for(&mut client);
+    let idle = text(&mut client, block, "terminal.process", &[]);
+    let shell: Vec<&str> = idle.split('\t').collect();
+    assert_eq!(shell[1..], ["sh", "/bin/sh"], "{idle}");
+
+    client.input(block, b"sleep 30\r");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = text(&mut client, block, "terminal.process", &[]);
+        let rows: Vec<Vec<&str>> = now.lines().map(|l| l.split('\t').collect()).collect();
+        // Until `exec` finishes, the job can show as a forked `sh` or a
+        // `sleep` with no command line yet.
+        if let [job, last] = rows.as_slice()
+            && job[1..] == ["sleep", "sleep 30"]
+        {
+            assert_eq!(*last, shell, "{now}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "no job in {now:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.input(block, b"\x03");
+}
+
 #[test]
 fn block_calls_are_checked_against_the_catalog() {
     let path = start_server();
@@ -214,13 +259,19 @@ fn block_calls_are_checked_against_the_catalog() {
 fn an_oversized_listing_is_refused_and_the_connection_kept() {
     let path = start_server();
     let mut client = Client::connect_with(&path, INSPECT, None);
-    // Each name fits one frame, but five exceed the bound on one reply.
-    for n in 0..5u8 {
-        client.request(|req| Message::CreateSession {
-            req,
-            name: char::from(b'a' + n).to_string().repeat(1 << 20),
+    // Names are short, but enough sessions exceed the bound on one reply
+    // (4 MiB); the requests are sent at once, then confirmed by a sync.
+    let name = "a".repeat(rusty_mux_core::MAX_NAME);
+    for req in 0..16_000 {
+        client.send(&Message::CreateSession {
+            req: 1_000_000 + req,
+            name: name.clone(),
         });
     }
+    assert!(matches!(
+        client.answer(|req| Message::Sync { req }).as_slice(),
+        [Message::Done { .. }]
+    ));
     let reason = refusal(client.answer(|req| Message::List { req }));
     assert!(reason.contains("list reply exceeds"), "{reason}");
     assert!(matches!(
@@ -288,4 +339,73 @@ fn a_block_program_knows_where_it_is() {
             .to_uppercase()
     );
     client.wait_for(block, &expected);
+}
+
+const CAPTURE: Features = INSPECT.union(Features::CAPTURE);
+
+fn send_keys(block: BlockId, keys: &[&str]) -> impl FnOnce(u64) -> Message {
+    let keys = Value::Words(keys.iter().map(|k| (*k).to_owned()).collect());
+    move |req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.send-keys".into(),
+        args: vec![("key".into(), keys)],
+    }
+}
+
+#[test]
+fn keys_reach_the_program_in_its_cursor_mode() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, INSPECT, None);
+    let block = block_for(&mut client);
+    // `cat -v` shows what it reads; DECCKM on turns Up into SS3 A.
+    // The marker shows the server has parsed DECCKM before keys are encoded.
+    client.input(block, b"printf '\\033[?1h'; echo ON$((1+1)); cat -v\r");
+    client.wait_for(block, "ON2");
+    let pressed = send_keys(block, &["up", "ctrl+a", "x", "enter", "ctrl+d"]);
+    client.send(&pressed(99));
+    client.wait_for(block, "^[OA^Ax\r\n");
+    let answer = client.answer(send_keys(block, &["up", "hyper+x"]));
+    let reason = refusal(answer);
+    assert!(reason.contains("`hyper+x` is not a key"), "{reason}");
+
+    let mut other = Client::connect_with(&path, INSPECT, None);
+    other.request(|req| Message::Attach { req, block });
+    let reason = refusal(other.answer(send_keys(block, &["enter"])));
+    assert!(reason.contains("lease"), "{reason}");
+}
+
+#[test]
+fn capture_options_trim_unwrap_and_keep_styles() {
+    let path = start_server();
+    let mut client = Client::connect_with(&path, CAPTURE, None);
+    let block = block_for(&mut client);
+    client.input(
+        block,
+        b"printf '\\033[H\\033[2J'; printf '\\033[1mBOLD\\033[0m %0100d\\n' 0; echo END$((1+1))\r",
+    );
+    client.wait_for(block, "END2");
+    let format = |client: &mut Client, flags: &[&str]| {
+        let mut args = vec![("history", Value::Lines(0))];
+        args.extend(flags.iter().map(|f| (*f, Value::Flag(true))));
+        text(client, block, "terminal.format", &args)
+    };
+    let zeros = "0".repeat(100);
+
+    let plain = format(&mut client, &[]);
+    assert_eq!(plain.split('\n').count(), 24, "{plain:?}");
+    assert!(!plain.contains(&zeros), "{plain:?}");
+
+    let trimmed = format(&mut client, &["trim", "unwrap"]);
+    let lines: Vec<&str> = trimmed.lines().collect();
+    assert_eq!(lines[..2], [format!("BOLD {zeros}").as_str(), "END2"]);
+    assert!(!trimmed.ends_with('\n'), "{trimmed:?}");
+
+    let vt = format(&mut client, &["vt"]);
+    assert!(vt.contains("\x1b[0;1mBOLD\x1b[0m 000"), "{vt:?}");
+
+    let mut old = Client::connect_with(&path, INSPECT, None);
+    let args = [("history", Value::Lines(0)), ("trim", Value::Flag(true))];
+    let reason = refusal(old.answer(block_call(block, "terminal.format", &args)));
+    assert!(reason.contains("requires feature bits"), "{reason}");
 }

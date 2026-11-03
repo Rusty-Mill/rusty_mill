@@ -1,6 +1,6 @@
 //! The `jwtAuth` and `extAuthz` route policies.
 //!
-//! Validation itself is [`rusty_mcp`]'s work: [`rusty_mcp::auth::JwtValidator`]
+//! Validation itself is [`rusty_mcp_middleware`]'s work: [`rusty_mcp_middleware::auth::JwtValidator`]
 //! is a JWKS-backed validator with key caching, an algorithm allow-list pinned
 //! before any key is touched, and a floor between refetches provoked by an
 //! unknown `kid` — that last one matters, because without it anyone can force
@@ -10,7 +10,7 @@
 //! This crate supplies the two things that validator deliberately leaves to its
 //! caller:
 //!
-//! - **The audience check.** [`rusty_mcp::auth::JwtValidator`] reads `aud` into
+//! - **The audience check.** [`rusty_mcp_middleware::auth::JwtValidator`] reads `aud` into
 //!   [`VerifiedToken::audiences`] and checks nothing, because upstream's own
 //!   layer binds it to a single canonical resource URI. Our `audiences` is a
 //!   *list*, so the check lives in [`JwtAuthenticator::authenticate`]. Getting
@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use agentgateway_config::{JwtAuth, JwtSource};
 use http::{HeaderMap, StatusCode, header};
-use rusty_mcp::auth::{JwtValidator, TokenError, TokenValidator, VerifiedToken};
+use rusty_mcp_middleware::auth::{JwtValidator, TokenError, TokenValidator, VerifiedToken};
 
 pub use extauthz::{Authorization, ExtAuthz, ExtAuthzError};
 pub use file_jwks::{FileJwks, FileJwksError};
@@ -56,7 +56,7 @@ pub enum AuthError {
         at: String,
         /// Underlying failure.
         #[source]
-        source: Box<rusty_mcp::auth::JwtValidatorError>,
+        source: Box<rusty_mcp_middleware::auth::JwtValidatorError>,
     },
 }
 

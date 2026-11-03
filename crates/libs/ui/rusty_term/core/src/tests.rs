@@ -71,6 +71,22 @@ fn line_text_spans_scrollback_then_screen() {
 }
 
 #[test]
+fn line_cells_carry_style_and_the_wrap_bit() {
+    // "abc" wraps after "ab" and scrolls into history; "\x1b[1md" is bold.
+    let g = parse(b"abc\r\n\x1b[1md", 2, 2);
+    assert_eq!(g.scrollback_len(), 1);
+    let (first, wrapped) = g.line_cells(0).expect("history row");
+    assert!(wrapped);
+    assert_eq!(first.iter().map(|c| c.ch).collect::<String>(), "ab");
+    let (second, wrapped) = g.line_cells(1).expect("screen row");
+    assert!(!wrapped);
+    assert_eq!(second[0].ch, 'c');
+    let (third, _) = g.line_cells(2).expect("screen row");
+    assert_ne!(third[0].flags & crate::ATTR_BOLD, 0);
+    assert_eq!(g.line_cells(3), None);
+}
+
+#[test]
 fn put_char_wraps_at_right_margin() {
     let g = parse(b"abc", 2, 24);
     assert_eq!(row_text(&g, 0), "ab");
@@ -94,6 +110,139 @@ fn tab_stops_at_eight_and_clamps_at_margin() {
 fn sgr_sets_basic_colors() {
     let g = parse(b"\x1b[31mX", 80, 24);
     assert_eq!(cells(&g)[0].fg, PALETTE_16[1]); // SGR 31 = dim red 0x800000
+}
+
+#[test]
+fn plain_tells_whether_sgr_0_alone_would_restore_the_rendition() {
+    let mut g = Grid::new(20, 2);
+    let mut p = AnsiParser::new();
+    assert!(p.plain());
+    for (input, plain) in [
+        (&b"\x1b[31m"[..], false),
+        (b"\x1b[0m", true),
+        (b"\x1b[4m", false),
+        (b"\x1b[24m", true),
+        (b"\x1b(0", false),
+        (b"\x1b(B", true),
+        (b"\x0e", true),
+        (b"\x1b)0\x0e", false),
+        (b"\x0f", true),
+        (b"\x1b[1\"q", false),
+        (b"\x1b[0\"q", true),
+        (b"\x1b[3", false),
+        (b"1m", false),
+        (b"\x1b[0m\xc3", false),
+        (b"\xa9", true),
+        (b"\x1b]0;title", false),
+        (b"\x07", true),
+    ] {
+        p.advance(&mut g, input);
+        assert_eq!(p.plain(), plain, "{input:?}");
+    }
+}
+
+#[test]
+fn can_and_sub_abort_an_osc_string_without_acting_on_it() {
+    for abort in [b"\x18", b"\x1a"] {
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b]0;stuck");
+        p.advance(&mut g, abort);
+        assert!(p.ground(), "{abort:?}");
+        p.advance(&mut g, b"\x07after");
+        assert_eq!(g.title, "", "{abort:?}: the title was never set");
+        assert_eq!(g.line_text(0).as_deref().map(str::trim_end), Some("after"));
+    }
+}
+
+#[test]
+fn can_and_sub_abort_a_string_at_every_split_without_acting_on_it() {
+    // Each string sets the title, writes the clipboard, posts a
+    // notification or asks for an answer. Cut after each of its bytes,
+    // its terminator's ESC included, then CAN or SUB, it does nothing.
+    let strings: [&[u8]; 7] = [
+        b"\x1b]0;stuck\x1b",
+        b"\x1b]52;c;YQ==\x1b",
+        b"\x1b]9;hello\x1b",
+        b"\x1b]777;notify;title;body\x1b",
+        b"\x1bP$qm\x1b",
+        b"\x1bP+q544e\x1b",
+        b"\x1b_Gi=99,a=q;\x1b",
+    ];
+    for string in strings {
+        for cut in 1..=string.len() {
+            for abort in [b"\x18", b"\x1a"] {
+                let what = format!("{:?} {abort:?}", &string[..cut]);
+                let mut g = Grid::new(20, 2);
+                let mut p = AnsiParser::new();
+                p.advance(&mut g, &string[..cut]);
+                p.advance(&mut g, abort);
+                assert!(p.ground(), "{what}");
+                p.advance(&mut g, b"after");
+                assert_eq!(g.title, "", "{what}");
+                assert_eq!(g.clipboard_set, None, "{what}");
+                assert!(g.notifications.is_empty(), "{what}");
+                assert!(p.take_responses().is_empty(), "{what}");
+                assert_eq!(
+                    g.line_text(0).as_deref().map(str::trim_end),
+                    Some("after"),
+                    "{what}"
+                );
+            }
+        }
+        // With ST instead, each is acted on: the test sees a real effect.
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, string);
+        p.advance(&mut g, b"\\");
+        let acted = g.title == "stuck"
+            || g.clipboard_set.is_some()
+            || !g.notifications.is_empty()
+            || !p.take_responses().is_empty();
+        assert!(acted, "{string:?}");
+    }
+}
+
+#[test]
+fn ground_is_false_inside_any_unfinished_sequence() {
+    let mut g = Grid::new(20, 2);
+    let mut p = AnsiParser::new();
+    assert!(p.ground());
+    for (input, ground) in [
+        (&b"\x1b[31m"[..], true),
+        (b"\x1b", false),
+        (b"[3", false),
+        (b"1m", true),
+        (b"\xe2\x94", false),
+        (b"\x80", true),
+        (b"\x1b]0;title", false),
+        (b"\x1b", false),
+        (b"\\", true),
+        (b"\x1bP1$r", false),
+        (b"\x18", true),
+        (b"\x1b(", false),
+        (b"0", true),
+    ] {
+        p.advance(&mut g, input);
+        assert_eq!(p.ground(), ground, "{input:?}");
+    }
+}
+
+#[test]
+fn plain_cursor_needs_origin_and_insert_mode_off_and_no_open_link() {
+    let mut g = Grid::new(20, 4);
+    let mut p = AnsiParser::new();
+    assert!(g.plain_cursor());
+    p.advance(&mut g, b"\x1b[2;3r\x1b[?6h");
+    assert!(!g.plain_cursor());
+    p.advance(&mut g, b"\x1b[?6l\x1b]8;;https://example.com\x1b\\");
+    assert!(!g.plain_cursor());
+    p.advance(&mut g, b"x\x1b]8;;\x1b\\");
+    assert!(g.plain_cursor());
+    p.advance(&mut g, b"\x1b[4h");
+    assert!(!g.plain_cursor());
+    p.advance(&mut g, b"\x1b[4l");
+    assert!(g.plain_cursor());
 }
 
 #[test]
@@ -1082,6 +1231,32 @@ fn dsr_cursor_position_report_uses_one_based_coords() {
 }
 
 #[test]
+fn cursor_reports_clamp_a_pending_wrap_to_the_last_column() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, "x".repeat(80).as_bytes());
+    assert_eq!(g.cursor.0, 80, "pending wrap");
+    p.advance(&mut g, b"\x1b[6n\x1b[?6n");
+    assert_eq!(p.take_responses(), b"\x1b[1;80R\x1b[?1;80;1R");
+    assert_eq!(g.cursor.0, 80, "the report keeps the pending wrap");
+    p.advance(&mut g, b"y");
+    assert_eq!(g.cursor, (1, 1), "the next glyph still wraps");
+}
+
+#[test]
+fn origin_region_follows_decom_and_the_margins() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    assert_eq!(g.origin_region(), None);
+    p.advance(&mut g, b"\x1b[5;20r\x1b[?6h");
+    assert_eq!(g.origin_region(), Some((0, 4, 79, 19)));
+    p.advance(&mut g, b"\x1b[?69h\x1b[3;40s");
+    assert_eq!(g.origin_region(), Some((2, 4, 39, 19)));
+    p.advance(&mut g, b"\x1b[?6l");
+    assert_eq!(g.origin_region(), None);
+}
+
+#[test]
 fn decxcpr_private_form_is_answered_with_the_private_marker() {
     // `CSI ? 6 n` (DECXCPR) is the private-marker form of CPR; a program
     // that probes with it (rather than the plain `CSI 6 n` above) used to
@@ -1119,13 +1294,31 @@ fn synchronized_output_mode_toggles_on_set_reset() {
     assert!(!g.sync_output_active());
 }
 
-// The timeout safety valve (SYNC_OUTPUT_TIMEOUT, ~800ms) that auto-closes a
-// window a misbehaving client never resets isn't exercised here: faking it
-// would need either a real sleep (slows the suite for one test) or injecting
-// a fake clock this crate doesn't otherwise need. Covered by inspection of
-// `Grid::sync_output_active` instead — the logic is a two-line elapsed()
-// check with nothing else that could plausibly break independently of the
-// toggle behavior the tests above already cover.
+#[test]
+fn an_open_synchronized_update_reports_its_timeout() {
+    use std::time::{Duration, Instant};
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    assert_eq!(g.sync_output_until(), None, "none open");
+    let before = Instant::now();
+    p.advance(&mut g, b"\x1b[?2026h");
+    let until = g.sync_output_until().expect("open");
+    assert!(until >= before + Duration::from_millis(800));
+    assert!(until <= Instant::now() + Duration::from_millis(800));
+    p.advance(&mut g, b"\x1b[?2026l");
+    assert_eq!(g.sync_output_until(), None, "closed normally");
+}
+
+#[test]
+fn a_synchronized_update_past_its_timeout_closes() {
+    use std::time::{Duration, Instant};
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[?2026h");
+    g.sync_output_since = Instant::now().checked_sub(Duration::from_millis(800));
+    assert_eq!(g.sync_output_until(), None, "expired");
+    assert!(!g.sync_output_active(), "and stays closed");
+}
 
 #[test]
 fn xtwinops_18t_reports_text_area_in_cells() {
@@ -1323,6 +1516,35 @@ fn sgr58_colon_form_matches_semicolon_form() {
 }
 
 #[test]
+fn sgr21_is_a_double_underline_that_24_clears() {
+    let g = parse(b"\x1b[21mA\x1b[24mB", 80, 24);
+    assert_ne!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
+    assert_eq!(
+        UnderlineStyle::from_attrs(cells(&g)[0].flags),
+        UnderlineStyle::Double
+    );
+    assert_eq!(cells(&g)[1].flags & ATTR_UNDERLINE, 0);
+}
+
+#[test]
+fn sgr53_sets_overline_and_55_or_0_clears_it() {
+    let g = parse(b"\x1b[53mA\x1b[55mB\x1b[53mC\x1b[0mD", 80, 24);
+    let overline = |i: usize| cells(&g)[i].flags & ATTR_OVERLINE != 0;
+    assert_eq!(
+        [overline(0), overline(1), overline(2), overline(3)],
+        [true, false, true, false]
+    );
+}
+
+#[test]
+fn decrqss_reports_overline_and_sgr21_as_their_sgr() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[21;53m\x1bP$qm\x1b\\");
+    assert_eq!(p.take_responses(), b"\x1bP1$r0;53;4:2m\x1b\\");
+}
+
+#[test]
 fn sgr_reset_clears_underline_style_and_color() {
     let g = parse(b"\x1b[4:3m\x1b[58;2;1;2;3m\x1b[0mx", 80, 24);
     assert_eq!(cells(&g)[0].flags & ATTR_UNDERLINE, 0);
@@ -1489,12 +1711,13 @@ fn scrolled_off_line_keeps_its_wrap_and_drops_its_size_attr() {
     // travels into history (the reflow needs it), the size attribute does not.
     let mut g = Grid::new(4, 2);
     let mut p = AnsiParser::new();
-    p.advance(&mut g, b"\x1b#6abcdef\r\nx");
+    // The double-width row holds two of the four columns, so "ab" wraps.
+    p.advance(&mut g, b"\x1b#6abcd\r\nx");
     assert_eq!(g.scrollback.len(), 1);
     assert!(g.scrollback[0].wrapped);
     assert_eq!(g.scrollback[0].attr, LineAttr::Single);
-    assert_eq!(hist_text(&g, 0), "abcd");
-    assert_eq!(row_text(&g, 0), "ef  ");
+    assert_eq!(hist_text(&g, 0), "ab  ");
+    assert_eq!(row_text(&g, 0), "cd  ");
 }
 
 #[test]
@@ -2081,6 +2304,357 @@ fn osc_11_query_replies_and_110_resets() {
     assert_eq!(cells(&g)[0].bg, 0x000000);
 }
 
+// ---- Default vs explicit colours under OSC 10/11, #1163 ----
+//
+// A cell drawn in the default colours follows a later OSC 10/11/110/111; a
+// colour the child chose stays, even when it equals the old or new default.
+
+const BLUE: u32 = 0x0000FF;
+
+/// `(fg, bg)` of cell `(x, y)`.
+fn colours(g: &Grid, x: usize, y: usize) -> (u32, u32) {
+    let c = g.row(y)[x];
+    (c.fg, c.bg)
+}
+
+#[test]
+fn osc_11_recolours_default_cells_but_not_explicit_ones() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    // A in the default bg, B explicitly black (the old default), C
+    // explicitly blue (the new one).
+    p.advance(&mut g, b"A\x1b[48;2;0;0;0mB\x1b[48;2;0;0;255mC\x1b[0m");
+    p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\");
+    assert_eq!(colours(&g, 0, 0).1, BLUE, "default follows");
+    assert_eq!(
+        colours(&g, 1, 0).1,
+        DEFAULT_BG,
+        "explicit old default stays"
+    );
+    assert_eq!(colours(&g, 2, 0).1, BLUE);
+    assert_eq!(colours(&g, 5, 1).1, BLUE, "an untouched blank follows");
+    p.advance(&mut g, b"\x1b]111\x1b\\");
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG);
+    assert_eq!(colours(&g, 1, 0).1, DEFAULT_BG);
+    assert_eq!(colours(&g, 2, 0).1, BLUE, "explicit new default stays");
+    assert_eq!(colours(&g, 5, 1).1, DEFAULT_BG);
+}
+
+#[test]
+fn osc_10_recolours_default_foreground_but_not_explicit_one() {
+    let mut g = Grid::new(10, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"A\x1b[38;2;255;255;255mB\x1b[39mC");
+    p.advance(&mut g, b"\x1b]10;rgb:00/00/ff\x1b\\");
+    assert_eq!(colours(&g, 0, 0).0, BLUE);
+    assert_eq!(colours(&g, 1, 0).0, DEFAULT_FG, "explicit white stays");
+    assert_eq!(colours(&g, 2, 0).0, BLUE, "SGR 39 is the default");
+    p.advance(&mut g, b"\x1b]110\x1b\\");
+    assert_eq!(colours(&g, 0, 0).0, DEFAULT_FG);
+}
+
+#[test]
+fn osc_11_recolours_default_cells_in_history() {
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"a\x1b[48;2;0;0;0mb\x1b[0m\r\n\r\n\r\n");
+    assert_eq!(g.scrollback_len(), 2);
+    p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\");
+    let (line, _) = g.line_cells(0).expect("history line");
+    assert_eq!((line[0].bg, line[1].bg), (BLUE, DEFAULT_BG));
+}
+
+#[test]
+fn osc_11_recolours_both_screens() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"p\x1b[48;2;0;0;0mq\x1b[0m\x1b[?1049h");
+    p.advance(&mut g, b"a\x1b[48;2;0;0;0mb\x1b[0m");
+    p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\");
+    assert_eq!(
+        (colours(&g, 0, 0).1, colours(&g, 1, 0).1),
+        (BLUE, DEFAULT_BG)
+    );
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(row_text(&g, 0), "pq  ");
+    assert_eq!(
+        (colours(&g, 0, 0).1, colours(&g, 1, 0).1),
+        (BLUE, DEFAULT_BG)
+    );
+}
+
+#[test]
+fn pen_keeps_colour_provenance_across_decsc_and_osc_11() {
+    // DECSC saves the pen with its provenance; a saved default colour comes
+    // back as the default in force at DECRC.
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // An explicit black pen is not the default: OSC 11 does not move it.
+    p.advance(
+        &mut g,
+        b"\x1b[48;2;0;0;0m\x1b7\x1b]11;rgb:00/00/ff\x1b\\\x1b8x",
+    );
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG);
+    // A default pen draws in the default in force when it draws.
+    p.advance(
+        &mut g,
+        b"\x1b[49m\x1b7\x1b]11;rgb:00/ff/00\x1b\\\x1b8\x1b[Cy",
+    );
+    assert_eq!(colours(&g, 1, 0).1, 0x00FF00);
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG, "explicit glyph stays");
+}
+
+#[test]
+fn decsc_saves_and_decrc_restores_the_rendition() {
+    let mut g = Grid::new(6, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[1;31m\x1b7\x1b[0m\x1b[5Ga\x1b8b");
+    let (a, b) = (g.row(0)[4], g.row(0)[0]);
+    assert_eq!(
+        (a.flags & ATTR_BOLD, a.fg),
+        (0, DEFAULT_FG),
+        "drawn after SGR 0"
+    );
+    assert_ne!(b.flags & ATTR_BOLD, 0, "bold restored");
+    assert_eq!(b.fg, 0x800000, "red restored");
+    // SCOSC / SCORC (`CSI s` / `CSI u`) do the same.
+    p.advance(&mut g, b"\x1b[0;32m\x1b[s\x1b[0m\x1b[uc");
+    assert_eq!(g.row(0)[1].fg, 0x008000);
+}
+
+#[test]
+fn decrc_without_a_save_restores_the_reset_rendition() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[1;31m\x1b8x");
+    let c = g.row(0)[0];
+    assert_eq!((c.flags & ATTR_BOLD, c.fg), (0, DEFAULT_FG));
+}
+
+#[test]
+fn decsc_saves_the_character_sets_and_protection() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // DEC line drawing in G0 and DECSCA on, saved; both undone, restored.
+    p.advance(&mut g, b"\x1b(0\x1b[1\"q\x1b7\x1b(B\x1b[0\"q\x1b8q");
+    assert_eq!(g.row(0)[0].ch, '\u{2500}', "line drawing restored");
+    p.advance(&mut g, b"\x1b[1;1H\x1b[?2K");
+    assert_eq!(
+        g.row(0)[0].ch,
+        '\u{2500}',
+        "protection restored: DECSEL kept it"
+    );
+}
+
+#[test]
+fn mode_1049_saves_the_rendition_apart_from_the_alt_screens_own_decsc() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // Red on entering; inside, the app saves and restores blue for itself.
+    p.advance(&mut g, b"\x1b[31m\x1b[?1049h\x1b[34m\x1b7\x1b[0m\x1b8a");
+    assert_eq!(g.row(0)[0].fg, 0x000080, "alt screen's own DECSC");
+    p.advance(&mut g, b"\x1b[0m\x1b[?1049lb");
+    assert_eq!(g.row(0)[0].fg, 0x800000, "1049 restored the primary's red");
+}
+
+/// The colour and column of the glyph `p` writes next at the cursor.
+fn next_glyph(g: &mut Grid, p: &mut AnsiParser) -> (u32, usize) {
+    let x = g.cursor.0;
+    p.advance(g, b"x");
+    (g.row(0)[x].fg, x)
+}
+
+#[test]
+fn mode_1049_keeps_the_primary_decsc_register() {
+    // A red save at column 1, then blue; 1049 in and out must leave the
+    // register as it was, as the grid does for the cursor.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[2G\x1b[31m\x1b7\x1b[5G\x1b[34m\x1b[?1049h\x1b[32m\x1b[?1049l",
+    );
+    assert_eq!(
+        next_glyph(&mut g, &mut p),
+        (0x000080, 4),
+        "1049 restored blue"
+    );
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 1), "ESC 8 still red");
+}
+
+#[test]
+fn the_entry_mode_decides_the_restore_for_pen_and_cursor_alike() {
+    // Entered by 1049, left by 47: cursor and pen both come back.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[3G\x1b[31m\x1b[?1049h\x1b[6G\x1b[34m\x1b[?47l",
+    );
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 2));
+    // Entered by 47, left by 1049: neither comes back.
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[3G\x1b[31m\x1b[?47h\x1b[6G\x1b[34m\x1b[?1049l",
+    );
+    assert_eq!(next_glyph(&mut g, &mut p), (0x000080, 5));
+}
+
+#[test]
+fn checkpoint_mid_alt_screen_keeps_the_1049_entry() {
+    let mut g = Grid::new(8, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[2G\x1b[31m\x1b7\x1b[4G\x1b[32m\x1b[?1049h\x1b[34m\x1b7",
+    );
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x008000, 3), "entry state");
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p), (0x800000, 1), "entry register");
+}
+
+#[test]
+fn decstr_and_ris_forget_the_saved_rendition() {
+    for reset in [&b"\x1b[!p"[..], b"\x1bc"] {
+        let mut g = Grid::new(4, 1);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"\x1b[31m\x1b7");
+        p.advance(&mut g, reset);
+        p.advance(&mut g, b"\x1b8x");
+        assert_eq!(g.row(0)[0].fg, DEFAULT_FG, "{reset:?}");
+    }
+}
+
+#[test]
+fn checkpoint_keeps_the_saved_rendition() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[31m\x1b7\x1b[0m");
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b8x");
+    assert_eq!(g.row(0)[0].fg, 0x800000);
+}
+
+#[test]
+fn osc_11_leaves_the_explicit_pen_and_its_erases_alone() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    // The pen's explicit black equals the default; OSC 11 must not move it.
+    p.advance(&mut g, b"\x1b[48;2;0;0;0m\x1b]11;rgb:00/00/ff\x1b\\x\x1b[K");
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG, "glyph");
+    assert_eq!(colours(&g, 2, 0).1, DEFAULT_BG, "BCE erase");
+    p.advance(&mut g, b"\x1b]11;rgb:00/ff/00\x1b\\");
+    assert_eq!(colours(&g, 2, 0).1, DEFAULT_BG, "an explicit erase stays");
+}
+
+#[test]
+fn checkpoint_keeps_colour_provenance() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b]11;rgb:00/00/ff\x1b\\a\x1b[48;2;0;0;255mb\x1b[49m",
+    );
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    assert_eq!((colours(&g, 0, 0).1, colours(&g, 1, 0).1), (BLUE, BLUE));
+    p.advance(&mut g, b"\x1b]111\x1b\\c");
+    assert_eq!(colours(&g, 0, 0).1, DEFAULT_BG, "default follows");
+    assert_eq!(colours(&g, 1, 0).1, BLUE, "explicit stays");
+    assert_eq!(colours(&g, 2, 0).1, DEFAULT_BG, "restored pen is default");
+}
+
+const GREEN: u32 = 0x00FF00;
+
+#[test]
+fn osc_4_recolours_palette_cells_but_not_equal_rgb() {
+    let mut g = Grid::new(6, 2);
+    let mut p = AnsiParser::new();
+    // a: SGR 31 (entry 1); b: the same red as RGB; c: 38;5;200; then a BCE
+    // erase on SGR 44 (entry 4).
+    p.advance(
+        &mut g,
+        b"\x1b[31ma\x1b[38;2;128;0;0mb\x1b[38;5;200mc\x1b[44m\x1b[K",
+    );
+    let red = colours(&g, 0, 0).0;
+    assert_eq!(colours(&g, 1, 0).0, red, "equal before");
+    p.advance(
+        &mut g,
+        b"\x1b]4;1;rgb:00/ff/00;200;rgb:00/00/ff;4;rgb:00/ff/00\x1b\\",
+    );
+    assert_eq!(colours(&g, 0, 0).0, GREEN, "SGR 31 follows entry 1");
+    assert_eq!(colours(&g, 1, 0).0, red, "RGB stays");
+    assert_eq!(colours(&g, 2, 0).0, BLUE, "38;5;200 follows entry 200");
+    assert_eq!(colours(&g, 4, 0).1, GREEN, "BCE erase follows entry 4");
+    // The pen follows too: text and erases written next use the new entry.
+    p.advance(&mut g, b"\r\n\x1b[31mx\x1b[K");
+    assert_eq!(colours(&g, 0, 1), (GREEN, GREEN));
+    // OSC 104 restores the entries, and everything drawn in them.
+    p.advance(&mut g, b"\x1b]104\x1b\\");
+    assert_eq!(colours(&g, 0, 0).0, red);
+    assert_eq!(colours(&g, 0, 1).0, red);
+    assert_eq!(colours(&g, 3, 1).1, PALETTE_16[4], "erase restored");
+    assert_eq!(colours(&g, 1, 0).0, red);
+}
+
+#[test]
+fn osc_4_recolours_the_primary_screen_under_the_alt_screen() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[32ma\x1b[?1049h\x1b]4;2;rgb:00/00/ff\x1b\\\x1b[?1049l",
+    );
+    assert_eq!(colours(&g, 0, 0).0, BLUE);
+}
+
+#[test]
+fn decsc_restores_a_palette_colour_as_it_reads_now() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(
+        &mut g,
+        b"\x1b[33m\x1b7\x1b[0m\x1b]4;3;rgb:00/ff/00\x1b\\\x1b8x",
+    );
+    assert_eq!(colours(&g, 0, 0).0, GREEN);
+}
+
+#[test]
+fn checkpoint_keeps_palette_tags() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[31ma\x1b[38;2;128;0;0mb\x1b[31m");
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b]4;1;rgb:00/ff/00\x1b\\c");
+    assert_eq!(colours(&g, 0, 0).0, GREEN, "tag restored");
+    assert_eq!(colours(&g, 1, 0).0, PALETTE_16[1], "RGB stays");
+    assert_eq!(colours(&g, 2, 0).0, GREEN, "restored pen is entry 1");
+}
+
+#[test]
+fn checkpoint_rejects_rtcp_v3_to_v5_and_other_versions() {
+    // v3 has no colour provenance and v4 no palette tags, so restoring
+    // either would bake colours in; v5's 16-bit flags would misread as the
+    // wider v6 ones. They fail closed instead.
+    let (g, p) = (Grid::new(4, 1), AnsiParser::new());
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    assert_eq!(&bytes[..5], b"RTCP\x06");
+    assert!(crate::checkpoint::decode(&bytes).is_ok());
+    for version in [3u8, 4, 5, 7] {
+        let mut other = bytes.clone();
+        other[4] = version;
+        assert!(crate::checkpoint::decode(&other).is_err(), "v{version}");
+    }
+}
+
 #[test]
 fn osc_color_resets_on_ris() {
     // A default background set via OSC 11 must not survive a full reset.
@@ -2172,6 +2746,35 @@ fn osc_133_not_recorded_on_alt_screen() {
     p.advance(&mut g, b"\x1b[?1049h"); // enter alt screen (no history)
     p.advance(&mut g, b"\x1b]133;A\x07");
     assert!(!g.scroll_to_prev_prompt()); // marks aren't recorded there
+}
+
+#[test]
+fn osc_133_marks_drive_the_shell_phase_and_exit() {
+    let mut g = Grid::new(10, 3);
+    let mut p = AnsiParser::new();
+    assert_eq!(g.shell_phase(), None);
+    assert_eq!(g.last_command_exit(), None);
+    p.advance(&mut g, b"\x1b]133;A\x07$ ");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
+    p.advance(&mut g, b"\x1b]133;C\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Running));
+    p.advance(&mut g, b"\x1b]133;D;2\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Finished));
+    assert_eq!(g.last_command_exit(), Some(2));
+    // A new prompt keeps the last exit code; a `D` without one clears it.
+    p.advance(&mut g, b"\x1b]633;A\x07");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
+    assert_eq!(g.last_command_exit(), Some(2));
+    p.advance(&mut g, b"\x1b]133;D\x07");
+    assert_eq!(g.last_command_exit(), None);
+}
+
+#[test]
+fn shell_phase_survives_ris() {
+    let mut g = Grid::new(4, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b]133;A\x07\x1bc");
+    assert_eq!(g.shell_phase(), Some(ShellPhase::Prompt));
 }
 
 #[test]
@@ -2419,10 +3022,10 @@ fn sgr_22_clears_both_bold_and_dim() {
 #[test]
 fn wide_trailer_carries_only_layout_bit_under_attributes() {
     // A bold wide glyph: the head carries the bold bit; the trailer carries
-    // only WIDE_TRAILER, never a rendition attribute.
+    // only WIDE_TRAILER and its colours' provenance, never a rendition.
     let g = parse("\x1b[1m世".as_bytes(), 80, 24);
     assert_ne!(cells(&g)[0].flags & ATTR_BOLD, 0); // head is bold
-    assert_eq!(cells(&g)[1].flags, WIDE_TRAILER); // trailer: layout bit only
+    assert_eq!(cells(&g)[1].flags, WIDE_TRAILER | ATTR_DEFAULT_COLORS);
 }
 
 #[test]
@@ -3132,15 +3735,63 @@ fn decdwl_decdhl_decswl_set_line_size() {
 }
 
 #[test]
+fn double_width_row_holds_half_the_columns() {
+    // 8 columns, double width: 4 glyphs fit, the 5th wraps (#1159).
+    let g = parse(b"\x1b#6ABCDE", 8, 2);
+    assert_eq!(row_text(&g, 0), "ABCD    ");
+    assert_eq!(cells(&g)[8].ch, 'E');
+    assert_eq!(g.cursor, (1, 1));
+    // DECDHL halves wrap the same way.
+    let g = parse(b"\x1b#3ABCDE", 8, 2);
+    assert_eq!(cells(&g)[8].ch, 'E');
+    // Autowrap off: the last glyph overwrites the last shown column.
+    let g = parse(b"\x1b[?7l\x1b#6ABCDE", 8, 2);
+    assert_eq!(row_text(&g, 0), "ABCE    ");
+    assert_eq!(g.cursor, (4, 0));
+    // Non-ASCII text takes the same path.
+    let g = parse("\x1b#6éééé漢".as_bytes(), 8, 2);
+    assert_eq!(cells(&g)[8].ch, '漢');
+}
+
+#[test]
+fn resize_rejoins_a_wrapped_double_width_row_at_its_half() {
+    // 8 columns: "ABCD" on the double row, "E" wrapped below. At 10 columns
+    // the double row holds 5, so the logical line rejoins as "ABCDE".
+    let mut g = parse(b"\x1b#6ABCDE", 8, 2);
+    g.resize(10, 2);
+    let row0: String = row_text(&g, 0).trim_end().into();
+    assert_eq!(row0, "ABCDE");
+    assert_eq!(g.snapshot_dirty().line_attrs[0], LineAttr::DoubleWidth);
+    assert_rows_sized(&g);
+    // Narrower again: 6 columns hold 3 per double row.
+    g.resize(6, 3);
+    let rows: Vec<String> = (0..3)
+        .map(|y| row_text(&g, y).trim_end().to_owned())
+        .collect();
+    assert_eq!(rows[..2], ["ABC".to_owned(), "DE".to_owned()]);
+    assert_rows_sized(&g);
+}
+
+#[test]
+fn double_width_moves_a_right_half_cursor_to_the_last_shown_column() {
+    let g = parse(b"\x1b[7G\x1b#6", 8, 2);
+    assert_eq!(g.cursor, (3, 0));
+    let g = parse(b"\x1b[3G\x1b#6", 8, 2);
+    assert_eq!(g.cursor, (2, 0), "left half unchanged");
+    let g = parse(b"\x1b[7G\x1b#5", 8, 2);
+    assert_eq!(g.cursor, (6, 0), "single width leaves it");
+}
+
+#[test]
 fn line_attr_follows_content_when_scrolling() {
     // A double-width line must keep its size as the screen scrolls it upward.
     let mut g = Grid::new(4, 3);
     let mut p = AnsiParser::new();
     p.advance(&mut g, b"AAAA\r\n"); // row 0
-    p.advance(&mut g, b"\x1b#6BBBB\r\n"); // row 1, double-width
+    p.advance(&mut g, b"\x1b#6BB\r\n"); // row 1, double-width (half the columns)
     p.advance(&mut g, b"CCCC\r\n"); // scrolls row 0 off; BBBB rises to row 0
     let attrs = g.snapshot_dirty().line_attrs;
-    assert_eq!(attrs[0], LineAttr::DoubleWidth); // followed BBBB up to row 0
+    assert_eq!(attrs[0], LineAttr::DoubleWidth); // followed BB up to row 0
     assert_eq!(attrs[1], LineAttr::Single);
 }
 
@@ -4926,6 +5577,47 @@ fn retheme_preserves_truecolor_and_child_overrides() {
 }
 
 #[test]
+fn retheme_follows_palette_provenance_not_equal_rgb() {
+    // Old palette 0 equals the old default background; the new theme splits
+    // them. SGR 30 text, old and new, follows palette 0; RGB equal to it
+    // follows the background, as an explicit colour equal to it always has.
+    let mut old = test_theme();
+    old.palette16[0] = old.bg;
+    let mut g = Grid::new(8, 1);
+    g.apply_theme(&old);
+    let mut p = AnsiParser::with_theme(old);
+    p.advance(&mut g, b"\x1b[30ma\x1b[38;2;29;31;33mb\x1b[30m");
+    let mut new = Theme {
+        bg: 0x222222,
+        ..old
+    };
+    new.palette16[0] = 0x333333;
+    let was = p.retheme(new);
+    g.retheme(&was, &new);
+    p.advance(&mut g, b"c");
+    let fg: Vec<u32> = g.row(0)[..3].iter().map(|c| c.fg).collect();
+    assert_eq!(fg, [0x333333, 0x222222, 0x333333]);
+}
+
+#[test]
+fn retheme_remaps_saved_pens_like_the_live_one() {
+    let mut g = Grid::new(8, 1);
+    g.apply_theme(&test_theme());
+    let mut p = AnsiParser::with_theme(test_theme());
+    // An explicit RGB equal to the old red, saved; then palette red, saved
+    // by 1049 entry.
+    p.advance(&mut g, b"\x1b[38;2;204;102;102m\x1b7\x1b[31m\x1b[?1049h");
+    let mut new = test_theme();
+    new.palette16[1] = 0x333333;
+    let was = p.retheme(new);
+    g.retheme(&was, &new);
+    p.advance(&mut g, b"\x1b[?1049l");
+    assert_eq!(next_glyph(&mut g, &mut p).0, 0x333333, "1049 entry pen");
+    p.advance(&mut g, b"\x1b8");
+    assert_eq!(next_glyph(&mut g, &mut p).0, 0x333333, "DECSC pen");
+}
+
+#[test]
 fn retheme_recolors_scrollback() {
     let mut g = Grid::new(4, 2);
     g.apply_theme(&test_theme());
@@ -6408,7 +7100,7 @@ fn assert_bce(g: &Grid, y: usize, xs: std::ops::Range<usize>, what: &str) {
         let c = g.row(y)[x];
         assert_eq!(
             (c.ch, c.bg, c.fg, c.flags),
-            (' ', BCE_BG, DEFAULT_FG, 0),
+            (' ', BCE_BG, DEFAULT_FG, ATTR_FG_DEFAULT),
             "{what}: cell ({x},{y})"
         );
     }
@@ -6764,11 +7456,14 @@ fn ascii_fast_path_matches_put_char_one_byte_at_a_time() {
     let style = "\x1b[1;31;44;4:3;58;2;1;2;3m";
     let link = "\x1b]8;;https://x.test\x07";
     let probe = cells(&parse(format!("{style}X").as_bytes(), 2, 1))[0];
+    // SGR 31 and 44: palette entries 1 and 4.
     let pen = Pen {
         fg: probe.fg,
         bg: probe.bg,
         attrs: probe.flags,
         underline_color: probe.underline_color,
+        fg_index: 2,
+        bg_index: 5,
     };
     for setup in setups {
         for x in 1..=9 {
@@ -6812,11 +7507,14 @@ fn text_fast_path_matches_put_char_one_scalar_at_a_time() {
     let style = "\x1b[1;31;44;4:3;58;2;1;2;3m";
     let link = "\x1b]8;;https://x.test\x07";
     let probe = cells(&parse(format!("{style}X").as_bytes(), 2, 1))[0];
+    // SGR 31 and 44: palette entries 1 and 4.
     let pen = Pen {
         fg: probe.fg,
         bg: probe.bg,
         attrs: probe.flags,
         underline_color: probe.underline_color,
+        fg_index: 2,
+        bg_index: 5,
     };
     for setup in setups {
         for x in 1..=9 {
@@ -6983,6 +7681,55 @@ fn snapshot_round_trips_the_drawable_state() {
 }
 
 #[test]
+fn snapshot_keeps_default_colours_and_their_provenance() {
+    let mut g = Grid::new(4, 1);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b]11;rgb:00/00/ff\x1b\\a\x1b[48;2;0;0;255mb");
+    let mut back = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode");
+    assert_eq!(back.row(0), g.row(0));
+    back.set_default_colors(DEFAULT_FG, DEFAULT_BG, DEFAULT_FG);
+    assert_eq!(colours(&back, 0, 0).1, DEFAULT_BG, "default follows");
+    assert_eq!(colours(&back, 1, 0).1, BLUE, "explicit stays");
+}
+
+#[test]
+fn snapshot_decodes_version_1_with_every_colour_explicit() {
+    // A 1x1 version 1 snapshot: one 'x' in fg 1, bg 2, underline 3.
+    let mut v1 = b"RTSN\x01".to_vec();
+    v1.extend([1, 1, 0, 0, 0, 0, 0, 0]); // size, cursors, scroll region
+    v1.extend([0, 0, 0, 0, 0, 0]); // flags, shape, title, clusters, links, history
+    v1.extend([1, 0, 1 << 2, 0, 1, 2, 0, 0, 3, b'x']); // line: run, style, glyph
+    v1.push(0); // no primary screen
+    let mut g = Grid::decode_snapshot(&v1).expect("decode v1");
+    assert_eq!((g.row(0)[0].ch, colours(&g, 0, 0)), ('x', (1, 2)));
+    g.set_default_colors(9, 9, 9);
+    assert_eq!(colours(&g, 0, 0), (1, 2), "baked colours stay as written");
+}
+
+#[test]
+fn snapshot_carries_overline_past_16_bits() {
+    let g = parse(b"\x1b[53mo\x1b[55mp", 4, 1);
+    assert_ne!(g.row(0)[0].flags & ATTR_OVERLINE, 0);
+    let back = Grid::decode_snapshot(&g.encode_snapshot()).expect("decode");
+    assert_eq!(back.row(0), g.row(0));
+    assert_eq!(back.row(0)[1].flags & ATTR_OVERLINE, 0);
+}
+
+#[test]
+fn snapshot_versions_before_3_keep_style_flags_to_16_bits() {
+    // The version 1 cell above with flags 1 << 16 (varint 80 80 04).
+    let mut v1 = b"RTSN\x01".to_vec();
+    v1.extend([1, 1, 0, 0, 0, 0, 0, 0]);
+    v1.extend([0, 0, 0, 0, 0, 0]);
+    v1.extend([1, 0, 1 << 2, 0, 1, 2, 0x80, 0x80, 0x04, 0, 3, b'x']);
+    v1.push(0);
+    assert_eq!(
+        Grid::decode_snapshot(&v1).err(),
+        Some(SnapshotError::Invalid("integer too large"))
+    );
+}
+
+#[test]
 fn snapshot_collapses_blank_runs() {
     // An empty 200x50 screen: one repeat run per line, under 10 bytes each
     // (24 bytes per cell in memory).
@@ -7001,11 +7748,11 @@ fn snapshot_decode_rejects_bad_headers() {
         Grid::decode_snapshot(b"XXXX\x01").err(),
         Some(SnapshotError::BadMagic)
     );
-    let mut v2 = good.clone();
-    v2[4] = 2;
+    let mut v4 = good.clone();
+    v4[4] = 4;
     assert_eq!(
-        Grid::decode_snapshot(&v2).err(),
-        Some(SnapshotError::UnsupportedVersion(2))
+        Grid::decode_snapshot(&v4).err(),
+        Some(SnapshotError::UnsupportedVersion(4))
     );
     let mut trailing = good.clone();
     trailing.push(0);
@@ -7172,6 +7919,68 @@ fn plain_csi_fast_path_matches_bytewise_parse() {
     }
 }
 
+#[test]
+fn private_csi_fast_path_matches_bytewise_parse() {
+    let private_256 = format!("\x1b[?{}h", "1".repeat(256));
+    let private_257 = format!("\x1b[?{}h", "1".repeat(257));
+    let private_17 = format!("\x1b[?{}1049h", "0;".repeat(17));
+    let cases: [&[u8]; 20] = [
+        b"\x1b[?h\x1b[?l\x1b[?;h\x1b[?25;7;6l\x1b[?25;7;6h",
+        b"\x1b[?1049hx\x1b[?1049l\x1b[?47hy\x1b[?47l\x1b[?1047hz\x1b[?1047l",
+        b"\x1b[>c\x1b[>0c\x1b[=c\x1b[>q",
+        b"\x1b[>1u\x1b[?u\x1b[=5;2u\x1b[<u\x1b[<3u\x1b[?u",
+        b"\x1b[>4;2m\x1b[>4m\x1b[>m",
+        b"\x1b[?996n\x1b[?6n\x1b[?5n",
+        b"\x1b[?1;1S\x1b[?2;1S\x1b[?3;1S\x1b[?1;9S\x1b[?S",
+        b"ab\x1b[1\"q\x1b[1;1Hc\x1b[0\"qd\x1b[?1J\x1b[?2K\x1b[?0J",
+        b"\x1b[?2026h\x1b[?2026$p\x1b[?2026l\x1b[?7$p",
+        b"\x1b[?1000;1006h\x1b[?2004h\x1b[?1004h\x1b[?2004l",
+        b"\x1b[??25l\x1b[1?25hx\x1b[?2?5lx\x1b[?25:1hx",
+        b"\x1b[?25\x01lx\x1b[?25\x18hx\x1b[?25\x1b[?25lx",
+        b"\x1b[?",
+        b"\x1b[?25",
+        b"\x1b[18446744073709551615Cx\x1b[18446744073709551616Cx",
+        b"\x1b[?18446744073709551615h\x1b[?18446744073709551616h",
+        b"\x1b[1;2;3;4;5;7;8;9;21;22;23;24;25;27;28;29;31;41mx\x1b[;;;;;;;;;;;;;;;;;1mx",
+        private_256.as_bytes(),
+        private_257.as_bytes(),
+        private_17.as_bytes(),
+    ];
+    for input in cases {
+        assert_eq!(
+            csi_paths_state(input, false),
+            csi_paths_state(input, true),
+            "fast and byte-wise CSI paths differ on {:?}",
+            String::from_utf8_lossy(input)
+        );
+    }
+}
+
+#[test]
+fn private_csi_split_at_every_offset_matches_one_chunk() {
+    let input = b"a\x1b[?1049hb\x1b[>1uc\x1b[?25;7ld\x1b[?6ne\x1b[>4;2mf\x1b[?1049l";
+    let whole = csi_paths_state(input, false);
+    for cut in 1..input.len() {
+        let mut g = Grid::new(80, 24);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, &input[..cut]);
+        p.advance(&mut g, &input[cut..]);
+        let responses = p.take_responses();
+        let host_out = g.take_host_out();
+        let state = super::checkpoint::encode(&g, &p).expect("checkpoint");
+        assert_eq!((state, responses, host_out), whole, "split at byte {cut}");
+    }
+}
+
+#[test]
+fn private_csi_fast_path_relays_its_parameters() {
+    let mut g = Grid::new(80, 24);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[>1u\x1b[>4;2m");
+    assert_eq!(g.take_host_out(), b"\x1b[>1u\x1b[>4;2m");
+    assert_eq!(g.kitty_keyboard_flags(), 1);
+}
+
 /// `lines` rows of `cols` glyphs, glyph `x` of row `k` in its own truecolour
 /// `first + k * cols + x`.
 fn rainbow(first: u32, lines: usize, cols: usize) -> Vec<u8> {
@@ -7270,6 +8079,50 @@ fn clearing_history_releases_its_styles() {
 }
 
 #[test]
+fn a_collecting_host_answers_the_status_query_in_order() {
+    const ANSWER: &[u8] = b"\x1b]7501;?\x1b\\";
+    const DA1: &[u8] = b"\x1b[?1;2;4c";
+    let mut p = AnsiParser::new();
+    let mut silent = Grid::new(80, 24);
+    p.advance(&mut silent, b"\x1b]7501;?\x07\x1b[c");
+    assert_eq!(
+        p.take_responses(),
+        DA1,
+        "a host that doesn't collect is silent"
+    );
+
+    let mut g = Grid::new(80, 24);
+    g.collect_program_status = true;
+    p.advance(&mut g, b"\x1b]7501;?\x1b\\\x1b[c");
+    assert_eq!(p.take_responses(), [ANSWER, DA1].concat(), "query then DA1");
+    p.advance(&mut g, b"\x1b[c\x1b]7501;?\x07");
+    assert_eq!(p.take_responses(), [DA1, ANSWER].concat(), "DA1 then query");
+    p.advance(&mut g, b"\x1b]7501;");
+    p.advance(&mut g, b"?\x07\x1b[c");
+    assert_eq!(p.take_responses(), [ANSWER, DA1].concat(), "split query");
+    p.advance(&mut g, b"\x1b]7501;?:x=1\x07");
+    assert!(
+        p.take_responses().is_empty(),
+        "only a bare `?` is the query"
+    );
+    assert_eq!(g.program_status, [StatusSignal::Report("?:x=1".into())]);
+
+    // Nothing that later resets or trims the status queue loses the answer.
+    p.advance(&mut g, b"\x1b]7501;?\x07\x1bc");
+    assert_eq!(p.take_responses(), ANSWER, "query then RIS");
+    let flood = b"\x1b]7501;state=working\x07".repeat(PROGRAM_STATUS_MAX + 1);
+    p.advance(
+        &mut g,
+        &[&flood[..], b"\x1b]7501;?\x07", &flood[..]].concat(),
+    );
+    assert_eq!(
+        p.take_responses(),
+        ANSWER,
+        "query inside a flood of reports"
+    );
+}
+
+#[test]
 fn program_status_is_collected_only_when_asked() {
     let input = b"\x1b]7501;state=working\x07\x1b]133;A\x07\x1bc";
     assert!(parse(input, 80, 24).program_status.is_empty());
@@ -7359,4 +8212,401 @@ fn program_status_queue_keeps_boundaries_when_full() {
             StatusSignal::Report("state=idle".into())
         ]
     );
+}
+
+/// Reflow time for a full 10k-line history at 200x50, resized in the order
+/// the perf backlog measured (§2.3). Run in release with `--ignored`.
+#[test]
+#[ignore = "measurement; run in release"]
+fn measure_reflow() {
+    let mut g = Grid::new(200, 50);
+    g.set_scrollback_max(10_000);
+    let mut p = AnsiParser::new();
+    let mut text = Vec::new();
+    for i in 0..10_100 {
+        text.extend_from_slice(
+            format!(
+                "{i:>6} \x1b[3{}m{}\x1b[m\r\n",
+                i % 8,
+                "lorem ipsum dolor sit amet ".repeat(1 + i % 9)
+            )
+            .as_bytes(),
+        );
+    }
+    p.advance(&mut g, &text);
+    for (cols, rows) in [(150, 50), (200, 50), (80, 24), (200, 50)] {
+        let start = std::time::Instant::now();
+        g.resize(cols, rows);
+        println!(
+            "{cols}x{rows}: {:.1} ms",
+            start.elapsed().as_secs_f64() * 1e3
+        );
+    }
+}
+
+/// Parser throughput on large string bodies (OSC 52, an unknown APC and an
+/// unknown DCS), fed in 4 KiB chunks as a PTY read delivers them. Run with
+/// `--release --ignored --nocapture`.
+#[test]
+#[ignore = "measurement"]
+fn measure_string_body_scan() {
+    use std::time::Instant;
+    let body: Vec<u8> = (0..900_000u32)
+        .map(|i| {
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"[i as usize % 64]
+        })
+        .collect();
+    let cases: [(&str, &[u8], &[u8]); 3] = [
+        ("osc 52", b"\x1b]52;c;", b"\x07"),
+        ("apc", b"\x1b_X", b"\x1b\\"),
+        ("dcs", b"\x1bPzz", b"\x1b\\"),
+    ];
+    for (name, open, close) in cases {
+        let stream = [open, &body[..], close].concat().repeat(4);
+        let mut best = f64::MAX;
+        for _ in 0..5 {
+            let mut g = Grid::new(80, 24);
+            let mut p = AnsiParser::new();
+            let t = Instant::now();
+            for chunk in stream.chunks(4096) {
+                p.advance(&mut g, chunk);
+            }
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        println!("{name}: {:.0} MB/s", stream.len() as f64 / best / 1e6);
+    }
+}
+
+#[test]
+fn string_body_len_matches_a_byte_scan() {
+    // Every byte value at every position of a 19-byte buffer (two words plus
+    // a tail), for both terminator sets.
+    for stops in [&[0x07, 0x1b, 0x18, 0x1a][..], &[0x1b, 0x18, 0x1a][..]] {
+        for bad in 0..=255u8 {
+            for pos in 0..19 {
+                let mut buf = [b'a'; 19];
+                buf[pos] = bad;
+                let want = buf.iter().take_while(|b| !stops.contains(b)).count();
+                assert_eq!(
+                    string_body_len(&buf, stops),
+                    want,
+                    "byte {bad:#04x} at {pos}, stops {stops:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(string_body_len(b"", &[0x1b]), 0);
+}
+
+/// OSC (BEL and ST ended), DCS, APC and SOS/PM strings, ended or aborted
+/// by CAN or SUB, each followed by text: split at any offset or fed a byte
+/// at a time, the grid, title and replies match one chunk's.
+#[test]
+fn string_bodies_split_at_every_offset_match_one_chunk() {
+    let stream: &[u8] = b"\x1b]2;first title\x07A\x1b]2;second\x1b\\B\
+        \x1bP+q544e\x1b\\C\x1b_Gabc\x18D\x1bPzz\x1aE\x1bXsos body\x1b\\F\
+        \x1b^pm\x18G\x1b]2;cut\x18I\x1b]2;last\x07H";
+    let run = |chunks: &mut dyn Iterator<Item = &[u8]>| {
+        let mut g = Grid::new(20, 2);
+        let mut p = AnsiParser::new();
+        for chunk in chunks {
+            p.advance(&mut g, chunk);
+        }
+        (grid_state(&g), g.title.clone(), p.take_responses())
+    };
+    let whole = run(&mut std::iter::once(stream));
+    let mut g = Grid::new(20, 2);
+    AnsiParser::new().advance(&mut g, stream);
+    assert_eq!(
+        row_text(&g, 0).trim_end(),
+        "ABCDEFGIH",
+        "every string returns to ground"
+    );
+    assert_eq!(whole.1, "last");
+    assert!(!whole.2.is_empty(), "XTGETTCAP answered");
+    assert_eq!(run(&mut stream.chunks(1)), whole, "a byte at a time");
+    for at in 1..stream.len() {
+        let (a, b) = stream.split_at(at);
+        assert_eq!(run(&mut [a, b].into_iter()), whole, "split at {at}");
+    }
+}
+
+/// An unterminated-looking long title keeps only the first `OSC_MAX` bytes
+/// of its OSC string, whatever the chunking.
+#[test]
+fn a_long_osc_is_capped_however_it_is_chunked() {
+    let stream = [b"\x1b]2;".as_slice(), &[b'a'; 5000], b"\x07"].concat();
+    for size in [1, 7, 4096, stream.len()] {
+        let mut g = Grid::new(10, 1);
+        let mut p = AnsiParser::new();
+        for chunk in stream.chunks(size) {
+            p.advance(&mut g, chunk);
+        }
+        assert_eq!(g.title.len(), 4096 - "2;".len(), "chunks of {size}");
+    }
+}
+
+#[cfg(feature = "l13")]
+#[test]
+fn status_line_in_default_colours_follows_osc_10_and_11() {
+    let mut g = Grid::new(6, 2);
+    let mut p = AnsiParser::new();
+    g.set_status_line("ab".into(), None, Some(0x123456));
+    p.advance(
+        &mut g,
+        b"\x1b]10;rgb:00/00/ff\x1b\\\x1b]11;rgb:00/ff/00\x1b\\",
+    );
+    let row = g.status_row().expect("status line").to_vec();
+    // The unset foreground follows OSC 10; the explicit background stays.
+    assert_eq!((row[0].ch, row[0].fg, row[0].bg), ('a', 0x0000FF, 0x123456));
+    assert_eq!((row[5].fg, row[5].bg), (0x0000FF, 0x123456), "padding");
+    assert_eq!(row[0].flags, ATTR_FG_DEFAULT);
+    g.set_status_line("c".into(), None, None);
+    p.advance(&mut g, b"\x1b]111\x1b\\");
+    let row = g.status_row().expect("status line");
+    assert_eq!((row[0].fg, row[0].bg), (0x0000FF, DEFAULT_BG));
+    // It survives a checkpoint and keeps following the defaults.
+    let bytes = crate::checkpoint::encode(&g, &p).expect("encode");
+    let (mut g, mut p) = crate::checkpoint::decode(&bytes).expect("decode");
+    p.advance(&mut g, b"\x1b]110\x1b\\");
+    assert_eq!(g.status_row().expect("status line")[0].fg, DEFAULT_FG);
+}
+
+// ---- Mode 2027 emoji presentation width and allocation-free joining, #1161 #1191 ----
+
+#[test]
+fn mode_2027_vs16_widens_a_narrow_emoji_base() {
+    // ❤ (1 column) + VS16 is the emoji ❤️, two columns.
+    let g = parse("\x1b[?2027h❤\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "❤\u{fe0f}");
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0);
+    assert_eq!(cells(&g)[2].ch, 'x');
+    assert_eq!(g.cursor, (3, 0));
+}
+
+#[test]
+fn mode_2027_keycap_is_two_columns() {
+    let g = parse("\x1b[?2027h1\u{fe0f}\u{20e3}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "1\u{fe0f}\u{20e3}");
+    assert_ne!(cells(&g)[1].flags & WIDE_TRAILER, 0);
+    assert_eq!(g.cursor, (3, 0));
+}
+
+#[test]
+fn mode_2027_vs16_on_a_non_emoji_base_stays_narrow() {
+    let g = parse("\x1b[?2027ha\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "a\u{fe0f}");
+    assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn mode_2027_vs16_at_the_right_edge_wraps_the_glyph() {
+    // ❤ lands in the last column; widening moves it to the next line.
+    let g = parse("\x1b[?2027hab❤\u{fe0f}".as_bytes(), 3, 2);
+    assert_eq!(row_text(&g, 0), "ab ");
+    assert_eq!(glyph(&g, 0, 1), "❤\u{fe0f}");
+    assert_ne!(cells(&g)[4].flags & WIDE_TRAILER, 0);
+    assert_eq!(g.cursor, (2, 1));
+    // Autowrap off: no room, so the glyph keeps its one column.
+    let g = parse("\x1b[?7l\x1b[?2027hab❤\u{fe0f}".as_bytes(), 3, 2);
+    assert_eq!(glyph(&g, 2, 0), "❤\u{fe0f}");
+    assert_eq!(g.cursor.1, 0);
+}
+
+#[test]
+fn mode_2027_vs16_on_a_one_column_grid_stays_narrow() {
+    // No row holds two columns: the glyph wraps once, then keeps one column.
+    let g = parse("\x1b[?2027h❤\u{fe0f}".as_bytes(), 1, 2);
+    assert_eq!(glyph(&g, 0, 1), "❤\u{fe0f}");
+    assert_eq!(g.cursor, (1, 1));
+    assert_rows_sized(&g);
+    // A two-column double-width row holds one column as well.
+    let g = parse("\x1b#6\x1b[?2027h❤\u{fe0f}x".as_bytes(), 2, 3);
+    assert_rows_sized(&g);
+}
+
+#[test]
+fn default_widths_keep_vs16_zero_width() {
+    // 2027 reset: per code point, so ❤ + VS16 stays one column.
+    let g = parse("❤\u{fe0f}x".as_bytes(), 20, 1);
+    assert_eq!(glyph(&g, 0, 0), "❤\u{fe0f}");
+    assert_eq!(g.cursor, (2, 0));
+    let g = parse("1\u{fe0f}\u{20e3}x".as_bytes(), 20, 1);
+    assert_eq!(g.cursor, (2, 0));
+}
+
+#[test]
+fn mode_2027_joining_matches_uax29_segmentation() {
+    use unicode_segmentation::UnicodeSegmentation;
+    // Scalars that exercise every joining rule: combining marks, ZWJ
+    // sequences, regional indicators, skin tones, VS16, keycaps, Hangul jamo
+    // and Indic conjuncts, plus plain bases and a narrow emoji base.
+    const POOL: &[char] = &[
+        'a',
+        '1',
+        '#',
+        '❤',
+        '👨',
+        '👩',
+        '👍',
+        '💻',
+        '\u{0301}',
+        '\u{0308}',
+        '\u{200d}',
+        '\u{fe0f}',
+        '\u{20e3}',
+        '\u{1f3fd}',
+        '\u{1f1ef}',
+        '\u{1f1f5}',
+        '\u{1f1fa}',
+        '\u{1100}',
+        '\u{1161}',
+        '\u{11a8}',
+        'न',
+        '\u{093f}',
+        '\u{094d}',
+        'क',
+        '漢',
+    ];
+    let mut seed: u64 = 0x2027_1191;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for _ in 0..2000 {
+        let len = 1 + (next() % 12) as usize;
+        let text: String = (0..len)
+            .map(|_| POOL[(next() % POOL.len() as u64) as usize])
+            .collect();
+        let g = parse(format!("\x1b[?2027h{text}").as_bytes(), 200, 1);
+        let got: Vec<String> = (0..200)
+            .filter(|&x| cells(&g)[x].flags & WIDE_TRAILER == 0 && cells(&g)[x].ch != ' ')
+            .map(|x| glyph(&g, x, 0))
+            .collect();
+        // The reference: the glyph joins `ch` when the two stay one UAX #29
+        // cluster; otherwise a zero-width scalar is dropped and any other
+        // starts a new glyph.
+        let mut want: Vec<String> = Vec::new();
+        for ch in text.chars() {
+            match want.last_mut() {
+                Some(last) if format!("{last}{ch}").graphemes(true).count() == 1 => last.push(ch),
+                _ if char_width(ch) == 0 => {}
+                _ => want.push(ch.to_string()),
+            }
+        }
+        assert_eq!(got, want, "{text:?}");
+    }
+}
+
+#[test]
+fn pen_colors_report_sgr_provenance() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    let reset = p.pen_colors();
+    assert_eq!((reset.fg, reset.bg), (ColorRef::Default, ColorRef::Default));
+    p.advance(&mut g, b"\x1b[31;44;4;7m");
+    let c = p.pen_colors();
+    assert_eq!((c.fg, c.bg), (ColorRef::Palette(1), ColorRef::Palette(4)));
+    assert_ne!(c.flags & ATTR_UNDERLINE, 0);
+    assert_ne!(c.flags & ATTR_REVERSE, 0);
+    p.advance(&mut g, b"\x1b[0;38;5;200;48;2;1;2;3m");
+    let c = p.pen_colors();
+    assert_eq!(
+        (c.fg, c.bg),
+        (ColorRef::Palette(200), ColorRef::Rgb(0x010203))
+    );
+    assert_eq!(c.flags & (ATTR_UNDERLINE | ATTR_REVERSE), 0);
+}
+
+#[test]
+fn pen_colors_drop_the_protection_bit() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    p.advance(&mut g, b"\x1b[1\"q");
+    assert_eq!(p.pen_colors().flags & WIDE_TRAILER, 0);
+    assert_eq!(p.pen_colors(), AnsiParser::new().pen_colors());
+}
+
+#[test]
+fn palette_follows_osc_4_and_104() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    let seed = *p.palette();
+    p.advance(&mut g, b"\x1b]4;1;rgb:00/00/ff\x1b\\");
+    assert_eq!(p.palette()[1], 0x0000FF);
+    p.advance(&mut g, b"\x1b]104;1\x1b\\");
+    assert_eq!(p.palette()[1], seed[1]);
+}
+
+#[test]
+fn cell_colors_read_the_stored_cell() {
+    let g = parse(b"a\x1b[93;41mb\x1b[38;2;9;8;7mc\x1b[0m\xe4\xb8\x80", 10, 2);
+    let at = |x| g.cell_colors(x, 0).map(|c| (c.fg, c.bg));
+    assert_eq!(at(0), Some((ColorRef::Default, ColorRef::Default)));
+    assert_eq!(at(1), Some((ColorRef::Palette(11), ColorRef::Palette(1))));
+    assert_eq!(at(2), Some((ColorRef::Rgb(0x090807), ColorRef::Palette(1))));
+    // The wide glyph at 3 and its trailer at 4 read alike.
+    assert_eq!(g.cell_colors(4, 0), g.cell_colors(3, 0));
+    assert_eq!(g.cell_colors(4, 0).map(|c| c.flags & WIDE_TRAILER), Some(0));
+    // Blank cells past the text, and off the screen.
+    assert_eq!(at(9), Some((ColorRef::Default, ColorRef::Default)));
+    assert_eq!(g.cell_colors(10, 0), None);
+    assert_eq!(g.cell_colors(0, 2), None);
+}
+
+#[test]
+fn cell_colors_keep_palette_cells_after_osc_4() {
+    let g = parse(b"\x1b[32mx\x1b]4;2;rgb:12/34/56\x1b\\", 10, 2);
+    let c = g.cell_colors(0, 0).map(|c| c.fg);
+    assert_eq!(c, Some(ColorRef::Palette(2)));
+    assert_eq!(cells(&g)[0].fg, 0x123456);
+}
+
+#[test]
+fn rendition_resets_are_reported_as_applied() {
+    let mut g = Grid::new(10, 2);
+    let mut p = AnsiParser::new();
+    let long = format!("\x1b[{}0m", "1;".repeat(33));
+    for vt in [
+        &b"\x1b[m"[..],
+        b"\x1b[0m",
+        b"\x1b[31;0m",
+        b"\x1b[;31m",
+        b"\x1b[00m",
+        long.as_bytes(),
+        b"\x1bc",
+        b"\x1b[!p",
+        b"\x1b[5!p",
+        b"\x1b8",
+    ] {
+        p.advance(&mut g, vt);
+        assert!(p.take_rendition_reset(), "{vt:?}");
+        assert!(!p.take_rendition_reset(), "taken once: {vt:?}");
+    }
+    for vt in [
+        &b"\x1b[31m"[..],
+        b"\x1b[24m",
+        b"\x1b[38;5;0m",
+        b"\x1b[38;05;0m",
+        b"\x1b[48;2;0;0;0m",
+        b"\x1b[38:2:0:0:0m",
+        b"\x1b[58;5;0m",
+        b"\x1b[4:0m",
+        b"\x1b[?0m",
+        b"\x1b[0K",
+        b"\x1b[0\x18m",
+        b"text 0m",
+    ] {
+        p.advance(&mut g, vt);
+        assert!(!p.take_rendition_reset(), "{vt:?}");
+    }
+    // Split across advances.
+    for part in [&b"\x1b["[..], b"1;", b"0"] {
+        p.advance(&mut g, part);
+        assert!(!p.take_rendition_reset());
+    }
+    p.advance(&mut g, b"m");
+    assert!(p.take_rendition_reset());
 }

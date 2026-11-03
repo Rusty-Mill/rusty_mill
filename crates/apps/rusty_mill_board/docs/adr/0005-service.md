@@ -1,6 +1,7 @@
 # ADR-0005: Running the board as a service
 
-- **Status:** Accepted (2026-10-19)
+- **Status:** Accepted (2026-10-19). The board file, the one-owner lock and the backups were removed by
+  [ADR-0012](../../../../../docs/adr/0012-one-task-store.md) step 6: the cards live in rusty_tick.
 
 ## Context
 The board is meant to stand all the time and be reached by several models. As shipped it was a

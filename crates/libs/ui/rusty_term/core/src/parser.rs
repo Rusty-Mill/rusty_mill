@@ -8,11 +8,12 @@
 //! DCS/APC/PM/SOS strings are consumed opaquely so they never leak as text.
 
 use super::cell::{
-    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_PROTECTED, ATTR_REVERSE,
-    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Pen, UnderlineStyle,
+    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_OVERLINE, ATTR_PROTECTED,
+    ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, CellColors, Pen, Source,
+    UnderlineStyle,
 };
 use super::charset::Charset;
-use super::color::Palette;
+use super::color::{Palette, Theme};
 use super::grid::{CursorShape, Grid, LineAttr, alt_mode};
 use super::kitty;
 use super::osc;
@@ -126,6 +127,37 @@ pub struct AnsiParser {
     /// fg/bg/cursor. SGR color selectors resolve through it; OSC 4/10/11/12
     /// mutate it.
     palette: Palette,
+    /// Set whenever the rendition is reset (SGR 0 or empty, DECSTR, RIS,
+    /// DECRC with nothing saved); taken by [`AnsiParser::take_rendition_reset`].
+    /// Transient: not checkpointed.
+    rendition_reset: bool,
+    /// What DECSC saved beside the cursor position, which the grid keeps in
+    /// its one register. `None` until a save; DECRC then restores the reset
+    /// state, as xterm does.
+    saved: Option<SavedState>,
+    /// What `?1049h` stashed, as the grid stashes the cursor and its DECSC
+    /// register: restored when the alternate screen it opened is left,
+    /// whatever mode leaves it. `None` outside a `?1049` alternate screen.
+    alt_entry: Option<AltEntry>,
+}
+
+/// The parser's side of a `?1049` alternate-screen entry.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AltEntry {
+    /// The live state at entry, restored on exit.
+    state: SavedState,
+    /// The DECSC register at entry, put back on exit.
+    register: Option<SavedState>,
+}
+
+/// The rendition and character-set state DECSC / SCOSC / `?1049h` save and
+/// DECRC / SCORC / `?1049l` restore (the position lives in the grid).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SavedState {
+    pen: Pen,
+    protected: bool,
+    charsets: [Charset; 4],
+    gl: usize,
 }
 
 /// Length of the leading run of printable ASCII (`0x20..=0x7e`) in `bytes`,
@@ -153,6 +185,37 @@ pub(crate) fn printable_ascii_len(bytes: &[u8]) -> usize {
             .take_while(|b| (0x20..=0x7e).contains(*b))
             .count()
 }
+
+/// Length of the leading run of `bytes` that holds none of `stops`, found a
+/// word at a time like [`printable_ascii_len`].
+///
+/// Per stop, a byte of `w ^ stop` is zero exactly where `w` holds the stop,
+/// and `(x - ONES) & !x & HIGH` flags zero bytes. A borrow only reaches the
+/// bytes above a real zero, so each stop's lowest flag is exact, and so is
+/// the lowest across all of them.
+pub(crate) fn string_body_len(bytes: &[u8], stops: &[u8]) -> usize {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGH: u64 = 0x8080_8080_8080_8080;
+    let (words, tail) = bytes.as_chunks::<8>();
+    for (i, word) in words.iter().enumerate() {
+        let w = u64::from_le_bytes(*word);
+        let mask = stops.iter().fold(0, |m, &stop| {
+            let x = w ^ (u64::from(stop) * ONES);
+            m | (x.wrapping_sub(ONES) & !x & HIGH)
+        });
+        if mask != 0 {
+            return i * 8 + (mask.trailing_zeros() / 8) as usize;
+        }
+    }
+    words.len() * 8 + tail.iter().take_while(|b| !stops.contains(b)).count()
+}
+
+/// Bytes that end an OSC body: BEL, the ESC of an ST, or a CAN or SUB
+/// abort.
+const OSC_STOPS: &[u8] = &[0x07, 0x1b, 0x18, 0x1a];
+/// Bytes that end a DCS, APC or ignored string body: the ESC of an ST, or a
+/// CAN or SUB abort.
+const STRING_STOPS: &[u8] = &[0x1b, 0x18, 0x1a];
 
 /// The leading run of valid UTF-8 in the first [`UTF8_RUN_WINDOW`] bytes of
 /// `bytes`, made only of non-ASCII scalars (every byte at or above 0x80), or
@@ -206,44 +269,76 @@ const CSI_PARAM_MAX: usize = 256;
 /// sequences carry at most a handful; a long DEC mode list is the exception.
 const PARAMS_INLINE: usize = 16;
 
-/// A CSI's positional parameters, as a slice where an absent or empty field
-/// is `None`. Parsed without allocating up to [`PARAMS_INLINE`] fields.
-#[allow(clippy::large_enum_variant)] // the inline array is the point: no heap per CSI
-enum Params {
-    Inline([Option<usize>; PARAMS_INLINE], usize),
-    Heap(Vec<Option<usize>>),
+/// A CSI's positional parameters, where an absent or empty field is `None`.
+/// Up to [`PARAMS_INLINE`] fields live inline as plain values with a
+/// presence bit each (absent reads as 0), so building one never allocates;
+/// a longer list spills every field to the heap.
+struct Params {
+    vals: [usize; PARAMS_INLINE],
+    present: u16,
+    len: usize,
+    spill: Vec<Option<usize>>,
 }
 
 impl Params {
+    /// No fields.
+    const EMPTY: Self = Self {
+        vals: [0; PARAMS_INLINE],
+        present: 0,
+        len: 0,
+        spill: Vec::new(),
+    };
+
     /// Split `buf` on `;` and parse each field as `str::parse::<usize>` would:
     /// empty, non-digit (such as a `:` sub-parameter) or overflowing is `None`.
-    /// Inlined so the array is built in the caller's frame, not copied out.
-    #[inline(always)]
+    /// An empty `buf` has no fields.
     fn parse(buf: &[u8]) -> Self {
-        let mut vals = [None; PARAMS_INLINE];
-        if buf.is_empty() {
-            return Self::Inline(vals, 0);
+        let mut params = Self::EMPTY;
+        if !buf.is_empty() {
+            for field in buf.split(|&b| b == b';') {
+                params.push(parse_field(field));
+            }
         }
-        let mut len = 0;
-        for field in buf.split(|&b| b == b';') {
-            let Some(slot) = vals.get_mut(len) else {
-                return Self::Heap(buf.split(|&b| b == b';').map(parse_field).collect());
-            };
-            *slot = parse_field(field);
-            len += 1;
-        }
-        Self::Inline(vals, len)
+        params
     }
-}
 
-impl std::ops::Deref for Params {
-    type Target = [Option<usize>];
-
-    fn deref(&self) -> &[Option<usize>] {
-        match self {
-            Self::Inline(vals, len) => &vals[..*len],
-            Self::Heap(vals) => vals,
+    /// Append the next field.
+    #[inline(always)]
+    fn push(&mut self, val: Option<usize>) {
+        if self.len < PARAMS_INLINE {
+            self.vals[self.len] = val.unwrap_or(0);
+            self.present |= u16::from(val.is_some()) << self.len;
+        } else {
+            if self.len == PARAMS_INLINE {
+                self.spill = (0..PARAMS_INLINE).map(|i| self.get(i)).collect();
+            }
+            self.spill.push(val);
         }
+        self.len += 1;
+    }
+
+    /// Field `i`; `None` when it is absent, empty or past the end.
+    fn get(&self, i: usize) -> Option<usize> {
+        if self.len > PARAMS_INLINE {
+            return self.spill.get(i).copied().flatten();
+        }
+        (i < self.len && self.present >> i & 1 == 1).then(|| self.vals[i])
+    }
+
+    /// The number of fields.
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Every field in order.
+    fn iter(&self) -> impl Iterator<Item = Option<usize>> + '_ {
+        (0..self.len).map(|i| self.get(i))
+    }
+
+    /// The fields as SGR codes, absent as 0, without copying; `None` once
+    /// they spilled to the heap.
+    fn codes(&self) -> Option<&[usize]> {
+        (self.len <= PARAMS_INLINE).then(|| &self.vals[..self.len])
     }
 }
 
@@ -305,18 +400,67 @@ fn parse_sgr_params(buf: &[u8]) -> Vec<usize> {
     out
 }
 
-/// Length of a complete plain CSI body at the start of `rest` (the bytes
-/// after `ESC [`): parameter digits and `;` followed by a final byte, which
-/// the length includes. `None` when the sequence carries anything else (a
-/// private marker, `:`, an intermediate, a C0 control), is cut by the end of
-/// the chunk, or is longer than [`CSI_PARAM_MAX`]: the byte-wise state
-/// machine handles those.
-fn plain_csi_len(rest: &[u8]) -> Option<usize> {
-    let window = &rest[..rest.len().min(CSI_PARAM_MAX + 1)];
-    let end = window
-        .iter()
-        .position(|b| !matches!(b, b'0'..=b'9' | b';'))?;
-    (0x40..=0x7e).contains(&window[end]).then_some(end + 1)
+/// The frame of a CSI that [`scan_plain_csi`] found wholly inside one chunk.
+struct PlainCsi {
+    /// The private marker (`<`, `=`, `>`, `?`) that led the body, or 0.
+    marker: u8,
+    /// Where the parameter bytes start and end in the scanned slice.
+    raw: std::ops::Range<usize>,
+    /// The final byte.
+    cmd: u8,
+}
+
+/// Scan and parse a plain CSI body at the start of `rest` (the bytes after
+/// `ESC [`) in one pass: an optional leading private marker, parameter digits
+/// and `;`, then a final byte. Each field accumulates as its digits go by and
+/// lands in `params` as its `;` or the final byte passes, with the values
+/// [`Params::parse`] gives for the same bytes. The final byte is at
+/// `rest[raw.end]`.
+///
+/// `None` when the sequence carries anything else (a second or late marker,
+/// `:`, an intermediate, a C0 control), is cut by the end of the chunk, or
+/// holds more than [`CSI_PARAM_MAX`] parameter bytes: the byte-wise state
+/// machine handles those, and `params` is then left partly filled.
+/// Inlined so `params` stays in the caller's frame.
+#[inline(always)]
+fn scan_plain_csi(rest: &[u8], params: &mut Params) -> Option<PlainCsi> {
+    let start = usize::from(matches!(rest.first(), Some(0x3c..=0x3f)));
+    let marker = if start == 1 { rest[0] } else { 0 };
+    let body = &rest[start..rest.len().min(start + CSI_PARAM_MAX + 1)];
+    // The open field: its value so far, whether it has a digit, and whether
+    // it still fits a `usize`.
+    let (mut acc, mut digits, mut fits) = (0usize, false, true);
+    for (i, &b) in body.iter().enumerate() {
+        if b.is_ascii_digit() {
+            match acc
+                .checked_mul(10)
+                .and_then(|v| v.checked_add(usize::from(b - b'0')))
+            {
+                Some(v) => acc = v,
+                None => fits = false,
+            }
+            digits = true;
+            continue;
+        }
+        let is_final = (0x40..=0x7e).contains(&b);
+        if b != b';' && !is_final {
+            return None;
+        }
+        // Every `;` closes a field, and so does the final byte unless the
+        // body is empty (no fields at all).
+        if !is_final || i > 0 {
+            params.push((digits && fits).then_some(acc));
+            (acc, digits, fits) = (0, false, true);
+        }
+        if is_final {
+            return Some(PlainCsi {
+                marker,
+                raw: start..start + i,
+                cmd: b,
+            });
+        }
+    }
+    None
 }
 
 impl Default for AnsiParser {
@@ -336,12 +480,7 @@ impl AnsiParser {
     /// default colors, so text drawn before any SGR lands in the right colors.
     pub fn with_theme(theme: super::color::Theme) -> Self {
         let palette = Palette::with_theme(theme);
-        let pen = Pen {
-            fg: palette.fg,
-            bg: palette.bg,
-            attrs: 0,
-            underline_color: palette.fg,
-        };
+        let pen = Pen::default_colors(palette.fg, palette.bg);
         Self {
             state: ParserState::Ground,
             pen,
@@ -363,7 +502,30 @@ impl AnsiParser {
             gl: 0,
             charset_slot: 0,
             palette,
+            saved: None,
+            alt_entry: None,
+            rendition_reset: false,
         }
+    }
+
+    /// Whether the next character would be written as after `SGR 0` with
+    /// nothing else set: between sequences, with the reset rendition,
+    /// US-ASCII in GL, unprotected. A client drawing over a passed-through
+    /// screen can then put the rendition back exactly with `SGR 0`, and its
+    /// bytes cannot land inside an unfinished escape or UTF-8 sequence.
+    pub fn plain(&self) -> bool {
+        self.state == ParserState::Ground
+            && self.pen == Pen::default_colors(self.palette.fg, self.palette.bg)
+            && !self.protected
+            && self.charsets[self.gl] == Charset::Ascii
+    }
+
+    /// Whether the parser is between sequences: not inside an escape, control
+    /// or string sequence, nor a UTF-8 character. Bytes a host adds to the
+    /// stream here are read on their own, not as the rest of something
+    /// unfinished.
+    pub fn ground(&self) -> bool {
+        self.state == ParserState::Ground
     }
 
     /// Drain the bytes the parser owes the host in reply to queries (DA1/DA2/
@@ -373,6 +535,25 @@ impl AnsiParser {
         std::mem::take(&mut self.responses)
     }
 
+    /// Whether the rendition was reset since the last call: SGR 0 or an
+    /// empty SGR, DECSTR, RIS, or DECRC with nothing saved, exactly as this
+    /// parser applied them. A console host clears state that only a reset
+    /// clears (conhost's gridlines) on it, without parsing SGR again.
+    pub fn take_rendition_reset(&mut self) -> bool {
+        std::mem::take(&mut self.rendition_reset)
+    }
+
+    /// The current SGR pen, the one the next printed character takes.
+    pub fn pen_colors(&self) -> CellColors {
+        self.pen.colors()
+    }
+
+    /// The live 256-entry palette as `0x00RRGGBB`, OSC 4 / 104 and theme
+    /// changes included.
+    pub fn palette(&self) -> &[u32; 256] {
+        self.palette.colors()
+    }
+
     /// Live theme switch (config reload). Returns the previous seed theme so
     /// the caller can remap the grid with [`Grid::retheme`].
     ///
@@ -380,12 +561,16 @@ impl AnsiParser {
     /// old built-in value follow the new theme, while colors the child set
     /// itself (OSC 4/10/11/12) are kept — the child's choices outrank ours,
     /// exactly as they would have had the new theme been set at startup. The
-    /// pen is remapped the same way, so text typed next stays coherent.
+    /// pen's and the saved pens' default and palette colours follow the new
+    /// palette and their explicit ones are remapped, as [`Grid::retheme`]
+    /// treats cells, so text typed next stays coherent.
     pub fn retheme(&mut self, new: super::color::Theme) -> super::color::Theme {
         let old = self.palette.seed();
-        self.pen.fg = super::color::remap(self.pen.fg, &old, &new);
-        self.pen.bg = super::color::remap(self.pen.bg, &old, &new);
         self.palette.retheme(&old, &new);
+        self.pen = retheme_pen(self.pen, &old, &new, &self.palette);
+        for pen in saved_pens(&mut self.saved, &mut self.alt_entry) {
+            *pen = retheme_pen(*pen, &old, &new, &self.palette);
+        }
         old
     }
 
@@ -453,11 +638,18 @@ impl AnsiParser {
                         // Fast path: a plain CSI wholly inside this chunk is
                         // parsed and dispatched in one step, with the same
                         // effects as the byte-wise `Csi` state.
-                        match plain_csi_len(&bytes[i..]) {
-                            Some(n) => {
+                        let mut params = Params::EMPTY;
+                        match scan_plain_csi(&bytes[i..], &mut params) {
+                            Some(csi) => {
                                 self.state = ParserState::Ground;
-                                self.dispatch_csi(bytes[i + n - 1], g, &bytes[i..i + n - 1]);
-                                i += n;
+                                let raw = &bytes[i + csi.raw.start..i + csi.raw.end];
+                                if csi.marker == 0 {
+                                    self.dispatch_csi(csi.cmd, g, raw, &params);
+                                } else {
+                                    self.csi_marker = csi.marker;
+                                    self.dispatch_private_csi(csi.cmd, g, raw, &params);
+                                }
+                                i += csi.raw.end + 1;
                             }
                             None => self.state = ParserState::Csi,
                         }
@@ -468,11 +660,11 @@ impl AnsiParser {
                     }
                     // DECSC / DECRC: save and restore the cursor.
                     b'7' => {
-                        g.save_cursor();
+                        self.save_cursor(g);
                         self.state = ParserState::Ground;
                     }
                     b'8' => {
-                        g.restore_cursor();
+                        self.restore_cursor(g);
                         self.state = ParserState::Ground;
                     }
                     // IND — index: down one line, scrolling at the region bottom.
@@ -498,6 +690,7 @@ impl AnsiParser {
                     }
                     // RIS — reset to initial state (full reset).
                     b'c' => {
+                        let before = *self.palette.colors();
                         self.palette.reset();
                         self.reset_sgr();
                         self.protected = false;
@@ -508,6 +701,8 @@ impl AnsiParser {
                         g.push_program_status(super::grid::StatusSignal::Reset);
                         self.charsets = [Charset::Ascii; 4];
                         self.gl = 0;
+                        (self.saved, self.alt_entry) = (None, None);
+                        self.sync_palette(g, &before);
                         self.last_char = None;
                         self.state = ParserState::Ground;
                     }
@@ -562,7 +757,7 @@ impl AnsiParser {
                     // Parameter bytes, bounded (a hostile unterminated CSI must
                     // not grow the buffer without limit). `:` (ECMA-48
                     // sub-parameter separator) is only meaningful to SGR (see
-                    // `parse_sgr_params`); every other command's `parse_params`
+                    // `parse_sgr_params`); every other command's `Params::parse`
                     // never sees a field containing one in practice, so
                     // collecting it here unconditionally is harmless.
                     b'0'..=b'9' | b';' | b':' => {
@@ -625,25 +820,23 @@ impl AnsiParser {
                         self.state = ParserState::Ground;
                     }
                     0x1b => self.state = ParserState::OscEsc, // possible ST (ESC \)
-                    _ => {
-                        // Accumulate the payload byte, bounded. iTerm2 inline
-                        // images (`1337;File=`) and OSC 52 clipboard payloads
-                        // get much larger caps; the cheap length check
-                        // short-circuits for every ordinary OSC.
-                        if self.osc_buffer.len() < OSC_MAX
-                            || (self.osc_buffer.len() < OSC_IMAGE_MAX
-                                && self.osc_buffer.starts_with(b"1337;File="))
-                            || (self.osc_buffer.len() < OSC_CLIPBOARD_MAX
-                                && self.osc_buffer.starts_with(b"52;"))
-                        {
-                            self.osc_buffer.push(b);
-                        }
+                    0x18 | 0x1a => {
+                        // CAN / SUB abort the string with no action.
+                        self.osc_buffer.clear();
+                        self.state = ParserState::Ground;
                     }
+                    // Fast path: the body up to the next terminator is
+                    // collected in one step.
+                    _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::OscEsc => {
                     // Whether or not this is the `\` of an ST, the OSC string is
-                    // over; act on it and return to ground.
-                    self.finish_osc(g);
+                    // over; act on it and return to ground, unless CAN / SUB
+                    // abort it.
+                    match b {
+                        0x18 | 0x1a => self.osc_buffer.clear(),
+                        _ => self.finish_osc(g),
+                    }
                     self.state = ParserState::Ground;
                 }
                 ParserState::EscCharset => {
@@ -669,7 +862,7 @@ impl AnsiParser {
                 ParserState::StrSink => match b {
                     0x1b => self.state = ParserState::StrSinkEsc, // possible ST (ESC \)
                     0x18 | 0x1a => self.state = ParserState::Ground, // CAN / SUB abort
-                    _ => {}                                       // consume body byte
+                    _ => i += self.string_body(&bytes[i - 1..]) - 1, // skip the body
                 },
                 ParserState::StrSinkEsc => {
                     // Whether or not this is the `\` of an ST, the string is
@@ -683,15 +876,15 @@ impl AnsiParser {
                         self.dcs_buffer.clear();
                         self.state = ParserState::Ground;
                     }
-                    _ => {
-                        if self.dcs_buffer.len() < DCS_MAX {
-                            self.dcs_buffer.push(b);
-                        }
-                    }
+                    _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::DcsEsc => {
-                    // The DCS string is over (ST or otherwise); act on it.
-                    self.finish_dcs(g);
+                    // The DCS string is over (ST or otherwise); act on it,
+                    // unless CAN / SUB abort it.
+                    match b {
+                        0x18 | 0x1a => self.dcs_buffer.clear(),
+                        _ => self.finish_dcs(g),
+                    }
                     self.state = ParserState::Ground;
                 }
                 ParserState::Apc => match b {
@@ -701,21 +894,55 @@ impl AnsiParser {
                         self.apc_buffer.clear();
                         self.state = ParserState::Ground;
                     }
-                    _ => {
-                        if self.apc_buffer.len() < DCS_MAX {
-                            self.apc_buffer.push(b);
-                        }
-                    }
+                    _ => i += self.string_body(&bytes[i - 1..]) - 1,
                 },
                 ParserState::ApcEsc => {
-                    // The APC string is over (ST or otherwise); act on it.
-                    self.finish_apc(g);
+                    // The APC string is over (ST or otherwise); act on it,
+                    // unless CAN / SUB abort it.
+                    match b {
+                        0x18 | 0x1a => self.apc_buffer.clear(),
+                        _ => self.finish_apc(g),
+                    }
                     self.state = ParserState::Ground;
                 }
             }
         }
         // Between batches nothing outside the grid's cells holds a style id.
         g.sweep_styles();
+    }
+
+    /// In a string body state, take the leading run of `bytes` that holds no
+    /// terminator into the state's buffer, within its cap, and return its
+    /// length. `bytes` starts with a body byte, so the run is never empty.
+    fn string_body(&mut self, bytes: &[u8]) -> usize {
+        let (stops, buf, cap) = match self.state {
+            ParserState::Osc => (OSC_STOPS, &mut self.osc_buffer, OSC_MAX),
+            ParserState::Dcs => (STRING_STOPS, &mut self.dcs_buffer, DCS_MAX),
+            ParserState::Apc => (STRING_STOPS, &mut self.apc_buffer, DCS_MAX),
+            ParserState::StrSink => (STRING_STOPS, &mut Vec::new(), 0),
+            _ => return 1,
+        };
+        let run = string_body_len(bytes, stops).max(1);
+        let body = &bytes[..run];
+        let fill = |buf: &mut Vec<u8>, cap: usize, from: usize| {
+            let take = cap.saturating_sub(buf.len()).min(body.len() - from);
+            buf.extend_from_slice(&body[from..from + take]);
+            from + take
+        };
+        let used = fill(buf, cap, 0);
+        // Past `OSC_MAX` only an image or clipboard OSC keeps collecting; by
+        // then its prefix is in the buffer.
+        if self.state == ParserState::Osc && used < run {
+            let cap = if buf.starts_with(b"1337;File=") {
+                OSC_IMAGE_MAX
+            } else if buf.starts_with(b"52;") {
+                OSC_CLIPBOARD_MAX
+            } else {
+                OSC_MAX
+            };
+            fill(buf, cap, used);
+        }
+        run
     }
 
     /// Finalize a collected DCS string. If it's a Sixel (`<params> q <data>`),
@@ -821,8 +1048,8 @@ impl AnsiParser {
     }
 
     /// Serialize the parser's current pen as SGR parameters for DECRQSS `m`
-    /// (leading `0` reset, then each set attribute, then explicit truecolor
-    /// fg/bg/underline parameters when they differ from the palette defaults),
+    /// (leading `0` reset, then each set attribute, then truecolor fg/bg/
+    /// underline parameters for each explicit colour),
     /// ending with the `m` final byte.
     fn pen_sgr_params(&self) -> String {
         use std::fmt::Write as _;
@@ -835,6 +1062,7 @@ impl AnsiParser {
             (ATTR_REVERSE, 7),
             (ATTR_HIDDEN, 8),
             (ATTR_STRIKE, 9),
+            (ATTR_OVERLINE, 53),
         ] {
             if self.pen.attrs & bit != 0 {
                 let _ = write!(s, ";{code}");
@@ -851,11 +1079,11 @@ impl AnsiParser {
             let _ = write!(s, ";4:{style}");
         }
         let rgb = |c: u32| ((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
-        if self.pen.fg != self.palette.fg {
+        if !self.pen.fg_is_default() {
             let (r, g, b) = rgb(self.pen.fg);
             let _ = write!(s, ";38;2;{r};{g};{b}");
         }
-        if self.pen.bg != self.palette.bg {
+        if !self.pen.bg_is_default() {
             let (r, g, b) = rgb(self.pen.bg);
             let _ = write!(s, ";48;2;{r};{g};{b}");
         }
@@ -885,6 +1113,7 @@ impl AnsiParser {
             rusty_term_l13::handle(payload, g, &mut self.responses);
             return;
         }
+        let before = *self.palette.colors();
         osc::dispatch(
             &self.osc_buffer,
             g,
@@ -892,7 +1121,21 @@ impl AnsiParser {
             &mut self.responses,
             &mut self.pen,
         );
-        // OSC 4/10/11/104 can move the pen's background or the default.
+        self.sync_palette(g, &before);
+    }
+
+    /// After the indexed colours may have changed from `before` (OSC 4,
+    /// OSC 104, RIS, DECSTR): recolour the pens and every cell drawn in a
+    /// changed entry, then re-sync the erase fill, which OSC 10/11 can also
+    /// move.
+    fn sync_palette(&mut self, g: &mut Grid, before: &[u32; 256]) {
+        if self.palette.colors() != before {
+            self.pen = resolve_pen(self.pen, &self.palette);
+            for pen in saved_pens(&mut self.saved, &mut self.alt_entry) {
+                *pen = resolve_pen(*pen, &self.palette);
+            }
+            g.repaint(|n| self.palette.index(usize::from(n)));
+        }
         self.sync_erase_bg(g);
     }
 
@@ -987,9 +1230,20 @@ impl AnsiParser {
     /// modes (mouse, focus, bracketed paste, and the Kitty keyboard / xterm
     /// modifyOtherKeys protocols) are *relayed* to the host terminal so it
     /// produces the corresponding input — see [`is_host_input_mode`].
-    /// Everything else (cursor visibility `25`, autowrap `7`, …) is consumed and
-    /// ignored so it never leaks as text.
+    /// Modes the grid keeps (cursor visibility `25`, autowrap `7`, origin `6`,
+    /// …) set grid state; everything else is consumed and ignored so it never
+    /// leaks as text.
     fn handle_private_csi(&mut self, cmd: u8, g: &mut Grid) {
+        // Lent out for the dispatch and handed back, so its capacity is kept.
+        let raw = std::mem::take(&mut self.param_buffer);
+        let params = Params::parse(raw.as_bytes());
+        self.dispatch_private_csi(cmd, g, raw.as_bytes(), &params);
+        self.param_buffer = raw;
+    }
+
+    /// Act on a completed private-marker CSI given its final byte, its raw
+    /// parameter bytes and their parsed [`Params`].
+    fn dispatch_private_csi(&mut self, cmd: u8, g: &mut Grid, raw: &[u8], params: &Params) {
         // DA2 (Secondary Device Attributes): `CSI > c`. Reply with a terminal
         // type (0), a firmware "version", and a ROM cartridge field (0) — the
         // values are conventional; programs care that an answer arrives.
@@ -1029,12 +1283,10 @@ impl AnsiParser {
             g.host_out.push(0x1b);
             g.host_out.push(b'[');
             g.host_out.push(self.csi_marker);
-            g.host_out.extend_from_slice(self.param_buffer.as_bytes());
+            g.host_out.extend_from_slice(raw);
             g.host_out.push(cmd);
             if kitty_keyboard {
-                let params = self.parse_params();
-                let p =
-                    |i: usize, default: usize| params.get(i).copied().flatten().unwrap_or(default);
+                let p = |i: usize, default: usize| params.get(i).unwrap_or(default);
                 match self.csi_marker {
                     b'>' => g.push_kitty_flags(p(0, 0) as u8),
                     b'<' => g.pop_kitty_flags(p(0, 1)),
@@ -1052,7 +1304,7 @@ impl AnsiParser {
         // DECRQM (`CSI ? Ps $ p`) — report whether DEC private mode `Ps` is
         // set/reset, answered with a DECRPM (`CSI ? Ps ; Pv $ y`).
         if self.csi_marker == b'?' && self.csi_intermediate == b'$' && cmd == b'p' {
-            let mode = self.parse_params().first().copied().flatten().unwrap_or(0);
+            let mode = params.get(0).unwrap_or(0);
             self.report_dec_mode(g, mode);
             return;
         }
@@ -1067,11 +1319,11 @@ impl AnsiParser {
         // Other private DSR requests are silently ignored rather than
         // answered with something we'd have to make up.
         if self.csi_marker == b'?' && cmd == b'n' {
-            let param = self.parse_params().first().copied().flatten().unwrap_or(0);
+            let param = params.get(0).unwrap_or(0);
             match param {
                 996 => self.responses.extend_from_slice(&g.color_scheme_report()),
                 6 => {
-                    let (cx, cy) = g.cursor;
+                    let (cx, cy) = g.report_cursor();
                     self.responses
                         .extend_from_slice(format!("\x1b[?{};{};1R", cy + 1, cx + 1).as_bytes());
                 }
@@ -1084,13 +1336,13 @@ impl AnsiParser {
         // this before choosing an output strategy; silence makes them fall
         // back to conservative defaults.
         if self.csi_marker == b'?' && cmd == b'S' {
-            self.answer_xtsmgraphics();
+            self.answer_xtsmgraphics(params);
             return;
         }
         // DECSED / DECSEL (`CSI ? Ps J` / `CSI ? Ps K`) — selective erase:
         // like ED/EL, but cells written under DECSCA protection survive.
         if self.csi_marker == b'?' && (cmd == b'J' || cmd == b'K') {
-            let mode = self.parse_params().first().copied().flatten().unwrap_or(0);
+            let mode = params.get(0).unwrap_or(0);
             if cmd == b'J' {
                 g.selective_erase_display(mode);
             } else {
@@ -1104,16 +1356,28 @@ impl AnsiParser {
             return;
         }
         let set = cmd == b'h';
-        let params = self.parse_params();
-        for param in params.iter().flatten().copied() {
+        for param in params.iter().flatten() {
             if let Some(mode) = alt_mode(param) {
                 // 47 / 1047 / 1049 select the alternate screen buffer; the mode
                 // governs cursor save/restore (only 1049). The leave path uses
                 // the mode stashed on entry, so the reset value doesn't matter.
+                // The rendition follows the cursor through the same stash.
                 if set {
+                    if mode == super::grid::AltMode::Dec1049 && !g.in_alt_screen() {
+                        self.alt_entry = Some(AltEntry {
+                            state: self.state(),
+                            register: self.saved,
+                        });
+                    }
                     g.enter_alt_screen(mode);
                 } else {
+                    let entered = g.alt_mode();
                     g.leave_alt_screen();
+                    let entry = self.alt_entry.take();
+                    if let (Some(super::grid::AltMode::Dec1049), Some(entry)) = (entered, entry) {
+                        self.apply_state(g, Some(entry.state));
+                        self.saved = entry.register;
+                    }
                 }
             } else if is_host_input_mode(param) {
                 // Relay verbatim to the host terminal so it starts/stops
@@ -1211,9 +1475,8 @@ impl AnsiParser {
     /// runtime-adjustable, so a "set"/"reset" action succeeds by reporting
     /// the actual (unchanged) values, same as a read. Item 3 (ReGIS) is not
     /// implemented and reports an item error.
-    fn answer_xtsmgraphics(&mut self) {
-        let params = self.parse_params();
-        let p = |i: usize| params.get(i).copied().flatten().unwrap_or(0);
+    fn answer_xtsmgraphics(&mut self, params: &Params) {
+        let p = |i: usize| params.get(i).unwrap_or(0);
         let (item, action) = (p(0), p(1));
         let reply = match (item, action) {
             (1, 1..=4) => "\x1b[?1;0;256S".to_string(),
@@ -1303,35 +1566,34 @@ impl AnsiParser {
             .extend_from_slice(format!("\x1b[{mode};{status}$y").as_bytes());
     }
 
-    /// Parse `param_buffer` into positional parameters. An empty slot (e.g. the
-    /// leading field of `CSI ;5H`) becomes `None` so callers can apply the
-    /// per-command default in the correct position, per ECMA-48 §5.4.2.
-    fn parse_params(&self) -> Params {
-        Params::parse(self.param_buffer.as_bytes())
-    }
-
     /// Dispatch a completed CSI sequence given its final command byte.
     fn handle_csi(&mut self, cmd: u8, g: &mut Grid) {
         // Lent out for the dispatch and handed back, so its capacity is kept.
         let raw = std::mem::take(&mut self.param_buffer);
-        self.dispatch_csi(cmd, g, raw.as_bytes());
+        let params = Params::parse(raw.as_bytes());
+        self.dispatch_csi(cmd, g, raw.as_bytes(), &params);
         self.param_buffer = raw;
     }
 
-    /// Act on a completed CSI given its final byte and its raw parameter
-    /// bytes (digits, `;` and `:`).
-    fn dispatch_csi(&mut self, cmd: u8, g: &mut Grid, raw: &[u8]) {
-        let params = Params::parse(raw);
+    /// Act on a completed CSI given its final byte, its raw parameter bytes
+    /// (digits, `;` and `:`) and their parsed [`Params`]. An empty or absent
+    /// slot (e.g. the leading field of `CSI ;5H`) is `None`, so each command
+    /// applies its default in the right position, per ECMA-48 §5.4.2.
+    fn dispatch_csi(&mut self, cmd: u8, g: &mut Grid, raw: &[u8], params: &Params) {
         // Positional parameter `i` with `default` applied to an absent/empty slot.
-        let p = |i: usize, default: usize| params.get(i).copied().flatten().unwrap_or(default);
+        let p = |i: usize, default: usize| params.get(i).unwrap_or(default);
         // Most cursor-motion commands take a single count that defaults to (and
         // treats 0 as) 1.
         let count = p(0, 1).max(1);
 
         match cmd {
             b'm' => {
-                let sgr = parse_sgr_params(raw);
-                self.apply_sgr(&sgr);
+                // Colon-free SGR is its positional fields; only the colon
+                // sub-parameter forms need the full parse.
+                match params.codes().filter(|_| !raw.contains(&b':')) {
+                    Some(codes) => self.apply_sgr(codes),
+                    None => self.apply_sgr(&parse_sgr_params(raw)),
+                }
                 self.sync_erase_bg(g);
             }
             b'H' | b'f' => {
@@ -1391,10 +1653,10 @@ impl AnsiParser {
                     let right = p(1, g.cols).saturating_sub(1);
                     g.set_lr_margins(left, right);
                 } else {
-                    g.save_cursor(); // SCP
+                    self.save_cursor(g); // SCOSC
                 }
             }
-            b'u' => g.restore_cursor(), // RCP
+            b'u' => self.restore_cursor(g), // SCORC
             b'r' => {
                 // DECSTBM — set top/bottom scrolling margins (1-based).
                 let top = p(0, 1).saturating_sub(1);
@@ -1445,7 +1707,7 @@ impl AnsiParser {
                 // modeled; the rest of ECMA-48's ANSI mode family (GATM, KAM,
                 // CRM, …) are vestigial even in xterm and left unimplemented.
                 let set = cmd == b'h';
-                for param in params.iter().flatten().copied() {
+                for param in params.iter().flatten() {
                     match param {
                         4 => g.insert_mode = set,
                         // BDSM (mode 8): implicit vs explicit bidi (the
@@ -1499,6 +1761,7 @@ impl AnsiParser {
             }
             b'p' if self.csi_intermediate == b'!' => {
                 // DECSTR — soft terminal reset (`CSI ! p`).
+                let before = *self.palette.colors();
                 self.palette.reset();
                 self.reset_sgr();
                 self.protected = false;
@@ -1507,6 +1770,9 @@ impl AnsiParser {
                 self.last_char = None;
                 self.charsets = [Charset::Ascii; 4];
                 self.gl = 0;
+                // DECSTR keeps the alternate screen, so it keeps its entry.
+                self.saved = None;
+                self.sync_palette(g, &before);
             }
             b'q' if self.csi_intermediate == b'"' => {
                 // DECSCA — select character protection attribute
@@ -1563,7 +1829,7 @@ impl AnsiParser {
                 5 => self.responses.extend_from_slice(b"\x1b[0n"), // terminal OK
                 6 => {
                     // CPR — report the cursor position, 1-based row;col.
-                    let (cx, cy) = g.cursor;
+                    let (cx, cy) = g.report_cursor();
                     self.responses
                         .extend_from_slice(format!("\x1b[{};{}R", cy + 1, cx + 1).as_bytes());
                 }
@@ -1604,25 +1870,62 @@ impl AnsiParser {
         }
     }
 
+    /// DECSC / SCOSC: save the cursor position and the rendition state.
+    fn save_cursor(&mut self, g: &mut Grid) {
+        g.save_cursor();
+        self.saved = Some(self.state());
+    }
+
+    /// DECRC / SCORC: restore what [`Self::save_cursor`] saved.
+    fn restore_cursor(&mut self, g: &mut Grid) {
+        g.restore_cursor();
+        self.apply_state(g, self.saved);
+    }
+
+    /// The pen, protection and charsets, as DECSC saves them.
+    fn state(&self) -> SavedState {
+        SavedState {
+            pen: self.pen,
+            protected: self.protected,
+            charsets: self.charsets,
+            gl: self.gl,
+        }
+    }
+
+    /// Restore `state`, or the reset state for `None`. A saved default or
+    /// palette colour takes its value now.
+    fn apply_state(&mut self, g: &mut Grid, state: Option<SavedState>) {
+        match state {
+            Some(s) => {
+                self.pen = resolve_pen(s.pen, &self.palette);
+                (self.protected, self.charsets, self.gl) = (s.protected, s.charsets, s.gl);
+            }
+            None => {
+                self.reset_sgr();
+                self.protected = false;
+                self.charsets = [Charset::Ascii; 4];
+                self.gl = 0;
+            }
+        }
+        self.sync_erase_bg(g);
+    }
+
     /// Tell the grid which background erases fill with (BCE): the pen's,
-    /// or `None` while it is the palette default so OSC 11 still applies.
+    /// or `None` while it is the default colour so OSC 11 still applies.
     fn sync_erase_bg(&self, g: &mut Grid) {
-        g.set_erase_bg((self.pen.bg != self.palette.bg).then_some(self.pen.bg));
+        g.set_erase_bg((!self.pen.bg_is_default()).then_some((self.pen.bg, self.pen.bg_index)));
     }
 
     /// Reset SGR state to the default pen (default colors, no attributes).
     fn reset_sgr(&mut self) {
-        self.pen = Pen {
-            fg: self.palette.fg,
-            bg: self.palette.bg,
-            attrs: 0,
-            underline_color: self.palette.fg,
-        };
+        self.pen = Pen::default_colors(self.palette.fg, self.palette.bg);
+        self.rendition_reset = true;
     }
 
     /// Apply an SGR (`CSI … m`) parameter list. Supports reset, the text
-    /// attributes (bold/dim/italic/underline/blink/reverse/hidden/strike and
-    /// their resets), the underline style/color sub-forms (`4:0`-`4:5`, `58`,
+    /// attributes (bold/dim/italic/underline/blink/reverse/hidden/strike/
+    /// overline and their resets, and 21 as double underline), the underline
+    /// style/color sub-forms (`4:0`-`4:5`, `58`,
     /// `59`), the 16-color palette (normal + bright), and the extended
     /// `38/48;5;n` (256-color) and `38/48;2;r;g;b` (truecolor) forms. An empty
     /// list means reset. `params[i]` in `4000..=4005` is the synthetic
@@ -1670,6 +1973,12 @@ impl AnsiParser {
                 7 => self.pen.attrs |= ATTR_REVERSE,
                 8 => self.pen.attrs |= ATTR_HIDDEN,
                 9 => self.pen.attrs |= ATTR_STRIKE,
+                // ECMA-48 doubly underlined, as current xterm-compatible
+                // terminals read it (not the old "bold off").
+                21 => {
+                    self.pen.attrs =
+                        UnderlineStyle::Double.pack_into(self.pen.attrs | ATTR_UNDERLINE)
+                }
                 // Reset text attributes. 22 clears both bold and dim.
                 22 => self.pen.attrs &= !(ATTR_BOLD | ATTR_DIM),
                 23 => self.pen.attrs &= !ATTR_ITALIC,
@@ -1681,41 +1990,102 @@ impl AnsiParser {
                 27 => self.pen.attrs &= !ATTR_REVERSE,
                 28 => self.pen.attrs &= !ATTR_HIDDEN,
                 29 => self.pen.attrs &= !ATTR_STRIKE,
+                53 => self.pen.attrs |= ATTR_OVERLINE,
+                55 => self.pen.attrs &= !ATTR_OVERLINE,
                 // Colors.
-                30..=37 => self.pen.fg = self.palette.index(params[i] - 30),
+                30..=37 => self.set_fg_index(params[i] - 30),
                 38 => {
-                    if let Some((color, consumed)) = self.palette.extended(&params[i + 1..]) {
-                        self.pen.fg = color;
+                    if let Some((color, source, consumed)) = self.palette.extended(&params[i + 1..])
+                    {
+                        self.pen.set_fg(color, source);
                         i += consumed;
                     }
                 }
-                39 => self.pen.fg = self.palette.fg,
-                40..=47 => self.pen.bg = self.palette.index(params[i] - 40),
+                39 => self.pen.set_fg(self.palette.fg, Source::Default),
+                40..=47 => self.set_bg_index(params[i] - 40),
                 48 => {
-                    if let Some((color, consumed)) = self.palette.extended(&params[i + 1..]) {
-                        self.pen.bg = color;
+                    if let Some((color, source, consumed)) = self.palette.extended(&params[i + 1..])
+                    {
+                        self.pen.set_bg(color, source);
                         i += consumed;
                     }
                 }
-                49 => self.pen.bg = self.palette.bg,
+                49 => self.pen.set_bg(self.palette.bg, Source::Default),
                 // 58/59 — set/reset the underline color independent of `fg`
                 // (colon `58:2:r:g:b`/`58:5:n` and semicolon `58;2;r;g;b` both
                 // land here identically; see `palette.extended`).
                 58 => {
-                    if let Some((color, consumed)) = self.palette.extended(&params[i + 1..]) {
+                    if let Some((color, _, consumed)) = self.palette.extended(&params[i + 1..]) {
                         self.pen.underline_color = color;
                         self.pen.attrs |= ATTR_UNDERLINE_COLOR;
                         i += consumed;
                     }
                 }
                 59 => self.pen.attrs &= !ATTR_UNDERLINE_COLOR,
-                90..=97 => self.pen.fg = self.palette.index(8 + (params[i] - 90)),
-                100..=107 => self.pen.bg = self.palette.index(8 + (params[i] - 100)),
+                90..=97 => self.set_fg_index(8 + (params[i] - 90)),
+                100..=107 => self.set_bg_index(8 + (params[i] - 100)),
                 _ => {}
             }
             i += 1;
         }
     }
+
+    /// Set the pen's foreground to palette entry `n` (below 16).
+    fn set_fg_index(&mut self, n: usize) {
+        let source = u8::try_from(n).map_or(Source::Rgb, Source::Index);
+        self.pen.set_fg(self.palette.index(n), source);
+    }
+
+    /// Set the pen's background to palette entry `n` (below 16).
+    fn set_bg_index(&mut self, n: usize) {
+        let source = u8::try_from(n).map_or(Source::Rgb, Source::Index);
+        self.pen.set_bg(self.palette.index(n), source);
+    }
+}
+
+/// Every pen held for later: the DECSC register and the `?1049` entry's
+/// state and register.
+fn saved_pens<'a>(
+    saved: &'a mut Option<SavedState>,
+    entry: &'a mut Option<AltEntry>,
+) -> impl Iterator<Item = &'a mut Pen> {
+    let (state, register) = match entry {
+        Some(e) => (Some(&mut e.state), e.register.as_mut()),
+        None => (None, None),
+    };
+    [saved.as_mut(), state, register]
+        .into_iter()
+        .flatten()
+        .map(|s| &mut s.pen)
+}
+
+/// `pen` after a theme change from `old` to `new`: explicit RGB remapped as
+/// [`super::color::remap`] does, default and palette colours taken from
+/// `palette`, which has already switched.
+fn retheme_pen(mut pen: Pen, old: &Theme, new: &Theme, palette: &Palette) -> Pen {
+    if !pen.fg_is_default() && pen.fg_index == 0 {
+        pen.fg = super::color::remap(pen.fg, old, new);
+    }
+    if !pen.bg_is_default() && pen.bg_index == 0 {
+        pen.bg = super::color::remap(pen.bg, old, new);
+    }
+    resolve_pen(pen, palette)
+}
+
+/// `pen` with its default and palette colours taken from `palette`, as
+/// they read now; explicit RGB is kept.
+fn resolve_pen(mut pen: Pen, palette: &Palette) -> Pen {
+    if pen.fg_is_default() {
+        pen.fg = palette.fg;
+    } else if let Some(n) = Source::entry(pen.fg_index) {
+        pen.fg = palette.index(usize::from(n));
+    }
+    if pen.bg_is_default() {
+        pen.bg = palette.bg;
+    } else if let Some(n) = Source::entry(pen.bg_index) {
+        pen.bg = palette.index(usize::from(n));
+    }
+    pen
 }
 
 /// Whether a DEC private mode controls *host-terminal input generation* —
@@ -1790,9 +2160,14 @@ crate::checkpoint::fields!(
         charsets,
         gl,
         charset_slot,
-        palette
-    ]
+        palette,
+        saved,
+        alt_entry
+    ],
+    skip[rendition_reset]
 );
+crate::checkpoint::fields!(SavedState, [pen, protected, charsets, gl]);
+crate::checkpoint::fields!(AltEntry, [state, register]);
 crate::checkpoint::variants!(
     ParserState,
     [
@@ -1803,6 +2178,10 @@ crate::checkpoint::variants!(
 impl AnsiParser {
     pub(crate) fn validate_checkpoint(&self) -> crate::checkpoint::Result<()> {
         if self.gl > 1
+            || self.saved.is_some_and(|s| s.gl > 1)
+            || self
+                .alt_entry
+                .is_some_and(|e| e.state.gl > 1 || e.register.is_some_and(|s| s.gl > 1))
             || self.charset_slot > 3
             || self.utf8_remaining > 3
             || (self.state == ParserState::Utf8 && self.utf8_remaining == 0)

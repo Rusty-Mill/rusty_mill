@@ -1,9 +1,14 @@
 //! `bbp pairs`: the 2b gate criteria evaluated over a run's pairs. The
 //! evaluation is pure ([`evaluate`] over [`Pair`] facts); [`load`] reads the
-//! facts from each run's log, harness output and saved `bbp mod` output. It
-//! decides nothing the criteria note does not say; see "2b gate criteria" in
-//! `docs/bbp-concurrency-design.md` for the definitions and the thresholds.
+//! facts from each run's log, harness output and saved `bbp mod` output, and
+//! from its evidence record: a run that more than one `bbp mod` produced is a
+//! failed, stopped run (`resumed`), and a record that is missing, unreadable
+//! or names another build is refused ([`check_segments`]). It decides
+//! nothing the criteria note does not say;
+//! see "2b gate criteria" in `docs/bbp-concurrency-design.md` for the
+//! definitions and the thresholds.
 
+use crate::clean_tree::{self, git};
 use crate::{report, tokens};
 use rusty_bbp::*;
 use rusty_serde::{Deserialize, Serialize};
@@ -44,7 +49,8 @@ pub struct RunFacts {
     pub closed: bool,
     /// The grader's verdict against the frozen rubric and pass mark.
     pub rubric_ok: bool,
-    /// The first `planning` visit, from `bbp mod`'s `state_ms`.
+    /// The first `planning` visit, from `bbp mod`'s `state_ms`; `None` for a
+    /// resumed run, whose last output timed only its last segment.
     pub spec_wall_ms: Option<u64>,
     /// Dollars, all turns (revoked included), priced per model by the
     /// criteria file; `None` when any turn left no output.
@@ -55,14 +61,16 @@ pub struct RunFacts {
     /// `unused_share` as (unused bytes, all spec bytes).
     pub unused_bytes: (u64, u64),
     /// The moderator's live state equalled the replay of the log at the end
-    /// of the run (`bbp mod` prints it); `None` when the run did not say.
+    /// of the run (`bbp mod` prints it); `None` when the run did not say, or
+    /// was resumed (the last output speaks for its last segment only).
     pub replay_equals_live: Option<bool>,
     /// State boundaries up to and including the end of the first `Planning`
     /// visit, each observed to within one poll.
     pub spec_boundaries: u64,
     /// The run's harnesses cost more than the per-run cap.
     pub over_cap: bool,
-    /// The task's `reads_per_turn`, from its card.
+    /// The `reads_per_turn` the task was opened with (its `TaskOpened`
+    /// event). A run whose limit was later extended does not load.
     pub reads_per_turn: u64,
     /// The models each role's turns used, from the harness output.
     pub role_models: BTreeMap<String, BTreeSet<String>>,
@@ -74,7 +82,13 @@ pub struct RunFacts {
     /// Turns that ended with no valid result (killed, interrupted, crashed):
     /// their cost is only known from below.
     pub killed_turns: u64,
-    /// The moderator stopped the run (cap or wall limit): it may have printed
+    /// Why the run stopped: `cap` or `wall` from its `bbp mod` output, or
+    /// `resumed: N bbp mod segments` (with `; last: cap|wall` when the last
+    /// output stopped) when more than one `bbp mod` produced it. Reported with a
+    /// failed pair.
+    pub stop: Option<String>,
+    /// The moderator stopped the run (cap or wall limit), or it was resumed
+    /// (a later segment cannot show an earlier one's stop): it may have printed
     /// little or nothing a model can be read from.
     pub stopped: bool,
     /// The dollars the run is known to have cost, at least: complete turns at
@@ -91,6 +105,8 @@ pub struct FailedCost {
     pub incomplete: bool,
     /// Failures encountered while retaining readable turns.
     pub accounting_errors: Vec<String>,
+    /// Why each stopped run of the pair stopped, as `arm: reason`.
+    pub stops: Vec<String>,
 }
 
 impl RunFacts {
@@ -369,12 +385,16 @@ fn failed_pair_costs(pairs: &[Pair]) -> Vec<FailedCost> {
                 .iter()
                 .flat_map(|r| r.accounting_errors.clone())
                 .collect(),
+            stops: [("control", &p.control), ("treatment", &p.treatment)]
+                .iter()
+                .filter_map(|(arm, r)| r.stop.as_ref().map(|s| format!("{arm}: {s}")))
+                .collect(),
             usd_at_least: [&p.control, &p.treatment]
                 .iter()
                 .filter_map(|r| r.usd_floor)
                 .sum(),
         })
-        .filter(|f| f.usd_at_least > 0.0 || f.incomplete)
+        .filter(|f| f.usd_at_least > 0.0 || f.incomplete || !f.stops.is_empty())
         .collect()
 }
 
@@ -547,14 +567,29 @@ pub fn facts(
     cap_usd: f64,
 ) -> Result<RunFacts, String> {
     let task = TaskId(r.task.clone());
-    crate::moderator::require_evidence_marker(Path::new(&r.dir), &task, cap_usd, sha)?;
+    let segments =
+        crate::moderator::require_evidence_marker(Path::new(&r.dir), &task, cap_usd, sha)?;
     let rep = report::of(Path::new(&r.dir), &task, None)?;
     let d = crate::open_driver(Path::new(&r.dir), &task)?;
     let events = d.store.events(&task, 0).map_err(|e| format!("{e:?}"))?;
     let text =
         std::fs::read_to_string(&r.mod_output).map_err(|e| format!("{}: {e}", r.mod_output))?;
     let m = mod_facts(&text)?;
-    let stopped = m.stop.is_some();
+    let build_sha = build_sha_of(&text)?;
+    let resumed = check_segments(&segments, &build_sha)?;
+    let stop = match (resumed, &m.stop) {
+        (Some(n), None) => Some(format!("resumed: {n} bbp mod segments")),
+        (Some(n), Some(last)) => Some(format!("resumed: {n} bbp mod segments; last: {last}")),
+        (None, s) => s.clone(),
+    };
+    let stopped = stop.is_some();
+    // A resumed run's saved output describes only its last segment: it timed
+    // the resume point as a fresh start, and its replay check says nothing of
+    // an earlier segment. Both are unknown, so criterion 1 cannot hold on it.
+    let (spec_wall_ms, spec_boundaries, replay_equals_live) = match resumed {
+        Some(_) => (None, 0, None),
+        None => (m.spec_wall_ms, m.spec_boundaries, m.replay_equals_live),
+    };
     // A run the moderator stopped is a failed run whatever its log holds: a log
     // the tool cannot read (which may be why the cap stopped it) must not drop
     // the manifest. Any other run's log has to read.
@@ -569,22 +604,67 @@ pub fn facts(
         accounting_errors: tok.errors.clone(),
         closed: st.state == State::Closed,
         rubric_ok: r.rubric_ok,
-        spec_wall_ms: m.spec_wall_ms,
-        spec_boundaries: m.spec_boundaries,
-        replay_equals_live: m.replay_equals_live,
+        spec_wall_ms,
+        spec_boundaries,
+        replay_equals_live,
         over_cap: m.stop.as_deref() == Some("cap") || tok.usd_floor.is_some_and(|f| f > cap_usd),
         tokens: (tok.without_output == 0).then_some(tok.usd).flatten(),
         overshoot: st.spent.messages > st.budget.messages || st.spent.bytes > st.budget.bytes,
         unused_conflicts: rep.unused_conflicts,
         unused_bytes: rep.unused_bytes,
-        reads_per_turn: st.budget.reads_per_turn,
+        reads_per_turn: opened_reads_per_turn(&events)?,
         role_models,
-        build_sha: build_sha_of(&text)?,
+        build_sha,
         no_model_turns,
         killed_turns: tok.unknown_turns,
+        stop,
         stopped,
         usd_floor: tok.usd_floor,
     })
+}
+
+/// Every `bbp mod` segment that produced a run must be the build its saved
+/// output reports; no record, or one naming another build, is refused. A run
+/// that more than one segment produced is judged by its last output alone,
+/// its earlier stops and state timings lost (#1326), so it counts as a
+/// failed, stopped run under the failed-pair rule: `Some(segments)` when it
+/// was resumed, `None` when one `bbp mod` produced it.
+pub fn check_segments(segments: &[String], build_sha: &str) -> Result<Option<usize>, String> {
+    if segments.is_empty() {
+        return Err("no bbp mod segment recorded: nothing shows what produced the run".into());
+    }
+    if let Some((i, other)) = segments.iter().enumerate().find(|(_, s)| *s != build_sha) {
+        return Err(format!(
+            "its bbp mod segment {} was built from {other}, but its saved output reports {build_sha}",
+            i + 1
+        ));
+    }
+    Ok((segments.len() > 1).then_some(segments.len()))
+}
+
+/// The `reads_per_turn` a run was opened with. The final card is not the
+/// run's limit: a human extension changes it after turns already ran under the
+/// opened one, so the arms of a pair could differ while both cards match the
+/// manifest. A run with any `reads_per_turn` extension, even one back to the
+/// opened value, ran under more than one limit and refuses (#1327).
+fn opened_reads_per_turn(events: &[Event]) -> Result<u64, String> {
+    let Some(Event::TaskOpened { budget, .. }) = events.first() else {
+        return Err("the log does not start with TaskOpened".to_owned());
+    };
+    let extended = events.iter().find_map(|e| match e {
+        Event::BudgetExtended {
+            field: BudgetField::ReadsPerTurn,
+            limit,
+        } => Some(*limit),
+        _ => None,
+    });
+    match extended {
+        Some(limit) => Err(format!(
+            "reads_per_turn was opened at {} and extended to {limit}: the run ran under more than one limit",
+            budget.reads_per_turn
+        )),
+        None => Ok(budget.reads_per_turn),
+    }
 }
 
 /// Every run must have been produced by a `bbp` built from `head`.
@@ -681,36 +761,44 @@ pub fn check_settings(pairs: &[Pair], reads_per_turn: u64) -> Result<(), String>
     Ok(())
 }
 
-fn git(repo: &Path, args: &[&str]) -> Result<(bool, String), String> {
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .output()
-        .map_err(|e| format!("git: {e}"))?;
-    Ok((
-        out.status.success(),
-        String::from_utf8_lossy(&out.stdout).trim().to_owned(),
-    ))
-}
-
-/// The commit a run is pinned to: HEAD of `repo`, which must be clean and must
-/// contain `min_commit` (the merge of the verdict-binding fix). A criteria file
+/// The commit a run is pinned to: HEAD of `repo`, whose tree must be exactly
+/// HEAD as [`clean_tree::dirt`] sees it (past git settings that hide a change)
+/// and which must contain `min_commit` (the merge of the verdict-binding fix). A criteria file
 /// with no `min_commit` refuses: the pin is part of the criteria.
 pub fn pin(repo: &Path, min_commit: Option<&str>, build_sha: &str) -> Result<String, String> {
     let min =
         min_commit.ok_or("the criteria file does not pin min_commit (the verdict-binding fix)")?;
-    let (ok, head) = git(repo, &["rev-parse", "HEAD"])?;
-    if !ok {
-        return Err(format!("{}: not a git checkout", repo.display()));
+    let rev = git(repo, &["rev-parse", "HEAD"])?;
+    if !rev.ok {
+        return Err(format!(
+            "{}: not a git checkout: {}",
+            repo.display(),
+            rev.stderr
+        ));
     }
-    let (_, dirty) = git(repo, &["status", "--porcelain"])?;
-    if !dirty.is_empty() {
-        return Err(format!("{}: the working tree is not clean", repo.display()));
+    let head = rev.line().to_owned();
+    // A question git could not answer is not a clean tree (#1328, #1361).
+    let dirt = clean_tree::dirt(repo).map_err(|e| format!("{}: {e}", repo.display()))?;
+    if let Some(why) = dirt {
+        return Err(format!(
+            "{}: the working tree is not clean ({why})",
+            repo.display()
+        ));
     }
-    let (contains, _) = git(repo, &["merge-base", "--is-ancestor", min, "HEAD"])?;
-    if !contains {
-        return Err(format!("HEAD {head} does not contain min_commit {min}"));
+    // Exit 1 is "not an ancestor"; any other failure (an unknown commit)
+    // refuses too, with git's reason.
+    let contains = git(repo, &["merge-base", "--is-ancestor", min, "HEAD"])?;
+    match (contains.ok, contains.code) {
+        (true, _) => {}
+        (false, Some(1)) => {
+            return Err(format!("HEAD {head} does not contain min_commit {min}"));
+        }
+        (false, _) => {
+            return Err(format!(
+                "cannot check that HEAD {head} contains min_commit {min}: {}",
+                contains.stderr
+            ));
+        }
     }
     if build_sha != head {
         return Err(format!(
@@ -976,6 +1064,19 @@ mod tests {
         assert!(e.decision == row(1));
     }
 
+    /// #1326 review: a resumed run's replay check is unknown, so safety
+    /// cannot hold on ten otherwise good pairs; it is inconclusive.
+    #[test]
+    fn a_resumed_run_leaves_safety_inconclusive() {
+        let mut p = all([0.5; 5], 1, 1);
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Holds);
+        let i = p.iter().position(|x| x.kind == Kind::Shared).unwrap();
+        p[i].treatment.stopped = true;
+        p[i].treatment.stop = Some("resumed: 2 bbp mod segments".into());
+        p[i].treatment.replay_equals_live = None;
+        assert_eq!(evaluate(&p, 500).c1_safety, Verdict::Inconclusive);
+    }
+
     #[test]
     fn eight_of_ten_pairs_succeeding_is_enough_and_seven_is_not() {
         let mut p = all([0.5; 5], 1, 1);
@@ -1021,21 +1122,42 @@ mod tests {
         assert!(spec_wall_ms("not json").is_err());
     }
 
-    /// A scratch git repo with two commits; returns (dir, first sha, second sha).
-    fn repo() -> (std::path::PathBuf, String, String) {
-        let d = std::env::temp_dir().join(format!("pin-{}-{:p}", std::process::id(), &0u8));
+    /// Run test-setup git on `d`, isolated from the developer's own git config
+    /// (a global hook, signing or excludes file must not turn a test red).
+    fn setup_git(d: &Path, a: &[&str]) -> String {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(d)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(a)
+            .env("GIT_CONFIG_GLOBAL", d.with_extension("no-gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            o.status.success(),
+            "{a:?}: {}",
+            String::from_utf8_lossy(&o.stderr)
+        );
+        String::from_utf8_lossy(&o.stdout).trim().to_owned()
+    }
+
+    /// A scratch git repo with two commits, in its own directory per `tag`;
+    /// returns (dir, first sha, second sha).
+    fn repo(tag: &str) -> (std::path::PathBuf, String, String) {
+        repo_at(scratch(tag))
+    }
+
+    /// The scratch directory for `tag`.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("pin-{}-{tag}", std::process::id()))
+    }
+
+    /// [`repo`] at `d`.
+    fn repo_at(d: std::path::PathBuf) -> (std::path::PathBuf, String, String) {
+        let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        let g = |a: &[&str]| {
-            let o = std::process::Command::new("git")
-                .arg("-C")
-                .arg(&d)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-                .args(a)
-                .output()
-                .unwrap();
-            assert!(o.status.success(), "{a:?}");
-            String::from_utf8_lossy(&o.stdout).trim().to_owned()
-        };
+        let g = |a: &[&str]| setup_git(&d, a);
         g(&["init", "-q"]);
         std::fs::write(d.join("a"), "1").unwrap();
         g(&["add", "a"]);
@@ -1047,9 +1169,27 @@ mod tests {
         (d, first, second)
     }
 
+    /// `hide` sets a git setting on a clean scratch repo, which still pins;
+    /// `change` then makes a change the setting hides from `git status`, and
+    /// the pin must refuse it (#1361).
+    fn refuses_hidden_change(tag: &str, hide: impl Fn(&Path), change: impl Fn(&Path)) {
+        let (d, first, _) = repo(tag);
+        hide(&d);
+        let head = setup_git(&d, &["rev-parse", "HEAD"]);
+        assert_eq!(pin(&d, Some(&first), &head).unwrap(), head);
+        change(&d);
+        let err = pin(&d, Some(&first), &head).unwrap_err();
+        assert!(err.contains("not clean"), "{err}");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    fn untracked(d: &Path) {
+        std::fs::write(d.join("new.rs"), "// untracked\n").unwrap();
+    }
+
     #[test]
     fn a_run_is_pinned_to_a_clean_head_built_into_the_binary_that_contains_the_minimum_commit() {
-        let (d, first, second) = repo();
+        let (d, first, second) = repo("pinned");
         assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
         assert_eq!(pin(&d, Some(&second), &second).unwrap(), second);
         // A binary built from another commit, or from a dirty tree, refuses.
@@ -1059,7 +1199,9 @@ mod tests {
         assert!(pin(&d, Some(&first), &format!("{second}-dirty")).is_err());
         assert!(pin(&d, Some(&first), "unknown").is_err());
         // A commit HEAD does not contain (here: a made-up sha) refuses.
-        assert!(pin(&d, Some(&"0".repeat(40)), &second).is_err());
+        assert!(pin(&d, Some(&"0".repeat(40)), &second)
+            .unwrap_err()
+            .contains("cannot check"));
         // No pin in the criteria refuses.
         assert!(pin(&d, None, &second).unwrap_err().contains("min_commit"));
         // A dirty tree refuses.
@@ -1074,6 +1216,231 @@ mod tests {
             &second
         )
         .is_err());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn an_untracked_file_is_dirty_even_when_git_config_hides_untracked_files() {
+        // #1328: `status.showUntrackedFiles=no` (here in the repository's own
+        // config, as a user's global config would set it) made `git status
+        // --porcelain` print nothing for an untracked file.
+        let (d, first, second) = repo("untracked");
+        let cfg = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&d)
+            .args(["config", "status.showUntrackedFiles", "no"])
+            .status()
+            .unwrap();
+        assert!(cfg.success());
+        assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
+        std::fs::write(d.join("new.rs"), "// untracked\n").unwrap();
+        assert!(pin(&d, Some(&first), &second)
+            .unwrap_err()
+            .contains("not clean"));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[cfg(unix)] // Windows refuses a file named by a space
+    #[test]
+    fn an_untracked_file_named_by_whitespace_alone_is_dirty() {
+        // Trimming git's listing turned " \n" into nothing, and the tree
+        // read as clean.
+        refuses_hidden_change(
+            "whitespace-name",
+            |_| {},
+            |d| std::fs::write(d.join(" "), "x").unwrap(),
+        );
+    }
+
+    #[cfg(unix)] // only the Unix-only tests below have such names
+    /// An edited checkout at `d` must refuse although its namesake `clean`
+    /// (the name a lossy reading of `d` would give) is a clean checkout.
+    fn refuses_beside_clean_namesake(d: std::path::PathBuf, clean: std::path::PathBuf) {
+        let (clean, _, _) = repo_at(clean);
+        let (d, first, second) = repo_at(d);
+        std::fs::write(d.join("a"), "edited").unwrap();
+        for at in [d.clone(), d.join("sub")] {
+            std::fs::create_dir_all(&at).unwrap();
+            let err = pin(&at, Some(&first), &second).unwrap_err();
+            assert!(err.contains("not clean"), "{}: {err}", at.display());
+        }
+        std::fs::remove_dir_all(d).unwrap();
+        std::fs::remove_dir_all(clean).unwrap();
+    }
+
+    #[cfg(unix)] // Windows refuses a directory name ending in a space or CR
+    #[test]
+    fn a_checkout_whose_name_ends_in_whitespace_is_checked_not_its_namesake() {
+        // Trimming `--show-toplevel` sent the checks to the clean sibling.
+        for end in [" ", "\r", "\n"] {
+            refuses_beside_clean_namesake(scratch(&format!("trail{end}")), scratch("trail"));
+        }
+    }
+
+    #[cfg(target_os = "linux")] // macOS and Windows refuse non-UTF-8 names
+    #[test]
+    fn a_checkout_whose_name_is_not_utf8_is_checked_not_its_namesake() {
+        // A lossy reading of the root would turn the byte 0xff into U+FFFD.
+        use std::os::unix::ffi::OsStringExt;
+        let name = format!("pin-{}-bad", std::process::id()).into_bytes();
+        let bad = std::ffi::OsString::from_vec([name.clone(), vec![0xff]].concat());
+        let lossy = format!("{}\u{fffd}", String::from_utf8_lossy(&name));
+        let tmp = std::env::temp_dir();
+        refuses_beside_clean_namesake(tmp.join(bad), tmp.join(lossy));
+    }
+
+    #[test]
+    fn an_untracked_file_is_dirty_even_when_an_excludes_file_lists_it() {
+        // The repository's own config stands in for a user's global one.
+        refuses_hidden_change(
+            "excludes-file",
+            |d| {
+                let ex = d.with_extension("excludes");
+                std::fs::write(&ex, "new.rs\n").unwrap();
+                setup_git(d, &["config", "core.excludesFile", ex.to_str().unwrap()]);
+            },
+            untracked,
+        );
+    }
+
+    #[test]
+    fn an_untracked_file_is_dirty_even_when_info_exclude_lists_it() {
+        refuses_hidden_change(
+            "info-exclude",
+            |d| std::fs::write(d.join(".git/info/exclude"), "new.rs\n").unwrap(),
+            untracked,
+        );
+    }
+
+    #[test]
+    fn a_tree_with_assume_unchanged_or_skip_worktree_entries_refuses() {
+        // No flag makes `git status` look past these bits, so an entry with
+        // one refuses whether or not its file was edited.
+        for flag in ["--assume-unchanged", "--skip-worktree"] {
+            let (d, first, second) = repo(flag.trim_start_matches('-'));
+            setup_git(&d, &["update-index", flag, "a"]);
+            std::fs::write(d.join("a"), "edited").unwrap();
+            // Also from a subdirectory, as `build.rs` asks from its crate's.
+            std::fs::create_dir(d.join("sub")).unwrap();
+            for at in [d.clone(), d.join("sub")] {
+                let err = pin(&at, Some(&first), &second).unwrap_err();
+                assert!(err.contains("skip-worktree: "), "{err}");
+            }
+            std::fs::remove_dir_all(d).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_edit_is_dirty_even_under_core_ignore_stat() {
+        // `core.ignoreStat` marks files assume-unchanged as git updates them.
+        refuses_hidden_change(
+            "ignore-stat",
+            |d| {
+                setup_git(d, &["config", "core.ignoreStat", "true"]);
+            },
+            |d| {
+                std::fs::write(d.join("a"), "3").unwrap();
+                setup_git(d, &["commit", "-q", "-am", "three"]);
+                std::fs::write(d.join("a"), "edited").unwrap();
+            },
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mode_change_is_dirty_even_under_core_file_mode_false() {
+        use std::os::unix::fs::PermissionsExt;
+        refuses_hidden_change(
+            "file-mode",
+            |d| {
+                setup_git(d, &["config", "core.fileMode", "false"]);
+            },
+            |d| {
+                let perms = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(d.join("a"), perms).unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn a_submodule_change_is_dirty_even_when_git_config_ignores_submodules() {
+        let (inner, _, _) = repo("submodule-inner");
+        refuses_hidden_change(
+            "submodule",
+            |d| {
+                let url = inner.to_str().unwrap();
+                setup_git(
+                    d,
+                    &[
+                        "-c",
+                        "protocol.file.allow=always",
+                        "submodule",
+                        "add",
+                        "-q",
+                        url,
+                        "sub",
+                    ],
+                );
+                setup_git(d, &["commit", "-q", "-m", "sub"]);
+                setup_git(d, &["config", "diff.ignoreSubmodules", "all"]);
+                setup_git(d, &["config", "submodule.sub.ignore", "all"]);
+            },
+            |d| std::fs::write(d.join("sub/a"), "edited").unwrap(),
+        );
+        std::fs::remove_dir_all(inner).unwrap();
+    }
+
+    #[test]
+    fn the_checks_ignore_git_environment_that_points_at_another_tree() {
+        // A git hook that runs cargo exports these; inherited, they make the
+        // checks inspect the hook's repository instead of `repo`.
+        let cmd = clean_tree::command(Path::new("."));
+        let removed: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.to_string_lossy().into_owned())
+            .collect();
+        for var in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+        ] {
+            assert!(removed.iter().any(|k| k == var), "{var} is inherited");
+        }
+    }
+
+    #[test]
+    fn a_status_git_cannot_read_is_not_a_clean_tree() {
+        // A failed `git status` printed nothing, which read as clean. A corrupt
+        // index fails status while `rev-parse HEAD` still answers.
+        let (d, first, second) = repo("corrupt-index");
+        std::fs::write(d.join(".git/index"), "not an index").unwrap();
+        let err = pin(&d, Some(&first), &second).unwrap_err();
+        assert!(err.contains("git status"), "{err}");
+        // git's own reason reaches the operator. Its wording is translated,
+        // so only its presence is checked.
+        let reason = err.split("git status failed:").nth(1).unwrap_or("");
+        assert!(!reason.trim().is_empty(), "{err}");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn the_pin_does_not_rewrite_the_index_it_inspects() {
+        // A file whose stat data changed but whose content did not: a plain
+        // `git status` refreshes the index and writes it back, so the check
+        // would change the tree it describes. `GIT_OPTIONAL_LOCKS=0` stops it.
+        let (d, first, second) = repo("optional-locks");
+        let index = d.join(".git/index");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(d.join("a"), "2").unwrap();
+        let before = std::fs::read(&index).unwrap();
+        assert_eq!(pin(&d, Some(&first), &second).unwrap(), second);
+        assert_eq!(
+            std::fs::read(&index).unwrap(),
+            before,
+            "the index was rewritten"
+        );
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -1872,7 +2239,8 @@ mod tests {
                 pair: id,
                 usd_at_least: 4.0,
                 incomplete: true,
-                accounting_errors: Vec::new()
+                accounting_errors: Vec::new(),
+                stops: Vec::new(),
             }]
         );
         // The killed run's cost is in the total all the same.
@@ -1880,6 +2248,23 @@ mod tests {
             near_f(e.total_usd_at_least, 2.0 * p.len() as f64 + 2.0),
             "{}",
             e.total_usd_at_least
+        );
+    }
+
+    /// #1326: a resumed run is a failed pair, reported with why it stopped,
+    /// even when its known cost is zero.
+    #[test]
+    fn a_resumed_run_fails_its_pair_and_the_report_says_resumed() {
+        let mut resumed = run(100, 100);
+        resumed.stopped = true;
+        resumed.stop = Some("resumed: 2 bbp mod segments".into());
+        assert!(!resumed.succeeded());
+        let p = vec![pair("p1", Kind::Separable, run(100, 100), resumed)];
+        let e = evaluate(&p, 500);
+        assert_eq!(e.failed_pair_costs.len(), 1, "{:?}", e.failed_pair_costs);
+        assert_eq!(
+            e.failed_pair_costs[0].stops,
+            vec!["treatment: resumed: 2 bbp mod segments".to_owned()]
         );
     }
 

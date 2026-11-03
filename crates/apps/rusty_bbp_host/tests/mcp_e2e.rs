@@ -422,6 +422,7 @@ fn runner_passes(dir: &Path, task: &TaskId, log: &[u8]) -> (ArtId, ArtId) {
     };
     let log_id = store_as(&mut d, blob, ArtifactPayload::Log, "log");
     let report = ArtifactPayload::TestReport(Report {
+        tests_changed: vec![],
         candidate: run.candidate,
         run: run.id,
         profile_digest: d.state.profile_digest,
@@ -722,6 +723,73 @@ fn a_session_acts_only_in_turns_wait_has_shown() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// The hang-up probe is Linux-only; elsewhere a wait runs to its timeout.
+#[cfg(target_os = "linux")]
+#[test]
+fn closing_stdin_ends_a_blocked_wait_and_the_server() {
+    let dir = tempdir("hangup");
+    let _task = setup(&dir);
+    // The first turn is the planner's, so the coder's wait blocks.
+    let mut coder = Mcp::session(&dir, "T1", "coder");
+    let id = coder.send_call("wait", r#"{"timeout_s":30}"#);
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let started = std::time::Instant::now();
+    drop(coder.child.stdin.take());
+    let (w, _) = coder.recv_call(id);
+    assert_eq!(woke(&w), ("closed", None));
+    let status = coder.child.wait().expect("server exits");
+    assert!(status.success(), "{status}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_reply_the_client_cannot_read_ends_the_server_with_stdin_open() {
+    let dir = tempdir("deaf");
+    let _task = setup(&dir);
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .arg("mcp")
+        .env("BBP_DIR", &dir)
+        .env("BBP_TASK", "T1")
+        .env("BBP_PRINCIPAL", "coder")
+        .env_remove("BBP_TURN")
+        .env("BBP_SESSION", "yes")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn bbp mcp");
+    // The client stops reading replies but keeps its request stream open.
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin
+        .write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n")
+        .expect("write");
+    stdin.flush().expect("flush");
+    let started = std::time::Instant::now();
+    let exited = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break Some(status);
+        }
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(stdin);
+    assert!(
+        exited.is_some(),
+        "the server waits on input after its output failed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_partial_request_never_holds_back_a_wait_reply() {
     let dir = tempdir("partial");
@@ -770,5 +838,176 @@ fn a_server_is_bound_to_one_turn_or_to_a_session_never_both() {
         "{refused}"
     );
     drop(mcp);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_co_edited_spec_is_written_and_read_by_line_id() {
+    let dir = tempdir("coedit");
+    let task = setup(&dir);
+    let mut planner = Mcp::spawn(&dir, "T1", "planner", turn_of(&dir, &task));
+    let (v1, err) = planner.call(
+        "put_artifact",
+        r##"{"op":"e1","kind":"spec","brief":1,"edit":{"ops":[{"insert":{"lines":["# A","a"]}}]}}"##,
+    );
+    assert!(!err, "{v1}");
+    let v1 = stored(&v1);
+    let (got, err) = planner.call("get_artifact", &format!(r#"{{"op":"g1","id":{v1}}}"#));
+    assert!(!err, "{got}");
+    assert_eq!(got["content"].as_str(), Some("# A\na"));
+    assert_eq!(got["head"].as_u64(), Some(v1));
+    let a = format!("art:{v1}#1");
+    assert_eq!(got["lines"][1]["id"].as_str(), Some(a.as_str()));
+    assert_eq!(got["lines"][1]["text"].as_str(), Some("a"));
+    let snap1 = got["snapshot"].as_str().map(str::to_owned);
+    assert_eq!(snap1.as_deref().map(str::len), Some(64));
+
+    let edit = format!(
+        r##"{{"op":"e2","kind":"spec","brief":1,"edit":{{"base":{v1},"ops":[{{"insert":{{"after":"{a}","lines":["b"]}}}},{{"delete":"art:{v1}#0"}}]}}}}"##
+    );
+    let (v2, err) = planner.call("put_artifact", &edit);
+    assert!(!err, "{v2}");
+    let v2 = stored(&v2);
+    let (got, err) = planner.call("get_artifact", &format!(r#"{{"op":"g2","id":{v2}}}"#));
+    assert!(!err, "{got}");
+    assert_eq!(got["content"].as_str(), Some("a\nb"));
+    assert_ne!(got["snapshot"].as_str().map(str::to_owned), snap1);
+    let (old, err) = planner.call("get_artifact", &format!(r#"{{"op":"g3","id":{v1}}}"#));
+    assert!(!err, "{old}");
+    assert_eq!(
+        old["head"].as_u64(),
+        Some(v2),
+        "an old version names its head"
+    );
+
+    let (bad, err) = planner.call(
+        "put_artifact",
+        r##"{"op":"e3","kind":"spec","brief":1,"edit":{"ops":[{"delete":"line 3"}]}}"##,
+    );
+    assert!(err, "{bad}");
+    assert!(bad.to_string().contains("art:N#M"), "{bad}");
+    let mixed = format!(
+        r##"{{"op":"e4","kind":"spec","brief":1,"edit":{{"base":{v2},"ops":[{{"delete":"{a}","insert":{{"lines":["replacement"]}}}}]}}}}"##
+    );
+    let (refused, err) = planner.call("put_artifact", &mixed);
+    assert!(err, "an op naming two variants is refused: {refused}");
+    let (after, err) = planner.call("get_artifact", &format!(r#"{{"op":"g4","id":{v2}}}"#));
+    assert!(!err, "{after}");
+    assert_eq!(after["head"].as_u64(), Some(v2), "nothing was stored");
+    assert_eq!(after["content"].as_str(), Some("a\nb"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A task whose two planners, `planner` and `planner2`, hold turns at once.
+fn two_planners(dir: &Path) -> TaskId {
+    let task = TaskId("T1".into());
+    let mut roster = common::roster();
+    let mut second = roster
+        .iter()
+        .find(|r| r.id.0 == "planner")
+        .expect("planner")
+        .clone();
+    second.id = RoleId("planner2".into());
+    second.turn_order = 10;
+    roster.push(second);
+    admin::open_task_live(
+        dir,
+        &task,
+        "github.com/example/repo",
+        b"Add retry with backoff.",
+        &PrincipalId("human".into()),
+        &rusty_bbp_host::profiles::ProfileSet::shell("test", "true"),
+        roster,
+        2,
+        SchedulingPolicy::default(),
+    )
+    .expect("open");
+    for role in ["planner", "planner2", "coder", "tester", "reviewer"] {
+        admin::assign(
+            dir,
+            &task,
+            &RoleId(role.into()),
+            &PrincipalId(role.into()),
+            "v",
+        )
+        .expect("assign");
+    }
+    admin::tick(dir, &task).expect("tick");
+    task
+}
+
+/// A session's turn ticket, from a `wait` that must show a turn.
+fn granted(mcp: &mut Mcp) -> String {
+    let (w, _) = mcp.call("wait", r#"{"timeout_s":5}"#);
+    assert_eq!(woke(&w).0, "turn", "{w}");
+    ticket(&w)
+}
+
+/// Step 4: two `bbp mcp` sessions read one co-edited spec at the same version
+/// and edit the same line. The first edit lands; the slower one is refused
+/// `stale_base`, stores nothing, and lands once redone on the head.
+#[test]
+fn two_sessions_edit_one_spec_and_the_slower_edit_is_refused_stale_base() {
+    let dir = tempdir("two_sessions");
+    let _task = two_planners(&dir);
+    let mut one = Mcp::session(&dir, "T1", "planner");
+    let mut two = Mcp::session(&dir, "T1", "planner2");
+    let (t1, t2) = (granted(&mut one), granted(&mut two));
+
+    let seed = format!(
+        r##"{{"op":"s","kind":"spec","brief":1,"ticket":"{t1}","edit":{{"ops":[{{"insert":{{"lines":["# A","a"]}}}}]}}}}"##
+    );
+    let (v1, err) = one.call("put_artifact", &seed);
+    assert!(!err, "{v1}");
+    let v1 = stored(&v1);
+    let read = |mcp: &mut Mcp, op: &str, t: &str, id: u64| {
+        let (got, err) = mcp.call(
+            "get_artifact",
+            &format!(r#"{{"op":"{op}","id":{id},"ticket":"{t}"}}"#),
+        );
+        assert!(!err, "{got}");
+        got
+    };
+    // Both sessions read v1 before either edits.
+    let a = format!("art:{v1}#1");
+    for (mcp, t, op) in [(&mut one, &t1, "r1"), (&mut two, &t2, "r2")] {
+        let got = read(mcp, op, t, v1);
+        assert_eq!(got["head"].as_u64(), Some(v1));
+        assert_eq!(got["lines"][1]["id"].as_str(), Some(a.as_str()));
+    }
+
+    let delete = |op: &str, t: &str, base: u64| {
+        format!(
+            r##"{{"op":"{op}","kind":"spec","brief":1,"ticket":"{t}","edit":{{"base":{base},"ops":[{{"delete":"{a}"}}]}}}}"##
+        )
+    };
+    let insert = format!(
+        r##"{{"op":"e1","kind":"spec","brief":1,"ticket":"{t1}","edit":{{"base":{v1},"ops":[{{"insert":{{"after":"{a}","lines":["first"]}}}}]}}}}"##
+    );
+    let (v2, err) = one.call("put_artifact", &insert);
+    assert!(!err, "{v2}");
+    let v2 = stored(&v2);
+
+    let refused = two.call("put_artifact", &delete("e2", &t2, v1));
+    assert!(refused.1, "the slower edit is refused: {}", refused.0);
+    assert_eq!(
+        refused.0["Rejected"]["code"].as_str(),
+        Some("StaleBase"),
+        "{}",
+        refused.0
+    );
+    let head = read(&mut two, "r3", &t2, v1);
+    assert_eq!(head["head"].as_u64(), Some(v2), "nothing was stored");
+    assert_eq!(
+        read(&mut two, "r4", &t2, v2)["content"].as_str(),
+        Some("# A\na\nfirst")
+    );
+
+    let (v3, err) = two.call("put_artifact", &delete("e3", &t2, v2));
+    assert!(!err, "redone on the head, it lands: {v3}");
+    let v3 = stored(&v3);
+    let got = read(&mut one, "r5", &t1, v3);
+    assert_eq!(got["content"].as_str(), Some("# A\nfirst"));
+    assert_eq!(got["head"].as_u64(), Some(v3));
     let _ = std::fs::remove_dir_all(&dir);
 }

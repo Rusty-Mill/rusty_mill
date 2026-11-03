@@ -1,4 +1,5 @@
-//! TCP/UDP sockets over IPv4 (`AF_INET`) and IPv6 (`AF_INET6`).
+//! TCP/UDP sockets over IPv4 (`AF_INET`) and IPv6 (`AF_INET6`), and
+//! stream sockets bound to a path (`AF_UNIX`).
 //!
 //! Kernel `struct sockaddr_in`/`sockaddr_in6` layouts (checked by
 //! `const` size/offset assertions, not copied from glibc), matching this
@@ -13,13 +14,17 @@
 //! [`SOCK_NONBLOCK`] to [`socket`] for non-blocking I/O instead of assuming
 //! an async runtime. See [ADR-0003](../../docs/adr/0003-add-sockets-tcp-udp-and-dns-resolution.md)
 //! for why this module exists and what it deliberately leaves out (no
-//! `setsockopt`/`getsockopt`, no Unix-domain sockets -- nothing beyond what
-//! `/dev/tcp`/`/dev/udp`-style redirection and the `dns` resolver module
-//! that sits on top of this one need).
+//! `setsockopt`/`getsockopt` -- nothing beyond what `/dev/tcp`/`/dev/udp`-style
+//! redirection and the `dns` resolver module that sits on top of this one
+//! need). Unix-domain sockets cover one more need: a non-blocking `connect`
+//! to a path, which `std` cannot do, so a client can give up on a server
+//! whose accept backlog is full; only pathname addresses are supported.
 
 use crate::arch::nr;
 use crate::arch::{from_ret, from_ret_i32, syscall2, syscall3, syscall4, syscall6, Errno};
 
+/// Address family: Unix-domain (local) sockets.
+pub const AF_UNIX: i32 = 1;
 /// Address family: IPv4.
 pub const AF_INET: i32 = 2;
 /// Address family: IPv6.
@@ -42,6 +47,47 @@ pub const SHUT_RD: i32 = 0;
 pub const SHUT_WR: i32 = 1;
 /// `shutdown(2)` mode: no further sends or receives.
 pub const SHUT_RDWR: i32 = 2;
+
+/// The longest [`SockAddrUn`] path, leaving room for its terminating NUL.
+pub const UNIX_PATH_MAX: usize = 107;
+
+/// A Unix-domain socket address naming a path (kernel `struct sockaddr_un`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SockAddrUn {
+    family: u16,
+    path: [u8; UNIX_PATH_MAX + 1], // NUL-terminated
+}
+
+const _: () = assert!(core::mem::size_of::<SockAddrUn>() == 110);
+const _: () = assert!(core::mem::offset_of!(SockAddrUn, path) == 2);
+
+impl SockAddrUn {
+    /// The address of the socket at `path`, or `None` when `path` is empty,
+    /// longer than [`UNIX_PATH_MAX`] or holds a NUL (abstract addresses are
+    /// not supported).
+    pub fn new(path: &[u8]) -> Option<Self> {
+        if path.is_empty() || path.len() > UNIX_PATH_MAX || path.contains(&0) {
+            return None;
+        }
+        let mut addr = SockAddrUn {
+            family: AF_UNIX as u16,
+            path: [0; UNIX_PATH_MAX + 1],
+        };
+        addr.path[..path.len()].copy_from_slice(path);
+        Some(addr)
+    }
+
+    /// The path, without its terminating NUL.
+    pub fn path(&self) -> &[u8] {
+        let len = self
+            .path
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(UNIX_PATH_MAX);
+        &self.path[..len]
+    }
+}
 
 /// An IPv4 socket address (kernel `struct sockaddr_in`).
 #[repr(C)]
@@ -186,6 +232,39 @@ pub fn connect_in6(fd: i32, addr: &SockAddrIn6) -> Result<(), Errno> {
             fd as usize,
             addr as *const SockAddrIn6 as usize,
             core::mem::size_of::<SockAddrIn6>(),
+        )
+    };
+    from_ret(ret).map(|_| ())
+}
+
+/// Bind `fd` to a path, creating the socket file there.
+pub fn bind_un(fd: i32, addr: &SockAddrUn) -> Result<(), Errno> {
+    // SAFETY: `addr` is a valid, correctly-sized `sockaddr_un` the kernel
+    // only reads.
+    let ret = unsafe {
+        syscall3(
+            nr::BIND,
+            fd as usize,
+            addr as *const SockAddrUn as usize,
+            core::mem::size_of::<SockAddrUn>(),
+        )
+    };
+    from_ret(ret).map(|_| ())
+}
+
+/// Connect `fd` to the socket at a path. Blocks while the listener's accept
+/// backlog is full unless `fd` was opened with [`SOCK_NONBLOCK`], when it
+/// fails with [`Errno::EAGAIN`] instead and may be retried; it never
+/// returns `EINPROGRESS`.
+pub fn connect_un(fd: i32, addr: &SockAddrUn) -> Result<(), Errno> {
+    // SAFETY: `addr` is a valid, correctly-sized `sockaddr_un` the kernel
+    // only reads.
+    let ret = unsafe {
+        syscall3(
+            nr::CONNECT,
+            fd as usize,
+            addr as *const SockAddrUn as usize,
+            core::mem::size_of::<SockAddrUn>(),
         )
     };
     from_ret(ret).map(|_| ())
@@ -510,6 +589,46 @@ mod tests {
 
     const LOOPBACK: [u8; 4] = [127, 0, 0, 1];
     const LOOPBACK6: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+
+    #[test]
+    fn sockaddr_un_takes_paths_that_fit() {
+        let a = SockAddrUn::new(b"/run/x.sock").expect("fits");
+        assert_eq!(a.path(), b"/run/x.sock");
+        let longest = [b'a'; UNIX_PATH_MAX];
+        assert_eq!(
+            SockAddrUn::new(&longest).expect("fits").path(),
+            &longest[..]
+        );
+        assert_eq!(SockAddrUn::new(&[b'a'; UNIX_PATH_MAX + 1]), None);
+        assert_eq!(SockAddrUn::new(b""), None);
+        assert_eq!(SockAddrUn::new(b"\0abstract"), None);
+    }
+
+    #[test]
+    fn unix_connect_fails_fast_on_a_full_backlog_when_non_blocking() {
+        let path = std::env::temp_dir().join(format!("rusty-libc-un-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let addr = SockAddrUn::new(path.as_os_str().as_encoded_bytes()).expect("fits");
+        let listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0).expect("socket");
+        bind_un(listener, &addr).expect("bind");
+        // A backlog of 0 holds one pending connection.
+        listen(listener, 0).expect("listen");
+
+        let flags = SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK;
+        let first = socket(AF_UNIX, flags, 0).expect("socket");
+        connect_un(first, &addr).expect("queued");
+        let second = socket(AF_UNIX, flags, 0).expect("socket");
+        assert_eq!(connect_un(second, &addr), Err(Errno::EAGAIN));
+
+        // Accepting makes room, and the same socket connects on retry.
+        let accepted = accept(listener).expect("accept");
+        connect_un(second, &addr).expect("retried");
+
+        for fd in [accepted, second, first, listener] {
+            fd::close(fd).expect("close");
+        }
+        std::fs::remove_file(&path).expect("remove");
+    }
 
     #[test]
     fn sockaddr_in_roundtrips_octets_and_port() {

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "rusty-remind-me": {
-      "command": "rusty-remind-me",
-      "args": ["server"]
-    }
-  }
-}

@@ -1,4 +1,4 @@
-# Phase 1 attach: RTCP v3 headless checkpoints
+# Phase 1 attach: RTCP v6 headless checkpoints
 
 The former experimental RMRP lifetime replay mechanism is removed. There is
 no cumulative output cutoff, no replay log, and no reduction of the engine's
@@ -8,12 +8,17 @@ output, subject to current-state memory limits.
 
 ## Negotiation and transfer
 
-`Features::CHECKPOINT_V3` is bit 3 (value 8). Bits 0, 1 and 2 are reserved for
-rejected RMRP replay, incomplete RTCP v1 and superseded fixed-width RTCP v2
-respectively; none enables attach. Hello/Welcome negotiate bit 3; Attach
-without it returns Failed. No released client spoke v2, so the server does not
-offer it. Existing frame layouts and the drawable
-RTSN v1 API remain unchanged.
+`Features::CHECKPOINT_V6` is bit 18 (value 262144). Bits 0, 1, 2, 3, 16 and
+17 are reserved for rejected RMRP replay, incomplete RTCP v1, superseded
+fixed-width RTCP v2, superseded RTCP v3, superseded RTCP v4 and superseded
+RTCP v5 respectively; none enables attach. Hello/Welcome negotiate bit 18;
+Attach without it returns Failed. The server offers no older version, and the
+client refuses a Welcome without bit 18, so a v3, v4 or v5 peer on either side
+fails closed instead of restoring v3's baked-in default colours, v4's untagged
+palette colours or v5's 16-bit cell flags. Existing frame layouts are
+unchanged. The drawable RTSN snapshot is a separate format: it writes v3
+(32-bit style flags, for overline) and still decodes v2 (default fg/bg in the
+header, #1163) and v1.
 
 A successful attach sends Done, then ordered `Checkpoint` messages (type `0x88`),
 then Ready, then raw Output and subsequent model events. A Checkpoint contains
@@ -38,12 +43,16 @@ reader/writer futures and socket halves. It does not modify the block or its
 ability to produce a fresh checkpoint for another attach. A blocked non-reading
 peer cannot retain the transfer indefinitely after eviction.
 
-## RTCP v3 binary format
+## RTCP v6 binary format
 
 The codec is `rusty_term_core::checkpoint::{encode,decode}`. Magic `RTCP` is
-followed by version byte `3`, then Grid fields and AnsiParser fields in the
-explicit order in their `Wire` implementations. Field order is part of v3;
-changing it or its meaning requires another version. This is an independent
+followed by version byte `6`, then Grid fields and AnsiParser fields in the
+explicit order in their `Wire` implementations. Field order is part of v6;
+changing it or its meaning requires another version. v6 widens cell, style
+and pen flags to u32 (for `ATTR_OVERLINE`, bit 16). v5 added palette tags to
+line styles, the pen and the erase colour (so OSC 4 recolours restored text),
+the DECSC pen, protection and charsets and the `?1049` entry stash, and status-line colours
+that may follow the defaults. This is an independent
 continuation format, not a reinterpretation of RTSN's drawable snapshot.
 
 - Integers are fixed-width little endian; usize/counts use u64 and reject
@@ -60,7 +69,9 @@ continuation format, not a reinterpretation of RTSN's drawable snapshot.
   allocating), then runs that cover exactly that many cells, then the wrapped
   flag and line attribute. A run is a style reference, a varint
   `len << 1 | repeat`, then one UTF-8 scalar repeated `len` times or `len`
-  UTF-8 scalars. A style is every Cell field but `ch`, in Cell's field order.
+  UTF-8 scalars. A style is every Cell field but `ch`, in Cell's field order,
+  then the u16 palette tags of fg and bg (`1 + n` for entry `n`, at most 256;
+  0 for a default or RGB colour).
   Style reference 0 defines the next style in a per-checkpoint table; `i + 1`
   reuses entry `i`. The writer uses a repeat run for four or more identical
   cells. Zero-length runs, runs past the count, unknown style indices, varint
@@ -83,7 +94,7 @@ Front-end selection/search/folds, render caches and spare allocations, pending
 host clipboard/notification/bell effects, and L13 application channel state are
 outside this *headless VT* profile. Pixel overlays present only in GUI builds
 are front-end state; headless Sixel/iTerm display cells and Kitty stored pixels
-are preserved. Enabling a library feature does not change RTCP v3's schema.
+are preserved. Enabling a library feature does not change RTCP v6's schema.
 The Phase 1 server does not enable GUI or L13. Clients must not treat RTCP as a
 GUI/L13 session checkpoint or replay host actions during restore.
 
@@ -101,8 +112,19 @@ ragged tails:
 | 200x50 + 10k | 44.32 MB | 0.64 MB | 0.65 MB | 67.3 ms | 18.9 ms | 45.1 ms | 24.6 ms |
 
 Encoding still runs under the server's state borrow, so its time is a stall
-for the server's other blocks. Most of it is the per-cell run scan; the
-existing pre-encode grid validation is about a fifth.
+for the server's other blocks. The table above predates the 8-byte cell.
+Re-measured on 2026-10-27 (`checkpoint::encode` alone, same workload and
+method, a 4-vCPU cloud host; the bytes are identical before and after):
+
+| Grid | before the 8-byte cell (#1058) | 8-byte cell (#1090) | per-run style checks |
+|---|---:|---:|---:|
+| 120x40 + 10k | — | 4.1 ms | 2.2 ms |
+| 200x50 + 10k | 17.0 ms | 5.4 ms | 2.8 ms |
+
+The last column checks each cell's style id once per run while writing,
+instead of in a separate pass over every cell, and finds a run's wire style by
+grid style id instead of hashing the resolved style. Encode instructions fell
+by 46% (callgrind). What remains is the run scan and UTF-8 output.
 `coloured_history_checkpoint_stays_compact` fails if the 200x50 case grows
 past twice the RTSN size.
 Incremental deltas for reconnecting clients are designed in
@@ -133,6 +155,10 @@ to KILL after one second, and reaps it. Setup/teardown fallback kills and waits.
 The review correction adds cursor_visible symmetrically after tab_stops in the
 Grid schema and used version 2/capability bit 2 so old v1 layouts fail closed;
 v3 (bit 3) changes only the line encoding, so v2 layouts fail closed too.
+v4 (bit 16, #1163) keeps v3's layout but changes the meaning of cell and pen
+flags: `ATTR_FG_DEFAULT` / `ATTR_BG_DEFAULT` mark a colour that follows the
+default (OSC 10/11), and a colour without them is explicit. A v3 image has no
+such bits, so it is rejected rather than restored with every colour explicit.
 An independent inventory test covers all 87 Grid fields: 60 durable fields are
 encoded and decoded, and 27 excluded fields have explicit profile reasons.
 Exclusions are rebuildable caches/allocations, client view/render configuration,

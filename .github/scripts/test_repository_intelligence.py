@@ -73,7 +73,7 @@ class IntelligenceTests(unittest.TestCase):
 
     def test_existing_first_party_shadow_and_pinned_checks_are_reused(self):
         md = self.fixture([("local", "foundation", "local"), ("user", "apps", "user"),
-                           ("rusty-mcp", "libs", "mcp")], [])
+                           ("rusty_mcp_middleware", "libs", "mcp")], [])
         md["packages"].append({"id": "git-copy", "name": "local", "source": "git+https://example.test/local"})
         md["resolve"]["nodes"][1]["deps"] = [{"pkg": "git-copy", "name": "local"}]
         md["packages"][2]["dependencies"] = [{"name": "unapproved", "source": "registry+example", "kind": None}]

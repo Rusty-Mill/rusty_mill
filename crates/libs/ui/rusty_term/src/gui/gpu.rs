@@ -29,19 +29,47 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 #[cfg(test)]
 use crate::core::Grid;
 use crate::core::{
-    ATTR_BOLD, ATTR_ITALIC, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell, CursorShape,
-    UnderlineStyle, WIDE_TRAILER, char_width,
+    ATTR_BOLD, ATTR_ITALIC, ATTR_OVERLINE, ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, Cell,
+    CursorShape, LineAttr, UnderlineStyle, WIDE_TRAILER, char_width,
 };
 
 use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
-use super::render::{PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG};
+use super::render::{
+    PaneFrame, Renderer, SEARCH_BG, SEARCH_CUR_BG, SEARCH_FG, concealed, drawn, glyph_char,
+    is_overlay_mark,
+};
+
+/// The part of atlas tile `rect` (`x, y, w, h`) a row of size `attr` shows:
+/// a DECDHL half samples its half of the tile, stretched over the cell.
+fn half_tile(rect: (u32, u32, u32, u32), attr: LineAttr) -> (u32, u32, u32, u32) {
+    let (x, y, w, h) = rect;
+    match attr {
+        LineAttr::DoubleTop => (x, y, w, h / 2),
+        LineAttr::DoubleBottom => (x, y + h / 2, w, h - h / 2),
+        LineAttr::Single | LineAttr::DoubleWidth => rect,
+    }
+}
+
+/// [`Instance::deco`] bits for strikethrough and overline.
+const DECO_STRIKE: u32 = 8;
+const DECO_OVERLINE: u32 = 16;
+
+/// The decoration bits (see [`Instance::deco`]) a row of size `attr` draws:
+/// a DECDHL line's underline sits on its bottom half, overline and strike on
+/// its top half.
+fn half_deco(deco: u32, attr: LineAttr) -> u32 {
+    match attr {
+        LineAttr::DoubleTop => deco & !0b111,
+        LineAttr::DoubleBottom => deco & !(DECO_STRIKE | DECO_OVERLINE),
+        LineAttr::Single | LineAttr::DoubleWidth => deco,
+    }
+}
 
 /// Atlas texture edge (clamped to the device limit at creation).
 const ATLAS_MAX: u32 = 2048;
@@ -50,7 +78,7 @@ const ATLAS_MAX: u32 = 2048;
 const IMG_CACHE_MAX: usize = 32;
 
 const SHADER: &str = r#"
-struct Uniforms { screen: vec2<f32>, cell: vec2<f32>, atlas: vec2<f32>, origin: vec2<f32>, opacity: f32, bar_inset: f32 };
+struct Uniforms { screen: vec2<f32>, cell: vec2<f32>, atlas: vec2<f32>, origin: vec2<f32>, opacity: f32, bar_inset: f32, bar: vec2<f32> };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_smp: sampler;
@@ -95,25 +123,28 @@ fn vs(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
         vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
     let corner = corners[vi];
     let span = f32(max(inst.span, 1u));
-    var px = (vec2<f32>(f32(inst.col), f32(inst.row)) + corner * vec2(span, 1.0)) * u.cell;
-    // The window-padding inset applies to grid content only; the chrome bar
-    // (the sole occupant of cell row 0) stays horizontally flush but sits
+    // Grid content sits at the grid origin (padding plus the chrome bar
+    // above it). Bar cells (chrome: deco bit 5; status ribbon: bit 6) lay
+    // out on the UI font's own cell (`u.bar`), which the font zoom leaves
+    // alone, and stay horizontally flush. The chrome row sits
     // bar_inset px below the top edge, so the strip band shows above the
-    // tabs. The band quad itself carries deco bit 7 and stays absolute.
-    // Status-ribbon cells carry deco bit 6: anchored flush to the window's
-    // bottom edge, exempt from both the padding origin and the bar inset.
+    // tabs; the band quad itself carries deco bit 7 and stays absolute.
+    // The status ribbon is anchored flush to the window's bottom edge.
     // Command gutter marks (kind 3) are a 3px stripe hugging the cell
     // column's left edge from outside (1px gap), one cell tall, padded by
     // the grid origin like any grid content.
+    var px = (vec2<f32>(f32(inst.col), f32(inst.row)) + corner * vec2(span, 1.0)) * u.cell
+        + u.origin;
     if (inst.kind == 3u) {
         px = vec2(f32(inst.col) * u.cell.x - 4.0 + corner.x * 3.0,
                   (f32(inst.row) + corner.y) * u.cell.y) + u.origin;
-    } else if ((inst.deco & 64u) != 0u) {
-        px.y = u.screen.y - u.cell.y + corner.y * u.cell.y;
-    } else if (inst.row > 0u) {
-        px = px + u.origin;
-    } else if ((inst.deco & 128u) == 0u) {
-        px.y = px.y + u.bar_inset;
+    } else if ((inst.deco & 96u) != 0u) {
+        px = (vec2<f32>(f32(inst.col), 0.0) + corner * vec2(span, 1.0)) * u.bar;
+        if ((inst.deco & 64u) != 0u) {
+            px.y = px.y + u.screen.y - u.bar.y;
+        } else if ((inst.deco & 128u) == 0u) {
+            px.y = px.y + u.bar_inset;
+        }
     }
     let ndc = vec2(px.x / u.screen.x * 2.0 - 1.0, 1.0 - px.y / u.screen.y * 2.0);
     let uv0 = vec2(f32(inst.uv_xy >> 16u), f32(inst.uv_xy & 0xffffu));
@@ -150,12 +181,16 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     // curs: 0 none/block (block uses the fg/bg swap); 2 underline, 3 bar.
     if (in.curs == 2u && in.local.y >= 0.85) { return vec4(in.ccol.rgb, u.opacity); }
     if (in.curs == 3u && in.local.x <= 0.12) { return vec4(in.ccol.rgb, u.opacity); }
-    // deco: bit 3 (8) strikethrough; bits 0-2 underline style (0 = none, per
-    // UnderlineStyle::pack_into's 1-5 encoding). Drawn as thin stripes near
-    // the cell's bottom (underline) or vertical middle (strike), matching the
-    // CPU rasterizer's `draw_underline`/`draw_strike`.
+    // deco: bit 4 (16) overline; bit 3 (8) strikethrough; bits 0-2 underline
+    // style (0 = none, per UnderlineStyle::pack_into's 1-5 encoding). Drawn
+    // as thin stripes near the cell's bottom (underline), vertical middle
+    // (strike) or top (overline), matching the CPU rasterizer.
     if ((in.deco & 8u) != 0u && in.local.y >= 0.45 && in.local.y < 0.55) {
         return vec4(in.dcol.rgb, u.opacity);
+    }
+    // Overline (bit 4): a stripe along the top edge in the text colour.
+    if ((in.deco & 16u) != 0u && in.local.y < 0.08) {
+        return vec4(in.fg.rgb, u.opacity);
     }
     let style = in.deco & 7u;
     if (style != 0u) {
@@ -189,7 +224,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 const IMG_SHADER: &str = r#"
-struct Uniforms { screen: vec2<f32>, cell: vec2<f32>, atlas: vec2<f32>, origin: vec2<f32>, opacity: f32, bar_inset: f32 };
+struct Uniforms { screen: vec2<f32>, cell: vec2<f32>, atlas: vec2<f32>, origin: vec2<f32>, opacity: f32, bar_inset: f32, bar: vec2<f32> };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(2) var smp: sampler;
 @group(1) @binding(0) var img: texture_2d<f32>;
@@ -244,7 +279,7 @@ struct Instance {
     bg: u32,
     curs: u32,
     ccol: u32,
-    /// Bit 3: strikethrough. Bits 0-2: underline style, `0` none else
+    /// Bit 4: overline. Bit 3: strikethrough. Bits 0-2: underline style, `0` none else
     /// `UnderlineStyle`'s 1-5 encoding (straight/double/curly/dotted/dashed).
     deco: u32,
     /// Underline/strike stripe color (`dcol`), used only when `deco != 0`.
@@ -271,8 +306,9 @@ struct Uniforms {
     screen: [f32; 2],
     cell: [f32; 2],
     atlas: [f32; 2],
-    /// Pixel inset of grid content (`[window] padding`); the vertex shaders
-    /// add it to everything except the chrome row.
+    /// Pixel offset of grid content: the `[window] padding` band, plus the
+    /// chrome bar above it (see `render::grid_top`). The vertex shaders add
+    /// it to everything except the bars.
     origin: [f32; 2],
     /// Window background opacity (`[window] opacity` config key), `0.0`-`1.0`.
     /// Written as every base fragment's alpha; only visible when the surface
@@ -283,6 +319,8 @@ struct Uniforms {
     /// strip-colored band (drawn separately, exempt via deco bit 7) shows
     /// above the tabs. See `render::bar_inset`.
     bar_inset: f32,
+    /// The bars' cell size: the UI font's, independent of the grid's zoom.
+    bar: [f32; 2],
 }
 
 /// A glyph's identity in the atlas: plain chars by `(char, style)`, shaped
@@ -291,7 +329,14 @@ struct Uniforms {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum TileKey {
     Char(char, Style),
+    /// A chrome/status bar char, drawn in the UI font at its own cell size.
+    Bar(char, Style),
     Shaped(usize),
+    /// A combining mark centered over a base `span` cells wide.
+    Mark(char, Style, usize),
+    /// A glyph stored wider than its scalar (a mode 2027 VS16 cluster on a
+    /// narrow base), drawn at its own size in a `span`-cell tile.
+    Spanned(char, Style, usize),
 }
 
 /// One pane row's instances as last built, and what they were built from.
@@ -330,15 +375,22 @@ pub(crate) struct GpuCore {
     atlas: wgpu::Texture,
     atlas_w: u32,
     atlas_h: u32,
-    /// Shelf packer state: the current shelf's fill x and top y. Shelves are
-    /// one cell tall; tiles any multiple of the cell width.
+    /// Shelf packer state: the current shelf's fill x, top y and height.
+    /// A shelf is as tall as its tallest tile (grid or bar cells).
     shelf_x: u32,
     shelf_y: u32,
+    shelf_h: u32,
     tiles: HashMap<TileKey, (u32, u32, u32, u32)>,
     /// Bumped each time the atlas is recycled.
     atlas_epoch: u64,
     /// Per pane, in paint order.
     row_cache: Vec<PaneRows>,
+    /// The last frame's lists, cleared and refilled by the next one so a
+    /// steady frame allocates no new `Vec`s.
+    spare: FrameLists,
+    base_buf: InstanceBuffer,
+    overlay_buf: InstanceBuffer,
+    img_buf: InstanceBuffer,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     img_bind_layout: wgpu::BindGroupLayout,
@@ -608,9 +660,14 @@ impl GpuCore {
             atlas_h,
             shelf_x: 0,
             shelf_y: 0,
+            shelf_h: 0,
             tiles: HashMap::new(),
             atlas_epoch: 0,
             row_cache: Vec::new(),
+            spare: FrameLists::default(),
+            base_buf: InstanceBuffer::new("base instances"),
+            overlay_buf: InstanceBuffer::new("overlay instances"),
+            img_buf: InstanceBuffer::new("image instances"),
             uniform_buf,
             bind_group,
             img_bind_layout,
@@ -626,25 +683,27 @@ impl GpuCore {
         Some(core)
     }
 
-    /// Shelf-allocate a `w × cell_h` texel rect, or `None` when the atlas is
-    /// full (the caller recycles the atlas and retries).
-    fn alloc_shelf(&mut self, w: u32) -> Option<(u32, u32)> {
+    /// Shelf-allocate a `w × h` texel rect, or `None` when the atlas is
+    /// full (the caller recycles the atlas and retries). A tile that does
+    /// not fit the current shelf's width or height starts a new shelf.
+    fn alloc_shelf(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         let w = w.min(self.atlas_w);
-        if self.shelf_x + w > self.atlas_w {
+        if self.shelf_x > 0 && (self.shelf_x + w > self.atlas_w || h > self.shelf_h) {
             self.shelf_x = 0;
-            self.shelf_y += self.cell_h;
+            self.shelf_y += self.shelf_h;
+            self.shelf_h = 0;
         }
-        if self.shelf_y + self.cell_h > self.atlas_h {
+        if self.shelf_y + h > self.atlas_h {
             return None;
         }
+        self.shelf_h = self.shelf_h.max(h);
         let at = (self.shelf_x, self.shelf_y);
         self.shelf_x += w;
         Some(at)
     }
 
-    /// Upload `glyph` as an RGBA tile spanning `span` cells and return its
-    /// atlas rect. Ordinary coverage glyphs upload white×alpha (the shader
-    /// tints by `fg`); color glyphs (emoji strikes) upload their own pixels.
+    /// Upload `glyph` as an RGBA tile spanning `span` grid cells and return
+    /// its atlas rect (see [`Self::upload_rect`]).
     fn upload_tile(
         &mut self,
         key: TileKey,
@@ -652,12 +711,26 @@ impl GpuCore {
         span: usize,
         baseline: i32,
     ) -> (u32, u32, u32, u32) {
+        let w = (span.max(1) as u32) * self.cell_w;
+        self.upload_rect(key, glyph, (w, self.cell_h), baseline)
+    }
+
+    /// Upload `glyph` as an RGBA tile of `(w, h)` texels and return its
+    /// atlas rect. Ordinary coverage glyphs upload white×alpha (the shader
+    /// tints by `fg`); color glyphs (emoji strikes) upload their own pixels.
+    fn upload_rect(
+        &mut self,
+        key: TileKey,
+        glyph: &Glyph,
+        (w, h): (u32, u32),
+        baseline: i32,
+    ) -> (u32, u32, u32, u32) {
         if let Some(&r) = self.tiles.get(&key) {
             return r;
         }
-        let w = (span.max(1) as u32) * self.cell_w;
-        let h = self.cell_h;
-        let (x, y) = match self.alloc_shelf(w) {
+        let w = w.max(1);
+        let h = h.max(1);
+        let (x, y) = match self.alloc_shelf(w, h) {
             Some(at) => at,
             None => {
                 // Atlas full: recycle it (drop every cached tile and restart the
@@ -668,7 +741,8 @@ impl GpuCore {
                 self.atlas_epoch += 1;
                 self.shelf_x = 0;
                 self.shelf_y = 0;
-                match self.alloc_shelf(w) {
+                self.shelf_h = 0;
+                match self.alloc_shelf(w, h) {
                     Some(at) => at,
                     // Wider than the atlas itself: draw as background.
                     None => return (0, 0, 0, 0),
@@ -747,6 +821,48 @@ impl GpuCore {
         )
     }
 
+    /// The atlas rect for a bar (chrome/status) character, drawn in the UI
+    /// font `ui` at its own cell size; keyed apart from grid glyphs.
+    fn tile_for_bar_char(
+        &mut self,
+        ch: char,
+        style: Style,
+        ui: &mut FontCache,
+    ) -> ((u32, u32, u32, u32), bool) {
+        let (cw, ch_px) = ui.cell_size();
+        let span = char_width(ch).max(1) as u32;
+        let baseline = ui.baseline();
+        let glyph = ui.glyph(ch, style);
+        let size = (span * cw.max(1) as u32, ch_px.max(1) as u32);
+        (
+            self.upload_rect(TileKey::Bar(ch, style), &glyph, size, baseline),
+            glyph.color.is_some(),
+        )
+    }
+
+    /// The tile of combining mark `ch`, its ink centered over a base glyph
+    /// `span` cells wide (#1160).
+    fn tile_for_mark(
+        &mut self,
+        ch: char,
+        style: Style,
+        span: usize,
+        font: &mut FontCache,
+    ) -> (u32, u32, u32, u32) {
+        let key = TileKey::Mark(ch, style, span);
+        if let Some(&r) = self.tiles.get(&key) {
+            return r;
+        }
+        let glyph = font.glyph(ch, style);
+        let centered = Glyph {
+            left: (span as i32 * self.cell_w as i32 - glyph.width as i32) / 2,
+            coverage: glyph.coverage.clone(),
+            color: glyph.color.clone(),
+            ..*glyph
+        };
+        self.upload_tile(key, &centered, span, font.baseline())
+    }
+
     /// Set the window background opacity (`[window] opacity`), clamped to
     /// `0.0..=1.0`. A no-op visually unless `alpha_mode` negotiated straight
     /// alpha compositing — see [`Self::alpha_mode`].
@@ -754,22 +870,32 @@ impl GpuCore {
         self.opacity = opacity.clamp(0.0, 1.0);
     }
 
-    fn write_uniforms(&self, width: u32, height: u32, pad: usize, chrome: bool) {
+    /// `bar` is the UI font's cell size, which lays out both bars.
+    fn write_uniforms(
+        &self,
+        width: u32,
+        height: u32,
+        pad: usize,
+        chrome: &[Cell],
+        bar: (usize, usize),
+    ) {
         // With a chrome bar, the bar sits `bar_inset` px below the top edge
-        // and the grid shifts down by the same amount, preserving the
-        // pad-sized gap between them (the bottom pad absorbs it).
-        let inset = if chrome {
-            super::render::bar_inset(pad, self.cell_h as usize)
-        } else {
+        // and the grid starts below it, preserving the pad-sized gap between
+        // them (the bottom pad absorbs it).
+        let inset = if chrome.is_empty() {
             0
+        } else {
+            super::render::bar_inset(pad, bar.1)
         };
+        let top = super::render::grid_top(chrome, pad, bar.1);
         let uniforms = Uniforms {
             screen: [width.max(1) as f32, height.max(1) as f32],
             cell: [self.cell_w as f32, self.cell_h as f32],
             atlas: [self.atlas_w as f32, self.atlas_h as f32],
-            origin: [pad as f32, (pad + inset) as f32],
+            origin: [pad as f32, top as f32],
             opacity: self.opacity,
             bar_inset: inset as f32,
+            bar: [bar.0 as f32, bar.1 as f32],
         };
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
@@ -806,8 +932,8 @@ impl GpuCore {
     }
 
     /// Render `grid` into `view` (a surface frame or an offscreen texture).
-    /// A non-empty `chrome` row is drawn as cell row 0 with the grid shifted
-    /// one row down (see [`Renderer::render`]).
+    /// A non-empty `chrome` row is drawn in the same font as the grid, which
+    /// starts one row down (see [`Renderer::render`]).
     #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
     pub(crate) fn render(
@@ -820,15 +946,14 @@ impl GpuCore {
         font: &mut FontCache,
         cursor_on: bool,
     ) {
-        self.write_uniforms(width, height, 0, !chrome.is_empty());
-        let row_off = if chrome.is_empty() { 0 } else { 1 };
+        self.write_uniforms(width, height, 0, chrome, font.cell_size());
         let mut frame = FrameLists::default();
         self.append_chrome(&mut frame, chrome, font);
         let view_grid = grid.frame_view();
         let pane = PaneFrame {
             grid: &view_grid,
             col0: 0,
-            row0: row_off,
+            row0: 0,
             focused: true,
             cursor_on,
             trail: Vec::new(),
@@ -839,13 +964,28 @@ impl GpuCore {
         self.draw_frame(view, &frame, 0x000000);
     }
 
-    fn append_chrome(&mut self, frame: &mut FrameLists, chrome: &[Cell], font: &mut FontCache) {
-        for (col, cell) in chrome.iter().enumerate() {
+    /// Append the chrome bar's cells, drawn in the UI font `ui`. Every
+    /// instance carries deco bit 5, which the vertex shader lays out on the
+    /// bar cell at the window's top (see the `SHADER` source).
+    fn append_chrome(&mut self, frame: &mut FrameLists, chrome: &[Cell], ui: &mut FontCache) {
+        self.append_bar(frame, chrome, ui, 32);
+    }
+
+    /// Append the bottom status ribbon's cells: like [`Self::append_chrome`]
+    /// but every instance carries deco bit 6, which the vertex shader anchors
+    /// flush to the window's bottom edge (see the `SHADER` source).
+    fn append_status(&mut self, frame: &mut FrameLists, status: &[Cell], ui: &mut FontCache) {
+        self.append_bar(frame, status, ui, 64);
+    }
+
+    /// Append one bar's cells in the UI font, each tagged with `bit`.
+    fn append_bar(&mut self, frame: &mut FrameLists, cells: &[Cell], ui: &mut FontCache, bit: u32) {
+        for (col, cell) in cells.iter().enumerate() {
             if cell.flags & WIDE_TRAILER != 0 {
                 continue;
             }
             let style = Style::new(cell.flags & ATTR_BOLD != 0, cell.flags & ATTR_ITALIC != 0);
-            let (rect, color) = self.tile_for_char(cell.ch, style, font);
+            let (rect, color) = self.tile_for_bar_char(cell.ch, style, ui);
             let fg = if color { 0xFFFFFF } else { cell.fg };
             // Chrome cells carry underline state for the active tab's accent
             // line; `plain` — no cursor/selection swap happens up here.
@@ -859,34 +999,7 @@ impl GpuCore {
                 cell.bg,
                 0,
                 0,
-                deco,
-                dcol,
-            ));
-        }
-    }
-
-    /// Append the bottom status ribbon's cells: like [`Self::append_chrome`]
-    /// but every instance carries deco bit 6, which the vertex shader anchors
-    /// flush to the window's bottom edge (see the `SHADER` source).
-    fn append_status(&mut self, frame: &mut FrameLists, status: &[Cell], font: &mut FontCache) {
-        for (col, cell) in status.iter().enumerate() {
-            if cell.flags & WIDE_TRAILER != 0 {
-                continue;
-            }
-            let style = Style::new(cell.flags & ATTR_BOLD != 0, cell.flags & ATTR_ITALIC != 0);
-            let (rect, color) = self.tile_for_char(cell.ch, style, font);
-            let fg = if color { 0xFFFFFF } else { cell.fg };
-            let (deco, dcol) = deco_for(cell.flags, cell.underline_color, fg, true, false);
-            frame.base.push(Self::base_inst(
-                col as u32,
-                0,
-                char_width(cell.ch).max(1) as u32,
-                rect,
-                fg,
-                cell.bg,
-                0,
-                0,
-                deco | 64,
+                deco | bit,
                 dcol,
             ));
         }
@@ -964,13 +1077,17 @@ impl GpuCore {
                     .and_then(|b| b.log2vis.get(col))
                     .map_or(col, |&v| v as usize)
             };
+            // DECDWL/DECDHL: each cell's quad spans twice the columns (the
+            // tile stretches), DECDHL halves sample half the tile each.
+            let attr = grid.line_attr(row);
+            let scale = if attr == LineAttr::Single { 1 } else { 2 };
             let mut cols: Vec<Resolved> = Vec::with_capacity(grid.cols);
             for col in 0..grid.cols {
-                let cell = if on_status {
+                let cell = drawn(if on_status {
                     status.unwrap()[col]
                 } else {
                     grid.cell(col, row)
-                };
+                });
                 if cell.flags & WIDE_TRAILER != 0 {
                     cols.push(Resolved {
                         cell,
@@ -1013,14 +1130,17 @@ impl GpuCore {
                 let (deco, dcol) = deco_for(cell.flags, cell.underline_color, fg, plain, hovered);
                 // Same run eligibility as the CPU renderer's ligature plan.
                 let run_ok = plain
+                    && !concealed(&cell)
                     && cell.cluster == 0
                     && cell.ch != ' '
                     && char_width(cell.ch) == 1
                     && !super::boxdraw::is_synthesized(cell.ch)
                     && cell.ch != '\u{10EEEE}'
                     // A reordered (bidi) row draws cell-by-cell; a shaped run
-                    // across visually non-adjacent cells would garble it.
+                    // across visually non-adjacent cells would garble it. So
+                    // does a scaled (double-width) row.
                     && bidi.is_none()
+                    && attr == LineAttr::Single
                     && font.has_ligatures();
                 cols.push(Resolved {
                     cell,
@@ -1049,40 +1169,70 @@ impl GpuCore {
                         r.cell.flags & ATTR_BOLD != 0,
                         r.cell.flags & ATTR_ITALIC != 0,
                     );
-                    let ch = if r.cell.ch == '\u{10EEEE}' {
-                        ' '
+                    // The span follows the stored character, so a concealed
+                    // wide glyph still paints both columns' background.
+                    let ch = glyph_char(&r.cell, bidi, col);
+                    // The columns as stored, trailer included: a mode 2027
+                    // VS16 cluster on a narrow base is two wide.
+                    let span = if cols.get(col + 1).is_some_and(|c| c.trailer) {
+                        2
                     } else {
-                        r.cell.ch
+                        1
                     };
-                    // Arabic contextual form first (phase 3), then rule L4
-                    // mirroring for RTL-run chars.
-                    let ch = match &bidi {
-                        Some(b) => {
-                            let ch = b.shaped.as_ref().and_then(|s| s[col]).unwrap_or(ch);
-                            if b.rtl[col] {
-                                crate::core::bidi_mirrored(ch).unwrap_or(ch)
-                            } else {
-                                ch
-                            }
-                        }
-                        None => ch,
+                    let x = scale * vis(col);
+                    if x >= grid.cols {
+                        col += span; // past the half a double-width row shows
+                        continue;
+                    }
+                    let quad = (scale * span).min(grid.cols - x) as u32;
+                    let (rect, is_color) = if span > char_width(ch).max(1) && ch != ' ' {
+                        // A two-column cluster on a narrow base: a two-cell
+                        // tile, so the quad does not stretch the glyph.
+                        let key = TileKey::Spanned(ch, style, span);
+                        let glyph = font.glyph(ch, style);
+                        let color = glyph.color.is_some();
+                        (self.upload_tile(key, &glyph, span, font.baseline()), color)
+                    } else {
+                        self.tile_for_char(ch, style, font)
                     };
-                    let (rect, is_color) = self.tile_for_char(ch, style, font);
-                    let span = char_width(r.cell.ch).max(1) as u32;
                     let fg = if is_color { 0xFFFFFF } else { r.fg };
                     frame.base.push(Self::base_inst(
-                        (col0 + vis(col)) as u32,
+                        (col0 + x) as u32,
                         (row0 + row) as u32,
-                        span,
-                        rect,
+                        quad,
+                        half_tile(rect, attr),
                         fg,
                         r.bg,
                         r.curs,
                         r.ccol,
-                        r.deco,
+                        half_deco(r.deco, attr),
                         r.dcol,
                     ));
-                    col += span as usize;
+                    // A concealed cell hides its marks too; a Kitty
+                    // placeholder's suffix is image metadata, never drawn.
+                    let hidden = concealed(&r.cell) || r.cell.ch == '\u{10EEEE}';
+                    let marks = grid
+                        .cluster_suffix(&r.cell)
+                        .chars()
+                        .filter(|&c| !hidden && is_overlay_mark(c));
+                    for mark in marks {
+                        let rect = self.tile_for_mark(mark, style, span, font);
+                        let mut inst = Self::base_inst(
+                            (col0 + x) as u32,
+                            (row0 + row) as u32,
+                            quad,
+                            half_tile(rect, attr),
+                            r.fg,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        );
+                        inst.kind = 1;
+                        frame.overlay.push(inst);
+                    }
+                    col += span;
                     continue;
                 }
                 // A run: same style and fg, contiguous eligible cells.
@@ -1344,7 +1494,6 @@ impl GpuCore {
 
     /// Render a tab's `panes` into `view`, filling the gaps with `divider`.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_panes(
         &mut self,
         view: &wgpu::TextureView,
@@ -1354,42 +1503,64 @@ impl GpuCore {
         chrome: &[Cell],
         status: &[Cell],
         font: &mut FontCache,
+        ui: &mut FontCache,
         divider: u32,
         bg: u32,
         bar_bg: u32,
         pad: usize,
     ) {
-        self.write_uniforms(width, height, pad, !chrome.is_empty());
-        let frame = self.frame_lists(width, panes, chrome, status, font, divider, bar_bg);
+        self.write_uniforms(width, height, pad, chrome, ui.cell_size());
+        let mut frame = self.frame_lists(panes, font, divider);
+        self.append_bars(&mut frame, width, chrome, status, ui, bar_bg);
         self.draw_frame(view, &frame, bg);
+        self.spare = frame;
     }
 
-    /// Every instance of one frame, as [`Self::render_panes`] draws it.
-    #[allow(clippy::too_many_arguments)]
-    fn frame_lists(
+    /// Append both bars, drawn in the UI font `ui`. They never overlap the
+    /// panes, so their order against the grid's instances doesn't matter.
+    fn append_bars(
         &mut self,
+        frame: &mut FrameLists,
         width: u32,
-        panes: &[PaneFrame],
         chrome: &[Cell],
         status: &[Cell],
-        font: &mut FontCache,
-        divider: u32,
+        ui: &mut FontCache,
         bar_bg: u32,
-    ) -> FrameLists {
-        let mut frame = FrameLists::default();
+    ) {
         // The strip-colored band above the chrome (see `render::bar_inset`):
-        // a full-width quad at the window's top edge, exempt from the
-        // bar-inset shift via deco bit 7. Drawn before the chrome cells, so
-        // they overpaint everything below the inset.
+        // a full-width bar-cell quad at the window's top edge, exempt from
+        // the bar-inset shift via deco bit 7. Drawn before the chrome cells,
+        // so they overpaint everything below the inset.
         if !chrome.is_empty() {
-            let (rect, _) = self.tile_for_char(' ', Style::Regular, font);
-            let span = width.div_ceil(self.cell_w.max(1));
+            let (rect, _) = self.tile_for_bar_char(' ', Style::Regular, ui);
+            let span = width.div_ceil(ui.cell_size().0.max(1) as u32);
             frame.base.push(Self::base_inst(
-                0, 0, span, rect, bar_bg, bar_bg, 0, 0, 128, 0,
+                0,
+                0,
+                span,
+                rect,
+                bar_bg,
+                bar_bg,
+                0,
+                0,
+                32 | 128,
+                0,
             ));
         }
-        self.append_chrome(&mut frame, chrome, font);
-        self.append_status(&mut frame, status, font);
+        self.append_chrome(frame, chrome, ui);
+        self.append_status(frame, status, ui);
+    }
+
+    /// Every pane instance of one frame, as [`Self::render_panes`] draws it
+    /// (the bars come after, from [`Self::append_bars`]).
+    fn frame_lists(
+        &mut self,
+        panes: &[PaneFrame],
+        font: &mut FontCache,
+        divider: u32,
+    ) -> FrameLists {
+        let mut frame = std::mem::take(&mut self.spare);
+        frame.clear();
         // The clear paints the padding band (and slack) in the terminal
         // background; gaps *between* panes still show the divider, via a
         // divider-colored fill under the panes' bounding box (the grids
@@ -1461,29 +1632,18 @@ impl GpuCore {
 
     /// Submit the frame: base cells (opaque), overlay glyphs (blended), then
     /// image quads (blended, grouped by texture), clearing to `clear`.
-    fn draw_frame(&self, view: &wgpu::TextureView, frame: &FrameLists, clear: u32) {
-        let base_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("base instances"),
-                contents: bytemuck::cast_slice(&frame.base),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let overlay_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("overlay instances"),
-                contents: bytemuck::cast_slice(&frame.overlay),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+    fn draw_frame(&mut self, view: &wgpu::TextureView, frame: &FrameLists, clear: u32) {
+        let (device, queue) = (&self.device, &self.queue);
+        let base = self
+            .base_buf
+            .upload(device, queue, bytemuck::cast_slice(&frame.base));
+        let overlay = self
+            .overlay_buf
+            .upload(device, queue, bytemuck::cast_slice(&frame.overlay));
         let img_insts: Vec<ImgInstance> = frame.images.iter().map(|(_, i)| *i).collect();
-        let img_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("image instances"),
-                contents: bytemuck::cast_slice(&img_insts),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        let images = self
+            .img_buf
+            .upload(device, queue, bytemuck::cast_slice(&img_insts));
         let c = wgpu::Color {
             r: ((clear >> 16) & 0xff) as f64 / 255.0,
             g: ((clear >> 8) & 0xff) as f64 / 255.0,
@@ -1510,18 +1670,20 @@ impl GpuCore {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_pipeline(&self.base_pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
-            pass.set_vertex_buffer(0, base_buf.slice(..));
-            pass.draw(0..6, 0..frame.base.len() as u32);
-            if !frame.overlay.is_empty() {
+            if let Some(base) = base {
+                pass.set_pipeline(&self.base_pipeline);
+                pass.set_vertex_buffer(0, base);
+                pass.draw(0..6, 0..frame.base.len() as u32);
+            }
+            if let Some(overlay) = overlay {
                 pass.set_pipeline(&self.overlay_pipeline);
-                pass.set_vertex_buffer(0, overlay_buf.slice(..));
+                pass.set_vertex_buffer(0, overlay);
                 pass.draw(0..6, 0..frame.overlay.len() as u32);
             }
-            if !frame.images.is_empty() {
+            if let Some(images) = images {
                 pass.set_pipeline(&self.img_pipeline);
-                pass.set_vertex_buffer(0, img_buf.slice(..));
+                pass.set_vertex_buffer(0, images);
                 for (i, (bind, _)) in frame.images.iter().enumerate() {
                     pass.set_bind_group(1, bind.as_ref(), &[]);
                     pass.draw(0..6, i as u32..i as u32 + 1);
@@ -1540,7 +1702,62 @@ struct FrameLists {
     images: Vec<(Rc<wgpu::BindGroup>, ImgInstance)>,
 }
 
-/// Pack a cell's underline/strikethrough state into the `Instance::deco` bits
+impl FrameLists {
+    /// Empty every list, keeping its capacity.
+    fn clear(&mut self) {
+        self.base.clear();
+        self.overlay.clear();
+        self.images.clear();
+    }
+}
+
+/// A vertex buffer kept across frames and rewritten in place; it is
+/// reallocated only when a frame needs more room than it has.
+struct InstanceBuffer {
+    label: &'static str,
+    buf: Option<wgpu::Buffer>,
+}
+
+impl InstanceBuffer {
+    fn new(label: &'static str) -> Self {
+        InstanceBuffer { label, buf: None }
+    }
+
+    /// Write `bytes` at the start and return the slice they fill, or `None`
+    /// when there is nothing to draw.
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bytes: &[u8],
+    ) -> Option<wgpu::BufferSlice<'_>> {
+        let len = bytes.len() as u64;
+        if len == 0 {
+            return None;
+        }
+        let have = self.buf.as_ref().map_or(0, wgpu::Buffer::size);
+        if let Some(size) = grown_size(have, len) {
+            self.buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(self.label),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+        let buf = self.buf.as_ref()?;
+        queue.write_buffer(buf, 0, bytes);
+        Some(buf.slice(..len))
+    }
+}
+
+/// The size to reallocate an instance buffer of `have` bytes to so it holds
+/// `need`, or `None` when it already does: the next power of two, at least
+/// 4 KiB, so a growing session reallocates a handful of times, not per frame.
+fn grown_size(have: u64, need: u64) -> Option<u64> {
+    (need > have).then(|| need.next_power_of_two().max(4096))
+}
+
+/// Pack a cell's underline/strikethrough/overline state into the `Instance::deco` bits
 /// and pick the stripe color: `underline_color` when SGR 58 set it and `plain`
 /// (the cell isn't under the cursor, a selection, or a search highlight —
 /// those already swapped `fg` to something that should win instead).
@@ -1548,10 +1765,13 @@ struct FrameLists {
 /// underline in `fg`, overriding the cell's own SGR underline attribute —
 /// it's a click affordance, not a text style, so it never takes
 /// `underline_color`.
-fn deco_for(flags: u16, underline_color: u32, fg: u32, plain: bool, hovered: bool) -> (u32, u32) {
+fn deco_for(flags: u32, underline_color: u32, fg: u32, plain: bool, hovered: bool) -> (u32, u32) {
     let mut deco = 0u32;
     if flags & ATTR_STRIKE != 0 {
         deco |= 8;
+    }
+    if flags & ATTR_OVERLINE != 0 {
+        deco |= 16;
     }
     if hovered {
         deco |= 1; // Straight
@@ -1602,6 +1822,7 @@ impl Renderer for GpuRenderer {
         chrome: &[Cell],
         status: &[Cell],
         font: &mut FontCache,
+        ui: &mut FontCache,
         width: u32,
         height: u32,
         divider: u32,
@@ -1644,7 +1865,7 @@ impl Renderer for GpuRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.core.render_panes(
-            &view, width, height, panes, chrome, status, font, divider, bg, bar_bg, pad,
+            &view, width, height, panes, chrome, status, font, ui, divider, bg, bar_bg, pad,
         );
         frame.present();
     }
@@ -1654,6 +1875,11 @@ impl Renderer for GpuRenderer {
     }
 
     fn supports_opacity(&self) -> bool {
+        true
+    }
+
+    /// The surface presents with `PresentMode::Fifo`, which blocks to vsync.
+    fn waits_for_vsync(&self) -> bool {
         true
     }
 }
@@ -1678,6 +1904,18 @@ mod tests {
             deco_for(flags, 0x0000FF, 0xFF0000, true, false),
             (1, 0x0000FF)
         );
+    }
+
+    #[test]
+    fn deco_for_colours_every_underline_style_and_flags_overline() {
+        for style in [UnderlineStyle::Straight, UnderlineStyle::Double] {
+            let flags = style.pack_into(ATTR_UNDERLINE | ATTR_UNDERLINE_COLOR);
+            let (deco, dcol) = deco_for(flags, 0x0087FF, 0xFFFFFF, true, false);
+            assert_eq!(dcol, 0x0087FF, "{style:?}");
+            assert_ne!(deco & 7, 0, "{style:?}");
+        }
+        let (deco, _) = deco_for(ATTR_OVERLINE, 0, 0xFFFFFF, true, false);
+        assert_eq!(deco, 16);
     }
 
     /// The adapter, WGSL shader, render pipeline, and glyph atlas all build.
@@ -1748,18 +1986,18 @@ mod tests {
         assert_eq!((blank.2, blank.3), (core.cell_w, core.cell_h));
 
         // Sequential allocations advance along the shelf...
-        let (x1, y1) = core.alloc_shelf(core.cell_w).unwrap();
-        let (x2, y2) = core.alloc_shelf(core.cell_w).unwrap();
+        let (x1, y1) = core.alloc_shelf(core.cell_w, core.cell_h).unwrap();
+        let (x2, y2) = core.alloc_shelf(core.cell_w, core.cell_h).unwrap();
         assert_eq!(y1, y2);
         assert_eq!(x2, x1 + core.cell_w);
 
         // ...an allocation that can't fit wraps to the next shelf...
-        let (x3, y3) = core.alloc_shelf(core.atlas_w).unwrap();
+        let (x3, y3) = core.alloc_shelf(core.atlas_w, core.cell_h).unwrap();
         assert_eq!((x3, y3), (0, y1 + core.cell_h));
 
         // ...and a full atlas yields None rather than clipping.
         core.shelf_y = core.atlas_h;
-        assert_eq!(core.alloc_shelf(core.cell_w), None);
+        assert_eq!(core.alloc_shelf(core.cell_w, core.cell_h), None);
         // upload_tile then falls back to the pre-reserved blank rect.
         let g = Glyph {
             width: 0,
@@ -1773,6 +2011,51 @@ mod tests {
             core.upload_tile(TileKey::Char('q', Style::Bold), &g, 1, 0),
             blank
         );
+    }
+
+    /// A tile taller than the current shelf (a bar glyph under a smaller
+    /// zoomed grid font, or the reverse) opens a new shelf instead of
+    /// overlapping the next one.
+    #[test]
+    fn taller_tiles_start_a_new_shelf() {
+        let Some((mut core, _font)) = headless_core() else {
+            return;
+        };
+        let h = core.cell_h;
+        let (_, y1) = core.alloc_shelf(4, h).unwrap();
+        let (x2, y2) = core.alloc_shelf(4, h + 5).unwrap();
+        assert_eq!((x2, y2), (0, y1 + h), "taller tile wraps");
+        let (x3, y3) = core.alloc_shelf(4, h).unwrap();
+        assert_eq!((x3, y3), (4, y2), "a shorter tile shares the tall shelf");
+        let (x4, y4) = core.alloc_shelf(core.atlas_w, h).unwrap();
+        assert_eq!(
+            (x4, y4),
+            (0, y2 + h + 5),
+            "the next shelf clears the tall one"
+        );
+    }
+
+    /// Bar glyphs come from the UI font at its own cell size, keyed apart
+    /// from the grid font's glyphs.
+    #[test]
+    fn bar_tiles_use_the_ui_font_cell() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let Some(bytes) = super::super::font::load_default_font(None) else {
+            return;
+        };
+        let set = super::super::font::FontSet {
+            regular: bytes,
+            ..Default::default()
+        };
+        let mut ui = FontCache::new(set, 10.0, false).unwrap();
+        let (bw, bh) = ui.cell_size();
+        let (bar, _) = core.tile_for_bar_char('a', Style::Regular, &mut ui);
+        assert_eq!((bar.2, bar.3), (bw as u32, bh as u32));
+        let (grid, _) = core.tile_for_char('a', Style::Regular, &mut font);
+        assert_eq!((grid.2, grid.3), (core.cell_w, core.cell_h));
+        assert_ne!((bar.0, bar.1), (grid.0, grid.1), "separate tiles");
     }
 
     /// Wide (two-column) characters get a two-cell tile so CJK/emoji glyphs
@@ -1822,31 +2105,13 @@ mod tests {
         assert_eq!(core.opacity, 1.0);
     }
 
-    /// Full render-to-texture + readback: a blank blue cell should read back as
-    /// blue. Ignored by default because the software drivers in headless CI/WSL
-    /// (lavapipe, dzn) segfault during draw/submit; run with `--ignored` on a
-    /// machine with a working GPU/Vulkan adapter.
-    #[test]
-    #[ignore = "render+readback needs a working GPU adapter; lavapipe/dzn crash headless"]
-    fn gpu_renders_to_texture() {
-        let bytes = super::super::font::load_default_font(None).unwrap();
-        let mut font = FontCache::new(
-            super::super::font::FontSet {
-                regular: bytes,
-                ..Default::default()
-            },
-            16.0,
-            false,
-        )
-        .unwrap();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
-        let mut core = GpuCore::new(&instance, None, &mut font).expect("adapter");
-
-        let mut grid = Grid::new(1, 1);
-        let mut p = AnsiParser::new();
-        p.advance(&mut grid, b"\x1b[48;2;0;0;255m ");
-
-        let (w, h) = (core.cell_w, core.cell_h);
+    /// Render `grid` to an offscreen texture of exactly its size and read
+    /// the pixels back as tightly packed RGBA rows.
+    fn render_pixels(core: &mut GpuCore, font: &mut FontCache, grid: &Grid) -> Vec<u8> {
+        let (w, h) = (
+            core.cell_w * grid.cols as u32,
+            core.cell_h * grid.rows as u32,
+        );
         let target = core.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("target"),
             size: wgpu::Extent3d {
@@ -1862,7 +2127,7 @@ mod tests {
             view_formats: &[],
         });
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        core.render(&view, w, h, &grid, &[], &mut font, true);
+        core.render(&view, w, h, grid, &[], font, true);
 
         let bytes_per_row = (w * 4).next_multiple_of(256);
         let readback = core.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1899,7 +2164,82 @@ mod tests {
         readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
         core.device.poll(wgpu::Maintain::Wait);
         let data = readback.slice(..).get_mapped_range();
+        data.chunks(bytes_per_row as usize)
+            .flat_map(|row| &row[..(w * 4) as usize])
+            .copied()
+            .collect()
+    }
+
+    /// A grid of `cols`x`rows` after `bytes`.
+    fn grid_after(cols: usize, rows: usize, bytes: &[u8]) -> Grid {
+        let mut grid = Grid::new(cols, rows);
+        AnsiParser::new().advance(&mut grid, bytes);
+        grid
+    }
+
+    /// Full render-to-texture + readback: a blank blue cell should read back as
+    /// blue. Ignored by default because the software drivers in headless CI/WSL
+    /// (lavapipe, dzn) segfault during draw/submit; run with `--ignored` on a
+    /// machine with a working GPU/Vulkan adapter.
+    #[test]
+    #[ignore = "render+readback needs a working GPU adapter; lavapipe/dzn crash headless"]
+    fn gpu_renders_to_texture() {
+        let (mut core, mut font) = headless_core().expect("adapter");
+        let grid = grid_after(1, 1, b"\x1b[48;2;0;0;255m ");
+        let data = render_pixels(&mut core, &mut font, &grid);
         assert_eq!([data[0], data[1], data[2]], [0, 0, 255]);
+    }
+
+    /// The instance buffers persist across frames: a bigger frame regrows
+    /// them, and a smaller one after it draws only its own instances, not
+    /// the bigger frame's left past its end. Each frame reads back the same
+    /// pixels a fresh core renders, and the base buffer's allocation, read
+    /// after each frame, is replaced once and then kept. Ignored like
+    /// `gpu_renders_to_texture`.
+    #[test]
+    #[ignore = "render+readback needs a working GPU adapter; lavapipe/dzn crash headless"]
+    fn reused_instance_buffers_render_what_fresh_ones_do() {
+        let (mut core, mut font) = headless_core().expect("adapter");
+        let small = grid_after(2, 1, b"\x1b[48;2;0;0;255m \x1b[4mx");
+        let big = grid_after(60, 40, &b"\x1b[41mlorem \x1b[4;32mipsum ".repeat(300));
+        let mut frames = Vec::new();
+        let mut bufs = Vec::new();
+        for grid in [&small, &big, &small] {
+            frames.push(render_pixels(&mut core, &mut font, grid));
+            bufs.push(buffer_identity(&core.base_buf).expect("base layer drawn"));
+        }
+        let [(small_id, small_size), (big_id, big_size), after] = [bufs[0], bufs[1], bufs[2]];
+        assert_eq!(small_size, 4096, "the small frame fits the minimum size");
+        assert!(
+            big_size > 4096 && big_id != small_id,
+            "the big frame regrew the buffer"
+        );
+        assert_eq!(
+            after,
+            (big_id, big_size),
+            "the small frame kept the big buffer"
+        );
+        for (n, grid) in [&small, &big, &small].into_iter().enumerate() {
+            let (mut fresh, mut font) = headless_core().expect("adapter");
+            let want = render_pixels(&mut fresh, &mut font, grid);
+            assert!(frames[n] == want, "frame {n} differs from a fresh render");
+        }
+    }
+
+    /// The live allocation behind an instance buffer and its size, if any.
+    fn buffer_identity(b: &InstanceBuffer) -> Option<(wgpu::Id<wgpu::Buffer>, u64)> {
+        b.buf.as_ref().map(|buf| (buf.global_id(), buf.size()))
+    }
+
+    /// A buffer regrows to the next power of two (at least 4 KiB) only when
+    /// a frame outgrows it.
+    #[test]
+    fn instance_buffers_grow_by_powers_of_two_only_when_outgrown() {
+        assert_eq!(grown_size(0, 48), Some(4096));
+        assert_eq!(grown_size(4096, 4096), None);
+        assert_eq!(grown_size(4096, 100), None);
+        assert_eq!(grown_size(4096, 4097), Some(8192));
+        assert_eq!(grown_size(8192, 70_000), Some(131_072));
     }
 
     /// A generated session (writes, cursor and view moves, selections, hover,
@@ -1926,14 +2266,157 @@ mod tests {
             step(&mut rng, &mut grids, &mut x);
             let views: Vec<_> = grids.iter().map(|(g, _)| g.frame_view()).collect();
             let panes = panes(&views, x);
-            let cached = core.frame_lists(400, &panes, &[], &[], &mut font, 1, 2);
+            let cached = core.frame_lists(&panes, &mut font, 1);
             let kept = std::mem::take(&mut core.row_cache);
-            let fresh = core.frame_lists(400, &panes, &[], &[], &mut font, 1, 2);
+            let fresh = core.frame_lists(&panes, &mut font, 1);
             core.row_cache = kept;
             assert_eq!(cached.base, fresh.base, "frame {n}: base instances");
             assert_eq!(
                 cached.overlay, fresh.overlay,
                 "frame {n}: overlay instances"
+            );
+        }
+    }
+
+    /// The base instances of a one-pane, one-row frame of `grid`.
+    fn row_instances(core: &mut GpuCore, font: &mut FontCache, grid: &Grid) -> Vec<Instance> {
+        let v = grid.frame_view();
+        let pane = PaneFrame {
+            grid: &v,
+            col0: 0,
+            row0: 0,
+            focused: false,
+            cursor_on: false,
+            trail: Vec::new(),
+            hover_link: None,
+            marks: Vec::new(),
+        };
+        let frame = core.frame_lists(&[pane], font, 1);
+        frame.base.into_iter().filter(|i| i.row == 0).collect()
+    }
+
+    #[test]
+    fn double_height_halves_sample_half_the_tile_and_split_decorations() {
+        let rect = (10, 20, 8, 17);
+        assert_eq!(half_tile(rect, LineAttr::Single), rect);
+        assert_eq!(half_tile(rect, LineAttr::DoubleWidth), rect);
+        assert_eq!(half_tile(rect, LineAttr::DoubleTop), (10, 20, 8, 8));
+        assert_eq!(half_tile(rect, LineAttr::DoubleBottom), (10, 28, 8, 9));
+        // Underline (bits 0-2) on the bottom half; strike and overline on
+        // the top; layout bits (6, 7) on both.
+        let deco = 1 | DECO_STRIKE | DECO_OVERLINE | 64;
+        assert_eq!(
+            half_deco(deco, LineAttr::DoubleTop),
+            DECO_STRIKE | DECO_OVERLINE | 64
+        );
+        assert_eq!(half_deco(deco, LineAttr::DoubleBottom), 1 | 64);
+        assert_eq!(half_deco(deco, LineAttr::DoubleWidth), deco);
+    }
+
+    #[test]
+    fn double_width_row_emits_two_column_quads() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let mut g = Grid::new(6, 1);
+        AnsiParser::new().advance(&mut g, b"\x1b#6XYZ");
+        let base = row_instances(&mut core, &mut font, &g);
+        for col in [0, 2, 4] {
+            assert!(
+                base.iter().any(|i| i.col == col && i.span == 2),
+                "cell at column {col}: {base:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn widened_vs16_cluster_quad_spans_both_columns() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let mut g = Grid::new(4, 1);
+        AnsiParser::new().advance(&mut g, "\x1b[?2027h\x1b[48;2;0;0;255m❤\u{fe0f}".as_bytes());
+        let base = row_instances(&mut core, &mut font, &g);
+        let head = base.iter().rfind(|i| i.col == 0).expect("head cell");
+        assert_eq!((head.span, head.bg), (2, 0x0000FF), "{base:?}");
+        // The tile is two cells wide, so the narrow glyph is not stretched.
+        let cell_w = core.cell_w;
+        assert_eq!(head.uv_wh >> 16, 2 * cell_w, "two-cell tile");
+    }
+
+    #[test]
+    fn combining_mark_adds_an_overlay_glyph() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let overlays = |core: &mut GpuCore, font: &mut FontCache, text: &str| {
+            let mut g = Grid::new(4, 1);
+            AnsiParser::new().advance(&mut g, text.as_bytes());
+            let v = g.frame_view();
+            let pane = PaneFrame {
+                grid: &v,
+                col0: 0,
+                row0: 0,
+                focused: false,
+                cursor_on: false,
+                trail: Vec::new(),
+                hover_link: None,
+                marks: Vec::new(),
+            };
+            let frame = core.frame_lists(&[pane], font, 1);
+            frame
+                .overlay
+                .iter()
+                .filter(|i| i.row == 0 && i.kind == 1)
+                .count()
+        };
+        let bare = overlays(&mut core, &mut font, "e");
+        assert_eq!(overlays(&mut core, &mut font, "e\u{301}"), bare + 1);
+        // Concealed: the mark hides with its base.
+        let hidden = overlays(&mut core, &mut font, "\x1b[8me");
+        assert_eq!(overlays(&mut core, &mut font, "\x1b[8me\u{301}"), hidden);
+    }
+
+    #[test]
+    fn concealed_wide_glyph_keeps_both_columns_background() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let (blank, _) = core.tile_for_char(' ', Style::Regular, &mut font);
+        let mut g = Grid::new(4, 1);
+        AnsiParser::new().advance(&mut g, "\x1b[48;2;0;0;255;8m\u{754c}".as_bytes());
+        let base = row_instances(&mut core, &mut font, &g);
+        // Skip the pane's background fill; the cells come after it.
+        let lead = base.iter().rfind(|i| i.col == 0).expect("lead cell");
+        assert!(!base.iter().any(|i| i.col == 1 && i.span == 1), "{base:?}");
+        assert_eq!((lead.span, lead.bg), (2, 0x0000FF), "covers both columns");
+        assert_eq!(
+            (lead.uv_xy, lead.uv_wh),
+            (blank.0 << 16 | blank.1, blank.2 << 16 | blank.3)
+        );
+    }
+
+    #[test]
+    fn concealed_arabic_draws_no_shaped_glyph() {
+        let Some((mut core, mut font)) = headless_core() else {
+            return;
+        };
+        let (blank, _) = core.tile_for_char(' ', Style::Regular, &mut font);
+        let mut g = Grid::new(4, 1);
+        g.bidi = true;
+        AnsiParser::new().advance(&mut g, "\x1b[8m\u{628}\u{628}".as_bytes());
+        // `glyph_char` is pinned without a font in `render::tests`; here a
+        // font with no Arabic draws the shaped form as blank anyway.
+        let shaped = g.frame_view().bidi_row(0).and_then(|b| b.shaped.clone());
+        let form = shaped.and_then(|s| s[0]).expect("a shaped form");
+        if core.tile_for_char(form, Style::Regular, &mut font).0 == blank {
+            eprintln!("no Arabic glyph in the test font; nothing to tell apart");
+        }
+        let base = row_instances(&mut core, &mut font, &g);
+        for i in base.iter().filter(|i| i.col < 2) {
+            assert_eq!(
+                (i.uv_xy, i.uv_wh),
+                (blank.0 << 16 | blank.1, blank.2 << 16 | blank.3)
             );
         }
     }
@@ -1958,7 +2441,7 @@ mod tests {
             marks: Vec::new(),
         };
         let v = g.frame_view();
-        core.frame_lists(400, &[pane(&v)], &[], &[], &mut font, 1, 2);
+        core.frame_lists(&[pane(&v)], &mut font, 1);
         // Mark every cached instance, so a replay is visible.
         for row in core.row_cache[0].rows.iter_mut().flatten() {
             row.base.iter_mut().for_each(|i| i.dcol = 0xABCDEF);
@@ -1966,7 +2449,7 @@ mod tests {
         // Row 2 changes; the cursor stays on row 0.
         p.advance(&mut g, b"\x1b[3;1Hz\x1b[H");
         let v = g.frame_view();
-        let frame = core.frame_lists(400, &[pane(&v)], &[], &[], &mut font, 1, 2);
+        let frame = core.frame_lists(&[pane(&v)], &mut font, 1);
         // The divider fill under the panes is never cached.
         let marked = |row: u32| {
             frame

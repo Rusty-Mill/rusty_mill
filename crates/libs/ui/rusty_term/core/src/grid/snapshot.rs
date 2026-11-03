@@ -6,17 +6,17 @@
 //! blink), scroll region, autowrap, title, the grapheme-cluster and hyperlink
 //! tables, scrollback, the live screen and, while the alternate screen is
 //! active, the stashed primary screen. Not included: parser state, input
-//! modes (mouse, keypad, bracketed paste), the colour palette, images,
-//! selection, search and folds.
+//! modes (mouse, keypad, bracketed paste), the colour palette (beyond the
+//! default fg/bg), images, selection, search and folds.
 //!
-//! # Format (version 1)
+//! # Format (version 3)
 //!
 //! All integers are unsigned LEB128 varints unless noted.
 //!
 //! ```text
 //! snapshot = "RTSN" version:u8 header tables lines(history) lines(rows) primary
 //! header   = cols rows cursor.x cursor.y saved.x saved.y scroll_top scroll_bottom
-//!            flags:u8 shape:u8 title:string
+//!            flags:u8 shape:u8 title:string default_fg default_bg
 //! tables   = count string*  (clusters), count string*  (links)
 //! lines(n) = n line*        (history is preceded by its count; the screen is not)
 //! primary  = 0:u8 | 1:u8 cursor.x cursor.y saved.x saved.y mode:u8 lines(rows)
@@ -28,6 +28,13 @@
 //!          | (char << 2 | trailer << 1 | clustered) [cluster]   (rich run)
 //! string   = len bytes                   (UTF-8)
 //! ```
+//!
+//! A style's `flags` may carry `ATTR_FG_DEFAULT` / `ATTR_BG_DEFAULT`: that
+//! colour is the default one and follows `default_fg` / `default_bg` (its
+//! stored RGB is ignored). Version 1 has no defaults in the header and no
+//! default bits; it decodes with every colour explicit, as it was written.
+//! Version 3 widens `flags` past 16 bits for `ATTR_OVERLINE`; versions 1 and
+//! 2 still decode, their flags limited to 16 bits as they were written.
 //!
 //! A style is a cell's colours, attributes and link; the wide-glyph trailer
 //! bit travels with the glyph, so a wide glyph does not split its run. A run
@@ -43,10 +50,14 @@ use rusty_wire::Reader;
 
 use super::{AltMode, CursorShape, Grid, Line, LineAttr, SavedScreen};
 use crate::cell::{Cell, PackedCell, WIDE_TRAILER};
-use crate::style::{CellStyle, StyleId, StyleTable};
+use crate::style::{CellStyle, Defaults, StyleId, StyleTable};
 
 const MAGIC: &[u8; 4] = b"RTSN";
-const VERSION: u8 = 1;
+const VERSION: u8 = 3;
+/// The last version whose style flags fit in 16 bits.
+const VERSION_2: u8 = 2;
+/// The last version without the default colours in its header.
+const VERSION_1: u8 = 1;
 /// Largest width or height a snapshot may declare.
 const MAX_DIM: usize = 4096;
 /// Most cells a snapshot may decode to (history and screens together), so a
@@ -106,7 +117,7 @@ type Result<T> = std::result::Result<T, SnapshotError>;
 struct Style {
     fg: u32,
     bg: u32,
-    flags: u16,
+    flags: u32,
     link: u16,
     underline_color: u32,
 }
@@ -162,6 +173,9 @@ impl Grid {
         enc.out.push(flags);
         enc.out.push(shape_code(self.cursor_shape));
         enc.string(&self.title);
+        let defaults = self.styles.defaults();
+        enc.varint(u64::from(defaults.fg));
+        enc.varint(u64::from(defaults.bg));
         for table in [&self.clusters, &self.links] {
             enc.varint(table.len() as u64);
             for s in table {
@@ -200,7 +214,7 @@ impl Grid {
             return Err(SnapshotError::BadMagic);
         }
         let version = d.r.read_u8()?;
-        if version != VERSION {
+        if !matches!(version, VERSION_1 | VERSION_2 | VERSION) {
             return Err(SnapshotError::UnsupportedVersion(version));
         }
         let cols = d.dim()?;
@@ -216,6 +230,11 @@ impl Grid {
         let flags = d.r.read_u8()?;
         let cursor_shape = shape_from(d.r.read_u8()?)?;
         let title = d.string()?;
+        d.wide_flags = version == VERSION;
+        if version != VERSION_1 {
+            let (fg, bg) = (d.u32()?, d.u32()?);
+            d.table.set_defaults(Defaults { fg, bg });
+        }
         let clusters = d.table()?;
         let links = d.table()?;
         (d.clusters, d.links) = (clusters.len(), links.len());
@@ -260,6 +279,7 @@ impl Grid {
         g.rebuild_cluster_caches();
         g.scrollback_max = g.scrollback_max.max(history);
         g.scrollback = scrollback;
+        g.untrimmed = g.scrollback.len();
         g.primary = primary;
         g.reset_damage();
         g.touch_hist();
@@ -297,7 +317,7 @@ impl Encoder<'_> {
         row.clear();
         let table = self.table;
         row.extend(
-            line.cells()
+            line.padded()
                 .iter()
                 .map(|c| c.resolve(&table.get(c.style()))),
         );
@@ -357,7 +377,7 @@ impl Encoder<'_> {
             for v in [
                 style.fg,
                 style.bg,
-                style.flags.into(),
+                style.flags,
                 style.link.into(),
                 style.underline_color,
             ] {
@@ -399,6 +419,8 @@ struct Decoder<'a> {
     lines_left: usize,
     clusters: usize,
     links: usize,
+    /// Style flags may use all 32 bits (version 3 on), not just 16.
+    wide_flags: bool,
 }
 
 impl<'a> Decoder<'a> {
@@ -413,6 +435,7 @@ impl<'a> Decoder<'a> {
             lines_left: MAX_LINES,
             clusters: 0,
             links: 0,
+            wide_flags: true,
         }
     }
 
@@ -535,7 +558,11 @@ impl<'a> Decoder<'a> {
         let style = Style {
             fg: self.u32()?,
             bg: self.u32()?,
-            flags: self.u16()?,
+            flags: if self.wide_flags {
+                self.u32()?
+            } else {
+                self.u16()?.into()
+            },
             link: self.u16()?,
             underline_color: self.u32()?,
         };

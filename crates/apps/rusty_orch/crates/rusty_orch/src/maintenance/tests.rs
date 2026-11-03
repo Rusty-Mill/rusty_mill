@@ -360,6 +360,7 @@ fn lost_publication_reply_adopts_same_commit_and_pr_without_push_or_creation() {
     let bundle = dir.join("pr").join(&a.namespace);
     fs::create_dir_all(&bundle).unwrap();
     let report = rusty_bbp::Report {
+        tests_changed: vec![],
         candidate: rusty_bbp::ArtId(4),
         run: rusty_bbp::RunId(1),
         profile_digest: Sha256::of(b"profiles"),
@@ -502,6 +503,7 @@ fn publication_fixture(unmerged_feature: bool) {
     )
     .unwrap();
     let report = rusty_bbp::Report {
+        tests_changed: vec![],
         candidate: rusty_bbp::ArtId(4),
         run: rusty_bbp::RunId(1),
         profile_digest: Sha256::of(b"profiles"),
@@ -721,6 +723,8 @@ fn persist_task(dir: &Path, name: &str, repo: &Path, terminal: bool) {
     use rusty_bbp::{Budget, Event, PrincipalId, Rev, SchedulingPolicy, TaskId, LOG_SCHEMA};
     let task = TaskId(name.into());
     let mut events = vec![Event::TaskOpened {
+        claims: None,
+        mode: rusty_bbp::Mode::Stages,
         schema: LOG_SCHEMA,
         roster: vec![],
         task: task.clone(),
@@ -739,6 +743,7 @@ fn persist_task(dir: &Path, name: &str, repo: &Path, terminal: bool) {
         max_live_turns: 1,
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::default(),
+        holdout_digest: None,
     }];
     if terminal {
         events.push(Event::StateChanged {

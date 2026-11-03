@@ -88,7 +88,8 @@ pub struct ReadDir {
 /// into any subdirectories. See `std::fs::read_dir`.
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub async fn read_dir(path: impl AsRef<Path>) -> io::Result<ReadDir> {
     let path = path.as_ref().to_path_buf();
     let reader = crate::spawn_blocking(move || std::fs::read_dir(path))
@@ -168,7 +169,8 @@ impl DirEntry {
     /// path lookup -- see `std::fs::DirEntry::metadata`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn metadata(&self) -> io::Result<std::fs::Metadata> {
         let entry = self.0.clone();
         crate::spawn_blocking(move || entry.metadata())
@@ -181,7 +183,8 @@ impl DirEntry {
     /// `std::fs::DirEntry::file_type`.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub async fn file_type(&self) -> io::Result<std::fs::FileType> {
         let entry = self.0.clone();
         crate::spawn_blocking(move || entry.file_type())

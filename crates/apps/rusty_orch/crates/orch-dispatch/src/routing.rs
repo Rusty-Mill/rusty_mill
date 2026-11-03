@@ -4,18 +4,18 @@
 use std::collections::HashSet;
 use std::fmt;
 
-use orch_core::task::{Agent, Role};
+use orch_core::task::{AgentId, Role};
 
 /// Routing as configured, before validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutingConfig {
-    pub research: Agent,
-    pub design: Agent,
-    pub implement: Agent,
-    pub triage: Agent,
+    pub research: AgentId,
+    pub design: AgentId,
+    pub implement: AgentId,
+    pub triage: AgentId,
     /// Reviewer preference, most preferred first. The first agent that is
     /// not the target's author gets the review.
-    pub reviewers: Vec<Agent>,
+    pub reviewers: Vec<AgentId>,
 }
 
 /// Why a routing config was refused.
@@ -57,7 +57,7 @@ impl TryFrom<RoutingConfig> for Routing {
 impl Routing {
     /// The agent for a work role; `None` for [`Role::Review`], which needs
     /// the target's author (see [`Routing::reviewer`]).
-    pub fn work(&self, role: Role) -> Option<Agent> {
+    pub fn work(&self, role: Role) -> Option<AgentId> {
         match role {
             Role::Research => Some(self.0.research),
             Role::Design => Some(self.0.design),
@@ -69,7 +69,7 @@ impl Routing {
 
     /// The most preferred reviewer that is not `author`. Always `Some` for a
     /// validated table, since two distinct reviewers cannot both be `author`.
-    pub fn reviewer(&self, author: Agent) -> Option<Agent> {
+    pub fn reviewer(&self, author: AgentId) -> Option<AgentId> {
         self.0.reviewers.iter().copied().find(|a| *a != author)
     }
 }

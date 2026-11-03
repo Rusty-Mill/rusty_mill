@@ -28,10 +28,8 @@ impl Body {
     /// written as-is; `None` sends `Transfer-Encoding: chunked` instead,
     /// for a source whose total size isn't known upfront.
     ///
-    /// The reader implements `rusty_tokio::io::AsyncRead` -- this crate's
-    /// native I/O trait, whatever runtime the request ends up running on.
-    /// For a real tokio reader (`tokio::fs::File`, etc.) use
-    /// `Body::streaming_tokio` (with the `tokio` feature) instead.
+    /// The reader implements `rusty_tokio::io::AsyncRead`, this crate's
+    /// I/O trait.
     pub fn streaming<F, R>(len: Option<u64>, open: F) -> Body
     where
         F: Fn() -> R + Send + Sync + 'static,
@@ -41,23 +39,6 @@ impl Body {
             open_fn: Arc::new(move || StreamSource(Box::new(open()))),
             len,
         })
-    }
-
-    /// [`Body::streaming`] for a reader implementing real tokio's
-    /// `tokio::io::AsyncRead` (`tokio::fs::File`, `&[u8]`, ...), bridged
-    /// through the same shim the real-tokio connector uses
-    /// (`src/tokio_compat.rs`) so the rest of the send path is shared.
-    /// Only meaningful for a request that will itself run on a real tokio
-    /// runtime -- the reader is polled by whatever runtime drives the
-    /// request, and a tokio-runtime-backed reader (a `tokio::fs::File`)
-    /// polled from inside `rusty_tokio` would find no tokio reactor.
-    #[cfg(feature = "tokio")]
-    pub fn streaming_tokio<F, R>(len: Option<u64>, open: F) -> Body
-    where
-        F: Fn() -> R + Send + Sync + 'static,
-        R: tokio::io::AsyncRead + Send + Unpin + 'static,
-    {
-        Body::streaming(len, move || crate::tokio_compat::TokioIo::new(open()))
     }
 
     /// The body's bytes, if it's fully buffered (`Empty`/`Bytes`) --

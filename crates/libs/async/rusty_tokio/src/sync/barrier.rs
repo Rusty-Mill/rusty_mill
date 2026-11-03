@@ -6,7 +6,8 @@
 
 use std::future::poll_fn;
 use std::sync::Mutex;
-use std::task::{Poll, Waker};
+
+use super::wait_list::{HasWaitList, WaitList, Waiting};
 
 struct State {
     /// Arrivals counted toward the current round.
@@ -15,10 +16,16 @@ struct State {
     /// "my round finished" apart from "some *other* round finished"
     /// without needing a dedicated wakeup channel per round.
     generation: u64,
-    /// Wakers for every non-leader arrival still waiting on the current
-    /// round. Woken (and cleared) all at once the moment the round
-    /// completes.
-    wakers: Vec<Waker>,
+    /// One slot per non-leader arrival still waiting on the current
+    /// round, removed if its future is dropped. Woken (and cleared) all
+    /// at once the moment the round completes.
+    waiters: WaitList,
+}
+
+impl HasWaitList for State {
+    fn wait_list(&mut self) -> &mut WaitList {
+        &mut self.waiters
+    }
 }
 
 /// A rendezvous point for a fixed number of tasks. Mirrors tokio's own
@@ -26,7 +33,7 @@ struct State {
 /// all called it, then every one of the `n` calls resolves together,
 /// and the barrier immediately resets to accept the next round of `n`.
 ///
-/// Hand-rolls its own waiter list (a `Vec<Waker>` behind one plain
+/// Hand-rolls its own waiter list (a [`WaitList`] behind one plain
 /// `std::sync::Mutex`, alongside the arrival count and generation
 /// counter) rather than building on [`crate::sync::Notify`]: `Notify`'s
 /// own waiters queue lives behind a *separate* lock from whatever
@@ -39,7 +46,7 @@ struct State {
 /// *same* lock already guarding `arrived`/`generation` here sidesteps
 /// that entirely: a waiter either observes its round has already
 /// completed (no need to register at all) or is guaranteed to land in
-/// `wakers` before the completing arrival can possibly take and drain
+/// `waiters` before the completing arrival can possibly take and drain
 /// that list, since both only ever happen while holding this one mutex
 /// -- there's no window for a completion to slip in between "checked"
 /// and "registered" the way there would be across two locks.
@@ -75,7 +82,7 @@ impl Barrier {
             state: Mutex::new(State {
                 arrived: 0,
                 generation: 0,
-                wakers: Vec::new(),
+                waiters: WaitList::new(),
             }),
         }
     }
@@ -92,7 +99,8 @@ impl Barrier {
     /// call on; not one this crate's own use cases (staged startup,
     /// tests waiting for N workers to be ready) are likely to hit in
     /// practice, so not worth the extra bookkeeping a fully cancel-safe
-    /// version would need.
+    /// version would need. Its waker, though, is removed: a dropped or
+    /// re-polled wait leaves no extra waker behind (#579).
     pub async fn wait(&self) -> BarrierWaitResult {
         let my_generation = {
             let mut guard = self.state.lock().unwrap();
@@ -104,7 +112,7 @@ impl Barrier {
                 // ever suspend this call at all.
                 guard.arrived = 0;
                 guard.generation = guard.generation.wrapping_add(1);
-                let wakers = std::mem::take(&mut guard.wakers);
+                let wakers = guard.waiters.take();
                 drop(guard);
                 for waker in wakers {
                     waker.wake();
@@ -114,15 +122,8 @@ impl Barrier {
             my_generation
         };
 
-        poll_fn(|cx| {
-            let mut guard = self.state.lock().unwrap();
-            if guard.generation != my_generation {
-                return Poll::Ready(());
-            }
-            guard.wakers.push(cx.waker().clone());
-            Poll::Pending
-        })
-        .await;
+        let mut waiting = Waiting::new(&self.state);
+        poll_fn(|cx| waiting.poll_until(cx, |state| state.generation != my_generation)).await;
 
         BarrierWaitResult { is_leader: false }
     }

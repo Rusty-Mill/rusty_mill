@@ -6,25 +6,27 @@
 //! files never disagree and every file stays human-readable. Each operation needs the `Admin`
 //! capability. They are not MCP tools: a model should not mint credentials.
 //!
-//! Nothing here ever returns a token except the one it just made, once.
+//! Apps signed in through OAuth are listed and revoked here too; their grants live in OAuth's own
+//! state file. Nothing here ever returns a token except the one it just made, once.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::time::Duration;
 
+use rusty_oauth_server::Provider;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
 use crate::api::{CallError, Identity, Shared, Who, acting};
-use crate::board::Roles;
-use crate::domain::{Actor, BoardError, Capability};
+use crate::board::{ProjectsSink, Roles};
+use crate::domain::{Actor, BoardError, Capability, MoveRules};
 use crate::github::GithubConfig;
 use crate::identities::{Credentials, read_private};
 use crate::projects::Projects;
 use crate::syncer::{MIN_SECS, Syncer};
+use crate::workflow::Workflow;
 
 const DEFAULT_API: &str = "https://api.github.com";
 const DEFAULT_SECS: u64 = 60;
@@ -42,18 +44,35 @@ pub struct Files {
     pub roles: Option<PathBuf>,
     /// The GitHub sync.
     pub github: Option<PathBuf>,
+    /// Whether card movement rules are enforced.
+    pub rules: Option<PathBuf>,
+    /// The columns and the moves between them.
+    pub workflow: Option<PathBuf>,
 }
 
 impl Files {
-    /// The four files in one directory.
+    /// The settings files in one directory.
     pub fn in_dir(dir: &Path) -> Self {
         Self {
             identities: Some(dir.join("identities.json")),
             projects: Some(dir.join("projects.json")),
             roles: Some(dir.join("roles.json")),
             github: Some(dir.join("github.json")),
+            rules: Some(dir.join("rules.json")),
+            workflow: Some(dir.join("workflow.json")),
         }
     }
+}
+
+/// How the server was started, shown read-only in the settings view.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ServerInfo {
+    /// Where the cards are kept: a rusty_tick URL, or `None` for memory.
+    pub tick: Option<String>,
+    /// The public origin OAuth sign-in is served under, when on.
+    pub issuer: Option<String>,
+    /// Accepted `Host` names.
+    pub hosts: Vec<String>,
 }
 
 /// The GitHub sync as its file holds it. The token is a secret: the file is owner-only.
@@ -104,7 +123,51 @@ pub fn load_roles(path: &Path) -> Result<Roles, String> {
     Ok(roles)
 }
 
+/// The rules file: `{"movement": "enforced" | "open"}`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RulesFile {
+    /// Whether card moves follow the transition table.
+    pub movement: MoveRules,
+}
+
+/// The movement rules from `path`, or the default ([`MoveRules::Enforced`]) if there is no such
+/// file yet.
+///
+/// # Errors
+/// If it exists but cannot be read or parsed.
+pub fn load_rules(path: &Path) -> Result<MoveRules, String> {
+    if !path.exists() {
+        return Ok(MoveRules::default());
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let file: RulesFile = serde_json::from_str(&json).map_err(|e| format!("rules: {e}"))?;
+    Ok(file.movement)
+}
+
+/// The workflow from `path`, or the default (the original seven columns) if there is no such
+/// file yet.
+///
+/// # Errors
+/// If it exists but cannot be read, parsed or validated.
+pub fn load_workflow(path: &Path) -> Result<Workflow, String> {
+    if !path.exists() {
+        return Ok(Workflow::default());
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&json).map_err(|e| format!("workflow: {e}"))
+}
+
 /// Roles must be plainly named, and some role must hold `Admin`.
+/// Persist a project registry to the projects file at `path`, atomically.
+pub fn projects_sink(path: PathBuf) -> ProjectsSink {
+    Box::new(move |projects: &Projects| {
+        let json = projects.file_json()?;
+        rusty_atomic_file::write(&path, json.as_bytes())
+            .map_err(|e| format!("{}: {e}", path.display()))
+    })
+}
+
 fn check_roles(roles: &Roles) -> Result<(), String> {
     let plain = |n: &str| {
         !n.is_empty()
@@ -210,6 +273,11 @@ struct AgentName {
 }
 
 #[derive(Deserialize)]
+struct AppId {
+    client_id: String,
+}
+
+#[derive(Deserialize)]
 struct ProjectsSet {
     repos: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
@@ -217,6 +285,22 @@ struct ProjectsSet {
 #[derive(Deserialize)]
 struct RolesSet {
     roles: Roles,
+}
+
+#[derive(Deserialize)]
+struct RoleRename {
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
+struct RulesSet {
+    movement: MoveRules,
+}
+
+#[derive(Deserialize)]
+struct WorkflowSet {
+    workflow: Workflow,
 }
 
 #[derive(Deserialize)]
@@ -234,34 +318,6 @@ fn refused(why: impl Into<String>) -> BoardError {
     BoardError::Refused(why.into())
 }
 
-/// The settings files' names inside a snapshot.
-const IDENTITIES: &str = "identities.json";
-const PROJECTS: &str = "projects.json";
-const ROLES: &str = "roles.json";
-const GITHUB: &str = "github.json";
-
-/// Load a snapshot as a restore would: roles and projects (the defaults where absent, as at
-/// start), then the agents against them, then the GitHub sync.
-fn check_set(dir: &Path) -> Result<(), String> {
-    let roles_file = dir.join(ROLES);
-    let roles = if roles_file.exists() {
-        load_roles(&roles_file)?
-    } else {
-        Roles::default()
-    };
-    let projects_file = dir.join(PROJECTS);
-    let projects = if projects_file.exists() {
-        Projects::load(&projects_file)?
-    } else {
-        Projects::default()
-    };
-    let identities = dir.join(IDENTITIES);
-    if identities.exists() {
-        Credentials::load(&identities, &roles, &projects)?;
-    }
-    load_github(&dir.join(GITHUB)).map(drop)
-}
-
 /// The settings service.
 pub struct Settings {
     board: Arc<Shared>,
@@ -272,8 +328,9 @@ pub struct Settings {
     github: Mutex<Option<GithubFile>>,
     /// One change at a time.
     changing: Mutex<()>,
-    /// Changes waiting for `changing`, so a test can tell one has reached the lock.
-    waiting: AtomicUsize,
+    /// OAuth's provider, once the web layer turns sign-in on.
+    oauth: OnceLock<Arc<Provider>>,
+    server: ServerInfo,
 }
 
 impl Settings {
@@ -293,83 +350,27 @@ impl Settings {
             syncer,
             github: Mutex::new(github),
             changing: Mutex::new(()),
-            waiting: AtomicUsize::new(0),
+            oauth: OnceLock::new(),
+            server: ServerInfo::default(),
         }
     }
 
-    /// Changes now waiting for another to finish.
-    #[doc(hidden)]
-    pub fn waiting(&self) -> usize {
-        self.waiting.load(Ordering::SeqCst)
+    /// Show how the server was started.
+    #[must_use]
+    pub fn with_server(mut self, server: ServerInfo) -> Self {
+        self.server = server;
+        self
+    }
+
+    /// List and revoke the apps signed in through `provider`. Only the first one is kept.
+    pub fn attach_oauth(&self, provider: Arc<Provider>) {
+        let _ = self.oauth.set(provider);
     }
 
     /// Settings with nothing configured: every change is refused with the way to enable it.
     pub fn read_only(board: Arc<Shared>) -> Self {
         let syncer = Syncer::new(Arc::clone(&board));
         Self::new(board, Files::default(), None, syncer, None)
-    }
-
-    /// Copy the settings files into the existing directory `dir` as one consistent set, each under
-    /// a fixed name (`identities.json`, `projects.json`, `roles.json`, `github.json`) whatever it
-    /// is called here, so two files that share a name elsewhere cannot overwrite one another. Then
-    /// check that the copy loads together. It holds the lock every change holds, so an agent
-    /// cannot be copied with a role that the copy of the roles then lacks.
-    ///
-    /// # Errors
-    /// If a file cannot be read or written, or the copied set does not load.
-    pub fn snapshot(&self, dir: &Path) -> Result<(), String> {
-        self.snapshot_with(dir, &mut || Ok(()))
-    }
-
-    /// [`Settings::snapshot`], running `store` first, with the lock held: the store's own copy.
-    /// Holding the settings lock across both is what keeps the two coherent: a project cannot be
-    /// removed (nor an agent's role changed) between the cards being copied and the registry
-    /// they belong to.
-    ///
-    /// Lock order: this lock first, then whatever `store` takes (the store's commit lock). Nothing
-    /// takes the commit lock and then waits for this one.
-    ///
-    /// # Errors
-    /// If `store` fails, or see [`Settings::snapshot`].
-    pub fn snapshot_with(
-        &self,
-        dir: &Path,
-        store: &mut dyn FnMut() -> Result<(), String>,
-    ) -> Result<(), String> {
-        self.snapshot_between(dir, store, &mut || {})
-    }
-
-    /// [`Settings::snapshot_with`], calling `between` after each settings file is copied, still
-    /// holding the lock. For tests that need a change to arrive mid-copy.
-    ///
-    /// # Errors
-    /// See [`Settings::snapshot_with`].
-    #[doc(hidden)]
-    pub fn snapshot_between(
-        &self,
-        dir: &Path,
-        store: &mut dyn FnMut() -> Result<(), String>,
-        between: &mut dyn FnMut(),
-    ) -> Result<(), String> {
-        let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
-        store()?;
-        let live = [
-            (&self.files.identities, IDENTITIES),
-            (&self.files.projects, PROJECTS),
-            (&self.files.roles, ROLES),
-            (&self.files.github, GITHUB),
-        ];
-        for (from, name) in live {
-            let Some(from) = from.as_deref().filter(|p| p.exists()) else {
-                continue;
-            };
-            let bytes = std::fs::read(from).map_err(|e| format!("{}: {e}", from.display()))?;
-            let to = dir.join(name);
-            rusty_atomic_file::write_private(&to, &bytes)
-                .map_err(|e| format!("{}: {e}", to.display()))?;
-            between();
-        }
-        check_set(dir)
     }
 
     /// Run a settings operation, or `None` if `name` is not one.
@@ -389,8 +390,14 @@ impl Settings {
             "settings_agent_rotate" => |s, _, a| s.agent_rotate(&parse(a)?),
             "settings_projects_set" => |s, _, a| s.projects_set(&parse(a)?),
             "settings_roles_set" => |s, _, a| s.roles_set(&parse(a)?),
+            "settings_role_rename" => |s, _, a| s.role_rename(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
+            "settings_rules_set" => |s, by, a| s.rules_set(by, &parse(a)?),
+            "settings_workflow_set" => {
+                |s, by, a| s.workflow_set(by, parse::<WorkflowSet>(a)?.workflow)
+            }
+            "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
         Some(self.admin(identity, args, run))
@@ -408,9 +415,7 @@ impl Settings {
         if !actor.caps.contains(&Capability::Admin) {
             return Err(BoardError::Forbidden(Capability::Admin).into());
         }
-        self.waiting.fetch_add(1, Ordering::SeqCst);
         let _one_at_a_time = self.changing.lock().unwrap_or_else(PoisonError::into_inner);
-        self.waiting.fetch_sub(1, Ordering::SeqCst);
         run(self, &actor, args).map_err(CallError::Board)
     }
 
@@ -432,13 +437,41 @@ impl Settings {
                 "projects": self.files.projects.is_some(),
                 "roles": self.files.roles.is_some(),
                 "github": self.files.github.is_some(),
+                "rules": self.files.rules.is_some(),
+                "workflow": self.files.workflow.is_some(),
             },
             "agents": agents,
             "repos": self.board.projects(),
             "roles": self.board.roles(),
             "capabilities": Capability::ALL,
+            "capability_about": Capability::ALL.map(|c| (c, c.about())).into_iter().collect::<BTreeMap<_, _>>(),
             "github": github,
+            "rules": RulesFile { movement: self.board.move_rules() },
+            "workflow": self.board.workflow(),
+            "apps": self.oauth.get().map(|p| p.store().list_clients()),
+            "server": self.server,
+            "paths": {
+                "agents": self.files.identities,
+                "projects": self.files.projects,
+                "roles": self.files.roles,
+                "github": self.files.github,
+                "rules": self.files.rules,
+                "workflow": self.files.workflow,
+            },
         }))
+    }
+
+    /// Sign an app out: drop its registration and every token it holds. It can sign in again.
+    fn app_revoke(&self, a: &AppId) -> Res {
+        let provider = self
+            .oauth
+            .get()
+            .ok_or_else(|| refused("OAuth sign-in is off: start the board with --issuer"))?;
+        match provider.store().revoke_client(&a.client_id) {
+            Ok(Some(gone)) => Ok(json!(gone)),
+            Ok(None) => Err(refused(format!("no app {:?}", a.client_id))),
+            Err(e) => Err(refused(format!("not revoked: {e}"))),
+        }
     }
 
     /// The role must exist and every named project too.
@@ -475,6 +508,7 @@ impl Settings {
         let mut next = live.clone();
         let out = f(&mut next).map_err(refused)?;
         self.keeps_an_admin(&next, &self.board.roles())?;
+        self.fits_saved_roles(&next)?;
         next.save(path).map_err(refused)?;
         *live = next;
         Ok(out)
@@ -553,32 +587,157 @@ impl Settings {
             }
         }
         // Persisted inside the board's critical section: live and disk change together or not at all.
-        self.board.set_projects(new.clone(), |projects| {
-            let json = projects.file_json()?;
-            rusty_atomic_file::write(&path, json.as_bytes())
-                .map_err(|e| format!("{}: {e}", path.display()))
-        })?;
+        self.board.set_projects(new.clone(), projects_sink(path))?;
         Ok(json!({ "repos": new }))
     }
 
     fn roles_set(&self, a: &RolesSet) -> Res {
+        self.write_roles(&a.roles)?;
+        Ok(json!({ "roles": a.roles }))
+    }
+
+    /// Validate `roles` against the agents, write them to their file, then apply them.
+    fn write_roles(&self, roles: &Roles) -> Result<(), BoardError> {
         let path = self.file(&self.files.roles)?;
-        check_roles(&a.roles).map_err(refused)?;
+        check_roles(roles).map_err(refused)?;
         if let Some(creds) = &self.creds {
             let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
-            if let Some(i) = creds.list().find(|i| !a.roles.0.contains_key(&i.role)) {
+            if let Some(i) = creds.list().find(|i| !roles.0.contains_key(&i.role)) {
                 return Err(refused(format!(
                     "agent {:?} has role {:?}, which would no longer exist; change the agent first",
                     i.actor, i.role
                 )));
             }
-            self.keeps_an_admin(&creds, &a.roles)?;
+            self.keeps_an_admin(&creds, roles)?;
         }
-        let json = serde_json::to_string_pretty(&a.roles).map_err(|e| refused(e.to_string()))?;
+        self.saved_creds_fit(roles)?;
+        let json = serde_json::to_string_pretty(roles).map_err(|e| refused(e.to_string()))?;
         rusty_atomic_file::write(&path, json.as_bytes())
             .map_err(|e| refused(format!("{}: {e}", path.display())))?;
-        self.board.set_roles(a.roles.clone());
-        Ok(json!({ "roles": a.roles }))
+        self.board.set_roles(roles.clone());
+        Ok(())
+    }
+
+    /// The credentials file as saved must still load with `roles`. A failed save does not
+    /// prove the file is unchanged (an atomic write can fail after replacing it), so the saved
+    /// file may hold roles the live set does not.
+    fn saved_creds_fit(&self, roles: &Roles) -> Result<(), BoardError> {
+        let Some(path) = self
+            .files
+            .identities
+            .as_ref()
+            .filter(|_| self.creds.is_some())
+        else {
+            return Ok(());
+        };
+        if !path.exists() {
+            return Ok(());
+        }
+        let saved = Credentials::load(path, roles, &self.board.projects()).map_err(|e| {
+            refused(format!(
+                "the saved credentials would not load with these roles ({e}); save any agent on the Agents tab first"
+            ))
+        })?;
+        self.keeps_an_admin(&saved, roles)
+    }
+
+    /// `creds` must load with the roles as saved, the other half of [`Self::saved_creds_fit`]:
+    /// a failed roles write may still have replaced the file. No roles file: the defaults,
+    /// which is what a restart reads.
+    fn fits_saved_roles(&self, creds: &Credentials) -> Result<(), BoardError> {
+        let saved = match &self.files.roles {
+            Some(path) if path.exists() => load_roles(path).map_err(refused)?,
+            Some(_) => Roles::default(),
+            None => self.board.roles(),
+        };
+        if let Some(i) = creds.list().find(|i| !saved.0.contains_key(&i.role)) {
+            return Err(refused(format!(
+                "agent {:?} would have role {:?}, which the saved roles file lacks; save the roles on the Roles tab first",
+                i.actor, i.role
+            )));
+        }
+        self.keeps_an_admin(creds, &saved)
+    }
+
+    /// Rename a role and move every agent holding it: add the new name beside the old, move
+    /// the agents, drop the old name. Each step leaves the files valid whatever a failed write
+    /// left behind, so nothing is rolled back: a failure keeps both names live (on disk the
+    /// old one may already be gone), and the error says how to finish from there. Every later
+    /// change is checked against the saved files as well as the live state, so none can make
+    /// them unloadable in the meantime.
+    fn role_rename(&self, a: &RoleRename) -> Res {
+        let mut roles = self.board.roles();
+        if roles.0.contains_key(&a.to) {
+            return Err(refused(format!("there is already a role {:?}", a.to)));
+        }
+        let caps = roles
+            .0
+            .get(&a.from)
+            .cloned()
+            .ok_or_else(|| refused(format!("there is no role {:?}", a.from)))?;
+        roles.0.insert(a.to.clone(), caps);
+        self.write_roles(&roles)?;
+        if self.held(&a.from) {
+            self.change_creds(|c| {
+                c.rename_role(&a.from, &a.to);
+                Ok(())
+            })
+            .map_err(|e| {
+                refused(format!(
+                    "partly renamed: roles {:?} and {:?} both exist with the same capabilities, but the agents \
+                     may not have moved ({e}). To finish, give {:?}'s agents role {:?} on the Agents tab, then remove {:?}",
+                    a.from, a.to, a.from, a.to, a.from
+                ))
+            })?;
+        }
+        roles.0.remove(&a.from);
+        self.write_roles(&roles).map_err(|e| {
+            refused(format!(
+                "partly renamed: the agents hold {:?}, but dropping {:?} may not have been saved ({e}). \
+                 To finish, remove {:?} on the Roles tab",
+                a.to, a.from, a.from
+            ))
+        })?;
+        Ok(json!({ "roles": roles }))
+    }
+
+    /// Whether some agent holds `role`.
+    fn held(&self, role: &str) -> bool {
+        self.creds.as_ref().is_some_and(|c| {
+            c.read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .list()
+                .any(|i| i.role == role)
+        })
+    }
+
+    /// Turn the movement rules on or off: written first, then applied, and logged.
+    fn rules_set(&self, by: &Actor, a: &RulesSet) -> Res {
+        let path = self.file(&self.files.rules)?;
+        let file = RulesFile {
+            movement: a.movement,
+        };
+        let json = serde_json::to_string_pretty(&file).map_err(|e| refused(e.to_string()))?;
+        rusty_atomic_file::write(&path, json.as_bytes())
+            .map_err(|e| refused(format!("{}: {e}", path.display())))?;
+        self.board.set_move_rules(a.movement);
+        rusty_log::warn!(actor = %by.name, movement = ?a.movement, "card movement rules changed");
+        Ok(json!(file))
+    }
+
+    /// Replace the columns and moves. Refused if a removed column still holds cards; the file
+    /// is written under the board's lock, before the change applies, and the change is logged.
+    fn workflow_set(&self, by: &Actor, next: Workflow) -> Res {
+        let path = self.file(&self.files.workflow)?;
+        let json = serde_json::to_string_pretty(&next).map_err(|e| refused(e.to_string()))?;
+        self.board.set_workflow(next, |_| {
+            rusty_atomic_file::write(&path, json.as_bytes())
+                .map_err(|e| format!("{}: {e}", path.display()))
+        })?;
+        let flow = self.board.workflow();
+        let columns: Vec<&str> = flow.columns().iter().map(|c| c.id.as_str()).collect();
+        rusty_log::warn!(actor = %by.name, columns = ?columns, "board workflow changed");
+        Ok(json!({ "workflow": flow }))
     }
 
     fn github_set(&self, a: &GithubSet) -> Res {

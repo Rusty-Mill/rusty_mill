@@ -22,13 +22,14 @@ inside the `rusty_mill` monorepo. The monorepo's own conventions (root
   `generic/{traits,store,mmap_store,production,query,...}.rs`, `codec.rs`,
   the journal, the full-text index or the directory lock is made in the
   engine crate, and its tests run there. Here: `src/` (`record`,
-  `generator`, `store` + the research backends, `durability`, `concurrency`,
+  `generator`, `store`, `durability`, `concurrency`,
   `production`, `generic/{entity,memory,relation,reminder}.rs` (and `generic::fair_play`, a re-export of the libs crate `rusty_fair_play_domain`), `server/`,
   `bin/`), `benches/`, `tests/`, `examples/`, `clients/python/`.
 - Features: default (front-door only: `ProductionStore`,
-  `GenericProductionStore`, the domain stacks), `research` (the benchmarked
-  alternatives and spikes), `client` (the wire client and protocol),
-  `server` (implies `client`; the listener and adapters), `perf-events`.
+  `GenericProductionStore`, the domain stacks), `research` (the reference
+  domains, dataset builders and durability harnesses), `client` (the wire
+  client and protocol), `server` (implies `client`; the listener and
+  adapters).
 - Architectural boundaries: see
   `docs/architecture/SYSTEM-ARCHITECTURE.md` — one-way dependency
   direction (backends depend on `store`/`record`, never the reverse), and
@@ -57,9 +58,6 @@ feature sets separately (`ADR-0098`), so check the ones you touched:
   --all-features --no-deps` (`ADR-0101`).
 - Benchmarks (wall-clock, cross-platform): `cargo bench -p
   rusty_multimodal_db --features research`
-- Benchmarks (cache-miss, Linux bare-metal only): `cargo bench --features
-  perf-events --bench cache_events` — see ADR-0002 before relying on this
-  anywhere else.
 - After any dependency or feature change: regenerate the workspace map the
   way CI checks it — `cargo metadata --format-version=1 --all-features
   --locked > /tmp/metadata.json`, then `python3

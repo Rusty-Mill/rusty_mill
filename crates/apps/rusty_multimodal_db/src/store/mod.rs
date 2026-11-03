@@ -1,4 +1,6 @@
-//! The `DogStore` trait shared by all four backends, and its error type.
+//! The `DogStore` trait `ProductionStore` implements, and its error type.
+//! `AosStore` and `CanonicalCachedStore` remain as test-only references;
+//! the SoA and canonical backends were removed by ADR-0138.
 //!
 //! See `docs/decisions/ADR-0001-three-backend-empirical-comparison.md` for
 //! why the first three implementations are compared behind one trait,
@@ -11,18 +13,8 @@
 //! `STORAGE-006-littermate-graph-traversal.md` for the requirements each
 //! implementation satisfies.
 
-// The four backends below are the benchmark comparison this crate's
-// charter set out to run — not the recommended path (see `lib.rs`'s own
-// top-level doc comment). Gated behind the `research` feature; the
-// `DogStore` trait/`StoreError` type below stay unconditional since
-// `crate::production::ProductionStore` implements this trait directly.
-// Also available under plain `#[cfg(test)]`: `bench_support`'s own tests
-// use `AosStore` for a sanity check — see `canonical_cached` above for
-// why this doesn't widen what an external consumer actually sees.
 #[cfg(any(test, feature = "research"))]
 pub mod aos;
-#[cfg(feature = "research")]
-pub mod canonical;
 // Also available under plain `#[cfg(test)]` regardless of `research`:
 // `concurrency::test_support::run_concurrency_stress_test` (used by
 // `ProductionStore`'s own flagship, always-on test) replays writes
@@ -32,17 +24,11 @@ pub mod canonical;
 // external consumer actually sees.
 #[cfg(any(test, feature = "research"))]
 pub mod canonical_cached;
-#[cfg(feature = "research")]
-pub mod soa;
 
 #[cfg(any(test, feature = "research"))]
 pub use aos::AosStore;
-#[cfg(feature = "research")]
-pub use canonical::CanonicalStore;
 #[cfg(any(test, feature = "research"))]
 pub use canonical_cached::CanonicalCachedStore;
-#[cfg(feature = "research")]
-pub use soa::SoaStore;
 
 use crate::record::DogRecord;
 use thiserror::Error;
@@ -76,7 +62,7 @@ pub enum StoreError {
 }
 
 /// Shared storage interface implemented by [`AosStore`] (row-oriented),
-/// [`SoaStore`] (column-oriented), [`CanonicalStore`] (UUID-canonical with
+/// `SoaStore` (column-oriented), `CanonicalStore` (UUID-canonical with
 /// derived views), and [`CanonicalCachedStore`] (UUID-canonical plus a
 /// materialized age cache).
 ///

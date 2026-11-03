@@ -6,6 +6,7 @@ mod error;
 mod fifo;
 mod free_tiers;
 mod guardrails;
+mod http;
 mod metrics;
 mod moderation;
 mod persistence;
@@ -966,7 +967,7 @@ where
             break;
         }
         retries += 1;
-        tokio::time::sleep(SAME_PROVIDER_RETRY_BACKOFF).await;
+        rusty_tokio::time::sleep(SAME_PROVIDER_RETRY_BACKOFF).await;
         result = attempt().await;
     }
     result
@@ -1532,7 +1533,7 @@ impl Router {
             if let Some(webhook) = self.webhook.clone() {
                 let persistence = persistence.clone();
                 let client_name = client_name.to_string();
-                tokio::spawn(async move {
+                rusty_tokio::spawn(async move {
                     if let Ok(Some((period_key, spent_usd))) =
                         persistence.client_spend(&client_name).await
                     {
@@ -2658,7 +2659,7 @@ impl Router {
             let api_key_override = self.byok_key_for(req, &provider_name).map(str::to_string);
             let timeout = fusion.timeout;
             futures.push(async move {
-                let result = tokio::time::timeout(
+                let result = rusty_tokio::time::timeout(
                     timeout,
                     retry_same_provider(|| {
                         provider.chat(&req_clone, &model_name, api_key_override.as_deref())
@@ -3597,7 +3598,7 @@ mod tests {
         ) -> Result<ChatResponse, ProviderError> {
             self.seen_requests.lock().unwrap().push(req.clone());
             if let Some(delay) = self.delay {
-                tokio::time::sleep(delay).await;
+                rusty_tokio::time::sleep(delay).await;
             }
             let message = if self.with_tool_calls {
                 ChatMessage {
@@ -3705,6 +3706,7 @@ mod tests {
 
     #[tokio::test]
     async fn from_config_opens_persistence_when_configured() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_db_path("opens");
         let config = Config::from_toml_str(&format!(
             "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
@@ -3879,6 +3881,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_fires_budget_exceeded_on_the_crossing_request() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -3904,6 +3907,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_does_not_refire_once_already_over_budget() {
+        crate::http::install_fallback_for_test();
         // `.expect(1)` on the mock means a second delivery would fail
         // verification -- proving the second, already-over-budget request
         // doesn't fire another event.
@@ -3942,6 +3946,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_sends_the_configured_authorization_header() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -3986,6 +3991,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_fires_budget_warning_on_the_crossing_request() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4012,6 +4018,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_spend_does_not_refire_budget_warning_once_already_over_threshold() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4055,6 +4062,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_client_spend_fires_budget_reset() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4105,6 +4113,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_carries_a_valid_hmac_signature_when_signing_secret_is_configured() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         let expected_body =
             br#"{"event":"budget_reset","client":"acme","budget_usd":10.0,"period":"total"}"#;
@@ -4144,6 +4153,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_sends_no_signature_header_when_signing_secret_is_unset() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4165,6 +4175,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_retries_after_a_5xx_and_succeeds() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         // First attempt 500s, second succeeds -- `.up_to_n_times` sequences
         // two distinct responses across the retry.
@@ -4203,6 +4214,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_gives_up_after_exhausting_max_retries() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4230,6 +4242,7 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_does_not_retry_a_4xx_response() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
@@ -4255,6 +4268,106 @@ mod tests {
         server.verify().await;
     }
 
+    /// Reads one whole HTTP/1.1 request (headers plus a `Content-Length`
+    /// body) off `stream`. A server that closes with request bytes still
+    /// unread makes Windows reset the connection, which can discard the
+    /// response before the client reads it.
+    fn read_request(stream: &mut std::net::TcpStream) {
+        use std::io::Read;
+        let mut request = Vec::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            if let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                let body_len: usize = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + body_len {
+                    return;
+                }
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => request.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+
+    /// A one-shot-per-connection raw TCP receiver: answers every connection
+    /// with `head` (status line, headers and the start of a body shorter
+    /// than its declared `Content-Length`), then holds the connection for
+    /// `hold` before closing it. Returns the URL and a count of
+    /// connections, one per delivery attempt.
+    fn partial_body_receiver(
+        head: &'static str,
+        hold: std::time::Duration,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    read_request(&mut stream);
+                    let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
+                    std::thread::sleep(hold);
+                });
+            }
+        });
+        (url, attempts)
+    }
+
+    /// Fires one budget-reset webhook at `url` (1s timeout, up to 3 quick
+    /// retries) and waits `settle` for any retries to land.
+    async fn fire_one_webhook(url: String, settle: std::time::Duration) {
+        let router = router_with_budgeted_client(10.0, BudgetPeriod::Total);
+        let router = Router {
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                url,
+                None,
+                1,
+                None,
+                RetryPolicy::for_test(10, 3),
+            ))),
+            ..router
+        };
+        assert!(router.reset_client_spend("acme"));
+        tokio::time::sleep(settle).await;
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_200_whose_body_stalls() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nok";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::from_secs(3));
+        // Past the 1s timeout, so reading the body would have timed out and retried.
+        fire_one_webhook(url, std::time::Duration::from_millis(1500)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_200_whose_body_is_truncated() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nok";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::ZERO);
+        fire_one_webhook(url, std::time::Duration::from_millis(300)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_400_whose_body_is_truncated() {
+        crate::http::install_fallback_for_test();
+        let head = "HTTP/1.1 400 Bad Request\r\nContent-Length: 100\r\n\r\nno";
+        let (url, attempts) = partial_body_receiver(head, std::time::Duration::ZERO);
+        fire_one_webhook(url, std::time::Duration::from_millis(300)).await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     // --- client daily usage history -----------------------------------------------
 
     #[tokio::test]
@@ -4276,6 +4389,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_daily_usage_and_client_usage_history_round_trip() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_db_path("daily_usage_round_trip");
         let config = Config::from_toml_str(&format!(
             "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
@@ -4312,6 +4426,7 @@ mod tests {
 
     #[tokio::test]
     async fn record_client_daily_usage_applies_even_without_a_configured_budget() {
+        crate::http::install_fallback_for_test();
         // Distinct from record_client_spend, which no-ops for a client
         // with no budget_usd set -- historical usage tracking applies to
         // every named client, budgeted or not.
@@ -4347,6 +4462,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_usage_history_days_parameter_bounds_how_far_back_it_looks() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_db_path("daily_usage_days_bound");
         let config = Config::from_toml_str(&format!(
             "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
@@ -4376,6 +4492,7 @@ mod tests {
 
     #[tokio::test]
     async fn client_budget_is_persisted_and_shared_across_two_router_instances_sqlite() {
+        crate::http::install_fallback_for_test();
         // Same shape as the usage-sharing test below, but for client spend
         // budgets: router_a records spend against "acme"; router_b, a
         // separate Router pointed at the same SQLite file, must see it via
@@ -4476,6 +4593,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_router_instances_sharing_a_persistence_file_see_each_others_usage() {
+        crate::http::install_fallback_for_test();
         // Simulates two processes (or a restart): router_a dispatches and
         // persists a request; router_b, an entirely separate Router that
         // never dispatched anything itself, is pointed at the same SQLite
@@ -4537,6 +4655,7 @@ mod tests {
 
     #[tokio::test]
     async fn check_readiness_is_ok_against_a_reachable_persistence_file() {
+        crate::http::install_fallback_for_test();
         let path = unique_temp_db_path("readiness_ok");
         let router = test_router(vec![], vec![], vec![], vec![], vec![]);
         let router = Router {
@@ -4760,6 +4879,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_moderation_blocks_and_records_a_metric_per_flagged_category() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/moderations"))
@@ -4791,6 +4911,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_moderation_allows_the_request_through_when_the_backend_is_unreachable() {
+        crate::http::install_fallback_for_test();
         let mut router = test_router(vec![], vec![], vec![], vec![], vec![]);
         // Port 0 never accepts connections -- a real, unrecoverable
         // network failure, not just a non-2xx response.
@@ -4854,6 +4975,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_prepends_results_to_the_last_user_message_and_records_a_metric() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/res/v1/web/search"))
@@ -4892,6 +5014,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_leaves_the_message_unchanged_when_there_are_no_results() {
+        crate::http::install_fallback_for_test();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
@@ -4915,6 +5038,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_web_search_leaves_the_request_unmodified_when_the_backend_is_unreachable() {
+        crate::http::install_fallback_for_test();
         let mut router = test_router(vec![], vec![], vec![], vec![], vec![]);
         // Port 0 never accepts connections -- a real, unrecoverable
         // network failure, not just a non-2xx response.
@@ -6913,6 +7037,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_records_uptime_of_zero_on_retryable_failure_and_falls_through() {
+        crate::http::install_fallback_for_test();
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
         let failing = Arc::new(MockProvider {
@@ -8352,7 +8477,7 @@ mod tests {
         assert_eq!(trace.fallback_attempts, 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_traced_counts_every_candidate_tried_when_the_chain_falls_through() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let a = Arc::new(MockProvider {
@@ -8389,6 +8514,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_traced_reports_fusion_strategy_with_the_panel_size_as_attempts() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
         let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
         let judge = Arc::new(FusionCandidateProvider::new("j", "synthesized"));
@@ -8483,6 +8609,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_stream_traced_reports_the_winning_candidate_before_any_chunk_is_read() {
+        crate::http::install_fallback_for_test();
         let calls_a = Arc::new(AtomicUsize::new(0));
         let a = Arc::new(MockProvider {
             name: "a".to_string(),
@@ -8953,7 +9080,7 @@ mod tests {
         assert_eq!(resp.model, "openai/text-embedding-3-small");
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn embeddings_falls_back_to_the_next_candidate_on_a_retryable_error() {
         // Anthropic has no embeddings API -- UnsupportedFeature is
         // retryable, so a chain naming it alongside a real embeddings
@@ -9221,7 +9348,7 @@ mod tests {
         assert!(metrics.contains(r#"model="m1""#));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_falls_back_to_next_candidate_on_retryable_error() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -9257,7 +9384,7 @@ mod tests {
         assert_eq!(calls_b.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_retries_the_same_provider_and_succeeds_without_falling_through() {
         // The retry actually rescues the candidate -- not just delays an
         // inevitable fall-through to the next one, which the call-count
@@ -9299,7 +9426,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_does_not_retry_a_retryable_but_non_transient_error() {
         // UnsupportedFeature is retryable (the chain should move on to a
         // candidate that might support it) but not transient -- retrying
@@ -9339,7 +9466,7 @@ mod tests {
         assert_eq!(calls_b.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_falls_back_across_an_ad_hoc_models_list_with_no_configured_route() {
         // No `[[routes]]` alias at all -- the chain comes entirely from
         // `model` + `req.models`, proving the ad-hoc list is honored even
@@ -9418,6 +9545,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_returns_last_error_when_every_candidate_fails() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(MockProvider {
             name: "anthropic".to_string(),
             behavior: MockBehavior::FailRetryable,
@@ -9627,7 +9755,7 @@ mod tests {
         assert!(matches!(err, RouterError::InvalidModel(m) if m == "smart"));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_exhausts_a_longer_chain_trying_every_candidate_before_failing() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -9682,7 +9810,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_final_error_reflects_the_last_candidate_even_when_its_kind_differs() {
         // "a" is configured and fails retryably; "b" isn't registered at
         // all. The chain still runs to exhaustion and returns whichever
@@ -9712,7 +9840,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_stops_on_a_fatal_error_without_trying_remaining_candidates() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -9763,7 +9891,7 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_stream_falls_back_to_next_candidate_on_retryable_error() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -9841,6 +9969,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_stream_returns_last_error_when_every_candidate_fails() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(MockProvider {
             name: "anthropic".to_string(),
             behavior: MockBehavior::FailRetryable,
@@ -9932,6 +10061,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_fusion_synthesizes_from_the_full_panel() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
         let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
         let judge = Arc::new(ReqCapturingProvider {
@@ -10007,7 +10137,7 @@ mod tests {
         assert_eq!(usage.total_tokens, 15 + 15 + 30);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_fusion_a_slow_panel_member_does_not_block_past_the_timeout() {
         let fast = Arc::new(FusionCandidateProvider::new("fast", "fast answer"));
         let slow = Arc::new(
@@ -10056,7 +10186,7 @@ mod tests {
         let _ = resp;
     }
 
-    #[tokio::test(start_paused = true)]
+    #[rusty_tokio::test(flavor = "current_thread", start_paused = true)]
     async fn dispatch_fusion_fails_only_when_every_candidate_fails() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let a = Arc::new(MockProvider {
@@ -10090,6 +10220,7 @@ mod tests {
     #[tokio::test]
     async fn dispatch_fusion_returns_a_panel_members_response_directly_when_it_carries_tool_calls()
     {
+        crate::http::install_fallback_for_test();
         // Defense in depth: even though `dispatch_uncached` already keeps a
         // tool-calling *request* out of fusion entirely, a panel member
         // could in principle still emit tool_calls unprompted. A judge
@@ -10183,6 +10314,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_fusion_accounts_cost_and_usage_for_every_contributor() {
+        crate::http::install_fallback_for_test();
         let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
         let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
         let judge = Arc::new(FusionCandidateProvider::new("j", "synthesized"));

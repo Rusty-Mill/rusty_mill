@@ -8,9 +8,12 @@ use common::{exit, fixture, task, text, ReplyFile, REPLY_ONE};
 use orch_cli::ExecError;
 use orch_codex::CodexAgent;
 use orch_core::board::{Author, Confidence, EntryKind, NewEntry};
-use orch_core::task::{Agent, Plan, Role, TaskSpec};
+use orch_core::task::{AgentId, Plan, Role, TaskSpec};
 use orch_core::GoalId;
 use orch_dispatch::{AgentRunner, ClassifiedError};
+
+const CODEX: AgentId = AgentId::from_static("codex");
+const LOCAL: AgentId = AgentId::from_static("local");
 
 fn agent(fake: ReplyFile) -> CodexAgent<ReplyFile> {
     CodexAgent::with_runner("/repo", fake).timeout(Duration::from_secs(30))
@@ -21,7 +24,7 @@ fn success_reads_the_last_message_file_and_scrubs_the_api_key() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(ReplyFile::ok(REPLY_ONE));
 
-    let out = a.run(Agent::Codex, task(&plan), &board).expect("ok");
+    let out = a.run(CODEX, task(&plan), &board).expect("ok");
 
     assert_eq!(out.len(), 1);
     let calls = a.runner().inner.calls.lock().expect("lock");
@@ -32,7 +35,10 @@ fn success_reads_the_last_message_file_and_scrubs_the_api_key() {
     assert!(prompt.contains("OUTPUT FORMAT"));
     assert!(prompt.contains("Plan::start rejects the author."));
     let scrubbed = a.runner().inner.scrubbed.lock().expect("lock");
-    assert_eq!(scrubbed[0], ["OPENAI_API_KEY"]);
+    assert_eq!(
+        scrubbed[0],
+        ["OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"]
+    );
     // Scratch files are gone after the run.
     let reply_path = &argv[argv.len() - 2];
     assert!(!std::path::Path::new(reply_path).exists());
@@ -42,13 +48,11 @@ fn success_reads_the_last_message_file_and_scrubs_the_api_key() {
 fn wrong_agent_is_refused_without_running() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(ReplyFile::ok(REPLY_ONE));
-    let err = a
-        .run(Agent::Local, task(&plan), &board)
-        .expect_err("refused");
+    let err = a.run(LOCAL, task(&plan), &board).expect_err("refused");
     assert!(err
         .0
         .as_str()
-        .contains("cannot serve Research through Local"));
+        .contains("cannot serve Research through local"));
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
 
@@ -69,13 +73,13 @@ fn implement_is_refused_before_scratch_or_process_work() {
     let mut a = agent(ReplyFile::ok(REPLY_ONE));
 
     let err = a
-        .run(Agent::Codex, plan.get(id).expect("task"), &board)
+        .run(CODEX, plan.get(id).expect("task"), &board)
         .expect_err("unsupported");
 
     assert!(err
         .0
         .as_str()
-        .contains("cannot serve Implement through Codex"));
+        .contains("cannot serve Implement through codex"));
     assert!(a.runner().inner.calls.lock().expect("lock").is_empty());
 }
 
@@ -84,7 +88,7 @@ fn not_logged_in_is_named() {
     let (plan, board, _, _) = fixture();
     let stderr = "ERROR: Reconnecting... 5/5\nERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses\n";
     let mut a = agent(ReplyFile::failing(Ok(exit(1, "", stderr))));
-    let err = a.run(Agent::Codex, task(&plan), &board).expect_err("401");
+    let err = a.run(CODEX, task(&plan), &board).expect_err("401");
     assert!(
         err.0.as_str().starts_with("codex: not logged in"),
         "{}",
@@ -104,7 +108,7 @@ fn not_logged_in_is_an_unavailable_prerequisite() {
     ))));
 
     let failure = a
-        .run_classified(Agent::Codex, task(&plan), &board)
+        .run_classified(CODEX, task(&plan), &board)
         .expect_err("401");
 
     assert!(matches!(failure, ClassifiedError::Unavailable(_)));
@@ -119,7 +123,7 @@ fn rate_limit_is_named_and_distinct_from_login() {
         "ERROR: usage_limit_reached",
     ] {
         let mut a = agent(ReplyFile::failing(Ok(exit(1, "", stderr))));
-        let err = a.run(Agent::Codex, task(&plan), &board).expect_err("429");
+        let err = a.run(CODEX, task(&plan), &board).expect_err("429");
         assert!(
             err.0.as_str().starts_with("codex: rate limited"),
             "{}",
@@ -135,7 +139,7 @@ fn sandbox_refusal_is_a_normal_reply_not_an_error() {
     let (plan, board, _, _) = fixture();
     let reply = r#"{"entries":[{"kind":"assumption","body":"Could not run `git log`: the sandbox denied it, so history is unverified.","refs":[]}]}"#;
     let mut a = agent(ReplyFile::ok(reply));
-    let out = a.run(Agent::Codex, task(&plan), &board).expect("parses");
+    let out = a.run(CODEX, task(&plan), &board).expect("parses");
     assert_eq!(out.len(), 1);
 }
 
@@ -147,9 +151,7 @@ fn other_non_zero_exit_keeps_the_status() {
         "",
         "error: unexpected argument",
     ))));
-    let err = a
-        .run(Agent::Codex, task(&plan), &board)
-        .expect_err("exit 2");
+    let err = a.run(CODEX, task(&plan), &board).expect_err("exit 2");
     assert!(
         err.0.as_str().starts_with("codex exited with status 2"),
         "{}",
@@ -163,9 +165,7 @@ fn timeout_maps_to_agent_error() {
     let mut a = agent(ReplyFile::failing(Err(ExecError::Timeout(
         Duration::from_secs(30),
     ))));
-    let err = a
-        .run(Agent::Codex, task(&plan), &board)
-        .expect_err("timeout");
+    let err = a.run(CODEX, task(&plan), &board).expect_err("timeout");
     assert!(err.0.as_str().contains("exceeded 30s"));
 }
 
@@ -173,7 +173,7 @@ fn timeout_maps_to_agent_error() {
 fn malformed_reply_is_a_parse_error() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(ReplyFile::ok("Sure! Here is what I found."));
-    let err = a.run(Agent::Codex, task(&plan), &board).expect_err("prose");
+    let err = a.run(CODEX, task(&plan), &board).expect_err("prose");
     assert!(err.0.as_str().contains("not JSON"));
 }
 
@@ -181,9 +181,7 @@ fn malformed_reply_is_a_parse_error() {
 fn missing_last_message_file_is_an_error() {
     let (plan, board, _, _) = fixture();
     let mut a = agent(ReplyFile::silent());
-    let err = a
-        .run(Agent::Codex, task(&plan), &board)
-        .expect_err("no file");
+    let err = a.run(CODEX, task(&plan), &board).expect_err("no file");
     assert!(err.0.as_str().contains("wrote no last message"));
 }
 
@@ -206,7 +204,7 @@ fn resumed_card_prompt_carries_answers_and_live_successors() {
     let question = board
         .append(NewEntry {
             task: Some(card.id()),
-            author: Author::Agent(Agent::Codex),
+            author: Author::Agent(CODEX),
             kind: EntryKind::Question,
             body: text("Which branch is the baseline?"),
             refs: vec![],
@@ -225,7 +223,7 @@ fn resumed_card_prompt_carries_answers_and_live_successors() {
         .expect("answer");
     let mut a = agent(ReplyFile::ok(REPLY_ONE));
 
-    a.run(Agent::Codex, card, &board).expect("ok");
+    a.run(CODEX, card, &board).expect("ok");
 
     let calls = a.runner().inner.calls.lock().expect("lock");
     let prompt = String::from_utf8(calls[0].1.clone()).expect("utf8");
@@ -243,7 +241,7 @@ fn best_effort_withdraws_questions_from_prompt_and_parser() {
     let mut a = agent(ReplyFile::ok(question)).with_stop_rule(StopRule::BestEffort);
 
     let err = a
-        .run_classified(Agent::Codex, task(&plan), &board)
+        .run_classified(CODEX, task(&plan), &board)
         .expect_err("questions are withdrawn under best effort");
     assert!(
         matches!(&err, ClassifiedError::Transient(e) if e.0.contains("question")),
@@ -257,6 +255,6 @@ fn best_effort_withdraws_questions_from_prompt_and_parser() {
 
     // Under checkpoint the same reply is a question the dispatcher can block on.
     let mut a = agent(ReplyFile::ok(question));
-    let out = a.run(Agent::Codex, task(&plan), &board).expect("ok");
+    let out = a.run(CODEX, task(&plan), &board).expect("ok");
     assert_eq!(out[0].kind, EntryKind::Question);
 }

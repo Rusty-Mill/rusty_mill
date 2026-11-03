@@ -33,7 +33,6 @@ async fn spawn_test_server() -> (String, String) {
 
     let grpc_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let grpc_addr = grpc_listener.local_addr().unwrap();
-    drop(grpc_listener);
     let grpc_url = format!("http://{grpc_addr}");
 
     let card = AgentCard::new(
@@ -51,7 +50,7 @@ async fn spawn_test_server() -> (String, String) {
         axum::serve(http_listener, http_services.router()).await.unwrap();
     });
     tokio::spawn(async move {
-        services.serve_grpc(grpc_addr).await.unwrap();
+        services.serve_grpc_on(grpc_listener).await.unwrap();
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
     (http_base_url, grpc_url)

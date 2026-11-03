@@ -1,8 +1,6 @@
 //! The storage port and an in-memory adapter.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::path::Path;
 use std::sync::Mutex;
 
 use uuid::Uuid;
@@ -11,25 +9,37 @@ use crate::domain::{BoardError, Card, Event, next_event_id};
 
 /// Persistence for cards and their event log.
 ///
-/// **A commit is atomic**: the card and its event become durable and visible
-/// together or not at all, and the store assigns the event's id inside the
-/// commit, so event ids are in commit order. `replace` is a compare-and-swap on
-/// the revision: it succeeds only if the stored card is at `card.rev - 1`, else
-/// [`BoardError::Conflict`].
+/// **A commit is a compare-and-swap**: `replace` succeeds only if the stored card
+/// is at `card.rev - 1`, else [`BoardError::Conflict`]. The store assigns each
+/// event's id as it records it, so ids are in the order events were recorded.
+///
+/// What else a commit promises depends on the adapter. [`MemStore`] records the
+/// card and its event in one step under its lock, so they become visible together
+/// and event order is commit order. [`crate::tick::TickStore`] writes the card to
+/// rusty_tick first and records the event after it: a reader can see the card
+/// before its event, events live only as long as the process (rusty_tick keeps no
+/// change log), and one commit may take more than one fenced step (`card_plan`),
+/// so the revision it returns can be ahead of `card.rev`.
 pub trait Store: Send + Sync {
     /// One card.
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError>;
     /// All cards, oldest first.
     fn list(&self) -> Result<Vec<Card>, BoardError>;
     /// Commit a new card (rev 0) and its event. The event's `id` is ignored
-    /// and assigned here.
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError>;
+    /// and assigned here. Returns the revision committed, which a later `replace`
+    /// must follow: `card.rev`, or more when the adapter commits in several steps.
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError>;
     /// Commit the next revision of a card and its event (id assigned here).
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError>;
+    /// Returns the revision committed, as for `insert`.
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError>;
     /// Events with id greater than `after`, in commit order, at most `limit`.
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError>;
     /// The id of the newest committed event: a cursor that has seen everything so far.
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError>;
+    /// Reserve a card number for `card`: the lowest above `floor` and above every number
+    /// reserved before. A reservation is durable and never released, so no two cards get the
+    /// same number, whichever boards share the store and whatever leaves the board meanwhile.
+    fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError>;
     /// `Err` once the store can no longer commit and must be reopened.
     ///
     /// # Errors
@@ -37,31 +47,21 @@ pub trait Store: Send + Sync {
     fn health(&self) -> Result<(), BoardError> {
         Ok(())
     }
-    /// Copy a consistent image of the store into the existing directory `dir`: no commit
-    /// lands while it is copied, so the copy opens as the board stood at one moment. Returns the
-    /// file name of the store's main file as copied (its companions are named after it, so the
-    /// main one cannot be told from them by looking at the names).
-    ///
-    /// # Errors
-    /// [`BoardError::Storage`] if the store is not durable or a file cannot be copied.
-    fn backup(&self, _dir: &Path) -> Result<OsString, BoardError> {
-        Err(BoardError::Storage("this store is not durable".into()))
-    }
-    /// Fold the store's append log into its main files; reads and state are unchanged.
-    ///
-    /// # Errors
-    /// [`BoardError::Storage`] if the files cannot be rewritten.
-    fn compact(&self) -> Result<(), BoardError> {
-        Ok(())
+    /// Whether a committed card survives a restart. A write-ahead record, such as
+    /// the inbox's Remediate card, is only worth writing to a store that says so.
+    fn durable(&self) -> bool {
+        false
     }
 }
 
-/// The committed state both adapters keep in memory: cards by id and the
-/// event log in commit (= id) order. Mutated only under the adapter's lock.
+/// The committed state [`MemStore`] keeps: cards by id and the event log in
+/// commit (= id) order. Mutated only under its lock.
 #[derive(Default)]
-pub struct Log {
+struct Log {
     cards: BTreeMap<Uuid, Card>,
     events: Vec<Event>,
+    /// The highest card number reserved.
+    numbers: u64,
 }
 
 impl Log {
@@ -69,7 +69,7 @@ impl Log {
     ///
     /// # Errors
     /// [`BoardError::Conflict`] for a duplicate id or a stale revision, [`BoardError::NotFound`] for a missing card.
-    pub fn check(&self, card: &Card, is_insert: bool) -> Result<(), BoardError> {
+    fn check(&self, card: &Card, is_insert: bool) -> Result<(), BoardError> {
         match (self.cards.get(&card.id), is_insert) {
             (Some(_), true) => Err(BoardError::Conflict),
             (None, true) => Ok(()),
@@ -80,45 +80,37 @@ impl Log {
     }
 
     /// The event as it will be committed: its id above every earlier one.
-    pub fn stamp(&self, mut event: Event) -> Event {
+    fn stamp(&self, mut event: Event) -> Event {
         event.id = next_event_id(self.events.last().map(|e| e.id));
         event
     }
 
     /// Apply a checked commit.
-    pub fn apply(&mut self, card: &Card, event: Event) {
+    fn apply(&mut self, card: &Card, event: Event) {
         self.cards.insert(card.id, card.clone());
         self.events.push(event);
     }
 
-    /// Replay a committed record at load time (events arrive in id order).
-    pub fn replay(&mut self, card: Card, event: Event) {
-        if self.cards.get(&card.id).is_none_or(|c| c.rev <= card.rev) {
-            self.cards.insert(card.id, card);
-        }
-        self.events.push(event);
-    }
-
     /// One card.
-    pub fn get(&self, id: Uuid) -> Option<Card> {
+    fn get(&self, id: Uuid) -> Option<Card> {
         self.cards.get(&id).cloned()
     }
 
     /// All cards, oldest first.
-    pub fn list(&self) -> Vec<Card> {
+    fn list(&self) -> Vec<Card> {
         let mut cards: Vec<_> = self.cards.values().cloned().collect();
         cards.sort_by_key(|c| (c.created_ms, c.id));
         cards
     }
 
     /// Events after `after`, up to `limit`. Binary search: the log is sorted by id.
-    pub fn since(&self, after: Option<Uuid>, limit: usize) -> Vec<Event> {
+    fn since(&self, after: Option<Uuid>, limit: usize) -> Vec<Event> {
         let start = after.map_or(0, |a| self.events.partition_point(|e| e.id <= a));
         self.events[start..].iter().take(limit).cloned().collect()
     }
 
     /// The newest event id.
-    pub fn last_id(&self) -> Option<Uuid> {
+    fn last_id(&self) -> Option<Uuid> {
         self.events.last().map(|e| e.id)
     }
 }
@@ -152,12 +144,12 @@ impl Store for MemStore {
         Ok(self.log.lock().map_err(poisoned)?.list())
     }
 
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
-        self.commit(card, event, true)
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+        self.commit(card, event, true).map(|()| card.rev)
     }
 
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
-        self.commit(card, event, false)
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
+        self.commit(card, event, false).map(|()| card.rev)
     }
 
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
@@ -166,6 +158,12 @@ impl Store for MemStore {
 
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
         Ok(self.log.lock().map_err(poisoned)?.last_id())
+    }
+
+    fn reserve_number(&self, _card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        let mut log = self.log.lock().map_err(poisoned)?;
+        log.numbers = log.numbers.max(floor) + 1;
+        Ok(log.numbers)
     }
 }
 
@@ -176,10 +174,10 @@ impl<T: Store + ?Sized> Store for Box<T> {
     fn list(&self) -> Result<Vec<Card>, BoardError> {
         (**self).list()
     }
-    fn insert(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn insert(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         (**self).insert(card, event)
     }
-    fn replace(&self, card: &Card, event: Event) -> Result<(), BoardError> {
+    fn replace(&self, card: &Card, event: Event) -> Result<u64, BoardError> {
         (**self).replace(card, event)
     }
     fn events_since(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<Event>, BoardError> {
@@ -188,13 +186,13 @@ impl<T: Store + ?Sized> Store for Box<T> {
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
         (**self).last_event_id()
     }
+    fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
+        (**self).reserve_number(card, floor)
+    }
     fn health(&self) -> Result<(), BoardError> {
         (**self).health()
     }
-    fn backup(&self, dir: &Path) -> Result<OsString, BoardError> {
-        (**self).backup(dir)
-    }
-    fn compact(&self) -> Result<(), BoardError> {
-        (**self).compact()
+    fn durable(&self) -> bool {
+        (**self).durable()
     }
 }

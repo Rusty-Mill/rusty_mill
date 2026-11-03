@@ -361,10 +361,17 @@ pub fn commit_a_file(name: &str) -> Vec<String> {
 /// stdin, and a test runner's stdin is not necessarily anything that will
 /// ever produce an EOF.
 pub fn run(root: &Path, args: &[&str]) -> std::process::Output {
+    run_with_env(root, args, &[])
+}
+
+/// As [`run`], with extra environment variables. A daemon this starts,
+/// and every worker it starts, inherits them.
+pub fn run_with_env(root: &Path, args: &[&str], env: &[(&str, &str)]) -> std::process::Output {
     Command::new(bin())
         .arg("--state-root")
         .arg(root)
         .args(args)
+        .envs(env.iter().copied())
         .stdin(Stdio::null())
         .output()
         .expect("failed to run the sessionmgr binary")

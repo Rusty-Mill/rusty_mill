@@ -12,7 +12,11 @@
 //! mutex, so neither ever happens with `state` held. Queued wakers sit
 //! behind an `Arc` that a handoff copies by refcount alone, a waiter's
 //! own clone is made before it locks, and wakers removed from or
-//! replaced in the queue are dropped after unlocking.
+//! replaced in the queue are dropped after unlocking. A waker's
+//! destructor may also panic: an acquiring waiter drops its leftover
+//! wakers only once its guard exists, and a cancelled one wakes the
+//! next waiter before dropping its own, so neither a held lock nor a
+//! hand-off is lost.
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -84,6 +88,15 @@ fn lock(state: &StdMutex<State>) -> StdGuard<'_, State> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The wakers an acquiring waiter no longer needs: the one it dequeued
+/// and a clone it made. Dropped by `lock`/`lock_owned` only after the
+/// guard exists, so a destructor that panics unwinds through the guard
+/// and unlocks.
+#[must_use = "drop it after building the guard"]
+struct Leftover {
+    _wakers: [Option<Arc<Waker>>; 2],
+}
+
 /// A waiter's place in the queue, left on drop (a cancelled `lock()`).
 /// Leaving from the front of a free lock passes the wake on.
 struct Place<'a> {
@@ -101,10 +114,11 @@ impl Drop for Place<'_> {
             _ => None,
         };
         drop(state);
-        drop(removed);
+        // Woken first: if dropping `removed` panics, it is still woken.
         if let Some(waker) = next {
             waker.wake_by_ref();
         }
+        drop(removed);
     }
 }
 
@@ -142,7 +156,7 @@ impl<T> Mutex<T> {
         }
     }
 
-    async fn acquire(&self) {
+    async fn acquire(&self) -> Leftover {
         let mut place = Place {
             state: &self.state,
             id: None,
@@ -155,10 +169,15 @@ impl<T> Mutex<T> {
                 let mut state = lock(&self.state);
                 if !state.locked {
                     state.locked = true;
-                    let removed = place.id.take().and_then(|id| state.dequeue(id));
+                    let removed = place
+                        .id
+                        .take()
+                        .and_then(|id| state.dequeue(id))
+                        .map(|(w, _)| w);
                     drop(state);
-                    drop((removed, fresh));
-                    return Poll::Ready(());
+                    return Poll::Ready(Leftover {
+                        _wakers: [removed, fresh],
+                    });
                 }
                 if place.id.is_some_and(|id| state.wakes(id, cx.waker())) {
                     drop(state);
@@ -182,7 +201,7 @@ impl<T> Mutex<T> {
                 return Poll::Pending;
             }
         })
-        .await;
+        .await
     }
 
     fn try_acquire(&self) -> bool {
@@ -218,8 +237,10 @@ impl<T> Mutex<T> {
     }
 
     pub async fn lock(&self) -> MutexGuard<'_, T> {
-        self.acquire().await;
-        MutexGuard { mutex: self }
+        let leftover = self.acquire().await;
+        let guard = MutexGuard { mutex: self };
+        drop(leftover);
+        guard
     }
 
     /// Locks without waiting, failing if it's currently held.
@@ -238,10 +259,12 @@ impl<T> Mutex<T> {
     /// outlive the scope holding `self`, e.g. across a spawned task
     /// boundary.
     pub async fn lock_owned(self: &Arc<Self>) -> OwnedMutexGuard<T> {
-        self.acquire().await;
-        OwnedMutexGuard {
+        let leftover = self.acquire().await;
+        let guard = OwnedMutexGuard {
             mutex: self.clone(),
-        }
+        };
+        drop(leftover);
+        guard
     }
 
     /// `Arc`-owned counterpart of [`try_lock`](Self::try_lock).

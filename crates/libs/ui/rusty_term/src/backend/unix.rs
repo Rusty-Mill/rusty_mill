@@ -286,8 +286,7 @@ struct UnixHandle {
 }
 
 impl crate::backend::BackendHandle for UnixHandle {
-    fn read(&mut self) -> Result<Vec<u8>, std::io::Error> {
-        let mut buf = vec![0u8; 4096];
+    fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
         loop {
             let n =
                 unsafe { libc::read(self.fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
@@ -296,7 +295,7 @@ impl crate::backend::BackendHandle for UnixHandle {
                 // The shell closing the slave surfaces as EIO on the master; treat
                 // that as a clean end-of-file rather than a hard error.
                 if err.raw_os_error() == Some(libc::EIO) {
-                    return Ok(Vec::new());
+                    return Ok(0);
                 }
                 // A signal landing on this thread mid-syscall (a profiler, a
                 // debugger, anything installing a non-`SA_RESTART` handler) is
@@ -308,9 +307,19 @@ impl crate::backend::BackendHandle for UnixHandle {
                 }
                 return Err(err);
             }
-            buf.truncate(n as usize);
-            return Ok(buf);
+            return Ok(n as usize);
         }
+    }
+
+    fn output_ready(&self) -> bool {
+        let mut fd = libc::pollfd {
+            fd: self.fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one valid pollfd, zero timeout.
+        let n = unsafe { libc::poll(&mut fd, 1, 0) };
+        n > 0 && fd.revents & libc::POLLIN != 0
     }
 
     fn write(&mut self, data: &[u8]) -> Result<(), std::io::Error> {
@@ -450,6 +459,107 @@ impl Drop for UnixHandle {
 #[cfg(test)]
 mod tests {
     use super::{exit_code_from_wait_status, split_shell_words};
+
+    /// `cat` of `bytes` through a real PTY, parsed into a grid the way the
+    /// window's reader thread does: `(seconds, advance calls)`, with each
+    /// read parsed alone or reads batched by `read_batch`. Panics unless
+    /// every byte arrives and `cat` exits 0, so a measurement never counts
+    /// a run that lost output.
+    fn pty_parse(bytes: &[u8], batched: bool) -> (f64, usize) {
+        use crate::backend::{Backend as _, read_batch};
+        let dir = std::env::temp_dir().join(format!("rt-pty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join(if batched { "batched" } else { "single" });
+        std::fs::write(&file, bytes).expect("write input");
+        let mut grid = rusty_term_core::Grid::new(120, 40);
+        grid.set_scrollback_max(10_000);
+        let mut parser = rusty_term_core::AnsiParser::new();
+        let start = std::time::Instant::now();
+        let mut h = super::UnixBackend
+            .spawn_shell(
+                120,
+                40,
+                Some("/bin/cat"),
+                &[file.display().to_string()],
+                None,
+            )
+            .expect("spawn cat");
+        let mut reader = h.try_clone().expect("clone");
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut calls = 0;
+        let mut received = Vec::with_capacity(bytes.len() * 2);
+        loop {
+            let n = if batched {
+                read_batch(reader.as_mut(), &mut buf).expect("read")
+            } else {
+                reader.read_into(&mut buf[..4096]).expect("read")
+            };
+            if n == 0 {
+                break;
+            }
+            parser.advance(&mut grid, &buf[..n]);
+            received.extend_from_slice(&buf[..n]);
+            calls += 1;
+        }
+        let secs = start.elapsed().as_secs_f64();
+        let _ = std::fs::remove_file(&file);
+        // The PTY's output processing (ONLCR) turns each `\n` into `\r\n`.
+        let sent: Vec<u8> = bytes.iter().copied().filter(|&b| b != b'\r').collect();
+        received.retain(|&b| b != b'\r');
+        assert!(
+            received == sent,
+            "{} of {} bytes",
+            received.len(),
+            sent.len()
+        );
+        assert_eq!(exit_code(h.as_mut()), 0, "cat failed");
+        (secs, calls)
+    }
+
+    /// The owned child's exit code, waiting at most 5 s for it.
+    fn exit_code(h: &mut dyn crate::backend::BackendHandle) -> i32 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(code) = h.reap_exit_status() {
+                return code;
+            }
+            assert!(std::time::Instant::now() < deadline, "child never exited");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// Scroll-heavy text: about `mb` megabytes of numbered lines.
+    fn lines(mb: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while out.len() < mb << 20 {
+            out.extend_from_slice(
+                format!("{i:>8} the quick brown fox jumps over the lazy dog\r\n").as_bytes(),
+            );
+            i += 1;
+        }
+        out
+    }
+
+    #[test]
+    fn batched_reads_carry_every_byte_through_a_pty() {
+        // `pty_parse` checks the bytes and the exit status.
+        let (_, calls) = pty_parse(&lines(1), true);
+        assert!(calls > 0);
+    }
+
+    #[test]
+    #[ignore = "measurement; run in release"]
+    fn measure_pty_read_batching() {
+        let bytes = lines(8);
+        for batched in [false, true, false, true, false, true] {
+            let (secs, calls) = pty_parse(&bytes, batched);
+            println!(
+                "batched {batched}: {:.0} MB/s, {calls} advance calls",
+                bytes.len() as f64 / secs / 1e6
+            );
+        }
+    }
 
     #[test]
     fn bare_program_is_a_single_word() {

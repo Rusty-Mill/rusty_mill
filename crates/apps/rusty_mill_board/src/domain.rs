@@ -4,6 +4,7 @@
 //! by reference and returns the next card, so an illegal move is an `Err`,
 //! never a half-applied mutation.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -11,39 +12,84 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// A board column, in workflow order (the order mirrors super-board's).
+use crate::workflow::{Kind, Transition, Workflow};
+
+/// A board column's id: 1-32 of `a-z 0-9 _`, starting with a letter. It is what cards
+/// store (rusty_tick's `board:<id>` tag), so it never changes; people see a column's
+/// label ([`ColumnDef`](crate::workflow::ColumnDef)), which an admin may rename.
+///
+/// Which columns exist, their order and the moves between them are the board's
+/// [`Workflow`]. Three ids are fixed because storage relies
+/// on them without knowing the workflow: [`Column::BACKLOG`] (where new cards land, and
+/// what a card with no or an unknown column reads as), [`Column::DONE`] (a closed task)
+/// and [`Column::BLOCKED`].
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
-#[serde(rename_all = "snake_case")]
-pub enum Column {
-    /// Collected ideas, not yet approved.
-    Backlog,
-    /// Approved and waiting for a builder.
-    Ready,
-    /// Being implemented.
-    Building,
-    /// Being verified.
-    Qa,
-    /// Awaiting review and merge.
-    Review,
-    /// Merged. Terminal.
-    Done,
-    /// Stuck; needs a human.
-    Blocked,
-}
+#[serde(try_from = "String", into = "String")]
+#[schemars(with = "String")]
+pub struct Column(Cow<'static, str>);
 
 impl Column {
-    /// All columns, in display order.
-    pub const ALL: [Column; 7] = [
-        Column::Backlog,
-        Column::Ready,
-        Column::Building,
-        Column::Qa,
-        Column::Review,
-        Column::Done,
-        Column::Blocked,
-    ];
+    /// Where new cards land.
+    pub const BACKLOG: Self = Self(Cow::Borrowed("backlog"));
+    /// Shipped or closed. Terminal.
+    pub const DONE: Self = Self(Cow::Borrowed("done"));
+    /// Stuck; needs a human. Any open card may be moved here.
+    pub const BLOCKED: Self = Self(Cow::Borrowed("blocked"));
+    /// The default workflow's queue: approved, waiting for a builder.
+    pub const READY: Self = Self(Cow::Borrowed("ready"));
+    /// The default workflow's building column.
+    pub const BUILDING: Self = Self(Cow::Borrowed("building"));
+    /// The default workflow's verification column.
+    pub const QA: Self = Self(Cow::Borrowed("qa"));
+    /// The default workflow's review column.
+    pub const REVIEW: Self = Self(Cow::Borrowed("review"));
+
+    /// Longest id, in bytes.
+    pub const MAX_LEN: usize = 32;
+
+    /// The column `id`.
+    ///
+    /// # Errors
+    /// If `id` is not 1-32 of `a-z 0-9 _` starting with a letter.
+    pub fn new(id: &str) -> Result<Self, BoardError> {
+        let ok = id.len() <= Self::MAX_LEN
+            && id.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if !ok {
+            return Err(BoardError::Invalid(
+                "a column id is 1-32 of a-z 0-9 _, starting with a letter",
+            ));
+        }
+        Ok(Self(Cow::Owned(id.to_owned())))
+    }
+
+    /// The id.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Column {
+    type Error = BoardError;
+    fn try_from(id: String) -> Result<Self, BoardError> {
+        Self::new(&id)
+    }
+}
+
+impl From<Column> for String {
+    fn from(c: Column) -> Self {
+        c.0.into_owned()
+    }
+}
+
+impl fmt::Display for Column {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
 }
 
 /// What an actor is allowed to do. A role is a set of these; the board
@@ -55,26 +101,61 @@ pub enum Capability {
     Triage,
     /// Implement.
     Build,
-    /// Verify.
-    Qa,
+    /// Write requirements: pick up approved cards and plan them.
+    Plan,
+    /// Design: turn a card's requirements into an architecture.
+    Architect,
+    /// Plan tests, write them first, and verify built work. Was `qa`, which stored roles
+    /// still say, so it still reads as this.
+    #[serde(alias = "qa")]
+    Test,
     /// Review code.
     Review,
     /// Merge a reviewed card to Done.
     Merge,
+    /// Record as Done a card from Building or QA whose work already merged
+    /// outside the board's flow (the PR was reviewed and merged on the forge).
+    Close,
+    /// Add a project (never change or remove one).
+    Project,
     /// Change the board's settings: agents and their credentials, repositories, projects, roles.
     Admin,
 }
 
 impl Capability {
     /// Every capability, in display order.
-    pub const ALL: [Capability; 6] = [
+    pub const ALL: [Capability; 10] = [
         Capability::Triage,
+        Capability::Plan,
+        Capability::Architect,
         Capability::Build,
-        Capability::Qa,
+        Capability::Test,
         Capability::Review,
         Capability::Merge,
+        Capability::Close,
+        Capability::Project,
         Capability::Admin,
     ];
+
+    /// What holding this lets a role do, for the settings view.
+    pub fn about(self) -> &'static str {
+        match self {
+            Capability::Triage => {
+                "Approve cards into Ready, set priority and project, and take over others' claims."
+            }
+            Capability::Build => "Claim Ready cards and build them, then pass them to QA.",
+            Capability::Plan => "Take approved cards and write their requirements.",
+            Capability::Architect => "Design cards whose requirements have passed review.",
+            Capability::Test => "Plan and write tests first, then verify built work.",
+            Capability::Review => "Send reviewed work back to Building.",
+            Capability::Merge => "Move reviewed cards to Done.",
+            Capability::Close => {
+                "Move Building or QA cards whose PR already merged straight to Done."
+            }
+            Capability::Project => "Add a project (never change or remove one).",
+            Capability::Admin => "Change these settings: agents, projects, roles, GitHub, apps.",
+        }
+    }
 }
 
 /// Who is acting, and what they may do.
@@ -103,39 +184,56 @@ fn default_project() -> String {
     DEFAULT_PROJECT.to_owned()
 }
 
-/// The capability needed to move a card `from` -> `to`.
-/// `Ok(None)` means any actor may; `Err` means the move does not exist.
-pub fn required_capability(from: Column, to: Column) -> Result<Option<Capability>, BoardError> {
-    use Column::*;
-    match (from, to) {
-        (Done, _) => Err(BoardError::Terminal),
-        (_, Blocked) => Ok(None),
-        (Backlog, Ready) | (Blocked, Ready) => Ok(Some(Capability::Triage)),
-        (Ready, Building) | (Building, Qa) => Ok(Some(Capability::Build)),
-        (Qa, Building) | (Qa, Review) => Ok(Some(Capability::Qa)),
-        (Review, Building) => Ok(Some(Capability::Review)),
-        (Review, Done) => Ok(Some(Capability::Merge)),
-        _ => Err(BoardError::NoSuchMove { from, to }),
+/// Whether moves follow the workflow's transitions (the default), or are open: an admin's
+/// temporary switch for when the table is in the way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MoveRules {
+    /// The workflow's transitions, their capabilities and the claim rule apply.
+    #[default]
+    Enforced,
+    /// Any column to any other, by any actor holding a capability. Done stays terminal and
+    /// a gate still needs its capability and `Admin`.
+    Open,
+}
+
+/// The id of the card imported from forge issue `issue`: derived from the number,
+/// so an import interrupted between two writes (a store that cannot commit a card
+/// and its link together) is finished, not repeated, by the next run.
+///
+/// The id depends on the number only, not on the repository. A board pointed at a
+/// second repository treats that repository's issue `n` as already imported when
+/// it has imported `n` from the first, and skips it; give such a repository its
+/// own board.
+pub fn import_id(issue: u64) -> Uuid {
+    const NAMESPACE: Uuid = Uuid::from_u128(0x6d69_6c6c_2d62_6f61_7264_2d69_7373_7565);
+    Uuid::new_v5(&NAMESPACE, &issue.to_be_bytes())
+}
+
+/// The priorities a card may have, on rusty_tick's scale: none, low, medium, high.
+pub const PRIORITIES: [u8; 4] = [0, 1, 3, 5];
+
+/// Most cards one card may wait on.
+pub const MAX_DEPS: usize = 32;
+
+/// Whether `tag` is one the board keeps for itself in rusty_tick (ADR-0012):
+/// `agent` puts a task on the board, `board:<column>`, `claim:<actor>` and
+/// `number:<n>` carry its state. Tags match case-insensitively there, so here too.
+pub fn reserved_tag(tag: &str) -> bool {
+    let tag = tag.trim().to_lowercase();
+    tag == "agent"
+        || tag.starts_with("board:")
+        || tag.starts_with("claim:")
+        || tag.starts_with("number:")
+}
+
+fn check_tags(tags: &[String]) -> Result<(), BoardError> {
+    if tags.iter().any(|t| reserved_tag(t)) {
+        return Err(BoardError::Invalid(
+            "tags `agent`, `board:…`, `claim:…` and `number:…` are the board's own",
+        ));
     }
-}
-
-/// Columns where work is picked up, in the order a worker should look:
-/// finish what is nearest Done first.
-pub const WORK_QUEUES: [Column; 4] = [Column::Review, Column::Qa, Column::Building, Column::Ready];
-
-/// The column a worker moves a card into before working it, if it waits in a
-/// pure queue (Ready) rather than a working column.
-pub fn entry_column(column: Column) -> Option<Column> {
-    (column == Column::Ready).then_some(Column::Building)
-}
-
-/// Whether someone holding `caps` can move a card forward out of `column`
-/// (the test for "this card is for my role").
-pub fn actionable(column: Column, caps: &BTreeSet<Capability>) -> bool {
-    Column::ALL.iter().any(|to| {
-        *to != Column::Blocked
-            && matches!(required_capability(column, *to), Ok(Some(cap)) if caps.contains(&cap))
-    })
+    Ok(())
 }
 
 /// A stable 64-bit hash (FNV-1a) of a title and body, for comparing text across
@@ -172,6 +270,10 @@ pub struct Comment {
 pub struct Card {
     /// Identity.
     pub id: Uuid,
+    /// Short board-wide number people use, shown as `#n`. The board assigns it in creation
+    /// order; `None` until then (a card made directly in rusty_tick, before the board numbers it).
+    #[serde(default)]
+    pub number: Option<u64>,
     /// Optimistic-concurrency revision; `0` for a new card.
     pub rev: u64,
     /// Short title.
@@ -189,6 +291,16 @@ pub struct Card {
     pub project: String,
     /// Discussion, oldest first.
     pub comments: Vec<Comment>,
+    /// Higher is taken first within a queue; one of [`PRIORITIES`].
+    #[serde(default)]
+    pub priority: u8,
+    /// Cards that must be Done before this one is taken.
+    #[serde(default)]
+    pub deps: Vec<Uuid>,
+    /// Manual order within a queue, lower first, after priority. Set by the store
+    /// (rusty_tick's drag order); `0` elsewhere.
+    #[serde(default)]
+    pub sort_order: i64,
     /// Linked forge issue number, if synced.
     #[serde(default)]
     pub issue: Option<u64>,
@@ -204,6 +316,10 @@ pub struct Card {
     pub created_ms: i64,
     /// Last change, Unix ms.
     pub updated_ms: i64,
+    /// When the card was completed (reached Done as shipped work), Unix ms. `None` while open,
+    /// and for work closed without shipping (rusty_tick's won't-do).
+    #[serde(default)]
+    pub done_ms: Option<i64>,
 }
 
 /// Stable cross-component ids for the one logical execution a card may own.
@@ -287,7 +403,7 @@ impl fmt::Display for BoardError {
         match self {
             Self::NotFound(id) => write!(f, "no card {id}"),
             Self::Terminal => write!(f, "done cards cannot move"),
-            Self::NoSuchMove { from, to } => write!(f, "no move {from:?} -> {to:?}"),
+            Self::NoSuchMove { from, to } => write!(f, "no move {from} -> {to}"),
             Self::Forbidden(c) => write!(f, "requires capability {c:?}"),
             Self::Claimed(by) => write!(f, "claimed by {by}"),
             Self::NotClaimant => write!(f, "only the claim holder may move this card"),
@@ -328,6 +444,8 @@ pub enum EventKind {
     ExecutionRecovered,
     /// Moved to another project.
     Assigned,
+    /// Given its board-wide number.
+    Numbered,
 }
 
 /// One entry in the append-only log. `id` is a UUIDv7 assigned by the store
@@ -371,17 +489,43 @@ impl Event {
             actor: actor.to_owned(),
             kind,
             rev: card.rev,
-            column: card.column,
+            column: card.column.clone(),
             at_ms: card.updated_ms,
         }
     }
+}
+
+/// Whether `by` may make one of the transitions `ts` (alternatives for the same move).
+/// If none, the first one's reason.
+fn check_any(ts: &[&Transition], by: &Actor) -> Result<(), BoardError> {
+    let mut first = None;
+    for t in ts {
+        match check_transition(t, by) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                first.get_or_insert(e);
+            }
+        }
+    }
+    first.map_or(Ok(()), Err)
+}
+
+/// Whether `by` may make transition `t`: its capability, and `Admin` too for a gate.
+fn check_transition(t: &Transition, by: &Actor) -> Result<(), BoardError> {
+    if !by.caps.contains(&t.cap) {
+        return Err(BoardError::Forbidden(t.cap));
+    }
+    if t.gate && !by.caps.contains(&Capability::Admin) {
+        return Err(BoardError::Forbidden(Capability::Admin));
+    }
+    Ok(())
 }
 
 impl Card {
     /// A new Backlog card.
     ///
     /// # Errors
-    /// If `title` is blank.
+    /// If `title` is blank or a tag is reserved ([`reserved_tag`]).
     pub fn new(
         title: &str,
         body: &str,
@@ -392,22 +536,42 @@ impl Card {
         if title.is_empty() {
             return Err(BoardError::Invalid("title is empty"));
         }
+        check_tags(&tags)?;
         Ok(Self {
             id: Uuid::new_v4(),
+            number: None,
             rev: 0,
             title: title.to_owned(),
             body: body.to_owned(),
-            column: Column::Backlog,
+            column: Column::BACKLOG,
             claim: None,
             tags,
             project: default_project(),
             comments: Vec::new(),
+            priority: 0,
+            deps: Vec::new(),
+            sort_order: 0,
             issue: None,
             synced_text: None,
             execution: None,
             created_ms: now_ms,
             updated_ms: now_ms,
+            done_ms: None,
         })
+    }
+
+    /// The card given its board-wide `number`, or unchanged if it has one already: a number
+    /// never changes. Not a change people make, so `updated_ms` stays.
+    #[must_use]
+    pub fn numbered(&self, number: u64) -> Self {
+        if self.number.is_some() {
+            return self.clone();
+        }
+        Self {
+            number: Some(number),
+            rev: self.rev + 1,
+            ..self.clone()
+        }
     }
 
     fn next(&self, now_ms: i64) -> Self {
@@ -418,19 +582,25 @@ impl Card {
         }
     }
 
-    /// Move the card to `project`, dropping any claim (the claimant may not be in scope there).
-    ///
-    /// # Errors
-    /// If the card is Done.
-    pub fn assign(&self, project: &str, now_ms: i64) -> Result<Self, BoardError> {
-        if self.column == Column::Done {
-            return Err(BoardError::Terminal);
+    /// Re-file the card under column `to` when the workflow's columns change (a retag, not a
+    /// move): no transition, rule or claim check, and the claim is kept, since the work is the
+    /// same work in a renamed stage. Callers keep Done and Blocked out of it, as
+    /// [`crate::retag::parse_map`] does.
+    pub fn retag(&self, to: &Column, now_ms: i64) -> Self {
+        Self {
+            column: to.clone(),
+            ..self.next(now_ms)
         }
-        Ok(Self {
+    }
+
+    /// Move the card to `project`, dropping any claim (the claimant may not be in scope there).
+    /// Only the project changes: the column stays, so a Done card is re-filed, never reopened.
+    pub fn assign(&self, project: &str, now_ms: i64) -> Self {
+        Self {
             project: project.to_owned(),
             claim: None,
             ..self.next(now_ms)
-        })
+        }
     }
 
     /// Take the claim.
@@ -464,38 +634,92 @@ impl Card {
         }
     }
 
-    /// Move to `to`. The claim is cleared on arrival, so the next stage's
-    /// worker claims it afresh. Leaving a worked column (Building, Qa, Review)
-    /// requires holding the claim, unless the actor holds `Triage` (the
-    /// human override).
+    /// Move to `to` along `flow`. The claim is cleared on arrival, so the next stage's
+    /// worker claims it afresh. Leaving a worked column ([`Kind::Work`]) requires holding
+    /// the claim, unless the actor holds `Triage` (the human override).
     ///
     /// # Errors
-    /// If the move does not exist, the actor lacks the capability, or the
-    /// actor is not the claim holder.
-    pub fn move_to(&self, to: Column, by: &Actor, now_ms: i64) -> Result<Self, BoardError> {
-        if let Some(cap) = required_capability(self.column, to)?
-            && !by.caps.contains(&cap)
-        {
-            return Err(BoardError::Forbidden(cap));
+    /// If the move does not exist, the actor lacks its capability (or `Admin`, for a gate),
+    /// or the actor is not the claim holder.
+    pub fn move_to(
+        &self,
+        flow: &Workflow,
+        to: &Column,
+        by: &Actor,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        if let Some(ts) = flow.transition(&self.column, to)? {
+            check_any(&ts, by)?;
         }
-        let worked = matches!(self.column, Column::Building | Column::Qa | Column::Review);
-        if worked
+        if flow.kind(&self.column) == Some(Kind::Work)
             && self.claim.as_deref() != Some(&by.name)
             && !by.caps.contains(&Capability::Triage)
         {
             return Err(BoardError::NotClaimant);
         }
-        Ok(Self {
-            column: to,
+        Ok(self.arrive(to, now_ms))
+    }
+
+    /// Move to `to` with the movement rules off: no transition table, capability or claim
+    /// check, only an actor holding some capability, except that gates hold: a listed move
+    /// with a gated alternative needs one of its alternatives, and a move that jumps over a
+    /// gate ([`Workflow::gates_crossed`]) needs `Admin`, or, when the workflow lists it, the
+    /// capability of one of its ways (Building -> Done by `close`). The claim is cleared on
+    /// arrival.
+    ///
+    /// # Errors
+    /// If the card is Done, already in `to`, `to` is not a column, the actor holds no
+    /// capability, or the move is a gate the actor may not pass.
+    pub fn move_freely(
+        &self,
+        flow: &Workflow,
+        to: &Column,
+        by: &Actor,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        if self.column == Column::DONE {
+            return Err(BoardError::Terminal);
+        }
+        if self.column == *to {
+            return Err(BoardError::NoSuchMove {
+                from: to.clone(),
+                to: to.clone(),
+            });
+        }
+        if flow.column(to).is_none() {
+            return Err(BoardError::Invalid("no such column"));
+        }
+        if by.caps.is_empty() {
+            return Err(BoardError::Invalid("moving a card needs some capability"));
+        }
+        // Gates hold with the rules off. A listed move with a gated way of making it needs one
+        // of its ways (a gated merge, or the `close` beside it); a move that jumps over a gate
+        // needs `Admin`, or one of its listed ways.
+        let listed = flow.transition(&self.column, to).ok().flatten();
+        match listed {
+            Some(ts) if ts.iter().any(|t| t.gate) => check_any(&ts, by)?,
+            _ if by.caps.contains(&Capability::Admin)
+                || flow.gates_crossed(&self.column, to).is_empty() => {}
+            // A listed shortcut past a gate (Building -> Done by `close`) keeps its capability.
+            Some(ts) => check_any(&ts, by)?,
+            None => return Err(BoardError::Forbidden(Capability::Admin)),
+        }
+        Ok(self.arrive(to, now_ms))
+    }
+
+    fn arrive(&self, to: &Column, now_ms: i64) -> Self {
+        Self {
+            column: to.clone(),
             claim: None,
+            done_ms: (*to == Column::DONE).then_some(now_ms),
             ..self.next(now_ms)
-        })
+        }
     }
 
     /// Replace title/body/tags (each optional).
     ///
     /// # Errors
-    /// If the new title is blank.
+    /// If the new title is blank or a tag is reserved.
     pub fn edit(
         &self,
         title: Option<&str>,
@@ -514,7 +738,41 @@ impl Card {
             next.body = b.to_owned();
         }
         if let Some(t) = tags {
+            check_tags(&t)?;
             next.tags = t;
+        }
+        Ok(next)
+    }
+
+    /// Set the priority and the cards this one waits on (each optional).
+    /// Repeated dependencies are dropped.
+    ///
+    /// # Errors
+    /// A priority outside [`PRIORITIES`], a card depending on itself, or more
+    /// than [`MAX_DEPS`] dependencies.
+    pub fn plan(
+        &self,
+        priority: Option<u8>,
+        deps: Option<Vec<Uuid>>,
+        now_ms: i64,
+    ) -> Result<Self, BoardError> {
+        let mut next = self.next(now_ms);
+        if let Some(p) = priority {
+            if !PRIORITIES.contains(&p) {
+                return Err(BoardError::Invalid("priority must be 0, 1, 3 or 5"));
+            }
+            next.priority = p;
+        }
+        if let Some(mut d) = deps {
+            if d.contains(&self.id) {
+                return Err(BoardError::Invalid("a card cannot depend on itself"));
+            }
+            d.sort_unstable();
+            d.dedup();
+            if d.len() > MAX_DEPS {
+                return Err(BoardError::Invalid("too many dependencies"));
+            }
+            next.deps = d;
         }
         Ok(next)
     }
@@ -628,8 +886,25 @@ mod tests {
         }
     }
 
+    fn flow() -> Workflow {
+        Workflow::default()
+    }
+
     fn card() -> Card {
         Card::new("t", "", vec![], 0).expect("valid")
+    }
+
+    #[test]
+    fn reaching_done_stamps_the_ship_time() {
+        let human = actor("nano", &[Capability::Triage, Capability::Merge]);
+        let c = card()
+            .move_to(&flow(), &Column::READY, &human, 1)
+            .expect("triage");
+        assert_eq!(c.done_ms, None);
+        let c = c
+            .move_freely(&flow(), &Column::DONE, &human, 7)
+            .expect("done");
+        assert_eq!(c.done_ms, Some(7));
     }
 
     #[test]
@@ -644,18 +919,24 @@ mod tests {
     fn happy_path_backlog_to_done() {
         let human = actor("nano", &[Capability::Triage, Capability::Merge]);
         let dev = actor("dev", &[Capability::Build]);
-        let qa = actor("qa", &[Capability::Qa]);
+        let qa = actor("qa", &[Capability::Test]);
         let rev = actor("rev", &[Capability::Review, Capability::Merge]);
 
-        let c = card().move_to(Column::Ready, &human, 1).expect("triage");
-        let c = c.move_to(Column::Building, &dev, 2).expect("start");
+        let c = card()
+            .move_to(&flow(), &Column::READY, &human, 1)
+            .expect("triage");
+        let c = c
+            .move_to(&flow(), &Column::BUILDING, &dev, 2)
+            .expect("start");
         let c = c.claim(&dev, 3).expect("claim");
-        let c = c.move_to(Column::Qa, &dev, 4).expect("to qa");
+        let c = c.move_to(&flow(), &Column::QA, &dev, 4).expect("to qa");
         let c = c.claim(&qa, 5).expect("claim");
-        let c = c.move_to(Column::Review, &qa, 6).expect("to review");
+        let c = c
+            .move_to(&flow(), &Column::REVIEW, &qa, 6)
+            .expect("to review");
         let c = c.claim(&rev, 7).expect("claim");
-        let c = c.move_to(Column::Done, &rev, 8).expect("merge");
-        assert_eq!(c.column, Column::Done);
+        let c = c.move_to(&flow(), &Column::DONE, &rev, 8).expect("merge");
+        assert_eq!(c.column, Column::DONE);
         assert_eq!(c.claim, None);
         assert_eq!(c.rev, 8);
     }
@@ -664,7 +945,7 @@ mod tests {
     fn capability_is_enforced() {
         let dev = actor("dev", &[Capability::Build]);
         assert_eq!(
-            card().move_to(Column::Ready, &dev, 1),
+            card().move_to(&flow(), &Column::READY, &dev, 1),
             Err(BoardError::Forbidden(Capability::Triage))
         );
     }
@@ -676,17 +957,52 @@ mod tests {
             &[Capability::Triage, Capability::Build, Capability::Merge],
         );
         assert_eq!(
-            card().move_to(Column::Done, &all, 1),
+            card().move_to(&flow(), &Column::DONE, &all, 1),
             Err(BoardError::NoSuchMove {
-                from: Column::Backlog,
-                to: Column::Done
+                from: Column::BACKLOG,
+                to: Column::DONE
             })
         );
         let mut done = card();
-        done.column = Column::Done;
+        done.column = Column::DONE;
         assert_eq!(
-            done.move_to(Column::Ready, &all, 1),
+            done.move_to(&flow(), &Column::READY, &all, 1),
             Err(BoardError::Terminal)
+        );
+    }
+
+    #[test]
+    fn open_rules_allow_any_move_but_keep_done_terminal() {
+        let builder = actor("claude-cloud", &[Capability::Build]);
+        let mut c = card();
+        c.column = Column::REVIEW;
+        c.claim = Some("someone-else".into());
+        let c = c
+            .move_freely(&flow(), &Column::READY, &builder, 1)
+            .expect("out of review");
+        assert_eq!((&c.column, c.claim.as_deref()), (&Column::READY, None));
+        let c = c
+            .move_freely(&flow(), &Column::DONE, &builder, 2)
+            .expect("ready to done");
+        assert_eq!(
+            c.move_freely(&flow(), &Column::BACKLOG, &builder, 3),
+            Err(BoardError::Terminal)
+        );
+    }
+
+    #[test]
+    fn open_rules_refuse_a_same_column_move_and_an_actor_without_capabilities() {
+        let builder = actor("b", &[Capability::Build]);
+        assert_eq!(
+            card().move_freely(&flow(), &Column::BACKLOG, &builder, 1),
+            Err(BoardError::NoSuchMove {
+                from: Column::BACKLOG,
+                to: Column::BACKLOG
+            })
+        );
+        assert_eq!(
+            card().move_freely(&flow(), &Column::READY, &actor("none", &[]), 1),
+            Err(BoardError::Invalid("moving a card needs some capability"))
         );
     }
 
@@ -695,12 +1011,15 @@ mod tests {
         let dev = actor("dev", &[Capability::Build]);
         let other = actor("other", &[Capability::Build]);
         let mut c = card();
-        c.column = Column::Building;
-        assert_eq!(c.move_to(Column::Qa, &dev, 1), Err(BoardError::NotClaimant));
+        c.column = Column::BUILDING;
+        assert_eq!(
+            c.move_to(&flow(), &Column::QA, &dev, 1),
+            Err(BoardError::NotClaimant)
+        );
         let c = c.claim(&dev, 1).expect("claim");
         assert_eq!(c.claim(&other, 2), Err(BoardError::Claimed("dev".into())));
         assert_eq!(
-            c.move_to(Column::Qa, &other, 2),
+            c.move_to(&flow(), &Column::QA, &other, 2),
             Err(BoardError::NotClaimant)
         );
         assert_eq!(c.release(&other, 2), Err(BoardError::Claimed("dev".into())));
@@ -708,19 +1027,42 @@ mod tests {
     }
 
     #[test]
-    fn actionable_follows_the_transition_table() {
-        let caps = |c: &[Capability]| c.iter().copied().collect::<BTreeSet<_>>();
-        let builder = caps(&[Capability::Build]);
-        assert!(actionable(Column::Ready, &builder) && actionable(Column::Building, &builder));
-        assert!(!actionable(Column::Qa, &builder) && !actionable(Column::Review, &builder));
-        let reviewer = caps(&[Capability::Review, Capability::Merge]);
-        assert!(actionable(Column::Review, &reviewer) && !actionable(Column::Ready, &reviewer));
-        assert!(
-            !actionable(Column::Done, &caps(&[Capability::Merge])),
-            "done is terminal"
-        );
-        assert_eq!(entry_column(Column::Ready), Some(Column::Building));
-        assert_eq!(entry_column(Column::Qa), None);
+    fn close_records_merged_work_as_done() {
+        let dev = actor("dev", &[Capability::Build]);
+        let closer = actor("closer", &[Capability::Build, Capability::Close]);
+        for from in [Column::BUILDING, Column::QA] {
+            let mut c = card();
+            c.column = from;
+            let held = c.claim(&dev, 1).expect("claim");
+            assert_eq!(
+                held.move_to(&flow(), &Column::DONE, &dev, 2),
+                Err(BoardError::Forbidden(Capability::Close))
+            );
+            assert_eq!(
+                held.move_to(&flow(), &Column::DONE, &closer, 2),
+                Err(BoardError::NotClaimant),
+                "close still needs the claim"
+            );
+            let c = c.claim(&closer, 1).expect("claim");
+            assert_eq!(
+                c.move_to(&flow(), &Column::DONE, &closer, 2)
+                    .expect("close")
+                    .column,
+                Column::DONE
+            );
+        }
+        for from in [Column::BACKLOG, Column::READY, Column::BLOCKED] {
+            let mut c = card();
+            c.column = from.clone();
+            assert_eq!(
+                c.move_to(&flow(), &Column::DONE, &closer, 1),
+                Err(BoardError::NoSuchMove {
+                    from,
+                    to: Column::DONE
+                }),
+                "only started work can be closed"
+            );
+        }
     }
 
     #[test]
@@ -728,7 +1070,7 @@ mod tests {
         let dev = actor("dev", &[Capability::Build]);
         let human = actor("nano", &[Capability::Triage]);
         let mut c = card();
-        c.column = Column::Building;
+        c.column = Column::BUILDING;
         let c = c.claim(&dev, 1).expect("claim");
         assert!(
             c.release(&human, 2)
@@ -737,14 +1079,14 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
-            c.move_to(Column::Blocked, &human, 2)
+            c.move_to(&flow(), &Column::BLOCKED, &human, 2)
                 .expect("override move")
                 .column,
-            Column::Blocked
+            Column::BLOCKED
         );
         let other = actor("other", &[Capability::Build]);
         assert_eq!(
-            c.move_to(Column::Blocked, &other, 2),
+            c.move_to(&flow(), &Column::BLOCKED, &other, 2),
             Err(BoardError::NotClaimant)
         );
     }
@@ -752,8 +1094,10 @@ mod tests {
     #[test]
     fn anyone_may_block() {
         let nobody = actor("n", &[]);
-        let c = card().move_to(Column::Blocked, &nobody, 1).expect("block");
-        assert_eq!(c.column, Column::Blocked);
+        let c = card()
+            .move_to(&flow(), &Column::BLOCKED, &nobody, 1)
+            .expect("block");
+        assert_eq!(c.column, Column::BLOCKED);
     }
 
     #[test]

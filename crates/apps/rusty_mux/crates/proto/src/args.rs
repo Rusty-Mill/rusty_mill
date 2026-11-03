@@ -21,6 +21,8 @@ mod tag {
     pub const BYTES: u8 = 3;
     pub const CELLS: u8 = 4;
     pub const LINES: u8 = 5;
+    pub const WORDS: u8 = 6;
+    pub const FLAG: u8 = 7;
 }
 
 pub(crate) fn encode(args: &[(String, Value)]) -> Vec<u8> {
@@ -48,6 +50,17 @@ pub(crate) fn encode(args: &[(String, Value)]) -> Vec<u8> {
                 w.write_u8(tag::LINES);
                 varint::write(&mut w, (*n).into());
             }
+            Value::Words(words) => {
+                w.write_u8(tag::WORDS);
+                varint::write(&mut w, words.len() as u64);
+                for word in words {
+                    put_bytes(&mut w, word.as_bytes());
+                }
+            }
+            Value::Flag(on) => {
+                w.write_u8(tag::FLAG);
+                w.write_u8(u8::from(*on));
+            }
         }
     }
     w.into_vec()
@@ -69,11 +82,29 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<Vec<(String, Value)>> {
             tag::BYTES => Value::Bytes(get_bytes(&mut r)?.to_vec()),
             tag::CELLS => Value::Cells(u16::try_from(varint::read(&mut r).ok()?).ok()?),
             tag::LINES => Value::Lines(u32::try_from(varint::read(&mut r).ok()?).ok()?),
+            tag::WORDS => Value::Words(get_words(&mut r)?),
+            tag::FLAG => match r.read_u8().ok()? {
+                0 => Value::Flag(false),
+                1 => Value::Flag(true),
+                _ => return None,
+            },
             _ => return None,
         };
         args.push((name, value));
     }
     Some(args)
+}
+
+/// A count, then that many texts; a count past what is left to read is
+/// refused before anything is allocated for it.
+fn get_words(r: &mut Reader<'_>) -> Option<Vec<String>> {
+    let count = usize::try_from(varint::read(r).ok()?).ok()?;
+    if count > r.remaining() {
+        return None;
+    }
+    (0..count)
+        .map(|_| String::from_utf8(get_bytes(r)?.to_vec()).ok())
+        .collect()
 }
 
 fn put_bytes(w: &mut Writer, bytes: &[u8]) {

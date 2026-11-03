@@ -8,9 +8,13 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, OnceLock};
 
-use super::cell::{Cell, DEFAULT_BG, DEFAULT_FG, PackedCell, Pen, WIDE_TRAILER, char_width};
-use super::style::{CellStyle, StyleId, StyleTable};
-use unicode_segmentation::UnicodeSegmentation;
+use super::cell::{
+    ATTR_BG_DEFAULT, ATTR_DEFAULT_COLORS, ATTR_FG_DEFAULT, Cell, CellColors, PackedCell, Pen,
+    Source, WIDE_TRAILER, char_width,
+};
+use super::style::{CellStyle, Defaults, StyleId, StyleTable};
+use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
+use unicode_width::UnicodeWidthStr;
 
 use super::sixel::SixelImage;
 
@@ -19,6 +23,8 @@ mod snapshot;
 pub(crate) use line::Line;
 #[cfg(test)]
 mod stamp_tests;
+#[cfg(test)]
+mod trim_tests;
 pub use snapshot::SnapshotError;
 #[cfg(any(test, feature = "gui"))]
 mod frame;
@@ -385,6 +391,18 @@ pub struct KittyFrame {
 /// drains.
 pub const PROGRAM_STATUS_MAX: usize = 256;
 
+/// Where a shell is in its command cycle, by the last OSC 133/633 mark it
+/// sent (see [`Grid::shell_phase`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellPhase {
+    /// `A`: its prompt is showing, and any command line is being typed.
+    Prompt,
+    /// `C`: a command it started is running.
+    Running,
+    /// `D`: a command finished and no prompt has started since.
+    Finished,
+}
+
 /// An input to a program-status (OSC 7501) record store, in the order the
 /// program produced it. The grid only collects them; the host interprets.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -492,6 +510,10 @@ pub struct Grid {
     /// its soft-wrap bit, so a resize can rejoin wrapped runs and re-wrap them to
     /// the new width. Rewrapped to the live width on every resize.
     pub(crate) scrollback: VecDeque<Line>,
+    /// How many of the newest [`Grid::scrollback`] lines
+    /// [`Grid::compact_history`] has not looked at yet. Clamped to the
+    /// history length on use, so an eviction or clear needs no update.
+    untrimmed: usize,
     /// The live scrollback cap: [`SCROLLBACK_MAX`] unless overridden by the
     /// `scrollback` config key via [`Grid::set_scrollback_max`].
     pub(crate) scrollback_max: usize,
@@ -555,7 +577,7 @@ pub struct Grid {
     sync_output: bool,
     /// When `sync_output` was last set, for the timeout in
     /// [`Grid::sync_output_active`]. `None` when `sync_output` is false.
-    sync_output_since: Option<std::time::Instant>,
+    pub(crate) sync_output_since: Option<std::time::Instant>,
     /// Whether bracketed paste (DEC `?2004`) is enabled by the child. In TUI
     /// mode it is also relayed to the host; the windowed front-end reads it to
     /// decide whether to wrap pasted text in `ESC[200~` / `ESC[201~`.
@@ -692,7 +714,10 @@ pub struct Grid {
     /// front-end picks a default. Bounded by [`Grid::push_notification`].
     pub notifications: Vec<(String, String)>,
     /// Whether to queue [`StatusSignal`]s in [`Grid::program_status`]. Off by
-    /// default, so a host that never drains them stores nothing.
+    /// default, so a host that never drains them stores nothing. When on,
+    /// the parser answers the OSC 7501 `?` query for the host, claiming all
+    /// of draft 0.4's states and kinds, so set it only in a host that
+    /// handles them all.
     pub collect_program_status: bool,
     /// Program-status signals (OSC 7501 reports and the events that end
     /// records' lifetimes), in arrival order, for a host such as a
@@ -742,15 +767,12 @@ pub struct Grid {
     /// on, a printed glyph shifts the rest of the row right instead of
     /// overwriting.
     pub(crate) insert_mode: bool,
-    /// Default foreground/background colors (OSC 10/11), mirrored from the
-    /// parser's palette. The background doubles as the erase-fill color, so a
-    /// theme set via OSC 11 colors cleared regions, not just freshly written text.
-    default_fg: u32,
-    default_bg: u32,
     /// Background color erases fill with (BCE): the parser's SGR background,
     /// or `None` while that is the default, so the fill tracks OSC 11. Kept in
-    /// sync by the parser via [`Grid::set_erase_bg`].
-    erase_bg: Option<u32>,
+    /// sync by the parser via [`Grid::set_erase_bg`]. Held as the colour and
+    /// its palette tag ([`crate::cell::Source::tag`]), so OSC 4 recolours
+    /// the fill as it does the pen.
+    erase_bg: Option<(u32, u16)>,
     /// Cursor color (OSC 12 / the `cursor` config key), mirrored from the
     /// parser's palette like the defaults above. The windowed renderers paint
     /// the block cursor in it; the TUI host owns its own cursor.
@@ -790,12 +812,13 @@ pub struct Grid {
     /// over the bottom row by every renderer. `None` (no allocation) when unset.
     status_line: Option<StatusLine>,
     /// Exit code of the last finished command, reported via OSC 133;D. Surfaced
-    /// to a structured client as the `terminal://exit` resource and shown by
-    /// the windowed front-end's status ribbon; `None` until a command
-    /// finishes (or when the shell omits the code). Written by every build
-    /// (the OSC 133;D path), read only by the `gui`/`l13` fronts.
-    #[cfg_attr(not(any(feature = "gui", feature = "l13")), allow(dead_code))]
+    /// to a structured client as the `terminal://exit` resource, shown by
+    /// the windowed front-end's status ribbon and read by a multiplexer;
+    /// `None` until a command finishes (or when the shell omits the code).
     last_exit: Option<i32>,
+    /// The shell's last OSC 133/633 lifecycle mark, `None` until it sends
+    /// one. Not checkpointed: a restored grid learns it from the next mark.
+    shell_phase: Option<ShellPhase>,
     /// Absolute logical line (`scrollback.len() + cursor row`) where the running
     /// command's output began (OSC 133;C), or `None` outside a command. Decays
     /// with scrollback eviction and is remapped across a resize (it rides the
@@ -812,6 +835,41 @@ pub struct Grid {
 /// 8th column (0, 8, 16, …), matching the classic 8-column default.
 fn default_tab_stops(cols: usize) -> Vec<bool> {
     (0..cols).map(|i| i % 8 == 0).collect()
+}
+
+/// The columns a row of size `attr` holds on a `cols`-wide grid: all of
+/// them, or the left half for a double-width row (DECDWL/DECDHL).
+fn line_capacity(cols: usize, attr: LineAttr) -> usize {
+    match attr {
+        LineAttr::Single => cols,
+        _ => cols.div_ceil(2),
+    }
+}
+
+/// VARIATION SELECTOR-16: asks for emoji presentation of the scalar before it.
+const VS16: char = '\u{fe0f}';
+
+/// Whether an extended grapheme boundary (UAX #29) falls between the glyph
+/// `base` + `suffix` and the scalar `next`. The three pieces are handed to the
+/// segmenter as chunks of one logical string, so nothing is concatenated.
+fn is_grapheme_boundary(base: &str, suffix: &str, next: &str) -> bool {
+    let at = base.len() + suffix.len();
+    let mut cursor = GraphemeCursor::new(at, at + next.len(), true);
+    loop {
+        match cursor.is_boundary(next, at) {
+            Ok(boundary) => return boundary,
+            // Context runs back at most through the suffix, then the base.
+            Err(GraphemeIncomplete::PreContext(end)) if end == at && !suffix.is_empty() => {
+                cursor.provide_context(suffix, base.len());
+            }
+            Err(GraphemeIncomplete::PreContext(end)) if end == base.len() && end > 0 => {
+                cursor.provide_context(base, 0);
+            }
+            // Out of context (or an unexpected request): treat as a boundary,
+            // so the scalar starts its own glyph.
+            Err(_) => return true,
+        }
+    }
 }
 
 /// Per-row size attribute set by `ESC # 3/4/5/6` (DECDHL/DECDWL/DECSWL). A
@@ -929,12 +987,29 @@ fn reflow_clip(old: &[Line], cols: usize, rows: usize, blank: PackedCell) -> Vec
 /// padding. `flags == 0` excludes both [`WIDE_TRAILER`] and any SGR attribute,
 /// so a colored/attributed blank is *kept* (its background is content).
 fn is_padding(c: &Cell) -> bool {
-    c.ch == ' ' && c.cluster == 0 && c.link == 0 && c.flags == 0
+    c.ch == ' ' && c.cluster == 0 && c.link == 0 && c.flags & !ATTR_DEFAULT_COLORS == 0
 }
 
 /// [`is_padding`] for a stored cell, through its style.
 fn is_padding_packed(c: PackedCell, styles: &StyleTable) -> bool {
     c.ch() == ' ' && is_padding(&c.resolve(&styles.get(c.style())))
+}
+
+/// Store a history line's trailing run of one padding cell as a single
+/// cell and a repeat count.
+/// Only a hard-broken line: the padding of a soft-wrapped one is part of
+/// the logical line that continues below it. A reflow drops this padding
+/// anyway, so it never sees the difference.
+fn trim_padding(line: &mut Line, styles: &StyleTable) {
+    let cells = line.cells();
+    let Some(&last) = cells.last() else {
+        return;
+    };
+    if line.wrapped || !is_padding_packed(last, styles) {
+        return;
+    }
+    let keep = cells.iter().rposition(|c| *c != last).map_or(0, |i| i + 1);
+    line.trim_tail(keep);
 }
 
 /// A pixel image (Sixel/Kitty) placed on the grid: source pixels plus the cell
@@ -1002,8 +1077,8 @@ struct Reflowed {
 /// physical-row → logical-line → new-physical-row mapping.
 #[allow(clippy::too_many_arguments)]
 fn reflow_history(
-    scrollback: &VecDeque<Line>,
-    screen: &[Line],
+    scrollback: VecDeque<Line>,
+    screen: Vec<Line>,
     old_cols: usize,
     cursor: (usize, usize),
     prompt_marks: &[usize],
@@ -1016,7 +1091,19 @@ fn reflow_history(
     scrollback_max: usize,
     styles: &StyleTable,
 ) -> Reflowed {
-    let is_padding = |c: &PackedCell| is_padding_packed(*c, styles);
+    // Whether a cell pads is resolved once per run of equal cells, not per
+    // cell: trimming walks every trailing blank of every line.
+    let last = std::cell::Cell::new(None::<(PackedCell, bool)>);
+    let is_padding = |c: &PackedCell| {
+        if let Some((cell, pads)) = last.get()
+            && cell == *c
+        {
+            return pads;
+        }
+        let pads = is_padding_packed(*c, styles);
+        last.set(Some((*c, pads)));
+        pads
+    };
     let hist = scrollback.len();
     let old_total = hist + screen.len();
     let cursor_phys = hist + cursor.1.min(screen.len().saturating_sub(1));
@@ -1037,30 +1124,47 @@ fn reflow_history(
     };
 
     // --- Phase 1: flatten physical rows into logical lines. ---
-    let mut logical: Vec<Vec<PackedCell>> = Vec::new();
+    // Every logical line's cells go into one buffer, `flat`; `logical` holds
+    // each line's range in it.
+    let cells_total = (0..old_total).map(|i| phys(i).0.len()).sum();
+    let mut flat: Vec<PackedCell> = Vec::with_capacity(cells_total);
+    let mut logical: Vec<std::ops::Range<usize>> = Vec::new();
     let mut logical_attr: Vec<LineAttr> = Vec::new();
     let mut phys_to_logical: Vec<usize> = Vec::with_capacity(old_total);
-    let mut cur: Vec<PackedCell> = Vec::new();
+    let mut cur_start = 0usize;
     let mut cur_attr = LineAttr::Single;
     let mut cur_started = false;
     let mut cursor_logical = 0usize;
     let mut cursor_off = 0usize;
+    // Close the open logical line, trimming trailing padding but never past
+    // the cursor's column on the cursor's own line.
+    let close = |flat: &mut Vec<PackedCell>, start: usize, min_keep: usize| {
+        let mut end = flat.len();
+        while end > start + min_keep && is_padding(&flat[end - 1]) {
+            end -= 1;
+        }
+        flat.truncate(end);
+        start..end
+    };
     for i in 0..old_total {
         let (cells, wrapped, attr) = phys(i);
         let li = logical.len(); // index this physical row's logical line will get
         phys_to_logical.push(li);
         if !cur_started {
             cur_attr = attr;
+            cur_start = flat.len();
             cur_started = true;
         }
         if i == cursor_phys {
             cursor_logical = li;
-            cursor_off = cur.len() + cursor.0.min(old_cols);
+            cursor_off = flat.len() - cur_start + cursor.0.min(old_cols);
         }
         // Append this row's content. A wrapped row that ends in one padding cell
         // because a wide glyph didn't fit drops that filler — detected precisely
         // by the next row beginning with a width-2 glyph.
-        let mut take = cells.len();
+        // A double-width row holds only its left half; the cells past it are
+        // never shown, so they are not part of the logical line.
+        let mut take = cells.len().min(line_capacity(old_cols, attr));
         if wrapped && take > 0 && is_padding(&cells[take - 1]) {
             let next_wide = i + 1 < old_total && {
                 let (nc, _, _) = phys(i + 1);
@@ -1070,19 +1174,12 @@ fn reflow_history(
                 take -= 1;
             }
         }
-        cur.extend_from_slice(&cells[..take]);
+        flat.extend_from_slice(&cells[..take]);
         if wrapped {
             continue; // logical line continues on the next physical row
         }
-        // Hard break: close the logical line, trimming trailing padding but never
-        // past the cursor's column on the cursor's own line.
         let min_keep = if li == cursor_logical { cursor_off } else { 0 };
-        let mut end = cur.len();
-        while end > min_keep && is_padding(&cur[end - 1]) {
-            end -= 1;
-        }
-        cur.truncate(end);
-        logical.push(std::mem::take(&mut cur));
+        logical.push(close(&mut flat, cur_start, min_keep));
         logical_attr.push(cur_attr);
         cur_started = false;
     }
@@ -1094,14 +1191,15 @@ fn reflow_history(
         } else {
             0
         };
-        let mut end = cur.len();
-        while end > min_keep && is_padding(&cur[end - 1]) {
-            end -= 1;
-        }
-        cur.truncate(end);
-        logical.push(cur);
+        logical.push(close(&mut flat, cur_start, min_keep));
         logical_attr.push(cur_attr);
     }
+    // The old rows' cell buffers, reused for the new rows below.
+    let mut spare: Vec<Vec<PackedCell>> = scrollback
+        .into_iter()
+        .chain(screen)
+        .map(Line::into_cells)
+        .collect();
 
     // Drop blank logical lines trailing *below* the cursor: those are the screen's
     // empty tail (padding under the last output), not history. Lines at or above
@@ -1112,14 +1210,17 @@ fn reflow_history(
         logical_attr.pop();
     }
 
-    // --- Phase 2: re-wrap each logical line to the new width. ---
-    let mut out_cells: Vec<Vec<PackedCell>> = Vec::new();
+    // --- Phase 2: split each logical line into rows of the new width. ---
+    // Only the split is computed here: a row is its cell range in `flat`
+    // (empty for a blank row). Phase 3 builds just the rows it keeps.
+    let mut out_cells: Vec<std::ops::Range<usize>> = Vec::new();
     let mut out_wrapped: Vec<bool> = Vec::new();
     let mut out_attr: Vec<LineAttr> = Vec::new();
     let mut logical_first_row: Vec<usize> = vec![0; logical.len()];
     let mut ncur = (0usize, 0usize);
     let mut cursor_set = false;
-    for (li, line) in logical.iter().enumerate() {
+    for (li, span) in logical.iter().enumerate() {
+        let line = &flat[span.clone()];
         logical_first_row[li] = out_cells.len();
         let attr = logical_attr[li];
         if line.is_empty() {
@@ -1127,15 +1228,16 @@ fn reflow_history(
                 ncur = (out_cells.len(), 0);
                 cursor_set = true;
             }
-            out_cells.push(vec![blank; new_cols]);
+            out_cells.push(span.start..span.start);
             out_wrapped.push(false);
             out_attr.push(attr);
             continue;
         }
+        let cap = line_capacity(new_cols, attr);
         let mut i = 0;
         let mut seg_start = 0;
         while i < line.len() {
-            let mut take = new_cols.min(line.len() - i);
+            let mut take = cap.min(line.len() - i);
             // Don't cut a double-width glyph from its trailer: if the cell just
             // past the segment is a trailer, push its head to the next row.
             if i + take < line.len() && line[i + take].is_wide_trailer() && take > 1 {
@@ -1144,23 +1246,21 @@ fn reflow_history(
             if take == 0 {
                 take = 1; // degenerate new_cols == 1 vs a wide glyph: force progress
             }
-            let mut row = vec![blank; new_cols];
-            let n = take.min(new_cols);
-            row[..n].copy_from_slice(&line[i..i + n]);
+            let n = take.min(cap);
             seg_start = i;
             if li == cursor_logical && !cursor_set && cursor_off >= i && cursor_off < i + take {
-                ncur = (out_cells.len(), (cursor_off - i).min(new_cols - 1));
+                ncur = (out_cells.len(), (cursor_off - i).min(cap - 1));
                 cursor_set = true;
             }
             let more = i + take < line.len();
-            out_cells.push(row);
+            out_cells.push(span.start + i..span.start + i + n);
             out_wrapped.push(more);
             out_attr.push(attr);
             i += take;
         }
         if li == cursor_logical && !cursor_set {
             // Cursor sat at or past the last cell of its (trimmed) line.
-            let col = (cursor_off - seg_start).min(new_cols - 1);
+            let col = (cursor_off - seg_start).min(cap - 1);
             ncur = (out_cells.len() - 1, col);
             cursor_set = true;
         }
@@ -1176,19 +1276,22 @@ fn reflow_history(
         screen_top = ncur.0; // cursor would be above the window: pull the window up
     }
     let dropped = screen_top.saturating_sub(scrollback_max);
-    let mut new_scrollback: VecDeque<Line> = VecDeque::new();
+    // Rows past the scrollback cap and below the cursor's window are never built.
+    let mut row = |r: usize| -> Vec<PackedCell> {
+        let mut cells = spare.pop().unwrap_or_default();
+        cells.clear();
+        cells.extend_from_slice(&flat[out_cells[r].clone()]);
+        cells.resize(new_cols, blank);
+        cells
+    };
+    let new_scrollback: VecDeque<Line> = (dropped..screen_top)
+        .map(|r| Line::new(row(r), out_wrapped[r], LineAttr::Single))
+        .collect();
     let mut new_screen: Vec<Line> = Vec::with_capacity(new_rows);
-    for (r, row) in out_cells.into_iter().enumerate() {
-        if r < dropped {
-            continue; // oldest history beyond the scrollback cap
-        }
-        if r < screen_top {
-            new_scrollback.push_back(Line::new(row, out_wrapped[r], LineAttr::Single));
-        } else if r < screen_top + new_rows {
-            new_screen.push(Line::new(row, out_wrapped[r], out_attr[r]));
-        }
-        // r >= screen_top + new_rows: below the cursor's window, dropped.
-    }
+    new_screen.extend(
+        (screen_top..total.min(screen_top + new_rows))
+            .map(|r| Line::new(row(r), out_wrapped[r], out_attr[r])),
+    );
     new_screen.resize_with(new_rows, || Line::blank(new_cols, blank));
     let cy = ncur.0.saturating_sub(screen_top).min(new_rows - 1);
     let cx = ncur.1.min(new_cols - 1);
@@ -1250,25 +1353,42 @@ fn reflow_history(
 /// pre-rendered cells the renderer composites over the bottom of the live
 /// screen, independent of the child's output stream. Kept pre-rendered so the
 /// hot render path just borrows the slice; re-laid from `text`/`fg`/`bg` on a
-/// resize.
+/// resize and whenever the default colours change.
 pub(crate) struct StatusLine {
     text: String,
-    fg: u32,
-    bg: u32,
+    /// The colours asked for; `None` is the default colour, resolved when
+    /// the cells are laid out.
+    fg: Option<u32>,
+    bg: Option<u32>,
     cells: Vec<Cell>,
 }
 
 impl StatusLine {
-    /// Lay `text` out into exactly `cols` cells in `fg`/`bg`: advance wide glyphs
-    /// by two columns with a flagged trailer, drop zero-width scalars, stop at the
-    /// margin, and pad the tail with blanks in `bg`.
-    fn lay_out(text: &str, fg: u32, bg: u32, cols: usize) -> Vec<Cell> {
+    /// Lay `text` out into exactly `cols` cells in `fg`/`bg` (the defaults
+    /// where unset): advance wide glyphs by two columns with a flagged
+    /// trailer, drop zero-width scalars, stop at the margin, and pad the tail
+    /// with blanks in `bg`.
+    fn lay_out(
+        text: &str,
+        fg: Option<u32>,
+        bg: Option<u32>,
+        d: Defaults,
+        cols: usize,
+    ) -> Vec<Cell> {
+        let mut provenance = 0;
+        if fg.is_none() {
+            provenance |= ATTR_FG_DEFAULT;
+        }
+        if bg.is_none() {
+            provenance |= ATTR_BG_DEFAULT;
+        }
+        let (fg, bg) = (fg.unwrap_or(d.fg), bg.unwrap_or(d.bg));
         let blank = Cell {
             ch: ' ',
             cluster: 0,
             fg,
             bg,
-            flags: 0,
+            flags: provenance,
             link: 0,
             underline_color: fg,
         };
@@ -1282,24 +1402,11 @@ impl StatusLine {
             if x + w > cols {
                 break;
             }
-            cells[x] = Cell {
-                ch,
-                cluster: 0,
-                fg,
-                bg,
-                flags: 0,
-                link: 0,
-                underline_color: fg,
-            };
+            cells[x] = Cell { ch, ..blank };
             if w == 2 {
                 cells[x + 1] = Cell {
-                    ch: ' ',
-                    cluster: 0,
-                    fg,
-                    bg,
-                    flags: WIDE_TRAILER,
-                    link: 0,
-                    underline_color: fg,
+                    flags: WIDE_TRAILER | provenance,
+                    ..blank
                 };
             }
             x += w;
@@ -1308,8 +1415,8 @@ impl StatusLine {
     }
 
     #[cfg(feature = "l13")]
-    fn new(text: String, fg: u32, bg: u32, cols: usize) -> Self {
-        let cells = Self::lay_out(&text, fg, bg, cols);
+    fn new(text: String, fg: Option<u32>, bg: Option<u32>, d: Defaults, cols: usize) -> Self {
+        let cells = Self::lay_out(&text, fg, bg, d, cols);
         StatusLine {
             text,
             fg,
@@ -1318,9 +1425,10 @@ impl StatusLine {
         }
     }
 
-    /// Re-lay the existing text/colors at a new width (after a resize).
-    fn relayout(&mut self, cols: usize) {
-        self.cells = Self::lay_out(&self.text, self.fg, self.bg, cols);
+    /// Re-lay the existing text/colours at `cols` in the defaults `d`
+    /// (after a resize or a default-colour change).
+    fn relayout(&mut self, cols: usize, d: Defaults) {
+        self.cells = Self::lay_out(&self.text, self.fg, self.bg, d, cols);
     }
 }
 
@@ -1378,6 +1486,7 @@ impl Grid {
             kitty_flags_stack: Vec::new(),
             cwd: String::new(),
             scrollback: VecDeque::new(),
+            untrimmed: 0,
             scrollback_max: SCROLLBACK_MAX,
             view_offset: 0,
             selection: None,
@@ -1443,10 +1552,8 @@ impl Grid {
             left_margin: 0,
             right_margin: cols.saturating_sub(1),
             insert_mode: false,
-            default_fg: DEFAULT_FG,
-            default_bg: DEFAULT_BG,
             erase_bg: None,
-            cursor_color: DEFAULT_FG,
+            cursor_color: crate::cell::DEFAULT_FG,
             cursor_shape: CursorShape::default(),
             cursor_blink: false,
             default_cursor_shape: CursorShape::default(),
@@ -1460,6 +1567,7 @@ impl Grid {
             channel: rusty_term_l13::ChannelState::default(),
             status_line: None,
             last_exit: None,
+            shell_phase: None,
             #[cfg(feature = "l13")]
             command_start: None,
             #[cfg(feature = "l13")]
@@ -1477,7 +1585,13 @@ impl Grid {
             return;
         }
         let cell = self.pack(cell);
-        let blank = self.pack(Cell::blank());
+        self.set_packed(x, y, cell);
+    }
+
+    /// [`Grid::set_cell`] for a cell already stored; `(x, y)` must be on
+    /// the screen.
+    fn set_packed(&mut self, x: usize, y: usize, cell: PackedCell) {
+        let blank = self.default_packed();
         let row = self.screen[y].cells_mut();
         if row[x].is_wide_trailer() {
             // Overwriting the trailing half: blank the head to its left.
@@ -1490,6 +1604,22 @@ impl Grid {
         }
         row[x] = cell;
         self.touch(y);
+    }
+
+    /// The colours and attributes of the live screen cell at (`col`, `row`),
+    /// row 0 at the top. A wide glyph's trailer reports its lead cell.
+    /// `None` off the screen.
+    pub fn cell_colors(&self, col: usize, row: usize) -> Option<CellColors> {
+        let line = self.screen.get(row).filter(|_| col < self.cols)?;
+        let lead = match line.cell(col) {
+            Some(cell) if cell.is_wide_trailer() && col > 0 => col - 1,
+            _ => col,
+        };
+        let style = line.cell(lead).map_or_else(
+            || CellStyle::of(&self.default_cell()),
+            |cell| self.styles.get(cell.style()),
+        );
+        Some(style.colors())
     }
 
     /// The cells of live screen row `y` (`cols` of them), collected; empty
@@ -1512,9 +1642,8 @@ impl Grid {
     /// by-value cell read goes through here, so the cell storage can change
     /// behind it.
     pub(crate) fn line_cell(&self, line: &Line, col: usize) -> Cell {
-        line.cells()
-            .get(col)
-            .map_or_else(Cell::blank, |&cell| self.resolve(cell))
+        line.cell(col)
+            .map_or_else(|| self.default_cell(), |cell| self.resolve(cell))
     }
 
     /// The full cell behind a stored one.
@@ -1526,6 +1655,7 @@ impl Grid {
     /// blanks past its width. A run of one style looks the table up once.
     #[cfg(any(test, feature = "gui"))]
     pub(crate) fn push_resolved(&self, line: &Line, cols: usize, out: &mut Vec<Cell>) {
+        let start = out.len();
         let cells = &line.cells()[..line.cells().len().min(cols)];
         let mut memo: Option<(StyleId, CellStyle)> = None;
         for &cell in cells {
@@ -1539,7 +1669,13 @@ impl Grid {
             };
             out.push(cell.resolve(&style));
         }
-        out.resize(out.len() + (cols - cells.len()), Cell::blank());
+        let width = start + line.width().min(cols);
+        if let Some(&fill) = line.cells().last()
+            && out.len() < width
+        {
+            out.resize(width, self.resolve(fill));
+        }
+        out.resize(start + cols, self.default_cell());
     }
 
     /// `cells` resolved, for readers that want a whole row by value.
@@ -1578,15 +1714,18 @@ impl Grid {
 
     /// The style id of a glyph written in `pen` under `link`. `pen`'s DECSCA
     /// bit is a layout bit and does not reach the style.
+    #[inline]
     fn pen_id(&mut self, pen: Pen, link: u16) -> StyleId {
-        self.styles.intern_pen(CellStyle {
-            fg: pen.fg,
-            bg: pen.bg,
-            underline_color: pen.underline_color,
-            attrs: pen.attrs & !super::cell::ATTR_PROTECTED,
-            link,
-            cluster: 0,
-        })
+        self.styles.intern_pen(CellStyle::of_pen(&pen, link))
+    }
+
+    /// The style of a wide glyph's trailer in `pen`: its colours and their
+    /// provenance, but no rendition.
+    fn trailer_style(pen: Pen, link: u16) -> CellStyle {
+        CellStyle {
+            attrs: pen.attrs & ATTR_DEFAULT_COLORS,
+            ..CellStyle::of_pen(&pen, link)
+        }
     }
 
     /// Run a style sweep if one is due, and a compaction if the sweep left
@@ -1627,7 +1766,7 @@ impl Grid {
             .chain(&mut self.scrollback)
             .chain(stashed)
         {
-            remap.apply(line.cells_mut());
+            remap.apply(line.cells_restyle());
         }
     }
 
@@ -1787,7 +1926,7 @@ impl Grid {
         }
         if self
             .sync_output_since
-            .is_some_and(|t| t.elapsed() > SYNC_OUTPUT_TIMEOUT)
+            .is_some_and(|t| t.elapsed() >= SYNC_OUTPUT_TIMEOUT)
         {
             self.sync_output = false;
             self.sync_output_since = None;
@@ -1796,7 +1935,48 @@ impl Grid {
         true
     }
 
+    /// When the open synchronized-output window times out, for a render loop
+    /// to wake and repaint then even if no more output arrives. `None` when
+    /// no window is open; one already past its timeout is closed here, as by
+    /// [`Grid::sync_output_active`].
+    pub fn sync_output_until(&mut self) -> Option<std::time::Instant> {
+        if !self.sync_output_active() {
+            return None;
+        }
+        self.sync_output_since.map(|t| t + SYNC_OUTPUT_TIMEOUT)
+    }
+
     /// Move the cursor to column 0 of the current row.
+    /// The cursor as a position report (CPR, DECXCPR) gives it: a pending
+    /// wrap reads as the last column, as in xterm.
+    pub(crate) fn report_cursor(&self) -> (usize, usize) {
+        (
+            self.cursor.0.min(self.cols.saturating_sub(1)),
+            self.cursor.1,
+        )
+    }
+
+    /// Whether insert mode (IRM, `CSI 4 h`) is on: printing shifts the
+    /// rest of the row right instead of replacing cells.
+    pub fn insert_mode(&self) -> bool {
+        self.insert_mode
+    }
+
+    /// The region cursor addressing is relative to while origin mode
+    /// (DECOM) is on, as 0-based inclusive (left, top, right, bottom);
+    /// `None` with origin mode off.
+    pub fn origin_region(&self) -> Option<(usize, usize, usize, usize)> {
+        if !self.origin_mode {
+            return None;
+        }
+        let (left, right) = if self.side_margins_active() {
+            (self.left_margin, self.right_margin)
+        } else {
+            (0, self.cols.saturating_sub(1))
+        };
+        Some((left, self.scroll_top, right, self.scroll_bottom))
+    }
+
     /// Whether DECSLRM margins narrower than the full width are in effect —
     /// the guard on every margin-aware branch, so the common case pays one
     /// boolean test.
@@ -2013,7 +2193,7 @@ impl Grid {
                 }
                 let top = sample(cc, cr * 2, tw, th);
                 let bottom = sample(cc, cr * 2 + 1, tw, th);
-                if let Some(cell) = half_block(top, bottom, self.default_bg) {
+                if let Some(cell) = half_block(top, bottom, self.default_bg()) {
                     self.set_cell(col, y, cell);
                 }
             }
@@ -2178,6 +2358,7 @@ impl Grid {
             let mut line = std::mem::take(&mut self.screen[bottom]);
             line.attr = LineAttr::Single;
             self.scrollback.push_back(line);
+            self.untrimmed += 1;
             self.touch_hist();
             if self.scrollback.len() > self.scrollback_max {
                 if let Some(evicted) = self.scrollback.pop_front() {
@@ -2249,6 +2430,9 @@ impl Grid {
                     && self.continues_grapheme(bx, by, ch)
                 {
                     self.append_to_glyph(bx, by, ch);
+                    if ch == VS16 {
+                        self.widen_for_emoji(bx, by);
+                    }
                     return;
                 }
             } else if w == 0
@@ -2265,26 +2449,10 @@ impl Grid {
                 return;
             }
         }
-        // With DECSLRM margins, a cursor inside them wraps (or pins) at the
-        // right margin instead of the screen edge.
-        let limit = if self.side_margins_active() && self.cursor.0 >= self.left_margin {
-            (self.right_margin + 1).min(self.cols)
-        } else {
-            self.cols
-        };
+        let limit = self.wrap_limit();
         if self.cursor.0 + w > limit {
             if self.autowrap {
-                // Mark this row as soft-wrapped before leaving it, so the reflow
-                // and scrollback know it and its successor are one logical line.
-                let y = self.cursor.1;
-                if let Some(line) = self.screen.get_mut(y)
-                    && !line.wrapped
-                {
-                    line.wrapped = true;
-                    self.touch(y);
-                }
-                self.carriage_return();
-                self.newline();
+                self.soft_wrap();
             } else {
                 // Autowrap off: keep the glyph in the last cell(s) of the row
                 // (or of the margin band).
@@ -2297,40 +2465,100 @@ impl Grid {
         }
         let (x, y) = self.cursor;
         let link = self.current_link;
-        self.set_cell(
-            x,
-            y,
-            Cell {
-                ch,
-                cluster: 0,
-                fg: pen.fg,
-                bg: pen.bg,
-                flags: pen.attrs,
-                link,
-                underline_color: pen.underline_color,
-            },
-        );
-        if w == 2 && x + 1 < self.cols {
+        if x < self.cols && y < self.rows {
+            let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
+            let head = PackedCell::glyph(ch, protected, self.pen_id(pen, link));
+            self.set_packed(x, y, head);
+        }
+        if w == 2 && x + 1 < self.cols && y < self.rows {
             // Trailing half: a flagged placeholder the renderer skips. It keeps
             // the pen's colors but only the WIDE_TRAILER layout bit.
-            self.set_cell(
-                x + 1,
-                y,
-                Cell {
-                    ch: ' ',
-                    cluster: 0,
-                    fg: pen.fg,
-                    bg: pen.bg,
-                    flags: WIDE_TRAILER,
-                    link,
-                    underline_color: pen.underline_color,
-                },
-            );
+            let id = self.styles.intern(Self::trailer_style(pen, link));
+            self.set_packed(x + 1, y, PackedCell::trailer(id));
         }
         // `cols` (one past the last column) is the pending-wrap position; a
         // glyph wider than the grid itself (w=2, cols=1) must not push past it,
         // or later column arithmetic indexes outside the row.
         self.cursor.0 = (self.cursor.0 + w).min(self.cols);
+    }
+
+    /// The column a glyph at the cursor must end before: the right margin
+    /// while DECSLRM margins hold the cursor, otherwise the screen edge; on a
+    /// double-width row (DECDWL/DECDHL) no further than half the columns.
+    fn wrap_limit(&self) -> usize {
+        let edge = if self.side_margins_active() && self.cursor.0 >= self.left_margin {
+            (self.right_margin + 1).min(self.cols)
+        } else {
+            self.cols
+        };
+        let attr = self
+            .screen
+            .get(self.cursor.1)
+            .map_or(LineAttr::Single, |l| l.attr);
+        edge.min(line_capacity(self.cols, attr))
+    }
+
+    /// Whether the cursor row is double-width (DECDWL, or either half of
+    /// DECDHL), which shows only its left half of the columns.
+    fn cursor_row_is_double(&self) -> bool {
+        self.screen
+            .get(self.cursor.1)
+            .is_some_and(|line| line.attr != LineAttr::Single)
+    }
+
+    /// Autowrap: mark the cursor row soft-wrapped (so reflow and scrollback
+    /// know it and its successor are one logical line), then move to the
+    /// start of the next line.
+    fn soft_wrap(&mut self) {
+        let y = self.cursor.1;
+        if let Some(line) = self.screen.get_mut(y)
+            && !line.wrapped
+        {
+            line.wrapped = true;
+            self.touch(y);
+        }
+        self.carriage_return();
+        self.newline();
+    }
+
+    /// Mode 2027: a VS16 just joined the narrow glyph at `(x, y)`, left of the
+    /// cursor. If that makes an emoji presentation sequence (`❤️`, `1️⃣`), the
+    /// glyph becomes two columns: in place when the next column fits, else
+    /// moved to the next line by autowrap. Without autowrap it stays narrow.
+    fn widen_for_emoji(&mut self, x: usize, y: usize) {
+        let head = self.screen[y].cells()[x];
+        if head.is_wide_trailer() || self.cursor != (x + 1, y) {
+            return; // already wide (or not the glyph the cursor just passed)
+        }
+        let mut buf = [0u8; 8];
+        let base = self.resolve(head).ch.encode_utf8(&mut buf).len();
+        let pair = VS16.encode_utf8(&mut buf[base..]).len() + base;
+        if std::str::from_utf8(&buf[..pair]).map_or(1, UnicodeWidthStr::width) != 2 {
+            return;
+        }
+        let (mut x, mut y) = (x, y);
+        if x + 2 > self.wrap_limit() {
+            if !self.autowrap {
+                return;
+            }
+            let blank = self.default_packed();
+            self.screen[y].cells_mut()[x] = blank;
+            self.touch(y);
+            self.soft_wrap();
+            (x, y) = self.cursor;
+            self.set_packed(x, y, head);
+            if x + 2 > self.wrap_limit() {
+                // Narrower than two columns (a one-column grid): stays narrow.
+                self.cursor = ((x + 1).min(self.cols), y);
+                return;
+            }
+        }
+        let mut trailer = self.styles.get(head.style());
+        trailer.attrs &= ATTR_DEFAULT_COLORS;
+        trailer.cluster = 0;
+        let id = self.styles.intern(trailer);
+        self.set_packed(x + 1, y, PackedCell::trailer(id));
+        self.cursor = ((x + 2).min(self.cols), y);
     }
 
     /// Write a run of printable ASCII at the cursor, as [`Grid::put_char`]
@@ -2342,7 +2570,11 @@ impl Grid {
         while let Some((&first, tail)) = rest.split_first() {
             let (x, y) = self.cursor;
             let room = self.cols.saturating_sub(x);
-            if room == 0 || self.insert_mode || self.side_margins_active() {
+            if room == 0
+                || self.insert_mode
+                || self.side_margins_active()
+                || self.cursor_row_is_double()
+            {
                 self.put_char(char::from(first), pen);
                 rest = tail;
                 continue;
@@ -2385,6 +2617,7 @@ impl Grid {
             && !self.side_margins_active()
             && !self.grapheme_clustering
             && self.cursor.1 < self.rows
+            && !self.cursor_row_is_double()
     }
 
     /// Fill the leading glyphs of `text` into the cursor row while each has a
@@ -2399,23 +2632,17 @@ impl Grid {
             return 0;
         }
         let head_id = self.pen_id(pen, link);
-        // A trailer carries the pen's colours but only the layout bit. It and
-        // the blank are interned only when a wide glyph needs them.
-        let trailer = CellStyle {
-            fg: pen.fg,
-            bg: pen.bg,
-            underline_color: pen.underline_color,
-            attrs: 0,
-            link,
-            cluster: 0,
-        };
+        // The trailer and the blank are interned only when a wide glyph
+        // needs them.
+        let trailer = Self::trailer_style(pen, link);
         let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
         let styles = &mut self.styles;
         let blank = |styles: &mut StyleTable| {
-            PackedCell::new(&Cell::blank(), styles.intern(CellStyle::of(&Cell::blank())))
+            let cell = Cell::default_blank();
+            PackedCell::new(&cell, styles.intern(CellStyle::of(&cell)))
         };
         // With no attributes the trailer's style is the head's.
-        let plain = pen.attrs & !super::cell::ATTR_PROTECTED == 0;
+        let plain = pen.attrs & !(super::cell::ATTR_PROTECTED | ATTR_DEFAULT_COLORS) == 0;
         let mut trailer_id = plain.then_some(head_id);
         let row = self.screen[y].cells_mut();
         let (mut x, mut used) = (x0, 0);
@@ -2460,7 +2687,7 @@ impl Grid {
         let blank_needed =
             (x >= 1 && row[x].is_wide_trailer()) || (end < row.len() && row[end].is_wide_trailer());
         if blank_needed {
-            let blank = self.pack(Cell::blank());
+            let blank = self.default_packed();
             let row = self.screen[y].cells_mut();
             if x >= 1 && row[x].is_wide_trailer() {
                 row[x - 1] = blank;
@@ -2491,32 +2718,23 @@ impl Grid {
         }
     }
 
-    /// Whether appending `next` to the glyph at `(x, y)` keeps it a single
-    /// grapheme cluster (UAX #29) — i.e. `next` continues that glyph rather than
-    /// starting a new one.
+    /// Whether `next` continues the glyph at `(x, y)` rather than starting a
+    /// new grapheme cluster (UAX #29): no extended grapheme boundary falls
+    /// between the glyph's text and `next`. Asks only about that one boundary,
+    /// reading the base scalar and the interned suffix in place, so joining
+    /// neither allocates nor re-segments the glyph.
     fn continues_grapheme(&self, x: usize, y: usize, next: char) -> bool {
-        let mut s = self.glyph_text(x, y);
-        s.push(next);
-        s.graphemes(true).count() == 1
-    }
-
-    /// The full glyph text at `(x, y)` of the live grid: the base scalar plus
-    /// any interned grapheme continuation.
-    fn glyph_text(&self, x: usize, y: usize) -> String {
-        self.cell_text(self.resolve(self.screen[y].cells()[x]))
-    }
-
-    /// The full glyph text of `cell` (live or scrollback — the cluster table is
-    /// shared): the base scalar plus any interned grapheme continuation.
-    fn cell_text(&self, cell: Cell) -> String {
-        let mut s = String::new();
-        s.push(cell.ch);
-        if cell.cluster != 0
-            && let Some(suffix) = self.clusters.get((cell.cluster - 1) as usize)
-        {
-            s.push_str(suffix);
-        }
-        s
+        let cell = self.resolve(self.screen[y].cells()[x]);
+        let mut base_buf = [0u8; 4];
+        let base: &str = cell.ch.encode_utf8(&mut base_buf);
+        let suffix = cell
+            .cluster
+            .checked_sub(1)
+            .and_then(|i| self.clusters.get(usize::from(i)))
+            .map_or("", String::as_str);
+        let mut next_buf = [0u8; 4];
+        let next: &str = next.encode_utf8(&mut next_buf);
+        !is_grapheme_boundary(base, suffix, next)
     }
 
     /// Normalize the active selection into an inclusive `(start, end)` pair of
@@ -2719,11 +2937,8 @@ impl Grid {
         Cell {
             ch,
             cluster: 0,
-            fg: self.default_fg,
-            bg: self.default_bg,
-            flags: crate::cell::ATTR_DIM | crate::cell::ATTR_ITALIC,
-            link: 0,
-            underline_color: self.default_fg,
+            flags: crate::cell::ATTR_DIM | crate::cell::ATTR_ITALIC | ATTR_DEFAULT_COLORS,
+            ..self.default_cell()
         }
     }
 
@@ -2915,7 +3130,7 @@ impl Grid {
             c => out.push(c),
         };
         let hex = |c: u32| format!("#{:06x}", c & 0xFF_FF_FF);
-        let style_of = |cell: &Cell| -> (u32, u32, u16) {
+        let style_of = |cell: &Cell| -> (u32, u32, u32) {
             // Reverse video swaps the resolved pair; the run key is what the
             // reader sees, not the raw attribute.
             let (fg, bg) = if cell.flags & super::cell::ATTR_REVERSE != 0 {
@@ -2923,17 +3138,18 @@ impl Grid {
             } else {
                 (cell.fg, cell.bg)
             };
-            const STYLED: u16 = super::cell::ATTR_BOLD
+            const STYLED: u32 = super::cell::ATTR_BOLD
                 | super::cell::ATTR_ITALIC
                 | super::cell::ATTR_UNDERLINE
                 | super::cell::ATTR_STRIKE
+                | super::cell::ATTR_OVERLINE
                 | super::cell::ATTR_DIM;
             (fg, bg, cell.flags & STYLED)
         };
         let mut out = format!(
             "<pre style=\"font-family:monospace;background:{};color:{}\">",
-            hex(self.default_bg),
-            hex(self.default_fg)
+            hex(self.default_bg()),
+            hex(self.default_fg())
         );
         for row in start.1..=end.1 {
             let (cells, _) = self.phys_row(row);
@@ -2946,7 +3162,7 @@ impl Grid {
             // plain flavor does.
             let hi = c1.min(cells.len().saturating_sub(1));
             // One selected char: its cluster suffix and (fg, bg, flags) run key.
-            type StyledChar<'a> = (char, Option<&'a str>, (u32, u32, u16));
+            type StyledChar<'a> = (char, Option<&'a str>, (u32, u32, u32));
             let mut line: Vec<StyledChar> = Vec::new();
             for cell in cells.get(c0..=hi).unwrap_or(&[]) {
                 if cell.flags & WIDE_TRAILER != 0 {
@@ -2964,7 +3180,7 @@ impl Grid {
             {
                 line.pop();
             }
-            let mut open: Option<(u32, u32, u16)> = None;
+            let mut open: Option<(u32, u32, u32)> = None;
             for (ch, suffix, style) in line {
                 if open != Some(style) {
                     if open.is_some() {
@@ -2972,7 +3188,7 @@ impl Grid {
                     }
                     let (fg, bg, flags) = style;
                     let mut css = format!("color:{}", hex(fg));
-                    if bg != self.default_bg {
+                    if bg != self.default_bg() {
                         css.push_str(&format!(";background:{}", hex(bg)));
                     }
                     if flags & super::cell::ATTR_BOLD != 0 {
@@ -2984,6 +3200,7 @@ impl Grid {
                     let deco: Vec<&str> = [
                         (flags & super::cell::ATTR_UNDERLINE != 0, "underline"),
                         (flags & super::cell::ATTR_STRIKE != 0, "line-through"),
+                        (flags & super::cell::ATTR_OVERLINE != 0, "overline"),
                     ]
                     .iter()
                     .filter_map(|&(on, name)| on.then_some(name))
@@ -3194,16 +3411,12 @@ impl Grid {
         if top > bottom || left > right || top >= self.rows || left >= self.cols {
             return;
         }
-        let cell = Cell {
+        let protected = pen.attrs & super::cell::ATTR_PROTECTED != 0;
+        let cell = PackedCell::glyph(
             ch,
-            cluster: 0,
-            fg: pen.fg,
-            bg: pen.bg,
-            flags: pen.attrs,
-            link: 0,
-            underline_color: pen.underline_color,
-        };
-        let cell = self.pack(cell);
+            protected,
+            self.styles.intern(CellStyle::of_pen(&pen, 0)),
+        );
         for y in top..=bottom {
             self.screen[y].cells_mut()[left..=right].fill(cell);
             self.touch(y);
@@ -3287,24 +3500,17 @@ impl Grid {
     /// The fill used by every erase / scroll-clear path: a blank in the
     /// default foreground on the current SGR background (BCE, as xterm does),
     /// falling back to the default background, so an OSC 11 theme also colors
-    /// cleared regions.
-    fn erase_cell(&self) -> Cell {
-        let mut c = self.default_cell();
-        c.bg = self.erase_bg.unwrap_or(self.default_bg);
-        c
-    }
-
-    /// [`Grid::erase_cell`], stored. Every scroll and erase takes one, so it
-    /// goes through the pen cache rather than the table's hash index.
+    /// cleared regions. Every scroll and erase takes one, so it goes through
+    /// the pen cache rather than the table's hash index.
+    #[inline]
     fn erase_packed(&mut self) -> PackedCell {
-        let cell = self.erase_cell();
-        let pen = Pen {
-            fg: cell.fg,
-            bg: cell.bg,
-            attrs: cell.flags,
-            underline_color: cell.underline_color,
-        };
-        PackedCell::glyph(cell.ch, false, self.pen_id(pen, cell.link))
+        let d = self.styles.defaults();
+        let mut pen = Pen::default_colors(d.fg, d.bg);
+        if let Some((bg, tag)) = self.erase_bg {
+            (pen.bg, pen.bg_index) = (bg, tag);
+            pen.attrs &= !ATTR_BG_DEFAULT;
+        }
+        PackedCell::glyph(' ', false, self.pen_id(pen, 0))
     }
 
     /// [`Grid::default_cell`], stored.
@@ -3328,24 +3534,54 @@ impl Grid {
     /// A blank cell in the default colors, for fills that are not erases
     /// (resize, theme application, full reset).
     fn default_cell(&self) -> Cell {
-        let mut c = Cell::blank();
-        c.fg = self.default_fg;
-        c.bg = self.default_bg;
-        c
+        let d = self.styles.defaults();
+        Cell {
+            fg: d.fg,
+            bg: d.bg,
+            underline_color: d.fg,
+            ..Cell::default_blank()
+        }
     }
 
-    /// Set the background erases fill with (see [`Grid::erase_cell`]):
-    /// `Some(rgb)` for an SGR background, `None` for the default.
-    pub(crate) fn set_erase_bg(&mut self, bg: Option<u32>) {
+    /// Re-lay the status line in the current defaults.
+    fn relayout_status(&mut self) {
+        let (cols, defaults) = (self.cols, self.styles.defaults());
+        if let Some(s) = &mut self.status_line {
+            s.relayout(cols, defaults);
+        }
+    }
+
+    /// The default foreground (OSC 10), which cells marked default show.
+    fn default_fg(&self) -> u32 {
+        self.styles.defaults().fg
+    }
+
+    /// The default background (OSC 11), which cells marked default show.
+    fn default_bg(&self) -> u32 {
+        self.styles.defaults().bg
+    }
+
+    /// Set the background erases fill with (see [`Grid::erase_packed`]):
+    /// `Some((rgb, tag))` for an SGR background, `None` for the default.
+    pub(crate) fn set_erase_bg(&mut self, bg: Option<(u32, u16)>) {
         self.erase_bg = bg;
     }
 
-    /// Update the default foreground/background/cursor colors (OSC 10/11/12).
-    /// Mirrors the parser's palette so subsequent erases fill with the new
-    /// background and the windowed cursor paints in the new cursor color.
+    /// Update the default foreground/background/cursor colors (OSC 10/11/12
+    /// and their resets). Mirrors the parser's palette so subsequent erases
+    /// fill with the new background and the windowed cursor paints in the new
+    /// cursor color. Every cell whose colour is marked default
+    /// ([`crate::ATTR_FG_DEFAULT`] / [`crate::ATTR_BG_DEFAULT`]) follows, on
+    /// screen and in history; colours the child chose do not.
     pub(crate) fn set_default_colors(&mut self, fg: u32, bg: u32, cursor: u32) {
-        self.default_fg = fg;
-        self.default_bg = bg;
+        let defaults = Defaults { fg, bg };
+        if self.styles.defaults() != defaults {
+            self.styles.set_defaults(defaults);
+            self.relayout_status();
+            self.reset_damage();
+            self.touch_hist();
+            self.epoch += 1;
+        }
         if self.cursor_color != cursor {
             self.cursor_color = cursor;
             // Repaint the cursor cell's row so a pure OSC 12 change shows.
@@ -3374,12 +3610,28 @@ impl Grid {
         self.set_cursor_style(shape, blink);
     }
 
-    /// Override the scrollback line cap (the `scrollback` config key). `0`
     /// Number of lines currently held in scrollback (folds not applied).
     pub fn scrollback_len(&self) -> usize {
         self.scrollback.len()
     }
 
+    /// Release the memory of trailing padding in up to `budget` history lines
+    /// not yet looked at, oldest first. Readers see the same cells, so call
+    /// it whenever the terminal is idle; it is never needed for correctness.
+    /// `true` while lines remain to look at.
+    pub fn compact_history(&mut self, budget: usize) -> bool {
+        let len = self.scrollback.len();
+        let pending = self.untrimmed.min(len);
+        let take = pending.min(budget);
+        let first = len - pending;
+        for line in self.scrollback.range_mut(first..first + take) {
+            trim_padding(line, &self.styles);
+        }
+        self.untrimmed = pending - take;
+        self.untrimmed > 0
+    }
+
+    /// Override the scrollback line cap (the `scrollback` config key). `0`
     /// disables history. An already-overfull buffer is trimmed immediately.
     pub fn set_scrollback_max(&mut self, max: usize) {
         self.scrollback_max = max;
@@ -3417,22 +3669,45 @@ impl Grid {
     /// Live theme switch (config reload): remap every color that resolves to
     /// an `old`-theme entry — across the live screen, scrollback, and the
     /// stashed primary screen — to its `new`-theme counterpart, and adopt the
-    /// new defaults. Truecolor/256-cube colors pass through untouched (we
-    /// can't know they meant "the theme's red"). Full repaint requested.
+    /// new defaults. A palette colour (SGR 30-37 and the like) follows its
+    /// entry as the parser's palette does; an explicit RGB one is remapped
+    /// only when it equals an old theme colour, and truecolor/256-cube
+    /// colors otherwise pass through. Full repaint requested.
     pub fn retheme(&mut self, old: &super::Theme, new: &super::Theme) {
-        let map = |c: &mut u32| *c = super::color::remap(*c, old, new);
+        let map = |c: u32| super::color::remap(c, old, new);
         // Cells hold style ids, so only the table changes; styles that become
-        // equal merge, and only then are the cells rewritten.
+        // equal merge, and only then are the cells rewritten. Cells in the
+        // default colours follow the new defaults without a remap.
         self.blank_row.clear();
-        if let Some(remap) = self.styles.retheme(|c| super::color::remap(c, old, new)) {
+        let entry = |n: u8, c: u32| super::color::remap_entry(n, c, old, new);
+        if let Some(remap) = self.styles.retheme(map, entry) {
             self.apply_remap(&remap);
         }
-        map(&mut self.default_fg);
-        map(&mut self.default_bg);
-        if let Some(bg) = &mut self.erase_bg {
-            map(bg);
+        let d = self.styles.defaults();
+        self.styles.set_defaults(Defaults {
+            fg: map(d.fg),
+            bg: map(d.bg),
+        });
+        if let Some((bg, tag)) = &mut self.erase_bg {
+            *bg = Source::entry(*tag).map_or_else(|| map(*bg), |n| entry(n, *bg));
         }
+        self.relayout_status();
         self.cursor_color = super::color::remap(self.cursor_color, old, new);
+        self.reset_damage();
+        self.touch_hist();
+        self.epoch += 1;
+    }
+
+    /// Palette change (OSC 4, OSC 104, RIS, DECSTR): recolour every cell
+    /// written in a palette colour, on both screens and in history, to
+    /// `palette` of its entry. Cells in explicit RGB, even an equal one,
+    /// keep their colour. The parser re-syncs the erase fill. Full repaint
+    /// requested.
+    pub(crate) fn repaint(&mut self, palette: impl Fn(u8) -> u32) {
+        self.blank_row.clear();
+        if let Some(remap) = self.styles.repaint(palette) {
+            self.apply_remap(&remap);
+        }
         self.reset_damage();
         self.touch_hist();
         self.epoch += 1;
@@ -3482,8 +3757,8 @@ impl Grid {
         let (fold_start, fold_blocks): (Option<usize>, Vec<CommandBlock>) = (None, Vec::new());
         if let Some(primary) = self.primary.take() {
             let r = reflow_history(
-                &self.scrollback,
-                &primary.screen,
+                std::mem::take(&mut self.scrollback),
+                primary.screen,
                 old_cols,
                 primary.cursor,
                 &self.prompt_marks,
@@ -3497,6 +3772,7 @@ impl Grid {
                 &self.styles,
             );
             self.scrollback = r.scrollback;
+            self.untrimmed = self.scrollback.len();
             self.touch_hist();
             self.prompt_marks = r.prompt_marks;
             #[cfg(feature = "l13")]
@@ -3519,8 +3795,8 @@ impl Grid {
             self.saved_cursor = clamp(self.saved_cursor);
         } else {
             let r = reflow_history(
-                &self.scrollback,
-                &self.screen,
+                std::mem::take(&mut self.scrollback),
+                std::mem::take(&mut self.screen),
                 old_cols,
                 self.cursor,
                 &self.prompt_marks,
@@ -3534,6 +3810,7 @@ impl Grid {
                 &self.styles,
             );
             self.scrollback = r.scrollback;
+            self.untrimmed = self.scrollback.len();
             self.touch_hist();
             self.screen = r.screen;
             self.cursor = r.cursor;
@@ -3554,8 +3831,9 @@ impl Grid {
         self.rows = rows;
         self.reset_damage();
         self.view_offset = 0;
+        let defaults = self.styles.defaults();
         if let Some(s) = &mut self.status_line {
-            s.relayout(cols);
+            s.relayout(cols, defaults);
         }
         self.reset_scroll_region();
         self.styles.request_sweep();
@@ -3620,6 +3898,18 @@ impl Grid {
             self.reset_scroll_region();
             self.touch_all();
         }
+    }
+
+    /// The mode that opened the active alternate screen, if one is.
+    pub(crate) fn alt_mode(&self) -> Option<AltMode> {
+        self.primary.as_ref().map(|p| p.mode)
+    }
+
+    /// Whether a cursor move with `CUP` lands where its numbers say and text
+    /// written there replaces only the cells it covers: origin mode (DECOM)
+    /// and insert mode (IRM) are off, and no hyperlink (OSC 8) is open.
+    pub fn plain_cursor(&self) -> bool {
+        !self.origin_mode && !self.insert_mode && self.current_link == 0
     }
 
     /// Whether the alternate screen buffer (`?47`/`?1047`/`?1049`) is active.
@@ -3824,6 +4114,12 @@ impl Grid {
             line.attr = attr;
             self.touch(y);
         }
+        // A double-width row shows half the columns: a cursor in the right
+        // half moves to the last one it shows.
+        if attr != LineAttr::Single {
+            let last = line_capacity(self.cols, attr).saturating_sub(1);
+            self.cursor.0 = self.cursor.0.min(last);
+        }
     }
 
     /// Move the cursor forward `n` tab stops (`HT` / `CHT`), without writing
@@ -3989,7 +4285,7 @@ impl Grid {
     /// Screen-alignment test (`DECALN`, `ESC # 8`): fill every cell with `E` and
     /// home the cursor. Used to check character positioning.
     pub(crate) fn fill_alignment(&mut self) {
-        let mut e = Cell::blank();
+        let mut e = self.default_cell();
         e.ch = 'E';
         let e = self.pack(e);
         self.prime_blank_row(e);
@@ -4061,13 +4357,13 @@ impl Grid {
     }
 
     /// Overlay a status line at the bottom of the screen (L13 `render/set_status`),
-    /// laid out at the current width; `fg`/`bg` default to the grid's defaults.
-    /// Marks the bottom row dirty so the next frame composites it.
+    /// laid out at the current width; an unset `fg`/`bg` is the default colour
+    /// and follows later OSC 10/11 changes. Marks the bottom row dirty so the
+    /// next frame composites it.
     #[cfg(feature = "l13")]
     pub fn set_status_line(&mut self, text: String, fg: Option<u32>, bg: Option<u32>) {
-        let fg = fg.unwrap_or(self.default_fg);
-        let bg = bg.unwrap_or(self.default_bg);
-        self.status_line = Some(StatusLine::new(text, fg, bg, self.cols));
+        let defaults = self.styles.defaults();
+        self.status_line = Some(StatusLine::new(text, fg, bg, defaults, self.cols));
         if let Some(y) = self.rows.checked_sub(1) {
             self.touch(y);
         }
@@ -4101,12 +4397,11 @@ impl Grid {
         self.command_start = Some(self.scrollback.len() + self.cursor.1);
     }
 
-    /// A command finished (OSC 133;D): record its exit status and, if its output
-    /// start was marked (C), capture the text from there to the cursor as the
-    /// `terminal://command` resource.
+    /// A command finished (OSC 133;D): if its output start was marked (C),
+    /// capture the text from there to the cursor as the `terminal://command`
+    /// resource. The exit code is recorded by [`Grid::mark_shell_phase`].
     #[cfg(feature = "l13")]
-    pub(crate) fn command_finished(&mut self, exit: Option<i32>) {
-        self.last_exit = exit;
+    pub(crate) fn command_finished(&mut self) {
         if let Some(start) = self.command_start.take() {
             self.last_command_output = Some(self.capture_command_output(start));
         }
@@ -4121,7 +4416,7 @@ impl Grid {
     /// mode-2031 reports. Derived from the live default background, so it
     /// tracks theme changes with no extra state.
     pub fn appearance_is_dark(&self) -> bool {
-        super::color::luminance(self.default_bg) < 0.5
+        super::color::luminance(self.default_bg()) < 0.5
     }
 
     /// The Contour color-scheme report (`CSI ? 997 ; 1|2 n`): `1` dark,
@@ -4218,7 +4513,7 @@ impl Grid {
             let ch = |sh: u32| (((a >> sh) & 0xFF) * 2 + ((b >> sh) & 0xFF)) / 3;
             (ch(16) << 16) | (ch(8) << 8) | ch(0)
         };
-        Some((first, len, mix(self.default_fg, self.default_bg)))
+        Some((first, len, mix(self.default_fg(), self.default_bg())))
     }
 
     /// Store a Kitty image by id (`a=t`/`a=T`), bounded: a 17th image (or
@@ -4512,10 +4807,6 @@ impl Grid {
     /// `C`). Bounded so an undrained grid never grows it.
     #[cfg(any(test, feature = "gui"))]
     pub(crate) fn command_timer_end(&mut self, exit: Option<i32>) {
-        // The status ribbon's exit pill reads this even when the l13 capture
-        // path (which also records it) is compiled out. `D` without a
-        // matching `C` still updates it — the exit code needs no timer.
-        self.last_exit = exit;
         let Some(began) = self.command_began.take() else {
             return;
         };
@@ -4661,6 +4952,19 @@ impl Grid {
         Some(self.text_of(line))
     }
 
+    /// The cells of absolute row `abs`, counted as for [`Grid::line_text`],
+    /// and whether the program's text wrapped from it onto the next row.
+    /// Holds only the cells stored, so trailing blanks may be missing.
+    /// `None` past the last screen row.
+    pub fn line_cells(&self, abs: usize) -> Option<(Vec<Cell>, bool)> {
+        let history = self.scrollback.len();
+        let line = match abs.checked_sub(history) {
+            None => self.scrollback.get(abs)?,
+            Some(row) => self.screen.get(row)?,
+        };
+        Some((self.resolved(line.cells()), line.wrapped))
+    }
+
     /// Join the cell rows in the absolute line range `[start, cursor line)` into
     /// text, one row per line, trailing blanks trimmed per row.
     #[cfg(feature = "l13")]
@@ -4686,10 +4990,26 @@ impl Grid {
     /// The exit code of the last finished command, or `None` if none has
     /// finished (or the shell reported no code). The windowed front-end's
     /// status ribbon shows it as a success/error pill; L13 reads it for the
-    /// structured side-channel.
-    #[cfg(any(feature = "l13", feature = "gui"))]
+    /// structured side-channel, and a multiplexer reports it.
     pub fn last_command_exit(&self) -> Option<i32> {
         self.last_exit
+    }
+
+    /// Where the shell is in its command cycle, by the last OSC 133/633
+    /// `A`, `C` or `D` mark it sent; `None` if it never sent one, as a
+    /// shell without that integration does not.
+    pub fn shell_phase(&self) -> Option<ShellPhase> {
+        self.shell_phase
+    }
+
+    /// The shell sent lifecycle mark `phase`; `D` (`Finished`) carries
+    /// `exit`, its code, or `None` when the shell gave none. A `D` without
+    /// a `C` still counts: the exit code needs no start.
+    pub(crate) fn mark_shell_phase(&mut self, phase: ShellPhase, exit: Option<i32>) {
+        self.shell_phase = Some(phase);
+        if phase == ShellPhase::Finished {
+            self.last_exit = exit;
+        }
     }
 
     /// The output text of the last finished command (OSC 133;C..D), if captured.
@@ -4772,7 +5092,7 @@ impl Grid {
     #[cfg(any(test, feature = "gui"))]
     fn phys_row(&self, abs: usize) -> (Vec<Cell>, bool) {
         let line = self.phys_line(abs);
-        (self.resolved(line.cells()), line.wrapped)
+        (self.resolved(&line.padded()), line.wrapped)
     }
 
     /// Scroll the viewport so absolute row `abs` is visible, about a third
@@ -5558,8 +5878,8 @@ impl crate::checkpoint::Wire for Grid {
         crate::checkpoint::Wire::write(&self.left_margin, w)?;
         crate::checkpoint::Wire::write(&self.right_margin, w)?;
         crate::checkpoint::Wire::write(&self.insert_mode, w)?;
-        crate::checkpoint::Wire::write(&self.default_fg, w)?;
-        crate::checkpoint::Wire::write(&self.default_bg, w)?;
+        crate::checkpoint::Wire::write(&self.default_fg(), w)?;
+        crate::checkpoint::Wire::write(&self.default_bg(), w)?;
         crate::checkpoint::Wire::write(&self.erase_bg, w)?;
         crate::checkpoint::Wire::write(&self.cursor_color, w)?;
         crate::checkpoint::Wire::write(&self.cursor_shape, w)?;
@@ -5589,6 +5909,7 @@ impl crate::checkpoint::Wire for Grid {
         grid.kitty_flags_stack = crate::checkpoint::Wire::read(r)?;
         grid.cwd = crate::checkpoint::Wire::read(r)?;
         grid.scrollback = crate::checkpoint::Wire::read(r)?;
+        grid.untrimmed = grid.scrollback.len();
         grid.scrollback_max = crate::checkpoint::Wire::read(r)?;
         grid.current_link = crate::checkpoint::Wire::read(r)?;
         grid.tab_stops = crate::checkpoint::Wire::read(r)?;
@@ -5623,8 +5944,10 @@ impl crate::checkpoint::Wire for Grid {
         grid.left_margin = crate::checkpoint::Wire::read(r)?;
         grid.right_margin = crate::checkpoint::Wire::read(r)?;
         grid.insert_mode = crate::checkpoint::Wire::read(r)?;
-        grid.default_fg = crate::checkpoint::Wire::read(r)?;
-        grid.default_bg = crate::checkpoint::Wire::read(r)?;
+        let defaults = Defaults {
+            fg: crate::checkpoint::Wire::read(r)?,
+            bg: crate::checkpoint::Wire::read(r)?,
+        };
         grid.erase_bg = crate::checkpoint::Wire::read(r)?;
         grid.cursor_color = crate::checkpoint::Wire::read(r)?;
         grid.cursor_shape = crate::checkpoint::Wire::read(r)?;
@@ -5643,6 +5966,7 @@ impl crate::checkpoint::Wire for Grid {
         }
         r.charge(grid.table_cache_cost())?;
         grid.styles = r.take_styles();
+        grid.styles.set_defaults(defaults);
         grid.links_arc = grid.links.clone().into();
         grid.rebuild_cluster_caches();
         r.charge(grid.rows)?;
@@ -5710,16 +6034,8 @@ impl Grid {
         if (0..free.len()).any(|i| !free[i] && !style_ok(i)) {
             return Err(Error("style bounds"));
         }
-        let primary = self.primary.iter().flat_map(|p| p.screen.iter());
-        for line in self.screen.iter().chain(primary).chain(&self.scrollback) {
-            if line.cells().len() > 4096
-                || line
-                    .cells()
-                    .iter()
-                    .any(|c| free.get(c.style().0 as usize) != Some(&false))
-            {
-                return Err(Error("cell bounds"));
-            }
+        if self.lines().any(|line| line.cells().len() > 4096) {
+            return Err(Error("cell bounds"));
         }
         if self.screen.iter().any(|l| l.cells().len() != self.cols)
             || self
@@ -5760,5 +6076,22 @@ impl Grid {
             return Err(Error("image store budget"));
         }
         Ok(())
+    }
+
+    /// Whether every cell names a live style. Encoding checks this per run
+    /// as it writes; decoding checks the restored grid here.
+    pub(crate) fn validate_cell_styles(&self) -> crate::checkpoint::Result<()> {
+        let free = self.styles.free_mask();
+        let live = |c: &PackedCell| free.get(c.style().0 as usize) == Some(&false);
+        if self.lines().all(|line| line.cells().iter().all(live)) {
+            return Ok(());
+        }
+        Err(crate::checkpoint::Error("cell bounds"))
+    }
+
+    /// Live and primary screen rows, then history.
+    fn lines(&self) -> impl Iterator<Item = &Line> {
+        let primary = self.primary.iter().flat_map(|p| p.screen.iter());
+        self.screen.iter().chain(primary).chain(&self.scrollback)
     }
 }

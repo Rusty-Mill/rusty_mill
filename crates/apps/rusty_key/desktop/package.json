@@ -15,10 +15,10 @@
     "@codemirror/lang-python": "^6.1.6",
     "@codemirror/lang-rust": "^6.0.1",
     "@codemirror/language": "^6.13.1",
-    "@codemirror/merge": "^6.12.2",
+    "@codemirror/merge": "^6.12.3",
     "@codemirror/state": "^6.7.6",
     "@codemirror/theme-one-dark": "^6.1.2",
-    "@codemirror/view": "^6.43.14",
+    "@codemirror/view": "^6.43.15",
     "@tauri-apps/api": "^2.12.4",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
@@ -28,7 +28,7 @@
     "@tailwindcss/vite": "^4.3.3",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.6.3",
-    "vite": "^8.3.4",
+    "vite": "^8.3.5",
     "vite-plugin-solid": "^2.11.14"
   }
 }

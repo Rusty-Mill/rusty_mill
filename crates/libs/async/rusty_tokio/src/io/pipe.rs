@@ -142,7 +142,8 @@ fn new_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
 /// [`PipeOpenOptions`].
 ///
 /// # Panics
-/// Panics if called outside a running [`crate::Runtime`].
+/// Panics if called outside a running [`crate::Runtime`] with no
+/// [fallback](crate::runtime::install_fallback) installed.
 pub fn pipe() -> io::Result<(PipeSender, PipeReceiver)> {
     let (read_fd, write_fd) = new_pipe()?;
     let sender = PipeSender::from_owned_fd_unchecked(write_fd)?;
@@ -221,7 +222,8 @@ impl PipeOpenOptions {
     /// Opens the FIFO at `path` for reading.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn open_receiver(&self, path: impl AsRef<Path>) -> io::Result<PipeReceiver> {
         let file = self.open(path.as_ref(), PipeEnd::Receiver)?;
         PipeReceiver::from_file_unchecked(file)
@@ -230,7 +232,8 @@ impl PipeOpenOptions {
     /// Opens the FIFO at `path` for writing.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn open_sender(&self, path: impl AsRef<Path>) -> io::Result<PipeSender> {
         let file = self.open(path.as_ref(), PipeEnd::Sender)?;
         PipeSender::from_file_unchecked(file)
@@ -253,7 +256,8 @@ impl PipeSender {
     /// checks (e.g. if the file is already known to satisfy them).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_file(file: File) -> io::Result<PipeSender> {
         if !is_pipe(file.as_fd())? {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a pipe"));
@@ -273,9 +277,10 @@ impl PipeSender {
     /// open for writing, and already non-blocking.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_file_unchecked(file: File) -> io::Result<PipeSender> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let io = reactor.register(file.as_raw_fd())?;
         Ok(PipeSender { file, io, reactor })
     }
@@ -283,7 +288,8 @@ impl PipeSender {
     /// Adopts an already-open fd -- see [`from_file`](Self::from_file).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_owned_fd(owned_fd: OwnedFd) -> io::Result<PipeSender> {
         Self::from_file(File::from(owned_fd))
     }
@@ -293,7 +299,8 @@ impl PipeSender {
     /// ](Self::from_file_unchecked).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_owned_fd_unchecked(owned_fd: OwnedFd) -> io::Result<PipeSender> {
         Self::from_file_unchecked(File::from(owned_fd))
     }
@@ -430,7 +437,8 @@ impl PipeReceiver {
     /// checks.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_file(file: File) -> io::Result<PipeReceiver> {
         if !is_pipe(file.as_fd())? {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a pipe"));
@@ -450,9 +458,10 @@ impl PipeReceiver {
     /// open for reading, and already non-blocking.
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_file_unchecked(file: File) -> io::Result<PipeReceiver> {
-        let reactor = Handle::current().shared.reactor.clone();
+        let reactor = Handle::current_or_fallback().shared.reactor.clone();
         let io = reactor.register(file.as_raw_fd())?;
         Ok(PipeReceiver { file, io, reactor })
     }
@@ -460,7 +469,8 @@ impl PipeReceiver {
     /// Adopts an already-open fd -- see [`from_file`](Self::from_file).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_owned_fd(owned_fd: OwnedFd) -> io::Result<PipeReceiver> {
         Self::from_file(File::from(owned_fd))
     }
@@ -470,7 +480,8 @@ impl PipeReceiver {
     /// ](Self::from_file_unchecked).
     ///
     /// # Panics
-    /// Panics if called outside a running [`crate::Runtime`].
+    /// Panics if called outside a running [`crate::Runtime`] with no
+    /// [fallback](crate::runtime::install_fallback) installed.
     pub fn from_owned_fd_unchecked(owned_fd: OwnedFd) -> io::Result<PipeReceiver> {
         Self::from_file_unchecked(File::from(owned_fd))
     }

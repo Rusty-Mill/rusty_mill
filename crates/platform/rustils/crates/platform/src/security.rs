@@ -170,6 +170,23 @@ pub trait Sandbox {
     /// untouched, mirroring nexus's own narrow scope (this is "no new
     /// internet sockets," not a general syscall allowlist).
     fn block_inet_sockets(&self) -> Result<SandboxStatus>;
+
+    /// [`Sandbox::confine_filesystem`], and also deny sending a signal
+    /// (`kill`, `tgkill`, `pidfd_send_signal`, ...) to any process outside
+    /// the confinement this call creates. Processes it starts stay inside,
+    /// so a job can still signal its own children; signals sent *to* it
+    /// are unaffected. Returns the filesystem status, then the signal
+    /// status. The default confines the filesystem only and reports
+    /// signals [`SandboxStatus::Unsupported`]. Call from a single-threaded
+    /// context (see the trait doc comment).
+    fn confine_filesystem_and_signals(
+        &self,
+        readable_roots: &[&Path],
+        writable_roots: &[&Path],
+    ) -> Result<(SandboxStatus, SandboxStatus)> {
+        let fs = self.confine_filesystem(readable_roots, writable_roots)?;
+        Ok((fs, SandboxStatus::Unsupported))
+    }
 }
 
 /// Access to the operating system's trust anchors: the root certificates

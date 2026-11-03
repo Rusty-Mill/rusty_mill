@@ -1,21 +1,50 @@
 //! `rusty-mux-ctl` against a real server: output, chains, events and every
-//! exit code (0, 1, 2, 3, 4, and 130 from an interrupt).
+//! exit code (0, 1, 2, 3, 4, and 130 from an interrupt), on Linux and
+//! Windows.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixListener as StdListener;
-use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use rusty_mux_server::{Config, serve};
+#[cfg(windows)]
+use platform_windows::WindowsUnixListener as StdListener;
+use rusty_mux_server::{Config, ConsoleHost, serve};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
+#[cfg(unix)]
+use std::os::unix::net::UnixListener as StdListener;
 
 const PATIENCE: Duration = Duration::from_secs(20);
+
+/// The shell each test block runs: `/bin/sh` in `/`, or `cmd.exe /Q` (no
+/// command echo) in the temp directory. The server's own tests use the
+/// same; one crate's integration tests cannot share another's helpers.
+fn shell() -> Config {
+    if cfg!(windows) {
+        Config {
+            program: "cmd.exe".into(),
+            args: vec!["/Q".into()],
+            cwd: std::env::temp_dir().into_os_string(),
+            console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
+            config_file: None,
+        }
+    } else {
+        Config {
+            program: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: "/".into(),
+            console_host: ConsoleHost::default(),
+            config_file: None,
+        }
+    }
+}
+
+/// A command that does nothing and prints nothing.
+const NOTHING: &str = if cfg!(windows) { "rem" } else { "true" };
 
 fn socket_path(tag: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -27,6 +56,10 @@ fn socket_path(tag: &str) -> PathBuf {
 }
 
 fn start_server() -> PathBuf {
+    start_server_with(shell())
+}
+
+fn start_server_with(config: Config) -> PathBuf {
     let path = socket_path("srv");
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let bind_path = path.clone();
@@ -37,11 +70,6 @@ fn start_server() -> PathBuf {
         runtime.block_on(async move {
             let listener = UnixListener::bind(&bind_path).expect("bind");
             ready_tx.send(()).expect("signal ready");
-            let config = Config {
-                program: "/bin/sh".into(),
-                args: Vec::new(),
-                cwd: "/".into(),
-            };
             serve(listener, config).await.expect("serve");
         });
     });
@@ -56,6 +84,7 @@ fn ctl_command(socket: &Path, args: &[&str]) -> Command {
         .env_remove("RUSTY_MUX_SESSION")
         .env_remove("RUSTY_MUX_WINDOW")
         .env_remove("RUSTY_MUX_BLOCK")
+        .env_remove("RUSTY_MUX_CONFIG")
         .arg("--socket")
         .arg(socket)
         .args(args);
@@ -120,6 +149,117 @@ fn a_request_prints_its_new_id() {
 }
 
 #[test]
+fn a_session_created_without_a_name_gets_a_generated_one() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session"]);
+    let name = session_name(&socket, &session);
+    assert!(rusty_mux_core::is_generated(&name), "{name}");
+    let help = ok(&socket, &["help", "create-session"]);
+    assert!(help.contains("[--name <text>]"), "{help}");
+}
+
+#[test]
+fn the_naming_hook_asks_only_while_the_name_is_generated() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session"]);
+    let block = "00000000-0000-0000-0000-00000000000b";
+    let hook = |session: &str, flag: &[&str]| {
+        let mut args = vec!["agent", "hook"];
+        args.extend(flag);
+        let output = ctl_command(&socket, &args)
+            .env("RUSTY_MUX_SESSION", session)
+            .env("RUSTY_MUX_BLOCK", block)
+            .output()
+            .expect("run rusty-mux-ctl");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        stdout(&output)
+    };
+    let asked = hook(&session, &["--name-session"]);
+    assert!(
+        asked.contains(&format!("name-session --session {session} --name NAME")),
+        "{asked}"
+    );
+    assert!(
+        !hook(&session, &[]).contains("name-session"),
+        "not opted in"
+    );
+
+    rename(&socket, &session, "fix-login");
+    let named = hook(&session, &["--name-session"]);
+    assert!(
+        named.contains(block) && !named.contains("name-session"),
+        "{named}"
+    );
+
+    // A name chosen in the generated shape is still chosen.
+    let chosen = ok(&socket, &["create-session", "--name", "quiet-harbor"]);
+    let text = hook(&chosen, &["--name-session"]);
+    assert!(
+        text.contains(block) && !text.contains("name-session"),
+        "{text}"
+    );
+}
+
+fn rename(socket: &Path, session: &str, name: &str) {
+    ok(
+        socket,
+        &["rename-session", "--session", session, "--name", name],
+    );
+}
+
+/// Runs the naming hook's instruction; true if the name was taken.
+fn name_session(socket: &Path, session: &str, name: &str) -> bool {
+    let output = ctl(
+        socket,
+        &["name-session", "--session", session, "--name", name],
+    );
+    match output.status.code() {
+        Some(0) => true,
+        Some(1) => {
+            let err = String::from_utf8_lossy(&output.stderr);
+            assert!(err.contains("chosen name"), "{err}");
+            false
+        }
+        other => panic!("{other:?}: {output:?}"),
+    }
+}
+
+/// The name `list` reports for `session`.
+fn session_name(socket: &Path, session: &str) -> String {
+    ok(socket, &["--json", "list"])
+        .lines()
+        .find_map(|line| {
+            let rusty_json::Value::Object(map) =
+                rusty_json::Value::from_json_str(line).expect("json")
+            else {
+                panic!("object")
+            };
+            let is_it = map.get("session") == Some(&rusty_json::Value::String(session.into()));
+            match (is_it, map.get("name")) {
+                (true, Some(rusty_json::Value::String(name))) => Some(name.clone()),
+                _ => None,
+            }
+        })
+        .expect("the session is listed")
+}
+
+#[test]
+fn a_stale_naming_instruction_keeps_a_name_chosen_since() {
+    let socket = start_server();
+    // The hook told the agent to name this session; then a person did.
+    let session = ok(&socket, &["create-session"]);
+    rename(&socket, &session, "release-notes");
+    assert!(!name_session(&socket, &session, "fix-login"));
+    assert_eq!(session_name(&socket, &session), "release-notes");
+
+    // Two agents told to name one session: only the first does.
+    let shared = ok(&socket, &["create-session"]);
+    assert!(name_session(&socket, &shared, "fix-login"));
+    assert!(!name_session(&socket, &shared, "write-docs"));
+    assert_eq!(session_name(&socket, &shared), "fix-login");
+}
+
+#[test]
 fn a_chain_takes_the_lease_and_types() {
     let socket = start_server();
     let block = block(&socket);
@@ -136,7 +276,7 @@ fn a_chain_takes_the_lease_and_types() {
         "--block",
         &block,
         "--data",
-        "true\r",
+        &format!("{NOTHING}\r"),
     ];
     let output = ctl(&socket, &chain);
     assert_eq!(
@@ -184,13 +324,59 @@ fn format_prints_the_screen_and_list_the_tree() {
         "--block",
         &block,
         "--data",
-        "echo HI$((6*7))\r",
+        // Output differs from the echo: `cmd.exe` drops the `^` escape.
+        if cfg!(windows) {
+            "echo HI^42\r"
+        } else {
+            "echo HI$((6*7))\r"
+        },
     ];
     ok(&socket, &chain);
     let capture = ["terminal.format", "--block", &block, "--history", "0"];
     let deadline = std::time::Instant::now() + PATIENCE;
-    while !ok(&socket, &capture).lines().any(|l| l == "HI42") {
+    // A prompt printed after the echo can share the output's line.
+    let shown = |screen: String, text: &str| screen.lines().any(|l| l.ends_with(text));
+    while !shown(ok(&socket, &capture), "HI42") {
         assert!(std::time::Instant::now() < deadline, "no HI42 on screen");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Rows below the prompt are blank; `--trim` leaves them out.
+    let rows = |args: &[&str]| stdout(&ctl(&socket, args)).lines().count();
+    assert_eq!(rows(&capture), 24);
+    let trimmed = [&capture[..], &["--trim"]].concat();
+    assert!(rows(&trimmed) < 24);
+    assert!(shown(ok(&socket, &trimmed), "HI42"));
+
+    // The same command, typed as keys; only its output says KEY42.
+    let typed = if cfg!(windows) {
+        "echo KEY^42"
+    } else {
+        "echo KEY$((6*7))"
+    };
+    let mut keys = vec!["terminal.send-keys", "--block", &block];
+    for key in typed.split("").filter(|k| !k.is_empty()) {
+        keys.extend(["--key", key]);
+    }
+    keys.extend(["--key", "enter"]);
+    let pressed = [
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+        ][..],
+        &keys,
+    ]
+    .concat();
+    ok(&socket, &pressed);
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !shown(ok(&socket, &capture), "KEY42") {
+        assert!(std::time::Instant::now() < deadline, "no KEY42 on screen");
         std::thread::sleep(Duration::from_millis(20));
     }
 
@@ -209,10 +395,14 @@ fn format_prints_the_screen_and_list_the_tree() {
             }
         })
         .collect();
-    assert_eq!(kinds, ["session", "window", "block", "done"]);
+    // ctl's own connection is a client too.
+    assert_eq!(kinds, ["session", "window", "block", "client", "done"]);
     assert!(listing.contains(&format!("\"block\":\"{block}\"")));
 }
 
+/// Unix only: on Windows `pwd` is known only from OSC 7, which `cmd.exe`
+/// does not send, and `cmd.exe` sets a title.
+#[cfg(unix)]
 #[test]
 fn terminal_methods_read_the_block() {
     let socket = start_server();
@@ -221,6 +411,113 @@ fn terminal_methods_read_the_block() {
     assert_eq!(ok(&socket, &["terminal.title", "--block", &block]), "");
     let json = ok(&socket, &["--json", "terminal.pwd", "--block", &block]);
     assert!(json.contains("\"text\":\"/\""), "{json}");
+}
+
+#[test]
+fn terminal_size_theme_and_reset() {
+    let socket = start_server();
+    let block = block(&socket);
+    assert_eq!(ok(&socket, &["terminal.size", "--block", &block]), "80x24");
+    let leased = [
+        "attach",
+        "--block",
+        &block,
+        "+",
+        "acquire-lease",
+        "--block",
+        &block,
+        "+",
+    ];
+    let theme = [
+        "terminal.set-theme",
+        "--block",
+        &block,
+        "--background",
+        "#102030",
+        "--palette",
+        "1=#cc0000",
+        "--palette",
+        "2=default",
+    ];
+    ok(&socket, &[&leased[..], &theme].concat());
+    ok(
+        &socket,
+        &[&leased[..], &["terminal.reset", "--block", &block]].concat(),
+    );
+    // Without the lease the server refuses; a bad colour never leaves ctl.
+    let output = ctl(&socket, &["terminal.reset", "--block", &block]);
+    assert_eq!(output.status.code(), Some(1));
+    let bad = [
+        "terminal.set-theme",
+        "--block",
+        &block,
+        "--background",
+        "red",
+    ];
+    let output = ctl(&socket, &[&leased[..], &bad].concat());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("background"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// An agent's view of a job: wait until it has the terminal, then read
+/// what runs. Linux only: Windows reports no foreground process.
+#[cfg(target_os = "linux")]
+#[test]
+fn wait_for_a_job_then_read_the_process() {
+    let socket = start_server();
+    let block = block(&socket);
+    let waiter = ctl_command(
+        &socket,
+        &[
+            "wait",
+            "--event",
+            "process-changed",
+            "--block",
+            &block,
+            "--name",
+            "sleep",
+            "--timeout",
+            "20",
+        ],
+    )
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn");
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            "sleep 30\r",
+        ],
+    );
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        stdout(&output).contains(" name=\"sleep\""),
+        "{}",
+        stdout(&output)
+    );
+    let process = ok(&socket, &["terminal.process", "--block", &block]);
+    let names: Vec<&str> = process
+        .lines()
+        .filter_map(|l| l.split('\t').nth(1))
+        .collect();
+    assert_eq!(names, ["sleep", "sh"], "{process}");
 }
 
 #[test]
@@ -235,7 +532,15 @@ fn api_lists_and_describes_methods_without_a_server() {
         panic!("{described}");
     };
     assert_eq!(map.get("name"), Some(&"resize".into()));
-    for args in [&["api", "describe", "nope"][..], &["api"], &["api", "call"]] {
+    let llms = ok(nowhere, &["api", "llms"]);
+    assert!(llms.starts_with("# rusty_mux API\n"), "{llms}");
+    assert!(llms.contains("\n### `terminal.format`\n"), "{llms}");
+    for args in [
+        &["api", "describe", "nope"][..],
+        &["api"],
+        &["api", "call"],
+        &["api", "llms", "extra"],
+    ] {
         assert_eq!(ctl(nowhere, args).status.code(), Some(2), "{args:?}");
     }
 }
@@ -279,6 +584,93 @@ fn targets_resolve_by_name_position_and_suffix() {
     assert!(!ok(&socket, &["list"]).contains(&block));
 }
 
+/// The ids of the clients `list` shows.
+fn client_ids(socket: &Path) -> Vec<String> {
+    ok(socket, &["list"])
+        .lines()
+        .filter_map(|l| l.strip_prefix("client "))
+        .filter_map(|l| l.split(' ').next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `whoami` prints the caller's own client: a fresh one each run, as
+/// `list` would show it, with the server's user as its principal (C25).
+#[cfg(target_os = "linux")]
+#[test]
+fn whoami_shows_the_callers_principal_and_transport() {
+    let socket = start_server();
+    let me = ok(&socket, &["whoami"]);
+    let uid = rusty_libc::process::geteuid();
+    assert!(me.starts_with("client "), "{me}");
+    assert!(me.contains(&format!("principal=\"uid:{uid}\"")), "{me}");
+    assert!(me.contains("transport=\"socket\""), "{me}");
+    assert_eq!(me.lines().count(), 1, "{me}");
+}
+
+#[test]
+fn rename_then_disconnect_a_client_by_its_name() {
+    let socket = start_server();
+    let block = block(&socket);
+    ok(
+        &socket,
+        &["rename-block", "--block", &block, "--name", "Build"],
+    );
+    ok(
+        &socket,
+        &["terminal.format", "--block", "build", "--history", "0"],
+    );
+
+    // A follower is a client that stays: the one in both listings.
+    let mut follower = ctl_command(&socket, &["events", "--follow"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(follower.stdout.take().expect("stdout")).lines();
+    let first = lines.next().expect("a line").expect("read");
+    assert!(first.starts_with("cursor "), "{first}");
+    let (one, two) = (client_ids(&socket), client_ids(&socket));
+    let stays: Vec<&String> = one.iter().filter(|id| two.contains(id)).collect();
+    let [id] = stays.as_slice() else {
+        panic!("one lasting client: {one:?} {two:?}");
+    };
+    ok(
+        &socket,
+        &[
+            "rename-client",
+            "--client",
+            &id[id.len() - 6..],
+            "--name",
+            "Follower",
+        ],
+    );
+    let renamed = lines
+        .by_ref()
+        .map(|l| l.expect("read"))
+        .find(|l| l.contains("client-renamed"));
+    assert!(
+        renamed.is_some_and(|l| l.contains(id.as_str()) && l.contains("Follower")),
+        "the follower hears of its new name"
+    );
+
+    let own = ctl(&socket, &["disconnect-client", "--client", "nobody"]);
+    assert_eq!(
+        own.status.code(),
+        Some(3),
+        "a missing client is a missing target"
+    );
+    ok(&socket, &["disconnect-client", "--client", "follower"]);
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while follower.try_wait().expect("wait").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "follower still connected"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!client_ids(&socket).contains(id));
+}
+
 #[test]
 fn a_missing_or_ambiguous_target_exits_3() {
     let socket = start_server();
@@ -314,6 +706,40 @@ fn a_missing_id_defaults_to_where_ctl_runs() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(!ok(&socket, &["list"]).contains(&block));
+}
+
+#[test]
+fn split_beside_here_then_zoom_and_read_the_layout() {
+    let socket = start_server();
+    let block = block(&socket);
+    let output = ctl_command(&socket, &["split-block", "--side", "down"])
+        .env("RUSTY_MUX_BLOCK", &block)
+        .output()
+        .expect("run");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let new = stdout(&output).trim().to_owned();
+    ok(&socket, &["zoom-block", "--block", &new]);
+    let listed = ok(&socket, &["list"]);
+    let window = listed
+        .lines()
+        .find(|l| l.starts_with("window "))
+        .expect("a window line");
+    assert!(
+        window.contains(&format!("layout=\"rows50({block},{new})\" zoomed={new}")),
+        "{window}"
+    );
+    let json = ok(&socket, &["--json", "list"]);
+    assert!(json.contains(&format!("\"zoomed\":\"{new}\"")), "{json}");
+    let refused = ctl(
+        &socket,
+        &["split-block", "--block", &block, "--side", "north"],
+    );
+    assert_eq!(refused.status.code(), Some(2));
 }
 
 /// Whether `block` still exists: only an existing block can be attached.
@@ -362,7 +788,7 @@ fn each_input_is_confirmed_in_order() {
         "--block",
         &block,
         "--data",
-        "true",
+        NOTHING,
         "+",
         "input",
         "--block",
@@ -425,7 +851,7 @@ fn a_bad_command_line_exits_2() {
     let socket = start_server();
     for args in [
         &["frobnicate"][..],
-        &["create-session"],
+        &["create-window"],
         &["resize", "--block", "x"],
     ] {
         assert_eq!(ctl(&socket, args).status.code(), Some(2), "{args:?}");
@@ -470,8 +896,15 @@ fn garbage_from_the_server_exits_1() {
 /// A server from before SYNC: it welcomes the client and then counts the
 /// request frames it receives until the client hangs up.
 fn legacy_server() -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
+    legacy_server_with(rusty_mux_proto::Features::CHECKPOINT_V6)
+}
+
+/// [`legacy_server`] offering `features`.
+fn legacy_server_with(
+    features: rusty_mux_proto::Features,
+) -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
     use rusty_mux_core::ClientId;
-    use rusty_mux_proto::{Features, Message, decode, encode};
+    use rusty_mux_proto::{Message, decode, encode};
 
     let path = socket_path("legacy");
     let listener = StdListener::bind(&path).expect("bind");
@@ -487,9 +920,10 @@ fn legacy_server() -> (PathBuf, std::sync::mpsc::Receiver<usize>) {
                 buf.drain(..used);
                 if let Message::Hello { .. } = message {
                     let welcome = Message::Welcome {
-                        features: Features::CHECKPOINT_V3,
+                        features,
                         client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
                         cursor: None,
+                        token: None,
                     };
                     stream
                         .write_all(&encode(&welcome).expect("encode"))
@@ -527,6 +961,102 @@ fn a_chain_the_server_cannot_run_sends_nothing() {
     }
 }
 
+/// A server from before C40 has block calls but not the terminal control
+/// methods: ctl refuses them before sending anything, chained or not.
+#[test]
+fn terminal_control_is_refused_by_a_server_without_it() {
+    use rusty_mux_proto::Features;
+    let block = "00000000-0000-0000-0000-000000000001";
+    let older = Features::CHECKPOINT_V6
+        .union(Features::SYNC)
+        .union(Features::INSPECT)
+        .union(Features::BLOCK_CALL);
+    let chains: [&[&str]; 3] = [
+        &["terminal.size", "--block", block],
+        &[
+            "attach",
+            "--block",
+            block,
+            "+",
+            "acquire-lease",
+            "--block",
+            block,
+            "+",
+            "terminal.reset",
+            "--block",
+            block,
+        ],
+        &[
+            "terminal.set-theme",
+            "--block",
+            block,
+            "--background",
+            "#102030",
+        ],
+    ];
+    for chain in chains {
+        let (path, frames) = legacy_server_with(older);
+        let output = ctl(&path, chain);
+        assert_eq!(output.status.code(), Some(1), "{chain:?}");
+        let sent = frames.recv_timeout(PATIENCE).expect("frame count");
+        assert_eq!(sent, 0, "{chain:?} sent requests before refusing");
+    }
+}
+
+/// A server without `LAUNCH` would ignore a launch argument and start its
+/// shell, so ctl refuses before sending anything, typed, scripted or run.
+#[test]
+fn launch_arguments_are_refused_by_a_server_that_would_ignore_them() {
+    let window = "00000000-0000-0000-0000-000000000001";
+    let create = [
+        "create-block",
+        "--window",
+        window,
+        "--cols",
+        "80",
+        "--rows",
+        "24",
+    ];
+    let launches: [&[&str]; 3] = [
+        &["--command", "true"],
+        &["--command", "sh", "--arg", "-c", "--arg", "exit 3"],
+        &["--cwd", "/tmp"],
+    ];
+    for launch in launches {
+        let (path, frames) = legacy_server();
+        let args: Vec<&str> = create.iter().chain(launch).copied().collect();
+        let output = ctl(&path, &args);
+        assert_eq!(output.status.code(), Some(1), "{launch:?}");
+        let reason = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            reason.contains("does not support create-block with --"),
+            "{reason}"
+        );
+        assert_eq!(
+            frames.recv_timeout(PATIENCE).expect("count"),
+            0,
+            "{launch:?}"
+        );
+    }
+
+    let (path, frames) = legacy_server();
+    let output = ctl(&path, &["run", "--window", window, "--", "true"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(frames.recv_timeout(PATIENCE).expect("count"), 0, "run");
+
+    let config = config_file(
+        "launch",
+        &format!(
+            r#"{{"actions": [{{"name": "go", "run": [{{"call": "create-block", "args": {{"window": "{window}", "cols": 80, "rows": 24, "command": "true"}}}}]}}]}}"#
+        ),
+    );
+    let (path, frames) = legacy_server();
+    let output = with_config(&path, &config, &["do", "go"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(frames.recv_timeout(PATIENCE).expect("count"), 0, "do");
+    std::fs::remove_file(&config).expect("cleanup");
+}
+
 fn cursor_of(line: &str) -> String {
     line.strip_prefix("cursor ")
         .expect("a cursor line")
@@ -560,8 +1090,12 @@ fn events_resume_from_the_printed_cursor() {
     );
 }
 
+/// Unix only: it sends `SIGINT` and checks the signal in the exit status.
+#[cfg(unix)]
 #[test]
 fn an_interrupted_follow_ends_with_sigint() {
+    use std::os::unix::process::ExitStatusExt;
+
     let socket = start_server();
     let mut child = ctl_command(&socket, &["events", "--follow"])
         .stdout(Stdio::piped())
@@ -587,4 +1121,1024 @@ fn an_interrupted_follow_ends_with_sigint() {
     let status = child.wait().expect("wait");
     // A shell reports this as exit code 130.
     assert_eq!(status.signal(), Some(2));
+}
+
+/// Writes `text` as a config file for one test; returns its path.
+fn config_file(tag: &str, text: &str) -> PathBuf {
+    let path =
+        std::env::temp_dir().join(format!("rusty-mux-ctl-{}-{tag}.json", std::process::id()));
+    std::fs::write(&path, text).expect("write config");
+    path
+}
+
+fn with_config(socket: &Path, config: &Path, args: &[&str]) -> Output {
+    ctl_command(socket, args)
+        .env("RUSTY_MUX_CONFIG", config)
+        .output()
+        .expect("run rusty-mux-ctl")
+}
+
+const WORKSPACE: &str = r#"{
+  "actions": [{
+    "name": "workspace",
+    "title": "A session with one block",
+    "args": ["name"],
+    "run": [
+      {"call": "create-session", "args": {"name": "${name}"}},
+      {"call": "create-window", "args": {"session": "${name}", "name": "main"}},
+      {"call": "create-block", "args": {"window": "${name}/main", "cols": 80, "rows": 24}}
+    ]
+  }],
+  "binds": [{"keys": "ctrl+b>w", "action": "workspace", "args": {"name": "work"}}]
+}"#;
+
+#[test]
+fn do_runs_a_configured_action_as_one_chain() {
+    let socket = start_server();
+    let config = config_file("do", WORKSPACE);
+    let output = with_config(&socket, &config, &["do", "workspace", "--name", "agents"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(stdout(&output).lines().count(), 3, "three new ids");
+    let listing = ok(&socket, &["list"]);
+    assert!(
+        listing.contains("agents") && listing.contains("main"),
+        "{listing}"
+    );
+
+    let usage = |args: &[&str]| with_config(&socket, &config, args).status.code();
+    assert_eq!(usage(&["do", "workspace"]), Some(2), "missing argument");
+    assert_eq!(
+        usage(&["do", "workspace", "--name", "a", "--x", "1"]),
+        Some(2)
+    );
+    assert_eq!(usage(&["do", "nope"]), Some(2), "unknown action");
+    assert_eq!(usage(&["do"]), Some(2));
+    let refused = with_config(&socket, &config, &["do", "workspace", "--name", "agents"]);
+    assert_eq!(
+        refused.status.code(),
+        Some(3),
+        "the session name is taken, so its window target is ambiguous"
+    );
+    std::fs::remove_file(&config).expect("cleanup");
+}
+
+#[test]
+fn config_check_and_list_need_no_server() {
+    let nowhere = Path::new("/nonexistent/rusty-mux.sock");
+    let good = config_file("good", WORKSPACE);
+    let checked = with_config(nowhere, &good, &["config", "check"]);
+    assert_eq!(
+        stdout(&checked).trim(),
+        "ok: 1 actions, 1 bindings, 0 rules"
+    );
+    let listed = stdout(&with_config(nowhere, &good, &["config", "list"]));
+    assert!(listed.starts_with("action workspace"), "{listed}");
+    assert!(listed.contains("bind   ctrl+b>w"), "{listed}");
+
+    let bad = config_file(
+        "bad",
+        r#"{"actions": [{"name": "x", "run": [{"call": "nope"}]}]}"#,
+    );
+    let path = bad.to_str().expect("utf-8");
+    let refused = ctl(nowhere, &["config", "check", path]);
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("actions[0].run[0]: unknown method `nope`"),
+        "{stderr}"
+    );
+    assert_eq!(
+        with_config(nowhere, &bad, &["do", "x"]).status.code(),
+        Some(1)
+    );
+    assert_eq!(ctl(nowhere, &["config", "frob"]).status.code(), Some(2));
+    for path in [good, bad] {
+        std::fs::remove_file(path).expect("cleanup");
+    }
+}
+
+const RULES: &str = r#"{
+  "on": [
+    {"event": "session-created", "action": "terminal.title", "args": {"block": "nothing"}},
+    {"event": "pwd-changed", "action": "create-session", "args": {"name": "at ${pwd}"}}
+  ]
+}"#;
+
+/// Unix only: it reports the directory with `printf` and OSC 7, which
+/// `cmd.exe` cannot print and ConPTY may not pass through.
+#[cfg(unix)]
+#[test]
+fn watch_runs_rules_for_events_and_survives_a_failing_one() {
+    let socket = start_server();
+    let config = config_file("watch", RULES);
+    let mut child = ctl_command(&socket, &["watch"])
+        .env("RUSTY_MUX_CONFIG", &config)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    let first = lines.next().expect("a line").expect("read");
+    assert!(first.starts_with("cursor "), "{first}");
+
+    // Creating the block's session fails rule 0; the watch goes on.
+    let block = block(&socket);
+    let report = "printf '\\033]7;file://host/tmp\\007'\r";
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            report,
+        ],
+    );
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &["list"]).contains("at /tmp") {
+        assert!(std::time::Instant::now() < deadline, "rule 1 never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut stderr)
+        .expect("read");
+    assert!(stderr.contains("on[0] failed for event"), "{stderr}");
+    let printed: Vec<String> = lines.map(|l| l.expect("read")).collect();
+    assert!(
+        printed.iter().any(|l| l.contains("pwd-changed")),
+        "{printed:?}"
+    );
+    std::fs::remove_file(&config).expect("cleanup");
+}
+
+#[test]
+fn watch_hands_a_rule_the_exit_code() {
+    let socket = start_server();
+    let config = config_file(
+        "exit",
+        r#"{"on": [{"event": "program-exited", "action": "create-session", "args": {"name": "exit ${code}"}}]}"#,
+    );
+    let mut child = ctl_command(&socket, &["watch"])
+        .env("RUSTY_MUX_CONFIG", &config)
+        .stdout(Stdio::null())
+        .spawn()
+        .expect("spawn");
+    let block = block(&socket);
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            "exit 4\r",
+        ],
+    );
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &["list"]).contains("exit 4") {
+        assert!(std::time::Instant::now() < deadline, "the rule never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    std::fs::remove_file(&config).expect("cleanup");
+}
+
+#[test]
+fn watch_needs_rules_and_takes_only_a_cursor() {
+    let socket = start_server();
+    let none = config_file("norules", WORKSPACE);
+    let refused = with_config(&socket, &none, &["watch"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("no `on` rules"));
+    assert_eq!(
+        with_config(&socket, &none, &["watch", "--follow"])
+            .status
+            .code(),
+        Some(2)
+    );
+    std::fs::remove_file(&none).expect("cleanup");
+}
+
+/// A server that numbers events but offers only `features`: it welcomes
+/// the client with a cursor, then stays silent until it hangs up.
+fn events_server(features: rusty_mux_proto::Features) -> PathBuf {
+    use rusty_mux_core::ClientId;
+    use rusty_mux_proto::{Cursor, Message, decode, encode};
+
+    let path = socket_path("old-events");
+    let listener = StdListener::bind(&path).expect("bind");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !matches!(decode(&buf), Ok(Some((Message::Hello { .. }, _)))) {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        let welcome = Message::Welcome {
+            features,
+            client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
+            cursor: Some(Cursor {
+                epoch: rusty_uuid::Uuid::nil(),
+                seq: 0,
+            }),
+            token: None,
+        };
+        stream
+            .write_all(&encode(&welcome).expect("encode"))
+            .expect("write");
+        std::thread::sleep(PATIENCE);
+    });
+    path
+}
+
+#[test]
+fn watch_refuses_rules_for_events_the_server_never_sends() {
+    use rusty_mux_proto::Features;
+
+    let old = Features::EVENT_SEQ
+        .union(Features::SYNC)
+        .union(Features::STATUS);
+    let pwd = config_file("needs-pwd", RULES);
+    let refused = with_config(&events_server(old), &pwd, &["watch"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("does not send `pwd-changed` events"),
+        "{stderr}"
+    );
+
+    let bell = config_file(
+        "needs-bell",
+        r#"{"on": [{"event": "bell", "action": "list"}]}"#,
+    );
+    let pwd_only = old.union(Features::TERMINAL_EVENTS);
+    let refused = with_config(&events_server(pwd_only), &bell, &["watch"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(stderr.contains("does not send `bell` events"), "{stderr}");
+    std::fs::remove_file(&bell).expect("cleanup");
+
+    // Rules for events every numbering server sends still run.
+    let generic = config_file(
+        "generic",
+        r#"{"on": [{"event": "session-created", "action": "list"}]}"#,
+    );
+    let mut child = ctl_command(&events_server(old), &["watch"])
+        .env("RUSTY_MUX_CONFIG", &generic)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    let first = lines.next().expect("a line").expect("read");
+    assert!(first.starts_with("cursor "), "{first}");
+    child.kill().expect("kill");
+    child.wait().expect("wait");
+    for path in [pwd, generic] {
+        std::fs::remove_file(path).expect("cleanup");
+    }
+}
+
+/// Creates a session and a window; returns the window id.
+fn window(socket: &Path) -> String {
+    let session = ok(socket, &["create-session", "--name", "s"]);
+    ok(
+        socket,
+        &["create-window", "--session", &session, "--name", "w"],
+    )
+}
+
+/// A program, as `run` takes it, that exits with `code`.
+fn exits_with(code: u8) -> Vec<String> {
+    let line = format!("exit {code}");
+    match cfg!(windows) {
+        true => vec!["cmd.exe".into(), "/c".into(), line],
+        false => vec!["sh".into(), "-c".into(), line],
+    }
+}
+
+/// What to type at the block's shell so it waits a second, long enough
+/// for a waiter to be listening, then exits with `code`.
+fn pause_then_exit(code: u8) -> String {
+    match cfg!(windows) {
+        true => format!("ping -n 2 127.0.0.1 >nul & exit {code}\r"),
+        false => format!("sleep 1; exit {code}\r"),
+    }
+}
+
+#[test]
+fn run_wait_exits_with_the_programs_status() {
+    let socket = start_server();
+    let window = window(&socket);
+    let program = exits_with(3);
+    let mut args = vec!["run", "--window", &window, "--wait", "--"];
+    args.extend(program.iter().map(String::as_str));
+    let output = ctl(&socket, &args);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = stdout(&output);
+    let mut lines = text.lines();
+    let block = lines.next().expect("the new block's id");
+    assert!(block.parse::<rusty_uuid::Uuid>().is_ok(), "{text}");
+    let exited = lines.next().expect("the exit");
+    assert!(
+        exited.contains(&format!("program-exited block={block} code=3")),
+        "{text}"
+    );
+
+    // Without --wait it prints the block and returns at once.
+    let program = exits_with(0);
+    let mut args = vec!["run", "--window", &window, "--"];
+    args.extend(program.iter().map(String::as_str));
+    assert!(ok(&socket, &args).parse::<rusty_uuid::Uuid>().is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn run_starts_in_ctls_directory_and_reports_a_signal() {
+    let socket = start_server();
+    let window = window(&socket);
+    let check = r#"[ "$(pwd)" = /tmp ]"#;
+    let output = ctl_command(
+        &socket,
+        &["run", "--window", &window, "--wait", "sh", "-c", check],
+    )
+    .current_dir("/tmp")
+    .output()
+    .expect("run");
+    assert_eq!(output.status.code(), Some(0), "the server's dir is /");
+    let killed = ctl(
+        &socket,
+        &[
+            "run",
+            "--window",
+            &window,
+            "--wait",
+            "--",
+            "sh",
+            "-c",
+            "kill -9 $$",
+        ],
+    );
+    assert_eq!(killed.status.code(), Some(128 + 9));
+    assert!(stdout(&killed).contains("signal=9"));
+    let missing = ctl(
+        &socket,
+        &[
+            "run",
+            "--window",
+            &window,
+            "--wait",
+            "--",
+            "/no/such/program",
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(1), "refused, not run");
+}
+
+#[test]
+fn wait_follows_an_existing_block_until_its_program_exits() {
+    let socket = start_server();
+    let block = block(&socket);
+    let waiter = ctl_command(&socket, &["wait", "--block", &block, "--timeout", "20"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    // Long enough for the waiter to be listening first.
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            &pause_then_exit(5),
+        ],
+    );
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(5));
+    assert!(stdout(&output).contains("code=5"), "{}", stdout(&output));
+
+    // The block is gone now.
+    assert_eq!(
+        ctl(&socket, &["wait", "--block", &block]).status.code(),
+        Some(3)
+    );
+}
+
+#[test]
+fn wait_gives_up_at_its_timeout_and_fails_on_a_closed_block() {
+    let socket = start_server();
+    let block = block(&socket);
+    let started = std::time::Instant::now();
+    let output = ctl(&socket, &["wait", "--block", &block, "--timeout", "0.3"]);
+    assert_eq!(output.status.code(), Some(124));
+    assert!(started.elapsed() < PATIENCE);
+
+    let waiter = ctl_command(&socket, &["wait", "--block", &block, "--timeout", "20"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    std::thread::sleep(Duration::from_millis(500));
+    ok(&socket, &["close-block", "--block", &block]);
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stdout(&output).contains("block-closed"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("before its program exited"));
+}
+
+#[test]
+fn wait_for_an_event_whose_fields_match() {
+    let socket = start_server();
+    let block = block(&socket);
+    let waiter = ctl_command(
+        &socket,
+        &[
+            "--json",
+            "wait",
+            "--event",
+            "program-exited",
+            "--block",
+            &block,
+            "--code",
+            "7",
+            "--timeout",
+            "20",
+        ],
+    )
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn");
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            &pause_then_exit(7),
+        ],
+    );
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    let line = stdout(&output);
+    let event = rusty_json::Value::from_json_str(line.trim()).expect("json");
+    let rusty_json::Value::Object(map) = event else {
+        panic!("{line}")
+    };
+    assert_eq!(
+        map.get("kind"),
+        Some(&rusty_json::Value::from("program-exited"))
+    );
+
+    let output = ctl(&socket, &["wait", "--event", "bell", "--timeout", "0.3"]);
+    assert_eq!(output.status.code(), Some(124));
+    for args in [&["wait"][..], &["wait", "--event", "nope"], &["run"]] {
+        assert_eq!(ctl(&socket, args).status.code(), Some(2), "{args:?}");
+    }
+}
+
+/// An agent waits for the program to copy to the primary selection, and
+/// then for its status record to end, without reading the screen.
+#[cfg(unix)]
+#[test]
+fn wait_for_a_clipboard_write_and_an_ended_status() {
+    let socket = start_server();
+    let block = block(&socket);
+    let wait = |kind: &str, field: &str, value: &str| {
+        ctl_command(
+            &socket,
+            &[
+                "wait",
+                "--event",
+                kind,
+                "--block",
+                &block,
+                field,
+                value,
+                "--timeout",
+                "20",
+            ],
+        )
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn")
+    };
+    let copied = wait("clipboard-written", "--selection", "primary");
+    let ended = wait("status-removed", "--id", "job");
+    std::thread::sleep(Duration::from_millis(500));
+    // "aGk=" is "hi". The program pauses first, so both waiters are
+    // listening, and again before the clear, so it lands in a later read
+    // and ends the record.
+    let typed = "sleep 1; printf '\\033]7501;state=working:id=job\\007\\033]52;p;aGk=\\007'; \
+                 sleep 1; printf '\\033]7501;state=clear:id=job\\007'\r";
+    ok(
+        &socket,
+        &[
+            "attach",
+            "--block",
+            &block,
+            "+",
+            "acquire-lease",
+            "--block",
+            &block,
+            "+",
+            "input",
+            "--block",
+            &block,
+            "--data",
+            typed,
+        ],
+    );
+    let expected = [
+        (
+            copied,
+            format!("clipboard-written block={block} selection=primary"),
+        ),
+        (ended, format!("status-removed block={block} id=\"job\"")),
+    ];
+    for (waiter, line) in expected {
+        let output = waiter.wait_with_output().expect("wait");
+        assert_eq!(output.status.code(), Some(0), "{line}");
+        let printed = stdout(&output);
+        assert!(printed.trim_end().ends_with(&line), "{printed}");
+    }
+}
+
+/// An agent selects a window and sees the session's active window move,
+/// both in the listing and as an event a waiter catches.
+#[test]
+fn select_window_moves_the_active_window() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let first = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "a"],
+    );
+    let second = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "b"],
+    );
+    let line = |listing: &str| {
+        listing
+            .lines()
+            .find(|l| l.starts_with("session "))
+            .expect("a session line")
+            .to_owned()
+    };
+    assert!(line(&ok(&socket, &["list"])).ends_with(&format!("active={first}")));
+
+    let waiter = ctl_command(
+        &socket,
+        &[
+            "wait",
+            "--event",
+            "active-window-changed",
+            "--window",
+            &second,
+            "--timeout",
+            "20",
+        ],
+    )
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn");
+    // `wait` sees only events after it subscribes, so select back and
+    // forth until it has caught one, rather than guess how long that takes.
+    let mut waiter = waiter;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while waiter.try_wait().expect("poll").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the waiter never saw it"
+        );
+        ok(&socket, &["select-window", "--window", &first]);
+        ok(&socket, &["select-window", "--window", &second]);
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    let printed = stdout(&output);
+    assert!(
+        printed.trim_end().ends_with(&format!(
+            "active-window-changed session={session} window={second}"
+        )),
+        "{printed}"
+    );
+    assert!(line(&ok(&socket, &["list"])).ends_with(&format!("active={second}")));
+    // A window that does not exist is a missing target: exit 3.
+    let gone = "00000000-0000-4000-8000-000000000000";
+    assert_eq!(
+        ctl(&socket, &["select-window", "--window", gone])
+            .status
+            .code(),
+        Some(3)
+    );
+}
+
+/// An agent edits a window's layout and reorders windows from the command
+/// line (C41).
+#[test]
+fn layout_edits_reshape_a_window_and_reorder_windows() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let window = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "a"],
+    );
+    let size = ["--cols", "80", "--rows", "24"];
+    let block = |socket: &Path| {
+        let mut args = vec!["create-block", "--window", &window];
+        args.extend(size);
+        ok(socket, &args)
+    };
+    let (a, b) = (block(&socket), block(&socket));
+    let layout = |socket: &Path| {
+        ok(socket, &["list"])
+            .lines()
+            .find(|l| l.starts_with(&format!("window {window}")))
+            .and_then(|l| l.split(" layout=").nth(1))
+            .map(|rest| {
+                rest.split(' ')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches('"')
+                    .to_owned()
+            })
+            .expect("a window line with a layout")
+    };
+    assert_eq!(layout(&socket), format!("cols50({a},{b})"));
+    ok(
+        &socket,
+        &[
+            "resize-split",
+            "--block",
+            &b,
+            "--axis",
+            "cols",
+            "--percent",
+            "25",
+        ],
+    );
+    assert_eq!(layout(&socket), format!("cols75({a},{b})"));
+    ok(&socket, &["swap-blocks", "--block", &a, "--other", &b]);
+    assert_eq!(layout(&socket), format!("cols75({b},{a})"));
+    ok(&socket, &["detach-block", "--block", &b]);
+    assert_eq!(layout(&socket), a);
+    ok(
+        &socket,
+        &[
+            "move-block",
+            "--block",
+            &b,
+            "--beside",
+            &a,
+            "--side",
+            "down",
+        ],
+    );
+    assert_eq!(layout(&socket), format!("rows50({a},{b})"));
+    // A percent outside 1 to 99 is refused before it is sent.
+    let bad = ctl(
+        &socket,
+        &[
+            "resize-split",
+            "--block",
+            &b,
+            "--axis",
+            "rows",
+            "--percent",
+            "100",
+        ],
+    );
+    assert_ne!(bad.status.code(), Some(0));
+
+    let second = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "b"],
+    );
+    ok(
+        &socket,
+        &["move-window", "--window", &second, "--index", "0"],
+    );
+    let order: Vec<String> = ok(&socket, &["list"])
+        .lines()
+        .filter(|l| l.starts_with("window "))
+        .filter_map(|l| l.split(' ').nth(1).map(str::to_owned))
+        .collect();
+    assert_eq!(order, vec![second, window]);
+}
+
+/// An agent moves a window's focus from the command line, and `list`
+/// shows it (C41).
+#[test]
+fn focus_moves_between_blocks_and_shows_in_the_listing() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let window = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "a"],
+    );
+    let block = |socket: &Path| {
+        ok(
+            socket,
+            &[
+                "create-block",
+                "--window",
+                &window,
+                "--cols",
+                "80",
+                "--rows",
+                "24",
+            ],
+        )
+    };
+    let (a, b) = (block(&socket), block(&socket));
+    let focus = |socket: &Path| {
+        ok(socket, &["list"])
+            .lines()
+            .find(|l| l.starts_with(&format!("window {window}")))
+            .and_then(|l| l.split(" focused=").nth(1))
+            .map(str::to_owned)
+            .expect("a window line with its focus")
+    };
+    assert_eq!(focus(&socket), a);
+    ok(
+        &socket,
+        &["move-focus", "--window", &window, "--toward", "right"],
+    );
+    assert_eq!(focus(&socket), b);
+    ok(&socket, &["focus-block", "--block", &a]);
+    assert_eq!(focus(&socket), a);
+    let bad = ctl(
+        &socket,
+        &["move-focus", "--window", &window, "--toward", "north"],
+    );
+    assert_ne!(bad.status.code(), Some(0));
+}
+
+#[test]
+fn reload_config_rereads_the_file_and_says_so() {
+    let file = socket_path("config").with_extension("json");
+    std::fs::write(&file, "{}").expect("write config");
+    let socket = start_server_with(Config {
+        config_file: Some(file.clone()),
+        ..shell()
+    });
+    let mut waiter = ctl_command(
+        &socket,
+        &["wait", "--event", "config-reloaded", "--timeout", "20"],
+    )
+    .stdout(Stdio::piped())
+    .spawn()
+    .expect("spawn");
+    // As with select-window: reload until the waiter has caught one.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while waiter.try_wait().expect("poll").is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the waiter never saw it"
+        );
+        assert_eq!(ok(&socket, &["reload-config"]), "");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let output = waiter.wait_with_output().expect("wait");
+    assert_eq!(output.status.code(), Some(0));
+    let printed = stdout(&output);
+    assert!(printed.trim_end().ends_with("config-reloaded"), "{printed}");
+
+    std::fs::write(&file, r#"{"server": {"command": ""}}"#).expect("write config");
+    let refused = ctl(&socket, &["reload-config"]);
+    assert_ne!(refused.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(err.contains("server.command"), "{err}");
+}
+
+/// Types at `block`'s shell, once leased, what makes it exit with `code`
+/// after a pause.
+fn exit_later(socket: &Path, block: &str, code: u8) {
+    ok(
+        socket,
+        &[
+            "attach",
+            "--block",
+            block,
+            "+",
+            "acquire-lease",
+            "--block",
+            block,
+            "+",
+            "input",
+            "--block",
+            block,
+            "--data",
+            &pause_then_exit(code),
+        ],
+    );
+}
+
+/// Returns once a second client, the waiter, is connected besides the
+/// one `list` itself uses. Its stream is open by then; whatever ends
+/// before its listing still counts.
+fn connected(socket: &Path) {
+    let started = std::time::Instant::now();
+    while client_ids(socket).len() < 2 {
+        assert!(started.elapsed() < PATIENCE, "the waiter never connected");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn shell_block(socket: &Path, window: &str) -> String {
+    ok(
+        socket,
+        &[
+            "create-block",
+            "--window",
+            window,
+            "--cols",
+            "80",
+            "--rows",
+            "24",
+        ],
+    )
+}
+
+#[test]
+fn wait_on_a_window_follows_every_block_until_the_last_ends() {
+    let socket = start_server();
+    let window = window(&socket);
+    let (first, second) = (shell_block(&socket, &window), shell_block(&socket, &window));
+    let waiter = ctl_command(&socket, &["wait", "--window", &window, "--timeout", "20"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    connected(&socket);
+    // A block made after the wait began joins it.
+    let late = shell_block(&socket, &window);
+    exit_later(&socket, &first, 0);
+    exit_later(&socket, &second, 4);
+    exit_later(&socket, &late, 0);
+    let output = waiter.wait_with_output().expect("wait");
+    let text = stdout(&output);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "{text}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (block, code) in [(&first, 0), (&second, 4), (&late, 0)] {
+        let line = format!("program-exited block={block} code={code}");
+        assert!(text.contains(&line), "{line} in {text}");
+    }
+
+    // Nothing is left in it, so a new wait ends at once, quietly.
+    let output = ctl(&socket, &["wait", "--window", &window, "--timeout", "5"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(stdout(&output), "");
+}
+
+#[test]
+fn wait_on_a_session_fails_when_a_block_closes_unfinished() {
+    let socket = start_server();
+    let session = ok(&socket, &["create-session", "--name", "s"]);
+    let window = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "w"],
+    );
+    let closed = shell_block(&socket, &window);
+    let waiter = ctl_command(&socket, &["wait", "--session", "s", "--timeout", "20"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    connected(&socket);
+    // A window and block made during the wait join it.
+    let other = ok(
+        &socket,
+        &["create-window", "--session", &session, "--name", "x"],
+    );
+    let finished = shell_block(&socket, &other);
+    exit_later(&socket, &finished, 0);
+    ok(&socket, &["close-block", "--block", &closed]);
+    let output = waiter.wait_with_output().expect("wait");
+    let text = stdout(&output);
+    assert_eq!(output.status.code(), Some(1), "{text}");
+    assert!(
+        text.contains(&format!("block-closed block={closed}")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("program-exited block={finished} code=0")),
+        "{text}"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("before its program exited"));
+
+    assert_eq!(
+        ctl(&socket, &["wait", "--session", "nope"]).status.code(),
+        Some(3)
+    );
+}
+
+/// What a client running `ssh host rusty-mux-ctl bridge` sees: its frames
+/// reach the server through stdin and the answers come back on stdout. The
+/// end of stdin ends the bridge.
+#[test]
+fn bridge_carries_the_protocol_over_stdin_and_stdout() {
+    use rusty_mux_proto::{Features, Message, decode, encode};
+
+    let socket = start_server();
+    let mut bridge = ctl_command(&socket, &["bridge"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("run rusty-mux-ctl bridge");
+    let mut input = bridge.stdin.take().expect("stdin");
+    let hello = Message::Hello {
+        features: Features::SYNC,
+        resume: None,
+        takeover: None,
+    };
+    let sync = Message::Sync { req: 1 };
+    for message in [&hello, &sync] {
+        input.write_all(&encode(message).expect("encode")).unwrap();
+    }
+    input.flush().unwrap();
+
+    let mut output = bridge.stdout.take().expect("stdout");
+    let (mut buf, mut got) = (Vec::new(), Vec::new());
+    while !matches!(got.last(), Some(Message::Done { req: 1, .. })) {
+        if let Some((message, used)) = decode(&buf).expect("decode") {
+            buf.drain(..used);
+            got.push(message);
+            continue;
+        }
+        let mut chunk = [0u8; 4096];
+        let n = output.read(&mut chunk).expect("read");
+        assert!(n > 0, "the bridge ended early");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    assert!(matches!(got[0], Message::Welcome { .. }), "{got:?}");
+
+    drop(input);
+    let status = bridge.wait().expect("wait");
+    assert!(status.success(), "{status}");
+}
+
+#[test]
+fn bridge_to_no_server_is_unreachable() {
+    let output = ctl(&socket_path("bridge-none"), &["bridge"]);
+    assert_eq!(output.status.code(), Some(4), "{output:?}");
 }

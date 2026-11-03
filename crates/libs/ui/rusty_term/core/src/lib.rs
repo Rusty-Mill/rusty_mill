@@ -46,12 +46,12 @@ mod webp;
 
 #[cfg(feature = "gui")]
 pub use bidi::mirrored as bidi_mirrored;
+pub use cell::char_width;
 pub use cell::{
-    ATTR_BLINK, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_REVERSE,
-    ATTR_STRIKE, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, UnderlineStyle, WIDE_TRAILER,
+    ATTR_BG_DEFAULT, ATTR_BLINK, ATTR_BOLD, ATTR_DEFAULT_COLORS, ATTR_DIM, ATTR_FG_DEFAULT,
+    ATTR_HIDDEN, ATTR_ITALIC, ATTR_MASK, ATTR_OVERLINE, ATTR_REVERSE, ATTR_STRIKE, ATTR_UNDERLINE,
+    ATTR_UNDERLINE_COLOR, Cell, CellColors, ColorRef, UnderlineStyle, WIDE_TRAILER,
 };
-#[cfg(feature = "gui")]
-pub use cell::{Cell, char_width};
 pub use color::Theme;
 #[cfg(feature = "gui")]
 pub use color::ensure_contrast;
@@ -64,8 +64,8 @@ pub use grid::StyleStats;
 #[cfg(any(test, feature = "gui"))]
 pub use grid::View;
 pub use grid::{
-    CursorShape, DirtyFrame, Grid, LineAttr, PROGRAM_STATUS_MAX, SCROLLBACK_MAX, SnapshotError,
-    StatusSignal,
+    CursorShape, DirtyFrame, Grid, LineAttr, PROGRAM_STATUS_MAX, SCROLLBACK_MAX, ShellPhase,
+    SnapshotError, StatusSignal,
 };
 #[cfg(any(test, feature = "gui"))]
 pub use grid::{FrameImage, FrameView, RowKey};

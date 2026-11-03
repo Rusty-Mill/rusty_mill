@@ -24,6 +24,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | foundation | rusty_compress | rusty_compress | A sans-IO stream compression and decompression abstraction crate for DEFLATE, Gzip, Zlib, and LZMA |
 | foundation | rusty_config | rusty_config | A zero-dependency, no_std INI and Key-Value configuration file parser for Rust |
 | foundation | rusty_confined_fs | rusty_confined_fs | Create directories and open files for writing beneath a root without following a symlink: openat/O_NOFOLLOW walk on Linux, checked fallback elsewhere. |
+| foundation | rusty_crdt | rusty_crdt | Sequence CRDT (RGA): sync, no I/O, no dependencies, generic over id and element |
 | foundation | rusty_crypto_key | rusty_crypto_key | A zeroize-on-drop key storage and file persistence micro-crate (0600 permissions on Unix) |
 | foundation | rusty_ct_check | rusty_ct_check | Test-support harness for constant-time evidence: valgrind secret tainting, a dudect-style timing t-test and a disassembly audit script. Detects planted leaks; proves nothing about their absence. Not for production dependencies. |
 | foundation | rusty_diff | rusty_diff | Pure Rust implementation of Myers and Patience diff algorithms, unified diff formatting, and patch application |
@@ -100,6 +101,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_bbp | rusty_bbp | Blackboard Protocol core: records, rules, lifecycle for multi-vendor agents collaborating on one software task. Pure, no I/O. |
 | libs | rusty_bot | rusty_bot | Per-bot sandboxes for AG-UI agents: a BotSpec confined by rusty_sandbox (its own workspace, read roots, limits, a process group), a Fleet that starts and stops them, and the rusty-bot binary |
 | libs | rusty_channel | rusty_channel | Chat channels for AG-UI agents: a sans-IO Channel trait mapping an inbound message to a RunAgentInput and reply events back, with Slack, Microsoft Teams and SMS (Twilio) adapters |
+| libs | rusty_conhost | rusty_conhost | Our own Windows console host: a sans-I/O console engine over ConDrv, with a pty-shaped front end. |
 | libs | rusty_db | rusty-db | A database-agnostic query builder and connection abstraction, in the spirit of SQLAlchemy Core |
 | libs | rusty_db | rusty-db-core | Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of rusty_db) |
 | libs | rusty_db | rusty-db-derive | #[derive(Mapped)] macro for rusty_db: maps a struct to a table |
@@ -122,14 +124,15 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_llama | rusty_llama | A from-scratch Llama (llama2.c-format) inference engine in Rust |
 | libs | rusty_log | rusty_log | The workspace's single door to \`tracing\`: re-exports the logging and span API, and (feature \`subscriber\`) the subscriber kit, so that one crate owns the third-party dependency. |
 | libs | rusty_lsp | rusty_lsp | A small, reusable async Language Server Protocol framework. Own the protocol plumbing; implement one trait for your language. |
-| libs | rusty_mcp | rusty-mcp | Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry |
 | libs | rusty_mcp | rusty-mcp-client | Protocol-only MCP client: stdio child process and Streamable HTTP, with API-key, bearer and OAuth client-credentials auth |
 | libs | rusty_mcp | rusty-mcp-demo | Example MCP server built on rusty_mcp_server |
 | libs | rusty_mcp_client_native | rusty_mcp_client_native | Sovereign MCP client core on rusty_mcp_proto: a sans-IO session for the classic and stateless handshakes, a server-sent-events parser, and a blocking client over a child-process transport |
+| libs | rusty_mcp_middleware | rusty_mcp_middleware | Transport-level building blocks for MCP servers and gateways: OAuth resource-server auth, load shedding, W3C trace context, OpenTelemetry |
 | libs | rusty_mcp_proto | rusty_mcp_proto | Sovereign MCP wire types on rusty_json: JSON-RPC 2.0 envelope, error codes, protocol versions, content, tools and paginated lists, with a hand-written codec and no serde |
 | libs | rusty_mcp_server | rusty_mcp_server | Sovereign MCP server core on rusty_mcp_proto: a tool registry, a sans-IO connection dispatcher for the classic and stateless handshakes, cancellation and progress, pagination, and a stdio transport |
 | libs | rusty_multimodal_db_engine | rusty_multimodal_db_engine | The embedded, mmap-backed generic record store extracted from rusty_multimodal_db: composable store layers, durable slot files and record blobs |
 | libs | rusty_oauth | rusty_oauth | A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust. |
+| libs | rusty_oauth_server | rusty_oauth_server | A small, sans-IO OAuth 2.1 authorization server for single-owner MCP servers: PKCE, refresh rotation, dynamic registration, revocation and a token-pasting consent page. |
 | libs | rusty_opnsense | rusty_opnsense | Async client for the OPNsense REST API: system status, services, interfaces, firewall/VLAN CRUD, gateways, DHCP leases, diagnostics, and backups. |
 | libs | rusty_prost | rusty_prost | Dependency-free Protobuf message layer on rusty_protobuf: a Message trait for hand-written schemas, and the well-known types (Timestamp, Any, Struct, Value, ...) plus google.rpc Status and ErrorInfo. No derive, no code generation. |
 | libs | rusty_protobuf | rusty_protobuf | Dependency-free Protobuf wire-format runtime: a zero-copy reader that returns errors instead of panicking on hostile input, and a length-fixing writer. No code generation; schemas are hand-written on top. |
@@ -240,20 +243,25 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_meshed | rusty-meshed-trace | Reverse-trace and domain-maturity model for rusty_meshed: outcome -&gt; domains -&gt; sources, with a fidelity verdict and a worst-first bottleneck list. |
 | apps | rusty_mill_board | rusty_mill_board | Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI. |
 | apps | rusty_mill_board | rusty_mill_runner | Optional runner for Mill Board: works cards through stages by running a configured agent command per column, sandboxed in a git worktree. |
-| apps | rusty_multimodal_db | rusty_multimodal_db | Benchmark harness comparing AoS, SoA, and UUID-canonical-store views as storage backends |
+| apps | rusty_multimodal_db | rusty_multimodal_db | The multimodal_db server, clients and domain adapters over rusty_multimodal_db_engine |
 | apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. |
 | apps | rusty_mux | rusty_mux_ctl | rusty-mux-ctl: scriptable rusty_mux client generated from the request catalog, with --json output and stable exit codes. |
+| apps | rusty_mux | rusty_mux_mcp | rusty-mux-mcp: the rusty_mux request catalog as MCP tools over stdio, each call run as rusty-mux-ctl would run it. |
 | apps | rusty_mux | rusty_mux_proto | rusty_mux's wire protocol: length-prefixed frames of tagged varint fields, with feature bits. No I/O. |
+| apps | rusty_mux | rusty_mux_script | rusty_mux actions and key bindings: named chains of catalog requests read from a JSON config, checked against the catalog. No I/O. |
 | apps | rusty_mux | rusty_mux_server | rusty_mux's server: owns the PTYs, keeps one terminal per block, and tees raw output to attached clients over a Unix socket. |
 | apps | rusty_mux | rusty_mux_status | rusty_mux program status: parses OSC 7501 (Program Status Protocol) reports and keeps a block's records. No I/O. |
-| apps | rusty_mux | rusty_mux_tui | Throwaway Phase 1 terminal client for rusty_mux: attaches the local terminal to one block over a Unix socket. |
+| apps | rusty_mux | rusty_mux_transport | rusty_mux's UDP transport: sealed datagrams carrying reliable ordered streams, with roaming. No I/O. |
+| apps | rusty_mux | rusty_mux_tui | Terminal client for rusty_mux: shows a block's window on the local terminal over a Unix socket, drawing its split layout. |
 | apps | rusty_orch | orch-bbp | TaskHost adapter over the existing BBP CLI and moderator |
 | apps | rusty_orch | orch-claude | Orchestrator adapter: Agent::Claude over the Claude Code CLI, read-only tools, prompt on stdin, one schema-constrained JSON object out. |
 | apps | rusty_orch | orch-cli | Shared CLI-adapter core for rusty_orch: process seam with a hard deadline, the JSON reply protocol, and prompt rendering. |
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. |
 | apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. |
+| apps | rusty_orch | orch-lens | Orchestrator lens runner core: critic lenses over a BBP claims board. Reply protocol, context assembly, tiering, data classes and the money meter. Pure, no I/O. |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. |
+| apps | rusty_orch | orch-openai | Orchestrator adapter: one OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only (llama-swap in v0). |
 | apps | rusty_orch | orch-store | Orchestrator persistence: one snapshot record per goal (plan, board, ledger) in the embedded rusty_multimodal_db engine, so a blocked run resumes in a later process. |
 | apps | rusty_orch | rusty_orch | Orchestrator command line: runs a JSON goal file through the dispatcher over the Codex, Claude, and Ollama adapters and prints the board. |
 | apps | rusty_provider | rp-cli |  |
@@ -262,12 +270,6 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_provider | rp-providers |  |
 | apps | rusty_provider | rp-router |  |
 | apps | rusty_provider | rp-server |  |
-| apps | rusty_remind_me | remind_me_api |  |
-| apps | rusty_remind_me | remind_me_core |  |
-| apps | rusty_remind_me | remind_me_hub |  |
-| apps | rusty_remind_me | remind_me_mcp |  |
-| apps | rusty_remind_me | remind_me_remote |  |
-| apps | rusty_remind_me | rusty-remind-me |  |
 | apps | rusty_rsi | rsi-cli | Composition root of the rusty_rsi harness: the \`rsi\` binary (calibrate, run, report, inner) and its sandbox and grader entry points |
 | apps | rusty_rsi | rsi-core | Pure domain core of the rusty_rsi self-improvement harness: accept gate, noise margin, budget metering, search helpers and lineage types |
 | apps | rusty_rsi | rsi-harness | a0, the inner agent of the rusty_rsi harness: AIDE0-style tree search over a metered broker; the outer loop's only mutable surface |
@@ -302,7 +304,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_yirp | sessionmgr-git | Git adapter for sessionmgr: worktree lifecycle, status, and diff, by shelling out to the system git. |
 | apps | rusty_yirp | sessionmgr-proc | Process adapter for sessionmgr: detached spawn, PID-reuse-safe liveness, termination, and stdio-inheritance hardening. |
 | apps | rusty_yirp | sessionmgr-protocol | Wire types shared by the sessionmgr daemon, its workers, and its clients. Serde only, no I/O. |
-| apps | rusty_yirp | sessionmgr-pty | PTY adapter for sessionmgr: hosts a session's process on a real terminal (ConPTY on Windows) via rustils' platform Pty capability. |
+| apps | rusty_yirp | sessionmgr-pty | PTY adapter for sessionmgr: hosts a session's process on a real terminal (ConPTY or our own console host on Windows) via rustils' platform Pty capability. |
 | apps | rusty_yirp | sessionmgr-tui | The sessionmgr TUI: a grid of session panes over the daemon's public socket. Depends on sessionmgr-protocol only -- never sessionmgr-proc or sessionmgr-agents -- so a UI that cannot name a process type cannot accidentally spawn one. |
 | tools | rusty_baseline | rusty_baseline | Per-product baseline: binary size, dependency closure, clean and incremental build, startup, idle and peak RSS |
 | tools | rusty_boot | rusty_boot | A #![no_std] + alloc sovereign bootstrapper demonstrating kernel-to-application execution without Rust std |

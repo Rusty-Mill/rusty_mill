@@ -96,7 +96,7 @@ def test_artifacts_are_encrypted_at_rest(client, make_account, monkeypatch):
     assert "fake report" in blobs.load_html(rid)
 
 
-def test_upload_delegates_to_injected_job_queue(client, make_account, monkeypatch):
+def test_upload_delegates_to_injected_job_queue(client, make_account):
     """A swapped JobQueue adapter receives the job; scoring does not run inline."""
     from app.main import app
 
@@ -106,18 +106,30 @@ def test_upload_delegates_to_injected_job_queue(client, make_account, monkeypatc
         def enqueue_scoring(self, replay_id: str) -> None:
             enqueued.append(replay_id)
 
-    monkeypatch.setattr(
-        app.state, "queue_factory", lambda background, scorer: RecordingQueue()
-    )
-    make_account(credits_n=5)
-    r = client.post("/v1/replays", files=_file(b"queued-not-scored"), headers=H)
+    # State forwards attributes into a mapping; restore through the same API.
+    original_factory = app.state.queue_factory
+    try:
+        app.state.queue_factory = lambda background, scorer: RecordingQueue()
+        make_account(credits_n=5)
+        r = client.post("/v1/replays", files=_file(b"queued-not-scored"), headers=H)
+        assert r.status_code == 202
+        rid = r.json()["replay_id"]
+        # The job was handed to our queue, and the default in-process scoring did NOT
+        # run, so the replay is still queued with no reports.
+        assert enqueued == [rid]
+        assert client.get(f"/v1/replays/{rid}", headers=H).json()["status"] == "queued"
+        assert client.get(f"/v1/reports/{rid}", headers=H).json()["reports"] == []
+
+    finally:
+        app.state.queue_factory = original_factory
+
+    assert app.state.queue_factory is original_factory
+    # Cleanup must leave the default queue usable for the next request.
+    r = client.post("/v1/replays", files=_file(b"scored-after-cleanup"), headers=H)
     assert r.status_code == 202
     rid = r.json()["replay_id"]
-    # The job was handed to our queue, and the default in-process scoring did NOT
-    # run, so the replay is still queued with no reports.
-    assert enqueued == [rid]
-    assert client.get(f"/v1/replays/{rid}", headers=H).json()["status"] == "queued"
-    assert client.get(f"/v1/reports/{rid}", headers=H).json()["reports"] == []
+    assert client.get(f"/v1/replays/{rid}", headers=H).json()["status"] == "done"
+    assert rid not in enqueued
 
 
 def test_lock_profile(client, make_account):

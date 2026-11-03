@@ -8,7 +8,6 @@
 use std::net::SocketAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::{Value, json};
@@ -119,7 +118,7 @@ async fn start() -> (String, CancellationToken, tempfile::TempDir) {
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None)
+    let gateway = common::build(&config, None)
         .await
         .expect("gateway should build");
 
@@ -127,7 +126,7 @@ async fn start() -> (String, CancellationToken, tempfile::TempDir) {
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
     // The returned future only joins the accept loops; the tests drive the
     // gateway over HTTP and cancel it directly, so it is deliberately dropped.
-    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    let _serving = common::serve(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 

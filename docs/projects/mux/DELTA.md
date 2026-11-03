@@ -9,7 +9,7 @@ Phase 3). Nothing here changes a wire format yet.
 
 A Phase 1 attach is a fresh client with no state, so a delta has nothing to
 apply to. The worst Phase 1 case, 200x50 with 10,000 history rows, is already
-0.64 MB and about 19 ms to encode in v3 (see [REPLAY.md](REPLAY.md)). Deltas
+0.64 MB and about 3 ms to encode in v3 (see [REPLAY.md](REPLAY.md)). Deltas
 pay off only when a client reconnects holding recent state, which is what C05
 and C13 add.
 

@@ -4,10 +4,16 @@ fn size(cols: u16, rows: u16) -> Size {
     Size::new(cols, rows).expect("non-zero size")
 }
 
+/// A local client.
+fn connect(mux: &mut Mux) -> ClientId {
+    let me = Principal::unix(1000, Some("me".into())).expect("principal");
+    mux.connect(me, Transport::Socket)
+}
+
 /// A session with one window and one block, events drained.
 fn fixture() -> (Mux, SessionId, WindowId, BlockId) {
     let mut mux = Mux::new();
-    let session = mux.create_session("s");
+    let session = mux.create_session("s").expect("session");
     let window = mux.create_window(session, "w").expect("window");
     let block = mux.create_block(window, size(80, 24)).expect("block");
     mux.take_events();
@@ -15,7 +21,7 @@ fn fixture() -> (Mux, SessionId, WindowId, BlockId) {
 }
 
 fn leased_client(mux: &mut Mux, block: BlockId) -> ClientId {
-    let client = mux.connect();
+    let client = connect(mux);
     mux.attach(client, block).expect("attach");
     mux.acquire_lease(client, block).expect("lease");
     mux.take_events();
@@ -25,7 +31,7 @@ fn leased_client(mux: &mut Mux, block: BlockId) -> ClientId {
 #[test]
 fn create_links_children_and_emits_in_order() {
     let mut mux = Mux::new();
-    let session = mux.create_session("work");
+    let session = mux.create_session("work").unwrap();
     let window = mux.create_window(session, "main").unwrap();
     let block = mux.create_block(window, size(80, 24)).unwrap();
 
@@ -38,14 +44,108 @@ fn create_links_children_and_emits_in_order() {
         vec![
             Event::SessionCreated { session },
             Event::WindowCreated { window, session },
+            Event::ActiveWindowChanged {
+                session,
+                window: Some(window)
+            },
             Event::BlockCreated {
                 block,
                 window,
                 size: size(80, 24)
             },
+            Event::LayoutChanged {
+                window,
+                layout: Some(Layout::Block(block)),
+                zoomed: None,
+            },
+            Event::FocusChanged {
+                window,
+                block: Some(block)
+            },
         ]
     );
     assert!(mux.take_events().is_empty());
+}
+
+#[test]
+fn only_the_first_window_becomes_active_by_itself() {
+    let (mut mux, session, first, _) = fixture();
+    assert_eq!(mux.session(session).unwrap().active(), Some(first));
+    let second = mux.create_window(session, "bg").unwrap();
+    assert_eq!(mux.session(session).unwrap().active(), Some(first));
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::WindowCreated {
+            window: second,
+            session
+        }]
+    );
+}
+
+#[test]
+fn selecting_a_window_makes_it_active_once() {
+    let (mut mux, session, first, _) = fixture();
+    let second = mux.create_window(session, "two").unwrap();
+    mux.take_events();
+    assert_eq!(mux.select_window(second), Ok(()));
+    assert_eq!(mux.select_window(second), Ok(()), "again: no change");
+    assert_eq!(mux.session(session).unwrap().active(), Some(second));
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::ActiveWindowChanged {
+            session,
+            window: Some(second)
+        }]
+    );
+    mux.close_window(first).unwrap();
+    mux.take_events();
+    assert_eq!(mux.select_window(first), Err(Error::UnknownWindow(first)));
+    assert!(mux.take_events().is_empty());
+}
+
+#[test]
+fn closing_the_active_window_hands_over_to_the_newest() {
+    let (mut mux, session, first, block) = fixture();
+    let second = mux.create_window(session, "two").unwrap();
+    let third = mux.create_window(session, "three").unwrap();
+    mux.select_window(second).unwrap();
+    mux.take_events();
+
+    // An inactive window closes quietly.
+    mux.close_window(first).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::BlockClosed { block },
+            Event::WindowClosed { window: first }
+        ]
+    );
+    mux.close_window(second).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::WindowClosed { window: second },
+            Event::ActiveWindowChanged {
+                session,
+                window: Some(third)
+            },
+        ]
+    );
+    mux.close_window(third).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::WindowClosed { window: third },
+            Event::ActiveWindowChanged {
+                session,
+                window: None
+            },
+        ]
+    );
+    assert_eq!(mux.session(session).unwrap().active(), None);
+    // The next window is the first again.
+    let fourth = mux.create_window(session, "four").unwrap();
+    assert_eq!(mux.session(session).unwrap().active(), Some(fourth));
 }
 
 #[test]
@@ -75,7 +175,7 @@ fn unknown_parents_are_rejected_without_events() {
 fn lease_is_single_writer() {
     let (mut mux, _, _, block) = fixture();
     let a = leased_client(&mut mux, block);
-    let b = mux.connect();
+    let b = connect(&mut mux);
     mux.attach(b, block).unwrap();
 
     assert_eq!(
@@ -93,7 +193,7 @@ fn lease_is_single_writer() {
 #[test]
 fn lease_requires_attachment() {
     let (mut mux, _, _, block) = fixture();
-    let client = mux.connect();
+    let client = connect(&mut mux);
     assert_eq!(
         mux.acquire_lease(client, block),
         Err(Error::NotAttached { client, block })
@@ -116,7 +216,7 @@ fn acquiring_own_lease_twice_is_a_no_op() {
 fn release_frees_the_lease_for_another_client() {
     let (mut mux, _, _, block) = fixture();
     let a = leased_client(&mut mux, block);
-    let b = mux.connect();
+    let b = connect(&mut mux);
     mux.attach(b, block).unwrap();
     mux.take_events();
 
@@ -134,6 +234,24 @@ fn release_frees_the_lease_for_another_client() {
     );
     mux.acquire_lease(b, block).unwrap();
     assert_eq!(mux.block(block).unwrap().lease(), Some(b));
+}
+
+/// A client giving back a lease it no longer holds is refused, and the
+/// holder keeps it: a TUI releasing after a takeover cannot disturb it.
+#[test]
+fn releasing_a_lease_held_by_another_client_leaves_it() {
+    let (mut mux, _, _, block) = fixture();
+    let a = connect(&mut mux);
+    mux.attach(a, block).unwrap();
+    let b = leased_client(&mut mux, block);
+    mux.take_events();
+
+    assert_eq!(
+        mux.release_lease(a, block),
+        Err(Error::NoLease { client: a, block })
+    );
+    assert_eq!(mux.block(block).unwrap().lease(), Some(b));
+    assert!(mux.take_events().is_empty());
 }
 
 #[test]
@@ -211,7 +329,7 @@ fn disconnect_releases_lease_and_forgets_client() {
 #[test]
 fn resize_needs_the_lease_and_skips_same_size() {
     let (mut mux, _, _, block) = fixture();
-    let viewer = mux.connect();
+    let viewer = connect(&mut mux);
     mux.attach(viewer, block).unwrap();
     assert_eq!(
         mux.resize_block(viewer, block, size(100, 30)),
@@ -292,7 +410,9 @@ fn errors_display_their_ids() {
 #[test]
 fn sessions_list_in_creation_order() {
     let mut mux = Mux::new();
-    let ids: Vec<SessionId> = (0..8).map(|n| mux.create_session(n.to_string())).collect();
+    let ids: Vec<SessionId> = (0..8)
+        .map(|n| mux.create_session(n.to_string()).unwrap())
+        .collect();
     mux.close_session(ids[3]).unwrap();
     let listed: Vec<SessionId> = mux.sessions().map(Session::id).collect();
     let expected: Vec<SessionId> = ids.iter().copied().filter(|id| *id != ids[3]).collect();
@@ -310,7 +430,11 @@ fn a_block_can_take_a_chosen_id_once() {
         mux.add_block(id, window, size(80, 24)),
         Err(Error::BlockExists(id))
     );
-    assert_eq!(mux.take_events().len(), 1, "the refused add emits nothing");
+    assert_eq!(
+        mux.take_events().len(),
+        2,
+        "a create and a layout; the refused add emits nothing"
+    );
 }
 
 #[test]
@@ -321,5 +445,881 @@ fn status_notes_need_a_live_block() {
     mux.close_block(block).expect("close");
     mux.take_events();
     assert_eq!(mux.note_status(block), Err(Error::UnknownBlock(block)));
+    assert_eq!(mux.note_pwd(block), Err(Error::UnknownBlock(block)));
+    assert_eq!(mux.note_title(block), Err(Error::UnknownBlock(block)));
+    let gone = Err(Error::UnknownBlock(block));
+    assert_eq!(mux.note_exit(block, ExitStatus::Code(0)), gone);
+    assert_eq!(mux.note_bell(block), gone);
+    assert_eq!(mux.note_progress(block, Progress::Cleared), gone);
+    assert_eq!(
+        mux.note_notification(block, String::new(), "b".into()),
+        gone
+    );
+    assert_eq!(mux.note_process(block, 7, "vim".into()), gone);
+    assert_eq!(mux.note_clipboard(block, Selection::Primary), gone);
+    assert_eq!(mux.note_status_removed(block, "a".into()), gone);
     assert!(mux.take_events().is_empty());
+}
+
+#[test]
+fn pwd_and_title_notes_emit_their_events() {
+    let (mut mux, _, _, block) = fixture();
+    mux.take_events();
+    assert_eq!(mux.note_pwd(block), Ok(()));
+    assert_eq!(mux.note_title(block), Ok(()));
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::PwdChanged { block }, Event::TitleChanged { block }]
+    );
+}
+
+#[test]
+fn program_notes_emit_their_events_in_order() {
+    let (mut mux, _, _, block) = fixture();
+    mux.take_events();
+    assert_eq!(mux.note_bell(block), Ok(()));
+    assert_eq!(mux.note_progress(block, Progress::Normal(40)), Ok(()));
+    assert_eq!(mux.note_notification(block, "t".into(), "b".into()), Ok(()));
+    assert_eq!(mux.note_exit(block, ExitStatus::Signal(9)), Ok(()));
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::Bell { block },
+            Event::ProgressChanged {
+                block,
+                progress: Progress::Normal(40)
+            },
+            Event::Notification {
+                block,
+                title: "t".into(),
+                body: "b".into()
+            },
+            Event::ProgramExited {
+                block,
+                status: ExitStatus::Signal(9)
+            },
+        ]
+    );
+}
+
+#[test]
+fn clipboard_and_status_removal_notes_emit_their_events() {
+    let (mut mux, _, _, block) = fixture();
+    mux.take_events();
+    assert_eq!(mux.note_clipboard(block, Selection::Clipboard), Ok(()));
+    assert_eq!(mux.note_status_removed(block, "a/b".into()), Ok(()));
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::ClipboardWritten {
+                block,
+                selection: Selection::Clipboard
+            },
+            Event::StatusRemoved {
+                block,
+                id: "a/b".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_config_reload_is_announced() {
+    let (mut mux, ..) = fixture();
+    mux.note_config_reloaded();
+    assert_eq!(mux.take_events(), vec![Event::ConfigReloaded]);
+}
+
+#[test]
+fn process_notes_emit_their_event() {
+    let (mut mux, _, _, block) = fixture();
+    mux.take_events();
+    assert_eq!(mux.note_process(block, 42, "vim".into()), Ok(()));
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::ProcessChanged {
+            block,
+            pid: 42,
+            name: "vim".into()
+        }]
+    );
+}
+
+#[test]
+fn rename_names_every_kind_and_emits_once() {
+    let (mut mux, session, window, block) = fixture();
+    let client = connect(&mut mux);
+    mux.take_events();
+    mux.rename(EntityId::Session(session), "work").unwrap();
+    mux.rename(EntityId::Window(window), "logs").unwrap();
+    mux.rename(EntityId::Block(block), "build").unwrap();
+    mux.rename(EntityId::Client(client), "laptop").unwrap();
+    // The same name again changes nothing.
+    mux.rename(EntityId::Block(block), "build").unwrap();
+
+    assert_eq!(mux.session(session).unwrap().name(), "work");
+    assert_eq!(mux.window(window).unwrap().name(), "logs");
+    assert_eq!(mux.block(block).unwrap().name(), "build");
+    assert_eq!(mux.client(client).unwrap().name(), "laptop");
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::SessionRenamed {
+                session,
+                name: "work".into()
+            },
+            Event::WindowRenamed {
+                window,
+                name: "logs".into()
+            },
+            Event::BlockRenamed {
+                block,
+                name: "build".into()
+            },
+            Event::ClientRenamed {
+                client,
+                name: "laptop".into()
+            },
+        ]
+    );
+}
+
+#[test]
+fn new_blocks_and_clients_have_empty_names() {
+    let (mut mux, _, _, block) = fixture();
+    let client = connect(&mut mux);
+    assert_eq!(mux.block(block).unwrap().name(), "");
+    assert_eq!(mux.client(client).unwrap().name(), "");
+    assert_eq!(mux.clients().map(Client::id).collect::<Vec<_>>(), [client]);
+}
+
+#[test]
+fn renaming_an_unknown_entity_changes_nothing() {
+    let (mut mux, _, window, block) = fixture();
+    let client = connect(&mut mux);
+    mux.close_window(window).unwrap();
+    mux.disconnect(client).unwrap();
+    mux.take_events();
+    assert_eq!(
+        mux.rename(EntityId::Block(block), "x"),
+        Err(Error::UnknownBlock(block))
+    );
+    assert_eq!(
+        mux.rename(EntityId::Client(client), "x"),
+        Err(Error::UnknownClient(client))
+    );
+    assert!(mux.take_events().is_empty());
+}
+
+#[test]
+fn names_over_the_limit_are_refused_without_a_change() {
+    let (mut mux, session, window, block) = fixture();
+    let client = connect(&mut mux);
+    mux.rename(EntityId::Block(block), "build").unwrap();
+    mux.take_events();
+    let at_limit = "a".repeat(MAX_NAME);
+    let over = "a".repeat(MAX_NAME + 1);
+    let error = Error::NameTooLong { len: MAX_NAME + 1 };
+    let too_long = Err(error.clone());
+    for id in [
+        EntityId::Session(session),
+        EntityId::Window(window),
+        EntityId::Block(block),
+        EntityId::Client(client),
+    ] {
+        assert_eq!(mux.rename(id, over.clone()), too_long, "{id:?}");
+    }
+    assert_eq!(mux.create_session(over.clone()), Err(error.clone()));
+    assert_eq!(mux.create_window(session, over), Err(error));
+    assert_eq!(mux.block(block).unwrap().name(), "build");
+    assert_eq!(mux.sessions().count(), 1);
+    assert!(mux.take_events().is_empty());
+    // Exactly the limit is a name like any other.
+    mux.rename(EntityId::Block(block), at_limit.clone())
+        .unwrap();
+    assert_eq!(mux.block(block).unwrap().name(), at_limit);
+}
+
+/// The layout of `window`.
+fn layout_of(mux: &Mux, window: WindowId) -> Option<Layout> {
+    mux.window(window).and_then(|w| w.layout().cloned())
+}
+
+#[test]
+fn new_blocks_split_the_largest_block_by_its_shape() {
+    let (mut mux, _, window, a) = fixture();
+    // 80x24 is wider than tall: side by side.
+    let b = mux.create_block(window, size(80, 24)).unwrap();
+    // `a` and `b` are equal, so `a` splits; at 20x24 it is taller than wide.
+    let client = leased_client(&mut mux, a);
+    mux.resize_block(client, a, size(20, 24)).unwrap();
+    let c = mux.create_block(window, size(20, 12)).unwrap();
+    let expected = Layout::Block(a)
+        .split(a, b, Side::Right)
+        .split(a, c, Side::Down);
+    assert_eq!(layout_of(&mux, window), Some(expected));
+    assert_eq!(mux.window(window).unwrap().blocks(), &[a, b, c]);
+}
+
+#[test]
+fn split_places_the_block_beside_its_target_and_unzooms() {
+    let (mut mux, _, window, a) = fixture();
+    mux.zoom(a).unwrap();
+    mux.take_events();
+    let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    let size = mux.split_size(a, Side::Left).unwrap();
+    assert_eq!(size, Size::new(40, 24).unwrap());
+    mux.split_block(new, a, Side::Left, size).unwrap();
+    let layout = Layout::Block(a).split(a, new, Side::Left);
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::BlockCreated {
+                block: new,
+                window,
+                size
+            },
+            Event::LayoutChanged {
+                window,
+                layout: Some(layout),
+                zoomed: None
+            },
+        ]
+    );
+    assert_eq!(
+        mux.split_size(a, Side::Down),
+        Ok(Size::new(80, 11).unwrap())
+    );
+}
+
+#[test]
+fn a_refused_split_changes_nothing() {
+    let (mut mux, _, window, a) = fixture();
+    let client = leased_client(&mut mux, a);
+    mux.resize_block(client, a, size(2, 24)).unwrap();
+    mux.take_events();
+    let no_room = Err(Error::NoRoom {
+        block: a,
+        side: Side::Right,
+    });
+    assert_eq!(mux.split_size(a, Side::Right), no_room);
+    let gone = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.split_size(gone, Side::Down),
+        Err(Error::UnknownBlock(gone))
+    );
+    assert_eq!(
+        mux.split_block(gone, gone, Side::Down, size(1, 1)),
+        Err(Error::UnknownBlock(gone))
+    );
+    assert_eq!(
+        mux.split_block(a, a, Side::Down, size(1, 1)),
+        Err(Error::BlockExists(a))
+    );
+    assert!(mux.take_events().is_empty());
+    assert_eq!(layout_of(&mux, window), Some(Layout::Block(a)));
+}
+
+#[test]
+fn splits_stop_at_the_depth_limit() {
+    let (mut mux, _, _, mut target) = fixture();
+    for _ in 0..MAX_DEPTH {
+        let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+        mux.split_block(new, target, Side::Down, size(80, 24))
+            .unwrap();
+        target = new;
+    }
+    assert_eq!(
+        mux.split_size(target, Side::Down),
+        Err(Error::TooDeep(target))
+    );
+    let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.split_block(new, target, Side::Down, size(80, 24)),
+        Err(Error::TooDeep(target))
+    );
+}
+
+#[test]
+fn closing_a_block_promotes_its_sibling_and_ends_its_zoom() {
+    let (mut mux, _, window, a) = fixture();
+    let b = mux.create_block(window, size(80, 24)).unwrap();
+    mux.zoom(b).unwrap();
+    mux.take_events();
+    mux.close_block(b).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![
+            Event::BlockClosed { block: b },
+            Event::LayoutChanged {
+                window,
+                layout: Some(Layout::Block(a)),
+                zoomed: None
+            },
+            Event::FocusChanged {
+                window,
+                block: Some(a)
+            },
+        ]
+    );
+    mux.close_block(a).unwrap();
+    let events = mux.take_events();
+    assert_eq!(
+        events[events.len() - 2..],
+        [
+            Event::LayoutChanged {
+                window,
+                layout: None,
+                zoomed: None
+            },
+            Event::FocusChanged {
+                window,
+                block: None
+            },
+        ]
+    );
+    assert_eq!(layout_of(&mux, window), None);
+}
+
+#[test]
+fn closing_a_window_sends_no_layout() {
+    let (mut mux, _, window, _) = fixture();
+    mux.close_window(window).unwrap();
+    let events = mux.take_events();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::LayoutChanged { .. })),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn zoom_and_unzoom_emit_only_on_a_change() {
+    let (mut mux, _, window, a) = fixture();
+    mux.zoom(a).unwrap();
+    mux.zoom(a).unwrap();
+    let zoomed = Event::LayoutChanged {
+        window,
+        layout: Some(Layout::Block(a)),
+        zoomed: Some(a),
+    };
+    assert_eq!(mux.take_events(), vec![zoomed]);
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+    // A new block joins the layout behind the zoom.
+    let b = mux.create_block(window, size(80, 24)).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+    mux.take_events();
+    mux.unzoom(window).unwrap();
+    mux.unzoom(window).unwrap();
+    assert_eq!(mux.take_events().len(), 1);
+    let gone = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(mux.zoom(gone), Err(Error::UnknownBlock(gone)));
+    mux.close_window(window).unwrap();
+    assert_eq!(mux.unzoom(window), Err(Error::UnknownWindow(window)));
+    assert!(mux.block(b).is_none());
+}
+
+#[test]
+fn a_reconnect_records_the_transport_and_says_so() {
+    let mut mux = Mux::new();
+    let client = connect(&mut mux);
+    mux.take_events();
+    mux.reconnect(client, Transport::Datagram).expect("known");
+    let found = mux.client(client).expect("kept");
+    assert_eq!(found.transport(), Transport::Datagram);
+    assert_eq!(found.principal().id(), "uid:1000");
+    assert_eq!(
+        mux.take_events(),
+        [Event::ClientConnectionChanged {
+            client,
+            principal: Principal::unix(1000, Some("me".into())).expect("principal"),
+            transport: Transport::Datagram,
+        }]
+    );
+    let gone = ClientId::random();
+    assert_eq!(
+        mux.reconnect(gone, Transport::Socket),
+        Err(Error::UnknownClient(gone))
+    );
+    assert!(mux.take_events().is_empty(), "a refusal changes nothing");
+}
+
+/// A window of three blocks, `a` left of `b`, `c` split off below `b`,
+/// events drained.
+fn three() -> (Mux, SessionId, WindowId, [BlockId; 3]) {
+    let (mut mux, session, window, a) = fixture();
+    let b = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    mux.split_block(b, a, Side::Right, size(40, 24)).unwrap();
+    let c = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    mux.split_block(c, b, Side::Down, size(40, 12)).unwrap();
+    mux.take_events();
+    (mux, session, window, [a, b, c])
+}
+
+fn layout_event(mux: &Mux, window: WindowId) -> Event {
+    let w = mux.window(window).unwrap();
+    Event::LayoutChanged {
+        window,
+        layout: w.layout().cloned(),
+        zoomed: w.zoomed(),
+    }
+}
+
+fn focus_event(window: WindowId, block: BlockId) -> Event {
+    Event::FocusChanged {
+        window,
+        block: Some(block),
+    }
+}
+
+fn share(percent: u8) -> Share {
+    Share::new(percent).unwrap()
+}
+
+#[test]
+fn resizing_a_split_announces_the_layout_once() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.resize_split(c, Axis::Rows, share(25)).unwrap();
+    let text = format!("cols50({a},rows75({b},{c}))");
+    assert_eq!(layout_of(&mux, window).unwrap().to_string(), text);
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    // The same share again changes nothing.
+    mux.resize_split(b, Axis::Rows, share(75)).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn a_refused_resize_changes_nothing() {
+    let (mut mux, _, window, [a, ..]) = three();
+    let before = layout_of(&mux, window);
+    assert_eq!(
+        mux.resize_split(a, Axis::Rows, share(30)),
+        Err(Error::NoSplit {
+            block: a,
+            axis: Axis::Rows
+        })
+    );
+    mux.detach_block(a).unwrap();
+    mux.take_events();
+    assert_eq!(
+        mux.resize_split(a, Axis::Columns, share(30)),
+        Err(Error::Detached(a))
+    );
+    let gone = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.resize_split(gone, Axis::Columns, share(30)),
+        Err(Error::UnknownBlock(gone))
+    );
+    assert_ne!(layout_of(&mux, window), before);
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn swapping_trades_places_and_keeps_the_zoom_on_its_block() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.zoom(a).unwrap();
+    mux.take_events();
+    mux.swap_blocks(a, c).unwrap();
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![c, b, a]);
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+    // A block swapped with itself stays.
+    mux.swap_blocks(b, b).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn swapping_with_a_detached_block_detaches_the_other() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.detach_block(c).unwrap();
+    mux.zoom(a).unwrap();
+    mux.take_events();
+    mux.swap_blocks(a, c).unwrap();
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![c, b]);
+    let detached: Vec<BlockId> = mux.window(window).unwrap().detached().collect();
+    assert_eq!(detached, vec![a]);
+    // The zoomed block left, so the zoom goes to the one in its place.
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(c));
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, c)]
+    );
+}
+
+#[test]
+fn blocks_in_other_windows_neither_swap_nor_move() {
+    let (mut mux, session, _, [a, ..]) = three();
+    let other = mux.create_window(session, "x").unwrap();
+    let d = mux.create_block(other, size(80, 24)).unwrap();
+    mux.take_events();
+    let refused = Err(Error::OtherWindow { block: a, other: d });
+    assert_eq!(mux.swap_blocks(a, d), refused);
+    assert_eq!(mux.move_block(a, Some(d), Side::Left), refused);
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn moving_a_block_splits_its_new_neighbour_and_unzooms() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.zoom(b).unwrap();
+    mux.take_events();
+    mux.move_block(a, Some(c), Side::Right).unwrap();
+    // `a` left; `b` stays over the split of `c` and `a`.
+    let text = format!("rows50({b},cols50({c},{a}))");
+    assert_eq!(layout_of(&mux, window).unwrap().to_string(), text);
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(mux.take_events(), vec![layout_event(&mux, window)]);
+}
+
+#[test]
+fn a_detached_block_keeps_running_until_moved_back() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.zoom(b).unwrap();
+    mux.take_events();
+    mux.detach_block(b).unwrap();
+    let w = mux.window(window).unwrap();
+    assert_eq!(w.blocks(), &[a, b, c]);
+    assert_eq!(w.detached().collect::<Vec<_>>(), vec![b]);
+    assert_eq!(w.zoomed(), None);
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![a, c]);
+    // The focus was on `b`, zoomed; `c`, below it, takes its place.
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, c)]
+    );
+    // Detaching it again changes nothing.
+    mux.detach_block(b).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+    // Nothing goes beside a detached block.
+    assert_eq!(
+        mux.move_block(a, Some(b), Side::Left),
+        Err(Error::Detached(b))
+    );
+    mux.move_block(b, Some(a), Side::Up).unwrap();
+    let text = format!("cols50(rows50({b},{a}),{c})");
+    assert_eq!(layout_of(&mux, window).unwrap().to_string(), text);
+    // Closing a detached block still announces the layout.
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    mux.close_block(b).unwrap();
+    let events = mux.take_events();
+    assert_eq!(events.last(), Some(&layout_event(&mux, window)));
+}
+
+#[test]
+fn a_window_showing_nothing_takes_a_block_back_without_a_neighbour() {
+    let (mut mux, _, window, a) = fixture();
+    mux.detach_block(a).unwrap();
+    assert_eq!(layout_of(&mux, window), None);
+    let b = mux.create_block(window, size(80, 24)).unwrap();
+    assert_eq!(layout_of(&mux, window), Some(Layout::Block(b)));
+    assert_eq!(
+        mux.move_block(a, None, Side::Left),
+        Err(Error::Placed(window))
+    );
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    mux.move_block(a, None, Side::Left).unwrap();
+    assert_eq!(layout_of(&mux, window), Some(Layout::Block(a)));
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, a)]
+    );
+    assert_eq!(
+        mux.move_block(a, Some(a), Side::Left),
+        Err(Error::SameBlock(a))
+    );
+}
+
+#[test]
+fn moving_stops_at_the_depth_limit() {
+    let (mut mux, _, window, a) = fixture();
+    let spare = mux.create_block(window, size(80, 24)).unwrap();
+    mux.detach_block(spare).unwrap();
+    let mut target = a;
+    for _ in 0..MAX_DEPTH {
+        let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+        mux.split_block(new, target, Side::Down, size(80, 24))
+            .unwrap();
+        target = new;
+    }
+    mux.take_events();
+    assert_eq!(
+        mux.move_block(spare, Some(target), Side::Down),
+        Err(Error::TooDeep(target))
+    );
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn moving_a_window_reorders_its_session() {
+    let (mut mux, session, w1, _) = fixture();
+    let w2 = mux.create_window(session, "2").unwrap();
+    let w3 = mux.create_window(session, "3").unwrap();
+    mux.take_events();
+    mux.move_window(w3, 0).unwrap();
+    assert_eq!(mux.session(session).unwrap().windows(), &[w3, w1, w2]);
+    assert_eq!(
+        mux.take_events(),
+        vec![Event::WindowMoved {
+            window: w3,
+            index: 0
+        }]
+    );
+    mux.move_window(w3, 2).unwrap();
+    assert_eq!(mux.session(session).unwrap().windows(), &[w1, w2, w3]);
+    mux.take_events();
+    // Its own place changes nothing; a place past the end is refused.
+    mux.move_window(w3, 2).unwrap();
+    assert_eq!(
+        mux.move_window(w3, 3),
+        Err(Error::NoPlace {
+            window: w3,
+            index: 3
+        })
+    );
+    assert_eq!(mux.take_events(), vec![]);
+    // The active window is unchanged by a move.
+    assert_eq!(mux.session(session).unwrap().active(), Some(w1));
+}
+
+#[test]
+fn a_detached_block_can_not_be_zoomed() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    assert_eq!(mux.zoom(b), Err(Error::Detached(b)));
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(mux.take_events(), vec![]);
+    // A following swap of other blocks leaves the zoom alone.
+    mux.swap_blocks(a, c).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(layout_of(&mux, window).unwrap().blocks(), vec![c, a]);
+    // Placed blocks zoom as before.
+    mux.zoom(a).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(a));
+}
+
+#[test]
+fn a_window_with_every_block_detached_zooms_nothing() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    for block in [a, b, c] {
+        mux.detach_block(block).unwrap();
+    }
+    assert_eq!(layout_of(&mux, window), None);
+    mux.take_events();
+    for block in [a, b, c] {
+        assert_eq!(mux.zoom(block), Err(Error::Detached(block)));
+    }
+    mux.swap_blocks(a, b).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn new_blocks_never_split_a_block_at_the_depth_limit() {
+    let (mut mux, _, window, _) = fixture();
+    // Each new block splits the largest; giving it 99% keeps it so, until
+    // it is too deep to split.
+    for _ in 0..=MAX_DEPTH {
+        let new = mux.create_block(window, size(80, 24)).unwrap();
+        mux.resize_split(new, Axis::Columns, share(99)).unwrap();
+    }
+    let layout = layout_of(&mux, window).unwrap();
+    let depth = layout
+        .blocks()
+        .iter()
+        .filter_map(|b| layout.depth_of(*b))
+        .max();
+    assert_eq!(depth, Some(MAX_DEPTH));
+    assert_eq!(layout.to_string().parse::<Layout>(), Ok(layout));
+}
+
+#[test]
+fn the_first_placed_block_takes_the_focus_and_new_ones_do_not() {
+    let (mut mux, _, window, [a, b, _]) = three();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    mux.create_block(window, size(80, 24)).unwrap();
+    let new = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    mux.split_block(new, b, Side::Left, size(10, 10)).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    assert!(
+        !mux.take_events()
+            .iter()
+            .any(|e| matches!(e, Event::FocusChanged { .. }))
+    );
+}
+
+#[test]
+fn focusing_a_block_announces_it_once_and_ends_another_zoom() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    mux.focus_block(c).unwrap();
+    assert_eq!(mux.take_events(), vec![focus_event(window, c)]);
+    mux.focus_block(c).unwrap();
+    assert_eq!(mux.take_events(), vec![]);
+    // Zooming focuses; focusing another block ends the zoom first.
+    mux.zoom(b).unwrap();
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, b)]
+    );
+    mux.focus_block(a).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), None);
+    assert_eq!(
+        mux.take_events(),
+        vec![layout_event(&mux, window), focus_event(window, a)]
+    );
+    // Focusing the zoomed block keeps its zoom.
+    mux.zoom(c).unwrap();
+    mux.take_events();
+    mux.focus_block(c).unwrap();
+    assert_eq!(mux.window(window).unwrap().zoomed(), Some(c));
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn a_detached_block_can_not_take_the_focus() {
+    let (mut mux, _, window, [a, b, _]) = three();
+    mux.detach_block(b).unwrap();
+    mux.take_events();
+    assert_eq!(mux.focus_block(b), Err(Error::Detached(b)));
+    assert_eq!(mux.window(window).unwrap().focused(), Some(a));
+    assert_eq!(mux.take_events(), vec![]);
+}
+
+#[test]
+fn focus_passes_to_the_block_taking_its_place() {
+    let (mut mux, _, window, [a, b, c]) = three();
+    // `b` over `c`, right of `a`: closing `b` leaves `c` in its place.
+    mux.focus_block(b).unwrap();
+    mux.close_block(b).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(c));
+    // Swapping the focused block for a detached one focuses that one.
+    let d = mux.create_block(window, size(80, 24)).unwrap();
+    mux.detach_block(d).unwrap();
+    mux.swap_blocks(c, d).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(d));
+    // Swapping two placed blocks keeps the focus on its block.
+    mux.swap_blocks(a, d).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(d));
+    // Moving the focused block keeps it focused.
+    mux.move_block(d, Some(a), Side::Down).unwrap();
+    assert_eq!(mux.window(window).unwrap().focused(), Some(d));
+}
+
+#[test]
+fn focus_moves_by_side_and_by_order() {
+    // `a` left; `b` over `c` on the right.
+    let (mut mux, _, window, [a, b, c]) = three();
+    let go = |mux: &mut Mux, toward| {
+        mux.move_focus(window, toward).unwrap();
+        mux.window(window).unwrap().focused().unwrap()
+    };
+    assert_eq!(go(&mut mux, Toward::Side(Side::Right)), b);
+    assert_eq!(go(&mut mux, Toward::Side(Side::Down)), c);
+    assert_eq!(go(&mut mux, Toward::Side(Side::Left)), a);
+    // Nothing further left: the focus stays, and nothing is announced.
+    mux.take_events();
+    assert_eq!(go(&mut mux, Toward::Side(Side::Left)), a);
+    assert_eq!(mux.take_events(), vec![]);
+    assert_eq!(go(&mut mux, Toward::Next), b);
+    assert_eq!(go(&mut mux, Toward::Next), c);
+    assert_eq!(go(&mut mux, Toward::Next), a);
+    assert_eq!(go(&mut mux, Toward::Previous), c);
+    let gone = WindowId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.move_focus(gone, Toward::Next),
+        Err(Error::UnknownWindow(gone))
+    );
+}
+
+#[test]
+fn a_generated_session_name_is_one_no_other_session_has() {
+    let mut mux = Mux::new();
+    let taken = mux.create_session("amber-acorn").unwrap();
+    let first = mux.create_generated_session(0).unwrap();
+    let second = mux.create_generated_session(0).unwrap();
+
+    let name = |id| mux.session(id).unwrap().name().to_owned();
+    assert_eq!(name(taken), "amber-acorn");
+    assert_eq!(name(first), "amber-anchor");
+    assert_eq!(name(second), "amber-aspen");
+    assert!(crate::is_generated(&name(second)));
+    assert_eq!(
+        mux.take_events(),
+        [taken, first, second].map(|session| Event::SessionCreated { session })
+    );
+}
+
+#[test]
+fn a_session_keeps_its_generated_mark_until_renamed() {
+    let mut mux = Mux::new();
+    let chosen = mux.create_session("quiet-harbor").unwrap();
+    let made = mux.create_generated_session(7).unwrap();
+    assert!(
+        !mux.session(chosen).unwrap().generated(),
+        "chosen, whatever its spelling"
+    );
+    assert!(mux.session(made).unwrap().generated());
+
+    let name = mux.session(made).unwrap().name().to_owned();
+    mux.rename(EntityId::Session(made), name).unwrap();
+    assert!(
+        mux.session(made).unwrap().generated(),
+        "a no-op rename keeps it"
+    );
+    mux.rename(EntityId::Session(made), "fix-login").unwrap();
+    assert!(!mux.session(made).unwrap().generated());
+}
+
+#[test]
+fn name_session_names_only_a_generated_name_and_only_once() {
+    let mut mux = Mux::new();
+    let chosen = mux.create_session("quiet-harbor").unwrap();
+    let made = mux.create_generated_session(7).unwrap();
+    mux.take_events();
+
+    assert_eq!(
+        mux.name_session(chosen, "fix-login"),
+        Err(Error::NameChosen(chosen)),
+        "a chosen name stays, whatever its spelling"
+    );
+    mux.name_session(made, "fix-login").unwrap();
+    assert_eq!(
+        mux.name_session(made, "write-docs"),
+        Err(Error::NameChosen(made)),
+        "the second of two stale attempts is refused"
+    );
+    assert_eq!(mux.session(chosen).unwrap().name(), "quiet-harbor");
+    assert_eq!(mux.session(made).unwrap().name(), "fix-login");
+    assert_eq!(
+        mux.take_events(),
+        [Event::SessionRenamed {
+            session: made,
+            name: "fix-login".into()
+        }]
+    );
+    let gone = SessionId::from_uuid(rusty_uuid::Uuid::new_v4());
+    assert_eq!(
+        mux.name_session(gone, "x"),
+        Err(Error::UnknownSession(gone))
+    );
+}
+
+#[test]
+fn name_session_to_the_current_name_still_claims_it() {
+    let mut mux = Mux::new();
+    let made = mux.create_generated_session(7).unwrap();
+    let name = mux.session(made).unwrap().name().to_owned();
+    mux.take_events();
+
+    mux.name_session(made, name.clone()).unwrap();
+    assert!(!mux.session(made).unwrap().generated());
+    assert_eq!(
+        mux.name_session(made, "write-docs"),
+        Err(Error::NameChosen(made))
+    );
+    assert_eq!(mux.session(made).unwrap().name(), name);
+    assert_eq!(mux.take_events(), [], "the name never changed");
 }

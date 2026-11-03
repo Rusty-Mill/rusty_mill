@@ -224,16 +224,14 @@ fn webhook_at(base: String) -> Webhook {
 }
 
 /// A webhook that answers `{}` and hands back the request it read.
-async fn recording_webhook() -> (Webhook, tokio::sync::oneshot::Receiver<String>) {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+async fn recording_webhook() -> (Webhook, rusty_tokio::sync::oneshot::Receiver<String>) {
+    let listener = rusty_tokio::io::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
     let addr = listener.local_addr().expect("addr");
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(async move {
-        let Ok((mut stream, _)) = listener.accept().await else {
+    let (tx, rx) = rusty_tokio::sync::oneshot::channel();
+    rusty_tokio::spawn(async move {
+        let Ok((stream, _)) = listener.accept().await else {
             return;
         };
         let mut request = vec![0u8; 8192];
@@ -246,7 +244,7 @@ async fn recording_webhook() -> (Webhook, tokio::sync::oneshot::Receiver<String>
     (webhook_at(format!("http://{addr}")), rx)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_configured_and_a_forwarded_header_of_one_name_both_arrive() {
     let (webhook, request) = recording_webhook().await;
     let headers = [
@@ -270,7 +268,7 @@ async fn a_configured_and_a_forwarded_header_of_one_name_both_arrive() {
     assert_eq!(values, ["configured", "forwarded"], "request: {request}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_header_that_cannot_be_sent_is_reported_without_its_value() {
     let webhook = webhook_at("http://127.0.0.1:9".to_string());
     let secret = "s3cr3t-tenant-token";

@@ -1453,8 +1453,8 @@ impl UringFile {
     ///
     /// # Panics
     /// Against the real driver: panics if called outside a running
-    /// [`crate::Runtime`] (the same contract every
-    /// [`crate::spawn_blocking`] call has).
+    /// [`crate::Runtime`] with no [fallback](crate::runtime::install_fallback)
+    /// installed (the same contract every [`crate::spawn_blocking`] call has).
     pub async fn set_len(&self, len: u64) -> io::Result<()> {
         self.driver.set_len(self.handle, len).await
     }

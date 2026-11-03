@@ -13,7 +13,11 @@
 
 use super::cell::Pen;
 use super::color::{Palette, format_color_spec, parse_color_spec};
-use super::grid::Grid;
+use super::grid::{Grid, ShellPhase};
+
+/// The answer to an OSC 7501 `?` query. Listing no states or kinds, it
+/// claims all of draft 0.4's: five states and three kinds.
+const STATUS_ANSWER: &[u8] = b"\x1b]7501;?\x1b\\";
 
 /// Act on the OSC string in `osc_buffer` (the bytes between `ESC ]` and its
 /// `BEL`/`ST` terminator). The payload is `<code>` optionally followed by
@@ -218,20 +222,18 @@ pub(crate) fn dispatch(
         "11" => set_dynamic_colors(11, text, g, palette, responses, pen),
         "12" => set_dynamic_colors(12, text, g, palette, responses, pen),
         // 110/111/112 reset the default fg / bg / cursor to the built-in values.
-        // A pen currently sitting on the old default follows the reset, so text
-        // drawn next uses the restored color.
+        // A pen on the default colour follows the reset, so text drawn next
+        // uses the restored color.
         "110" => {
-            let old = palette.fg;
             palette.reset_fg();
-            if pen.fg == old {
+            if pen.fg_is_default() {
                 pen.fg = palette.fg;
             }
             g.set_default_colors(palette.fg, palette.bg, palette.cursor);
         }
         "111" => {
-            let old = palette.bg;
             palette.reset_bg();
-            if pen.bg == old {
+            if pen.bg_is_default() {
                 pen.bg = palette.bg;
             }
             g.set_default_colors(palette.fg, palette.bg, palette.cursor);
@@ -279,12 +281,16 @@ pub(crate) fn dispatch(
         }
         // 7501 (Program Status Protocol) reports a program's state. The grid
         // only queues the body for a host that collects it; validation and the
-        // record store live with the host.
-        "7501" => {
-            if let Some(text) = text {
+        // record store live with the host. For such a host the `?` query is
+        // answered here, in order with every other reply, since a program may
+        // follow it with DA1 and take DA1's answer first to mean unsupported.
+        "7501" => match text {
+            Some("?") if g.collect_program_status => responses.extend_from_slice(STATUS_ANSWER),
+            Some(text) => {
                 g.push_program_status(super::grid::StatusSignal::Report(text.to_string()));
             }
-        }
+            None => {}
+        },
         // 1337 (iTerm2) multiplexes several subcommands; we handle inline images
         // (`File=<args>:<base64>`) and ignore the rest.
         "1337" => {
@@ -316,10 +322,12 @@ fn mark_command_lifecycle(
     match sub {
         "A" => {
             g.mark_prompt();
+            g.mark_shell_phase(ShellPhase::Prompt, None);
             g.push_program_status(super::grid::StatusSignal::Prompt);
             true
         }
         "C" => {
+            g.mark_shell_phase(ShellPhase::Running, None);
             #[cfg(feature = "l13")]
             g.command_output_begin();
             #[cfg(any(test, feature = "gui"))]
@@ -331,10 +339,10 @@ fn mark_command_lifecycle(
         }
         "D" => {
             let exit = parts.next().and_then(|s| s.parse::<i32>().ok());
-            let _ = exit; // consumed only by the cfg-gated arms below
+            g.mark_shell_phase(ShellPhase::Finished, exit);
             #[cfg(feature = "l13")]
             {
-                g.command_finished(exit);
+                g.command_finished();
                 rusty_term_l13::notify_command_finished(g, exit, responses);
                 rusty_term_l13::notify_resource_changed(g, rusty_term_l13::RES_COMMAND, responses);
             }
@@ -408,17 +416,17 @@ fn set_dynamic_colors(
             responses.extend_from_slice(format_color_spec(value).as_bytes());
             responses.extend_from_slice(b"\x1b\\");
         } else if let Some(rgb) = parse_color_spec(spec) {
-            // A pen currently showing the old default follows the change, so the
-            // common "set OSC 10/11 then print" pattern recolors immediately.
+            // A pen on the default colour follows the change, so the common
+            // "set OSC 10/11 then print" pattern recolors immediately.
             match role {
                 10 => {
-                    if pen.fg == palette.fg {
+                    if pen.fg_is_default() {
                         pen.fg = rgb;
                     }
                     palette.fg = rgb;
                 }
                 11 => {
-                    if pen.bg == palette.bg {
+                    if pen.bg_is_default() {
                         pen.bg = rgb;
                     }
                     palette.bg = rgb;

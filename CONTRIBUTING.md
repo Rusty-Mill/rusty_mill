@@ -44,19 +44,18 @@ How the repo is organised, validated and released:
     credential handling, deletions, public-API breaks that cross crates,
     CI-control changes) should still wait for an independent reviewer when one
     can be found within a reasonable time.
-- Board robot PRs are the exception. PRs opened and merged by the super-board pipeline
-  under [`docs/super-board/autonomy-policy.md`](docs/super-board/autonomy-policy.md)
-  (owner decision, 2026-10-15) need no independent review, including for security-sensitive
-  changes. They still go through the merge queue and need a green `required-gate`.
-  Human-authored PRs follow the rules above unchanged.
+- Agents, including the super-board robot, never queue or merge PRs. DottiusMaximus
+  manages reviews and merges (owner decision, 2026-10-27, superseding the robot's
+  self-merge in [`docs/super-board/autonomy-policy.md`](docs/super-board/autonomy-policy.md)).
+  Robot PRs follow the rules above like any other PR.
 - Reviewers, independent or self: check for scope creep, missing tests, and
   unexplained non-obvious decisions.
 - Merge with a **merge commit** ("Create a merge commit" — merge and sync). Do **not**
   squash-merge or rebase-merge: full commit history is preserved deliberately.
 - Do not merge the default branch into a PR branch just to bring it up to date. The
   merge queue already tests each entry against the current default branch, and every
-  such merge re-runs the PR's CI. Merge it in only to resolve a conflict or to pick up
-  a fix the PR needs to go green.
+  such merge re-runs the PR's CI. Merge it in only for a merge conflict, a required-check
+  failure caused by the default branch, or an explicit request from the repository owner.
 - Merging goes through the **merge queue** (ADR-0009 §8): use "Merge when ready"
   and let the `required-gate` check pass on the queued entry. Do not merge around
   a red or stuck check; fix or re-run it. The queue's merge method is merge commit.

@@ -26,6 +26,7 @@ stream targeting a different part of the terminal pipeline:
 
 - **`ascii_throughput`** — plain-text scroll (the `cat a-log-file` case).
 - **`unicode_heavy`** — wide CJK, combining marks, emoji: width/grapheme handling.
+- **`unicode_2027`** — the same mix plus ZWJ, skin-tone, flag, VS16 and keycap clusters, under mode 2027 (grapheme clustering): the cluster-joining path.
 - **`sgr_churn`** — every line changes fg/bg/bold/italic/underline: style-run pressure.
 - **`sgr_alternate`** — three pens alternate word by word within each row, as in syntax-highlighted code: style-lookup pressure. Not in the CI instruction gate.
 - **`cursor_thrash`** — scattered absolute cursor positioning, like a redraw-storm TUI app (vim, htop, tmux).

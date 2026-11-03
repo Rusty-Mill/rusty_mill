@@ -75,6 +75,64 @@ pub fn sandboxed(state_dir: &Path) -> Result<Sandboxed, String> {
     Ok(Sandboxed::new(me, state_dir))
 }
 
+/// Check that `exec` can confine a workload here: run `/bin/true` under it
+/// in `scratch` (made fresh, outside every workload's reach). `Ok` only when
+/// the program ran and exited 0, so a kernel without Landlock or seccomp, or
+/// a missing helper, fails the probe instead of running unconfined.
+pub fn probe<E: Executor>(exec: &E, scratch: &Path) -> Result<(), String>
+where
+    E::Error: std::fmt::Display,
+{
+    if scratch.exists() {
+        std::fs::remove_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+    }
+    std::fs::create_dir_all(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+    let set = ProfileSet::shell("probe", "true");
+    let roots = set
+        .read_roots
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect();
+    let limits = Limits::new(
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+        set.limits.memory_bytes,
+        set.limits.file_bytes,
+        set.limits.open_files,
+        set.limits.processes,
+    )
+    .map_err(|e| e.to_string())?;
+    let spec = SandboxSpec::new(
+        roots,
+        vec![scratch.to_path_buf(), PathBuf::from(DEV_NULL)],
+        scratch.to_path_buf(),
+        set.env,
+        limits,
+    )
+    .map_err(|e| e.to_string())?;
+    let out = exec
+        .exec(&spec, "/bin/true", &[])
+        .map_err(|e| e.to_string())?;
+    match out.termination {
+        Termination::Exited(0) => Ok(()),
+        other => Err(format!(
+            "{other:?}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// [`probe`] with this binary as the sandbox helper, in a private temporary
+/// directory that is removed afterwards. What `bbp open --mode claims` runs.
+pub fn probe_host() -> Result<(), String> {
+    let base = std::env::temp_dir().join(format!("bbp-probe-{}", std::process::id()));
+    let exec = sandboxed(&base.join("state"))?;
+    let result = probe(&exec, &base.join("work"));
+    let _ = std::fs::remove_dir_all(&base);
+    result
+}
+
 /// An executor that confines nothing. Only for trusted local use; the report
 /// says `unconfined` so a reviewer can see it.
 pub struct Unconfined;
@@ -116,6 +174,12 @@ fn git(work: &Path, args: &[&str]) -> Result<String, String> {
 /// way so the supervisor never writes a file into the candidate's checkout,
 /// where a tracked or candidate-created symlink could redirect the write.
 fn git_with_stdin(work: &Path, args: &[&str], stdin: &[u8]) -> Result<String, String> {
+    let out = git_raw(work, args, stdin)?;
+    Ok(String::from_utf8_lossy(&out).trim().to_owned())
+}
+
+/// Run git in `work`; its standard output, byte for byte.
+fn git_raw(work: &Path, args: &[&str], stdin: &[u8]) -> Result<Vec<u8>, String> {
     let mut child = Proc::new("git")
         .arg("-C")
         .arg(work)
@@ -137,7 +201,7 @@ fn git_with_stdin(work: &Path, args: &[&str], stdin: &[u8]) -> Result<String, St
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    Ok(out.stdout)
 }
 
 /// Clone `repo` into `work`, check out `base`, apply `diffs` in order.
@@ -439,6 +503,73 @@ pub(crate) fn lock_task(dir: &Path, task: &TaskId) -> Result<std::fs::File, Stri
     Ok(lock)
 }
 
+/// The run a runner serves next: in stage mode the selected run while it has
+/// no result; in claims mode the oldest live run with no report.
+struct Pending {
+    id: RunId,
+    candidate: ArtId,
+    log: Option<ArtId>,
+}
+
+fn pending_run(st: &TaskState) -> Option<Pending> {
+    if st.mode == Mode::Claims {
+        return st
+            .claims
+            .runs
+            .iter()
+            .find(|(_, r)| !r.revoked && r.report.is_none())
+            .map(|(id, r)| Pending {
+                id: *id,
+                candidate: r.candidate,
+                log: r.log,
+            });
+    }
+    st.selected_run()
+        .filter(|r| r.status.is_none())
+        .map(|r| Pending {
+            id: r.id,
+            candidate: r.candidate,
+            log: r.log,
+        })
+}
+
+/// Every file under `globs` that the staged diffs in `work` add, modify or
+/// delete relative to `base` (a rename is a delete and an add). Read from
+/// git's NUL-separated output, so any path survives; a path that is not
+/// UTF-8 cannot be matched faithfully, so it fails the run closed.
+pub fn tests_changed(work: &Path, base: &str, globs: &[String]) -> Result<Vec<TestChange>, String> {
+    let raw = git_raw(
+        work,
+        &[
+            "diff",
+            "--cached",
+            "--name-status",
+            "--no-renames",
+            "-z",
+            base,
+        ],
+        &[],
+    )?;
+    let out = String::from_utf8(raw)
+        .map_err(|_| "tests_changed: a changed path is not UTF-8; refusing to guess".to_owned())?;
+    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+    let mut changed = Vec::new();
+    while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+        let change = match status.chars().next() {
+            Some('A') => FileChange::Added,
+            Some('D') => FileChange::Deleted,
+            _ => FileChange::Modified,
+        };
+        if profiles::is_test_path(globs, path) {
+            changed.push(TestChange {
+                path: path.to_owned(),
+                change,
+            });
+        }
+    }
+    Ok(changed)
+}
+
 /// Serve the task's selected run once. `repo` is a local path to the task's
 /// repository; `work_root` holds one checkout per run.
 pub fn run_once<E: Executor>(
@@ -455,11 +586,11 @@ where
     let _lock = lock_task(dir, task)?;
     let mut d = open_driver(dir, task)?;
     let st = &d.state;
-    let run = st
-        .selected_run()
-        .filter(|r| r.status.is_none())
-        .ok_or("no pending selected run")?
-        .clone();
+    let claims = st.mode == Mode::Claims;
+    if claims && confinement != Confinement::Sandboxed {
+        return Err("a claims-mode run executes only sandboxed (--confine sandbox)".into());
+    }
+    let run = pending_run(st).ok_or("no pending selected run")?;
     let cand = st
         .artifacts
         .get(&run.candidate)
@@ -467,7 +598,29 @@ where
     let ArtifactPayload::Candidate(manifest) = &cand.payload else {
         return Err("candidate payload is not a manifest".into());
     };
-    let set = profiles::load(dir, task, st.profile_digest)?;
+    // A holdout candidate runs the task's current holdout suite (#597).
+    let suite = match (manifest.suite, st.claims.holdout_digest) {
+        (Suite::Build, _) => None,
+        (Suite::Holdout, Some(d)) => Some((crate::holdout::load(dir, task, d)?, d)),
+        (Suite::Holdout, None) => {
+            return Err("a holdout run on a task without a holdout suite".into())
+        }
+    };
+    let holdout = suite.is_some();
+    let build = profiles::load(dir, task, st.profile_digest)?;
+    // #597 2.2: no run starts while a build run could read the suite, checked
+    // against this invocation's repository and work root as well.
+    if let Some(d) = st.claims.holdout_digest {
+        let current = match &suite {
+            Some((hs, _)) => hs.clone(),
+            None => crate::holdout::load(dir, task, d)?,
+        };
+        current.isolated_from(&build, &[repo, work_root])?;
+    }
+    let (set, digest) = match &suite {
+        Some((hs, d)) => (hs.run_set(), *d),
+        None => (build, st.profile_digest),
+    };
     let mut diffs = Vec::new();
     for id in &manifest.diffs {
         let a = st
@@ -488,6 +641,7 @@ where
     // execution could only be reported against evidence it did not produce.
     // Report `error` against the log on record and let the human rerun.
     let interrupted = run.log.is_some();
+    let mut tests = vec![];
     let (tree, outcome) = if interrupted {
         (
             None,
@@ -498,11 +652,29 @@ where
             },
         )
     } else {
-        match prepare(repo, &work, &manifest.base, &diffs) {
-            Ok(tree) => (
-                Some(Sha256::of(tree.as_bytes())),
-                execute(exec, &set, &work),
-            ),
+        // A holdout run checks the suite's files first: a changed or
+        // planted file fails it before anything executes.
+        let suite_ok = match &suite {
+            Some((hs, _)) => hs.verify_files(),
+            None => Ok(()),
+        };
+        let prepared = suite_ok
+            .and_then(|()| prepare(repo, &work, &manifest.base, &diffs))
+            .and_then(|tree| {
+                let changed = match claims && !holdout {
+                    true => tests_changed(&work, &manifest.base, &set.test_paths)?,
+                    false => vec![],
+                };
+                Ok((tree, changed))
+            });
+        match prepared {
+            Ok((tree, changed)) => {
+                tests = changed;
+                (
+                    Some(Sha256::of(tree.as_bytes())),
+                    execute(exec, &set, &work),
+                )
+            }
             Err(e) => (
                 None,
                 Outcome {
@@ -513,10 +685,25 @@ where
             ),
         }
     };
+    // #597 2.2: a holdout run's artifact log is a summary; the output stays
+    // on the host, where no lens reads it. A recovered run has no output of
+    // its own and leaves the host log of the run that died untouched.
+    let log_text = match holdout && !interrupted {
+        true => {
+            let full = crate::holdout::log_path(dir, task, run.id);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| format!("holdout log: {e}"))?;
+            }
+            rusty_atomic_file::write(&full, outcome.log.as_bytes())
+                .map_err(|e| format!("holdout log: {e}"))?;
+            crate::holdout::summary(outcome.status, &outcome.profiles)
+        }
+        false => outcome.log.clone(),
+    };
     let log_id = match run.log {
         Some(id) => id,
         None => {
-            let log_blob = d.store.blob_put(outcome.log.as_bytes());
+            let log_blob = d.store.blob_put(log_text.as_bytes());
             let logged = d
                 .dispatch(
                     &Command::Runner {
@@ -536,9 +723,10 @@ where
         }
     };
     let report = Report {
+        tests_changed: tests,
         candidate: run.candidate,
         run: run.id,
-        profile_digest: d.state.profile_digest,
+        profile_digest: digest,
         status: outcome.status,
         profiles: outcome.profiles,
         tree,

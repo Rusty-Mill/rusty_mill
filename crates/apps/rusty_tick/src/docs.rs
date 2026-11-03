@@ -13,7 +13,7 @@ use std::path::Path;
 use uuid::Uuid;
 
 /// The document kinds the API accepts.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 14] = [
     "habit",
     "habit_checkin",
     "focus",
@@ -26,7 +26,15 @@ pub const KINDS: [&str; 12] = [
     "assignee",
     "subscription",
     "import_alias",
+    BOARD_KIND,
+    BOARD_NUMBER_KIND,
 ];
+/// Mill Board's per-task document (ADR-0012): its id is the task's id, and it
+/// goes when the task is purged.
+pub const BOARD_KIND: &str = "board";
+/// Mill Board's reservation of one card number: created once with `If-None-Match: *` and
+/// never fenced, purged or reused, so two boards never hand out the same number.
+pub const BOARD_NUMBER_KIND: &str = "board_number";
 /// Largest accepted body, in bytes.
 pub const MAX_DOC_BYTES: usize = 64 * 1024;
 
@@ -70,6 +78,18 @@ impl ScannableField<UpdatedAt> for Doc {
     }
 }
 
+/// The task a comment's body names (`taskId`), if it names a readable one.
+pub fn comment_owner(body: &str) -> Option<Uuid> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Owner {
+        task_id: String,
+    }
+    rusty_json::from_str::<Owner>(body)
+        .ok()
+        .and_then(|o| Uuid::parse_str(&o.task_id).ok())
+}
+
 pub struct DocStore {
     table: Table<Doc, ByKind, UpdatedAt>,
 }
@@ -104,26 +124,28 @@ impl DocStore {
         &mut self,
         doomed: impl Fn(Option<Uuid>) -> bool,
     ) -> Result<usize, TickError> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Owner {
-            task_id: String,
-        }
         let gone: Vec<Uuid> = self
             .of_kind("comment")
             .into_iter()
-            .filter(|d| {
-                let owner = rusty_json::from_str::<Owner>(&d.body)
-                    .ok()
-                    .and_then(|o| Uuid::parse_str(&o.task_id).ok());
-                doomed(owner)
-            })
+            .filter(|d| doomed(comment_owner(&d.body)))
             .map(|d| d.id)
             .collect();
         for id in &gone {
             self.table.delete(*id)?;
         }
         Ok(gone.len())
+    }
+
+    /// Delete the `board` documents of `tasks` (a board document's id is its task's).
+    pub fn delete_board_of(&mut self, tasks: &[Uuid]) -> Result<usize, TickError> {
+        let mut gone = 0;
+        for id in tasks {
+            if self.get(*id).is_some_and(|d| d.kind == BOARD_KIND) {
+                self.table.delete(*id)?;
+                gone += 1;
+            }
+        }
+        Ok(gone)
     }
 
     /// Delete every comment that belongs to one of `tasks`.
