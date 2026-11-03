@@ -103,6 +103,7 @@ fn a_candidate_revokes_every_other_live_turn() {
             claim: None,
             base: "a".repeat(40),
             diffs: vec![diff],
+            suite: Suite::Build,
         }),
         b"{}",
     ));
@@ -892,6 +893,7 @@ mod model {
                         claim: None,
                         base: "a".repeat(40),
                         diffs: vec![diff],
+                        suite: Suite::Build,
                     });
                     drop(fx.put(BUILDERS[*i], c, b"{}"));
                 }

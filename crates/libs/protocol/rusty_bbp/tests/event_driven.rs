@@ -45,6 +45,7 @@ fn event_driven_needs_exactly_one_live_turn() {
             brief,
             human: PrincipalId("human".into()),
             policy: SchedulingPolicy::EventDriven,
+            holdout_digest: None,
         })
     };
     let brief = store.blob_put(b"brief");

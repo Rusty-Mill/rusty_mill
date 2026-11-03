@@ -98,6 +98,41 @@ pub struct Candidate {
     /// stage mode; absent, it is not written, so stage logs are unchanged.
     #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<MsgId>,
+    /// Claims mode: which frozen profile set runs this candidate (#597).
+    /// `build` is not written, so existing logs are unchanged.
+    #[rusty_serde(default, skip_serializing_if = "Suite::is_build")]
+    pub suite: Suite,
+}
+
+impl Candidate {
+    /// Same base and diffs: the two manifests build the same code.
+    pub fn same_code(&self, other: &Candidate) -> bool {
+        self.base == other.base && self.diffs == other.diffs
+    }
+}
+
+/// The profile set a claims-mode candidate runs under (#597). A holdout
+/// candidate re-runs the current candidate's code against the holdout suite,
+/// whose tests live outside every sandbox; it never becomes current.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Suite {
+    #[default]
+    Build,
+    Holdout,
+}
+
+impl Suite {
+    pub fn is_build(&self) -> bool {
+        *self == Suite::Build
+    }
+
+    /// Profile names this suite may report: holdout profiles start with
+    /// `holdout:` or `golden:`, build profiles never do, so a build run can
+    /// neither set nor clear a holdout failure.
+    pub fn owns_profile(self, name: &str) -> bool {
+        let holdout = name.starts_with("holdout:") || name.starts_with("golden:");
+        holdout == (self == Suite::Holdout)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

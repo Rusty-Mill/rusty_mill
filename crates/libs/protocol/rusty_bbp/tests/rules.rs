@@ -463,7 +463,8 @@ fn r17_candidate_needs_approved_spec_and_approval_binds() {
             ArtifactPayload::Candidate(Candidate {
                 claim: None,
                 base: "a".repeat(40),
-                diffs: vec![]
+                diffs: vec![],
+                suite: Suite::Build,
             }),
             b"{}"
         )),
@@ -596,6 +597,7 @@ fn assignment_grants_nothing_until_the_first_tick() {
         brief,
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::default(),
+        holdout_digest: None,
     });
     assert!(matches!(
         d.dispatch(&open, Time(1)).expect("open"),

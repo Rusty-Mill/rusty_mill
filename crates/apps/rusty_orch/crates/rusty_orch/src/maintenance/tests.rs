@@ -743,6 +743,7 @@ fn persist_task(dir: &Path, name: &str, repo: &Path, terminal: bool) {
         max_live_turns: 1,
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::default(),
+        holdout_digest: None,
     }];
     if terminal {
         events.push(Event::StateChanged {

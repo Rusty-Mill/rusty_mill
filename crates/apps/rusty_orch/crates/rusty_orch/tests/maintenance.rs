@@ -204,6 +204,7 @@ fn shipped_author_policy_checks_linked_tasks_before_opening_and_skips_deleted_te
                 max_live_turns: 1,
                 human: PrincipalId("human".into()),
                 policy: SchedulingPolicy::default(),
+                holdout_digest: None,
             }],
         )
         .unwrap();

@@ -144,6 +144,7 @@ fn open_mode(
         brief: blob,
         human: human.clone(),
         policy,
+        holdout_digest: None,
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }

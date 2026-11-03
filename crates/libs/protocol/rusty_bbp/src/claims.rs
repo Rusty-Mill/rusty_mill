@@ -391,6 +391,8 @@ pub struct ClaimsBook {
     /// Artifacts each principal has been charged a read for (R11 in claims
     /// mode: one charge per principal and artifact).
     pub read_arts: BTreeSet<(PrincipalId, ArtId)>,
+    /// SHA-256 of the task's frozen holdout suite, if it has one (#597).
+    pub holdout_digest: Option<Sha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -464,6 +466,15 @@ impl ClaimsBook {
         self.runs
             .values()
             .filter(|r| r.candidate == candidate)
+            .filter_map(|r| r.report)
+            .max()
+    }
+
+    /// The latest final report of any run of a candidate naming `claim`.
+    pub fn latest_claim_report(&self, claim: MsgId) -> Option<ArtId> {
+        self.runs
+            .values()
+            .filter(|r| self.candidates.get(&r.candidate) == Some(&claim))
             .filter_map(|r| r.report)
             .max()
     }
@@ -545,6 +556,9 @@ pub(crate) fn on_artifact(st: &mut crate::state::TaskState, a: &crate::record::A
         return;
     };
     st.claims.candidates.insert(a.id, claim);
+    if !k.suite.is_build() {
+        return; // a holdout candidate never becomes current
+    }
     if let Some(c) = st.claims.claims.get_mut(&claim) {
         c.current = Some(a.id);
     }
@@ -555,13 +569,11 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
     use crate::event::Event as E;
     let rev = st.rev;
     let book = &mut st.claims;
-    // The report a newly failing profile comes from: the current candidate's
-    // latest, which the runner has just stored.
+    // The report a newly failing profile comes from: the claim's latest,
+    // which the runner has just stored (on the current candidate, or on a
+    // holdout candidate of the same code).
     let failing_report = match e {
-        E::ClaimFailing { claim, .. } => book
-            .get(*claim)
-            .and_then(|c| c.current)
-            .and_then(|k| book.latest_report(k)),
+        E::ClaimFailing { claim, .. } => book.latest_claim_report(*claim),
         _ => None,
     };
     let mut touch = |id: &MsgId, f: &mut dyn FnMut(&mut ClaimRecord)| {
@@ -713,6 +725,9 @@ pub struct ClaimView {
     pub tests_changed: Vec<crate::record::TestChange>,
     /// The cited support that endorses those changes, if any.
     pub endorsement: Option<MsgId>,
+    /// The task has a holdout suite and the current candidate has no passed
+    /// holdout run on it yet: the accept line waits for one (#597).
+    pub holdout_due: bool,
 }
 
 /// A failing profile and the report that set it (hidden if unreadable).
@@ -810,6 +825,7 @@ pub fn card(st: &crate::state::TaskState, c: &ClaimRecord, sight: &Sight) -> Cla
             .collect(),
         tests_changed,
         endorsement,
+        holdout_due: !crate::claims_engine::holdout_passed(st, c),
     }
 }
 

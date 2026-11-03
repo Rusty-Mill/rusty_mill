@@ -23,6 +23,7 @@ fn submit(fx: &mut Fx, role: &str, diffs: Vec<ArtId>) {
             claim: None,
             base: "a".repeat(40),
             diffs,
+            suite: Suite::Build,
         }),
         b"{}",
     ));

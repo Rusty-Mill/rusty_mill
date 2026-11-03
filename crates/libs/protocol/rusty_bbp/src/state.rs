@@ -713,6 +713,7 @@ impl TaskState {
                 policy,
                 mode,
                 claims,
+                holdout_digest,
             } => {
                 self.task = task.clone();
                 self.schema = *schema;
@@ -724,6 +725,7 @@ impl TaskState {
                 };
                 if self.mode == crate::claims::Mode::Claims {
                     self.claims.config = claims.unwrap_or_default();
+                    self.claims.holdout_digest = *holdout_digest;
                     self.state = State::Open;
                 }
                 // The engine validated this roster before logging it; a log

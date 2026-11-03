@@ -229,7 +229,7 @@ fn put_artifact(
         return Err(rej(Code::TooLarge, "artifact exceeds max_artifact_bytes"));
     }
     let claim = match payload {
-        ArtifactPayload::Candidate(c) => Some(check_candidate(&w.st, c)?),
+        ArtifactPayload::Candidate(c) => Some(check_candidate(&w.st, r, c)?),
         ArtifactPayload::Source(s) => {
             check_source(s)?;
             None
@@ -263,7 +263,7 @@ fn put_artifact(
 
 /// A claims-mode candidate names a live claim with budget left (Runs and
 /// candidates). Returns that claim.
-fn check_candidate(st: &TaskState, k: &Candidate) -> R<MsgId> {
+fn check_candidate(st: &TaskState, role: &Role, k: &Candidate) -> R<MsgId> {
     let c = k
         .claim
         .ok_or_else(|| rej(Code::BadClaim, "a claims-mode candidate names its claim"))?;
@@ -280,7 +280,77 @@ fn check_candidate(st: &TaskState, k: &Candidate) -> R<MsgId> {
     for d in &k.diffs {
         resolve_kind(st, *d, ArtifactKind::Diff)?;
     }
+    if k.suite == Suite::Holdout {
+        check_holdout(st, role, rec, k)?;
+    }
     Ok(c)
+}
+
+/// A holdout candidate (#597): stored only by a holdout role, on a task with
+/// a holdout suite, building exactly the claim's current code.
+fn check_holdout(st: &TaskState, role: &Role, rec: &ClaimRecord, k: &Candidate) -> R<()> {
+    if !role.holds(Cap::Holdout) {
+        return Err(rej(Code::KindForbidden, role.lacks(Cap::Holdout)));
+    }
+    if st.claims.holdout_digest.is_none() {
+        return Err(rej(Code::HoldoutMismatch, "the task has no holdout suite"));
+    }
+    let current = rec.current.and_then(|id| manifest(st, id)).ok_or_else(|| {
+        rej(
+            Code::HoldoutMismatch,
+            format!("{} has no candidate", rec.id),
+        )
+    })?;
+    if !k.same_code(current) {
+        return Err(rej(
+            Code::HoldoutMismatch,
+            format!("base and diffs must equal those of {}", rec.id),
+        ));
+    }
+    Ok(())
+}
+
+fn manifest(st: &TaskState, k: ArtId) -> Option<&Candidate> {
+    match &st.artifacts.get(&k)?.payload {
+        ArtifactPayload::Candidate(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// Does `k` build the code of `c`'s current candidate? True for the current
+/// candidate itself and for a holdout candidate of the same manifest.
+fn builds_current(st: &TaskState, c: &ClaimRecord, k: ArtId) -> bool {
+    let Some(cur) = c.current else {
+        return false;
+    };
+    if cur == k {
+        return true;
+    }
+    match (manifest(st, k), manifest(st, cur)) {
+        (Some(a), Some(b)) => a.suite == Suite::Holdout && a.same_code(b),
+        _ => false,
+    }
+}
+
+/// The holdout condition of the accept line (#597): with a holdout suite and
+/// a current candidate, a `passed` holdout report on the current code, under
+/// the task's holdout digest, stored after that candidate became current.
+/// True when the task has no holdout suite or the claim no candidate.
+pub(crate) fn holdout_passed(st: &TaskState, c: &ClaimRecord) -> bool {
+    let (Some(digest), Some(cur)) = (st.claims.holdout_digest, c.current) else {
+        return true;
+    };
+    st.claims
+        .runs
+        .values()
+        .filter(|r| r.candidate != cur && builds_current(st, c, r.candidate))
+        .filter_map(|r| r.report)
+        .filter(|id| *id > cur)
+        .filter_map(|id| match &st.artifacts.get(&id)?.payload {
+            ArtifactPayload::TestReport(rep) => Some(rep),
+            _ => None,
+        })
+        .any(|rep| rep.status == RunStatus::Passed && rep.profile_digest == digest)
 }
 
 /// A run may start on an open claim or re-check a settled one.
@@ -678,6 +748,7 @@ fn accept_line(st: &TaskState, c: &ClaimRecord) -> bool {
         && c.authors(Direction::Support) >= cfg.min_authors as usize
         && c.grounded(Direction::Support)
         && c.failing.is_empty()
+        && holdout_passed(st, c)
         && c.body
             .deps
             .iter()
@@ -922,8 +993,22 @@ fn check_report(st: &TaskState, run: RunId, r: &ClaimRun, rep: &Report) -> R<()>
             "report names another candidate or run",
         ));
     }
-    if rep.profile_digest != st.profile_digest {
-        return Err(rej(Code::ProfileMismatch, "profile digest"));
+    let suite = manifest(st, r.candidate).map_or(Suite::Build, |k| k.suite);
+    let digest = match suite {
+        Suite::Build => Some(st.profile_digest),
+        Suite::Holdout => st.claims.holdout_digest,
+    };
+    if Some(rep.profile_digest) != digest {
+        return Err(rej(
+            Code::ProfileMismatch,
+            format!("profile digest is not the task's {suite:?} suite"),
+        ));
+    }
+    if let Some(p) = rep.profiles.iter().find(|p| !suite.owns_profile(&p.name)) {
+        return Err(rej(
+            Code::InconsistentReport,
+            format!("profile {:?} is not a {suite:?} suite profile", p.name),
+        ));
     }
     if !rep.consistent() {
         return Err(rej(
@@ -944,7 +1029,12 @@ fn on_report(w: &mut Work, k: ArtId, rep: &Report) {
     let Some(c) = w.st.claims.candidates.get(&k).copied() else {
         return;
     };
-    if w.st.claims.get(c).and_then(|r| r.current) != Some(k) {
+    if !w
+        .st
+        .claims
+        .get(c)
+        .is_some_and(|r| builds_current(&w.st, r, k))
+    {
         return; // a replaced candidate cannot block
     }
     match rep.status {

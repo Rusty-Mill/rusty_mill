@@ -598,6 +598,13 @@ where
     let ArtifactPayload::Candidate(manifest) = &cand.payload else {
         return Err("candidate payload is not a manifest".into());
     };
+    if !manifest.suite.is_build() {
+        // No `bbp open` path sets a holdout digest yet, so the core admits
+        // no holdout candidate; running one needs the holdout set file (#597).
+        return Err(
+            "holdout runs need the task's holdout suite, which this host does not load yet".into(),
+        );
+    }
     let set = profiles::load(dir, task, st.profile_digest)?;
     let mut diffs = Vec::new();
     for id in &manifest.diffs {

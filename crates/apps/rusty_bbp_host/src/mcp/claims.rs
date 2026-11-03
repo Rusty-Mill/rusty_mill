@@ -250,6 +250,7 @@ fn put(a: &Value) -> Result<Translated, String> {
                     .map(ArtId)
                     .collect(),
                 claim: Some(MsgId(u64_of(a.get("claim"), "claim")?)),
+                suite: Suite::Build,
             }),
             vec![],
         ),

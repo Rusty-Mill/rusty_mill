@@ -124,6 +124,10 @@ pub enum Event {
         mode: Mode,
         #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
         claims: Option<ClaimsConfig>,
+        /// Claims mode (#597): SHA-256 of the frozen holdout suite. Written
+        /// only when present.
+        #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+        holdout_digest: Option<Sha256>,
     },
     Assigned {
         role: RoleId,

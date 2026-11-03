@@ -530,6 +530,7 @@ pub fn action(name: &str, a: &Value) -> Result<Translated, String> {
                             .unwrap_or("")
                             .to_owned(),
                         diffs,
+                        suite: Suite::Build,
                     })
                 }
                 other => {

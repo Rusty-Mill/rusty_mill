@@ -243,6 +243,7 @@ impl<S: Store> Fx<S> {
             brief,
             human: PrincipalId("human".into()),
             policy,
+            holdout_digest: None,
         });
         fx.run(&open);
         for r in roles.iter().filter(|r| !skip.contains(&r.id.0.as_str())) {
@@ -576,6 +577,7 @@ impl<S: Store> Fx<S> {
                 claim: None,
                 base: "a".repeat(40),
                 diffs: vec![diff],
+                suite: Suite::Build,
             }),
             b"{}",
         ))
