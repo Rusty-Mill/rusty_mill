@@ -42,6 +42,7 @@ mod api;
 #[cfg(any(unix, windows))]
 mod bridge;
 pub mod cli;
+mod completion;
 mod config;
 mod conn;
 mod render;
@@ -285,6 +286,9 @@ pub fn run_until(
         Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
         Command::Api(Api::Describe(method)) => return write_line(out, &api::describe(method)),
         Command::Api(Api::Llms) => return write_line(out, api::llms().trim_end()),
+        Command::Completion(shell) => {
+            return write_line(out, completion::script(shell).trim_end());
+        }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
         Command::Agent(command) => {
             let generated_name = || {
@@ -496,7 +500,8 @@ fn execute(
         | Command::Config(_)
         | Command::Agent(_)
         | Command::Watch { .. }
-        | Command::Bridge => Ok(Exit::Ok),
+        | Command::Bridge
+        | Command::Completion(_) => Ok(Exit::Ok),
     }
 }
 
