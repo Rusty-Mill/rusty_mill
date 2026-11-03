@@ -239,7 +239,8 @@ area re-tiles around the dock, and it auto-hides on windows too narrow to
 fit it beside a usable terminal.
 
 The `[keys]` section rebinds any window shortcut as `action = "chord"`. The
-actions are `copy`, `paste`, `new_tab`, `new_window`, `fold_output`,
+actions are `copy`, `copy_or_send` (copy if there is a selection, else pass
+the key to the shell), `paste`, `new_tab`, `new_window`, `fold_output`,
 `close_tab`, `next_tab`, `prev_tab`, `open_config`, `open_settings`, `search`,
 `open_links`, `copy_mode`, `broadcast`, `split_right`, `split_down`,
 `focus_next`, `focus_left`, `focus_right`, `focus_up`, `focus_down`,
@@ -278,7 +279,7 @@ window edges to resize.
 |-------|--------|
 | Left-drag | Select text (highlighted by inversion); double/triple-click first to extend by word/line as you drag, and drag past a pane's top/bottom edge to auto-scroll. |
 | Ctrl+hover / Ctrl+click | Underline + pointer cursor over a hyperlink (OSC 8 or a detected plain-text URL), Ctrl+click opens it. |
-| Ctrl+Shift+C | Copy the selection to the system clipboard. |
+| Ctrl+Shift+C (and Ctrl+C on Windows) | Copy the selection to the system clipboard. On Windows, plain Ctrl+C copies and clears the selection when there is one, and otherwise sends ^C to the shell as usual, as in Windows Terminal. |
 | Ctrl+Shift+V (and Ctrl+V on Windows) | Paste the clipboard into the shell (bracketed-paste aware). Plain Ctrl+V pastes on Windows only, as in Windows Terminal; to send a raw ^V there instead, set `paste = "Ctrl+Shift+V"` under `[keys]`. |
 | Ctrl+Shift+F | Open the in-window search bar (incremental match highlighting; Ctrl+R toggles regex, Alt+C toggles case sensitivity, Ctrl+V/middle-click pastes into the query). |
 | Ctrl+Shift+, | Open the config file in your editor (created from a template on first use). |

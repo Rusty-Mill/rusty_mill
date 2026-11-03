@@ -25,9 +25,10 @@
 //! Note: this drives a live window and so cannot be exercised in a headless
 //! environment — the render, input-encoding, and font layers it composes are
 //! unit-tested independently. Wired here: mouse drag-selection, clipboard
-//! copy/paste (Ctrl+Shift+C / Ctrl+Shift+V, plus Ctrl+V on Windows), OSC 52
-//! get/set, SGR/1006 mouse reporting, Ctrl+click to open OSC 8 hyperlinks, DECSCUSR cursor styles +
-//! blink, and a Windows child-exit watcher.
+//! copy/paste (Ctrl+Shift+C / Ctrl+Shift+V, plus Ctrl+C / Ctrl+V on
+//! Windows), OSC 52 get/set, SGR/1006 mouse reporting, Ctrl+click to open
+//! OSC 8 hyperlinks, DECSCUSR cursor styles + blink, and a Windows
+//! child-exit watcher.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -2559,9 +2560,26 @@ impl WindowState<'_> {
         }
     }
 
+    /// Copy the selection, then clear it so the next Ctrl+C interrupts.
+    /// Returns whether there was anything to copy; when not, the caller lets
+    /// the key reach the child (Ctrl+C on Windows, [`Action::CopyOrSend`]).
+    fn copy_or_send(&mut self) -> bool {
+        if !self.copy_selection() {
+            return false;
+        }
+        if let Some(p) = self.pane() {
+            p.grid.lock().selection = None;
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        true
+    }
+
     /// Copy the active tab's selection to the system clipboard (Ctrl+Shift+C).
-    fn copy_selection(&mut self) {
-        let Some(p) = self.pane() else { return };
+    /// Returns whether there was a selection to copy.
+    fn copy_selection(&mut self) -> bool {
+        let Some(p) = self.pane() else { return false };
         let (text, html) = {
             let g = p.grid.lock();
             let html = if self.config.copy_html.unwrap_or(true) {
@@ -2571,7 +2589,8 @@ impl WindowState<'_> {
             };
             (g.selected_text(), html)
         };
-        if let (Some(text), Some(cb)) = (text, self.clipboard.as_mut()) {
+        let Some(text) = text else { return false };
+        if let Some(cb) = self.clipboard.as_mut() {
             // The HTML flavor carries the selection's colors/attributes for
             // rich-paste targets (G29); plain editors read the text flavor.
             let _ = match html {
@@ -2579,6 +2598,7 @@ impl WindowState<'_> {
                 None => cb.set_text(text),
             };
         }
+        true
     }
 
     /// Service a tab's pending OSC 52 clipboard request recorded by the parser.
@@ -2742,7 +2762,12 @@ impl WindowState<'_> {
     /// Dispatch a terminal-owned [`Action`] resolved from the keymap.
     fn run_action(&mut self, action: Action) {
         match action {
-            Action::Copy => self.copy_selection(),
+            Action::Copy => {
+                self.copy_selection();
+            }
+            Action::CopyOrSend => {
+                self.copy_or_send();
+            }
             Action::Paste => self.paste(),
             Action::NewTab => {
                 if let Err(e) = self.spawn_tab() {
@@ -5137,9 +5162,18 @@ impl WindowState<'_> {
                         self.mods.alt_key(),
                         key,
                     );
-                    if let Some(action) = self.config.keys.action(chord) {
-                        self.run_action(action);
-                        return;
+                    match self.config.keys.action(chord) {
+                        // Nothing selected: fall through so ^C interrupts.
+                        Some(Action::CopyOrSend) => {
+                            if self.copy_or_send() {
+                                return;
+                            }
+                        }
+                        Some(action) => {
+                            self.run_action(action);
+                            return;
+                        }
+                        None => {}
                     }
                 }
                 // Ctrl+Alt+1..9 jump straight to that tab (the Windows

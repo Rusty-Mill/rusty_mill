@@ -12,6 +12,10 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Action {
     Copy,
+    /// Copy the selection and clear it, or, with nothing selected, let the
+    /// key reach the child. Plain Ctrl+C on Windows (Windows Terminal style),
+    /// so one chord both copies and interrupts.
+    CopyOrSend,
     Paste,
     NewTab,
     NewWindow,
@@ -124,12 +128,14 @@ impl Default for Keymap {
 }
 
 impl Keymap {
-    /// The built-in bindings. `windows` adds plain Ctrl+V as a second Paste
-    /// chord, as Windows Terminal does: there Ctrl+V means paste everywhere,
-    /// and the shells (PowerShell's PSReadLine, cmd) have no use for a raw ^V.
-    /// Elsewhere ^V stays the child's (bash/zsh quoted insert, vim block
-    /// select). On Windows a child that needs raw ^V gets it back by rebinding
-    /// `paste` in `[keys]`, which replaces both default chords.
+    /// The built-in bindings. `windows` adds the Windows Terminal clipboard
+    /// chords: plain Ctrl+V as a second Paste chord (the Windows shells,
+    /// PowerShell's PSReadLine and cmd, have no use for a raw ^V), and plain
+    /// Ctrl+C as [`Action::CopyOrSend`], which copies only when there is a
+    /// selection, so ^C still interrupts. Elsewhere both stay the child's
+    /// (bash/zsh quoted insert, vim block select). On Windows a child that
+    /// needs raw ^V gets it back by rebinding `paste` in `[keys]`, which
+    /// replaces both default chords.
     fn builtin(windows: bool) -> Self {
         use Action::*;
         use Key::{Char, PageDown, PageUp, Tab};
@@ -180,6 +186,7 @@ impl Keymap {
         };
         if windows {
             km.binds.push((c(true, false, Char('v')), Paste));
+            km.binds.push((c(true, false, Char('c')), CopyOrSend));
         }
         km
     }
@@ -206,6 +213,7 @@ impl Keymap {
 pub fn parse_action(name: &str) -> Option<Action> {
     Some(match name {
         "copy" => Action::Copy,
+        "copy_or_send" => Action::CopyOrSend,
         "paste" => Action::Paste,
         "new_tab" => Action::NewTab,
         "new_window" => Action::NewWindow,
@@ -372,6 +380,19 @@ mod tests {
             windows.action(Chord::new(true, false, true, Key::Char('v'))),
             None
         );
+    }
+
+    #[test]
+    fn plain_ctrl_c_copies_or_sends_on_windows_only() {
+        let ctrl_c = Chord::new(true, false, false, Key::Char('c'));
+        let ctrl_shift_c = Chord::new(true, true, false, Key::Char('c'));
+        let windows = Keymap::builtin(true);
+        assert_eq!(windows.action(ctrl_c), Some(Action::CopyOrSend));
+        assert_eq!(windows.action(ctrl_shift_c), Some(Action::Copy));
+        let other = Keymap::builtin(false);
+        assert_eq!(other.action(ctrl_c), None);
+        assert_eq!(other.action(ctrl_shift_c), Some(Action::Copy));
+        assert_eq!(parse_action("copy_or_send"), Some(Action::CopyOrSend));
     }
 
     #[test]
