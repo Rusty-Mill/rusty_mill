@@ -299,7 +299,9 @@ mod tests {
             claim: None,
             refused: unresolved(&st, &m),
         };
-        assert!(guard.judge(&st).is_some_and(|r| r.code == Code::RefUnresolved));
+        assert!(guard
+            .judge(&st)
+            .is_some_and(|r| r.code == Code::RefUnresolved));
         st.artifacts.insert(
             ArtId(5),
             ArtifactRecord {
@@ -317,7 +319,9 @@ mod tests {
             },
         );
         assert!(unresolved(&st, &m).is_none());
-        assert!(guard.judge(&st).is_some_and(|r| r.code == Code::RefUnresolved));
+        assert!(guard
+            .judge(&st)
+            .is_some_and(|r| r.code == Code::RefUnresolved));
     }
 
     #[test]
