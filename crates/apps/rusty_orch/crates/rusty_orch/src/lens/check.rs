@@ -283,20 +283,83 @@ mod tests {
         assert!(e.contains("cannot read /nonexistent/lens.json"), "{e}");
     }
 
+    /// A directory this test created exclusively (never an existing one),
+    /// private on Unix, holding only the files it wrote. Drop removes just
+    /// those files and the directory, never recursively.
+    struct Scratch {
+        dir: PathBuf,
+        files: Vec<PathBuf>,
+    }
+
+    impl Scratch {
+        fn create_in(base: &Path, stem: &str) -> std::io::Result<Self> {
+            let dir = base.join(stem);
+            let mut b = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+            b.create(&dir)?;
+            Ok(Self {
+                dir,
+                files: Vec::new(),
+            })
+        }
+
+        fn create() -> std::io::Result<Self> {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let stem = format!("orch-lens-check-{}-{nanos}", std::process::id());
+            Self::create_in(&std::env::temp_dir(), &stem)
+        }
+
+        /// Write a new file; an existing one (or a link) is an error.
+        fn write(&mut self, name: &str, text: &str) -> std::io::Result<PathBuf> {
+            use std::io::Write as _;
+            let path = self.dir.join(name);
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?;
+            self.files.push(path.clone());
+            f.write_all(text.as_bytes())?;
+            Ok(path)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            for f in &self.files {
+                let _ = std::fs::remove_file(f);
+            }
+            let _ = std::fs::remove_dir(&self.dir);
+        }
+    }
+
     #[test]
     fn a_valid_config_with_no_assertions_file_reports_without_calls() {
-        let dir = std::env::temp_dir().join(format!("orch-lens-check-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let path = dir.join("lens.json");
-        std::fs::write(&path, CONFIG).expect("write");
+        let mut scratch = Scratch::create().expect("private dir");
         let o = Options {
-            config: path,
-            assertions: dir.join("absent.json"),
+            config: scratch.write("lens.json", CONFIG).expect("write"),
+            assertions: scratch.dir.join("absent.json"),
             repo: PathBuf::from("/repo"),
         };
         let r = run(&o).expect("checks");
-        std::fs::remove_dir_all(&dir).expect("cleanup");
         assert!(r.contains("local\topenai-http\tready\n"), "{r}");
         assert!(!r.contains("assertions ignored"), "{r}");
+    }
+
+    #[test]
+    fn a_scratch_root_that_already_exists_is_refused_and_left_alone() {
+        let base = Scratch::create().expect("private base");
+        let taken = base.dir.join("taken");
+        std::fs::create_dir(&taken).expect("pre-existing root");
+        let sentinel = taken.join("lens.json");
+        std::fs::write(&sentinel, "keep").expect("sentinel");
+
+        assert!(Scratch::create_in(&base.dir, "taken").is_err());
+        assert_eq!(std::fs::read_to_string(&sentinel).expect("kept"), "keep");
+
+        std::fs::remove_file(&sentinel).expect("cleanup");
+        std::fs::remove_dir(&taken).expect("cleanup");
     }
 }
