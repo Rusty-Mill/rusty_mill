@@ -1479,7 +1479,9 @@ fn human_stage(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
     }
 }
 
-fn exhausted_fields(st: &TaskState) -> Vec<BudgetField> {
+/// The task budget fields spent past their limit: what a task-total
+/// escalation waits on, and what `resume` needs extended first.
+pub fn exhausted_fields(st: &TaskState) -> Vec<BudgetField> {
     let mut out = Vec::new();
     if st.spent.messages > st.budget.messages {
         out.push(BudgetField::Messages);

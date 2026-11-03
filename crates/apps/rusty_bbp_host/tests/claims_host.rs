@@ -9,7 +9,7 @@ use rusty_bbp::*;
 use rusty_bbp_host::mcp::{Binding, Server};
 use rusty_bbp_host::profiles::ProfileSet;
 use rusty_bbp_host::runner::{self, Confinement, Unconfined};
-use rusty_bbp_host::{admin, human, inbox, open_driver};
+use rusty_bbp_host::{admin, human, inbox, now, open_driver};
 use rusty_serde::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command as Proc;
@@ -701,6 +701,127 @@ fn the_host_probe_passes_where_the_sandbox_works() {
     }
     assert!(runner::probe(&Broken, &base.join("work")).is_err());
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---------------------------------------------------------------- inbox follow-up (#595)
+
+fn post_dep(dir: &Path, text: &str, dep: u64) -> u64 {
+    let b = brief(dir);
+    id_of(&ok(
+        &mut server(dir, "a"),
+        "post",
+        &format!(
+            r#"{{"op":"c-{text}","kind":"claim","text":"{text}","domains":["d"],"stakes":"low","reversible":true,"deps":[{dep}],"refs":["art:{b}"]}}"#
+        ),
+    ))
+}
+
+fn human_ok(dir: &Path, verb: &str, args: &[&str]) {
+    let rev = state(dir).rev;
+    let r = human::perform_fenced(
+        dir,
+        &task(),
+        verb,
+        args,
+        Some(rev),
+        "owner",
+        Some(rev),
+        None,
+    )
+    .expect(verb);
+    assert!(
+        !matches!(r, Response::Rejected(_)),
+        "{verb} {args:?}: {r:?}"
+    );
+}
+
+#[test]
+fn an_acted_on_escalation_names_its_marks_and_refine_answers_it() {
+    let dir = tempdir("acted");
+    claims_task(&dir);
+    let d = claim(&dir, "a", "foundation", true);
+    let x = post_dep(&dir, "built-on-it", d);
+    for c in [d, x] {
+        human_ok(&dir, "claim", &[&format!("msg:{c}"), "accept"]);
+    }
+    let epoch = state(&dir).claims.get(MsgId(x)).expect("x").epoch;
+    let mark = Command::Host {
+        op: OpId("mark-x".into()),
+        action: HostAction::Acting {
+            claim: MsgId(x),
+            epoch,
+            reference: "pr-7".into(),
+        },
+    };
+    let r = open_driver(&dir, &task())
+        .unwrap()
+        .dispatch(&mark, now())
+        .unwrap();
+    assert!(matches!(r, Response::Marked(_)), "{r:?}");
+    human_ok(&dir, "claim", &[&format!("msg:{d}"), "drop"]);
+
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].reason, inbox::Reason::DepCollapsed);
+    assert_eq!(rows[0].brief, state(&dir).brief);
+    assert_eq!(
+        rows[0].acted,
+        [inbox::Acted {
+            claim: MsgId(x),
+            marks: vec!["pr-7".into()]
+        }]
+    );
+
+    let b = format!("art:{}", brief(&dir));
+    human_ok(
+        &dir,
+        "refine",
+        &[&format!("msg:{x}"), &b, "keep", "it", "small"],
+    );
+    let st = state(&dir);
+    let last = st.messages.last().expect("answer");
+    assert_eq!(last.draft.kind, MessageKind::Answer);
+    assert_eq!(last.draft.reply_to, Some(MsgId(x)));
+    assert_eq!(last.draft.refs, [Ref::art(st.brief.expect("brief"))]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_task_total_row_names_the_field_its_limit_and_one_allowance() {
+    let dir = tempdir("total");
+    claims_task(&dir);
+    let opened = state(&dir).budget.messages;
+    human_ok(&dir, "extend", &["messages", "1"]);
+    claim(&dir, "a", "one", true);
+    claim(&dir, "a", "two", true);
+    assert_eq!(state(&dir).state, State::Escalated);
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    let row = rows
+        .iter()
+        .find(|r| r.reason == inbox::Reason::TaskTotal)
+        .expect("task row");
+    assert_eq!(row.totals.len(), 1, "{row:?}");
+    let t = row.totals[0];
+    assert_eq!(
+        (t.field, t.limit, t.allowance),
+        (BudgetField::Messages, 1, opened)
+    );
+    assert!(t.spent > t.limit);
+    // Refine on the whole task, then one allowance and resume, as the inbox does.
+    let b = format!("art:{}", brief(&dir));
+    human_ok(&dir, "refine", &["task", &b, "smaller", "steps"]);
+    human_ok(
+        &dir,
+        "extend",
+        &["messages", &(t.limit + t.allowance).to_string()],
+    );
+    human_ok(&dir, "resume", &["open"]);
+    assert_eq!(state(&dir).state, State::Open);
+    assert!(inbox::read(&dir, &[task()])
+        .unwrap()
+        .iter()
+        .all(|r| r.reason != inbox::Reason::TaskTotal));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------- protected paths (#597)

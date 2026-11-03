@@ -3012,6 +3012,57 @@ fn cl_77_suite_versions_need_a_fresh_holdout_pass() {
     );
 }
 
+/// CL-81: the human's `answer` (Refine, #595) refs the brief, replies to a
+/// claim or to no message, needs no turn, is not charged, changes no claim,
+/// and is taken while the task is escalated. An agent's `answer` stays refused.
+#[test]
+fn cl_81_human_answer_clarifies_the_intent() {
+    let mut o = open_task(Mode::Claims, None, roster());
+    o.budget.messages = 2;
+    let mut cx = Cx::new();
+    cx.st = TaskState::new(TaskId::from("t"));
+    cx.log.clear();
+    cx.brief = stored(cx.run(Command::Open(o)));
+    for who in ["a", "b", "c", "s"] {
+        cx.assign(who);
+    }
+    let c = cx.low();
+    let answer = |brief: Option<ArtId>, to: Option<MsgId>| {
+        let d = Draft::new(MessageKind::Answer, "prefer the smaller change")
+            .refs(brief.map(Ref::art).into_iter().collect());
+        HumanAction::Post(match to {
+            Some(m) => d.reply_to(m),
+            None => d,
+        })
+    };
+    let (status, spent) = (cx.status(c), cx.st.spent.messages);
+    let a = posted(cx.human(answer(Some(cx.brief), Some(c))));
+    assert_eq!(cx.st.message(a).map(|m| m.from_role.clone()), Some(None));
+    assert_eq!(
+        (cx.status(c), cx.st.spent.messages),
+        (status, spent),
+        "no claim change, not charged"
+    );
+    assert_eq!(
+        rejected(cx.human(answer(None, Some(c)))),
+        Code::RefsRequired
+    );
+    let e = posted(cx.opinion("a", c, Support));
+    assert_eq!(
+        rejected(cx.human(answer(Some(cx.brief), Some(e)))),
+        Code::WrongKind
+    );
+    let agent = Draft::new(MessageKind::Answer, "x").refs(vec![Ref::art(cx.brief)]);
+    assert_eq!(
+        rejected(cx.agent("a", AgentAction::Post(agent))),
+        Code::WrongMode
+    );
+    // Escalated on a task total: the human may still clarify the task.
+    ok(cx.opinion("b", c, Support));
+    assert_eq!(cx.st.state, State::Escalated);
+    posted(cx.human(answer(Some(cx.brief), None)));
+}
+
 #[test]
 fn cl_78_a_tests_claim_needs_support_from_outside_its_authors() {
     let mut cx = Cx::new();

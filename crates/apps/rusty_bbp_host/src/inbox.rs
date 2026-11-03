@@ -10,6 +10,7 @@
 
 use crate::open_driver;
 use rusty_bbp::claims::{card, ClaimView, EvidenceView, Sight};
+use rusty_bbp::engine::exhausted_fields;
 use rusty_bbp::event::Event;
 use rusty_bbp::*;
 use rusty_serde::Serialize;
@@ -51,6 +52,8 @@ pub struct Escalation {
     /// `<task>/<subject>/<seq>`: stable while the escalation is open.
     pub id: String,
     pub task: TaskId,
+    /// The task's brief, which a Refine answer refs (C-R10).
+    pub brief: Option<ArtId>,
     /// The task revision this was read at; act with `--fence <rev>`.
     pub rev: Rev,
     /// Position in the log of the event that opened it.
@@ -68,6 +71,30 @@ pub struct Escalation {
     pub mark: Option<u64>,
     /// `rerun_held`: the candidate waiting on budget.
     pub candidate: Option<ArtId>,
+    /// The claim and candidates shown that were acted on, with their action
+    /// references: what a Reject or Choose would leave to remediate.
+    pub acted: Vec<Acted>,
+    /// `task_total`: each exhausted task budget field, its limit, and one
+    /// allowance (the limit the task opened with).
+    pub totals: Vec<Total>,
+}
+
+/// A claim that was acted on: a mark with no `aborted` result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Acted {
+    pub claim: MsgId,
+    /// The references of its marks that were not aborted (a PR, a deploy id).
+    pub marks: Vec<String>,
+}
+
+/// One exhausted task budget field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Total {
+    pub field: BudgetField,
+    pub spent: u64,
+    pub limit: u64,
+    /// One allowance: the field's limit when the task opened.
+    pub allowance: u64,
 }
 
 /// The open escalations of `tasks` in `dir`: irreversible first, then task
@@ -149,9 +176,14 @@ pub fn open(st: &TaskState, events: &[Event]) -> Vec<Escalation> {
         out.push(e);
     }
     if let (State::Escalated, Some(seq)) = (st.state, task_at) {
+        let opened = events.iter().find_map(|e| match e {
+            Event::TaskOpened { budget, .. } => Some(*budget),
+            _ => None,
+        });
         out.push(Escalation {
             id: format!("{}/task/{seq}", st.task.0),
             task: st.task.clone(),
+            brief: st.brief,
             rev: st.rev,
             seq,
             reason: Reason::TaskTotal,
@@ -162,9 +194,46 @@ pub fn open(st: &TaskState, events: &[Event]) -> Vec<Escalation> {
             candidates: vec![],
             mark: None,
             candidate: None,
+            acted: vec![],
+            totals: totals(st, opened.unwrap_or(st.budget)),
         });
     }
     out
+}
+
+fn totals(st: &TaskState, opened: Budget) -> Vec<Total> {
+    exhausted_fields(st)
+        .into_iter()
+        .map(|field| Total {
+            field,
+            spent: match field {
+                BudgetField::Messages => st.spent.messages,
+                BudgetField::Bytes => st.spent.bytes,
+                BudgetField::Reads => st.spent.reads,
+                BudgetField::ReadsPerTurn => 0,
+                BudgetField::Turns => st.spent.turns,
+                BudgetField::Iterations => st.iteration,
+            },
+            limit: st.budget.get(field),
+            allowance: opened.get(field),
+        })
+        .collect()
+}
+
+/// Which of `ids` were acted on, with their live action references.
+fn acted(st: &TaskState, ids: impl Iterator<Item = MsgId>) -> Vec<Acted> {
+    ids.filter_map(|c| st.claims.get(c))
+        .filter(|r| r.acted_on())
+        .map(|r| Acted {
+            claim: r.id,
+            marks: r
+                .marks
+                .iter()
+                .filter(|m| m.outcome != Some(MarkOutcome::Aborted))
+                .map(|m| m.reference.clone())
+                .collect(),
+        })
+        .collect()
 }
 
 fn of_claim(st: &TaskState, c: MsgId, seq: usize, reason: Reason) -> Escalation {
@@ -175,9 +244,12 @@ fn of_claim(st: &TaskState, c: MsgId, seq: usize, reason: Reason) -> Escalation 
         (Reason::Stuck, Some(v)) => live_candidates(st, &v.candidates),
         _ => vec![],
     };
+    let shown = std::iter::once(c).chain(candidates.iter().map(|k| k.id));
+    let acted = acted(st, shown);
     Escalation {
         id: format!("{}/{c}/{seq}", st.task.0),
         task: st.task.clone(),
+        brief: st.brief,
         rev: st.rev,
         seq,
         reason,
@@ -188,6 +260,8 @@ fn of_claim(st: &TaskState, c: MsgId, seq: usize, reason: Reason) -> Escalation 
         candidates,
         mark: None,
         candidate: None,
+        acted,
+        totals: vec![],
     }
 }
 
