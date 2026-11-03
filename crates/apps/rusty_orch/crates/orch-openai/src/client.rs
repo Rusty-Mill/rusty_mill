@@ -2,6 +2,7 @@
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -18,6 +19,9 @@ use crate::Config;
 
 /// Interim (1xx) responses read past before giving up on a final one.
 const MAX_INTERIM: usize = 8;
+/// Lookups one client may have running at once, counting ones abandoned
+/// at a deadline until they actually finish.
+pub const MAX_PENDING_LOOKUPS: usize = 4;
 
 /// Turns a host name into addresses. A seam so tests control DNS.
 ///
@@ -51,6 +55,8 @@ pub struct OpenAiHttp<R = SystemResolver> {
     config: Config,
     resolver: Arc<R>,
     env: EnvLookup,
+    /// Lookup threads still running, including abandoned ones.
+    pending: Arc<AtomicUsize>,
 }
 
 impl OpenAiHttp<SystemResolver> {
@@ -60,6 +66,7 @@ impl OpenAiHttp<SystemResolver> {
             config,
             resolver: Arc::new(SystemResolver),
             env: process_env,
+            pending: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -71,6 +78,7 @@ impl<R: Resolve> OpenAiHttp<R> {
             config: self.config,
             resolver: Arc::new(resolver),
             env: self.env,
+            pending: self.pending,
         }
     }
 
@@ -118,7 +126,12 @@ impl<R: Resolve> OpenAiHttp<R> {
         let raw = transport
             .read_request_body(framing, DEFAULT_MAX_BODY_LEN)
             .map_err(|e| self.io(e))?;
-        check_status(response.status, &String::from_utf8_lossy(&raw))?;
+        // Redact before `check_status` cuts an excerpt: a key split at the
+        // cut would no longer match the outer scrub.
+        check_status(
+            response.status,
+            &redact(&String::from_utf8_lossy(&raw), key),
+        )?;
         let text = String::from_utf8(raw)
             .map_err(|_| permanent("the reply is not valid UTF-8".to_owned()))?;
         parse_response(&text).map_err(permanent)
@@ -184,12 +197,18 @@ impl<R: Resolve> OpenAiHttp<R> {
         if let Ok(ip) = host.parse::<IpAddr>() {
             return Ok(Ok(vec![SocketAddr::new(ip, port)]));
         }
+        let slot = Pending::claim(&self.pending).ok_or_else(|| {
+            ClassifiedError::Transient(err(format!(
+                "{MAX_PENDING_LOOKUPS} lookups still pending; DNS is not answering"
+            )))
+        })?;
         let (tx, rx) = mpsc::channel();
         let resolver = Arc::clone(&self.resolver);
         let name = host.to_owned();
         thread::Builder::new()
             .name("orch-openai-dns".to_owned())
             .spawn(move || {
+                let _slot = slot;
                 // The receiver is gone once the deadline passed; nothing to do.
                 let _ = tx.send(resolver.resolve(&name, port));
             })
@@ -319,6 +338,27 @@ fn permanent(message: String) -> ClassifiedError {
 
 fn timed_out() -> ClassifiedError {
     ClassifiedError::Transient(err("timed out".to_owned()))
+}
+
+/// One running lookup's place in its client's count, released when the
+/// lookup thread ends, not when its caller gives up.
+struct Pending(Arc<AtomicUsize>);
+
+impl Pending {
+    fn claim(count: &Arc<AtomicUsize>) -> Option<Self> {
+        count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < MAX_PENDING_LOOKUPS).then_some(n + 1)
+            })
+            .ok()
+            .map(|_| Self(Arc::clone(count)))
+    }
+}
+
+impl Drop for Pending {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// A stream whose every read and write is bounded by one end time, so a
