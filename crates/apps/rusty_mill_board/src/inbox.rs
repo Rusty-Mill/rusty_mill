@@ -106,6 +106,9 @@ pub struct Escalation {
     pub id: String,
     /// BBP task id.
     pub task: String,
+    /// The task's brief artifact, which a Refine answer refs.
+    #[serde(default)]
+    pub brief: Option<u64>,
     /// The task revision this was read at. Every action is fenced on it.
     pub rev: u64,
     /// Log position of the escalating event, within its task.
@@ -128,6 +131,103 @@ pub struct Escalation {
     pub mark: Option<u64>,
     /// `RerunHeld`: the candidate artifact waiting on budget.
     pub candidate: Option<u64>,
+    /// The claim and candidates shown that were acted on. `None` when the host does
+    /// not report it (older than #1420): then no decision that could drop work is sent.
+    #[serde(default)]
+    pub acted: Option<Vec<Acted>>,
+    /// A task total: each exhausted budget field, empty once they are all funded again.
+    /// `None` when the host does not report it (older than #1420).
+    #[serde(default)]
+    pub totals: Option<Vec<Total>>,
+}
+
+/// A claim that was acted on, with the references of its live action marks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acted {
+    /// The claim id.
+    pub claim: u64,
+    /// What was done (a PR, a deploy id).
+    pub marks: Vec<String>,
+}
+
+/// One exhausted task budget field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Total {
+    /// BBP's field name, e.g. `Messages` or `ReadsPerTurn`.
+    pub field: String,
+    /// Spent so far.
+    pub spent: u64,
+    /// The current limit.
+    pub limit: u64,
+    /// One allowance: the limit the task opened with.
+    pub allowance: u64,
+}
+
+impl Total {
+    /// The `bbp human extend` that adds exactly one allowance.
+    fn extend(&self) -> Result<Step, InboxError> {
+        let limit = self
+            .limit
+            .checked_add(self.allowance)
+            .ok_or_else(|| InboxError::Invalid(format!("{} limit would overflow", self.field)))?;
+        Ok(Step {
+            verb: "extend",
+            args: vec![snake(&self.field), limit.to_string()],
+        })
+    }
+}
+
+/// `ReadsPerTurn` -> `reads_per_turn`, the host CLI's field names.
+fn snake(field: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in field.chars().enumerate() {
+        if ch.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
+impl Escalation {
+    /// The acted-on claims `a` would drop: what needs a Remediate card.
+    ///
+    /// # Errors
+    /// [`InboxError::Unsupported`] when `a` could drop a claim and the host does not
+    /// report acted-on work: the decision fails closed rather than lose its card.
+    pub fn dropped_acted(&self, a: &Action) -> Result<Vec<&Acted>, InboxError> {
+        let claim = self.claim.as_ref().map(|c| c.id);
+        let drops = |x: &Acted| match (a, self.reason) {
+            (
+                Action::Reject { .. },
+                Reason::RerunHeld | Reason::ActionUnconfirmed | Reason::TaskTotal,
+            ) => false,
+            (Action::Reject { .. }, _) => Some(x.claim) == claim,
+            (Action::Choose { chosen }, _) => x.claim != *chosen && Some(x.claim) != claim,
+            _ => false,
+        };
+        let could_drop = match (a, self.reason) {
+            (Action::Reject { .. }, r) => !matches!(
+                r,
+                Reason::RerunHeld | Reason::ActionUnconfirmed | Reason::TaskTotal
+            ),
+            (Action::Choose { .. }, _) => true,
+            _ => false,
+        };
+        match &self.acted {
+            Some(acted) => Ok(acted.iter().filter(|x| drops(x)).collect()),
+            None if could_drop => Err(InboxError::Unsupported(
+                "the bbp host does not report acted-on work (it predates #1420), so a drop could lose its Remediate card",
+            )),
+            None => Ok(vec![]),
+        }
+    }
+
+    fn brief(&self) -> Result<String, InboxError> {
+        self.brief
+            .map(|b| format!("art:{b}"))
+            .ok_or_else(|| missing(self, "brief"))
+    }
 }
 
 /// What the human decides.
@@ -147,10 +247,9 @@ pub enum Action {
         /// The chosen candidate's claim id.
         chosen: u64,
     },
-    /// Clarify the intent and let the lenses judge again: a human `answer`
-    /// to the claim, then a reopen. Known limit: claims mode on the host
-    /// still refuses human answers (`WrongMode`), so today BBP refuses the
-    /// first command and nothing is written.
+    /// Clarify the intent and let the lenses judge again: a human answer
+    /// that refs the brief (C-R10), then a reopen of the claim or a resume
+    /// of the task.
     Refine {
         /// The clarification, 1 to [`NOTE_MAX`] characters.
         note: String,
@@ -293,13 +392,14 @@ pub trait Escalations: Send + Sync {
 /// command needs.
 pub fn plan(e: &Escalation, a: &Action) -> Result<Vec<Step>, InboxError> {
     if e.reason == Reason::TaskTotal {
-        return plan_task(a);
+        return plan_task(e, a);
     }
     let claim = e
         .claim
         .as_ref()
         .ok_or_else(|| InboxError::Invalid(format!("{} has no claim", e.id)))?;
     let c = format!("msg:{}", claim.id);
+    e.dropped_acted(a)?;
     let steps = match (a, e.reason) {
         (Action::Approve, Reason::Budget) => vec![
             Step::new("extend-claim", &[&c]),
@@ -332,25 +432,44 @@ pub fn plan(e: &Escalation, a: &Action) -> Result<Vec<Step>, InboxError> {
             ));
         }
         (Action::Refine { note }, _) => vec![
-            Step::new("answer", &[&c, free_text(note)?]),
+            Step::new("refine", &[&c, &e.brief()?, free_text(note)?]),
             Step::new("claim", &[&c, "reopen"]),
         ],
     };
     Ok(steps)
 }
 
-fn plan_task(a: &Action) -> Result<Vec<Step>, InboxError> {
+/// A paused task. Approve and Refine both continue it, so both add one
+/// allowance to each exhausted total before `resume`; Refine first posts
+/// the clarification.
+fn plan_task(e: &Escalation, a: &Action) -> Result<Vec<Step>, InboxError> {
+    // An empty list means every total is funded again (an earlier Approve's extends
+    // committed and its resume did not): resume adds nothing, so a retry completes it.
+    let extend_and_resume = || -> Result<Vec<Step>, InboxError> {
+        let totals = e.totals.as_ref().ok_or(InboxError::Unsupported(
+            "the bbp host does not report task totals (it predates #1420)",
+        ))?;
+        let mut steps = totals
+            .iter()
+            .map(Total::extend)
+            .collect::<Result<Vec<_>, _>>()?;
+        steps.push(Step::new("resume", &["open"]));
+        Ok(steps)
+    };
     match a {
         Action::Reject { reason: Some(r) } => Ok(vec![Step::new("cancel", &[free_text(r)?])]),
         Action::Reject { reason: None } => Err(InboxError::Invalid(
             "cancelling a task needs a reason".into(),
         )),
-        Action::Approve => Err(InboxError::Unsupported(
-            "bbp inbox does not report which task total was crossed, so one allowance cannot be computed",
-        )),
-        Action::Refine { .. } => Err(InboxError::Unsupported(
-            "bbp human answer needs a message to reply to; a task total has none",
-        )),
+        Action::Approve => extend_and_resume(),
+        Action::Refine { note } => {
+            let mut steps = vec![Step::new(
+                "refine",
+                &["task", &e.brief()?, free_text(note)?],
+            )];
+            steps.extend(extend_and_resume()?);
+            Ok(steps)
+        }
         Action::Choose { .. } => Err(InboxError::Invalid(
             "choose is for a stuck question with candidates".into(),
         )),
@@ -391,7 +510,7 @@ mod tests {
     use super::*;
 
     /// The JSON `bbp inbox --json` printed for an irreversible claim (host #1391).
-    const SAMPLE: &str = r#"[{"id":"C1/msg:1/14","task":"C1","rev":16,"seq":14,"reason":"Irreversible","claim":{"id":1,"text":"ship it","domains":["d"],"status":"Escalated","score":12,"confidence":96,"epoch":1,"spent":2,"budget":16,"evidence":[{"msg":2,"author":"a","direction":"Support","kind":"Cited","delta":6,"epoch":1,"scoring":true}],"deps":[],"candidates":[],"sole_candidate":false,"current":null,"failing":[],"tests_changed":[],"endorsement":null},"stakes":"Low","reversible":false,"evidence":[{"msg":2,"author":"a","direction":"Support","kind":"Cited","delta":6,"epoch":1,"scoring":true}],"candidates":[],"mark":null,"candidate":null}]"#;
+    const SAMPLE: &str = r#"[{"id":"C1/msg:1/14","task":"C1","rev":16,"seq":14,"reason":"Irreversible","claim":{"id":1,"text":"ship it","domains":["d"],"status":"Escalated","score":12,"confidence":96,"epoch":1,"spent":2,"budget":16,"evidence":[{"msg":2,"author":"a","direction":"Support","kind":"Cited","delta":6,"epoch":1,"scoring":true}],"deps":[],"candidates":[],"sole_candidate":false,"current":null,"failing":[],"tests_changed":[],"endorsement":null},"stakes":"Low","reversible":false,"evidence":[{"msg":2,"author":"a","direction":"Support","kind":"Cited","delta":6,"epoch":1,"scoring":true}],"candidates":[],"mark":null,"candidate":null,"brief":5,"acted":[],"totals":[]}]"#;
 
     fn esc(reason: Reason) -> Escalation {
         let mut e: Vec<Escalation> = serde_json::from_str(SAMPLE).unwrap();
@@ -489,12 +608,18 @@ mod tests {
                     note: " speed over size ".into()
                 }
             ),
-            ["answer msg:1 speed over size", "claim msg:1 reopen"]
+            ["refine msg:1 art:5 speed over size", "claim msg:1 reopen"]
+        );
+        let mut e = esc(Reason::Stuck);
+        e.brief = None;
+        assert!(
+            plan(&e, &Action::Refine { note: "x".into() }).is_err(),
+            "an answer must ref the brief"
         );
     }
 
     #[test]
-    fn a_task_total_cancels_with_a_reason_and_defers_the_rest() {
+    fn a_task_total_cancels_extends_by_one_allowance_or_refines() {
         let mut e = esc(Reason::TaskTotal);
         e.claim = None;
         assert_eq!(
@@ -512,14 +637,95 @@ mod tests {
                 Err(InboxError::Invalid(_))
             ));
         }
-        assert!(matches!(
-            plan(&e, &Action::Approve),
-            Err(InboxError::Unsupported(_))
-        ));
-        assert!(matches!(
-            plan(&e, &Action::Refine { note: "x".into() }),
-            Err(InboxError::Unsupported(_))
-        ));
+        e.totals = None;
+        assert!(
+            matches!(plan(&e, &Action::Approve), Err(InboxError::Unsupported(_))),
+            "a host that does not report totals cannot be given one allowance"
+        );
+        e.totals = Some(vec![]);
+        assert_eq!(
+            verbs(&e, &Action::Approve),
+            ["resume open"],
+            "totals already funded (an earlier Approve lost its resume): resume adds nothing"
+        );
+        e.totals = Some(vec![
+            Total {
+                field: "Messages".into(),
+                spent: 41,
+                limit: 40,
+                allowance: 40,
+            },
+            Total {
+                field: "ReadsPerTurn".into(),
+                spent: 31,
+                limit: 30,
+                allowance: 30,
+            },
+        ]);
+        assert_eq!(
+            verbs(&e, &Action::Approve),
+            [
+                "extend messages 80",
+                "extend reads_per_turn 60",
+                "resume open"
+            ]
+        );
+        assert_eq!(
+            verbs(
+                &e,
+                &Action::Refine {
+                    note: "smaller steps".into()
+                }
+            ),
+            [
+                "refine task art:5 smaller steps",
+                "extend messages 80",
+                "extend reads_per_turn 60",
+                "resume open"
+            ]
+        );
+    }
+
+    #[test]
+    fn only_a_drop_of_acted_on_work_needs_remediation() {
+        let mut e = esc(Reason::ReopenedAfterAction);
+        let pr = |claim| Acted {
+            claim,
+            marks: vec!["pr-7".into()],
+        };
+        e.acted = Some(vec![pr(1)]);
+        let reject = Action::Reject { reason: None };
+        assert_eq!(e.dropped_acted(&reject).unwrap(), [&pr(1)]);
+        assert!(e.dropped_acted(&Action::Approve).unwrap().is_empty());
+        e.reason = Reason::ActionUnconfirmed;
+        assert!(
+            e.dropped_acted(&reject).unwrap().is_empty(),
+            "aborting a mark drops nothing"
+        );
+        let mut q = esc(Reason::Stuck);
+        q.acted = Some(vec![pr(5), pr(6)]);
+        assert_eq!(
+            q.dropped_acted(&Action::Choose { chosen: 5 }).unwrap(),
+            [&pr(6)]
+        );
+    }
+
+    #[test]
+    fn a_host_without_acted_on_metadata_refuses_every_drop() {
+        let mut e = esc(Reason::ReopenedAfterAction);
+        e.acted = None;
+        let reject = Action::Reject { reason: None };
+        for a in [&reject, &Action::Choose { chosen: 5 }] {
+            assert!(matches!(
+                e.dropped_acted(a),
+                Err(InboxError::Unsupported(_))
+            ));
+            assert!(matches!(plan(&e, a), Err(InboxError::Unsupported(_))));
+        }
+        assert_eq!(verbs(&e, &Action::Approve), ["claim msg:1 accept"]);
+        e.reason = Reason::ActionUnconfirmed;
+        e.mark = Some(7);
+        assert_eq!(verbs(&e, &reject), ["action-result mark:7 aborted"]);
     }
 
     #[test]

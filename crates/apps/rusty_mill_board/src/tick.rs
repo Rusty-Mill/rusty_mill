@@ -683,6 +683,10 @@ fn check_claim(card: &Card) -> Result<(), BoardError> {
 }
 
 impl<T: TickApi> Store for TickStore<T> {
+    fn durable(&self) -> bool {
+        true
+    }
+
     fn get(&self, id: Uuid) -> Result<Option<Card>, BoardError> {
         self.parts(id)?.map(card_of).transpose()
     }
