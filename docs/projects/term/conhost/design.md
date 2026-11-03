@@ -754,6 +754,7 @@ and never reads one. `rusty_conhost`'s `console` follows that from PR 2.
 
 ### 9.2 Phases
 - **Phase A:** `own` is opt-in from PR 5.
+- **As built:** Phase B switches all three defaults (rusty_term `[console] host`, `RUSTY_CONSOLE_HOST` for the mux server and yirp) to `own` in one PR. `conpty` stays selectable, and an unusable ConDrv is still an error, never a silent fallback.
 - **Phase B:** `own` becomes the default once all of these hold:
   - the parity suite passes;
   - the manual gate is green on two builds;
@@ -988,8 +989,8 @@ None of these changes the wire format, so RTCP and RTSN (the mux checkpoint and 
 
 | Item | Behaviour |
 |---|---|
-| rusty_term `[console] host = "conpty" \| "own"` (parsed in PR 2, documented in PR 5) | Default `"conpty"`. Any other value is a config error naming the key, like other enum keys. It's ignored on non-Windows builds, with one debug log line. |
-| Env var `RUSTY_CONSOLE_HOST=conpty\|own` (PRs 11, 12) | Read once at mux server start and at yirp `PtyOptions` construction. If it's unset, the default is `conpty`. Any other value is a startup error. |
+| rusty_term `[console] host = "conpty" \| "own"` (parsed in PR 2, documented in PR 5) | Default `"conpty"`; `"own"` from Phase B (§9.2). Any other value is a config error naming the key, like other enum keys. It's ignored on non-Windows builds, with one debug log line. |
+| Env var `RUSTY_CONSOLE_HOST=conpty\|own` (PRs 11, 12) | Read once at mux server start and at yirp `PtyOptions` construction. If it's unset, the default is `conpty`, and `own` from Phase B (§9.2). Any other value is a startup error. |
 
 ## 12. Risks
 

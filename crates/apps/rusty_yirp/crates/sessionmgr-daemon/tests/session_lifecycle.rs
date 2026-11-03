@@ -257,8 +257,9 @@ fn a_repo_backed_kind_outside_a_repository_fails_clearly() {
 /// Unix-only: `test -t 1` has no portable `cmd.exe` equivalent, and a
 /// contrived Windows probe would test the probe rather than the product.
 /// Windows coverage comes from the whole suite instead -- every session
-/// there now runs on ConPTY by default, so a broken ConPTY path fails
-/// these tests wholesale rather than in one dedicated case.
+/// there now runs on our own console host by default, so a broken host
+/// fails these tests wholesale rather than in one dedicated case. ConPTY,
+/// the rollback, keeps its own test in `sessionmgr-pty`.
 #[cfg(unix)]
 fn tty_probe() -> Vec<&'static str> {
     vec!["sh", "-c", "test -t 1 && echo IS_A_TTY || echo NOT_A_TTY"]

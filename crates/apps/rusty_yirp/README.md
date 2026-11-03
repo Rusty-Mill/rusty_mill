@@ -116,9 +116,9 @@ extra (WebView2 ships with Windows 10/11).
 
 ## Console host on Windows
 
-A PTY session runs on Microsoft's ConPTY by default. Set
-`RUSTY_CONSOLE_HOST=own` in the daemon's environment to run sessions on our
-own console host (`rusty_conhost`) instead; `conpty` or unset keeps ConPTY.
+A PTY session runs on our own console host (`rusty_conhost`) by default. Set
+`RUSTY_CONSOLE_HOST=conpty` in the daemon's environment to run sessions on
+Microsoft's ConPTY instead; `own` or unset keeps our host.
 Each worker reads it when it starts its session, so any other value fails
 that session's start with an error naming the variable, and a Windows that
 can't run our host fails it too: there is no silent fallback. Linux ignores

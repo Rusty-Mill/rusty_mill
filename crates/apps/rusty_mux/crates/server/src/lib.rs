@@ -79,16 +79,16 @@ pub struct Config {
 /// The Windows console host behind each block.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConsoleHost {
-    /// Windows' ConPTY.
-    #[default]
+    /// Windows' ConPTY, kept selectable as the rollback.
     ConPty,
-    /// Our own host, `rusty_conhost`.
+    /// Our own host, `rusty_conhost`. The default (design §9.2, Phase B).
+    #[default]
     Own,
 }
 
 impl ConsoleHost {
-    /// The variable that picks the host: `conpty` (the default when it is
-    /// unset) or `own`.
+    /// The variable that picks the host: `own` (the default when it is
+    /// unset) or `conpty`.
     pub const ENV: &str = "RUSTY_CONSOLE_HOST";
 
     /// The host [`Self::ENV`] names. Any other value is an error, never a

@@ -23,11 +23,12 @@
 //!
 //! On Windows (10 1809 or later, for ConPTY; AF_UNIX alone needs 1803)
 //! each block runs `%COMSPEC%` (or `cmd.exe`) in `%USERPROFILE%` (or `C:\`)
-//! on a pseudo console. Put the socket under `%LOCALAPPDATA%`, for example
+//! on a console we host ourselves (rusty_conhost). Put the socket under
+//! `%LOCALAPPDATA%`, for example
 //! `rusty-mux-server %LOCALAPPDATA%\rusty-mux.sock`; the server limits the
-//! file to the current user. `RUSTY_CONSOLE_HOST=own` hosts the console
-//! ourselves (rusty_conhost) instead of ConPTY; `conpty` or unset keeps
-//! ConPTY, and any other value stops the server before it starts.
+//! file to the current user. `RUSTY_CONSOLE_HOST=conpty` uses Windows'
+//! ConPTY instead; `own` or unset keeps our host, and any other value
+//! stops the server before it starts.
 //! Ctrl+C or Ctrl+Break stops the server cleanly: it ends every block's
 //! program and waits up to 6 s for the consoles it hosts to shut down,
 //! which includes trying to end the other programs still attached.
