@@ -8,6 +8,9 @@
 //! | `z` | zoom the focused block, or unzoom |
 //! | `\|` or `-` | split the focused block right or down |
 //! | `x` | close the focused block |
+//! | `H` `J` `K` `L` | make the focused block narrower, taller, shorter or wider |
+//! | `{` or `}` | swap the focused block with the previous or next block |
+//! | `D` | detach the focused block from the layout; it keeps running |
 //! | Ctrl-] | type a Ctrl-] |
 //!
 //! Any other key is dropped.
@@ -37,8 +40,25 @@ pub enum Action {
         beside: bool,
     },
     Close,
+    /// Resize the focused block within its split along the direction's
+    /// axis: `Right` wider, `Left` narrower, `Down` taller, `Up` shorter.
+    Resize(Dir),
+    /// Swap the focused block with the next block in layout order
+    /// (`true`) or the previous one.
+    Swap {
+        next: bool,
+    },
+    /// Take the focused block out of the layout, still running.
+    DetachBlock,
     /// A key after the prefix that means nothing.
     Unknown,
+}
+
+impl Action {
+    /// Whether this acts on the focused block, which must then be shown.
+    pub fn on_focused_block(&self) -> bool {
+        !matches!(self, Action::Detach | Action::Focus(_) | Action::Unknown)
+    }
 }
 
 /// Where the parser is in a prefix command, which may span reads.
@@ -116,6 +136,13 @@ impl Keys {
             b'|' => Action::Split { beside: true },
             b'-' => Action::Split { beside: false },
             b'x' => Action::Close,
+            b'H' => Action::Resize(Dir::Left),
+            b'J' => Action::Resize(Dir::Down),
+            b'K' => Action::Resize(Dir::Up),
+            b'L' => Action::Resize(Dir::Right),
+            b'{' => Action::Swap { next: false },
+            b'}' => Action::Swap { next: true },
+            b'D' => Action::DetachBlock,
             _ => Action::Unknown,
         };
         self.go(State::Typing, Some(action))
@@ -195,6 +222,13 @@ mod tests {
             (b"\x1d\x1bOD", Action::Focus(Dir::Left)),
             (b"\x1d|", Action::Split { beside: true }),
             (b"\x1dx", Action::Close),
+            (b"\x1dH", Action::Resize(Dir::Left)),
+            (b"\x1dJ", Action::Resize(Dir::Down)),
+            (b"\x1dK", Action::Resize(Dir::Up)),
+            (b"\x1dL", Action::Resize(Dir::Right)),
+            (b"\x1d{", Action::Swap { next: false }),
+            (b"\x1d}", Action::Swap { next: true }),
+            (b"\x1dD", Action::DetachBlock),
             (b"\x1dq", Action::Unknown),
             (b"\x1d\x1bq", Action::Unknown),
             (b"\x1d\x1b[Z", Action::Unknown),

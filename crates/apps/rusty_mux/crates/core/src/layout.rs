@@ -445,6 +445,32 @@ impl Layout {
         first.sibling(block).or_else(|| second.sibling(block))
     }
 
+    /// `block`'s share of the innermost split along `axis` that holds it,
+    /// the share [`Self::resize`] would set; `None` when no such split does.
+    pub fn share_of(&self, block: BlockId, axis: Axis) -> Option<Share> {
+        let Self::Split {
+            axis: own,
+            share,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        let in_first = first.contains(block);
+        if !in_first && !second.contains(block) {
+            return None;
+        }
+        let child = if in_first { first } else { second };
+        child
+            .share_of(block, axis)
+            .or_else(|| match (*own == axis, in_first) {
+                (false, _) => None,
+                (true, true) => Some(*share),
+                (true, false) => Some(share.rest()),
+            })
+    }
+
     /// Gives `block` `share` of the innermost split along `axis` that
     /// holds it; `false`, changing nothing, when no such split does.
     pub(crate) fn resize(&mut self, block: BlockId, axis: Axis, share: Share) -> bool {

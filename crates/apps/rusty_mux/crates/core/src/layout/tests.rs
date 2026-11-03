@@ -399,3 +399,17 @@ fn the_longest_edge_wins_deep_near_the_bottom() {
         assert_eq!(right, Some(id(3)), "{wrappers} wrappers");
     }
 }
+
+#[test]
+fn a_blocks_share_is_that_of_its_innermost_split_along_the_axis() {
+    // cols30(1, rows80(2, 3))
+    let b = |n| Layout::Block(id(n));
+    let layout = split(Axis::Columns, 30, b(1), split(Axis::Rows, 80, b(2), b(3)));
+    let share = |b, axis| layout.share_of(id(b), axis).map(Share::percent);
+    assert_eq!(share(1, Axis::Columns), Some(30));
+    assert_eq!(share(3, Axis::Columns), Some(70));
+    assert_eq!(share(2, Axis::Rows), Some(80));
+    assert_eq!(share(3, Axis::Rows), Some(20));
+    assert_eq!(share(1, Axis::Rows), None);
+    assert_eq!(share(9, Axis::Columns), None);
+}

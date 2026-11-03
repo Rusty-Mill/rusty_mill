@@ -57,10 +57,9 @@ gives B 30% of the split beside it (`rows` for the one above or below);
 Each window has a focused block, shared by every client; `list` shows it as
 `focused`. `focus-block --block B` focuses B, and `move-focus --window W
 --toward right` (or `left`, `up`, `down`, `next`, `previous`) moves it. The
-attach client does not follow it yet, so focusing a block does not change
-what a person types into; `input` and `terminal.send-keys` still go to the
-block you name.
-A block you start does not take the focus; leave it alone unless asked.
+attach client follows it, so focusing a block moves where a person types;
+`input` and `terminal.send-keys` still go to the block you name. A block
+you start does not take the focus; leave it alone unless asked.
 
 Prefer `wait` over polling. `wait --window W` or `wait --session S` waits
 until every block there has ended, blocks started meanwhile included; it
