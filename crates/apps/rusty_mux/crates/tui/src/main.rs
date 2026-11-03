@@ -2373,10 +2373,11 @@ mod client {
                 if self.layout.is_none() && self.layouts && !self.gone {
                     self.wanted.add(Why::Blocks);
                 }
-                // So may the session's active window have moved.
+                // So may the session's active window have moved: where it
+                // is now overrides any window to show asked before.
                 let ours = self.session.is_some() && shape.session == self.session;
-                if let Some(active) = shape.active.filter(|w| ours && Some(*w) != self.window) {
-                    self.wanted.add(Why::Show(active));
+                if let Some(active) = shape.active.filter(|_| ours) {
+                    self.wanted.show = Some(active).filter(|w| Some(*w) != self.window);
                 }
             }
             self.joined += 1;
@@ -4166,6 +4167,26 @@ mod client {
             assert_eq!(shape.session, Some(session_id(8)));
             assert_eq!(shape.active, Some(window_id(9)));
             assert!(shape_of(Vec::new(), window_id(7)).is_none());
+        }
+
+        /// A window to show asked before the path was lost is overridden by
+        /// the session's active window the path's List tells.
+        #[cfg(unix)]
+        #[test]
+        fn a_show_asked_before_the_path_was_lost_yields_to_the_active_window() {
+            let (mut app, _inbox, _far) = following_on_a_path();
+            activate(&mut app, window_id(9));
+            app.lose(false);
+            let (mut back, _control, _a_new, _b_new) = back(takeover(1));
+            back.layout = Some(Shape {
+                layout: app.layout.clone(),
+                session: Some(session_id(8)),
+                active: Some(window_id(7)),
+                ..Shape::default()
+            });
+            app.take(Input::Rejoined(Ok(back)));
+            assert!(app.listing.is_none(), "7 shows already: nothing to ask");
+            assert_eq!(app.window, Some(window_id(7)));
         }
 
         /// An empty window with a block still detached in it stays open on
