@@ -17,4 +17,6 @@ Resolved items are checked and point to the D# or QA entry that answers them. On
 - [ ] Q6 (2026-11-02, n): Do tool-using agents join the board over MCP? D14 is still Proposed.
 - [ ] Q7 (2026-11-02, y for #600 build): The #600 builder-session design isn't posted or approved. (card #600)
 - [ ] Q8 (2026-11-03, n): #708 alien review lens: trigger policy, per-language defect lists, scoring, and how reproduced findings enter BBP. Design not approved. (card #708 open questions 1–4)
+- [ ] Q10 (2026-11-03, y before report-only ends): What happens when report-only reaches its time box (2 weeks or 10 tasks) before Nano has set limits? Pause new claims tasks, escalate, or keep reporting? Tasks already open keep their frozen profile digest either way. (#1384 review, D42) — interim choice: none built; the report-only slice doesn't need it.
+- [ ] Q11 (2026-11-03, y for the #704 cleanup slice): A D44 cleanup needs negative limits, but a metric already at 0 can't go down. Does improving one metric with no regression in the other pass? What happens when both are 0 (skip the cleanup)? (#1384 review, D44) — interim choice: none built; needs Nano.
 - [ ] Q9 (scheduled, n): Erosion limits. Due after report-only ends (2 weeks or 10 tasks from go-live); Nano sets them from the calibration numbers. (D42)
