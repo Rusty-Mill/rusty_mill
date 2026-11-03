@@ -265,6 +265,9 @@ mod client {
         writer: Conn<UnixStream>,
         me: Takeover,
         next: u64,
+        /// The window `layout` is of, when asked for: the session's active
+        /// window, if it moved while the path was away.
+        window: Option<WindowId>,
         /// What the window shows, when asked for.
         layout: Option<Shape>,
         panes: Vec<Opened>,
@@ -1444,14 +1447,15 @@ mod client {
             _ => return Err(Missed::Dropped),
         };
         // Taken over: from here on, a failure ends the client.
-        let layout = match plan.window {
+        let (window, layout) = match plan.window {
             Some(window) => {
                 let entries = req
                     .call(|req| Message::List { req })
                     .map_err(|why| Missed::Broken(why, me))?;
-                Some(shape_of(entries, window).unwrap_or_default())
+                let (window, shape) = view_back(entries, window);
+                (Some(window), Some(shape))
             }
-            None => None,
+            None => (None, None),
         };
         let next = req.next;
         let panes = plan
@@ -1471,9 +1475,22 @@ mod client {
             writer,
             me,
             next,
+            window,
             layout,
             panes,
         })
+    }
+
+    /// The window to show on the path back, and what it shows, from the
+    /// path's List: `window`, or its session's active window if that moved
+    /// while the path was away (its event is never told).
+    fn view_back(entries: Vec<Message>, window: WindowId) -> (WindowId, Shape) {
+        let shape = shape_of(entries.clone(), window).unwrap_or_default();
+        let moved = shape.active.filter(|active| *active != window);
+        match moved.and_then(|active| Some((active, shape_of(entries, active)?))) {
+            Some(view) => view,
+            None => (window, shape),
+        }
     }
 
     /// A block's connection past its Welcome, its reader not started yet.
@@ -2364,6 +2381,10 @@ mod client {
             if let Some(listing) = self.listing.take() {
                 self.wanted.merge(listing.wants);
             }
+            if let Some(window) = back.window.filter(|w| Some(*w) != self.window) {
+                self.window = Some(window);
+                self.gone = false;
+            }
             if let Some(shape) = back.layout {
                 (self.layout, self.zoomed) = (shape.layout, shape.zoomed);
                 if let Some(focused) = shape.focused.filter(|_| self.focusing) {
@@ -2373,11 +2394,10 @@ mod client {
                 if self.layout.is_none() && self.layouts && !self.gone {
                     self.wanted.add(Why::Blocks);
                 }
-                // So may the session's active window have moved: where it
-                // is now overrides any window to show asked before.
-                let ours = self.session.is_some() && shape.session == self.session;
-                if let Some(active) = shape.active.filter(|_| ours) {
-                    self.wanted.show = Some(active).filter(|w| Some(*w) != self.window);
+                // The session's active window, shown already (see
+                // [`view_back`]), overrides any window to show asked before.
+                if shape.active.is_some() {
+                    self.wanted.show = None;
                 }
             }
             self.joined += 1;
@@ -3530,6 +3550,7 @@ mod client {
                 stream,
                 me,
                 next: 50,
+                window: None,
                 layout: None,
                 panes: vec![a, b],
             };
@@ -4118,25 +4139,71 @@ mod client {
         }
 
         /// The session's active window moved while the path was away, its
-        /// event missed: the path's List tells it, and it is shown.
+        /// event missed: the path back shows it at once, before anything
+        /// held is taken. Keys typed into A are not A's to have any more,
+        /// nor the new window's block's: neither gets them.
         #[cfg(unix)]
         #[test]
-        fn an_active_window_moved_while_the_path_was_away_is_shown() {
-            let (mut app, _inbox, _far) = following_on_a_path();
-            app.lose(false);
-            let (mut back, control, _a_new, _b_new) = back(takeover(1));
+        fn an_active_window_moved_while_the_path_was_away_is_shown_before_held_keys() {
+            let (mut app, _inbox, [_control, a_old, b_old]) = following_on_a_path();
+            let c = block(3);
+            app.standby.moving = Moving::Taking(Taking::default());
+            app.typed(input(b"kept"));
+            app.take(Input::Moved(Err(Missed::Broken(
+                "pane".into(),
+                takeover(1),
+            ))));
+            app.typed(input(b"held"));
+            assert!(!app.held.is_empty());
+            let (mut back, control, a_new, b_new) = back(takeover(1));
+            back.window = Some(window_id(9));
             back.layout = Some(Shape {
-                layout: app.layout.clone(),
+                layout: Some(Layout::Block(c)),
+                focused: Some(c),
                 session: Some(session_id(8)),
                 active: Some(window_id(9)),
                 ..Shape::default()
             });
             app.take(Input::Rejoined(Ok(back)));
-            assert!(app.listing.is_some(), "no Show was pending before");
-            let req = app.next - 1;
-            listed_as(&control, req);
-            answer_windows(&mut app, req);
             assert_eq!(app.window, Some(window_id(9)));
+            assert_eq!(app.focus, c);
+            assert!(app.listing.is_none(), "nothing left to ask");
+            assert!(app.kept.is_none() && app.held.is_empty(), "dropped");
+            for far in [&a_old, &b_old, &a_new, &b_new, &control] {
+                assert!(typed_in(&sent(far)).is_empty());
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn the_view_back_is_the_sessions_active_window() {
+            let entry = |entry| Message::Entry { req: 1, entry };
+            let window = |n: u8| {
+                entry(Entry::Window {
+                    window: window_id(n),
+                    session: session_id(8),
+                    name: String::new(),
+                    layout: Some(Layout::Block(block(n))),
+                    zoomed: None,
+                    focused: Some(block(n)),
+                })
+            };
+            let session = |active: u8| {
+                entry(Entry::Session {
+                    session: session_id(8),
+                    name: String::new(),
+                    active: Some(window_id(active)),
+                })
+            };
+            let (at, shape) = view_back(vec![session(9), window(7), window(9)], window_id(7));
+            assert_eq!(at, window_id(9));
+            assert_eq!(shape.layout, Some(Layout::Block(block(9))));
+            let (at, shape) = view_back(vec![session(7), window(7), window(9)], window_id(7));
+            assert_eq!(at, window_id(7));
+            assert_eq!(shape.layout, Some(Layout::Block(block(7))));
+            // The active window gone too: the client's own, as it is.
+            let (at, _) = view_back(vec![session(9), window(7)], window_id(7));
+            assert_eq!(at, window_id(7));
         }
 
         #[cfg(unix)]
