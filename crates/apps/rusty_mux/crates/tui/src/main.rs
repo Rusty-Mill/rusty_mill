@@ -971,6 +971,7 @@ mod client {
             follow: Follow::default(),
             session: shape.session,
             listing: None,
+            wanted: Wants::default(),
             gone: false,
             window,
             layout: shape.layout,
@@ -1772,6 +1773,8 @@ mod client {
         session: Option<SessionId>,
         /// A List asked for, with the answer so far.
         listing: Option<Listing>,
+        /// What the next List is to answer, asked while one is in flight.
+        wanted: Wants,
         /// Whether the window was closed, so an empty layout ends the
         /// client rather than showing an empty window.
         gone: bool,
@@ -1815,11 +1818,11 @@ mod client {
     /// A List asked for while running.
     struct Listing {
         req: u64,
-        why: Why,
+        wants: Wants,
         entries: Vec<Message>,
     }
 
-    /// What a [`Listing`] is for.
+    /// What a List is asked for: one answers every reason given meanwhile.
     #[derive(Debug, Clone, Copy)]
     enum Why {
         /// The session's active window moved to this one: show it.
@@ -1827,6 +1830,27 @@ mod client {
         /// The layout is empty: whether any block is left in the window,
         /// detached from its layout, or the window shows nothing for good.
         Blocks,
+    }
+
+    /// The reasons for one List, gathered. Only the latest window to show
+    /// counts.
+    #[derive(Debug, Default, Clone, Copy)]
+    struct Wants {
+        show: Option<WindowId>,
+        blocks: bool,
+    }
+
+    impl Wants {
+        fn add(&mut self, why: Why) {
+            match why {
+                Why::Show(window) => self.show = Some(window),
+                Why::Blocks => self.blocks = true,
+            }
+        }
+
+        fn is_empty(&self) -> bool {
+            self.show.is_none() && !self.blocks
+        }
     }
 
     /// A layout change that drops shown blocks. The server tells it on the
@@ -2010,53 +2034,82 @@ mod client {
             self.listing.as_ref().is_some_and(|l| l.req == req)
         }
 
-        /// Asks for a List, unless one is in flight already.
+        /// Asks for a List for `why`. One in flight answers it only if
+        /// asked before it, so then the next List, sent once that one is
+        /// in, does.
         fn list(&mut self, why: Why) {
-            if self.listing.is_some() {
+            self.wanted.add(why);
+            self.list_wanted();
+        }
+
+        /// Sends a List for what is wanted, unless one is in flight.
+        fn list_wanted(&mut self) {
+            if self.listing.is_some() || self.wanted.is_empty() {
                 return;
             }
             let req = self.request(|req| Message::List { req });
-            // 0: not sent, the path being down.
+            // 0: not sent, the path being down; still wanted.
             if req != 0 {
                 self.listing = Some(Listing {
                     req,
-                    why,
+                    wants: std::mem::take(&mut self.wanted),
                     entries: Vec::new(),
                 });
             }
         }
 
+        /// The window this client shows once the Lists asked for are in.
+        fn heading(&self) -> Option<WindowId> {
+            let listing = self.listing.as_ref().and_then(|l| l.wants.show);
+            self.wanted.show.or(listing).or(self.window)
+        }
+
         /// The List asked for while running is in.
         fn listed(&mut self) {
-            let Some(Listing { why, entries, .. }) = self.listing.take() else {
+            let Some(Listing { wants, entries, .. }) = self.listing.take() else {
                 return;
             };
-            match why {
-                Why::Show(window) => self.show_window(window, entries),
-                Why::Blocks => {
-                    let window = self.window;
-                    let left = entries.iter().any(|m| {
-                        matches!(m, Message::Entry { entry: Entry::Block { window: w, .. }, .. }
-                            if Some(*w) == window)
-                    });
-                    if !left && self.layout.is_none() {
-                        self.end(Ended::Closed);
-                    }
-                }
+            // A window to show was asked for since: this answer is stale,
+            // and the next one answers all.
+            if self.wanted.show.is_some() {
+                self.wanted.blocks |= wants.blocks;
+                return self.list_wanted();
+            }
+            let shown = wants
+                .show
+                .is_some_and(|window| self.show_window(window, entries.clone()));
+            // A window shown anew asks again once its layout is in, if empty.
+            if wants.blocks && !shown {
+                self.blocks_left(&entries);
+            }
+            self.list_wanted();
+        }
+
+        /// Ends the client if its layout is empty and `entries` list no
+        /// block left in its window.
+        fn blocks_left(&mut self, entries: &[Message]) {
+            let window = self.window;
+            let left = entries.iter().any(|m| {
+                matches!(m, Message::Entry { entry: Entry::Block { window: w, .. }, .. }
+                    if Some(*w) == window)
+            });
+            if !left && self.layout.is_none() {
+                self.end(Ended::Closed);
             }
         }
 
         /// Shows `window`, the session's active one now, as `entries` tell
-        /// it, focus and all.
-        fn show_window(&mut self, window: WindowId, entries: Vec<Message>) {
+        /// it, focus and all. Whether it was: not if gone meanwhile.
+        fn show_window(&mut self, window: WindowId, entries: Vec<Message>) -> bool {
             // Gone meanwhile: its close is told, or the next change is.
             let Some(shape) = shape_of(entries, window) else {
-                return;
+                return false;
             };
             self.window = Some(window);
             self.gone = false;
             self.relayout(shape.layout, shape.zoomed);
             self.take_focus(shape.focused);
+            true
         }
 
         /// Whether `req` asked for the new association awaited.
@@ -2634,7 +2687,10 @@ mod client {
                     }
                 }
                 Message::Done { req, .. } if self.listing(req) => self.listed(),
-                Message::Failed { req, .. } if self.listing(req) => self.listing = None,
+                Message::Failed { req, .. } if self.listing(req) => {
+                    self.listing = None;
+                    self.list_wanted();
+                }
                 Message::Failed { .. } => bell(),
                 _ => {}
             }
@@ -2659,7 +2715,7 @@ mod client {
                 Event::ActiveWindowChanged {
                     session,
                     window: Some(window),
-                } if self.session == Some(session) && Some(window) != self.window => {
+                } if self.session == Some(session) && Some(window) != self.heading() => {
                     self.list(Why::Show(window))
                 }
                 // A block detached from the empty layout may have closed.
@@ -3471,6 +3527,7 @@ mod client {
                 follow: Follow::default(),
                 session: None,
                 listing: None,
+                wanted: Wants::default(),
                 gone: false,
                 window: None,
                 layout: Some(Layout::Split {
@@ -3792,39 +3849,131 @@ mod client {
         }
 
         #[cfg(unix)]
-        #[test]
-        fn the_sessions_active_window_is_followed() {
-            let (mut app, _inbox, [control, _a, _b]) = following();
-            let (other, c) = (window_id(9), block(3));
+        fn activate(app: &mut App, window: WindowId) {
             app.on_control(Message::Event {
                 seq: None,
                 event: Event::ActiveWindowChanged {
                     session: session_id(8),
-                    window: Some(other),
+                    window: Some(window),
                 },
             });
-            let req = app.next - 1;
+        }
+
+        /// The List last sent on `control`, which must be `req`.
+        #[cfg(unix)]
+        fn listed_as(control: &UnixStream, req: u64) {
+            let asked = sent(control);
             assert!(
-                sent(&control)
+                asked
                     .iter()
-                    .any(|m| matches!(m, Message::List { req: r } if *r == req))
+                    .any(|m| matches!(m, Message::List { req: r } if *r == req)),
+                "{asked:?}"
             );
-            app.on_control(Message::Entry {
-                req,
-                entry: Entry::Window {
-                    window: other,
-                    session: session_id(8),
-                    name: "two".into(),
-                    layout: Some(Layout::Block(c)),
-                    zoomed: None,
-                    focused: Some(c),
-                },
-            });
+        }
+
+        /// Answers List `req` with windows 7, 9 and 10, each showing one
+        /// block of its own, focused.
+        #[cfg(unix)]
+        fn answer_windows(app: &mut App, req: u64) {
+            for n in [7, 9, 10] {
+                let block = block(n);
+                app.on_control(Message::Entry {
+                    req,
+                    entry: Entry::Window {
+                        window: window_id(n),
+                        session: session_id(8),
+                        name: String::new(),
+                        layout: Some(Layout::Block(block)),
+                        zoomed: None,
+                        focused: Some(block),
+                    },
+                });
+            }
             app.on_control(Message::Done { req, created: None });
             app.settle();
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn the_sessions_active_window_is_followed() {
+            let (mut app, _inbox, [control, _a, _b]) = following();
+            let other = window_id(9);
+            activate(&mut app, other);
+            let req = app.next - 1;
+            listed_as(&control, req);
+            answer_windows(&mut app, req);
             assert_eq!(app.window, Some(other));
-            assert_eq!(app.layout, Some(Layout::Block(c)));
-            assert_eq!(app.focus, c);
+            assert_eq!(app.layout, Some(Layout::Block(block(9))));
+            assert_eq!(app.focus, block(9));
+        }
+
+        /// Moves of the active window while a List is in flight are not
+        /// lost: the latest is shown, after one more List.
+        #[cfg(unix)]
+        #[test]
+        fn active_window_moves_during_a_list_end_on_the_latest() {
+            let (mut app, _inbox, [control, _a, _b]) = following();
+            // 7 → 9, then 9 → 10 before the first answer.
+            activate(&mut app, window_id(9));
+            let first = app.next - 1;
+            activate(&mut app, window_id(10));
+            assert_eq!(app.next - 1, first, "one List in flight");
+            answer_windows(&mut app, first);
+            assert_eq!(
+                app.window,
+                Some(window_id(7)),
+                "the stale answer is not shown"
+            );
+            let second = app.next - 1;
+            assert_ne!(second, first);
+            listed_as(&control, second);
+            answer_windows(&mut app, second);
+            assert_eq!(app.window, Some(window_id(10)));
+            assert_eq!(app.focus, block(10));
+
+            // 10 → 9 → 10 again: back where it was, after all.
+            activate(&mut app, window_id(9));
+            let third = app.next - 1;
+            activate(&mut app, window_id(10));
+            answer_windows(&mut app, third);
+            let fourth = app.next - 1;
+            assert_ne!(fourth, third, "the move back is asked too");
+            answer_windows(&mut app, fourth);
+            assert_eq!(app.window, Some(window_id(10)));
+        }
+
+        /// A move of the active window while the empty layout's List is in
+        /// flight is shown, and the empty window's question still answered.
+        #[cfg(unix)]
+        #[test]
+        fn an_active_window_move_during_a_blocks_list_is_shown() {
+            let (mut app, _inbox, [control, _a, _b]) = following();
+            app.on_control(Message::Event {
+                seq: None,
+                event: Event::LayoutChanged {
+                    window: window_id(7),
+                    layout: None,
+                    zoomed: None,
+                },
+            });
+            app.settle();
+            let probe = app.next - 1;
+            listed_as(&control, probe);
+            activate(&mut app, window_id(9));
+            // The probe's answer: no block left in 7, yet 9 is to be shown.
+            app.on_control(Message::Done {
+                req: probe,
+                created: None,
+            });
+            assert!(app.ended.is_none(), "a window to show is still asked for");
+            let req = app.next - 1;
+            assert_ne!(req, probe);
+            listed_as(&control, req);
+            answer_windows(&mut app, req);
+            // (Opening 9's block fails here, there being no server.)
+            assert!(!matches!(app.ended, Some(Ended::Closed)));
+            assert_eq!(app.window, Some(window_id(9)));
+            assert_eq!(app.layout, Some(Layout::Block(block(9))));
         }
 
         /// A passing program's OSC 12 reaches the terminal as it is, even
