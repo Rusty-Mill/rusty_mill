@@ -465,3 +465,31 @@ fn lookups_recover_once_the_resolver_unblocks() {
     };
     assert_eq!(c.text, r#"{"posts":[]}"#);
 }
+
+#[test]
+fn a_lens_question_is_asked_through_the_model_port() {
+    use orch_lens::{Allowed, Model, Question};
+    let (addr, seen) = serve_once(Some(response("200 OK", OK_BODY)));
+    let q = Question {
+        prefix: "intent and rules".to_owned(),
+        body: "claim C-1".to_owned(),
+        allowed: Allowed {
+            evidence: None,
+            claims: None,
+        },
+        max_output_tokens: 256,
+    };
+    let a = client(addr, None, SECS).ask(&q).expect("answers");
+    assert!(a.posts.is_empty());
+    assert_eq!((a.usage.input_tokens, a.usage.output_tokens), (40, 5));
+
+    let body = Value::parse(&seen.recv().expect("request seen").body).expect("json body");
+    assert_eq!(
+        body.pointer("/messages/1/content").and_then(Value::as_str),
+        Some("claim C-1")
+    );
+    assert_eq!(
+        body.pointer("/max_tokens").and_then(Value::as_u64),
+        Some(256)
+    );
+}

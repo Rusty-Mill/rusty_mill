@@ -7180,6 +7180,7 @@ name = "orch-openai"
 version = "0.1.0"
 dependencies = [
  "orch-dispatch",
+ "orch-lens",
  "rusty_http",
  "rusty_json",
 ]

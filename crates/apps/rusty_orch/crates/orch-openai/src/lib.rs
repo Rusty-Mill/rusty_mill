@@ -13,6 +13,8 @@
 //!   between check and connect. One deadline bounds the whole call.
 //! - The API key, when one is configured, is read from its environment
 //!   variable at call time and never appears in an error.
+//! - [`OpenAiHttp`] implements the lens runner's [`orch_lens::Model`]:
+//!   [`answer`] checks the reply with [`orch_lens::parse`].
 
 #![cfg_attr(
     not(test),
@@ -22,9 +24,11 @@
 mod address;
 mod client;
 mod config;
+mod model;
 mod wire;
 
 pub use address::{all_private, is_private};
 pub use client::{EnvLookup, OpenAiHttp, Resolve, SystemResolver, MAX_PENDING_LOOKUPS};
 pub use config::{Config, ConfigError};
+pub use model::answer;
 pub use wire::{parse_response, request_body, Completion, Prompt, Usage};
