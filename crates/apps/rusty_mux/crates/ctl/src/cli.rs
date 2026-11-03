@@ -2,6 +2,7 @@
 //! come from [`schema::CATALOG`].
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use rusty_mux_proto::Cursor;
@@ -47,18 +48,71 @@ pub enum Command {
     /// Joins stdin and stdout to the socket, for a client that runs this
     /// over SSH.
     Bridge,
+    /// Prints a completion script for a shell.
+    Completion(Shell),
 }
 
-/// `agent`: each verb but `hook` works in `--dir`, else the agent's usual
-/// config directory.
+/// `agent`: each verb but `hook` acts on the chosen agents in one scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
-    Setup(Option<PathBuf>),
-    /// Exits 0 only when the skill and hook are installed and current.
-    Status(Option<PathBuf>),
-    Remove(Option<PathBuf>),
-    /// What the session-start hook runs.
-    Hook,
+    /// With `dry_run`, reports what it would do and writes nothing.
+    Setup(AgentArgs),
+    /// Exits 0 only when every item is installed and current.
+    Status(AgentArgs),
+    Remove(AgentArgs),
+    /// What the session-start hook runs; with `name_session`, it also asks
+    /// the agent to name a session that still has a generated name after
+    /// its task.
+    Hook {
+        name_session: bool,
+    },
+}
+
+/// Which agents an `agent` verb acts on, and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentArgs {
+    /// Each named once, in the order [`AgentKind::ALL`] lists them.
+    pub agents: Vec<AgentKind>,
+    pub scope: AgentScope,
+    pub dry_run: bool,
+    /// The hook asks the agent to name its session after its task (C50):
+    /// setup installs that hook, status checks for it, and setup without
+    /// it turns it off again.
+    pub name_session: bool,
+}
+
+/// A coding agent `agent setup` knows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AgentKind {
+    Claude,
+    Codex,
+    OpenCode,
+    Pi,
+}
+
+impl AgentKind {
+    pub const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::OpenCode, Self::Pi];
+
+    /// Its name on the command line and in output.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::Pi => "pi",
+        }
+    }
+}
+
+/// Where an agent's files go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentScope {
+    /// The agent's own config directory, for every project.
+    User,
+    /// The project in the current directory, for that project only.
+    Project,
+    /// Claude Code's config directory given by `--dir`.
+    Dir(PathBuf),
 }
 
 /// What `wait` waits for, and for how long at most.
@@ -117,6 +171,36 @@ pub enum Api {
     List,
     /// One method, with its parameters as a JSON Schema.
     Describe(&'static Method),
+    /// Every method and command as one Markdown document for a language
+    /// model.
+    Llms,
+}
+
+/// A shell `completion` writes a script for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shell {
+    Bash,
+    Zsh,
+    Fish,
+    Nu,
+    PowerShell,
+}
+
+impl FromStr for Shell {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, String> {
+        match name {
+            "bash" => Ok(Self::Bash),
+            "zsh" => Ok(Self::Zsh),
+            "fish" => Ok(Self::Fish),
+            "nu" => Ok(Self::Nu),
+            "powershell" | "pwsh" => Ok(Self::PowerShell),
+            _ => Err(format!(
+                "completion: unknown shell `{name}`; expected bash, zsh, fish, nu or powershell"
+            )),
+        }
+    }
 }
 
 /// One request with its checked arguments.
@@ -214,6 +298,10 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "agent" => agent(rest).map(Command::Agent),
         "bridge" if rest.is_empty() => Ok(Command::Bridge),
         "bridge" => Err("bridge takes no arguments".into()),
+        "completion" => match rest {
+            [shell] => shell.parse().map(Command::Completion),
+            _ => Err("usage: completion bash|zsh|fish|nu|powershell".into()),
+        },
         _ => args
             .split(|a| a == "+")
             .map(|args| call(args, defaults))
@@ -234,7 +322,8 @@ fn api(args: &[String]) -> Result<Command, String> {
     match args {
         [verb] if verb == "list" => Ok(Command::Api(Api::List)),
         [verb, name] if verb == "describe" => known(name).map(|m| Command::Api(Api::Describe(m))),
-        _ => Err("usage: api list | api describe METHOD".into()),
+        [verb] if verb == "llms" => Ok(Command::Api(Api::Llms)),
+        _ => Err("usage: api list | api describe METHOD | api llms".into()),
     }
 }
 
@@ -273,22 +362,70 @@ fn watch(args: &[String]) -> Result<Command, String> {
     }
 }
 
-const AGENT_USAGE: &str = "usage: agent setup|status|remove [--dir DIR] | agent hook";
+const AGENT_USAGE: &str = "usage: agent setup|status|remove [--agent claude|codex|opencode|pi|all]... \
+     [--project | --dir DIR] [--dry-run] [--name-session] | agent hook [--name-session]";
 
 fn agent(args: &[String]) -> Result<AgentCommand, String> {
     let (verb, rest) = args.split_first().ok_or(AGENT_USAGE)?;
-    let dir = match flags("agent", rest, |_| false)?.as_slice() {
-        [] => None,
-        [("dir", dir)] if verb != "hook" => Some(PathBuf::from(dir)),
+    let make: fn(AgentArgs) -> AgentCommand = match verb.as_str() {
+        "setup" => AgentCommand::Setup,
+        "status" => AgentCommand::Status,
+        "remove" => AgentCommand::Remove,
+        "hook" => {
+            let name_session = match rest {
+                [] => false,
+                [flag] if flag == "--name-session" => true,
+                _ => return Err(AGENT_USAGE.into()),
+            };
+            return Ok(AgentCommand::Hook { name_session });
+        }
         _ => return Err(AGENT_USAGE.into()),
     };
-    match verb.as_str() {
-        "setup" => Ok(AgentCommand::Setup(dir)),
-        "status" => Ok(AgentCommand::Status(dir)),
-        "remove" => Ok(AgentCommand::Remove(dir)),
-        "hook" => Ok(AgentCommand::Hook),
-        _ => Err(AGENT_USAGE.into()),
+    let mut agents = Vec::new();
+    let mut scope = AgentScope::User;
+    let mut dry_run = false;
+    let mut name_session = false;
+    let bare = |f: &str| matches!(f, "project" | "dry-run" | "name-session");
+    for (key, text) in flags("agent", rest, bare)? {
+        match (key, &scope) {
+            ("agent", _) => agents.extend(agent_kinds(text)?),
+            ("project", AgentScope::User) if text == "true" => scope = AgentScope::Project,
+            ("dir", AgentScope::User) => scope = AgentScope::Dir(PathBuf::from(text)),
+            ("dry-run", _) if text == "true" && verb != "status" => dry_run = true,
+            ("name-session", _) if text == "true" => name_session = true,
+            _ => return Err(AGENT_USAGE.into()),
+        }
     }
+    agents.sort_unstable();
+    agents.dedup();
+    if agents.is_empty() {
+        agents.push(AgentKind::Claude);
+    }
+    if matches!(scope, AgentScope::Dir(_)) && agents != [AgentKind::Claude] {
+        return Err(
+            "agent: --dir is Claude Code's directory; use --project for other agents".into(),
+        );
+    }
+    Ok(make(AgentArgs {
+        agents,
+        scope,
+        dry_run,
+        name_session,
+    }))
+}
+
+/// The agents `--agent NAME` names.
+fn agent_kinds(name: &str) -> Result<Vec<AgentKind>, String> {
+    if name == "all" {
+        return Ok(AgentKind::ALL.to_vec());
+    }
+    AgentKind::ALL
+        .into_iter()
+        .find(|kind| kind.name() == name)
+        .map(|kind| vec![kind])
+        .ok_or_else(|| {
+            format!("agent: unknown agent `{name}`; expected claude, codex, opencode, pi or all")
+        })
 }
 
 const WAIT_USAGE: &str = "usage: wait (--block BLOCK | --window WINDOW | --session SESSION) [--timeout SECS] | wait --event KIND [--FIELD VALUE]... [--timeout SECS]";
@@ -553,74 +690,104 @@ fn reason(method: &str, error: &CallError) -> String {
     format!("{method}: {error}")
 }
 
-/// The usage text: every method, or one method's flags.
+/// The commands that are not catalog methods, with their help as [`usage`]
+/// prints it: wrapped, each further line indented to the text.
+pub(crate) const COMMANDS: &[(&str, &str)] = &[
+    (
+        "events",
+        "Print missed events: [--after EPOCH:SEQ] [--follow]",
+    ),
+    ("do", "Run a configured action: do ACTION [--ARG VALUE]..."),
+    (
+        "config",
+        "Check or list the config: config check [PATH] | config list",
+    ),
+    (
+        "watch",
+        "Run the config's rules on events: watch [--after EPOCH:SEQ]",
+    ),
+    (
+        "wait",
+        "Wait for a block's program to exit, exiting with its status;\n\
+         \x20                  for every block in a window or session to end, exiting with\n\
+         \x20                  the last failure; or for an event whose fields match:\n\
+         \x20                  wait --block BLOCK | --window WINDOW | --session SESSION |\n\
+         \x20                  wait --event KIND [--FIELD VALUE]...; [--timeout SECS] exits 124",
+    ),
+    (
+        "run",
+        "Start a program in a new block; with --wait, exit with its status:\n\
+         \x20                  run [--window W] [--cols N] [--rows N] [--cwd DIR] [--wait\n\
+         \x20                  [--timeout SECS]] [--] COMMAND [ARG]...",
+    ),
+    (
+        "agent",
+        "Set up coding agents to use rusty_mux: a skill and a session-start\n\
+         \x20                  hook: agent setup|status|remove\n\
+         \x20                  [--agent claude|codex|opencode|pi|all]... [--project | --dir DIR]\n\
+         \x20                  [--dry-run] [--name-session];\n\
+         \x20                  Claude Code when no --agent; status exits 0 only when every\n\
+         \x20                  item is current; --name-session has the agent name a session\n\
+         \x20                  that still has a generated name after its task",
+    ),
+    (
+        "bridge",
+        "Join stdin and stdout to the socket, for a client that runs\n\
+         \x20                  `ssh HOST rusty-mux-ctl bridge`",
+    ),
+    (
+        "api",
+        "List methods, describe one as JSON, or print the whole API as\n\
+         \x20                  Markdown for a language model: api list | api describe METHOD |\n\
+         \x20                  api llms",
+    ),
+    ("help", "Show a command's flags: help COMMAND"),
+    (
+        "completion",
+        "Print a shell completion script: completion bash|zsh|fish|nu|powershell",
+    ),
+];
+
+/// The usage text: every command, or one method's flags.
 pub fn usage(method: Option<&Method>) -> String {
-    match method {
-        None => {
-            let mut text = String::from(
-                "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
-                 The socket defaults to $RUSTY_MUX_SOCKET. An id flag also takes a name, a\n\
-                 position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
-                 defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\
-                 Actions come from $RUSTY_MUX_CONFIG, or rusty_mux/config.json in the\n\
-                 config directory.\n\ncommands:\n",
-            );
-            for m in schema::CATALOG {
-                text.push_str(&format!("  {:<16} {}\n", m.name, m.doc));
-            }
-            text.push_str(
-                "  events           Print missed events: [--after EPOCH:SEQ] [--follow]\n",
-            );
-            text.push_str(
-                "  do               Run a configured action: do ACTION [--ARG VALUE]...\n",
-            );
-            text.push_str(
-                "  config           Check or list the config: config check [PATH] | config list\n",
-            );
-            text.push_str(
-                "  watch            Run the config's rules on events: watch [--after EPOCH:SEQ]\n",
-            );
-            text.push_str(
-                "  wait             Wait for a block's program to exit, exiting with its status;\n\
-                 \x20                  for every block in a window or session to end, exiting with\n\
-                 \x20                  the last failure; or for an event whose fields match:\n\
-                 \x20                  wait --block BLOCK | --window WINDOW | --session SESSION |\n\
-                 \x20                  wait --event KIND [--FIELD VALUE]...; [--timeout SECS] exits 124\n",
-            );
-            text.push_str(
-                "  run              Start a program in a new block; with --wait, exit with its status:\n\
-                 \x20                  run [--window W] [--cols N] [--rows N] [--cwd DIR] [--wait\n\
-                 \x20                  [--timeout SECS]] [--] COMMAND [ARG]...\n",
-            );
-            text.push_str(
-                "  agent            Set up Claude Code to use rusty_mux: a skill and a session-start\n\
-                 \x20                  hook in $CLAUDE_CONFIG_DIR or ~/.claude: agent setup|status|remove\n\
-                 \x20                  [--dir DIR]; status exits 0 only when both are current\n",
-            );
-            text.push_str(
-                "  bridge           Join stdin and stdout to the socket, for a client that runs\n\
-                 \x20                  `ssh HOST rusty-mux-ctl bridge`\n",
-            );
-            text.push_str("  api              List methods, or describe one as JSON: api list | api describe METHOD\n");
-            text.push_str("  help             Show a command's flags: help COMMAND\n");
-            text
+    let Some(m) = method else {
+        let mut text = String::from(
+            "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
+             The socket defaults to $RUSTY_MUX_SOCKET. An id flag also takes a name, a\n\
+             position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
+             defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\
+             Actions come from $RUSTY_MUX_CONFIG, or rusty_mux/config.json in the\n\
+             config directory.\n\ncommands:\n",
+        );
+        for m in schema::CATALOG {
+            text.push_str(&format!("  {:<16} {}\n", m.name, m.doc));
         }
-        Some(m) => {
-            let mut text = format!("usage: rusty-mux-ctl {}", m.name);
-            for p in m.params {
-                text.push_str(&match (p.presence, p.ty) {
-                    (Presence::Optional { .. }, Ty::Flag) => format!(" [--{}]", p.name),
-                    (Presence::Required, _) => format!(" --{} <{}>", p.name, p.ty),
-                    (Presence::Optional { .. }, _) => format!(" [--{} <{}>]", p.name, p.ty),
-                });
-            }
-            text.push_str(&format!("\n{}\n", m.doc));
-            for p in m.params {
-                text.push_str(&format!("  --{:<10} {}\n", p.name, p.doc));
-            }
-            text
+        for (name, help) in COMMANDS {
+            text.push_str(&format!("  {name:<16} {help}\n"));
         }
+        return text;
+    };
+    let mut text = format!("usage: {}\n{}\n", synopsis(m), m.doc);
+    for p in m.params {
+        text.push_str(&format!("  --{:<10} {}\n", p.name, p.doc));
     }
+    text
+}
+
+/// `m` as a command line: `rusty-mux-ctl NAME` and its flags, optional
+/// ones in brackets.
+pub(crate) fn synopsis(m: &Method) -> String {
+    let mut text = format!("rusty-mux-ctl {}", m.name);
+    for p in m.params {
+        text.push_str(&match (p.presence, p.ty) {
+            (Presence::Optional { .. }, Ty::Flag) => format!(" [--{}]", p.name),
+            (Presence::Required, _) => format!(" --{} <{}>", p.name, p.ty),
+            (Presence::Optional { .. } | Presence::Defaulted { .. }, _) => {
+                format!(" [--{} <{}>]", p.name, p.ty)
+            }
+        });
+    }
+    text
 }
 
 #[cfg(test)]

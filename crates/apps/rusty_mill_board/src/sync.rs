@@ -199,12 +199,8 @@ fn split_marker(body: &str) -> (String, Option<Marker>) {
     (body.to_owned(), None)
 }
 
-fn column_label(column: Column) -> String {
-    let name = serde_json::to_value(column)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_default();
-    format!("{BOARD_PREFIX}{name}")
+fn column_label(column: &Column) -> String {
+    format!("{BOARD_PREFIX}{column}")
 }
 
 /// Text hash of an issue, ignoring the marker.
@@ -230,7 +226,7 @@ fn draft(
                 .collect()
         })
         .unwrap_or_default();
-    labels.push(column_label(card.column));
+    labels.push(column_label(&card.column));
     for tag in &card.tags {
         if !labels.contains(tag) {
             labels.push(tag.clone());
@@ -240,7 +236,7 @@ fn draft(
         title: text.0.to_owned(),
         body: marker.map_or_else(|| text.1.to_owned(), |m| with_marker(text.1, m)),
         labels,
-        closed: card.column == Column::Done || existing.is_some_and(|i| i.closed),
+        closed: card.column == Column::DONE || existing.is_some_and(|i| i.closed),
     }
 }
 
@@ -430,7 +426,7 @@ fn sync_pair(
             None => report.unresolved.push(issue.number),
         }
     }
-    if issue.closed && card.column != Column::Done {
+    if issue.closed && card.column != Column::DONE {
         report.drift.push(issue.number);
     }
     let text = if push_text {
@@ -628,7 +624,7 @@ mod tests {
         let forge = Fake::default();
         reconcile(&b, &forge).expect("sync");
         forge.edit(1, |i| i.labels.push("bug".into()));
-        b.move_card(card.id, Column::Ready, &h).expect("move");
+        b.move_card(card.id, &Column::READY, &h).expect("move");
 
         let r = reconcile(&b, &forge).expect("sync");
         assert_eq!(r.issues_updated, 1);
@@ -642,11 +638,11 @@ mod tests {
         let card = b.add(&h, "Ship", "", vec![]).expect("add");
         let forge = Fake::default();
         reconcile(&b, &forge).expect("sync");
-        b.move_card(card.id, Column::Ready, &h).expect("move");
-        b.move_card(card.id, Column::Building, &h).expect("move");
-        for to in [Column::Qa, Column::Review, Column::Done] {
+        b.move_card(card.id, &Column::READY, &h).expect("move");
+        b.move_card(card.id, &Column::BUILDING, &h).expect("move");
+        for to in [Column::QA, Column::REVIEW, Column::DONE] {
             b.claim(card.id, &h).expect("claim");
-            b.move_card(card.id, to, &h).expect("move");
+            b.move_card(card.id, &to, &h).expect("move");
         }
         reconcile(&b, &forge).expect("sync");
         assert!(forge.get(1).closed);
@@ -734,7 +730,7 @@ mod tests {
         forge.edit(1, |i| i.title = "Edited on GitHub".into()); // t2
         b.comment(card.id, &h, "unrelated board activity")
             .expect("comment"); // t3, newer than t2
-        b.move_card(card.id, Column::Ready, &h).expect("move");
+        b.move_card(card.id, &Column::READY, &h).expect("move");
 
         let r = reconcile(&b, &forge).expect("sync");
         assert_eq!((r.cards_pulled, r.conflicts.len()), (1, 0));
@@ -1205,7 +1201,7 @@ mod tests {
         let r = reconcile(&b, &forge).expect("sync");
         assert_eq!((r.drift.clone(), r.issues_updated), (vec![1], 0));
         assert!(forge.get(1).closed);
-        assert_eq!(b.get(card.id).expect("card").column, Column::Backlog);
+        assert_eq!(b.get(card.id).expect("card").column, Column::BACKLOG);
     }
 
     #[test]

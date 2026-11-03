@@ -443,6 +443,9 @@ struct Shared {
     right_asked: (Mutex<bool>, Condvar),
     /// Events for the control connection to send.
     events: Mutex<Sender<Event>>,
+    /// Set once the script closed the window's blocks: a List then lists
+    /// none, as a server's does once a window's last block closed.
+    emptied: AtomicBool,
 }
 
 impl Shared {
@@ -474,6 +477,7 @@ fn layout_server(script: Script) -> (PathBuf, Arc<Shared>) {
         log: Mutex::default(),
         right_asked: (Mutex::new(false), Condvar::new()),
         events: Mutex::new(events),
+        emptied: AtomicBool::new(false),
     });
     let server = shared.clone();
     std::thread::spawn(move || {
@@ -526,8 +530,13 @@ fn serve_control(stream: Stream, shared: &Shared) {
                     name: "main".into(),
                     layout: Some(shared.layout()),
                     zoomed: None,
+                    focused: None,
                 }];
-                for block in shared.layout().blocks() {
+                let blocks = match shared.emptied.load(Ordering::Acquire) {
+                    true => Vec::new(),
+                    false => shared.layout().blocks(),
+                };
+                for block in blocks {
                     entries.push(Entry::Block {
                         block,
                         window,
@@ -604,6 +613,7 @@ fn serve_layout_block(mut conn: Conn<Stream>, shared: &Shared) {
                 conn.send(&Message::Done { req, created: None })
                     .expect("lease");
                 if block == left && script.close {
+                    shared.emptied.store(true, Ordering::Release);
                     shared.tell(layout_changed(shared.window, None, None));
                     last_words(&mut conn, block, b"FINAL");
                 }
@@ -824,6 +834,7 @@ fn real_server_with(udp: Option<Duration>) -> (PathBuf, Option<u16>) {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                config_file: None,
             };
             let Some(idle) = udp else {
                 ready_tx.send(None).expect("ready");
@@ -1638,13 +1649,16 @@ fn a_block_zoomed_away_and_back_is_leased_again_at_once() {
     assert!(text.contains("detached from block"), "{text:?}");
 }
 
-/// A client of the server at `socket` that can change layouts.
+/// A client of the server at `socket` that can change and edit layouts
+/// and move the focus.
 fn control(socket: &Path) -> Conn<Stream> {
     let mut conn = Conn::new(Stream::connect(socket).expect("connect"));
     conn.send(&Message::Hello {
         features: Features::CHECKPOINT_V6
             .union(Features::INSPECT)
-            .union(Features::LAYOUT),
+            .union(Features::LAYOUT)
+            .union(Features::LAYOUT_EDIT)
+            .union(Features::FOCUS),
         resume: None,
         takeover: None,
     })
@@ -1795,4 +1809,121 @@ fn predictions_stay_off_on_a_fast_path_or_when_switched_off() {
         assert!(!tui.saw(AHEAD), "{name}: drew a prediction");
         detach_ssh(tui, &work);
     }
+}
+
+/// The window's layout blocks and focus, and the blocks holding a lease.
+#[derive(Debug, Default, PartialEq)]
+struct Seen {
+    window: Option<WindowId>,
+    layout: Vec<BlockId>,
+    focused: Option<BlockId>,
+    leased: Vec<BlockId>,
+    blocks: Vec<BlockId>,
+}
+
+fn look(conn: &mut Conn<Stream>) -> Seen {
+    let mut seen = Seen::default();
+    for entry in list(conn) {
+        match entry {
+            Entry::Window {
+                window,
+                layout,
+                focused,
+                ..
+            } => {
+                seen.window = Some(window);
+                seen.layout = layout.map(|l| l.blocks()).unwrap_or_default();
+                seen.focused = focused;
+            }
+            Entry::Block { block, holder, .. } => {
+                seen.blocks.push(block);
+                if holder.is_some() {
+                    seen.leased.push(block);
+                }
+            }
+            _ => {}
+        }
+    }
+    seen
+}
+
+/// Lists until the server shows what `wanted` accepts.
+fn until(conn: &mut Conn<Stream>, wanted: impl Fn(&Seen) -> bool) -> Seen {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let seen = look(conn);
+        if wanted(&seen) {
+            return seen;
+        }
+        assert!(Instant::now() < deadline, "never: {seen:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The attach client follows the window's shared focus (taking the
+/// focused block's lease), edits the layout with its keys, and keeps an
+/// empty window open until a block is moved back.
+#[test]
+fn the_client_follows_the_shared_focus_and_edits_the_layout() {
+    let socket = real_server();
+    let tui = Tui::run(&[socket.as_os_str()], EnvSpec::Inherit);
+    type_until(&tui, b"echo one-$((1+0))\r", b"one-1");
+    let mut conn = control(&socket);
+    let seen = until(&mut conn, |s| s.leased.len() == 1);
+    let a = seen.leased[0];
+    let req = 1;
+    let split = Message::Split {
+        req,
+        block: a,
+        side: rusty_mux_core::Side::Right,
+        launch: rusty_mux_proto::Launch::default(),
+    };
+    conn.send(&split).expect("split");
+    let b = loop {
+        match conn.recv().expect("split answer") {
+            Message::Done {
+                req: r,
+                created: Some(id),
+            } if r == req => break BlockId::from_uuid(id),
+            Message::Failed { reason, .. } => panic!("{reason}"),
+            _ => {}
+        }
+    };
+
+    // An agent's split does not take the focus; focusing B does, and the
+    // client follows, leasing B and giving A back.
+    let seen = until(&mut conn, |s| s.layout == [a, b]);
+    assert_eq!(seen.focused, Some(a));
+    ask(&mut conn, 2, Message::FocusBlock { req: 2, block: b });
+    until(&mut conn, |s| s.leased == [b]);
+    // The client's own focus keys move the shared focus.
+    tui.master.write(b"\x1dh").expect("ctrl-] h");
+    until(&mut conn, |s| s.focused == Some(a) && s.leased == [a]);
+    tui.master.write(b"\x1dl").expect("ctrl-] l");
+    until(&mut conn, |s| s.focused == Some(b) && s.leased == [b]);
+
+    // Ctrl-] D detaches the focused block; the focus passes to A.
+    tui.master.write(b"\x1dD").expect("ctrl-] D");
+    let seen = until(&mut conn, |s| s.layout == [a]);
+    assert_eq!(seen.focused, Some(a));
+    assert!(seen.blocks.contains(&b), "B keeps running: {seen:?}");
+    until(&mut conn, |s| s.leased == [a]);
+
+    // Detaching A too leaves the window empty, and the client open.
+    tui.master.write(b"\x1dD").expect("ctrl-] D");
+    until(&mut conn, |s| s.layout.is_empty() && s.leased.is_empty());
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(!tui.saw(b"closed"), "the client must stay open");
+
+    // Moved back by an agent, A shows and is leased again.
+    let back = Message::MoveBlock {
+        req: 3,
+        block: a,
+        beside: None,
+        side: rusty_mux_core::Side::Right,
+    };
+    ask(&mut conn, 3, back);
+    until(&mut conn, |s| s.leased == [a]);
+    let text = detach(tui);
+    assert!(text.contains("detached from block"), "{text:?}");
 }

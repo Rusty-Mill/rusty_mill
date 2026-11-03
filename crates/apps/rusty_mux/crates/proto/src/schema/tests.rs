@@ -30,6 +30,13 @@ fn samples(method: &Method) -> Vec<(&'static str, Value)> {
         .map(|p| match p.name {
             // Text, but one of four words.
             "side" => (p.name, Value::Text("right".into())),
+            "axis" => (p.name, Value::Text("rows".into())),
+            "toward" => (p.name, Value::Text("next".into())),
+            // A number, but a share from 1 to 99.
+            "percent" => (p.name, Value::Lines(30)),
+            // Text, but a colour.
+            "foreground" | "background" | "cursor" => (p.name, Value::Text("#102030".into())),
+            "palette" => (p.name, Value::Words(vec!["1=#cc0000".into()])),
             _ => (p.name, sample(p.ty)),
         })
         .collect()
@@ -86,10 +93,12 @@ fn catalog_covers_each_request_type_once() {
     let unique: BTreeSet<u8> = types.iter().copied().collect();
     assert_eq!(unique.len(), types.len(), "two methods build one type");
     // 0x0d was Capture; 0x0f is BlockCall, 0x10 Rename. 0x15, OpenDatagram,
-    // is the attach client's own, not an agent's; 0x16 is Whoami.
+    // is the attach client's own, not an agent's; 0x16 is Whoami, 0x17
+    // SelectWindow, 0x18 ReloadConfig, 0x19 to 0x1d the layout edits,
+    // 0x1e and 0x1f focus, 0x20 NameSession.
     let expected = (0x02..=0x14)
         .filter(|t| ![0x0d, 0x0f, 0x10].contains(t))
-        .chain([0x16]);
+        .chain(0x16..=0x20);
     assert_eq!(unique, expected.collect());
     assert!(block.iter().all(|m| ty(m) == 0x0f));
     assert_eq!(renames.len(), 4);
@@ -111,21 +120,51 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.pwd",
             "terminal.title",
             "terminal.status",
-            "terminal.process"
+            "terminal.process",
+            "terminal.size",
+            "terminal.reset",
+            "terminal.set-theme",
+            "terminal.modes",
+            "terminal.clear",
+            "terminal.shell"
         ]
     );
+    let control = ["terminal.size", "terminal.reset", "terminal.set-theme"];
+    let more = ["terminal.modes", "terminal.clear"];
     for name in block_methods {
         let method = block_method(name).expect(name);
         assert_eq!(method.params[0].ty, Ty::Id(Entity::Block), "{name}");
-        assert_eq!(method.needs, Features::BLOCK_CALL, "{name}");
-        let writes = name == "terminal.send-keys";
-        let returns = if writes {
-            Returns::Unanswered
-        } else {
-            Returns::Text
+        let needs = match (control.contains(&name), more.contains(&name), name) {
+            (true, _, _) => Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL),
+            (_, true, _) => Features::BLOCK_CALL.union(Features::TERMINAL_MORE),
+            (_, _, "terminal.shell") => Features::BLOCK_CALL.union(Features::TERMINAL_SHELL),
+            _ => Features::BLOCK_CALL,
+        };
+        assert_eq!(method.needs, needs, "{name}");
+        let returns = match name {
+            "terminal.send-keys" => Returns::Unanswered,
+            "terminal.reset" | "terminal.set-theme" | "terminal.clear" => Returns::Nothing,
+            _ => Returns::Text,
         };
         assert_eq!(method.returns, returns, "{name}");
     }
+    // A theme is checked whole before anything is sent.
+    let theme = method("terminal.set-theme").expect("set-theme");
+    let block = ("block", Value::Id(id(1)));
+    assert!(matches!(
+        theme.request(1, std::slice::from_ref(&block)),
+        Err(CallError::Invalid {
+            param: "palette",
+            ..
+        })
+    ));
+    assert!(matches!(
+        theme.request(1, &[block, ("background", Value::Text("red".into()))]),
+        Err(CallError::Invalid {
+            param: "background",
+            ..
+        })
+    ));
     let format = method("terminal.format").expect("format");
     let args = [("history", Value::Lines(3)), ("block", Value::Id(id(1)))];
     assert_eq!(
@@ -191,6 +230,21 @@ fn methods_need_the_features_their_messages_are_gated_by() {
     for name in ["split-block", "zoom-block", "unzoom-window"] {
         assert_eq!(needs(name), Features::LAYOUT, "{name}");
     }
+    assert_eq!(needs("select-window"), Features::ACTIVE_WINDOW);
+    for name in [
+        "resize-split",
+        "swap-blocks",
+        "move-block",
+        "detach-block",
+        "move-window",
+    ] {
+        assert_eq!(needs(name), Features::LAYOUT_EDIT, "{name}");
+    }
+    for name in ["focus-block", "move-focus"] {
+        assert_eq!(needs(name), Features::FOCUS, "{name}");
+    }
+    assert_eq!(needs("reload-config"), Features::CONFIG_RELOAD);
+    assert_eq!(needs("name-session"), Features::NAME_SESSION);
 }
 
 #[test]
@@ -238,13 +292,26 @@ fn optional_parameters_add_their_features_only_when_given() {
     let optional: Vec<&str> = CATALOG
         .iter()
         .flat_map(|m| m.params)
-        .filter(|p| p.presence != Presence::Required)
+        .filter(|p| matches!(p.presence, Presence::Optional { .. }))
         .map(|p| p.name)
         .collect();
     assert_eq!(
         optional,
         [
-            "command", "arg", "cwd", "command", "arg", "cwd", "trim", "unwrap", "vt"
+            "command",
+            "arg",
+            "cwd",
+            "command",
+            "arg",
+            "cwd",
+            "beside",
+            "trim",
+            "unwrap",
+            "vt",
+            "foreground",
+            "background",
+            "cursor",
+            "palette"
         ]
     );
     let format = method("terminal.format").expect("format");
@@ -429,4 +496,86 @@ fn split_names_its_side_and_launch() {
         method.needs_for(["block", "side", "cwd"]),
         Features::LAYOUT.union(Features::LAUNCH)
     );
+}
+
+#[test]
+fn layout_edits_check_their_axis_share_and_neighbour() {
+    let block = ("block", Value::Id(id(1)));
+    let resize = method("resize-split").expect("resize-split");
+    let args = |axis: &str, percent| {
+        [
+            block.clone(),
+            ("axis", Value::Text(axis.into())),
+            ("percent", Value::Lines(percent)),
+        ]
+    };
+    assert_eq!(
+        resize.request(1, &args("cols", 25)),
+        Ok(Message::ResizeSplit {
+            req: 1,
+            block: BlockId::from_uuid(id(1)),
+            axis: Axis::Columns,
+            share: Share::new(25).expect("in range"),
+        })
+    );
+    for percent in [0, 100, 256] {
+        assert!(
+            matches!(
+                resize.request(1, &args("rows", percent)),
+                Err(CallError::Invalid {
+                    param: "percent",
+                    ..
+                })
+            ),
+            "{percent}"
+        );
+    }
+    assert!(matches!(
+        resize.request(1, &args("left", 50)),
+        Err(CallError::Invalid { param: "axis", .. })
+    ));
+    let move_block = method("move-block").expect("move-block");
+    let side = ("side", Value::Text("up".into()));
+    assert_eq!(
+        move_block.request(2, &[block.clone(), side.clone()]),
+        Ok(Message::MoveBlock {
+            req: 2,
+            block: BlockId::from_uuid(id(1)),
+            beside: None,
+            side: Side::Up,
+        })
+    );
+    assert_eq!(
+        move_block.request(2, &[block, ("beside", Value::Id(id(2))), side]),
+        Ok(Message::MoveBlock {
+            req: 2,
+            block: BlockId::from_uuid(id(1)),
+            beside: Some(BlockId::from_uuid(id(2))),
+            side: Side::Up,
+        })
+    );
+}
+
+#[test]
+fn a_defaulted_parameter_adds_its_features_only_when_left_out() {
+    let create = method("create-session").expect("create-session");
+    let defaulted: Vec<&str> = CATALOG
+        .iter()
+        .flat_map(|m| m.params)
+        .filter(|p| matches!(p.presence, Presence::Defaulted { .. }))
+        .map(|p| p.name)
+        .collect();
+    assert_eq!(defaulted, ["name"]);
+    assert_eq!(create.needs_for(["name"]), Features::NONE);
+    assert_eq!(create.needs_for([]), Features::SESSION_NAMES);
+    assert_eq!(create.all_needs(), Features::SESSION_NAMES);
+    assert_eq!(
+        create.request(4, &[]),
+        Ok(Message::CreateSession {
+            req: 4,
+            name: String::new()
+        })
+    );
+    let launch = method("create-block").expect("create-block");
+    assert_eq!(launch.all_needs(), Features::LAUNCH);
 }

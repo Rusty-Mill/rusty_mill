@@ -13,12 +13,15 @@ use std::time::Duration;
 use orch_codex::CodexAgent;
 use orch_core::board::Board;
 use orch_core::goal::{Goal, GoalDraft, StopRule};
-use orch_core::task::{Agent, Plan, Role, Task, TaskSpec, TaskState};
+use orch_core::task::{AgentId, Plan, Role, Task, TaskSpec, TaskState};
 use orch_core::{GoalId, Ref, Text};
 use orch_dispatch::{
     AgentError, AgentRunner, ClassifiedError, Dispatcher, Ledger, Output, Routing, RoutingConfig,
 };
 use orch_ollama::OllamaAgent;
+
+const CODEX: AgentId = AgentId::from_static("codex");
+const LOCAL: AgentId = AgentId::from_static("local");
 
 /// One runner per agent; the dispatcher only ever hands us the agent it routed.
 struct Agents {
@@ -27,31 +30,36 @@ struct Agents {
 }
 
 impl AgentRunner for Agents {
-    fn supports(&self, agent: Agent, role: Role) -> bool {
+    fn supports(&self, agent: AgentId, role: Role) -> bool {
         match agent {
-            Agent::Codex => self.codex.supports(agent, role),
-            Agent::Local => self.local.supports(agent, role),
+            CODEX => self.codex.supports(agent, role),
+            LOCAL => self.local.supports(agent, role),
             _ => false,
         }
     }
 
-    fn run(&mut self, agent: Agent, task: &Task, board: &Board) -> Result<Vec<Output>, AgentError> {
+    fn run(
+        &mut self,
+        agent: AgentId,
+        task: &Task,
+        board: &Board,
+    ) -> Result<Vec<Output>, AgentError> {
         match agent {
-            Agent::Codex => self.codex.run(agent, task, board),
-            Agent::Local => self.local.run(agent, task, board),
+            CODEX => self.codex.run(agent, task, board),
+            LOCAL => self.local.run(agent, task, board),
             other => Err(AgentError(format!("no adapter for {other:?}"))),
         }
     }
 
     fn run_classified(
         &mut self,
-        agent: Agent,
+        agent: AgentId,
         task: &Task,
         board: &Board,
     ) -> Result<Vec<Output>, ClassifiedError> {
         match agent {
-            Agent::Codex => self.codex.run_classified(agent, task, board),
-            Agent::Local => self.local.run_classified(agent, task, board),
+            CODEX => self.codex.run_classified(agent, task, board),
+            LOCAL => self.local.run_classified(agent, task, board),
             other => Err(ClassifiedError::Permanent(AgentError(format!(
                 "no adapter for {other:?}"
             )))),
@@ -86,11 +94,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut board = Board::new(id);
     let mut ledger = Ledger::new();
     let routing = Routing::try_from(RoutingConfig {
-        research: Agent::Codex,
-        design: Agent::Codex,
-        implement: Agent::Codex,
-        triage: Agent::Local,
-        reviewers: vec![Agent::Local, Agent::Codex],
+        research: CODEX,
+        design: CODEX,
+        implement: CODEX,
+        triage: LOCAL,
+        reviewers: vec![LOCAL, CODEX],
     })?;
     let mut dispatcher = Dispatcher::new(
         routing,

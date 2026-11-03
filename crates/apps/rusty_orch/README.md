@@ -3,7 +3,7 @@
 A small orchestrator that lets Claude, ChatGPT (Codex), and local models (Ollama/Hermes) collaborate on development research and tasks without a human relaying context between them. Agents never message each other: they read and write a shared, append-only blackboard and a git repo, and a deterministic dispatcher hands each one a task card.
 
 ## Status
-Experimental. Domain core (`orch-core`), an in-memory dispatcher (`orch-dispatch`), a shared CLI-adapter core (`orch-cli`), three real adapters (`orch-ollama` for `Agent::Local`, `orch-codex` for `Agent::Codex`, `orch-claude` for `Agent::Claude`, both read-only), a snapshot store (`orch-store`) over the embedded `rusty_multimodal_db` engine, and the `rusty_orch` command that runs a JSON goal file through them and resumes a blocked run from `--state <dir>`. Owner: @baileyrd.
+Experimental. Domain core (`orch-core`), an in-memory dispatcher (`orch-dispatch`), a shared CLI-adapter core (`orch-cli`), three real adapters (`orch-ollama` for `local`, `orch-codex` for `codex`, `orch-claude` for `claude`, both read-only), a snapshot store (`orch-store`) over the embedded `rusty_multimodal_db` engine, and the `rusty_orch` command that runs a JSON goal file through them and resumes a blocked run from `--state <dir>`. Owner: @baileyrd.
 
 ## Getting started
 ```powershell
@@ -19,10 +19,12 @@ ORCH_OLLAMA_MODEL=llama3.2 cargo run -p orch-codex --example research_review -- 
 | `crates/orch-core` | Pure domain: goal contracts, task cards + `Plan`, blackboard. No I/O, no dependencies. |
 | `crates/orch-dispatch` | Application layer: `AgentRunner` port, validated role → agent routing, sequential loop over `Plan` metered by a caller-owned `Ledger`. Depends only on `orch-core`. `FakeAgent` behind the `fake` feature. |
 | `crates/orch-cli` | Shared CLI-adapter core: `CommandRunner`/`StdCommand` seam (hard deadline, group kill, env scrub, working directory), strict JSON `parse`, prompt `render` with a per-adapter footer, the reply `output_schema`, `fake` test doubles. The kinds a role may write depend on the goal's stop rule: best effort withdraws `question` ([ADR-0011](./docs/adr/0011-best-effort-stop-rule.md)). |
-| `crates/orch-ollama` | `Agent::Local` over `ollama run --format json`: thin adapter on `orch-cli`. `research` example runs one card end to end. |
+| `crates/orch-ollama` | The `local` provider over `ollama run --format json`: thin adapter on `orch-cli`. `research` example runs one card end to end. |
 | `crates/rusty_orch` | The command: `rusty_orch run <goal.json> [--interactive] [--json]`. Parses the goal file, wires both adapters, enforces the wall clock, prints the board. ADR-0009. |
-| `crates/orch-codex` | `Agent::Codex` over `codex exec --sandbox read-only`, schema-constrained reply via the last-message file, `OPENAI_API_KEY` scrubbed. `research_review` example: Codex researches, a local model reviews. |
-| `crates/orch-claude` | `Agent::Claude` over `claude -p --tools Read,Grep,Glob --restricted`, schema-constrained reply read from the JSON result envelope, a `claude auth status` probe before each run, `ANTHROPIC_API_KEY` and provider overrides scrubbed ([ADR-0012](./docs/adr/0012-claude-adapter.md)). |
+| `crates/orch-codex` | The `codex` provider over `codex exec --sandbox read-only`, schema-constrained reply via the last-message file, `OPENAI_API_KEY` scrubbed. `research_review` example: Codex researches, a local model reviews. |
+| `crates/orch-claude` | The `claude` provider over `claude -p --tools Read,Grep,Glob --restricted`, schema-constrained reply read from the JSON result envelope, a `claude auth status` probe before each run, `ANTHROPIC_API_KEY` and provider overrides scrubbed ([ADR-0012](./docs/adr/0012-claude-adapter.md)). |
+| `crates/orch-lens` | The lens runner's pure core (Let Em Loose #594): `Model` port, strict reply protocol, config checks, context assembly, data classes, tiering, money meter, scheduler ([ADR-0021](./docs/adr/0021-lens-runner-core.md)). |
+| `crates/orch-openai` | One OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only, on `rusty_http`. For llama-swap in the lens runner ([ADR-0020](./docs/adr/0020-openai-http-adapter.md)). |
 | `crates/orch-store` | Persistence: one snapshot record per goal (plan, board, ledger, goal-file fingerprint) in `rusty_multimodal_db_engine`, rebuilt on load through the domain's constructors. The family's one crate with registry dependencies ([ADR-0010](./docs/adr/0010-persistence-on-multimodal-db.md)). |
 
 ## Architecture

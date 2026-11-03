@@ -30,6 +30,6 @@ pub use exec::{
     excerpt, scrub_env, CommandRunner, ExecError, Exit, StdCommand, BOARD_TOKEN_ENV, EXCERPT_CHARS,
     JOIN_GRACE, MAX_STDOUT_BYTES, PARENT_SECRETS,
 };
-pub use parse::{allowed_kinds, parse, parse_ref, MAX_BODY_CHARS, MAX_ENTRIES};
+pub use parse::{allowed_kinds, parse, parse_ref, unfence, MAX_BODY_CHARS, MAX_ENTRIES};
 pub use prompt::{format_spec, render, BEST_EFFORT_RULES};
 pub use schema::output_schema;

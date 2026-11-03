@@ -38,6 +38,7 @@ pub fn parse_state(s: &str) -> Result<State, String> {
         "merge_gate" => State::MergeGate,
         "approved" => State::Approved,
         "escalated" => State::Escalated,
+        "open" => State::Open,
         other => return Err(format!("unknown state {other}")),
     })
 }
@@ -107,6 +108,15 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
         "answer" => {
             HumanAction::Post(Draft::new(MessageKind::Answer, rest(1)).reply_to(msg(a(0)?)?))
         }
+        // Claims mode (C-R10): the human's clarification of the intent. It refs
+        // the brief; `task` targets the whole task, `msg:N` replies to a claim.
+        "refine" => {
+            let d = Draft::new(MessageKind::Answer, rest(2)).refs(vec![Ref::art(art(a(1)?)?)]);
+            HumanAction::Post(match a(0)? {
+                "task" => d,
+                target => d.reply_to(msg(target)?),
+            })
+        }
         "rerun" => HumanAction::Rerun {
             candidate: art(a(0)?)?,
             expected_rev: rev()?,
@@ -128,6 +138,50 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
         "cancel" => HumanAction::Cancel {
             expected_rev: rev()?,
             reason: rest(0),
+        },
+        // Claims mode (C-R8, C-R9).
+        "claim" => HumanAction::ClaimDecision {
+            claim: msg(a(0)?)?,
+            outcome: match a(1)? {
+                "accept" => ClaimOutcome::Accept,
+                "drop" => ClaimOutcome::Drop,
+                "reopen" => ClaimOutcome::Reopen,
+                other => {
+                    return Err(format!(
+                        "claim outcome must be accept, drop or reopen, got {other}"
+                    ))
+                }
+            },
+        },
+        "choose" => HumanAction::Choose {
+            question: msg(a(0)?)?,
+            chosen: msg(a(1)?)?,
+        },
+        "extend-claim" => HumanAction::ClaimBudgetExtended { claim: msg(a(0)?)? },
+        "withdraw-rerun" => HumanAction::WithdrawRerun {
+            candidate: art(a(0)?)?,
+        },
+        "action-result" => HumanAction::ClaimActionResult {
+            mark: a(0)?
+                .trim_start_matches("mark:")
+                .parse()
+                .map_err(|_| "mark must be a number".to_owned())?,
+            outcome: match a(1)? {
+                "done" => MarkOutcome::Done,
+                "aborted" => MarkOutcome::Aborted,
+                other => {
+                    return Err(format!(
+                        "action result must be done or aborted, got {other}"
+                    ))
+                }
+            },
+        },
+        "close" => HumanAction::Close {
+            expected_rev: rev()?,
+        },
+        // #597 G3: adopt a staged holdout suite that changes or removes tests.
+        "holdout-updated" => HumanAction::HoldoutUpdated {
+            digest: Sha256::from_hex(a(0)?).ok_or("holdout digest must be 64 hex digits")?,
         },
         other => return Err(format!("unknown human action {other}")),
     })
@@ -180,6 +234,9 @@ pub fn perform_as(
     by: &str,
 ) -> Result<Response, String> {
     let act = action(verb, args, rev)?;
+    if let Some(rej) = unstaged(dir, task, &act) {
+        return Ok(Response::Rejected(rej));
+    }
     let _admission = refuse_evidence_extension(dir, task, &act)?;
     let op = labelled_op(by)?;
     let mut d = open_driver(dir, task)?;
@@ -226,6 +283,111 @@ fn refuse_evidence_extension(
     }
 }
 
+/// #597 G3: `holdout-updated` adopts only a suite staged for this task and
+/// intact on disk; the core sees just a digest, so a typo or another task's
+/// digest would otherwise retire the current suite for one no run can load.
+fn unstaged(dir: &Path, task: &TaskId, act: &HumanAction) -> Option<Rejection> {
+    let digest = match act {
+        HumanAction::HoldoutUpdated { digest } => *digest,
+        HumanAction::Fenced { action, .. } => return unstaged(dir, task, action),
+        _ => return None,
+    };
+    let loaded = crate::holdout::load(dir, task, digest).and_then(|hs| hs.verify_files());
+    loaded.err().map(|e| {
+        Rejection::new(
+            Code::HoldoutMismatch,
+            format!("holdout {}: {e}", digest.hex()),
+        )
+    })
+}
+
+/// What `bbp human … --dry-run` prints: the events the action would append
+/// and the response it would return at `rev`. Nothing is committed.
+#[derive(Clone, Debug, PartialEq, Eq, rusty_serde::Serialize)]
+pub struct Preview {
+    pub rev: Rev,
+    pub response: Response,
+    pub events: Vec<rusty_bbp::event::Event>,
+}
+
+/// The fenced human command `perform_fenced` would dispatch.
+fn command(
+    verb: &str,
+    args: &[&str],
+    rev: Option<Rev>,
+    by: &str,
+    fence: Option<Rev>,
+    op: Option<OpId>,
+) -> Result<Result<Command, Rejection>, String> {
+    let action = match action(verb, args, rev) {
+        Ok(action) => action,
+        Err(detail) if fence.is_some() => {
+            return Ok(Err(Rejection::new(Code::BadHumanInput, detail)))
+        }
+        Err(error) => return Err(error),
+    };
+    let action = match fence {
+        Some(expected_rev) => HumanAction::Fenced {
+            expected_rev,
+            action: Box::new(action),
+        },
+        None => action,
+    };
+    let op = match op {
+        Some(op) => op,
+        None => labelled_op(by)?,
+    };
+    Ok(Ok(Command::Human { op, action }))
+}
+
+/// [`perform_fenced`] without committing: the pure engine applied to the
+/// task's current state, so the preview is what the commit would do at that
+/// revision (#595 dry run).
+#[allow(clippy::too_many_arguments)]
+pub fn preview_fenced(
+    dir: &Path,
+    task: &TaskId,
+    verb: &str,
+    args: &[&str],
+    rev: Option<Rev>,
+    by: &str,
+    fence: Option<Rev>,
+    op: Option<OpId>,
+) -> Result<Preview, String> {
+    let d = open_driver(dir, task)?;
+    let rev_now = d.state.rev;
+    let cmd = match command(verb, args, rev, by, fence, op)? {
+        Ok(cmd) => cmd,
+        Err(rej) => {
+            return Ok(Preview {
+                rev: rev_now,
+                response: Response::Rejected(rej),
+                events: vec![],
+            })
+        }
+    };
+    if let Command::Human { action, .. } = &cmd {
+        let refused = unstaged(dir, task, action).or_else(|| {
+            refuse_evidence_extension(dir, task, action)
+                .err()
+                .map(|detail| Rejection::new(Code::BadHumanInput, detail))
+        });
+        if let Some(rej) = refused {
+            return Ok(Preview {
+                rev: rev_now,
+                response: Response::Rejected(rej),
+                events: vec![],
+            });
+        }
+    }
+    let out = handle(&d.state, &cmd, now());
+    Ok(Preview {
+        rev: rev_now,
+        response: out.response,
+        events: out.events,
+    })
+}
+
 /// Human action with an optional transactional revision fence and retry op.
 /// The host's existing unfenced CLI behavior remains available to direct users.
 #[allow(clippy::too_many_arguments)]
@@ -239,41 +401,28 @@ pub fn perform_fenced(
     fence: Option<Rev>,
     op: Option<OpId>,
 ) -> Result<Response, String> {
-    let action = match action(verb, args, rev) {
-        Ok(action) => action,
+    let cmd = match command(verb, args, rev, by, fence, op)? {
+        Ok(cmd) => cmd,
+        Err(rej) => return Ok(Response::Rejected(rej)),
+    };
+    let Command::Human { action, .. } = &cmd else {
+        return Err("not a human command".into());
+    };
+    if let Some(rej) = unstaged(dir, task, action) {
+        return Ok(Response::Rejected(rej));
+    }
+    let _admission = match refuse_evidence_extension(dir, task, action) {
+        Ok(admission) => admission,
         Err(detail) if fence.is_some() => {
             return Ok(Response::Rejected(Rejection::new(
                 Code::BadHumanInput,
                 detail,
             )))
         }
-        Err(error) => return Err(error),
-    };
-    let _admission = match refuse_evidence_extension(dir, task, &action) {
-        Ok(admission) => admission,
-        Err(detail) => {
-            return match fence {
-                Some(_) => Ok(Response::Rejected(Rejection::new(
-                    Code::BadHumanInput,
-                    detail,
-                ))),
-                None => Err(detail),
-            }
-        }
-    };
-    let action = match fence {
-        Some(expected_rev) => HumanAction::Fenced {
-            expected_rev,
-            action: Box::new(action),
-        },
-        None => action,
-    };
-    let op = match op {
-        Some(op) => op,
-        None => labelled_op(by)?,
+        Err(detail) => return Err(detail),
     };
     open_driver(dir, task)?
-        .dispatch(&Command::Human { op, action }, now())
+        .dispatch(&cmd, now())
         .map_err(|e| format!("{e:?}"))
 }
 
@@ -364,6 +513,29 @@ mod tests {
             before,
             "a refused extend appends nothing"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dry_run_extend_on_an_evidence_task_previews_the_refusal() {
+        let (dir, task) = task("evidence-preview", true);
+        let p = preview_fenced(
+            &dir,
+            &task,
+            "extend",
+            &["messages", "1000"],
+            None,
+            "o",
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            matches!(&p.response, Response::Rejected(r)
+                if r.code == Code::BadHumanInput && r.detail.contains("evidence")),
+            "{p:?}"
+        );
+        assert!(p.events.is_empty(), "{p:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

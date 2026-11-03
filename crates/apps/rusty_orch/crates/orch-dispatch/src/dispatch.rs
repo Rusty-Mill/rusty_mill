@@ -6,7 +6,7 @@ use std::num::NonZeroU32;
 
 use orch_core::board::{Author, Board, BoardError, EntryKind, NewEntry};
 use orch_core::goal::Goal;
-use orch_core::task::{Agent, Plan, PlanError, Role, Status, Task, TaskState};
+use orch_core::task::{AgentId, Plan, PlanError, Role, Status, Task, TaskState};
 use orch_core::{EntryId, Ref, TaskId, Text};
 
 use crate::{AgentError, AgentRunner, ClassifiedError, Ledger, Output, Routing};
@@ -31,14 +31,14 @@ pub enum DispatchError {
     /// metering and whether the card remains `Running` or becomes `Failed`.
     Agent {
         task: TaskId,
-        agent: Agent,
+        agent: AgentId,
         source: AgentError,
     },
     /// The selected adapter cannot serve this role. The card is failed
     /// without counting or invoking a model call.
     UnsupportedRole {
         task: TaskId,
-        agent: Agent,
+        agent: AgentId,
         role: Role,
     },
     /// Running `task` would exceed `ceiling`. No call was made. For the
@@ -68,9 +68,9 @@ impl fmt::Display for DispatchError {
                 task,
                 agent,
                 source,
-            } => write!(f, "{agent:?} failed {task}: {source}"),
+            } => write!(f, "{agent} failed {task}: {source}"),
             Self::UnsupportedRole { task, agent, role } => {
-                write!(f, "{agent:?} cannot serve {role:?} for {task}")
+                write!(f, "{agent} cannot serve {role:?} for {task}")
             }
             Self::CeilingReached {
                 ceiling,
@@ -291,7 +291,7 @@ impl<R: AgentRunner> Dispatcher<R> {
         &mut self,
         goal: &Goal,
         id: TaskId,
-        agent: Agent,
+        agent: AgentId,
         plan: &mut Plan,
         board: &mut Board,
         ledger: &mut Ledger,
@@ -401,7 +401,7 @@ impl<R: AgentRunner> Dispatcher<R> {
         Ok(())
     }
 
-    fn route(&self, task: &Task, plan: &Plan) -> Result<Agent, DispatchError> {
+    fn route(&self, task: &Task, plan: &Plan) -> Result<AgentId, DispatchError> {
         let unroutable = DispatchError::Unroutable { task: task.id() };
         let Role::Review { target } = task.spec().role else {
             return self.routing.work(task.spec().role).ok_or(unroutable);
@@ -507,7 +507,7 @@ fn outcome(plan: &Plan) -> Result<Outcome, DispatchError> {
 fn append_atomically(
     board: &mut Board,
     task: TaskId,
-    agent: Agent,
+    agent: AgentId,
     outputs: Vec<Output>,
 ) -> Result<Vec<EntryId>, DispatchError> {
     let mut staged = board.clone();
@@ -535,7 +535,7 @@ fn first_question(board: &Board, ids: &[EntryId]) -> Option<EntryId> {
         .find(|id| board.get(*id).map(|e| e.content().kind) == Some(EntryKind::Question))
 }
 
-fn host_error(plan: &mut Plan, id: TaskId, agent: Agent, e: ClassifiedError) -> DispatchError {
+fn host_error(plan: &mut Plan, id: TaskId, agent: AgentId, e: ClassifiedError) -> DispatchError {
     let permanent = matches!(e, ClassifiedError::Permanent(_));
     let error = DispatchError::Agent {
         task: id,
@@ -562,7 +562,7 @@ fn apply_progress(
     plan: &mut Plan,
     board: &mut Board,
     id: TaskId,
-    agent: Agent,
+    agent: AgentId,
     handle: &crate::HostHandle,
     progress: crate::Progress,
     supersedes: Option<EntryId>,

@@ -1,4 +1,5 @@
-//! The session-start hook in Claude Code's `settings.json`, as pure edits of
+//! The session-start hook in Claude Code's `settings.json` or Codex's
+//! `hooks.json` (one shape), as pure edits of
 //! the parsed file: everything else in it is kept as it was.
 //!
 //! The hook is one group in `hooks.SessionStart` whose single command runs
@@ -10,14 +11,44 @@
 use rusty_json::{Map, Value};
 
 use super::State;
+use super::layout::Ctl;
 
 const EVENT: &str = "SessionStart";
-const SUFFIX: &str = " agent hook";
 
-/// The hook command that runs the ctl at `ctl`, quoted for the POSIX shell
-/// Claude Code runs hooks in (Git Bash on Windows).
-pub(crate) fn command(ctl: &str) -> String {
-    format!("'{}'{SUFFIX}", ctl.replace('\'', r"'\''"))
+/// The command after the ctl's path, for `ctl`.
+fn suffix(ctl: Ctl<'_>) -> String {
+    format!(" {}", ctl.args().join(" "))
+}
+
+/// Every suffix a hook of ours may have, whether or not it names sessions.
+const SUFFIXES: [&str; 2] = [" agent hook", " agent hook --name-session"];
+
+/// The hook command that runs `ctl`, quoted for the POSIX shell Claude
+/// Code runs hooks in (Git Bash on Windows).
+pub(crate) fn command(ctl: Ctl<'_>) -> String {
+    format!("'{}'{}", ctl.path.replace('\'', r"'\''"), suffix(ctl))
+}
+
+/// The key of the Windows command Codex runs instead of `command` there.
+const WINDOWS: &str = "commandWindows";
+
+/// The Windows command for Codex, which runs a hook's command with the
+/// session's shell: PowerShell, `cmd.exe` or Git Bash. No quoting works in
+/// all three, so the path goes unquoted, with `/` for `\` (which all three
+/// take in an absolute path), and a path with any character one of them
+/// would read specially is refused.
+pub(crate) fn windows_command(ctl: Ctl<'_>) -> Result<String, String> {
+    let path = ctl.path.replace('\\', "/");
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '.' | '-' | '_');
+    if path.is_empty() || !path.chars().all(plain) {
+        return Err(format!(
+            "{}: Codex on Windows runs hooks in the session's shell, and this path \
+             needs quoting there; put rusty-mux-ctl in a directory whose path has only \
+             letters, digits, `-`, `_` and `.`",
+            ctl.path
+        ));
+    }
+    Ok(format!("{path}{}", suffix(ctl)))
 }
 
 fn is_ours(hook: &Value) -> bool {
@@ -30,7 +61,11 @@ fn is_ours(hook: &Value) -> bool {
 
 /// Whether [`command`] wrote `command`, for a ctl at any path.
 fn is_ours_command(command: &str) -> bool {
-    let Some(path) = command.strip_suffix(SUFFIX).and_then(unquote) else {
+    let Some(path) = SUFFIXES
+        .iter()
+        .find_map(|suffix| command.strip_suffix(suffix))
+        .and_then(unquote)
+    else {
         return false;
     };
     let name = path.rsplit(['/', '\\']).next().unwrap_or_default();
@@ -79,14 +114,22 @@ pub(crate) fn has_hook(settings: &Value) -> Result<bool, String> {
     Ok(groups(settings)?.iter().flat_map(hooks_of).any(is_ours))
 }
 
-/// Whether `settings` hold the hook that runs `command`.
-pub(crate) fn state(settings: &Value, command: &str) -> Result<State, String> {
+/// Whether `settings` hold the hook that runs `command`, and on Windows
+/// `windows` (absent when `None`).
+pub(crate) fn state(
+    settings: &Value,
+    command: &str,
+    windows: Option<&str>,
+) -> Result<State, String> {
     let ours: Vec<&Value> = groups(settings)?
         .iter()
         .flat_map(hooks_of)
         .filter(|h| is_ours(h))
         .collect();
-    let current = |h: &&Value| h.get("command").and_then(Value::as_str) == Some(command);
+    let current = |h: &&Value| {
+        h.get("command").and_then(Value::as_str) == Some(command)
+            && h.get(WINDOWS).and_then(Value::as_str) == windows
+    };
     Ok(match ours.as_slice() {
         [] => State::Missing,
         hooks if hooks.iter().all(current) => State::Installed,
@@ -96,19 +139,23 @@ pub(crate) fn state(settings: &Value, command: &str) -> Result<State, String> {
 
 /// `settings` with the hook running `command`: an outdated one is pointed
 /// at `command`, a missing one appended as a group of its own.
-pub(crate) fn with_hook(mut settings: Value, command: &str) -> Result<Value, String> {
-    let had = state(&settings, command)?;
+pub(crate) fn with_hook(
+    mut settings: Value,
+    command: &str,
+    windows: Option<&str>,
+) -> Result<Value, String> {
+    let had = state(&settings, command, windows)?;
     let groups = groups_mut(&mut settings)?;
     match had {
-        State::Installed | State::Foreign => {}
+        State::Installed | State::Foreign | State::Unreadable | State::Unsupported => {}
         State::Outdated => {
             for hook in groups.iter_mut().flat_map(hooks_of_mut) {
                 if is_ours(hook) {
-                    hook["command"] = command.into();
+                    set_commands(hook, command, windows);
                 }
             }
         }
-        State::Missing => groups.push(group(command)),
+        State::Missing => groups.push(group(command, windows)),
     }
     Ok(settings)
 }
@@ -175,11 +222,24 @@ fn hooks_of_mut(group: &mut Value) -> impl Iterator<Item = &mut Value> {
 }
 
 /// A group with no matcher, so it runs on every kind of session start.
-fn group(command: &str) -> Value {
+fn group(command: &str, windows: Option<&str>) -> Value {
     let mut hook = Map::new();
     hook.insert("type".into(), "command".into());
-    hook.insert("command".into(), command.into());
+    let mut hook = Value::Object(hook);
+    set_commands(&mut hook, command, windows);
     let mut group = Map::new();
-    group.insert("hooks".into(), Value::Array(vec![Value::Object(hook)]));
+    group.insert("hooks".into(), Value::Array(vec![hook]));
     Value::Object(group)
+}
+
+/// Points our `hook` at `command`, with `windows` or without one.
+fn set_commands(hook: &mut Value, command: &str, windows: Option<&str>) {
+    let Some(hook) = hook.as_object_mut() else {
+        return;
+    };
+    hook.insert("command".into(), command.into());
+    match windows {
+        Some(windows) => hook.insert(WINDOWS.into(), windows.into()),
+        None => hook.remove(WINDOWS),
+    };
 }

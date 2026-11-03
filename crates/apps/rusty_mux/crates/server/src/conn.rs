@@ -7,22 +7,24 @@ use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
 
-use rusty_mux_core::{ClientId, Transport};
+use rusty_mux_core::{ClientId, Principal, Transport};
 use rusty_mux_proto::{Message, decode};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use rusty_tokio::sync::Notify;
 
 use crate::outbox::{Inbox, outbox};
-use crate::state::{Kept, Shared, State};
+use crate::state::{Kept, Pending, Shared, State};
 
 const READ_CHUNK: usize = 64 << 10;
 
-/// Serves one connection; `on_client` learns which client it serves, and
-/// the cancel that tells whether it still does.
+/// Serves one connection of `principal`, whom the server verified;
+/// `on_client` learns which client it serves, and the cancel that tells
+/// whether it still does.
 pub(crate) async fn run<R, W>(
     state: Shared,
     mut rd: R,
     wr: W,
+    principal: Principal,
     transport: Transport,
     on_client: impl FnOnce(ClientId, &Rc<Notify>),
 ) where
@@ -44,7 +46,7 @@ pub(crate) async fn run<R, W>(
     let (out, inbox, cancel) = outbox();
     let client = state
         .borrow_mut()
-        .connect(out, transport, features, resume, takeover);
+        .connect(out, principal, transport, features, resume, takeover);
     on_client(client, &cancel);
     // One owning future races both halves and eviction. Dropping the losing
     // futures closes both socket halves and discards the receiver/backlog,
@@ -114,8 +116,14 @@ async fn serve(
         if !state.borrow().served_by(client, cancel) {
             return Ok(());
         }
-        let Some(write) = State::request(state, client, message) else {
-            continue;
+        let write = match State::request(state, client, message) {
+            None => continue,
+            Some(Pending::Write(write)) => write,
+            Some(Pending::Reload(done)) => {
+                // Its task answers; a dropped task has nothing to wait for.
+                let _ = done.await;
+                continue;
+            }
         };
         write.pty.write_all(&write.data).await?;
         if let Some(key) = write.key {
@@ -228,9 +236,9 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    config_file: None,
                 },
                 None,
-                crate::state::test_owner(),
             );
             let (peer, server) = UnixStream::pair().unwrap();
             peer.write_all(
@@ -248,6 +256,7 @@ mod regression {
                 state.clone(),
                 rd,
                 wr,
+                crate::state::test_owner(),
                 Transport::Socket,
                 |_, _| {},
             ));
@@ -321,8 +330,9 @@ mod tests {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                config_file: None,
             };
-            let state = State::shared(config, None, crate::state::test_owner());
+            let state = State::shared(config, None);
             let (theirs, ours) = UnixStream::pair().expect("pair");
             let (rd, wr) = ours.into_split();
             let served = Rc::new(Cell::new(None));
@@ -331,6 +341,7 @@ mod tests {
                 state.clone(),
                 rd,
                 wr,
+                crate::state::test_owner(),
                 Transport::Socket,
                 move |c, _| {
                     seen.set(Some(c));
@@ -360,14 +371,105 @@ mod tests {
             let token = state.borrow().test_token(client);
             let (out, _inbox, _) = outbox();
             let takeover = Some(Takeover { client, token });
-            state
-                .borrow_mut()
-                .connect(out, Transport::Socket, features, None, takeover);
+            state.borrow_mut().connect(
+                out,
+                crate::state::test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                takeover,
+            );
             rusty_tokio::time::timeout(Duration::from_secs(1), task)
                 .await
                 .expect("the wait outlived the takeover")
                 .expect("join");
             assert!(state.borrow().has_client(client));
+        });
+    }
+
+    /// Reads one message from `theirs`, with what is buffered in `buf`.
+    async fn next_message(theirs: &mut UnixStream, buf: &mut Vec<u8>) -> Message {
+        loop {
+            if let Some((message, used)) = decode(buf).expect("a frame") {
+                buf.drain(..used);
+                return message;
+            }
+            let mut chunk = [0u8; 4096];
+            let n = theirs.read(&mut chunk).await.expect("read");
+            assert!(n > 0, "the server hung up");
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// The next answer to a request, past any events.
+    async fn next_answer(theirs: &mut UnixStream, buf: &mut Vec<u8>) -> Message {
+        loop {
+            let message = next_message(theirs, buf).await;
+            if matches!(message, Message::Done { .. } | Message::Failed { .. }) {
+                return message;
+            }
+        }
+    }
+
+    /// Requests on one connection finish in order: a `sync` sent after a
+    /// reload whose read stalls is answered only after the reload, and a
+    /// block then starts with the reloaded defaults.
+    #[test]
+    fn a_sync_after_a_stalled_reload_waits_for_it() {
+        let runtime = Builder::new_current_thread()
+            .build_local(&LocalOptions::default())
+            .expect("runtime");
+        runtime.block_on(async {
+            let config = Config {
+                program: "/bin/sh".into(),
+                args: Vec::new(),
+                cwd: "/".into(),
+                console_host: ConsoleHost::default(),
+                config_file: Some("/stalled.json".into()),
+            };
+            let state = State::shared(config, None);
+            let (loader, go) = crate::settings::stalled();
+            state.borrow_mut().loader = loader;
+            let (mut theirs, ours) = UnixStream::pair().expect("pair");
+            let (rd, wr) = ours.into_split();
+            rusty_tokio::task::spawn_local(run(
+                state.clone(),
+                rd,
+                wr,
+                crate::state::test_owner(),
+                Transport::Socket,
+                |_, _| {},
+            ));
+            let hello = Message::Hello {
+                features: Features::CONFIG_RELOAD,
+                resume: None,
+                takeover: None,
+            };
+            let mut bytes = encode(&hello).expect("encode");
+            bytes.extend(encode(&Message::ReloadConfig { req: 1 }).expect("encode"));
+            bytes.extend(encode(&Message::Sync { req: 2 }).expect("encode"));
+            theirs.write_all(&bytes).await.expect("send");
+            let mut buf = Vec::new();
+            assert!(matches!(
+                next_message(&mut theirs, &mut buf).await,
+                Message::Welcome { .. }
+            ));
+            let early = rusty_tokio::time::timeout(
+                Duration::from_millis(200),
+                next_answer(&mut theirs, &mut buf),
+            )
+            .await;
+            assert!(early.is_err(), "answered before the reload: {early:?}");
+
+            go.send(()).expect("go");
+            let mut answered = Vec::new();
+            while answered.len() < 2 {
+                if let Message::Done { req, .. } = next_answer(&mut theirs, &mut buf).await {
+                    answered.push(req);
+                }
+            }
+            assert_eq!(answered, [1, 2]);
+            assert_eq!(state.borrow().test_cwd(), "/tmp");
         });
     }
 }

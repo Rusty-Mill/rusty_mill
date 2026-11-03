@@ -20,8 +20,10 @@ fn submit(fx: &mut Fx, role: &str, diffs: Vec<ArtId>) {
     stored(fx.put(
         role,
         ArtifactPayload::Candidate(Candidate {
+            claim: None,
             base: "a".repeat(40),
             diffs,
+            suite: Suite::Build,
         }),
         b"{}",
     ));

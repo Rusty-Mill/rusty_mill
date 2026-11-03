@@ -26,6 +26,7 @@ use crate::github::GithubConfig;
 use crate::identities::{Credentials, read_private};
 use crate::projects::Projects;
 use crate::syncer::{MIN_SECS, Syncer};
+use crate::workflow::Workflow;
 
 const DEFAULT_API: &str = "https://api.github.com";
 const DEFAULT_SECS: u64 = 60;
@@ -45,6 +46,8 @@ pub struct Files {
     pub github: Option<PathBuf>,
     /// Whether card movement rules are enforced.
     pub rules: Option<PathBuf>,
+    /// The columns and the moves between them.
+    pub workflow: Option<PathBuf>,
 }
 
 impl Files {
@@ -56,6 +59,7 @@ impl Files {
             roles: Some(dir.join("roles.json")),
             github: Some(dir.join("github.json")),
             rules: Some(dir.join("rules.json")),
+            workflow: Some(dir.join("workflow.json")),
         }
     }
 }
@@ -139,6 +143,19 @@ pub fn load_rules(path: &Path) -> Result<MoveRules, String> {
     let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let file: RulesFile = serde_json::from_str(&json).map_err(|e| format!("rules: {e}"))?;
     Ok(file.movement)
+}
+
+/// The workflow from `path`, or the default (the original seven columns) if there is no such
+/// file yet.
+///
+/// # Errors
+/// If it exists but cannot be read, parsed or validated.
+pub fn load_workflow(path: &Path) -> Result<Workflow, String> {
+    if !path.exists() {
+        return Ok(Workflow::default());
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&json).map_err(|e| format!("workflow: {e}"))
 }
 
 /// Roles must be plainly named, and some role must hold `Admin`.
@@ -271,8 +288,19 @@ struct RolesSet {
 }
 
 #[derive(Deserialize)]
+struct RoleRename {
+    from: String,
+    to: String,
+}
+
+#[derive(Deserialize)]
 struct RulesSet {
     movement: MoveRules,
+}
+
+#[derive(Deserialize)]
+struct WorkflowSet {
+    workflow: Workflow,
 }
 
 #[derive(Deserialize)]
@@ -362,9 +390,13 @@ impl Settings {
             "settings_agent_rotate" => |s, _, a| s.agent_rotate(&parse(a)?),
             "settings_projects_set" => |s, _, a| s.projects_set(&parse(a)?),
             "settings_roles_set" => |s, _, a| s.roles_set(&parse(a)?),
+            "settings_role_rename" => |s, _, a| s.role_rename(&parse(a)?),
             "settings_github_set" => |s, _, a| s.github_set(&parse(a)?),
             "settings_github_clear" => |s, _, _| s.github_clear(),
             "settings_rules_set" => |s, by, a| s.rules_set(by, &parse(a)?),
+            "settings_workflow_set" => {
+                |s, by, a| s.workflow_set(by, parse::<WorkflowSet>(a)?.workflow)
+            }
             "settings_app_revoke" => |s, _, a| s.app_revoke(&parse(a)?),
             _ => return None,
         };
@@ -406,6 +438,7 @@ impl Settings {
                 "roles": self.files.roles.is_some(),
                 "github": self.files.github.is_some(),
                 "rules": self.files.rules.is_some(),
+                "workflow": self.files.workflow.is_some(),
             },
             "agents": agents,
             "repos": self.board.projects(),
@@ -414,6 +447,7 @@ impl Settings {
             "capability_about": Capability::ALL.map(|c| (c, c.about())).into_iter().collect::<BTreeMap<_, _>>(),
             "github": github,
             "rules": RulesFile { movement: self.board.move_rules() },
+            "workflow": self.board.workflow(),
             "apps": self.oauth.get().map(|p| p.store().list_clients()),
             "server": self.server,
             "paths": {
@@ -422,6 +456,7 @@ impl Settings {
                 "roles": self.files.roles,
                 "github": self.files.github,
                 "rules": self.files.rules,
+                "workflow": self.files.workflow,
             },
         }))
     }
@@ -473,6 +508,7 @@ impl Settings {
         let mut next = live.clone();
         let out = f(&mut next).map_err(refused)?;
         self.keeps_an_admin(&next, &self.board.roles())?;
+        self.fits_saved_roles(&next)?;
         next.save(path).map_err(refused)?;
         *live = next;
         Ok(out)
@@ -556,23 +592,123 @@ impl Settings {
     }
 
     fn roles_set(&self, a: &RolesSet) -> Res {
+        self.write_roles(&a.roles)?;
+        Ok(json!({ "roles": a.roles }))
+    }
+
+    /// Validate `roles` against the agents, write them to their file, then apply them.
+    fn write_roles(&self, roles: &Roles) -> Result<(), BoardError> {
         let path = self.file(&self.files.roles)?;
-        check_roles(&a.roles).map_err(refused)?;
+        check_roles(roles).map_err(refused)?;
         if let Some(creds) = &self.creds {
             let creds = creds.read().unwrap_or_else(PoisonError::into_inner);
-            if let Some(i) = creds.list().find(|i| !a.roles.0.contains_key(&i.role)) {
+            if let Some(i) = creds.list().find(|i| !roles.0.contains_key(&i.role)) {
                 return Err(refused(format!(
                     "agent {:?} has role {:?}, which would no longer exist; change the agent first",
                     i.actor, i.role
                 )));
             }
-            self.keeps_an_admin(&creds, &a.roles)?;
+            self.keeps_an_admin(&creds, roles)?;
         }
-        let json = serde_json::to_string_pretty(&a.roles).map_err(|e| refused(e.to_string()))?;
+        self.saved_creds_fit(roles)?;
+        let json = serde_json::to_string_pretty(roles).map_err(|e| refused(e.to_string()))?;
         rusty_atomic_file::write(&path, json.as_bytes())
             .map_err(|e| refused(format!("{}: {e}", path.display())))?;
-        self.board.set_roles(a.roles.clone());
-        Ok(json!({ "roles": a.roles }))
+        self.board.set_roles(roles.clone());
+        Ok(())
+    }
+
+    /// The credentials file as saved must still load with `roles`. A failed save does not
+    /// prove the file is unchanged (an atomic write can fail after replacing it), so the saved
+    /// file may hold roles the live set does not.
+    fn saved_creds_fit(&self, roles: &Roles) -> Result<(), BoardError> {
+        let Some(path) = self
+            .files
+            .identities
+            .as_ref()
+            .filter(|_| self.creds.is_some())
+        else {
+            return Ok(());
+        };
+        if !path.exists() {
+            return Ok(());
+        }
+        let saved = Credentials::load(path, roles, &self.board.projects()).map_err(|e| {
+            refused(format!(
+                "the saved credentials would not load with these roles ({e}); save any agent on the Agents tab first"
+            ))
+        })?;
+        self.keeps_an_admin(&saved, roles)
+    }
+
+    /// `creds` must load with the roles as saved, the other half of [`Self::saved_creds_fit`]:
+    /// a failed roles write may still have replaced the file. No roles file: the defaults,
+    /// which is what a restart reads.
+    fn fits_saved_roles(&self, creds: &Credentials) -> Result<(), BoardError> {
+        let saved = match &self.files.roles {
+            Some(path) if path.exists() => load_roles(path).map_err(refused)?,
+            Some(_) => Roles::default(),
+            None => self.board.roles(),
+        };
+        if let Some(i) = creds.list().find(|i| !saved.0.contains_key(&i.role)) {
+            return Err(refused(format!(
+                "agent {:?} would have role {:?}, which the saved roles file lacks; save the roles on the Roles tab first",
+                i.actor, i.role
+            )));
+        }
+        self.keeps_an_admin(creds, &saved)
+    }
+
+    /// Rename a role and move every agent holding it: add the new name beside the old, move
+    /// the agents, drop the old name. Each step leaves the files valid whatever a failed write
+    /// left behind, so nothing is rolled back: a failure keeps both names live (on disk the
+    /// old one may already be gone), and the error says how to finish from there. Every later
+    /// change is checked against the saved files as well as the live state, so none can make
+    /// them unloadable in the meantime.
+    fn role_rename(&self, a: &RoleRename) -> Res {
+        let mut roles = self.board.roles();
+        if roles.0.contains_key(&a.to) {
+            return Err(refused(format!("there is already a role {:?}", a.to)));
+        }
+        let caps = roles
+            .0
+            .get(&a.from)
+            .cloned()
+            .ok_or_else(|| refused(format!("there is no role {:?}", a.from)))?;
+        roles.0.insert(a.to.clone(), caps);
+        self.write_roles(&roles)?;
+        if self.held(&a.from) {
+            self.change_creds(|c| {
+                c.rename_role(&a.from, &a.to);
+                Ok(())
+            })
+            .map_err(|e| {
+                refused(format!(
+                    "partly renamed: roles {:?} and {:?} both exist with the same capabilities, but the agents \
+                     may not have moved ({e}). To finish, give {:?}'s agents role {:?} on the Agents tab, then remove {:?}",
+                    a.from, a.to, a.from, a.to, a.from
+                ))
+            })?;
+        }
+        roles.0.remove(&a.from);
+        self.write_roles(&roles).map_err(|e| {
+            refused(format!(
+                "partly renamed: the agents hold {:?}, but dropping {:?} may not have been saved ({e}). \
+                 To finish, remove {:?} on the Roles tab",
+                a.to, a.from, a.from
+            ))
+        })?;
+        Ok(json!({ "roles": roles }))
+    }
+
+    /// Whether some agent holds `role`.
+    fn held(&self, role: &str) -> bool {
+        self.creds.as_ref().is_some_and(|c| {
+            c.read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .list()
+                .any(|i| i.role == role)
+        })
     }
 
     /// Turn the movement rules on or off: written first, then applied, and logged.
@@ -587,6 +723,21 @@ impl Settings {
         self.board.set_move_rules(a.movement);
         rusty_log::warn!(actor = %by.name, movement = ?a.movement, "card movement rules changed");
         Ok(json!(file))
+    }
+
+    /// Replace the columns and moves. Refused if a removed column still holds cards; the file
+    /// is written under the board's lock, before the change applies, and the change is logged.
+    fn workflow_set(&self, by: &Actor, next: Workflow) -> Res {
+        let path = self.file(&self.files.workflow)?;
+        let json = serde_json::to_string_pretty(&next).map_err(|e| refused(e.to_string()))?;
+        self.board.set_workflow(next, |_| {
+            rusty_atomic_file::write(&path, json.as_bytes())
+                .map_err(|e| format!("{}: {e}", path.display()))
+        })?;
+        let flow = self.board.workflow();
+        let columns: Vec<&str> = flow.columns().iter().map(|c| c.id.as_str()).collect();
+        rusty_log::warn!(actor = %by.name, columns = ?columns, "board workflow changed");
+        Ok(json!({ "workflow": flow }))
     }
 
     fn github_set(&self, a: &GithubSet) -> Res {

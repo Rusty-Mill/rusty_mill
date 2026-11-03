@@ -42,6 +42,7 @@ mod api;
 #[cfg(any(unix, windows))]
 mod bridge;
 pub mod cli;
+mod completion;
 mod config;
 mod conn;
 mod render;
@@ -115,9 +116,8 @@ pub struct Env {
     /// The config file `do` and `config` read: `$RUSTY_MUX_CONFIG`, else
     /// `rusty_mux/config.json` in the config directory.
     pub config: Option<PathBuf>,
-    /// The agent config directory `agent` works in: `$CLAUDE_CONFIG_DIR`,
-    /// else `.claude` in the home directory.
-    pub agent_dir: Option<PathBuf>,
+    /// Where `agent` finds each agent's config directory.
+    pub agent_homes: AgentHomes,
     /// This program, which the agent's session-start hook runs.
     pub ctl: Option<PathBuf>,
 }
@@ -135,18 +135,44 @@ impl Env {
                 dir: std::env::current_dir().ok(),
             },
             config: config::default_path(),
-            agent_dir: agent_dir(),
+            agent_homes: AgentHomes::from_process(),
             ctl: std::env::current_exe().ok(),
         }
     }
 }
 
-fn agent_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        return Some(dir.into());
+/// The environment that says where coding agents keep their config. An
+/// empty variable counts as unset.
+#[derive(Debug, Clone, Default)]
+pub struct AgentHomes {
+    /// `$HOME`, else `%USERPROFILE%`.
+    pub home: Option<PathBuf>,
+    /// `$CLAUDE_CONFIG_DIR`: Claude Code's directory, else `~/.claude`.
+    pub claude: Option<PathBuf>,
+    /// `$CODEX_HOME`: Codex's directory, else `~/.codex`.
+    pub codex: Option<PathBuf>,
+    /// `$XDG_CONFIG_HOME` when absolute: holds OpenCode's `opencode`, else
+    /// `~/.config` does.
+    pub config: Option<PathBuf>,
+    /// `$PI_CODING_AGENT_DIR`: Pi's directory, else `~/.pi/agent`.
+    pub pi: Option<PathBuf>,
+}
+
+impl AgentHomes {
+    fn from_process() -> Self {
+        let var = |name: &str| {
+            std::env::var_os(name)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        Self {
+            home: var("HOME").or_else(|| var("USERPROFILE")),
+            claude: var("CLAUDE_CONFIG_DIR"),
+            codex: var("CODEX_HOME"),
+            config: var("XDG_CONFIG_HOME").filter(|dir| dir.is_absolute()),
+            pi: var("PI_CODING_AGENT_DIR"),
+        }
     }
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(Path::new(&home).join(".claude"))
 }
 
 fn id_var(name: &str) -> Option<Uuid> {
@@ -253,13 +279,23 @@ pub fn run_until(
         Ok(invocation) => invocation,
         Err(reason) => return report(err, Exit::Usage, &reason),
     };
+    // Where the agent hook asks for its session's name.
+    let hook_socket = socket(&invocation, env).ok();
     match invocation.command {
         Command::Help(method) => return write_line(out, cli::usage(method).trim_end()),
         Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
         Command::Api(Api::Describe(method)) => return write_line(out, &api::describe(method)),
+        Command::Api(Api::Llms) => return write_line(out, api::llms().trim_end()),
+        Command::Completion(shell) => {
+            return write_line(out, completion::script(shell).trim_end());
+        }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
         Command::Agent(command) => {
-            return agent::run(&command, env, invocation.json, out)
+            let generated_name = || {
+                let (socket, session) = (hook_socket.as_deref()?, env.here.session?);
+                hook_generated_name(socket, session, stop).ok().flatten()
+            };
+            return agent::run(&command, env, invocation.json, out, &generated_name)
                 .unwrap_or_else(|reason| report(err, Exit::Failed, &reason));
         }
         Command::Do { action, args } => match action_calls(&action, &args, env) {
@@ -464,7 +500,8 @@ fn execute(
         | Command::Config(_)
         | Command::Agent(_)
         | Command::Watch { .. }
-        | Command::Bridge => Ok(Exit::Ok),
+        | Command::Bridge
+        | Command::Completion(_) => Ok(Exit::Ok),
     }
 }
 
@@ -519,6 +556,55 @@ fn follow(
     _: &mut dyn Write,
     _: &mut OnEvent<'_>,
 ) -> Result<(), Failure> {
+    Err(unsupported())
+}
+
+/// How long the agent hook waits for the server to tell a session's name,
+/// well inside the 5 s the OpenCode and Pi scripts give the whole hook.
+/// A hard bound only where [`conn::connect`] bounds connecting and writes
+/// (Linux); elsewhere the host's hook timeout is the bound.
+const HOOK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The name of `session` on the server at `socket` while it is one the
+/// server made up and nobody has renamed it since, for the agent hook.
+/// `None` from a server without [`Features::NAME_SESSION`], which could
+/// not keep a name chosen after the hook ran.
+#[cfg(any(unix, windows))]
+fn hook_generated_name(
+    socket: &Path,
+    session: Uuid,
+    stop: &Stop,
+) -> Result<Option<String>, Failure> {
+    let stop = stop.sooner(Instant::now() + HOOK_PATIENCE);
+    let mut conn = Conn::new(conn::connect(socket, &stop)?, stop);
+    let mut sink = io::sink();
+    let mut client = Session {
+        conn: &mut conn,
+        out: &mut sink,
+        json: false,
+        here: None,
+    };
+    let (features, _) = client.hello(Features::INSPECT.union(Features::NAME_SESSION), None)?;
+    if !features.contains(Features::NAME_SESSION) {
+        return Ok(None);
+    }
+    client
+        .list(features, 1)?
+        .into_iter()
+        .find_map(|entry| match entry {
+            Entry::Session {
+                session: s,
+                name,
+                generated,
+                ..
+            } if s.uuid() == session => Some(generated.then_some(name)),
+            _ => None,
+        })
+        .ok_or_else(|| Failure::Failed(format!("no session {session}")))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hook_generated_name(_: &Path, _: Uuid, _: &Stop) -> Result<Option<String>, Failure> {
     Err(unsupported())
 }
 
@@ -585,9 +671,9 @@ impl<S: io::Read + Write> Session<'_, S> {
     fn calls(&mut self, calls: &[Call]) -> Result<(), Failure> {
         // Everything any method needs, and sync to confirm unanswered ones.
         // The screen an attach sends is ignored.
-        let wanted = CATALOG.iter().fold(Features::SYNC, |all, m| {
-            all.union(m.needs_for(m.params.iter().map(|p| p.name)))
-        });
+        let wanted = CATALOG
+            .iter()
+            .fold(Features::SYNC, |all, m| all.union(m.all_needs()));
         let (features, _) = self.hello(wanted, None)?;
         // Refuse a chain the server cannot run before any of it runs.
         for call in calls {
@@ -731,7 +817,12 @@ impl<S: io::Read + Write> Session<'_, S> {
             .union(Features::PROCESS)
             .union(Features::LABELS)
             .union(Features::LAYOUT)
-            .union(Features::IDENTITY);
+            .union(Features::IDENTITY)
+            .union(Features::MORE_PROGRAM_EVENTS)
+            .union(Features::ACTIVE_WINDOW)
+            .union(Features::CONFIG_RELOAD)
+            .union(Features::LAYOUT_EDIT)
+            .union(Features::FOCUS);
         let (features, start) = self.hello(wanted, after)?;
         if let Some((kind, _)) = needs.iter().find(|(_, need)| !features.contains(*need)) {
             return Err(Failure::Failed(format!(
@@ -789,21 +880,25 @@ fn require(features: Features, call: &Call) -> Result<(), Failure> {
             method.name
         )));
     }
-    let given = call.args.iter().map(|(name, _)| *name);
-    if !features.contains(method.needs_for(given)) {
-        let optional: Vec<String> = call
-            .args
-            .iter()
-            .filter(|(name, _)| method.needs_for([*name]) != method.needs)
-            .map(|(name, _)| format!("--{name}"))
-            .collect();
-        return Err(Failure::Failed(format!(
-            "the server does not support {} with {}",
-            method.name,
-            optional.join(", ")
-        )));
+    let given: Vec<&str> = call.args.iter().map(|(name, _)| *name).collect();
+    if features.contains(method.needs_for(given.iter().copied())) {
+        return Ok(());
     }
-    Ok(())
+    // Each parameter whose presence or absence the server cannot handle.
+    let unsupported: Vec<String> = method
+        .params
+        .iter()
+        .filter(|p| p.extra_needs(&given).is_some_and(|n| !features.contains(n)))
+        .map(|p| match given.contains(&p.name) {
+            true => format!("with --{}", p.name),
+            false => format!("without --{}", p.name),
+        })
+        .collect();
+    Err(Failure::Failed(format!(
+        "the server does not support {} {}",
+        method.name,
+        unsupported.join(", ")
+    )))
 }
 
 fn require_sync(features: Features) -> Result<(), Failure> {
@@ -819,7 +914,7 @@ fn require_sync(features: Features) -> Result<(), Failure> {
 mod tests {
     use super::*;
 
-    fn create_block(line: &str) -> Call {
+    fn parsed(line: &str) -> Call {
         let args: Vec<String> = line.split_whitespace().map(String::from).collect();
         match cli::parse(&args, &Defaults::default()) {
             Ok(Invocation {
@@ -845,7 +940,7 @@ mod tests {
             socket: Some(socket.clone()),
             here: Defaults::default(),
             config: None,
-            agent_dir: None,
+            agent_homes: AgentHomes::default(),
             ctl: None,
         };
         let stop = Stop::after(std::time::Duration::ZERO);
@@ -861,11 +956,11 @@ mod tests {
 
     #[test]
     fn only_launch_arguments_need_the_launch_feature() {
-        let plain = create_block(
+        let plain = parsed(
             "create-block --window 00000000-0000-0000-0000-000000000001 --cols 80 --rows 24",
         );
         assert!(require(Features::NONE, &plain).is_ok());
-        let launched = create_block(
+        let launched = parsed(
             "create-block --window 00000000-0000-0000-0000-000000000001 --cols 80 --rows 24 \
              --cwd /tmp",
         );
@@ -874,5 +969,17 @@ mod tests {
             Err(Failure::Failed(why)) if why.ends_with("with --cwd")
         ));
         assert!(require(Features::LAUNCH, &launched).is_ok());
+    }
+
+    #[test]
+    fn leaving_out_a_session_name_needs_the_server_to_make_one_up() {
+        let named = parsed("create-session --name work");
+        assert!(require(Features::NONE, &named).is_ok());
+        let unnamed = parsed("create-session");
+        assert!(matches!(
+            require(Features::NONE, &unnamed),
+            Err(Failure::Failed(why)) if why == "the server does not support create-session without --name"
+        ));
+        assert!(require(Features::SESSION_NAMES, &unnamed).is_ok());
     }
 }

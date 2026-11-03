@@ -1,22 +1,16 @@
 //! `do` and `config`: actions and key bindings from the config file (see
 //! [`rusty_mux_script`]). The file is read by each command, so an edit
-//! takes effect at once and there is nothing to reload.
+//! takes effect at once here; only the server's `server` section waits
+//! for `reload-config`.
 
 use std::path::{Path, PathBuf};
 
 use rusty_json::{Map, Value};
 use rusty_mux_script::{Action, Call, Config, Rule, Run};
 
-/// `$RUSTY_MUX_CONFIG`, else `rusty_mux/config.json` under
-/// `$XDG_CONFIG_HOME`, else under `$HOME/.config`.
+/// The config file, as [`rusty_mux_script::default_path`] finds it.
 pub(crate) fn default_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("RUSTY_MUX_CONFIG") {
-        return Some(path.into());
-    }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")))?;
-    Some(base.join("rusty_mux").join("config.json"))
+    rusty_mux_script::default_path(|name| std::env::var_os(name))
 }
 
 /// The checked config at `path`; the error names the file and lists every

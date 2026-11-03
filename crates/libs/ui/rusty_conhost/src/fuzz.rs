@@ -33,7 +33,7 @@ const MAX_LOGS: usize = crate::console::MAX_LOGGED + 1;
 
 /// API numbers the script picks from by index; any other index sends a
 /// raw number.
-const APIS: [u32; 21] = [
+const APIS: [u32; 31] = [
     api::GET_CP,
     api::GET_MODE,
     api::SET_MODE,
@@ -54,6 +54,16 @@ const APIS: [u32; 21] = [
     api::SET_TITLE,
     api::GET_CURRENT_FONT,
     api::GET_CONSOLE_WINDOW,
+    api::FILL_OUTPUT,
+    api::SCROLL_SCREEN_BUFFER,
+    api::READ_OUTPUT,
+    api::WRITE_OUTPUT,
+    api::READ_OUTPUT_STRING,
+    api::WRITE_OUTPUT_STRING,
+    api::SET_SCREEN_BUFFER_SIZE,
+    api::SET_WINDOW_INFO,
+    api::GET_LARGEST_WINDOW_SIZE,
+    api::SET_SCREEN_BUFFER_INFO,
     api::WRITE_CONSOLE_INPUT,
 ];
 
@@ -223,6 +233,10 @@ struct Engine {
     killed: HashSet<u32>,
     /// The grace deadline has passed: the next turn handles it first.
     grace_due: bool,
+    /// A CPR is awaited ([`Effect::AwaitCursor`]), and its wait has
+    /// passed: the next turn ends it first.
+    cursor_armed: bool,
+    cursor_due: bool,
     /// No reader: output is discarded, and blocked calls drain each turn.
     detached: bool,
     /// The last answer's status, for tests.
@@ -255,6 +269,8 @@ impl Engine {
             attached: HashSet::new(),
             killed: HashSet::new(),
             grace_due: false,
+            cursor_armed: false,
+            cursor_due: false,
             detached: false,
             last_status: 0,
         }
@@ -320,8 +336,11 @@ impl Engine {
             244..=249 => self.control.resize = s.size(),
             250 => self.control.hang_up = true,
             251 => self.exited = true,
-            // The deadline passes with whatever is still in flight.
-            252 => self.grace_due = self.grace_armed,
+            // The deadlines pass with whatever is still in flight.
+            252 => {
+                self.grace_due = self.grace_armed;
+                self.cursor_due = self.cursor_armed;
+            }
             // The terminal goes away: `OwnPtyMaster::detach`.
             253 => {
                 self.detached = true;
@@ -388,6 +407,7 @@ impl Engine {
     fn send(&mut self, function: u32, process: usize, object: usize, payload: &[u8], output: u32) {
         if self.closed
             || self.c.streaming()
+            || self.c.awaiting_cursor()
             || !sched::admits_read(self.c.waiting(), self.c.parked())
         {
             return;
@@ -415,6 +435,10 @@ impl Engine {
     fn turn(&mut self) {
         if std::mem::take(&mut self.grace_due) && !self.closed {
             self.handle(Event::GraceExpired);
+        }
+        if std::mem::take(&mut self.cursor_due) && !self.closed {
+            self.cursor_armed = false;
+            self.handle(Event::CursorWaitExpired);
         }
         let mut control = std::mem::take(&mut self.control);
         // Calls wait on output nobody will read: `drains_itself`.
@@ -464,6 +488,7 @@ impl Engine {
             input_paused: self.c.input_paused(),
             writes_ready: self.c.writes_ready(),
             streaming: self.c.streaming(),
+            awaiting_cursor: self.c.awaiting_cursor(),
             fetch_due: self.fetch.is_some(),
         }
     }
@@ -538,6 +563,10 @@ impl Engine {
                     );
                 }
                 Effect::SetInputAvailable(_) => {}
+                Effect::AwaitCursor => {
+                    assert!(!self.closed, "AwaitCursor after CloseServer");
+                    self.cursor_armed = true;
+                }
                 Effect::Fetch { id, at, len } => {
                     assert!(!self.closed, "Fetch after CloseServer");
                     assert!(fetch.is_none(), "two fetches from one event");

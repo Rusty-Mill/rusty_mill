@@ -148,10 +148,9 @@ pub(crate) struct Shared {
     /// consumes `self` by value doesn't redo (or, worse, re-wait on)
     /// work already done.
     torn_down: AtomicBool,
-    /// The persistent, checkable half of the graceful-shutdown signal --
-    /// see `shutdown_notified`'s doc comment for why a bare `Notify`
-    /// alone (which only wakes whoever's *already* waiting) isn't
-    /// enough on its own.
+    /// The persistent, checkable half of the graceful-shutdown signal:
+    /// a task that starts waiting after the broadcast still needs to see
+    /// it (see `flag_or_notified`).
     shutting_down: AtomicBool,
     shutdown_signal: Notify,
     /// Tasks currently spawned and not yet finished (completed, aborted,
@@ -163,6 +162,10 @@ pub(crate) struct Shared {
     /// the necessary synchronization with whichever thread just
     /// decremented it to zero.
     active_tasks: AtomicUsize,
+    /// Every task spawned and not yet finished. The runtime owns its
+    /// tasks through this, not only through their wakers, so a task with
+    /// no stored waker stays alive until shutdown cancels it (#405).
+    pub(crate) owned: task::OwnedTasks,
     drain_lock: Mutex<()>,
     drain_condvar: Condvar,
     /// Per-worker counters backing [`RuntimeMetrics`] -- how many tasks
@@ -207,6 +210,20 @@ pub(crate) struct Shared {
     name: Option<String>,
     /// This runtime's opaque identity -- see [`Id`]/[`Handle::id`].
     pub(crate) id: Id,
+}
+
+type PanicPayload = Box<dyn std::any::Any + Send>;
+
+/// Keeps the first panic payload of a shutdown sweep. Later ones are
+/// leaked rather than dropped: a payload is arbitrary user data whose
+/// destructor could itself panic and cut the sweep short. Shutdown
+/// happens once per runtime, so the leak is bounded.
+fn keep_first_panic(first: &mut Option<PanicPayload>, payload: PanicPayload) {
+    if first.is_none() {
+        *first = Some(payload);
+    } else {
+        std::mem::forget(payload);
+    }
 }
 
 impl Shared {
@@ -358,6 +375,33 @@ impl Shared {
         }
     }
 
+    /// Cancels every task still alive, as the last step of runtime
+    /// shutdown: each one's future is dropped, inside this runtime's
+    /// context where the thread still has one, so drop code can still
+    /// reach it, and its `JoinHandle`
+    /// resolves as cancelled. Spawns from then on are cancelled too
+    /// (see [`task::OwnedTasks::bind`]).
+    ///
+    /// Each task is cancelled on its own: a panic from one (its join
+    /// waker; a destructor panic goes to its `JoinHandle` instead)
+    /// doesn't stop the rest. Returns the first such panic for the
+    /// caller to re-raise once every `Shared` is swept; later ones are
+    /// kept out of the way by [`keep_first_panic`].
+    fn cancel_all_tasks(self: &Arc<Self>) -> Option<PanicPayload> {
+        // `None` during thread-local teardown: drop code then can't reach
+        // the runtime, but the tasks are still cancelled.
+        let _context = context::try_enter(self.clone());
+        let mut first_panic = None;
+        for task in self.owned.close() {
+            let cancelled =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task.shutdown()));
+            if let Err(payload) = cancelled {
+                keep_first_panic(&mut first_panic, payload);
+            }
+        }
+        first_panic
+    }
+
     /// Marks shutdown as having begun and wakes every task currently
     /// awaiting `shutdown_notified()` -- the *advisory* half of
     /// shutdown, fired before the hard `shutdown` flag so a task that's
@@ -374,22 +418,9 @@ impl Shared {
     }
 
     /// Resolves once `begin_graceful_shutdown` has been called --
-    /// immediately, if it already has been by the time this is first
-    /// polled. Plain `Notify::notify_waiters` alone only wakes a
-    /// `Notified` that *already exists* when it's called (matching tokio's
-    /// own semantics -- see `sync::notify`'s docs), and this one is only
-    /// created on first poll; a task that calls this *after* shutdown has
-    /// already begun still needs to observe that, which is exactly what
-    /// the `shutting_down` flag checked here first is for.
+    /// immediately, if it already has been. See [`flag_or_notified`].
     pub(crate) fn shutdown_notified(&self) -> impl Future<Output = ()> + Send + '_ {
-        let mut inner: Option<crate::sync::Notified<'_>> = None;
-        std::future::poll_fn(move |cx| {
-            if self.is_shutting_down() {
-                return std::task::Poll::Ready(());
-            }
-            let fut = inner.get_or_insert_with(|| self.shutdown_signal.notified());
-            std::pin::Pin::new(fut).poll(cx)
-        })
+        flag_or_notified(&self.shutdown_signal, move || self.is_shutting_down())
     }
 
     pub(crate) fn is_current_thread(&self) -> bool {
@@ -697,6 +728,7 @@ impl Builder {
             shutting_down: AtomicBool::new(false),
             shutdown_signal: Notify::new(),
             active_tasks: AtomicUsize::new(0),
+            owned: task::OwnedTasks::new(),
             drain_lock: Mutex::new(()),
             drain_condvar: Condvar::new(),
             steal_counts: vec![AtomicU64::new(0)],
@@ -791,6 +823,7 @@ impl Builder {
             shutting_down: AtomicBool::new(false),
             shutdown_signal: Notify::new(),
             active_tasks: AtomicUsize::new(0),
+            owned: task::OwnedTasks::new(),
             drain_lock: Mutex::new(()),
             drain_condvar: Condvar::new(),
             steal_counts,
@@ -1258,6 +1291,28 @@ impl Runtime {
         }
     }
 
+    /// Cancels every task still alive on every `Shared` this runtime
+    /// owns; see [`Shared::cancel_all_tasks`]. Every core is swept before
+    /// the first panic, if any, is re-raised, unless this thread is
+    /// already unwinding, where a second panic would abort the process.
+    fn cancel_all_tasks(&self) {
+        let mut first_panic = None;
+        for shared in self.all_shared() {
+            if let Some(payload) = shared.cancel_all_tasks() {
+                keep_first_panic(&mut first_panic, payload);
+            }
+        }
+        let Some(payload) = first_panic else {
+            return;
+        };
+        if std::thread::panicking() {
+            // See `keep_first_panic`: dropping it could panic again.
+            std::mem::forget(payload);
+            return;
+        }
+        std::panic::resume_unwind(payload);
+    }
+
     /// Signals shutdown and returns immediately -- doesn't wait for
     /// outstanding tasks to finish, the blocking pool to drain, or even
     /// the worker threads themselves to exit. Dropping the worker
@@ -1282,6 +1337,9 @@ impl Runtime {
             shared.blocking_pool.signal_shutdown();
         }
         self.take_workers();
+        // Workers may still be mid-poll here; `Task::shutdown` leaves
+        // those tasks for their poller to cancel when the poll returns.
+        self.cancel_all_tasks();
     }
 
     /// Signals shutdown, then waits up to `timeout` for every
@@ -1321,6 +1379,7 @@ impl Runtime {
         for w in self.take_workers() {
             let _ = w.join();
         }
+        self.cancel_all_tasks();
     }
 }
 
@@ -1342,6 +1401,7 @@ impl Drop for Runtime {
         for w in self.take_workers() {
             let _ = w.join();
         }
+        self.cancel_all_tasks();
     }
 }
 
@@ -1388,5 +1448,93 @@ pub(crate) fn block_on_inner<F: Future>(future: F) -> F::Output {
             std::task::Poll::Ready(v) => return v,
             std::task::Poll::Pending => parker.park(),
         }
+    }
+}
+
+/// Resolves once `flagged()` holds or `notify` broadcasts with
+/// `notify_waiters`. The setter stores the flag, then broadcasts.
+///
+/// The `Notified` is created *before* the flag is read, as tokio's own
+/// docs prescribe: a `Notified` receives every `notify_waiters` from its
+/// creation on, even unpolled (#576). Reading the flag first would let a
+/// broadcast land between the read and the creation and be missed by
+/// both (#583).
+///
+/// A `poll_fn` rather than an `async fn` so the future stays `Unpin`, as
+/// `Handle::shutdown_notified` always was.
+fn flag_or_notified<'a>(
+    notify: &'a Notify,
+    flagged: impl Fn() -> bool + 'a,
+) -> impl Future<Output = ()> + 'a {
+    let mut notified: Option<crate::sync::Notified<'a>> = None;
+    std::future::poll_fn(move |cx| {
+        let first = notified.is_none();
+        let fut = notified.get_or_insert_with(|| notify.notified());
+        if first && flagged() {
+            return Poll::Ready(());
+        }
+        std::pin::Pin::new(fut).poll(cx)
+    })
+}
+
+#[cfg(test)]
+mod flag_or_notified_tests {
+    use super::*;
+    use std::pin::pin;
+
+    struct Flag(AtomicBool);
+
+    impl Wake for Flag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn flag_waker() -> (Arc<Flag>, Waker) {
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        (flag.clone(), Waker::from(flag))
+    }
+
+    /// A broadcast that lands between the flag check and the `Notified`'s
+    /// creation still resolves the future (#583). Here `flagged` itself
+    /// runs `begin_graceful_shutdown`'s two steps right after reading the
+    /// flag, as another thread could.
+    #[test]
+    fn a_broadcast_right_after_the_flag_check_is_not_missed() {
+        let notify = Notify::new();
+        let flag = AtomicBool::new(false);
+        let mut fut = pin!(flag_or_notified(&notify, || {
+            let was = flag.load(Ordering::SeqCst);
+            if !was {
+                flag.store(true, Ordering::SeqCst);
+                notify.notify_waiters();
+            }
+            was
+        }));
+        let (woken, waker) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+        let ready = fut.as_mut().poll(&mut cx).is_ready()
+            || (woken.0.load(Ordering::SeqCst) && fut.as_mut().poll(&mut cx).is_ready());
+        assert!(ready, "the shutdown is observed, not slept through");
+    }
+
+    #[test]
+    fn a_flag_already_set_resolves_at_once() {
+        let notify = Notify::new();
+        let mut fut = pin!(flag_or_notified(&notify, || true));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(fut.as_mut().poll(&mut cx).is_ready());
+    }
+
+    #[test]
+    fn a_later_broadcast_wakes_a_pending_waiter() {
+        let notify = Notify::new();
+        let mut fut = pin!(flag_or_notified(&notify, || false));
+        let (woken, waker) = flag_waker();
+        let mut cx = Context::from_waker(&waker);
+        assert!(fut.as_mut().poll(&mut cx).is_pending());
+        notify.notify_waiters();
+        assert!(woken.0.load(Ordering::SeqCst), "woken by the broadcast");
+        assert!(fut.as_mut().poll(&mut cx).is_ready());
     }
 }

@@ -193,7 +193,7 @@ fn values_must_suit_the_catalog_as_ctl_would_check_them() {
     let text = r#"{
       "actions": [
         {"name": "bad", "run": [
-          {"call": "create-session"},
+          {"call": "create-window"},
           {"call": "input"},
           {"call": "resize", "args": {"cols": 0, "rows": "wide"}},
           {"call": "resize", "args": {"cols": 65536, "rows": 24}}
@@ -207,21 +207,21 @@ fn values_must_suit_the_catalog_as_ctl_would_check_them() {
         {"keys": "a", "action": "size", "args": {"cols": "0"}},
         {"keys": "b", "action": "size", "args": {"cols": "120"}},
         {"keys": "c", "action": "resize", "args": {"cols": "80", "rows": "x"}},
-        {"keys": "d", "action": "create-session"},
+        {"keys": "d", "action": "create-window"},
         {"keys": "e", "action": "create-window", "args": {"name": "w"}}
       ]
     }"#;
     assert_eq!(
         problems(text),
         [
-            "actions[0].run[0]: `create-session` needs parameter `name`",
+            "actions[0].run[0]: `create-window` needs parameter `name`",
             "actions[0].run[1]: `input` needs parameter `data`",
             "actions[0].run[2].args.cols: `cols`: `0` is not a valid cell count",
             "actions[0].run[2].args.rows: `rows`: `wide` is not a valid cell count",
             "actions[0].run[3].args.cols: `cols`: `65536` is not a valid cell count",
             "binds[0]: `cols`: `0` is not a valid cell count",
             "binds[2]: `rows`: `x` is not a valid cell count",
-            "binds[3]: `create-session` needs parameter `name`",
+            "binds[3]: `create-window` needs parameter `name`",
         ]
     );
 }
@@ -304,4 +304,93 @@ fn rules_are_checked_against_events_and_their_fields() {
             "on[7].event: missing",
         ]
     );
+}
+
+#[test]
+fn the_server_section_gives_new_block_defaults() {
+    // Absolute on this platform.
+    let (cwd, json) = match cfg!(windows) {
+        true => (r"C:\srv", r"C:\\srv"),
+        false => ("/srv", "/srv"),
+    };
+    let text = format!(r#"{{"server": {{"command": "fish", "args": ["-l"], "cwd": "{json}"}}}}"#);
+    let expected = Defaults {
+        command: Some("fish".into()),
+        args: vec!["-l".into()],
+        cwd: Some(cwd.into()),
+    };
+    assert_eq!(parse(&text).expect("valid").server, expected);
+    assert_eq!(parse_server(&text), Ok(expected));
+    assert_eq!(parse("{}").expect("valid").server, Defaults::default());
+    assert_eq!(
+        parse(r#"{"server": {}}"#).expect("valid").server,
+        Defaults::default()
+    );
+}
+
+#[test]
+fn the_server_reads_only_its_own_section() {
+    // A rule for an event this build does not know is ctl's problem.
+    let text =
+        r#"{"on": [{"event": "from-the-future", "action": "x"}], "server": {"command": "sh"}}"#;
+    assert!(parse(text).is_err());
+    assert_eq!(
+        parse_server(text).expect("valid").command.as_deref(),
+        Some("sh")
+    );
+    let found = parse_server(r#"{"server": {"cwd": "rel"}}"#).expect_err("relative");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(parse_server("[]").is_err());
+    assert!(parse_server("not json").is_err());
+}
+
+#[test]
+fn a_bad_server_section_is_reported() {
+    let found =
+        problems(r#"{"server": {"command": "", "args": ["a", 1], "cwd": "rel", "shell": "x"}}"#);
+    for expected in [
+        "server: unknown key `shell`",
+        "server.command: must not be empty",
+        "server.args[1]: expected a string",
+        "server.cwd: `rel` is not an absolute path",
+    ] {
+        assert!(found.iter().any(|p| p == expected), "{expected}: {found:?}");
+    }
+    let found = problems(r#"{"server": {"args": ["-l"]}}"#);
+    assert_eq!(found, ["server.args: needs a `command`"]);
+    let found = problems(r#"{"server": {"command": "a\u0000b"}}"#);
+    assert_eq!(found, ["server.command: must not hold a NUL"]);
+    assert_eq!(problems(r#"{"server": 3}"#), ["server: expected an object"]);
+}
+
+#[test]
+fn the_config_file_is_found_as_documented() {
+    let env = |pairs: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            pairs
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, v)| std::ffi::OsString::from(v))
+        }
+    };
+    let path = |pairs| default_path(env(pairs));
+    let under = |base: &str| Some(Path::new(base).join("rusty_mux").join("config.json"));
+    assert_eq!(
+        path(&[("RUSTY_MUX_CONFIG", "/c.json"), ("HOME", "/h")]),
+        Some("/c.json".into())
+    );
+    assert_eq!(
+        path(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")]),
+        under("/x")
+    );
+    assert_eq!(
+        path(&[("HOME", "/h")]),
+        Some(
+            Path::new("/h")
+                .join(".config")
+                .join("rusty_mux")
+                .join("config.json")
+        )
+    );
+    assert_eq!(path(&[]), None);
 }

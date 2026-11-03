@@ -10,6 +10,13 @@
 //! Silence of [`LEASE_SILENCE`] already releases the leases its clients
 //! hold, so others can type; the next datagram heard gives them back where
 //! nobody took them meanwhile.
+//!
+//! An association belongs to the principal of the client that asked for
+//! it: its streams are that principal's connections, so a takeover over
+//! UDP is checked against the same principal as one over the socket. A
+//! roam (the newest authentic datagram came from a new address) keeps
+//! every stream and tells `IDENTITY` clients each client's connection
+//! changed.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -20,7 +27,7 @@ use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
-use rusty_mux_core::{ClientId, Transport};
+use rusty_mux_core::{ClientId, Principal, Transport};
 use rusty_mux_transport::{Association, ID_LEN, KEY_LEN, MAX_DATAGRAM, Side, StreamId};
 use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf, UdpSocket};
 use rusty_tokio::sync::Notify;
@@ -58,7 +65,11 @@ pub(crate) struct Registry {
 }
 
 enum Slot {
-    Offered { key: Key, at: Instant },
+    Offered {
+        key: Key,
+        at: Instant,
+        principal: Principal,
+    },
     Live(Rc<Link>),
 }
 
@@ -70,10 +81,14 @@ impl Registry {
         }
     }
 
-    /// A fresh association, from the OS's CSPRNG: the port to send to, its
-    /// id and its key. Offers older than [`OFFER_TTL`] are forgotten, and
-    /// none is made while [`MAX_ASSOCIATIONS`] are held.
-    pub(crate) fn offer(&self, now: Instant) -> Result<(u16, Id, Key), String> {
+    /// A fresh association for `principal`, from the OS's CSPRNG: the port
+    /// to send to, its id and its key. Offers older than [`OFFER_TTL`] are
+    /// forgotten, and none is made while [`MAX_ASSOCIATIONS`] are held.
+    pub(crate) fn offer(
+        &self,
+        now: Instant,
+        principal: Principal,
+    ) -> Result<(u16, Id, Key), String> {
         let mut slots = self.slots.borrow_mut();
         slots.retain(|_, slot| match slot {
             Slot::Offered { at, .. } => !expired(*at, now),
@@ -89,39 +104,47 @@ impl Registry {
         if slots.contains_key(&id) {
             return Err("association id already in use".into());
         }
-        slots.insert(id, Slot::Offered { key, at: now });
+        slots.insert(
+            id,
+            Slot::Offered {
+                key,
+                at: now,
+                principal,
+            },
+        );
         Ok((self.port, id, key))
     }
 
     /// Hands `datagram` to its association. Returns the link when this
     /// datagram is the first authentic one of an offer, for the caller to
-    /// drive; anything not authentic changes nothing.
+    /// drive, or whether it moved a live one to a new address; anything not
+    /// authentic changes nothing.
     fn datagram(&self, now: Instant, from: SocketAddr, datagram: &[u8]) -> Received {
         let Some(id) = datagram.get(..ID_LEN).and_then(|id| Id::try_from(id).ok()) else {
             return Received::Nothing;
         };
         let mut slots = self.slots.borrow_mut();
-        let key = match slots.get(&id) {
+        let (key, principal) = match slots.get(&id) {
             None => return Received::Nothing,
             Some(Slot::Live(link)) => {
                 let link = link.clone();
                 drop(slots);
                 return match link.datagram(now, from, datagram) {
-                    true => Received::Live(link),
-                    false => Received::Nothing,
+                    Some(roamed) => Received::Live { link, roamed },
+                    None => Received::Nothing,
                 };
             }
             Some(Slot::Offered { at, .. }) if expired(*at, now) => {
                 slots.remove(&id);
                 return Received::Nothing;
             }
-            Some(Slot::Offered { key, .. }) => *key,
+            Some(Slot::Offered { key, principal, .. }) => (*key, principal.clone()),
         };
         let mut assoc = Association::new(Side::Server, id, &key, now, None);
         if !assoc.datagram(now, from, datagram) {
             return Received::Nothing;
         }
-        let link = Rc::new(Link::new(id, assoc, now));
+        let link = Rc::new(Link::new(id, assoc, principal, now));
         slots.insert(id, Slot::Live(link.clone()));
         Received::New(link)
     }
@@ -147,7 +170,12 @@ fn expired(at: Instant, now: Instant) -> bool {
 
 enum Received {
     Nothing,
-    Live(Rc<Link>),
+    /// An authentic datagram of a live link, which `roamed` it to a new
+    /// address.
+    Live {
+        link: Rc<Link>,
+        roamed: bool,
+    },
     New(Rc<Link>),
 }
 
@@ -180,8 +208,11 @@ pub(crate) async fn serve(
         }
         let link = match registry.datagram(Instant::now(), from, &buf[..n]) {
             Received::Nothing => continue,
-            Received::Live(link) => {
+            Received::Live { link, roamed } => {
                 link.heard(&state);
+                if roamed {
+                    link.roamed(&state);
+                }
                 link
             }
             Received::New(link) => {
@@ -211,7 +242,8 @@ pub(crate) async fn serve(
                 known.borrow_mut().over_datagram(client, cancel);
                 adopter.adopt(client, cancel, &known);
             };
-            let served = conn::run(state.clone(), rd, wr, Transport::Datagram, adopt);
+            let principal = link.principal.clone();
+            let served = conn::run(state.clone(), rd, wr, principal, Transport::Datagram, adopt);
             rusty_tokio::task::spawn_local(served);
         }
     }
@@ -255,6 +287,8 @@ async fn drive(
 /// A live association, shared by its driver and its streams' halves.
 pub(crate) struct Link {
     id: Id,
+    /// Whose connections its streams are: the client that asked for it.
+    principal: Principal,
     born: Instant,
     assoc: RefCell<Association>,
     /// Wakes the driver: something may be ready to send.
@@ -279,9 +313,10 @@ struct Wakers {
 }
 
 impl Link {
-    fn new(id: Id, assoc: Association, born: Instant) -> Self {
+    fn new(id: Id, assoc: Association, principal: Principal, born: Instant) -> Self {
         Self {
             id,
+            principal,
             born,
             assoc: RefCell::new(assoc),
             wake: Notify::new(),
@@ -322,18 +357,33 @@ impl Link {
         }
     }
 
+    /// Moved to a new address: tells `IDENTITY` clients that each client
+    /// this link still serves is reached there now.
+    fn roamed(&self, state: &Shared) {
+        let mut clients = self.clients.borrow_mut();
+        let mut state = state.borrow_mut();
+        clients.retain(|(client, cancel)| state.kept_by(*client, cancel));
+        state.roamed(&clients);
+    }
+
     /// When the last authentic datagram arrived, or the link was born.
     fn heard_at(&self) -> Instant {
         self.assoc.borrow().last_heard().unwrap_or(self.born)
     }
 
-    fn datagram(&self, now: Instant, from: SocketAddr, datagram: &[u8]) -> bool {
-        if !self.assoc.borrow_mut().datagram(now, from, datagram) {
-            return false;
+    /// Feeds an authentic `datagram` to the association; whether it moved
+    /// the association to a new address, or `None` if it was not authentic.
+    fn datagram(&self, now: Instant, from: SocketAddr, datagram: &[u8]) -> Option<bool> {
+        let mut assoc = self.assoc.borrow_mut();
+        let before = assoc.peer();
+        if !assoc.datagram(now, from, datagram) {
+            return None;
         }
+        let roamed = assoc.peer() != before;
+        drop(assoc);
         self.wake_streams();
         self.wake.notify_one();
-        true
+        Some(roamed)
     }
 
     /// When the driver should next look, or `None` once the association

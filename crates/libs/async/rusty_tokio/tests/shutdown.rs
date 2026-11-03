@@ -96,3 +96,14 @@ fn shutdown_background_returns_immediately_without_waiting_for_outstanding_tasks
         "shutdown_background should never wait on outstanding tasks"
     );
 }
+
+/// `shutdown_notified()` stays `Unpin + Send + Sync`, as it was before
+/// #583, so `select! { _ = &mut fut => .. }` in a loop and `Pin::new`
+/// keep compiling.
+#[test]
+fn shutdown_notified_is_unpin_send_and_sync() {
+    fn assert_traits<F: std::future::Future + Unpin + Send + Sync>(_: &F) {}
+    let rt = Runtime::new().unwrap();
+    let handle = rt.handle();
+    assert_traits(&handle.shutdown_notified());
+}

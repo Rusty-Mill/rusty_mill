@@ -166,7 +166,7 @@ fn a_synthetic_agent_error_reaches_the_report_but_not_progress() {
     assert_eq!(progress.len(), 1, "{stderr}");
     assert_eq!(
         progress[0],
-        "run: stopped: Codex failed T-1 (see report) after 1 call(s)"
+        "run: stopped: codex failed T-1 (see report) after 1 call(s)"
     );
 }
 
@@ -214,7 +214,7 @@ fn a_childs_stderr_excerpt_never_reaches_progress() {
     assert!(!stderr.contains(SENTINEL), "{stderr}");
     assert_eq!(
         progress_lines(&stderr),
-        vec!["run: stopped: Local failed T-1 (see report) after 1 call(s)"]
+        vec!["run: stopped: local failed T-1 (see report) after 1 call(s)"]
     );
 }
 

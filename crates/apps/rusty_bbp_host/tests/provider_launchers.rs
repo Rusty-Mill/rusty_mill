@@ -400,3 +400,20 @@ fn author_refuses_a_session_before_provider_start() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot keep a session"));
     assert!(!f.dir.join("args").exists());
 }
+
+#[test]
+fn a_launcher_refuses_a_session_binding_before_provider_start() {
+    for reviewer in [false, true] {
+        let f = Fixture::new(reviewer);
+        let out = f
+            .command()
+            .env_remove("BBP_TURN")
+            .env("BBP_SESSION", "yes")
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("serves one turn"), "{err}");
+        assert!(!f.dir.join("args").exists());
+    }
+}

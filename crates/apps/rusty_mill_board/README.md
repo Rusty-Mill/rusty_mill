@@ -14,9 +14,32 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 "Sign in now" with one of the board's own tokens; see
 [deploy/README.md](deploy/README.md#signing-in-from-claudeai-oauth).
 
-- **Columns:** backlog, ready, building, qa, review, done, blocked.
-- **Rules:** each move needs a capability (triage, build, qa, review, merge, close); leaving
-  building/qa/review needs your claim. `close` moves a card from building or qa straight to done when
+- **Columns:** set by an admin (Settings > Columns, kept in `workflow.json`); `board_columns` lists them and
+  the moves between them. The default is backlog, ready, building, qa, review, done, blocked. Each column has a
+  kind: `queue` (waits to be taken; `card_take` enters it into the first work column it moves to), `work`
+  (claimed; leaving needs the claim), or one of the fixed `backlog`, `done` and `blocked`, which can be relabelled
+  and reordered but not removed. A column id is what cards store (`board:<id>` in rusty_tick) and never changes;
+  its label is what people see. A column that still holds cards cannot be removed, and a card whose column the
+  workflow lacks reads as backlog. A move may be a **gate** (a human approval): it needs its capability and
+  `admin`, even with movement rules off.
+- **Factory workflow:** [`deploy/factory.workflow.json`](deploy/factory.workflow.json) is the software factory's
+  stages: Backlog, Ready, Planning, Architecting, Building, V&Ving, Done, Blocked. Its gates (Backlog to Ready,
+  Architecting to Building, V&Ving to Done by `merge`, and every move out of Blocked, so blocking is no way around
+  an approval) need `admin`; `close` may still record V&Ving to Done for a PR already merged on the forge. With
+  movement rules off, a move that jumps over a gate still needs `admin`, and V&Ving to Done still needs `close`
+  or the gated `merge`. Each work column names its `takers`, so `card_take` gives a planner
+  Ready and Planning, an architect Architecting, a tester Planning to V&Ving, a builder Building, and a reviewer
+  every work column. A move may list more than one capability (one transition each); holding any one is enough.
+  Install it by copying it to `workflow.json`, after re-filing the cards of columns it drops (below).
+- **Re-filing cards:** `rusty_mill_board --tick-url URL --retag-columns qa=v_and_ving,review=v_and_ving` prints
+  the plan as JSON (each card's id, revision, from and to). `--apply --retag-record FILE` (board stopped) creates
+  FILE exclusively and syncs the plan into it, then, for each card still at its planned revision, records `begin`,
+  retags it (keeping its claim) and records `done`, each line synced. `--undo-retag FILE` puts back each card
+  recorded `done` that is in the new column at the very next revision; a card changed since, never reached, or
+  whose write's outcome is unknown is left alone and reported. Unix only: elsewhere the record's directory entry
+  cannot be synced, so `--apply` refuses.
+- **Rules:** each move needs the capability the workflow gives it (by default triage, build, test, review, merge,
+  close; `plan` and `architect` serve the factory workflow; `test` was `qa`, which stored roles may still say); any open card may be moved to blocked; leaving a work column needs your claim. `close` moves a card from building or qa straight to done when
   its work already merged on the forge, and lets `card_add` with `done: true` record merged work that never
   had a card (bookkeeping, not a review: it never makes a card someone's work in `card_take`). The default
   `builder` role holds it, and `project`: `project_add` adds a project (or a repository) whose paths overlap no
@@ -25,7 +48,8 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   defined by the caller, `Roles::default()` is a starting set. `actor`/`role` are
   trusted as given: this is a workflow guard between cooperating agents, and the
   bearer token is the authentication.
-- **Order:** `card_take` looks in Review, QA, Building, then Ready; within one, the highest `priority` (0, 1, 3, 5)
+- **Order:** `card_take` looks in the queue and work columns nearest Done first (by default Review, QA, Building,
+  then Ready); within one, the highest `priority` (0, 1, 3, 5)
   first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
   holds nothing up); naming it explicitly says why. `card_plan` sets both and needs Triage. The tags `agent`,
   `board:…` and `claim:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
@@ -46,16 +70,20 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
-  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`. The web API
+  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`, `inbox_list`, `inbox_act`. The web API
   exposes the same table, so the two cannot drift.
+- **Decision inbox (#595).** `inbox_list` and `inbox_act` (admin only, and only through a token or OAuth credential, never a caller-named actor) show and decide the open BBP escalations
+  of the tasks linked from cards. Mill Board stores none of it: run with `--bbp-bin PATH --bbp-root DIR` on the
+  orch host and it runs `bbp inbox` and fenced `bbp human` commands, so the host stays the only writer of the log.
 - **Settings.** The ⚙ button opens a view to add and remove agents (credentials: name, role, project limit; a
   token is shown once; "New token" replaces it), edit repositories and their projects, edit roles, and configure
   the GitHub sync. It needs the `admin` capability (the default `human` role has it). Run with
-  `--settings-dir DIR`: it keeps `identities.json`, `projects.json`, `roles.json`, `github.json` and `rules.json` there
+  `--settings-dir DIR`: it keeps `identities.json`, `projects.json`, `roles.json`, `github.json`, `rules.json` and `workflow.json` there
   (secrets owner-only), changes take effect at once, and a first start creates an `admin` credential and
   prints its token once. Without files the view is read-only. A change that would lock everyone out, or drop a
   project that still has cards, is refused. Roles explain each capability. **Apps** lists the apps signed in
-  through OAuth (with `--issuer`) and revokes one (it can sign in again); **Rules** turns card movement
+  through OAuth (with `--issuer`) and revokes one (it can sign in again); **Columns** adds, relabels, reorders and removes columns and edits the moves between them;
+  **Rules** turns card movement
   rules off and on (off: any move but out of Done, by anyone holding a capability, each logged; on by
   default); **Server** shows, read-only, where
   the cards live, the issuer, the accepted hosts and the settings files. Not available over MCP. ADR-0004.

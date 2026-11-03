@@ -18,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
+# The config file's `server` section, parsed as ctl parses the rest.
+rusty_mux_script = { workspace = true }
 rusty_mux_status = { workspace = true }
 # The UDP association behind `--udp`; its keys come from the OS CSPRNG.
 rusty_mux_transport = { workspace = true }

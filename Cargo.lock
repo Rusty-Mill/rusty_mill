@@ -7119,6 +7119,7 @@ dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
  "rusty_json",
 ]
 
@@ -7139,6 +7140,7 @@ dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
  "orch-ollama",
  "rusty_json",
 ]
@@ -7156,12 +7158,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-lens"
+version = "0.1.0"
+dependencies = [
+ "orch-cli",
+ "orch-core",
+ "orch-dispatch",
+ "rusty_bbp",
+ "rusty_json",
+]
+
+[[package]]
 name = "orch-ollama"
 version = "0.1.0"
 dependencies = [
  "orch-cli",
  "orch-core",
  "orch-dispatch",
+]
+
+[[package]]
+name = "orch-openai"
+version = "0.1.0"
+dependencies = [
+ "orch-dispatch",
+ "orch-lens",
+ "rusty_http",
+ "rusty_json",
 ]
 
 [[package]]
@@ -10335,6 +10358,7 @@ version = "0.1.0"
 dependencies = [
  "rusty_atomic_file",
  "rusty_bbp",
+ "rusty_codec",
  "rusty_libc",
  "rusty_rand",
  "rusty_sandbox",
@@ -10932,6 +10956,7 @@ dependencies = [
  "rusty_libc",
  "rusty_mux_core",
  "rusty_mux_proto",
+ "rusty_mux_script",
  "rusty_mux_status",
  "rusty_mux_transport",
  "rusty_rand",
@@ -11019,7 +11044,9 @@ dependencies = [
  "orch-codex",
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
  "orch-ollama",
+ "orch-openai",
  "orch-store",
  "rusty_atomic_file",
  "rusty_bbp",
@@ -11027,6 +11054,7 @@ dependencies = [
  "rusty_json",
  "rusty_rand",
  "rusty_serde",
+ "rusty_time",
 ]
 
 [[package]]

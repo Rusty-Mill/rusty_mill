@@ -27,9 +27,12 @@
 
 use std::fmt;
 
-use rusty_mux_core::{BlockId, ClientId, EntityId, SessionId, Side, Size, WindowId};
+use rusty_mux_core::{
+    Axis, BlockId, ClientId, EntityId, SessionId, Share, Side, Size, Toward, WindowId,
+};
 use rusty_uuid::Uuid;
 
+use crate::theme::ThemeChange;
 use crate::{Features, Launch, Message, Program};
 
 /// Which entity an id names.
@@ -158,6 +161,19 @@ pub struct Param {
     pub presence: Presence,
 }
 
+impl Param {
+    /// The features this parameter adds to a call whose arguments are
+    /// named `given`, if any.
+    pub fn extra_needs(&self, given: &[&str]) -> Option<Features> {
+        let present = given.contains(&self.name);
+        match self.presence {
+            Presence::Optional { needs } if present => Some(needs),
+            Presence::Defaulted { needs } if !present => Some(needs),
+            _ => None,
+        }
+    }
+}
+
 /// Whether a request must carry a parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Presence {
@@ -165,6 +181,12 @@ pub enum Presence {
     /// May be left out; when given, the connection must also have
     /// negotiated `needs`, since a server without it would ignore it.
     Optional {
+        needs: Features,
+    },
+    /// May be left out, and the server then picks the value; leaving it
+    /// out needs `needs`, since a server without it would take the gap as
+    /// an empty value.
+    Defaulted {
         needs: Features,
     },
 }
@@ -227,14 +249,25 @@ impl Method {
 
     /// The features a connection needs to send this method with arguments
     /// named `given`: the method's own, plus those of each optional
-    /// parameter given.
+    /// parameter given and of each defaulted one left out.
     pub fn needs_for<'a>(&self, given: impl IntoIterator<Item = &'a str>) -> Features {
-        given
-            .into_iter()
-            .filter_map(|name| self.params.iter().find(|p| p.name == name))
+        let given: Vec<&str> = given.into_iter().collect();
+        self.params
+            .iter()
+            .fold(self.needs, |all, param| match param.extra_needs(&given) {
+                Some(needs) => all.union(needs),
+                None => all,
+            })
+    }
+
+    /// Every feature some form of this call can need: what a client asks
+    /// for to send it in any form.
+    pub fn all_needs(&self) -> Features {
+        self.params
+            .iter()
             .fold(self.needs, |all, param| match param.presence {
                 Presence::Required => all,
-                Presence::Optional { needs } => all.union(needs),
+                Presence::Optional { needs } | Presence::Defaulted { needs } => all.union(needs),
             })
     }
 
@@ -433,6 +466,54 @@ impl Args<'_> {
         self.uuid("block", Entity::Block).map(BlockId::from_uuid)
     }
 
+    fn window(&self) -> Result<WindowId, CallError> {
+        self.uuid("window", Entity::Window).map(WindowId::from_uuid)
+    }
+
+    /// The block named `name`, if given.
+    fn opt_block(&self, name: &'static str) -> Result<Option<BlockId>, CallError> {
+        self.has(name)
+            .then(|| self.uuid(name, Entity::Block).map(BlockId::from_uuid))
+            .transpose()
+    }
+
+    /// The `toward` parameter: a side, `next` or `previous`.
+    fn toward(&self) -> Result<Toward, CallError> {
+        let text = self.text("toward")?;
+        text.parse().map_err(|_| CallError::Invalid {
+            param: "toward",
+            why: format!("`{text}` is not left, right, up, down, next or previous"),
+        })
+    }
+
+    /// The `axis` parameter: `cols` or `rows`.
+    fn axis(&self) -> Result<Axis, CallError> {
+        let text = self.text("axis")?;
+        text.parse().map_err(|_| CallError::Invalid {
+            param: "axis",
+            why: format!("`{text}` is not cols or rows"),
+        })
+    }
+
+    fn number(&self, name: &'static str) -> Result<u32, CallError> {
+        match self.get(name)? {
+            Value::Lines(n) => Ok(*n),
+            _ => Err(self.wrong(name, Ty::Lines)),
+        }
+    }
+
+    /// The `percent` parameter, from 1 to 99.
+    fn share(&self) -> Result<Share, CallError> {
+        let percent = self.number("percent")?;
+        u8::try_from(percent)
+            .ok()
+            .and_then(Share::new)
+            .ok_or_else(|| CallError::Invalid {
+                param: "percent",
+                why: format!("{percent} is not from 1 to 99"),
+            })
+    }
+
     fn wrong(&self, param: &'static str, ty: Ty) -> CallError {
         CallError::WrongType { param, ty }
     }
@@ -472,6 +553,27 @@ const fn capture(name: &'static str, doc: &'static str) -> Param {
     }
 }
 
+/// What the block methods that measure and change a terminal need.
+const TERMINAL_CONTROL: Features = Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL);
+
+/// What `terminal.modes` and `terminal.clear` need.
+const TERMINAL_MORE: Features = Features::BLOCK_CALL.union(Features::TERMINAL_MORE);
+
+/// What `terminal.shell` needs.
+const TERMINAL_SHELL: Features = Features::BLOCK_CALL.union(Features::TERMINAL_SHELL);
+
+/// An optional parameter of `terminal.set-theme`.
+const fn theme(name: &'static str, ty: Ty, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::TERMINAL_CONTROL,
+        },
+    }
+}
+
 const BLOCK: Param = required("block", Ty::Id(Entity::Block), "The block to act on.");
 const NEW_NAME: Param = required(
     "name",
@@ -500,18 +602,21 @@ const ROWS: Param = required("rows", Ty::Cells, "Height in cells.");
 pub static CATALOG: &[Method] = &[
     Method {
         name: "create-session",
-        doc: "Create a named session.",
-        params: &[required(
-            "name",
-            Ty::Text,
-            "The session's name, at most 256 bytes.",
-        )],
+        doc: "Create a session, named `name` or else a generated name such as `quiet-harbor`.",
+        params: &[Param {
+            name: "name",
+            ty: Ty::Text,
+            doc: "The session's name, at most 256 bytes; left out, the server makes one up that no other session has.",
+            presence: Presence::Defaulted {
+                needs: Features::SESSION_NAMES,
+            },
+        }],
         needs: Features::NONE,
         returns: Returns::Created(Entity::Session),
         build: |req, a| {
             Ok(Message::CreateSession {
                 req,
-                name: a.text("name")?,
+                name: a.opt_text("name")?.unwrap_or_default(),
             })
         },
     },
@@ -657,6 +762,24 @@ pub static CATALOG: &[Method] = &[
         build: |req, a| rename(req, a, Entity::Session),
     },
     Method {
+        name: "name-session",
+        doc: "Rename a session only while its name is generated, such as `quiet-harbor`; \
+              refused once somebody chose a name, which stays.",
+        params: &[
+            required("session", Ty::Id(Entity::Session), "The session to name."),
+            NEW_NAME,
+        ],
+        needs: Features::NAME_SESSION,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::NameSession {
+                req,
+                session: SessionId::from_uuid(a.uuid("session", Entity::Session)?),
+                name: a.text("name")?,
+            })
+        },
+    },
+    Method {
         name: "rename-window",
         doc: "Rename a window.",
         params: &[
@@ -773,6 +896,197 @@ pub static CATALOG: &[Method] = &[
         },
     },
     Method {
+        name: "resize-split",
+        doc: "Resize the split between a block and its neighbour: give the block a share \
+              of the innermost split along an axis that holds it.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "The block to resize."),
+            required(
+                "axis",
+                Ty::Text,
+                "`cols` for the split beside it, `rows` for the one above or below.",
+            ),
+            required(
+                "percent",
+                Ty::Lines,
+                "The block's side's share of the split, from 1 to 99.",
+            ),
+        ],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::ResizeSplit {
+                req,
+                block: a.block()?,
+                axis: a.axis()?,
+                share: a.share()?,
+            })
+        },
+    },
+    Method {
+        name: "swap-blocks",
+        doc: "Put two blocks of one window each where the other was. If one is detached, \
+              the other is detached in its place.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "One block."),
+            required(
+                "other",
+                Ty::Id(Entity::Block),
+                "The other, in the same window.",
+            ),
+        ],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::SwapBlocks {
+                req,
+                block: a.block()?,
+                other: BlockId::from_uuid(a.uuid("other", Entity::Block)?),
+            })
+        },
+    },
+    Method {
+        name: "move-block",
+        doc: "Move a block, detached or not, into a new split beside another block of its \
+              window, splitting that one's place in half; unzooms the window. Without \
+              `beside` the block fills a window that shows no block.",
+        params: &[
+            required("block", Ty::Id(Entity::Block), "The block to move."),
+            Param {
+                name: "beside",
+                ty: Ty::Id(Entity::Block),
+                doc: "The block whose place it shares; left out only when the window \
+                      shows no block.",
+                presence: Presence::Optional {
+                    needs: Features::LAYOUT_EDIT,
+                },
+            },
+            required(
+                "side",
+                Ty::Text,
+                "Which side of `beside` it goes: `left`, `right`, `up` or `down`.",
+            ),
+        ],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::MoveBlock {
+                req,
+                block: a.block()?,
+                beside: a.opt_block("beside")?,
+                side: a.side()?,
+            })
+        },
+    },
+    Method {
+        name: "detach-block",
+        doc: "Take a block out of its window's layout. Its program keeps running and it \
+              stays listed in the window, until `move-block` puts it back or it closes.",
+        params: &[required(
+            "block",
+            Ty::Id(Entity::Block),
+            "The block to detach.",
+        )],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::DetachBlock {
+                req,
+                block: a.block()?,
+            })
+        },
+    },
+    Method {
+        name: "move-window",
+        doc: "Move a window to another place among its session's windows, shifting those \
+              between by one.",
+        params: &[
+            required("window", Ty::Id(Entity::Window), "The window to move."),
+            required("index", Ty::Lines, "Its new place, from 0 for the first."),
+        ],
+        needs: Features::LAYOUT_EDIT,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::MoveWindow {
+                req,
+                window: a.window()?,
+                index: usize::try_from(a.number("index")?).unwrap_or(usize::MAX),
+            })
+        },
+    },
+    Method {
+        name: "focus-block",
+        doc: "Focus a block in its window; ends a zoom on another block of the window. \
+              The focus is shared by every client: the attach client follows it, so a \
+              person typing there types into this block. input and terminal.send-keys \
+              still go to the block they name.",
+        params: &[required(
+            "block",
+            Ty::Id(Entity::Block),
+            "The block to focus; not a detached one.",
+        )],
+        needs: Features::FOCUS,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::FocusBlock {
+                req,
+                block: a.block()?,
+            })
+        },
+    },
+    Method {
+        name: "move-focus",
+        doc: "Move a window's focus from its focused block to the nearest block on a side, \
+              or to the next or previous block in layout order, wrapping around. With no \
+              block that way, nothing changes. Like focus-block, it moves where a person \
+              in the attach client types.",
+        params: &[
+            required("window", Ty::Id(Entity::Window), "The window."),
+            required(
+                "toward",
+                Ty::Text,
+                "`left`, `right`, `up`, `down`, `next` or `previous`.",
+            ),
+        ],
+        needs: Features::FOCUS,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::MoveFocus {
+                req,
+                window: a.window()?,
+                toward: a.toward()?,
+            })
+        },
+    },
+    Method {
+        name: "select-window",
+        doc: "Make a window its session's active window, the one clients show for the \
+              session unless told otherwise.",
+        params: &[required(
+            "window",
+            Ty::Id(Entity::Window),
+            "The window to make active.",
+        )],
+        needs: Features::ACTIVE_WINDOW,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            Ok(Message::SelectWindow {
+                req,
+                window: WindowId::from_uuid(a.uuid("window", Entity::Window)?),
+            })
+        },
+    },
+    Method {
+        name: "reload-config",
+        doc: "Have the server read its config file again: the `server` section's \
+              defaults for new blocks. A file with problems is refused, naming each, and \
+              the server keeps what it had.",
+        params: &[],
+        needs: Features::CONFIG_RELOAD,
+        returns: Returns::Nothing,
+        build: |req, _| Ok(Message::ReloadConfig { req }),
+    },
+    Method {
         name: "list",
         doc: "List every session, window, block and client.",
         params: &[],
@@ -872,6 +1186,103 @@ pub static CATALOG: &[Method] = &[
         needs: Features::BLOCK_CALL,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.process"),
+    },
+    Method {
+        name: "terminal.size",
+        doc: "Read the terminal's size in cells, as `COLSxROWS`, such as `80x24`.",
+        params: &[BLOCK],
+        needs: TERMINAL_CONTROL,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.size"),
+    },
+    Method {
+        name: "terminal.reset",
+        doc: "Reset the terminal as its program sending RIS would, ending any sequence it \
+              left unfinished: the screen and its scrollback are cleared, and modes, \
+              colours and the cursor go back to how they started. The program is not \
+              told. Needs the lease.",
+        params: &[BLOCK],
+        needs: TERMINAL_CONTROL,
+        returns: Returns::Nothing,
+        build: |req, a| block_call(req, a, "terminal.reset"),
+    },
+    Method {
+        name: "terminal.set-theme",
+        doc: "Set the terminal's colours as its program could with OSC 4, 10, 11 and 12: \
+              programs that ask see them and clients draw with them, until the program \
+              changes them or the terminal is reset. Refused while the program is in the \
+              middle of an escape sequence. Needs the lease.",
+        params: &[
+            BLOCK,
+            theme(
+                "foreground",
+                Ty::Text,
+                "The default text colour: `#RRGGBB`, or `default` for the terminal's own.",
+            ),
+            theme(
+                "background",
+                Ty::Text,
+                "The default background colour: `#RRGGBB` or `default`.",
+            ),
+            theme(
+                "cursor",
+                Ty::Text,
+                "The cursor colour: `#RRGGBB` or `default`.",
+            ),
+            theme(
+                "palette",
+                Ty::Words,
+                "A palette entry as `INDEX=COLOUR`, the index from 0 to 255 and the colour \
+                 `#RRGGBB` or `default`, as in `1=#cc0000`. Repeat the flag for each.",
+            ),
+        ],
+        needs: TERMINAL_CONTROL,
+        returns: Returns::Nothing,
+        build: |req, a| {
+            ThemeChange::from_args(a.0)?;
+            block_call(req, a, "terminal.set-theme")
+        },
+    },
+    Method {
+        name: "terminal.modes",
+        doc: "Read the terminal modes its program set, one per line as `NAME<TAB>VALUE`: \
+              `app-cursor-keys`, `app-keypad`, `bracketed-paste`, `focus-reporting`, \
+              `alt-screen`, `alt-scroll`, `insert`, `cursor-visible`, `cursor-blink`, \
+              `report-color-scheme` and `win32-input` are `on` or `off`; `mouse` is `off`, \
+              `click`, `drag` or `any`; `mouse-encoding` is `default` or a comma-separated \
+              list of `utf8`, `sgr`, `urxvt` and `sgr-pixels`; `kitty-keyboard` is the \
+              Kitty keyboard flags in effect, as a decimal number. Lines may be added; \
+              read them by name.",
+        params: &[BLOCK],
+        needs: TERMINAL_MORE,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.modes"),
+    },
+    Method {
+        name: "terminal.clear",
+        doc: "Clear the screen and its scrollback as `clear` does, the cursor going to the \
+              top left; modes, colours and the title stay. The program is not told, so \
+              its prompt comes back with its next output. Refused while the program is in \
+              the middle of an escape sequence. Needs the lease.",
+        params: &[BLOCK],
+        needs: TERMINAL_MORE,
+        returns: Returns::Nothing,
+        build: |req, a| block_call(req, a, "terminal.clear"),
+    },
+    Method {
+        name: "terminal.shell",
+        doc: "Read what the block's shell is and does, one per line as `NAME<TAB>VALUE`: \
+              `program` is the program the block started; `activity` is `idle` while it \
+              has the terminal, `busy` while a job it started does, or `unknown` where \
+              the platform cannot tell, as on Windows (a program that exits closes its \
+              block); `phase` \
+              is `prompt`, `running` or `finished` by the last OSC 133 mark the shell \
+              sent, and `exit` the code its last finished command reported, both \
+              `unknown` until it sends them. Lines may be added; read them by name.",
+        params: &[BLOCK],
+        needs: TERMINAL_SHELL,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.shell"),
     },
     Method {
         name: "close-block",

@@ -42,6 +42,7 @@ class AcceptanceTests(unittest.TestCase):
             self.assertEqual(run.call_count, len(acceptance.CASES))
             self.assertIn("| pause-adoption | PASS |", (Path(directory) / "summary.md").read_text())
             self.assertIn("| rust-lld | PASS |", (Path(directory) / "summary.md").read_text())
+            self.assertIn("| millboard-inbox | PASS |", (Path(directory) / "summary.md").read_text())
             self.assertIn('"mode": "kill"', (Path(directory) / "results.json").read_text())
             self.assertIn("| timeout | FAIL |", (Path(directory) / "summary.md").read_text())
 

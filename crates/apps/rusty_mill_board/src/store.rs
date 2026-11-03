@@ -47,6 +47,11 @@ pub trait Store: Send + Sync {
     fn health(&self) -> Result<(), BoardError> {
         Ok(())
     }
+    /// Whether a committed card survives a restart. A write-ahead record, such as
+    /// the inbox's Remediate card, is only worth writing to a store that says so.
+    fn durable(&self) -> bool {
+        false
+    }
 }
 
 /// The committed state [`MemStore`] keeps: cards by id and the event log in
@@ -186,5 +191,8 @@ impl<T: Store + ?Sized> Store for Box<T> {
     }
     fn health(&self) -> Result<(), BoardError> {
         (**self).health()
+    }
+    fn durable(&self) -> bool {
+        (**self).durable()
     }
 }

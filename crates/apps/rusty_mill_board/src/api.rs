@@ -141,8 +141,42 @@ pub(crate) fn acting(
     }
 }
 
+/// The actor for an inbox op. These ops carry BBP's human authority (they lift
+/// its gates and budgets), so a caller-named actor and role are not enough: only
+/// an identity bound to the transport (a token or OAuth grant) may use them.
+fn bound_acting(b: &Shared, identity: Option<&Identity>, who: &Who) -> Result<Actor, BoardError> {
+    if identity.is_none() {
+        return Err(BoardError::Invalid(
+            "the inbox needs an authenticated admin credential; a named actor and role are not enough",
+        ));
+    }
+    acting(b, identity, who)
+}
+
 #[derive(Deserialize, JsonSchema)]
 struct Nothing {}
+
+#[derive(Deserialize, JsonSchema)]
+struct InboxListArgs {
+    #[serde(flatten)]
+    who: Who,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct InboxActArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// The escalation id from `inbox_list`.
+    id: String,
+    /// Its `rev` from `inbox_list`; an action against newer work is refused.
+    rev: u64,
+    /// What you decide.
+    #[serde(flatten)]
+    action: crate::inbox::Action,
+    /// Only show what the first command would write.
+    #[serde(default)]
+    dry_run: bool,
+}
 
 #[derive(Deserialize, JsonSchema)]
 struct TakeArgs {
@@ -392,10 +426,10 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column and/or one project. Columns: backlog, ready, building, qa, review, done, blocked. A credential limited to some projects only sees those.",
+            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those.",
             |b, i, a: ListArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
-                let mut cards = b.list(a.column)?;
+                let mut cards = b.list(a.column.as_ref())?;
                 cards.retain(|c| {
                     in_scope(scope(i), &c.project)
                         && a.project.as_deref().is_none_or(|p| c.project == p)
@@ -427,7 +461,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_roadmap",
-            "A project's roadmap, derived from its cards: lanes now (building, qa, review), next (ready), later (backlog), blocked, and shipped (done in the last 30 days, newest first). Each lane is ordered as card_take orders work; `waits_on` lists dependencies not yet done. {project, lanes: [{lane, cards}]}.",
+            "A project's roadmap, derived from its cards: lanes now (work columns), next (queues), later (backlog), blocked, and shipped (done in the last 30 days, newest first). Each lane is ordered as card_take orders work; `waits_on` lists dependencies not yet done. {project, lanes: [{lane, cards}]}.",
             |b, i, a: RoadmapArgs| {
                 checked_project(b, scope(i), Some(&a.project))?;
                 to_json(b.roadmap(&a.project)?)
@@ -435,7 +469,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_metrics",
-            "Board metrics over the cards the caller may see, optionally one project or one repository's projects: open cards by column, project (with shipped in the last 30 days), priority and claimant (building, qa, review); cards added and shipped per week for 8 weeks, oldest first; created-to-shipped lead time (median, p85, ms) over the last 30 days; and the 5 open cards past backlog idle longest. {open, by_column, by_project, by_priority, by_claim, weeks, lead_time, idle}.",
+            "Board metrics over the cards the caller may see, optionally one project or one repository's projects: open cards by column, project (with shipped in the last 30 days), priority and claimant (work columns); cards added and shipped per week for 8 weeks, oldest first; created-to-shipped lead time (median, p85, ms) over the last 30 days; and the 5 open cards past backlog idle longest. {open, by_column, by_project, by_priority, by_claim, weeks, lead_time, idle}.",
             |b, i, a: MetricsArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
                 let projects = b.projects();
@@ -465,6 +499,11 @@ pub fn ops() -> Vec<Op> {
             "board_roles",
             "List roles and the capabilities each holds.",
             |b, _, _: Nothing| to_json(json!({ "roles": b.roles().0 })),
+        ),
+        op(
+            "board_columns",
+            "The board's columns in display order ({id, label, kind}: kind backlog, queue (waits to be taken), work (claimed; leaving needs the claim), done or blocked) and the moves between them ({from, to, cap, gate}: the capability a move needs; a gate also needs admin). Any open card may move to blocked.",
+            |b, _, _: Nothing| to_json(json!(b.workflow())),
         ),
         op(
             "board_events",
@@ -576,10 +615,10 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_move",
-            "Move a card. Needs the capability for that transition; leaving building/qa/review needs your claim. While an admin has turned movement rules off, any move but out of Done is allowed.",
+            "Move a card to a column (an id from `board_columns`). Needs the capability of that transition (`board_columns` lists them; a gate also needs admin); leaving a work column needs your claim. Any open card may be moved to blocked. While an admin has turned movement rules off, any move but out of Done and through a gate is allowed.",
             |b, i, a: MoveArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.move_card(card_ref(b, &a.id)?, a.to, &who)?)
+                card(b.move_card(card_ref(b, &a.id)?, &a.to, &who)?)
             },
         ),
         op(
@@ -627,6 +666,24 @@ pub fn ops() -> Vec<Op> {
                     })
                     .transpose()?;
                 card(b.plan(card_ref(b, &a.id)?, &who, a.priority, deps)?)
+            },
+        ),
+        op(
+            "inbox_list",
+            "The decisions waiting for the owner (needs an authenticated admin credential): open BBP escalations of the tasks linked from cards, irreversible first, then oldest. Each has an `id`, a `rev`, the `reason` (and `label` in plain words), the claim with its confidence and budget, the strongest evidence, and its card. Empty means nothing needs you.",
+            |b, i, a: InboxListArgs| {
+                let who = bound_acting(b, i, &a.who)?;
+                Ok(json!(b.inbox(&who)?))
+            },
+        ),
+        op(
+            "inbox_act",
+            "Decide an escalation from `inbox_list` (needs an authenticated admin credential). `action`: `approve` (do it, keep it, or spend exactly one more allowance), `reject` (drop it; a task total needs `reason`), `choose` with `chosen` (a stuck question's candidate id), or `refine` with `note` (clarify the intent, then the lenses judge again). Pass the `rev` you read; `dry_run: true` shows what BBP would write and writes nothing.",
+            |b, i, a: InboxActArgs| {
+                let who = bound_acting(b, i, &a.who)?;
+                Ok(json!(
+                    b.inbox_act(&who, &a.id, a.rev, &a.action, a.dry_run)?
+                ))
             },
         ),
         op(

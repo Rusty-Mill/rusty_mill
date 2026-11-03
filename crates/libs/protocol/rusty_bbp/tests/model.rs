@@ -153,8 +153,10 @@ fn apply(fx: &mut Fx, step: &Step, last: &mut Option<Command>) {
             fx.put(
                 Who::Coder,
                 ArtifactPayload::Candidate(Candidate {
+                    claim: None,
                     base: "a".repeat(40),
                     diffs,
+                    suite: Suite::Build,
                 }),
                 b"{}",
             );

@@ -449,6 +449,15 @@ After that, the content and the cursor row differ until the screen is redrawn:
 
 This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd, PSReadLine and edit.exe, and is part of the Phase B gate. A synchronization strategy, such as repainting the host's screen to the terminal after every resize, would need its own validation and a design update before this document claims the screens match.
 
+**Cursor resync after resize (#1375).** S3 showed V3 is very visible with PSReadLine in rusty_term's window: PSReadLine reads the cursor from GetConsoleScreenBufferInfo and draws its line with absolute positioning, so its echo and the command's output landed on the host's row, not the terminal's. The host now resyncs the cursor, as ConPTY does (microsoft/terminal GH#18725, `SCREEN_INFORMATION::WaitForConptyCursorPositionToBeSynchronized`):
+- A resize that changes the size marks the cursor as possibly wrong. Nothing is emitted yet.
+- The next GetConsoleScreenBufferInfo (valid handle, full descriptor) sends DSR 6 to the terminal and is held. Further calls of it are held behind it, and the engine takes no packet until the wait ends, as conhost's API thread blocks. Terminal input keeps flowing.
+- The first `CSI row ; col R` in the terminal's input during the wait is the answer, never a key. It moves the host's cursor to that screen position (a position the cursor already reads as keeps its pending wrap), and the held calls are answered from the model. A resize during the wait asks again, since the answer may predate it. So does any output sent after the DSR (a parked write that drains, a cooked read's echo): the CPR is the terminal's cursor where it parsed the DSR, and the model has moved on since.
+- With no answer in 500 ms, counted from the first DSR however often the terminal is asked again, the held calls are answered from the model, as before. A resize during that wait leaves the cursor marked, so the next call asks again.
+- A CPR outside a wait is input, as before.
+
+Only the cursor is resynced. The contents can still differ (ReadConsoleOutput), as under ConPTY. `v3_the_cursor_resyncs_from_the_terminal_after_a_resize` pins it at core level, and `own_pty.rs`'s `a_client_positioning_from_the_cursor_follows_the_terminal_after_a_resize` on Windows.
+
 **Regression tests (PR 4, Linux, core level).** Each test runs the same VT through a host Grid (scrollback 0) and a terminal-side Grid (with scrollback), resizes both and asserts the documented result for each, so V3 is pinned as an expected difference rather than discovered later:
 - shrink then grow, using the trace above;
 - narrow then widen with a wrapped line, primary and alternate screen;
@@ -472,9 +481,9 @@ This is recorded as V3 (§5.10). S3 (§9.1) measures how visible it is with cmd,
 
 | # | Behaviour | conhost | We | Why |
 |---|---|---|---|---|
-| V1 | Buffer larger than window | allowed (e.g. 9001 rows) | window size only | scrollback belongs to the terminal; ConPTY does the same |
+| V1 | Buffer or window other than the terminal's size | SetConsoleScreenBufferSize grows the buffer (e.g. 9001 rows); under ConPTY SetConsoleWindowInfo resizes the buffer to the window asked for; GetLargestConsoleWindowSize reports what the display could hold | SetConsoleScreenBufferSize and SetConsoleWindowInfo succeed only at the window's size (`E_INVALIDARG` otherwise); GetLargestConsoleWindowSize reports the window | scrollback belongs to the terminal, and the terminal owns the size: a buffer the host resized alone would wrap text where the terminal doesn't |
 | V2 | SetConsoleScreenBufferInfoEx colours | changes the palette | no-op | no target program needs it |
-| V3 | Content and cursor after resize | one buffer, so one history | the host's model and the terminal's screen can differ after a shrink then grow, or a narrow then widen, until a redraw; absolute positioning then lands on different rows (§5.7) | the host keeps no scrollback, the terminal does; S3 measures it before Phase B |
+| V3 | Content after resize | one buffer, so one history | the host's model and the terminal's screen can differ after a shrink then grow, or a narrow then widen, until a redraw. The cursor is resynced from the terminal (DSR 6) before the next GetConsoleScreenBufferInfo, as ConPTY does, so absolute positioning lands on the terminal's rows (§5.7, #1375) | the host keeps no scrollback, the terminal does |
 | V4 | Startup code pages, input and output | OEM (e.g. 437) | 65001; `chcp` changes both from PR 9 | consumers are UTF-8 |
 | V5 | GetConsoleWindow | a hidden pseudo-window | NULL | add a message-only window if a program in the census needs it; conhost's source names cygwin, which fails silently on NULL, so cygwin and MSYS2 (git-bash tools) are in the census |
 | V6 | Multiple screen buffers (CREATE_OBJECT type 3, SetConsoleActiveScreenBuffer) | supported | STATUS_NOT_IMPLEMENTED | no target program uses them (edit.exe uses `?1049h`); build when the unknown-API log shows a real caller |
@@ -745,6 +754,7 @@ and never reads one. `rusty_conhost`'s `console` follows that from PR 2.
 
 ### 9.2 Phases
 - **Phase A:** `own` is opt-in from PR 5.
+- **As built:** Phase B switches all three defaults (rusty_term `[console] host`, `RUSTY_CONSOLE_HOST` for the mux server and yirp) to `own` in one PR. `conpty` stays selectable, and an unusable ConDrv is still an error, never a silent fallback.
 - **Phase B:** `own` becomes the default once all of these hold:
   - the parity suite passes;
   - the manual gate is green on two builds;
@@ -763,8 +773,8 @@ Each PR includes one change fragment and is reviewed by Dottius. Line counts inc
 | 3 | Input. Covers: VT/win32-input-mode parser, raw passthrough, reply filter, waiting reads, input event, cooked ReadConsole, Ctrl+C/Break, process groups, GenerateConsoleCtrlEvent, 65001-only code pages. Interactive cmd works. As built: the ctrl worker and its queue land here, since Ctrl+C needs them; cooked editing is typing, Backspace, Escape and Enter, with the cursor keys, history and popups later | 700 | 3–4 |
 | 4 | Screen over Grid. Covers: rusty_term_core additions (§4.3, flagged), cursor/attribute/cursor-info APIs, SBI from the Grid, output-mode table, query routing (§5.6), resize (§5.7) with the V3 regression tests. pwsh/PSReadLine and edit.exe start work. As built: with VT processing off and PROCESSED_OUTPUT on, C0 controls other than the five keep their CP437 glyph; §5.4 gained rules 3–5 from the conhost review (legacy wrap, DEL and C1, re-asserting the input modes); DECXCPR (`CSI ? 6 n`) is answered with CPR (V11); the start of a watched sequence at the end of a write is held for the next bytes, and goes out before host VT or at hang-up; on the alternate screen the V3 tests show no divergence, since neither side keeps history there | 700 | 3–4 |
 | 5 | rusty_term `OwnBackend` (§4.5), key documented. **Milestone**. As built: `OwnBackend` is the `Backend` and `OwnHandle` the `BackendHandle`, following `WindowsBackend`/`WindowsHandle`; raw mode and the host size stay the ConPTY backend's. The program is split off the `shell` string by `CreateProcessW`'s rules (`backend/cmdline.rs`, §4.5). PR 5 also split the arguments and `winargv` quoted each again, which changed the raw tail cmd.exe reads (`cmd /c echo a"b c"d`); the follow-up adds `Command::raw_args` (a D3 public API change) and passes the tail verbatim. The web bridge stays on ConPTY. The root `Cargo.toml` gains the `rusty_conhost` workspace entry that `rusty_conhost.workspace = true` needs | 300 | 1–2 |
-| 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works | 450 | 2 |
-| 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls | 550 | 2–3 |
+| 6 | FillConsoleOutput, ScrollConsoleScreenBuffer. Clear-Host works. As built (with PR 7, #1330): every cell write paints as conhost under ConPTY does (`VtIo::Writer::WriteInfos`): runs of CUP, SGR and characters between DECSC and DECRC, through the host's Grid, so the terminal and the model get the same bytes. A write queues as one call and paints at most a slice's worth of cells per step, reading what it keeps (attributes under a character fill, a scroll's source) a row at a time, a scroll's rows in memmove order. cmd `cls` and PowerShell's Clear-Host and `[Console]::Clear()` take conhost's GH#3126 shims (#1371): a whole-screen clear by `cmd.exe`, `powershell.exe` or `pwsh.exe` (by CONNECT's ApplicationName) sends `CSI H CSI 2J CSI 3J` instead of cells, so the terminal drops its scrollback as under ConPTY | 450 | 2 |
+| 7 | Read/WriteConsoleOutput family, SBIEx, window/buffer size calls. As built (#1333): reads take conhost's `AsCharInfo` view of the Grid; a ReadConsoleOutput reply over 1 MiB is refused with `STATUS_INVALID_PARAMETER` (§7.4). The size calls follow V1, GetLargestConsoleWindowSize reports the window, SetConsoleScreenBufferInfoEx is the V2 no-op | 550 | 2–3 |
 | 8 | Lifetime: CTRL_CLOSE (the ctrl worker and its queue are in PR 3), absolute grace deadline, `hang_up`, the §7.3 tests (§5.8). Needs S1. As built: CTRL_CLOSE supersedes queued Ctrl+C/Break and is still delivered after the server closes; a client connecting during the grace gets it; Drop discards output nobody reads | 350 | 1–2 |
 | 9 | Code pages via `codec` (§5.9). As built: the two code pages, WriteConsoleA's DBCS lead byte and the slice-wise decode of parked writes (§5.9), V13, `chcp` end to end on Windows | 250 | 1–2 |
 | 10 | (reserved for issues found at the milestone) | — | 2 |
@@ -979,8 +989,8 @@ None of these changes the wire format, so RTCP and RTSN (the mux checkpoint and 
 
 | Item | Behaviour |
 |---|---|
-| rusty_term `[console] host = "conpty" \| "own"` (parsed in PR 2, documented in PR 5) | Default `"conpty"`. Any other value is a config error naming the key, like other enum keys. It's ignored on non-Windows builds, with one debug log line. |
-| Env var `RUSTY_CONSOLE_HOST=conpty\|own` (PRs 11, 12) | Read once at mux server start and at yirp `PtyOptions` construction. If it's unset, the default is `conpty`. Any other value is a startup error. |
+| rusty_term `[console] host = "conpty" \| "own"` (parsed in PR 2, documented in PR 5) | Default `"conpty"`; `"own"` from Phase B (§9.2). Any other value is a config error naming the key, like other enum keys. It's ignored on non-Windows builds, with one debug log line. |
+| Env var `RUSTY_CONSOLE_HOST=conpty\|own` (PRs 11, 12) | Read once at mux server start and at yirp `PtyOptions` construction. If it's unset, the default is `conpty`, and `own` from Phase B (§9.2). Any other value is a startup error. |
 
 ## 12. Risks
 
@@ -1025,9 +1035,11 @@ Function codes: 1 CONNECT, 2 DISCONNECT, 3 CREATE_OBJECT, 4 CLOSE_OBJECT, 5 RAW_
 | 4 | GetCurrentConsoleFont | 0x03000004 |
 | 4 | GetConsoleWindow (returns NULL, V5) | 0x0300001F |
 | 6 | FillConsoleOutput | 0x02000000 |
-| 6 | ScrollConsoleScreenBuffer | from `conmsgl2.h`, pinned in PR 6 |
+| 6 | ScrollConsoleScreenBuffer | 0x0200000C |
 | 7 | ReadConsoleOutput | 0x02000013 |
-| 7 | WriteConsoleOutput(+String), ReadConsoleOutputString, Get/SetConsoleScreenBufferInfoEx, GetLargestConsoleWindowSize, SetConsoleScreenBufferSize, SetConsoleWindowInfo | from `conmsgl2.h`, pinned in PR 7 |
+| 7 | WriteConsoleOutput / WriteConsoleOutputString / ReadConsoleOutputString | 0x02000011 / 0x02000012 / 0x0200000F |
+| 7 | SetConsoleScreenBufferInfoEx (GetConsoleScreenBufferInfoEx is 0x02000007, PR 4) | 0x02000008 |
+| 7 | SetConsoleScreenBufferSize / GetLargestConsoleWindowSize / SetConsoleWindowInfo | 0x02000009 / 0x0200000B / 0x0200000E |
 | 11 | GetConsoleProcessList | 0x03000029 (draft 6 said 0x0300002A, which is GetConsoleHistory in `conmsgl3.h`) |
 | 11 | SetCurrentConsoleFontEx (accepted, ignored; Windows PowerShell 5.1 exits at startup without it) | 0x0300002C |
 | #1335 | WriteConsoleInput (W and A, append or prepend; A in the input code page, keeping a DBCS lead byte for the next write) | 0x02000010 |

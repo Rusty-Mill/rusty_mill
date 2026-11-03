@@ -70,7 +70,7 @@ impl Style {
 
 /// Font files for a session: the required regular face, optional styled faces,
 /// and a fallback chain tried (in order) for glyphs the main font lacks.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct FontSet {
     pub regular: Vec<u8>,
     pub bold: Option<Vec<u8>>,

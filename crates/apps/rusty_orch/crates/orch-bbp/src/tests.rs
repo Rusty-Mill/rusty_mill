@@ -357,7 +357,7 @@ fn relay_uses_saved_fence_and_stable_op_and_rejects_subject_or_flag_injection() 
         dir: c.dir.clone(),
         task: "task".into(),
     };
-    host.freeze(&h, &task, &board, &fence()).unwrap();
+    host.freeze(&h, &task, &board, None).unwrap();
     let handle = HostHandle(txt(&format!("bbp:{}", json(&h))));
     let gate = question(&mut board, &handle);
     cmd.replies.borrow_mut().extend([
@@ -459,7 +459,7 @@ fn hosted_brief_reuses_the_existing_renderer_to_resolve_board_context() {
             },
             plan.get(id).unwrap(),
             &board,
-            &fence(),
+            None,
         )
         .unwrap();
     assert!(frozen.brief.contains("required research context"));
@@ -738,10 +738,78 @@ fn a_leased_task_runs_confined_and_refuses_changed_or_ended_leases() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
-fn an_unleased_task_refuses_a_leased_holder() {
-    let dir = temp();
-    let c = config(&dir);
+fn a_lease_refuses_a_profile_root_outside_it_before_anything_runs() {
+    let dir = temp().canonicalize().unwrap();
+    let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+    for made in ["src", "secret"] {
+        std::fs::create_dir_all(dir.join(made)).unwrap();
+    }
+    let mut c = config(&dir);
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox::default());
+    }
+    std::fs::write(
+        &c.profiles,
+        format!(r#"{{"read_roots":["/usr",{}]}}"#, json(&path("secret"))),
+    )
+    .unwrap();
+    let mut leased = fence();
+    leased.lease = Some(orch_core::factory::Lease {
+        read: vec![],
+        write: vec![path("src")],
+        expires: None,
+    });
+    let (task, board) = task();
+    let command = Contract::default();
+    let sup = FakeSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c,
+        "goal".into(),
+        "profiles".into(),
+        command.clone(),
+        sup.clone(),
+    )
+    .unwrap();
+    let refused = host.open(&task, &board, &leased).unwrap_err();
+    assert!(
+        matches!(&refused, ClassifiedError::Permanent(e) if e.0.contains("outside the lease")),
+        "{refused:?}"
+    );
+    assert!(command.calls.borrow().is_empty(), "BBP is never asked");
+    assert_eq!(sup.0.get(), 0, "no moderator is started");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_leased_task_freezes_profile_roots_as_resolved_so_a_swap_cannot_move_them() {
+    let dir = temp().canonicalize().unwrap();
+    let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+    for made in ["src", "tool", "secret"] {
+        std::fs::create_dir_all(dir.join(made)).unwrap();
+    }
+    // `src/link` lies in the harness's write root and resolves into the lease.
+    std::os::unix::fs::symlink(dir.join("tool"), dir.join("src/link")).unwrap();
+    let mut c = config(&dir);
+    for agent in c.pool.values_mut() {
+        agent.sandbox = Some(Sandbox {
+            write: vec![path("src")],
+            ..Sandbox::default()
+        });
+    }
+    std::fs::write(
+        &c.profiles,
+        format!(r#"{{"read_roots":[{}]}}"#, json(&path("src/link"))),
+    )
+    .unwrap();
+    let mut leased = fence();
+    leased.lease = Some(orch_core::factory::Lease {
+        read: vec![path("tool")],
+        write: vec![path("src")],
+        expires: None,
+    });
     let (task, board) = task();
     let command = Contract::default();
     command.replies.borrow_mut().extend([
@@ -754,21 +822,120 @@ fn an_unleased_task_refuses_a_leased_holder() {
     let mut host = BbpHost::with_seams(
         c,
         "goal".into(),
-        "unleased".into(),
+        "alias".into(),
         command,
         FakeSupervisor::default(),
     )
     .unwrap();
-    let handle = host.open(&task, &board, &fence()).unwrap();
+    let handle = host.open(&task, &board, &leased).unwrap();
+    // The harness re-points the link once the task is frozen.
+    std::fs::remove_file(dir.join("src/link")).unwrap();
+    std::os::unix::fs::symlink(dir.join("secret"), dir.join("src/link")).unwrap();
+    let h = host.handle(&handle).unwrap();
+    let manifest = BbpHost::<Contract, FakeSupervisor>::manifest(&h);
+    let given = std::fs::read_to_string(manifest.join("profiles.json")).unwrap();
+    let given: rusty_serde::json::Value = rusty_serde::json::from_str(&given).unwrap();
+    // The runner's rule names the root checked at freeze, never the link.
+    assert_eq!(given["read_roots"][0].as_str(), Some(path("tool").as_str()));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cancel_of_a_never_frozen_leased_task_skips_confinement() {
+    let dir = temp().canonicalize().unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    // The pool is unconfined, which `open` under a lease refuses.
+    let c = config(&dir);
     let mut leased = fence();
     leased.lease = Some(orch_core::factory::Lease {
-        read: vec!["/".into()],
-        write: vec!["/".into()],
+        read: vec![],
+        write: vec![dir.join("src").to_string_lossy().into_owned()],
         expires: None,
     });
+    let (task, board) = task();
+    let command = Contract::default();
+    let mut ended = view(&c, State::Cancelled);
+    ended.cancelled = Some("withdrawn".into());
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        "true".into(),
+        json(&Some(ended)),
+    ]);
+    let sup = FakeSupervisor::default();
+    let mut host = BbpHost::with_seams(
+        c,
+        "goal".into(),
+        "cancel".into(),
+        command.clone(),
+        sup.clone(),
+    )
+    .unwrap();
+    let progress = host
+        .cancel(&task, &board, &txt("withdrawn"), &leased)
+        .unwrap();
+    assert!(matches!(progress, Progress::Cancelled { .. }));
+    assert_eq!(sup.0.get(), 0, "no moderator is started");
+    // A later leased holder finds a task frozen unleased and is refused.
+    command.calls.borrow_mut().clear();
     assert!(matches!(
-        host.poll(&handle, &leased),
+        host.open(&task, &board, &leased),
         Err(ClassifiedError::Permanent(_))
     ));
+    assert!(command.calls.borrow().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_unleased_task_refuses_a_leased_holder() {
+    let dir = temp();
+    let c = config(&dir);
+    let (task, mut board) = task();
+    let command = Contract::default();
+    command.replies.borrow_mut().extend([
+        "null".into(),
+        json(&Response::Ok),
+        json(&Some(view(&c, State::Planning))),
+        json(&Response::Ok),
+        json(&Response::Ok),
+    ]);
+    let mut host = BbpHost::with_seams(
+        c,
+        "goal".into(),
+        "unleased".into(),
+        command.clone(),
+        FakeSupervisor::default(),
+    )
+    .unwrap();
+    let handle = host.open(&task, &board, &fence()).unwrap();
+    let lease = |expires: Option<u64>| {
+        let mut f = fence();
+        f.lease = Some(orch_core::factory::Lease {
+            read: vec!["/".into()],
+            write: vec!["/".into()],
+            expires,
+        });
+        f
+    };
+    assert!(matches!(
+        host.poll(&handle, &lease(None)),
+        Err(ClassifiedError::Permanent(_))
+    ));
+    // A human answer is checked against the lease too, before BBP is asked.
+    let gate = question(&mut board, &handle);
+    let calls = command.calls.borrow().len();
+    let answer = txt("approve-plan art:2");
+    assert!(matches!(
+        host.relay(&handle, &gate, &answer, &lease(None)),
+        Err(ClassifiedError::Permanent(_))
+    ));
+    assert!(matches!(
+        host.relay(&handle, &gate, &answer, &lease(Some(1))),
+        Err(ClassifiedError::Unavailable(_))
+    ));
+    assert_eq!(command.calls.borrow().len(), calls, "BBP was never asked");
     std::fs::remove_dir_all(dir).unwrap();
 }

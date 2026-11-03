@@ -23,6 +23,8 @@ fn listing() -> Vec<Entry> {
     let session = |s: &str, name: &str| Entry::Session {
         session: SessionId::from_uuid(id(s)),
         name: name.into(),
+        active: None,
+        generated: false,
     };
     let window = |w: &str, s: &str| Entry::Window {
         window: WindowId::from_uuid(id(w)),
@@ -30,6 +32,7 @@ fn listing() -> Vec<Entry> {
         name: "logs".into(),
         layout: None,
         zoomed: None,
+        focused: None,
     };
     let block = |b: &str, w: &str, name: &str| Entry::Block {
         block: BlockId::from_uuid(id(b)),

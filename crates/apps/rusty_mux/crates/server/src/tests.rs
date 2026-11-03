@@ -23,6 +23,7 @@ fn a_client_of_another_user_is_refused() {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                config_file: None,
             };
             let other = rusty_libc::process::geteuid().wrapping_add(1);
             serve_for(
@@ -77,10 +78,10 @@ fn a_client_of_this_process_is_allowed() {
 }
 
 #[test]
-fn the_console_host_defaults_to_conpty_and_parses_in_any_case() {
+fn the_console_host_defaults_to_own_and_parses_in_any_case() {
     use std::ffi::OsStr;
     let parse = |v: &str| ConsoleHost::parse(Some(OsStr::new(v)));
-    assert_eq!(ConsoleHost::parse(None), Ok(ConsoleHost::ConPty));
+    assert_eq!(ConsoleHost::parse(None), Ok(ConsoleHost::Own));
     assert_eq!(parse("conpty"), Ok(ConsoleHost::ConPty));
     assert_eq!(parse("Own"), Ok(ConsoleHost::Own));
     assert_eq!(parse("OWN"), Ok(ConsoleHost::Own));

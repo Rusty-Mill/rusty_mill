@@ -10,6 +10,9 @@ use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::time::Instant;
 
+const CLAUDE: orch_core::AgentId = orch_core::AgentId::from_static("claude");
+const CODEX: orch_core::AgentId = orch_core::AgentId::from_static("codex");
+const LOCAL: orch_core::AgentId = orch_core::AgentId::from_static("local");
 #[derive(Debug, Clone)]
 struct LostReply {
     at: usize,
@@ -1547,14 +1550,11 @@ fn dispatcher_allows_invalid_subject_and_missing_receipt_to_be_corrected() {
     })
     .unwrap();
     let route = Routing::try_from(RoutingConfig {
-        research: orch_core::task::Agent::Codex,
-        design: orch_core::task::Agent::Codex,
-        implement: orch_core::task::Agent::Codex,
-        triage: orch_core::task::Agent::Local,
-        reviewers: vec![
-            orch_core::task::Agent::Claude,
-            orch_core::task::Agent::Codex,
-        ],
+        research: CODEX,
+        design: CODEX,
+        implement: CODEX,
+        triage: LOCAL,
+        reviewers: vec![CLAUDE, CODEX],
     })
     .unwrap();
     let supervisor = ScriptSupervisor::default();

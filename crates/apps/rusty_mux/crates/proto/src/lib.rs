@@ -25,6 +25,7 @@ mod field;
 mod frame;
 mod message;
 pub mod schema;
+pub mod theme;
 mod varint;
 
 pub use error::Error;

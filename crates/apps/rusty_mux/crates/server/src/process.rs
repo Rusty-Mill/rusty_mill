@@ -61,6 +61,19 @@ pub(crate) fn chain(
     found
 }
 
+/// Whether a block's program `child` waits for input, by who has the
+/// terminal: `idle` while its own process group does, `busy` while another
+/// does (a job it started), and `unknown` where the platform tells no
+/// foreground group, as on Windows. A program that exits closes its block,
+/// so there is no state for that.
+pub(crate) fn activity(child: u32, foreground: Option<u32>) -> &'static str {
+    match foreground {
+        None => "unknown",
+        Some(group) if group == child => "idle",
+        Some(_) => "busy",
+    }
+}
+
 /// The foreground process group a block last announced, and its leader's
 /// program name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +121,7 @@ pub(crate) fn text(chain: &[Proc]) -> String {
 /// `\t`, `\n` or `\r`, and any other control character, such as ESC or a
 /// C1 control, as `\u{HEX}`, the notation `rusty-mux-ctl` prints text
 /// fields in. Reversible, and plain commands read as they are.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -205,6 +218,13 @@ mod tests {
 
     fn pids(chain: &[Proc]) -> Vec<u32> {
         chain.iter().map(|p| p.pid).collect()
+    }
+
+    #[test]
+    fn activity_follows_who_has_the_terminal() {
+        assert_eq!(activity(CHILD, Some(CHILD)), "idle");
+        assert_eq!(activity(CHILD, Some(42)), "busy");
+        assert_eq!(activity(CHILD, None), "unknown");
     }
 
     #[test]

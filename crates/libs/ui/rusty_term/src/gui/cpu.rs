@@ -24,8 +24,8 @@ use super::render::{
 /// font's cell size; cells past the buffer edge are clipped.
 ///
 /// A non-empty `chrome` row (the window's own tab/caption bar) is painted as
-/// the first cell row and pushes the grid one row down; empty paints the grid
-/// at the top, unchanged.
+/// the first cell row (in the same font) and pushes the grid one row down;
+/// empty paints the grid at the top, unchanged.
 #[cfg(test)]
 pub(crate) fn render(
     grid: &Grid,
@@ -45,16 +45,16 @@ pub(crate) fn render(
         // exercised through the real `CpuRenderer::render` path.
         draw_chrome(buf, width, height, chrome, font, cw, ch, 0, 0);
     }
-    let row0 = if chrome.is_empty() { 0 } else { 1 };
+    let oy = if chrome.is_empty() { 0 } else { ch };
     draw_grid(
         buf,
         width,
         height,
         &grid.frame_view(),
         0,
-        row0,
         0,
         0,
+        oy,
         true,
         cursor_on,
         None,

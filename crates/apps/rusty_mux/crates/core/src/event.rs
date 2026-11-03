@@ -21,6 +21,26 @@ pub enum Event {
     WindowClosed {
         window: WindowId,
     },
+    /// The session's active window changed: its first window was made,
+    /// a client selected one, or the active one closed. `None` once the
+    /// session has no windows.
+    ActiveWindowChanged {
+        session: SessionId,
+        window: Option<WindowId>,
+    },
+    /// The window's focus moved to `block`: a client focused or zoomed it,
+    /// or the focused block left the layout and the block that took its
+    /// place has it. `None` once no block is placed.
+    FocusChanged {
+        window: WindowId,
+        block: Option<BlockId>,
+    },
+    /// A client moved the window to place `index` among its session's
+    /// windows, counted from 0; the windows between shifted by one.
+    WindowMoved {
+        window: WindowId,
+        index: usize,
+    },
     BlockCreated {
         block: BlockId,
         window: WindowId,
@@ -42,8 +62,9 @@ pub enum Event {
     ClientDisconnected {
         client: ClientId,
     },
-    /// A new connection took the client over, by `transport`: it keeps its
-    /// id, name, attachment and lease.
+    /// The client is reached another way, by `transport`: a new connection
+    /// took it over, or its UDP association moved to a new address. It
+    /// keeps its id, name, attachment and lease.
     ClientConnectionChanged {
         client: ClientId,
         principal: Principal,
@@ -133,6 +154,43 @@ pub enum Event {
         layout: Option<Layout>,
         zoomed: Option<BlockId>,
     },
+    /// The server read its config again and now starts new blocks as it
+    /// says.
+    ConfigReloaded,
+    /// The block's program set a selection (OSC 52). The text is not in
+    /// the event: it may be a secret, and clients attached to the block
+    /// already received it in the output. Several writes read at once are
+    /// one event per selection.
+    ClipboardWritten {
+        block: BlockId,
+        selection: Selection,
+    },
+    /// A status record the block's program reported ended: cleared, ended
+    /// by a prompt or reset, or evicted by a newer one. `id` is its path,
+    /// empty for the root; [`Event::BlockStatus`] follows.
+    StatusRemoved {
+        block: BlockId,
+        id: String,
+    },
+}
+
+/// Which selection a program wrote with OSC 52.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    /// The clipboard, also what an empty or unknown target means.
+    Clipboard,
+    /// The X11 primary selection.
+    Primary,
+}
+
+impl Selection {
+    /// The name ctl and MCP print.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Clipboard => "clipboard",
+            Self::Primary => "primary",
+        }
+    }
 }
 
 /// How a block's program ended.

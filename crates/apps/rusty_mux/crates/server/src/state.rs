@@ -11,12 +11,13 @@ use rusty_mux_core::{
     BlockId, ClientId, Event, ExitStatus, Mux, Principal, Side, Size, Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
+use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
     Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Takeover, encode,
 };
 use rusty_mux_status::Records;
 use rusty_term_core::{AnsiParser, Grid};
-use rusty_tokio::sync::Notify;
+use rusty_tokio::sync::{Notify, oneshot};
 use rusty_tokio::task::JoinHandle;
 use rusty_uuid::Uuid;
 
@@ -72,7 +73,25 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::LAYOUT)
     .union(Features::TAKEOVER)
     .union(Features::ECHO_ACK)
-    .union(Features::IDENTITY);
+    .union(Features::IDENTITY)
+    .union(Features::MORE_PROGRAM_EVENTS)
+    .union(Features::ACTIVE_WINDOW)
+    .union(Features::CONFIG_RELOAD)
+    .union(Features::TERMINAL_CONTROL)
+    .union(Features::LAYOUT_EDIT)
+    .union(Features::FOCUS)
+    .union(Features::SESSION_NAMES)
+    .union(Features::NAME_SESSION)
+    .union(Features::TERMINAL_MORE)
+    .union(Features::TERMINAL_SHELL);
+
+/// Fresh randomness to pick a generated session name with.
+fn name_seed() -> u64 {
+    let bytes = Uuid::new_v4();
+    let mut seed = [0; 8];
+    seed.copy_from_slice(&bytes.as_bytes()[..8]);
+    u64::from_le_bytes(seed)
+}
 
 /// Input to write to a PTY once the state is no longer borrowed.
 pub(crate) struct PtyWrite {
@@ -83,9 +102,21 @@ pub(crate) struct PtyWrite {
     pub(crate) key: Option<(BlockId, u64)>,
 }
 
+/// What a connection must finish before it reads its next request, so
+/// requests on one connection complete in order (`sync` is a fence).
+pub(crate) enum Pending {
+    /// A PTY write.
+    Write(PtyWrite),
+    /// A `reload-config` reading off this thread; resolves once it has been
+    /// applied or refused and answered.
+    Reload(oneshot::Receiver<()>),
+}
+
 struct BlockRt {
     pty: Rc<Pty>,
     process: Process,
+    /// The program the block started, as configured, for `terminal.shell`.
+    program: String,
     grid: Grid,
     parser: AnsiParser,
     /// What the program reported with OSC 7501.
@@ -119,13 +150,12 @@ impl BlockRt {
 }
 
 pub(crate) struct State {
+    /// What the server was started with, under the config file's section.
+    base: Config,
+    /// `base` with the config file's `server` section over it.
     config: Config,
     /// The listening socket's path, given to each block's program.
     socket: Option<PathBuf>,
-    /// Every client's principal. A personal server serves only its own
-    /// user: the socket's peer check refuses anyone else, and a UDP
-    /// association is handed only to a client already connected.
-    owner: Principal,
     mux: Mux,
     blocks: HashMap<BlockId, BlockRt>,
     clients: HashMap<ClientId, Outbox>,
@@ -151,6 +181,11 @@ pub(crate) struct State {
     hosts: pty::Hosts,
     /// Set by [`State::stop`]: no block starts any more.
     stopping: bool,
+    /// What `reload-config` reads the file with.
+    pub(crate) loader: crate::settings::Loader,
+    /// A reload is reading the file; one at a time, so a stalled
+    /// filesystem holds one thread at most.
+    reloading: bool,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -173,11 +208,11 @@ pub(crate) enum Kept {
 }
 
 impl State {
-    pub(crate) fn shared(config: Config, socket: Option<PathBuf>, owner: Principal) -> Shared {
+    pub(crate) fn shared(config: Config, socket: Option<PathBuf>) -> Shared {
         Rc::new(RefCell::new(Self {
+            base: config.clone(),
             config,
             socket,
-            owner,
             mux: Mux::new(),
             blocks: HashMap::new(),
             clients: HashMap::new(),
@@ -194,7 +229,86 @@ impl State {
             silenced: HashMap::new(),
             hosts: Default::default(),
             stopping: false,
+            loader: crate::settings::reloader(),
+            reloading: false,
         }))
+    }
+
+    /// Reads the config file at start, before serving: a bad one stops
+    /// the server.
+    pub(crate) fn load_config(&mut self) -> Result<(), String> {
+        self.config = crate::settings::read(&self.base, crate::settings::When::Start)?;
+        Ok(())
+    }
+
+    /// `reload-config`: reads the file off this thread and answers once
+    /// read ([`Self::reloaded`]), in a task of its own, so the read lands
+    /// even if the connection goes. The connection waits for it before its
+    /// next request. A server started with no file refuses, as does a
+    /// second reload while one is reading.
+    fn reload_config(
+        &mut self,
+        shared: &Shared,
+        client: ClientId,
+        req: u64,
+    ) -> Result<Outcome, Refusal> {
+        if self.base.config_file.is_none() {
+            return Err("the server was started with no config file".into());
+        }
+        if self.reloading {
+            return Err("a reload is still reading the config file".into());
+        }
+        let cancel = self
+            .clients
+            .get(&client)
+            .map(|out| out.cancel().clone())
+            .ok_or("no such client")?;
+        let read = crate::settings::load_apart(self.loader.clone(), self.base.clone())
+            .map_err(|e| format!("reading the config file: {e}"))?;
+        self.reloading = true;
+        let (done, finished) = oneshot::channel();
+        let weak = Rc::downgrade(shared);
+        rusty_tokio::task::spawn_local(async move {
+            let result = read
+                .await
+                .unwrap_or_else(|_| Err("reading the config file failed".into()));
+            if let Some(shared) = weak.upgrade() {
+                shared.borrow_mut().reloaded(client, &cancel, req, result);
+            }
+            // The connection may have gone; nothing waits then.
+            let _ = done.send(());
+        });
+        Ok(Outcome::Later(finished))
+    }
+
+    /// A reload read `result`: a good config replaces the last and is
+    /// announced, a bad one changes nothing. The answer goes to the
+    /// connection that asked, unless another took its client over, where
+    /// `req` means nothing.
+    fn reloaded(
+        &mut self,
+        client: ClientId,
+        cancel: &Rc<Notify>,
+        req: u64,
+        result: Result<Config, String>,
+    ) {
+        self.reloading = false;
+        let answer = match result {
+            Ok(config) => {
+                self.config = config;
+                self.mux.note_config_reloaded();
+                Message::Done { req, created: None }
+            }
+            Err(reason) => Message::Failed {
+                req,
+                reason,
+                code: None,
+            },
+        };
+        if self.served_by(client, cancel) {
+            self.send(client, &answer);
+        }
+        self.flush();
     }
 
     /// The server is stopping: starts no more blocks, and ends every
@@ -233,6 +347,11 @@ impl State {
             Some(_) => OFFERED.union(Features::DATAGRAM),
             None => OFFERED,
         }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn test_cwd(&self) -> &std::ffi::OsStr {
+        &self.config.cwd
     }
 
     #[cfg(test)]
@@ -277,29 +396,31 @@ impl State {
             .is_some_and(|out| out.belongs_to(cancel))
     }
 
-    /// Registers a client, negotiates features and, with `EVENT_SEQ`,
-    /// replays the events after `resume` when they are all still held.
-    /// With `TAKEOVER` and a valid `takeover`, the connection continues
-    /// that client instead: its id, name, attachment and lease stay, and
+    /// Registers a client of `principal`, whom the server verified, and
+    /// negotiates features and, with `EVENT_SEQ`, replays the events after
+    /// `resume` when they are all still held. With `TAKEOVER` and a valid
+    /// `takeover` by the same principal, the connection continues that
+    /// client instead: its id, name, attachment and lease stay, and
     /// replacing its outbox closes the old connection. Either way the
     /// client is now reached by `transport`.
     pub(crate) fn connect(
         &mut self,
         outbox: Outbox,
+        principal: Principal,
         transport: Transport,
         theirs: Features,
         resume: Option<Cursor>,
         takeover: Option<Takeover>,
     ) -> ClientId {
         let features = theirs.intersection(self.offered());
-        let continued = takeover.and_then(|t| self.takes_over(t, features));
+        let continued = takeover.and_then(|t| self.takes_over(t, &principal, features));
         let client = match continued {
             Some(client) => {
                 let moved = self.mux.reconnect(client, transport);
                 in_step("reconnect", moved);
                 client
             }
-            None => self.mux.connect(self.owner.clone(), transport),
+            None => self.mux.connect(principal, transport),
         };
         // The new connection numbers its requests afresh.
         self.forget_keys(client);
@@ -372,12 +493,20 @@ impl State {
     }
 
     /// The client `takeover` names, if it is connected or kept for a
-    /// reconnect, the token is its current or confirmed one, and the new
-    /// connection negotiated exactly its features.
+    /// reconnect, the token is its current or confirmed one, the new
+    /// connection is `principal`'s, as the client is, and it negotiated
+    /// exactly the client's features.
     /// Only `TAKEOVER` clients hold a token. Equal features keep what the
     /// client is already attached to and subscribed for (a checkpoint
-    /// version, event numbering) valid on the new connection.
-    fn takes_over(&self, takeover: Takeover, features: Features) -> Option<ClientId> {
+    /// version, event numbering) valid on the new connection. A token
+    /// leaked to another principal continues nothing: that connection
+    /// becomes a client of its own, and the token stays good.
+    fn takes_over(
+        &self,
+        takeover: Takeover,
+        principal: &Principal,
+        features: Features,
+    ) -> Option<ClientId> {
         let tokens = self.tokens.get(&takeover.client)?;
         let matches = |token: &Uuid| {
             rusty_crypto_key::constant_time_eq(token.as_bytes(), takeover.token.as_bytes())
@@ -386,7 +515,11 @@ impl State {
         let same = self.features.get(&takeover.client) == Some(&features);
         let known = self.clients.contains_key(&takeover.client)
             || self.orphans.contains_key(&takeover.client);
-        (valid && same && known).then_some(takeover.client)
+        let theirs = self
+            .mux
+            .client(takeover.client)
+            .is_some_and(|c| c.principal().id() == principal.id());
+        (valid && same && known && theirs).then_some(takeover.client)
     }
 
     /// Forgets a client whose connection, the one owning `cancel`, ended. A
@@ -506,6 +639,20 @@ impl State {
         self.flush();
     }
 
+    /// Tells clients with `IDENTITY` that each of `clients` the same
+    /// connection still serves is reached at a new address: its UDP
+    /// association roamed. A client taken over elsewhere is not this
+    /// association's any more.
+    pub(crate) fn roamed(&mut self, clients: &[(ClientId, Rc<Notify>)]) {
+        for (client, cancel) in clients {
+            if self.served_by(*client, cancel) {
+                let moved = self.mux.reconnect(*client, Transport::Datagram);
+                in_step("roam", moved);
+            }
+        }
+        self.flush();
+    }
+
     /// Gives `client` the lease on `block` if it is still attached there
     /// and the lease is still free.
     fn regain_lease(&mut self, client: ClientId, block: BlockId) {
@@ -543,7 +690,7 @@ impl State {
 
     /// Applies one request. Returns input for the caller to write to a PTY
     /// after releasing the borrow.
-    pub(crate) fn request(shared: &Shared, client: ClientId, message: Message) -> Option<PtyWrite> {
+    pub(crate) fn request(shared: &Shared, client: ClientId, message: Message) -> Option<Pending> {
         let mut this = shared.borrow_mut();
         // A request proves the client got this connection's Welcome, and
         // with it the current token.
@@ -568,7 +715,8 @@ impl State {
                 frames.into_iter().for_each(|f| this.send_frame(client, f));
                 None
             }
-            Ok(Outcome::Write(write)) => Some(write),
+            Ok(Outcome::Write(write)) => Some(Pending::Write(write)),
+            Ok(Outcome::Later(done)) => Some(Pending::Reload(done)),
             Err(Refusal { reason, code }) => {
                 this.send(client, &Message::Failed { req, reason, code });
                 None
@@ -590,7 +738,10 @@ impl State {
         };
         match message {
             M::CreateSession { req, name } => {
-                let result = self.mux.create_session(name);
+                let result = match name.is_empty() && self.has(client, Features::SESSION_NAMES) {
+                    true => self.mux.create_generated_session(name_seed()),
+                    false => self.mux.create_session(name),
+                };
                 (
                     req,
                     result
@@ -649,6 +800,64 @@ impl State {
                 self.require(client, Features::LAYOUT, "unzoom")
                     .and_then(|()| done(self.mux.unzoom(window))),
             ),
+            M::SelectWindow { req, window } => (
+                req,
+                self.require(client, Features::ACTIVE_WINDOW, "select-window")
+                    .and_then(|()| done(self.mux.select_window(window))),
+            ),
+            M::ResizeSplit {
+                req,
+                block,
+                axis,
+                share,
+            } => (
+                req,
+                self.edit(client, "resize-split", |mux| {
+                    mux.resize_split(block, axis, share)
+                }),
+            ),
+            M::SwapBlocks { req, block, other } => (
+                req,
+                self.edit(client, "swap-blocks", |mux| mux.swap_blocks(block, other)),
+            ),
+            M::MoveBlock {
+                req,
+                block,
+                beside,
+                side,
+            } => (
+                req,
+                self.edit(client, "move-block", |mux| {
+                    mux.move_block(block, beside, side)
+                }),
+            ),
+            M::DetachBlock { req, block } => (
+                req,
+                self.edit(client, "detach-block", |mux| mux.detach_block(block)),
+            ),
+            M::MoveWindow { req, window, index } => (
+                req,
+                self.edit(client, "move-window", |mux| mux.move_window(window, index)),
+            ),
+            M::FocusBlock { req, block } => (
+                req,
+                self.require(client, Features::FOCUS, "focus-block")
+                    .and_then(|()| done(self.mux.focus_block(block))),
+            ),
+            M::MoveFocus {
+                req,
+                window,
+                toward,
+            } => (
+                req,
+                self.require(client, Features::FOCUS, "move-focus")
+                    .and_then(|()| done(self.mux.move_focus(window, toward))),
+            ),
+            M::ReloadConfig { req } => (
+                req,
+                self.require(client, Features::CONFIG_RELOAD, "reload-config")
+                    .and_then(|()| self.reload_config(shared, client, req)),
+            ),
             M::Attach { req, block } => {
                 if let Err(refusal) = self.require(client, Features::CHECKPOINT_V6, "attach") {
                     return (req, Err(refusal));
@@ -701,6 +910,11 @@ impl State {
                 self.require(client, Features::LABELS, "rename")
                     .and_then(|()| done(self.mux.rename(target, name))),
             ),
+            M::NameSession { req, session, name } => (
+                req,
+                self.require(client, Features::NAME_SESSION, "name-session")
+                    .and_then(|()| done(self.mux.name_session(session, name))),
+            ),
             M::Disconnect {
                 req,
                 client: target,
@@ -712,17 +926,24 @@ impl State {
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
-                    .and_then(|()| self.open_datagram(req)),
+                    .and_then(|()| self.open_datagram(client, req)),
             ),
             other => (0, Err(format!("not a client request: {other:?}").into())),
         }
     }
 
-    /// A new association for the client to move its connections onto. The
-    /// key travels only in this reply, inside the client's connection.
-    fn open_datagram(&self, req: u64) -> Result<Outcome, Refusal> {
+    /// A new association for the client to move its connections onto,
+    /// whose streams are the client's principal's. The key travels only in
+    /// this reply, inside the client's connection.
+    fn open_datagram(&self, client: ClientId, req: u64) -> Result<Outcome, Refusal> {
         let registry = self.datagrams.as_ref().ok_or("no UDP listener")?;
-        let (port, id, key) = registry.offer(Instant::now())?;
+        let principal = self
+            .mux
+            .client(client)
+            .ok_or("unknown client")?
+            .principal()
+            .clone();
+        let (port, id, key) = registry.offer(Instant::now(), principal)?;
         reply(
             "open datagram",
             &[Message::Datagram {
@@ -735,12 +956,30 @@ impl State {
     }
 
     /// Fails unless `client` negotiated `feature`, which `what` needs.
-    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), Refusal> {
-        if self
-            .features
+    /// A layout edit, for a client that negotiated them.
+    fn edit(
+        &mut self,
+        client: ClientId,
+        what: &str,
+        edit: impl FnOnce(&mut Mux) -> Result<(), rusty_mux_core::Error>,
+    ) -> Result<Outcome, Refusal> {
+        self.require(client, Features::LAYOUT_EDIT, what)
+            .and_then(|()| {
+                edit(&mut self.mux)
+                    .map(|()| Outcome::Done(None))
+                    .map_err(Refusal::from)
+            })
+    }
+
+    /// Whether `client` negotiated `feature`.
+    fn has(&self, client: ClientId, feature: Features) -> bool {
+        self.features
             .get(&client)
             .is_some_and(|f| f.contains(feature))
-        {
+    }
+
+    fn require(&self, client: ClientId, feature: Features, what: &str) -> Result<(), Refusal> {
+        if self.has(client, feature) {
             return Ok(());
         }
         Err(format!("{what} requires feature bits {:#x}", feature.bits()).into())
@@ -749,7 +988,7 @@ impl State {
     /// Runs block method `method` on `block`, after checking its arguments
     /// against the catalog.
     fn block_call(
-        &self,
+        &mut self,
         client: ClientId,
         req: u64,
         block: BlockId,
@@ -811,6 +1050,55 @@ impl State {
                 let pid = rt.process.pid().ok_or("the program has exited")?;
                 process::text(&process::chain(pid, rt.pty.foreground(), process::lookup))
             }
+            "terminal.size" => format!("{}x{}", rt.grid.cols, rt.grid.rows),
+            "terminal.reset" => {
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                // A client without the bit was built before CAN ended an OSC
+                // string: its copy would act on what the program left
+                // unfinished and miss the RIS, or both.
+                let older = self.attached(block).into_iter().any(|c| {
+                    !(self.features.get(&c)).is_some_and(|f| f.contains(Features::TERMINAL_CONTROL))
+                });
+                if older {
+                    return Err(format!(
+                        "{method}: a client attached to this block is too old to reset \
+                         its terminal safely; detach it or update it"
+                    )
+                    .into());
+                }
+                self.inject(block, terminal::RESET);
+                return Ok(Outcome::Done(None));
+            }
+            "terminal.modes" => terminal::modes(&rt.grid),
+            "terminal.shell" => {
+                let pid = rt.process.pid().ok_or("the program has exited")?;
+                let activity = process::activity(pid, rt.pty.foreground());
+                terminal::shell(&rt.grid, &rt.program, activity)
+            }
+            "terminal.set-theme" | "terminal.clear" => {
+                self.mux
+                    .authorize_input(client, block)
+                    .map_err(Refusal::from)?;
+                // Bytes added inside the program's unfinished sequence would
+                // end it early and leave its rest on the screen as text.
+                if !rt.parser.ground() {
+                    return Err(format!(
+                        "{method}: the program left an escape sequence unfinished; \
+                         try again, or reset the terminal"
+                    )
+                    .into());
+                }
+                let bytes = match found.name {
+                    "terminal.clear" => terminal::CLEAR.to_vec(),
+                    _ => terminal::theme(
+                        &ThemeChange::from_args(&named).map_err(|e| format!("{method}: {e}"))?,
+                    ),
+                };
+                self.inject(block, &bytes);
+                return Ok(Outcome::Done(None));
+            }
             _ => return Err(unknown()),
         };
         reply(method, &[Message::Text { req, text }])
@@ -840,6 +1128,8 @@ impl State {
             entries.push(Entry::Session {
                 session: session.id(),
                 name: session.name().to_owned(),
+                active: session.active(),
+                generated: session.generated(),
             });
             for window in session.windows().iter().filter_map(|w| self.mux.window(*w)) {
                 entries.push(Entry::Window {
@@ -848,6 +1138,7 @@ impl State {
                     name: window.name().to_owned(),
                     layout: window.layout().cloned(),
                     zoomed: window.zoomed(),
+                    focused: window.focused(),
                 });
                 for block in window.blocks().iter().filter_map(|b| self.mux.block(*b)) {
                     entries.push(Entry::Block {
@@ -964,6 +1255,7 @@ impl State {
             BlockRt {
                 pty,
                 process,
+                program: config.program.to_string_lossy().into_owned(),
                 grid,
                 parser: AnsiParser::new(),
                 status: Records::default(),
@@ -1143,7 +1435,11 @@ impl State {
         };
         rt.parser.advance(&mut rt.grid, data);
         let replies = rt.parser.take_responses();
-        if terminal::absorb_status(&mut rt.grid, &mut rt.status) {
+        let status = terminal::absorb_status(&mut rt.grid, &mut rt.status);
+        for id in status.removed {
+            in_step("status removed", self.mux.note_status_removed(block, id));
+        }
+        if status.changed {
             in_step("status", self.mux.note_status(block));
         }
         let (pwd, title) = rt.seen.changes(&rt.grid);
@@ -1165,6 +1461,9 @@ impl State {
                 self.mux.note_notification(block, title, body),
             );
         }
+        for selection in terminal::take_clipboard(&mut rt.grid) {
+            in_step("clipboard", self.mux.note_clipboard(block, selection));
+        }
         // What a terminal host would relay, such as the bell; clients
         // already have the raw output.
         rt.grid.take_host_out();
@@ -1182,6 +1481,21 @@ impl State {
         }
         self.flush();
         replies
+    }
+
+    /// Feeds `bytes` of the server's own to `block`'s terminal and to every
+    /// client attached to it, as if its program had written them, so all
+    /// copies of the terminal stay alike. They must ask nothing: the
+    /// program would read an answer as input.
+    fn inject(&mut self, block: BlockId, bytes: &[u8]) {
+        let replies = self.output(block, bytes);
+        if !replies.is_empty() {
+            eprintln!(
+                "rusty-mux-server: block {block} answered the server's own bytes; \
+                 {} bytes of answer dropped",
+                replies.len()
+            );
+        }
     }
 
     /// Announces the foreground process group of `block` if another took
@@ -1353,6 +1667,13 @@ fn receives(features: Features, event: &Event) -> bool {
         | Event::ClientRenamed { .. } => Features::LABELS,
         Event::LayoutChanged { .. } => Features::LAYOUT,
         Event::ClientConnectionChanged { .. } => Features::IDENTITY,
+        Event::ClipboardWritten { .. } | Event::StatusRemoved { .. } => {
+            Features::MORE_PROGRAM_EVENTS
+        }
+        Event::ActiveWindowChanged { .. } => Features::ACTIVE_WINDOW,
+        Event::ConfigReloaded => Features::CONFIG_RELOAD,
+        Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
+        Event::FocusChanged { .. } => Features::FOCUS,
         _ => Features::NONE,
     };
     features.contains(needs)
@@ -1448,6 +1769,9 @@ enum Outcome {
     /// Encoded messages answering the request, in order.
     Reply(Vec<Vec<u8>>),
     Write(PtyWrite),
+    /// Answered later, by the task the request started; resolves once it
+    /// has.
+    Later(oneshot::Receiver<()>),
 }
 
 /// `terminal.format`'s options from its arguments, which the catalog
@@ -1627,9 +1951,9 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    config_file: None,
                 },
                 None,
-                crate::state::test_owner(),
             );
             let poll = rusty_tokio::task::spawn_local(watch_processes(Rc::downgrade(&shared)));
             // One pass over an empty state first.
@@ -1650,13 +1974,20 @@ mod regression {
                 args: vec![],
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                config_file: None,
             },
             None,
-            crate::state::test_owner(),
         );
         let (out, inbox, _) = outbox();
         let mut state = shared.borrow_mut();
-        let client = state.connect(out, Transport::Socket, Features::CHECKPOINT_V6, None, None);
+        let client = state.connect(
+            out,
+            test_owner(),
+            Transport::Socket,
+            Features::CHECKPOINT_V6,
+            None,
+            None,
+        );
         let session = state.mux.create_session("s").unwrap();
         let window = state.mux.create_window(session, "w").unwrap();
         let Outcome::Done(Some(id)) = state
@@ -1685,16 +2016,25 @@ mod regression {
                 .union(Features::TAKEOVER)
                 .union(Features::ECHO_ACK);
             let (out, _old_inbox, old) = outbox();
-            let client = shared
-                .borrow_mut()
-                .connect(out, Transport::Socket, features, None, None);
+            let client = shared.borrow_mut().connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                None,
+            );
             let token = shared.borrow().tokens[&client].current;
             let (out, _new_inbox, new) = outbox();
             let takeover = Some(Takeover { client, token });
-            let taken =
-                shared
-                    .borrow_mut()
-                    .connect(out, Transport::Socket, features, None, takeover);
+            let taken = shared.borrow_mut().connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                takeover,
+            );
             assert_eq!(taken, client);
 
             let now = Instant::now();
@@ -1715,7 +2055,7 @@ mod regression {
             let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
             let (out, _old_inbox, old) = outbox();
             let mut state = shared.borrow_mut();
-            let client = state.connect(out, Transport::Socket, features, None, None);
+            let client = state.connect(out, test_owner(), Transport::Socket, features, None, None);
             state.mux.attach(client, block).unwrap();
             state.mux.acquire_lease(client, block).unwrap();
             let token = state.tokens[&client].current;
@@ -1726,10 +2066,65 @@ mod regression {
             let (out, _new_inbox, _) = outbox();
             let takeover = Some(Takeover { client, token });
             assert_eq!(
-                state.connect(out, Transport::Socket, features, None, takeover),
+                state.connect(
+                    out,
+                    test_owner(),
+                    Transport::Socket,
+                    features,
+                    None,
+                    takeover
+                ),
                 client
             );
             assert_eq!(state.lease_of(block), Some(client));
+        });
+    }
+
+    /// A takeover must come from the client's own principal: a valid
+    /// token presented by anyone else continues nothing, takes no lease,
+    /// and leaves the token good for its owner (C26).
+    #[test]
+    fn a_takeover_by_another_principal_starts_a_client_of_its_own() {
+        runtime().block_on(async {
+            let (shared, _, block, _inbox) = fixture();
+            let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
+            let mut state = shared.borrow_mut();
+            let (out, _owner_inbox, _) = outbox();
+            let client = state.connect(out, test_owner(), Transport::Socket, features, None, None);
+            state.mux.attach(client, block).unwrap();
+            state.mux.acquire_lease(client, block).unwrap();
+            let takeover = Some(Takeover {
+                client,
+                token: state.tokens[&client].current,
+            });
+
+            let stranger = Principal::unix(1001, Some("other".into())).unwrap();
+            let (out, _stranger_inbox, _) = outbox();
+            let theirs = state.connect(
+                out,
+                stranger.clone(),
+                Transport::Datagram,
+                features,
+                None,
+                takeover,
+            );
+            assert_ne!(theirs, client);
+            assert_eq!(state.mux.client(theirs).unwrap().principal(), &stranger);
+            assert_eq!(state.mux.client(theirs).unwrap().attached(), None);
+            assert_eq!(state.lease_of(block), Some(client));
+            let mine = state.mux.client(client).unwrap();
+            assert_eq!(mine.transport(), Transport::Socket);
+
+            let (out, _new_inbox, _) = outbox();
+            let again = state.connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                features,
+                None,
+                takeover,
+            );
+            assert_eq!(again, client, "the token still works for its owner");
         });
     }
 
@@ -1934,6 +2329,97 @@ mod regression {
         }
     }
 
+    /// A state whose reloads wait for the returned sender's go, and a
+    /// `CONFIG_RELOAD` client of it.
+    fn stalled_reloads() -> (Shared, ClientId, Inbox, std::sync::mpsc::Sender<()>) {
+        let base = Config {
+            program: "/bin/sh".into(),
+            args: vec![],
+            cwd: "/".into(),
+            console_host: ConsoleHost::default(),
+            config_file: Some("/stalled.json".into()),
+        };
+        let shared = State::shared(base, None);
+        let (loader, go) = crate::settings::stalled();
+        shared.borrow_mut().loader = loader;
+        let (client, inbox) = reload_client(&shared);
+        (shared, client, inbox, go)
+    }
+
+    fn reload_client(shared: &Shared) -> (ClientId, Inbox) {
+        let (out, inbox, _) = outbox();
+        let client = shared.borrow_mut().connect(
+            out,
+            test_owner(),
+            Transport::Socket,
+            Features::EVENT_SEQ.union(Features::CONFIG_RELOAD),
+            None,
+            None,
+        );
+        (client, inbox)
+    }
+
+    /// A reload reads off the server's thread: while the file stalls,
+    /// another client is answered, its reload is refused rather than
+    /// queued, and the stalled one lands, announced, once the read returns.
+    #[test]
+    fn a_stalled_reload_holds_up_no_other_client_and_only_one_runs() {
+        runtime().block_on(async {
+            let (shared, client, mut inbox, go) = stalled_reloads();
+            let (other, mut others) = reload_client(&shared);
+            let pending = State::request(&shared, client, Message::ReloadConfig { req: 1 });
+            let Some(Pending::Reload(mut done)) = pending else {
+                panic!("the connection must wait for the reload");
+            };
+            State::request(&shared, other, Message::ReloadConfig { req: 2 });
+            let second = reply_to(&mut others, 2).await;
+            assert!(
+                matches!(&second, Message::Failed { reason, .. } if reason.contains("still reading")),
+                "{second:?}"
+            );
+            State::request(&shared, other, Message::Sync { req: 3 });
+            assert!(matches!(reply_to(&mut others, 3).await, Message::Done { .. }));
+            assert_eq!(shared.borrow().config.cwd, "/");
+            let early = rusty_tokio::time::timeout(Duration::from_millis(50), &mut done).await;
+            assert!(early.is_err(), "the reload finished before its read");
+
+            go.send(()).unwrap();
+            assert!(matches!(reply_to(&mut inbox, 1).await, Message::Done { .. }));
+            done.await.expect("finished");
+            let frame = inbox.next().await.expect("the event");
+            assert!(matches!(
+                rusty_mux_proto::decode(&frame).unwrap().unwrap().0,
+                Message::Event {
+                    event: Event::ConfigReloaded,
+                    ..
+                }
+            ));
+            assert_eq!(shared.borrow().config.cwd, "/tmp");
+            assert!(!shared.borrow().reloading);
+        });
+    }
+
+    /// A read that never returns does not keep the server from stopping:
+    /// its thread is never joined.
+    #[test]
+    fn a_stalled_reload_does_not_hold_up_a_stop() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            runtime().block_on(async {
+                let (shared, client, _inbox, go) = stalled_reloads();
+                State::request(&shared, client, Message::ReloadConfig { req: 1 });
+                let hosts = shared.borrow_mut().stop();
+                assert!(hosts.shut_down(pty::SHUTDOWN).await);
+                // Kept alive, so the read never gets its cue.
+                std::mem::forget(go);
+            });
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the runtime ended while the read stalled");
+    }
+
     #[test]
     fn a_block_being_reaped_refuses_attach_and_may_still_be_closed() {
         runtime().block_on(async {
@@ -2043,13 +2529,20 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    config_file: None,
                 },
                 None,
-                crate::state::test_owner(),
             );
             let mut state = shared.borrow_mut();
             let (out, _inbox, cancel) = outbox();
-            let client = state.connect(out, Transport::Socket, Features::TAKEOVER, None, None);
+            let client = state.connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                Features::TAKEOVER,
+                None,
+                None,
+            );
             assert_eq!(
                 state.disconnect(client, &cancel),
                 Kept::Orphan,
@@ -2068,7 +2561,14 @@ mod regression {
             );
 
             let (out, _inbox, cancel) = outbox();
-            let plain = state.connect(out, Transport::Socket, Features::NONE, None, None);
+            let plain = state.connect(
+                out,
+                test_owner(),
+                Transport::Socket,
+                Features::NONE,
+                None,
+                None,
+            );
             assert_eq!(
                 state.disconnect(plain, &cancel),
                 Kept::Gone,

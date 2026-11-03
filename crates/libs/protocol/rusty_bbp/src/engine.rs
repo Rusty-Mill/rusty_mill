@@ -1,6 +1,7 @@
 //! The processing model: validation in rule order, effects, transitions, entry
 //! actions and generated events. `handle` is the only entry point and is pure.
 
+use crate::claims::Mode;
 use crate::coedit::{self, Doc, SpecEdit};
 use crate::command::*;
 use crate::event::*;
@@ -13,7 +14,9 @@ use crate::state::*;
 use crate::wake::{pick_from, wake_set, WAKE_RULES};
 
 pub const MAX_ARTIFACT_BYTES: u64 = 2_000_000;
-const RUNNER: &str = "runner";
+pub(crate) const RUNNER: &str = "runner";
+/// The principal that host writes (claims-mode action marks) are recorded under.
+pub(crate) const HOST: &str = "host";
 
 /// Result of handling one command: the events to append and the response to return.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,21 +28,21 @@ pub struct Handled {
     pub shadow: Vec<Shadow>,
 }
 
-type R<T> = Result<T, Rejection>;
+pub(crate) type R<T> = Result<T, Rejection>;
 
-fn rej(code: Code, detail: impl Into<String>) -> Rejection {
+pub(crate) fn rej(code: Code, detail: impl Into<String>) -> Rejection {
     Rejection::new(code, detail)
 }
 
 /// Working copy: applies each emitted event immediately so later rules see it.
-struct Work {
-    st: TaskState,
+pub(crate) struct Work {
+    pub(crate) st: TaskState,
     events: Vec<Event>,
     shadow: Vec<Shadow>,
 }
 
 impl Work {
-    fn emit(&mut self, e: Event) {
+    pub(crate) fn emit(&mut self, e: Event) {
         self.st.apply(&e);
         self.events.push(e);
     }
@@ -110,6 +113,7 @@ fn principal_of(st: &TaskState, cmd: &Command) -> Option<PrincipalId> {
         Command::Agent { principal, .. } => Some(principal.clone()),
         Command::Runner { .. } => Some(PrincipalId(RUNNER.into())),
         Command::Human { .. } => Some(st.human.clone()),
+        Command::Host { .. } => Some(PrincipalId(HOST.into())),
         _ => None,
     }
 }
@@ -128,9 +132,7 @@ fn op_key(st: &TaskState, cmd: &Command) -> Option<(PrincipalId, OpId, Sha256)> 
             op,
             action,
             ..
-        } if !matches!(action, AgentAction::TaskCard) => {
-            Some((principal.clone(), op.clone(), payload_hash(action).ok()?))
-        }
+        } if !action.is_view() => Some((principal.clone(), op.clone(), payload_hash(action).ok()?)),
         Command::Runner {
             op,
             run,
@@ -145,6 +147,11 @@ fn op_key(st: &TaskState, cmd: &Command) -> Option<(PrincipalId, OpId, Sha256)> 
         Command::Human { op, action } => {
             Some((st.human.clone(), op.clone(), payload_hash(action).ok()?))
         }
+        Command::Host { op, action } => Some((
+            PrincipalId(HOST.into()),
+            op.clone(),
+            payload_hash(action).ok()?,
+        )),
         _ => None,
     }
 }
@@ -164,6 +171,15 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
                 role: role.clone(),
                 principal: principal.clone(),
             });
+            if w.st.mode == Mode::Claims {
+                if let Some(t) = w.st.credential_for(&principal.id) {
+                    w.emit(Event::CredentialIssued {
+                        role: role.clone(),
+                        principal: principal.id.clone(),
+                        digest: Sha256::of(&t.0 .0),
+                    });
+                }
+            }
             // No grant here: a turn needs a host ready to launch its harness,
             // and assignment happens before any moderator runs. The first
             // `Tick` grants it.
@@ -195,11 +211,28 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
             let role =
                 w.st.role_of(principal)
                     .ok_or_else(|| rej(Code::NotAssigned, "principal is not an assigned agent"))?;
-            if !matches!(action, AgentAction::TaskCard) {
+            let claims = w.st.mode == Mode::Claims;
+            if !claims && crate::claims_engine::claims_only(action) {
+                return Err(rej(
+                    Code::WrongMode,
+                    "claims-mode operation on a stage task",
+                ));
+            }
+            // Claims mode authenticates before replay: a cached response is
+            // served only to the principal's current session.
+            if claims {
+                crate::claims_engine::check_credential(&w.st, principal, *token)?;
+            }
+            if !action.is_view() {
                 if let Some(r) = replay(&w.st, principal, op, &payload_hash(action)?)? {
                     return Ok(Flow::Replay(r));
                 }
                 terminal(&w.st)?;
+            }
+            if claims {
+                return crate::claims_engine::agent(w, principal, &role, action).map(Flow::Done);
+            }
+            if !action.is_view() {
                 check_token(&w.st, principal, &role, *token, now)?;
             }
             agent(w, principal, &role, action, now).map(Flow::Done)
@@ -217,6 +250,10 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
                 return Ok(Flow::Replay(r));
             }
             terminal(&w.st)?;
+            if w.st.mode == Mode::Claims {
+                return crate::claims_engine::runner(w, *run, *secret, *blob, payload)
+                    .map(Flow::Done);
+            }
             runner(w, *run, *secret, *blob, payload, now).map(Flow::Done)
         }
         Command::Human { op, action } => {
@@ -227,6 +264,18 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
             }
             terminal(&w.st)?;
             human(w, action, now).map(Flow::Done)
+        }
+        Command::Host { op, action } => {
+            require_open(&w.st)?;
+            if w.st.mode != Mode::Claims {
+                return Err(rej(Code::WrongMode, "host writes are claims-mode only"));
+            }
+            let p = PrincipalId(HOST.into());
+            if let Some(r) = replay(&w.st, &p, op, &payload_hash(action)?)? {
+                return Ok(Flow::Replay(r));
+            }
+            terminal(&w.st)?;
+            crate::claims_engine::host(w, action, now).map(Flow::Done)
         }
     }
 }
@@ -285,7 +334,16 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
     if w.st.opened {
         return Err(rej(Code::AlreadyOpen, "task already opened"));
     }
-    let roster = Roster::new(o.roster.clone()).map_err(|e| rej(Code::BadRoster, e.to_string()))?;
+    if o.mode == Mode::Claims {
+        crate::claims_engine::check_open(o)?;
+    } else if o.holdout_digest.is_some() {
+        return Err(rej(
+            Code::BadClaimsConfig,
+            "holdout_digest: a holdout suite needs claims mode",
+        ));
+    }
+    let roster = Roster::for_mode(o.roster.clone(), o.mode)
+        .map_err(|e| rej(Code::BadRoster, e.to_string()))?;
     if o.max_live_turns == 0 || o.max_live_turns as usize > roster.roles().len() {
         return Err(rej(
             Code::BadLiveTurns,
@@ -305,8 +363,13 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
             ),
         ));
     }
+    let claims = o.mode == Mode::Claims;
     w.emit(Event::TaskOpened {
-        schema: schema_for(o.max_live_turns, o.policy),
+        schema: if claims {
+            LOG_SCHEMA_CLAIMS
+        } else {
+            schema_for(o.max_live_turns, o.policy)
+        },
         roster: o.roster.clone(),
         task: o.task.clone(),
         repo: o.repo.clone(),
@@ -317,6 +380,9 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         max_live_turns: o.max_live_turns,
         human: o.human.clone(),
         policy: o.policy,
+        mode: o.mode,
+        claims: claims.then(|| o.claims.unwrap_or_default()),
+        holdout_digest: o.holdout_digest,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {
@@ -336,7 +402,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
 // ---------------------------------------------------------------- agent
 
 /// The capability record for a rostered role.
-fn role_data<'a>(st: &'a TaskState, id: &RoleId) -> R<&'a Role> {
+pub(crate) fn role_data<'a>(st: &'a TaskState, id: &RoleId) -> R<&'a Role> {
     st.roster
         .get(id)
         .ok_or_else(|| rej(Code::NotAssigned, format!("role {id} is not in the roster")))
@@ -355,6 +421,11 @@ fn agent(
         AgentAction::GetArtifact { id } => get_artifact(w, p, role, *id, now),
         AgentAction::PutArtifact { blob, payload } => put_artifact(w, p, role, *blob, payload, now),
         AgentAction::Post(d) => post(w, p, role, d, now),
+        AgentAction::ClaimsDelta { .. }
+        | AgentAction::ClaimCard { .. }
+        | AgentAction::ClaimLine { .. } => {
+            Err(rej(Code::WrongMode, "claims views need a claims-mode task"))
+        }
     }
 }
 
@@ -433,16 +504,21 @@ fn read(
     })
 }
 
-fn get_artifact(w: &mut Work, p: &PrincipalId, role: &RoleId, id: ArtId, now: Time) -> R<Response> {
-    let rec =
-        w.st.artifacts
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| rej(Code::RefUnresolved, format!("{id}")))?;
-    let reader = role_data(&w.st, role)?;
+pub(crate) fn get_artifact_record(st: &TaskState, role: &RoleId, id: ArtId) -> R<ArtifactRecord> {
+    let rec = st
+        .artifacts
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| rej(Code::RefUnresolved, format!("{id}")))?;
+    let reader = role_data(st, role)?;
     if !reader.holds(Cap::Read(rec.kind)) {
         return Err(rej(Code::RoleForbidden, reader.lacks(Cap::Read(rec.kind))));
     }
+    Ok(rec)
+}
+
+fn get_artifact(w: &mut Work, p: &PrincipalId, role: &RoleId, id: ArtId, now: Time) -> R<Response> {
+    let rec = get_artifact_record(&w.st, role, id)?;
     let turn =
         w.st.turn_of(role)
             .map(|t| (t.id, t.read_arts.contains(&id)));
@@ -462,7 +538,10 @@ fn write_state(kind: ArtifactKind) -> Option<State> {
     match kind {
         ArtifactKind::Spec => Some(State::Planning),
         ArtifactKind::Diff | ArtifactKind::Candidate => Some(State::Build),
-        ArtifactKind::Brief | ArtifactKind::TestReport | ArtifactKind::Log => None,
+        ArtifactKind::Brief
+        | ArtifactKind::TestReport
+        | ArtifactKind::Log
+        | ArtifactKind::Source => None,
     }
 }
 
@@ -511,6 +590,9 @@ fn put_artifact(
         }
         ArtifactPayload::SpecEdit(e) => check_edit(&w.st, e)?,
         ArtifactPayload::Candidate(c) => {
+            if c.claim.is_some() {
+                return Err(rej(Code::WrongMode, "a stage candidate names no claim"));
+            }
             spec = Some(
                 w.st.approved_spec
                     .ok_or_else(|| rej(Code::NoApprovedSpec, "no approved spec"))?,
@@ -599,7 +681,7 @@ fn check_edit(st: &TaskState, e: &SpecEdit) -> R<()> {
     ))
 }
 
-fn resolve_kind(st: &TaskState, id: ArtId, kind: ArtifactKind) -> R<&ArtifactRecord> {
+pub(crate) fn resolve_kind(st: &TaskState, id: ArtId, kind: ArtifactKind) -> R<&ArtifactRecord> {
     let a = st
         .artifacts
         .get(&id)
@@ -650,11 +732,12 @@ pub(crate) fn state_accepts(state: State, kind: MessageKind) -> bool {
         State::PlanGate | State::MergeGate | State::Approved | State::Escalated => {
             matches!(kind, Answer | Pass)
         }
+        State::Open => matches!(kind, Claim | Evidence),
         State::Closed | State::Cancelled => false,
     }
 }
 
-fn body_len(b: &Body) -> R<usize> {
+pub(crate) fn body_len(b: &Body) -> R<usize> {
     match b {
         Body::Prose(s) => Ok(s.len()),
         Body::Verdict(v) => {
@@ -666,16 +749,20 @@ fn body_len(b: &Body) -> R<usize> {
             Ok(0)
         }
         Body::Decision(d) => Ok(d.note.len()),
+        Body::Claim(c) => Ok(c.text.len()),
+        Body::Evidence(e) => Ok(e.note.len()),
     }
 }
 
-fn check_common(st: &TaskState, d: &Draft) -> R<()> {
+pub(crate) fn check_common(st: &TaskState, d: &Draft) -> R<()> {
     use MessageKind::*;
     // R1: body shape matches kind.
     let shape_ok = matches!(
         (d.kind, &d.body),
         (Verdict, Body::Verdict(_))
             | (Decision, Body::Decision(_))
+            | (Claim, Body::Claim(_))
+            | (Evidence, Body::Evidence(_))
             | (
                 Ask | Answer | Propose | Finding | RequestDecision | Pass,
                 Body::Prose(_)
@@ -687,7 +774,7 @@ fn check_common(st: &TaskState, d: &Draft) -> R<()> {
     // R2.
     if matches!(
         d.kind,
-        Propose | Finding | Verdict | RequestDecision | Decision
+        Propose | Finding | Verdict | RequestDecision | Decision | Claim | Evidence
     ) && d.refs.is_empty()
     {
         return Err(rej(Code::RefsRequired, "refs required"));
@@ -1152,7 +1239,7 @@ fn runner(
 
 // ---------------------------------------------------------------- human
 
-fn check_rev(st: &TaskState, expected: Rev) -> R<()> {
+pub(crate) fn check_rev(st: &TaskState, expected: Rev) -> R<()> {
     if st.rev != expected {
         return Err(rej(
             Code::StaleRev,
@@ -1176,6 +1263,64 @@ fn human(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
             }
             human(w, action, now)
         }
+        HumanAction::Resume { .. }
+        | HumanAction::BudgetExtended { .. }
+        | HumanAction::Cancel { .. } => human_shared(w, a, now),
+        _ if w.st.mode == Mode::Claims => crate::claims_engine::human(w, a, now),
+        _ => human_stage(w, a, now),
+    }
+}
+
+/// Human actions with the same meaning in both modes.
+fn human_shared(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
+    match a {
+        HumanAction::Resume {
+            target,
+            expected_rev,
+        } => {
+            check_rev(&w.st, *expected_rev)?;
+            if w.st.state != State::Escalated {
+                return Err(rej(Code::WrongState, "not escalated"));
+            }
+            if (w.st.mode == Mode::Claims) != (*target == State::Open) {
+                return Err(rej(
+                    Code::WrongState,
+                    format!("cannot resume a {:?} task to {target:?}", w.st.mode),
+                ));
+            }
+            check_resume(&w.st, *target)?;
+            if let (State::Planning, Some(c)) = (target, w.st.candidate) {
+                w.emit(Event::VerdictsStaled { candidate: c });
+            }
+            w.emit(Event::Resumed { target: *target });
+            transition(w, *target, now);
+            Ok(Response::Ok)
+        }
+        HumanAction::BudgetExtended { field, limit } => {
+            w.emit(Event::BudgetExtended {
+                field: *field,
+                limit: *limit,
+            });
+            Ok(Response::Ok)
+        }
+        HumanAction::Cancel {
+            expected_rev,
+            reason,
+        } => {
+            check_rev(&w.st, *expected_rev)?;
+            w.emit(Event::Cancelled {
+                reason: reason.clone(),
+            });
+            transition(w, State::Cancelled, now);
+            Ok(Response::Ok)
+        }
+        _ => Err(rej(Code::Forbidden, "not a shared human action")),
+    }
+}
+
+/// Human actions of the stage pipeline.
+fn human_stage(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
+    match a {
         HumanAction::Approve {
             gate: Gate::Plan,
             subject,
@@ -1327,44 +1472,16 @@ fn human(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
             transition(w, State::Closed, now);
             Ok(Response::Ok)
         }
-        HumanAction::Resume {
-            target,
-            expected_rev,
-        } => {
-            check_rev(&w.st, *expected_rev)?;
-            if w.st.state != State::Escalated {
-                return Err(rej(Code::WrongState, "not escalated"));
-            }
-            check_resume(&w.st, *target)?;
-            if let (State::Planning, Some(c)) = (target, w.st.candidate) {
-                w.emit(Event::VerdictsStaled { candidate: c });
-            }
-            w.emit(Event::Resumed { target: *target });
-            transition(w, *target, now);
-            Ok(Response::Ok)
-        }
-        HumanAction::BudgetExtended { field, limit } => {
-            w.emit(Event::BudgetExtended {
-                field: *field,
-                limit: *limit,
-            });
-            Ok(Response::Ok)
-        }
-        HumanAction::Cancel {
-            expected_rev,
-            reason,
-        } => {
-            check_rev(&w.st, *expected_rev)?;
-            w.emit(Event::Cancelled {
-                reason: reason.clone(),
-            });
-            transition(w, State::Cancelled, now);
-            Ok(Response::Ok)
-        }
+        _ => Err(rej(
+            Code::WrongMode,
+            "claims-mode human action on a stage task",
+        )),
     }
 }
 
-fn exhausted_fields(st: &TaskState) -> Vec<BudgetField> {
+/// The task budget fields spent past their limit: what a task-total
+/// escalation waits on, and what `resume` needs extended first.
+pub fn exhausted_fields(st: &TaskState) -> Vec<BudgetField> {
     let mut out = Vec::new();
     if st.spent.messages > st.budget.messages {
         out.push(BudgetField::Messages);
@@ -1429,6 +1546,7 @@ fn check_resume(st: &TaskState, target: State) -> R<()> {
                 .map(|_| ())
                 .ok_or_else(|| rej(Code::NotReviewed, "review needs an approve at stage test"))
         }
+        State::Open => Ok(()),
         State::MergeGate if st.final_approved() && !st.final_blocked() => Ok(()),
         State::MergeGate => Err(rej(
             Code::NotReviewed,
@@ -1619,7 +1737,8 @@ fn grants_since(w: &Work, from: usize, rev0: Rev) -> Vec<(RoleId, Rev)> {
 /// serve the state, in `turn_order`; at `max_live_turns == 1` that is the
 /// default holder alone. An unassigned default holder blocks the rest.
 fn schedule(w: &mut Work, now: Time) {
-    if w.st.pending_request.is_some() || !w.st.opened {
+    // Claims mode grants no agent turn.
+    if w.st.pending_request.is_some() || !w.st.opened || w.st.mode == Mode::Claims {
         return;
     }
     let serving = pick_next(&w.st);
@@ -1722,7 +1841,7 @@ fn start_run(w: &mut Work, candidate: ArtId) {
     w.emit(Event::RunStarted { candidate, run });
 }
 
-fn transition(w: &mut Work, to: State, now: Time) {
+pub(crate) fn transition(w: &mut Work, to: State, now: Time) {
     let from = w.st.state;
     if from == to {
         return;
@@ -1790,6 +1909,9 @@ fn fire_deadlines(w: &mut Work, now: Time) {
     }
     if w.st.request_deadline().is_some_and(|d| d <= now) {
         escalate(w, EscalateReason::RequestDeadline, now);
+    }
+    if w.st.mode == Mode::Claims {
+        crate::claims_engine::fire_marks(w, now);
     }
 }
 

@@ -56,7 +56,10 @@ fn plus_chains_requests() {
 fn bad_calls_fail_before_sending() {
     for (line, want) in [
         ("frobnicate", "unknown command `frobnicate`"),
-        ("create-session", "create-session: missing parameter `name`"),
+        (
+            "create-window --session 00000000-0000-0000-0000-000000000009",
+            "create-window: missing parameter `name`",
+        ),
         ("create-session --nme x", "unknown parameter `nme`"),
         ("create-session --name", "--name needs a value"),
         ("create-session name", "expected a --flag"),
@@ -353,27 +356,82 @@ fn a_repeated_list_flag_gathers_its_values() {
 }
 
 #[test]
-fn agent_verbs_take_an_optional_dir() {
+fn agent_verbs_take_agents_a_scope_and_dry_run() {
     let agent = |line: &str| parse(&args(line)).map(|i| i.command);
+    let with = |agents: &[AgentKind], scope: AgentScope, dry_run: bool| AgentArgs {
+        agents: agents.to_vec(),
+        scope,
+        dry_run,
+        name_session: false,
+    };
     assert_eq!(
         agent("agent setup"),
-        Ok(Command::Agent(AgentCommand::Setup(None)))
+        Ok(Command::Agent(AgentCommand::Setup(with(
+            &[AgentKind::Claude],
+            AgentScope::User,
+            false
+        ))))
     );
     assert_eq!(
         agent("agent remove --dir .claude"),
-        Ok(Command::Agent(AgentCommand::Remove(Some(".claude".into()))))
+        Ok(Command::Agent(AgentCommand::Remove(with(
+            &[AgentKind::Claude],
+            AgentScope::Dir(".claude".into()),
+            false
+        ))))
     );
     assert_eq!(
-        agent("agent status --dir=x"),
-        Ok(Command::Agent(AgentCommand::Status(Some("x".into()))))
+        agent("agent status --dir=x --agent claude"),
+        Ok(Command::Agent(AgentCommand::Status(with(
+            &[AgentKind::Claude],
+            AgentScope::Dir("x".into()),
+            false
+        ))))
     );
-    assert_eq!(agent("agent hook"), Ok(Command::Agent(AgentCommand::Hook)));
+    // Named in any order and more than once, each is kept once, in order.
+    assert_eq!(
+        agent("agent setup --agent pi --agent codex --project --agent pi --dry-run"),
+        Ok(Command::Agent(AgentCommand::Setup(with(
+            &[AgentKind::Codex, AgentKind::Pi],
+            AgentScope::Project,
+            true
+        ))))
+    );
+    assert_eq!(
+        agent("agent remove --agent all --dry-run"),
+        Ok(Command::Agent(AgentCommand::Remove(with(
+            &AgentKind::ALL,
+            AgentScope::User,
+            true
+        ))))
+    );
+    let naming = |name_session| Ok(Command::Agent(AgentCommand::Hook { name_session }));
+    assert_eq!(agent("agent hook"), naming(false));
+    assert_eq!(agent("agent hook --name-session"), naming(true));
+    assert_eq!(
+        agent("agent setup --name-session --agent codex"),
+        Ok(Command::Agent(AgentCommand::Setup(AgentArgs {
+            name_session: true,
+            ..with(&[AgentKind::Codex], AgentScope::User, false)
+        })))
+    );
     for bad in [
+        "agent hook --name-session --name-session",
+        "agent hook --name-session=true",
+        "agent setup --name-session=yes",
         "agent",
         "agent install",
         "agent hook --dir x",
+        "agent hook --agent codex",
         "agent setup --to x",
         "agent setup x",
+        "agent setup --agent cursor",
+        "agent setup --agent codex --dir x",
+        "agent setup --project --dir x",
+        "agent setup --dir x --project",
+        "agent setup --project=yes",
+        "agent status --dry-run",
+        "agent setup --dry-run=no",
     ] {
         assert!(agent(bad).is_err(), "{bad}");
     }

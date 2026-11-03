@@ -24,11 +24,9 @@ use uuid::Uuid;
 pub const BOARD_TAG: &str = "agent";
 /// The tag prefix that names a task's board column.
 pub const COLUMN_PREFIX: &str = "board:";
-/// Mill Board's columns (`rusty_mill_board::domain::Column`, snake case).
-pub const COLUMNS: [&str; 7] = [
-    "backlog", "ready", "building", "qa", "review", "done", "blocked",
-];
-/// The column of an open card whose `board:` tag is missing or unknown.
+/// Longest Mill Board column id, in bytes.
+pub const MAX_COLUMN_BYTES: usize = 32;
+/// The column of an open card whose `board:` tag is missing or not a column id.
 pub const DEFAULT_COLUMN: &str = "backlog";
 /// The column of a closed card.
 pub const DONE_COLUMN: &str = "done";
@@ -39,23 +37,33 @@ pub const MAX_ACTOR_BYTES: usize = 64;
 /// Most moves one page returns.
 pub const MAX_PAGE: usize = 1000;
 
+/// Whether `id` is a Mill Board column id (`rusty_mill_board::domain::Column`): 1 to
+/// [`MAX_COLUMN_BYTES`] of `a-z 0-9 _`, starting with a letter. Which columns exist is the
+/// board's (an admin edits them), so any such id is recorded as given.
+pub fn valid_column(id: &str) -> bool {
+    id.len() <= MAX_COLUMN_BYTES
+        && id.bytes().next().is_some_and(|b| b.is_ascii_lowercase())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// The board column `task` is in, exactly as Mill Board's `card_of` reads it:
 /// `None` off the board (no [`BOARD_TAG`]), `done` when closed, else its first
-/// `board:` tag if that names a column, else `backlog`.
-pub fn column_of(task: &Task) -> Option<&'static str> {
+/// `board:` tag if that is a column id ([`valid_column`]), else `backlog`.
+pub fn column_of(task: &Task) -> Option<&str> {
     if !task.tags.iter().any(|t| t == BOARD_TAG) {
         return None;
     }
     if task.status != Status::Open {
         return Some(DONE_COLUMN);
     }
-    let tag = task.tags.iter().find_map(|t| t.strip_prefix(COLUMN_PREFIX));
-    Some(
-        COLUMNS
-            .into_iter()
-            .find(|c| Some(*c) == tag)
-            .unwrap_or(DEFAULT_COLUMN),
-    )
+    let tag = task
+        .tags
+        .iter()
+        .find_map(|t| t.strip_prefix(COLUMN_PREFIX))
+        .filter(|c| valid_column(c));
+    Some(tag.unwrap_or(DEFAULT_COLUMN))
 }
 
 /// Whether `actor` is a usable name: 1 to [`MAX_ACTOR_BYTES`] printable ASCII
@@ -341,19 +349,31 @@ mod tests {
 
     #[test]
     fn the_column_is_read_as_mill_board_reads_it() {
-        let column = |tags: &[&str], status| column_of(&task(tags, status));
-        assert_eq!(column(&["agent", "board:qa"], Status::Open), Some("qa"));
-        assert_eq!(column(&["agent", "board:qa"], Status::WontDo), Some("done"));
-        assert_eq!(column(&["agent"], Status::Open), Some("backlog"));
+        let column = |tags: &[&str], status| column_of(&task(tags, status)).map(str::to_owned);
         assert_eq!(
-            column(&["agent", "board:typo"], Status::Open),
-            Some("backlog")
+            column(&["agent", "board:qa"], Status::Open),
+            Some("qa".to_owned())
         );
         assert_eq!(
-            column(&["agent", "board:typo", "board:qa"], Status::Open),
-            Some("backlog")
+            column(&["agent", "board:qa"], Status::WontDo),
+            Some("done".to_owned())
         );
-        assert_eq!(column(&["agent"], Status::Done), Some("done"));
+        assert_eq!(column(&["agent"], Status::Open), Some("backlog".to_owned()));
+        assert_eq!(
+            column(&["agent", "board:design"], Status::Open),
+            Some("design".to_owned()),
+            "a column an admin added is recorded as given"
+        );
+        assert_eq!(
+            column(&["agent", "board:Not A Column"], Status::Open),
+            Some("backlog".to_owned())
+        );
+        assert_eq!(
+            column(&["agent", "board:", "board:qa"], Status::Open),
+            Some("backlog".to_owned()),
+            "only the first board: tag counts, as on the board"
+        );
+        assert_eq!(column(&["agent"], Status::Done), Some("done".to_owned()));
         assert_eq!(
             column(&["board:qa"], Status::Open),
             None,

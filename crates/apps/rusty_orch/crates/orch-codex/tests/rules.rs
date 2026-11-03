@@ -62,7 +62,7 @@ fn a_saved_allow_rule_matches_a_write_command() {
 fn adapter_ignores_saved_allow_rules_end_to_end() {
     use orch_codex::CodexAgent;
     use orch_core::board::Board;
-    use orch_core::task::{Agent, Plan, Role, TaskSpec};
+    use orch_core::task::{Plan, Role, TaskSpec};
     use orch_core::{GoalId, Text};
     use orch_dispatch::AgentRunner;
 
@@ -103,7 +103,7 @@ fn adapter_ignores_saved_allow_rules_end_to_end() {
     let board = Board::new(plan.goal());
 
     let result =
-        CodexAgent::new(repo).run(Agent::Codex, plan.tasks().first().expect("card"), &board);
+        CodexAgent::new(repo).run(orch_codex::ID, plan.tasks().first().expect("card"), &board);
     let leaked = target.exists();
     let _ = std::fs::remove_file(&target);
     let _ = std::fs::remove_dir_all(&home);

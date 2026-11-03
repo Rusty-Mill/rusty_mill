@@ -18,7 +18,8 @@ const browser = await chromium.launch({ executablePath: process.env.CHROMIUM ?? 
 const page = await browser.newPage({ viewport: { width: 1300, height: 900 } });
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
-page.on("dialog", (d) => d.accept());
+let promptAnswer;
+page.on("dialog", (d) => d.accept(d.type() === "prompt" ? promptAnswer : undefined));
 await page.goto(`${BASE}/#token=${TOKEN}`);
 await page.waitForSelector("#gear");
 await page.waitForFunction(() => document.querySelector("#actor").value);
@@ -91,16 +92,16 @@ await limited.close();
 // Roles.
 await page.click("#gear");
 await dialog.getByRole("button", { name: "Roles" }).click();
-await dialog.locator("input[placeholder^='new role']").fill("tester");
+await dialog.locator("input[placeholder^='new role']").fill("checker");
 await dialog.getByRole("button", { name: "Add role" }).click();
-await dialog.locator("tr", { hasText: "tester" }).waitFor();
-check((await api(rotated, "board_roles")).body.roles.tester !== undefined, "a role is added");
+await dialog.locator("tr", { hasText: "checker" }).waitFor();
+check((await api(rotated, "board_roles")).body.roles.checker !== undefined, "a role is added");
 await page.waitForTimeout(200);
-await dialog.locator("tr", { hasText: "tester" }).locator("input[type=checkbox]").nth(2).check();
+await dialog.locator("tr", { hasText: "checker" }).locator("input[type=checkbox]").nth(4).check();
 await dialog.getByRole("button", { name: "Save roles" }).click();
 await page.waitForTimeout(400);
-check(JSON.stringify((await api(rotated, "board_roles")).body.roles.tester) === '["qa"]', "its capabilities are saved");
-check((await dialog.innerText()).includes("Verify built work"), "each capability is explained");
+check(JSON.stringify((await api(rotated, "board_roles")).body.roles.checker) === '["test"]', "its capabilities are saved");
+check((await dialog.innerText()).includes("write tests first"), "each capability is explained");
 
 // Rules: turning movement rules off and on is saved at once.
 await dialog.getByRole("button", { name: "Rules" }).click();
@@ -110,7 +111,7 @@ await enforce.uncheck();
 await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("except out of Done"));
 check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "unticking turns them off");
 await dialog.getByLabel("Enforce card movement rules").check();
-await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("along the column table"));
+await page.waitForFunction(() => document.querySelector("#settings")?.innerText.includes("along the Columns tab's moves"));
 check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "ticking turns them back on");
 // A failed save, either way, shows the error and puts the checkbox and its note back to what the server holds.
 const rulesShown = (on, note) => page.waitForFunction(([on, note]) => {
@@ -121,7 +122,7 @@ const refuse = () => page.route("**/api/settings_rules_set", (r) => r.fulfill({ 
 await refuse();
 await dialog.getByLabel("Enforce card movement rules").uncheck();
 await page.waitForFunction(() => document.querySelector("#settings .err")?.textContent.includes("disk full"));
-await rulesShown(true, "along the column table");
+await rulesShown(true, "along the Columns tab's moves");
 check((await api(TOKEN, "settings_get")).body.rules.movement === "enforced", "a failed turn-off leaves the checkbox, its note and the server on");
 await page.unroute("**/api/settings_rules_set");
 await dialog.getByLabel("Enforce card movement rules").uncheck();
@@ -133,7 +134,7 @@ await rulesShown(false, "except out of Done");
 check((await api(TOKEN, "settings_get")).body.rules.movement === "open", "a failed turn-on leaves the checkbox, its note and the server off");
 await page.unroute("**/api/settings_rules_set");
 await dialog.getByLabel("Enforce card movement rules").check();
-await rulesShown(true, "along the column table");
+await rulesShown(true, "along the Columns tab's moves");
 
 // Apps and Server: read-only views of sign-in and how the board was started.
 await dialog.getByRole("button", { name: "Apps" }).click();
@@ -174,6 +175,24 @@ await page.fill("#title", "after rotation");
 await page.click("#add");
 await page.waitForFunction((n) => document.querySelectorAll(".card").length === n + 1, before);
 check(true, "card calls succeed after self-rotation");
+
+// Renaming your own role: the page follows without a reload, and settings and card calls keep working.
+await page.click("#gear");
+await page.waitForSelector("#settings[open]");
+await dialog.getByRole("button", { name: "Roles" }).click();
+promptAnswer = "owner";
+await dialog.locator("tr", { has: page.locator("td", { hasText: /^human$/ }) }).getByRole("button", { name: "Rename" }).click();
+await dialog.locator("td", { hasText: /^owner$/ }).waitFor();
+check((await page.inputValue("#role")) === "owner", "the header follows the renamed role");
+check((await api(adminToken, "board_whoami")).body.role === "owner", "renaming your own role moves you with it");
+check((await dialog.locator(".err").first().innerText()) === "", "and the settings view refreshes without an error");
+check((await dialog.locator("td", { hasText: /^human$/ }).count()) === 0, "and the old name is gone");
+await dialog.getByRole("button", { name: "Close" }).click();
+const n = await page.locator(".card").count();
+await page.fill("#title", "after renaming my role");
+await page.click("#add");
+await page.waitForFunction((k) => document.querySelectorAll(".card").length === k + 1, n);
+check(true, "card calls succeed after renaming your own role");
 
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);
 await browser.close();

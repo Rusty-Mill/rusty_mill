@@ -174,10 +174,18 @@ fn principal_fields(principal: Option<&Principal>) -> [(&'static str, Field); 2]
 fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Field)>) {
     use Field::{Id, Text};
     match entry {
-        Entry::Session { session, name } => (
+        Entry::Session {
+            session,
+            name,
+            active,
+            ..
+        } => (
             "session",
             session.uuid(),
-            vec![("name", Text(name.clone()))],
+            vec![
+                ("name", Text(name.clone())),
+                ("active", active.map_or(Field::Absent, |w| Id(w.uuid()))),
+            ],
         ),
         Entry::Window {
             window,
@@ -185,12 +193,14 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             name,
             layout,
             zoomed,
+            focused,
         } => {
             let mut fields = vec![
                 ("session", Id(session.uuid())),
                 ("name", Text(name.clone())),
             ];
             fields.extend(layout_fields(layout.as_ref(), *zoomed));
+            fields.push(("focused", focused.map_or(Field::Absent, |b| Id(b.uuid()))));
             ("window", window.uuid(), fields)
         }
         Entry::Block {
@@ -241,6 +251,31 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             ],
         ),
         E::WindowClosed { window } => ("window-closed", vec![("window", Id(window.uuid()))]),
+        E::ActiveWindowChanged { session, window } => (
+            "active-window-changed",
+            vec![
+                ("session", Id(session.uuid())),
+                ("window", window.map_or(Field::Absent, |w| Id(w.uuid()))),
+            ],
+        ),
+        E::ConfigReloaded => ("config-reloaded", vec![]),
+        E::FocusChanged { window, block } => (
+            "focus-changed",
+            vec![
+                ("window", Id(window.uuid())),
+                ("block", block.map_or(Field::Absent, |b| Id(b.uuid()))),
+            ],
+        ),
+        E::WindowMoved { window, index } => (
+            "window-moved",
+            vec![
+                ("window", Id(window.uuid())),
+                (
+                    "index",
+                    Field::Num(i64::try_from(index).unwrap_or(i64::MAX)),
+                ),
+            ],
+        ),
         E::BlockCreated {
             block,
             window,
@@ -342,6 +377,17 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
                 ("body", Text(body.clone())),
             ],
         ),
+        E::ClipboardWritten { block, selection } => (
+            "clipboard-written",
+            vec![
+                ("block", Id(block.uuid())),
+                ("selection", Field::Word(selection.name())),
+            ],
+        ),
+        E::StatusRemoved { block, ref id } => (
+            "status-removed",
+            vec![("block", Id(block.uuid())), ("id", Text(id.clone()))],
+        ),
         E::ProcessChanged {
             block,
             pid,
@@ -403,7 +449,9 @@ fn renamed(entity: &'static str, id: Uuid, name: &str) -> Vec<(&'static str, Fie
 
 #[cfg(test)]
 mod tests {
-    use rusty_mux_core::{BlockId, ClientId, Principal, SessionId, Size, Transport, WindowId};
+    use rusty_mux_core::{
+        BlockId, ClientId, Principal, Selection, SessionId, Size, Transport, WindowId,
+    };
 
     use super::*;
 
@@ -501,6 +549,15 @@ mod tests {
             Event::SessionClosed { session },
             Event::WindowCreated { window, session },
             Event::WindowClosed { window },
+            Event::ActiveWindowChanged {
+                session,
+                window: Some(window),
+            },
+            Event::WindowMoved { window, index: 2 },
+            Event::FocusChanged {
+                window,
+                block: Some(block),
+            },
             Event::BlockCreated {
                 block,
                 window,
@@ -567,6 +624,15 @@ mod tests {
                 principal: Principal::unix(1, None).unwrap(),
                 transport: Transport::Socket,
             },
+            Event::ClipboardWritten {
+                block,
+                selection: Selection::Primary,
+            },
+            Event::StatusRemoved {
+                block,
+                id: "build".into(),
+            },
+            Event::ConfigReloaded,
         ];
         assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
         for (event, (kind, declared)) in events.iter().zip(rusty_mux_script::EVENTS) {
@@ -665,11 +731,12 @@ mod tests {
             name: "w".into(),
             layout: Some(layout.clone()),
             zoomed: None,
+            focused: Some(a),
         };
         assert_eq!(
             entry_line(&window, false),
             format!(
-                "window {} session={} name=\"w\" layout=\"rows50({a},{b})\" zoomed=-",
+                "window {} session={} name=\"w\" layout=\"rows50({a},{b})\" zoomed=- focused={a}",
                 id(2),
                 id(4)
             )
@@ -705,12 +772,14 @@ mod tests {
         let session = Entry::Session {
             session: SessionId::from_uuid(id(1)),
             name: name.into(),
+            active: None,
+            generated: false,
         };
         let text = entry_line(&session, false);
         assert_eq!(
             text,
             format!(
-                "session {} name=\"a b\\nsession x\\r\\u{{1b}}]0;pwn\\u{{7}}\\\"\"",
+                "session {} name=\"a b\\nsession x\\r\\u{{1b}}]0;pwn\\u{{7}}\\\"\" active=-",
                 id(1)
             )
         );

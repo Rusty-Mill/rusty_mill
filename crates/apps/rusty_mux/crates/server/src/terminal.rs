@@ -2,11 +2,135 @@
 
 use std::path::Path;
 
-use rusty_mux_core::Progress;
+use rusty_mux_core::{Progress, Selection};
+use rusty_mux_proto::theme::{Colour, ThemeChange};
 use rusty_mux_status::Records;
-use rusty_term_core::{Cell, Grid, StatusSignal, WIDE_TRAILER};
+use rusty_term_core::{Cell, Grid, ShellPhase, StatusSignal, WIDE_TRAILER};
 
 use crate::style::Style;
+
+/// What `terminal.reset` feeds a terminal: CAN, which ends any sequence the
+/// program left unfinished (a string, an ESC waiting for its next byte, a
+/// cut CSI or UTF-8 character) without acting on it, then RIS. Without the
+/// CAN, rusty_term_core reads the RIS's ESC as part of an unfinished string
+/// or escape and never resets, while a VT500-style outer terminal would.
+/// Clients built before CAN ended an OSC string take it into the string;
+/// a reset is refused while one is attached.
+pub(crate) const RESET: &[u8] = b"\x18\x1bc";
+
+/// The OSC sequences that make `change`, each ended by ST: OSC 10, 11 and
+/// 12 set the default foreground, background and cursor colours, 110, 111
+/// and 112 put them back, and OSC 4 and 104 do the same for a palette
+/// entry. None asks the terminal anything, so none is answered.
+pub(crate) fn theme(change: &ThemeChange) -> Vec<u8> {
+    let mut out = String::new();
+    let dynamic = [
+        (change.foreground, 10),
+        (change.background, 11),
+        (change.cursor, 12),
+    ];
+    for (colour, code) in dynamic {
+        match colour {
+            Some(Colour::Rgb(rgb)) => out.push_str(&format!("\x1b]{code};#{rgb:06x}\x1b\\")),
+            Some(Colour::Default) => out.push_str(&format!("\x1b]1{code}\x1b\\")),
+            None => {}
+        }
+    }
+    for (index, colour) in &change.palette {
+        match colour {
+            Colour::Rgb(rgb) => out.push_str(&format!("\x1b]4;{index};#{rgb:06x}\x1b\\")),
+            Colour::Default => out.push_str(&format!("\x1b]104;{index}\x1b\\")),
+        }
+    }
+    out.into_bytes()
+}
+
+/// What `terminal.clear` feeds a terminal, as `clear` writes it: the
+/// cursor home, the screen erased (ED 2), then the scrollback (ED 3).
+/// Nothing asks the terminal anything, so nothing is answered.
+pub(crate) const CLEAR: &[u8] = b"\x1b[H\x1b[2J\x1b[3J";
+
+/// The mouse tracking DEC mode `base` turns on, as `terminal.modes` names
+/// it.
+fn mouse_tracking(base: usize) -> &'static str {
+    match base {
+        1000 => "click",
+        1002 => "drag",
+        1003 => "any",
+        _ => "off",
+    }
+}
+
+/// The mouse report encodings in `extended`, as `terminal.modes` names
+/// them: `default` when none is on.
+fn mouse_encoding(extended: u8) -> String {
+    let names: Vec<&str> = [(1, "utf8"), (2, "sgr"), (4, "urxvt"), (8, "sgr-pixels")]
+        .into_iter()
+        .filter(|(bit, _)| extended & bit != 0)
+        .map(|(_, name)| name)
+        .collect();
+    match names.is_empty() {
+        true => "default".to_owned(),
+        false => names.join(","),
+    }
+}
+
+/// `terminal.modes`: the modes `grid`'s program set, one `NAME<TAB>VALUE`
+/// line each.
+pub(crate) fn modes(grid: &Grid) -> String {
+    let flag = |on: bool| if on { "on" } else { "off" }.to_owned();
+    let mouse = grid.mouse_modes;
+    let lines = [
+        ("app-cursor-keys", flag(grid.app_cursor_keys)),
+        ("app-keypad", flag(grid.app_keypad)),
+        ("bracketed-paste", flag(grid.bracketed_paste)),
+        ("focus-reporting", flag(grid.focus_reporting)),
+        ("mouse", mouse_tracking(mouse.base).to_owned()),
+        ("mouse-encoding", mouse_encoding(mouse.extended)),
+        ("alt-screen", flag(grid.in_alt_screen())),
+        ("alt-scroll", flag(grid.alt_scroll)),
+        ("insert", flag(grid.insert_mode())),
+        ("cursor-visible", flag(grid.cursor_visible)),
+        ("cursor-blink", flag(grid.cursor_blink)),
+        ("report-color-scheme", flag(grid.report_color_scheme)),
+        ("win32-input", flag(grid.win32_input)),
+        ("kitty-keyboard", grid.kitty_keyboard_flags().to_string()),
+    ];
+    lines
+        .iter()
+        .map(|(name, value)| format!("{name}\t{value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `terminal.shell`: what the block's shell is and does, one
+/// `NAME<TAB>VALUE` line each. `program` is what the block started and
+/// `activity` comes from the process table (see [`crate::process::activity`]);
+/// `phase` and `exit` come from the shell's OSC 133 marks in `grid`, and
+/// are `unknown` until it sends one, as a shell without that integration
+/// never does. The program is [`crate::process::escape`]d, so its path can
+/// add neither a field nor a line.
+pub(crate) fn shell(grid: &Grid, program: &str, activity: &str) -> String {
+    let phase = match grid.shell_phase() {
+        None => "unknown",
+        Some(ShellPhase::Prompt) => "prompt",
+        Some(ShellPhase::Running) => "running",
+        Some(ShellPhase::Finished) => "finished",
+    };
+    let exit = grid
+        .last_command_exit()
+        .map_or_else(|| "unknown".to_owned(), |code| code.to_string());
+    [
+        ("program", crate::process::escape(program)),
+        ("activity", activity.to_owned()),
+        ("phase", phase.to_owned()),
+        ("exit", exit),
+    ]
+    .iter()
+    .map(|(name, value)| format!("{name}\t{value}"))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
 
 /// What `terminal.format` reads, and how.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -128,12 +252,22 @@ pub(crate) fn pwd(grid: &Grid, pid: Option<u32>) -> Option<String> {
     })
 }
 
+/// What applying a block's status signals did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Absorbed {
+    /// Whether any record's state changed, the part worth announcing;
+    /// progress and text alone are not.
+    pub(crate) changed: bool,
+    /// The ids of the records that ended, in id order. A record cleared
+    /// and reported again in the same read did not end.
+    pub(crate) removed: Vec<String>,
+}
+
 /// Applies the status signals the grid collected since the last call: OSC
-/// 7501 reports, prompts and resets. Whether any record's state changed, the
-/// part worth announcing; progress and text alone are not.
-pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> bool {
+/// 7501 reports, prompts and resets.
+pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> Absorbed {
     if grid.program_status.is_empty() {
-        return false;
+        return Absorbed::default();
     }
     let before = records.states();
     for signal in grid.program_status.drain(..) {
@@ -147,7 +281,28 @@ pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> bool {
             StatusSignal::Reset => records.reset(),
         }
     }
-    records.states() != before
+    let after = records.states();
+    // Both are in id order, as `Records` keeps them.
+    let removed = before
+        .iter()
+        .filter(|(id, ..)| after.binary_search_by(|(a, ..)| a.cmp(id)).is_err())
+        .map(|(id, ..)| id.as_str().to_owned())
+        .collect();
+    Absorbed {
+        changed: after != before,
+        removed,
+    }
+}
+
+/// The selections the block's program wrote (OSC 52) since the last call,
+/// clipboard first; the text itself is let go.
+pub(crate) fn take_clipboard(grid: &mut Grid) -> Vec<Selection> {
+    let clipboard = grid.clipboard_set.take().map(|_| Selection::Clipboard);
+    let primary = grid
+        .clipboard_set_primary
+        .take()
+        .map(|_| Selection::Primary);
+    clipboard.into_iter().chain(primary).collect()
 }
 
 /// The working directory URI (OSC 7) and title a block last announced, to
@@ -226,6 +381,182 @@ fn percent_decode(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusty_term_core::AnsiParser;
+
+    /// Every state a program can leave the parser in, as the bytes that
+    /// leave it there: strings, an ESC inside a string (which starts its
+    /// terminator), escapes waiting for a byte, a CSI and a UTF-8
+    /// character cut short.
+    pub(crate) const STUCK: &[&[u8]] = &[
+        b"\x1b]0;stuck",
+        b"\x1b]0;stuck\x1b",
+        b"\x1bP1$r",
+        b"\x1bP1$r\x1b",
+        b"\x1b_Gstuck",
+        b"\x1b_Gstuck\x1b",
+        b"\x1b^stuck",
+        b"\x1b^stuck\x1b",
+        b"\x1bXstuck\x1b",
+        b"\x1b",
+        b"\x1b(",
+        b"\x1b#",
+        b"\x1b[3",
+        b"\xe2\x94",
+    ];
+
+    #[test]
+    fn a_reset_resets_whatever_the_program_left_unfinished() {
+        for stuck in STUCK {
+            let mut grid = Grid::new(20, 3);
+            let mut parser = AnsiParser::new();
+            parser.advance(&mut grid, b"\x1b[?1hBEFORE");
+            parser.advance(&mut grid, stuck);
+            parser.advance(&mut grid, RESET);
+            let screen = format(&grid, Capture::default(), usize::MAX).unwrap_or_default();
+            assert!(!screen.contains("BEFORE"), "{stuck:?}: {screen:?}");
+            assert!(!grid.app_cursor_keys, "{stuck:?}");
+            assert!(parser.ground(), "{stuck:?}");
+            assert_eq!(grid.title, "", "{stuck:?}: the string was not acted on");
+            assert!(parser.take_responses().is_empty(), "{stuck:?}");
+        }
+    }
+
+    /// `terminal.modes` as a map from name to value.
+    fn mode_map(grid: &Grid) -> Vec<(String, String)> {
+        modes(grid)
+            .lines()
+            .map(|l| {
+                let (name, value) = l.split_once('\t').unwrap_or((l, ""));
+                (name.to_owned(), value.to_owned())
+            })
+            .collect()
+    }
+
+    fn mode(grid: &Grid, name: &str) -> String {
+        let found = mode_map(grid).into_iter().find(|(n, _)| n == name);
+        found.map(|(_, v)| v).unwrap_or_else(|| panic!("no {name}"))
+    }
+
+    #[test]
+    fn modes_start_as_a_fresh_terminal_sets_them() {
+        let grid = Grid::new(20, 3);
+        let names: Vec<String> = mode_map(&grid).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            [
+                "app-cursor-keys",
+                "app-keypad",
+                "bracketed-paste",
+                "focus-reporting",
+                "mouse",
+                "mouse-encoding",
+                "alt-screen",
+                "alt-scroll",
+                "insert",
+                "cursor-visible",
+                "cursor-blink",
+                "report-color-scheme",
+                "win32-input",
+                "kitty-keyboard",
+            ]
+        );
+        assert_eq!(mode(&grid, "cursor-visible"), "on");
+        assert_eq!(mode(&grid, "bracketed-paste"), "off");
+        assert_eq!(mode(&grid, "mouse"), "off");
+        assert_eq!(mode(&grid, "mouse-encoding"), "default");
+        assert_eq!(mode(&grid, "kitty-keyboard"), "0");
+    }
+
+    #[test]
+    fn modes_follow_what_the_program_sets() {
+        let mut grid = Grid::new(20, 3);
+        let mut parser = AnsiParser::new();
+        parser.advance(
+            &mut grid,
+            b"\x1b[?1h\x1b=\x1b[?2004h\x1b[?1004h\x1b[?1002h\x1b[?1006h\x1b[?1016h\
+              \x1b[?1049h\x1b[4h\x1b[?25l\x1b[>5u",
+        );
+        for (name, value) in [
+            ("app-cursor-keys", "on"),
+            ("app-keypad", "on"),
+            ("bracketed-paste", "on"),
+            ("focus-reporting", "on"),
+            ("mouse", "drag"),
+            ("mouse-encoding", "sgr,sgr-pixels"),
+            ("alt-screen", "on"),
+            ("insert", "on"),
+            ("cursor-visible", "off"),
+            ("kitty-keyboard", "5"),
+        ] {
+            assert_eq!(mode(&grid, name), value, "{name}");
+        }
+        parser.advance(&mut grid, b"\x1b[?1003h\x1b[?1002l\x1b[?1049l");
+        assert_eq!(mode(&grid, "mouse"), "any");
+        assert_eq!(mode(&grid, "alt-screen"), "off");
+    }
+
+    /// The value of `terminal.shell`'s line `name`.
+    fn shell_line(grid: &Grid, name: &str) -> String {
+        let text = shell(grid, "/bin/sh", "idle");
+        let found = text
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{name}\t")));
+        found.unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn shell_reports_unknown_marks_until_the_shell_sends_one() {
+        let grid = Grid::new(20, 3);
+        let text = shell(&grid, "/bin/sh", "idle");
+        assert_eq!(
+            text,
+            "program\t/bin/sh\nactivity\tidle\nphase\tunknown\nexit\tunknown"
+        );
+    }
+
+    #[test]
+    fn shell_follows_osc_133_marks() {
+        let mut grid = Grid::new(20, 3);
+        let mut parser = AnsiParser::new();
+        parser.advance(&mut grid, b"\x1b]133;A\x07$ ");
+        assert_eq!(shell_line(&grid, "phase"), "prompt");
+        parser.advance(&mut grid, b"\x1b]133;C\x07");
+        assert_eq!(shell_line(&grid, "phase"), "running");
+        parser.advance(&mut grid, b"\x1b]133;D;127\x07");
+        assert_eq!(shell_line(&grid, "phase"), "finished");
+        assert_eq!(shell_line(&grid, "exit"), "127");
+    }
+
+    #[test]
+    fn shell_escapes_the_program() {
+        let grid = Grid::new(20, 3);
+        let text = shell(&grid, "/odd\tpath\nx", "busy");
+        assert_eq!(text.lines().count(), 4, "{text:?}");
+        assert!(text.starts_with("program\t/odd\\tpath\\nx\n"), "{text:?}");
+    }
+
+    #[test]
+    fn a_clear_empties_the_screen_and_scrollback_and_keeps_modes() {
+        let mut grid = Grid::new(20, 3);
+        let mut parser = AnsiParser::new();
+        parser.advance(&mut grid, b"\x1b]0;kept\x07\x1b[?2004h");
+        for n in 0..10 {
+            parser.advance(&mut grid, format!("LINE{n}\r\n").as_bytes());
+        }
+        let all = Capture {
+            history: 1000,
+            ..Capture::default()
+        };
+        let before = format(&grid, all, usize::MAX).unwrap_or_default();
+        assert!(before.contains("LINE0"), "scrolled back: {before:?}");
+        parser.advance(&mut grid, CLEAR);
+        let screen = format(&grid, all, usize::MAX).unwrap_or_default();
+        assert!(!screen.contains("LINE"), "{screen:?}");
+        assert_eq!(grid.cursor, (0, 0));
+        assert!(grid.bracketed_paste);
+        assert_eq!(grid.title, "kept");
+        assert!(parser.take_responses().is_empty());
+    }
 
     #[test]
     fn reported_paths_are_decoded() {
@@ -294,13 +625,14 @@ mod tests {
     #[test]
     fn status_changes_are_announced_once() {
         let (mut grid, mut parser, mut records) = status_grid();
-        assert!(!absorb_status(&mut grid, &mut records), "nothing collected");
+        let changed = |grid: &mut Grid, records: &mut Records| absorb_status(grid, records).changed;
+        assert!(!changed(&mut grid, &mut records), "nothing collected");
         parser.advance(&mut grid, b"\x1b]7501;state=working:progress=10\x07");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert!(changed(&mut grid, &mut records));
         parser.advance(&mut grid, b"\x1b]7501;state=working:progress=90\x07");
-        assert!(!absorb_status(&mut grid, &mut records), "progress only");
+        assert!(!changed(&mut grid, &mut records), "progress only");
         parser.advance(&mut grid, b"\x1b]7501;state=bogus\x07");
-        assert!(!absorb_status(&mut grid, &mut records), "ignored report");
+        assert!(!changed(&mut grid, &mut records), "ignored report");
         assert!(grid.program_status.is_empty(), "drained");
         assert_eq!(records.bodies(), ["state=working:progress=90"]);
     }
@@ -310,13 +642,61 @@ mod tests {
         let (mut grid, mut parser, mut records) = status_grid();
         parser.advance(&mut grid, b"\x1b]7501;state=blocked:kind=question\x07");
         parser.advance(&mut grid, b"\x1b]7501;state=done:id=build\x07");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
         parser.advance(&mut grid, b"\x1b]133;A\x07");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[""]));
         assert_eq!(records.bodies(), ["state=done:id=build"]);
         parser.advance(&mut grid, b"\x1bc");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&["build"]));
         assert!(records.bodies().is_empty());
+    }
+
+    fn changed(removed: &[&str]) -> Absorbed {
+        Absorbed {
+            changed: true,
+            removed: removed.iter().map(|id| (*id).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_clear_removes_the_record_and_those_beneath_it() {
+        let (mut grid, mut parser, mut records) = status_grid();
+        for id in ["a", "a/x", "ab", "b"] {
+            let report = format!("\x1b]7501;state=working:id={id}\x07");
+            parser.advance(&mut grid, report.as_bytes());
+        }
+        absorb_status(&mut grid, &mut records);
+        parser.advance(&mut grid, b"\x1b]7501;state=clear:id=a\x07");
+        assert_eq!(
+            absorb_status(&mut grid, &mut records),
+            changed(&["a", "a/x"])
+        );
+        // Cleared and reported again in one read: it never ended.
+        parser.advance(
+            &mut grid,
+            b"\x1b]7501;state=clear:id=b\x07\x1b]7501;state=done:id=b\x07",
+        );
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
+        parser.advance(&mut grid, b"\x1b]7501;state=clear:id=nothing\x07");
+        assert_eq!(absorb_status(&mut grid, &mut records), Absorbed::default());
+    }
+
+    #[test]
+    fn clipboard_writes_are_taken_once_each() {
+        let mut grid = Grid::new(20, 2);
+        let mut parser = rusty_term_core::AnsiParser::new();
+        assert!(take_clipboard(&mut grid).is_empty());
+        // "aGk=" is "hi"; a query and undecodable data are not writes.
+        parser.advance(
+            &mut grid,
+            b"\x1b]52;p;aGk=\x07\x1b]52;c;aGk=\x07\x1b]52;;aGk=\x07",
+        );
+        parser.advance(&mut grid, b"\x1b]52;c;?\x07\x1b]52;p;!!\x07");
+        assert_eq!(
+            take_clipboard(&mut grid),
+            [Selection::Clipboard, Selection::Primary]
+        );
+        assert!(take_clipboard(&mut grid).is_empty(), "taken");
     }
 
     #[test]
@@ -326,7 +706,7 @@ mod tests {
         let burst = round.repeat(rusty_term_core::PROGRAM_STATUS_MAX * 2);
         parser.advance(&mut grid, &burst);
         parser.advance(&mut grid, b"\x1b]7501;state=done\x07");
-        assert!(absorb_status(&mut grid, &mut records));
+        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
         assert_eq!(records.bodies(), ["state=done"]);
     }
 

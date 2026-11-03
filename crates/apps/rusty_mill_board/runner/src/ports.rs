@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use rusty_mill_board::domain::{Capability, Card, Column};
+use rusty_mill_board::workflow::Workflow;
 use uuid::Uuid;
 
 use crate::config::Stage;
@@ -39,9 +40,11 @@ pub type Roles = BTreeMap<String, BTreeSet<Capability>>;
 /// The board, as one actor acting in a role.
 pub trait BoardApi: Sync {
     /// Cards in a column.
-    fn list(&self, column: Column) -> Result<Vec<Card>, ApiError>;
+    fn list(&self, column: &Column) -> Result<Vec<Card>, ApiError>;
     /// One card.
     fn get(&self, id: Uuid) -> Result<Card, ApiError>;
+    /// The board's columns and the moves between them.
+    fn workflow(&self) -> Result<Workflow, ApiError>;
     /// The board's roles.
     fn roles(&self) -> Result<Roles, ApiError>;
     /// How many projects the board has (whatever this credential may see).
@@ -50,7 +53,7 @@ pub trait BoardApi: Sync {
     /// that `project` exists and this credential may work in it.
     fn foreign(&self, project: &str, files: &[String]) -> Result<Vec<String>, ApiError>;
     /// Move a card as `role`.
-    fn move_card(&self, role: &str, id: Uuid, to: Column) -> Result<Card, ApiError>;
+    fn move_card(&self, role: &str, id: Uuid, to: &Column) -> Result<Card, ApiError>;
     /// Claim a card as `role`.
     fn claim(&self, role: &str, id: Uuid) -> Result<Card, ApiError>;
     /// Release a claim as `role`.

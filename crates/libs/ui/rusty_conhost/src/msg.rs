@@ -70,15 +70,25 @@ pub(crate) mod api {
     pub(crate) const READ_CONSOLE: u32 = 0x0100_0005;
     pub(crate) const WRITE_CONSOLE: u32 = 0x0100_0006;
     pub(crate) const GET_LANG_ID: u32 = 0x0100_0008;
+    pub(crate) const FILL_OUTPUT: u32 = 0x0200_0000;
     pub(crate) const GENERATE_CTRL_EVENT: u32 = 0x0200_0001;
     pub(crate) const FLUSH_INPUT_BUFFER: u32 = 0x0200_0003;
     pub(crate) const SET_CP: u32 = 0x0200_0004;
     pub(crate) const GET_CURSOR_INFO: u32 = 0x0200_0005;
     pub(crate) const SET_CURSOR_INFO: u32 = 0x0200_0006;
     pub(crate) const GET_SCREEN_BUFFER_INFO: u32 = 0x0200_0007;
+    pub(crate) const SET_SCREEN_BUFFER_INFO: u32 = 0x0200_0008;
+    pub(crate) const SET_SCREEN_BUFFER_SIZE: u32 = 0x0200_0009;
     pub(crate) const SET_CURSOR_POSITION: u32 = 0x0200_000A;
+    pub(crate) const GET_LARGEST_WINDOW_SIZE: u32 = 0x0200_000B;
+    pub(crate) const SCROLL_SCREEN_BUFFER: u32 = 0x0200_000C;
     pub(crate) const SET_TEXT_ATTRIBUTE: u32 = 0x0200_000D;
+    pub(crate) const SET_WINDOW_INFO: u32 = 0x0200_000E;
+    pub(crate) const READ_OUTPUT_STRING: u32 = 0x0200_000F;
     pub(crate) const WRITE_CONSOLE_INPUT: u32 = 0x0200_0010;
+    pub(crate) const WRITE_OUTPUT: u32 = 0x0200_0011;
+    pub(crate) const WRITE_OUTPUT_STRING: u32 = 0x0200_0012;
+    pub(crate) const READ_OUTPUT: u32 = 0x0200_0013;
     pub(crate) const GET_TITLE: u32 = 0x0200_0014;
     pub(crate) const SET_TITLE: u32 = 0x0200_0015;
     pub(crate) const GET_CURRENT_FONT: u32 = 0x0300_0004;
@@ -156,6 +166,8 @@ const SERVER_MSG_GROUP_AT: usize = 28;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ServerMsg {
     pub title: Vec<u16>,
+    /// `ApplicationName`, the client's executable name (`cmd.exe`).
+    pub app: Vec<u16>,
     /// `ProcessGroupId`, which GenerateConsoleCtrlEvent targets.
     pub group: u32,
 }
@@ -177,6 +189,7 @@ pub(crate) fn server_msg_info(payload: &[u8]) -> Result<ServerMsg, i32> {
         strings.push(array[..len / 2].to_vec());
     }
     Ok(ServerMsg {
+        app: strings.swap_remove(1),
         title: strings.swap_remove(0),
         group: u32_at(msg, SERVER_MSG_GROUP_AT).unwrap_or(0),
     })
@@ -239,12 +252,25 @@ pub(crate) fn server_msg(title: &str) -> Vec<u8> {
 pub(crate) fn server_msg_in_group(title: &str, group: u32) -> Vec<u8> {
     let mut m = vec![0; SERVER_MSG_LEN];
     put_u32(&mut m, SERVER_MSG_GROUP_AT, group);
-    let units: Vec<u16> = title.encode_utf16().collect();
-    m[34..36].copy_from_slice(&((units.len() * 2) as u16).to_le_bytes());
-    for (i, u) in units.iter().enumerate() {
-        m[36 + i * 2..38 + i * 2].copy_from_slice(&u.to_le_bytes());
-    }
+    put_counted(&mut m, SERVER_MSG_STRINGS[0], title);
     m
+}
+
+#[cfg(test)]
+/// A CONSOLE_SERVER_MSG from the client executable `app`.
+pub(crate) fn server_msg_from(app: &str) -> Vec<u8> {
+    let mut m = vec![0; SERVER_MSG_LEN];
+    put_counted(&mut m, SERVER_MSG_STRINGS[1], app);
+    m
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+fn put_counted(m: &mut [u8], (len_at, array_at, _): (usize, usize, usize), text: &str) {
+    let units: Vec<u16> = text.encode_utf16().collect();
+    put_u16(m, len_at, (units.len() * 2) as u16);
+    for (i, u) in units.iter().enumerate() {
+        put_u16(m, array_at + i * 2, *u);
+    }
 }
 
 #[cfg(test)]
@@ -305,6 +331,9 @@ mod tests {
             server_msg_info(&server_msg_in_group("", 4242)).map(|i| i.group),
             Ok(4242)
         );
+        let app: Vec<u16> = "pwsh.exe".encode_utf16().collect();
+        let from = server_msg_info(&server_msg_from("pwsh.exe"));
+        assert_eq!(from.map(|i| (i.title, i.app)), Ok((Vec::new(), app)));
         let longest = "x".repeat(260);
         assert_eq!(
             server_msg_info(&server_msg(&longest)).map(|i| i.title.len()),

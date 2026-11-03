@@ -67,6 +67,8 @@ fn a_malformed_policy_is_an_error_not_a_default() {
 fn open_task() -> OpenTask {
     let mut store = MemStore::new();
     OpenTask {
+        claims: None,
+        mode: rusty_bbp::Mode::Stages,
         task: TaskId("T1".into()),
         roster: four_roles(),
         repo: "r".into(),
@@ -85,6 +87,7 @@ fn open_task() -> OpenTask {
         brief: store.blob_put(b"brief"),
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::TurnBased,
+        holdout_digest: None,
     }
 }
 

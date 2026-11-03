@@ -44,7 +44,9 @@ The configuration contains:
   Lease paths must exist and be canonical. Every assigned pool member must
   then be sandboxed; its sandbox paths are met with the lease's when the task
   is first frozen, and a pool where one member's path lies beneath any
-  member's write root is refused. A later run under a lease that reaches
+  member's write root is refused. The profile set's `read_roots` must be
+  system roots or lie within the lease, and not beneath a member's write
+  root, since candidate code reads them. A later run under a lease that reaches
   other paths is refused, so widening access needs a new task. Each run
   renews the end, which BBP enforces as an absolute deadline on every harness.
 

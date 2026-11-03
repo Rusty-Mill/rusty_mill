@@ -31,11 +31,15 @@ use crate::input::{self, KeyFor};
 use crate::msg::{self, ApiMsg, api};
 use crate::sched::{MAX_RETAINED_PER_CALL, PACKET_INPUT_CAP, WRITE_BACK_CAP};
 
+mod cells;
 mod output;
 mod read;
 #[cfg(any(test, feature = "fuzz"))]
 pub(crate) use read::READ_REPLY_CAP;
 mod screen;
+mod sync;
+#[cfg(windows)]
+pub(crate) use sync::CURSOR_WAIT;
 
 use output::get_console_window;
 use screen::Screen;
@@ -143,6 +147,9 @@ pub(crate) enum Event<'a> {
     HangUp,
     /// The CTRL_CLOSE grace deadline passed (§7.3).
     GraceExpired,
+    /// [`CURSOR_WAIT`] passed since the last [`Effect::AwaitCursor`]
+    /// with no CPR from the terminal.
+    CursorWaitExpired,
     /// The slice of a streamed write's input that [`Effect::Fetch`]
     /// asked for; `None` when the driver could not read it.
     Fetched {
@@ -229,6 +236,10 @@ pub(crate) enum Effect {
         at: usize,
         len: usize,
     },
+    /// DSR 6 went to the terminal after a resize (#1375): the engine
+    /// takes no packet until its CPR comes, and sends
+    /// [`Event::CursorWaitExpired`] [`CURSOR_WAIT`] from now if none does.
+    AwaitCursor,
     Log(Diag),
 }
 
@@ -312,6 +323,8 @@ struct Client {
     pid: u32,
     /// CONNECT's `ProcessGroupId`.
     group: u32,
+    /// The GH#3126 shims its `ApplicationName` gets.
+    shim: cells::ShimPolicy,
     /// The input and output objects CONNECT opened, which DISCONNECT
     /// closes.
     own: [usize; 2],
@@ -451,6 +464,8 @@ enum Text {
     /// SetConsoleTextAttribute's attribute, made into SGR when it is
     /// emitted, so the pen it leaves is the one its gridlines go with.
     Attr(u16),
+    /// Cells painted a step at a time (fill, scroll, WriteConsoleOutput).
+    Cells(Box<cells::Paint>),
 }
 
 impl Text {
@@ -459,7 +474,7 @@ impl Text {
             Text::Wide(units) => units.len(),
             Text::Bytes(bytes) => bytes.len(),
             Text::Coded { units, .. } => *units,
-            Text::CursorTo(..) | Text::Attr(_) => 1,
+            Text::CursorTo(..) | Text::Attr(_) | Text::Cells(_) => 1,
         }
     }
 
@@ -469,6 +484,7 @@ impl Text {
             Text::Wide(units) => units.len() * 2,
             Text::Bytes(bytes) | Text::Coded { bytes, .. } => bytes.len(),
             Text::CursorTo(..) | Text::Attr(_) => 0,
+            Text::Cells(paint) => paint.retained(),
         }
     }
 
@@ -476,7 +492,7 @@ impl Text {
     /// position. A slice's VT is at most [`SLICE`] bytes. `first`: `at`
     /// is the start of the client's call, not of a streamed slice.
     fn emit(
-        &self,
+        &mut self,
         (at, first): (usize, bool),
         origin: Origin,
         codec: &Codec,
@@ -485,15 +501,16 @@ impl Text {
         replies: &mut Vec<u8>,
     ) -> usize {
         match self {
-            &Text::CursorTo(x, y) => {
+            &mut Text::CursorTo(x, y) => {
                 let vt = screen.absolute_cup(x, y);
                 screen.host(&vt, out);
                 1
             }
-            &Text::Attr(attr) => {
+            &mut Text::Attr(attr) => {
                 screen.set_attributes(attr, out);
                 1
             }
+            Text::Cells(paint) => usize::from(paint.step(screen, out, codec)),
             Text::Bytes(bytes) => match origin {
                 Origin::Client(mode) => {
                     at + screen.client(&bytes[at..], mode, SLICE, first, out, replies)
@@ -707,6 +724,10 @@ pub(crate) struct Console {
     /// A DBCS lead byte's record that ended the last `WriteConsoleInputA`,
     /// for the next (conhost `_writePartialByteSequence`).
     input_lead: Option<input::KeyEvent>,
+    /// Whether the cursor still matches the terminal's after a resize.
+    cursor_sync: sync::CursorSync,
+    /// GetConsoleScreenBufferInfo calls held for the terminal's CPR.
+    held_info: VecDeque<sync::HeldInfo>,
 }
 
 impl Console {
@@ -752,6 +773,8 @@ impl Console {
             record_utf8: [input::Utf8Units::default(); 2],
             vt_utf8: input::Utf8Units::default(),
             input_lead: None,
+            cursor_sync: sync::CursorSync::Clean,
+            held_info: VecDeque::new(),
         }
     }
 
@@ -776,9 +799,10 @@ impl Console {
         self.writes_cut
     }
 
-    /// Calls held without a reply: parked writes and waiting reads.
+    /// Calls held without a reply: parked writes, waiting reads and
+    /// screen buffer info held for the terminal's cursor.
     pub(crate) fn waiting(&self) -> usize {
-        self.writes.len() + self.reads.len()
+        self.writes.len() + self.reads.len() + self.held_info()
     }
 
     /// Calls wait on the output queue draining: parked writes, or
@@ -832,6 +856,7 @@ impl Console {
                 self.start_close(&mut fx);
             }
             Event::GraceExpired => self.close(&mut fx),
+            Event::CursorWaitExpired => self.cursor_wait_expired(&mut fx),
             Event::Fetched { id, bytes } => self.fetched(id, bytes, out, &mut fx),
         }
         self.sync_input_available(&mut fx);
@@ -882,6 +907,7 @@ impl Console {
         // Their clients are about to be disconnected.
         self.writes.clear();
         self.reads.clear();
+        self.drop_held_info();
         self.echo_held = false;
         self.reads_cut = false;
         self.writes_cut = false;
@@ -1022,6 +1048,7 @@ impl Console {
                 // On CONNECT, Process carries the client's pid.
                 pid: p.process as u32,
                 group: info.group,
+                shim: cells::ShimPolicy::of(&info.app),
                 own: [input, output],
                 objects: 0,
             },
@@ -1147,10 +1174,26 @@ impl Console {
             api::SET_TITLE => return self.set_title(p, m, fixed, out, fx),
             api::GET_CURSOR_INFO => self.get_cursor_info(p.object, &mut fixed),
             api::SET_CURSOR_INFO => return self.set_cursor_info(p, fixed, out, fx),
-            api::GET_SCREEN_BUFFER_INFO => self.get_screen_buffer_info(p.object, &mut fixed),
+            api::GET_SCREEN_BUFFER_INFO => return self.screen_buffer_info(p, fixed, out, fx),
             api::SET_CURSOR_POSITION => return self.set_cursor_position(p, fixed, out, fx),
             api::SET_TEXT_ATTRIBUTE => return self.set_text_attribute(p, fixed, out, fx),
             api::GET_CURRENT_FONT => self.get_current_font(p.object, &mut fixed),
+            api::FILL_OUTPUT => return self.fill_output(p, fixed, out, fx),
+            api::SCROLL_SCREEN_BUFFER => return self.scroll_screen_buffer(p, fixed, out, fx),
+            api::WRITE_OUTPUT => return self.write_output(p, m, fixed, out, fx),
+            api::WRITE_OUTPUT_STRING => return self.write_output_string(p, m, fixed, out, fx),
+            api::READ_OUTPUT => {
+                fx.push(Effect::Reply(self.read_output(p, m, fixed)));
+                return;
+            }
+            api::READ_OUTPUT_STRING => {
+                fx.push(Effect::Reply(self.read_output_string(p, m, fixed)));
+                return;
+            }
+            api::SET_SCREEN_BUFFER_SIZE => self.set_screen_buffer_size(p.object, &fixed),
+            api::SET_WINDOW_INFO => self.set_window_info(p.object, &fixed),
+            api::GET_LARGEST_WINDOW_SIZE => self.get_largest_window_size(p.object, &mut fixed),
+            api::SET_SCREEN_BUFFER_INFO => self.set_screen_buffer_info(p.object, &fixed),
             api::GET_CONSOLE_WINDOW => get_console_window(&mut fixed),
             api::SET_CURRENT_FONT => self.set_current_font(p.object, &fixed),
             api::GET_CONSOLE_PROCESS_LIST => {
@@ -1657,9 +1700,17 @@ impl Console {
                 }
                 return;
             }
-            let Some(done) = self.writes.pop_front() else {
+            // The whole call is out: make the margin move its text owes
+            // (its room was reserved when the text met the margin). Not
+            // at a slice's end, whose next slice may hold marks that
+            // join the glyph.
+            self.screen.end_write(out);
+            let Some(mut done) = self.writes.pop_front() else {
                 return;
             };
+            if let Text::Cells(paint) = &done.text {
+                paint.complete(&mut done.reply.write_back, &self.codec);
+            }
             self.parked -= done.retained;
             if Some(done.reply.id) == current {
                 fx.push(Effect::Reply(done.reply));
@@ -1893,8 +1944,17 @@ pub(crate) mod tests {
 
         /// CONNECT as `pid`: the (process, input, output) cookies.
         pub(super) fn connect(&mut self, pid: usize, title: &str) -> [usize; 3] {
+            self.connect_with(pid, &msg::server_msg(title))
+        }
+
+        /// CONNECT as `pid` from the executable `app`.
+        pub(super) fn connect_from(&mut self, pid: usize, app: &str) -> [usize; 3] {
+            self.connect_with(pid, &msg::server_msg_from(app))
+        }
+
+        fn connect_with(&mut self, pid: usize, server_msg: &[u8]) -> [usize; 3] {
             let info = msg::CONNECTION_INFORMATION_LEN as u32;
-            let (r, _) = self.packet(msg::CONNECT, pid, 0, &msg::server_msg(title), info);
+            let (r, _) = self.packet(msg::CONNECT, pid, 0, server_msg, info);
             assert_eq!(r.status, msg::STATUS_SUCCESS);
             let cookie = |i: usize| {
                 let bytes: [u8; 8] = r.write_back[i * 8..i * 8 + 8].try_into().expect("8 bytes");
@@ -2661,6 +2721,92 @@ pub(crate) mod tests {
         Some(out)
     }
 
+    /// A glyph in the last column, then `marks` past a slice, then `x`,
+    /// in one write under output `mode`: the marks join the glyph, and
+    /// the margin move comes after them.
+    fn marks_across_slices(mode: u32, mark: char, then: &str) {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        h.set_mode(output, mode);
+        let marks = mark.to_string().repeat(WIDE_SLICE + 5);
+        let text = format!("{}e{marks}x", "a".repeat(79));
+        assert!(text.encode_utf16().count() * 2 <= PACKET_INPUT_CAP);
+        h.vt.clear();
+        assert_eq!(h.write_w(output, &text).status, msg::STATUS_SUCCESS);
+        let shown = format!("{}e{marks}{then}x", "a".repeat(79));
+        assert!(h.vt == shown.as_bytes(), "mode {mode:#x}, {mark:?}");
+        assert_ne!(h.c.screen.grid().row(0)[79].cluster, 0, "on the e");
+    }
+
+    #[test]
+    fn marks_past_a_slice_join_the_glyph_at_the_margin() {
+        for mark in ['\u{301}', '\u{1D167}'] {
+            marks_across_slices(screen::PROCESSED_OUTPUT, mark, "\x1b[1G");
+            marks_across_slices(
+                screen::PROCESSED_OUTPUT | screen::WRAP_AT_EOL_OUTPUT,
+                mark,
+                "\r\n",
+            );
+        }
+    }
+
+    #[test]
+    fn a_control_ending_a_write_at_the_margin_keeps_its_own_column() {
+        for (control, shown) in [("\u{1}", "☺"), ("\0", " ")] {
+            let mut h = Host::new();
+            let [_, _, output] = h.connect(1, "");
+            h.set_mode(output, screen::PROCESSED_OUTPUT);
+            h.write_w(output, &"a".repeat(79));
+            h.vt.clear();
+            assert_eq!(h.write_w(output, control).status, msg::STATUS_SUCCESS);
+            assert_eq!(h.vt, format!("{shown}\x1b[80G").as_bytes(), "{control:?}");
+            assert_eq!(h.c.screen.cursor(), (79, 0));
+            // Text after it in the same write is a run of its own.
+            h.vt.clear();
+            h.write_w(output, &format!("{control}b"));
+            assert_eq!(h.vt, format!("{shown}\x1b[80Gb\x1b[80G").as_bytes());
+            assert_eq!(h.c.screen.cursor(), (79, 0));
+        }
+    }
+
+    #[test]
+    fn a_mark_in_the_next_slice_does_not_join_a_control_at_the_margin() {
+        let modes = [
+            (screen::PROCESSED_OUTPUT, "\x1b[80G"),
+            (
+                screen::PROCESSED_OUTPUT | screen::WRAP_AT_EOL_OUTPUT,
+                "\r\n",
+            ),
+        ];
+        for (control, shown) in [('\u{1}', '☺'), ('\0', ' ')] {
+            for (mode, moved) in modes {
+                let mut h = Host::new();
+                let [_, _, output] = h.connect(1, "");
+                h.set_mode(output, mode);
+                // The control is the last unit of the first slice, in the
+                // last column.
+                let lead = "b".repeat(WIDE_SLICE - 81);
+                let text = format!("{lead}\r{}{control}\u{301}x", "a".repeat(79));
+                assert_eq!(text.find(control), Some(WIDE_SLICE - 1));
+                assert_eq!(h.write_w(output, &text).status, msg::STATUS_SUCCESS);
+                let tail = format!("{shown}{moved}\u{301}x");
+                let shown_vt = String::from_utf8_lossy(&h.vt);
+                assert!(shown_vt.contains(&tail), "{control:?} mode {mode:#x}");
+                // With wrap the control keeps its row; without, x
+                // overwrites it after the mark.
+                let (x, y) = h.c.screen.cursor();
+                let (y, glyph) = if moved == "\r\n" {
+                    (y - 1, shown)
+                } else {
+                    (y, 'x')
+                };
+                assert_eq!(x, if moved == "\r\n" { 1 } else { 79 });
+                let cell = h.c.screen.grid().row(usize::from(y))[79];
+                assert_eq!((cell.ch, cell.cluster), (glyph, 0), "no mark on it");
+            }
+        }
+    }
+
     /// A stateful output code page would lose its shift state at a slice
     /// boundary, so ANSI text past the cap is refused there; W text, which
     /// no code page touches, still streams.
@@ -3095,6 +3241,62 @@ pub(crate) mod tests {
         }
     }
 
+    /// One call past the packet cap whose first fetched slice ends with
+    /// `e` in the last column, the marks after it in the next slice:
+    /// raw, WriteConsoleA (UTF-8) and W, with wrap on and off. The marks
+    /// join the `e`, and the margin move comes after them.
+    #[test]
+    fn marks_past_a_fetch_join_the_glyph_at_the_margin() {
+        let modes = [
+            (screen::PROCESSED_OUTPUT, "\x1b[1G"),
+            (
+                screen::PROCESSED_OUTPUT | screen::WRAP_AT_EOL_OUTPUT,
+                "\r\n",
+            ),
+        ];
+        // 0 raw, 1 A, 2 W.
+        for api_kind in 0..3 {
+            for (mode, moved) in modes {
+                let mut h = Host::new();
+                let [_, _, output] = h.connect(1, "");
+                assert_eq!(h.set_cp(65001, true), msg::STATUS_SUCCESS);
+                h.set_mode(output, mode);
+                let unit = if api_kind == 2 { 2 } else { 1 };
+                let first = match api_kind {
+                    0 => PACKET_INPUT_CAP,
+                    _ => (PACKET_INPUT_CAP - 16) / unit,
+                };
+                let marks = "\u{301}".repeat(3);
+                let text = format!("{}\r{}e{marks}x", "b".repeat(first - 81), "a".repeat(79));
+                let variable: Vec<u8> = if api_kind == 2 {
+                    text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+                } else {
+                    text.clone().into_bytes()
+                };
+                let r = if api_kind == 0 {
+                    h.packet(msg::RAW_WRITE, 1, output, &variable, 0).0
+                } else {
+                    let mut payload = Vec::new();
+                    payload.extend(api::WRITE_CONSOLE.to_le_bytes());
+                    payload.extend(8u32.to_le_bytes());
+                    payload.extend([0, 0, 0, 0, u8::from(api_kind == 2), 0, 0, 0]);
+                    payload.extend(&variable);
+                    h.packet(msg::USER_DEFINED, 1, output, &payload, 8).0
+                };
+                let what = format!("api {api_kind}, mode {mode:#x}");
+                assert_eq!(answered(&mut h, r).information, variable.len(), "{what}");
+                assert!(h.fetches >= 1, "{what}: it streamed");
+                let tail = format!("e{marks}{moved}x");
+                assert!(String::from_utf8_lossy(&h.vt).ends_with(&tail), "{what}");
+                let (_, y) = h.c.screen.cursor();
+                let y = usize::from(y) - usize::from(moved == "\r\n");
+                let cell = h.c.screen.grid().row(y)[79];
+                assert_eq!(cell.ch, 'e', "{what}");
+                assert_ne!(cell.cluster, 0, "{what}: the marks are on the e");
+            }
+        }
+    }
+
     #[test]
     fn a_streamed_write_holds_new_packets_and_fails_on_a_lost_slice() {
         let mut h = Host::new();
@@ -3106,6 +3308,7 @@ pub(crate) mod tests {
         assert!(h.c.streaming());
         let v = crate::sched::View {
             streaming: h.c.streaming(),
+            awaiting_cursor: h.c.awaiting_cursor(),
             ..crate::sched::View::default()
         };
         assert!(

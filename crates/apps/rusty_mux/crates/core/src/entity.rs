@@ -35,6 +35,10 @@ pub struct Session {
     pub(crate) id: SessionId,
     pub(crate) name: String,
     pub(crate) windows: Vec<WindowId>,
+    /// One of `windows`; `None` only while there are none.
+    pub(crate) active: Option<WindowId>,
+    /// Whether the server made up `name` and nobody has renamed it since.
+    pub(crate) generated: bool,
 }
 
 impl Session {
@@ -46,9 +50,21 @@ impl Session {
         &self.name
     }
 
+    /// Whether the name is one the server made up and nobody has renamed
+    /// the session since: unlike [`crate::is_generated`], which reads only
+    /// the spelling, this knows where the name came from.
+    pub fn generated(&self) -> bool {
+        self.generated
+    }
+
     /// Windows in creation order.
     pub fn windows(&self) -> &[WindowId] {
         &self.windows
+    }
+
+    /// The window clients show for the session unless told otherwise.
+    pub fn active(&self) -> Option<WindowId> {
+        self.active
     }
 }
 
@@ -59,9 +75,13 @@ pub struct Window {
     pub(crate) session: SessionId,
     pub(crate) name: String,
     pub(crate) blocks: Vec<BlockId>,
-    /// Holds exactly `blocks`; `None` while there are none.
+    /// Holds `blocks` but the detached ones; `None` while none is placed.
     pub(crate) layout: Option<Layout>,
+    /// One of the blocks in `layout`, never a detached one.
     pub(crate) zoomed: Option<BlockId>,
+    /// One of the blocks in `layout`, the zoomed one if any; `None` only
+    /// while none is placed.
+    pub(crate) focused: Option<BlockId>,
 }
 
 impl Window {
@@ -82,14 +102,29 @@ impl Window {
         &self.blocks
     }
 
-    /// Where its blocks go; `None` while it has none.
+    /// Where its blocks go; `None` while none is placed.
     pub fn layout(&self) -> Option<&Layout> {
         self.layout.as_ref()
+    }
+
+    /// Its blocks in no layout, in creation order: they keep running
+    /// unseen until moved back in.
+    pub fn detached(&self) -> impl Iterator<Item = BlockId> + '_ {
+        self.blocks
+            .iter()
+            .copied()
+            .filter(|b| !self.layout.as_ref().is_some_and(|l| l.contains(*b)))
     }
 
     /// The block shown alone, over the whole window, if any.
     pub fn zoomed(&self) -> Option<BlockId> {
         self.zoomed
+    }
+
+    /// The block in focus, shared by every client; `None` only while none
+    /// is placed. The attach client follows it: a person types into it.
+    pub fn focused(&self) -> Option<BlockId> {
+        self.focused
     }
 }
 

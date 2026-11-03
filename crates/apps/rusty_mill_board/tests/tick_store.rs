@@ -68,7 +68,7 @@ fn a_task_tagged_agent_in_rusty_tick_is_on_the_board_and_untagging_removes_it() 
     let card = board.add(&human, "a", "", vec![]).expect("add");
     tick.owner_edit(card.id, |t| t["tags"] = json!(["board:ready", "Agent"]));
     tick.owner_edit(card.id, |t| t["tags"] = json!(["agent", "board:ready"]));
-    assert_eq!(board.get(card.id).expect("get").column, Column::Ready);
+    assert_eq!(board.get(card.id).expect("get").column, Column::READY);
 
     tick.owner_edit(card.id, |t| t["tags"] = json!(["board:ready"]));
     assert_eq!(board.get(card.id), Err(BoardError::NotFound(card.id)));
@@ -94,7 +94,7 @@ fn an_owner_edit_in_rusty_tick_is_read_next_and_shows_as_an_event() {
     );
     // The board writes on top of the owner's edit, not over it.
     let moved = board
-        .move_card(card.id, Column::Ready, &human)
+        .move_card(card.id, &Column::READY, &human)
         .expect("move");
     assert_eq!(
         (moved.title.as_str(), moved.rev),
@@ -190,12 +190,12 @@ fn done_closes_the_task_and_a_task_closed_in_rusty_tick_is_done() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");
     let card = board.add(&human, "a", "", vec![]).expect("add");
-    for column in [Column::Ready, Column::Building, Column::Qa, Column::Review] {
-        board.move_card(card.id, column, &human).expect("move");
+    for column in [Column::READY, Column::BUILDING, Column::QA, Column::REVIEW] {
+        board.move_card(card.id, &column, &human).expect("move");
         assert_eq!(tick.task(card.id)["status"], "open");
     }
     board
-        .move_card(card.id, Column::Done, &human)
+        .move_card(card.id, &Column::DONE, &human)
         .expect("done");
     assert_eq!(tick.task(card.id)["status"], "done");
     let shipped = tick.task(card.id)["completedMs"].as_i64();
@@ -205,7 +205,7 @@ fn done_closes_the_task_and_a_task_closed_in_rusty_tick_is_done() {
     let other = board.add(&human, "b", "", vec![]).expect("add");
     tick.owner_edit(other.id, |t| t["status"] = json!("wontdo"));
     let closed = board.get(other.id).expect("get");
-    assert_eq!(closed.column, Column::Done);
+    assert_eq!(closed.column, Column::DONE);
     assert_eq!(closed.done_ms, None, "won't-do is closed, not shipped");
 }
 
@@ -217,7 +217,7 @@ fn a_card_recorded_in_done_closes_its_task() {
         .add_done_in(&builder, "default", "shipped in #1", "", vec![])
         .expect("add done");
     assert_eq!(tick.task(card.id)["status"], "done");
-    assert_eq!(board.get(card.id).expect("get").column, Column::Done);
+    assert_eq!(board.get(card.id).expect("get").column, Column::DONE);
     assert_eq!(tick.task(card.id)["etag"], "1", "one write: created closed");
 
     // A refused create leaves nothing behind, so a retry cannot duplicate it.
@@ -262,7 +262,7 @@ fn a_done_card_moves_to_another_list_and_its_task_stays_closed() {
     assert_ne!(tick.task(card.id)["listId"], inbox);
     assert_eq!(tick.task(card.id)["status"], "done");
     let read = board.get(card.id).expect("get");
-    assert_eq!((read.project.as_str(), read.column), ("orch", Column::Done));
+    assert_eq!((read.project.as_str(), read.column), ("orch", Column::DONE));
 }
 
 #[test]

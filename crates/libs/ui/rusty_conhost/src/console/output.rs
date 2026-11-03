@@ -25,7 +25,7 @@ const CURSOR_INFO_LEN: usize = 8;
 const CONSOLE_WINDOW_LEN: usize = 8;
 /// `CONSOLE_SCREENBUFFERINFO_MSG`: four COORDs and a USHORT around the
 /// window sizes, then the colour table at 28.
-const SBI_LEN: usize = 92;
+pub(super) const SBI_LEN: usize = 92;
 const SBI_COLOR_TABLE: usize = 28;
 /// conhost's default popup colours: magenta on white.
 const POPUP_ATTRIBUTES: u16 = 0xF5;
@@ -43,7 +43,7 @@ const FONT_FACE_NAME: &str = "Consolas";
 
 impl Console {
     /// The output object behind `object`, if the handle has the access.
-    fn output_object(&self, object: usize, write: bool) -> Result<(), i32> {
+    pub(super) fn output_object(&self, object: usize, write: bool) -> Result<(), i32> {
         let Some(o) = self.objects.get(&object) else {
             return Err(msg::STATUS_FROM_HANDLE);
         };
@@ -232,14 +232,92 @@ impl Console {
         }
     }
 
+    /// `CONSOLE_SETSCREENBUFFERSIZE_MSG { IN COORD Size }`. The buffer is
+    /// the window (§5.1, V1), so only the window's own size succeeds.
+    pub(super) fn set_screen_buffer_size(&self, object: usize, fixed: &[u8]) -> i32 {
+        let (Some(x), Some(y)) = (msg::u16_at(fixed, 0), msg::u16_at(fixed, 2)) else {
+            return msg::STATUS_ILLEGAL_FUNCTION;
+        };
+        if let Err(status) = self.output_object(object, true) {
+            return status;
+        }
+        let size = self.screen.size();
+        if (x, y) == (size.cols, size.rows) {
+            msg::STATUS_SUCCESS
+        } else {
+            msg::STATUS_FROM_INVALIDARG
+        }
+    }
+
+    /// `CONSOLE_SETWINDOWINFO_MSG { IN Absolute; IN SMALL_RECT Window }`,
+    /// relative edges added to the window's own as conhost does. The
+    /// window is the whole buffer (§5.1, V1): only that window succeeds,
+    /// and an inverted one fails as in conhost.
+    pub(super) fn set_window_info(&self, object: usize, fixed: &[u8]) -> i32 {
+        let edge = |i: usize| msg::u16_at(fixed, 2 + 2 * i).map(|v| i32::from(v as i16));
+        let (Some(absolute), Some(l), Some(t), Some(r), Some(b)) =
+            (msg::bool_at(fixed, 0), edge(0), edge(1), edge(2), edge(3))
+        else {
+            return msg::STATUS_ILLEGAL_FUNCTION;
+        };
+        if let Err(status) = self.output_object(object, true) {
+            return status;
+        }
+        let size = self.screen.size();
+        let now = [0, 0, i32::from(size.cols) - 1, i32::from(size.rows) - 1];
+        let mut window = [l, t, r, b];
+        if !absolute {
+            for (edge, base) in window.iter_mut().zip(now) {
+                *edge += base;
+            }
+        }
+        match window {
+            [l, t, r, b] if r < l || b < t => msg::STATUS_FROM_INVALIDARG,
+            w if w == now => msg::STATUS_SUCCESS,
+            _ => msg::STATUS_FROM_INVALIDARG,
+        }
+    }
+
+    /// `CONSOLE_GETLARGESTWINDOWSIZE_MSG { OUT COORD Size }`: the window,
+    /// since the buffer can't grow past it (V1). conhost asks for write
+    /// access here.
+    pub(super) fn get_largest_window_size(&self, object: usize, fixed: &mut [u8]) -> i32 {
+        if fixed.len() < 4 {
+            return msg::STATUS_ILLEGAL_FUNCTION;
+        }
+        if let Err(status) = self.output_object(object, true) {
+            return status;
+        }
+        let size = self.screen.size();
+        msg::put_u16(fixed, 0, size.cols);
+        msg::put_u16(fixed, 2, size.rows);
+        msg::STATUS_SUCCESS
+    }
+
+    /// `CONSOLE_SCREENBUFFERINFO_MSG`, as SetConsoleScreenBufferInfoEx
+    /// sends it: accepted and changes nothing (§5.2, V2). Clients send
+    /// back what GetConsoleScreenBufferInfoEx gave them with new colours.
+    pub(super) fn set_screen_buffer_info(&self, object: usize, fixed: &[u8]) -> i32 {
+        if fixed.len() < SBI_LEN {
+            return msg::STATUS_ILLEGAL_FUNCTION;
+        }
+        match self.output_object(object, true) {
+            Ok(()) => msg::STATUS_SUCCESS,
+            Err(status) => status,
+        }
+    }
+
     /// The terminal's new size (§5.7). The Grid reflows; the terminal
-    /// does its own, so nothing is emitted. A client that asked for
-    /// WINDOW_INPUT gets a WINDOW_BUFFER_SIZE_EVENT.
+    /// does its own, so nothing is emitted, and the cursor may differ
+    /// from the terminal's until the next screen buffer info resyncs it
+    /// (#1375). A client that asked for WINDOW_INPUT gets a
+    /// WINDOW_BUFFER_SIZE_EVENT.
     pub(super) fn resize(&mut self, size: WinSize, out: &mut OutputQueue, fx: &mut Vec<Effect>) {
         if size.rows == 0 || size.cols == 0 || size == self.screen.size() {
             return;
         }
         self.screen.resize(size);
+        self.cursor_maybe_wrong();
         if self.input_mode & mode::WINDOW_INPUT == 0 {
             return;
         }
@@ -275,7 +353,7 @@ pub(super) fn get_console_window(fixed: &mut [u8]) -> i32 {
     msg::STATUS_SUCCESS
 }
 
-fn reply(p: &Packet<'_>, status: i32, fixed: Vec<u8>, fx: &mut Vec<Effect>) {
+pub(super) fn reply(p: &Packet<'_>, status: i32, fixed: Vec<u8>, fx: &mut Vec<Effect>) {
     let mut reply = Reply::status(p.id, status);
     reply.write_back = fixed;
     fx.push(Effect::Reply(reply));
@@ -796,6 +874,42 @@ mod tests {
         assert_eq!(rows(&t.grid), ["B", "D", "E"]);
     }
 
+    /// #1375: the terminal answers the host's DSR after the resize, so a
+    /// client positioning from screen buffer info writes where the
+    /// terminal's cursor is. Only the contents still differ (V3).
+    #[test]
+    fn v3_the_cursor_resyncs_from_the_terminal_after_a_resize() {
+        let size = |rows| WinSize { rows, cols: 4 };
+        let mut h = Host::sized(size(3));
+        let mut t = Terminal::new(size(3));
+        let [_, _, output] = h.connect(1, "");
+        h.write_w(output, "A\r\nB\r\nC");
+        t.sync(&h);
+        resize(&mut h, &mut t, size(2));
+        resize(&mut h, &mut t, size(3));
+        assert_eq!(sbi(&mut h, output).status, i32::MIN, "held for the CPR");
+        t.sync(&h);
+        let cpr = t.parser.take_responses();
+        assert_eq!(cpr, b"\x1b[3;2R");
+        let fx = h.ev(Event::Input(&cpr));
+        let info = fx
+            .iter()
+            .find_map(|e| match e {
+                Effect::Complete(r) => Some(r.clone()),
+                _ => None,
+            })
+            .expect("answered");
+        assert_eq!(u16s(&info, &[4, 6]), [1, 2], "the terminal's cursor");
+        let [cup, rel] = positioned_then_relative(&mut h, output, 2);
+        assert_eq!(cup, b"\x1b[3;1HD");
+        assert_eq!(rel, b"\r\nE");
+        t.sync(&h);
+        let (x, y) = h.c.screen.cursor();
+        assert_eq!((usize::from(x), usize::from(y)), t.grid.cursor);
+        assert_eq!(rows(&t.grid), ["B", "D", "E"]);
+        assert_eq!(rows(h.c.screen.grid()), ["C", "D", "E"]);
+    }
+
     #[test]
     fn v3_narrow_then_widen_diverges_on_the_primary_screen() {
         let size = |cols| WinSize { rows: 3, cols };
@@ -837,5 +951,71 @@ mod tests {
         t.sync(&h);
         assert_eq!(rows(h.c.screen.grid()), ["ab", "Df", "E"]);
         assert_eq!(rows(&t.grid), rows(h.c.screen.grid()));
+    }
+
+    fn window(h: &mut Host, output: usize, absolute: bool, r: [i16; 4]) -> i32 {
+        let mut fixed = vec![u8::from(absolute), 0];
+        fixed.extend(r.iter().flat_map(|v| v.to_le_bytes()));
+        h.call(output, api::SET_WINDOW_INFO, &fixed, &[], 0).status
+    }
+
+    #[test]
+    fn the_buffer_and_window_stay_the_window_size() {
+        let mut h = Host::new();
+        let [process, _, output] = h.connect(1, "");
+        let size = |h: &mut Host, x: u16, y: u16| {
+            h.call(output, api::SET_SCREEN_BUFFER_SIZE, &coord(x, y), &[], 0)
+                .status
+        };
+        assert_eq!(size(&mut h, 80, 24), msg::STATUS_SUCCESS);
+        for (x, y) in [(80, 9001), (40, 24), (0x7FFF, 0x7FFF)] {
+            assert_eq!(size(&mut h, x, y), msg::STATUS_FROM_INVALIDARG, "{x}x{y}");
+        }
+        assert_eq!(
+            window(&mut h, output, true, [0, 0, 79, 23]),
+            msg::STATUS_SUCCESS
+        );
+        assert_eq!(window(&mut h, output, false, [0; 4]), msg::STATUS_SUCCESS);
+        for (absolute, r) in [
+            (true, [0, 0, 39, 23]),
+            (true, [0, 0, 99, 23]),
+            (false, [1, 0, 0, 0]),
+        ] {
+            let status = window(&mut h, output, absolute, r);
+            assert_eq!(status, msg::STATUS_FROM_INVALIDARG, "{r:?}");
+        }
+        assert_eq!(
+            window(&mut h, output, true, [5, 0, 4, 23]),
+            msg::STATUS_FROM_INVALIDARG
+        );
+        assert_eq!(u16s(&sbi(&mut h, output), &[0, 2]), [80, 24]);
+        let r = h.call(output, api::GET_LARGEST_WINDOW_SIZE, &[0; 4], &[], 0);
+        assert_eq!(
+            (r.status, u16s(&r, &[0, 2])),
+            (msg::STATUS_SUCCESS, vec![80, 24])
+        );
+        let reader = h.create(process, msg::OBJECT_CURRENT_OUTPUT, msg::GENERIC_READ);
+        let reader = reader.information;
+        assert_eq!(size(&mut h, 80, 24), msg::STATUS_SUCCESS);
+        let r = h.call(reader, api::SET_SCREEN_BUFFER_SIZE, &coord(80, 24), &[], 0);
+        assert_eq!(r.status, msg::STATUS_FROM_ACCESS_DENIED);
+        let r = h.call(reader, api::GET_LARGEST_WINDOW_SIZE, &[0; 4], &[], 0);
+        assert_eq!(r.status, msg::STATUS_FROM_ACCESS_DENIED);
+    }
+
+    #[test]
+    fn set_screen_buffer_info_is_accepted_and_changes_nothing() {
+        let mut h = Host::new();
+        let [_, _, output] = h.connect(1, "");
+        let before = sbi(&mut h, output);
+        let mut fixed = before.write_back.clone();
+        msg::put_u32(&mut fixed, SBI_COLOR_TABLE, 0x00FF_FFFF);
+        let (r, vt) = emitted(&mut h, |h| {
+            h.call(output, api::SET_SCREEN_BUFFER_INFO, &fixed, &[], 0)
+        });
+        assert_eq!((r.status, vt.len()), (msg::STATUS_SUCCESS, 0));
+        assert_eq!(sbi(&mut h, output).write_back, before.write_back);
+        let short = h.call(output, api::SET_SCREEN_BUFFER_INFO, &[0; 88], &[], 0);
+        assert_eq!(short.status, msg::STATUS_ILLEGAL_FUNCTION);
     }
 }

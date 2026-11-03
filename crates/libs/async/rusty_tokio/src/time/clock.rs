@@ -43,12 +43,16 @@ impl Clock {
         self.paused.lock().unwrap().is_some()
     }
 
-    /// # Panics
-    /// Panics if already paused.
-    pub(crate) fn pause(&self) {
-        let mut guard = self.paused.lock().unwrap();
-        assert!(guard.is_none(), "time is already paused");
+    /// Freezes the clock at the current real time. Returns `false`, and
+    /// changes nothing, if it is already paused. The caller panics on
+    /// that misuse after releasing its own locks, so none is poisoned.
+    pub(crate) fn pause(&self) -> bool {
+        let mut guard = self.paused.lock().unwrap_or_else(PoisonError::into_inner);
+        if guard.is_some() {
+            return false;
+        }
         *guard = Some(Instant::now());
+        true
     }
 
     /// Unfreezes the clock -- `now()` goes back to tracking real time.
@@ -57,12 +61,13 @@ impl Clock {
     /// on the next check, the same as any other now-elapsed deadline;
     /// there's no special "catch-up" behavior beyond that.
     ///
-    /// # Panics
-    /// Panics if not currently paused.
-    pub(crate) fn resume(&self) {
-        let mut guard = self.paused.lock().unwrap();
-        assert!(guard.is_some(), "time is not paused");
-        *guard = None;
+    /// Returns `false`, and changes nothing, if the clock is not paused.
+    pub(crate) fn resume(&self) -> bool {
+        self.paused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .is_some()
     }
 
     /// Moves a paused clock forward to `instant` and returns the

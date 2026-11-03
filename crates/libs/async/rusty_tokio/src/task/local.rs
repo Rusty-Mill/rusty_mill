@@ -39,13 +39,15 @@
 //!   of scope simply drops whatever's left in its queue (and thus their
 //!   still-boxed futures) without delivering a `JoinError` to any
 //!   `JoinHandle` still awaiting them, which then just hangs forever if
-//!   polled again. This matches (not: improves on) how this crate's
-//!   multi-threaded `Runtime` already behaves for tasks abandoned by a
-//!   hard shutdown -- not a new gap introduced here.
+//!   polled again. `Runtime` no longer behaves this way: it owns its
+//!   tasks in a registry (`OwnedTasks`) and cancels what is left at
+//!   shutdown. `LocalSet` tasks are not in that registry, so a
+//!   `spawn_local` task pending with no stored waker can still be
+//!   dropped early.
 
 use super::id::{self, CurrentTask};
 use super::join::{JoinHandle, JoinInner, Outcome};
-use super::state::{State, StateSnapshot};
+use super::state::{Begin, State, StateSnapshot};
 use super::TaskId;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -114,7 +116,13 @@ impl LocalTask {
     /// call on the single thread `bind_or_check_thread` bound this set
     /// to, same as from `drive` itself.
     pub(crate) fn run(self: Arc<Self>) {
-        if !self.state.begin_poll() {
+        let begin = self.state.begin_poll();
+        // Only runtime shutdown makes an entry stale, and it never claims
+        // `LocalSet` tasks.
+        if begin == Begin::Stale {
+            return;
+        }
+        if begin == Begin::Aborted {
             self.future.borrow_mut().take();
             self.state.end_poll(true);
             self.fire_abnormal_hook(Outcome::Aborted);

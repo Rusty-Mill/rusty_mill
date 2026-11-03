@@ -11,7 +11,9 @@
 //! Each window is borderless (`decorations(false)`) and draws its own chrome: a
 //! one-cell-row bar across the top holding the session tabs, a `+` new-tab
 //! button, and the minimize/maximize/close caption buttons, all laid out as
-//! ordinary cells so both renderers composite it for free. Dragging the bar
+//! ordinary cells so both renderers composite it for free. The bars use their
+//! own UI font at the configured size, so the Ctrl+=/Ctrl+- font zoom scales
+//! only the terminal text. Dragging the bar
 //! moves the window, double-click toggles maximize, and a thin band at the
 //! window edges drag-resizes (the native frame is gone).
 //!
@@ -23,9 +25,10 @@
 //! Note: this drives a live window and so cannot be exercised in a headless
 //! environment — the render, input-encoding, and font layers it composes are
 //! unit-tested independently. Wired here: mouse drag-selection, clipboard
-//! copy/paste (Ctrl+Shift+C / Ctrl+Shift+V) plus OSC 52 get/set, SGR/1006 mouse
-//! reporting, Ctrl+click to open OSC 8 hyperlinks, DECSCUSR cursor styles +
-//! blink, and a Windows child-exit watcher.
+//! copy/paste (Ctrl+Shift+C / Ctrl+Shift+V, plus Ctrl+C / Ctrl+V on
+//! Windows), OSC 52 get/set, SGR/1006 mouse reporting, Ctrl+click to open
+//! OSC 8 hyperlinks, DECSCUSR cursor styles + blink, and a Windows
+//! child-exit watcher.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,6 +45,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
+use super::pace::Pacer;
 use super::render::{CpuRenderer, PaneFrame, Renderer};
 use super::settings::{CATEGORIES, Field, Settings, Widget};
 use crate::backend::{Backend, BackendHandle};
@@ -572,6 +576,12 @@ struct WindowState<'a> {
     font: FontCache,
     cell_w: usize,
     cell_h: usize,
+    /// The chrome bar's and status ribbon's font, at the configured size
+    /// (`ui_px`): the Ctrl+=/Ctrl+- zoom changes only `font`.
+    ui_font: FontCache,
+    /// `ui_font`'s cell size: one bar cell.
+    bar_w: usize,
+    bar_h: usize,
     /// Inner margin in pixels around the pane area (`[window] padding`). The
     /// chrome bar stays flush; the grid sits inset by this on the other three
     /// sides (and below the bar), painted in the theme background.
@@ -595,17 +605,16 @@ struct WindowState<'a> {
     /// floor and slow scrolling didn't move anything. Accumulating instead
     /// means every bit of delta eventually turns into a scrolled line.
     scroll_accum: f64,
-    /// Whether the left button is held (a drag-selection is in progress).
-    selecting: bool,
+    /// The left-button drag selection, live while the button is held.
+    drag: SelectionDrag,
     /// Physical button currently held, if any — drives `?1002` drag-motion
     /// reporting (which button to report) and whether `?1002` reports motion
     /// at all (only while a button is down; `?1003` reports regardless).
     mouse_button_down: Option<MouseButtonKind>,
-    /// Cell where the current drag-selection began.
-    /// Cell where the current drag-selection began, in **absolute**
-    /// coordinates (`(col, abs_row)`) so the anchor survives scrolling
-    /// mid-drag.
-    sel_anchor: Option<(usize, usize)>,
+    /// Keys held down whose press a window shortcut consumed. Their repeats
+    /// and releases never reach the child, so one reading key-ups
+    /// (win32-input-mode, Kitty event types) sees no unpaired events.
+    consumed_keys: ConsumedKeys,
     /// Per-cell click actions for the chrome bar, rebuilt with each layout.
     hits: Vec<Hit>,
     /// An in-progress tab drag (press on a tab arms it; releasing clears).
@@ -654,6 +663,9 @@ struct WindowState<'a> {
     /// holding a synchronized update, so a tick that finds one of them
     /// released repaints.
     sync_held: Vec<u64>,
+    /// Paces output-driven repaints to the display refresh (CPU renderer);
+    /// set up by [`make_renderer`](Self::make_renderer).
+    pacer: Pacer,
     /// Active scrollback-search query (windowed front-end); `Some` means search
     /// mode is on, intercepting keys and showing the find bar in the chrome.
     searching: Option<String>,
@@ -661,8 +673,11 @@ struct WindowState<'a> {
     shells: Vec<crate::shells::DetectedShell>,
     /// The open settings page / shell menu, if any (drawn over the active tab).
     overlay: Option<Overlay>,
-    /// Current font size in px, tracked so the settings page can rebuild it.
+    /// Current terminal font size in px, zoom included.
     font_px: f32,
+    /// The configured (unzoomed) font size in px at the current DPI: the
+    /// bars' size, and what Ctrl+0 resets the terminal font to.
+    ui_px: f32,
     /// The window's current monitor DPI scale factor (1.0 = 100%), tracked so
     /// `WindowEvent::ScaleFactorChanged` can rescale `font_px` proportionally
     /// instead of leaving text rendered at the wrong physical size after a
@@ -1323,10 +1338,9 @@ impl WindowState<'_> {
         let inner_w = (px_w as usize).saturating_sub(2 * self.pad);
         let inner_h = (px_h as usize).saturating_sub(2 * self.pad);
         let cols = ((inner_w / self.cell_w).max(1)) as u16;
-        // One screen row goes to the chrome bar; one more to the status
-        // ribbon when it's on.
-        let bars = 1 + usize::from(self.status_enabled());
-        let rows = (((inner_h / self.cell_h).saturating_sub(bars)).max(1)) as u16;
+        // One bar row goes to the chrome bar; one more to the status ribbon
+        // when it's on.
+        let rows = ((inner_h.saturating_sub(self.bars_h()) / self.cell_h).max(1)) as u16;
         if (cols, rows) != (self.cols, self.rows) {
             self.cols = cols;
             self.rows = rows;
@@ -1338,6 +1352,7 @@ impl WindowState<'_> {
 
     /// Paint the chrome bar + the active tab's panes through the renderer.
     fn redraw(&mut self) {
+        self.pacer.painted(Instant::now());
         let chrome = self.chrome_row();
         let status = self.status_row();
         let divider = mix(self.theme.bg, self.theme.fg, 60);
@@ -1351,7 +1366,7 @@ impl WindowState<'_> {
             let frame = PaneFrame {
                 grid: &page,
                 col0: 0,
-                row0: 1,
+                row0: 0,
                 focused: false,
                 cursor_on: false,
                 trail: Vec::new(),
@@ -1363,6 +1378,7 @@ impl WindowState<'_> {
                 &chrome,
                 &status,
                 &mut self.font,
+                &mut self.ui_font,
                 size.width,
                 size.height,
                 divider,
@@ -1486,7 +1502,7 @@ impl WindowState<'_> {
             .map(|(g, r, foc)| PaneFrame {
                 grid: g,
                 col0: r.col,
-                row0: r.row + 1,
+                row0: r.row,
                 focused: *foc,
                 cursor_on: blink,
                 trail: if *foc {
@@ -1510,7 +1526,7 @@ impl WindowState<'_> {
             frames.push(PaneFrame {
                 grid: dg,
                 col0: area.cols + 1, // right of the pane area's divider column
-                row0: 1,
+                row0: 0,
                 focused: false,
                 cursor_on: false,
                 trail: Vec::new(),
@@ -1523,6 +1539,7 @@ impl WindowState<'_> {
             &chrome,
             &status,
             &mut self.font,
+            &mut self.ui_font,
             size.width,
             size.height,
             divider,
@@ -1567,11 +1584,11 @@ impl WindowState<'_> {
             .as_ref()
             .map(|w| w.inner_size().width)
             .unwrap_or(0) as usize;
-        if px == 0 || self.cell_w == 0 {
+        if px == 0 {
             let c = self.cols as usize;
             return (c, c);
         }
-        (px.div_ceil(self.cell_w), px / self.cell_w)
+        (px.div_ceil(self.bar_w), px / self.bar_w)
     }
 
     /// Whether the bottom status ribbon is on (`[window] status_bar`,
@@ -2139,7 +2156,21 @@ impl WindowState<'_> {
 
     /// Build the configured renderer for `window`: the GPU one when `--gpu` is
     /// passed and `gui-gpu` is built (falling back to CPU on failure), else CPU.
+    /// Also sets output repaint pacing to suit it.
     fn make_renderer(&mut self, window: Arc<Window>) -> Option<Box<dyn Renderer>> {
+        let renderer = self.build_renderer(window.clone())?;
+        if renderer.waits_for_vsync() {
+            self.pacer.disable();
+        } else {
+            let rate = window
+                .current_monitor()
+                .and_then(|m| m.refresh_rate_millihertz());
+            self.pacer.set_refresh(rate);
+        }
+        Some(renderer)
+    }
+
+    fn build_renderer(&mut self, window: Arc<Window>) -> Option<Box<dyn Renderer>> {
         #[cfg(feature = "gui-gpu")]
         if std::env::args().any(|a| a == "--gpu") {
             match super::gpu::GpuRenderer::new(window.clone(), &mut self.font) {
@@ -2156,21 +2187,41 @@ impl WindowState<'_> {
         }
     }
 
-    /// The grid content's vertical pixel offset: the padding band plus the
-    /// chrome bar's own downward inset (the strip band above the tabs pushes
-    /// the bar — and everything under it — down; see `render::bar_inset`).
-    fn grid_oy(&self) -> usize {
-        self.pad + super::render::bar_inset(self.pad, self.cell_h)
+    /// Pixel height of the chrome bar plus its downward inset (the strip
+    /// band above the tabs; see `render::bar_inset`): the bar's hit area.
+    fn chrome_h(&self) -> usize {
+        super::render::bar_inset(self.pad, self.bar_h) + self.bar_h
     }
 
-    /// Map a physical pixel position to a clamped `(col, row)` *grid* cell
-    /// (the chrome bar occupies the screen row above grid row 0).
+    /// Pixel height both bars take from the pane area: the chrome bar (with
+    /// its inset) plus the status ribbon when it's on.
+    fn bars_h(&self) -> usize {
+        self.chrome_h() + usize::from(self.status_enabled()) * self.bar_h
+    }
+
+    /// The grid content's vertical pixel offset: the padding band below the
+    /// chrome bar (see `render::grid_top`).
+    fn grid_oy(&self) -> usize {
+        self.pad + self.chrome_h()
+    }
+
+    /// Whether window pixel row `y` is on the chrome bar.
+    fn in_chrome(&self, y: f64) -> bool {
+        (y.max(0.0) as usize) < self.chrome_h()
+    }
+
+    /// The chrome bar cell under window pixel column `x`, clamped to the hit
+    /// map. Callers check `hits` is non-empty first.
+    fn bar_col(&self, x: f64) -> usize {
+        (x.max(0.0) as usize / self.bar_w).min(self.hits.len() - 1)
+    }
+
+    /// Map a physical pixel position to a clamped `(col, row)` *grid* cell.
     fn cell_at(&self, px: f64, py: f64) -> (usize, usize) {
         let pad = self.pad as f64;
         let col = ((px - pad).max(0.0) as usize / self.cell_w)
             .min((self.cols as usize).saturating_sub(1));
         let row = ((py - self.grid_oy() as f64).max(0.0) as usize / self.cell_h)
-            .saturating_sub(1)
             .min((self.rows as usize).saturating_sub(1));
         (col, row)
     }
@@ -2214,7 +2265,7 @@ impl WindowState<'_> {
             }
             return;
         }
-        if (y.max(0.0) as usize) < self.cell_h {
+        if self.in_chrome(y) {
             return self.on_bar_click(x);
         }
         if self.overlay.is_some() {
@@ -2279,6 +2330,7 @@ impl WindowState<'_> {
             };
             if let Some(((dx, dy), app_cursor)) = moves {
                 let bytes = arrow_presses(dx, dy, app_cursor);
+                self.pacer.input(Instant::now());
                 if let Some(p) = self.pane_mut() {
                     let _ = p.writer.write(&bytes);
                 }
@@ -2295,7 +2347,7 @@ impl WindowState<'_> {
             _ => 1,
         };
         self.last_grid_click = Some((now, cell));
-        self.sel_anchor = self
+        let anchor = self
             .pane()
             .map(|p| (cell.0, p.grid.lock().abs_of_view_row(cell.1)));
         // Every streak arms a drag now, not just a plain click: dragging
@@ -2303,7 +2355,7 @@ impl WindowState<'_> {
         // word/line (`CursorMoved` below reads `click_streak` to pick the
         // granularity), instead of the drag being inert past the initial
         // word/line as it was before.
-        self.selecting = true;
+        self.drag.start(anchor);
         if let Some(p) = self.pane() {
             let mut g = p.grid.lock();
             match self.click_streak {
@@ -2384,7 +2436,7 @@ impl WindowState<'_> {
     /// tick below, which re-applies it each scroll step at the pointer's
     /// last known (off-pane) position.
     fn update_drag_selection_head(&mut self, hx: f64, hy: f64) -> bool {
-        let (Some(anchor), Some(p)) = (self.sel_anchor, self.pane()) else {
+        let (Some(anchor), Some(p)) = (self.drag.live_anchor(), self.pane()) else {
             return false;
         };
         let (hc, hr) = self.cell_in_focused(hx, hy);
@@ -2407,14 +2459,14 @@ impl WindowState<'_> {
     /// the edge with the pointer stationary should keep scrolling, not just
     /// scroll once per `CursorMoved`.
     fn drag_edge_autoscroll(&mut self) -> bool {
-        if !self.selecting {
+        if !self.drag.is_live() {
             return false;
         }
         let Some(r) = self.focused_pane_rect() else {
             return false;
         };
-        let top_px = (self.grid_oy() + (r.row + 1) * self.cell_h) as f64;
-        let bottom_px = (self.grid_oy() + (r.row + r.rows + 1) * self.cell_h) as f64;
+        let top_px = (self.grid_oy() + r.row * self.cell_h) as f64;
+        let bottom_px = (self.grid_oy() + (r.row + r.rows) * self.cell_h) as f64;
         let Some(scroll_up) =
             drag_scroll_direction(self.mouse_pos.1, top_px, bottom_px, DRAG_SCROLL_MARGIN)
         else {
@@ -2444,7 +2496,7 @@ impl WindowState<'_> {
         if self.hits.is_empty() {
             return; // no frame laid out yet
         }
-        let col = (x.max(0.0) as usize / self.cell_w).min(self.hits.len() - 1);
+        let col = self.bar_col(x);
         let Some(window) = self.window.clone() else {
             return;
         };
@@ -2518,7 +2570,7 @@ impl WindowState<'_> {
         if self.hits.is_empty() {
             return;
         }
-        let col = (x.max(0.0) as usize / self.cell_w).min(self.hits.len() - 1);
+        let col = self.bar_col(x);
         if let Hit::Tab(i) | Hit::CloseTab(i) = self.hits[col]
             && i < self.tabs.len()
         {
@@ -2527,9 +2579,33 @@ impl WindowState<'_> {
         }
     }
 
+    /// [`Action::CopyOrSend`] (Ctrl+C on Windows): copy the selection and
+    /// clear it so the next press interrupts. Returns whether the key was
+    /// consumed; with nothing selected it was not, and the caller lets it
+    /// reach the child as ^C. A failed copy keeps the selection for a retry
+    /// and still consumes the key, so it never turns into a surprise ^C.
+    fn copy_or_send(&mut self) -> bool {
+        let copied = self.copy_selection();
+        if copied.clears_selection() {
+            if let Some(p) = self.pane() {
+                p.grid.lock().selection = None;
+            }
+            // End a drag still in progress, or the next pointer move or
+            // edge auto-scroll tick would rebuild the selection.
+            self.drag.cancel();
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        copied.consumes_key()
+    }
+
     /// Copy the active tab's selection to the system clipboard (Ctrl+Shift+C).
-    fn copy_selection(&mut self) {
-        let Some(p) = self.pane() else { return };
+    /// A failed write is reported on stderr and leaves the selection alone.
+    fn copy_selection(&mut self) -> Copied {
+        let Some(p) = self.pane() else {
+            return Copied::NothingSelected;
+        };
         let (text, html) = {
             let g = p.grid.lock();
             let html = if self.config.copy_html.unwrap_or(true) {
@@ -2539,14 +2615,22 @@ impl WindowState<'_> {
             };
             (g.selected_text(), html)
         };
-        if let (Some(text), Some(cb)) = (text, self.clipboard.as_mut()) {
-            // The HTML flavor carries the selection's colors/attributes for
-            // rich-paste targets (G29); plain editors read the text flavor.
-            let _ = match html {
-                Some(html) => cb.set_html(html, Some(text)),
-                None => cb.set_text(text),
-            };
+        // The HTML flavor carries the selection's colors/attributes for
+        // rich-paste targets (G29); plain editors read the text flavor.
+        let write = self.clipboard.as_mut().map(|cb| {
+            move |text: String| {
+                match html {
+                    Some(html) => cb.set_html(html, Some(text)),
+                    None => cb.set_text(text),
+                }
+                .map_err(|e| e.to_string())
+            }
+        });
+        let copied = copy_text(text, write);
+        if let Copied::Failed(e) = &copied {
+            eprintln!("rusty_term: copy: {e}");
         }
+        copied
     }
 
     /// Service a tab's pending OSC 52 clipboard request recorded by the parser.
@@ -2707,10 +2791,25 @@ impl WindowState<'_> {
         }
     }
 
+    /// Run a key's action; returns whether it consumed the key. Only
+    /// [`Action::CopyOrSend`] with nothing selected leaves it for the child.
+    fn exec_action(&mut self, action: Action) -> bool {
+        if action == Action::CopyOrSend {
+            return self.copy_or_send();
+        }
+        self.run_action(action);
+        true
+    }
+
     /// Dispatch a terminal-owned [`Action`] resolved from the keymap.
     fn run_action(&mut self, action: Action) {
         match action {
-            Action::Copy => self.copy_selection(),
+            Action::Copy => {
+                self.copy_selection();
+            }
+            Action::CopyOrSend => {
+                self.copy_or_send();
+            }
             Action::Paste => self.paste(),
             Action::NewTab => {
                 if let Err(e) = self.spawn_tab() {
@@ -2776,13 +2875,9 @@ impl WindowState<'_> {
             Action::ScrollPromptUp => self.scroll_key(true, true),
             Action::ScrollPromptDown => self.scroll_key(true, false),
             Action::ToggleFullscreen => self.toggle_fullscreen(),
-            Action::FontSizeUp => self.zoom_font(FONT_ZOOM_STEP),
-            Action::FontSizeDown => self.zoom_font(-FONT_ZOOM_STEP),
-            Action::FontSizeReset => {
-                let px = self.config.font_size.unwrap_or(FONT_PX);
-                let ligatures = self.config.ligatures.unwrap_or(true);
-                self.rebuild_font(px, ligatures);
-            }
+            Action::FontSizeUp => self.zoom_font(Zoom::In),
+            Action::FontSizeDown => self.zoom_font(Zoom::Out),
+            Action::FontSizeReset => self.zoom_font(Zoom::Reset),
         }
     }
 
@@ -2798,13 +2893,14 @@ impl WindowState<'_> {
         window.set_fullscreen((!now_fullscreen).then_some(Fullscreen::Borderless(None)));
     }
 
-    /// Grow/shrink the font by `delta` px (Ctrl+=/Ctrl+-, the Chrome/VS Code/
-    /// iTerm2/Windows Terminal convention), clamped to the same range the
-    /// settings overlay enforces.
-    fn zoom_font(&mut self, delta: f32) {
-        let px = (self.font_px + delta).clamp(super::settings::FONT_MIN, super::settings::FONT_MAX);
+    /// Zoom the terminal text (Ctrl+=/Ctrl+-/Ctrl+0, the Chrome/VS Code/
+    /// iTerm2/Windows Terminal convention); see [`zoom_px`]. Only the panes'
+    /// font changes: the chrome and status bars keep the UI font, and the
+    /// configured size is untouched, so a zoom never persists.
+    fn zoom_font(&mut self, zoom: Zoom) {
+        let px = zoom_px(zoom, self.font_px, self.ui_px, self.scale_factor);
         let ligatures = self.config.ligatures.unwrap_or(true);
-        self.rebuild_font(px, ligatures);
+        self.rebuild_font_at(px, ligatures);
     }
 
     /// Enter incremental scrollback-search mode with an empty query.
@@ -2973,6 +3069,7 @@ impl WindowState<'_> {
     /// Write child input to the focused pane — or, while broadcast is on,
     /// to every pane in the active tab.
     fn write_child(&mut self, bytes: &[u8]) {
+        self.pacer.input(Instant::now());
         if !self.broadcast {
             if let Some(p) = self.pane_mut() {
                 let _ = p.writer.write(bytes);
@@ -3030,6 +3127,7 @@ impl WindowState<'_> {
         let Some(text) = self.primary_text().filter(|t| !t.is_empty()) else {
             return;
         };
+        self.pacer.input(Instant::now());
         if let Some(p) = self.pane_mut() {
             let bracketed = p.grid.lock().bracketed_paste;
             let _ = p.writer.write(&encode_paste(&text, bracketed));
@@ -3037,7 +3135,8 @@ impl WindowState<'_> {
         self.snap_to_bottom();
     }
 
-    /// Paste the system clipboard into the active tab's child (Ctrl+Shift+V).
+    /// Paste the system clipboard into the active tab's child (Ctrl+Shift+V, and
+    /// Ctrl+V on Windows).
     fn paste(&mut self) {
         let Some(cb) = self.clipboard.as_mut() else {
             return;
@@ -3098,8 +3197,7 @@ impl WindowState<'_> {
         // SGR-pixel mode (`?1016`): the same SGR encoding, but the position
         // is the pointer's pixel offset within the target pane's text area
         // (this pane is its own terminal, so pane-relative is the analogue of
-        // xterm's text-area-relative pixels). The chrome bar above the grid
-        // is one cell row tall, hence the +1 on the pane's row origin.
+        // xterm's text-area-relative pixels), below the chrome bar.
         if modes.extended & 8 != 0
             && let Some(r) = self.pane_rect(id)
         {
@@ -3107,7 +3205,7 @@ impl WindowState<'_> {
                 self.mouse_pos,
                 (
                     self.pad + r.col * self.cell_w,
-                    self.pad + (r.row + 1) * self.cell_h,
+                    self.grid_oy() + r.row * self.cell_h,
                 ),
                 (r.cols * self.cell_w, r.rows * self.cell_h),
             );
@@ -3117,6 +3215,7 @@ impl WindowState<'_> {
         if out.is_empty() {
             return false;
         }
+        self.pacer.input(Instant::now());
         let Some(p) = self.pane_by_id_mut(id) else {
             return false;
         };
@@ -3151,7 +3250,7 @@ impl WindowState<'_> {
     /// repaint.
     fn update_hover_link(&mut self) -> bool {
         let (x, y) = self.mouse_pos;
-        let new = if self.mods.control_key() && (y.max(0.0) as usize) >= self.cell_h {
+        let new = if self.mods.control_key() && !self.in_chrome(y) {
             self.pane().and_then(|p| {
                 let (col, row) = self.cell_in_focused(x, y);
                 let g = p.grid.lock();
@@ -3236,6 +3335,7 @@ impl WindowState<'_> {
             (false, true) => b"\x1bOB",
             (false, false) => b"\x1b[B",
         };
+        self.pacer.input(Instant::now());
         if let Some(p) = self.pane_by_id_mut(id) {
             for _ in 0..lines.unsigned_abs() {
                 let _ = p.writer.write(seq);
@@ -3377,7 +3477,7 @@ impl WindowState<'_> {
         let s = Settings::new(
             &self.config,
             &self.theme,
-            self.font_px,
+            self.ui_px,
             &self.shells,
             opacity_supported,
         );
@@ -3648,12 +3748,15 @@ impl WindowState<'_> {
     }
 
     /// The overlay-grid cell under window pixel `(x, y)`, `None` above the
-    /// chrome bar. Mirrors the overlay's own layout: the bar takes the first
-    /// cell row flush, the grid sits below it inset by `pad`.
+    /// chrome bar. Mirrors the overlay's own layout: the bar sits flush on
+    /// top, the grid below it inset by `pad`.
     fn overlay_cell(&self, x: f64, y: f64) -> Option<(usize, usize)> {
+        if self.in_chrome(y) {
+            return None;
+        }
         let col = ((x - self.pad as f64).max(0.0) as usize) / self.cell_w;
-        let screen_row = ((y - self.grid_oy() as f64).max(0.0) as usize) / self.cell_h;
-        Some((col, screen_row.checked_sub(1)?))
+        let row = ((y - self.grid_oy() as f64).max(0.0) as usize) / self.cell_h;
+        Some((col, row))
     }
 
     /// Handle a click in the overlay body (below the chrome bar): select the
@@ -3746,8 +3849,10 @@ impl WindowState<'_> {
                     self.apply_theme_live(t);
                 }
             }
-            Field::FontSize => self.rebuild_font(font_size, self.config.ligatures.unwrap_or(true)),
-            Field::Ligatures => self.rebuild_font(self.font_px, ligatures),
+            Field::FontSize => {
+                self.rebuild_font(font_size, font_size, self.config.ligatures.unwrap_or(true))
+            }
+            Field::Ligatures => self.rebuild_font(self.ui_px, self.font_px, ligatures),
             Field::Cursor => {
                 self.config.cursor_style = Some(cursor);
                 let blink = self.config.cursor_blink.unwrap_or(false);
@@ -3881,16 +3986,18 @@ impl WindowState<'_> {
         }
     }
 
-    /// Rebuild the glyph cache at `px` / `ligatures`, re-fit the grid to the new
-    /// cell size, and rebuild the renderer (the GPU atlas is font-bound). This
-    /// is the user-driven entry point (settings overlay font-size/ligatures
-    /// fields): it persists `px` as the configured font size. A monitor-DPI
-    /// change should *not* overwrite that preference — see
-    /// [`Self::on_scale_factor_changed`], which calls [`Self::rebuild_font_at`]
-    /// directly instead.
-    fn rebuild_font(&mut self, px: f32, ligatures: bool) {
-        if self.rebuild_font_at(px, ligatures) {
-            self.config.font_size = Some(px);
+    /// Rebuild both fonts, the bars' at `ui_px` and the panes' at `font_px`,
+    /// re-fit the grid to the new cell size, and rebuild the renderer (the
+    /// GPU atlas is font-bound). This is the user-driven entry point
+    /// (settings overlay font-size/ligatures fields): it persists `ui_px` as
+    /// the configured font size. A monitor-DPI change should *not* overwrite
+    /// that preference — see [`Self::on_scale_factor_changed`].
+    fn rebuild_font(&mut self, ui_px: f32, font_px: f32, ligatures: bool) {
+        if !self.rescale_ui_font(ui_px, ligatures) {
+            return;
+        }
+        if self.rebuild_font_at(font_px, ligatures) {
+            self.config.font_size = Some(ui_px);
             self.config.ligatures = Some(ligatures);
         }
     }
@@ -3914,16 +4021,7 @@ impl WindowState<'_> {
     /// whether it succeeded (a missing/unparseable font leaves state
     /// untouched).
     fn rescale_font_cache(&mut self, px: f32, ligatures: bool, scale_factor: f64) -> bool {
-        let Some(font_set) = font::load_set(
-            self.config.font.as_deref(),
-            self.config.font_bold.as_deref(),
-            self.config.font_italic.as_deref(),
-            self.config.font_bold_italic.as_deref(),
-            self.config.font_fallback.as_deref(),
-        ) else {
-            return false;
-        };
-        let Some(font) = FontCache::new(font_set, px, ligatures) else {
+        let Some(font) = load_font(&self.config, px, ligatures) else {
             return false;
         };
         let (cw, ch) = font.cell_size();
@@ -3932,6 +4030,21 @@ impl WindowState<'_> {
         self.cell_h = ch.max(1);
         self.font_px = px;
         self.scale_factor = scale_factor;
+        true
+    }
+
+    /// Rebuild the bars' UI font at `px` — no renderer rebuild, so this is
+    /// safe before an OS window exists. Returns whether it succeeded (a
+    /// missing/unparseable font leaves state untouched).
+    fn rescale_ui_font(&mut self, px: f32, ligatures: bool) -> bool {
+        let Some(font) = load_font(&self.config, px, ligatures) else {
+            return false;
+        };
+        let (bw, bh) = font.cell_size();
+        self.ui_font = font;
+        self.bar_w = bw.max(1);
+        self.bar_h = bh.max(1);
+        self.ui_px = px;
         true
     }
 
@@ -3952,6 +4065,10 @@ impl WindowState<'_> {
             self.apply_opacity();
             let size = window.inner_size();
             self.apply_size(size.width, size.height);
+            // A keymap zoom (Ctrl+=/Ctrl+-) returns without any other
+            // repaint, so the new cell size would otherwise only show on the
+            // next unrelated redraw (child output, a mouse move).
+            window.request_redraw();
         }
     }
 
@@ -3977,6 +4094,7 @@ impl WindowState<'_> {
         let ratio = new_scale / self.scale_factor;
         let ligatures = self.config.ligatures.unwrap_or(true);
         let px = ((self.font_px as f64) * ratio) as f32;
+        self.rescale_ui_font(((self.ui_px as f64) * ratio) as f32, ligatures);
         if self.rescale_font_cache(px, ligatures, new_scale) {
             self.after_font_rescale();
         }
@@ -4714,7 +4832,23 @@ impl WindowState<'_> {
         let cursor = self.tick_cursor(now);
         let sync = self.tick_sync();
         let compact = self.tick_compact(now);
-        cursor.into_iter().chain(sync).chain(compact).min()
+        let paced = self.tick_paced(now);
+        cursor
+            .into_iter()
+            .chain(sync)
+            .chain(compact)
+            .chain(paced)
+            .min()
+    }
+
+    /// Paint output held back by the [`Pacer`] once its frame is due; return
+    /// the deadline while it is still held.
+    fn tick_paced(&mut self, now: Instant) -> Option<Instant> {
+        let (due, next) = self.pacer.poll(now);
+        if due && let Some(window) = &self.window {
+            window.request_redraw();
+        }
+        next
     }
 
     /// Run every pane's due compaction step, background tabs included, and
@@ -4838,13 +4972,13 @@ impl WindowState<'_> {
             let ratio = target_scale / self.scale_factor;
             let px = ((self.font_px as f64) * ratio) as f32;
             let ligatures = self.config.ligatures.unwrap_or(true);
+            self.rescale_ui_font(((self.ui_px as f64) * ratio) as f32, ligatures);
             self.rescale_font_cache(px, ligatures, target_scale);
         }
         let width = (self.cols as usize * self.cell_w + 2 * self.pad) as u32;
-        // One extra cell row on top for the chrome bar (plus one at the bottom
-        // for the status ribbon when it's on), plus the padding band.
-        let bars = 1 + usize::from(self.status_enabled());
-        let height = ((self.rows as usize + bars) * self.cell_h + 2 * self.pad) as u32;
+        // The chrome bar on top (plus the status ribbon at the bottom when
+        // it's on), plus the padding band.
+        let height = (self.rows as usize * self.cell_h + self.bars_h() + 2 * self.pad) as u32;
         // `--title` (or a config `title` key) seeds the initial title; the
         // child's own OSC 0/2 still wins once it emits one (see the per-frame
         // `set_title` above).
@@ -5021,10 +5155,6 @@ impl WindowState<'_> {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
-                    // Key releases are terminal input only under win32-input-
-                    // mode (?9001) or Kitty keyboard flag 2 (report event
-                    // types); the UI layers (chords, search, copy mode) never
-                    // see them.
                     let (app_cursor, kitty_flags, win32_input) = self
                         .pane()
                         .map(|p| {
@@ -5032,33 +5162,19 @@ impl WindowState<'_> {
                             (g.app_cursor_keys, g.kitty_keyboard_flags(), g.win32_input)
                         })
                         .unwrap_or_default();
-                    if self.overlay.is_some()
+                    let ui_owns_keys = self.overlay.is_some()
                         || self.searching.is_some()
-                        || self.copy_mode.is_some()
-                    {
-                        return;
-                    }
-                    if win32_input {
-                        if let Some(bytes) = super::input::encode_win32(
-                            event.physical_key,
-                            &event.logical_key,
-                            self.mods,
-                            false,
-                        ) {
-                            self.write_child(&bytes);
-                        }
-                        return;
-                    }
-                    if kitty_flags & 2 != 0
-                        && let Some(bytes) = super::input::encode_full(
-                            &event.logical_key,
-                            self.mods,
-                            app_cursor,
-                            kitty_flags,
-                            super::input::KeyPhase::Release,
-                            kitty_alternate(&event.logical_key, self.mods),
-                            None,
-                        )
+                        || self.copy_mode.is_some();
+                    let release = KeyRelease {
+                        physical: event.physical_key,
+                        logical: &event.logical_key,
+                        mods: self.mods,
+                        app_cursor,
+                        kitty_flags,
+                        win32_input,
+                    };
+                    if let Some(bytes) =
+                        release_input(&mut self.consumed_keys, ui_owns_keys, &release)
                     {
                         self.write_child(&bytes);
                     }
@@ -5081,19 +5197,28 @@ impl WindowState<'_> {
                 // Terminal-owned shortcuts (configurable via the `[keys]` config
                 // section) are looked up before native encoding, so a bound chord
                 // never reaches the child.
-                if let PhysicalKey::Code(code) = event.physical_key
-                    && let Some(key) = chord_key(code)
-                {
-                    let chord = Chord::new(
-                        self.mods.control_key(),
-                        self.mods.shift_key(),
-                        self.mods.alt_key(),
-                        key,
-                    );
-                    if let Some(action) = self.config.keys.action(chord) {
-                        self.run_action(action);
-                        return;
-                    }
+                let action = match event.physical_key {
+                    PhysicalKey::Code(code) => chord_key(code).and_then(|key| {
+                        self.config.keys.action(Chord::new(
+                            self.mods.control_key(),
+                            self.mods.shift_key(),
+                            self.mods.alt_key(),
+                            key,
+                        ))
+                    }),
+                    PhysicalKey::Unidentified(_) => None,
+                };
+                let mut consumed = std::mem::take(&mut self.consumed_keys);
+                let taken = route_key_down(
+                    &mut consumed,
+                    event.physical_key,
+                    event.repeat,
+                    action,
+                    |a| self.exec_action(a),
+                );
+                self.consumed_keys = consumed;
+                if taken {
+                    return;
                 }
                 // Ctrl+Alt+1..9 jump straight to that tab (the Windows
                 // Terminal convention; 9 = last tab, browser-style). After
@@ -5225,6 +5350,7 @@ impl WindowState<'_> {
                             }
                         }
                         ImeCommitTarget::Pane => {
+                            self.pacer.input(Instant::now());
                             if let Some(p) = self.pane_mut() {
                                 let _ = p.writer.write(text.as_bytes());
                             }
@@ -5270,13 +5396,12 @@ impl WindowState<'_> {
                         let d = self.tab_drag.as_ref().unwrap();
                         (d.moving, d.press_x, d.idx)
                     };
-                    if !moving && (position.x - press_x).abs() > self.cell_w as f64 {
+                    if !moving && (position.x - press_x).abs() > self.bar_w as f64 {
                         moving = true;
                     }
                     let mut to = from;
                     if moving {
-                        let col =
-                            (position.x.max(0.0) as usize / self.cell_w).min(self.hits.len() - 1);
+                        let col = self.bar_col(position.x);
                         to = tab_drag_target(col, &tab_spans(&self.hits), from);
                     }
                     if let Some(d) = &mut self.tab_drag {
@@ -5290,9 +5415,8 @@ impl WindowState<'_> {
                 // Chrome-bar hover feedback: track the element under the
                 // pointer and repaint when it changes (drag-strip cells and
                 // anything below the bar count as no hover).
-                let hover = if (position.y.max(0.0) as usize) < self.cell_h && !self.hits.is_empty()
-                {
-                    let col = (position.x.max(0.0) as usize / self.cell_w).min(self.hits.len() - 1);
+                let hover = if self.in_chrome(position.y) && !self.hits.is_empty() {
+                    let col = self.bar_col(position.x);
                     match self.hits[col] {
                         Hit::Drag => None,
                         h => Some(h),
@@ -5352,7 +5476,7 @@ impl WindowState<'_> {
                     // An open overlay (menu / settings) is a page of controls,
                     // not selectable text — the I-beam below would mislead.
                     None if self.overlay.is_some() => CursorIcon::Default,
-                    None if (position.y.max(0.0) as usize) >= self.cell_h => {
+                    None if !self.in_chrome(position.y) => {
                         if self.hover_link.is_some() {
                             CursorIcon::Pointer
                         } else {
@@ -5372,7 +5496,7 @@ impl WindowState<'_> {
                 if let Some(window) = &self.window {
                     window.set_cursor(icon);
                 }
-                if self.selecting
+                if self.drag.is_live()
                     && self.update_drag_selection_head(position.x, position.y)
                     && let Some(window) = &self.window
                 {
@@ -5424,7 +5548,7 @@ impl WindowState<'_> {
                             // of falling through to PRIMARY-paste, which
                             // previously happened regardless of y-position —
                             // the chrome bar was never even consulted.
-                            if (self.mouse_pos.1.max(0.0) as usize) < self.cell_h {
+                            if self.in_chrome(self.mouse_pos.1) {
                                 self.on_bar_middle_click(self.mouse_pos.0);
                                 return;
                             }
@@ -5457,10 +5581,9 @@ impl WindowState<'_> {
                     }
                     ElementState::Released => {
                         if kind == MouseButtonKind::Left {
-                            if self.selecting {
+                            if self.drag.release() {
                                 self.copy_selection_primary(); // copy-on-select
                             }
-                            self.selecting = false;
                             self.tab_drag = None; // a reorder drag ends with the button
                         }
                         if self.mouse_button_down == Some(kind) {
@@ -5558,12 +5681,14 @@ impl WindowState<'_> {
             .pane_by_id_mut(id)
             .is_some_and(|p| p.grid.lock().sync_output_active());
         // Output on a background tab doesn't repaint; its bar label
-        // refreshes with the next frame the active tab causes.
+        // refreshes with the next frame the active tab causes. A flood
+        // repaints at most once per display refresh (`Pacer`).
         if !syncing
             && self
                 .tabs
                 .get(self.active)
                 .is_some_and(|t| t.panes.iter().any(|p| p.id == id))
+            && self.pacer.output(Instant::now())
             && let Some(window) = &self.window
         {
             window.request_redraw();
@@ -5612,8 +5737,11 @@ impl<'a> App<'a> {
         )
         .ok_or("no monospace font found")?;
         let ligatures = self.config.ligatures.unwrap_or(true);
+        let ui_font =
+            FontCache::new(font_set.clone(), font_px, ligatures).ok_or("font failed to parse")?;
         let font = FontCache::new(font_set, font_px, ligatures).ok_or("font failed to parse")?;
         let (cell_w, cell_h) = font.cell_size();
+        let (bar_w, bar_h) = ui_font.cell_size();
         Ok(WindowState {
             backend: self.backend,
             config: self.config.clone(),
@@ -5626,6 +5754,9 @@ impl<'a> App<'a> {
             font,
             cell_w: cell_w.max(1),
             cell_h: cell_h.max(1),
+            ui_font,
+            bar_w: bar_w.max(1),
+            bar_h: bar_h.max(1),
             pad: self.config.padding.unwrap_or(DEFAULT_PAD) as usize,
             window: None,
             renderer: None,
@@ -5636,7 +5767,7 @@ impl<'a> App<'a> {
             clipboard: arboard::Clipboard::new().ok(),
             mouse_pos: (0.0, 0.0),
             scroll_accum: 0.0,
-            selecting: false,
+            drag: SelectionDrag::default(),
             hover: None,
             hover_link: None,
             focused: true,
@@ -5647,17 +5778,19 @@ impl<'a> App<'a> {
             last_grid_click: None,
             click_streak: 0,
             mouse_button_down: None,
-            sel_anchor: None,
+            consumed_keys: ConsumedKeys::default(),
             hits: Vec::new(),
             tab_drag: None,
             last_strip_click: None,
             cursor_blink_on: true,
             last_blink: Instant::now(),
             sync_held: Vec::new(),
+            pacer: Pacer::unpaced(),
             searching: None,
             shells: self.shells.clone(),
             overlay: None,
             font_px,
+            ui_px: font_px,
             // Updated to the real value once the OS window exists (see
             // `ensure_window`); 1.0 is the correct assumption until then.
             scale_factor: 1.0,
@@ -5860,6 +5993,187 @@ impl ApplicationHandler<UserEvent> for App<'_> {
     }
 }
 
+/// A left-button drag selection. A press arms it at `anchor` (absolute
+/// `(col, abs_row)`, so it survives scrolling mid-drag); while live, pointer
+/// moves and edge auto-scroll extend the selection from it. Releasing the
+/// button or copying with Ctrl+C ends it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SelectionDrag {
+    anchor: Option<(usize, usize)>,
+    live: bool,
+}
+
+impl SelectionDrag {
+    fn start(&mut self, anchor: Option<(usize, usize)>) {
+        *self = Self { anchor, live: true };
+    }
+
+    fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// The anchor to extend from; `None` once the drag has ended.
+    fn live_anchor(&self) -> Option<(usize, usize)> {
+        self.anchor.filter(|_| self.live)
+    }
+
+    /// The button went up. Returns whether a drag was live (copy-on-select).
+    fn release(&mut self) -> bool {
+        std::mem::replace(&mut self.live, false)
+    }
+
+    /// End the drag without a release, so nothing can rebuild the selection.
+    fn cancel(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// A key release and the focused pane's keyboard reporting modes.
+struct KeyRelease<'a> {
+    physical: PhysicalKey,
+    logical: &'a winit::keyboard::Key,
+    mods: ModifiersState,
+    app_cursor: bool,
+    kitty_flags: u8,
+    win32_input: bool,
+}
+
+/// The bytes a key release sends the child, if any. Releases are terminal
+/// input only under win32-input-mode (?9001) or Kitty keyboard flag 2 (report
+/// event types). None when a window shortcut consumed the press (its release
+/// would arrive unpaired) or a UI layer (overlay, search, copy mode) owns the
+/// keyboard. The swallowed key is cleared first, whatever owns the keys.
+fn release_input(
+    consumed: &mut ConsumedKeys,
+    ui_owns_keys: bool,
+    r: &KeyRelease,
+) -> Option<Vec<u8>> {
+    if consumed.release(r.physical) || ui_owns_keys {
+        return None;
+    }
+    if r.win32_input {
+        return super::input::encode_win32(r.physical, r.logical, r.mods, false);
+    }
+    if r.kitty_flags & 2 == 0 {
+        return None;
+    }
+    super::input::encode_full(
+        r.logical,
+        r.mods,
+        r.app_cursor,
+        r.kitty_flags,
+        super::input::KeyPhase::Release,
+        kitty_alternate(r.logical, r.mods),
+        None,
+    )
+}
+
+/// Physical keys held down whose press a window shortcut consumed. Each
+/// stays until its own release, so overlapping shortcuts are independent.
+#[derive(Debug, Default)]
+struct ConsumedKeys(Vec<PhysicalKey>);
+
+impl ConsumedKeys {
+    /// A keydown of `key`. Returns whether it repeats a consumed press. A
+    /// fresh press of a key still listed means its release was lost (focus
+    /// change), so the stale entry is dropped and the press is new.
+    fn press(&mut self, key: PhysicalKey, repeat: bool) -> bool {
+        if !self.0.contains(&key) {
+            return false;
+        }
+        if repeat {
+            return true;
+        }
+        self.release(key);
+        false
+    }
+
+    fn consume(&mut self, key: PhysicalKey) {
+        if !self.0.contains(&key) {
+            self.0.push(key);
+        }
+    }
+
+    /// A key-up of `key`. Returns whether its press was consumed.
+    fn release(&mut self, key: PhysicalKey) -> bool {
+        let Some(i) = self.0.iter().position(|k| *k == key) else {
+            return false;
+        };
+        self.0.swap_remove(i);
+        true
+    }
+}
+
+/// Route a keydown the keymap resolved to `action` (None: unbound). `exec`
+/// runs an action and returns whether it consumed the key. Returns whether
+/// the key is consumed; if not, it goes on to the child. Who owns a held key
+/// is settled by its first press, so the child always sees whole
+/// down/repeat/up runs:
+/// - A repeat of a consumed press never reaches the child: a held Ctrl+C
+///   that copied must not turn into ^C once the selection is gone. Other
+///   actions still repeat (zoom, scrolling); a held copy does not re-copy.
+/// - A repeat of a press the child got stays the child's, even if the chord
+///   or the selection changed meanwhile, or its release would be swallowed.
+fn route_key_down(
+    consumed: &mut ConsumedKeys,
+    key: PhysicalKey,
+    repeat: bool,
+    action: Option<Action>,
+    exec: impl FnOnce(Action) -> bool,
+) -> bool {
+    let held = consumed.press(key, repeat);
+    if repeat && !held {
+        return false;
+    }
+    let taken = match action {
+        Some(Action::CopyOrSend) if held => true,
+        Some(action) => exec(action),
+        None => held,
+    };
+    if taken {
+        consumed.consume(key);
+    }
+    taken
+}
+
+/// What copying the selection achieved.
+#[derive(Debug, PartialEq, Eq)]
+enum Copied {
+    NothingSelected,
+    Done,
+    /// There was a selection but the clipboard is missing or refused it.
+    Failed(String),
+}
+
+impl Copied {
+    /// Whether a copy-or-send key press is used up (else it goes to the child).
+    fn consumes_key(&self) -> bool {
+        !matches!(self, Copied::NothingSelected)
+    }
+
+    /// Whether the selection should go: only once it is safely copied.
+    fn clears_selection(&self) -> bool {
+        matches!(self, Copied::Done)
+    }
+}
+
+/// Copy `text` (the selection, if any) with `write` (the clipboard, if any).
+fn copy_text<W>(text: Option<String>, write: Option<W>) -> Copied
+where
+    W: FnOnce(String) -> Result<(), String>,
+{
+    let Some(text) = text else {
+        return Copied::NothingSelected;
+    };
+    let Some(write) = write else {
+        return Copied::Failed("no system clipboard".to_string());
+    };
+    match write(text) {
+        Ok(()) => Copied::Done,
+        Err(e) => Copied::Failed(e),
+    }
+}
+
 /// Encode clipboard `text` for the child: normalize line endings to CR, and
 /// when `bracketed` wrap it in `ESC[200~`/`ESC[201~`, stripping any embedded
 /// end marker first so the payload can't close the bracket early (a
@@ -5956,6 +6270,44 @@ fn ime_commit_target(searching: bool, overlay: bool, copy_mode: bool) -> ImeComm
     }
 }
 
+/// A Ctrl+=/Ctrl+-/Ctrl+0 font zoom.
+#[derive(Clone, Copy, Debug)]
+enum Zoom {
+    In,
+    Out,
+    Reset,
+}
+
+/// The terminal font size, in physical px, after `zoom` from `current`.
+/// `base` is the configured size at the current DPI: a reset returns to it
+/// exactly. A step stays within the settings range scaled to the monitor
+/// (`FONT_MIN..=FONT_MAX` logical px), widened to include `base`, so a
+/// DPI-scaled size outside the logical range is still reachable.
+fn zoom_px(zoom: Zoom, current: f32, base: f32, scale: f64) -> f32 {
+    let step = match zoom {
+        Zoom::Reset => return base,
+        Zoom::In => FONT_ZOOM_STEP,
+        Zoom::Out => -FONT_ZOOM_STEP,
+    };
+    let scale = scale as f32;
+    let lo = (super::settings::FONT_MIN * scale).min(base);
+    let hi = (super::settings::FONT_MAX * scale).max(base);
+    (current + step).clamp(lo, hi)
+}
+
+/// Load the configured font set and build a glyph cache at `px`, `None` when
+/// no usable font is found.
+fn load_font(config: &Config, px: f32, ligatures: bool) -> Option<FontCache> {
+    let set = font::load_set(
+        config.font.as_deref(),
+        config.font_bold.as_deref(),
+        config.font_italic.as_deref(),
+        config.font_bold_italic.as_deref(),
+        config.font_fallback.as_deref(),
+    )?;
+    FontCache::new(set, px, ligatures)
+}
+
 /// The IME candidate-popup origin, in physical pixels, for a cursor at
 /// pane-local `(col, row)` within the pane whose rect starts at
 /// `pane_origin` (in cells) — pulled out of `update_ime_area` so the split
@@ -5971,9 +6323,9 @@ fn ime_cursor_area_origin(
     let (base_col, base_row) = pane_origin;
     let (col, row) = cursor;
     let x = (pad + (base_col + col) * cell_w) as f64;
-    // +1 cell row for the chrome bar above the grid, plus the grid's own
-    // vertical offset (padding band + the bar's inset).
-    let y = (oy + (base_row + row + 1) * cell_h) as f64;
+    // The cell's top, below the grid's own vertical offset (padding band +
+    // the chrome bar).
+    let y = (oy + (base_row + row) * cell_h) as f64;
     (x, y)
 }
 
@@ -6295,6 +6647,10 @@ fn chord_key(code: KeyCode) -> Option<crate::keymap::Key> {
         KeyCode::F12 => Key::F12,
         KeyCode::Comma => Key::Char(','),
         KeyCode::Period => Key::Char('.'),
+        // The font-zoom chords (Ctrl+=, Ctrl+Shift+=, Ctrl+-) are bound to
+        // these; without them those presses fell through to the child.
+        KeyCode::Equal => Key::Char('='),
+        KeyCode::Minus => Key::Char('-'),
         KeyCode::KeyA => Key::Char('a'),
         KeyCode::KeyB => Key::Char('b'),
         KeyCode::KeyC => Key::Char('c'),
@@ -6352,15 +6708,32 @@ mod tests {
     #[cfg(not(windows))]
     use super::shell_quote;
     use super::{
-        Hit, ImeCommitTarget, MenuKind, SETTINGS_CARDS_TOP, SETTINGS_FOOTER_H, SETTINGS_ROW_H,
-        SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SettingsHit, Widget, accumulate_scroll_lines,
-        arrow_presses, display_path, drag_scroll_direction, encode_paste, fmt_runtime,
-        ime_commit_target, ime_cursor_area_origin, is_openable_url, mix, osc52_reply,
-        pane_pixel_point, path_from_file_uri, put_text, read_git_branch, settings_hit,
+        ConsumedKeys, Copied, Hit, ImeCommitTarget, KeyRelease, MenuKind, SETTINGS_CARDS_TOP,
+        SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
+        SettingsHit, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text, display_path,
+        drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
+        ime_cursor_area_origin, is_openable_url, mix, osc52_reply, pane_pixel_point,
+        path_from_file_uri, put_text, read_git_branch, release_input, route_key_down, settings_hit,
         settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
-        tab_widths, visible_tab_range, widget_text,
+        tab_widths, visible_tab_range, widget_text, zoom_px,
     };
     use crate::core::Cell;
+
+    #[test]
+    fn the_font_zoom_keys_reach_their_default_bindings() {
+        use super::chord_key;
+        use crate::keymap::{Action, Chord, Keymap};
+        use winit::keyboard::KeyCode;
+        let km = Keymap::default();
+        let action = |shift: bool, code: KeyCode| {
+            let key = chord_key(code).expect("the key maps to a chord key");
+            km.action(Chord::new(true, shift, false, key))
+        };
+        assert_eq!(action(false, KeyCode::Equal), Some(Action::FontSizeUp));
+        assert_eq!(action(true, KeyCode::Equal), Some(Action::FontSizeUp));
+        assert_eq!(action(false, KeyCode::Minus), Some(Action::FontSizeDown));
+        assert_eq!(action(false, KeyCode::Digit0), Some(Action::FontSizeReset));
+    }
 
     #[test]
     fn a_synchronized_update_repaints_the_last_frame_until_it_closes() {
@@ -6609,6 +6982,245 @@ mod tests {
         assert!((remainder + 0.4).abs() < 1e-9);
     }
 
+    type Write = fn(String) -> Result<(), String>;
+
+    use crate::keymap::Action as KeyAction;
+    use winit::keyboard::{Key as WKey, KeyCode, ModifiersState, PhysicalKey};
+
+    const C: PhysicalKey = PhysicalKey::Code(KeyCode::KeyC);
+    const V: PhysicalKey = PhysicalKey::Code(KeyCode::KeyV);
+
+    /// Bytes a release of `key` sends under win32-input-mode or Kitty
+    /// event types (`win32` picks which).
+    fn up(consumed: &mut ConsumedKeys, key: PhysicalKey, win32: bool) -> Option<Vec<u8>> {
+        let ch = if key == C { "c" } else { "v" };
+        let logical = WKey::Character(ch.into());
+        let release = KeyRelease {
+            physical: key,
+            logical: &logical,
+            mods: ModifiersState::CONTROL,
+            app_cursor: false,
+            kitty_flags: if win32 { 0 } else { 2 | 1 },
+            win32_input: win32,
+        };
+        release_input(consumed, false, &release)
+    }
+
+    /// A keydown of plain Ctrl+C bound to CopyOrSend, with `selected`
+    /// standing in for the pane selection. Returns whether it was consumed
+    /// and whether the copy ran.
+    fn ctrl_c_down(consumed: &mut ConsumedKeys, repeat: bool, selected: &mut bool) -> (bool, bool) {
+        let mut ran = false;
+        let taken = route_key_down(consumed, C, repeat, Some(KeyAction::CopyOrSend), |_| {
+            ran = true;
+            std::mem::replace(selected, false)
+        });
+        (taken, ran)
+    }
+
+    #[test]
+    fn a_held_copy_never_interrupts_and_stays_paired() {
+        for win32 in [true, false] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = true;
+            // Selected Ctrl+C: copies, consumed.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (true, true)
+            );
+            // Held: repeats are swallowed and do not re-run the copy, so
+            // they never become ^C now the selection is gone.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (true, false)
+            );
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (true, false)
+            );
+            // Its release is swallowed too.
+            assert_eq!(up(&mut consumed, C, win32), None, "win32={win32}");
+            // A later, unselected Ctrl+C reaches the child down and up.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (false, true)
+            );
+            // Its repeat is the child's too, without re-running the copy.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (false, false)
+            );
+            assert!(up(&mut consumed, C, win32).is_some(), "win32={win32}");
+        }
+    }
+
+    #[test]
+    fn a_key_the_child_got_stays_the_childs_while_held() {
+        for win32 in [true, false] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = false;
+            // Unselected Ctrl+C goes to the child.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (false, true)
+            );
+            // Text gets selected while C is held: repeats stay the child's
+            // and do not copy, so its release is not swallowed either.
+            selected = true;
+            assert_eq!(
+                ctrl_c_down(&mut consumed, true, &mut selected),
+                (false, false)
+            );
+            assert!(selected);
+            assert!(up(&mut consumed, C, win32).is_some(), "win32={win32}");
+            // The next fresh press copies as usual.
+            assert_eq!(
+                ctrl_c_down(&mut consumed, false, &mut selected),
+                (true, true)
+            );
+        }
+        // Same for a chord that appears mid-hold (C held, then Ctrl).
+        let mut consumed = ConsumedKeys::default();
+        assert!(!route_key_down(&mut consumed, V, false, None, |_| true));
+        assert!(!route_key_down(
+            &mut consumed,
+            V,
+            true,
+            Some(KeyAction::Paste),
+            |_| { panic!("a repeat of the child's key must not run a shortcut") }
+        ));
+        assert!(up(&mut consumed, V, true).is_some());
+    }
+
+    #[test]
+    fn overlapping_consumed_shortcuts_release_in_either_order() {
+        for (first, second) in [(C, V), (V, C)] {
+            let mut consumed = ConsumedKeys::default();
+            let mut selected = true;
+            assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+            assert!(route_key_down(
+                &mut consumed,
+                V,
+                false,
+                Some(KeyAction::Paste),
+                |_| true
+            ));
+            assert_eq!(up(&mut consumed, first, true), None);
+            assert_eq!(up(&mut consumed, second, true), None);
+            // Both cleared: the next releases are ordinary input again.
+            assert!(up(&mut consumed, C, true).is_some());
+            assert!(up(&mut consumed, V, true).is_some());
+        }
+    }
+
+    #[test]
+    fn other_shortcuts_still_repeat() {
+        let mut consumed = ConsumedKeys::default();
+        let mut runs = 0;
+        for repeat in [false, true, true] {
+            assert!(route_key_down(
+                &mut consumed,
+                V,
+                repeat,
+                Some(KeyAction::Paste),
+                |_| {
+                    runs += 1;
+                    true
+                }
+            ));
+        }
+        assert_eq!(runs, 3);
+    }
+
+    #[test]
+    fn a_held_consumed_key_stays_swallowed_after_its_modifier_lifts() {
+        let mut consumed = ConsumedKeys::default();
+        let mut selected = true;
+        assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+        // Ctrl released first: C now repeats as an unbound key.
+        assert!(route_key_down(&mut consumed, C, true, None, |_| false));
+        assert_eq!(up(&mut consumed, C, true), None);
+    }
+
+    #[test]
+    fn a_lost_release_does_not_eat_the_next_press() {
+        let mut consumed = ConsumedKeys::default();
+        let mut selected = true;
+        assert!(ctrl_c_down(&mut consumed, false, &mut selected).0);
+        // The key-up never came (focus moved). A fresh, unbound press of
+        // the same key is ordinary input, and so is its release.
+        assert!(!route_key_down(&mut consumed, C, false, None, |_| false));
+        assert!(up(&mut consumed, C, true).is_some());
+    }
+
+    #[test]
+    fn a_swallowed_release_clears_even_while_the_ui_owns_keys() {
+        let mut consumed = ConsumedKeys::default();
+        consumed.consume(C);
+        let logical = WKey::Character("c".into());
+        let release = KeyRelease {
+            physical: C,
+            logical: &logical,
+            mods: ModifiersState::CONTROL,
+            app_cursor: false,
+            kitty_flags: 0,
+            win32_input: true,
+        };
+        assert_eq!(release_input(&mut consumed, true, &release), None);
+        assert!(up(&mut consumed, C, true).is_some());
+    }
+
+    #[test]
+    fn a_cancelled_drag_cannot_extend_the_selection() {
+        let mut drag = SelectionDrag::default();
+        drag.start(Some((3, 7)));
+        // Pointer moves and edge auto-scroll extend only from a live anchor.
+        assert!(drag.is_live());
+        assert_eq!(drag.live_anchor(), Some((3, 7)));
+        drag.cancel(); // Ctrl+C copied mid-drag
+        assert!(!drag.is_live());
+        assert_eq!(drag.live_anchor(), None);
+        // The later button-up is not a copy-on-select.
+        assert!(!drag.release());
+    }
+
+    #[test]
+    fn releasing_a_drag_copies_on_select_once() {
+        let mut drag = SelectionDrag::default();
+        drag.start(Some((0, 0)));
+        assert!(drag.release());
+        assert!(!drag.release());
+        assert_eq!(drag.live_anchor(), None);
+    }
+
+    #[test]
+    fn copy_or_send_copies_then_clears_the_selection() {
+        let copied = copy_text(Some("ls".into()), Some((|_| Ok(())) as Write));
+        assert_eq!(copied, Copied::Done);
+        assert!(copied.consumes_key() && copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_with_no_selection_sends_the_key() {
+        let copied = copy_text(None, Some((|_| Ok(())) as Write));
+        assert_eq!(copied, Copied::NothingSelected);
+        assert!(!copied.consumes_key() && !copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_without_a_clipboard_keeps_selection_and_key() {
+        let copied = copy_text(Some("ls".into()), None::<Write>);
+        assert!(matches!(copied, Copied::Failed(_)));
+        assert!(copied.consumes_key() && !copied.clears_selection());
+    }
+
+    #[test]
+    fn copy_or_send_on_write_failure_keeps_selection_and_key() {
+        let copied = copy_text(Some("ls".into()), Some((|_| Err("busy".into())) as Write));
+        assert_eq!(copied, Copied::Failed("busy".into()));
+        assert!(copied.consumes_key() && !copied.clears_selection());
+    }
+
     #[test]
     fn paste_normalizes_newlines_to_cr() {
         assert_eq!(encode_paste("a\r\nb\nc", false), b"a\rb\rc");
@@ -6844,11 +7456,32 @@ mod tests {
     }
 
     #[test]
+    fn zoom_reset_restores_the_dpi_scaled_size_exactly() {
+        // Configured 48 px on a 200% monitor: 96 physical px, above the
+        // logical FONT_MAX. Reset lands on it; zoom steps reach past it.
+        assert_eq!(zoom_px(Zoom::Reset, 72.0, 96.0, 2.0), 96.0);
+        assert_eq!(zoom_px(Zoom::In, 96.0, 96.0, 2.0), 97.0);
+        assert_eq!(zoom_px(Zoom::Out, 96.0, 96.0, 2.0), 95.0);
+        // Configured 4 px at 100% (below FONT_MIN): reset is exact too.
+        assert_eq!(zoom_px(Zoom::Reset, 10.0, 4.0, 1.0), 4.0);
+        assert_eq!(zoom_px(Zoom::Out, 4.0, 4.0, 1.0), 4.0);
+    }
+
+    #[test]
+    fn zoom_steps_clamp_to_the_dpi_scaled_range() {
+        assert_eq!(zoom_px(Zoom::In, 72.0, 18.0, 1.0), 72.0);
+        assert_eq!(zoom_px(Zoom::Out, 6.0, 18.0, 1.0), 6.0);
+        assert_eq!(zoom_px(Zoom::In, 144.0, 36.0, 2.0), 144.0);
+        assert_eq!(zoom_px(Zoom::Out, 12.0, 36.0, 2.0), 12.0);
+        assert_eq!(zoom_px(Zoom::In, 18.0, 18.0, 1.0), 19.0);
+    }
+
+    #[test]
     fn ime_cursor_area_origin_is_window_relative_for_an_unsplit_pane() {
-        // Unsplit pane origin (0, 0): matches the pre-fix single-pane math
-        // exactly, including the chrome-bar +1 row and the padding band.
+        // Unsplit pane origin (0, 0): the grid offset (padding band and
+        // chrome bar) plus the cursor's cell.
         let (x, y) = ime_cursor_area_origin(4, 4, 10, 20, (0, 0), (3, 2));
-        assert_eq!((x, y), ((4 + 3 * 10) as f64, (4 + (2 + 1) * 20) as f64));
+        assert_eq!((x, y), ((4 + 3 * 10) as f64, (4 + 2 * 20) as f64));
     }
 
     #[test]

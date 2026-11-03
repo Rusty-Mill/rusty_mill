@@ -8,6 +8,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::domain::{Card, Column, PRIORITIES};
+use crate::workflow::{Kind, Workflow};
 
 /// Weeks of flow history, the current week last.
 pub const WEEKS: usize = 8;
@@ -90,7 +91,7 @@ pub struct Metrics {
     pub by_project: Vec<ProjectTally>,
     /// Open cards per priority, most urgent first, every priority.
     pub by_priority: Vec<Tally<u8>>,
-    /// Claimed cards in Building, QA or Review per claimant, most first.
+    /// Claimed cards in work columns per claimant, most first.
     pub by_claim: Vec<Tally<String>>,
     /// The last [`WEEKS`] weeks, oldest first.
     pub weeks: Vec<Week>,
@@ -101,8 +102,8 @@ pub struct Metrics {
 }
 
 /// The metrics of `cards` as of `now_ms`.
-pub fn metrics(cards: &[Card], now_ms: i64) -> Metrics {
-    let open: Vec<&Card> = cards.iter().filter(|c| c.column != Column::Done).collect();
+pub fn metrics(flow: &Workflow, cards: &[Card], now_ms: i64) -> Metrics {
+    let open: Vec<&Card> = cards.iter().filter(|c| c.column != Column::DONE).collect();
     let since = now_ms.saturating_sub(RECENT_DAYS * DAY_MS);
     let recent: Vec<&Card> = cards
         .iter()
@@ -110,7 +111,7 @@ pub fn metrics(cards: &[Card], now_ms: i64) -> Metrics {
         .collect();
     Metrics {
         open: open.len(),
-        by_column: by_column(&open),
+        by_column: by_column(flow, &open),
         by_project: by_project(&open, &recent),
         by_priority: PRIORITIES
             .into_iter()
@@ -120,20 +121,20 @@ pub fn metrics(cards: &[Card], now_ms: i64) -> Metrics {
                 count: open.iter().filter(|c| c.priority == p).count(),
             })
             .collect(),
-        by_claim: by_claim(&open),
+        by_claim: by_claim(flow, &open),
         weeks: weeks(cards, now_ms),
         lead_time: lead_time(&recent),
         idle: idle(&open, now_ms),
     }
 }
 
-fn by_column(open: &[&Card]) -> Vec<Tally<Column>> {
-    Column::ALL
-        .into_iter()
-        .filter(|&col| col != Column::Done)
+fn by_column(flow: &Workflow, open: &[&Card]) -> Vec<Tally<Column>> {
+    flow.columns()
+        .iter()
+        .filter(|col| col.kind != Kind::Done)
         .map(|col| Tally {
-            key: col,
-            count: open.iter().filter(|c| c.column == col).count(),
+            key: col.id.clone(),
+            count: open.iter().filter(|c| c.column == col.id).count(),
         })
         .collect()
 }
@@ -157,10 +158,10 @@ fn by_project(open: &[&Card], recent: &[&Card]) -> Vec<ProjectTally> {
     out
 }
 
-fn by_claim(open: &[&Card]) -> Vec<Tally<String>> {
+fn by_claim(flow: &Workflow, open: &[&Card]) -> Vec<Tally<String>> {
     let mut per: BTreeMap<&str, usize> = BTreeMap::new();
     open.iter()
-        .filter(|c| matches!(c.column, Column::Building | Column::Qa | Column::Review))
+        .filter(|c| flow.kind(&c.column) == Some(Kind::Work))
         .filter_map(|c| c.claim.as_deref())
         .for_each(|who| *per.entry(who).or_default() += 1);
     let mut out: Vec<Tally<String>> = per
@@ -222,7 +223,7 @@ fn idle(open: &[&Card], now_ms: i64) -> Vec<IdleCard> {
     let mut past_backlog: Vec<&Card> = open
         .iter()
         .copied()
-        .filter(|c| c.column != Column::Backlog)
+        .filter(|c| c.column != Column::BACKLOG)
         .collect();
     past_backlog.sort_by_key(|c| (c.updated_ms, c.id));
     past_backlog
@@ -233,7 +234,7 @@ fn idle(open: &[&Card], now_ms: i64) -> Vec<IdleCard> {
             number: c.number,
             title: c.title.clone(),
             project: c.project.clone(),
-            column: c.column,
+            column: c.column.clone(),
             claim: c.claim.clone(),
             idle_ms: now_ms.saturating_sub(c.updated_ms).max(0),
         })
@@ -259,24 +260,24 @@ mod tests {
         Card {
             created_ms,
             done_ms: Some(done_ms),
-            ..card(title, Column::Done)
+            ..card(title, Column::DONE)
         }
     }
 
     #[test]
     fn empty_board_has_every_bucket_and_no_lead_time() {
-        let m = metrics(&[], NOW);
+        let m = metrics(&Workflow::default(), &[], NOW);
         assert_eq!(m.open, 0);
-        let cols: Vec<Column> = m.by_column.iter().map(|t| t.key).collect();
+        let cols: Vec<Column> = m.by_column.iter().map(|t| t.key.clone()).collect();
         assert_eq!(
             cols,
             [
-                Column::Backlog,
-                Column::Ready,
-                Column::Building,
-                Column::Qa,
-                Column::Review,
-                Column::Blocked
+                Column::BACKLOG,
+                Column::READY,
+                Column::BUILDING,
+                Column::QA,
+                Column::REVIEW,
+                Column::BLOCKED
             ]
         );
         let prios: Vec<u8> = m.by_priority.iter().map(|t| t.key).collect();
@@ -296,10 +297,10 @@ mod tests {
 
     #[test]
     fn open_counts_leave_done_out() {
-        let mut high = card("high", Column::Ready);
+        let mut high = card("high", Column::READY);
         high.priority = 5;
-        let cards = [high, card("b", Column::Backlog), shipped("s", NOW, NOW)];
-        let m = metrics(&cards, NOW);
+        let cards = [high, card("b", Column::BACKLOG), shipped("s", NOW, NOW)];
+        let m = metrics(&Workflow::default(), &cards, NOW);
         assert_eq!(m.open, 2);
         assert_eq!(m.by_column[0].count, 1, "backlog");
         assert_eq!(m.by_column[1].count, 1, "ready");
@@ -309,13 +310,13 @@ mod tests {
 
     #[test]
     fn projects_count_open_and_recently_shipped_most_open_first() {
-        let mut q1 = card("q1", Column::Ready);
+        let mut q1 = card("q1", Column::READY);
         q1.project = "q".into();
-        let mut q2 = card("q2", Column::Building);
+        let mut q2 = card("q2", Column::BUILDING);
         q2.project = "q".into();
         let old = shipped("old", 0, NOW - RECENT_DAYS * DAY_MS - 1);
         let cards = [q1, q2, shipped("new", NOW - DAY_MS, NOW), old];
-        let m = metrics(&cards, NOW);
+        let m = metrics(&Workflow::default(), &cards, NOW);
         assert_eq!(
             m.by_project,
             [
@@ -340,13 +341,13 @@ mod tests {
             ..card("c", col)
         };
         let cards = [
-            claimed(Column::Building, "b"),
-            claimed(Column::Review, "a"),
-            claimed(Column::Qa, "a"),
-            claimed(Column::Ready, "z"),
-            card("free", Column::Building),
+            claimed(Column::BUILDING, "b"),
+            claimed(Column::REVIEW, "a"),
+            claimed(Column::QA, "a"),
+            claimed(Column::READY, "z"),
+            card("free", Column::BUILDING),
         ];
-        let m = metrics(&cards, NOW);
+        let m = metrics(&Workflow::default(), &cards, NOW);
         assert_eq!(
             m.by_claim,
             [
@@ -371,10 +372,10 @@ mod tests {
             shipped("too old", NOW - 8 * WEEK_MS, NOW - 8 * WEEK_MS),
             Card {
                 created_ms: NOW + DAY_MS,
-                ..card("clock skew", Column::Backlog)
+                ..card("clock skew", Column::BACKLOG)
             },
         ];
-        let m = metrics(&cards, NOW);
+        let m = metrics(&Workflow::default(), &cards, NOW);
         let added: Vec<usize> = m.weeks.iter().map(|w| w.added).collect();
         let done: Vec<usize> = m.weeks.iter().map(|w| w.done).collect();
         assert_eq!(added, [1, 0, 0, 0, 0, 0, 1, 2]);
@@ -389,11 +390,11 @@ mod tests {
                 shipped("closed long ago", 0, NOW - RECENT_DAYS * DAY_MS - 1),
                 Card {
                     done_ms: None,
-                    ..card("won't do", Column::Done)
+                    ..card("won't do", Column::DONE)
                 },
             ])
             .collect();
-        let lt = metrics(&cards, NOW).lead_time;
+        let lt = metrics(&Workflow::default(), &cards, NOW).lead_time;
         assert_eq!(lt.shipped, 10);
         assert_eq!(lt.median_ms, Some(5 * DAY_MS));
         assert_eq!(lt.p85_ms, Some(9 * DAY_MS));
@@ -401,7 +402,12 @@ mod tests {
 
     #[test]
     fn single_ship_is_its_own_median_and_p85() {
-        let lt = metrics(&[shipped("s", NOW - DAY_MS, NOW)], NOW).lead_time;
+        let lt = metrics(
+            &Workflow::default(),
+            &[shipped("s", NOW - DAY_MS, NOW)],
+            NOW,
+        )
+        .lead_time;
         assert_eq!((lt.median_ms, lt.p85_ms), (Some(DAY_MS), Some(DAY_MS)));
     }
 
@@ -410,18 +416,18 @@ mod tests {
         let mut cards: Vec<Card> = (0..7)
             .map(|i| Card {
                 updated_ms: NOW - i * DAY_MS,
-                ..card(&format!("c{i}"), Column::Ready)
+                ..card(&format!("c{i}"), Column::READY)
             })
             .collect();
         cards.push(Card {
             updated_ms: 0,
-            ..card("backlog", Column::Backlog)
+            ..card("backlog", Column::BACKLOG)
         });
         cards.push(Card {
             updated_ms: 0,
             ..shipped("done", 0, 0)
         });
-        let idle = metrics(&cards, NOW).idle;
+        let idle = metrics(&Workflow::default(), &cards, NOW).idle;
         let titles: Vec<&str> = idle.iter().map(|c| c.title.as_str()).collect();
         assert_eq!(titles, ["c6", "c5", "c4", "c3", "c2"]);
         assert_eq!(idle[0].idle_ms, 6 * DAY_MS);

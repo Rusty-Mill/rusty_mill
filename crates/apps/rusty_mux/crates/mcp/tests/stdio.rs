@@ -45,6 +45,7 @@ fn start_server() -> PathBuf {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                config_file: None,
             };
             serve(listener, config).await.expect("serve");
         });

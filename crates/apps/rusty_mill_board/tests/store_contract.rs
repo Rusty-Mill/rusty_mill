@@ -20,12 +20,12 @@ fn scenario<S: Store>(board: &Board<S>) {
         .add(&human, "ship it", "body", vec!["x".into()])
         .expect("add");
     assert_eq!(card.number, Some(1));
-    assert_eq!(board.list(Some(Column::Backlog)).expect("list").len(), 1);
+    assert_eq!(board.list(Some(&Column::BACKLOG)).expect("list").len(), 1);
     board
-        .move_card(card.id, Column::Ready, &human)
+        .move_card(card.id, &Column::READY, &human)
         .expect("ready");
     board
-        .move_card(card.id, Column::Building, &dev)
+        .move_card(card.id, &Column::BUILDING, &dev)
         .expect("building");
     board.claim(card.id, &dev).expect("claim");
     assert_eq!(
@@ -37,7 +37,7 @@ fn scenario<S: Store>(board: &Board<S>) {
     let now = board.get(card.id).expect("get");
     assert_eq!(
         (now.column, now.claim.as_deref(), now.comments.len()),
-        (Column::Building, Some("dev"), 1)
+        (Column::BUILDING, Some("dev"), 1)
     );
     assert_eq!(now.number, Some(1), "the number survives every write");
 
