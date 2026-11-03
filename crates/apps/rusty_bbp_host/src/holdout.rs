@@ -65,7 +65,7 @@ pub fn with_golden(
     set.profiles.push(crate::profiles::Profile {
         name: format!("golden:{name}"),
         program: text(exe)?,
-        args: vec!["golden-run".into(), text(&golden)?],
+        args: vec![GOLDEN_RUN.into(), text(&golden)?],
     });
     if let Some(bin) = exe.parent() {
         set.read_roots.push(text(bin)?);
@@ -74,6 +74,9 @@ pub fn with_golden(
         .extend(crate::golden::fixture_files(&golden)?);
     HoldoutSet::scan(set, &root)
 }
+
+/// The `bbp` subcommand a signed golden profile runs.
+const GOLDEN_RUN: &str = "golden-run";
 
 /// The environment variable a holdout profile finds the suite under.
 pub const ROOT_ENV: &str = "BBP_HOLDOUT";
@@ -206,7 +209,9 @@ impl HoldoutSet {
     }
 
     /// What build runs must never reach: the suite root and the absolute
-    /// fixture files of each golden set, which may lie outside the root.
+    /// fixture files of each signed golden set, which may lie outside the
+    /// root. Only a profile [`with_golden`] wrote (`golden-run DIR`) names a
+    /// signed set; a custom `golden:` profile has no MANIFEST to read.
     fn private(&self) -> Result<Vec<PathBuf>, String> {
         let mut out = vec![PathBuf::from(&self.root)];
         let golden = self
@@ -214,7 +219,10 @@ impl HoldoutSet {
             .profiles
             .iter()
             .filter(|p| p.name.starts_with("golden:"))
-            .filter_map(|p| p.args.get(1));
+            .filter_map(|p| match p.args.as_slice() {
+                [run, dir] if run == GOLDEN_RUN => Some(dir),
+                _ => None,
+            });
         for dir in golden {
             out.extend(
                 crate::golden::fixture_files(Path::new(dir))?
@@ -494,6 +502,15 @@ mod tests {
         let mut wide = build;
         wide.read_roots.push(repo.to_str().unwrap().into());
         assert!(hs.isolated_from(&wide, &[]).is_err(), "a build read root");
+        // A custom `golden:` profile names no signed set and opens as before.
+        let mut custom = set();
+        custom
+            .profiles
+            .extend(ProfileSet::shell("golden:api", "true").profiles);
+        let plain = HoldoutSet::scan(custom, &root).unwrap();
+        plain
+            .isolated_from(&ProfileSet::shell("test", "true"), &[&repo])
+            .unwrap();
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&root);
     }
