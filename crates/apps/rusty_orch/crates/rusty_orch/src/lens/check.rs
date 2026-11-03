@@ -123,7 +123,15 @@ fn http(settings: &Map, env: &dyn Fn(&str) -> Option<String>) -> String {
     }
 }
 
+/// Mirrors `registry::claude`: a container clearance withholds the grant,
+/// because the Claude adapter runs on the runner's host.
 fn claude(a: &Assertions) -> String {
+    if let Some(Clearance::Container(spec)) = &a.host_cleared {
+        return format!(
+            "unavailable: container {} is cleared, but Claude runs on the host",
+            spec.name
+        );
+    }
     match &a.no_overage {
         Some(n) => format!("ready if logged in as {}", n.account),
         None => "unavailable: no no-overage assertion".to_owned(),
@@ -308,6 +316,38 @@ mod tests {
         assert!(
             r.contains("codex\tcodex-cli\tunavailable: /home/nano/repo is not mounted in container lel-codex\n"),
             "{r}"
+        );
+    }
+
+    #[test]
+    fn claude_under_a_container_clearance_is_unavailable_like_the_registry() {
+        let line = |host_cleared: Option<Clearance>| {
+            let a = Assertions {
+                no_overage: Some(NoOverage {
+                    account: "nano@example.com".to_owned(),
+                    machine_bound: true,
+                }),
+                host_cleared,
+            };
+            let grants: Grants = [(id("claude"), a)].into_iter().collect();
+            report(&config(), &grants, Path::new("/repo"), None, &no_env)
+                .lines()
+                .find(|l| l.starts_with("claude"))
+                .map(str::to_owned)
+                .expect("claude line")
+        };
+        let spec = ContainerSpec {
+            name: "lel-codex".to_owned(),
+            machine_id: "lel-1".to_owned(),
+            mounts: Vec::new(),
+        };
+        assert_eq!(
+            line(Some(Clearance::Container(spec))),
+            "claude\tclaude-cli\tunavailable: container lel-codex is cleared, but Claude runs on the host"
+        );
+        assert_eq!(
+            line(Some(Clearance::Host)),
+            "claude\tclaude-cli\tready if logged in as nano@example.com"
         );
     }
 
