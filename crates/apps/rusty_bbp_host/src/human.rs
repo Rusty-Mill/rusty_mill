@@ -237,7 +237,7 @@ pub fn perform_as(
     if let Some(rej) = unstaged(dir, task, &act) {
         return Ok(Response::Rejected(rej));
     }
-    let _admission = refuse_evidence_extension(dir, task, &act)?;
+    let _admission = refuse_evidence_extension(dir, task, &act)?.map_err(|r| r.detail)?;
     let op = labelled_op(by)?;
     let mut d = open_driver(dir, task)?;
     d.dispatch(&Command::Human { op, action: act }, now())
@@ -246,35 +246,40 @@ pub fn perform_as(
 
 /// An evidence run runs under the budget its task was opened with (owner
 /// decision, 2026-11-01), so `extend` refuses, for every field, on a task
-/// that carries an evidence marker. Only a specific not-found means there is
-/// no marker; any other error reading it refuses too. `bbp pairs` refuses a
+/// that carries an evidence marker: `Ok(Err(..))`, a `BadHumanInput`
+/// rejection. Only a specific not-found means there is no marker; any other
+/// error reading it, or taking the admission lock, is `Err`, a host error
+/// that refuses too but is not the human's fault. `bbp pairs` refuses a
 /// run whose log holds an extension anyway (one logged before the marker was
 /// written, or by an older `bbp`), so this check is the early, operator-facing
 /// half and not the only one.
 ///
-/// An extend that may go ahead returns the evidence admission lock (see
+/// An extend that may go ahead returns `Ok(Ok(Some(..)))`, the evidence admission lock (see
 /// [`crate::moderator::evidence_admission`]); the caller holds it through its
 /// append, so a capped first start cannot write the marker in between.
 fn refuse_evidence_extension(
     dir: &Path,
     task: &TaskId,
     act: &HumanAction,
-) -> Result<Option<std::fs::File>, String> {
+) -> Result<Result<Option<std::fs::File>, Rejection>, String> {
     let mut act = act;
     while let HumanAction::Fenced { action, .. } = act {
         act = action;
     }
     if !matches!(act, HumanAction::BudgetExtended { .. }) {
-        return Ok(None);
+        return Ok(Ok(None));
     }
     let admission = crate::moderator::evidence_admission(dir, task)?;
     let marker = crate::moderator::evidence_marker_path(dir, task);
     match std::fs::metadata(&marker) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(admission)),
-        Ok(_) => Err(format!(
-            "{}: an evidence run's budget cannot be extended; it runs under the budget it was opened with",
-            task.0
-        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Ok(Some(admission))),
+        Ok(_) => Ok(Err(Rejection::new(
+            Code::BadHumanInput,
+            format!(
+                "{}: an evidence run's budget cannot be extended; it runs under the budget it was opened with",
+                task.0
+            ),
+        ))),
         Err(e) => Err(format!(
             "{}: cannot tell whether this is an evidence run ({}: {e}), so the budget is not extended",
             task.0,
@@ -367,11 +372,10 @@ pub fn preview_fenced(
         }
     };
     if let Command::Human { action, .. } = &cmd {
-        let refused = unstaged(dir, task, action).or_else(|| {
-            refuse_evidence_extension(dir, task, action)
-                .err()
-                .map(|detail| Rejection::new(Code::BadHumanInput, detail))
-        });
+        let refused = match unstaged(dir, task, action) {
+            Some(rej) => Some(rej),
+            None => refuse_evidence_extension(dir, task, action)?.err(),
+        };
         if let Some(rej) = refused {
             return Ok(Preview {
                 rev: rev_now,
@@ -411,15 +415,10 @@ pub fn perform_fenced(
     if let Some(rej) = unstaged(dir, task, action) {
         return Ok(Response::Rejected(rej));
     }
-    let _admission = match refuse_evidence_extension(dir, task, action) {
+    let _admission = match refuse_evidence_extension(dir, task, action)? {
         Ok(admission) => admission,
-        Err(detail) if fence.is_some() => {
-            return Ok(Response::Rejected(Rejection::new(
-                Code::BadHumanInput,
-                detail,
-            )))
-        }
-        Err(detail) => return Err(detail),
+        Err(rej) if fence.is_some() => return Ok(Response::Rejected(rej)),
+        Err(rej) => return Err(rej.detail),
     };
     open_driver(dir, task)?
         .dispatch(&cmd, now())
@@ -599,6 +598,57 @@ mod tests {
         let err = perform(&dir, &task, "extend", &["messages", "1000"], None).unwrap_err();
         assert!(err.contains("evidence"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fenced_extend_reports_marker_and_lock_io_errors_as_host_errors() {
+        // A confirmed evidence task is a policy refusal (BadHumanInput); an
+        // I/O failure is not, so Orch sees a host error rather than "Answer
+        // rejected" (README: I/O errors stay process failures).
+        let fenced = |dir: &Path, task: &TaskId| {
+            perform_fenced(
+                dir,
+                task,
+                "extend",
+                &["messages", "1000"],
+                None,
+                "o",
+                Some(Rev(1)),
+                None,
+            )
+        };
+        let (dir, task) = task("fenced-marker-io", false);
+        let marker = crate::moderator::evidence_marker_path(&dir, &task);
+        std::fs::write(marker.parent().unwrap(), "not a directory").unwrap();
+        let before = log_len(&dir, &task);
+        let err = fenced(&dir, &task).unwrap_err();
+        assert!(
+            err.contains("cannot tell whether this is an evidence run"),
+            "{err}"
+        );
+        let p = preview_fenced(
+            &dir,
+            &task,
+            "extend",
+            &["messages", "1000"],
+            None,
+            "o",
+            Some(Rev(1)),
+            None,
+        );
+        assert!(p.is_err(), "{p:?}");
+        assert_eq!(log_len(&dir, &task), before);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (dir2, task2) = super::tests::task("fenced-lock-io", false);
+        let lock = crate::moderator::lock_path(&dir2, &task2);
+        let _ = std::fs::remove_dir_all(lock.parent().unwrap());
+        std::fs::write(lock.parent().unwrap(), "not a directory").unwrap();
+        let before = log_len(&dir2, &task2);
+        assert!(fenced(&dir2, &task2).is_err());
+        assert_eq!(log_len(&dir2, &task2), before);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     #[test]
