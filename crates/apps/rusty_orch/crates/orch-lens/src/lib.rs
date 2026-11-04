@@ -18,6 +18,7 @@
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
+//! - [`taint`]: what a lens saw marks what it posts; never lowered.
 
 #![cfg_attr(
     not(test),
@@ -36,6 +37,7 @@ pub mod post;
 pub mod record;
 pub mod round;
 pub mod schedule;
+pub mod taint;
 pub mod tier;
 
 pub use class::DataClass;

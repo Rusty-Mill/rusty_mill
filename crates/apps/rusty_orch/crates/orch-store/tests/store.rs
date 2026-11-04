@@ -531,3 +531,27 @@ mod meters {
         assert!(matches!(s.load_meter("dedup"), Err(StoreError::Corrupt(_))));
     }
 }
+
+mod taints {
+    use orch_lens::taint::Taints;
+    use orch_lens::DataClass::{Internal, Sensitive};
+    use orch_store::Store;
+
+    use super::dir;
+
+    #[test]
+    fn a_taint_table_survives_reopening_per_task() {
+        let d = dir("taint_reopen");
+        let first = Taints::from_entries([(3, Internal), (9, Sensitive)]);
+        let t = Taints::from_entries([(3, Sensitive), (3, Internal), (9, Sensitive)]);
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert_eq!(s.load_taints("T").expect("load"), Taints::default());
+            s.save_taints("T", &first).expect("save");
+            s.save_taints("T", &t).expect("save again");
+        }
+        let s = Store::open(&d).expect("reopen");
+        assert_eq!(s.load_taints("T").expect("load"), t);
+        assert_eq!(s.load_taints("U").expect("load"), Taints::default());
+    }
+}

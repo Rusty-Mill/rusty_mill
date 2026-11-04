@@ -22,6 +22,7 @@
 mod assignments;
 mod meters;
 mod record;
+mod taints;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,7 @@ use orch_core::task::Plan;
 use orch_core::GoalId;
 use orch_dispatch::Ledger;
 use orch_lens::meter::Snapshot;
+use orch_lens::taint::Taints;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
@@ -41,6 +43,7 @@ use rusty_multimodal_db_engine::generic::GenericMmapStore;
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
 use meters::MeterRecord;
 use record::{ById, GoalRecord, Revision};
+use taints::TaintRecord;
 
 /// The store's files inside its directory.
 const LOCK_FILE: &str = "lock";
@@ -50,6 +53,8 @@ const LEGACY_ASSIGNMENTS_FILE: &str = "assignments.mmap";
 const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 /// Lens experiment meters (#594).
 const METERS_FILE: &str = "meters.mmap";
+/// BBP tasks' taint tables (#598).
+const TAINTS_FILE: &str = "taints.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -132,6 +137,7 @@ pub struct Store {
     assignments: GenericMmapStore<AssignmentRecord, ById, Revision>,
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     meters: GenericMmapStore<MeterRecord, ById, Revision>,
+    taints: GenericMmapStore<TaintRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -164,6 +170,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(TAINTS_FILE);
+        let taints = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -175,6 +187,7 @@ impl Store {
             assignments,
             legacy,
             meters,
+            taints,
             _lock: lock,
         })
     }
@@ -322,6 +335,47 @@ impl Store {
             self.meters.insert(record).map_err(engine_error)
         } else {
             self.meters.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+}
+
+impl Store {
+    /// BBP task `task`'s taint table; empty when none was saved.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record under its key names another
+    /// task or an unknown class.
+    pub fn load_taints(&self, task: &str) -> Result<Taints, StoreError> {
+        self.taints
+            .get(taints::key(task))
+            .map_or(Ok(Taints::default()), |r| r.into_taints(task))
+    }
+
+    /// Save `taints` as task `task`'s table. Only ever grows: the caller
+    /// loads, raises and saves under the store's lock.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another task's
+    /// table; [`StoreError::Engine`] when the write fails.
+    pub fn save_taints(&mut self, task: &str, taints: &Taints) -> Result<(), StoreError> {
+        let existing = self.taints.get(taints::key(task));
+        if let Some(r) = &existing {
+            if r.task != task {
+                return Err(StoreError::Corrupt(format!(
+                    "taint key for {task:?} holds {:?}",
+                    r.task
+                )));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = TaintRecord::new(task, taints, revision);
+        let written = if existing.is_none() {
+            self.taints.insert(record).map_err(engine_error)
+        } else {
+            self.taints.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
     }
