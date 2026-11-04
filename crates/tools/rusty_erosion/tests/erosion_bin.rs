@@ -87,9 +87,22 @@ fn a_dangling_rust_symlink_is_not_a_deletion() {
         "{}",
         stdout(&enforced)
     );
+    // Replacing existing Rust with one, on its own.
+    std::fs::remove_file(repo.dir.join("src/b.rs")).expect("rm");
     std::fs::remove_file(repo.dir.join("src/a.rs")).expect("rm");
     std::os::unix::fs::symlink("nowhere.rs", repo.dir.join("src/a.rs")).expect("symlink");
-    assert_eq!(repo.erosion(&enforcing(&base)).status.code(), Some(2));
+    let replaced = repo.erosion(&enforcing(&base));
+    assert_eq!(replaced.status.code(), Some(2), "{}", stdout(&replaced));
+    assert!(
+        stdout(&replaced).contains("src/a.rs"),
+        "{}",
+        stdout(&replaced)
+    );
+    assert!(
+        !stdout(&replaced).contains("src/b.rs"),
+        "{}",
+        stdout(&replaced)
+    );
 }
 
 struct Repo {
