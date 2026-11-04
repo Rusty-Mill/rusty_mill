@@ -455,6 +455,30 @@ fn custom_and_default_headers_are_sent() {
     });
 }
 
+#[test]
+fn no_user_agent_sends_none_unless_the_request_sets_one() {
+    run(async {
+        let server = start_test_server(|req| {
+            let expected = req.header("x-expect").map(str::to_owned);
+            assert_eq!(req.header("user-agent").map(str::to_owned), expected);
+            http_response(200, "OK", &[], b"")
+        });
+        let client = Client::builder().no_user_agent().build();
+
+        client.get(&server.url("/")).unwrap().send().await.unwrap();
+        client
+            .get(&server.url("/"))
+            .unwrap()
+            .header("User-Agent", "caller/1")
+            .unwrap()
+            .header("X-Expect", "caller/1")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+    });
+}
+
 async fn assert_method_round_trips(method: &str, builder: rusty_request::RequestBuilder) {
     let resp = builder.body("payload").send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);

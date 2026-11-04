@@ -995,13 +995,13 @@ async fn request_headers_reach_the_upstream_as_the_client_sent_them() {
     assert_eq!(
         header_values(with_agent, "user-agent"),
         vec!["caller/1"],
-        "the client's User-Agent replaces the library's"
+        "the client's User-Agent goes up as it arrived"
     );
     assert_eq!(header_values(with_agent, "x-multi"), vec!["a", "b"]);
     let agent = header_values(without_agent, "user-agent");
     assert!(
-        agent.len() == 1 && agent[0].starts_with("rusty_request/"),
-        "a request without one goes up with rusty_request's: {agent:?}"
+        agent.is_empty(),
+        "a request without one goes up without one: {agent:?}"
     );
     shutdown.cancel();
 }

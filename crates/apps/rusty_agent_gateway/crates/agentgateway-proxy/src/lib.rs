@@ -148,11 +148,12 @@ impl HostProxy {
             .and_then(|t| t.backend_request_timeout)
             .map(Duration::from);
 
-        // A proxy passes responses on as they are: no redirects followed,
-        // no cookies kept, no retries or timeout of its own (the route's
-        // policies are applied here, per attempt), and no forward proxy
-        // from the environment.
+        // A proxy passes requests and responses on as they are: no
+        // User-Agent of its own, no redirects followed, no cookies kept, no
+        // retries or timeout of its own (the route's policies are applied
+        // here, per attempt), and no forward proxy from the environment.
         let client = Client::builder()
+            .no_user_agent()
             .no_redirects()
             .no_cookie_store()
             .no_retry()

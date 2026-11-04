@@ -1155,10 +1155,12 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
             // An evidence run runs under the budget it was opened with: a run
             // on an extended task would be a failed run in `bbp pairs`, so refuse it
             // before anything is spent.
-            if events
-                .iter()
-                .any(|e| matches!(e, Event::BudgetExtended { .. }))
-            {
+            if events.iter().any(|e| {
+                matches!(
+                    e,
+                    Event::BudgetExtended { .. } | Event::ClaimBudgetExtended { .. }
+                )
+            }) {
                 return Err("moderator: refusing to start: this task's budget was extended, so it is not an evidence run; open a new task for the run".into());
             }
             write_evidence_marker(&cfg.dir, &cfg.task, cap.usd, &cap.criteria_sha256)?;

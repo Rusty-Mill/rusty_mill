@@ -2,9 +2,13 @@
 //! card plus each evidence message's note), with orch's data class on every
 //! part. Pure data and its text rendering.
 
-use rusty_bbp::{ClaimStatus, Direction, EvidenceKind, MsgId, PrincipalId, Stakes};
+use rusty_bbp::{
+    ClaimBody, ClaimStatus, ClaimView, ClaimsConfig, Direction, EvidenceKind, MsgId, PrincipalId,
+    Stakes,
+};
 
 use crate::class::{admit, DataClass};
+use crate::config::LensConfig;
 
 /// One claim as a lens may be shown it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +62,63 @@ impl Card {
     /// Has `author` posted evidence here?
     pub fn has_evidence_by(&self, author: &PrincipalId) -> bool {
         self.evidence.iter().any(|i| &i.author == author)
+    }
+}
+
+impl Card {
+    /// The card from BBP's view of a claim, the claim's own body (stakes,
+    /// reversibility, the question it answers) and each evidence item's
+    /// note, which the view leaves out (`notes` gives `""` for one not yet
+    /// read). The claim's class is the highest of its domains' classes;
+    /// its evidence shares it.
+    pub fn from_view(
+        view: &ClaimView,
+        body: &ClaimBody,
+        notes: &dyn Fn(MsgId) -> String,
+        config: &LensConfig,
+        claims: &ClaimsConfig,
+    ) -> Self {
+        let class = view
+            .domains
+            .iter()
+            .map(|d| config.domain_class(d))
+            .max()
+            .unwrap_or(DataClass::Internal);
+        let strict = body.stakes == Stakes::High || !body.reversible;
+        let evidence = view
+            .evidence
+            .iter()
+            .map(|e| Item {
+                msg: e.msg,
+                author: e.author.clone(),
+                direction: e.direction,
+                kind: e.kind,
+                delta: e.delta,
+                note: notes(e.msg),
+                class,
+            })
+            .collect();
+        Self {
+            id: view.id,
+            text: view.text.clone(),
+            domains: view.domains.clone(),
+            status: view.status,
+            score: view.score,
+            accept_at: if strict {
+                claims.accept_at_strict
+            } else {
+                claims.accept_at
+            },
+            stakes: body.stakes,
+            reversible: body.reversible,
+            answers: body.answers,
+            deps: view.deps.clone(),
+            spent: view.spent,
+            budget: view.budget,
+            evidence,
+            candidates: view.candidates.clone(),
+            class,
+        }
     }
 }
 
@@ -256,6 +317,102 @@ mod tests {
             "CLAIM msg:7 OPEN score +0 (accepts at +8), budget 2/16, stakes medium, reversible\n"
         ));
         assert!(shown.contains("answers: msg:3\ndeps: msg:4\n"));
+    }
+
+    fn view(domains: &[&str]) -> ClaimView {
+        ClaimView {
+            id: MsgId(7),
+            text: "Hash by size first".to_owned(),
+            domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+            status: ClaimStatus::Open,
+            score: -2,
+            confidence: 40,
+            epoch: 0,
+            spent: 2,
+            budget: 16,
+            evidence: vec![rusty_bbp::claims::EvidenceView {
+                msg: MsgId(20),
+                author: PrincipalId("operator".to_owned()),
+                direction: Direction::Counter,
+                kind: EvidenceKind::Cited,
+                delta: -2,
+                epoch: 0,
+                scoring: true,
+            }],
+            deps: vec![MsgId(4)],
+            candidates: vec![],
+            sole_candidate: false,
+            current: None,
+            failing: vec![],
+            tests_changed: vec![],
+            endorsement: None,
+            holdout_due: false,
+        }
+    }
+
+    fn body(stakes: Stakes, reversible: bool) -> ClaimBody {
+        ClaimBody {
+            text: "Hash by size first".to_owned(),
+            domains: vec!["dedup".to_owned()],
+            deps: vec![MsgId(4)],
+            answers: Some(MsgId(3)),
+            supersedes: None,
+            stakes,
+            reversible,
+        }
+    }
+
+    fn starter() -> LensConfig {
+        LensConfig::parse(crate::config::tests::STARTER).expect("config")
+    }
+
+    #[test]
+    fn a_view_with_its_body_and_notes_is_the_fixture_card() {
+        let notes = |m: MsgId| format!("note {}", m.0);
+        let got = Card::from_view(
+            &view(&["dedup"]),
+            &body(Stakes::Medium, true),
+            &notes,
+            &starter(),
+            &ClaimsConfig::default(),
+        );
+        let mut want = card(vec![item(
+            20,
+            "operator",
+            Direction::Counter,
+            DataClass::Internal,
+        )]);
+        want.score = -2;
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn strict_claims_accept_higher_and_the_top_domain_class_wins() {
+        let cfg = ClaimsConfig::default();
+        let none = |_: MsgId| String::new();
+        let high = Card::from_view(
+            &view(&["dedup", "real-data"]),
+            &body(Stakes::High, true),
+            &none,
+            &starter(),
+            &cfg,
+        );
+        assert_eq!(high.accept_at, cfg.accept_at_strict);
+        assert_eq!(high.class, DataClass::Sensitive);
+        assert!(high
+            .evidence
+            .iter()
+            .all(|i| i.class == DataClass::Sensitive));
+        assert_eq!(high.evidence[0].note, "");
+        let irreversible = Card::from_view(
+            &view(&[]),
+            &body(Stakes::Low, false),
+            &none,
+            &starter(),
+            &cfg,
+        );
+        assert_eq!(irreversible.accept_at, cfg.accept_at_strict);
+        assert_eq!(irreversible.class, DataClass::Internal);
     }
 
     #[test]

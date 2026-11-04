@@ -70,6 +70,7 @@ Precise contracts used by this guide:
 | D51 | The expert is the single writer of settled answers | [default] 2026-11-03 (handoff) |
 | D52 | rusty_erosion location and core/adapter module split | [default] 2026-11-03 (#704) |
 | D53 | One host: everything deploys on BaileyAi | [stated] 2026-11-03 (#598, #599, #594) |
+| D54 | Lens shell reaches BBP through one `bbp mcp` session per lens | [default] 2026-11-04 (#594) |
 | D55 | Orch-originated intents are parked | [stated] 2026-11-03 (general) |
 | D56 | Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases | [stated] 2026-11-03 (#600) |
 | D57 | #596 adds an erosion pass rule: no worse than baseline on 4 of 5 runs | [stated] 2026-11-04 (#596) |
@@ -463,6 +464,15 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_5862c484286b46c9a3ff25d6ff2fde7e
 **Key.** lel:general:one-host-baileyai
 **Source.** Nano's saved record (cap_58e514f9f3d94b3da5d26c0b8a118dd3; dialog mem_77a1f7b27e1340d8a644b8b2062b8f6d, 11-03 "Nano chose all on BaileyAi"; summary mem_eb16b0dea2394f46990c384f69a2ac41 "all deployment on BaileyAi"), pointed to in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds (2026-11-04). Staged as R1 in PR #1446.
+
+## D54. Lens shell reaches BBP through one `bbp mcp` session per lens
+
+**Decision.** The `rusty_orch lens run` shell spawns one `bbp mcp` stdio JSON-RPC child per lens for the run (`BBP_SESSION=yes`, `BBP_PRINCIPAL=<lens id>`) and uses its claims tools: `claims_delta` to wake, `claim_card` and `claim_line` for the card and settled lines, `post` for claims and evidence. `claim_card`'s `EvidenceView` carries author, direction, kind, delta, epoch and scoring but no note, so the shell fills each evidence note from an incremental `read(after)` on the same session, cached by message id (one read per wake, not per claim).
+**Why.** Design rev 3 §5 makes each lens a BBP principal with one session credential, and §6 steps 1 and 7 call `claims_delta` and post with that credential; `bbp mcp` is the only existing credentialed claims path, so this needs no BBP change and keeps the session's `read_messages` filtering. A child process per lens is cheap to replace.
+**Rejected.** New finite `bbp` CLI subcommands for claims views and lens posts (new public CLI surface, ask-first). Linking `rusty_bbp` and opening `FsStore` in-process (bypasses the host's credential and visibility path). Adding `note` to `claim_card` (public API change to the addendum's card, ask-first; open question).
+**Tag.** [default] · remind-me: mem_fc34b139927341aabc53a249d2427f81
+**Key.** lel:594:lens-shell-bbp-transport
+**Source.** Caller question from the #594 shell slice, 2026-11-04; 594-lens-runner-design.md §5, §6; bbp-claims-addendum.md § Reads, delta and subscriptions and R11; `rusty_bbp/src/claims.rs` `EvidenceView`/`ClaimView`; `rusty_bbp_host/src/mcp/claims.rs`.
 
 ## D55. Orch-originated intents are parked
 

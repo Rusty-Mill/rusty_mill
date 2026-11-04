@@ -801,27 +801,37 @@ pub unsafe fn pending_input_events(console_input: RawHandle) -> Result<u32, Win3
 /// attached to this console" check. No current `rush` feature asks for
 /// this; filed for Win32 parity.
 pub fn process_list() -> Result<alloc::vec::Vec<u32>, Win32Error> {
+    fill_growing(|buf| {
+        let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
+        // SAFETY: `buf` is a valid, writable buffer of at least `len`
+        // elements, and `len` is passed as its length.
+        unsafe { GetConsoleProcessList(buf.as_mut_ptr(), len) }
+    })
+}
+
+/// How many times [`fill_growing`] calls its fill function before giving up.
+const FILL_ATTEMPTS: usize = 4;
+
+/// Runs `fill` on a growing buffer until the list fits. `fill` writes up to
+/// `buf.len()` entries and returns how many the whole list needs, which can
+/// be more than fit (0 is failure, read from `GetLastError`). The list can
+/// grow between one call and the next (another process attaches to the
+/// console), so each retry leaves twice the room the last call asked for
+/// instead of exactly that, and the retries are bounded (card #525).
+fn fill_growing(
+    mut fill: impl FnMut(&mut [u32]) -> u32,
+) -> Result<alloc::vec::Vec<u32>, Win32Error> {
     let mut buf: alloc::vec::Vec<u32> = alloc::vec![0u32; 8];
-    // `GetConsoleProcessList` reports how many pids it actually needed
-    // (which can be larger than the buffer just tried) in its own return
-    // value — grow to that exact size and retry, the same shape this
-    // crate's other "ask, then maybe grow" calls use, just via a return
-    // value instead of an `ERROR_INSUFFICIENT_BUFFER`/ in-out size
-    // parameter.
-    for _ in 0..2 {
-        // SAFETY: `buf` is a valid, `buf.len()`-element writable buffer
-        // matched by the `process_count` argument naming its exact
-        // length.
-        let needed = unsafe { GetConsoleProcessList(buf.as_mut_ptr(), buf.len() as u32) };
+    for _ in 0..FILL_ATTEMPTS {
+        let needed = fill(&mut buf) as usize;
         if needed == 0 {
             return Err(Win32Error::last());
         }
-        if (needed as usize) > buf.len() {
-            buf.resize(needed as usize, 0);
-            continue;
+        if needed <= buf.len() {
+            buf.truncate(needed);
+            return Ok(buf);
         }
-        buf.truncate(needed as usize);
-        return Ok(buf);
+        buf.resize(needed.saturating_mul(2), 0);
     }
     Err(Win32Error::ERROR_INSUFFICIENT_BUFFER)
 }
@@ -1326,6 +1336,51 @@ mod tests {
             pids.contains(&crate::process::current_pid()),
             "the calling process should be attached to its own console, got: {pids:?}"
         );
+    }
+
+    /// A fake `GetConsoleProcessList` whose list has `sizes[n]` pids on
+    /// call `n`, numbered from 1; counts its calls in `calls`.
+    fn growing_list<'a>(
+        sizes: &'a [usize],
+        calls: &'a core::cell::Cell<usize>,
+    ) -> impl FnMut(&mut [u32]) -> u32 + 'a {
+        move |buf| {
+            let n = calls.get();
+            calls.set(n + 1);
+            let size = sizes[n.min(sizes.len() - 1)];
+            for (slot, pid) in buf.iter_mut().zip(1..=size as u32) {
+                *slot = pid;
+            }
+            size as u32
+        }
+    }
+
+    #[test]
+    fn fill_growing_returns_a_list_that_fits_at_once() {
+        let calls = core::cell::Cell::new(0);
+        let pids = fill_growing(growing_list(&[3], &calls)).unwrap();
+        assert_eq!(pids, [1, 2, 3]);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn fill_growing_leaves_headroom_for_a_list_that_grows_between_calls() {
+        // 8 slots, then the list is 20 and grows to 30 before the refill:
+        // sizing to exactly 20 (the old code) fails here; 40 fits.
+        let calls = core::cell::Cell::new(0);
+        let pids = fill_growing(growing_list(&[20, 30], &calls)).unwrap();
+        assert_eq!(pids, (1..=30).collect::<alloc::vec::Vec<u32>>());
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn fill_growing_gives_up_after_its_bounded_retries() {
+        // Always more than twice the room offered.
+        let calls = core::cell::Cell::new(0);
+        let sizes = [9, 100, 1_000, 10_000, 100_000];
+        let err = fill_growing(growing_list(&sizes, &calls)).unwrap_err();
+        assert_eq!(err, Win32Error::ERROR_INSUFFICIENT_BUFFER);
+        assert_eq!(calls.get(), FILL_ATTEMPTS);
     }
 
     #[test]

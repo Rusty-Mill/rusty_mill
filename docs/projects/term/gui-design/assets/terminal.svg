@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="480" viewBox="0 0 800 480" role="img" aria-label="Terminal window">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <clipPath id="win"><rect x="20" y="20" width="760" height="440" rx="10"/></clipPath>
+  </defs>
+
+  <!-- Window -->
+  <g filter="url(#shadow)">
+    <rect x="20" y="20" width="760" height="440" rx="10" fill="#1e1f29"/>
+  </g>
+
+  <g clip-path="url(#win)">
+    <!-- Title bar -->
+    <rect x="20" y="20" width="760" height="36" fill="#2b2d3a"/>
+    <line x1="20" y1="56" x2="780" y2="56" stroke="#14151c" stroke-width="1"/>
+    <circle cx="44" cy="38" r="6.5" fill="#ff5f57"/>
+    <circle cx="66" cy="38" r="6.5" fill="#febc2e"/>
+    <circle cx="88" cy="38" r="6.5" fill="#28c840"/>
+    <text x="400" y="43" text-anchor="middle" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" font-size="13" fill="#a9abb8">user@host:&#160;~/projects&#160;—&#160;bash&#160;—&#160;80×24</text>
+
+    <!-- Body -->
+    <g font-family="SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="14" fill="#e6e6e6">
+      <text x="40" y="86"><tspan fill="#8a8ea3">Last&#160;login:&#160;Tue&#160;Nov&#160;&#160;3&#160;09:14:22&#160;on&#160;ttys001</tspan></text>
+
+      <text x="40" y="114"><tspan fill="#50fa7b">user@host</tspan><tspan fill="#e6e6e6">:</tspan><tspan fill="#6cb6ff">~/projects</tspan><tspan fill="#e6e6e6">$&#160;ls&#160;-la</tspan></text>
+      <text x="40" y="134">total&#160;24</text>
+      <text x="40" y="154">drwxr-xr-x&#160;&#160;&#160;6&#160;user&#160;&#160;staff&#160;&#160;&#160;192&#160;Nov&#160;&#160;3&#160;09:10&#160;<tspan fill="#6cb6ff">.</tspan></text>
+      <text x="40" y="174">drwxr-xr-x&#160;&#160;24&#160;user&#160;&#160;staff&#160;&#160;&#160;768&#160;Nov&#160;&#160;2&#160;18:42&#160;<tspan fill="#6cb6ff">..</tspan></text>
+      <text x="40" y="194">-rw-r--r--&#160;&#160;&#160;1&#160;user&#160;&#160;staff&#160;&#160;1024&#160;Nov&#160;&#160;3&#160;08:55&#160;README.md</text>
+      <text x="40" y="214">-rwxr-xr-x&#160;&#160;&#160;1&#160;user&#160;&#160;staff&#160;&#160;2048&#160;Nov&#160;&#160;3&#160;09:02&#160;<tspan fill="#50fa7b">build.sh</tspan></text>
+      <text x="40" y="234">drwxr-xr-x&#160;&#160;&#160;8&#160;user&#160;&#160;staff&#160;&#160;&#160;256&#160;Nov&#160;&#160;3&#160;09:10&#160;<tspan fill="#6cb6ff">src</tspan></text>
+
+      <text x="40" y="262"><tspan fill="#50fa7b">user@host</tspan>:<tspan fill="#6cb6ff">~/projects</tspan>$&#160;git&#160;status</text>
+      <text x="40" y="282">On&#160;branch&#160;<tspan fill="#ff79c6">main</tspan></text>
+      <text x="40" y="302">Changes&#160;not&#160;staged&#160;for&#160;commit:</text>
+      <text x="40" y="322">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;<tspan fill="#ff5555">modified:&#160;&#160;&#160;src/main.rs</tspan></text>
+
+      <text x="40" y="350"><tspan fill="#50fa7b">user@host</tspan>:<tspan fill="#6cb6ff">~/projects</tspan>$&#160;./build.sh</text>
+      <text x="40" y="370"><tspan fill="#f1fa8c">&#160;&#160;&#160;Compiling</tspan>&#160;app&#160;v0.1.0</text>
+      <text x="40" y="390"><tspan fill="#50fa7b">&#160;&#160;&#160;&#160;Finished</tspan>&#160;release&#160;in&#160;2.41s</text>
+
+      <text x="40" y="418"><tspan fill="#50fa7b">user@host</tspan>:<tspan fill="#6cb6ff">~/projects</tspan>$&#160;</text>
+    </g>
+
+    <!-- Blinking cursor (after 22-char prompt × 8.4px) -->
+    <rect x="226" y="404" width="9" height="18" fill="#e6e6e6">
+      <animate attributeName="opacity" values="1;1;0;0" keyTimes="0;0.5;0.5;1" dur="1.1s" repeatCount="indefinite"/>
+    </rect>
+
+    <!-- Scrollbar -->
+    <rect x="768" y="64" width="5" height="120" rx="2.5" fill="#44475a"/>
+  </g>
+</svg>
