@@ -15,8 +15,8 @@ use rmcp::{
     ServiceExt, model::CallToolRequestParams, service::RunningService,
     transport::StreamableHttpClientTransport,
 };
+use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
 const ISSUER: &str = "https://auth.example.com";
 const KID: &str = "gateway-test-key";
@@ -97,7 +97,7 @@ impl Harness {
     /// is set the route also carries `jwtAuth`, so `jwt.*` has something to
     /// resolve against.
     async fn start(rules: &[&str], bearer: Option<&str>) -> Harness {
-        let port = free_port().await;
+        let port = free_port();
         let rules = rules
             .iter()
             .map(|line| format!("                  {line}"))
@@ -385,7 +385,7 @@ async fn a_rule_that_does_not_compile_stops_the_gateway_booting() {
     // Rather than skipping the rule, which would turn a typo in an allow rule
     // into a route that serves nothing and a typo in a deny rule into one that
     // refuses nothing.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:

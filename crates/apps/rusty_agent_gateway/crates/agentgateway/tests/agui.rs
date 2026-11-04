@@ -10,11 +10,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway_config::Config;
+use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
 mod common;
 use common::free_port;
+use common::http;
 
 const STREAM: &str = "data: {\"type\":\"RUN_STARTED\",\"threadId\":\"t\",\"runId\":\"r\"}\n\n\
 data: {\"type\":\"TEXT_MESSAGE_CHUNK\",\"messageId\":\"m\",\"delta\":\"hi\"}\n\n\
@@ -29,7 +30,7 @@ struct Agent {
 async fn agent() -> Agent {
     use rusty_axum::{Request, Response, Router, StatusCode};
 
-    let port = free_port().await;
+    let port = free_port();
     let hits = Arc::new(AtomicUsize::new(0));
     let last = Arc::new(Mutex::new((String::new(), Value::Null)));
     let counter = Arc::clone(&hits);
@@ -61,7 +62,7 @@ async fn start(rules: &[&str], agent: u16) -> (String, CancellationToken) {
 /// The same, with `head` spliced in ahead of `binds`, for gateway-wide
 /// settings such as `config.limits`.
 async fn start_configured(head: &str, rules: &[&str], agent: u16) -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let rules: String = rules
         .iter()
         .map(|line| format!("                  {line}\n"))
@@ -112,8 +113,8 @@ fn run_input(tools: &[&str]) -> Value {
     })
 }
 
-async fn run(base: &str, input: &Value) -> reqwest::Response {
-    reqwest::Client::new()
+async fn run(base: &str, input: &Value) -> http::Response {
+    http::Client::new()
         .post(format!("{base}/api/agent"))
         .json(input)
         .send()
@@ -121,7 +122,7 @@ async fn run(base: &str, input: &Value) -> reqwest::Response {
         .expect("request should reach the gateway")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn no_allow_rule_refuses_every_run() {
     let a = agent().await;
     let (base, shutdown) = start(&[], a.port).await;
@@ -129,11 +130,7 @@ async fn no_allow_rule_refuses_every_run() {
     let response = run(&base, &run_input(&[])).await;
     assert_eq!(response.status(), 403);
     assert!(
-        response
-            .text()
-            .await
-            .expect("text")
-            .contains("no allow rule"),
+        response.text().expect("text").contains("no allow rule"),
         "the reason names the gap"
     );
     assert_eq!(a.hits.load(Ordering::Relaxed), 0, "the agent never saw it");
@@ -141,7 +138,7 @@ async fn no_allow_rule_refuses_every_run() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_allowed_run_streams_through_untouched() {
     let a = agent().await;
     let (base, shutdown) = start(
@@ -153,13 +150,10 @@ async fn an_allowed_run_streams_through_untouched() {
     let response = run(&base, &run_input(&["create_task"])).await;
     assert_eq!(response.status(), 200);
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
+        response.headers().get("content-type"),
         Some("text/event-stream")
     );
-    assert_eq!(response.text().await.expect("text"), STREAM);
+    assert_eq!(response.text().expect("text"), STREAM);
     assert_eq!(a.hits.load(Ordering::Relaxed), 1);
     let (method, body) = a.last.lock().expect("lock").clone();
     assert_eq!(method, "POST");
@@ -171,7 +165,7 @@ async fn an_allowed_run_streams_through_untouched() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn deny_and_require_narrow_an_allow() {
     let a = agent().await;
     let (base, shutdown) = start(
@@ -186,23 +180,11 @@ async fn deny_and_require_narrow_an_allow() {
 
     let denied = run(&base, &run_input(&["delete_task"])).await;
     assert_eq!(denied.status(), 403);
-    assert!(
-        denied
-            .text()
-            .await
-            .expect("text")
-            .contains("deny rule matched")
-    );
+    assert!(denied.text().expect("text").contains("deny rule matched"));
 
     let unmet = run(&base, &run_input(&[])).await;
     assert_eq!(unmet.status(), 403);
-    assert!(
-        unmet
-            .text()
-            .await
-            .expect("text")
-            .contains("require rule failed")
-    );
+    assert!(unmet.text().expect("text").contains("require rule failed"));
 
     assert_eq!(a.hits.load(Ordering::Relaxed), 0);
     assert_eq!(run(&base, &run_input(&["create_task"])).await.status(), 200);
@@ -211,7 +193,7 @@ async fn deny_and_require_narrow_an_allow() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_post_that_is_not_a_run_is_a_400_and_a_get_passes_through() {
     let a = agent().await;
     let (base, shutdown) = start(&["- allow: 'true'"], a.port).await;
@@ -220,7 +202,7 @@ async fn a_post_that_is_not_a_run_is_a_400_and_a_get_passes_through() {
     assert_eq!(response.status(), 400);
     assert_eq!(a.hits.load(Ordering::Relaxed), 0);
 
-    let get = reqwest::get(format!("{base}/api/agent/health"))
+    let get = http::get(format!("{base}/api/agent/health"))
         .await
         .expect("request should reach the gateway");
     assert_eq!(get.status(), 200);
@@ -265,7 +247,7 @@ fn run_input_of_len(len: usize) -> String {
     with_pad(&"x".repeat(pad))
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn max_request_body_bytes_caps_a_run_below_the_protocol_bound() {
     let a = agent().await;
     let (base, shutdown) = start_configured(
@@ -274,7 +256,7 @@ async fn max_request_body_bytes_caps_a_run_below_the_protocol_bound() {
         a.port,
     )
     .await;
-    let client = reqwest::Client::new();
+    let client = http::Client::new();
     let send = |body: String| {
         client
             .post(format!("{base}/api/agent"))

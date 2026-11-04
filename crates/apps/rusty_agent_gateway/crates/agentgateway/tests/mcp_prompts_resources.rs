@@ -16,7 +16,7 @@ use rmcp::{
     service::RunningService,
     transport::StreamableHttpClientTransport,
 };
-use tokio_util::sync::CancellationToken;
+use rusty_tokio::sync::CancellationToken;
 
 mod common;
 use common::free_port;
@@ -45,7 +45,7 @@ struct Harness {
 impl Harness {
     /// Boot a gateway over the given YAML, substituting `{server}` and `{port}`.
     async fn start(body: &str) -> Harness {
-        let port = free_port().await;
+        let port = free_port();
         let yaml = format!(
             r#"
 binds:
