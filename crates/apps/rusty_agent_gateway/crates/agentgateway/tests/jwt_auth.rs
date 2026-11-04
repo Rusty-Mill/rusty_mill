@@ -10,8 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentgateway_config::Config;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
 const ISSUER: &str = "https://auth.example.com";
 const KID: &str = "gateway-test-key";
@@ -73,6 +73,7 @@ fn mock_server() -> String {
 }
 
 mod common;
+use common::http;
 use common::{free_port, yaml_path};
 
 const CONFIG: &str = r#"
@@ -110,7 +111,7 @@ async fn start() -> (String, CancellationToken, tempfile::TempDir) {
     let jwks_path = dir.path().join("jwks.json");
     std::fs::write(&jwks_path, jwks.to_string()).expect("should write the JWKS");
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = CONFIG
         .replace("{port}", &port.to_string())
         .replace("{server}", &mock_server())
@@ -145,8 +146,8 @@ fn initialize_body() -> Value {
     })
 }
 
-async fn post(url: &str, token: Option<&str>) -> reqwest::Response {
-    let mut request = reqwest::Client::new()
+async fn post(url: &str, token: Option<&str>) -> http::Response {
+    let mut request = http::Client::new()
         .post(url)
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
@@ -160,7 +161,7 @@ async fn post(url: &str, token: Option<&str>) -> reqwest::Response {
         .expect("request should reach the gateway")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_valid_token_reaches_the_backend() {
     let (url, shutdown, _dir) = start().await;
 
@@ -174,17 +175,14 @@ async fn a_valid_token_reaches_the_backend() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_with_no_token_is_challenged() {
     let (url, shutdown, _dir) = start().await;
 
     let response = post(&url, None).await;
     assert_eq!(response.status(), 401);
     assert_eq!(
-        response
-            .headers()
-            .get("www-authenticate")
-            .and_then(|v| v.to_str().ok()),
+        response.headers().get("www-authenticate"),
         Some("Bearer"),
         "a 401 without a challenge leaves the client no way to learn it should authenticate"
     );
@@ -192,7 +190,7 @@ async fn a_request_with_no_token_is_challenged() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_token_for_another_audience_never_reaches_the_backend() {
     let (url, shutdown, _dir) = start().await;
 
@@ -208,7 +206,6 @@ async fn a_token_for_another_audience_never_reaches_the_backend() {
     let challenge = response
         .headers()
         .get("www-authenticate")
-        .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
     assert!(
@@ -219,7 +216,7 @@ async fn a_token_for_another_audience_never_reaches_the_backend() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_garbage_token_is_rejected() {
     let (url, shutdown, _dir) = start().await;
 
@@ -229,15 +226,15 @@ async fn a_garbage_token_is_rejected() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_cors_preflight_is_answered_without_a_token() {
     // Browsers never send `Authorization` on a preflight. If auth ran before
     // the preflight branch, every cross-origin call would fail here and the
     // real request would never be sent -- so this asserts the ordering.
     let (url, shutdown, _dir) = start().await;
 
-    let response = reqwest::Client::new()
-        .request(reqwest::Method::OPTIONS, &url)
+    let response = http::Client::new()
+        .request(http::Method::Options, &url)
         .header("origin", "https://app.example.com")
         .header("access-control-request-method", "POST")
         .header("access-control-request-headers", "authorization")
@@ -251,23 +248,20 @@ async fn a_cors_preflight_is_answered_without_a_token() {
         "an unauthenticated preflight must still be answered"
     );
     assert_eq!(
-        response
-            .headers()
-            .get("access-control-allow-origin")
-            .and_then(|v| v.to_str().ok()),
+        response.headers().get("access-control-allow-origin"),
         Some("*")
     );
 
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rejection_still_carries_cors_headers() {
     // Without these the browser reports an opaque network error instead of the
     // 401, and the caller cannot tell "log in" from "the gateway is down".
     let (url, shutdown, _dir) = start().await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(&url)
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
@@ -279,10 +273,7 @@ async fn a_rejection_still_carries_cors_headers() {
 
     assert_eq!(response.status(), 401);
     assert_eq!(
-        response
-            .headers()
-            .get("access-control-allow-origin")
-            .and_then(|v| v.to_str().ok()),
+        response.headers().get("access-control-allow-origin"),
         Some("*"),
         "a 401 the browser cannot read is a 401 nobody can act on"
     );

@@ -205,7 +205,7 @@ mod tests {
     use crate::config::tests::STARTER;
     use crate::config::Tools;
     use crate::meter::{Ceilings, Meter};
-    use crate::port::{Answer, Model, Question, Usage};
+    use crate::port::{Answer, Model, Question, Reply, Usage};
 
     const USD: u64 = 1_000_000;
     const LENSES: [&str; 4] = ["adversary", "architect", "operator", "research"];
@@ -257,7 +257,7 @@ mod tests {
                 self.asked.push((id, tools, q.clone()));
             }
             self.reply.clone().map(|posts| Answer {
-                posts,
+                reply: Reply::Posts(posts),
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 10,

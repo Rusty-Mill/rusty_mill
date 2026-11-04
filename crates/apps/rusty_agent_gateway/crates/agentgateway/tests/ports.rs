@@ -56,17 +56,16 @@ fn a_machine_with_no_band_left_says_so_rather_than_waiting() {
     assert!(!held.is_empty());
 }
 
-#[tokio::test]
-async fn a_port_is_handed_out_once_and_is_free_when_it_is() {
-    let first = free_port().await;
-    let second = free_port().await;
+#[test]
+fn a_port_is_handed_out_once_and_is_free_when_it_is() {
+    let first = free_port();
+    let second = free_port();
     assert_ne!(first, second);
 
     // Both are still bindable: the allocator does not hand back something it
     // is holding open itself.
     for port in [first, second] {
-        tokio::net::TcpListener::bind(("127.0.0.1", port))
-            .await
+        std::net::TcpListener::bind(("127.0.0.1", port))
             .unwrap_or_else(|err| panic!("{port} should be free: {err}"));
     }
 }
