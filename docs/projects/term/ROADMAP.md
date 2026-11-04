@@ -101,8 +101,10 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
    can't support"):* negotiate down through `Features`, refuse only below a floor, and tell the
    user when the other side lacks features their client has (ctl, attach client and GUI show which
    are missing and that the server is older). Nano to restate on this PR.
-10. **Card 283 (ConPTY convergence gate).** Moot since our host is the default? *Recommend
-    close it, with the ConPTY review a year after Phase B kept.*
+10. **Card 283 (ConPTY convergence gate).** *Answered (Nano, project thread, 2026-11-04 12:24Z:
+    "Concur"):* the gate is moot; the ConPTY review a year after Phase B stays. The card itself
+    stays open (Backlog) for its real remainder: Phase 1's acceptance suite on Windows on our host,
+    lifting the Linux-only cfg on the 4 MiB reattach test if it passes. Nano to restate on this PR.
 11. **C33 force-disconnect.** Restrict to the session's owner before shared mode?
     *Recommend yes, as the first step of arc 1.*
 12. **Clean room across the merged project.** Does "contamination is not a concern, licence
