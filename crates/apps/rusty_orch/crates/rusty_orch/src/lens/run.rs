@@ -28,7 +28,7 @@ use orch_store::Store;
 use rusty_bbp::ClaimsConfig;
 
 use super::assertions::{self, Grants};
-use super::bbp::{Child, Rpc, Session};
+use super::bbp::{run_id, Child, Rpc, Session};
 use super::check::DEFAULT_ASSERTIONS;
 use super::registry::Registry;
 use crate::args::ArgsError;
@@ -165,9 +165,11 @@ pub enum Ended {
     Halted(Halt),
 }
 
-/// The lenses to run: the config, and each lens's seat and prefix by id.
+/// The lenses to run: the config, the task's frozen claims settings, and
+/// each lens's seat and prefix by id.
 pub struct Lenses<'a> {
     pub config: &'a LensConfig,
+    pub claims: &'a ClaimsConfig,
     pub seats: &'a mut BTreeMap<String, Box<dyn Seat>>,
     pub prefixes: &'a BTreeMap<String, String>,
 }
@@ -184,10 +186,10 @@ pub fn passes(
 ) -> Result<Ended, String> {
     let Lenses {
         config,
+        claims,
         seats,
         prefixes,
     } = lenses;
-    let claims = ClaimsConfig::default();
     let records = BTreeMap::new();
     for pass in 1..=max {
         let mut started = 0;
@@ -197,7 +199,7 @@ pub fn passes(
                 .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             seat.refresh(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
-            let cards = seat.cards(config, &claims);
+            let cards = seat.cards(config, claims);
             let lines = seat
                 .lines(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
@@ -244,12 +246,36 @@ pub fn passes(
     Ok(Ended::MaxPasses)
 }
 
+/// Why `lens run` refuses to start for now. Each claim's accept line comes
+/// from the claims settings frozen when its task opened, and no BBP
+/// interface shows them to a lens or to the host. Assuming the defaults
+/// would show models a false accept line and pick the wrong tier.
+pub const UNKNOWN_CLAIMS: &str = "lens run needs the task's frozen claims settings (its accept lines), and no BBP interface exposes them yet; refusing to assume the defaults";
+
+/// The claims settings task `o.task` was opened with: see [`UNKNOWN_CLAIMS`].
+fn task_claims(_: &Options) -> Result<ClaimsConfig, String> {
+    Err(UNKNOWN_CLAIMS.to_owned())
+}
+
+/// The command's result: the log on a clean end (quiet, the pass cap, or a
+/// task ceiling, which pauses the task by design), an error carrying the
+/// log when the runner itself failed (an unsaved meter, a refused post, a
+/// lens with no prefix).
+pub fn outcome(ended: &Ended, mut log: String) -> Result<String, String> {
+    let _ = writeln!(log, "ended: {ended:?}");
+    match ended {
+        Ended::Halted(Halt::Unsaved(_) | Halt::Board(_) | Halt::NoPrefix(_)) => Err(log),
+        Ended::Quiet | Ended::MaxPasses | Ended::Halted(Halt::Task(_)) => Ok(log),
+    }
+}
+
 /// Run `o`: open the store and the sessions, build the providers, read
 /// the prompts, then [`passes`]. Returns the log and how it ended.
 pub fn run(o: &Options) -> Result<String, String> {
     let text = std::fs::read_to_string(&o.config)
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
     let config = LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
+    let claims = task_claims(o)?;
     let base = o.config.parent().map(PathBuf::from).unwrap_or_default();
     let rules = match &o.rules {
         Some(p) => {
@@ -273,9 +299,11 @@ pub fn run(o: &Options) -> Result<String, String> {
     };
     let mut seats: BTreeMap<String, Box<dyn Seat>> = BTreeMap::new();
     let mut prefixes = BTreeMap::new();
+    let run = run_id()?;
+    let _ = writeln!(log, "run {run}");
     for lens in &config.lenses {
         let child = Child::spawn(&o.bbp, &o.dir, &o.task, &lens.id)?;
-        let mut session = Session::new(&lens.id, child);
+        let mut session = Session::new(&lens.id, child, &run);
         let intent = session.brief().map_err(|e| format!("{}: {e}", lens.id))?;
         let path = base.join(&lens.prompt);
         let prompt = std::fs::read_to_string(&path)
@@ -297,6 +325,7 @@ pub fn run(o: &Options) -> Result<String, String> {
     let mut state = State::default();
     let lenses = Lenses {
         config: &config,
+        claims: &claims,
         seats: &mut seats,
         prefixes: &prefixes,
     };
@@ -308,8 +337,7 @@ pub fn run(o: &Options) -> Result<String, String> {
         o.max_passes,
         &mut log,
     )?;
-    let _ = writeln!(log, "ended: {ended:?}");
-    Ok(log)
+    outcome(&ended, log)
 }
 
 #[cfg(test)]
@@ -324,16 +352,18 @@ mod tests {
     const CONFIG: &str = r#"{
       "providers": {
         "codex": {"kind": "codex-cli", "context_tokens": 32768,
+                  "price": {"input": 0, "output": 0, "cached_input": 0}},
+        "claude": {"kind": "claude-cli", "context_tokens": 32768,
                   "price": {"input": 0, "output": 0, "cached_input": 0}}
       },
       "ceilings": {"experiment_usd": 1, "task_usd": 1, "task_calls": 10},
       "lenses": [
         {"id": "adversary", "prompt": "p", "domains": ["*"],
          "may_post": {"evidence": ["counter"]},
-         "models": {"routine": ["codex"], "contested": ["codex"]}},
+         "models": {"routine": ["codex"], "contested": ["claude"]}},
         {"id": "operator", "prompt": "p", "domains": ["*"],
          "may_post": {"evidence": ["counter"]},
-         "models": {"routine": ["codex"], "contested": ["codex"]}}
+         "models": {"routine": ["codex"], "contested": ["claude"]}}
       ]
     }"#;
 
@@ -361,9 +391,11 @@ mod tests {
         }
     }
 
-    /// A board that shows fixed cards and records posts.
+    /// A board that shows fixed cards and records posts. Cards given as a
+    /// BBP view are built the way a session builds them.
     struct FakeSeat {
         cards: Vec<Card>,
+        views: Vec<(rusty_bbp::ClaimView, rusty_bbp::ClaimBody)>,
         refreshes: u32,
         posts: Vec<Post>,
         refresh_error: Option<String>,
@@ -373,6 +405,7 @@ mod tests {
         fn new(cards: Vec<Card>) -> Self {
             Self {
                 cards,
+                views: vec![],
                 refreshes: 0,
                 posts: vec![],
                 refresh_error: None,
@@ -392,8 +425,13 @@ mod tests {
             self.refreshes += 1;
             self.refresh_error.clone().map_or(Ok(()), Err)
         }
-        fn cards(&self, _: &LensConfig, _: &ClaimsConfig) -> Vec<Card> {
-            self.cards.clone()
+        fn cards(&self, config: &LensConfig, claims: &ClaimsConfig) -> Vec<Card> {
+            let none = |_: MsgId| String::new();
+            let built = self
+                .views
+                .iter()
+                .map(|(v, b)| Card::from_view(v, b, &none, config, claims));
+            self.cards.iter().cloned().chain(built).collect()
         }
         fn lines(&mut self, _: &LensConfig) -> Result<Vec<Line>, String> {
             Ok(vec![])
@@ -403,11 +441,20 @@ mod tests {
         }
     }
 
-    struct Echo(Result<Vec<Post>, ClassifiedError>, u32);
+    /// Every provider gives the same reply; `asked` is who was asked what.
+    struct Echo(
+        Result<Vec<Post>, ClassifiedError>,
+        u32,
+        Vec<(AgentId, String)>,
+        Option<AgentId>,
+    );
 
     impl Model for Echo {
-        fn ask(&mut self, _: &Question) -> Result<Answer, ClassifiedError> {
+        fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
             self.1 += 1;
+            if let Some(id) = self.3 {
+                self.2.push((id, q.body.clone()));
+            }
             self.0.clone().map(|posts| Answer {
                 posts,
                 usage: Usage::default(),
@@ -416,9 +463,14 @@ mod tests {
     }
 
     impl Models for Echo {
-        fn get(&mut self, _: AgentId, _: Tools) -> Option<&mut dyn Model> {
+        fn get(&mut self, id: AgentId, _: Tools) -> Option<&mut dyn Model> {
+            self.3 = Some(id);
             Some(self)
         }
+    }
+
+    fn echo(reply: Result<Vec<Post>, ClassifiedError>) -> Echo {
+        Echo(reply, 0, vec![], None)
     }
 
     fn counter() -> Post {
@@ -439,6 +491,16 @@ mod tests {
         echo: &mut Echo,
         task_calls: u32,
         max: u32,
+    ) -> (Result<Ended, String>, String) {
+        go_with(seats, echo, task_calls, max, &ClaimsConfig::default())
+    }
+
+    fn go_with(
+        seats: Vec<(&str, FakeSeat)>,
+        echo: &mut Echo,
+        task_calls: u32,
+        max: u32,
+        claims: &ClaimsConfig,
     ) -> (Result<Ended, String>, String) {
         let cfg = config();
         let mut boxed: BTreeMap<String, Box<dyn Seat>> = seats
@@ -461,6 +523,7 @@ mod tests {
         };
         let lenses = Lenses {
             config: &cfg,
+            claims,
             seats: &mut boxed,
             prefixes: &prefixes,
         };
@@ -471,7 +534,7 @@ mod tests {
 
     #[test]
     fn passes_run_until_quiet() {
-        let mut echo = Echo(Ok(vec![counter()]), 0);
+        let mut echo = echo(Ok(vec![counter()]));
         let seats = vec![
             ("adversary", FakeSeat::new(vec![card(7)])),
             ("operator", FakeSeat::new(vec![card(7)])),
@@ -484,10 +547,7 @@ mod tests {
 
     #[test]
     fn a_failing_provider_stops_at_max_passes() {
-        let mut echo = Echo(
-            Err(ClassifiedError::Transient(AgentError("busy".into()))),
-            0,
-        );
+        let mut echo = echo(Err(ClassifiedError::Transient(AgentError("busy".into()))));
         let seats = vec![
             ("adversary", FakeSeat::new(vec![card(7)])),
             ("operator", FakeSeat::new(vec![card(7)])),
@@ -499,7 +559,7 @@ mod tests {
 
     #[test]
     fn a_halted_round_ends_the_run() {
-        let mut echo = Echo(Ok(vec![]), 0);
+        let mut echo = echo(Ok(vec![]));
         let seats = vec![
             ("adversary", FakeSeat::new(vec![card(7)])),
             ("operator", FakeSeat::new(vec![card(7)])),
@@ -511,7 +571,7 @@ mod tests {
 
     #[test]
     fn a_missing_seat_or_a_failed_refresh_is_an_error() {
-        let mut echo = Echo(Ok(vec![]), 0);
+        let mut echo = echo(Ok(vec![]));
         let (ended, _) = go(
             vec![("adversary", FakeSeat::new(vec![]))],
             &mut echo,
@@ -524,6 +584,119 @@ mod tests {
         let seats = vec![("adversary", bad), ("operator", FakeSeat::new(vec![]))];
         let (ended, _) = go(seats, &mut echo, 10, 20);
         assert_eq!(ended, Err("adversary: bbp mcp exited".to_owned()));
+    }
+
+    /// A split claim at score +5 with four evidence items: under half of
+    /// a 20-point accept line, not under half of the default 8.
+    fn split_view() -> (rusty_bbp::ClaimView, rusty_bbp::ClaimBody) {
+        let item = |m: u64, author: &str, direction: Direction| rusty_bbp::claims::EvidenceView {
+            msg: MsgId(m),
+            author: rusty_bbp::PrincipalId(author.to_owned()),
+            direction,
+            kind: EvidenceKind::Cited,
+            delta: 0,
+            epoch: 0,
+            scoring: true,
+        };
+        let view = rusty_bbp::ClaimView {
+            id: MsgId(7),
+            text: "Hash by size first".to_owned(),
+            domains: vec!["dedup".to_owned()],
+            status: ClaimStatus::Open,
+            score: 5,
+            confidence: 50,
+            epoch: 0,
+            spent: 4,
+            budget: 16,
+            evidence: vec![
+                item(20, "a", Direction::Support),
+                item(21, "b", Direction::Support),
+                item(22, "c", Direction::Counter),
+                item(23, "d", Direction::Support),
+            ],
+            deps: vec![],
+            candidates: vec![],
+            sole_candidate: false,
+            current: None,
+            failing: vec![],
+            tests_changed: vec![],
+            endorsement: None,
+            holdout_due: false,
+        };
+        let body = rusty_bbp::ClaimBody {
+            text: view.text.clone(),
+            domains: view.domains.clone(),
+            deps: vec![],
+            answers: None,
+            supersedes: None,
+            stakes: Stakes::Medium,
+            reversible: true,
+        };
+        (view, body)
+    }
+
+    fn asked_with(claims: &ClaimsConfig) -> Vec<(AgentId, String)> {
+        let mut seat = FakeSeat::new(vec![]);
+        seat.views.push(split_view());
+        let mut e = echo(Ok(vec![]));
+        let seats = vec![("adversary", seat), ("operator", FakeSeat::new(vec![]))];
+        let (ended, log) = go_with(seats, &mut e, 10, 1, claims);
+        assert!(ended.is_ok(), "{ended:?} {log}");
+        e.2
+    }
+
+    #[test]
+    fn the_tasks_accept_line_sets_the_tier_and_the_card() {
+        let id = |s: &str| AgentId::new(s).expect("id");
+        let default = asked_with(&ClaimsConfig::default());
+        assert_eq!(default[0].0, id("codex"), "routine under the default 8");
+        assert!(default[0].1.contains("(accepts at +8)"), "{}", default[0].1);
+        let custom = ClaimsConfig {
+            accept_at: 20,
+            ..ClaimsConfig::default()
+        };
+        let strict = asked_with(&custom);
+        assert_eq!(strict[0].0, id("claude"), "contested under the task's 20");
+        assert!(strict[0].1.contains("(accepts at +20)"), "{}", strict[0].1);
+    }
+
+    #[test]
+    fn the_command_fails_on_the_runners_own_halts() {
+        let ok = |e: Ended| outcome(&e, "log\n".to_owned());
+        assert!(ok(Ended::Quiet).is_ok_and(|l| l.starts_with("log\n")));
+        assert!(ok(Ended::MaxPasses).is_ok());
+        assert!(ok(Ended::Halted(Halt::Task(Stop::TaskCalls))).is_ok());
+        for h in [
+            Halt::Unsaved("disk full".to_owned()),
+            Halt::Board("refused".to_owned()),
+            Halt::NoPrefix("operator".to_owned()),
+        ] {
+            let err = ok(Ended::Halted(h.clone())).expect_err("a failure");
+            assert!(err.starts_with("log\n"), "the log is kept: {err}");
+            assert!(err.contains(&format!("{h:?}")), "{err}");
+        }
+    }
+
+    #[test]
+    fn run_refuses_without_the_tasks_claims_settings() {
+        let dir = std::env::temp_dir().join(format!("orch-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let cfg = dir.join("lens.json");
+        std::fs::write(&cfg, CONFIG).expect("config");
+        let o = options(
+            argv(&format!(
+                "run {} --bbp /nonexistent/bbp --dir /d --task t --state /s --experiment e",
+                cfg.display()
+            )),
+            dir.clone(),
+        )
+        .expect("options");
+        assert_eq!(
+            run(&o),
+            Err(UNKNOWN_CLAIMS.to_owned()),
+            "before any session or store"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     fn argv(s: &str) -> Vec<String> {

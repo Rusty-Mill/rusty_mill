@@ -933,7 +933,7 @@ mod tests {
             .push_back(Ok(
                 r#"{"id":1,"content":"Dedup 20 TB of photos."}"#.to_owned()
             ));
-        let mut s = Session::new("adversary", fake);
+        let mut s = Session::new("adversary", fake, "r1");
         assert_eq!(s.brief(), Ok("Dedup 20 TB of photos.".to_owned()));
         assert_eq!(word(s.rpc.args("get_artifact")[0], "id"), "1");
     }
