@@ -735,6 +735,72 @@ fn human_ok(dir: &Path, verb: &str, args: &[&str]) {
     );
 }
 
+fn log_len(dir: &Path) -> usize {
+    open_driver(dir, &task())
+        .expect("driver")
+        .store
+        .events(&task(), 0)
+        .expect("events")
+        .len()
+}
+
+/// Owner decision 2026-11-04: `extend-claim` gives an evidence run more
+/// budget just as `extend` does, so it is refused on an evidence task at the
+/// call and appends nothing; on any other task it still applies.
+#[test]
+fn extend_claim_is_refused_on_an_evidence_task_and_applies_elsewhere() {
+    let dir = tempdir("extend-claim-evidence");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "one", true);
+    let arg = format!("msg:{c}");
+    human_ok(&dir, "extend-claim", &[&arg]);
+    assert_eq!(
+        state(&dir).claims.get(MsgId(c)).expect("claim").extensions,
+        1
+    );
+
+    rusty_bbp_host::moderator::write_evidence_marker(&dir, &task(), 5.0, "sha").expect("marker");
+    let before = log_len(&dir);
+    let rev = state(&dir).rev;
+    let fenced = human::perform_fenced(
+        &dir,
+        &task(),
+        "extend-claim",
+        &[&arg],
+        Some(rev),
+        "owner",
+        Some(rev),
+        None,
+    )
+    .expect("fenced");
+    let (code, detail) = rejected(fenced);
+    assert_eq!(code, Code::BadHumanInput);
+    assert!(detail.contains("evidence"), "{detail}");
+    let cli = human::perform(&dir, &task(), "extend-claim", &[&arg], None).unwrap_err();
+    assert!(cli.contains("evidence"), "{cli}");
+    let preview = human::preview_fenced(
+        &dir,
+        &task(),
+        "extend-claim",
+        &[&arg],
+        Some(rev),
+        "owner",
+        Some(rev),
+        None,
+    )
+    .expect("preview");
+    assert!(
+        matches!(&preview.response, Response::Rejected(r) if r.code == Code::BadHumanInput),
+        "{preview:?}"
+    );
+    assert_eq!(
+        log_len(&dir),
+        before,
+        "a refused extend-claim appends nothing"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_acted_on_escalation_names_its_marks_and_refine_answers_it() {
     let dir = tempdir("acted");

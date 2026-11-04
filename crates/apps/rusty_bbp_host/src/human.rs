@@ -245,12 +245,12 @@ pub fn perform_as(
 }
 
 /// An evidence run runs under the budget its task was opened with (owner
-/// decision, 2026-11-01), so `extend` refuses, for every field, on a task
-/// that carries an evidence marker: `Ok(Err(..))`, a `BadHumanInput`
+/// decision, 2026-11-01), so `extend` (every field) and `extend-claim`
+/// refuse on a task that carries an evidence marker: `Ok(Err(..))`, a `BadHumanInput`
 /// rejection. Only a specific not-found means there is no marker; any other
 /// error reading it, or taking the admission lock, is `Err`, a host error
 /// that refuses too but is not the human's fault. `bbp pairs` counts a
-/// run whose log holds an extension anyway (one logged by an older `bbp`) as
+/// run whose log holds a task-budget extension anyway (one logged by an older `bbp`) as
 /// a failed run, so this check is the early, operator-facing half and not the
 /// only one.
 ///
@@ -266,7 +266,12 @@ fn refuse_evidence_extension(
     while let HumanAction::Fenced { action, .. } = act {
         act = action;
     }
-    if !matches!(act, HumanAction::BudgetExtended { .. }) {
+    // `extend-claim` gives a claims-mode run more budget just as `extend`
+    // does (owner decision, 2026-11-04), so it is refused the same way.
+    if !matches!(
+        act,
+        HumanAction::BudgetExtended { .. } | HumanAction::ClaimBudgetExtended { .. }
+    ) {
         return Ok(Ok(None));
     }
     let admission = crate::moderator::evidence_admission(dir, task)?;
