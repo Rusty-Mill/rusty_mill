@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use orch_lens::card::Card;
 use orch_lens::context::{Line, MAX_LINES};
@@ -25,7 +25,7 @@ use orch_lens::round::Board;
 use orch_lens::{LensConfig, Post};
 use rusty_bbp::{
     ArtId, Body, ClaimBody, ClaimStatus, ClaimView, ClaimsConfig, Direction, EvidenceKind, MsgId,
-    Ref, Response, Rev, Sha256, Stakes,
+    Ref, Response, Rev, Stakes,
 };
 use rusty_serde::Value;
 
@@ -45,6 +45,7 @@ pub struct Child {
     stdin: ChildStdin,
     lines: Receiver<std::io::Result<String>>,
     next: u64,
+    deadline: Duration,
 }
 
 impl Child {
@@ -82,6 +83,7 @@ impl Child {
             stdin,
             lines,
             next: 0,
+            deadline: CALL_DEADLINE,
         };
         let init = map(vec![
             ("protocolVersion", "2025-06-18".into()),
@@ -99,16 +101,25 @@ impl Child {
         Ok(s)
     }
 
+    /// Bound each later call by `deadline` instead of [`CALL_DEADLINE`].
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = deadline;
+        self
+    }
+
     fn send(&mut self, msg: &Value) -> Result<(), String> {
         writeln!(self.stdin, "{msg}")
             .and_then(|()| self.stdin.flush())
             .map_err(|e| format!("bbp mcp: {e}"))
     }
 
-    /// Send one request and wait for its response's `result`.
+    /// Send one request and wait for its response's `result`. The deadline
+    /// is for the whole request: replies to other ids and notifications do
+    /// not extend it.
     fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
         self.next += 1;
         let id = self.next;
+        let until = Instant::now() + self.deadline;
         self.send(&map(vec![
             ("jsonrpc", "2.0".into()),
             ("id", id.into()),
@@ -116,14 +127,19 @@ impl Child {
             ("params", params),
         ]))?;
         loop {
-            let line = match self.lines.recv_timeout(CALL_DEADLINE) {
+            let timeout = || {
+                format!(
+                    "bbp mcp: no answer to {method} in {}ms",
+                    self.deadline.as_millis()
+                )
+            };
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(timeout());
+            }
+            let line = match self.lines.recv_timeout(left) {
                 Ok(line) => line.map_err(|e| format!("bbp mcp: {e}"))?,
-                Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!(
-                        "bbp mcp: no answer to {method} in {}s",
-                        CALL_DEADLINE.as_secs()
-                    ))
-                }
+                Err(RecvTimeoutError::Timeout) => return Err(timeout()),
                 Err(RecvTimeoutError::Disconnected) => return Err("bbp mcp exited".to_owned()),
             };
             let reply: Value = rusty_serde::json::from_str(&line)
@@ -191,11 +207,23 @@ pub struct Session<R> {
     /// The task revision the views are current to.
     rev: Rev,
     brief: Option<ArtId>,
+    /// This run's id: with `posted`, it names each logical post.
+    run: String,
+    posted: u64,
+}
+
+/// A fresh run id, so a later run's posts never replay an earlier run's.
+pub fn run_id() -> Result<String, String> {
+    let bytes = rusty_rand::bytes(16).map_err(|e| format!("run id: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 impl<R: Rpc> Session<R> {
-    pub fn new(lens: &str, rpc: R) -> Self {
+    /// A session for `lens` in run `run` ([`run_id`]).
+    pub fn new(lens: &str, rpc: R, run: &str) -> Self {
         Self {
+            run: run.to_owned(),
+            posted: 0,
             lens: lens.to_owned(),
             rpc,
             cursor: None,
@@ -209,12 +237,7 @@ impl<R: Rpc> Session<R> {
 
     fn ask(&mut self, tool: &str, args: Value) -> Result<Response, String> {
         let text = self.rpc.call(tool, args)?;
-        let resp: Response = rusty_serde::json::from_str(&text)
-            .map_err(|e| format!("{tool}: unreadable answer: {e}"))?;
-        match resp {
-            Response::Rejected(r) => Err(format!("{tool}: {:?}: {}", r.code, r.detail)),
-            other => Ok(other),
-        }
+        parse(&text, tool)
     }
 
     /// Bring the lens's view up to date: new messages (claim bodies and
@@ -338,13 +361,22 @@ impl<R: Rpc> Session<R> {
 }
 
 impl<R: Rpc> Board for Session<R> {
+    /// Each post is its own logical post with its own op id. A call that
+    /// fails in transport is sent once more with the same op, so BBP
+    /// replays it if the first one landed; a rejection is not retried.
     fn post(&mut self, lens: &str, posts: &[Post]) -> Result<(), String> {
         if lens != self.lens {
             return Err(format!("{}'s session cannot post for {lens}", self.lens));
         }
         for p in posts {
-            let args = post_args(p, self.brief);
-            match self.ask("post", args)? {
+            self.posted += 1;
+            let op = format!("lens-{}-{}", self.run, self.posted);
+            let args = post_args(p, self.brief, &op);
+            let text = match self.rpc.call("post", args.clone()) {
+                Ok(text) => text,
+                Err(_) => self.rpc.call("post", args)?,
+            };
+            match parse(&text, "post")? {
                 Response::Posted(_) => {}
                 other => return Err(format!("post answered {other:?}")),
             }
@@ -353,10 +385,19 @@ impl<R: Rpc> Board for Session<R> {
     }
 }
 
-/// The `post` tool's arguments for `p`. Every post refs the brief. The op
-/// id is a digest of the rest, so posting the same thing again replays
-/// BBP's first answer instead of adding a copy.
-fn post_args(p: &Post, brief: Option<ArtId>) -> Value {
+/// A tool's answer; a rejection is an error.
+fn parse(text: &str, tool: &str) -> Result<Response, String> {
+    let resp: Response =
+        rusty_serde::json::from_str(text).map_err(|e| format!("{tool}: unreadable answer: {e}"))?;
+    match resp {
+        Response::Rejected(r) => Err(format!("{tool}: {:?}: {}", r.code, r.detail)),
+        other => Ok(other),
+    }
+}
+
+/// The `post` tool's arguments for `p`, under op id `op`. Every post refs
+/// the brief.
+fn post_args(p: &Post, brief: Option<ArtId>, op: &str) -> Value {
     let brief_ref = brief.map(Ref::art);
     let mut fields: Vec<(&str, Value)> = match p {
         Post::Claim { body, refs } => {
@@ -388,8 +429,7 @@ fn post_args(p: &Post, brief: Option<ArtId>) -> Value {
             ("refs", refs_of(&[], brief_ref.as_ref())),
         ],
     };
-    let digest = Sha256::of(map(fields.clone()).to_string().as_bytes()).hex();
-    fields.insert(0, ("op", format!("lens-{}", &digest[..32]).into()));
+    fields.insert(0, ("op", op.into()));
     map(fields)
 }
 
@@ -471,6 +511,14 @@ mod tests {
                 .entry(tool.to_owned())
                 .or_default()
                 .push_back(Ok(text));
+            self
+        }
+
+        fn fail(mut self, tool: &str, error: &str) -> Self {
+            self.replies
+                .entry(tool.to_owned())
+                .or_default()
+                .push_back(Err(error.to_owned()));
             self
         }
 
@@ -648,7 +696,7 @@ mod tests {
                 Response::Claims(vec![view(7, ClaimStatus::Open, &[20])]),
             );
         let cfg = config();
-        let mut s = Session::new("adversary", fake);
+        let mut s = Session::new("adversary", fake, "r1");
         s.refresh(&cfg).expect("refresh");
         let cards = s.cards(&cfg, &ClaimsConfig::default());
         assert_eq!(cards.len(), 1);
@@ -685,7 +733,7 @@ mod tests {
                 Response::Claims(vec![view(8, ClaimStatus::Accepted, &[])]),
             );
         let cfg = config();
-        let mut s = Session::new("adversary", fake);
+        let mut s = Session::new("adversary", fake, "r1");
         s.refresh(&cfg).expect("first");
         s.refresh(&cfg).expect("second");
         assert_eq!(word(s.rpc.args("claims_delta")[1], "after"), "5");
@@ -708,7 +756,7 @@ mod tests {
                 ]),
             );
         let cfg = config();
-        let mut s = Session::new("adversary", fake);
+        let mut s = Session::new("adversary", fake, "r1");
         s.refresh(&cfg).expect("refresh");
         let ids: Vec<MsgId> = s
             .cards(&cfg, &ClaimsConfig::default())
@@ -724,7 +772,7 @@ mod tests {
             rusty_bbp::Code::BadCredential,
             "reassigned",
         ));
-        let mut s = Session::new("adversary", Fake::default().on("task_card", rej));
+        let mut s = Session::new("adversary", Fake::default().on("task_card", rej), "r1");
         let err = s.refresh(&config()).expect_err("rejected");
         assert!(err.contains("reassigned"), "{err}");
     }
@@ -751,7 +799,7 @@ mod tests {
                 Response::Line(Some("msg:7 ACCEPTED".to_owned())),
             );
         let cfg = config();
-        let mut s = Session::new("adversary", fake);
+        let mut s = Session::new("adversary", fake, "r1");
         s.refresh(&cfg).expect("refresh");
         let lines = s.lines(&cfg).expect("lines");
         let text: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
@@ -779,19 +827,12 @@ mod tests {
     }
 
     #[test]
-    fn a_post_refs_the_brief_and_its_op_is_a_digest() {
-        let a = post_args(&counter("x"), Some(ArtId(1)));
+    fn a_post_refs_the_brief_and_carries_its_op() {
+        let a = post_args(&counter("x"), Some(ArtId(1)), "lens-r1-1");
+        assert_eq!(word(&a, "op"), r#""lens-r1-1""#);
         assert_eq!(word(&a, "refs"), r#"["art:1"]"#);
         assert_eq!(word(&a, "evidence"), r#"["msg:3"]"#);
         assert_eq!(word(&a, "direction"), r#""counter""#);
-        assert_eq!(
-            word(&a, "op"),
-            word(&post_args(&counter("x"), Some(ArtId(1))), "op")
-        );
-        assert_ne!(
-            word(&a, "op"),
-            word(&post_args(&counter("y"), Some(ArtId(1))), "op")
-        );
         let claim = Post::Claim {
             body: ClaimBody {
                 text: "Use a size index".to_owned(),
@@ -804,7 +845,7 @@ mod tests {
             },
             refs: vec![Ref::art(ArtId(1))],
         };
-        let c = post_args(&claim, Some(ArtId(1)));
+        let c = post_args(&claim, Some(ArtId(1)), "lens-r1-2");
         assert_eq!(word(&c, "refs"), r#"["art:1"]"#, "the brief once");
         assert_eq!(word(&c, "answers"), "3");
         assert_eq!(word(&c, "stakes"), r#""high""#);
@@ -812,14 +853,70 @@ mod tests {
         assert!(c.get("supersedes").is_none());
     }
 
+    fn ops(s: &Session<Fake>) -> Vec<String> {
+        s.rpc.args("post").iter().map(|a| word(a, "op")).collect()
+    }
+
+    #[test]
+    fn identical_posts_from_independent_jobs_get_their_own_ops() {
+        let fake = Fake::default()
+            .on("post", Response::Posted(MsgId(30)))
+            .on("post", Response::Posted(MsgId(31)))
+            .on("post", Response::Posted(MsgId(32)));
+        let mut s = Session::new("architect", fake, "r1");
+        s.post("architect", &[counter("same")]).expect("first job");
+        s.post("architect", &[counter("same"), counter("same")])
+            .expect("second job, two identical posts");
+        assert_eq!(
+            ops(&s),
+            [r#""lens-r1-1""#, r#""lens-r1-2""#, r#""lens-r1-3""#]
+        );
+        let other_run = Fake::default().on("post", Response::Posted(MsgId(40)));
+        let mut t = Session::new("architect", other_run, "r2");
+        t.post("architect", &[counter("same")])
+            .expect("a later run");
+        assert_eq!(ops(&t), [r#""lens-r2-1""#], "a later run never replays");
+    }
+
+    #[test]
+    fn a_post_lost_in_transport_is_retried_with_the_same_op() {
+        let fake = Fake::default()
+            .fail("post", "bbp mcp: no answer to tools/call in 30000ms")
+            .on("post", Response::Posted(MsgId(30)));
+        let mut s = Session::new("adversary", fake, "r1");
+        s.post("adversary", &[counter("x")]).expect("replayed");
+        assert_eq!(ops(&s), [r#""lens-r1-1""#, r#""lens-r1-1""#]);
+        let posts = s.rpc.args("post");
+        assert_eq!(posts[0], posts[1], "the retry is the same call");
+    }
+
+    #[test]
+    fn a_rejected_post_is_not_retried() {
+        let rej = Response::Rejected(rusty_bbp::Rejection::new(
+            rusty_bbp::Code::BadCredential,
+            "reassigned",
+        ));
+        let mut s = Session::new("adversary", Fake::default().on("post", rej), "r1");
+        let err = s.post("adversary", &[counter("x")]).expect_err("rejected");
+        assert!(err.contains("reassigned"), "{err}");
+        assert_eq!(s.rpc.args("post").len(), 1);
+    }
+
     #[test]
     fn a_session_posts_only_for_its_own_lens() {
         let fake = Fake::default().on("post", Response::Posted(MsgId(30)));
-        let mut s = Session::new("adversary", fake);
+        let mut s = Session::new("adversary", fake, "r1");
         assert!(s.post("operator", &[counter("x")]).is_err());
         assert!(s.rpc.calls.is_empty());
         s.post("adversary", &[counter("x")]).expect("posted");
         assert_eq!(s.rpc.args("post").len(), 1);
+    }
+
+    #[test]
+    fn run_ids_are_fresh() {
+        let a = run_id().expect("id");
+        assert_eq!(a.len(), 32);
+        assert_ne!(a, run_id().expect("id"));
     }
 
     #[test]
@@ -858,15 +955,53 @@ printf '{"jsonrpc":"2.0","id":99,"result":{}}\n'
 printf '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"%s %s %s"}]}}\n' "$BBP_PRINCIPAL" "$BBP_SESSION" "${GH_TOKEN:-scrubbed}"
 "#;
 
+    /// A stand-in that answers initialize, then sends replies to other ids
+    /// forever, faster than any deadline.
+    #[cfg(unix)]
+    const CHATTY: &str = r#"#!/bin/sh
+read -r l
+printf '{"jsonrpc":"2.0","id":1,"result":{}}\n'
+while :; do
+  printf '{"jsonrpc":"2.0","id":99,"result":{}}\n'
+  printf '{"jsonrpc":"2.0","method":"notifications/progress"}\n'
+  sleep 0.02
+done
+"#;
+
+    /// Write `script` as an executable stand-in `bbp` in a fresh dir.
+    #[cfg(unix)]
+    fn stand_in(name: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("orch-bbp-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let bin = dir.join("bbp");
+        std::fs::write(&bin, script).expect("script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_replies_do_not_extend_the_deadline() {
+        let dir = stand_in("chatty", CHATTY);
+        let mut child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+            .expect("spawn")
+            .with_deadline(Duration::from_millis(300));
+        let started = Instant::now();
+        let err = child.call("task_card", map(vec![])).expect_err("times out");
+        let took = started.elapsed();
+        assert!(err.contains("no answer"), "{err}");
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        assert!(took < Duration::from_secs(5), "bounded: {took:?}");
+        drop(child);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_child_session_answers_by_id_and_reports_its_exit() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("orch-bbp-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
+        let dir = stand_in("once", SCRIPT);
         let bin = dir.join("bbp");
-        std::fs::write(&bin, SCRIPT).expect("script");
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o700)).expect("chmod");
         let mut child = Child::spawn(&bin, &dir, "t", "adversary").expect("spawn");
         assert_eq!(
             child.call("task_card", map(vec![])),
