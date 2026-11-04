@@ -391,10 +391,10 @@ mod tests {
       "lenses": [
         {"id": "adversary", "prompt": "p", "domains": ["*"],
          "may_post": {"evidence": ["counter"]},
-         "models": {"routine": ["codex"], "contested": ["claude"]}},
+         "models": {"routine": ["codex", "claude"], "contested": ["claude"]}},
         {"id": "operator", "prompt": "p", "domains": ["*"],
          "may_post": {"evidence": ["counter"]},
-         "models": {"routine": ["codex"], "contested": ["claude"]}}
+         "models": {"routine": ["codex", "claude"], "contested": ["claude"]}}
       ]
     }"#;
 
@@ -718,6 +718,69 @@ mod tests {
         let (ended, log) = go_from(&mut restored, &mut |_| Ok(()), seats, &mut echo, 10, 20);
         assert_eq!(ended, Ok(Ended::Quiet));
         assert_eq!(echo.1, 4, "each lens looks at the new epoch blind: {log}");
+    }
+
+    fn seats_with(cards: &[Card]) -> Vec<(&'static str, FakeSeat)> {
+        vec![
+            ("adversary", FakeSeat::new(cards.to_vec())),
+            ("operator", FakeSeat::new(cards.to_vec())),
+        ]
+    }
+
+    /// Both passes done on `before` (blind found nothing, the look-harder
+    /// re-ask found nothing) and kept; then a restart onto `after`. Gives
+    /// the asks before and after, and the restart's log.
+    fn restart_after_both_passes(before: &[Card], after: &[Card]) -> (u32, u32, String) {
+        let mut echo = echo(Ok(vec![]));
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            seats_with(before),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        let first = echo.1;
+        let saved = kept.expect("kept");
+        assert!(saved
+            .progress
+            .iter()
+            .all(|p| p.blind.is_some() && p.look_harder.is_some()));
+        let mut restored = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            seats_with(after),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        (first, echo.1 - first, log)
+    }
+
+    #[test]
+    fn a_reopen_after_both_passes_gets_both_passes_again_and_other_claims_keep_theirs() {
+        let both = [card(7), card(8)];
+        let (first, again, log) = restart_after_both_passes(&both, &both);
+        assert_eq!(first, 8, "blind and look-harder, two lenses, two claims");
+        assert_eq!(again, 0, "same epoch resumes with nothing to do: {log}");
+        let mut reopened = card(7);
+        reopened.epoch = 1;
+        let (_, again, log) = restart_after_both_passes(&both, &[reopened, card(8)]);
+        assert_eq!(again, 4, "claim 7's new epoch, both passes per lens: {log}");
+        assert_eq!(log.matches("msg:7").count(), 4, "{log}");
+        assert_eq!(
+            log.matches("msg:8").count(),
+            0,
+            "claim 8 keeps its work: {log}"
+        );
     }
 
     #[test]
