@@ -14,6 +14,7 @@
 //! - [`class`]: data classes; nothing above a provider's clearance reaches it.
 //! - [`tier`]: routine or contested, and the cleared providers in order.
 //! - [`meter`]: integer micro-dollars, reserved before every call.
+//! - [`breaker`]: pause a task whose spend rises while its claims stay flat.
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
@@ -23,6 +24,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+pub mod breaker;
 pub mod call;
 pub mod card;
 pub mod class;
