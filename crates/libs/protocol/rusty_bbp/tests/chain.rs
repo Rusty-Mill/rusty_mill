@@ -175,3 +175,64 @@ fn verify_reports_a_partial_line_and_leaves_it_in_place() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The final line has no successor whose `prev` would catch a bad envelope,
+/// so the envelope itself is checked. Load and verify refuse the same lines.
+#[test]
+fn a_malformed_final_envelope_is_refused_by_load_and_verify() {
+    let tampers: [Tamper; 6] = [
+        ("brace replaced", |ls| {
+            let last = ls.last_mut().unwrap();
+            last.pop();
+            last.push('x');
+        }),
+        ("brace omitted", |ls| {
+            ls.last_mut().unwrap().pop();
+        }),
+        ("trailing junk", |ls| {
+            ls.last_mut().unwrap().push_str("junk")
+        }),
+        ("extra brace", |ls| ls.last_mut().unwrap().push('}')),
+        ("junk inside", |ls| {
+            let last = ls.last_mut().unwrap();
+            last.insert(last.len() - 1, 'x');
+        }),
+        ("empty events", |ls| {
+            let last = ls.last_mut().unwrap();
+            let at = last.find("\"events\":").unwrap() + "\"events\":".len();
+            last.replace_range(at..last.len() - 1, "");
+        }),
+    ];
+    for one_line in [false, true] {
+        for (name, tamper) in tampers {
+            let dir = tempdir();
+            let log = built(&dir);
+            let mut ls = lines(&log);
+            if one_line {
+                ls.truncate(1);
+            }
+            tamper(&mut ls);
+            write_lines(&log, &ls);
+            let err = refused(&dir);
+            assert!(err.contains("line"), "{name} (one line: {one_line}): {err}");
+            assert!(
+                verify_log(&dir, &TaskId("T1".into())).is_err(),
+                "{name} (one line: {one_line}): verify must refuse what load refuses"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+#[test]
+fn a_one_line_chained_log_loads_and_verifies() {
+    let dir = tempdir();
+    let log = built(&dir);
+    let mut ls = lines(&log);
+    ls.truncate(1);
+    write_lines(&log, &ls);
+    FsStore::open(&dir).expect("a one-line chained log opens");
+    let chain = verify_log(&dir, &TaskId("T1".into())).expect("verify");
+    assert_eq!((chain.hashes.len(), chain.unchained), (1, 0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
