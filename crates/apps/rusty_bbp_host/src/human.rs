@@ -235,23 +235,18 @@ fn affects(args: &[&str]) -> Result<Affects, String> {
     })
 }
 
-/// #598: `intent FILE …` stores FILE's bytes as a blob and names it
-/// `SHA:LEN` for [`action`]. Any other verb passes through unchanged.
-fn stage_brief(
-    dir: &Path,
-    task: &TaskId,
-    verb: &str,
-    args: &[&str],
-) -> Result<Vec<String>, String> {
+/// `intent FILE ...` read and hashed: the args with FILE replaced by its
+/// `SHA:LEN` blob ref, and the bytes to store before that ref is committed.
+/// Reads only; any other verb passes through with no bytes.
+fn brief_ref(verb: &str, args: &[&str]) -> Result<(Vec<String>, Option<Vec<u8>>), String> {
     let mut out: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
     if verb != "intent" {
-        return Ok(out);
+        return Ok((out, None));
     }
     let file = args.first().ok_or("intent: missing the brief FILE")?;
     let bytes = std::fs::read(file).map_err(|e| format!("intent: {file}: {e}"))?;
-    let b = open_driver(dir, task)?.store.blob_put(&bytes);
-    out[0] = format!("{}:{}", b.sha.hex(), b.len);
-    Ok(out)
+    out[0] = format!("{}:{}", Sha256::of(&bytes).hex(), bytes.len());
+    Ok((out, Some(bytes)))
 }
 
 /// Who answered when the op carries no label.
@@ -433,9 +428,10 @@ pub fn preview_fenced(
 ) -> Result<Preview, String> {
     let d = open_driver(dir, task)?;
     let rev_now = d.state.rev;
-    let staged = stage_brief(dir, task, verb, args)?;
-    let staged: Vec<&str> = staged.iter().map(String::as_str).collect();
-    let cmd = match command(verb, &staged, rev, by, fence, op)? {
+    // A preview stores nothing: the brief is hashed, never written.
+    let (args, _) = brief_ref(verb, args)?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let cmd = match command(verb, &args, rev, by, fence, op)? {
         Ok(cmd) => cmd,
         Err(rej) => {
             return Ok(Preview {
@@ -479,9 +475,9 @@ pub fn perform_fenced(
     fence: Option<Rev>,
     op: Option<OpId>,
 ) -> Result<Response, String> {
-    let staged = stage_brief(dir, task, verb, args)?;
-    let staged: Vec<&str> = staged.iter().map(String::as_str).collect();
-    let cmd = match command(verb, &staged, rev, by, fence, op)? {
+    let (args, brief) = brief_ref(verb, args)?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let cmd = match command(verb, &args, rev, by, fence, op)? {
         Ok(cmd) => cmd,
         Err(rej) => return Ok(Response::Rejected(rej)),
     };
@@ -496,9 +492,13 @@ pub fn perform_fenced(
         Err(rej) if fence.is_some() => return Ok(Response::Rejected(rej)),
         Err(rej) => return Err(rej.detail),
     };
-    open_driver(dir, task)?
-        .dispatch(&cmd, now())
-        .map_err(|e| format!("{e:?}"))
+    let mut d = open_driver(dir, task)?;
+    // Blobs before references: the brief is stored only now, just before
+    // the command that names it, so a refused command leaves nothing.
+    if let Some(bytes) = &brief {
+        d.store.blob_put(bytes);
+    }
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
 
 #[cfg(test)]

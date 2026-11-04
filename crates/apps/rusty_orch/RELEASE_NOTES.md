@@ -4,6 +4,25 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Lens cards show the task's accept line
+**2026-11-04**
+
+- BBP claim cards now carry each claim's accept line and every evidence
+  item's strength and note (#594). `lens run` reads them from the card,
+  so it can start: it no longer needs the task's claims settings or
+  reads evidence notes from message pages.
+
+## `rusty_orch lens run`
+**2026-11-04**
+
+- New command that runs the configured lenses on one BBP claims task
+  until the board goes quiet (#594). It calls real models, so don't run it
+  until a live run is approved. A restart asks every lens's first pass
+  again until the runner's memory is saved (next change).
+- Each claim's accept line comes from its BBP card, never from assumed
+  defaults. It exits nonzero when the runner itself fails (unsaved meter,
+  refused post).
+
 ## Lens models are told how to answer
 **2026-11-04**
 

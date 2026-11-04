@@ -12,7 +12,7 @@
 
 use orch_cli::{excerpt, CommandRunner, Exit};
 use orch_dispatch::{AgentError, ClassifiedError};
-use orch_lens::{parse, Answer, Model, Question, Usage};
+use orch_lens::{check, Answer, Model, Question, Usage};
 use rusty_json::Value;
 
 use crate::agent::{envelope, result, ClaudeAgent};
@@ -27,7 +27,7 @@ impl<C: CommandRunner> ClaudeAgent<C> {
     /// The argv for one lens question: the base argv with the lens tool
     /// set ([`ClaudeAgent::lens_read_only`], else none) and the question's
     /// prefix as the whole system prompt. No schema: the reply is checked
-    /// by [`orch_lens::parse`]. Public so tests and docs can pin it.
+    /// by [`orch_lens::check`]. Public so tests and docs can pin it.
     pub fn lens_argv(&self, prefix: &str) -> Vec<String> {
         let mut argv = self.base_argv(self.lens_tools);
         argv.push("--system-prompt".to_owned());
@@ -72,7 +72,7 @@ impl<C: CommandRunner> ClaudeAgent<C> {
 impl<C: CommandRunner> Model for ClaudeAgent<C> {
     /// Refuse without the no-overage assertion, check the subscription
     /// login and its account, then ask with the body on stdin. A
-    /// reply that is not UTF-8, does not pass [`parse`], or does not report
+    /// reply that is not UTF-8, does not pass [`check`], or does not report
     /// its usage is `Permanent`.
     fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
         let Some(account) = self.lens_no_overage.as_deref() else {
@@ -87,9 +87,9 @@ impl<C: CommandRunner> Model for ClaudeAgent<C> {
         let envelope = envelope(&exit)?;
         let usage = usage(&envelope).map_err(refuse)?;
         let text = result(&envelope);
-        let posts = parse(text, &q.allowed)
+        let reply = check(text, &q.shape)
             .map_err(|e| refuse(format!("{e}: {}", excerpt(text.as_bytes()))))?;
-        Ok(Answer { posts, usage })
+        Ok(Answer { reply, usage })
     }
 }
 

@@ -15,7 +15,7 @@
 //!
 //! [`ClaudeAgent`] also serves the lens runner's [`orch_lens::Model`]
 //! (#594): the question's prefix is the system prompt, its body goes on
-//! stdin, and the reply text must pass [`orch_lens::parse`]. A lens
+//! stdin, and the reply text must pass [`orch_lens::check`]. A lens
 //! question runs with no tools unless [`ClaudeAgent::lens_read_only`],
 //! and only with the operator's no-overage assertion
 //! ([`ClaudeAgent::lens_no_overage`]) and a subscription login

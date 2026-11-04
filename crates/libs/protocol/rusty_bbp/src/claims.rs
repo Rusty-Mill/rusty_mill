@@ -274,6 +274,10 @@ pub struct Item {
     pub author: PrincipalId,
     pub kind: EvidenceKind,
     pub direction: Direction,
+    /// The author's stated strength, as posted.
+    pub strength: u8,
+    /// The author's note, as posted (empty if none).
+    pub note: String,
     pub delta: i64,
     pub epoch: u32,
     /// Admitted while the claim was `open` (or reopened by it).
@@ -592,6 +596,8 @@ pub(crate) fn on_message(st: &mut crate::state::TaskState, m: &crate::record::Me
                     author: m.from.clone(),
                     kind: e.kind,
                     direction: e.direction,
+                    strength: e.strength,
+                    note: e.note.clone(),
                     delta: delta(e.kind, e.direction, e.strength),
                     epoch: c.epoch,
                     scoring: c.status == ClaimStatus::Open,
@@ -772,6 +778,10 @@ pub struct EvidenceView {
     pub author: PrincipalId,
     pub direction: Direction,
     pub kind: EvidenceKind,
+    /// The author's stated strength, as posted.
+    pub strength: u8,
+    /// The author's note, as posted (empty if none).
+    pub note: String,
     pub delta: i64,
     pub epoch: u32,
     pub scoring: bool,
@@ -785,6 +795,9 @@ pub struct ClaimView {
     pub domains: Vec<String>,
     pub status: ClaimStatus,
     pub score: i64,
+    /// The score this claim accepts at: the task's frozen line, strict for
+    /// high stakes or an irreversible claim (#594, D77).
+    pub accept_at: i64,
     pub confidence: u32,
     pub epoch: u32,
     pub spent: u64,
@@ -866,6 +879,7 @@ pub fn card(st: &crate::state::TaskState, c: &ClaimRecord, sight: &Sight) -> Cla
         domains: c.body.domains.clone(),
         status: c.status,
         score,
+        accept_at: c.accept_at(&book.config),
         confidence: confidence_pct(score),
         epoch: c.epoch,
         spent: c.spent(),
@@ -879,6 +893,8 @@ pub fn card(st: &crate::state::TaskState, c: &ClaimRecord, sight: &Sight) -> Cla
                 author: i.author.clone(),
                 direction: i.direction,
                 kind: i.kind,
+                strength: i.strength,
+                note: i.note.clone(),
                 delta: i.delta,
                 epoch: i.epoch,
                 scoring: i.scoring,

@@ -2,9 +2,11 @@
 
 Where an agent's commands act and where its new blocks go, as
 `rusty-mux-ctl` and `rusty-mux-mcp` behave today, and the conventions the
-rusty-mux skill asks agents to follow (C34). The skill is
-`crates/apps/rusty_mux/crates/ctl/src/agent/SKILL.md`; `rusty-mux-ctl agent
-setup` installs it.
+rusty-mux skill asks agents to follow (C34). `rusty-mux-ctl agent setup`
+installs the skill, `crates/apps/rusty_mux/crates/ctl/src/agent/SKILL.md`, a
+stub that has the agent run `rusty-mux-ctl agent skill`; that prints the guide
+built into ctl, `ctl/src/agent/GUIDE.md`, so the guide always matches the
+installed ctl (C73).
 
 ## How a target is chosen
 

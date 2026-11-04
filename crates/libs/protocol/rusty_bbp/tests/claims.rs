@@ -3486,7 +3486,7 @@ fn reopened_by_intent(cx: &Cx, c: MsgId) -> bool {
 }
 
 #[test]
-fn cl_102_intent_revised_reopens_accepted_claims_in_a_new_epoch() {
+fn cl_104_intent_revised_reopens_accepted_claims_in_a_new_epoch() {
     let mut cx = Cx::new();
     let x = cx.low();
     accept(&mut cx, x);
@@ -3519,7 +3519,7 @@ fn cl_102_intent_revised_reopens_accepted_claims_in_a_new_epoch() {
 }
 
 #[test]
-fn cl_103_an_acted_on_claim_escalates_intent_changed_in_any_epoch() {
+fn cl_105_an_acted_on_claim_escalates_intent_changed_in_any_epoch() {
     let mut cx = Cx::new();
     let x = cx.low();
     accept(&mut cx, x);
@@ -3542,7 +3542,7 @@ fn cl_103_an_acted_on_claim_escalates_intent_changed_in_any_epoch() {
 }
 
 #[test]
-fn cl_104_affects_is_the_union_of_claims_and_domains() {
+fn cl_106_affects_is_the_union_of_claims_and_domains() {
     let mut cx = Cx::new();
     let by_id = cx.low();
     let by_domain = cx.claim(
@@ -3595,7 +3595,7 @@ fn cl_104_affects_is_the_union_of_claims_and_domains() {
 }
 
 #[test]
-fn cl_105_bad_affects_is_refused_and_writes_nothing() {
+fn cl_107_bad_affects_is_refused_and_writes_nothing() {
     let mut cx = Cx::new();
     let x = cx.low();
     accept(&mut cx, x);
@@ -3618,7 +3618,7 @@ fn cl_105_bad_affects_is_refused_and_writes_nothing() {
 }
 
 #[test]
-fn cl_106_an_intent_reopen_carries_to_dependents() {
+fn cl_108_an_intent_reopen_carries_to_dependents() {
     let mut cx = Cx::new();
     let a = cx.low();
     let b = cx.claim(
@@ -3663,7 +3663,7 @@ fn cl_106_an_intent_reopen_carries_to_dependents() {
 }
 
 #[test]
-fn cl_107_a_refine_answer_refs_the_current_brief() {
+fn cl_109_a_refine_answer_refs_the_current_brief() {
     let mut cx = Cx::new();
     let old = cx.brief;
     let new = stored(revise(&mut cx, "v2", Affects::All));
@@ -3674,7 +3674,7 @@ fn cl_107_a_refine_answer_refs_the_current_brief() {
 }
 
 #[test]
-fn cl_108_task_paused_escalates_the_task_until_resumed_open() {
+fn cl_110_task_paused_escalates_the_task_until_resumed_open() {
     let mut cx = Cx::new();
     let x = cx.low();
     let pause = HostAction::TaskPaused {
@@ -3716,7 +3716,7 @@ fn cl_108_task_paused_escalates_the_task_until_resumed_open() {
 }
 
 #[test]
-fn cl_109_pause_detail_is_bounded() {
+fn cl_111_pause_detail_is_bounded() {
     let mut cx = Cx::new();
     let long = "x".repeat(rusty_bbp::claims::PAUSE_DETAIL_MAX + 1);
     assert_eq!(
@@ -3730,7 +3730,7 @@ fn cl_109_pause_detail_is_bounded() {
 }
 
 #[test]
-fn cl_110_intent_and_pause_are_claims_mode_only() {
+fn cl_112_intent_and_pause_are_claims_mode_only() {
     let mut st = TaskState::new(TaskId::from("t"));
     let run = |st: &mut TaskState, cmd: Command| {
         let h = handle(st, &cmd, Time(1_000));
@@ -3762,7 +3762,7 @@ fn cl_110_intent_and_pause_are_claims_mode_only() {
 }
 
 #[test]
-fn cl_111_affects_absent_on_the_wire_reads_as_all() {
+fn cl_113_affects_absent_on_the_wire_reads_as_all() {
     let e: Event =
         rusty_serde::json::from_str(r#"{"IntentRevised":{"brief":3}}"#).expect("decodes");
     assert_eq!(
@@ -3775,7 +3775,248 @@ fn cl_111_affects_absent_on_the_wire_reads_as_all() {
 }
 
 #[test]
-fn cl_112_baseline_digest_is_claims_mode_only_and_folds() {
+fn cl_102_the_card_carries_the_claims_own_accept_line() {
+    let mut cx = Cx::with(ClaimsConfig {
+        accept_at: 10,
+        accept_at_strict: 14,
+        ..ClaimsConfig::default()
+    });
+    let low = cx.low();
+    let high = cx.claim(
+        "a",
+        ClaimBody {
+            stakes: Stakes::High,
+            ..body("high")
+        },
+    );
+    let once = cx.claim(
+        "a",
+        ClaimBody {
+            reversible: false,
+            ..body("once")
+        },
+    );
+    assert_eq!(card_all(&cx.st, low).accept_at, 10, "the task's line");
+    assert_eq!(
+        card_all(&cx.st, high).accept_at,
+        14,
+        "strict for high stakes"
+    );
+    assert_eq!(
+        card_all(&cx.st, once).accept_at,
+        14,
+        "strict when irreversible"
+    );
+}
+
+#[test]
+fn cl_103_the_card_shows_each_evidence_items_strength_and_note() {
+    let mut cx = Cx::new();
+    let c = cx.low();
+    let b = cx.brief;
+    let mut d = cx.evidence_draft(
+        c,
+        Direction::Support,
+        EvidenceKind::Cited,
+        2,
+        vec![Ref::art(b)],
+    );
+    if let Body::Evidence(e) = &mut d.body {
+        e.note = "the brief asks for this".into();
+    }
+    posted(cx.agent("b", AgentAction::Post(d)));
+    ok(cx.opinion("c", c, Direction::Counter));
+    let card = card_all(&cx.st, c);
+    let shown: Vec<(u8, &str)> = card
+        .evidence
+        .iter()
+        .map(|e| (e.strength, e.note.as_str()))
+        .collect();
+    assert_eq!(shown, [(2, "the brief asks for this"), (1, "")]);
+}
+
+// ---------------------------------------------------------------- replay (#599)
+
+mod replay {
+    use super::*;
+    use rusty_bbp::history::{Change, History, Rule};
+
+    fn history(cx: &Cx, c: MsgId) -> History {
+        claim_history(&TaskId::from("t"), &cx.log, c, None).expect("history")
+    }
+
+    fn rules(h: &History) -> Vec<Rule> {
+        h.steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Status { rule, .. } => Some(rule.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn accept_line_names_its_numbers_and_each_evidence_step() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        accept(&mut cx, c);
+        let h = history(&cx, c);
+        assert_eq!(h.author, pid("a"));
+        assert_eq!(h.body.text, "x");
+        assert_eq!(h.steps[0].change, Change::Posted);
+        let moves: Vec<i64> = h
+            .steps
+            .iter()
+            .filter_map(|s| match s.change {
+                Change::Evidence { delta, scoring, .. } => scoring.then_some(delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(moves, vec![4, 4]);
+        assert_eq!(
+            rules(&h),
+            vec![Rule::AcceptLine {
+                accept_at: 8,
+                support_authors: 2
+            }]
+        );
+        let last = h.steps.last().expect("step");
+        assert_eq!(
+            (last.status, last.score, last.confidence),
+            (ClaimStatus::Accepted, 8, 90)
+        );
+        assert_eq!(
+            last.rev,
+            cx.log
+                .iter()
+                .position(|e| matches!(e, Event::ClaimAccepted { .. }))
+                .map(|i| Rev(i as u64 + 1))
+                .expect("accepted")
+        );
+    }
+
+    #[test]
+    fn drop_line_and_evidence_after_settling_does_not_score() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        drop_claim(&mut cx, c);
+        ok(cx.opinion("c", c, Support));
+        let h = history(&cx, c);
+        assert_eq!(
+            rules(&h),
+            vec![Rule::DropLine {
+                drop_at: -8,
+                counter_authors: 2
+            }]
+        );
+        let last = h.steps.last().expect("step");
+        assert!(matches!(
+            last.change,
+            Change::Evidence {
+                scoring: false,
+                delta: 1,
+                ..
+            }
+        ));
+        assert_eq!(last.score, -8);
+    }
+
+    #[test]
+    fn human_accept_after_an_irreversible_escalation() {
+        let mut cx = Cx::new();
+        let c = cx.claim(
+            "a",
+            ClaimBody {
+                reversible: false,
+                ..body("irreversible")
+            },
+        );
+        let r = cx.tested("a", c, true);
+        for who in ["a", "b", "c"] {
+            ok(cx.executed(who, c, Support, r));
+        }
+        ok(cx.decide(c, ClaimOutcome::Accept));
+        assert_eq!(
+            rules(&history(&cx, c)),
+            vec![
+                Rule::Escalation(ClaimEscalation::Irreversible),
+                Rule::Human { accept: true }
+            ]
+        );
+    }
+
+    /// Dormant passes count once the human reopens, and the line accepts in
+    /// that same command: the accept is the line's, not the human's.
+    #[test]
+    fn a_human_reopen_the_line_then_settles_is_the_lines() {
+        let mut cx = Cx::new();
+        let a = cx.low();
+        let b = cx.claim("b", dep_on("b", vec![a]));
+        let pass = cx.tested("c", b, true);
+        drop_claim(&mut cx, b);
+        drop_claim(&mut cx, a);
+        ok(cx.executed("c", b, Support, pass));
+        ok(cx.executed("a", b, Support, pass));
+        ok(cx.decide(a, ClaimOutcome::Reopen));
+        accept(&mut cx, a);
+        ok(cx.decide(b, ClaimOutcome::Reopen));
+        assert_eq!(cx.status(b), ClaimStatus::Accepted);
+        let got = rules(&history(&cx, b));
+        assert_eq!(
+            got[got.len() - 2..],
+            [
+                Rule::Reopen(ReopenCause::Human),
+                Rule::AcceptLine {
+                    accept_at: 8,
+                    support_authors: 2
+                }
+            ],
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn choose_marks_both_sides() {
+        let mut cx = Cx::new();
+        let q = cx.low();
+        let ans = |t: &str| ClaimBody {
+            answers: Some(q),
+            ..body(t)
+        };
+        let a = cx.claim("a", ans("a"));
+        let b = cx.claim("b", ans("b"));
+        let rev = cx.rev();
+        ok(cx.human(HumanAction::Fenced {
+            expected_rev: rev,
+            action: Box::new(HumanAction::Choose {
+                question: q,
+                chosen: b,
+            }),
+        }));
+        let chose = Rule::Choose { question: q };
+        assert_eq!(rules(&history(&cx, b)), vec![chose.clone()]);
+        assert_eq!(rules(&history(&cx, a)), vec![chose]);
+    }
+
+    #[test]
+    fn at_stops_the_replay_and_an_unposted_claim_has_none() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        accept(&mut cx, c);
+        let posted_at = history(&cx, c).steps[0].rev;
+        let h = claim_history(&TaskId::from("t"), &cx.log, c, Some(posted_at)).expect("history");
+        assert_eq!(h.steps.len(), 1);
+        assert_eq!(h.steps[0].status, ClaimStatus::Open);
+        let before = Rev(posted_at.0 - 1);
+        assert!(claim_history(&TaskId::from("t"), &cx.log, c, Some(before)).is_none());
+        assert!(claim_history(&TaskId::from("t"), &cx.log, MsgId(999), None).is_none());
+    }
+}
+
+// ---------------------------------------------------------------- #598 brownfield baseline
+
+#[test]
+fn cl_114_baseline_digest_is_claims_mode_only_and_folds() {
     let digest = Sha256::of(b"baseline report");
     let mut o = open_task(Mode::Stages, None, stage_roster());
     o.baseline_digest = Some(digest);

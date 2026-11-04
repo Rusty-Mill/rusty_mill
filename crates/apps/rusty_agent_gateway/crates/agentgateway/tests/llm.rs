@@ -11,11 +11,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway_config::Config;
+use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
 mod common;
 use common::free_port;
+use common::http;
 
 /// What the provider saw.
 #[derive(Default)]
@@ -30,7 +31,7 @@ struct Seen {
 async fn provider(reply: Value, sse: Option<String>) -> (u16, Arc<Mutex<Seen>>) {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let seen = Arc::new(Mutex::new(Seen::default()));
     let recorder = Arc::clone(&seen);
 
@@ -82,7 +83,7 @@ async fn start_with(
     extra: &str,
     extra_policies: &str,
 ) -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -131,8 +132,8 @@ fn chat_request() -> Value {
     })
 }
 
-async fn post(url: &str, body: &Value) -> reqwest::Response {
-    reqwest::Client::new()
+async fn post(url: &str, body: &Value) -> http::Response {
+    http::Client::new()
         .post(url)
         .json(body)
         .send()
@@ -164,7 +165,7 @@ fn anthropic_reply() -> Value {
     })
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_openai_request_reaches_the_provider_unchanged() {
     // The point of not building a typed model: fields this gateway has never
     // heard of must survive the trip.
@@ -190,7 +191,7 @@ async fn an_openai_request_reaches_the_provider_unchanged() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_openai_credential_is_a_bearer_token() {
     let (provider_port, seen) = provider(openai_reply(), None).await;
     let (url, shutdown) = start("openAI", provider_port, "").await;
@@ -209,7 +210,7 @@ async fn the_openai_credential_is_a_bearer_token() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_anthropic_request_is_translated_to_the_messages_api() {
     let (provider_port, seen) = provider(anthropic_reply(), None).await;
     let (url, shutdown) = start("anthropic", provider_port, "").await;
@@ -247,7 +248,7 @@ async fn an_anthropic_request_is_translated_to_the_messages_api() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_anthropic_response_comes_back_in_openai_shape() {
     // The whole promise of the gateway: the client's existing OpenAI parsing
     // works against a different provider.
@@ -257,7 +258,6 @@ async fn an_anthropic_response_comes_back_in_openai_shape() {
     let body: Value = post(&url, &chat_request())
         .await
         .json()
-        .await
         .expect("should be JSON");
 
     assert_eq!(body["object"], "chat.completion");
@@ -273,7 +273,7 @@ async fn an_anthropic_response_comes_back_in_openai_shape() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_configured_model_overrides_the_callers() {
     // An operator pinning a model is making a routing decision, not a
     // suggestion.
@@ -297,11 +297,11 @@ async fn a_configured_model_overrides_the_callers() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_provider_error_is_passed_through_rather_than_reshaped() {
     // "invalid api key" is the useful part; rewriting it as "bad gateway"
     // costs an afternoon.
-    let port = free_port().await;
+    let port = free_port();
     let app = rusty_axum::Router::new().fallback(|| async {
         (
             rusty_axum::StatusCode::UNAUTHORIZED,
@@ -314,18 +314,18 @@ async fn a_provider_error_is_passed_through_rather_than_reshaped() {
     let response = post(&url, &chat_request()).await;
 
     assert_eq!(response.status(), 401, "the provider's status is preserved");
-    let body: Value = response.json().await.expect("should be JSON");
+    let body: Value = response.json().expect("should be JSON");
     assert_eq!(body["error"]["message"], "invalid api key");
 
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_body_that_is_not_json_is_refused_in_openai_error_shape() {
     let (provider_port, _) = provider(openai_reply(), None).await;
     let (url, shutdown) = start("openAI", provider_port, "").await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(&url)
         .header("content-type", "application/json")
         .body("not json")
@@ -334,7 +334,7 @@ async fn a_body_that_is_not_json_is_refused_in_openai_error_shape() {
         .expect("should reach the gateway");
 
     assert_eq!(response.status(), 400);
-    let body: Value = response.json().await.expect("should be JSON");
+    let body: Value = response.json().expect("should be JSON");
     assert!(
         body["error"]["message"].is_string(),
         "a client's existing OpenAI error handling should work: {body}"
@@ -356,7 +356,7 @@ fn anthropic_stream() -> String {
     .concat()
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_anthropic_stream_is_reframed_as_openai_chunks() {
     let (provider_port, _) = provider(Value::Null, Some(anthropic_stream())).await;
     let (url, shutdown) = start("anthropic", provider_port, "").await;
@@ -366,14 +366,11 @@ async fn an_anthropic_stream_is_reframed_as_openai_chunks() {
 
     let response = post(&url, &body).await;
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok()),
+        response.headers().get("content-type"),
         Some("text/event-stream")
     );
 
-    let text = response.text().await.expect("should read the stream");
+    let text = response.text().expect("should read the stream");
 
     let chunks: Vec<Value> = text
         .lines()
@@ -405,7 +402,7 @@ async fn an_anthropic_stream_is_reframed_as_openai_chunks() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_openai_stream_passes_straight_through() {
     // Already the right frames; re-framing them would only risk corrupting
     // fields this gateway does not model.
@@ -419,7 +416,6 @@ async fn an_openai_stream_passes_straight_through() {
     let text = post(&url, &body)
         .await
         .text()
-        .await
         .expect("should read the stream");
 
     assert_eq!(text, frames, "the frames should arrive byte-identical");
@@ -427,9 +423,9 @@ async fn an_openai_stream_passes_straight_through() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unimplemented_provider_fails_at_startup() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -455,7 +451,7 @@ binds:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_modifier_reaches_an_ai_completion() {
     // An `ai` backend answers from inside the gateway rather than through the
     // `host` proxy, so it never saw the modifier before.
@@ -471,16 +467,7 @@ async fn a_response_modifier_reaches_an_ai_completion() {
     let response = post(&url, &chat_request()).await;
     assert!(response.status().is_success(), "{}", response.status());
 
-    let headers: Vec<(String, String)> = response
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                v.to_str().unwrap_or_default().to_string(),
-            )
-        })
-        .collect();
+    let headers = response.header_pairs();
     assert!(
         headers
             .iter()
@@ -491,7 +478,7 @@ async fn a_response_modifier_reaches_an_ai_completion() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_modifier_reaches_the_model_provider() {
     // The request an `ai` route sends is built by the LLM crate rather than
     // forwarded through the `host` proxy, so this modifier used to parse and
@@ -527,7 +514,7 @@ async fn a_request_modifier_reaches_the_model_provider() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_modifier_can_take_back_the_provider_credential() {
     // The modifier runs after the provider's own headers, matching the `host`
     // proxy's ordering with `backendAuth`: a route that names a header means
@@ -554,7 +541,7 @@ async fn a_request_modifier_can_take_back_the_provider_credential() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_modifier_can_replace_a_header_the_provider_set() {
     // `set` on `authorization` replaces the credential rather than appending a
     // second one, which is what a comma-joined value would do to a provider.
@@ -584,7 +571,7 @@ async fn a_request_modifier_can_replace_a_header_the_provider_set() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn add_appends_to_a_header_the_provider_set_rather_than_replacing_it() {
     // The distinction between `set` and `add` on a name that is already taken.
     // Unlike the MCP path, which has one value per name to give the transport,
@@ -612,11 +599,11 @@ async fn add_appends_to_a_header_the_provider_set_rather_than_replacing_it() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_modifier_http_rejects_fails_an_ai_route_at_startup() {
     // Rather than dropping the header at runtime on every call, where nobody
     // would see it.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -647,7 +634,7 @@ binds:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_full_path_rewrite_moves_the_provider_endpoint() {
     // The path the provider is asked for is its own API path, not the
     // client's -- a client's path never reaches it. This is the shape an
@@ -670,11 +657,11 @@ async fn a_full_path_rewrite_moves_the_provider_endpoint() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_prefix_rewrite_transforms_the_providers_own_path() {
     // `/v1/chat/completions` with the route's matched `/v1` replaced.
     let (provider_port, seen) = provider(openai_reply(), None).await;
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -727,7 +714,7 @@ binds:
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_authority_rewrite_redirects_the_provider_request() {
     // Two providers listening; the route names one via `hostOverride` and the
     // rewrite sends the request to the other instead.
@@ -756,11 +743,11 @@ async fn an_authority_rewrite_redirects_the_provider_request() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_url_rewrite_that_cannot_be_applied_fails_an_ai_route_at_startup() {
     // Serving traffic to the original address, when the config says to dial
     // somewhere else, is the outcome nobody asked for.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -790,11 +777,11 @@ binds:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_host_override_carrying_a_credential_fails_at_startup() {
     // It would be sent on every request from a place nobody reads, and logged
     // with the endpoint besides. `backendAuth.key` is where one belongs.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -825,7 +812,7 @@ binds:
 async fn flaky_provider(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>) {
     use rusty_axum::Router;
 
-    let port = free_port().await;
+    let port = free_port();
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&calls);
 
@@ -854,7 +841,7 @@ async fn flaky_provider(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>)
 const RETRY: &str =
     "              retry:\n                attempts: 2\n                codes: [429, 503]";
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_listed_status_is_retried_on_an_ai_route() {
     // An `ai` route asking for three attempts used to get exactly one: the
     // policy was consumed only by the `host` proxy.
@@ -872,7 +859,7 @@ async fn a_listed_status_is_retried_on_an_ai_route() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_status_the_route_did_not_list_is_not_retried() {
     // Nothing is retried on status unless `codes` names it: the provider
     // answered, so it certainly saw the request.
@@ -886,7 +873,7 @@ async fn a_status_the_route_did_not_list_is_not_retried() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_route_without_a_retry_policy_makes_one_attempt() {
     let (provider_port, calls) = flaky_provider(2, 429).await;
     let (url, shutdown) = start("openAI", provider_port, "").await;
@@ -898,7 +885,7 @@ async fn a_route_without_a_retry_policy_makes_one_attempt() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn exhausting_the_attempts_returns_the_providers_own_last_answer() {
     // Rather than a gateway error that hides what the provider said. The
     // message is the useful part.
@@ -907,7 +894,7 @@ async fn exhausting_the_attempts_returns_the_providers_own_last_answer() {
 
     let response = post(&url, &chat_request()).await;
     assert_eq!(response.status(), 503);
-    let body: Value = response.json().await.expect("should be JSON");
+    let body: Value = response.json().expect("should be JSON");
     assert_eq!(
         body["error"]["message"], "try again",
         "the provider's own body survives: {body}"
@@ -917,11 +904,11 @@ async fn exhausting_the_attempts_returns_the_providers_own_last_answer() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_connect_failure_is_retried_but_a_provider_that_never_comes_up_still_fails() {
     // A connect failure never reached the provider, so replaying it cannot
     // duplicate work -- the one transport error that is safe to repeat.
-    let dead = free_port().await;
+    let dead = free_port();
     let (url, shutdown) = start_with("openAI", dead, "", RETRY).await;
 
     let response = post(&url, &chat_request()).await;
@@ -934,7 +921,7 @@ async fn a_connect_failure_is_retried_but_a_provider_that_never_comes_up_still_f
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_retried_request_still_carries_its_body_and_credential() {
     // The body is serialized once and replayed, so an attempt after the first
     // must not arrive empty or unauthenticated.
@@ -967,7 +954,7 @@ async fn the_retried_request_still_carries_its_body_and_credential() {
 /// A tiny token budget: the first call fits, the second is refused.
 const TOKEN_LIMIT: &str = "              localRateLimit:\n                - maxTokens: 10\n                  tokensPerFill: 10\n                  fillInterval: 60s\n                  type: tokens";
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_token_budget_is_charged_by_what_the_provider_reported() {
     // The mock reply declares 10 total tokens, which is the whole bucket. The
     // first call is admitted -- nothing is charged up front, because the cost
@@ -983,7 +970,6 @@ async fn a_token_budget_is_charged_by_what_the_provider_reported() {
     let retry_after = second
         .headers()
         .get("retry-after")
-        .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .expect("a refusal should say when to come back");
     assert!(
@@ -994,7 +980,7 @@ async fn a_token_budget_is_charged_by_what_the_provider_reported() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_route_without_a_token_budget_is_never_refused() {
     let (provider_port, _seen) = provider(openai_reply(), None).await;
     let (url, shutdown) = start("openAI", provider_port, "").await;
@@ -1007,7 +993,7 @@ async fn a_route_without_a_token_budget_is_never_refused() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_limit_and_a_token_limit_coexist_on_one_route() {
     // Requests are charged before dispatch and tokens after the provider
     // answers, so a route can carry both without one standing in for the other.
@@ -1033,7 +1019,7 @@ async fn a_request_limit_and_a_token_limit_coexist_on_one_route() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_streamed_response_is_charged_too() {
     // Usage arrives in the trailing chunk, long after `handle` returned the
     // body. A limit that only applied to buffered responses would miss most of
@@ -1059,7 +1045,7 @@ async fn a_streamed_response_is_charged_too() {
     let first = post(&url, &body).await;
     assert!(first.status().is_success(), "{}", first.status());
     // Draining the stream is what delivers the trailing usage chunk.
-    let text = first.text().await.expect("should read the stream");
+    let text = first.text().expect("should read the stream");
     assert!(text.contains("total_tokens"), "got: {text}");
 
     let second = post(&url, &chat_request()).await;
@@ -1072,9 +1058,9 @@ async fn a_streamed_response_is_charged_too() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_bucket_that_can_never_refill_fails_an_ai_route_at_startup() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1102,13 +1088,13 @@ binds:
     assert!(err.to_string().contains("never refills"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_body_buffered_for_ext_authz_still_reaches_the_provider() {
     // `extAuthz.includeBody` reads the body before dispatch, so an `ai` route
     // is handed one that was already consumed once. The translation has to see
     // the same bytes it would have.
     let (provider_port, seen) = provider(openai_reply(), None).await;
-    let authz_port = free_port().await;
+    let authz_port = free_port();
     let allow = rusty_axum::Router::new().fallback(|| async { "" });
     common::upstream(format!("127.0.0.1:{authz_port}"), allow).await;
 
@@ -1135,7 +1121,7 @@ async fn a_body_buffered_for_ext_authz_still_reaches_the_provider() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_ai_policy_shapes_the_request_the_provider_sees() {
     // `modelAliases`, `prompts`, `defaults` and `overrides` all land on the
     // OpenAI-shaped body before translation, which is the only place a rule
@@ -1191,7 +1177,7 @@ async fn an_ai_policy_shapes_the_request_the_provider_sees() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_configured_model_still_wins_over_an_alias() {
     // The backend's own `model:` is backend configuration rather than route
     // policy -- the most specific statement about where traffic goes.
@@ -1219,7 +1205,7 @@ async fn a_configured_model_still_wins_over_an_alias() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn prompt_caching_marks_an_anthropic_request() {
     // A cache breakpoint is an annotation on the *translated* shape, so this
     // is the one part of the policy that runs after translation.
@@ -1257,7 +1243,7 @@ async fn prompt_caching_marks_an_anthropic_request() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn prompt_caching_leaves_an_openai_request_alone() {
     // OpenAI caches long prefixes by itself and takes no configuration, so a
     // breakpoint there would be a field nobody reads.
@@ -1287,7 +1273,7 @@ async fn prompt_caching_leaves_an_openai_request_alone() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_ai_policy_of_only_unimplemented_keys_changes_nothing() {
     // `promptGuard` is reported by `--check`; it must not quietly alter the
     // request on the way past.
@@ -1351,7 +1337,7 @@ fn anthropic_tool_reply() -> Value {
     })
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn tool_definitions_reach_anthropic_instead_of_being_dropped() {
     // They were dropped entirely, which was worse than unsupported: the
     // finish-reason mapping already translated `tool_use`, so a client could
@@ -1380,13 +1366,13 @@ async fn tool_definitions_reach_anthropic_instead_of_being_dropped() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_tool_call_comes_back_in_openai_shape() {
     let (provider_port, _seen) = provider(anthropic_tool_reply(), None).await;
     let (url, shutdown) = start("anthropic", provider_port, "").await;
 
     let response = post(&url, &tool_request()).await;
-    let body: Value = response.json().await.expect("should be JSON");
+    let body: Value = response.json().expect("should be JSON");
 
     let choice = &body["choices"][0];
     assert_eq!(choice["finish_reason"], "tool_calls");
@@ -1409,7 +1395,7 @@ async fn a_tool_call_comes_back_in_openai_shape() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_tool_result_goes_back_as_part_of_a_user_turn() {
     // Anthropic has no `tool` role: a result is a block inside a user turn.
     let (provider_port, seen) = provider(anthropic_reply(), None).await;
@@ -1446,7 +1432,7 @@ async fn a_tool_result_goes_back_as_part_of_a_user_turn() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_streamed_tool_call_is_reframed_as_openai_deltas() {
     let stream = concat!(
         "event: message_start\ndata: {\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4\",\"usage\":{\"input_tokens\":9}}}\n\n",
@@ -1461,7 +1447,7 @@ async fn a_streamed_tool_call_is_reframed_as_openai_deltas() {
     let mut body = tool_request();
     body["stream"] = json!(true);
     let response = post(&url, &body).await;
-    let text = response.text().await.expect("should read the stream");
+    let text = response.text().expect("should read the stream");
 
     let chunks: Vec<Value> = text
         .lines()
@@ -1493,7 +1479,7 @@ async fn a_streamed_tool_call_is_reframed_as_openai_deltas() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn cache_tools_marks_the_tool_definitions_now_that_they_exist() {
     let (provider_port, seen) = provider(anthropic_reply(), None).await;
     let (url, shutdown) = start_with(
@@ -1522,7 +1508,7 @@ async fn cache_tools_marks_the_tool_definitions_now_that_they_exist() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn openai_tool_definitions_still_pass_through_untouched() {
     // The passthrough path must not have picked up a translation it does not
     // need.
@@ -1554,7 +1540,7 @@ const REJECT_CREDENTIALS: &str = concat!(
     "                        body: '{\"error\":{\"message\":\"no credentials\"}}'\n",
 );
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_prompt_guard_refuses_before_the_provider_is_called() {
     let (provider_port, seen) = provider(openai_reply(), None).await;
     let (url, shutdown) = start_with("openAI", provider_port, "", REJECT_CREDENTIALS).await;
@@ -1564,7 +1550,7 @@ async fn a_prompt_guard_refuses_before_the_provider_is_called() {
     let response = post(&url, &body).await;
 
     assert_eq!(response.status(), 422);
-    let answer: Value = response.json().await.expect("should be JSON");
+    let answer: Value = response.json().expect("should be JSON");
     assert_eq!(
         answer["error"]["message"], "no credentials",
         "the operator's own body, not ours"
@@ -1577,7 +1563,7 @@ async fn a_prompt_guard_refuses_before_the_provider_is_called() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_prompt_the_guard_permits_reaches_the_provider_unchanged() {
     let (provider_port, seen) = provider(openai_reply(), None).await;
     let (url, shutdown) = start_with("openAI", provider_port, "", REJECT_CREDENTIALS).await;
@@ -1592,7 +1578,7 @@ async fn a_prompt_the_guard_permits_reaches_the_provider_unchanged() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_mask_rule_rewrites_the_prompt_and_lets_it_through() {
     let (provider_port, seen) = provider(openai_reply(), None).await;
     let (url, shutdown) = start_with(
@@ -1644,13 +1630,13 @@ const MASK_RESPONSE: &str = concat!(
     "                          - builtin: phoneNumber\n",
 );
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_guard_masks_a_buffered_answer() {
     let (provider_port, _seen) = provider(leaky_reply(), None).await;
     let (url, shutdown) = start_with("openAI", provider_port, "", MASK_RESPONSE).await;
 
     let response = post(&url, &chat_request()).await;
-    let answer: Value = response.json().await.expect("should be JSON");
+    let answer: Value = response.json().expect("should be JSON");
     assert_eq!(
         answer["choices"][0]["message"]["content"], "you can call <PHONE_NUMBER> today",
         "{answer}"
@@ -1659,7 +1645,7 @@ async fn a_response_guard_masks_a_buffered_answer() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_guard_catches_a_pattern_split_across_stream_chunks() {
     // The whole reason a response rule buffers: scanning each chunk on its own
     // would miss this, and the first half is already at the client by the time
@@ -1686,7 +1672,7 @@ async fn a_response_guard_catches_a_pattern_split_across_stream_chunks() {
     body["stream"] = json!(true);
     let response = post(&url, &body).await;
     assert!(response.status().is_success(), "{}", response.status());
-    let text = response.text().await.expect("should read the stream");
+    let text = response.text().expect("should read the stream");
 
     assert!(
         text.contains("<PHONE_NUMBER>"),
@@ -1704,7 +1690,7 @@ async fn a_response_guard_catches_a_pattern_split_across_stream_chunks() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_guarded_stream_sends_the_masked_text_as_one_chunk() {
     // After masking it is no longer the text the provider chunked, and
     // inventing boundaries for it would be making something up.
@@ -1727,7 +1713,6 @@ async fn a_guarded_stream_sends_the_masked_text_as_one_chunk() {
     let text = post(&url, &body)
         .await
         .text()
-        .await
         .expect("should read the stream");
 
     let contents: Vec<String> = text
@@ -1746,7 +1731,7 @@ async fn a_guarded_stream_sends_the_masked_text_as_one_chunk() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_guard_can_refuse_a_stream_before_anything_is_sent() {
     // Nothing has gone out yet, so the client can still be told plainly --
     // an ordinary JSON error rather than an event stream carrying a refusal.
@@ -1784,7 +1769,6 @@ async fn a_response_guard_can_refuse_a_stream_before_anything_is_sent() {
         response
             .headers()
             .get("content-type")
-            .and_then(|v| v.to_str().ok())
             .is_some_and(|v| v.starts_with("application/json")),
         "a refusal is not an event stream"
     );
@@ -1792,7 +1776,7 @@ async fn a_response_guard_can_refuse_a_stream_before_anything_is_sent() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_route_with_only_a_request_guard_still_streams_chunk_by_chunk() {
     // A request rule costs a stream nothing, and it would be a poor trade if
     // it did.
@@ -1815,7 +1799,6 @@ async fn a_route_with_only_a_request_guard_still_streams_chunk_by_chunk() {
     let text = post(&url, &body)
         .await
         .text()
-        .await
         .expect("should read the stream");
 
     let contents: Vec<String> = text
@@ -1838,9 +1821,9 @@ async fn a_route_with_only_a_request_guard_still_streams_chunk_by_chunk() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_pattern_that_does_not_compile_fails_an_ai_route_at_startup() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1872,7 +1855,7 @@ binds:
     assert!(err.to_string().contains("regular expression"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_guarded_stream_does_not_re_emit_the_done_sentinel_as_a_chunk() {
     // `data: [DONE]` is not JSON and parses to null. Collecting it with the
     // chunks would hand a client `data: null` before the real sentinel.
@@ -1891,7 +1874,6 @@ async fn a_guarded_stream_does_not_re_emit_the_done_sentinel_as_a_chunk() {
     let text = post(&url, &body)
         .await
         .text()
-        .await
         .expect("should read the stream");
 
     assert!(!text.contains("data: null"), "{text}");
@@ -1913,7 +1895,7 @@ async fn guard_webhook(
 ) -> (u16, Arc<Mutex<Vec<(String, Value, Vec<(String, String)>)>>>) {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
 
@@ -1959,7 +1941,7 @@ fn webhook_policy(port: u16, phase: &str) -> String {
     )
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_webhook_sees_the_conversation_in_upstreams_shape() {
     let (webhook_port, seen) = guard_webhook(json!({"reason": "fine"}), json!({})).await;
     let (provider_port, _p) = provider(openai_reply(), None).await;
@@ -1987,7 +1969,7 @@ async fn a_webhook_sees_the_conversation_in_upstreams_shape() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_webhook_refusal_stops_the_request() {
     let (webhook_port, _seen) = guard_webhook(
         json!({"body": "blocked by policy", "status_code": 451}),
@@ -2006,7 +1988,7 @@ async fn a_webhook_refusal_stops_the_request() {
     let response = post(&url, &chat_request()).await;
     assert_eq!(response.status(), 451);
     assert_eq!(
-        response.text().await.expect("a body"),
+        response.text().expect("a body"),
         "blocked by policy",
         "the webhook's own message"
     );
@@ -2018,7 +2000,7 @@ async fn a_webhook_refusal_stops_the_request() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_webhook_mask_rewrites_the_prompt_it_was_shown() {
     let (webhook_port, _seen) = guard_webhook(
         json!({"body": {"messages": [
@@ -2046,7 +2028,7 @@ async fn a_webhook_mask_rewrites_the_prompt_it_was_shown() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_webhook_guards_the_answer_too() {
     let (webhook_port, seen) = guard_webhook(
         json!({}),
@@ -2067,7 +2049,6 @@ async fn a_webhook_guards_the_answer_too() {
     let answer: Value = post(&url, &chat_request())
         .await
         .json()
-        .await
         .expect("should be JSON");
     assert_eq!(answer["choices"][0]["message"]["content"], "cleaned up");
 
@@ -2082,11 +2063,11 @@ async fn a_webhook_guards_the_answer_too() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_webhook_that_cannot_be_reached_refuses_by_default() {
     // A content control that waves traffic through when its service is down
     // is not a content control.
-    let dead = free_port().await;
+    let dead = free_port();
     let (provider_port, provider_seen) = provider(openai_reply(), None).await;
     let (url, shutdown) = start_with(
         "openAI",
@@ -2107,9 +2088,9 @@ async fn a_webhook_that_cannot_be_reached_refuses_by_default() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn failing_open_has_to_be_asked_for() {
-    let dead = free_port().await;
+    let dead = free_port();
     let (provider_port, provider_seen) = provider(openai_reply(), None).await;
     let (url, shutdown) = start_with(
         "openAI",
@@ -2140,7 +2121,7 @@ async fn failing_open_has_to_be_asked_for() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn header_expressions_read_the_callers_request_and_can_move_the_path() {
     let (webhook_port, seen) = guard_webhook(json!({}), json!({})).await;
     let (provider_port, _p) = provider(openai_reply(), None).await;
@@ -2166,7 +2147,7 @@ async fn header_expressions_read_the_callers_request_and_can_move_the_path() {
     )
     .await;
 
-    reqwest::Client::new()
+    http::Client::new()
         .post(&url)
         .header("x-tenant", "acme")
         .header("x-trace", "abc123")
@@ -2195,7 +2176,7 @@ async fn header_expressions_read_the_callers_request_and_can_move_the_path() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_regex_rule_above_a_webhook_can_refuse_without_the_network_call() {
     // Rules run in order, so a cheap local rule placed first saves the call.
     let (webhook_port, seen) = guard_webhook(json!({}), json!({})).await;
@@ -2234,7 +2215,7 @@ async fn a_regex_rule_above_a_webhook_can_refuse_without_the_network_call() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_header_expression_can_read_the_request_the_caller_wrote() {
     // `llmRequest.*` only exists once the body is parsed, so the context has
     // to be completed after that rather than built complete.
@@ -2283,7 +2264,7 @@ async fn moderating_provider(
 ) -> (u16, Arc<Mutex<Vec<(Value, Vec<(String, String)>)>>>) {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
 
@@ -2343,7 +2324,7 @@ fn moderation_policy(phase: &str, rejection: &[&str]) -> String {
     lines.join("\n")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_flagged_prompt_is_refused_before_the_provider_is_called() {
     let (provider_port, seen) = moderating_provider(true, 200).await;
     let (url, shutdown) = start_with(
@@ -2356,10 +2337,7 @@ async fn a_flagged_prompt_is_refused_before_the_provider_is_called() {
 
     let response = post(&url, &chat_request()).await;
     assert_eq!(response.status().as_u16(), 451);
-    assert_eq!(
-        response.text().await.expect("a body"),
-        "this prompt was refused"
-    );
+    assert_eq!(response.text().expect("a body"), "this prompt was refused");
 
     // The classifier was asked, and the chat endpoint never was: a refused
     // prompt costs nothing at the provider.
@@ -2368,7 +2346,7 @@ async fn a_flagged_prompt_is_refused_before_the_provider_is_called() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_classifier_is_shown_every_message_and_paid_for_with_the_routes_key() {
     // A borrowed key travels only as far as the route it came from, so the
     // call lands on this same stub rather than on `api.openai.com`.
@@ -2405,7 +2383,7 @@ async fn the_classifier_is_shown_every_message_and_paid_for_with_the_routes_key(
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_classifier_that_cannot_be_reached_refuses_the_request() {
     // Fails closed, and with a 503 rather than the rule's own rejection:
     // nothing decided this prompt was unacceptable.
@@ -2424,7 +2402,7 @@ async fn a_classifier_that_cannot_be_reached_refuses_the_request() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_moderation_rule_on_the_response_phase_inspects_nothing() {
     // Upstream's response guard has no moderation variant. `--check` reports
     // the rule; the request itself is served as though it were not there.
@@ -2447,11 +2425,11 @@ async fn a_moderation_rule_on_the_response_phase_inspects_nothing() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_moderation_rule_on_an_anthropic_route_fails_at_startup() {
     // The failure this refusal exists to prevent: borrowing the route's key
     // would send an Anthropic credential to OpenAI.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2481,11 +2459,11 @@ binds:
     assert!(err.to_string().contains("third party"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_moderation_rule_with_its_own_key_serves_an_anthropic_route() {
     // The other half of the rule above: a key of its own is an OpenAI key, so
     // there is nothing to refuse.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2544,7 +2522,7 @@ fn gemini_request() -> Value {
     })
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_gemini_request_names_the_model_and_the_method_in_the_path() {
     // Unlike the other two providers, the address depends on the request.
     let (provider_port, seen) = provider(gemini_reply(), None).await;
@@ -2584,7 +2562,7 @@ async fn a_gemini_request_names_the_model_and_the_method_in_the_path() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_gemini_response_comes_back_in_openai_shape() {
     let (provider_port, _seen) = provider(gemini_reply(), None).await;
     let (url, shutdown) = start("gemini", provider_port, "").await;
@@ -2592,7 +2570,6 @@ async fn a_gemini_response_comes_back_in_openai_shape() {
     let answered: Value = post(&url, &gemini_request())
         .await
         .json()
-        .await
         .expect("a JSON answer");
 
     assert_eq!(answered["object"], "chat.completion");
@@ -2608,7 +2585,7 @@ async fn a_gemini_response_comes_back_in_openai_shape() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_model_name_that_would_choose_another_endpoint_never_leaves_the_gateway() {
     // The one place a client's string reaches a URL the gateway signs with its
     // own key.
@@ -2628,7 +2605,7 @@ async fn a_model_name_that_would_choose_another_endpoint_never_leaves_the_gatewa
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_forced_model_decides_the_gemini_path() {
     // The URL is built after the whole policy chain has had its say, so the
     // backend's own model is what ends up in it.
@@ -2650,7 +2627,7 @@ async fn a_forced_model_decides_the_gemini_path() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_alias_decides_the_gemini_path_too() {
     let (provider_port, seen) = provider(gemini_reply(), None).await;
     let (url, shutdown) = start_with(
@@ -2681,7 +2658,7 @@ fn gemini_stream(frames: Vec<Value>) -> String {
         .collect()
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_gemini_stream_is_reframed_as_openai_chunks() {
     let stream = gemini_stream(vec![
         json!({"responseId": "resp-1", "modelVersion": "gemini-2.5-flash",
@@ -2699,14 +2676,11 @@ async fn a_gemini_stream_is_reframed_as_openai_chunks() {
     let response = post(&url, &asked).await;
     assert!(response.status().is_success(), "{}", response.status());
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
+        response.headers().get("content-type"),
         Some("text/event-stream")
     );
 
-    let body = response.text().await.expect("a body");
+    let body = response.text().expect("a body");
     let chunks: Vec<Value> = body
         .split("\n\n")
         .filter_map(|frame| frame.strip_prefix("data: "))
@@ -2737,7 +2711,7 @@ async fn a_gemini_stream_is_reframed_as_openai_chunks() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_streamed_gemini_call_reaches_the_client_as_tool_call_deltas() {
     // Gemini sends the call whole rather than as argument fragments, so the
     // delta carries the entire `arguments` string at once.
@@ -2756,7 +2730,7 @@ async fn a_streamed_gemini_call_reaches_the_client_as_tool_call_deltas() {
 
     let mut asked = gemini_request();
     asked["stream"] = json!(true);
-    let body = post(&url, &asked).await.text().await.expect("a body");
+    let body = post(&url, &asked).await.text().expect("a body");
 
     let chunks: Vec<Value> = body
         .split("\n\n")
@@ -2774,7 +2748,7 @@ async fn a_streamed_gemini_call_reaches_the_client_as_tool_call_deltas() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn tool_definitions_reach_gemini_as_function_declarations() {
     let (provider_port, seen) = provider(gemini_reply(), None).await;
     let (url, shutdown) = start("gemini", provider_port, "").await;
@@ -2814,7 +2788,7 @@ async fn tool_definitions_reach_gemini_as_function_declarations() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_gemini_tool_call_round_trips() {
     // The answer's call comes back with an id, and the result the client sends
     // under that id becomes a `functionResponse` naming the right function.
@@ -2839,7 +2813,7 @@ async fn a_gemini_tool_call_round_trips() {
         "type": "function",
         "function": {"name": "get_weather", "parameters": {"type": "object"}},
     }]);
-    let answered: Value = post(&url, &asked).await.json().await.expect("JSON");
+    let answered: Value = post(&url, &asked).await.json().expect("JSON");
 
     let call = &answered["choices"][0]["message"]["tool_calls"][0];
     assert_eq!(call["function"]["name"], "get_weather");
@@ -2875,7 +2849,7 @@ async fn a_gemini_tool_call_round_trips() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_gemini_stream_is_charged_to_the_token_budget() {
     let stream = gemini_stream(vec![json!({
         "responseId": "resp-1",
@@ -2896,7 +2870,7 @@ async fn a_gemini_stream_is_charged_to_the_token_budget() {
     asked["stream"] = json!(true);
     let first = post(&url, &asked).await;
     assert!(first.status().is_success());
-    let _ = first.text().await;
+    let _ = first.text();
 
     // The budget is spent by what the stream reported, so the next one is
     // refused rather than served.

@@ -1,4 +1,5 @@
-//! The model port: one stateless call, a fresh context in, validated posts out.
+//! The model port: one stateless call, a fresh context in, a checked reply
+//! out: board posts, or raw text for a caller-side parser (#708).
 
 use orch_dispatch::ClassifiedError;
 
@@ -11,9 +12,9 @@ pub struct Question {
     pub prefix: String,
     /// This claim, its deps, settled lines and the lens's track record.
     pub body: String,
-    /// What the reply may contain; every adapter checks it with
-    /// [`crate::parse`] before returning.
-    pub allowed: Allowed,
+    /// What the reply must be; every adapter checks it with
+    /// [`crate::check`] before returning.
+    pub shape: Shape,
     pub max_output_tokens: u32,
 }
 
@@ -25,10 +26,27 @@ pub struct Usage {
     pub cached_input_tokens: u64,
 }
 
+/// What a question's reply must be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shape {
+    /// Board posts under the reply protocol, within what the job may post.
+    Posts(Allowed),
+    /// Non-empty text, for a reply that posts nothing (the #708 alien
+    /// lens's enumerate and hunt steps). Its caller parses it.
+    Raw,
+}
+
+/// A checked reply, of the question's [`Shape`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    Posts(Vec<Post>),
+    Raw(String),
+}
+
 /// A validated reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
-    pub posts: Vec<Post>,
+    pub reply: Reply,
     pub usage: Usage,
 }
 

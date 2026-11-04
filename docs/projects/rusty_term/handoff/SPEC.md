@@ -16,7 +16,7 @@ unless a row or a Nano quote says otherwise.
 | Mux server and protocols (`rusty_mux_core`, `_proto`, `_server`, `_ctl`, `_mcp`, `_tui`, `_status`, `_script`) | `crates/apps/rusty_mux/crates/` | `docs/projects/mux/{CHARTER,ROADMAP,CAPABILITIES,DECISIONS,RISKS,DELTA,REPLAY,REX-DELTA,REX-APP,REX-GAP-CHECK,AGENT-PLACEMENT}.md` | @baileyrd | active | this one |
 | Transport (UDP associations, SSH bootstrap, predictive echo) | `crates/apps/rusty_mux/crates/transport/`, server/tui | `docs/projects/mux/{UDP-TRANSPORT,SPIKE-4-ROAMING,PREDICTIVE-ECHO}.md`, mux `DECISIONS.md` Phase 3 rows | @baileyrd | active | this one |
 | Windows console host (`rusty_conhost`, `platform_windows::condrv`) | `crates/libs/ui/rusty_conhost/`, `crates/platform/rustils/crates/platform-windows/` (`condrv`) | `docs/projects/term/conhost/design.md` (D1–D6, §5.10 V1–V15, §9.2), its spike and review files | @baileyrd | active | this one |
-| GUI (window, renderers, visual design) | `crates/libs/ui/rusty_term/src/gui/` | design: `docs/projects/rusty_term/gui-design/` (**not on main**, OPEN_QUESTIONS Q4); code behaviour: crate README | @baileyrd | active | `rusty-term-design-expert` for design; this one for code behaviour |
+| GUI (window, renderers, visual design) | `crates/libs/ui/rusty_term/src/gui/` | design: `docs/projects/term/gui-design/` (D70); code behaviour: crate README | @baileyrd | active | `rusty-term-design-expert` for design; this one for code behaviour |
 
 Owner: CODEOWNERS assigns `*` to @baileyrd. Status `active`: merged PRs in the last 90 days on every row.
 

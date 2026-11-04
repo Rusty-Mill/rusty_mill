@@ -1093,6 +1093,90 @@ fn a_green_base_pins_candidates_and_guards_its_tests() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every file under `dir` with its bytes, except `skip`.
+fn files_under(dir: &Path, skip: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if p != skip {
+                out.insert(p.clone(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
+    let dir = tempdir("intent_dry");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "plain", true);
+    human_ok(&dir, "claim", &[&format!("msg:{x}"), "accept"]);
+    let file = dir.join("brief-v2.md");
+    std::fs::write(&file, "A brief only previewed.").unwrap();
+    let path = file.to_str().unwrap();
+    let sha = Sha256::of(b"A brief only previewed.");
+    let before = files_under(&dir, &file);
+    let rev = state(&dir).rev;
+    let op = || Some(OpId("intent-1".into()));
+    let preview = |args: &[&str], fence: Rev| {
+        human::preview_fenced(
+            &dir,
+            &task(),
+            "intent",
+            args,
+            Some(rev),
+            "owner",
+            Some(fence),
+            op(),
+        )
+        .unwrap()
+    };
+    let fresh = preview(&[path], rev);
+    assert!(matches!(fresh.response, Response::Stored(_)), "{fresh:?}");
+    let unknown = preview(&[path, "claims=msg:999"], rev);
+    assert!(
+        matches!(&unknown.response, Response::Rejected(r) if r.code == Code::BadAffects),
+        "{unknown:?}"
+    );
+    let stale = preview(&[path], Rev(rev.0 - 1));
+    assert!(matches!(stale.response, Response::Rejected(_)), "{stale:?}");
+    assert_eq!(files_under(&dir, &file), before, "no preview wrote a file");
+    assert!(open_driver(&dir, &task())
+        .unwrap()
+        .store
+        .blob_get(&sha)
+        .is_err());
+
+    let applied = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path],
+        Some(rev),
+        "owner",
+        Some(rev),
+        op(),
+    )
+    .unwrap();
+    assert_eq!(
+        applied, fresh.response,
+        "the apply answers as its preview did"
+    );
+    assert_eq!(state(&dir).rev.0, rev.0 + fresh.events.len() as u64);
+    let stored = open_driver(&dir, &task())
+        .unwrap()
+        .store
+        .blob_get(&sha)
+        .unwrap();
+    assert_eq!(stored, b"A brief only previewed.");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- protected paths (#597)
 
 /// Store `diff` as `who` and a candidate of it naming claim `c`.
@@ -1704,5 +1788,57 @@ fn confined_golden_run_passes_and_reads_only_signed_fixtures() {
     assert!(!full.contains("UNSIGNED-SIBLING"), "{full}");
     assert!(shown.contains("golden:flag: exit 0"), "{shown}");
     println!("BBP_ACCEPTANCE PASS golden-confined");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `bbp why --claim` (#599): the claim's replay as JSON, `--at` cuts it, and
+/// an unknown claim or a bad flag pair is refused by name.
+#[test]
+fn why_replays_one_claim_and_names_the_rule() {
+    let dir = tempdir("why");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "flag", true);
+    cited(&dir, "b", c, 3);
+    cited(&dir, "a", c, 3);
+    let d = dir.to_str().unwrap();
+    let why = |extra: &[&str]| {
+        let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["why", "--dir", d, "--task", "C1"])
+            .args(extra)
+            .output()
+            .expect("run bbp");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let id = c.to_string();
+    let (ok, out, err) = why(&["--claim", &id]);
+    assert!(ok, "{err}");
+    let v: Value = rusty_serde::json::from_str(&out).unwrap();
+    let steps = match &v["steps"] {
+        Value::Seq(s) => s.clone(),
+        other => panic!("no steps: {other:?}"),
+    };
+    assert_eq!(steps.len(), 4, "{out}");
+    assert_eq!(steps[0]["change"].as_str(), Some("Posted"), "{out}");
+    assert!(
+        out.contains(r#""AcceptLine":{"accept_at":8,"support_authors":2}"#),
+        "{out}"
+    );
+    assert_eq!(steps[3]["status"].as_str(), Some("Accepted"), "{out}");
+
+    let at = steps[1]["rev"].as_u64().unwrap().to_string();
+    let (ok, cut, err) = why(&["--claim", &format!("msg:{id}"), "--at", &at]);
+    assert!(ok, "{err}");
+    assert_eq!(cut.matches("\"rev\":").count(), 2, "{cut}");
+
+    let (ok, _, err) = why(&["--claim", "999"]);
+    assert!(!ok && err.contains("no claim msg:999"), "{err}");
+    let (ok, _, err) = why(&["--claim", &id, "--turn", "1"]);
+    assert!(!ok && err.contains("exclusive"), "{err}");
+    let (ok, _, err) = why(&["--at", "3"]);
+    assert!(!ok && err.contains("--at needs --claim"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
