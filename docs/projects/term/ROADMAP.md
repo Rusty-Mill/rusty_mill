@@ -69,8 +69,9 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
    and C45 (sessions survive a server restart) land, then retires it. Nano to restate on this PR.
 2. **Restore after restart.** *Answered (Nano, project thread, 2026-11-04 12:06Z: "Q2 yes"):*
    C45 + C70 move forward from Phase 5. It forces question 3. Nano to restate on this PR.
-3. **Scrollback over 10k rows** (`SCROLLBACK_MAX = 10_000`, mux D14). What budget, and is the
-   spill to disk the answer? *Recommend: keep 10k in memory, spill the rest to disk with C70.*
+3. **Scrollback over 10k rows.** *Answered (Nano, project thread, 2026-11-04 12:07Z: "Q3
+   concur"):* keep `SCROLLBACK_MAX = 10_000` rows in memory; older rows spill to disk with C70.
+   The disk limit is set in C70's plan. Nano to restate on this PR.
 4. **Binary-loaded skill (O3).** Make it C73 and the next mux step? *Recommend yes.*
 5. **Agent hook plus OSC 7501 status (O2).** Adopt? *Recommend yes, after O3.*
 6. **tmux shim (O4).** tmux compatibility is a CHARTER non-goal. Reverse it for a narrow shim
