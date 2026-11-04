@@ -20,6 +20,7 @@
 )]
 
 mod assignments;
+mod lens_states;
 mod meters;
 mod record;
 mod taints;
@@ -34,6 +35,7 @@ use orch_core::GoalId;
 use orch_dispatch::Ledger;
 use orch_lens::meter::Snapshot;
 use orch_lens::taint::Taints;
+use orch_lens::saved::Saved;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
@@ -41,6 +43,7 @@ use rusty_multimodal_db_engine::generic::query::GetById;
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
+use lens_states::LensStateRecord;
 use meters::MeterRecord;
 use record::{ById, GoalRecord, Revision};
 use taints::TaintRecord;
@@ -55,6 +58,8 @@ const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 const METERS_FILE: &str = "meters.mmap";
 /// BBP tasks' taint tables (#598).
 const TAINTS_FILE: &str = "taints.mmap";
+/// Lens scheduler memory, one record per BBP board (#594).
+const LENS_STATES_FILE: &str = "lens-states.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -138,6 +143,7 @@ pub struct Store {
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     meters: GenericMmapStore<MeterRecord, ById, Revision>,
     taints: GenericMmapStore<TaintRecord, ById, Revision>,
+    lens_states: GenericMmapStore<LensStateRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -176,6 +182,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(LENS_STATES_FILE);
+        let lens_states = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -188,6 +200,7 @@ impl Store {
             legacy,
             meters,
             taints,
+            lens_states,
             _lock: lock,
         })
     }
@@ -335,6 +348,50 @@ impl Store {
             self.meters.insert(record).map_err(engine_error)
         } else {
             self.meters.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+}
+
+impl Store {
+    /// The saved lens scheduler memory of BBP board `board`, or `None` when
+    /// none was saved. A board names one task in one BBP store directory;
+    /// the caller builds it (`rusty_orch` uses the canonical directory and
+    /// the task id). Rebuild it with `orch_lens::schedule::State::restore`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record under its key names another
+    /// board.
+    pub fn load_lens_state(&self, board: &str) -> Result<Option<Saved>, StoreError> {
+        self.lens_states
+            .get(lens_states::key(board))
+            .map(|r| r.into_saved(board))
+            .transpose()
+    }
+
+    /// Save `saved` as the lens scheduler memory of `board`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another board's
+    /// memory; [`StoreError::Engine`] when the write fails.
+    pub fn save_lens_state(&mut self, board: &str, saved: &Saved) -> Result<(), StoreError> {
+        let existing = self.lens_states.get(lens_states::key(board));
+        if let Some(r) = &existing {
+            if r.board != board {
+                return Err(StoreError::Corrupt(format!(
+                    "lens state key for {board:?} holds {:?}",
+                    r.board
+                )));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = LensStateRecord::new(board, saved, revision);
+        let written = if existing.is_none() {
+            self.lens_states.insert(record).map_err(engine_error)
+        } else {
+            self.lens_states.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
     }

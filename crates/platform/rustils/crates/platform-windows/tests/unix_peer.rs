@@ -327,6 +327,29 @@ fn restrict_to_owner_leaves_one_protected_full_access_entry_for_this_user() {
 }
 
 #[test]
+fn restrict_dir_to_owner_is_inherited_by_new_entries() {
+    let dir = std::env::temp_dir().join(format!("pw-dacl-dir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).expect("mkdir");
+    fs::restrict_dir_to_owner(&dir).expect("restrict_dir_to_owner");
+    let only_me = vec![Entry {
+        kind: w::ACCESS_ALLOWED_ACE_TYPE as u8,
+        mask: w::FILE_ALL_ACCESS,
+        sid: whoami_sid(),
+    }];
+    let (control, entries) = dacl_of(&dir);
+    assert_eq!(entries, only_me, "the directory");
+    assert_ne!(control & w::SE_DACL_PROTECTED, 0);
+    let file = dir.join("child");
+    std::fs::write(&file, b"x").expect("write child");
+    assert_eq!(dacl_of(&file).1, only_me, "a file made in it inherits");
+    let sub = dir.join("sub");
+    std::fs::create_dir(&sub).expect("mkdir sub");
+    assert_eq!(dacl_of(&sub).1, only_me, "a directory made in it inherits");
+    std::fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
 fn std_read_and_write_round_trip() {
     let path = socket_path("io");
     let (_listener, mut server, mut client) = pair(&path);
