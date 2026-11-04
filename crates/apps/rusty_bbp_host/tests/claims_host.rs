@@ -33,6 +33,7 @@ fn lens(id: &str, order: u16) -> Role {
 fn profiles() -> ProfileSet {
     let mut set = ProfileSet::shell("test", "sh ./test.sh");
     set.test_paths = vec!["tests/**".into()];
+    set.erosion = Some("off".into());
     set
 }
 
@@ -66,10 +67,11 @@ fn claims_task(dir: &Path) {
 }
 
 fn claims_task_as(dir: &Path, t: &TaskId) {
-    assert!(matches!(
-        open_as(dir, t, &profiles(), Ok(())),
-        Response::Stored(_)
-    ));
+    claims_task_set(dir, t, &profiles());
+}
+
+fn claims_task_set(dir: &Path, t: &TaskId, set: &ProfileSet) {
+    assert!(matches!(open_as(dir, t, set, Ok(())), Response::Stored(_)));
     for who in ["a", "b"] {
         admin::assign(dir, t, &RoleId::from(who), &PrincipalId(who.into()), "v").expect("assign");
     }
@@ -87,7 +89,8 @@ fn rejected(r: Response) -> (Code, String) {
 }
 
 /// CL-44 (a): a host that cannot sandbox refuses a claims open, and so does a
-/// profile set without test_paths; nothing is written either way.
+/// profile set without test_paths or without an erosion profile or opt-out
+/// (#704); nothing is written either way.
 #[test]
 fn claims_open_refuses_a_host_without_a_sandbox() {
     let dir = tempdir("nosandbox");
@@ -97,6 +100,11 @@ fn claims_open_refuses_a_host_without_a_sandbox() {
     let (code, detail) = rejected(open(&dir, &ProfileSet::shell("t", "true"), Ok(())));
     assert_eq!(code, Code::BadClaimsConfig);
     assert!(detail.starts_with("test_paths"), "{detail}");
+    let mut no_erosion = profiles();
+    no_erosion.erosion = None;
+    let (code, detail) = rejected(open(&dir, &no_erosion, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.starts_with("erosion"), "{detail}");
     assert!(!log_path_for(&dir, &task()).exists());
     assert!(!rusty_bbp_host::profiles::path(&dir, &task()).exists());
 
@@ -1553,4 +1561,101 @@ fn why_replays_one_claim_and_names_the_rule() {
     let (ok, _, err) = why(&["--at", "3"]);
     assert!(!ok && err.contains("--at needs --claim"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- erosion profile (#704)
+
+const ORIGINAL_RS: &str = "pub fn total(items: &[Item], rate: u32) -> u32 {
+    let mut sum = 0;
+    for item in items.iter() {
+        let price = item.price * item.count;
+        let tax = price * rate / 100;
+        sum += price + tax;
+    }
+    sum
+}
+";
+
+/// A candidate that fixes the flag and pastes a renamed copy of `total`.
+fn paste_diff() -> String {
+    let pasted = ORIGINAL_RS
+        .replace("total", "grand")
+        .replace("items", "goods")
+        .replace("100", "250");
+    let lines: Vec<&str> = pasted.lines().collect();
+    let body: String = lines.iter().map(|l| format!("+{l}\n")).collect();
+    format!(
+        "{FLAG_ONLY}--- /dev/null\n+++ b/src/b.rs\n@@ -0,0 +1,{} @@\n{body}",
+        lines.len()
+    )
+}
+
+/// #704 slice 2, Linux acceptance lane: a claims task's `erosion` profile
+/// runs the real `erosion` binary in the sandbox against the pinned base. A
+/// pasted duplicate is reported while report-only, and fails the profile
+/// once limits are enforced. Refuses to pass where the sandbox does not work.
+#[test]
+#[ignore = "needs a working sandbox and EROSION_TEST_BIN; run by the confined acceptance lane"]
+fn confined_erosion_profile_reports_then_blocks_a_pasted_duplicate() {
+    let bin = PathBuf::from(std::env::var_os("EROSION_TEST_BIN").expect("EROSION_TEST_BIN"));
+    let bin_dir = bin
+        .parent()
+        .expect("bin dir")
+        .to_str()
+        .expect("utf-8")
+        .to_owned();
+    let modes = [
+        ("erosion_report", "--report-only", "exit 0"),
+        (
+            "erosion_enforce",
+            "--max-concentration-bp 100 --max-duplication-bp 100",
+            "exit 1",
+        ),
+    ];
+    for (tag, mode, exit) in modes {
+        let dir = tempdir(tag);
+        runner::probe(&sandbox(&dir), &dir.join("probe")).expect("a working sandbox");
+        let (repo, _) = repo(&dir);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), ORIGINAL_RS).unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "rust"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+
+        let mut set = profiles();
+        set.erosion = None;
+        set.read_roots.push(bin_dir.clone());
+        let mut args = vec!["check".to_owned(), "--base".to_owned(), base.clone()];
+        args.extend(mode.split_whitespace().map(String::from));
+        set.profiles.push(rusty_bbp_host::profiles::Profile {
+            name: rusty_bbp_host::profiles::EROSION_PROFILE.into(),
+            program: bin.to_str().expect("utf-8").into(),
+            args,
+        });
+        claims_task_set(&dir, &task(), &set);
+        let c = claim(&dir, "a", "flag", true);
+        let (text, err) = put_candidate(&mut server(&dir, "a"), "k", &base, &paste_diff(), c);
+        assert!(!err, "{text}");
+        let k = id_of(&text);
+        let exec = sandbox(&dir);
+        runner::run_once(
+            &dir,
+            &task(),
+            &repo,
+            &dir.join("work"),
+            &exec,
+            Confinement::Sandboxed,
+        )
+        .expect("run");
+
+        let (_, rep, log) = run_of(&dir, k);
+        assert_eq!(rep.sandbox, runner::Sandboxed::LABEL);
+        assert!(log.contains("--- test: exit 0"), "{log}");
+        assert!(log.contains(&format!("--- erosion: {exit}")), "{log}");
+        let dup = "\"duplication_bp\":{\"base\":0,\"candidate\":10000,\"delta\":10000}";
+        assert!(log.contains(dup), "{log}");
+        assert!(log.contains("\"key\":\"src/b.rs::grand\""), "{log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    println!("BBP_ACCEPTANCE PASS erosion-confined");
 }

@@ -4,6 +4,8 @@
 pub mod concentration;
 pub mod duplication;
 
+use std::collections::HashMap;
+
 /// Basis points in one whole: 10 000 bp = 100 %.
 pub const BP: u64 = 10_000;
 
@@ -143,6 +145,43 @@ impl Report {
             ),
         }
     }
+
+    /// The `n` functions whose CC rose most from `self` (the baseline) to
+    /// `candidate`, matched by key; a new function counts from 0. Ties go by
+    /// key. Functions whose CC did not rise are left out.
+    pub fn worst_affected(&self, candidate: &Report, n: usize) -> Vec<Affected> {
+        let base: HashMap<&str, u32> = self
+            .functions
+            .iter()
+            .map(|f| (f.key.as_str(), f.cc))
+            .collect();
+        let mut out: Vec<Affected> = candidate
+            .functions
+            .iter()
+            .map(|f| Affected {
+                key: f.key.clone(),
+                base_cc: base.get(f.key.as_str()).copied().unwrap_or(0),
+                cc: f.cc,
+            })
+            .filter(|a| a.cc > a.base_cc)
+            .collect();
+        out.sort_by(|a, b| {
+            (b.cc - b.base_cc)
+                .cmp(&(a.cc - a.base_cc))
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        out.truncate(n);
+        out
+    }
+}
+
+/// A function whose CC rose between baseline and candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Affected {
+    pub key: String,
+    /// 0 when the function is new.
+    pub base_cc: u32,
+    pub cc: u32,
 }
 
 /// Signed change from a baseline to a candidate. Positive is worse for the
@@ -192,5 +231,32 @@ mod tests {
             -5000
         );
         assert_eq!(Ratio::default().delta_bp(Ratio { num: 1, den: 2 }), 5000);
+    }
+
+    fn f(key: &str, cc: u32) -> FunctionMetric {
+        FunctionMetric {
+            key: key.into(),
+            path: "a.rs".into(),
+            line: 1,
+            cc,
+        }
+    }
+
+    #[test]
+    fn worst_affected_ranks_cc_rises_by_key() {
+        let base = Report::build(vec![], vec![]);
+        let mut base_fns = base.clone();
+        base_fns.functions = vec![f("a", 5), f("b", 2), f("c", 9)];
+        let mut cand = base.clone();
+        cand.functions = vec![f("a", 8), f("b", 2), f("c", 4), f("d", 3), f("e", 4)];
+        let got: Vec<(String, u32, u32)> = base_fns
+            .worst_affected(&cand, 3)
+            .into_iter()
+            .map(|a| (a.key, a.base_cc, a.cc))
+            .collect();
+        assert_eq!(
+            got,
+            [("e".into(), 0, 4), ("a".into(), 5, 8), ("d".into(), 0, 3)]
+        );
     }
 }

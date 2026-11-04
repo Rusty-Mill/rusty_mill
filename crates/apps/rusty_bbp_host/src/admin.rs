@@ -188,6 +188,9 @@ pub fn open_claims_task(
     if let Err(e) = set.check_protected() {
         return refuse(format!("protected: {e}"));
     }
+    if let Err(e) = set.check_erosion() {
+        return refuse(format!("erosion: {e}"));
+    }
     let repo_dir = Path::new(repo);
     let dirs: &[&Path] = match repo_dir.is_absolute() {
         true => &[repo_dir],
