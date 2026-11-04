@@ -11,6 +11,7 @@
 //! before every call. The scheduler's memory lives only as long as the
 //! process: a second run asks blind passes again.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -173,9 +174,12 @@ pub struct Lenses<'a> {
 
 /// Run up to `max` passes over every lens until one starts no job. A lens
 /// without a seat is an error. Each job's outcome is written to `log`.
+/// `state` goes to `keep` after every lens's round, so a restart resumes
+/// from it; a failed keep is an error.
 pub fn passes(
     lenses: Lenses<'_>,
     state: &mut State,
+    keep: &mut dyn FnMut(&State) -> Result<(), String>,
     metering: Metering<'_>,
     models: &mut dyn Models,
     max: u32,
@@ -216,6 +220,7 @@ pub fn passes(
                 save: &mut *metering.save,
             };
             let report = round(&one, &view, state, ctx, models, seat.board());
+            keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
             started += report.ran.len();
             for (key, end) in &report.ran {
                 let _ = writeln!(
@@ -276,8 +281,20 @@ pub fn run(o: &Options) -> Result<String, String> {
         }
     };
     let mut registry = Registry::build(&config, &o.repo, &grants)?;
-    let mut store = Store::open(&o.state).map_err(|e| e.to_string())?;
-    let mut meter = match store.load_meter(&o.experiment).map_err(|e| e.to_string())? {
+    let store = RefCell::new(Store::open(&o.state).map_err(|e| e.to_string())?);
+    let mut state = match store
+        .borrow()
+        .load_lens_state(&o.task)
+        .map_err(|e| e.to_string())?
+    {
+        Some(saved) => State::restore(&saved).map_err(|e| format!("lens state: {e}"))?,
+        None => State::default(),
+    };
+    let loaded = store
+        .borrow()
+        .load_meter(&o.experiment)
+        .map_err(|e| e.to_string())?;
+    let mut meter = match loaded {
         Some(snap) => Meter::restore(config.ceilings, &snap),
         None => Meter::new(config.ceilings, 0),
     };
@@ -298,7 +315,14 @@ pub fn run(o: &Options) -> Result<String, String> {
     let experiment = o.experiment.clone();
     let mut save = |m: &Meter| {
         store
+            .borrow_mut()
             .save_meter(&experiment, &m.snapshot())
+            .map_err(|e| e.to_string())
+    };
+    let mut keep = |s: &State| {
+        store
+            .borrow_mut()
+            .save_lens_state(&o.task, &s.saved())
             .map_err(|e| e.to_string())
     };
     let metering = Metering {
@@ -306,7 +330,6 @@ pub fn run(o: &Options) -> Result<String, String> {
         meter: &mut meter,
         save: &mut save,
     };
-    let mut state = State::default();
     let lenses = Lenses {
         config: &config,
         seats: &mut seats,
@@ -315,6 +338,7 @@ pub fn run(o: &Options) -> Result<String, String> {
     let ended = passes(
         lenses,
         &mut state,
+        &mut keep,
         metering,
         &mut registry,
         o.max_passes,
@@ -474,6 +498,25 @@ mod tests {
         task_calls: u32,
         max: u32,
     ) -> (Result<Ended, String>, String) {
+        go_from(
+            &mut State::default(),
+            &mut |_| Ok(()),
+            seats,
+            echo,
+            task_calls,
+            max,
+        )
+    }
+
+    /// [`go`] from `state`, keeping it through `keep`.
+    fn go_from(
+        state: &mut State,
+        keep: &mut dyn FnMut(&State) -> Result<(), String>,
+        seats: Vec<(&str, FakeSeat)>,
+        echo: &mut Echo,
+        task_calls: u32,
+        max: u32,
+    ) -> (Result<Ended, String>, String) {
         let cfg = config();
         let mut boxed: BTreeMap<String, Box<dyn Seat>> = seats
             .into_iter()
@@ -499,8 +542,64 @@ mod tests {
             prefixes: &prefixes,
         };
         let mut log = String::new();
-        let ended = passes(lenses, &mut State::default(), metering, echo, max, &mut log);
+        let ended = passes(lenses, state, keep, metering, echo, max, &mut log);
         (ended, log)
+    }
+
+    fn two_seats() -> Vec<(&'static str, FakeSeat)> {
+        vec![
+            ("adversary", FakeSeat::new(vec![card(7)])),
+            ("operator", FakeSeat::new(vec![card(7)])),
+        ]
+    }
+
+    #[test]
+    fn a_restart_from_the_kept_memory_does_not_ask_again() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut kept = Vec::new();
+        let mut keep = |s: &State| {
+            kept.push(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+        assert_eq!(kept.len(), 4, "kept after every lens's round, two passes");
+        let last = kept.last().expect("kept");
+        assert_eq!(last.progress.len(), 2, "both blind passes remembered");
+        let mut restored = State::restore(last).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2, "no lens asked again: {log}");
+    }
+
+    #[test]
+    fn memory_that_cannot_be_kept_is_an_error() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut |_| Err("disk full".to_owned()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Err("lens state not saved: disk full".to_owned()));
+        assert_eq!(echo.1, 1, "stops after the first round");
     }
 
     #[test]
