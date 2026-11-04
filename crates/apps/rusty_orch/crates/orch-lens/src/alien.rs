@@ -157,9 +157,13 @@ pub fn control(task: &str, claim: MsgId, n: u64) -> bool {
         return false;
     }
     let digest = Sha256::of(format!("{task}\n{}", claim.0).as_bytes());
-    let mut head = [0u8; 8];
-    head.copy_from_slice(&digest.0[..8]);
-    u64::from_be_bytes(head) % n == 0
+    // The whole digest as a big-endian integer, reduced mod n byte by byte.
+    let n = u128::from(n);
+    digest
+        .0
+        .iter()
+        .fold(0u128, |r, &b| (r * 256 + u128::from(b)) % n)
+        == 0
 }
 
 /// One suspect from an enumerate reply.
@@ -246,13 +250,22 @@ pub fn parse_probe(text: &str) -> Result<Option<String>, String> {
 pub fn unavailability(s: &Suspect, notes: &[String], list: &[Mechanism]) -> u8 {
     let lower: Vec<String> = notes.iter().map(|n| n.to_lowercase()).collect();
     let site = s.site.to_lowercase();
-    let named = lower.iter().any(|n| n.contains(&site));
+    let named = lower.iter().any(|n| names(n, &site));
     let keywords = list
         .iter()
         .find(|m| m.id == s.mechanism)
         .map_or(&[][..], |m| m.keywords);
     let tagged = lower.iter().any(|n| keywords.iter().any(|k| n.contains(k)));
     2 - u8::from(named) - u8::from(tagged)
+}
+
+/// Whether `note` names `site` whole: `store::write` does not match inside
+/// `store::write_all` or `my_store::write`.
+fn names(note: &str, site: &str) -> bool {
+    let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    note.match_indices(site).any(|(at, _)| {
+        !ident(note[..at].chars().next_back()) && !ident(note[at + site.len()..].chars().next())
+    })
 }
 
 /// The suspects to hunt: sorted by unavailability, then coherence (both
@@ -581,6 +594,10 @@ mod tests {
                 .map(|i| control("t", MsgId(i), 10))
                 .collect::<Vec<_>>()
         );
+        // Golden vectors, computed apart from this code: the whole
+        // sha256("t\n<claim>") as an integer, mod 10.
+        assert!(control("t", MsgId(0), 10)); // digest 5b1d…2c46, mod 10 == 0
+        assert!(!control("t", MsgId(2), 10)); // its first 8 bytes alone give 0
         assert!(!control("t", MsgId(1), 0));
         assert!(control("t", MsgId(1), 1));
     }
@@ -685,6 +702,19 @@ mod tests {
         assert_eq!(
             unavailability(&sus("path::join", "rs-path", 3), &[], RUST),
             2
+        );
+        for longer in ["store::write_all", "my_store::write", "store::write2"] {
+            let note = vec![format!("{longer} is fine")];
+            assert_eq!(
+                unavailability(&sus("store::write", "rs-path", 3), &note, RUST),
+                2,
+                "{longer}"
+            );
+        }
+        let whole = vec!["see store::write, line 3".to_owned()];
+        assert_eq!(
+            unavailability(&sus("store::write", "rs-path", 3), &whole, RUST),
+            1
         );
     }
 
