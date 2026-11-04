@@ -11,8 +11,9 @@
 //!
 //! Exit status: 0 when within the limits, and always 0 with `--report-only`
 //! (the deltas are still printed). 1 when a delta exceeds its limit. 2 when
-//! it could not measure; with `--report-only` that is printed and exits 0,
-//! so a report-only profile never blocks a claim.
+//! it could not measure, including changed Rust that is not UTF-8; with
+//! `--report-only` that is printed and exits 0 (unreadable Rust is listed as
+//! `unmeasured`), so a report-only profile never blocks a claim.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -153,6 +154,22 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
     // Changed code it cannot measure: another language (deleted included),
     // or Rust that is not UTF-8.
     let unreadable = unmeasured(&cand_files);
+    let bad_rust: Vec<&String> = unreadable
+        .iter()
+        .filter(|p| classify(p) == FileClass::Rust)
+        .collect();
+    if opts.limits.is_some() && !bad_rust.is_empty() {
+        // Supported code that cannot be read is a measurement failure, not
+        // `unmeasured` (D45 covers other languages only): fail closed.
+        return Err(format!(
+            "changed Rust is not UTF-8: {}",
+            bad_rust
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     let changed_unmeasured: Vec<&String> = changed
         .iter()
         .filter(|p| classify(p) == FileClass::Unmeasured || unreadable.contains(p))

@@ -176,20 +176,26 @@ impl ProfileSet {
         }
     }
 
-    /// The `--base` value in the profile's arguments, read as words so a
-    /// `sh -c` command line counts too.
+    /// The `--base` value: exactly one argument `--base` followed by the
+    /// commit, as separate arguments. Shell source (`sh -c "..."`) is not
+    /// parsed, since quotes and comments would make what is checked differ
+    /// from what runs; such a profile names no `--base` and is refused.
     fn check_erosion_base(&self, p: &Profile) -> Result<(), String> {
-        let words: Vec<&str> = p.args.iter().flat_map(|a| a.split_whitespace()).collect();
-        let bases: Vec<&str> = words
+        let bases: Vec<&str> = p
+            .args
             .windows(2)
             .filter(|w| w[0] == "--base")
-            .map(|w| w[1])
+            .map(|w| w[1].as_str())
             .collect();
         // One base only: `erosion` refuses a repeated flag, and the open must
         // validate the base the run will use.
         let base = match bases[..] {
             [base] => base,
-            [] => return Err("the erosion profile names no --base commit".into()),
+            [] => {
+                return Err(
+                    "the erosion profile names no --base commit as its own argument".into(),
+                );
+            }
             _ => return Err("the erosion profile names --base more than once".into()),
         };
         if !is_commit_id(base) {
@@ -428,13 +434,22 @@ mod tests {
         let mut off = ProfileSet::shell("test", "true");
         off.erosion = Some("off".into());
         assert_eq!(off.check_erosion(), Ok(()));
-        let mut shell = ProfileSet::shell(
+        let mut pinned_ok = ok.clone();
+        pinned_ok.baseline = Some(c.into());
+        assert_eq!(pinned_ok.check_erosion(), Ok(()));
+        // Shell source is not parsed: quoting or a trailing comment could
+        // make the checked base differ from the one that runs.
+        let quoted = ProfileSet::shell(
             EROSION_PROFILE,
-            &format!("erosion check --base {c} --report-only"),
+            &format!("erosion check --base '{c}' --report-only"),
         );
-        assert_eq!(shell.check_erosion(), Ok(()));
-        shell.baseline = Some(c.into());
-        assert_eq!(shell.check_erosion(), Ok(()));
+        let commented = ProfileSet::shell(
+            EROSION_PROFILE,
+            &format!(
+                "erosion check \"--base\" {} --report-only # --base {c}",
+                "f".repeat(40)
+            ),
+        );
 
         let mut both = ok.clone();
         both.erosion = Some("off".into());
@@ -455,6 +470,8 @@ mod tests {
                 "full commit",
             ),
             (pinned, "pinned baseline"),
+            (quoted, "own argument"),
+            (commented, "own argument"),
             (
                 erosion_set(&format!(
                     "check --base {c} --base {} --report-only",

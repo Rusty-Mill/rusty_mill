@@ -206,4 +206,11 @@ fn changed_rust_that_is_not_utf8_is_reported_unmeasured() {
     std::fs::write(repo.dir.join("src/bad.rs"), b"fn a() { \xff }\n").expect("write");
     let line = stdout(&repo.erosion(&["check", "--base", &base, "--report-only"]));
     assert!(line.contains("\"unmeasured\":[\"src/bad.rs\"]"), "{line}");
+    let enforced = repo.erosion(&enforcing(&base));
+    assert_eq!(enforced.status.code(), Some(2), "{}", stdout(&enforced));
+    assert!(
+        stdout(&enforced).contains("not UTF-8"),
+        "{}",
+        stdout(&enforced)
+    );
 }
