@@ -81,6 +81,7 @@ Precise contracts used by this guide:
 | D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
+| D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
 
 ## D1. Lenses, not stages
 
@@ -561,3 +562,12 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_ed23f39443c2424d96b224556a54303f
 **Key.** lel:600:windows-contradiction-human-reopen
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O3 "Concur with recommendation" (option a).
+
+## D66. The #600 builder-session design is approved
+
+**Decision.** Nano approved the #600 builder-session design (`/mnt/project-files/let-em-loose/600-builder-session-design.md`) as a whole, together with D63–D65. Its §8 changes count as approved: the orch `Builder` job kind and its admission check; the config values `builders_per_claim`, `max_live_builders` and `builder_wall_secs`; the orch-store `builder_session` table; the open-time `untested` check for Windows intent lines; the orch-bbp builder launch profile with a pre-fetched dependency mirror; and a new local-only repo `dedup-manager` on BaileyAi. The #598 items it depends on are approved in D62. The §10 defaults (local-only repo, 45-minute wall clock, dependency mirror) stay `[default]`. #600 is built once #594 and #595 are in place.
+**Why.** Design first on every card (D25). This closes OPEN_QUESTIONS Q7.
+**Rejected.** Further changes before approval (the card's other option).
+**Tag.** [stated] · remind-me: mem_c00104fb2fa0499c8f471bddcbb64cbc
+**Key.** lel:600:builder-session-design-approved
+**Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
