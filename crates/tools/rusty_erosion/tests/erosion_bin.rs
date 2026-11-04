@@ -339,6 +339,28 @@ fn parent_tracked_rust_beside_a_nested_git_is_still_measured() {
     assert!(stdout(&out).contains("\"functions\":1"), "{}", stdout(&out));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_gitlink_with_a_non_utf8_name_never_hides_a_real_directory() {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = Repo::new("subbytes");
+    // A gitlink named by byte FF, and a tracked directory named U+FFFD,
+    // which is what FF reads as when decoded lossily.
+    nested_repo(
+        &repo.dir.join(std::ffi::OsStr::from_bytes(b"\xff")),
+        &[("x.txt", "x\n")],
+    );
+    std::fs::create_dir_all(repo.dir.join("\u{fffd}")).expect("mkdir");
+    repo.write("\u{fffd}/a.rs", "pub fn z() {}\n");
+    commit(&repo);
+    let base = repo.head();
+    // A copy of src/a.rs: only measured if this path is.
+    repo.write("\u{fffd}/a.rs", &format!("pub fn z() {{}}\n{PASTED}"));
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(stdout(&out).contains("\"functions\":1"), "{}", stdout(&out));
+}
+
 #[test]
 fn an_updated_submodule_with_a_rust_name_is_skipped() {
     let repo = Repo::new("subname");

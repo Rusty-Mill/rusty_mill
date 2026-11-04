@@ -230,7 +230,8 @@ impl Snapshot {
 
 /// Paths the working tree changes against `base`: modified, added, deleted
 /// and untracked-unignored. The second set holds those whose names are not
-/// UTF-8, as lossy text: they cannot be named exactly, so are never opened.
+/// UTF-8, as lossy text for diagnostics only: they cannot be named exactly,
+/// so are never opened, and never mixed with the exact names.
 fn changed_paths(base: &str) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
     let mut raw = git(&["diff", "--name-only", "--no-renames", "-z", base, "--"])?;
     raw.push(0);
@@ -240,10 +241,7 @@ fn changed_paths(base: &str) -> Result<(BTreeSet<String>, BTreeSet<String>), Str
     for name in split_z(&raw) {
         match name {
             Ok(path) => all.insert(path),
-            Err(lossy) => {
-                mangled.insert(lossy.clone());
-                all.insert(lossy)
-            }
+            Err(lossy) => mangled.insert(lossy),
         };
     }
     Ok((all, mangled))
@@ -310,6 +308,18 @@ fn base_snapshot(base: &str) -> Result<Snapshot, String> {
 fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Snapshot, String> {
     let gitlinks = index_gitlinks()?;
     let mut snap = Snapshot::default();
+    // Names that are not UTF-8 are listed by their lossy text, never opened.
+    for name in mangled {
+        match classify(name) {
+            FileClass::Ignored => {}
+            FileClass::Unmeasured => {
+                snap.other.insert(name.clone());
+            }
+            FileClass::Rust => {
+                snap.unreadable.insert(name.clone());
+            }
+        }
+    }
     for path in changed {
         match classify(path) {
             FileClass::Ignored => {}
@@ -317,9 +327,6 @@ fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Sn
                 snap.other.insert(path.clone());
             }
             FileClass::Rust if gitlinks.contains(path) => {}
-            FileClass::Rust if mangled.contains(path) => {
-                snap.unreadable.insert(path.clone());
-            }
             FileClass::Rust => match entry(path, &gitlinks)? {
                 Entry::Absent => {}
                 Entry::Special => {
@@ -340,8 +347,11 @@ fn index_gitlinks() -> Result<BTreeSet<String>, String> {
         let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
             continue;
         };
-        if entry.starts_with(b"160000 ") {
-            out.insert(String::from_utf8_lossy(&entry[tab + 1..]).into_owned());
+        // Only exact names: they are matched against exact source paths,
+        // and a lossy one could equal a different, real directory.
+        let exact = std::str::from_utf8(&entry[tab + 1..]);
+        if let (true, Ok(path)) = (entry.starts_with(b"160000 "), exact) {
+            out.insert(path.to_owned());
         }
     }
     Ok(out)
