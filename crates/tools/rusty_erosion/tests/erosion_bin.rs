@@ -403,6 +403,22 @@ fn rust_removed_from_the_index_and_ignored_is_a_deletion() {
 }
 
 #[test]
+fn a_staged_deletion_of_another_language_is_still_reported() {
+    let repo = Repo::new("pydel");
+    repo.write("tool.py", "print(1)\n");
+    commit(&repo);
+    let base = repo.head();
+    repo.git(&["rm", "--quiet", "tool.py"]);
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"unmeasured\":[\"tool.py\"]"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
 fn an_updated_submodule_with_a_rust_name_is_skipped() {
     let repo = Repo::new("subname");
     let sub = repo.dir.join("vendor.rs");

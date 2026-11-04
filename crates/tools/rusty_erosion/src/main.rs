@@ -316,30 +316,30 @@ fn worktree(changed: &BTreeSet<String>, mangled: &Mangled) -> Result<Snapshot, S
     let tree = CandidateTree::read()?;
     let mut snap = Snapshot::default();
     // Names that are not UTF-8 are listed by their lossy text, never opened;
-    // membership is decided by their raw bytes first.
+    // identity is decided by their raw bytes first. Changed code in another
+    // language is listed whether or not it is still there (deleted
+    // included); Rust is looked at only if the candidate tree holds it.
     for (raw, name) in mangled {
-        if !tree.holds(raw) {
-            continue;
-        }
         match classify(name) {
+            _ if tree.in_gitlink(raw) => {}
             FileClass::Ignored => {}
             FileClass::Unmeasured => {
                 snap.other.insert(name.clone());
             }
+            FileClass::Rust if !tree.holds(raw) => {}
             FileClass::Rust => {
                 snap.unreadable.insert(name.clone());
             }
         }
     }
     for path in changed {
-        if !tree.holds(path.as_bytes()) {
-            continue;
-        }
         match classify(path) {
+            _ if tree.in_gitlink(path.as_bytes()) => {}
             FileClass::Ignored => {}
             FileClass::Unmeasured => {
                 snap.other.insert(path.clone());
             }
+            FileClass::Rust if !tree.holds(path.as_bytes()) => {}
             FileClass::Rust => match entry(path)? {
                 Entry::Absent => {}
                 Entry::Special => {
@@ -389,15 +389,20 @@ impl CandidateTree {
     }
 
     /// Whether `path` is this tree's own file: a member, and neither a
-    /// gitlink nor under one (the submodule's tree, skipped in the base too).
+    /// gitlink nor under one.
     fn holds(&self, path: &[u8]) -> bool {
+        self.members.contains(path) && !self.in_gitlink(path)
+    }
+
+    /// Whether `path` is a gitlink or under one: the submodule's tree, not
+    /// this one's (the base skips gitlinks too).
+    fn in_gitlink(&self, path: &[u8]) -> bool {
         let prefixes = path
             .iter()
             .enumerate()
             .filter(|(_, b)| **b == b'/')
             .map(|(i, _)| &path[..i]);
-        let in_gitlink = prefixes.chain([path]).any(|p| self.gitlinks.contains(p));
-        self.members.contains(path) && !in_gitlink
+        prefixes.chain([path]).any(|p| self.gitlinks.contains(p))
     }
 }
 
