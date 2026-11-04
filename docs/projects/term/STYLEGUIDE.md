@@ -48,9 +48,9 @@ are. Success is verdigris and failure is oxide (D7, D36). (Pack D34, D35.)
 
 - **Fixed chrome scale (owner, 2026-11-03).** Font zoom (Ctrl+= / Ctrl+-) and the configured
   terminal `font-size` change only the grid. The chrome is sized by display DPI and,
-  when added, a `[window] ui_scale`. Today the bars already draw in their own UI font that
-  zoom leaves alone (`ui_font`, #1388); the configured `font-size` still sets both,
-  and decoupling it is the remaining step.
+  when added, a `[window] ui_scale`. The bars draw in their own UI font (`ui_font`, #1388)
+  at a fixed 18 logical px (`UI_FONT_PX`) times the display scale; neither zoom nor the
+  configured `font-size` changes it.
 - **Face.** The chrome uses the terminal's monospace face.
   Target: interface text in Instrument Sans, terminal text in JetBrains Mono (pack D6).
 - **Spacing.** Chrome sits on a 4 px grid inside the padding band (`[window] padding`,
