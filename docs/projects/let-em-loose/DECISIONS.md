@@ -69,6 +69,9 @@ Precise contracts used by this guide:
 | D50 | One decision log, D-numbering continues | [default] 2026-11-03 (handoff) |
 | D51 | The expert is the single writer of settled answers | [default] 2026-11-03 (handoff) |
 | D52 | rusty_erosion location and core/adapter module split | [default] 2026-11-03 (#704) |
+| D53 | One host: everything deploys on BaileyAi | [stated] 2026-11-03 (#598, #599, #594) |
+| D54 | Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases | [stated] 2026-11-03 (#600) |
+| D55 | Orch-originated intents are parked | [stated] 2026-11-03 (general) |
 
 ## D1. Lenses, not stages
 
@@ -440,3 +443,30 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [default] · remind-me: mem_9d2be473f22f458a89532eac5e3b6363
 **Key.** lel:704:rusty-erosion-layout
 **Source.** Caller question from the #704 slice 1 build thread, 2026-11-03; erosion-gate-design §2, §9, §10; card #704 Build 1.
+
+## D53. One host: everything deploys on BaileyAi
+
+**Decision.** The BBP host, claims runs, shadow-run tooling, the daily watcher, `orch-runner` and the `lel-codex` container all run on BaileyAi. The agentos container on the MS-01 (LXC 107) is dropped. Supersedes the card #598/#599 note of 2026-11-02 22:08Z (mem_f7c9785174124786b33031d3cc1407bc).
+**Why.** Nano resolved the conflict between that card note and his 2026-11-03 voice answer by choosing BaileyAi, where llama-swap already runs.
+**Rejected.** agentos on the MS-01 with BaileyAi as fallback.
+**Tag.** [stated] · remind-me: mem_5862c484286b46c9a3ff25d6ff2fde7e
+**Key.** lel:general:one-host-baileyai
+**Source.** Nano's saved record (cap_58e514f9f3d94b3da5d26c0b8a118dd3; dialog mem_77a1f7b27e1340d8a644b8b2062b8f6d, 11-03 "Nano chose all on BaileyAi"; summary mem_eb16b0dea2394f46990c384f69a2ac41 "all deployment on BaileyAi"), pointed to in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds (2026-11-04). Staged as R1 in PR #1446.
+
+## D54. Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases
+
+**Decision.** Windows-specific behaviour of the #600 dedup intent (mapped drives, UNC paths) is covered by a read-only shadow run on Nano's Windows machine plus golden cases he signs off there. The Linux sandbox covers everything else. Each Windows-specific intent line must map to one of these, or it counts as untested.
+**Why.** Claims runs execute only in the Linux sandbox, which can't exercise Windows path behaviour.
+**Rejected.** Treating the Linux sandbox as enough for Windows paths.
+**Tag.** [stated] · remind-me: mem_b33951241b4740a2b44f9cd73a09e2fe
+**Key.** lel:600:windows-shadow-run-golden
+**Source.** Nano's saved record (cap_58e514f9f3d94b3da5d26c0b8a118dd3; dialog mem_77a1f7b27e1340d8a644b8b2062b8f6d, 11-03 "a Windows shadow run plus golden cases for #600"; summary mem_eb16b0dea2394f46990c384f69a2ac41), pointed to in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds (2026-11-04). Staged as R2 in PR #1446.
+
+## D55. Orch-originated intents are parked
+
+**Decision.** Neither the narrowed v0 nor the full design in orch-intents-design.md is approved. D44 cleanups open as already planned: orch writes the `consolidate` intent at half the drift limit or after 5 accepted claims, with no origin header, no `rules.toml` modes, no host rule check and no `would_open` table. Revisit when a second task-opening rule appears. The implementation defaults proposed for that design (key `lel:general:orch-intents-defaults`) were never adopted and don't apply.
+**Why.** Only D44 opens tasks today. #597 re-checks, #599 maintenance and #598 seeding all post into tasks that already exist, so an origin/mode mechanism would have one user.
+**Rejected.** The narrowed v0 (origin only for `consolidate`, through a separate host entry with modes off|auto). The full design (general origin header, rules engine, observe mode with a `would_open` table and `rusty_orch rules report`).
+**Tag.** [stated] · remind-me: mem_8727494da22f471998b4df97302c8de6
+**Key.** lel:general:orch-intents-parked
+**Source.** Nano chose "Neither, park it" on a decision card in thread "Discuss Let Em Loose design", 2026-11-03T22:54:11Z; mem_b6859bf1682b4b8c804edc23342f6746 (dsh-superagent review).

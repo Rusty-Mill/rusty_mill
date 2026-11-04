@@ -31,7 +31,7 @@ Build-time questions not already answered in [../QUESTIONS.md](../QUESTIONS.md) 
 
 ## Gaps (#598, #599)
 
-- **Q:** Where do the BBP host, claims runs, shadow run and daily watcher run? **A:** The agentos container on the MS-01 (LXC 107); BaileyAi bare metal if the sandbox probe fails there. Not deployed. [stated] cards #598, #599 (Nano 2026-11-02 22:08Z). PR #1446 (R1) stages a later Nano decision that moves all of this to BaileyAi; it applies once recorded.
+- **Q:** Where do the BBP host, claims runs, shadow run and daily watcher run? **A:** All on BaileyAi: the BBP host, claims runs, shadow-run tooling, the daily watcher, `orch-runner` and the `lel-codex` container. Not deployed. This supersedes the 2026-11-02 22:08Z card #598/#599 note (agentos on the MS-01, LXC 107). [stated] D53; Nano's saved record (cap_58e5…)
 - **Q:** What happens if the baseline suite is red at open? **A:** The open is refused, listing the red tests and the one profile-set edit that moves them out. [stated] card #598 Q1
 - **Q:** Can a cloud lens see real data? **A:** No. Cloud providers are cleared to `internal`; real data, including names, paths and shadow plans, is `sensitive` and stays local. [stated] card #598 Q6
 - **Q:** Does the cost breaker enforce in the first #600 run? **A:** No, it's observe-only and logs would-trips. The meter and the $200/$25 ceilings enforce from the first paid call. [stated] card #598 Q4

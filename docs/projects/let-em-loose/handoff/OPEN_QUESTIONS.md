@@ -6,7 +6,7 @@ Resolved items are checked and point to the D# or QA entry that answers them. On
 
 ## Not sourced (no record answers them)
 
-- [ ] Q1 (2026-11-03, n): What did the 2026-11-03 design chat decide beyond Nano's handoff prompt? The share link renders without the conversation, so its content couldn't be read. — interim choice: rely on the repo docs, remind-me and cards; nothing is attributed to the chat.
+- [x] Q1 (2026-11-03): What did the 2026-11-03 design chat decide beyond Nano's handoff prompt? → Resolved 2026-11-04: Nano saved the whole design discussion (11-01 to 11-04) to remind-me as "Let Em Loose: full design discussion, 2026-11-01 to 11-04", capture `cap_58e514f9f3d94b3da5d26c0b8a118dd3` (summary `mem_eb16b0dea2394f46990c384f69a2ac41`, dialog `mem_77a1f7b27e1340d8a644b8b2062b8f6d`); paraphrased, every exchange in order. Source: Nano, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds` (2026-11-04 11:36Z). Cite it as Nano's saved record; the share link still doesn't render. New decisions from it: D53, D54. It lists Q2, Q3, Q4, Q5 as still open.
 - [ ] Q2 (2026-11-03, n): Is the #596 pre-registered erosion criterion ("treatment arm's erosion delta no worse than baseline on 4 of 5 runs", erosion-gate-design §6) adopted? Nano's §11 answers and D41–D45 don't mention it. — interim choice: not part of the #596 rule until Nano confirms.
 - [ ] Q3 (2026-11-03, n): Are the #599 changes in 599-gaps-design.md §6 approved? Nano answered Q1–Q4 but no comment approves §6. — interim choice: treat §6 as needing approval (Ask first: schema/API).
 
