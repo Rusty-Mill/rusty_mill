@@ -27,7 +27,7 @@ use rmcp::{ServiceExt, model::CallToolRequestParams, transport::StreamableHttpCl
 use rusty_mcp_middleware::otel::OtelConfig;
 use rusty_prost::Message as _;
 use rusty_prost::wkt::Value;
-use tokio_util::sync::CancellationToken;
+use rusty_tokio::sync::CancellationToken;
 
 /// Distinctive enough to find by scanning, and not a substring of anything
 /// else the exporter sends.
@@ -177,7 +177,7 @@ async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
 
     let (processor_host, stop_processor) = processor().await;
 
-    let port = common::free_port().await;
+    let port = common::free_port();
     let yaml = format!(
         r#"
 binds:

@@ -6,11 +6,12 @@
 use std::net::SocketAddr;
 
 use agentgateway_config::Config;
+use rusty_tokio::sync::CancellationToken;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 mod common;
 use common::free_port;
+use common::http;
 
 fn mock_server() -> String {
     let mut path = std::env::current_exe().expect("test binary should have a path");
@@ -23,7 +24,7 @@ fn mock_server() -> String {
 
 /// A gateway with one MCP route whose CORS allows only `https://app.example`.
 async fn start() -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -60,8 +61,8 @@ binds:
     (format!("http://127.0.0.1:{port}/mcp"), shutdown)
 }
 
-async fn initialize(url: &str, host: &str, origin: &str) -> reqwest::Response {
-    reqwest::Client::new()
+async fn initialize(url: &str, host: &str, origin: &str) -> http::Response {
+    http::Client::new()
         .post(url)
         .header("host", host)
         .header("origin", origin)
@@ -80,7 +81,7 @@ async fn initialize(url: &str, host: &str, origin: &str) -> reqwest::Response {
         .expect("the request should reach the gateway")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_public_host_and_a_browser_origin_reach_the_handler() {
     let (url, shutdown) = start().await;
 
@@ -91,17 +92,13 @@ async fn a_public_host_and_a_browser_origin_reach_the_handler() {
         "the handler must not refuse a public host"
     );
     assert_eq!(
-        response
-            .headers()
-            .get("access-control-allow-origin")
-            .and_then(|v| v.to_str().ok()),
+        response.headers().get("access-control-allow-origin"),
         Some("https://app.example"),
         "a permitted origin is answered with its CORS headers"
     );
     assert!(
         response
             .text()
-            .await
             .expect("should read the body")
             .contains("protocolVersion"),
         "and gets the real initialize result"
@@ -110,7 +107,7 @@ async fn a_public_host_and_a_browser_origin_reach_the_handler() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_origin_cors_does_not_permit_gets_no_cors_headers() {
     let (url, shutdown) = start().await;
 
