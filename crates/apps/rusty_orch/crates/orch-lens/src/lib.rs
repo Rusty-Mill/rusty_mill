@@ -5,6 +5,7 @@
 //! through the [`Model`] port and posts what comes back; everything it
 //! decides is decided here.
 //!
+//! - [`round`]: one runner round: schedule, call, post, record.
 //! - [`call`]: one job over its fallback order, metered before each ask.
 //! - [`port`]: the [`Model`] port, one stateless question per call.
 //! - [`post`]: the strict reply protocol every adapter applies ([`parse`]).
@@ -31,6 +32,7 @@ pub mod meter;
 pub mod port;
 pub mod post;
 pub mod record;
+pub mod round;
 pub mod schedule;
 pub mod tier;
 

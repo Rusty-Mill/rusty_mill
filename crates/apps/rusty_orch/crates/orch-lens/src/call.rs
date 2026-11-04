@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use orch_core::AgentId;
 use orch_dispatch::{AgentError, ClassifiedError};
 
-use crate::config::Provider;
+use crate::config::{Provider, Tools};
 use crate::context::{assemble, Parts, Refusal, Window};
 use crate::meter::{cost, worst_case, Meter, Stop};
 use crate::port::{Model, Question};
@@ -33,8 +33,9 @@ pub const MAX_OUTPUT_TOKENS: u32 = 4_096;
 
 /// The built adapters, by provider id.
 pub trait Models {
-    /// Provider `id`'s adapter, or `None` when it was not built.
-    fn get(&mut self, id: AgentId) -> Option<&mut dyn Model>;
+    /// Provider `id`'s adapter for a lens with `tools`, or `None` when it
+    /// was not built.
+    fn get(&mut self, id: AgentId, tools: Tools) -> Option<&mut dyn Model>;
 }
 
 /// How a job's call ended.
@@ -154,7 +155,7 @@ fn attempt(
         Ok(text) => text,
         Err(refusal) => return Step::Pass(refused(&refusal)),
     };
-    let Some(model) = models.get(id) else {
+    let Some(model) = models.get(id, job.tools) else {
         return Step::Pass("not built".to_owned());
     };
     let bytes = (prefix.len() + body.len()) as u64;
@@ -297,7 +298,7 @@ mod tests {
     struct Fakes(BTreeMap<AgentId, Fake>);
 
     impl Models for Fakes {
-        fn get(&mut self, id: AgentId) -> Option<&mut dyn Model> {
+        fn get(&mut self, id: AgentId, _: Tools) -> Option<&mut dyn Model> {
             self.0.get_mut(&id).map(|f| f as &mut dyn Model)
         }
     }
@@ -352,6 +353,7 @@ mod tests {
             },
             suffix: Some("Look harder."),
             foreign_seen: 0,
+            tools: Tools::None,
         }
     }
 
