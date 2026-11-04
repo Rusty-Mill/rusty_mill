@@ -94,7 +94,8 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
    task cards and `rusty_bbp` is the blackboard with store-enforced roles, budgets and human gates
    (Let Em Loose). So O8 is not built in the mux; the mux's job is to be a good place for those
    agents to run (see arc 4). Nano to restate on this PR.
-8. **FreeBSD** as a server target? *Recommend not now.*
+8. **FreeBSD** as a server target? *Answered (Nano, project thread, 2026-11-04 12:22Z: "Q8 not
+   now"):* not now. Nano to restate on this PR.
 9. **Version mismatch (with C36).** Refuse, warn, or negotiate down when client and server
    differ? *Recommend negotiate via `Features`, refuse only below a floor.*
 10. **Card 283 (ConPTY convergence gate).** Moot since our host is the default? *Recommend
