@@ -37,7 +37,7 @@ bbp human   --dir D --task T [--rev N] VERB ARGS...
   extend FIELD LIMIT | cancel REASON...
 ```
 
-`extend` refuses on an evidence run (a task a capped `bbp mod` started, so it carries an evidence marker), for every field: an evidence run runs under the budget it was opened with, and one that exhausts a task budget (`messages`, `bytes`, `reads`, `turns` or `iterations`) stays escalated. A capped first start refuses a task whose log already holds an extension. `bbp pairs` loads a run whose log holds an extension anyway as a failed run (`budget extended`), its costs kept, with no replacement.
+`extend` refuses on an evidence run (a task a capped `bbp mod` started, so it carries an evidence marker), for every field: an evidence run runs under the budget it was opened with, and one that exhausts a task budget (`messages`, `bytes`, `reads`, `turns` or `iterations`) stays escalated. `extend-claim` refuses on an evidence run the same way. A capped first start refuses a task whose log already holds an extension of either kind. `bbp pairs` loads a run whose log holds an extension anyway as a failed run (`budget extended`), its costs kept, with no replacement.
 
 `bbp why` answers "why did this role get this turn?" for a task of either policy. The log records who was granted a turn, not why, so it recomputes the reason: it folds the log to the event before each `turn_granted`, runs `wake_set` on that state, and applies the policy's pick rule. Read-only. Per grant it prints the turn, role, state and kind, then `how`:
 
