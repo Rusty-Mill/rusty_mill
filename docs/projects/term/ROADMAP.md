@@ -49,7 +49,7 @@ Each arc needs the owner's go before it starts, and its own plan.
    client only, keeping its local mode until C69 and C45 land (question 1). This is where mux Phase 4's native client (C16) and C21,
    C42, C53–C55, C61–C64 land. Visual design goes to the design pack once it is on main.
 3. **Sessions that survive restarts.** C45 (state survives a server restart) plus C70
-   (scrollback spooled to disk), pulled forward from Phase 5 if the owner agrees (question 2).
+   (scrollback spooled to disk), pulled forward from Phase 5 (question 2); it gates arc 2.
    Then C36 upgrade without losing sessions and C69 auto-start, with Orca's endpoint-ownership
    rules (O6) first.
 4. **Mux Phase 4 rest and Phase 5.** Web client, WebSocket API, device pairing, config
@@ -67,8 +67,8 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
    GUI ends as a mux client only, as Rex and Orca do (REX-APP rows 38 and A9), reached through a
    standalone-plus-attach stage: rusty_term keeps its local mode until C69 (auto-start, idle exit)
    and C45 (sessions survive a server restart) land, then retires it. Nano to restate on this PR.
-2. **Restore after restart.** Pull C45 + C70 forward from Phase 5? Both peers have it, agent
-   sessions are long, and question 1's answer depends on it. *Recommend yes;* it forces question 3.
+2. **Restore after restart.** *Answered (Nano, project thread, 2026-11-04 12:06Z: "Q2 yes"):*
+   C45 + C70 move forward from Phase 5. It forces question 3. Nano to restate on this PR.
 3. **Scrollback over 10k rows** (`SCROLLBACK_MAX = 10_000`, mux D14). What budget, and is the
    spill to disk the answer? *Recommend: keep 10k in memory, spill the rest to disk with C70.*
 4. **Binary-loaded skill (O3).** Make it C73 and the next mux step? *Recommend yes.*
