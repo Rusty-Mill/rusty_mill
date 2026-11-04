@@ -84,6 +84,7 @@ Precise contracts used by this guide:
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 | D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
 | D67 | #708 alien review lens unparked (supersedes D61) | [stated] 2026-11-04 (#708) |
+| D68 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
 
 ## D1. Lenses, not stages
 
@@ -592,3 +593,19 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_80f2a194cf714d4586d27184e3522cc9 (supersedes mem_44c8bf81957240d8a0773acb5dc63f7f)
 **Key.** lel:708:alien-lens-unparked
 **Source.** Nano tapped option B "Unpark: design, review, then build" on decision card cmsg_014AqbZs58L565hMV2pFkCX59b5EzthujQuUWFyYCJrHdB ("Unpark the alien review lens (#708), which you parked this morning?"), 2026-11-04T20:16:21Z, thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Reopens OPEN_QUESTIONS Q8.
+
+## D68. #708 alien review lens design v1 approved (shadow-only)
+
+**Decision.** Nano approved the six points in §10 of `/mnt/project-files/let-em-loose-708/708-alien-lens-design.md`:
+1. v1 is shadow-only and changes nothing in BBP. Posting findings to BBP is a separate v2 design that comes back to Nano, since it is a BBP schema change.
+2. Q1: `min_value` is the Phase A 80th percentile of #596's value score. Until that exists, the lens runs on irreversible claims only; after that, a 1-in-10 random control sample is added.
+3. Q2: the Rust defect-mechanism list in §4.
+4. Q3: the ranking sort in §5.
+5. Q4 (v1): findings stay in orch-store. The v2 BBP route returns as its own design.
+6. The orch-lens port change `Question.shape: Shape { Posts(Allowed), Raw }` (§9.1), a public API change inside orch.
+The build is the four PRs in §9, with `--alien` off by default. v2 gets designed only if §8's bar is met: at least 1 new regression per 20 hunts, at under 15% of the lens's spend on those claims.
+**Why.** The Goldfish review of v0 (`708-goldfish-review.md`) found 3 blockers. Making v1 shadow-only removes them and leaves BBP unchanged until the lens shows its worth.
+**Rejected.** v0's shape, where reproduced findings block claims through BBP right away.
+**Tag.** [stated] · remind-me: mem_8088651b940e45a6a0c7bb6807c1d237
+**Key.** lel:708:design-v1-approved
+**Source.** Nano, "approved", thread message cmsg_014AqbZs58L565hMV2pFkCX5NbYhrp6skRZoUmd7dbZWP2 (2026-11-04T20:27:23Z), replying to cmsg_014AqbZs58L565hMV2pFkCX56Y25HTNtmVLdhS1nDojGpK, which asked him to approve §10. Thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Closes OPEN_QUESTIONS Q8.
