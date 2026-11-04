@@ -4,6 +4,13 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## The lens runner can talk to BBP
+**2026-11-04**
+
+- Each lens now has its own BBP session (#594), so it reads the board
+  and posts under its own identity, with what it may see limited the
+  same way as for any agent. Nothing starts these sessions yet.
+
 ## The lens runner can run a round
 **2026-11-04**
 
