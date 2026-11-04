@@ -11,9 +11,10 @@
 //!
 //! Exit status: 0 when within the limits, and always 0 with `--report-only`
 //! (the deltas are still printed). 1 when a delta exceeds its limit. 2 when
-//! it could not measure, including changed Rust that is not UTF-8; with
-//! `--report-only` that is printed and exits 0 (unreadable Rust is listed as
-//! `unmeasured`), so a report-only profile never blocks a claim.
+//! it could not measure, including Rust that is not UTF-8 in either the base
+//! or the working tree; with `--report-only` that is printed and exits 0
+//! (unreadable Rust is listed as `unmeasured`), so a report-only profile
+//! never blocks a claim.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
@@ -151,29 +152,31 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
     cand_unmeasured.retain(|p| !changed.contains(p));
     cand_unmeasured.extend(unmeasured(&cand_files));
     let cand = Report::build(cand_measures.into_values().collect(), cand_unmeasured);
-    // Changed code it cannot measure: another language (deleted included),
-    // or Rust that is not UTF-8.
-    let unreadable = unmeasured(&cand_files);
-    let bad_rust: Vec<&String> = unreadable
+    // Rust that is not UTF-8 in either snapshot: the base tree, or a
+    // changed candidate file (unchanged ones are the base's bytes).
+    let bad_rust: BTreeSet<String> = base_files
         .iter()
-        .filter(|p| classify(p) == FileClass::Rust)
+        .chain(&cand_files)
+        .filter(|(p, b)| classify(p) == FileClass::Rust && std::str::from_utf8(b).is_err())
+        .map(|(p, _)| p.clone())
         .collect();
     if opts.limits.is_some() && !bad_rust.is_empty() {
-        // Supported code that cannot be read is a measurement failure, not
-        // `unmeasured` (D45 covers other languages only): fail closed.
+        // Supported code that cannot be read leaves a snapshot incomplete, a
+        // measurement failure rather than `unmeasured` (D45 covers other
+        // languages only): fail closed.
         return Err(format!(
-            "changed Rust is not UTF-8: {}",
-            bad_rust
-                .iter()
-                .map(|p| p.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "Rust is not UTF-8: {}",
+            bad_rust.iter().cloned().collect::<Vec<_>>().join(", ")
         ));
     }
-    let changed_unmeasured: Vec<&String> = changed
+    // Changed code in another language (deleted included), and unreadable
+    // Rust in either snapshot.
+    let unmeasured_paths: BTreeSet<&String> = changed
         .iter()
-        .filter(|p| classify(p) == FileClass::Unmeasured || unreadable.contains(p))
+        .filter(|p| classify(p) == FileClass::Unmeasured)
+        .chain(&bad_rust)
         .collect();
+    let changed_unmeasured: Vec<&String> = unmeasured_paths.into_iter().collect();
     let delta = base.delta(&cand);
     let within = opts.limits.is_none_or(|l| {
         delta.concentration_bp <= l.concentration_bp && delta.duplication_bp <= l.duplication_bp

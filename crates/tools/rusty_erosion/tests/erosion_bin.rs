@@ -225,6 +225,60 @@ fn modified_rust_that_is_not_utf8_fails_enforcing_only() {
     assert_eq!(repo.erosion(&enforcing(&base)).status.code(), Some(2));
 }
 
+/// A repo whose base commit holds `src/bad.rs` that is not UTF-8.
+fn unreadable_base(name: &str) -> (Repo, String) {
+    let repo = Repo::new(name);
+    std::fs::write(repo.dir.join("src/bad.rs"), b"fn b() { \xff }\n").expect("write");
+    repo.git(&["add", "-A"]);
+    repo.git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "--quiet",
+        "-m",
+        "bad",
+    ]);
+    let base = repo.head();
+    (repo, base)
+}
+
+#[test]
+fn an_unchanged_unreadable_base_fails_enforcing_only() {
+    let (repo, base) = unreadable_base("utf8base");
+    repo.write("src/a.rs", &format!("{ORIGINAL}\npub fn more() {{}}\n"));
+    let report = repo.erosion(&["check", "--base", &base, "--report-only"]);
+    assert_eq!(report.status.code(), Some(0));
+    assert!(
+        stdout(&report).contains("\"unmeasured\":[\"src/bad.rs\"]"),
+        "{}",
+        stdout(&report)
+    );
+    let enforced = repo.erosion(&enforcing(&base));
+    assert_eq!(enforced.status.code(), Some(2), "{}", stdout(&enforced));
+    assert!(
+        stdout(&enforced).contains("src/bad.rs"),
+        "{}",
+        stdout(&enforced)
+    );
+}
+
+#[test]
+fn an_unreadable_base_replaced_with_readable_rust_still_fails_enforcing() {
+    let (repo, base) = unreadable_base("utf8fixed");
+    repo.write("src/bad.rs", "pub fn b() {}\n");
+    let report = repo.erosion(&["check", "--base", &base, "--report-only"]);
+    assert_eq!(report.status.code(), Some(0));
+    assert!(
+        stdout(&report).contains("\"unmeasured\":[\"src/bad.rs\"]"),
+        "{}",
+        stdout(&report)
+    );
+    let enforced = repo.erosion(&enforcing(&base));
+    assert_eq!(enforced.status.code(), Some(2), "{}", stdout(&enforced));
+}
+
 #[test]
 fn unsupported_language_changes_never_block_enforcing() {
     let repo = Repo::new("lang");
