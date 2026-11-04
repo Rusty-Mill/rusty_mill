@@ -6,6 +6,7 @@ VT engine `rusty_term_core` (`core/`). Moved out of `docs/projects/mux/` on
 
 | Doc | What it holds |
 |---|---|
+| [ROADMAP.md](ROADMAP.md) | Draft order of work across rusty_term and rusty_mux, and the open owner questions (2026-11-04) |
 | [HANDOFF.md](HANDOFF.md) | Remaining work, roadmap, rules and validation as of the 2026-10-23 handoff |
 | [NOTES.md](NOTES.md) | Decision log and design context from the 2026-10-21 to 10-23 perf session |
 | [STYLEGUIDE.md](STYLEGUIDE.md) | Chrome style guide for the windowed front-end: colour roles, the fixed chrome scale (owner, 2026-11-03), components, UX rules and review |
