@@ -25,8 +25,8 @@ use orch_lens::context::{Line, MAX_LINES};
 use orch_lens::round::Board;
 use orch_lens::{LensConfig, Post};
 use rusty_bbp::{
-    ArtId, Body, ClaimBody, ClaimStatus, ClaimView, ClaimsConfig, Direction, EvidenceKind, MsgId,
-    Ref, Response, Rev, Stakes,
+    ArtId, Body, ClaimBody, ClaimStatus, ClaimView, Direction, EvidenceKind, MsgId, Ref, Response,
+    Rev, Stakes,
 };
 use rusty_serde::Value;
 

@@ -25,7 +25,6 @@ use orch_lens::round::{round, Board, Halt, View};
 use orch_lens::schedule::State;
 use orch_lens::{LensConfig, Model};
 use orch_store::Store;
-use rusty_bbp::ClaimsConfig;
 
 use super::assertions::{self, Grants};
 use super::bbp::{run_id, Child, Rpc, Session};
