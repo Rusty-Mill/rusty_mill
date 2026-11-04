@@ -236,3 +236,34 @@ fn a_one_line_chained_log_loads_and_verifies() {
     assert_eq!((chain.hashes.len(), chain.unchained), (1, 0));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Legacy lines were read with `str::lines`, which drops a trailing `\r`,
+/// and blank lines were skipped. A legacy prefix written with CRLF endings
+/// and a blank CRLF line still loads, and chaining starts after it.
+#[test]
+fn a_legacy_crlf_prefix_with_a_blank_line_still_loads() {
+    let dir = tempdir();
+    let log = built(&dir);
+    let legacy: Vec<String> = lines(&log).iter().map(|l| unchain(l)).collect();
+    let mut text = String::new();
+    for (i, l) in legacy.iter().enumerate() {
+        text.push_str(l);
+        text.push_str("\r\n");
+        if i == 0 {
+            text.push_str("\r\n");
+        }
+    }
+    std::fs::write(&log, &text).expect("write");
+    let mut fx = Fx::with_store(FsStore::open(&dir).expect("a CRLF legacy log opens"));
+    fx.d.reload().expect("reload");
+    posted(fx.post(Who::Coder, ask(Who::Tester, "Which 429 cases matter?")));
+    let chain = verify_log(&dir, &TaskId("T1".into())).expect("verify");
+    assert_eq!(
+        chain.unchained,
+        legacy.len() + 1,
+        "the blank line counts as legacy"
+    );
+    drop(fx);
+    FsStore::open(&dir).expect("reopens after chaining");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -254,9 +254,14 @@ fn decode(path: &Path, bytes: &[u8]) -> Result<(Vec<Event>, Chain), FsError> {
     let mut events = Vec::new();
     for (i, line) in split_lines(bytes).enumerate() {
         let body = match parse_line(line) {
-            // A blank line is tolerated only before the chain (`check`).
-            Line::Legacy([]) => continue,
-            Line::Legacy(body) | Line::Chained { events: body, .. } => body,
+            // A legacy line read as `str::lines` did: a trailing `\r` is
+            // dropped and a blank line skipped. `check` refuses both after
+            // the chain begins.
+            Line::Legacy(body) => match body.strip_suffix(b"\r").unwrap_or(body) {
+                [] => continue,
+                body => body,
+            },
+            Line::Chained { events, .. } => events,
             // `check` has refused it already.
             Line::Malformed => return Err(corrupt(i + 1, "malformed chained line".into())),
         };
