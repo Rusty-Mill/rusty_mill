@@ -69,9 +69,13 @@ pub enum Refusal {
     TooLarge { needed: u64, room: u64 },
 }
 
-/// The prefix: intent, rules, lens prompt, in that order.
+/// The prefix: intent, rules, lens prompt and the reply protocol, in that
+/// order.
 pub fn prefix(intent: &str, rules: &str, lens_prompt: &str) -> String {
-    format!("# Intent\n{intent}\n\n# Board rules\n{rules}\n\n# Your lens\n{lens_prompt}\n")
+    format!(
+        "# Intent\n{intent}\n\n# Board rules\n{rules}\n\n# Your lens\n{lens_prompt}\n\n# Reply\n{}",
+        crate::post::protocol()
+    )
 }
 
 /// Build `(prefix, body)` for one provider.

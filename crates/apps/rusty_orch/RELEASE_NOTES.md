@@ -4,6 +4,13 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Lens models are told how to answer
+**2026-11-04**
+
+- Every lens question now explains the answer format and exactly what
+  that question may post (#594). Before this, any model's answer would
+  have been refused.
+
 ## The lens runner can talk to BBP
 **2026-11-04**
 

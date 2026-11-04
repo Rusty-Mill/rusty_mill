@@ -25,7 +25,7 @@ use crate::config::{Provider, Tools};
 use crate::context::{assemble, Parts, Refusal, Window};
 use crate::meter::{cost, worst_case, Meter, Stop};
 use crate::port::{Model, Question};
-use crate::post::Post;
+use crate::post::{allowance, Post};
 use crate::schedule::Job;
 
 /// Output tokens one lens reply may use, on every provider.
@@ -80,11 +80,16 @@ pub struct Ctx<'a> {
     pub save: &'a mut dyn FnMut(&Meter) -> Result<(), String>,
 }
 
-/// Run `job` with `parts` (its phase and suffix are taken from the job).
+/// Run `job` with `parts`. Its phase comes from the job, and its suffix is
+/// what the job may post ([`allowance`]) then the job's own suffix.
 pub fn call(job: &Job, parts: &Parts<'_>, mut ctx: Ctx<'_>, models: &mut dyn Models) -> Called {
+    let suffix = match job.suffix {
+        Some(s) => format!("{}\n{s}", allowance(&job.allowed)),
+        None => allowance(&job.allowed),
+    };
     let parts = Parts {
         phase: job.phase,
-        suffix: job.suffix,
+        suffix: Some(&suffix),
         ..*parts
     };
     let mut passed = Vec::new();
@@ -559,6 +564,11 @@ mod tests {
             q.body
         );
         assert!(q.body.contains("Look harder."), "{}", q.body);
+        assert!(
+            q.body.contains("What you may post: nothing"),
+            "the allowance comes before the job's suffix: {}",
+            q.body
+        );
         assert_eq!(q.max_output_tokens, MAX_OUTPUT_TOKENS);
     }
 
