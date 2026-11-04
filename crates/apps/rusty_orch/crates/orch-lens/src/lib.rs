@@ -17,6 +17,8 @@
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
+//! - [`value`] and [`policy`]: the #596 value score, and the policies that
+//!   pick a round's jobs (event-driven baseline, value-driven).
 
 #![cfg_attr(
     not(test),
@@ -29,14 +31,17 @@ pub mod class;
 pub mod config;
 pub mod context;
 pub mod meter;
+pub mod policy;
 pub mod port;
 pub mod post;
 pub mod record;
 pub mod round;
 pub mod schedule;
 pub mod tier;
+pub mod value;
 
 pub use class::DataClass;
 pub use config::LensConfig;
+pub use policy::{EventDriven, Policy, ValueDriven};
 pub use port::{Answer, Model, Question, Usage};
 pub use post::{parse, Allowed, Post};

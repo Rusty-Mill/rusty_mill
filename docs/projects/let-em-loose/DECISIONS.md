@@ -83,6 +83,9 @@ Precise contracts used by this guide:
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 | D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
+| D67 | #596 value score weights for stakes and reversibility | [default] 2026-11-04 (#596) |
+| D68 | #596 cost counts pending runs from orch's in-flight jobs | [default] 2026-11-04 (#596) |
+| D69 | #596 schema and API items are approved | [stated] 2026-11-02 (#596) |
 
 ## D1. Lenses, not stages
 
@@ -581,3 +584,30 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_c00104fb2fa0499c8f471bddcbb64cbc
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
+
+## D67. #596 value score weights for stakes and reversibility
+
+**Decision.** In the #596 value score, stakes weigh Low 1, Medium 2, High 4, and reversibility weighs reversible 1, irreversible 2, as named constants in orch-lens. They may change during Phase A (shadow) and are frozen before the Phase B paired runs.
+**Why.** Card #596 names the terms but not their weights. Reusing D29's stakes scaling (budgets 8/16/32, doubled if irreversible) keeps one stakes ratio across budget and score. Freezing before Phase B keeps D36's rule pre-registered.
+**Rejected.** Low 1 / Medium 2 / High 3 (a second, unrelated stakes ratio).
+**Tag.** [default] · remind-me: mem_96addcd8e867479aa45ade161c9584bd
+**Key.** lel:596:value-weights
+**Source.** Card #596 design comment (2026-11-02); D29; D36. #596 slice-1 plan O1 (/mnt/project-files/let-em-loose-596/slice-1-plan.md).
+
+## D68. #596 cost counts pending runs from orch's in-flight jobs
+
+**Decision.** The score's cost is 1 + the claim's in-flight jobs in orch's scheduler state (`State.in_flight` entries for that claim) + 3 if nothing is built yet (`ClaimView::current` is `None`). The "pending runs" term is kept and read from orch, not from BBP.
+**Why.** `ClaimView` has no pending-run count and D36 forbids a BBP change, but orch already knows what it has in flight on each claim, which is what the term guards against: piling effort onto a claim already being checked.
+**Rejected.** Dropping the term until BBP exposes it (changes the approved formula). Adding a count to `ClaimView` (BBP change, against D36).
+**Tag.** [default] · remind-me: mem_56219e7c93dc40749a9a7d5b1176bcc4
+**Key.** lel:596:pending-runs-cost
+**Source.** Card #596 design comment (2026-11-02); D36; `crates/apps/rusty_orch/crates/orch-lens/src/schedule.rs` (`State.in_flight`). #596 slice-1 plan O2.
+
+## D69. #596 schema and API items are approved
+
+**Decision.** Nano approved the #596 design's "Needs approval" list: the orch-lens `Policy` trait and its config; orch-store question and shadow records; the `--policy` and `--shadow` flags and `rusty_orch lens shadow`; the experiment intents and holdouts in Factory. The exact orch-store record shapes are those in the design; that file is missing from project files, so the slice that adds them cites the card comment and checks shapes against this list.
+**Why.** Design first on every card (D25); clears the ask-first schema/API gate for the #596 build.
+**Rejected.** None recorded.
+**Tag.** [stated] · remind-me: mem_f4df31cb57b840bc8f88e140b13ba3cc
+**Key.** lel:596:schema-api-approved
+**Source.** Nano's review of the #596 design, 2026-11-02, saved as mem_f4df31cb57b840bc8f88e140b13ba3cc ("Approved APIs: Policy trait, orch-store question+shadow records, --policy/--shadow, rusty_orch lens shadow, intents+holdouts in Factory"); card #596 status comment 2026-11-02 20:40Z ("Design and Phase B intents are approved"). The approved list is in card #596's design comment (2026-11-02).

@@ -13,6 +13,8 @@
 //!   saved, a board that refused a post, a lens with no prefix. An
 //!   experiment stop only drops that job: free providers go on.
 //! - A proposal slot that no cleared provider can serve is settled.
+//! - The run [`Policy`] picks which scheduled jobs run, and in what order;
+//!   a shadow policy's pick for the same jobs is reported, not run (#596).
 
 use std::collections::BTreeMap;
 
@@ -23,6 +25,7 @@ use crate::card::Card;
 use crate::config::LensConfig;
 use crate::context::{Line, Parts};
 use crate::meter::Stop;
+use crate::policy::Policy;
 use crate::post::Post;
 use crate::schedule::{schedule, Job, JobKey, Skipped, Slot, State};
 
@@ -45,6 +48,13 @@ pub struct View<'a> {
     pub records: &'a BTreeMap<String, String>,
 }
 
+/// The policy a round runs, and one it only reports (#596 Phase A).
+#[derive(Clone, Copy)]
+pub struct Policies<'a> {
+    pub run: &'a dyn Policy,
+    pub shadow: Option<&'a dyn Policy>,
+}
+
 /// Why a round ended early. Nothing is recorded for the job it ended on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Halt {
@@ -65,6 +75,8 @@ pub struct Report {
     pub ran: Vec<(JobKey, End)>,
     /// Jobs the rules allow but no provider can take.
     pub skipped: Vec<Skipped>,
+    /// The jobs the shadow policy would have run, in its order.
+    pub shadow: Option<Vec<JobKey>>,
     pub halt: Option<Halt>,
 }
 
@@ -72,6 +84,7 @@ pub struct Report {
 pub fn round(
     config: &LensConfig,
     view: &View<'_>,
+    policies: Policies<'_>,
     state: &mut State,
     ctx: Ctx<'_>,
     models: &mut dyn Models,
@@ -87,6 +100,13 @@ pub fn round(
     for s in &skipped {
         state.unservable(s);
     }
+    let shadow = policies.shadow.map(|p| {
+        p.pick(view.cards, state, jobs.clone())
+            .into_iter()
+            .map(|j| j.key)
+            .collect()
+    });
+    let jobs = policies.run.pick(view.cards, state, jobs);
     let by_id: BTreeMap<MsgId, &Card> = view.cards.iter().map(|c| (c.id, c)).collect();
     let mut ran = Vec::new();
     for job in &jobs {
@@ -94,7 +114,7 @@ pub fn round(
             continue;
         };
         let Some(prefix) = view.prefixes.get(&job.key.lens) else {
-            return report(ran, skipped, Halt::NoPrefix(job.key.lens.clone()));
+            return report(ran, skipped, shadow, Halt::NoPrefix(job.key.lens.clone()));
         };
         let lens = rusty_bbp::PrincipalId(job.key.lens.clone());
         let parts = Parts {
@@ -118,20 +138,27 @@ pub fn round(
             .or_else(|| called.unsaved.clone().map(Halt::Unsaved));
         ran.push((job.key.clone(), called.end));
         if let Some(h) = halt {
-            return report(ran, skipped, h);
+            return report(ran, skipped, shadow, h);
         }
     }
     Report {
         ran,
         skipped,
+        shadow,
         halt: None,
     }
 }
 
-fn report(ran: Vec<(JobKey, End)>, skipped: Vec<Skipped>, halt: Halt) -> Report {
+fn report(
+    ran: Vec<(JobKey, End)>,
+    skipped: Vec<Skipped>,
+    shadow: Option<Vec<JobKey>>,
+    halt: Halt,
+) -> Report {
     Report {
         ran,
         skipped,
+        shadow,
         halt: Some(halt),
     }
 }
@@ -205,6 +232,7 @@ mod tests {
     use crate::config::tests::STARTER;
     use crate::config::Tools;
     use crate::meter::{Ceilings, Meter};
+    use crate::policy::{EventDriven, ValueDriven};
     use crate::port::{Answer, Model, Question, Usage};
 
     const USD: u64 = 1_000_000;
@@ -311,11 +339,27 @@ mod tests {
 
     fn go_with(
         cards: &[Card],
+        state: State,
+        task_calls: u32,
+        echo: Echo,
+        board: Posted,
+        prefixes: &BTreeMap<String, String>,
+    ) -> Out {
+        let policies = Policies {
+            run: &EventDriven,
+            shadow: None,
+        };
+        go_policies(cards, state, task_calls, echo, board, prefixes, policies)
+    }
+
+    fn go_policies(
+        cards: &[Card],
         mut state: State,
         task_calls: u32,
         mut echo: Echo,
         mut board: Posted,
         prefixes: &BTreeMap<String, String>,
+        policies: Policies<'_>,
     ) -> Out {
         let cfg = config();
         let ceilings = Ceilings {
@@ -337,7 +381,9 @@ mod tests {
             meter: &mut meter,
             save: &mut |_| Ok(()),
         };
-        let report = round(&cfg, &view, &mut state, ctx, &mut echo, &mut board);
+        let report = round(
+            &cfg, &view, policies, &mut state, ctx, &mut echo, &mut board,
+        );
         Out {
             report,
             state,
@@ -498,5 +544,45 @@ mod tests {
         let attacks = &out.state.questions[&MsgId(3)].attacks;
         assert!(attacks[&MsgId(10)] > 0);
         assert_eq!(attacks[&MsgId(10)], attacks[&MsgId(11)]);
+    }
+
+    #[test]
+    fn the_run_policy_picks_and_the_shadow_is_only_reported() {
+        let mut low = plain(7);
+        low.stakes = rusty_bbp::Stakes::Low;
+        let cards = [low, plain(8)];
+        let value = ValueDriven {
+            claims: std::num::NonZeroUsize::MIN,
+        };
+        let policies = Policies {
+            run: &value,
+            shadow: Some(&EventDriven),
+        };
+        let out = go_policies(
+            &cards,
+            State::default(),
+            400,
+            Echo::new(Ok(vec![])),
+            Posted::default(),
+            &prefixes(),
+            policies,
+        );
+        assert!(!out.report.ran.is_empty());
+        assert!(out.report.ran.iter().all(|(k, _)| k.claim == MsgId(8)));
+        let shadow = out.report.shadow.expect("a shadow pick");
+        assert!(shadow.iter().any(|k| k.claim == MsgId(7)));
+        assert!(shadow.len() > out.report.ran.len());
+    }
+
+    #[test]
+    fn no_shadow_reports_none() {
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![])),
+            Posted::default(),
+        );
+        assert_eq!(out.report.shadow, None);
     }
 }

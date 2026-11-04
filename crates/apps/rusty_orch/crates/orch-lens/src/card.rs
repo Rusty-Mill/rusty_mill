@@ -21,6 +21,8 @@ pub struct Card {
     /// The score that accepts this claim (strict for high stakes or
     /// irreversible claims).
     pub accept_at: i64,
+    /// The score that drops this claim.
+    pub drop_at: i64,
     pub stakes: Stakes,
     pub reversible: bool,
     /// The question this claim answers, when it is a candidate.
@@ -32,6 +34,9 @@ pub struct Card {
     pub evidence: Vec<Item>,
     /// For a question: its candidate claims.
     pub candidates: Vec<MsgId>,
+    /// A candidate the viewer can read names this claim
+    /// (`ClaimView::current`).
+    pub built: bool,
     pub class: DataClass,
 }
 
@@ -109,6 +114,7 @@ impl Card {
             } else {
                 claims.accept_at
             },
+            drop_at: claims.drop_at,
             stakes: body.stakes,
             reversible: body.reversible,
             answers: body.answers,
@@ -117,6 +123,7 @@ impl Card {
             budget: view.budget,
             evidence,
             candidates: view.candidates.clone(),
+            built: view.current.is_some(),
             class,
         }
     }
@@ -240,6 +247,7 @@ pub(crate) mod fixtures {
             status: ClaimStatus::Open,
             score: 0,
             accept_at: 8,
+            drop_at: -8,
             stakes: Stakes::Medium,
             reversible: true,
             answers: Some(MsgId(3)),
@@ -248,6 +256,7 @@ pub(crate) mod fixtures {
             budget: 16,
             evidence,
             candidates: vec![],
+            built: false,
             class: DataClass::Internal,
         }
     }
