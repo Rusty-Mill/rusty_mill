@@ -149,3 +149,58 @@ fn an_invalid_clear_clears_nothing() {
         assert_eq!(parse(&body), None, "{body}");
     }
 }
+
+#[test]
+fn parts_make_the_report_their_body_would() {
+    let parts = Parts {
+        id: Some("sub/1"),
+        state: "blocked",
+        kind: Some("permission"),
+        app: Some("opencode"),
+        msg: Some("bash: rm -rf build"),
+    };
+    let body = format!(
+        "state=blocked:id=sub/1:kind=permission:app=opencode:msg={}",
+        rusty_base64::encode_standard(b"bash: rm -rf build")
+    );
+    assert_eq!(parts.report(), parse(&body));
+    assert!(matches!(parts.report(), Some(Report::Set(..))));
+}
+
+#[test]
+fn parts_refuse_what_a_body_would_and_smuggled_pairs() {
+    let ok = Parts {
+        state: "working",
+        ..Parts::default()
+    };
+    assert!(ok.report().is_some());
+    for bad in [
+        Parts {
+            state: "busy",
+            ..ok
+        },
+        Parts {
+            state: "working:app=x",
+            ..ok
+        },
+        Parts {
+            app: Some("a:state=error"),
+            ..ok
+        },
+        Parts {
+            id: Some("a//b"),
+            ..ok
+        },
+        Parts {
+            msg: Some("bell\u{7}"),
+            ..ok
+        },
+    ] {
+        assert_eq!(bad.report(), None, "{bad:?}");
+    }
+    let clear = Parts {
+        state: "clear",
+        ..ok
+    };
+    assert!(matches!(clear.report(), Some(Report::Clear(_))));
+}

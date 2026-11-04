@@ -200,6 +200,50 @@ fn the_naming_hook_asks_only_while_the_name_is_generated() {
     );
 }
 
+#[test]
+fn an_event_hook_reports_status_silently_and_never_fails() {
+    let socket = start_server();
+    let block = block(&socket);
+    let hook = |socket: &Path, block: &str, args: &[&str]| {
+        let mut all = vec!["agent", "hook", "--event"];
+        all.extend(args);
+        let output = ctl_command(socket, &all)
+            .env("RUSTY_MUX_BLOCK", block)
+            .output()
+            .expect("run rusty-mux-ctl");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+    };
+    hook(
+        &socket,
+        &block,
+        &[
+            "blocked",
+            "--kind",
+            "permission",
+            "--app",
+            "pi",
+            "--msg",
+            "hi",
+        ],
+    );
+    assert_eq!(
+        ok(&socket, &["terminal.status", "--block", &block]),
+        "state=blocked:kind=permission:app=pi:msg=aGk="
+    );
+    // A bad report, an unknown block and a missing server change nothing.
+    hook(&socket, &block, &["busy"]);
+    hook(&socket, "00000000-0000-0000-0000-00000000000b", &["idle"]);
+    hook(Path::new("/nonexistent/rusty-mux.sock"), &block, &["idle"]);
+    assert_eq!(
+        ok(&socket, &["terminal.status", "--block", &block]),
+        "state=blocked:kind=permission:app=pi:msg=aGk="
+    );
+}
+
 fn rename(socket: &Path, session: &str, name: &str) {
     ok(
         socket,

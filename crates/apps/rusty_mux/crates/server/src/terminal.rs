@@ -1,10 +1,11 @@
 //! The methods of the terminal block type, `terminal.*`, over a block's grid.
 
 use std::path::Path;
+use std::time::Instant;
 
 use rusty_mux_core::{Progress, Selection};
 use rusty_mux_proto::theme::{Colour, ThemeChange};
-use rusty_mux_status::Records;
+use rusty_mux_status::{Id, Kind, State, Status};
 use rusty_term_core::{Cell, Grid, ShellPhase, StatusSignal, WIDE_TRAILER};
 
 use crate::style::Style;
@@ -265,23 +266,27 @@ pub(crate) struct Absorbed {
 
 /// Applies the status signals the grid collected since the last call: OSC
 /// 7501 reports, prompts and resets.
-pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> Absorbed {
+pub(crate) fn absorb_status(grid: &mut Grid, status: &mut Status, now: Instant) -> Absorbed {
     if grid.program_status.is_empty() {
         return Absorbed::default();
     }
-    let before = records.states();
+    let before = status.shown().states();
     for signal in grid.program_status.drain(..) {
         match signal {
             StatusSignal::Report(body) => {
                 if let Some(report) = rusty_mux_status::parse(&body) {
-                    records.apply(report);
+                    status.program(report, now);
                 }
             }
-            StatusSignal::Prompt => records.prompt(),
-            StatusSignal::Reset => records.reset(),
+            StatusSignal::Prompt => status.prompt(),
+            StatusSignal::Reset => status.reset(),
         }
     }
-    let after = records.states();
+    absorbed(&before, &status.shown().states())
+}
+
+/// What changed between two [`rusty_mux_status::Records::states`] of the records shown.
+pub(crate) fn absorbed(before: &[StateOf], after: &[StateOf]) -> Absorbed {
     // Both are in id order, as `Records` keeps them.
     let removed = before
         .iter()
@@ -293,6 +298,10 @@ pub(crate) fn absorb_status(grid: &mut Grid, records: &mut Records) -> Absorbed 
         removed,
     }
 }
+
+/// One record's id, state and kind, as
+/// [`rusty_mux_status::Records::states`] lists them.
+pub(crate) type StateOf = (Id, State, Option<Kind>);
 
 /// The selections the block's program wrote (OSC 52) since the last call,
 /// clipboard first; the text itself is let go.
@@ -616,16 +625,18 @@ mod tests {
         }
     }
 
-    fn status_grid() -> (Grid, rusty_term_core::AnsiParser, Records) {
+    fn status_grid() -> (Grid, rusty_term_core::AnsiParser, Status) {
         let mut grid = Grid::new(20, 2);
         grid.collect_program_status = true;
-        (grid, rusty_term_core::AnsiParser::new(), Records::default())
+        (grid, rusty_term_core::AnsiParser::new(), Status::default())
     }
 
     #[test]
     fn status_changes_are_announced_once() {
         let (mut grid, mut parser, mut records) = status_grid();
-        let changed = |grid: &mut Grid, records: &mut Records| absorb_status(grid, records).changed;
+        let changed = |grid: &mut Grid, records: &mut Status| {
+            absorb_status(grid, records, Instant::now()).changed
+        };
         assert!(!changed(&mut grid, &mut records), "nothing collected");
         parser.advance(&mut grid, b"\x1b]7501;state=working:progress=10\x07");
         assert!(changed(&mut grid, &mut records));
@@ -634,7 +645,7 @@ mod tests {
         parser.advance(&mut grid, b"\x1b]7501;state=bogus\x07");
         assert!(!changed(&mut grid, &mut records), "ignored report");
         assert!(grid.program_status.is_empty(), "drained");
-        assert_eq!(records.bodies(), ["state=working:progress=90"]);
+        assert_eq!(records.shown().bodies(), ["state=working:progress=90"]);
     }
 
     #[test]
@@ -642,13 +653,22 @@ mod tests {
         let (mut grid, mut parser, mut records) = status_grid();
         parser.advance(&mut grid, b"\x1b]7501;state=blocked:kind=question\x07");
         parser.advance(&mut grid, b"\x1b]7501;state=done:id=build\x07");
-        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
+        assert_eq!(
+            absorb_status(&mut grid, &mut records, Instant::now()),
+            changed(&[])
+        );
         parser.advance(&mut grid, b"\x1b]133;A\x07");
-        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[""]));
-        assert_eq!(records.bodies(), ["state=done:id=build"]);
+        assert_eq!(
+            absorb_status(&mut grid, &mut records, Instant::now()),
+            changed(&[""])
+        );
+        assert_eq!(records.shown().bodies(), ["state=done:id=build"]);
         parser.advance(&mut grid, b"\x1bc");
-        assert_eq!(absorb_status(&mut grid, &mut records), changed(&["build"]));
-        assert!(records.bodies().is_empty());
+        assert_eq!(
+            absorb_status(&mut grid, &mut records, Instant::now()),
+            changed(&["build"])
+        );
+        assert!(records.shown().bodies().is_empty());
     }
 
     fn changed(removed: &[&str]) -> Absorbed {
@@ -665,10 +685,10 @@ mod tests {
             let report = format!("\x1b]7501;state=working:id={id}\x07");
             parser.advance(&mut grid, report.as_bytes());
         }
-        absorb_status(&mut grid, &mut records);
+        absorb_status(&mut grid, &mut records, Instant::now());
         parser.advance(&mut grid, b"\x1b]7501;state=clear:id=a\x07");
         assert_eq!(
-            absorb_status(&mut grid, &mut records),
+            absorb_status(&mut grid, &mut records, Instant::now()),
             changed(&["a", "a/x"])
         );
         // Cleared and reported again in one read: it never ended.
@@ -676,9 +696,15 @@ mod tests {
             &mut grid,
             b"\x1b]7501;state=clear:id=b\x07\x1b]7501;state=done:id=b\x07",
         );
-        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
+        assert_eq!(
+            absorb_status(&mut grid, &mut records, Instant::now()),
+            changed(&[])
+        );
         parser.advance(&mut grid, b"\x1b]7501;state=clear:id=nothing\x07");
-        assert_eq!(absorb_status(&mut grid, &mut records), Absorbed::default());
+        assert_eq!(
+            absorb_status(&mut grid, &mut records, Instant::now()),
+            Absorbed::default()
+        );
     }
 
     #[test]
@@ -706,8 +732,11 @@ mod tests {
         let burst = round.repeat(rusty_term_core::PROGRAM_STATUS_MAX * 2);
         parser.advance(&mut grid, &burst);
         parser.advance(&mut grid, b"\x1b]7501;state=done\x07");
-        assert_eq!(absorb_status(&mut grid, &mut records), changed(&[]));
-        assert_eq!(records.bodies(), ["state=done"]);
+        assert_eq!(
+            absorb_status(&mut grid, &mut records, Instant::now()),
+            changed(&[])
+        );
+        assert_eq!(records.shown().bodies(), ["state=done"]);
     }
 
     fn screen(cols: usize, rows: usize, input: &[u8]) -> Grid {

@@ -2,7 +2,9 @@
 //! are code: an OpenCode plugin and a Pi extension. Each runs
 //! `rusty-mux-ctl agent hook` by absolute path once when the agent starts
 //! and adds what it prints, nothing outside a block, to the system prompt.
-//! A file is ours only when it starts with [`MARK`].
+//! Inside a block it also reports the agent's turns and tools with
+//! `agent hook --event` (O2), without waiting for the answer. A file is ours
+//! only when it starts with [`MARK`].
 
 use rusty_json::Value;
 
@@ -14,13 +16,22 @@ pub(super) const MARK: &str =
 
 /// The OpenCode plugin. `experimental.chat.system.transform` is OpenCode's
 /// documented way to add system prompt lines; a ctl that fails or is gone
-/// adds nothing, as a hook that prints nothing does.
+/// adds nothing, as a hook that prints nothing does. A new message or tool
+/// reports `working`, a permission request `blocked`, an idle or failed
+/// session `idle` or `error`.
 pub(super) fn opencode(ctl: Ctl<'_>) -> String {
     format!(
-        r#"{MARK}// Tells OpenCode which rusty_mux block it runs in.
+        r#"{MARK}// Tells OpenCode which rusty_mux block it runs in, and rusty_mux what OpenCode does.
 import {{ execFile }} from "node:child_process";
 
 const CTL = {ctl};
+
+const report = (state, msg, kind) => {{
+  const args = ["agent", "hook", "--event", state, "--app", "opencode"];
+  if (kind) args.push("--kind", kind);
+  if (msg) args.push("--msg", String(msg));
+  execFile(CTL, args, {{ timeout: 5000 }}, () => {{}});
+}};
 
 export const RustyMux = async () => {{
   const text = await new Promise((resolve) => {{
@@ -33,6 +44,13 @@ export const RustyMux = async () => {{
     "experimental.chat.system.transform": async (_input, output) => {{
       output.system.push(text);
     }},
+    "chat.message": async () => report("working"),
+    "tool.execute.before": async (input) => report("working", input?.tool),
+    "permission.ask": async (input) => report("blocked", input?.title, "permission"),
+    event: async ({{ event }}) => {{
+      if (event?.type === "session.idle") report("idle");
+      if (event?.type === "session.error") report("error");
+    }},
   }};
 }};
 "#,
@@ -44,14 +62,24 @@ export const RustyMux = async () => {{
 /// The Pi extension: `session_start` asks the ctl once, and
 /// `before_agent_start` adds the answer to each run's system prompt, as a
 /// prompt section (`appendSystemPrompt`) where Pi has them, else by
-/// returning the whole prompt as older Pi wants.
+/// returning the whole prompt as older Pi wants. Inside a block, a run or
+/// tool call reports `working` and a finished run `idle`.
 pub(super) fn pi(ctl: Ctl<'_>) -> String {
     format!(
-        r#"{MARK}// Tells Pi which rusty_mux block it runs in.
+        r#"{MARK}// Tells Pi which rusty_mux block it runs in, and rusty_mux what Pi does.
 const CTL = {ctl};
 
 export default function rustyMux(pi: any) {{
   let text = "";
+  const report = (state: string, msg?: string) => {{
+    if (!text) return;
+    const args = ["agent", "hook", "--event", state, "--app", "pi"];
+    if (msg) args.push("--msg", String(msg));
+    pi.exec(CTL, args, {{ timeout: 5000 }}).catch(() => {{}});
+  }};
+  pi.on("agent_start", async () => {{ report("working"); }});
+  pi.on("tool_call", async (event: any) => {{ report("working", event?.toolName); }});
+  pi.on("agent_end", async () => {{ report("idle"); }});
   pi.on("session_start", async () => {{
     const result = await pi.exec(CTL, {args}, {{ timeout: 5000 }});
     text = result.code === 0 ? result.stdout.trim() : "";

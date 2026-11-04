@@ -57,6 +57,42 @@ pub fn parse(body: &str) -> Option<Report> {
     Some(Report::Set(id, record))
 }
 
+/// A report given field by field, as an agent hook names them, rather than
+/// as a body. [`Parts::report`] writes the body and [`parse`]s it, so it
+/// meets every rule a program's report does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Parts<'a> {
+    pub id: Option<&'a str>,
+    /// A state name, or `clear`.
+    pub state: &'a str,
+    pub kind: Option<&'a str>,
+    pub app: Option<&'a str>,
+    /// Free text, sent base64-encoded as the protocol wants.
+    pub msg: Option<&'a str>,
+}
+
+impl Parts<'_> {
+    /// The report, or `None` when [`parse`] would ignore or discard it. A
+    /// field holding `:` is refused, since it would split into other pairs.
+    pub fn report(&self) -> Option<Report> {
+        let plain = [Some(self.state), self.id, self.kind, self.app];
+        if plain.iter().flatten().any(|f| f.contains(':')) {
+            return None;
+        }
+        let mut pairs = vec![format!("state={}", self.state)];
+        for (key, value) in [("id", self.id), ("kind", self.kind), ("app", self.app)] {
+            if let Some(value) = value {
+                pairs.push(format!("{key}={value}"));
+            }
+        }
+        if let Some(msg) = self.msg {
+            let encoded = rusty_base64::encode_standard(msg.as_bytes());
+            pairs.push(format!("msg={encoded}"));
+        }
+        parse(&pairs.join(":"))
+    }
+}
+
 /// The last value of each key this crate knows, text already decoded.
 #[derive(Default)]
 struct Fields<'a> {
