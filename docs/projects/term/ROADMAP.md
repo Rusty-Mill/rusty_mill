@@ -96,8 +96,11 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
    agents to run (see arc 4). Nano to restate on this PR.
 8. **FreeBSD** as a server target? *Answered (Nano, project thread, 2026-11-04 12:22Z: "Q8 not
    now"):* not now. Nano to restate on this PR.
-9. **Version mismatch (with C36).** Refuse, warn, or negotiate down when client and server
-   differ? *Recommend negotiate via `Features`, refuse only below a floor.*
+9. **Version mismatch (with C36).** *Answered (Nano, project thread, 2026-11-04 12:23Z: "Agree but
+   we should also notify the user of that because they may be expecting capabilities the server
+   can't support"):* negotiate down through `Features`, refuse only below a floor, and tell the
+   user when the other side lacks features their client has (ctl, attach client and GUI show which
+   are missing and that the server is older). Nano to restate on this PR.
 10. **Card 283 (ConPTY convergence gate).** Moot since our host is the default? *Recommend
     close it, with the ConPTY review a year after Phase B kept.*
 11. **C33 force-disconnect.** Restrict to the session's owner before shared mode?
