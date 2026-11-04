@@ -154,9 +154,9 @@ Four crates still run on tokio because they drive a tier C crate:
 They move when `adk-models` or `adk-mcp` moves.
 
 #911 tier A (2026-10-25): `skillopt-core`, `agentgateway-agui` and
-`rusty_mill_board` are on `rusty_tokio`, and `rk-mcp`'s tests are. `rk-mcp`
-keeps `tokio::sync::Mutex` for its connection lock, which is held across
-remote awaits, until #1064 makes `rusty_tokio`'s mutex cancellation-safe. Three tier A rows stay on tokio because
+`rusty_mill_board` are on `rusty_tokio`, and `rk-mcp`'s tests are. `rk-mcp`'s
+connection lock, held across remote awaits, moved to `rusty_tokio::sync::Mutex`
+once #1066 made it cancellation-safe (#1064); `rk-mcp` no longer depends on tokio. Three tier A rows stay on tokio because
 of the runtime boundary (a fourth, `agentgateway-tls`, moved with the gateway in #885): `rusty_tokio`'s timers, I/O and processes need a
 `rusty_tokio` runtime, and these crates run on a tokio one. `rk-compose`'s
 checks (`tokio::process`, `time::timeout`) run inside `rk-app` (tier C);
@@ -240,7 +240,7 @@ through `Cargo.lock`. The counts are not a vetted audit.
 | `rk-constrain` | `apps/rusty_key/crates/constrain` | t | 2 | t::test×8, t::sync::mpsc×1, t::sync::oneshot×1, t::task::JoinHandle×1, t::spawn×1 | — | — | — | A |
 | `rk-feed` | `apps/rusty_key/crates/feed` | t | 14 | t::test×37, t::fs::read_to_string×2, t::fs::write×2, t::spawn×2, t::process::Command×2, t::sync::mpsc::UnboundedSender×1, +7 | aisdk, reqwest | rk-constrain | G9 | C |
 | `rk-kernel` | `apps/rusty_key/crates/kernel` | f t | 3 | t::test×6, f::StreamExt×1, t::task::block_in_place×1, t::runtime::Handle::current×1, f::Stream×1, f::stream::once×1 | aisdk | rk-constrain | G1 G4 G7 G9 | C |
-| `rk-mcp` | `apps/rusty_key/crates/mcp` | t | 3 | t::test×4, t::sync::Mutex×1 | — | rk-constrain, rk-feed, rusty-mcp-client | — | A |
+| `rk-mcp` | `apps/rusty_key/crates/mcp` | — | 0 | — (connection lock on `rusty_tokio::sync::Mutex`, card #402) | — | rk-constrain, rk-feed, rusty-mcp-client | — | done |
 | `rusty_mill_board` | `apps/rusty_mill_board` | t | 2 | t::signal::ctrl_c×2, t::runtime::Builder::new_current_thread×1, t::signal::unix::signal×1, t::signal::unix::SignalKind::terminate×1, t::select!×1, t::runtime::Builder×1, +1 | — | rusty_http, rusty_mcp_server, rusty_request | G1 | A |
 | `rp-core` | `apps/rusty_provider/crates/core` | — | 0 | — (moved to `rusty_stream`, #910) | — | — | — | done |
 | `rp-mcp` | `apps/rusty_provider/crates/mcp` | — | — | — (on `rusty_tokio`, #910) | — | rp-core, rp-router, rusty-mcp-client, rusty_mcp_server | — | done |
