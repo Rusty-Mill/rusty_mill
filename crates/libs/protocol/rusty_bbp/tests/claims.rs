@@ -3485,7 +3485,7 @@ fn reopened_by_intent(cx: &Cx, c: MsgId) -> bool {
 }
 
 #[test]
-fn cl_102_intent_revised_reopens_accepted_claims_in_a_new_epoch() {
+fn cl_104_intent_revised_reopens_accepted_claims_in_a_new_epoch() {
     let mut cx = Cx::new();
     let x = cx.low();
     accept(&mut cx, x);
@@ -3518,7 +3518,7 @@ fn cl_102_intent_revised_reopens_accepted_claims_in_a_new_epoch() {
 }
 
 #[test]
-fn cl_103_an_acted_on_claim_escalates_intent_changed_in_any_epoch() {
+fn cl_105_an_acted_on_claim_escalates_intent_changed_in_any_epoch() {
     let mut cx = Cx::new();
     let x = cx.low();
     accept(&mut cx, x);
@@ -3541,7 +3541,7 @@ fn cl_103_an_acted_on_claim_escalates_intent_changed_in_any_epoch() {
 }
 
 #[test]
-fn cl_104_affects_is_the_union_of_claims_and_domains() {
+fn cl_106_affects_is_the_union_of_claims_and_domains() {
     let mut cx = Cx::new();
     let by_id = cx.low();
     let by_domain = cx.claim(
@@ -3594,7 +3594,7 @@ fn cl_104_affects_is_the_union_of_claims_and_domains() {
 }
 
 #[test]
-fn cl_105_bad_affects_is_refused_and_writes_nothing() {
+fn cl_107_bad_affects_is_refused_and_writes_nothing() {
     let mut cx = Cx::new();
     let x = cx.low();
     accept(&mut cx, x);
@@ -3617,7 +3617,7 @@ fn cl_105_bad_affects_is_refused_and_writes_nothing() {
 }
 
 #[test]
-fn cl_106_an_intent_reopen_carries_to_dependents() {
+fn cl_108_an_intent_reopen_carries_to_dependents() {
     let mut cx = Cx::new();
     let a = cx.low();
     let b = cx.claim(
@@ -3662,7 +3662,7 @@ fn cl_106_an_intent_reopen_carries_to_dependents() {
 }
 
 #[test]
-fn cl_107_a_refine_answer_refs_the_current_brief() {
+fn cl_109_a_refine_answer_refs_the_current_brief() {
     let mut cx = Cx::new();
     let old = cx.brief;
     let new = stored(revise(&mut cx, "v2", Affects::All));
@@ -3673,7 +3673,7 @@ fn cl_107_a_refine_answer_refs_the_current_brief() {
 }
 
 #[test]
-fn cl_108_task_paused_escalates_the_task_until_resumed_open() {
+fn cl_110_task_paused_escalates_the_task_until_resumed_open() {
     let mut cx = Cx::new();
     let x = cx.low();
     let pause = HostAction::TaskPaused {
@@ -3715,7 +3715,7 @@ fn cl_108_task_paused_escalates_the_task_until_resumed_open() {
 }
 
 #[test]
-fn cl_109_pause_detail_is_bounded() {
+fn cl_111_pause_detail_is_bounded() {
     let mut cx = Cx::new();
     let long = "x".repeat(rusty_bbp::claims::PAUSE_DETAIL_MAX + 1);
     assert_eq!(
@@ -3729,7 +3729,7 @@ fn cl_109_pause_detail_is_bounded() {
 }
 
 #[test]
-fn cl_110_intent_and_pause_are_claims_mode_only() {
+fn cl_112_intent_and_pause_are_claims_mode_only() {
     let mut st = TaskState::new(TaskId::from("t"));
     let run = |st: &mut TaskState, cmd: Command| {
         let h = handle(st, &cmd, Time(1_000));
@@ -3761,7 +3761,7 @@ fn cl_110_intent_and_pause_are_claims_mode_only() {
 }
 
 #[test]
-fn cl_111_affects_absent_on_the_wire_reads_as_all() {
+fn cl_113_affects_absent_on_the_wire_reads_as_all() {
     let e: Event =
         rusty_serde::json::from_str(r#"{"IntentRevised":{"brief":3}}"#).expect("decodes");
     assert_eq!(
@@ -3771,6 +3771,67 @@ fn cl_111_affects_absent_on_the_wire_reads_as_all() {
             affects: Affects::All
         }
     );
+}
+
+#[test]
+fn cl_102_the_card_carries_the_claims_own_accept_line() {
+    let mut cx = Cx::with(ClaimsConfig {
+        accept_at: 10,
+        accept_at_strict: 14,
+        ..ClaimsConfig::default()
+    });
+    let low = cx.low();
+    let high = cx.claim(
+        "a",
+        ClaimBody {
+            stakes: Stakes::High,
+            ..body("high")
+        },
+    );
+    let once = cx.claim(
+        "a",
+        ClaimBody {
+            reversible: false,
+            ..body("once")
+        },
+    );
+    assert_eq!(card_all(&cx.st, low).accept_at, 10, "the task's line");
+    assert_eq!(
+        card_all(&cx.st, high).accept_at,
+        14,
+        "strict for high stakes"
+    );
+    assert_eq!(
+        card_all(&cx.st, once).accept_at,
+        14,
+        "strict when irreversible"
+    );
+}
+
+#[test]
+fn cl_103_the_card_shows_each_evidence_items_strength_and_note() {
+    let mut cx = Cx::new();
+    let c = cx.low();
+    let b = cx.brief;
+    let mut d = cx.evidence_draft(
+        c,
+        Direction::Support,
+        EvidenceKind::Cited,
+        2,
+        vec![Ref::art(b)],
+    );
+    if let Body::Evidence(e) = &mut d.body {
+        e.note = "the brief asks for this".into();
+    }
+    posted(cx.agent("b", AgentAction::Post(d)));
+    ok(cx.opinion("c", c, Direction::Counter));
+    let card = card_all(&cx.st, c);
+    let shown: Vec<(u8, &str)> = card
+        .evidence
+        .iter()
+        .map(|e| (e.strength, e.note.as_str()))
+        .collect();
+    assert_eq!(shown, [(2, "the brief asks for this"), (1, "")]);
 }
 
 // ---------------------------------------------------------------- replay (#599)

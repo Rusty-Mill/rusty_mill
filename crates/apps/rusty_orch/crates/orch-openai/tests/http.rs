@@ -483,14 +483,14 @@ fn a_lens_question_is_asked_through_the_model_port() {
     let q = Question {
         prefix: "intent and rules".to_owned(),
         body: "claim C-1".to_owned(),
-        allowed: Allowed {
+        shape: orch_lens::Shape::Posts(Allowed {
             evidence: None,
             claims: None,
-        },
+        }),
         max_output_tokens: 256,
     };
     let a = client(addr, None, SECS).ask(&q).expect("answers");
-    assert!(a.posts.is_empty());
+    assert_eq!(a.reply, orch_lens::Reply::Posts(Vec::new()));
     assert_eq!((a.usage.input_tokens, a.usage.output_tokens), (40, 5));
 
     let body = Value::parse(&seen.recv().expect("request seen").body).expect("json body");
@@ -508,10 +508,10 @@ fn lens_question() -> orch_lens::Question {
     orch_lens::Question {
         prefix: "intent and rules".to_owned(),
         body: "claim C-1".to_owned(),
-        allowed: orch_lens::Allowed {
+        shape: orch_lens::Shape::Posts(orch_lens::Allowed {
             evidence: None,
             claims: None,
-        },
+        }),
         max_output_tokens: 256,
     }
 }

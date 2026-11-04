@@ -25,7 +25,6 @@ use orch_lens::round::{round, Board, Halt, View};
 use orch_lens::schedule::State;
 use orch_lens::{LensConfig, Model};
 use orch_store::Store;
-use rusty_bbp::ClaimsConfig;
 
 use super::assertions::{self, Grants};
 use super::bbp::{run_id, Child, Rpc, Session};
@@ -121,7 +120,7 @@ pub fn options(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<O
 /// One lens's way onto the board.
 pub trait Seat {
     fn refresh(&mut self, config: &LensConfig) -> Result<(), String>;
-    fn cards(&self, config: &LensConfig, claims: &ClaimsConfig) -> Vec<Card>;
+    fn cards(&self, config: &LensConfig) -> Vec<Card>;
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String>;
     fn board(&mut self) -> &mut dyn Board;
 }
@@ -130,8 +129,8 @@ impl<R: Rpc> Seat for Session<R> {
     fn refresh(&mut self, config: &LensConfig) -> Result<(), String> {
         Session::refresh(self, config)
     }
-    fn cards(&self, config: &LensConfig, claims: &ClaimsConfig) -> Vec<Card> {
-        Session::cards(self, config, claims)
+    fn cards(&self, config: &LensConfig) -> Vec<Card> {
+        Session::cards(self, config)
     }
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String> {
         Session::lines(self, config)
@@ -165,11 +164,9 @@ pub enum Ended {
     Halted(Halt),
 }
 
-/// The lenses to run: the config, the task's frozen claims settings, and
-/// each lens's seat and prefix by id.
+/// The lenses to run: the config, and each lens's seat and prefix by id.
 pub struct Lenses<'a> {
     pub config: &'a LensConfig,
-    pub claims: &'a ClaimsConfig,
     pub seats: &'a mut BTreeMap<String, Box<dyn Seat>>,
     pub prefixes: &'a BTreeMap<String, String>,
 }
@@ -186,7 +183,6 @@ pub fn passes(
 ) -> Result<Ended, String> {
     let Lenses {
         config,
-        claims,
         seats,
         prefixes,
     } = lenses;
@@ -199,7 +195,7 @@ pub fn passes(
                 .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             seat.refresh(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
-            let cards = seat.cards(config, claims);
+            let cards = seat.cards(config);
             let lines = seat
                 .lines(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
@@ -246,17 +242,6 @@ pub fn passes(
     Ok(Ended::MaxPasses)
 }
 
-/// Why `lens run` refuses to start for now. Each claim's accept line comes
-/// from the claims settings frozen when its task opened, and no BBP
-/// interface shows them to a lens or to the host. Assuming the defaults
-/// would show models a false accept line and pick the wrong tier.
-pub const UNKNOWN_CLAIMS: &str = "lens run needs the task's frozen claims settings (its accept lines), and no BBP interface exposes them yet; refusing to assume the defaults";
-
-/// The claims settings task `o.task` was opened with: see [`UNKNOWN_CLAIMS`].
-fn task_claims(_: &Options) -> Result<ClaimsConfig, String> {
-    Err(UNKNOWN_CLAIMS.to_owned())
-}
-
 /// The command's result: the log on a clean end (quiet, the pass cap, or a
 /// task ceiling, which pauses the task by design), an error carrying the
 /// log when the runner itself failed (an unsaved meter, a refused post, a
@@ -275,7 +260,6 @@ pub fn run(o: &Options) -> Result<String, String> {
     let text = std::fs::read_to_string(&o.config)
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
     let config = LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
-    let claims = task_claims(o)?;
     let base = o.config.parent().map(PathBuf::from).unwrap_or_default();
     let rules = match &o.rules {
         Some(p) => {
@@ -325,7 +309,6 @@ pub fn run(o: &Options) -> Result<String, String> {
     let mut state = State::default();
     let lenses = Lenses {
         config: &config,
-        claims: &claims,
         seats: &mut seats,
         prefixes: &prefixes,
     };
@@ -425,12 +408,11 @@ mod tests {
             self.refreshes += 1;
             self.refresh_error.clone().map_or(Ok(()), Err)
         }
-        fn cards(&self, config: &LensConfig, claims: &ClaimsConfig) -> Vec<Card> {
-            let none = |_: MsgId| String::new();
+        fn cards(&self, config: &LensConfig) -> Vec<Card> {
             let built = self
                 .views
                 .iter()
-                .map(|(v, b)| Card::from_view(v, b, &none, config, claims));
+                .map(|(v, b)| Card::from_view(v, b, config));
             self.cards.iter().cloned().chain(built).collect()
         }
         fn lines(&mut self, _: &LensConfig) -> Result<Vec<Line>, String> {
@@ -456,7 +438,7 @@ mod tests {
                 self.2.push((id, q.body.clone()));
             }
             self.0.clone().map(|posts| Answer {
-                posts,
+                reply: orch_lens::Reply::Posts(posts),
                 usage: Usage::default(),
             })
         }
@@ -492,16 +474,6 @@ mod tests {
         task_calls: u32,
         max: u32,
     ) -> (Result<Ended, String>, String) {
-        go_with(seats, echo, task_calls, max, &ClaimsConfig::default())
-    }
-
-    fn go_with(
-        seats: Vec<(&str, FakeSeat)>,
-        echo: &mut Echo,
-        task_calls: u32,
-        max: u32,
-        claims: &ClaimsConfig,
-    ) -> (Result<Ended, String>, String) {
         let cfg = config();
         let mut boxed: BTreeMap<String, Box<dyn Seat>> = seats
             .into_iter()
@@ -523,7 +495,6 @@ mod tests {
         };
         let lenses = Lenses {
             config: &cfg,
-            claims,
             seats: &mut boxed,
             prefixes: &prefixes,
         };
@@ -586,14 +557,16 @@ mod tests {
         assert_eq!(ended, Err("adversary: bbp mcp exited".to_owned()));
     }
 
-    /// A split claim at score +5 with four evidence items: under half of
-    /// a 20-point accept line, not under half of the default 8.
-    fn split_view() -> (rusty_bbp::ClaimView, rusty_bbp::ClaimBody) {
+    /// A split claim at score +5 with four evidence items, accepting at
+    /// `accept_at`: under half of a 20-point line, not under half of 8.
+    fn split_view(accept_at: i64) -> (rusty_bbp::ClaimView, rusty_bbp::ClaimBody) {
         let item = |m: u64, author: &str, direction: Direction| rusty_bbp::claims::EvidenceView {
             msg: MsgId(m),
             author: rusty_bbp::PrincipalId(author.to_owned()),
             direction,
             kind: EvidenceKind::Cited,
+            strength: 1,
+            note: String::new(),
             delta: 0,
             epoch: 0,
             scoring: true,
@@ -604,6 +577,7 @@ mod tests {
             domains: vec!["dedup".to_owned()],
             status: ClaimStatus::Open,
             score: 5,
+            accept_at,
             confidence: 50,
             epoch: 0,
             spent: 4,
@@ -636,29 +610,23 @@ mod tests {
         (view, body)
     }
 
-    fn asked_with(claims: &ClaimsConfig) -> Vec<(AgentId, String)> {
+    fn asked_with(accept_at: i64) -> Vec<(AgentId, String)> {
         let mut seat = FakeSeat::new(vec![]);
-        seat.views.push(split_view());
+        seat.views.push(split_view(accept_at));
         let mut e = echo(Ok(vec![]));
         let seats = vec![("adversary", seat), ("operator", FakeSeat::new(vec![]))];
-        let (ended, log) = go_with(seats, &mut e, 10, 1, claims);
+        let (ended, log) = go(seats, &mut e, 10, 1);
         assert!(ended.is_ok(), "{ended:?} {log}");
         e.2
     }
 
     #[test]
-    fn the_tasks_accept_line_sets_the_tier_and_the_card() {
+    fn the_cards_accept_line_sets_the_tier_and_the_card() {
         let id = |s: &str| AgentId::new(s).expect("id");
-        let default = asked_with(&ClaimsConfig::default());
+        let default = asked_with(8);
         assert_eq!(default[0].0, id("codex"), "routine under the default 8");
         assert!(default[0].1.contains("(accepts at +8)"), "{}", default[0].1);
-        let custom = ClaimsConfig {
-            accept_at: 20,
-            accept_at_strict: 24,
-            ..ClaimsConfig::default()
-        };
-        assert_eq!(custom.invalid_field(), None, "a task BBP would open");
-        let strict = asked_with(&custom);
+        let strict = asked_with(20);
         assert_eq!(strict[0].0, id("claude"), "contested under the task's 20");
         assert!(strict[0].1.contains("(accepts at +20)"), "{}", strict[0].1);
     }
@@ -678,28 +646,6 @@ mod tests {
             assert!(err.starts_with("log\n"), "the log is kept: {err}");
             assert!(err.contains(&format!("{h:?}")), "{err}");
         }
-    }
-
-    #[test]
-    fn run_refuses_without_the_tasks_claims_settings() {
-        let dir = std::env::temp_dir().join(format!("orch-run-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let cfg = dir.join("lens.json");
-        std::fs::write(&cfg, CONFIG).expect("config");
-        let o = options(
-            argv(&format!(
-                "run {} --bbp /nonexistent/bbp --dir /d --task t --state /s --experiment e",
-                cfg.display()
-            )),
-            dir.clone(),
-        )
-        .expect("options");
-        assert_eq!(
-            run(&o),
-            Err(UNKNOWN_CLAIMS.to_owned()),
-            "before any session or store"
-        );
-        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     fn argv(s: &str) -> Vec<String> {
