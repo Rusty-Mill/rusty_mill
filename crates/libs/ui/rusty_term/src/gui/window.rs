@@ -4337,7 +4337,7 @@ impl WindowState<'_> {
                     }
                 } else if setup {
                     format!(
-                        "Set up rusty_term - step {} of {}",
+                        "Set up rusty_term: step {} of {}",
                         s.cat + 1,
                         s.sections().len()
                     )
@@ -4520,14 +4520,14 @@ impl WindowState<'_> {
                     // Most-needed first: a narrow window drops the tail.
                     &[
                         ("Enter", "finish"),
-                        ("T", "test alert"),
-                        ("Esc", "skip"),
+                        ("t", "test alert"),
+                        ("Esc", "skip setup"),
                         ("Left/Right", "change"),
                     ]
                 } else if setup {
                     &[
                         ("Enter", "next step"),
-                        ("Esc", "skip"),
+                        ("Esc", "skip setup"),
                         ("Left/Right", "change"),
                         ("Shift+Tab", "back"),
                     ]

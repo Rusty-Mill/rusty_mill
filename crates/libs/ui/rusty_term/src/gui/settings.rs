@@ -603,9 +603,19 @@ impl Settings {
         }
     }
 
-    /// Step to the next/previous category (Tab / Shift+Tab), wrapping.
+    /// Step to the next/previous category (Tab / Shift+Tab). The page
+    /// wraps; setup stops at its first and last step.
     pub(crate) fn cycle_category(&mut self, forward: bool) {
-        self.set_category(wrap(self.cat, self.sections().len(), forward));
+        let len = self.sections().len();
+        let at_end = if forward {
+            self.cat + 1 >= len
+        } else {
+            self.cat == 0
+        };
+        if self.is_setup() && at_end {
+            return;
+        }
+        self.set_category(wrap(self.cat, len, forward));
     }
 
     /// Scroll so the highlighted row is inside a window of `visible` rows.
@@ -1236,6 +1246,13 @@ mod tests {
         }
         assert!(s.on_last_step());
         assert_eq!(s.field(), Some(Field::CommandNotify));
+        // The ends don't wrap: Tab stays on the last step, Shift+Tab on the first.
+        s.cycle_category(true);
+        assert!(s.on_last_step());
+        for _ in 0..SETUP_STEPS.len() {
+            s.cycle_category(false);
+        }
+        assert_eq!(s.field(), Some(Field::Shell));
         // Every step's rows are settings-page rows: no new settings (D65).
         for (_, fields) in SETUP_STEPS {
             for f in fields {
