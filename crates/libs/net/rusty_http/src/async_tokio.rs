@@ -76,6 +76,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
     }
 
     async fn fill_more(&mut self) -> Result<usize> {
+        self.fill_up_to(usize::MAX).await
+    }
+
+    /// Reads once into the buffer, taking at most `limit` bytes from `io`
+    /// (`limit > 0`; a zero-length read would look like EOF). Compacts or
+    /// grows the buffer first so there is room to read into.
+    async fn fill_up_to(&mut self, limit: usize) -> Result<usize> {
         if self.start > 0 {
             self.buf.copy_within(self.start..self.end, 0);
             self.end -= self.start;
@@ -84,7 +91,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
         if self.end == self.buf.len() {
             self.buf.resize(self.buf.len() * 2, 0);
         }
-        let n = self.io.read(&mut self.buf[self.end..]).await?;
+        let room = (self.buf.len() - self.end).min(limit);
+        let n = self
+            .io
+            .read(&mut self.buf[self.end..self.end + room])
+            .await?;
         self.end += n;
         Ok(n)
     }
@@ -94,14 +105,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
     /// to stop work for a client that has gone. Bytes that arrive (a
     /// pipelined request) stay buffered for the next read. With
     /// `max_buffered` unread bytes held it stops reading and never resolves,
-    /// so a peer cannot make it buffer without bound. Cancel-safe: dropping
-    /// it loses no data.
+    /// so a peer cannot make it buffer without bound: no read takes more
+    /// than the bytes left under that cap. Cancel-safe: dropping it loses
+    /// no data.
     pub async fn closed(&mut self, max_buffered: usize) {
         loop {
-            if self.end - self.start >= max_buffered {
+            let buffered = self.end - self.start;
+            if buffered >= max_buffered {
                 return std::future::pending().await;
             }
-            match self.fill_more().await {
+            match self.fill_up_to(max_buffered - buffered).await {
                 Ok(0) | Err(_) => return,
                 Ok(_) => {}
             }
@@ -551,6 +564,94 @@ mod tests {
             body::response_framing(&head.headers, &Method::Get, StatusCode::from_u16(200)).unwrap();
         let body = t.read_body(framing).await.unwrap();
         assert_eq!(body, b"hello");
+    }
+
+    /// Polls `closed(cap)` once, then drops it (a cancellation). One poll
+    /// takes everything a ready duplex offers, up to the cap. Returns whether
+    /// it resolved.
+    async fn poll_closed_once<T>(t: &mut AsyncTransport<T>, cap: usize) -> bool
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let mut fut = std::pin::pin!(t.closed(cap));
+        std::future::poll_fn(|cx| {
+            Poll::Ready(std::future::Future::poll(fut.as_mut(), cx).is_ready())
+        })
+        .await
+    }
+
+    /// Splits `t`, checking its buffered bytes are `held` and that `io` still
+    /// has exactly `rest` unread: `closed` took nothing past its cap.
+    async fn assert_split<T>(t: AsyncTransport<T>, held: &[u8], rest: &[u8])
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let (mut io, buffered) = t.into_parts();
+        assert_eq!(buffered, held, "buffered bytes");
+        let mut unread = vec![0u8; rest.len()];
+        io.read_exact(&mut unread).await.unwrap();
+        assert_eq!(unread, rest, "bytes left in the stream");
+    }
+
+    fn numbered(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[rusty_tokio::test]
+    async fn closed_reads_no_further_than_its_cap() {
+        // 1 is under the initial allocation; 5000 is between it and the
+        // first growth, so the second read must be cut to the remainder.
+        for cap in [1usize, 5000] {
+            let wire = numbered(10_000);
+            let (mut feeder, reader) = duplex(wire.len());
+            feeder.write_all(&wire).await.unwrap();
+            let mut t = AsyncTransport::new(reader);
+            assert!(!poll_closed_once(&mut t, cap).await, "cap {cap}");
+            assert_split(t, &wire[..cap], &wire[cap..]).await;
+        }
+    }
+
+    #[rusty_tokio::test]
+    async fn closed_counts_already_buffered_bytes_against_its_cap() {
+        let (mut feeder, reader) = duplex(64);
+        feeder
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nabc")
+            .await
+            .unwrap();
+        let mut t = AsyncTransport::new(reader);
+        t.read_request_head(8192).await.unwrap(); // leaves "abc" buffered
+
+        // At or over the cap: pending, and reads nothing.
+        feeder.write_all(b"defgh").await.unwrap();
+        assert!(!poll_closed_once(&mut t, 2).await);
+        assert!(!poll_closed_once(&mut t, 3).await);
+        // Under it: tops up to exactly the cap.
+        assert!(!poll_closed_once(&mut t, 5).await);
+        assert_split(t, b"abcde", b"fgh").await;
+    }
+
+    #[rusty_tokio::test]
+    async fn closed_cancelled_and_resumed_loses_no_bytes() {
+        let wire = numbered(14);
+        let (mut feeder, reader) = duplex(64);
+        let mut t = AsyncTransport::new(reader);
+        feeder.write_all(&wire[..4]).await.unwrap();
+        assert!(!poll_closed_once(&mut t, 10).await);
+        feeder.write_all(&wire[4..]).await.unwrap();
+        assert!(!poll_closed_once(&mut t, 10).await);
+        assert!(!poll_closed_once(&mut t, 10).await);
+        assert_split(t, &wire[..10], &wire[10..]).await;
+    }
+
+    #[rusty_tokio::test]
+    async fn closed_resolves_on_eof_keeping_what_it_read() {
+        let (mut feeder, reader) = duplex(64);
+        feeder.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        drop(feeder);
+        let mut t = AsyncTransport::new(reader);
+        t.closed(1024).await;
+        let head = t.read_request_head(8192).await.unwrap();
+        assert_eq!(head.target, "/");
     }
 
     #[rusty_tokio::test]
