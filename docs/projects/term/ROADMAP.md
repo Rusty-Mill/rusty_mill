@@ -1,7 +1,8 @@
 # Rusty Term roadmap (with rusty_mux)
 
-Status: **draft for the owner's review** (2026-11-04, main 83e70a1c). Nothing here is
-approved until Nano says so on the PR that adds it; no item goes to the Mill Board's
+Status: **owner answered all 13 questions in the project thread on 2026-11-04** (main 83e70a1c);
+they count once Nano confirms them on the PR that adds this file. Items still each need their
+own go to start; no item goes to the Mill Board's
 Ready column before that. Mux phases, exit criteria and capability rows stay in
 [../mux/ROADMAP.md](../mux/ROADMAP.md) and [../mux/CAPABILITIES.md](../mux/CAPABILITIES.md);
 this file orders the work across both and does not copy them.
