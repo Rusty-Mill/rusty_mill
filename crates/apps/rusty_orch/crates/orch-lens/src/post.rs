@@ -66,6 +66,60 @@ impl DirectionKey {
     }
 }
 
+/// The reply protocol in words, for every lens's prefix. Built from the
+/// same limits [`parse`] checks; its example reply parses.
+pub fn protocol() -> String {
+    format!(
+        "Reply with exactly one JSON object and nothing else: {{\"posts\": [...]}}, at most {MAX_POSTS} posts. \
+Reply {{\"posts\": []}} when you have nothing to add.\n\
+A claim: {{\"kind\": \"claim\", \"text\": one sentence, \"domains\": [1 to {MAX_DOMAINS} names of 1 to {DOMAIN_CAP} characters from a-z, 0-9, _ and -], \
+\"stakes\": \"low\", \"medium\" or \"high\", \"reversible\": true or false, and optionally \"deps\": [up to {MAX_DEPS} claim ids], \
+\"answers\": a question's id, \"supersedes\": a claim's id, \"refs\": [references]}}.\n\
+Evidence: {{\"kind\": \"evidence\", \"claim\": the claim's id, \"direction\": \"support\" or \"counter\", \
+\"evidence_kind\": \"executed\", \"cited\" or \"opinion\", \"strength\": 1 to 3 (executed is always 1), \
+\"evidence\": [references], and optionally \"note\": why}}.\n\
+A reference is \"msg:N\" for a message or \"art:N\" for an artifact. \
+Claim and question ids (\"claim\", \"deps\", \"answers\", \"supersedes\") are bare numbers: 7 for msg:7. Support must be executed or cited, never opinion. \
+Executed and cited evidence cite at least one reference. Text and notes are at most {MAX_TEXT} characters. No other fields.\n\
+Example: {EXAMPLE}\n"
+    )
+}
+
+/// The example reply in [`protocol`].
+const EXAMPLE: &str = r#"{"posts": [{"kind": "evidence", "claim": 7, "direction": "counter", "evidence_kind": "cited", "strength": 2, "evidence": ["msg:5"], "note": "Fails on empty files."}]}"#;
+
+/// What one job may post, in words.
+pub fn allowance(a: &Allowed) -> String {
+    let mut out = String::from("What you may post:");
+    if let Some(e) = &a.evidence {
+        let dirs: Vec<&str> = e
+            .directions
+            .iter()
+            .map(|d| match d {
+                DirectionKey::Support => "support",
+                DirectionKey::Counter => "counter",
+            })
+            .collect();
+        out.push_str(&format!(
+            " evidence on claim {} ({}).",
+            e.claim,
+            dirs.join(" or ")
+        ));
+    }
+    match a.claims.map(|c| c.answers) {
+        Some(Some(q)) => out.push_str(&format!(
+            " claims that answer {q} (set \"answers\": {}).",
+            q.0
+        )),
+        Some(None) => out.push_str(" new claims."),
+        None => {}
+    }
+    if a.evidence.is_none() && a.claims.is_none() {
+        out.push_str(" nothing; reply {\"posts\": []}.");
+    }
+    out
+}
+
 /// Parse and check one reply. Tolerates one ``` fence around the object.
 /// The error names the first offending post and field.
 pub fn parse(text: &str, allowed: &Allowed) -> Result<Vec<Post>, String> {
@@ -363,6 +417,42 @@ mod tests {
                 answers: Some(MsgId(question)),
             }),
         }
+    }
+
+    #[test]
+    fn the_protocol_example_parses_and_names_the_limits() {
+        let posts = parse(EXAMPLE, &attack(7)).expect("example parses");
+        assert_eq!(posts.len(), 1);
+        let p = protocol();
+        assert!(p.contains(EXAMPLE));
+        for limit in [MAX_POSTS, MAX_DOMAINS, DOMAIN_CAP, MAX_DEPS, MAX_TEXT] {
+            assert!(p.contains(&limit.to_string()), "{limit}");
+        }
+    }
+
+    #[test]
+    fn the_allowance_says_what_a_job_may_post() {
+        assert_eq!(
+            allowance(&attack(7)),
+            "What you may post: evidence on claim msg:7 (support or counter)."
+        );
+        assert_eq!(
+            allowance(&propose(3)),
+            r#"What you may post: claims that answer msg:3 (set "answers": 3)."#
+        );
+        let both = Allowed {
+            claims: Some(ClaimRule { answers: None }),
+            ..attack(7)
+        };
+        assert!(allowance(&both).ends_with(" new claims."));
+        let none = Allowed {
+            evidence: None,
+            claims: None,
+        };
+        assert_eq!(
+            allowance(&none),
+            r#"What you may post: nothing; reply {"posts": []}."#
+        );
     }
 
     const COUNTER: &str = r#"{"posts":[{"kind":"evidence","claim":7,"direction":"counter",
