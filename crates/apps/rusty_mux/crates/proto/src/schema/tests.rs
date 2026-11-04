@@ -126,7 +126,8 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.set-theme",
             "terminal.modes",
             "terminal.clear",
-            "terminal.shell"
+            "terminal.shell",
+            "terminal.history"
         ]
     );
     let control = ["terminal.size", "terminal.reset", "terminal.set-theme"];
@@ -138,6 +139,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             (true, _, _) => Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL),
             (_, true, _) => Features::BLOCK_CALL.union(Features::TERMINAL_MORE),
             (_, _, "terminal.shell") => Features::BLOCK_CALL.union(Features::TERMINAL_SHELL),
+            (_, _, "terminal.history") => Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY),
             _ => Features::BLOCK_CALL,
         };
         assert_eq!(method.needs, needs, "{name}");
@@ -311,8 +313,17 @@ fn optional_parameters_add_their_features_only_when_given() {
             "foreground",
             "background",
             "cursor",
-            "palette"
+            "palette",
+            "skip",
+            "trim",
+            "unwrap",
+            "vt"
         ]
+    );
+    let history = method("terminal.history").expect("history");
+    assert_eq!(
+        history.needs_for(["block", "history", "skip", "vt"]),
+        Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY)
     );
     let format = method("terminal.format").expect("format");
     assert_eq!(format.needs_for(["block", "history"]), Features::BLOCK_CALL);

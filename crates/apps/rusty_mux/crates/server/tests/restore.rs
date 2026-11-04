@@ -1,7 +1,8 @@
 //! C45: a server started on the store an earlier one saved restores its
 //! sessions, windows, layouts and screens, by id: a shell block with a
 //! fresh shell, a command block read-only (D72). An unreadable store is
-//! moved aside and the server starts empty.
+//! moved aside and the server starts empty. C70: a block's history past
+//! its scrollback is spooled to the store and read with `terminal.history`.
 
 mod common;
 
@@ -288,5 +289,78 @@ fn restarted_read_only(name: &str, script: &str, needles: &[&str]) {
         drop(client);
         server.stop();
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+fn history(client: &mut Client, block: rusty_mux_core::BlockId, n: u32, skip: u32) -> String {
+    use rusty_mux_proto::schema::Value;
+    let args = vec![
+        ("history".to_owned(), Value::Lines(n)),
+        ("skip".to_owned(), Value::Lines(skip)),
+    ];
+    match client
+        .answer(|req| Message::BlockCall {
+            req,
+            block,
+            method: "terminal.history".into(),
+            args,
+        })
+        .as_slice()
+    {
+        [Message::Text { text, .. }] => text.clone(),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+/// Lines past the 10,000 of scrollback go to the spool, survive a restart
+/// and go with their block.
+#[cfg(unix)]
+#[test]
+fn history_past_scrollback_is_spooled_and_survives_a_restart() {
+    let dir = state_dir("spool");
+    let features = Features::CHECKPOINT_V6
+        .union(Features::BLOCK_CALL)
+        .union(Features::TERMINAL_HISTORY);
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(&server.socket, features, None);
+    let block = block_for(&mut client);
+    client.input(block, b"seq 12000 | sed 's/^/L/'; echo DONE$((6*7))\r");
+    client.wait_for(block, "DONE42");
+    let all = history(&mut client, block, 100_000, 0);
+    let lines: Vec<&str> = all.lines().collect();
+    assert!(
+        lines.contains(&"L2") && lines.contains(&"L1500"),
+        "{:?}",
+        &lines[..lines.len().min(5)]
+    );
+    assert!(!lines.contains(&"L11000"), "still in scrollback");
+    let newest = history(&mut client, block, 1, 0);
+    assert_eq!(Some(newest.as_str()), lines.last().copied());
+    let paged = history(&mut client, block, 2, 1);
+    assert_eq!(
+        paged.lines().collect::<Vec<_>>(),
+        lines[lines.len() - 3..lines.len() - 1]
+    );
+    drop(client);
+    server.stop();
+
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(&server.socket, features, None);
+    // The restart marker scrolls a few more lines out of the scrollback.
+    let after = history(&mut client, block, 100_000, 0);
+    assert!(
+        after.starts_with(&all) && after.len() > all.len(),
+        "kept, then the lines the marker pushed out"
+    );
+    client.request(|req| Message::CloseBlock { req, block });
+    let spool = dir.join(format!("{block}.spool"));
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while spool.exists() {
+        assert!(std::time::Instant::now() < deadline, "spool not removed");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(client);
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

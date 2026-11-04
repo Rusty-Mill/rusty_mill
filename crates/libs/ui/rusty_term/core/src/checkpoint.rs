@@ -71,6 +71,50 @@ pub fn decode(data: &[u8]) -> Result<(Grid, AnsiParser)> {
     Ok((grid, parser))
 }
 
+/// Magic and version that open one spilled line (the mux's C70 scrollback
+/// spool). Independent of [`HEADER`]: a spool outlives checkpoints.
+const SPILL: &[u8; 5] = b"RTSL\x01";
+
+/// One line evicted from a grid's scrollback, encoded alone with its styles
+/// inline (the RTCP line form), so it decodes without the grid it left. A
+/// grapheme cluster or hyperlink in it refers to that grid's tables and is
+/// not carried: a cluster cell decodes as the placeholder it held.
+pub(crate) fn encode_spilled(line: &crate::grid::Line, table: &StyleTable) -> Result<Vec<u8>> {
+    let mut w = Writer::new(MAX_DECODED, Some(table));
+    w.put(SPILL)?;
+    line.write(&mut w)?;
+    Ok(w.bytes)
+}
+
+/// A grid showing spilled `lines` (each from [`Grid::take_spilled`]),
+/// oldest first: all but the last as its scrollback, the last as its one
+/// screen row, every row as wide as the widest. Refuses a line that is not
+/// one, or more than [`MAX_DECODED`] of them in all.
+pub fn spilled_grid(lines: &[&[u8]]) -> Result<Grid> {
+    let mut r = Reader::new(&[], MAX_DECODED);
+    let mut decoded = Vec::with_capacity(lines.len().min(1 << 16));
+    for bytes in lines {
+        r.bytes = bytes
+            .strip_prefix(SPILL)
+            .ok_or(Error("spilled line header"))?;
+        // Each line defines its own styles; the table they intern into is shared.
+        r.styles.clear();
+        decoded.push(crate::grid::Line::read(&mut r)?);
+        if !r.bytes.is_empty() {
+            return Err(Error("trailing spilled line data"));
+        }
+    }
+    let cols = decoded.iter().map(|l| l.width()).max().unwrap_or(1).max(1);
+    let mut grid = Grid::new(cols, 1);
+    let defaults = grid.styles().defaults();
+    let mut table = r.take_styles();
+    table.set_defaults(defaults);
+    let last = decoded.pop();
+    let rows: Vec<_> = decoded.into_iter().map(|l| l.padded_to(cols)).collect();
+    grid.adopt_spilled(table, rows, last.map(|l| l.padded_to(cols)));
+    Ok(grid)
+}
+
 pub(crate) struct Writer<'a> {
     bytes: Vec<u8>,
     now: Instant,
@@ -727,6 +771,11 @@ mod tests {
                 "untrimmed",
                 "memory compaction progress; restored lines are all untrimmed",
             ),
+            (
+                "spilled",
+                "an embedder's opt-in spool feed; it turns spilling on again",
+            ),
+            ("spill_failed", "a count for the embedder, per run"),
             ("styles", "rebuilt from the line run styles"),
             ("epoch", "renderer freshness counter"),
             ("view_offset", "client viewport"),
@@ -1024,6 +1073,65 @@ mod tests {
             return Err(Error("trailing"));
         }
         Ok((lines, r.take_styles()))
+    }
+
+    /// A grid of `rows` rows keeping `history` lines, spilling the rest.
+    fn spilling(rows: usize, history: usize) -> (Grid, AnsiParser) {
+        let mut g = Grid::new(20, rows);
+        g.set_scrollback_max(history);
+        g.spill_evicted(true);
+        (g, AnsiParser::new())
+    }
+
+    #[test]
+    fn evicted_lines_spill_with_their_styles_and_read_back() {
+        let (mut g, mut p) = spilling(2, 2);
+        for n in 0..6 {
+            p.advance(
+                &mut g,
+                format!("\x1b[31mred{n}\x1b[0m plain\r\n").as_bytes(),
+            );
+        }
+        let spilled = g.take_spilled();
+        assert!(g.take_spilled().is_empty(), "taken once");
+        // 6 lines and the cursor's blank row: 2 on screen, 2 kept, 3 spilled.
+        assert_eq!(spilled.len(), 3);
+        let refs: Vec<&[u8]> = spilled.iter().map(Vec::as_slice).collect();
+        let back = spilled_grid(&refs).unwrap();
+        let text: Vec<_> = (0..).map_while(|n| back.line_text(n)).collect();
+        assert_eq!(text, ["red0 plain", "red1 plain", "red2 plain"]);
+        let (cells, _) = back.line_cells(1).unwrap();
+        assert_ne!(cells[0].fg, cells[5].fg, "red kept apart from plain");
+        assert_eq!(back.line_cells(0).unwrap().0[0].fg, cells[0].fg);
+    }
+
+    #[test]
+    fn nothing_spills_unless_asked_and_a_lower_cap_spills_what_it_drops() {
+        let mut g = Grid::new(10, 2);
+        g.set_scrollback_max(1);
+        let mut p = AnsiParser::new();
+        p.advance(&mut g, b"a\r\nb\r\nc\r\nd\r\n");
+        assert!(g.take_spilled().is_empty());
+        let (mut g, mut p) = spilling(2, 3);
+        p.advance(&mut g, b"a\r\nb\r\nc\r\nd\r\n");
+        g.set_scrollback_max(1);
+        let spilled = g.take_spilled();
+        let refs: Vec<&[u8]> = spilled.iter().map(Vec::as_slice).collect();
+        let back = spilled_grid(&refs).unwrap();
+        assert_eq!(back.line_text(0).as_deref(), Some("a"));
+        assert_eq!(back.line_text(1).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn spilled_lines_that_are_not_are_refused() {
+        assert!(spilled_grid(&[b"RTCP\x06"]).is_err());
+        assert!(spilled_grid(&[b"RTSL\x01"]).is_err());
+        let (mut g, mut p) = spilling(2, 1);
+        p.advance(&mut g, b"x\r\ny\r\nz\r\nw\r\n");
+        let mut line = g.take_spilled().remove(0);
+        line.push(0);
+        assert!(spilled_grid(&[&line]).is_err(), "trailing data");
+        assert_eq!(spilled_grid(&[]).unwrap().line_text(0).as_deref(), Some(""));
     }
 
     #[test]

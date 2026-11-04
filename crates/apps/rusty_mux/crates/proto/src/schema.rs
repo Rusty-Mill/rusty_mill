@@ -562,6 +562,21 @@ const TERMINAL_MORE: Features = Features::BLOCK_CALL.union(Features::TERMINAL_MO
 /// What `terminal.shell` needs.
 const TERMINAL_SHELL: Features = Features::BLOCK_CALL.union(Features::TERMINAL_SHELL);
 
+/// What `terminal.history` needs.
+const TERMINAL_HISTORY: Features = Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY);
+
+/// An optional parameter of `terminal.history`.
+const fn history(name: &'static str, ty: Ty, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::TERMINAL_HISTORY,
+        },
+    }
+}
+
 /// An optional parameter of `terminal.set-theme`.
 const fn theme(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     Param {
@@ -1283,6 +1298,46 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_SHELL,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.shell"),
+    },
+    Method {
+        name: "terminal.history",
+        doc: "Read the terminal's history older than its scrollback, kept on disk while the \
+              server keeps state (the newest 64 MiB a block spilled), as text: one line per \
+              row, oldest first, without trailing blanks. Refused when the server keeps no \
+              state. A line keeps its colors and wrapping, not a hyperlink or a character \
+              combined from several.",
+        params: &[
+            BLOCK,
+            required(
+                "history",
+                Ty::Lines,
+                "How many lines to read, at most 100000; fewer near the oldest kept.",
+            ),
+            history(
+                "skip",
+                Ty::Lines,
+                "How many of the newest spooled lines to pass over first, to page back.",
+            ),
+            history(
+                "trim",
+                Ty::Flag,
+                "Leave out the blank lines before the first and after the last line with text.",
+            ),
+            history(
+                "unwrap",
+                Ty::Flag,
+                "Join rows the program's text wrapped onto into one line, keeping their blanks.",
+            ),
+            history(
+                "vt",
+                Ty::Flag,
+                "Keep colors and attributes as SGR escape sequences, each line starting from \
+                 the default style and returning to it.",
+            ),
+        ],
+        needs: TERMINAL_HISTORY,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.history"),
     },
     Method {
         name: "close-block",

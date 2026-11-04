@@ -192,7 +192,12 @@ fn tools_carry_the_catalog_schema_and_hints() {
             "{name}"
         );
     }
-    for name in ["terminal.size", "terminal.modes", "terminal.shell"] {
+    for name in [
+        "terminal.size",
+        "terminal.modes",
+        "terminal.shell",
+        "terminal.history",
+    ] {
         let reads = tool(known(name));
         assert_eq!(
             hint(&reads, "readOnlyHint"),

@@ -30,6 +30,7 @@ use crate::keys;
 use crate::outbox::Outbox;
 use crate::process;
 use crate::pty::{self, Process, Pty};
+use crate::spool::Spool;
 use crate::store::{Started, Store};
 use crate::terminal;
 
@@ -87,7 +88,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SESSION_NAMES)
     .union(Features::NAME_SESSION)
     .union(Features::TERMINAL_MORE)
-    .union(Features::TERMINAL_SHELL);
+    .union(Features::TERMINAL_SHELL)
+    .union(Features::TERMINAL_HISTORY);
 
 /// Fresh randomness to pick a generated session name with.
 fn name_seed() -> u64 {
@@ -138,6 +140,9 @@ struct BlockRt {
     started: Started,
     /// The grid changed since the store last saved it.
     unsaved: bool,
+    /// Where lines evicted from the grid's scrollback go, while the
+    /// server keeps state (C70).
+    spool: Option<Spool>,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -209,6 +214,7 @@ impl BlockRt {
             waiting: Waiting::default(),
             started,
             unsaved: true,
+            spool: None,
         }
     }
 
@@ -225,6 +231,23 @@ impl BlockRt {
             "the block is read-only: it was restored after a server restart and its command was not run again"
                 .into()
         })
+    }
+
+    /// Appends the lines the grid evicted to the spool. A spool that
+    /// fails is dropped with a warning, and its history stops there.
+    fn spill(&mut self, block: BlockId) {
+        let Some(spool) = self.spool.as_mut() else {
+            return;
+        };
+        let lines = self.grid.take_spilled();
+        if lines.is_empty() {
+            return;
+        }
+        if let Err(e) = spool.append(lines) {
+            eprintln!("rusty-mux-server: block {block}'s history past scrollback stops here: {e}");
+            self.spool = None;
+            self.grid.spill_evicted(false);
+        }
     }
 
     fn pid(&self) -> Option<u32> {
@@ -1133,6 +1156,7 @@ impl State {
         let text = match found.name {
             "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX)
                 .ok_or_else(|| format!("{method} reply exceeds {REPLY_MAX} bytes"))?,
+            "terminal.history" => history(rt.spool.as_ref(), &named)?,
             "terminal.send-keys" => {
                 self.mux
                     .authorize_input(client, block)
@@ -1359,8 +1383,34 @@ impl State {
             Some((target, side)) => self.mux.split_block(block, target, side, size)?,
         }
         let rt = rt.screened(shared, crate::checkpoint::grid(size), AnsiParser::new());
-        self.blocks.insert(block, rt);
+        self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
+    }
+
+    /// Holds `rt` as `block`'s, spooling the history its grid evicts
+    /// while the server keeps state (C70).
+    fn adopt(&mut self, block: BlockId, mut rt: BlockRt) {
+        if let Some(store) = &self.store {
+            match store.spool(block) {
+                Ok(spool) => {
+                    // Lines a restore's marker pushed out already wait.
+                    let pending = rt.grid.take_spilled();
+                    rt.grid.spill_evicted(true);
+                    rt.spool = Some(spool);
+                    if let Some(spool) = rt.spool.as_mut()
+                        && let Err(e) = spool.append(pending)
+                    {
+                        eprintln!(
+                            "rusty-mux-server: block {block}'s restored history is short: {e}"
+                        );
+                    }
+                }
+                Err(e) => eprintln!(
+                    "rusty-mux-server: block {block}'s history past scrollback will not be kept: {e}"
+                ),
+            }
+        }
+        self.blocks.insert(block, rt);
     }
 
     /// Starts `start.block`'s program, for the caller to give a screen
@@ -1573,6 +1623,7 @@ impl State {
             return Vec::new();
         };
         rt.parser.advance(&mut rt.grid, data);
+        rt.spill(block);
         rt.unsaved = true;
         let replies = rt.parser.take_responses();
         let status = terminal::absorb_status(&mut rt.grid, &mut rt.status);
@@ -1742,10 +1793,9 @@ impl State {
             }
             for event in events {
                 if let Event::BlockClosed { block } = event
-                    && let Some(process) =
-                        self.blocks.remove(&block).and_then(|rt| rt.release(true))
+                    && let Some(rt) = self.blocks.remove(&block)
                 {
-                    rusty_tokio::task::spawn_local(process.reap());
+                    close(block, rt);
                 }
                 let seq = self.history.push(event.clone());
                 let (Some(plain), Some(numbered)) =
@@ -1765,6 +1815,16 @@ impl State {
                 }
             }
         }
+    }
+}
+
+/// Lets a closed block's program go, to be reaped, and deletes its spool.
+fn close(block: BlockId, mut rt: BlockRt) {
+    if let Some(Err(e)) = rt.spool.take().map(Spool::remove) {
+        eprintln!("rusty-mux-server: removing block {block}'s history: {e}");
+    }
+    if let Some(process) = rt.release(true) {
+        rusty_tokio::task::spawn_local(process.reap());
     }
 }
 
@@ -1916,6 +1976,17 @@ enum Outcome {
     Later(oneshot::Receiver<()>),
 }
 
+/// The line count `param` holds, 0 when left out.
+fn lines(named: &[(&str, Value)], param: &str) -> u32 {
+    named
+        .iter()
+        .find_map(|(name, value)| match value {
+            Value::Lines(n) if *name == param => Some(*n),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// `terminal.format`'s options from its arguments, which the catalog
 /// checked: a flag left out is off.
 fn capture(named: &[(&str, Value)]) -> terminal::Capture {
@@ -1926,17 +1997,36 @@ fn capture(named: &[(&str, Value)]) -> terminal::Capture {
     };
     terminal::Capture {
         // Required, so always there.
-        history: named
-            .iter()
-            .find_map(|(name, value)| match (*name, value) {
-                ("history", Value::Lines(n)) => Some(*n),
-                _ => None,
-            })
-            .unwrap_or_default(),
+        history: lines(named, "history"),
         trim: flag("trim"),
         unwrap: flag("unwrap"),
         vt: flag("vt"),
     }
+}
+
+/// `terminal.history`: the spooled lines `named` asks for, as
+/// `terminal.format` would show them.
+fn history(spool: Option<&Spool>, named: &[(&str, Value)]) -> Result<String, Refusal> {
+    let spool = spool.ok_or(
+        "no history is kept past this block's scrollback: the server keeps no state, \
+         or writing it failed",
+    )?;
+    let capture = capture(named);
+    let read = spool
+        .read(lines(named, "skip").into(), capture.history.into())
+        .map_err(|e| format!("reading the history: {e}"))?;
+    let Some(above) = read.len().checked_sub(1) else {
+        return Ok(String::new());
+    };
+    let read: Vec<&[u8]> = read.iter().map(Vec::as_slice).collect();
+    let grid = rusty_term_core::checkpoint::spilled_grid(&read)
+        .map_err(|e| format!("the history is damaged: {e}"))?;
+    let capture = terminal::Capture {
+        history: u32::try_from(above).unwrap_or(u32::MAX),
+        ..capture
+    };
+    terminal::format(&grid, capture, REPLY_MAX)
+        .ok_or_else(|| format!("terminal.history reply exceeds {REPLY_MAX} bytes").into())
 }
 
 /// Encodes the messages answering a `what` request, all or nothing: a reply

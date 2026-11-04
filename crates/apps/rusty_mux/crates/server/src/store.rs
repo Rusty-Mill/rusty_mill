@@ -5,6 +5,10 @@
 //! record in memory and logs each change, and a screen is megabytes that
 //! the server already holds as a grid (D76).
 //!
+//! A block's history past its scrollback is spooled beside them, in
+//! `<block>.spool/` (C70, [`crate::spool`]), written as lines leave the
+//! grid rather than at a save, and deleted with the block.
+//!
 //! A save writes screens first, each to a `.tmp` beside it renamed over the
 //! old one, then the changed session records, so a run that dies midway
 //! leaves records with screens at least as new. The directory is locked
@@ -27,12 +31,14 @@ use rusty_multimodal_db_engine::generic::{
 use rusty_mux_core::BlockId;
 use rusty_term_core::{AnsiParser, Grid};
 
+use crate::spool::Spool;
 use record::{ByGenerated, ByOrder, SessionRecord};
 pub(crate) use record::{Manifest, Started};
 
 const SESSIONS: &str = "sessions.mmap";
 const LOCK: &str = "server.lock";
 const SCREEN: &str = "rtcp";
+const SPOOL: &str = "spool";
 /// Saves between compactions of the engine's insert log.
 const COMPACT_EVERY: u32 = 64;
 
@@ -91,6 +97,11 @@ impl Store {
         self.dir.join(format!("{block}.{SCREEN}"))
     }
 
+    /// Opens `block`'s history spool, making it if missing.
+    pub(crate) fn spool(&self, block: BlockId) -> io::Result<Spool> {
+        Spool::open(self.dir.join(format!("{block}.{SPOOL}")))
+    }
+
     /// Opens the session records and returns what they hold, `Ok(None)`
     /// when they hold no session. Records that cannot be read are an error; a screen
     /// that cannot be read is skipped with a warning, so its block
@@ -102,6 +113,7 @@ impl Store {
             let empty = Sessions::create(Vec::new(), &path)
                 .map_err(|e| format!("creating {SESSIONS}: {e}"))?;
             inner.sessions = Some(empty);
+            self.remove_orphan_spools(&Manifest::default());
             return Ok(None);
         }
         let sessions =
@@ -113,15 +125,38 @@ impl Store {
             .collect();
         inner.sessions = Some(sessions);
         if records.is_empty() {
+            self.remove_orphan_spools(&Manifest::default());
             return Ok(None);
         }
         let manifest = record::manifest(records)?;
+        self.remove_orphan_spools(&manifest);
         let screens = manifest
             .started
             .keys()
             .filter_map(|block| self.load_screen(*block))
             .collect();
         Ok(Some(Loaded { manifest, screens }))
+    }
+
+    /// Deletes the spools of blocks `manifest` does not hold: closed while
+    /// a crash kept their spool. Only at load, before any block starts, so
+    /// a new block's spool is never taken for one. A failure is a warning.
+    fn remove_orphan_spools(&self, manifest: &Manifest) {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+            let orphan = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(&format!(".{SPOOL}")))
+                .and_then(|id| id.parse().ok())
+                .map(BlockId::from_uuid)
+                .is_some_and(|block| !manifest.started.contains_key(&block));
+            if orphan && let Err(e) = fs::remove_dir_all(&path) {
+                eprintln!("rusty-mux-server: removing {}: {e}", path.display());
+            }
+        }
     }
 
     fn load_screen(&self, block: BlockId) -> Option<(BlockId, Grid, AnsiParser)> {
