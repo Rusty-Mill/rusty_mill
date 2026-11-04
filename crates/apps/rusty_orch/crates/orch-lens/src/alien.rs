@@ -261,30 +261,32 @@ pub fn unavailability(s: &Suspect, notes: &[String], list: &[Mechanism]) -> u8 {
     2 - u8::from(named) - u8::from(tagged)
 }
 
-/// Whether `note` names `site` whole: `store::write` does not match inside
-/// `store::write_all`, `my_store::write` or `store::write::inner`, nor
-/// `src/a.rs` inside `x/src/a.rs`, `src/a.rs.old.rs` or `src/a.rs/b.rs`.
-/// Prose punctuation and a `:line` suffix still match.
+/// Whether `note` names `site` whole. The note is split into site-like
+/// tokens (letters, digits and `_ - / . :`); a token names the site when,
+/// less trailing punctuation and a `:line[:col]` suffix, it is the site
+/// itself or a path-qualified `…::site`. So `store::write` is named by
+/// `crate::store::write` and `Store::Write,`, but not by `store::write_all`
+/// or `store::write::inner`; `src/a.rs` by `src/a.rs:42`, but not by
+/// `x/src/a.rs`, `integration-src/a.rs` or `src/a.rs.old.rs`.
 fn names(note: &str, site: &str) -> bool {
-    note.match_indices(site).any(|(at, _)| {
-        let before = note[..at].chars().next_back();
-        let after = &note[at + site.len()..];
-        !before.is_some_and(|c| word(c) || c == '/') && !continues(after)
-    })
+    let token = |c: char| c.is_alphanumeric() || "_-/.:".contains(c);
+    note.split(|c: char| !token(c))
+        .map(bare)
+        .any(|t| t == site || t.strip_suffix(site).is_some_and(|q| q.ends_with("::")))
 }
 
-fn word(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-/// Whether `rest` carries on the identifier or path just before it.
-fn continues(rest: &str) -> bool {
-    let mut chars = rest.chars();
-    match (chars.next(), chars.next()) {
-        (Some(c), _) if word(c) || c == '/' => true,
-        (Some('.'), Some(c)) => word(c),
-        (Some(':'), Some(':')) => true,
-        _ => false,
+/// A token less trailing `.`, `,` or `:` and any `:line[:col]` suffix.
+fn bare(mut t: &str) -> &str {
+    loop {
+        let trimmed = t.trim_end_matches(['.', ',', ':']);
+        let unlined = match trimmed.rsplit_once(':') {
+            Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head,
+            _ => trimmed,
+        };
+        if unlined == t {
+            return t;
+        }
+        t = unlined;
     }
 }
 
@@ -783,6 +785,10 @@ mod tests {
             ("src/a.rs.old.rs is fine", "src/a.rs", false),
             ("src/a.rs/other.rs is fine", "src/a.rs", false),
             ("store::write::inner is fine", "store::write", false),
+            ("integration-tests/foo.rs is fine", "tests/foo.rs", false),
+            ("my-store::write is fine", "store::write", false),
+            ("`src/a.rs:42:7` is fine", "src/a.rs", true),
+            ("src/a.rs. Fine", "src/a.rs", true),
             ("src/a.rsx is fine", "src/a.rs", false),
         ] {
             let note = vec![note.to_owned()];
