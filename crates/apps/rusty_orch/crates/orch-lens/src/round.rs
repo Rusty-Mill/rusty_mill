@@ -16,7 +16,7 @@
 //! - The run [`Policy`] picks which scheduled jobs run, and in what order;
 //!   a shadow policy's pick for the same jobs is reported, not run (#596).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use rusty_bbp::{Direction, MsgId};
 
@@ -148,13 +148,16 @@ pub fn round(
     }
 }
 
-/// The picked jobs that were scheduled, each once: a policy cannot make a
-/// job the rules did not.
+/// The scheduler's own job for each picked key, in the policy's order and
+/// each once. Only the key of a pick is read, so a policy cannot make a
+/// job the rules did not, nor change one they did (its phase, providers,
+/// tools, allowed posts or suffix).
 fn only_scheduled(scheduled: &[Job], picked: Vec<Job>) -> Vec<Job> {
-    let mut allowed: BTreeSet<&JobKey> = scheduled.iter().map(|j| &j.key).collect();
+    let mut by_key: BTreeMap<&JobKey, &Job> = scheduled.iter().map(|j| (&j.key, j)).collect();
     picked
-        .into_iter()
-        .filter(|j| allowed.remove(&j.key))
+        .iter()
+        .filter_map(|p| by_key.remove(&p.key))
+        .cloned()
         .collect()
 }
 
@@ -247,6 +250,7 @@ mod tests {
     use crate::meter::{Ceilings, Meter};
     use crate::policy::{EventDriven, ValueDriven};
     use crate::port::{Answer, Model, Question, Usage};
+    use crate::schedule::schedule;
 
     const USD: u64 = 1_000_000;
     const LENSES: [&str; 4] = ["adversary", "architect", "operator", "research"];
@@ -595,5 +599,85 @@ mod tests {
             Posted::default(),
         );
         assert_eq!(out.report.shadow, None);
+    }
+
+    /// Returns every job tampered with, reversed, with a duplicate and an
+    /// unknown key added.
+    struct Tamper;
+
+    impl Policy for Tamper {
+        fn pick(&mut self, _: &[Card], _: &State, jobs: Vec<Job>) -> Vec<Job> {
+            let mut out: Vec<Job> = jobs
+                .into_iter()
+                .rev()
+                .map(|mut j| {
+                    j.phase = crate::context::Phase::Informed;
+                    j.tools = Tools::ReadOnly;
+                    j.allowed = crate::post::Allowed {
+                        evidence: None,
+                        claims: None,
+                    };
+                    j.providers.clear();
+                    j.suffix = Some("tampered");
+                    j
+                })
+                .collect();
+            if let Some(first) = out.first().cloned() {
+                out.push(first.clone());
+                let mut unknown = first;
+                unknown.key.claim = MsgId(99);
+                out.push(unknown);
+            }
+            out
+        }
+    }
+
+    #[test]
+    fn a_pick_keeps_only_the_schedulers_jobs() {
+        let cfg = config();
+        let cards = [plain(7)];
+        let scheduled = schedule(&cfg, &cards, &State::default()).0;
+        assert!(scheduled.len() > 1);
+        let picked = Tamper.pick(&cards, &State::default(), scheduled.clone());
+        let kept = only_scheduled(&scheduled, picked);
+        let mut want = scheduled.clone();
+        want.reverse();
+        assert_eq!(kept, want, "scheduler's jobs, policy's order, once each");
+    }
+
+    #[test]
+    fn a_tampering_policy_runs_and_shadows_only_scheduled_jobs() {
+        let cards = [plain(7)];
+        let scheduled = schedule(&config(), &cards, &State::default()).0;
+        let mut shadow = Tamper;
+        let policies = Policies {
+            run: &mut Tamper,
+            shadow: Some(&mut shadow),
+        };
+        let out = go_policies(
+            &cards,
+            State::default(),
+            400,
+            Echo::new(Ok(vec![])),
+            Posted::default(),
+            &prefixes(),
+            policies,
+        );
+        let mut want: Vec<JobKey> = scheduled.iter().map(|j| j.key.clone()).collect();
+        want.reverse();
+        let ran: Vec<JobKey> = out.report.ran.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(ran, want);
+        assert_eq!(out.report.shadow, Some(want));
+        assert_eq!(out.echo.asked.len(), scheduled.len());
+        for (agent, tools, q) in &out.echo.asked {
+            assert!(!q.body.contains("tampered"));
+            let job = scheduled
+                .iter()
+                .find(|j| q.prefix.contains(&format!("\n{}\n", j.key.lens)))
+                .expect("a scheduled lens");
+            assert!(job.providers.contains(agent));
+            assert_eq!(*tools, job.tools);
+            assert_eq!(q.allowed, job.allowed);
+        }
     }
 }
