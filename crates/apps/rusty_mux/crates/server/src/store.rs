@@ -52,8 +52,8 @@ struct Inner {
     /// one finishing late never overwrites a newer one.
     written: u64,
     saves: u32,
-    /// `None` only while [`Store::set_aside`] moves the directory.
-    lock: Option<DirLock>,
+    /// Held from open to drop, through a [`Store::set_aside`] too.
+    _lock: DirLock,
 }
 
 /// What a store held: the manifest and each block's screen it could read.
@@ -64,15 +64,16 @@ pub(crate) struct Loaded {
 
 impl Store {
     /// Opens `dir`, making it (and its parents) if missing, and locks it;
-    /// refused while another server holds it.
+    /// refused while another server holds it. On Windows `dir` may not be
+    /// a junction or link itself.
     pub(crate) fn open(dir: PathBuf) -> io::Result<Self> {
-        make_private_dir(&dir)?;
+        let dir = make_private_dir(&dir)?;
         let lock = DirLock::acquire(&dir, LOCK).map_err(io::Error::other)?;
         let inner = Inner {
             sessions: None,
             written: 0,
             saves: 0,
-            lock: Some(lock),
+            _lock: lock,
         };
         Ok(Self {
             dir,
@@ -173,22 +174,25 @@ impl Store {
         Ok(())
     }
 
-    /// Moves an unreadable store to `<dir>.bad-<seconds>` and starts a
-    /// new empty one in its place, locked again.
+    /// Moves an unreadable store's files to `<dir>.bad-<seconds>` and
+    /// starts a new empty one in their place. The lock file stays, held
+    /// throughout, so no other server opens the store meanwhile.
     pub(crate) fn set_aside(&self) -> io::Result<PathBuf> {
         let mut inner = self.inner()?;
+        // Windows moves no file that is open.
         inner.sessions = None;
-        // Windows renames no directory with a file open in it.
-        inner.lock = None;
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
         let mut aside = self.dir.clone().into_os_string();
         aside.push(format!(".bad-{secs}"));
-        let aside = PathBuf::from(aside);
-        fs::rename(&self.dir, &aside)?;
-        make_private_dir(&self.dir)?;
-        inner.lock = Some(DirLock::acquire(&self.dir, LOCK).map_err(io::Error::other)?);
+        let aside = make_private_dir(Path::new(&aside))?;
+        for entry in fs::read_dir(&self.dir)? {
+            let name = entry?.file_name();
+            if name != LOCK {
+                fs::rename(self.dir.join(&name), aside.join(&name))?;
+            }
+        }
         let path = self.dir.join(SESSIONS);
         inner.sessions = Some(Sessions::create(Vec::new(), &path).map_err(io::Error::other)?);
         Ok(aside)
@@ -263,27 +267,70 @@ fn replace(path: &Path, data: &[u8]) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// Makes `dir` (and its parents) if missing, owner-only, and returns the
+/// path to use for it.
 #[cfg(unix)]
-fn make_private_dir(dir: &Path) -> io::Result<()> {
+fn make_private_dir(dir: &Path) -> io::Result<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)?;
     // An existing directory keeps its mode through `create`; make it ours alone.
-    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    Ok(dir.to_path_buf())
+}
+
+/// Makes `dir` (and its parents) if missing and owner-only, with what is
+/// already in it, and returns its resolved path. Windows checks no
+/// parent's DACL to open a child, so each entry is restricted, and new
+/// ones inherit the directory's entry. A junction or link as `dir` or in
+/// it is refused: restricting one would leave its target as it was.
+#[cfg(windows)]
+fn make_private_dir(dir: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    refuse_link(dir)?;
+    let real = fs::canonicalize(dir)?;
+    restrict_tree(&real)?;
+    Ok(real)
 }
 
 #[cfg(windows)]
-fn make_private_dir(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    platform_windows::fs::restrict_to_owner(dir)
-        .map_err(|e| io::Error::other(format!("restricting {}: {e:?}", dir.display())))
+fn refuse_link(path: &Path) -> io::Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    if fs::symlink_metadata(path)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(io::Error::other(format!(
+            "{} is a junction or link: the state directory must be a real directory",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Restricts `dir`, then everything in it.
+#[cfg(windows)]
+fn restrict_tree(dir: &Path) -> io::Result<()> {
+    let restricted = |path: &Path, result: Result<(), _>| {
+        result.map_err(|e| io::Error::other(format!("restricting {}: {e:?}", path.display())))
+    };
+    restricted(dir, platform_windows::fs::restrict_dir_to_owner(dir))?;
+    for entry in fs::read_dir(dir)? {
+        let path = entry?.path();
+        refuse_link(&path)?;
+        if path.is_dir() {
+            restrict_tree(&path)?;
+        } else {
+            restricted(&path, platform_windows::fs::restrict_to_owner(&path))?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
-fn make_private_dir(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)
+fn make_private_dir(dir: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(dir)?;
+    Ok(dir.to_path_buf())
 }
 
 #[cfg(test)]

@@ -104,6 +104,15 @@ fn a_bad_manifest_is_an_error_and_can_be_set_aside() {
     assert!(store.0.load().is_err());
     let aside = store.0.set_aside().unwrap();
     assert!(aside.join(SESSIONS).exists());
+    assert!(!aside.join(LOCK).exists(), "the lock stays with the store");
+    assert!(
+        Store::open(store.0.dir.clone()).is_err(),
+        "still locked: no second server takes the new store"
+    );
+    assert!(
+        Store::open(aside.clone()).is_ok(),
+        "the set-aside files are unlocked"
+    );
     assert!(store.0.load().unwrap().is_none());
     fs::remove_dir_all(aside).unwrap();
 }
@@ -135,4 +144,71 @@ fn the_directory_is_the_owners_alone() {
     let store = Scratch::new("mode");
     let mode = fs::metadata(&store.0.dir).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o700);
+}
+
+/// Windows checks no parent's DACL to open a file, so a store's files are
+/// restricted one by one, and a junction is refused.
+#[cfg(windows)]
+#[test]
+fn a_windows_store_restricts_its_files_and_refuses_a_junction() {
+    let dir = std::env::temp_dir().join(format!("rusty-mux-store-acl-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let old = dir.join("old.rtcp");
+    fs::write(&old, b"x").unwrap();
+    let grant = std::process::Command::new("icacls")
+        .arg(&old)
+        .args(["/grant", "*S-1-1-0:R"])
+        .output()
+        .unwrap();
+    assert!(grant.status.success(), "{grant:?}");
+    assert!(acl(&old).contains("Everyone"), "set up: {}", acl(&old));
+    let store = Store::open(dir.clone()).unwrap();
+    assert!(
+        !acl(&old).contains("Everyone"),
+        "existing file: {}",
+        acl(&old)
+    );
+    let new = store.dir.join("new.rtcp");
+    fs::write(&new, b"x").unwrap();
+    assert_eq!(entries(&acl(&new)), 1, "new file: {}", acl(&new));
+    drop(store);
+
+    let target =
+        std::env::temp_dir().join(format!("rusty-mux-store-shared-{}", std::process::id()));
+    let junction =
+        std::env::temp_dir().join(format!("rusty-mux-store-junction-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&junction);
+    fs::create_dir_all(&target).unwrap();
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+    let refused = Store::open(junction.clone())
+        .err()
+        .expect("a junction is refused");
+    assert!(refused.to_string().contains("junction"), "{refused}");
+    assert!(!target.join(LOCK).exists(), "nothing written through it");
+    let _ = fs::remove_dir(&junction);
+    let _ = fs::remove_dir_all(&target);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// What `icacls` reports for `path`.
+#[cfg(windows)]
+fn acl(path: &Path) -> String {
+    let out = std::process::Command::new("icacls")
+        .arg(path)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The access entries in `icacls` output: each names an account then a colon.
+#[cfg(windows)]
+fn entries(acl: &str) -> usize {
+    acl.lines().filter(|l| l.contains(":(")).count()
 }

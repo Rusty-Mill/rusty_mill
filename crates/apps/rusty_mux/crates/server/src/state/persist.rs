@@ -124,7 +124,7 @@ impl State {
         let before = revive.before;
         let already = before.as_ref().is_some_and(|b| b.read_only);
         if !already {
-            parser.advance(&mut grid, marker(before.as_ref()).as_bytes());
+            mark(&mut grid, &mut parser, before.as_ref());
             // Queries in the saved screen were answered in the old run.
             drop(parser.take_responses());
         }
@@ -286,9 +286,32 @@ fn set_aside(store: &Store, why: &str) -> Option<Loaded> {
     None
 }
 
-/// Written under a restored screen: cancels any sequence the old program
-/// left unfinished, leaves the alternate screen, resets modes (DECSTR) and
-/// says what happened, dimmed, on a line of its own.
+/// Writes [`marker`] under a restored screen, keeping all its text: cancels
+/// any sequence the old program left unfinished, leaves the alternate
+/// screen with its text copied to the main one (which, unlike it, keeps
+/// what scrolls off), resets modes (DECSTR) and starts below the last row,
+/// wherever the saved cursor was.
+fn mark(grid: &mut Grid, parser: &mut AnsiParser, before: Option<&Started>) {
+    let full_screen = terminal::Capture {
+        history: 0,
+        trim: true,
+        unwrap: false,
+        vt: true,
+    };
+    let alternate = grid
+        .in_alt_screen()
+        .then(|| terminal::format(grid, full_screen, usize::MAX))
+        .flatten();
+    let mut out = format!("\x18\x1b[?1049l\x1b[!p\x1b[{};1H\r\n", grid.rows);
+    for line in alternate.iter().flat_map(|text| text.split('\n')) {
+        out.push_str(line);
+        out.push_str("\r\n");
+    }
+    out.push_str(&marker(before));
+    parser.advance(grid, out.as_bytes());
+}
+
+/// What happened, dimmed, on a line of its own.
 fn marker(before: Option<&Started>) -> String {
     let note = match before {
         Some(b) if !b.shell => {
@@ -302,7 +325,7 @@ fn marker(before: Option<&Started>) -> String {
         }
         _ => "restored after a server restart".into(),
     };
-    format!("\x18\x1b[?1049l\x1b[!p\r\n\x1b[2m[{note}]\x1b[0m\r\n")
+    format!("\x1b[2m[{note}]\x1b[0m\r\n")
 }
 
 #[cfg(test)]

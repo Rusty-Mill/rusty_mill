@@ -184,8 +184,36 @@ fn an_unreadable_store_is_set_aside() {
 #[cfg(unix)]
 #[test]
 fn a_command_block_comes_back_read_only() {
+    restarted_read_only("command", "echo CMD$((3*7)); exec sleep 600", &["CMD21"]);
+}
+
+/// A full-screen command's alternate screen is kept, with the main screen
+/// it covered.
+#[cfg(unix)]
+#[test]
+fn a_full_screen_command_keeps_its_screen() {
+    let script = r#"echo M$((5*5)); printf "\033[?1049hALT$((3*7))"; exec sleep 600"#;
+    restarted_read_only("full-screen", script, &["M25", "ALT21"]);
+}
+
+/// The marker goes below the last row, so a cursor left above saved text
+/// overwrites none of it.
+#[cfg(unix)]
+#[test]
+fn a_cursor_above_saved_text_overwrites_none_of_it() {
+    let script =
+        r#"printf "R%s\n" $((10+1)) $((10+2)); printf "R$((10+3))\033[1;1H"; exec sleep 600"#;
+    restarted_read_only("cursor", script, &["R11", "R12", "R13"]);
+}
+
+/// Starts `script` in a block, waits for the last of `needles`, then
+/// restarts the server twice: each time the block shows every one of
+/// `needles` once, a single read-only marker,
+/// and refuses input.
+#[cfg(unix)]
+fn restarted_read_only(name: &str, script: &str, needles: &[&str]) {
     use rusty_mux_proto::{Launch, Program};
-    let dir = state_dir("command");
+    let dir = state_dir(name);
     let server = Server::start(&dir);
     let mut client = Client::connect_with(
         &server.socket,
@@ -196,7 +224,7 @@ fn a_command_block_comes_back_read_only() {
     let launch = Launch {
         program: Some(Program {
             command: "/bin/sh".into(),
-            args: vec!["-c".into(), "echo CMD$((3*7)); exec sleep 600".into()],
+            args: vec!["-c".into(), script.into()],
         }),
         cwd: None,
     };
@@ -214,8 +242,10 @@ fn a_command_block_comes_back_read_only() {
     // The command may print before the attach, into the checkpoint.
     client.wait_ready(block);
     let deadline = std::time::Instant::now() + PATIENCE;
-    while !client.text(block).contains("CMD21") {
-        assert!(std::time::Instant::now() < deadline, "no CMD21");
+    // The last is printed last; a full-screen command hides the rest.
+    let last = needles.last().expect("a needle");
+    while !client.text(block).contains(last) {
+        assert!(std::time::Instant::now() < deadline, "{last} not shown");
         client.recv();
     }
     drop(client);
@@ -227,7 +257,13 @@ fn a_command_block_comes_back_read_only() {
         client.request(|req| Message::Attach { req, block });
         client.wait_ready(block);
         let text = client.text(block);
-        assert!(text.contains("CMD21"), "run {run}: {text}");
+        for needle in needles {
+            assert_eq!(
+                text.matches(needle).count(),
+                1,
+                "{needle}, run {run}: {text}"
+            );
+        }
         assert_eq!(
             text.matches("read-only").count(),
             1,
