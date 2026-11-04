@@ -309,6 +309,34 @@ impl Config {
     }
 }
 
+/// Whether this launch is a first run that opens setup by itself (O11, D67):
+/// a plain launch, reading the default config location, with no file there
+/// yet. An explicit config (`--config`, `$RUSTY_TERM_CONFIG`), a command
+/// (`--`, `-e`, `--command`), a session or a profile means the user already
+/// knows what they want, so setup stays out of the way.
+pub fn is_first_run(args: &[String]) -> bool {
+    plain_launch(args) && resolve_path(args).0.is_none() && Config::file_path(args).is_some()
+}
+
+/// Whether `args` hold none of the flags that rule out a first-run setup:
+/// the pure half of [`is_first_run`].
+fn plain_launch(args: &[String]) -> bool {
+    const RULED_OUT: [&str; 6] = [
+        "--",
+        "-e",
+        "--command",
+        "--config",
+        "--session",
+        "--profile",
+    ];
+    !args.iter().any(|a| {
+        RULED_OUT.contains(&a.as_str())
+            || a.starts_with("--config=")
+            || a.starts_with("--session=")
+            || a.starts_with("--profile=")
+    })
+}
+
 /// A `--flag value` or `--flag=value` CLI argument's value, first match wins.
 /// Shared by the initial CLI parse (`main.rs`) and both front-ends' live
 /// config-reload paths, so a flag like `--profile` is read identically
@@ -1353,6 +1381,29 @@ color15 = "ffffff"
             Some("no profile named `does-not-exist` in the config".to_string())
         );
         assert_eq!(cfg.shell, before);
+    }
+
+    #[test]
+    fn first_run_needs_a_plain_launch() {
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(plain_launch(&args(&["--gui", "--gpu", "--setup"])));
+        for ruled_out in [
+            &["--gui", "--config", "x.toml"][..],
+            &["--gui", "--config=x.toml"],
+            &["--gui", "-e", "vim"],
+            &["--gui", "--", "htop"],
+            &["--gui", "--command", "top"],
+            &["--gui", "--session", "s.toml"],
+            &["--gui", "--profile=dev"],
+        ] {
+            assert!(!plain_launch(&args(ruled_out)), "{ruled_out:?}");
+        }
+        // An explicit config path is never a first run, even when missing.
+        assert!(!is_first_run(&args(&[
+            "--gui",
+            "--config",
+            "/nonexistent/x.toml"
+        ])));
     }
 
     #[test]

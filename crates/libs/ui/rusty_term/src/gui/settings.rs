@@ -42,6 +42,12 @@ const OPACITY_STEP: f32 = 0.05;
 /// enhanced thresholds. (The config accepts any 1.0–21.0; a custom value
 /// seeds to the nearest step.)
 const CONTRAST_STEPS: [f32; 4] = [1.0, 3.0, 4.5, 7.0];
+/// Command-finished alert choices, in seconds; `0` is off. The config accepts
+/// any 0–86400, and a custom value seeds to the nearest step.
+const NOTIFY_STEPS: [u64; 6] = [0, 5, 10, 30, 60, 300];
+/// The built-in `command_notify_secs` when the config names none (mirrors
+/// `window::service_alerts`).
+pub(crate) const DEFAULT_NOTIFY_SECS: u64 = 10;
 
 /// Sidebar categories, in display order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -51,11 +57,23 @@ pub(crate) enum Category {
     Window,
 }
 
-/// `(category, sidebar label)` in display order.
-pub(crate) const CATEGORIES: [(Category, &str); 3] = [
-    (Category::Appearance, "Appearance"),
-    (Category::Terminal, "Terminal"),
-    (Category::Window, "Window"),
+/// A sidebar entry of the page: its label and the rows it shows.
+pub(crate) type Section = (&'static str, &'static [Field]);
+
+/// The settings page's sections, one per [`Category`], in display order.
+const PAGE_SECTIONS: [Section; 3] = [
+    ("Appearance", Field::in_category(Category::Appearance)),
+    ("Terminal", Field::in_category(Category::Terminal)),
+    ("Window", Field::in_category(Category::Window)),
+];
+
+/// The first-run setup steps (O11, D65/D66): a few existing rows, one step at
+/// a time, in the order a new user decides them.
+pub(crate) const SETUP_STEPS: [Section; 4] = [
+    ("Shell", &[Field::Shell]),
+    ("Theme", &[Field::Theme]),
+    ("Clipboard", &[Field::Clipboard, Field::CopyHtml]),
+    ("Alerts", &[Field::CommandNotify, Field::Bell]),
 ];
 
 /// Which setting a row edits.
@@ -76,6 +94,7 @@ pub(crate) enum Field {
     Clipboard,
     ClickToMove,
     Bell,
+    CommandNotify,
     // Window
     Padding,
     StatusBar,
@@ -88,7 +107,7 @@ pub(crate) enum Field {
 
 impl Field {
     /// The rows of `cat`, in display order.
-    pub(crate) fn in_category(cat: Category) -> &'static [Field] {
+    pub(crate) const fn in_category(cat: Category) -> &'static [Field] {
         match cat {
             Category::Appearance => &[
                 Field::Theme,
@@ -106,6 +125,7 @@ impl Field {
                 Field::Clipboard,
                 Field::ClickToMove,
                 Field::Bell,
+                Field::CommandNotify,
             ],
             Category::Window => &[
                 Field::Padding,
@@ -135,6 +155,7 @@ impl Field {
             Field::Clipboard => "Clipboard access (OSC 52)",
             Field::ClickToMove => "Click to move cursor",
             Field::Bell => "Bell alert",
+            Field::CommandNotify => "Command finished alert",
             Field::Padding => "Padding",
             Field::StatusBar => "Status bar",
             Field::CommandMarks => "Command marks",
@@ -161,6 +182,7 @@ impl Field {
             Field::Clipboard => "Whether programs may write or read the clipboard",
             Field::ClickToMove => "Click at the prompt moves the input cursor",
             Field::Bell => "BEL requests attention and badges the tab",
+            Field::CommandNotify => "Notify when a command this long ends while you look away",
             Field::Padding => "Inner margin around the terminal, in pixels",
             Field::StatusBar => "Bottom ribbon: cwd, git branch, last exit code",
             Field::CommandMarks => "Gutter stripe per command, colored by exit",
@@ -211,8 +233,12 @@ pub(crate) struct Row {
 
 /// The settings page state: current values plus navigation (active category,
 /// highlighted row, scroll offset, hovered row).
+#[derive(Clone)]
 pub(crate) struct Settings {
-    /// Active category, an index into [`CATEGORIES`].
+    /// First-run setup mode: the values as setup opened, which skipping
+    /// restores. `None` is the ordinary settings page.
+    setup: Option<Box<Settings>>,
+    /// Active section, an index into [`Self::sections`].
     pub cat: usize,
     /// Highlighted row within the active category.
     pub sel: usize,
@@ -253,6 +279,8 @@ pub(crate) struct Settings {
     clipboard: ClipboardPolicy,
     click_to_move: bool,
     bell: bool,
+    /// Index into [`NOTIFY_STEPS`].
+    command_notify: usize,
     padding: u32,
     status_bar: bool,
     command_marks: bool,
@@ -304,7 +332,15 @@ impl Settings {
             .min_by(|(_, a), (_, b)| (*a - ratio).abs().partial_cmp(&(*b - ratio).abs()).unwrap())
             .map(|(i, _)| i)
             .unwrap_or(0);
+        let secs = cfg.command_notify_secs.unwrap_or(DEFAULT_NOTIFY_SECS);
+        let command_notify = NOTIFY_STEPS
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, s)| s.abs_diff(secs))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
         Settings {
+            setup: None,
             cat: 0,
             sel: 0,
             scroll: 0,
@@ -327,6 +363,7 @@ impl Settings {
             clipboard: cfg.clipboard.unwrap_or_default(),
             click_to_move: cfg.click_to_move.unwrap_or(true),
             bell: cfg.bell.unwrap_or(true),
+            command_notify,
             padding: cfg.padding.unwrap_or(DEFAULT_PAD),
             status_bar: cfg.status_bar.unwrap_or(true),
             command_marks: cfg.command_marks.unwrap_or(true),
@@ -337,9 +374,45 @@ impl Settings {
         }
     }
 
-    /// The active category.
-    pub(crate) fn category(&self) -> Category {
-        CATEGORIES[self.cat].0
+    /// The same page in first-run setup mode: it shows [`SETUP_STEPS`] and
+    /// remembers the values it opened with, so skipping can restore them.
+    pub(crate) fn into_setup(mut self) -> Self {
+        self.setup = Some(Box::new(self.clone()));
+        self
+    }
+
+    /// Whether this is the first-run setup rather than the settings page.
+    pub(crate) fn is_setup(&self) -> bool {
+        self.setup.is_some()
+    }
+
+    /// The values setup opened with; `None` on the settings page.
+    pub(crate) fn setup_baseline(&self) -> Option<&Settings> {
+        self.setup.as_deref()
+    }
+
+    /// The sidebar entries: setup steps, or the settings categories.
+    pub(crate) fn sections(&self) -> &'static [Section] {
+        if self.is_setup() {
+            &SETUP_STEPS
+        } else {
+            &PAGE_SECTIONS
+        }
+    }
+
+    /// Whether the active section is setup's last step (Enter finishes).
+    pub(crate) fn on_last_step(&self) -> bool {
+        self.is_setup() && self.cat + 1 == SETUP_STEPS.len()
+    }
+
+    /// The fields whose values differ from `other`'s, in page order: what
+    /// restoring `other` must re-apply live.
+    pub(crate) fn changed_from(&self, other: &Settings) -> Vec<Field> {
+        PAGE_SECTIONS
+            .iter()
+            .flat_map(|&(_, fields)| fields.iter().copied())
+            .filter(|&f| self.widget(f) != other.widget(f))
+            .collect()
     }
 
     /// The fields the page currently shows, each with its category's label:
@@ -348,15 +421,15 @@ impl Settings {
     /// matches (case-insensitive). An empty query matches everything.
     fn visible(&self) -> Vec<(Field, &'static str)> {
         match &self.filter {
-            None => Field::in_category(self.category())
-                .iter()
-                .map(|&f| (f, CATEGORIES[self.cat].1))
-                .collect(),
+            None => {
+                let (name, fields) = self.sections()[self.cat];
+                fields.iter().map(|&f| (f, name)).collect()
+            }
             Some(q) => {
                 let q = q.to_lowercase();
-                CATEGORIES
+                PAGE_SECTIONS
                     .iter()
-                    .flat_map(|&(c, name)| Field::in_category(c).iter().map(move |&f| (f, name)))
+                    .flat_map(|&(name, fields)| fields.iter().map(move |&f| (f, name)))
                     .filter(|(f, _)| {
                         q.is_empty()
                             || f.label().to_lowercase().contains(&q)
@@ -381,7 +454,7 @@ impl Settings {
 
     /// Start (or keep) filtering; the query begins empty.
     pub(crate) fn start_filter(&mut self) {
-        if self.filter.is_none() {
+        if self.filter.is_none() && !self.is_setup() {
             self.filter = Some(String::new());
             self.reset_view();
         }
@@ -389,6 +462,9 @@ impl Settings {
 
     /// Append `c` to the filter query, starting the filter if needed.
     pub(crate) fn filter_input(&mut self, c: char) {
+        if self.is_setup() {
+            return; // setup has no search: a few rows, one step at a time
+        }
         self.filter.get_or_insert_with(String::new).push(c);
         self.reset_view();
     }
@@ -516,7 +592,7 @@ impl Settings {
     /// and scroll — and dropping any search filter, since the user just
     /// chose a category over the results. Ignores an out-of-range index.
     pub(crate) fn set_category(&mut self, i: usize) {
-        if i >= CATEGORIES.len() {
+        if i >= self.sections().len() {
             return;
         }
         let filtering = self.filter.is_some();
@@ -529,7 +605,7 @@ impl Settings {
 
     /// Step to the next/previous category (Tab / Shift+Tab), wrapping.
     pub(crate) fn cycle_category(&mut self, forward: bool) {
-        self.set_category(wrap(self.cat, CATEGORIES.len(), forward));
+        self.set_category(wrap(self.cat, self.sections().len(), forward));
     }
 
     /// Scroll so the highlighted row is inside a window of `visible` rows.
@@ -578,6 +654,7 @@ impl Settings {
             Field::Clipboard => self.clipboard != ClipboardPolicy::default(),
             Field::ClickToMove => !self.click_to_move,
             Field::Bell => !self.bell,
+            Field::CommandNotify => self.command_notify_secs() != DEFAULT_NOTIFY_SECS,
             Field::Padding => self.padding != DEFAULT_PAD,
             Field::StatusBar => !self.status_bar,
             Field::CommandMarks => !self.command_marks,
@@ -588,9 +665,11 @@ impl Settings {
         }
     }
 
-    /// Whether any of `cat`'s settings are modified (the sidebar's dot).
-    pub(crate) fn category_modified(&self, cat: Category) -> bool {
-        Field::in_category(cat).iter().any(|&f| self.is_modified(f))
+    /// Whether any of section `i`'s settings are modified (the sidebar's dot).
+    pub(crate) fn section_modified(&self, i: usize) -> bool {
+        self.sections()
+            .get(i)
+            .is_some_and(|(_, fields)| fields.iter().any(|&f| self.is_modified(f)))
     }
 
     /// Change the highlighted row's value by `1` or, with `big` on a stepped
@@ -682,6 +761,9 @@ impl Settings {
             }
             Field::ClickToMove => self.click_to_move = !self.click_to_move,
             Field::Bell => self.bell = !self.bell,
+            Field::CommandNotify => {
+                self.command_notify = wrap(self.command_notify, NOTIFY_STEPS.len(), forward)
+            }
             Field::Padding => {
                 self.padding = if forward {
                     (self.padding + PAD_STEP).min(PAD_MAX)
@@ -786,6 +868,9 @@ impl Settings {
     pub(crate) fn bell(&self) -> bool {
         self.bell
     }
+    pub(crate) fn command_notify_secs(&self) -> u64 {
+        NOTIFY_STEPS[self.command_notify]
+    }
     pub(crate) fn padding(&self) -> u32 {
         self.padding
     }
@@ -862,6 +947,7 @@ impl Settings {
             Field::Clipboard => Widget::Choice(clipboard_name(self.clipboard).to_string()),
             Field::ClickToMove => Widget::Toggle(self.click_to_move),
             Field::Bell => Widget::Toggle(self.bell),
+            Field::CommandNotify => Widget::Choice(fmt_secs(self.command_notify_secs())),
             Field::Padding => Widget::Number(format!("{} px", self.padding)),
             Field::StatusBar => Widget::Toggle(self.status_bar),
             Field::CommandMarks => Widget::Toggle(self.command_marks),
@@ -959,6 +1045,12 @@ impl Settings {
                 insert: !self.bell, // default is on
             },
             SettingEdit {
+                section: "",
+                key: "command_notify_secs",
+                value: Some(self.command_notify_secs().to_string()),
+                insert: self.command_notify_secs() != DEFAULT_NOTIFY_SECS,
+            },
+            SettingEdit {
                 section: "window",
                 key: "padding",
                 value: Some(self.padding.to_string()),
@@ -1024,6 +1116,15 @@ impl Settings {
             },
         });
         edits
+    }
+}
+
+/// A command-alert threshold for its row: "off", seconds, or whole minutes.
+fn fmt_secs(secs: u64) -> String {
+    match secs {
+        0 => "off".to_string(),
+        s if s >= 60 && s % 60 == 0 => format!("{} min", s / 60),
+        s => format!("{s} s"),
     }
 }
 
@@ -1113,8 +1214,8 @@ mod tests {
 
     /// Position the highlight on `f`, switching category as needed.
     fn select_field(s: &mut Settings, f: Field) {
-        for (ci, (cat, _)) in CATEGORIES.iter().enumerate() {
-            if let Some(ri) = Field::in_category(*cat).iter().position(|&x| x == f) {
+        for (ci, (_, fields)) in s.sections().iter().enumerate() {
+            if let Some(ri) = fields.iter().position(|&x| x == f) {
                 s.set_category(ci);
                 s.sel = ri;
                 return;
@@ -1124,10 +1225,88 @@ mod tests {
     }
 
     #[test]
+    fn setup_walks_its_steps_and_ends_on_the_last() {
+        let mut s = seeded().into_setup();
+        assert!(s.is_setup() && !seeded().is_setup());
+        assert_eq!(s.sections().len(), SETUP_STEPS.len());
+        assert_eq!(s.field(), Some(Field::Shell));
+        assert!(!s.on_last_step());
+        for _ in 1..SETUP_STEPS.len() {
+            s.cycle_category(true);
+        }
+        assert!(s.on_last_step());
+        assert_eq!(s.field(), Some(Field::CommandNotify));
+        // Every step's rows are settings-page rows: no new settings (D65).
+        for (_, fields) in SETUP_STEPS {
+            for f in fields {
+                assert!(PAGE_SECTIONS.iter().any(|(_, p)| p.contains(f)), "{f:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn setup_has_no_search() {
+        let mut s = seeded().into_setup();
+        s.start_filter();
+        s.filter_input('x');
+        assert!(s.filter.is_none());
+        assert_eq!(s.field(), Some(Field::Shell));
+    }
+
+    #[test]
+    fn setup_remembers_what_skipping_restores() {
+        let mut s = seeded().into_setup();
+        s.cycle_category(true); // Theme
+        s.change(true);
+        let base = s
+            .setup_baseline()
+            .expect("setup keeps its baseline")
+            .clone();
+        assert!(
+            !base.is_setup(),
+            "the baseline holds values, not another setup"
+        );
+        assert_eq!(s.changed_from(&base), vec![Field::Theme]);
+        assert!(base.changed_from(&base).is_empty());
+    }
+
+    #[test]
+    fn command_alert_cycles_seeds_and_persists_off_its_default() {
+        let mut s = seeded();
+        select_field(&mut s, Field::CommandNotify);
+        assert_eq!(s.command_notify_secs(), DEFAULT_NOTIFY_SECS);
+        assert!(!s.rows()[s.sel].modified);
+        let edit = |s: &Settings| {
+            s.edits()
+                .into_iter()
+                .find(|e| e.key == "command_notify_secs")
+                .expect("managed key")
+        };
+        assert!(!edit(&s).insert, "the default stays out of the file");
+        s.change(true);
+        assert_eq!(s.command_notify_secs(), 30);
+        assert_eq!(s.rows()[s.sel].widget, Widget::Choice("30 s".to_string()));
+        assert!(edit(&s).insert && edit(&s).value.as_deref() == Some("30"));
+        s.change(false);
+        s.change(false);
+        s.change(false);
+        assert_eq!(s.rows()[s.sel].widget, Widget::Choice("off".to_string()));
+        s.change(false); // wraps to the largest step
+        assert_eq!(s.rows()[s.sel].widget, Widget::Choice("5 min".to_string()));
+        // A custom config value seeds to the nearest step.
+        let cfg = Config {
+            command_notify_secs: Some(45),
+            ..Config::default()
+        };
+        let s = Settings::new(&cfg, &Theme::default(), 18.0, &shells(), true);
+        assert!(matches!(s.command_notify_secs(), 30 | 60));
+    }
+
+    #[test]
     fn every_field_appears_in_exactly_one_category() {
-        let all: Vec<Field> = CATEGORIES
+        let all: Vec<Field> = PAGE_SECTIONS
             .iter()
-            .flat_map(|(c, _)| Field::in_category(*c).iter().copied())
+            .flat_map(|(_, fields)| fields.iter().copied())
             .collect();
         for f in &all {
             assert_eq!(
@@ -1136,7 +1315,7 @@ mod tests {
                 "{f:?} appears exactly once",
             );
         }
-        assert_eq!(all.len(), 20, "all fields are reachable from the sidebar");
+        assert_eq!(all.len(), 21, "all fields are reachable from the sidebar");
     }
 
     #[test]
@@ -1369,13 +1548,13 @@ mod tests {
         s.sel = 3;
         s.scroll = 2;
         s.cycle_category(true);
-        assert_eq!(s.category(), Category::Terminal);
+        assert_eq!(s.cat, 1);
         assert_eq!((s.sel, s.scroll), (0, 0));
         s.cycle_category(false);
-        assert_eq!(s.category(), Category::Appearance);
+        assert_eq!(s.cat, 0);
         // Wrap backward from the first category to the last.
         s.cycle_category(false);
-        assert_eq!(s.category(), Category::Window);
+        assert_eq!(s.cat, 2);
     }
 
     #[test]
@@ -1676,22 +1855,22 @@ mod tests {
         let mut s = seeded();
         // Everything at defaults: no dots anywhere.
         assert!(s.rows().iter().all(|r| !r.modified));
-        for (cat, _) in CATEGORIES {
-            assert!(!s.category_modified(cat));
+        for i in 0..PAGE_SECTIONS.len() {
+            assert!(!s.section_modified(i));
         }
         // Flip one Appearance toggle: its row and its category light up,
         // the other categories stay clean.
         select_field(&mut s, Field::Blink);
         s.change(true);
         assert!(s.rows()[s.sel].modified);
-        assert!(s.category_modified(Category::Appearance));
-        assert!(!s.category_modified(Category::Terminal));
-        assert!(!s.category_modified(Category::Window));
+        assert!(s.section_modified(0));
+        assert!(!s.section_modified(1));
+        assert!(!s.section_modified(2));
         // Flipping it back clears the dot — the marker tracks "differs from
         // default", not "was touched".
         s.change(true);
         assert!(!s.rows()[s.sel].modified);
-        assert!(!s.category_modified(Category::Appearance));
+        assert!(!s.section_modified(0));
     }
 
     #[test]
