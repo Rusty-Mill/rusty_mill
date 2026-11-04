@@ -11,6 +11,8 @@ use rusty_bbp::claims::{DOMAIN_CAP, MAX_DEPS, MAX_DOMAINS};
 use rusty_bbp::{ArtId, ClaimBody, Direction, EvidenceBody, EvidenceKind, MsgId, Ref, Stakes};
 use rusty_json::{Map, Value};
 
+use crate::port::{Reply, Shape};
+
 /// Replies with more posts than this are refused whole.
 pub const MAX_POSTS: usize = 6;
 /// Longest claim text or evidence note, in characters.
@@ -118,6 +120,21 @@ pub fn allowance(a: &Allowed) -> String {
         out.push_str(" nothing; reply {\"posts\": []}.");
     }
     out
+}
+
+/// Check one reply against its question's shape: [`parse`] for posts, and
+/// for raw text the unfenced, trimmed text, refused when empty.
+pub fn check(text: &str, shape: &Shape) -> Result<Reply, String> {
+    match shape {
+        Shape::Posts(allowed) => parse(text, allowed).map(Reply::Posts),
+        Shape::Raw => {
+            let raw = orch_cli::unfence(text).trim();
+            if raw.is_empty() {
+                return Err("reply is empty".to_owned());
+            }
+            Ok(Reply::Raw(raw.to_owned()))
+        }
+    }
 }
 
 /// Parse and check one reply. Tolerates one ``` fence around the object.
@@ -468,6 +485,20 @@ mod tests {
         assert_eq!(body.direction, Direction::Counter);
         assert_eq!(body.strength, 2);
         assert!(evidence.is_empty());
+    }
+
+    #[test]
+    fn check_applies_the_question_shape() {
+        assert_eq!(
+            check(COUNTER, &Shape::Posts(attack(7))).expect("posts"),
+            Reply::Posts(parse(COUNTER, &attack(7)).expect("valid"))
+        );
+        assert!(check("not json", &Shape::Posts(attack(7))).is_err());
+        assert_eq!(
+            check("```\n  {\"suspects\": []}\n```", &Shape::Raw).expect("raw"),
+            Reply::Raw("{\"suspects\": []}".to_owned())
+        );
+        assert_eq!(check(" \n ", &Shape::Raw), Err("reply is empty".to_owned()));
     }
 
     #[test]

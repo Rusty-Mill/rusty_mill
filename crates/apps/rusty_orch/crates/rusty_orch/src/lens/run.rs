@@ -438,7 +438,7 @@ mod tests {
                 self.2.push((id, q.body.clone()));
             }
             self.0.clone().map(|posts| Answer {
-                posts,
+                reply: orch_lens::Reply::Posts(posts),
                 usage: Usage::default(),
             })
         }

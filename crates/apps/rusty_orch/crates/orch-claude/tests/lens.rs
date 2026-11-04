@@ -17,10 +17,10 @@ fn question() -> Question {
     Question {
         prefix: "intent and rules".to_owned(),
         body: "claim C-1".to_owned(),
-        allowed: Allowed {
+        shape: orch_lens::Shape::Posts(Allowed {
             evidence: None,
             claims: None,
-        },
+        }),
         max_output_tokens: 256,
     }
 }
@@ -87,7 +87,7 @@ fn a_question_runs_without_tools_and_returns_posts_and_usage() {
 
     let answer = a.ask(&question()).expect("answers");
 
-    assert!(answer.posts.is_empty());
+    assert_eq!(answer.reply, orch_lens::Reply::Posts(Vec::new()));
     assert_eq!(
         answer.usage,
         Usage {
@@ -240,4 +240,24 @@ fn a_reported_failure_is_classified() {
     let mut a = agent(subscribed(&error_envelope("error", "429 rate limit")));
     let err = a.ask(&question()).expect_err("refused");
     assert!(matches!(err, ClassifiedError::Transient(_)), "{err:?}");
+}
+
+fn raw_question() -> Question {
+    Question {
+        shape: orch_lens::Shape::Raw,
+        ..question()
+    }
+}
+
+#[test]
+fn a_raw_question_returns_the_text_and_refuses_an_empty_one() {
+    let mut a = agent(subscribed(&reply("free text")));
+    let answer = a.ask(&raw_question()).expect("answers");
+    assert_eq!(answer.reply, orch_lens::Reply::Raw("free text".to_owned()));
+
+    let mut a = agent(subscribed(&reply("``` ```")));
+    match a.ask(&raw_question()) {
+        Err(ClassifiedError::Permanent(m)) => assert!(m.0.contains("reply is empty"), "{}", m.0),
+        other => panic!("expected Permanent, got {other:?}"),
+    }
 }
