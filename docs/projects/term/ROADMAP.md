@@ -80,9 +80,10 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
    "Concur"):* adopt, built after C73. Hooks carry prompt, tool, reply and subagent state; OSC 7501
    fills in where hooks are silent or missing. A new `Features` bit if peers see new events. Nano to
    restate on this PR.
-6. **tmux shim (O4).** tmux compatibility is a CHARTER non-goal. Reverse it for a narrow shim
-   covering only the commands Claude Code agent teams use? *Recommend no for now;* revisit if
-   agent teams become a daily need.
+6. **tmux shim (O4).** *Answered (Nano, project thread, 2026-11-04 12:16Z: "No for now"):* the
+   CHARTER non-goal stands. Agents split panes through the skill's `split-block`; Claude Code's
+   built-in team panes stay in-process. Revisit if team panes become a daily need. Nano to restate
+   on this PR.
 7. **Agent orchestration (O7/O8).** Should rusty_mux grow ask/reply, gates and worktrees, or
    stay a substrate other tools run on? *Recommend substrate, plus O7 worktree-per-session.*
 8. **FreeBSD** as a server target? *Recommend not now.*
