@@ -36,7 +36,33 @@ const PAGE: u64 = 20;
 
 /// One tool call to a claims session: the tool's text result, or why not.
 pub trait Rpc {
-    fn call(&mut self, tool: &str, args: Value) -> Result<String, String>;
+    fn call(&mut self, tool: &str, args: Value) -> Result<String, CallError>;
+}
+
+/// Why a tool call gave no usable result. Only [`CallError::Lost`] may be
+/// retried: the call's fate is unknown, and its op id makes a resend replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallError {
+    /// The session answered with an error (an `isError` result, such as a
+    /// BBP rejection, or a JSON-RPC error). The call completed.
+    Answered(String),
+    /// No answer arrived: a timeout, an exit, a broken pipe or an
+    /// unreadable line. The call may or may not have landed.
+    Lost(String),
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Answered(e) | Self::Lost(e) => f.write_str(e),
+        }
+    }
+}
+
+impl From<CallError> for String {
+    fn from(e: CallError) -> Self {
+        e.to_string()
+    }
 }
 
 /// A `bbp mcp` session process for one lens.
@@ -107,16 +133,16 @@ impl Child {
         self
     }
 
-    fn send(&mut self, msg: &Value) -> Result<(), String> {
+    fn send(&mut self, msg: &Value) -> Result<(), CallError> {
         writeln!(self.stdin, "{msg}")
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("bbp mcp: {e}"))
+            .map_err(|e| CallError::Lost(format!("bbp mcp: {e}")))
     }
 
     /// Send one request and wait for its response's `result`. The deadline
     /// is for the whole request: replies to other ids and notifications do
     /// not extend it.
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    fn request(&mut self, method: &str, params: Value) -> Result<Value, CallError> {
         self.next += 1;
         let id = self.next;
         let until = Instant::now() + self.deadline;
@@ -128,44 +154,46 @@ impl Child {
         ]))?;
         loop {
             let timeout = || {
-                format!(
+                CallError::Lost(format!(
                     "bbp mcp: no answer to {method} in {}ms",
                     self.deadline.as_millis()
-                )
+                ))
             };
             let left = until.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Err(timeout());
             }
             let line = match self.lines.recv_timeout(left) {
-                Ok(line) => line.map_err(|e| format!("bbp mcp: {e}"))?,
+                Ok(line) => line.map_err(|e| CallError::Lost(format!("bbp mcp: {e}")))?,
                 Err(RecvTimeoutError::Timeout) => return Err(timeout()),
-                Err(RecvTimeoutError::Disconnected) => return Err("bbp mcp exited".to_owned()),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(CallError::Lost("bbp mcp exited".to_owned()))
+                }
             };
             let reply: Value = rusty_serde::json::from_str(&line)
-                .map_err(|e| format!("bbp mcp sent bad JSON: {e}"))?;
+                .map_err(|e| CallError::Lost(format!("bbp mcp sent bad JSON: {e}")))?;
             if reply.get("id").and_then(Value::as_u64) != Some(id) {
                 continue;
             }
             if let Some(e) = reply.get("error") {
                 let msg = e.get("message").and_then(Value::as_str).unwrap_or("error");
-                return Err(format!("bbp mcp {method}: {msg}"));
+                return Err(CallError::Answered(format!("bbp mcp {method}: {msg}")));
             }
             return reply
                 .get("result")
                 .cloned()
-                .ok_or_else(|| format!("bbp mcp {method}: no result"));
+                .ok_or_else(|| CallError::Answered(format!("bbp mcp {method}: no result")));
         }
     }
 }
 
 impl Rpc for Child {
-    fn call(&mut self, tool: &str, args: Value) -> Result<String, String> {
+    fn call(&mut self, tool: &str, args: Value) -> Result<String, CallError> {
         let result = self.request(
             "tools/call",
             map(vec![("name", tool.into()), ("arguments", args)]),
         )?;
-        tool_text(&result).map_err(|e| format!("{tool}: {e}"))
+        tool_text(&result)
     }
 }
 
@@ -177,8 +205,9 @@ impl Drop for Child {
     }
 }
 
-/// The text of a `tools/call` result; an `isError` result is an error.
-fn tool_text(result: &Value) -> Result<String, String> {
+/// The text of a `tools/call` result; an `isError` result is an answered
+/// error.
+fn tool_text(result: &Value) -> Result<String, CallError> {
     let text = result
         .get("content")
         .and_then(|c| match c {
@@ -187,10 +216,10 @@ fn tool_text(result: &Value) -> Result<String, String> {
         })
         .and_then(|c| c.get("text"))
         .and_then(Value::as_str)
-        .ok_or("result has no text")?
+        .ok_or_else(|| CallError::Answered("result has no text".to_owned()))?
         .to_owned();
     match result.get("isError").and_then(Value::as_bool) {
-        Some(true) => Err(text),
+        Some(true) => Err(CallError::Answered(text)),
         _ => Ok(text),
     }
 }
@@ -236,8 +265,7 @@ impl<R: Rpc> Session<R> {
     }
 
     fn ask(&mut self, tool: &str, args: Value) -> Result<Response, String> {
-        let text = self.rpc.call(tool, args)?;
-        parse(&text, tool)
+        answer(self.rpc.call(tool, args), tool)
     }
 
     /// Bring the lens's view up to date: new messages (claim bodies and
@@ -383,9 +411,10 @@ impl<R: Rpc> Session<R> {
 }
 
 impl<R: Rpc> Board for Session<R> {
-    /// Each post is its own logical post with its own op id. A call that
-    /// fails in transport is sent once more with the same op, so BBP
-    /// replays it if the first one landed; a rejection is not retried.
+    /// Each post is its own logical post with its own op id. A call whose
+    /// answer was lost is sent once more with the same op, so BBP replays
+    /// it if the first one landed; an answered error, such as a
+    /// rejection, is not retried.
     fn post(&mut self, lens: &str, posts: &[Post]) -> Result<(), String> {
         if lens != self.lens {
             return Err(format!("{}'s session cannot post for {lens}", self.lens));
@@ -394,11 +423,11 @@ impl<R: Rpc> Board for Session<R> {
             self.posted += 1;
             let op = format!("lens-{}-{}", self.run, self.posted);
             let args = post_args(p, self.brief, &op);
-            let text = match self.rpc.call("post", args.clone()) {
-                Ok(text) => text,
-                Err(_) => self.rpc.call("post", args)?,
+            let reply = match self.rpc.call("post", args.clone()) {
+                Err(CallError::Lost(_)) => self.rpc.call("post", args),
+                first => first,
             };
-            match parse(&text, "post")? {
+            match answer(reply, "post")? {
                 Response::Posted(_) => {}
                 other => return Err(format!("post answered {other:?}")),
             }
@@ -407,14 +436,32 @@ impl<R: Rpc> Board for Session<R> {
     }
 }
 
+/// A call's outcome as a response; a rejection or any other error is an
+/// error naming `tool`. An answered error's text is shown as a rejection
+/// when it is one (the host's `isError` shape), else as sent.
+fn answer(reply: Result<String, CallError>, tool: &str) -> Result<Response, String> {
+    match reply {
+        Ok(text) => parse(&text, tool),
+        Err(CallError::Answered(text)) => Err(match rusty_serde::json::from_str(&text) {
+            Ok(Response::Rejected(r)) => rejected(tool, &r),
+            _ => format!("{tool}: {text}"),
+        }),
+        Err(CallError::Lost(e)) => Err(format!("{tool}: {e}")),
+    }
+}
+
 /// A tool's answer; a rejection is an error.
 fn parse(text: &str, tool: &str) -> Result<Response, String> {
     let resp: Response =
         rusty_serde::json::from_str(text).map_err(|e| format!("{tool}: unreadable answer: {e}"))?;
     match resp {
-        Response::Rejected(r) => Err(format!("{tool}: {:?}: {}", r.code, r.detail)),
+        Response::Rejected(r) => Err(rejected(tool, &r)),
         other => Ok(other),
     }
+}
+
+fn rejected(tool: &str, r: &rusty_bbp::Rejection) -> String {
+    format!("{tool}: {:?}: {}", r.code, r.detail)
 }
 
 /// The `post` tool's arguments for `p`, under op id `op`. Every post refs
@@ -522,7 +569,7 @@ mod tests {
 
     #[derive(Default)]
     struct Fake {
-        replies: BTreeMap<String, VecDeque<Result<String, String>>>,
+        replies: BTreeMap<String, VecDeque<Result<String, CallError>>>,
         calls: Vec<(String, Value)>,
     }
 
@@ -536,11 +583,24 @@ mod tests {
             self
         }
 
+        /// The answer is lost: a timeout or an exit.
         fn fail(mut self, tool: &str, error: &str) -> Self {
             self.replies
                 .entry(tool.to_owned())
                 .or_default()
-                .push_back(Err(error.to_owned()));
+                .push_back(Err(CallError::Lost(error.to_owned())));
+            self
+        }
+
+        /// The host refuses, as `bbp mcp` does: an `isError` result whose
+        /// text is the rejection.
+        fn refuse(mut self, tool: &str, rejection: rusty_bbp::Rejection) -> Self {
+            let text =
+                rusty_serde::json::to_string(&Response::Rejected(rejection)).expect("encode");
+            self.replies
+                .entry(tool.to_owned())
+                .or_default()
+                .push_back(Err(CallError::Answered(text)));
             self
         }
 
@@ -554,12 +614,12 @@ mod tests {
     }
 
     impl Rpc for Fake {
-        fn call(&mut self, tool: &str, args: Value) -> Result<String, String> {
+        fn call(&mut self, tool: &str, args: Value) -> Result<String, CallError> {
             self.calls.push((tool.to_owned(), args));
             self.replies
                 .get_mut(tool)
                 .and_then(VecDeque::pop_front)
-                .unwrap_or_else(|| Err(format!("no reply for {tool}")))
+                .unwrap_or_else(|| Err(CallError::Answered(format!("no reply for {tool}"))))
         }
     }
 
@@ -914,11 +974,8 @@ mod tests {
 
     #[test]
     fn a_rejected_post_is_not_retried() {
-        let rej = Response::Rejected(rusty_bbp::Rejection::new(
-            rusty_bbp::Code::BadCredential,
-            "reassigned",
-        ));
-        let mut s = Session::new("adversary", Fake::default().on("post", rej), "r1");
+        let fake = Fake::default().refuse("post", reassigned());
+        let mut s = Session::new("adversary", fake, "r1");
         let err = s.post("adversary", &[counter("x")]).expect_err("rejected");
         assert!(err.contains("reassigned"), "{err}");
         assert_eq!(s.rpc.args("post").len(), 1);
@@ -975,7 +1032,7 @@ mod tests {
             ),
             ("isError", Value::Bool(true)),
         ]);
-        assert_eq!(tool_text(&bad), Err("no".to_owned()));
+        assert_eq!(tool_text(&bad), Err(CallError::Answered("no".to_owned())));
         assert!(tool_text(&map(vec![])).is_err());
     }
 
@@ -1026,7 +1083,10 @@ done
         let started = Instant::now();
         let err = child.call("task_card", map(vec![])).expect_err("times out");
         let took = started.elapsed();
-        assert!(err.contains("no answer"), "{err}");
+        assert!(
+            matches!(&err, CallError::Lost(e) if e.contains("no answer")),
+            "{err}"
+        );
         assert!(took >= Duration::from_millis(300), "{took:?}");
         assert!(took < Duration::from_secs(5), "bounded: {took:?}");
         drop(child);
@@ -1043,12 +1103,110 @@ done
             child.call("task_card", map(vec![])),
             Ok("adversary yes scrubbed".to_owned())
         );
-        let gone = child.call("task_card", map(vec![])).expect_err("exited");
+        let gone = child
+            .call("task_card", map(vec![]))
+            .expect_err("exited")
+            .to_string();
         assert!(
             gone.contains("exited") || gone.contains("Broken pipe"),
             "{gone}"
         );
         drop(child);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    fn reassigned() -> rusty_bbp::Rejection {
+        rusty_bbp::Rejection::new(rusty_bbp::Code::BadCredential, "reassigned")
+    }
+
+    /// A stand-in `bbp mcp` that logs each tool call to `calls` beside
+    /// it: it answers the first call with `first` (or never, if `None`),
+    /// and the second with `second`.
+    #[cfg(unix)]
+    fn logging_script(first: Option<Value>, second: Value) -> String {
+        let reply = |id: u64, result: Value| {
+            map(vec![
+                ("jsonrpc", "2.0".into()),
+                ("id", id.into()),
+                ("result", result),
+            ])
+            .to_string()
+        };
+        let first = first.map_or(String::new(), |r| {
+            format!("printf '%s\\n' '{}'\n", reply(2, r))
+        });
+        let next_id = if first.is_empty() { 3 } else { 2 };
+        format!(
+            "#!/bin/sh\nd=$(dirname \"$0\")\nread -r l\nprintf '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}\\n'\nread -r l\nread -r l\nprintf '%s\\n' \"$l\" >> \"$d/calls\"\n{first}read -r l\nprintf '%s\\n' \"$l\" >> \"$d/calls\"\nprintf '%s\\n' '{}'\n",
+            reply(next_id, second)
+        )
+    }
+
+    /// A `tools/call` result carrying `resp`, rendered as the host does.
+    #[cfg(unix)]
+    fn rendered(resp: &Response) -> Value {
+        let text = rusty_serde::json::to_string(resp).expect("encode");
+        map(vec![
+            (
+                "content",
+                Value::Seq(vec![map(vec![
+                    ("type", "text".into()),
+                    ("text", text.as_str().into()),
+                ])]),
+            ),
+            (
+                "isError",
+                Value::Bool(matches!(resp, Response::Rejected(_))),
+            ),
+        ])
+    }
+
+    /// The `post` calls the stand-in in `dir` logged, as their arguments.
+    #[cfg(unix)]
+    fn logged_posts(dir: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(dir.join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| rusty_serde::json::from_str::<Value>(l).expect("logged call"))
+            .filter_map(|v| v.get("params").and_then(|p| p.get("arguments")).cloned())
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hosts_rejection_through_the_child_is_sent_once() {
+        let posted = rendered(&Response::Posted(MsgId(30)));
+        let script = logging_script(Some(rendered(&Response::Rejected(reassigned()))), posted);
+        let dir = stand_in("refused", &script);
+        let child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+            .expect("spawn")
+            .with_deadline(Duration::from_millis(300));
+        let mut s = Session::new("adversary", child, "r1");
+        let err = s.post("adversary", &[counter("x")]).expect_err("rejected");
+        assert!(err.contains("reassigned"), "{err}");
+        drop(s);
+        assert_eq!(logged_posts(&dir).len(), 1, "a rejection is final");
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_lost_answer_through_the_child_is_resent_with_the_same_op() {
+        let script = logging_script(None, rendered(&Response::Posted(MsgId(30))));
+        let dir = stand_in("lost", &script);
+        let child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+            .expect("spawn")
+            .with_deadline(Duration::from_millis(300));
+        let mut s = Session::new("adversary", child, "r1");
+        s.post("adversary", &[counter("x")]).expect("replayed");
+        drop(s);
+        let posts = logged_posts(&dir);
+        assert_eq!(posts.len(), 2, "{posts:?}");
+        assert_eq!(posts[0], posts[1], "the resend is the same call");
+        assert_eq!(
+            posts[0].get("op").map(ToString::to_string).as_deref(),
+            Some(r#""lens-r1-1""#)
+        );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }
