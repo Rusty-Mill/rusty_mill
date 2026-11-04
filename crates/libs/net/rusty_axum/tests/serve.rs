@@ -669,3 +669,73 @@ impl Stream for Recv {
         Poll::Ready(item)
     }
 }
+
+/// Told when the `/hang` handler's future is dropped.
+static HANG_DROPPED: Mutex<Option<rusty_tokio::sync::oneshot::Sender<()>>> = Mutex::new(None);
+
+/// Sends on [`HANG_DROPPED`] when dropped.
+struct TellOnDrop;
+
+impl Drop for TellOnDrop {
+    fn drop(&mut self) {
+        if let Some(tx) = HANG_DROPPED.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+fn hang_app() -> Router {
+    Router::new()
+        .route(
+            "/hang",
+            get(|| async {
+                let _tell = TellOnDrop;
+                std::future::pending::<()>().await;
+                "never"
+            }),
+        )
+        .route(
+            "/slow",
+            get(|| async {
+                rusty_tokio::time::sleep(Duration::from_millis(100)).await;
+                "slow"
+            }),
+        )
+        .route("/health", get(|| async { "ok" }))
+}
+
+fn start_hang() -> Server {
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = TcpListener::from_std(std_listener).unwrap();
+    serve(listener, None, ServeOptions::default(), hang_app()).unwrap()
+}
+
+#[rusty_tokio::test]
+async fn a_client_hang_up_drops_the_running_handler() {
+    let (tx, rx) = rusty_tokio::sync::oneshot::channel();
+    *HANG_DROPPED.lock().unwrap() = Some(tx);
+    let server = start_hang();
+    let mut conn = connect(&server).await;
+    send(&mut conn, Method::Get, "/hang", &[], b"").await;
+    // Let the handler start, then go away.
+    rusty_tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(conn);
+    timeout(Duration::from_secs(5), rx)
+        .await
+        .expect("the handler is dropped when the client hangs up")
+        .unwrap();
+    server.shutdown().await;
+}
+
+#[rusty_tokio::test]
+async fn a_request_pipelined_behind_a_slow_one_is_still_served() {
+    let server = start_hang();
+    let mut conn = connect(&server).await;
+    // The second request arrives while the first handler runs, so the
+    // hang-up watch reads it ahead; it must not be lost.
+    send(&mut conn, Method::Get, "/slow", &[], b"").await;
+    send(&mut conn, Method::Get, "/health", &[], b"").await;
+    assert_eq!(read(&mut conn, &Method::Get).await.1, "slow");
+    assert_eq!(read(&mut conn, &Method::Get).await.1, "ok");
+    server.shutdown().await;
+}
