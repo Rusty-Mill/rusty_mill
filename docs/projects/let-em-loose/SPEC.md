@@ -1,6 +1,6 @@
 # Let Em Loose: spec
 
-Status: designs for #592–#597 approved 2026-11-02; implementation starts with the #593 engine. BBP rules: the claims addendum (PR #1386). Concept: [README.md](README.md). Decisions: [DECISIONS.md](DECISIONS.md). Pre-answered questions: [QUESTIONS.md](QUESTIONS.md).
+Status: concept/design record; the author reported #592–#597 approval on 2026-11-02. This is not an implementation-start authorization. See [authority, provenance and merged contracts](DECISIONS.md#authority-provenance-and-current-contracts); separately approved implementation work keeps its own gates. BBP rules: the claims addendum (PR #1386). Concept: [README.md](README.md). Decisions: [DECISIONS.md](DECISIONS.md). Pre-answered questions: [QUESTIONS.md](QUESTIONS.md).
 
 ## What it is for
 
@@ -52,16 +52,20 @@ The smallest thing that runs end to end. Its first real job is the dedup experim
 - **Brownfield in v0.** v0 targets greenfield work from intent; existing code is #598.
 - **UI before the slice.** The CLI and the inbox come first.
 
+## Erosion policy (#704)
+
+The erosion design in D41–D45 remains a documentation record, not an implementation delivered by this correction. At report-only expiry (2 weeks or 10 tasks, whichever comes first), new affected tasks pause until thresholds are approved; already-open tasks keep their settings and frozen profile digests. Cleanup requires at least one metric to improve and neither to worsen, and is skipped when both are already zero (D44 has worked examples). Budget approval funds another attempt; explicit fenced human acceptance/choice is the separate failed-profile override.
+
 ## Constraints
 
 - **Repository rules.** Every change through a PR with a change fragment. Review by `dottiusmaximus`. Merge commit through the merge queue. No force pushes.
-- **Design first.** Every card posts a design for Nano's approval before implementation.
+- **Design first.** Every card posts a design for Nano's approval before implementation. Merging these docs grants no implementation start, live call, spending, credential, deployment or settings permission. Phase B figures are planning ceilings, not provider admission or billing authorization (D38).
 - **Ask first:** schema migrations, BBP schema version bumps, public API changes, dependency or toolchain bumps, deletions, adding or removing an executor.
 - **Rust.** `Result` and `?` in library code; no `unwrap()` or `expect()` outside tests. Ports and adapters, domain logic free of I/O. No abstraction before two real call sites. Tests for all non-trivial logic.
 - **Determinism.** The confidence update, thresholds, settling and scoring are pure functions over the evidence log, reproducible in trace tests.
 - **Serialized control plane.** State transitions, budgets and human gates are serialized. Evidence posting is concurrent.
 - **Sovereignty.** Each adapter declares what data it may receive. Sensitive claims route to the local model.
-- **Auditability.** Every confidence change is traceable to the evidence that caused it.
+- **Auditability.** Every confidence change is traceable to the evidence that caused it. Executed evidence retains runner authentication and candidate/run/claim/profile binding; blind tool reads retain the same visibility boundary as initial contexts (QUESTIONS Q13–Q14). Human actions use the displayed revision fence and separate action marks (D35), with human digest-attestation limits for golden sets (D37).
 - **Sandboxing.** Nothing touches real user data before the shadow run, and shadow runs are read-only.
 - **Handoffs.** Commands handed to Nano are PowerShell.
 

@@ -10,7 +10,7 @@ use std::rc::Rc;
 use crate::core::{AnsiParser, Cell, Grid};
 
 use super::super::font::{Glyph, GlyphSource, Style};
-use super::super::render::{PaneFrame, composite};
+use super::super::render::{PaneFrame, SearchColors, composite};
 use super::{Damage, Frame, Plan};
 
 const CELL: (usize, usize) = (6, 10);
@@ -175,6 +175,7 @@ pub(in crate::gui) fn panes<'a>(
                     .collect(),
                 hover_link: x.hover.filter(|h| h.0 < v.rows),
                 marks: vec![(0, 0x00ff00)],
+                search: SearchColors::default(),
             };
             col0 += v.cols + 1;
             p
@@ -316,6 +317,7 @@ fn repaint_after(bytes: &[u8]) -> Vec<bool> {
             trail: Vec::new(),
             hover_link: None,
             marks: Vec::new(),
+            search: SearchColors::default(),
         };
         Frame::capture(&[pane], &[], &[], [1, 1], (120, 80), COLORS, 0)
     };
@@ -351,6 +353,7 @@ fn unknown_or_stale_buffers_repaint_fully() {
         trail: Vec::new(),
         hover_link: None,
         marks: Vec::new(),
+        search: SearchColors::default(),
     };
     let frame = |v, font| Frame::capture(&[pane(v)], &[], &[], [font, font], (24, 20), COLORS, 0);
     let mut damage = Damage::default();
@@ -404,6 +407,7 @@ fn ime_overhang_survives_a_neighbor_repaint() {
                 trail: Vec::new(),
                 hover_link: None,
                 marks: Vec::new(),
+                search: SearchColors::default(),
             }];
             let frame = Frame::capture(&pane, &[], &[], [7, 7], (w, h), COLORS, 0);
             let plan = damage.as_ref().map_or(Plan::Full, |d| d.plan(&frame, 1));

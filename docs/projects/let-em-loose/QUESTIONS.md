@@ -1,15 +1,14 @@
 # Let Em Loose: pre-answered questions
 
-These are the questions an implementer would ask while building v0 ([SPEC.md](SPEC.md)), with their answers. Most were settled during the #592–#597 design reviews on 2026-11-02; each settled answer names the decision in [DECISIONS.md](DECISIONS.md) that records it. Answers marked **[Nano decides]** are still open.
+These are the questions an implementer would ask while building v0 ([SPEC.md](SPEC.md)), with their answers. Most were settled during the #592–#597 design reviews on 2026-11-02; each settled answer names the decision in [DECISIONS.md](DECISIONS.md) that records it. Answers marked **[Nano decides]** are still open. Read the [authority/provenance limits and merged contract links](DECISIONS.md#authority-provenance-and-current-contracts) before using these summaries; reported approval and planning ceilings are not execution or spending permission.
 
 ## Still open
 
 | Q | Decision needed |
 | --- | --- |
-| 26 | When the intent interview for the #600 experiment happens |
-| 27 | The #600 experiment's own targets (Phase B targets are settled) |
 | 28 | Signing off the golden sets |
-| 31 | The write to existing remind-me records |
+
+Q26, Q27 and Q31 were settled after this list was written; see [handoff/QA.md](handoff/QA.md) (§ Dedup experiment, § remind-me).
 
 ## Claims model (BBP, #593)
 
@@ -52,10 +51,10 @@ Architects on Claude, local and Codex, with the rebel set in config. Operator on
 Request: lens id, question and the assembled context. Response: evidence items or new claims, checked against a schema in the adapter, with non-conforming replies rejected. The hard-coded provider list becomes a config registry; `orch-openai` is a new adapter crate for llama-swap, allowing plain HTTP only to loopback and private addresses. (D34)
 
 **13. How is the blind first pass enforced?**
-Through context assembly: a lens's first pass on a claim excludes the other lenses' evidence on it. Each question gets three blind Architect proposals before any attack. (D7, D34)
+Context assembly excludes the other lenses' evidence on a first pass, and the same barrier must cover subsequent MCP/tool reads. The claims addendum's **Reads, delta and subscriptions** requires session credentials, message visibility on `read`, `claims_delta`, `claim_card` and `claim_line`, nested-content filtering and artifact permissions on `get_artifact`. A blind tool participant must use an equivalently restricted/scoped session or have those tools withheld for the blind pass; a `read_messages: all` session with a filtered prompt is insufficient. Host/human unfiltered views must not be exposed as agent tools. Each question gets three blind Architect proposals before any attack. (D7, D34; [precise contracts](DECISIONS.md#authority-provenance-and-current-contracts))
 
 **14. How is "agreement costs evidence" enforced?**
-Support must cite a source artifact or a test run. Opinion can never reach accept. (D29)
+Executed support must cite a final, passed, runner-authenticated `test_report`, bound through its run secret to its selected run, candidate, claim and frozen profile digest; superseded run secrets are refused. C-R4 and **Runs and candidates** in the claims addendum define this binding; a resolvable reference or builder's assertion alone is not executable evidence. Agents cannot write runner reports/logs. Unverified builder results remain opinion, which cannot reach accept. Cited sources use `source` artifacts and retain cited weight, not executed weight. Holdout acceptance additionally binds the suite digest and current candidate's actual tree (D30, D37).
 
 **15. How is "look harder" triggered?**
 A critic lens that finds nothing gets one "look harder" retry; a second empty pass is accepted and recorded.
@@ -72,7 +71,7 @@ From the generic experts in Expert-Agents, bound and versioned as config in the 
 ## Budget and cost
 
 **19. What are the budget units and caps?**
-One unit buys one evidence post or one candidate run. Claims get 8, 16 or 32 units for low, medium or high stakes, doubled if irreversible. For Phase B: $200 in total, a $25 hard cap per run, and a pause if the first paired intent costs more than $40. (D29, D38)
+One unit buys one evidence post or one candidate run. Claims get 8, 16 or 32 units for low, medium or high stakes, doubled if irreversible. Phase B planning ceilings are $200 total, $25 per run, and a pause if the first paired intent exceeds $40, pending separate spending authorization. Neither these figures nor a BBP extension authorizes billed calls: v0 refuses nonzero rates and requires operator-controlled subscription/host admission. (D29, D38)
 
 **20. Who assigns stakes and reversibility?**
 The intent declares never-rules and reversibility classes, and the seeding pass tags each claim. Anything that writes to user data, shared branches or external systems defaults to irreversible.
@@ -86,7 +85,7 @@ A read view over BBP in Mill Board, reading only through the host's `bbp` comman
 No push notifications in v0. (D35)
 
 **23. What do the actions do?**
-Approve accepts, and on a budget escalation adds one base allowance (never open-ended; none for irreversible claims). Reject drops, and creates a "Remediate" card if the claim was already acted on. Choose picks one of several candidates for a taste call. Refine intent sends a human answer the lenses see. (D35)
+D35 and the merged inbox's `plan`/`plan_task` define the per-reason actions. Claim-budget Approve extends one claim base allowance and reopens, preserving the failure block; held-rerun Approve extends and starts the rerun. Whole-task Approve extends each exhausted total by its own opened allowance, then resumes, without accepting a claim. Explicit human `accept`/`choose` is the separate threshold/failure override; irreversible Approve adds no budget. Reject drops (or cancels a whole task with a reason), with remediation for acted-on claims. Choose selects among a stuck question's candidates. Refine records the clarification and reopens a claim, or extends exhausted totals and resumes a paused task. Preview and execution are revision-fenced against the displayed snapshot, not generic confidence evidence or permission for future actions; a stale revision requires re-reading. See D35's [precise contracts](DECISIONS.md#authority-provenance-and-current-contracts), including the action-mark fence and the current intent-versioning limit.
 
 **24. What counts as irreversible?**
 Deleting, moving or overwriting user data. Pushing to shared branches. External messages. Schema migrations. Spend above a tier allowance. Agents never merge PRs in any case.
@@ -105,7 +104,7 @@ Claude, in chat with Nano, interviewing by example. The output is committed to t
 Phase B is settled: five small intents, a pre-registered decision rule, and a `dedup-lite` timing target of 2 seconds on Nano's desktop, warm cache, median of 5. The #600 experiment, the full 20 TB app, gets its targets from the intent interview. (D36, D38)
 
 **28. What ground truth is used?** **[Nano signs off the golden sets]**
-Holdout suites written from intent only, plus golden sets in the Factory repo that only Nano can sign off. Private fixtures from Nano's drive are recorded as hashes and mounted read-only. (D37)
+Holdout suites written from intent only, plus golden sets in the Factory repo with Nano's human digest-attestation. The host verifies manifest hashes and the exact SIGNOFF digest, not cryptographic signer identity; CODEOWNERS/file presence does not prove authorship (D37). Private fixtures from Nano's drive are recorded as hashes and mounted read-only. (D37)
 
 **29. What may the agents read?**
 Public prior art, including fclones, for study only, with no copied code. No access to `rusty_fclone` or rusty_mill. Builders see only pass or fail counts for holdouts.
@@ -113,7 +112,15 @@ Public prior art, including fclones, for study only, with no copied code. No acc
 ## Process
 
 **30. Where does work land, and how?**
-BBP rules in the claims addendum (PR #1386). Each card's design on its card. Code in the existing crates, one PR per card, test-first, with a change fragment, reviewed by `dottiusmaximus`. Agents never queue or merge. Next up is the #593 engine; #598 and #599 are not designed yet. (D40)
+BBP rules in the claims addendum (PR #1386). Each card's design on its card. Code in the existing crates, one PR per card, test-first, with a change fragment, reviewed by `dottiusmaximus`. Agents never queue or merge. The original next step was the #593 engine; check current main and per-card approvals for current work. This historical guide does not authorize an implementation start. (D40)
 
 **31. What about existing remind-me records?** **[Nano decides]**
 The explicit `project` parameter is approved. Any write to existing records waits until Nano has seen exactly which records it would change. (D39)
+
+## Erosion gate (#704)
+
+**32. What happens when report-only expires?**
+At 2 weeks or 10 tasks, whichever comes first, pause new affected tasks until Nano approves thresholds. Existing tasks retain their settings and frozen profile digests. Calibration is reported for approval; no guessed thresholds or indefinite report-only extension. (D42)
+
+**33. How does cleanup work at zero?**
+Require at least one metric to improve and neither to worsen. Skip cleanup if both baseline metrics are zero; log the reason. For example, (100, 0) to (80, 0) passes, unchanged (100, 0) fails, and (0, 0) skips. D44 gives the full predicate and examples. These owner choices are recorded in the linked D42/D44 decision record.

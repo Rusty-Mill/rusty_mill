@@ -120,6 +120,9 @@ pub(super) struct Screen {
     /// Bytes sent to the terminal so far: a cursor sample taken at one
     /// count is stale once more has gone out (#1375).
     emitted: u64,
+    /// The buffer each client VT slice is transformed into, kept between
+    /// slices so a flood doesn't allocate and regrow it every write.
+    scratch: Vec<u8>,
 }
 
 /// Where the cursor goes when legacy text meets the margin.
@@ -146,6 +149,7 @@ impl Screen {
             run: None,
             owed: None,
             emitted: 0,
+            scratch: Vec::new(),
         };
         // conhost's colour table, which GetConsoleScreenBufferInfoEx
         // reports and legacy attributes are matched against. Only the
@@ -211,14 +215,41 @@ impl Screen {
         out: &mut OutputQueue,
         replies: &mut Vec<u8>,
     ) -> usize {
-        let mut vt = std::mem::take(&mut self.held);
+        let mut vt = std::mem::take(&mut self.scratch);
+        vt.clear();
+        vt.append(&mut self.held);
+        // Most bytes pass through as one; a control may grow, and the
+        // loop stops before `room` anyway.
+        vt.reserve(text.len().min(room));
         let held = vt.len();
         // The ESC of the sequence the bytes are in, while it may be watched.
         let mut esc = (held > 0).then_some(0);
         let mut long = self.long;
         let mut added = 0;
         let mut consumed = 0;
-        for &b in text {
+        // A watched sequence was found whole, so `route_vt` has work to do.
+        let mut watched = false;
+        while let Some(&b) = text.get(consumed) {
+            // Outside any sequence, everything up to the next ESC or LF
+            // passes through as it is: copy it in one go.
+            if esc.is_none() && !long && !self.c2 {
+                let budget = room.saturating_sub(vt.len() - held + added);
+                let rest = &text[consumed..text.len().min(consumed + budget)];
+                let run = rest
+                    .iter()
+                    .position(|&b| b == 0x1b || b == b'\n')
+                    .unwrap_or(rest.len());
+                let run = match run {
+                    0 => unwatched_csi(rest),
+                    run => run,
+                };
+                if run > 0 {
+                    vt.extend_from_slice(&rest[..run]);
+                    self.after_cr = rest[run - 1] == b'\r';
+                    consumed += run;
+                    continue;
+                }
+            }
             let step = transform(b, mode, self.after_cr, self.c2);
             let start = vt.len();
             vt.extend_from_slice(&step.bytes[..step.len]);
@@ -239,8 +270,11 @@ impl Screen {
             if let Some(e) = esc.filter(|&e| !inside || vt.len() - e <= 3) {
                 match watched_at(&vt[e..]) {
                     Watched::Prefix | Watched::Long => {}
-                    Watched::Whole(_, Action::Reassert(modes)) => (adds, esc) = (modes.len(), None),
-                    Watched::Whole(..) | Watched::No => esc = None,
+                    Watched::Whole(_, Action::Reassert(modes)) => {
+                        (adds, esc, watched) = (modes.len(), None, true);
+                    }
+                    Watched::Whole(..) => (esc, watched) = (None, true),
+                    Watched::No => esc = None,
                 }
             }
             if vt.len() - held + added + adds > room {
@@ -252,7 +286,14 @@ impl Screen {
             self.c2 = step.c2;
             consumed += 1;
         }
-        self.route_vt(&vt, out, replies);
+        // With nothing watched in it and nothing left open, the slice goes
+        // out as it is, without matching it again.
+        if watched || esc.is_some() || long || self.long {
+            self.route_vt(&vt, out, replies);
+        } else {
+            self.forward(&vt, out);
+        }
+        self.scratch = vt;
         consumed
     }
 
@@ -676,21 +717,37 @@ fn watched_at(rest: &[u8]) -> Watched {
     }
 }
 
+/// The length of the CSI `text` starts with when it is whole, has no LF
+/// (which gains a CR) and is not watched, so it passes through as it is;
+/// else 0.
+fn unwatched_csi(text: &[u8]) -> usize {
+    if !text.starts_with(b"\x1b[") {
+        return 0;
+    }
+    let Some(end) = text[2..]
+        .iter()
+        .position(|&b| csi_byte(b) != CsiByte::Inside)
+    else {
+        return 0;
+    };
+    let seq = &text[..end + 3];
+    let whole = csi_byte(seq[end + 2]) == CsiByte::Final;
+    let plain = whole && !seq.contains(&b'\n');
+    if plain && matches!(watched_at(seq), Watched::No) {
+        seq.len()
+    } else {
+        0
+    }
+}
+
 fn watched_csi(rest: &[u8]) -> Watched {
     let private = rest.get(2) == Some(&b'?');
     let first = if private { 3 } else { 2 };
-    // The parameters as rusty_term_core keeps them, without the controls
-    // it runs in place.
-    let mut stored = Vec::new();
     let mut plain = true;
     let mut end = None;
     for (i, &b) in rest.iter().enumerate().skip(first) {
         match csi_byte(b) {
-            CsiByte::Inside if is_param(b) => {
-                if stored.len() < CSI_PARAM_MAX {
-                    stored.push(b);
-                }
-            }
+            CsiByte::Inside if is_param(b) => {}
             CsiByte::Inside => plain = false,
             CsiByte::Final => {
                 end = Some(i);
@@ -714,18 +771,26 @@ fn watched_csi(rest: &[u8]) -> Watched {
             _ => Watched::No,
         };
     }
-    let params: Vec<u32> = stored
-        .split(|&b| b == b';')
-        .map(|p| {
-            std::str::from_utf8(p)
-                .ok()
-                .and_then(|p| p.parse().ok())
-                .unwrap_or(0)
-        })
-        .collect();
-    let action = match (private, rest[end], params.as_slice()) {
-        (false, b'n', [5 | 6]) | (true, b'n', [6]) if plain => Action::Answer,
-        (true, b'l', _) => match (params.contains(&9001), params.contains(&1004)) {
+    // Only DSR/CPR and DECRST are watched: any other final byte is decided
+    // without reading the parameters, which most client VT (SGR, cursor
+    // moves) never needs.
+    let kind = match (private, rest[end]) {
+        (_, b'n') if plain => b'n',
+        (true, b'l') => b'l',
+        _ => return Watched::No,
+    };
+    // The parameters as rusty_term_core keeps them, without the controls
+    // it runs in place.
+    let stored = rest[first..end]
+        .iter()
+        .copied()
+        .filter(|&b| is_param(b))
+        .take(CSI_PARAM_MAX);
+    let params = Params::of(stored);
+    let action = match (private, kind) {
+        (false, b'n') if matches!(params.only, Some(5 | 6)) => Action::Answer,
+        (true, b'n') if params.only == Some(6) => Action::Answer,
+        (true, b'l') => match (params.win32_input, params.focus) {
             (true, true) => Action::Reassert(PREAMBLE),
             (true, false) => Action::Reassert(b"\x1b[?9001h"),
             (false, true) => Action::Reassert(b"\x1b[?1004h"),
@@ -734,6 +799,55 @@ fn watched_csi(rest: &[u8]) -> Watched {
         _ => return Watched::No,
     };
     Watched::Whole(end + 1, action)
+}
+
+/// What the watched sequences need from a CSI's stored parameter bytes,
+/// read without allocating. Each `;`-separated parameter is its decimal
+/// value, or 0 when it is empty, has a `:` or overflows `u32`.
+#[derive(Debug, Default, PartialEq)]
+struct Params {
+    /// The value when there is exactly one parameter.
+    only: Option<u32>,
+    /// A parameter is 9001 (win32-input-mode).
+    win32_input: bool,
+    /// A parameter is 1004 (focus reports).
+    focus: bool,
+}
+
+impl Params {
+    fn of(bytes: impl Iterator<Item = u8>) -> Params {
+        let mut params = Params::default();
+        let mut count = 0usize;
+        // The parameter being read; `None` once it can only read as 0.
+        let mut value = Some(0u32);
+        let mut empty = true;
+        let mut end = |value: Option<u32>, empty: bool, params: &mut Params| {
+            let v = if empty { 0 } else { value.unwrap_or(0) };
+            count += 1;
+            params.only = (count == 1).then_some(v);
+            params.win32_input |= v == 9001;
+            params.focus |= v == 1004;
+        };
+        for b in bytes {
+            match b {
+                b';' => {
+                    end(value, empty, &mut params);
+                    (value, empty) = (Some(0), true);
+                }
+                b'0'..=b'9' => {
+                    let digit = u32::from(b - b'0');
+                    value = value.and_then(|v| v.checked_mul(10)?.checked_add(digit));
+                    empty = false;
+                }
+                _ => {
+                    value = None;
+                    empty = false;
+                }
+            }
+        }
+        end(value, empty, &mut params);
+        params
+    }
 }
 
 /// rusty_term_core's `CSI_PARAM_MAX`: the parameter bytes it keeps.
@@ -1508,5 +1622,142 @@ mod tests {
         let mut s = screen();
         s.resize(WinSize { rows: 2, cols: 5 });
         assert_eq!(s.size(), WinSize { rows: 2, cols: 5 });
+    }
+
+    /// `Params::of` reads parameters as `str::parse` of each `;` piece did
+    /// (anything unparsable is 0), without allocating.
+    #[test]
+    fn params_read_as_parsed_pieces() {
+        let reference = |bytes: &[u8]| -> Vec<u32> {
+            bytes
+                .split(|&b| b == b';')
+                .map(|p| {
+                    std::str::from_utf8(p)
+                        .ok()
+                        .and_then(|p| p.parse().ok())
+                        .unwrap_or(0)
+                })
+                .collect()
+        };
+        let cases: [&[u8]; 14] = [
+            b"",
+            b"5",
+            b"6",
+            b";",
+            b"05",
+            b"9001",
+            b"1;9001;1004",
+            b"1004:2",
+            b"4294967295",
+            b"4294967296",
+            b"99999999999;1004",
+            b"6;",
+            b";6",
+            b"1:;:9001",
+        ];
+        for bytes in cases {
+            let want = reference(bytes);
+            let got = Params::of(bytes.iter().copied());
+            let name = String::from_utf8_lossy(bytes);
+            assert_eq!(got.only, (want.len() == 1).then(|| want[0]), "{name}");
+            assert_eq!(got.win32_input, want.contains(&9001), "{name}");
+            assert_eq!(got.focus, want.contains(&1004), "{name}");
+        }
+    }
+
+    #[test]
+    fn unwatched_csi_is_copied_whole_and_nothing_else() {
+        assert_eq!(unwatched_csi(b"\x1b[38;5;196mtext"), 11);
+        assert_eq!(unwatched_csi(b"\x1b[?25h"), 6);
+        assert_eq!(unwatched_csi(b"\x1b[6n"), 0, "a query is answered");
+        assert_eq!(unwatched_csi(b"\x1b[?9001l"), 0, "a reset is reasserted");
+        assert_eq!(unwatched_csi(b"\x1b[1\n2m"), 0, "its LF gains a CR");
+        assert_eq!(unwatched_csi(b"\x1b[1\x18m"), 0, "CAN ends it");
+        assert_eq!(unwatched_csi(b"\x1b[12;4"), 0, "not whole yet");
+        assert_eq!(unwatched_csi(b"\x1b]0;t\x07"), 0, "not a CSI");
+    }
+
+    /// The bulk paths keep a watched sequence's handling: a query in a
+    /// run of text and SGR is still answered, and a reset still followed
+    /// by the modes.
+    #[test]
+    fn watched_sequences_inside_a_bulk_run_still_act() {
+        let mut s = screen();
+        let (vt, replies) = client(&mut s, b"ab\x1b[31mcd\x1b[6nef", VT);
+        assert_eq!(vt, b"ab\x1b[31mcdef");
+        assert_eq!(replies, b"\x1b[1;5R");
+        let (vt, _) = client(&mut s, b"x\x1b[0m\x1b[?9001ly", VT);
+        assert_eq!(vt, b"x\x1b[0m\x1b[?9001l\x1b[?9001hy");
+    }
+
+    #[test]
+    fn only_dsr_and_decrst_finals_are_watched() {
+        assert!(matches!(
+            watched_at(b"\x1b[5n"),
+            Watched::Whole(4, Action::Answer)
+        ));
+        assert!(matches!(
+            watched_at(b"\x1b[?6n"),
+            Watched::Whole(5, Action::Answer)
+        ));
+        assert!(matches!(watched_at(b"\x1b[?6;1n"), Watched::No));
+        assert!(matches!(
+            watched_at(b"\x1b[?1;9001l"),
+            Watched::Whole(_, Action::Reassert(_))
+        ));
+        assert!(
+            matches!(watched_at(b"\x1b[9001l"), Watched::No),
+            "not private"
+        );
+        assert!(matches!(watched_at(b"\x1b[38;5;196m"), Watched::No));
+        assert!(matches!(watched_at(b"\x1b[12;40H"), Watched::No));
+        assert!(matches!(watched_at(b"\x1b[38;5"), Watched::Prefix));
+    }
+
+    /// Client VT throughput of the screen alone, over the corpus from
+    /// `rusty_term/bench/gen_workloads.py` in `$RUSTY_CONHOST_WORKLOADS`:
+    /// 80x24, 64 KiB writes, the output queue drained after each slice as
+    /// the engine does. Run with
+    /// `cargo test --release -p rusty_conhost measure_client_vt -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement; needs $RUSTY_CONHOST_WORKLOADS"]
+    fn measure_client_vt() {
+        let Ok(dir) = std::env::var("RUSTY_CONHOST_WORKLOADS") else {
+            return;
+        };
+        let mut paths: Vec<_> = std::fs::read_dir(&dir)
+            .expect("workload dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "vt"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let data = std::fs::read(&path).expect("workload");
+            let best = (0..5)
+                .map(|_| {
+                    let mut s = Screen::new(WinSize { rows: 24, cols: 80 });
+                    let (mut out, mut replies) = (OutputQueue::default(), Vec::new());
+                    let t = std::time::Instant::now();
+                    for write in data.chunks(64 * 1024) {
+                        let mut done = 0;
+                        while done < write.len() {
+                            let rest = &write[done..];
+                            done +=
+                                s.client(rest, VT, 64 * 1024, done == 0, &mut out, &mut replies);
+                            std::hint::black_box(out.take());
+                        }
+                    }
+                    s.flush(&mut out);
+                    t.elapsed()
+                })
+                .min()
+                .expect("runs");
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
+            let mbps = data.len() as f64 / best.as_secs_f64() / 1e6;
+            println!(
+                "{name:20} {:8.1} ms {mbps:7.1} MB/s",
+                best.as_secs_f64() * 1e3
+            );
+        }
     }
 }

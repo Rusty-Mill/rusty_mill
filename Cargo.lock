@@ -7192,6 +7192,7 @@ version = "0.1.0"
 dependencies = [
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
  "rusty_multimodal_db_engine",
  "serde",
 ]
@@ -9232,7 +9233,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
  "toml 0.8.2",
 ]
 

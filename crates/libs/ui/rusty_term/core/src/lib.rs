@@ -54,7 +54,7 @@ pub use cell::{
 };
 pub use color::Theme;
 #[cfg(feature = "gui")]
-pub use color::ensure_contrast;
+pub use color::{contrast_ratio, ensure_contrast};
 #[cfg(any(test, feature = "gui"))]
 pub use grid::BidiRow;
 #[cfg(any(test, feature = "gui"))]

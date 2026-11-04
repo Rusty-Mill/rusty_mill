@@ -20,6 +20,7 @@
 )]
 
 mod assignments;
+mod meters;
 mod record;
 
 use std::fmt;
@@ -30,6 +31,7 @@ use orch_core::factory::Factory;
 use orch_core::task::Plan;
 use orch_core::GoalId;
 use orch_dispatch::Ledger;
+use orch_lens::meter::Snapshot;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
@@ -37,6 +39,7 @@ use rusty_multimodal_db_engine::generic::query::GetById;
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
+use meters::MeterRecord;
 use record::{ById, GoalRecord, Revision};
 
 /// The store's files inside its directory.
@@ -45,6 +48,8 @@ const GOALS_FILE: &str = "goals.mmap";
 /// v1 assignment records, read for goals not saved since leases.
 const LEGACY_ASSIGNMENTS_FILE: &str = "assignments.mmap";
 const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
+/// Lens experiment meters (#594).
+const METERS_FILE: &str = "meters.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -126,6 +131,7 @@ pub struct Store {
     goals: GenericMmapStore<GoalRecord, ById, Revision>,
     assignments: GenericMmapStore<AssignmentRecord, ById, Revision>,
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
+    meters: GenericMmapStore<MeterRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -152,6 +158,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(METERS_FILE);
+        let meters = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -162,6 +174,7 @@ impl Store {
             goals,
             assignments,
             legacy,
+            meters,
             _lock: lock,
         })
     }
@@ -267,6 +280,50 @@ impl Store {
                 .replace(record)
                 .map_err(|e| StoreError::Engine(engine_error(e)))
         }
+    }
+}
+
+impl Store {
+    /// The saved meter of lens experiment `experiment`, or `None` when
+    /// none was saved. Restore it with `orch_lens::meter::Meter::restore`,
+    /// which charges every reservation still held.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record under its key names another
+    /// experiment or lists a task twice.
+    pub fn load_meter(&self, experiment: &str) -> Result<Option<Snapshot>, StoreError> {
+        self.meters
+            .get(meters::key(experiment))
+            .map(|r| r.into_snapshot(experiment))
+            .transpose()
+    }
+
+    /// Save `snapshot` as the meter of `experiment`. A successful return
+    /// means it is durable, so a reservation in it may be spent.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another
+    /// experiment's meter; [`StoreError::Engine`] when the write fails.
+    pub fn save_meter(&mut self, experiment: &str, snapshot: &Snapshot) -> Result<(), StoreError> {
+        let existing = self.meters.get(meters::key(experiment));
+        if let Some(r) = &existing {
+            if r.experiment != experiment {
+                return Err(StoreError::Corrupt(format!(
+                    "meter key for {experiment:?} holds {:?}",
+                    r.experiment
+                )));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = MeterRecord::new(experiment, snapshot, revision);
+        let written = if existing.is_none() {
+            self.meters.insert(record).map_err(engine_error)
+        } else {
+            self.meters.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
     }
 }
 

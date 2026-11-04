@@ -46,7 +46,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::pace::Pacer;
-use super::render::{CpuRenderer, PaneFrame, Renderer};
+use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors};
 use super::settings::{CATEGORIES, Field, Settings, Widget};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
@@ -1372,6 +1372,7 @@ impl WindowState<'_> {
                 trail: Vec::new(),
                 hover_link: None,
                 marks: Vec::new(),
+                search: SearchColors::default(),
             };
             renderer.render(
                 std::slice::from_ref(&frame),
@@ -1497,6 +1498,7 @@ impl WindowState<'_> {
             crate::core::BlockMark::Error => self.theme.palette16[1],
             crate::core::BlockMark::Running => self.theme.cursor,
         };
+        let search = SearchColors::from_theme(&self.theme);
         let mut frames: Vec<PaneFrame> = snaps
             .iter()
             .map(|(g, r, foc)| PaneFrame {
@@ -1520,6 +1522,7 @@ impl WindowState<'_> {
                 } else {
                     Vec::new()
                 },
+                search,
             })
             .collect();
         if let Some(dg) = &dock_grid {
@@ -1532,6 +1535,7 @@ impl WindowState<'_> {
                 trail: Vec::new(),
                 hover_link: None,
                 marks: Vec::new(),
+                search: SearchColors::default(),
             });
         }
         renderer.render(

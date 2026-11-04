@@ -11,6 +11,7 @@ Never ask Nano first. Most specific row first; paths not listed have no expert y
 |---|---|
 | `crates/libs/ui/rusty_term/src/gui/**` and GUI visual design (`docs/projects/rusty_term/gui-design/**`) | `rusty-term-design-expert`. Needs the Paper MCP server, which runs locally on Nano's Windows machine; in a cloud session it answers from its pack only and can't edit designs. Code behaviour of the GUI goes to `rusty-term-expert`. |
 | `crates/libs/ui/rusty_term/**`, `crates/libs/ui/rusty_conhost/**`, `crates/apps/rusty_mux/**`, `crates/platform/rustils/crates/platform-windows/**` (condrv), `docs/projects/rusty_term/**`, `docs/projects/term/**`, `docs/projects/mux/**` | `rusty-term-expert` |
+| `crates/apps/rusty_bbp_host/**`, `crates/libs/protocol/rusty_bbp/**`, `crates/apps/rusty_orch/**`, `crates/foundation/rusty_crdt/**`, `docs/bbp/**`, `docs/projects/let-em-loose/**`, `crates/apps/rusty_mill_board/**` for #595 inbox work, and any Mill Board card tagged `let-em-loose` | `let-em-loose-expert`. It records Nano's answers only with a reference to where he said them (message link or id, card comment, or remind-me id), and its open questions go to `docs/projects/let-em-loose/handoff/OPEN_QUESTIONS.md`. |
 
 Call it with `subagent_type: "<expert>"`. **Fallback:** if that type isn't available (cloud sessions can
 fail to load agents), read `.claude/agents/<expert>.md` fresh at call time and spawn a general-purpose

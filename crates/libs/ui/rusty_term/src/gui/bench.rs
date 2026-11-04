@@ -12,7 +12,7 @@ use crate::core::FrameView;
 
 use super::damage::{Damage, Frame, Plan};
 use super::font::{self, FontCache, GlyphSource};
-use super::render::{self, PaneFrame};
+use super::render::{self, PaneFrame, SearchColors};
 
 /// An offscreen frame target with a loaded font.
 pub struct FrameBench {
@@ -70,6 +70,7 @@ impl FrameBench {
             trail: Vec::new(),
             hover_link: None,
             marks,
+            search: SearchColors::default(),
         };
         let colors = [0x202020, 0x000000, 0x101010];
         let panes = [pane];

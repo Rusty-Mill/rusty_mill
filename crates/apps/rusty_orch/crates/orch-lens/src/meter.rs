@@ -97,6 +97,16 @@ impl fmt::Display for Stop {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Ticket(u64);
 
+/// A meter's persisted form: settled spend, each task's account as
+/// `(task, spent, calls)`, and each reservation held as `(task, amount)`.
+/// The ceilings are config, so they are not part of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Snapshot {
+    pub experiment_spent: u64,
+    pub tasks: Vec<(String, u64, u32)>,
+    pub reserved: Vec<(String, u64)>,
+}
+
 /// What one task has settled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Account {
@@ -194,6 +204,49 @@ impl Meter {
         self.reserved
             .values()
             .fold(0, |sum, (_, amount)| sum.saturating_add(*amount))
+    }
+
+    /// Drop a reservation for a call that never started: nothing is
+    /// charged and no call is counted.
+    pub fn release(&mut self, ticket: Ticket) {
+        self.reserved.remove(&ticket.0);
+    }
+
+    /// Everything a later process needs to continue this meter.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            experiment_spent: self.experiment_spent,
+            tasks: self
+                .tasks
+                .iter()
+                .map(|(t, a)| (t.clone(), a.spent, a.calls))
+                .collect(),
+            reserved: self.reserved.values().cloned().collect(),
+        }
+    }
+
+    /// The meter a snapshot was taken of, after a crash. A reservation
+    /// still held may belong to a call that reached its provider, so it
+    /// settles at the amount held and counts as a call: a restart errs
+    /// toward stopping.
+    pub fn restore(ceilings: Ceilings, snapshot: &Snapshot) -> Self {
+        let mut m = Self::new(ceilings, snapshot.experiment_spent);
+        for (task, spent, calls) in &snapshot.tasks {
+            m.tasks.insert(
+                task.clone(),
+                Account {
+                    spent: *spent,
+                    calls: *calls,
+                },
+            );
+        }
+        for (task, held) in &snapshot.reserved {
+            let account = m.tasks.entry(task.clone()).or_default();
+            account.calls = account.calls.saturating_add(1);
+            account.spent = account.spent.saturating_add(*held);
+            m.experiment_spent = m.experiment_spent.saturating_add(*held);
+        }
+        m
     }
 
     /// Held and in flight for one task.
@@ -425,5 +478,47 @@ mod tests {
         let mut m = Meter::new(CEIL, 0);
         let _lost = m.reserve(T, 20 * USD).expect("held");
         assert_eq!(m.reserve(T, 6 * USD), Err(Stop::TaskSpend));
+    }
+
+    #[test]
+    fn a_released_reservation_charges_nothing() {
+        let mut m = Meter::new(CEIL, 0);
+        let t = m.reserve(T, 5 * USD).expect("room");
+        m.release(t);
+        assert_eq!((m.reserved(), m.calls(T), m.task_spent(T)), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_restored_meter_settles_held_reservations_at_their_amount() {
+        let mut m = Meter::new(CEIL, 7);
+        let t = m.reserve(T, 2 * USD).expect("room");
+        m.settle(t, USD);
+        let _in_flight = m.reserve(T, 3 * USD).expect("room");
+        let _other = m.reserve("task-2", 0).expect("room");
+        let snap = m.snapshot();
+        let r = Meter::restore(CEIL, &snap);
+        assert_eq!(r.reserved(), 0, "nothing is held after a restart");
+        assert_eq!(r.task_spent(T), 4 * USD, "settled 1 + held 3");
+        assert_eq!(r.calls(T), 2);
+        assert_eq!(r.calls("task-2"), 1, "a free call in flight still counts");
+        assert_eq!(r.experiment_spent(), 7 + 4 * USD);
+        assert_eq!(
+            Meter::restore(CEIL, &r.snapshot()),
+            r,
+            "a clean snapshot round-trips"
+        );
+    }
+
+    #[test]
+    fn a_restored_meter_keeps_its_ceilings() {
+        let ceil = Ceilings {
+            task_calls: 2,
+            ..CEIL
+        };
+        let mut m = Meter::new(ceil, 0);
+        let _a = m.reserve(T, 0).expect("room");
+        let _b = m.reserve(T, 0).expect("room");
+        let mut r = Meter::restore(ceil, &m.snapshot());
+        assert_eq!(r.reserve(T, 0), Err(Stop::TaskCalls));
     }
 }

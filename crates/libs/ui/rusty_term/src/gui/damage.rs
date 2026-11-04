@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 
 use crate::core::{BidiRow, Cell, CursorShape, RowKey};
 
-use super::render::PaneFrame;
+use super::render::{PaneFrame, SearchColors};
 
 /// Presented frames remembered. softbuffer reports a buffer age of 1 on
 /// X11 and Win32 and 2 on Wayland (double buffered), and 0 (unknown) on
@@ -43,6 +43,7 @@ struct PaneLayout {
     status: Option<Vec<Cell>>,
     cursor_color: u32,
     min_contrast: u32,
+    search: SearchColors,
 }
 
 /// Everything one pane row's pixels depend on besides [`Layout`]. The GPU
@@ -120,6 +121,7 @@ fn pane_layout(p: &PaneFrame) -> PaneLayout {
         status: g.status_row().map(<[Cell]>::to_vec),
         cursor_color: g.cursor_color,
         min_contrast: g.min_contrast.to_bits(),
+        search: p.search,
     }
 }
 

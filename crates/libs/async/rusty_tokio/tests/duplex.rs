@@ -1,5 +1,9 @@
-use rusty_tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use rusty_tokio::io::{self, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use rusty_tokio::Runtime;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 #[test]
@@ -114,4 +118,72 @@ fn shutdown_half_closes_without_dropping_the_whole_stream() {
         a.read_exact(&mut reply).await.unwrap();
         assert_eq!(&reply, b"got it");
     });
+}
+
+/// A waker that counts how often it was woken.
+#[derive(Default)]
+struct Counter(AtomicUsize);
+
+impl Wake for Counter {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+fn counter() -> (Arc<Counter>, Waker) {
+    let count = Arc::new(Counter::default());
+    let waker = Waker::from(count.clone());
+    (count, waker)
+}
+
+fn wakes(count: &Counter) -> usize {
+    count.0.load(Ordering::SeqCst)
+}
+
+fn poll_write(half: &mut io::DuplexStream, waker: &Waker) -> Poll<std::io::Result<usize>> {
+    Pin::new(half).poll_write(&mut Context::from_waker(waker), b"x")
+}
+
+/// A one-byte duplex pair whose `a` -> `b` buffer is already full.
+fn full_pair() -> (io::DuplexStream, io::DuplexStream) {
+    let (mut a, b) = io::duplex(1);
+    let (_, idle) = counter();
+    assert!(matches!(poll_write(&mut a, &idle), Poll::Ready(Ok(1))));
+    (a, b)
+}
+
+#[test]
+fn a_blocked_writer_re_polled_with_a_new_waker_is_woken_through_that_one() {
+    let (mut a, mut b) = full_pair();
+    let (first, first_waker) = counter();
+    let (second, second_waker) = counter();
+    assert!(poll_write(&mut a, &first_waker).is_pending());
+    assert!(poll_write(&mut a, &second_waker).is_pending());
+
+    let mut byte = [0u8; 1];
+    let mut buf = ReadBuf::new(&mut byte);
+    let (_, idle) = counter();
+    let read = Pin::new(&mut b).poll_read(&mut Context::from_waker(&idle), &mut buf);
+    assert!(matches!(read, Poll::Ready(Ok(()))));
+
+    assert_eq!(wakes(&second), 1, "the latest waker is woken");
+    assert_eq!(wakes(&first), 0, "the replaced waker is not");
+    assert!(matches!(
+        poll_write(&mut a, &second_waker),
+        Poll::Ready(Ok(1))
+    ));
+}
+
+#[test]
+fn dropping_the_reader_wakes_a_blocked_writer_which_then_fails() {
+    let (mut a, b) = full_pair();
+    let (count, waker) = counter();
+    assert!(poll_write(&mut a, &waker).is_pending());
+
+    drop(b);
+    assert_eq!(wakes(&count), 1, "dropping the reader wakes the writer");
+    match poll_write(&mut a, &waker) {
+        Poll::Ready(Err(err)) => assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe),
+        other => panic!("expected BrokenPipe after the reader dropped, got {other:?}"),
+    }
 }
