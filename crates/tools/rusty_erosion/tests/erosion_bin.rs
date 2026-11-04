@@ -382,6 +382,27 @@ fn an_updated_submodule_with_a_non_utf8_rust_name_is_skipped() {
 }
 
 #[test]
+fn rust_removed_from_the_index_and_ignored_is_a_deletion() {
+    let repo = Repo::new("ignored");
+    let base = repo.head();
+    repo.git(&["rm", "--cached", "--quiet", "src/a.rs"]);
+    repo.write(".gitignore", "/src/a.rs\n");
+    let status = repo.git(&["diff", "--name-status", "--no-renames", &base]);
+    assert!(status.contains("D\tsrc/a.rs"), "{status}");
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"functions\":-1"),
+        "{}",
+        stdout(&out)
+    );
+    // Even an unreadable ignored copy is not the candidate's.
+    std::fs::write(repo.dir.join("src/a.rs"), b"fn a() { \xff }\n").expect("write");
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+}
+
+#[test]
 fn an_updated_submodule_with_a_rust_name_is_skipped() {
     let repo = Repo::new("subname");
     let sub = repo.dir.join("vendor.rs");

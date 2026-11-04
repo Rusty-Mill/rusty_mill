@@ -313,12 +313,12 @@ fn base_snapshot(base: &str) -> Result<Snapshot, String> {
 /// (D45), so nothing about them, not even a failed lookup, decides the
 /// result.
 fn worktree(changed: &BTreeSet<String>, mangled: &Mangled) -> Result<Snapshot, String> {
-    let gitlinks = index_gitlinks()?;
+    let tree = CandidateTree::read()?;
     let mut snap = Snapshot::default();
     // Names that are not UTF-8 are listed by their lossy text, never opened;
-    // a gitlink, or a path under one, is matched by its raw bytes first.
+    // membership is decided by their raw bytes first.
     for (raw, name) in mangled {
-        if in_gitlink(raw, &gitlinks) {
+        if !tree.holds(raw) {
             continue;
         }
         match classify(name) {
@@ -332,7 +332,7 @@ fn worktree(changed: &BTreeSet<String>, mangled: &Mangled) -> Result<Snapshot, S
         }
     }
     for path in changed {
-        if in_gitlink(path.as_bytes(), &gitlinks) {
+        if !tree.holds(path.as_bytes()) {
             continue;
         }
         match classify(path) {
@@ -352,32 +352,53 @@ fn worktree(changed: &BTreeSet<String>, mangled: &Mangled) -> Result<Snapshot, S
     Ok(snap)
 }
 
-/// Index entries with mode `160000`, the candidate's submodules, by their
-/// raw path bytes so identity stays exact whatever the encoding.
-fn index_gitlinks() -> Result<BTreeSet<Vec<u8>>, String> {
-    let mut out = BTreeSet::new();
-    for entry in git(&["ls-files", "-s", "-z"])?.split(|b| *b == 0) {
-        // `<mode> <object> <stage>\t<path>`
-        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
-            continue;
-        };
-        if entry.starts_with(b"160000 ") {
-            out.insert(entry[tab + 1..].to_vec());
-        }
-    }
-    Ok(out)
+/// Which paths the candidate tree has, by raw path bytes so identity stays
+/// exact whatever the encoding: what the index tracks plus untracked,
+/// unignored files, the same set `changed_paths` draws from. A path git
+/// reports deleted that is still on disk (removed from the index and then
+/// ignored, say) is not in it.
+struct CandidateTree {
+    members: BTreeSet<Vec<u8>>,
+    /// Index entries with mode `160000`: the candidate's submodules.
+    gitlinks: BTreeSet<Vec<u8>>,
 }
 
-/// Whether `path` is a gitlink or lies under one: the submodule's tree, not
-/// this one's, so not this tree's source (in the base, gitlinks are skipped
-/// the same way).
-fn in_gitlink(path: &[u8], gitlinks: &BTreeSet<Vec<u8>>) -> bool {
-    let prefixes = path
-        .iter()
-        .enumerate()
-        .filter(|(_, b)| **b == b'/')
-        .map(|(i, _)| &path[..i]);
-    prefixes.chain([path]).any(|p| gitlinks.contains(p))
+impl CandidateTree {
+    fn read() -> Result<CandidateTree, String> {
+        let mut members = BTreeSet::new();
+        let mut gitlinks = BTreeSet::new();
+        for entry in git(&["ls-files", "-s", "-z"])?.split(|b| *b == 0) {
+            // `<mode> <object> <stage>\t<path>`
+            let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+                continue;
+            };
+            let path = entry[tab + 1..].to_vec();
+            if entry.starts_with(b"160000 ") {
+                gitlinks.insert(path.clone());
+            }
+            members.insert(path);
+        }
+        let others = git(&["ls-files", "-z", "--others", "--exclude-standard"])?;
+        members.extend(
+            others
+                .split(|b| *b == 0)
+                .filter(|p| !p.is_empty())
+                .map(<[u8]>::to_vec),
+        );
+        Ok(CandidateTree { members, gitlinks })
+    }
+
+    /// Whether `path` is this tree's own file: a member, and neither a
+    /// gitlink nor under one (the submodule's tree, skipped in the base too).
+    fn holds(&self, path: &[u8]) -> bool {
+        let prefixes = path
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| **b == b'/')
+            .map(|(i, _)| &path[..i]);
+        let in_gitlink = prefixes.chain([path]).any(|p| self.gitlinks.contains(p));
+        self.members.contains(path) && !in_gitlink
+    }
 }
 
 /// A working-tree path, without following any symlink.
