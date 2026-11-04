@@ -9,6 +9,7 @@ Resolved items are checked and point to the D# or QA entry that answers them. On
 - [ ] Q1 (2026-11-03, n): What did the 2026-11-03 design chat decide beyond Nano's handoff prompt? The share link renders without the conversation, so its content couldn't be read. — interim choice: rely on the repo docs, remind-me and cards; nothing is attributed to the chat.
 - [ ] Q2 (2026-11-03, n): Is the #596 pre-registered erosion criterion ("treatment arm's erosion delta no worse than baseline on 4 of 5 runs", erosion-gate-design §6) adopted? Nano's §11 answers and D41–D45 don't mention it. — interim choice: not part of the #596 rule until Nano confirms.
 - [ ] Q3 (2026-11-03, n): Are the #599 changes in 599-gaps-design.md §6 approved? Nano answered Q1–Q4 but no comment approves §6. — interim choice: treat §6 as needing approval (Ask first: schema/API).
+- [ ] Q12 (2026-11-04, n): Should `claim_card` carry each evidence item's note (and strength), so the #594 lens runner needn't spend charged `read` calls to fill them? Additive `rusty_bbp` public API change. — interim choice: incremental cached `read(after)` per lens session (D54).
 
 ## Waiting on Nano (sourced as open)
 
