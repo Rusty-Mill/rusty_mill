@@ -34,6 +34,7 @@ Each item is small and needs no new crate or dependency. Order avoids file confl
 | 4 | Conhost next ceiling: profile `Screen::client`/forward (~53%) and the mirror-grid parse (~32%) on Beast, measurements first | Host is now the Windows path; numbers decide whether a fix is worth it | none for the profile; the fix is a separate go |
 | 5 | Skill text read from the installed binary (Orca O3, Rex D1); new row C73 | XS; both peers do it; installed skill stays matched to the binary | Nano's go on the row; reconfirm the agent paths (K4) |
 | 6 | Agent hook plus OSC 7501 status precedence (Orca O2) | Richer agent status, OSC as the fallback on hosts without hooks | Nano's go; a new `Features` bit if peers see new events |
+| 7 | Snapshot encode reliably at or below libghostty (ROADMAP Phase 0's open ≤ 11.2 ms target, #939): profile, then fix | Owner wants it tried, not waved off (question 13) | none; measured on a fixed host |
 
 ## After that: the larger arcs
 
@@ -118,9 +119,12 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
     compatibility is the test, and MIT code is copied with its notice (as `rusty_conhost`'s
     THIRD_PARTY_NOTICES.md does for microsoft/terminal). No copied code was found outside
     rusty_conhost (grep, 2026-11-04). Nano to restate on this PR.
-13. **Smaller carry-overs:** snapshot encode speed against libghostty a hard target (no,
-    recommended); a config key for mode 2027 clustering (yes, off by default); after Phase B,
-    move rusty_term's ConPTY rollback backend onto platform-windows's wrapper (yes, recommended).
+13. **Smaller carry-overs.** *Answered (Nano, project thread, 2026-11-04 12:32Z: "A. We should
+    try, not just hand wave / B. Yes / C. Yes"):*
+    - Snapshot encode reliably at or below libghostty's time is a real target: next item 7.
+    - A config key for mode 2027 grapheme clustering, off by default.
+    - rusty_term's ConPTY rollback backend moves onto platform-windows's wrapper.
+    Nano to restate on this PR.
 
 ## How this file is kept
 
