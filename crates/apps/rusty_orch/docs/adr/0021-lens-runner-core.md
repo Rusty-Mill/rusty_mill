@@ -40,9 +40,10 @@ providers and posts.
 - **Policies (#596, D36).** A round's jobs pass through a run `Policy`
   after the rules above: `EventDriven` runs them all in schedule order,
   `ValueDriven` runs only the jobs of the top N claims by the integer
-  value score (`orch_lens::value`), so lower-value claims wait a round.
-  A policy picks among scheduled jobs and never makes one, so it cannot
-  bypass a rule. An optional shadow policy's pick is reported, not run.
+  value score (`orch_lens::value`), aged by rounds waited so none
+  starves, and never a claim worth 0. `round` drops any picked job that
+  was not scheduled, so a policy cannot bypass a rule. An optional shadow
+  policy's pick is reported, not run.
 
 ## Consequences
 
@@ -52,5 +53,8 @@ providers and posts.
   shell and the #598 host changes.
 - The value score reads only the card and the runner's in-flight jobs; a
   claim's `built` term follows `ClaimView::current`, which a lens that
-  cannot read the candidate sees as unbuilt. Shadow and question records,
+  cannot read the candidate sees as unbuilt. The in-flight term is 0
+  while `round` runs one job at a time. The shadow report carries job
+  keys only; per-claim values for weight tuning come with the shadow
+  records. Shadow and question records,
   `--policy`/`--shadow` and `lens shadow` wait for `lens run` (#1467).

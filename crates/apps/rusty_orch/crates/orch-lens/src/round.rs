@@ -16,7 +16,7 @@
 //! - The run [`Policy`] picks which scheduled jobs run, and in what order;
 //!   a shadow policy's pick for the same jobs is reported, not run (#596).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rusty_bbp::{Direction, MsgId};
 
@@ -49,10 +49,9 @@ pub struct View<'a> {
 }
 
 /// The policy a round runs, and one it only reports (#596 Phase A).
-#[derive(Clone, Copy)]
 pub struct Policies<'a> {
-    pub run: &'a dyn Policy,
-    pub shadow: Option<&'a dyn Policy>,
+    pub run: &'a mut dyn Policy,
+    pub shadow: Option<&'a mut dyn Policy>,
 }
 
 /// Why a round ended early. Nothing is recorded for the job it ended on.
@@ -101,12 +100,12 @@ pub fn round(
         state.unservable(s);
     }
     let shadow = policies.shadow.map(|p| {
-        p.pick(view.cards, state, jobs.clone())
-            .into_iter()
-            .map(|j| j.key)
-            .collect()
+        keys(only_scheduled(
+            &jobs,
+            p.pick(view.cards, state, jobs.clone()),
+        ))
     });
-    let jobs = policies.run.pick(view.cards, state, jobs);
+    let jobs = only_scheduled(&jobs, policies.run.pick(view.cards, state, jobs.clone()));
     let by_id: BTreeMap<MsgId, &Card> = view.cards.iter().map(|c| (c.id, c)).collect();
     let mut ran = Vec::new();
     for job in &jobs {
@@ -147,6 +146,20 @@ pub fn round(
         shadow,
         halt: None,
     }
+}
+
+/// The picked jobs that were scheduled, each once: a policy cannot make a
+/// job the rules did not.
+fn only_scheduled(scheduled: &[Job], picked: Vec<Job>) -> Vec<Job> {
+    let mut allowed: BTreeSet<&JobKey> = scheduled.iter().map(|j| &j.key).collect();
+    picked
+        .into_iter()
+        .filter(|j| allowed.remove(&j.key))
+        .collect()
+}
+
+fn keys(jobs: Vec<Job>) -> Vec<JobKey> {
+    jobs.into_iter().map(|j| j.key).collect()
 }
 
 fn report(
@@ -346,7 +359,7 @@ mod tests {
         prefixes: &BTreeMap<String, String>,
     ) -> Out {
         let policies = Policies {
-            run: &EventDriven,
+            run: &mut EventDriven,
             shadow: None,
         };
         go_policies(cards, state, task_calls, echo, board, prefixes, policies)
@@ -551,12 +564,10 @@ mod tests {
         let mut low = plain(7);
         low.stakes = rusty_bbp::Stakes::Low;
         let cards = [low, plain(8)];
-        let value = ValueDriven {
-            claims: std::num::NonZeroUsize::MIN,
-        };
+        let mut value = ValueDriven::new(std::num::NonZeroUsize::MIN);
         let policies = Policies {
-            run: &value,
-            shadow: Some(&EventDriven),
+            run: &mut value,
+            shadow: Some(&mut EventDriven),
         };
         let out = go_policies(
             &cards,

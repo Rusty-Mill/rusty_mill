@@ -1,13 +1,15 @@
 //! Scheduling policies (#596, D36): which of the scheduled jobs a round
 //! runs, and in what order. The #594 rules in [`crate::schedule`] decide
-//! which jobs may exist; a policy only picks among them, so no rule can be
-//! bypassed by a policy.
+//! which jobs may exist; a policy only picks among them, and
+//! [`crate::round::round`] drops any job it returns that was not scheduled.
 //!
 //! - [`EventDriven`]: every job, in schedule order. Today's behaviour and
 //!   the baseline.
-//! - [`ValueDriven`]: only the jobs of the highest-value claims
-//!   ([`crate::value`]), highest first. The rest wait for a later round, by
-//!   which time other evidence may have settled them.
+//! - [`ValueDriven`]: only the jobs of the highest-ranked claims, by value
+//!   ([`crate::value`]) aged by the rounds each has waited. The rest wait
+//!   for a later round, by which time other evidence may have settled them.
+//!   Unlike the baseline, it never runs a claim worth 0 (settled or out of
+//!   budget).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -20,10 +22,8 @@ use crate::value::values;
 
 /// Picks and orders a round's jobs.
 pub trait Policy {
-    /// The policy's name, as reports and shadow records give it.
-    fn name(&self) -> &'static str;
     /// The jobs to run, in order: a subset of `jobs`, never a new one.
-    fn pick(&self, cards: &[Card], state: &State, jobs: Vec<Job>) -> Vec<Job>;
+    fn pick(&mut self, cards: &[Card], state: &State, jobs: Vec<Job>) -> Vec<Job>;
 }
 
 /// Every job, in schedule order.
@@ -31,44 +31,62 @@ pub trait Policy {
 pub struct EventDriven;
 
 impl Policy for EventDriven {
-    fn name(&self) -> &'static str {
-        "event"
-    }
-
-    fn pick(&self, _: &[Card], _: &State, jobs: Vec<Job>) -> Vec<Job> {
+    fn pick(&mut self, _: &[Card], _: &State, jobs: Vec<Job>) -> Vec<Job> {
         jobs
     }
 }
 
-/// The jobs of the `claims` highest-value claims, highest first. Ties go
-/// to the older claim; a claim's own jobs keep their schedule order. A
-/// claim worth 0 gets no job.
-#[derive(Debug, Clone, Copy)]
+/// The jobs of the `claims` highest-ranked claims, highest first. A
+/// claim's rank is its value × (1 + rounds it had jobs but was passed
+/// over), so a claim that keeps winning without settling (its providers
+/// failing, say) cannot starve the rest. Ties go to the lower id, which in
+/// BBP is the older claim; a claim's own jobs keep their schedule order.
+#[derive(Debug, Clone)]
 pub struct ValueDriven {
-    pub claims: NonZeroUsize,
+    claims: NonZeroUsize,
+    waited: BTreeMap<MsgId, u64>,
+}
+
+impl ValueDriven {
+    pub fn new(claims: NonZeroUsize) -> Self {
+        Self {
+            claims,
+            waited: BTreeMap::new(),
+        }
+    }
 }
 
 impl Policy for ValueDriven {
-    fn name(&self) -> &'static str {
-        "value"
-    }
-
-    fn pick(&self, cards: &[Card], state: &State, mut jobs: Vec<Job>) -> Vec<Job> {
+    fn pick(&mut self, cards: &[Card], state: &State, mut jobs: Vec<Job>) -> Vec<Job> {
         let worth = values(cards, state);
-        let of = |claim: &MsgId| worth.get(claim).copied().unwrap_or(0);
-        let mut ranked: Vec<MsgId> = jobs
+        let wanting: BTreeSet<MsgId> = jobs
             .iter()
             .map(|j| j.key.claim)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter(|c| of(c) > 0)
+            .filter(|c| worth.get(c).is_some_and(|v| *v > 0))
             .collect();
-        // Stable over ascending ids, so equal values keep the older claim first.
-        ranked.sort_by_key(|c| std::cmp::Reverse(of(c)));
+        let rank = |c: &MsgId| {
+            let waited = self.waited.get(c).copied().unwrap_or(0);
+            worth
+                .get(c)
+                .copied()
+                .unwrap_or(0)
+                .saturating_mul(1 + waited)
+        };
+        let mut ranked: Vec<MsgId> = wanting.iter().copied().collect();
+        // Stable over ascending ids, so equal ranks keep the older claim first.
+        ranked.sort_by_key(|c| std::cmp::Reverse(rank(c)));
         ranked.truncate(self.claims.get());
-        let rank: BTreeMap<MsgId, usize> = ranked.into_iter().zip(0..).collect();
-        jobs.retain(|j| rank.contains_key(&j.key.claim));
-        jobs.sort_by_key(|j| rank.get(&j.key.claim).copied());
+        let order: BTreeMap<MsgId, usize> = ranked.into_iter().zip(0..).collect();
+        self.waited.retain(|c, _| wanting.contains(c));
+        for c in &wanting {
+            if order.contains_key(c) {
+                self.waited.remove(c);
+            } else {
+                *self.waited.entry(*c).or_insert(0) += 1;
+            }
+        }
+        jobs.retain(|j| order.contains_key(&j.key.claim));
+        jobs.sort_by_key(|j| order.get(&j.key.claim).copied());
         jobs
     }
 }
@@ -104,9 +122,7 @@ mod tests {
     }
 
     fn top(n: usize) -> ValueDriven {
-        ValueDriven {
-            claims: NonZeroUsize::new(n).expect("nonzero"),
-        }
+        ValueDriven::new(NonZeroUsize::new(n).expect("nonzero"))
     }
 
     #[test]
@@ -155,5 +171,18 @@ mod tests {
         let cards = [spent, plain(2, Stakes::Low)];
         let picked = top(5).pick(&cards, &State::default(), jobs(&cards));
         assert_eq!(claims(&picked), [2]);
+    }
+
+    #[test]
+    fn a_passed_over_claim_ages_into_a_round() {
+        // Claim 2 is worth 4x claim 1; with one claim a round, claim 1
+        // still runs within four rounds even though nothing settles.
+        let cards = [plain(1, Stakes::Low), plain(2, Stakes::High)];
+        let mut policy = top(1);
+        let picks: Vec<Vec<u64>> = (0..4)
+            .map(|_| claims(&policy.pick(&cards, &State::default(), jobs(&cards))))
+            .collect();
+        assert_eq!(picks[0], [2]);
+        assert!(picks.iter().any(|p| p == &[1]), "{picks:?}");
     }
 }

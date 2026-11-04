@@ -13,7 +13,10 @@
 //! - **Dependents**: 1 + open claims that depend on this one, directly or
 //!   through others, capped at [`DEPENDENTS_CAP`].
 //! - **Cost**: 1 + this claim's jobs in flight (D68), + [`UNBUILT`] when no
-//!   candidate names it.
+//!   candidate names it. A question is never built, so it never pays
+//!   [`UNBUILT`]: its proposals are what make candidates. Today's round
+//!   runs its jobs one at a time and none is in flight when it picks, so
+//!   the in-flight term only bites once a runner picks with jobs running.
 //!
 //! Settled claims and claims with no budget left score 0. The weights may
 //! change in shadow mode and freeze before the paired runs (D36).
@@ -23,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use rusty_bbp::{ClaimStatus, MsgId};
 
 use crate::card::Card;
-use crate::schedule::State;
+use crate::schedule::{is_question, State};
 
 /// The reversibility weight of an irreversible claim (D67).
 pub const IRREVERSIBLE: u64 = 2;
@@ -50,7 +53,8 @@ pub fn value(card: &Card, dependents: u64, in_flight: u64) -> u64 {
         return 0;
     }
     let reversibility = if card.reversible { 1 } else { IRREVERSIBLE };
-    let cost = 1 + in_flight + if card.built { 0 } else { UNBUILT };
+    let unbuilt = !card.built && !is_question(card);
+    let cost = 1 + in_flight + if unbuilt { UNBUILT } else { 0 };
     uncertainty(card)
         .saturating_mul(card.stakes.factor())
         .saturating_mul(reversibility)
@@ -135,6 +139,15 @@ mod tests {
         c.built = false;
         assert_eq!(value(&c, 0, 0), 400);
         assert_eq!(value(&c, 0, 1), 320);
+    }
+
+    #[test]
+    fn a_question_is_not_charged_for_being_unbuilt() {
+        let mut q = base(1, &[]);
+        q.built = false;
+        q.answers = None;
+        q.domains = vec![crate::schedule::QUESTION_DOMAIN.to_owned()];
+        assert_eq!(value(&q, 0, 0), 1_600);
     }
 
     #[test]

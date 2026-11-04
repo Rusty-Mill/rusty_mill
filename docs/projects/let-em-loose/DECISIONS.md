@@ -596,7 +596,7 @@ Worked examples (concentration, duplication, in basis points):
 
 ## D68. #596 cost counts pending runs from orch's in-flight jobs
 
-**Decision.** The score's cost is 1 + the claim's in-flight jobs in orch's scheduler state (`State.in_flight` entries for that claim) + 3 if nothing is built yet (`ClaimView::current` is `None`). The "pending runs" term is kept and read from orch, not from BBP.
+**Decision.** The score's cost is 1 + the claim's in-flight jobs in orch's scheduler state (`State.in_flight` entries for that claim) + 3 if nothing is built yet (`ClaimView::current` is `None`). The "pending runs" term is kept and read from orch, not from BBP. A question (`orch_lens::schedule::is_question`: domain `question`, no `answers`) never pays the +3: no candidate ever names a question, so it would always count as unbuilt and its proposal jobs, which create the candidates, would rank below built claims. The in-flight term is 0 while `round` runs jobs one at a time; it starts counting once jobs run concurrently. (Amended 2026-11-04 after a fresh-context review.)
 **Why.** `ClaimView` has no pending-run count and D36 forbids a BBP change, but orch already knows what it has in flight on each claim, which is what the term guards against: piling effort onto a claim already being checked.
 **Rejected.** Dropping the term until BBP exposes it (changes the approved formula). Adding a count to `ClaimView` (BBP change, against D36).
 **Tag.** [default] · remind-me: mem_56219e7c93dc40749a9a7d5b1176bcc4
