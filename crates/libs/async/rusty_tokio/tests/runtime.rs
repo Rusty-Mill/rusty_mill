@@ -97,6 +97,22 @@ fn join_error_into_panic_returns_the_original_payload() {
 }
 
 #[test]
+fn join_error_is_send_and_sync_and_boxes_as_a_sync_error() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<rusty_tokio::task::JoinError>();
+
+    let rt = Runtime::new().unwrap();
+    let err = rt.block_on(async {
+        rusty_tokio::spawn(async { panic!("boom") })
+            .await
+            .unwrap_err()
+    });
+    // The card #404 use: a `Sync` error type holding a `JoinError`.
+    let boxed: Box<dyn std::error::Error + Send + Sync> = Box::new(err);
+    assert_eq!(boxed.to_string(), "task panicked");
+}
+
+#[test]
 fn join_error_try_into_panic_succeeds_for_an_actual_panic() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {

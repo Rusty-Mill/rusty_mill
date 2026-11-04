@@ -1,8 +1,10 @@
 # Let Em Loose - Beyond the Software Factory
 
-> Status: concept, 2026-11-02. This is the original concept and is not kept in step with later decisions: where it and [DECISIONS.md](DECISIONS.md) differ, DECISIONS.md wins (for example, v0 runs Claude, Codex and local models, not Gemini). Source of truth while the design settles: the [live doc](https://claude.ai/artifact/JoCPd4weXwkJ7Zy8qMjiJJ). Work is tracked on Mill Board cards #592 to #599, tagged `let-em-loose`. Companion docs: [SPEC.md](SPEC.md), [DECISIONS.md](DECISIONS.md), [QUESTIONS.md](QUESTIONS.md).
+> Status: concept, 2026-11-02. This is the original concept and is not kept in step with later decisions: where it and [DECISIONS.md](DECISIONS.md) differ, DECISIONS.md wins (for example, v0 runs Claude, Codex and local models, not Gemini). The [live doc](https://claude.ai/artifact/JoCPd4weXwkJ7Zy8qMjiJJ) is source provenance, not authority over repository rules or merged contracts. Read the [approval/source limits and current contract links](DECISIONS.md#authority-provenance-and-current-contracts); this concept grants no implementation start, live call, spending, credential or deployment permission. Work is tracked on Mill Board cards #592 to #599, tagged `let-em-loose`. Companion docs: [SPEC.md](SPEC.md), [DECISIONS.md](DECISIONS.md), [QUESTIONS.md](QUESTIONS.md).
 
 ![Let Em Loose: how the pieces fit](map.svg)
+
+Current erosion choices (D42/D44): report-only expiry pauses new affected tasks until thresholds are approved, preserving already-open tasks' settings/digests. Cleanup improves at least one metric and worsens neither; skip when both are zero. Budget Approve funds another attempt; explicit human accept/choose is the separate failure override. The map is a concept summary; D35 and QUESTIONS Q13–Q14 supply the revision fence and tool/evidence boundaries it cannot show.
 
 A working proposal for agentic development that isn't modelled on the assembly line.
 

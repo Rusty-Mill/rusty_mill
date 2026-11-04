@@ -18,6 +18,7 @@ The detailed logs stay where they are: mux `docs/projects/mux/DECISIONS.md`, `do
 | D8 | In-flight work (#1435, C71) is status, not decisions | it belonged to the old mux thread | — | [stated] | primary: same prompt: "In-flight work (#1435, C71) stays with the old mux thread; list it as status, not decisions." Both finished by harvest time (SPEC § Status) |
 | D9 | No new dependencies for the pack; keep it terse | — | — | [default] | Nano tagged it [default] in the harvest prompt |
 | D10 | Until `.claude/agents/rusty-term-design-expert.md` exists, a GUI **design** question (look, layout, taste) escalates to Nano; GUI **code behaviour** questions are answered here from code | D7's target is missing; taste is never a default | answering design from remind-me memories alone | [default] | harvest 2026-11-03; Q4 |
+| D64 | The agent-recorded quotes behind the 13 † rows D28, D29, D30, D32, D34, D36, D40, D41, D45, D47, D48, D50, D54 are Nano's own decisions; those rows stay `[stated]`, now confirmed by a primary source; D31/D63 are untouched (not asked) | Nano confirmed them when asked whether the agents' notes count as his decisions | re-asking each row; demoting them to `[default]` | [stated] | primary: Nano, project thread cmsg_014f6o52E2iAAAgMm9v8hh1wGLb3Bik4exmBnn4EQ9Wr64, msg cmsg_014f6o52E2iAAAgMm9v8hh1wEHeVwBrwbqb8YouFdf2w7h, 2026-11-03 21:02:20Z: "Yes I did", answering msg cmsg_014f6o52E2iAAAgMm9v8hh1wAbdhTTTGHDM1Vu5PYihHwc (~20:57Z) that listed those 13 D numbers |
 
 ## Terminal core (`rusty_term_core`)
 

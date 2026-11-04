@@ -19,13 +19,10 @@ serde = { workspace = true }
 serde_json.workspace = true
 thiserror = "2"
 toml.workspace = true
-# `tokio::sync::Mutex` guards the connection across remote awaits; `rusty_tokio`'s
-# mutex loses the wakeup when a queued waiter is cancelled (#1064).
-tokio = { workspace = true, features = ["sync"] }
-rusty-mcp-client = { workspace = true, optional = true }
-
-[dev-dependencies]
+# `rusty_tokio::sync::Mutex` guards the connection across remote awaits
+# (cancel-safe since #1066). Runtime-free: no executor is pulled in.
 rusty_tokio.workspace = true
+rusty-mcp-client = { workspace = true, optional = true }
 
 [features]
 # Expose the in-process FakeMcpClient for downstream offline tests.

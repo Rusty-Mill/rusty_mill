@@ -4,6 +4,23 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## The lens meter is saved in the state directory
+**2026-11-04**
+
+- The lens money meter is now stored with the rest of rusty_orch's state
+  (#594), one record per experiment, so a restart picks up its spend and
+  charges any call that was in flight.
+- Don't roll rusty_orch back past this release once a meter is saved.
+
+## The lens meter survives a restart
+**2026-11-03**
+
+- The money meter can be saved and restored (#594). After a crash, any
+  call that was still in flight is charged its full reserved worst case,
+  so a restart never under-counts spend.
+- Every lens call saves the meter after reserving and before asking the
+  provider. If that save fails, the call is not made.
+
 ## Lens jobs fall back and are metered per call
 **2026-11-03**
 
