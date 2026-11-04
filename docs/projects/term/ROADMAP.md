@@ -45,8 +45,8 @@ Each arc needs the owner's go before it starts, and its own plan.
    `rusty_tail` move (ADR-0003); PAM links libpam (native dependency); C47/C48 write to
    remote hosts and `~/.ssh/config`; TLS (card 506) touches `rusty_tls`.
 2. **One GUI for terminal and mux.** The terminal-mux design (session switcher, split-tree
-   thumbnails, server-owned layout, per-block status) is a requirement; the architecture is
-   not decided (question 1 below). This is where mux Phase 4's native client (C16) and C21,
+   thumbnails, server-owned layout, per-block status) is a requirement. The GUI becomes a mux
+   client only, keeping its local mode until C69 and C45 land (question 1). This is where mux Phase 4's native client (C16) and C21,
    C42, C53–C55, C61–C64 land. Visual design goes to the design pack once it is on main.
 3. **Sessions that survive restarts.** C45 (state survives a server restart) plus C70
    (scrollback spooled to disk), pulled forward from Phase 5 if the owner agrees (question 2).
@@ -63,12 +63,12 @@ since #1403?), the two-account check, and Windows runs of C50 and C71.
 
 Each has a recommendation. Answer on the PR so the reviewer can accept it.
 
-1. **GUI architecture.** Should the combined GUI (a) only be a mux client that starts a local
-   server itself, (b) keep its standalone local mode and add a mux attach mode, or (c) be a
-   separate mux GUI app? *Recommend (b): most reversible; rusty_term keeps working with no
-   server.*
-2. **Restore after restart.** Pull C45 + C70 forward from Phase 5? Both peers have it and agent
-   sessions are long. *Recommend yes;* it forces question 3.
+1. **GUI architecture.** *Answered (Nano, project thread, 2026-11-04 12:06Z: "Concur"):* the
+   GUI ends as a mux client only, as Rex and Orca do (REX-APP rows 38 and A9), reached through a
+   standalone-plus-attach stage: rusty_term keeps its local mode until C69 (auto-start, idle exit)
+   and C45 (sessions survive a server restart) land, then retires it. Nano to restate on this PR.
+2. **Restore after restart.** Pull C45 + C70 forward from Phase 5? Both peers have it, agent
+   sessions are long, and question 1's answer depends on it. *Recommend yes;* it forces question 3.
 3. **Scrollback over 10k rows** (`SCROLLBACK_MAX = 10_000`, mux D14). What budget, and is the
    spill to disk the answer? *Recommend: keep 10k in memory, spill the rest to disk with C70.*
 4. **Binary-loaded skill (O3).** Make it C73 and the next mux step? *Recommend yes.*
