@@ -87,6 +87,7 @@ Precise contracts used by this guide:
 | D75 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
 | D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
+| D78 | Design mux-hosted agent ptys (D20 and D66's launch path reopened for that design) | [stated] 2026-11-04 (mux, #600) |
 
 ## D1. Lenses, not stages
 
@@ -628,3 +629,12 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [stated] · remind-me: mem_506f809db3894df0b29d8992879f373c
 **Key.** lel:594:claim-card-accept-line
 **Source.** Nano's tap on "a) Add accept line to claim view", hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Pksa1peJwFSFnWsRe6jtve (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:55:49Z; dottiusmaximus on #1467; `rusty_bbp/src/claims.rs` `ClaimView`, `EvidenceView`, `ClaimRecord::accept_at`; bbp-claims-addendum.md line on `claim_card`.
+
+## D78. Design mux-hosted agent ptys (D20 and D66's launch path reopened for that design)
+
+**Decision.** Nano chose to design, not build, rusty_mux hosting the ptys of Let Em Loose agents (he asked whether the lens runner could be a mux-hosted agent). For that design only, D20 (no fourth executor) and D66's approved #600 builder launch path (the orch-bbp builder launch profile) are reopened. D25 still applies: the design goes on a card and Nano approves it before any code. This does not by itself decide that the mux becomes an executor or that process lifecycle leaves orch and `bbp mod`; those are the design's questions, along with the collisions in the convergence brief (sandbox has no Unix sockets, `RUSTY_MUX_SOCKET` inheritance against D13, input lease against D8/D13, mux status not being evidence under D3/D22). Until a design is approved, D20 and D66 stand as written.
+**Why.** Nano wants agents visible and hosted in mux panes. Designing first keeps the choice reversible.
+**Rejected.** A watch-only card after #600 (the recommended option A). A watch-only card now (option B).
+**Tag.** [stated] · remind-me: mem_8d721e801bdf4d65a98e6035ad7c6b37
+**Key.** lel:mux:hosted-agents-design
+**Source.** Nano tapped option C "Design mux-hosted agents" ("The mux hosts agent ptys. This reopens D20 (no fourth executor) and the approved #600 design.") on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4MQRCC8E9wvaXezDJg8oqev ("Choose how agents should appear in rusty_mux panes"), 2026-11-04T22:28:51Z; preceded by thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4Nuc7mwNdskgzVg6vK8gWfC (20:07Z), "could the lens runner not be a mux hosted agent?". Context: remind-me mem_d92731e7311c4e90ae9256036eff3cd1 (rusty_mux stays an agent substrate, no orchestration), PR #1470 roadmap arc 4.
