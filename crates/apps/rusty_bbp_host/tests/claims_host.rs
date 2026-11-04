@@ -169,6 +169,7 @@ fn server_as(dir: &Path, t: &TaskId, who: &str) -> Server {
         principal: PrincipalId(who.into()),
         turn: None,
         hidden: vec![],
+        view: None,
     })
     .expect("server")
 }
@@ -291,6 +292,7 @@ fn a_claims_session_posts_with_its_credential_and_never_shows_it() {
         principal: PrincipalId("a".into()),
         turn: Some(TurnId(1)),
         hidden: vec![],
+        view: None,
     })
     .is_err());
     let (text, err) = call(&mut s, "wait", "{}");

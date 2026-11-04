@@ -9,7 +9,9 @@
 //! A path is hidden when it or any directory above it matches a glob.
 //!
 //! The same globs bound what the harness may post: a diff that touches a
-//! hidden path is refused before it is stored ([`refused`]).
+//! hidden path is refused before it is stored ([`refused`]). The copy's
+//! commit exists only in the copy, so a candidate based on it is pinned
+//! back to the source commit it was made from ([`View`]).
 
 use crate::profiles::path_matches;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -40,12 +42,32 @@ struct Entry {
     path: String,
 }
 
+/// A filtered copy's two commits: the source commit it was made from, and
+/// the copy's own, which exists nowhere else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct View {
+    /// The full id of the source commit.
+    pub base: String,
+    /// The full id of the copy's commit.
+    pub head: String,
+}
+
+impl View {
+    /// The source commit a candidate on `base` stands on: the copy's commit
+    /// is pinned to [`View::base`], and the source commit names itself.
+    /// Any other base is none the copy could have made. Pure.
+    pub fn pin(&self, base: &str) -> Option<&str> {
+        (base == self.head || base == self.base).then_some(self.base.as_str())
+    }
+}
+
 /// Copy commit `rev` of `repo` into the empty or absent `dest`, leaving out
 /// every path [`hidden`] by `hide`, and commit the copy into a fresh
 /// repository at `dest`. Submodules are left out; a path git would refuse
 /// to check out fails closed.
-pub fn copy(repo: &Path, rev: &str, dest: &Path, hide: &[String]) -> Result<(), String> {
-    let entries: Vec<Entry> = tree(repo, rev)?
+pub fn copy(repo: &Path, rev: &str, dest: &Path, hide: &[String]) -> Result<View, String> {
+    let base = commit_id(repo, &format!("{rev}^{{commit}}"))?;
+    let entries: Vec<Entry> = tree(repo, &base)?
         .into_iter()
         .filter(|e| e.mode != "160000" && !hidden(hide, &e.path))
         .collect();
@@ -54,7 +76,22 @@ pub fn copy(repo: &Path, rev: &str, dest: &Path, hide: &[String]) -> Result<(), 
     for (e, bytes) in entries.iter().zip(blobs) {
         write_entry(dest, e, &bytes)?;
     }
-    commit(dest)
+    commit(dest)?;
+    let head = commit_id(dest, "HEAD")?;
+    Ok(View { base, head })
+}
+
+/// The full commit id `rev` names in `repo`.
+fn commit_id(repo: &Path, rev: &str) -> Result<String, String> {
+    let out = git(repo)
+        .args(["rev-parse", "--verify", "--quiet", "--end-of-options", rev])
+        .output()
+        .map_err(|e| format!("git rev-parse: {e}"))?;
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if !out.status.success() || id.is_empty() {
+        return Err(format!("git rev-parse {rev}: no such commit"));
+    }
+    Ok(id)
 }
 
 /// Every blob of `rev`'s tree, from `git ls-tree -r -z`.
@@ -267,7 +304,14 @@ mod tests {
         let secret =
             String::from_utf8(run(&repo, &["rev-parse", "HEAD:secrets/token.txt"]).stdout).unwrap();
 
-        copy(&repo, "HEAD", &view, &["secrets".into()]).unwrap();
+        let pinned = copy(&repo, "HEAD", &view, &["secrets".into()]).unwrap();
+        let head = |d: &Path| String::from_utf8(run(d, &["rev-parse", "HEAD"]).stdout).unwrap();
+        assert_eq!(pinned.base, head(&repo).trim());
+        assert_eq!(pinned.head, head(&view).trim());
+        assert_ne!(pinned.base, pinned.head);
+        assert_eq!(pinned.pin(&pinned.head), Some(pinned.base.as_str()));
+        assert_eq!(pinned.pin(&pinned.base), Some(pinned.base.as_str()));
+        assert_eq!(pinned.pin("0123abcd"), None, "no other base is the copy's");
 
         assert!(
             !view.join("secrets").exists(),

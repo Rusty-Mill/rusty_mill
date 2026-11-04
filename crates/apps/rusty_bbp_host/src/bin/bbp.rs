@@ -119,7 +119,7 @@ fn dry_run(argv: &[String]) -> Result<String, String> {
         wall: std::time::Duration::from_secs(wall),
     };
     runner::probe_host().map_err(|e| format!("bbp dry-run needs a sandbox: {e}"))?;
-    let state = std::path::absolute(req.work.join("dry-run.state")).map_err(|e| e.to_string())?;
+    let state = dry_run::state_dir(&req.work)?;
     let summary = dry_run::run(&runner::sandboxed(&state)?, &req)?;
     rusty_serde::json::to_string(&summary).map_err(|e| e.to_string())
 }

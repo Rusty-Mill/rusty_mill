@@ -54,11 +54,33 @@ pub struct Binding {
     /// #598: globs of paths this principal's diffs may not touch, from
     /// [`HIDDEN_ENV`] (the confined harness's `hide`).
     pub hidden: Vec<String>,
+    /// #598: with `hidden`, the filtered copy the harness works in, from
+    /// [`VIEW_ENV`]; a candidate on its commit is pinned to the source's.
+    pub view: Option<crate::filtered::View>,
 }
 
 /// The broker's env var carrying a confined harness's `hide` globs, one per
 /// line. Set by the moderator, outside the harness's reach.
 pub const HIDDEN_ENV: &str = "BBP_HIDDEN";
+
+/// The broker's env var naming a filtered copy's commits, `<copy> <source>`;
+/// empty or unset when the harness works in the repository itself.
+pub const VIEW_ENV: &str = "BBP_VIEW";
+
+/// The [`VIEW_ENV`] value `text` as a view; `None` when empty. Pure.
+fn view_of(text: &str) -> Result<Option<crate::filtered::View>, String> {
+    let mut ids = text.split_whitespace();
+    match (ids.next(), ids.next(), ids.next()) {
+        (None, ..) => Ok(None),
+        (Some(head), Some(base), None) => Ok(Some(crate::filtered::View {
+            base: base.into(),
+            head: head.into(),
+        })),
+        _ => Err(format!(
+            "${VIEW_ENV} must be \"<copy commit> <source commit>\""
+        )),
+    }
+}
 
 impl Binding {
     /// Read `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL`, and either `BBP_TURN` or
@@ -87,6 +109,7 @@ impl Binding {
                 .filter(|l| !l.is_empty())
                 .map(str::to_owned)
                 .collect(),
+            view: view_of(&std::env::var(VIEW_ENV).unwrap_or_default())?,
         })
     }
 }
@@ -802,8 +825,15 @@ impl Server {
     /// never sees. Reassignment or the task's end invalidates it, and the
     /// core refuses the call with `bad_credential`.
     fn call_claims(&mut self, name: &str, args: &Value) -> Result<Response, String> {
-        let Translated { op, action, bytes } = claims::action(name, args)?;
+        let Translated {
+            op,
+            mut action,
+            mut bytes,
+        } = claims::action(name, args)?;
         if let Some(refused) = self.hidden_diff(&action, &bytes)? {
+            return Ok(Response::Rejected(refused));
+        }
+        if let Some(refused) = self.pinned(&mut action, &mut bytes) {
             return Ok(Response::Rejected(refused));
         }
         let key = (self.binding.principal.clone(), op.clone());
@@ -868,6 +898,42 @@ impl Server {
         }))
     }
 
+    /// #598: pin a candidate on the filtered copy's commit to the source
+    /// commit the copy was made from, which is what the runner checks out.
+    /// A base the copy could not have made is refused.
+    fn pinned(
+        &self,
+        action: &mut AgentAction,
+        bytes: &mut Option<(ArtifactPayload, Vec<u8>)>,
+    ) -> Option<Rejection> {
+        let view = self.binding.view.as_ref()?;
+        let payloads = [
+            match action {
+                AgentAction::PutArtifact { payload, .. } => Some(payload),
+                _ => None,
+            },
+            bytes.as_mut().map(|(p, _)| p),
+        ];
+        for payload in payloads.into_iter().flatten() {
+            let ArtifactPayload::Candidate(m) = payload else {
+                continue;
+            };
+            match view.pin(&m.base) {
+                Some(base) => m.base = base.to_owned(),
+                None => {
+                    return Some(Rejection::new(
+                        Code::RefUnresolved,
+                        format!(
+                            "base {:?} is not this workspace's commit {}",
+                            m.base, view.head
+                        ),
+                    ))
+                }
+            }
+        }
+        None
+    }
+
     /// #597: the protected-path rule for candidate `m`, when the task has
     /// protected paths: its baseline and the paths its diffs touch.
     fn protected(&self, m: &Candidate) -> Result<Option<crate::protect::Guard>, String> {
@@ -911,9 +977,12 @@ impl Server {
         let Translated {
             op,
             action: mut act,
-            bytes,
+            mut bytes,
         } = action(name, args)?;
         if let Some(refused) = self.hidden_diff(&act, &bytes)? {
+            return Ok(Response::Rejected(refused));
+        }
+        if let Some(refused) = self.pinned(&mut act, &mut bytes) {
             return Ok(Response::Rejected(refused));
         }
         let free = matches!(act, AgentAction::TaskCard);
@@ -1089,6 +1158,15 @@ mod tests {
     }
 
     #[test]
+    fn the_view_env_names_the_copy_then_the_source_commit() {
+        assert_eq!(view_of("").unwrap(), None);
+        let v = view_of("aaa bbb").unwrap().unwrap();
+        assert_eq!((v.head.as_str(), v.base.as_str()), ("aaa", "bbb"));
+        assert!(view_of("aaa").is_err());
+        assert!(view_of("aaa bbb ccc").is_err());
+    }
+
+    #[test]
     fn wait_is_capped_at_ten_minutes_and_defaults_to_one() {
         assert_eq!(wait_timeout(&args("{}")), WAIT_DEFAULT);
         assert_eq!(
@@ -1150,6 +1228,7 @@ mod tests {
             principal: PrincipalId("coder".into()),
             turn: None,
             hidden: vec![],
+            view: None,
         })
         .expect("server");
         // With the recheck past the timeout, only the log watch can wake it.

@@ -63,8 +63,11 @@ pub struct HarnessSandbox {
     /// #598: globs of paths this harness must not see or touch (the
     /// factory's `sensitive_paths`, for a cloud harness). With `checkout`
     /// the workspace is then a [filtered copy](crate::filtered) of `HEAD`
-    /// in a fresh repository instead of a worktree, and a diff it posts that
-    /// touches a hidden path is refused.
+    /// in a fresh repository instead of a worktree, which the launcher
+    /// clones from; a diff it posts that touches a hidden path is refused,
+    /// and a candidate on the copy's commit is pinned to the source commit.
+    /// No root it is granted, the system roots and `bbp`'s directory
+    /// included, may reach the repository.
     #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hide: Vec<String>,
 }
@@ -81,6 +84,8 @@ pub(crate) struct Turn {
     /// The sandbox's `hide` globs: the workspace is a filtered copy, removed
     /// at [`Turn::finish`], and the broker refuses diffs touching them.
     hide: Vec<String>,
+    /// With `hide`, the copy's commit and the source commit it pins to.
+    view: Option<crate::filtered::View>,
     pub pipes: PathBuf,
     pub mcp_config: PathBuf,
     /// The turn's launch [`Facts`], readable but not writable by the harness.
@@ -133,16 +138,31 @@ impl Turn {
                     .map_err(|e| format!("{}: {e}", workspace.display()))?;
             }
         }
+        let mut view = None;
         let repo = if let Some(repo) = repo {
             repo.add_detached(&workspace, "HEAD")?;
             Some(repo)
         } else if filtered {
-            crate::filtered::copy(&cfg.repo, "HEAD", &workspace, &sandbox.hide)?;
+            view = Some(crate::filtered::copy(
+                &cfg.repo,
+                "HEAD",
+                &workspace,
+                &sandbox.hide,
+            )?);
             None
         } else {
             std::fs::create_dir_all(&workspace)
                 .map_err(|e| format!("{}: {e}", workspace.display()))?;
             None
+        };
+        // A filtered harness never reaches the source repository: its
+        // launcher clones the copy instead.
+        let facts = match &view {
+            Some(_) => &Facts {
+                repo: workspace.to_string_lossy().into_owned(),
+                ..facts.clone()
+            },
+            None => facts,
         };
         broker::make_pipes(&pipes)?;
         let mcp_config = scratch.join("mcp.json");
@@ -165,6 +185,7 @@ impl Turn {
             scratch,
             repo,
             hide: sandbox.hide.clone(),
+            view,
             pipes,
             mcp_config,
             facts: facts_path,
@@ -225,6 +246,15 @@ impl Turn {
         let spec = SandboxSpec::new(read, write, self.workspace.clone(), env, limits)
             .map_err(|e| format!("harness sandbox: {e}"))?;
         refuse_reaching(&spec, &cfg.dir)?;
+        if !self.hide.is_empty() {
+            let roots: Vec<&Path> = spec
+                .read_roots()
+                .iter()
+                .chain(spec.write_roots())
+                .map(PathBuf::as_path)
+                .collect();
+            refuse_exposing(&roots, &cfg.repo)?;
+        }
         let request = HelperRequest {
             status: self.status.clone(),
             cwd: spec.cwd().clone(),
@@ -267,6 +297,12 @@ impl Turn {
             .env("BBP_PRINCIPAL", &principal.0)
             .env("BBP_TURN", turn.0.to_string())
             .env(crate::mcp::HIDDEN_ENV, self.hide.join("\n"))
+            .env(
+                crate::mcp::VIEW_ENV,
+                self.view
+                    .as_ref()
+                    .map_or_else(String::new, |v| format!("{} {}", v.head, v.base)),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(log);
@@ -361,7 +397,7 @@ pub fn refuse_swappable(
         roots.push(resolved(&Repo::open(repo)?.git_dir())?);
     }
     for s in sandboxes.iter().filter(|s| !s.hide.is_empty()) {
-        refuse_seeing(s, repo)?;
+        refuse_seeing(s, bbp, repo)?;
     }
     let work = resolved(&std::path::absolute(work).map_err(|e| e.to_string())?)?;
     for write in &writes {
@@ -383,19 +419,54 @@ pub fn refuse_swappable(
 }
 
 /// A sandbox with `hide` must name valid globs and grant no root that
-/// reaches the repository, whose files and object store hold what it hides.
-fn refuse_seeing(s: &HarnessSandbox, repo: &Path) -> Result<(), String> {
+/// reaches the repository, whose files and object store hold what it hides:
+/// neither its own roots nor those every harness gets, the system roots and
+/// `bbp`'s directory. [`Turn::command`] checks the complete roots again.
+fn refuse_seeing(s: &HarnessSandbox, bbp: &Path, repo: &Path) -> Result<(), String> {
     for g in &s.hide {
         crate::profiles::check_glob(g).map_err(|e| format!("harness sandbox: hide {g:?}: {e}"))?;
     }
+    let bbp_dir = resolved(bbp)?
+        .parent()
+        .ok_or("bbp binary has no directory")?
+        .to_path_buf();
+    let mut roots: Vec<PathBuf> = s.read.iter().chain(&s.write).map(PathBuf::from).collect();
+    roots.extend(
+        SYSTEM_ROOTS
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.exists()),
+    );
+    roots.push(bbp_dir);
+    let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    refuse_exposing(&roots, repo)
+}
+
+/// Refuse any of `roots` that, resolved, reaches the repository at `repo`
+/// or the object stores it borrows from (`objects/info/alternates`).
+fn refuse_exposing(roots: &[&Path], repo: &Path) -> Result<(), String> {
     let repo = resolved(&std::path::absolute(repo).map_err(|e| e.to_string())?)?;
-    for root in s.read.iter().chain(&s.write) {
-        let root = resolved(Path::new(root))?;
-        if repo.starts_with(&root) || root.starts_with(&repo) {
+    let mut held = vec![repo.clone()];
+    let alternates = repo.join(".git/objects/info/alternates");
+    if let Ok(text) = std::fs::read_to_string(&alternates) {
+        for line in text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let path = repo.join(".git/objects").join(line);
+            held.push(resolved(&path)?);
+        }
+    }
+    for root in roots {
+        let root = resolved(root)?;
+        if let Some(h) = held
+            .iter()
+            .find(|h| h.starts_with(&root) || root.starts_with(h))
+        {
             return Err(format!(
-                "harness sandbox: {} reaches the repository {}, which holds the paths it hides",
+                "harness sandbox: {} reaches {}, which holds the paths it hides",
                 root.display(),
-                repo.display()
+                h.display()
             ));
         }
     }
@@ -500,10 +571,30 @@ mod tests {
             Launchers::default().with("a", l)
         };
         let e = check(&root, hiding(&[&root], "secrets")).unwrap_err();
-        assert!(e.contains("reaches the repository"), "{e}");
+        assert!(e.contains("reaches"), "{e}");
         let e = check(&root, hiding(&[], "a/[b]")).unwrap_err();
         assert!(e.contains("hide"), "{e}");
         assert!(check(&root, hiding(&[], "secrets/**")).is_ok());
+        // Roots every harness gets count too: `bbp` installed in the repo.
+        let e = refuse_swappable(
+            &hiding(&[], "secrets"),
+            &repo.join("bbp"),
+            &root.join("work"),
+            &repo,
+        )
+        .unwrap_err();
+        assert!(e.contains("reaches"), "{e}");
+        // And so does an object store the repository borrows from.
+        let store = root.join("store");
+        std::fs::create_dir_all(repo.join(".git/objects/info")).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(
+            repo.join(".git/objects/info/alternates"),
+            format!("{}\n", store.display()),
+        )
+        .unwrap();
+        let e = check(&root, hiding(&[&store], "secrets")).unwrap_err();
+        assert!(e.contains("store"), "{e}");
     }
 
     #[test]

@@ -525,17 +525,23 @@ BBP_MCP_RELAY="$relay" "$bbp" mcp >/dev/null <<'RPC'
 RPC
 "##;
 
-#[test]
-#[ignore = "requires enforced Linux sandbox; required acceptance job"]
-fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
-    let root = root("launcher").canonicalize().expect("canonical");
-    let repo = root.join("repo");
-    std::fs::create_dir_all(&repo).expect("mkdir");
-    git(&repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join("flag.txt"), "no\n").expect("write");
-    git(&repo, &["add", "."]);
+/// A one-commit repository at `repo` with `files`.
+fn commit_repo(repo: &Path, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let path = repo.join(path);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, text).expect("write");
+    }
+    git(repo, &["init", "-q", "-b", "main"]);
+    git(repo, &["add", "."]);
     let who = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
-    git(&repo, &[&who[..], &["commit", "-qm", "base"]].concat());
+    git(repo, &[&who[..], &["commit", "-qm", "base"]].concat());
+}
+
+/// Task `T1` on `repo` with the example roster, its maker the built-in
+/// Codex launcher running `script` (with `TASK_DIR` and `REPO` set) as the
+/// provider, confined by `sandbox`, whose read roots gain the script's.
+fn codex_task(root: &Path, repo: &Path, script: &str, mut sandbox: HarnessSandbox) -> Config {
     let (dir, task) = (root.join("T1"), TaskId("T1".into()));
     let example: rusty_serde::json::Value =
         rusty_serde::json::from_str(include_str!("../../rusty_orch/docs/examples/bbp.json"))
@@ -550,7 +556,7 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
         &repo.to_string_lossy(),
         b"Make the flag say ok.",
         &PrincipalId("human".into()),
-        &ProfileSet::shell("test", "true"),
+        &ProfileSet::shell("test", "grep -q '^ok$' flag.txt"),
         roster,
     )
     .expect("open");
@@ -567,7 +573,7 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).expect("mkdir");
     let stub = bin.join("codex.sh");
-    let script = AUTHOR.replacen(
+    let script = script.replacen(
         "#!/bin/sh\n",
         &format!(
             "#!/bin/sh\nTASK_DIR='{}'\nREPO='{}'\n",
@@ -578,6 +584,7 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
     );
     std::fs::write(&stub, script).expect("write");
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    sandbox.read.push(bin.to_string_lossy().into_owned());
     let launcher = Launcher {
         program: env!("CARGO_BIN_EXE_codex-bbp-harness").into(),
         args: vec![
@@ -588,19 +595,13 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
         ],
         builtin_tools: true,
         session: false,
-        sandbox: Some(HarnessSandbox {
-            read: vec![
-                bin.to_string_lossy().into_owned(),
-                repo.join(".git").to_string_lossy().into_owned(),
-            ],
-            ..HarnessSandbox::default()
-        }),
+        sandbox: Some(sandbox),
     };
-    let cfg = Config {
+    Config {
         dir,
         task,
         bbp: PathBuf::from(env!("CARGO_BIN_EXE_bbp")),
-        repo: repo.clone(),
+        repo: repo.to_path_buf(),
         work: root.join("work"),
         launchers: Launchers::default().with("maker", launcher),
         confinement: Confinement::Unconfined,
@@ -610,7 +611,20 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
         deadline: None,
         cost_cap: None,
         admission: None,
+    }
+}
+
+#[test]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
+    let root = root("launcher").canonicalize().expect("canonical");
+    let repo = root.join("repo");
+    commit_repo(&repo, &[("flag.txt", "no\n")]);
+    let sandbox = HarnessSandbox {
+        read: vec![repo.join(".git").to_string_lossy().into_owned()],
+        ..HarnessSandbox::default()
     };
+    let cfg = codex_task(&root, &repo, AUTHOR, sandbox);
     let said = plan(cfg);
     println!("{said}");
     for line in [
@@ -727,6 +741,162 @@ printf '{"set":1}\n{"set":2}\n' > "$BBP_PLAN""#;
         "the plan itself is never printed: {said}"
     );
     assert!(!data.join("forged").exists());
+    // What a failed or timed-out run printed may be real data: never shown.
+    std::fs::write(data.join("secret.csv"), "ssn=078-05-1120\n").expect("write");
+    let leak = r#"cat "$BBP_DATA_CRM/secret.csv"; cat "$BBP_DATA_CRM/secret.csv" >&2"#;
+    for (case, wall, tail) in [("failed", "30", "exit 5"), ("timed out", "1", "sleep 30")] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["dry-run", "--name", "leak", "--wall-secs", wall, "--data"])
+            .arg(format!("crm={}", data.display()))
+            .arg("--work")
+            .arg(root.join("work"))
+            .args(["--", "/bin/sh", "-c", &format!("{leak}; {tail}")])
+            .output()
+            .expect("bbp");
+        let shown = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(!out.status.success(), "{case}: {shown}");
+        assert!(!shown.contains("078-05-1120"), "{case} leaked: {shown}");
+    }
     let _ = std::fs::remove_dir_all(&root);
     println!("BBP_ACCEPTANCE PASS dry-run");
+}
+
+/// A Codex provider stand-in for a filtered author: plans on turn 1; on
+/// turn 2 reports what it sees, makes the flag say ok, and submits it, first
+/// on a base the copy never had (refused), then on its clone's `HEAD`.
+const FILTERED_AUTHOR: &str = r##"#!/bin/sh
+cfg=$(for a in "$@"; do case "$a" in mcp_servers=*) printf '%s' "$a";; esac; done)
+relay=$(printf '%s' "$cfg" | sed -n 's/.*"BBP_MCP_RELAY"="\([^"]*\)".*/\1/p')
+bbp=$(printf '%s' "$cfg" | sed -n 's/^mcp_servers={bbp={command="\([^"]*\)".*/\1/p')
+rpc() {
+  { printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}'; cat; } |
+    BBP_MCP_RELAY="$relay" "$bbp" mcp
+}
+case "$*" in
+*"turn 1."*)
+  rpc <<'RPC'
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"t1-p1","kind":"spec","brief":1,"body":"# Spec\nAC1 flag says ok."}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"post","arguments":{"op":"t1-p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve the plan?","gate":true}}}
+RPC
+  ;;
+*"turn 2."*)
+  if [ -e secrets ]; then echo "secrets: seen"; else echo "secrets: absent"; fi
+  if cat "$REPO/secrets/token.txt" >/dev/null 2>&1; then echo "source: read"; else echo "source: denied"; fi
+  echo ok > flag.txt
+  base=$(git rev-parse HEAD)
+  diff=$(git diff | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{printf "%s\\n", $0}')
+  rpc <<RPC
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"t2-d1","kind":"diff","body":"$diff"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"t2-c0","kind":"candidate","base":"0123456789012345678901234567890123456789","diffs":[3]}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"t2-c1","kind":"candidate","base":"$base","diffs":[3]}}}
+RPC
+  ;;
+esac
+"##;
+
+/// The source repository for the filtered tests: a flag, the test of it,
+/// and a secret under `secrets/`.
+fn secret_repo(repo: &Path) {
+    commit_repo(
+        repo,
+        &[("flag.txt", "no\n"), ("secrets/token.txt", "hunter2\n")],
+    );
+}
+
+#[test]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn a_filtered_codex_author_builds_a_candidate_the_runner_runs_on_the_source_commit() {
+    let root = root("filtered_build").canonicalize().expect("canonical");
+    let repo = root.join("repo");
+    secret_repo(&repo);
+    let sandbox = HarnessSandbox {
+        checkout: true,
+        hide: vec!["secrets".into()],
+        ..HarnessSandbox::default()
+    };
+    let cfg = codex_task(&root, &repo, FILTERED_AUTHOR, sandbox);
+    let (dir, task) = (cfg.dir.clone(), cfg.task.clone());
+    let moderator = std::thread::spawn(move || moderator::run(&cfg));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let card = admin::card(&dir, &task).expect("card");
+        if card.state == State::PlanGate {
+            human::perform(&dir, &task, "approve-plan", &["2"], None).expect("approve plan");
+        }
+        let d = rusty_bbp_host::open_driver(&dir, &task).expect("driver");
+        if d.state.selected_run().is_some_and(|r| r.status.is_some()) {
+            let card = admin::card(&dir, &task).expect("card");
+            human::perform(&dir, &task, "cancel", &["done"], Some(card.rev)).expect("cancel");
+            break;
+        }
+        assert!(
+            !moderator.is_finished() && Instant::now() < deadline,
+            "no finished run; turn 2 said:\n{}",
+            std::fs::read_to_string(moderator::log_path(&dir, &task, TurnId(2)))
+                .unwrap_or_default()
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    moderator.join().expect("join").expect("moderator");
+    let said = std::fs::read_to_string(moderator::log_path(&dir, &task, TurnId(2))).expect("log");
+    println!("{said}");
+    for line in ["secrets: absent", "source: denied", "RefUnresolved"] {
+        assert!(said.contains(line), "{line}:\n{said}");
+    }
+    let source = String::from_utf8(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .expect("git")
+            .stdout,
+    )
+    .expect("utf8");
+    let d = rusty_bbp_host::open_driver(&dir, &task).expect("driver");
+    let run = d.state.selected_run().expect("run");
+    assert_eq!(run.status, Some(RunStatus::Passed), "the flag test passed");
+    let cand = d
+        .state
+        .artifacts
+        .values()
+        .find_map(|a| match &a.payload {
+            ArtifactPayload::Candidate(m) => Some(m.base.clone()),
+            _ => None,
+        })
+        .expect("one candidate");
+    assert_eq!(cand, source.trim(), "pinned to the source commit");
+    let _ = std::fs::remove_dir_all(&root);
+    println!("BBP_ACCEPTANCE PASS filtered-build");
+}
+
+#[test]
+fn a_hiding_sandbox_is_refused_when_an_implicit_root_reaches_the_repository() {
+    let root = root("hidden_implicit").canonicalize().expect("canonical");
+    let repo = root.join("repo");
+    secret_repo(&repo);
+    // `bbp` installed inside the repository: every harness reads its directory.
+    let tools = repo.join("tools");
+    std::fs::create_dir_all(&tools).expect("mkdir");
+    let bbp = tools.join("bbp");
+    std::fs::copy(env!("CARGO_BIN_EXE_bbp"), &bbp).expect("copy bbp");
+    let sandbox = HarnessSandbox {
+        checkout: true,
+        hide: vec!["secrets".into()],
+        ..scripts(&root)
+    };
+    let mut cfg = setup(&root, "T1", HIDDEN, vec!["x".into()], Some(sandbox));
+    cfg.bbp = bbp;
+    let error = moderator::run(&cfg).expect_err("the moderator refuses to launch");
+    assert!(error.contains("reaches"), "{error}");
+    assert!(planner_log(&cfg.dir, &cfg.task).is_empty(), "nothing ran");
+    assert!(
+        !root.join("work/turns").exists(),
+        "no filtered copy was made"
+    );
+    let _ = std::fs::remove_dir_all(&root);
 }

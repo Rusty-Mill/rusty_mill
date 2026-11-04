@@ -62,6 +62,8 @@ CASES = (
          "a_hiding_harness_sees_a_filtered_copy_and_cannot_post_into_what_it_hides"),
     Case("dry-run", "rusty_bbp_host", ("--test", "confined_harness"),
          "a_dry_run_reads_its_real_data_and_writes_only_its_plan"),
+    Case("filtered-build", "rusty_bbp_host", ("--test", "confined_harness"),
+         "a_filtered_codex_author_builds_a_candidate_the_runner_runs_on_the_source_commit"),
     Case("session-confined", "rusty_bbp_host", ("--test", "confined_harness"),
          "a_confined_session_keeps_its_home_and_one_fresh_workspace_across_turns"),
     Case("holdout-confined", "rusty_bbp_host", ("--test", "claims_host"),
