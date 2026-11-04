@@ -78,6 +78,9 @@ Precise contracts used by this guide:
 | D60 | Tool-using agents join over MCP after v0 ships | [stated] 2026-11-04 (general) |
 | D61 | #708 alien review lens parked until v0 runs | [stated] 2026-11-04 (#708) |
 | D62 | The rest of #598 §6 approved | [stated] 2026-11-04 (#598) |
+| D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
+| D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
+| D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 
 ## D1. Lenses, not stages
 
@@ -531,3 +534,30 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: pending
 **Key.** lel:598:section6-remaining-approved
 **Source.** Nano tapped option A "Approve all as listed" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Ppm26TJdNSuETWT9FqZp8E ("Approve the rest of #598 §6, not just the three I listed?"), 2026-11-04T17:15:20Z. OPEN_QUESTIONS Q5.
+
+## D63. #600's Windows GUI is judged only on Windows
+
+**Decision.** The #600 desktop GUI (Windows-first) is judged only through the Windows shadow run and golden cases (D56). Linux claims runs check the engine and the web UI.
+**Why.** Claims runs are Linux-only and can't exercise a Windows GUI.
+**Rejected.** Judging the GUI in the Linux sandbox.
+**Tag.** [stated] · remind-me: pending
+**Key.** lel:600:windows-gui-judged-on-windows
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O1 "Yes".
+
+## D64. #600 builders are Claude CLI only in v0
+
+**Decision.** In v0, #600 builder sessions run the Claude CLI only. Codex in `lel-codex` doesn't build.
+**Why.** The holdout lens then keeps a model that no builder uses (D37), and isn't left with only local models.
+**Rejected.** Codex as a second builder in v0.
+**Tag.** [stated] · remind-me: pending
+**Key.** lel:600:claude-only-builders
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O2 "Concur".
+
+## D65. A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen
+
+**Decision.** When the Windows shadow run contradicts a Linux pass, Nano reopens the claim with a human `decision reopen` (C-R8), which needs `budget_extended` first. It isn't posted as `executed` evidence, since it has no runner report bound to the claim's candidate (C-R4).
+**Why.** A real-data failure should stop acceptance, and only a reopen can do that. `cited` evidence never reopens a claim.
+**Rejected.** Posting it as `cited` evidence.
+**Tag.** [stated] · remind-me: pending
+**Key.** lel:600:windows-contradiction-human-reopen
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O3 "Concur with recommendation" (option a).
