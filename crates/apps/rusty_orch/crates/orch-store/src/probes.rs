@@ -16,14 +16,20 @@ use crate::StoreError;
 /// Engine key for a probe: a hash of what identifies it. The fields are
 /// stored too, so a collision is refused instead of read as another probe.
 pub fn key(row: &ProbeRow) -> i64 {
-    let mut hash = Fnv1a64::new();
-    for part in [
+    hash_parts(&[
         row.task.as_bytes(),
         &row.claim.to_le_bytes(),
         &row.candidate.to_le_bytes(),
         row.site.as_bytes(),
         row.mechanism.as_bytes(),
-    ] {
+    ])
+}
+
+/// FNV-1a over length-prefixed parts, so no two field splits collide by
+/// construction.
+pub fn hash_parts(parts: &[&[u8]]) -> i64 {
+    let mut hash = Fnv1a64::new();
+    for part in parts {
         hash.update(&(part.len() as u64).to_le_bytes());
         hash.update(part);
     }
@@ -42,7 +48,6 @@ pub struct ProbeRecord {
     novel: bool,
     outcome: String,
     runs: u32,
-    tokens: u64,
     probe_sha256: String,
 }
 
@@ -59,7 +64,6 @@ impl ProbeRecord {
             novel: row.novel,
             outcome: row.outcome.name().to_owned(),
             runs: row.runs,
-            tokens: row.tokens,
             probe_sha256: row.probe_sha256.clone(),
         }
     }
@@ -87,7 +91,6 @@ impl ProbeRecord {
             novel: self.novel,
             outcome,
             runs: self.runs,
-            tokens: self.tokens,
             probe_sha256: self.probe_sha256,
         };
         if key(&row) != self.id {
@@ -142,7 +145,6 @@ mod tests {
             novel: false,
             outcome: Outcome::Pass,
             runs: 1,
-            tokens: 10,
             probe_sha256: "00".to_owned(),
         }
     }

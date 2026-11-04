@@ -344,8 +344,24 @@ pub fn outcome(candidate: Run, base: Option<Run>) -> Outcome {
     }
 }
 
-/// One probe's record (design §6): what was hunted, what it showed, what
-/// it cost.
+/// One completed hunt (design §3), saved whether or not it produced a
+/// probe: an empty suspect list and an all-null hunt still count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HuntRow {
+    pub task: String,
+    pub claim: u64,
+    /// The candidate artifact hunted.
+    pub candidate: u64,
+    /// Suspects the enumerate reply named, and probes the hunts wrote.
+    pub suspects: u32,
+    pub probes: u32,
+    /// Model tokens over the hunt's calls.
+    pub tokens: u64,
+    /// What the hunt cost the lens's meter, in micro-dollars.
+    pub cost: u64,
+}
+
+/// One probe's record (design §6): what was hunted, what it showed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeRow {
     pub task: String,
@@ -358,20 +374,22 @@ pub struct ProbeRow {
     /// the mechanism.
     pub novel: bool,
     pub outcome: Outcome,
-    /// Sandbox runs debited to the lens, and model tokens spent.
+    /// Sandbox runs (candidate, then base when needed).
     pub runs: u32,
-    pub tokens: u64,
     /// SHA-256 of the probe file, hex.
     pub probe_sha256: String,
 }
 
 /// Hunts before the success bar is judged (design §8).
 pub const BAR_HUNTS: usize = 20;
+/// The alien lens's share of its claims' total spend must stay under this
+/// percentage (design §8).
+pub const BAR_SPEND_PERCENT: u64 = 15;
 
-/// The shadow numbers over a set of probe rows (design §8).
+/// The shadow numbers over a cohort of hunts and their probes (design §8).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
-    /// Distinct (task, claim, candidate).
+    /// Distinct (task, claim, candidate) over hunt and probe rows.
     pub hunts: usize,
     pub probes: usize,
     pub regressions: usize,
@@ -381,50 +399,75 @@ pub struct Summary {
     pub errors: usize,
     pub runs: u64,
     pub tokens: u64,
+    /// The alien lens's own cost over the cohort, micro-dollars.
+    pub cost: u64,
 }
+
+/// Total spend on the cohort's claims, every lens included, micro-dollars.
+/// The runner does not track it yet, so the bar's spend half stays
+/// unassessed until a caller supplies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimSpend(pub u64);
 
 /// Whether the shadow run has earned a v2 design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bar {
     /// Fewer than [`BAR_HUNTS`] hunts so far.
     TooFew,
-    /// At least one novel regression per [`BAR_HUNTS`] hunts.
+    /// Under one novel regression per [`BAR_HUNTS`] hunts.
+    RateNotMet,
+    /// The finding rate is met, but no claim spend is known (or it is
+    /// zero), so the bar is not met: fail closed.
+    SpendUnassessed,
+    /// The finding rate is met, but the lens cost at least
+    /// [`BAR_SPEND_PERCENT`]% of its claims' spend.
+    SpendOver,
+    /// Both halves met.
     Met,
-    NotMet,
 }
 
-/// Sum `rows`.
-pub fn summarize(rows: &[ProbeRow]) -> Summary {
-    let hunts: BTreeSet<_> = rows
+/// Sum a cohort. A probe whose hunt row is missing still counts its hunt.
+pub fn summarize(hunts: &[HuntRow], probes: &[ProbeRow]) -> Summary {
+    let keys: BTreeSet<_> = hunts
         .iter()
-        .map(|r| (&r.task, r.claim, r.candidate))
+        .map(|h| (&h.task, h.claim, h.candidate))
+        .chain(probes.iter().map(|r| (&r.task, r.claim, r.candidate)))
         .collect();
-    let count = |o: Outcome| rows.iter().filter(|r| r.outcome == o).count();
+    let count = |o: Outcome| probes.iter().filter(|r| r.outcome == o).count();
     Summary {
-        hunts: hunts.len(),
-        probes: rows.len(),
+        hunts: keys.len(),
+        probes: probes.len(),
         regressions: count(Outcome::Regression),
-        novel: rows
+        novel: probes
             .iter()
             .filter(|r| r.novel && r.outcome == Outcome::Regression)
             .count(),
         pre_existing: count(Outcome::PreExisting),
         errors: count(Outcome::Error),
-        runs: rows.iter().map(|r| u64::from(r.runs)).sum(),
-        tokens: rows.iter().map(|r| r.tokens).sum(),
+        runs: probes.iter().map(|r| u64::from(r.runs)).sum(),
+        tokens: hunts.iter().map(|h| h.tokens).sum(),
+        cost: hunts.iter().map(|h| h.cost).sum(),
     }
 }
 
 impl Summary {
-    /// The §8 bar: judged only after [`BAR_HUNTS`] hunts.
-    pub fn bar(&self) -> Bar {
+    /// The §8 bar: at least [`BAR_HUNTS`] hunts, at least one novel
+    /// regression per [`BAR_HUNTS`] of them, and the lens's cost under
+    /// [`BAR_SPEND_PERCENT`]% of `spend`.
+    pub fn bar(&self, spend: Option<ClaimSpend>) -> Bar {
         if self.hunts < BAR_HUNTS {
             return Bar::TooFew;
         }
-        if self.novel.saturating_mul(BAR_HUNTS) >= self.hunts {
+        if self.novel.saturating_mul(BAR_HUNTS) < self.hunts {
+            return Bar::RateNotMet;
+        }
+        let Some(ClaimSpend(total)) = spend.filter(|s| s.0 > 0) else {
+            return Bar::SpendUnassessed;
+        };
+        if self.cost.saturating_mul(100) < total.saturating_mul(BAR_SPEND_PERCENT) {
             Bar::Met
         } else {
-            Bar::NotMet
+            Bar::SpendOver
         }
     }
 }
@@ -706,47 +749,96 @@ mod tests {
             novel,
             outcome,
             runs: 2,
-            tokens: 100,
             probe_sha256: "00".to_owned(),
         }
     }
 
+    fn hunt(claim: u64, probes: u32) -> HuntRow {
+        HuntRow {
+            task: "t".to_owned(),
+            claim,
+            candidate: 1,
+            suspects: 3,
+            probes,
+            tokens: 100,
+            cost: 10,
+        }
+    }
+
     #[test]
-    fn summary_counts_hunts_once_and_only_novel_regressions() {
-        let rows = vec![
+    fn summary_counts_each_hunt_once_with_or_without_probes() {
+        let hunts = vec![hunt(1, 3), hunt(2, 0), hunt(3, 0)];
+        let probes = vec![
             row(1, true, Outcome::Regression),
             row(1, false, Outcome::Regression),
             row(1, true, Outcome::PreExisting),
-            row(2, true, Outcome::Error),
+            row(4, true, Outcome::Error),
         ];
-        let s = summarize(&rows);
         assert_eq!(
-            s,
+            summarize(&hunts, &probes),
             Summary {
-                hunts: 2,
+                hunts: 4,
                 probes: 4,
                 regressions: 2,
                 novel: 1,
                 pre_existing: 1,
                 errors: 1,
                 runs: 8,
-                tokens: 400,
+                tokens: 300,
+                cost: 30,
             }
         );
-        assert_eq!(s.bar(), Bar::TooFew);
-        assert_eq!(summarize(&[]), Summary::default());
+        assert_eq!(summarize(&[], &[]), Summary::default());
     }
 
     #[test]
-    fn the_bar_needs_one_novel_regression_per_twenty_hunts() {
-        let mut rows: Vec<_> = (0..20).map(|c| row(c, true, Outcome::Pass)).collect();
-        assert_eq!(summarize(&rows).bar(), Bar::NotMet);
-        rows[0].outcome = Outcome::Regression;
-        assert_eq!(summarize(&rows).bar(), Bar::Met);
-        rows.push(row(20, true, Outcome::Pass));
-        assert_eq!(summarize(&rows).bar(), Bar::NotMet, "1 in 21");
-        rows[0].novel = false;
-        assert_eq!(summarize(&rows[..20]).bar(), Bar::NotMet, "not novel");
+    fn twenty_hunts_without_probes_are_judged() {
+        let hunts: Vec<_> = (0..20).map(|c| hunt(c, 0)).collect();
+        let s = summarize(&hunts, &[]);
+        assert_eq!((s.hunts, s.probes), (20, 0));
+        assert_eq!(s.bar(Some(ClaimSpend(1_000_000))), Bar::RateNotMet);
+        assert_eq!(summarize(&hunts[..19], &[]).bar(None), Bar::TooFew);
+    }
+
+    #[test]
+    fn the_rate_needs_one_novel_regression_per_twenty_hunts() {
+        let mut hunts: Vec<_> = (0..20).map(|c| hunt(c, 0)).collect();
+        let mut probes = vec![row(0, true, Outcome::Regression)];
+        let spend = Some(ClaimSpend(1_000_000));
+        assert_eq!(summarize(&hunts, &probes).bar(spend), Bar::Met);
+        hunts.push(hunt(20, 0));
+        assert_eq!(
+            summarize(&hunts, &probes).bar(spend),
+            Bar::RateNotMet,
+            "1 in 21"
+        );
+        probes[0].novel = false;
+        assert_eq!(
+            summarize(&hunts[..20], &probes).bar(spend),
+            Bar::RateNotMet,
+            "not novel"
+        );
+    }
+
+    #[test]
+    fn the_spend_half_is_strictly_under_fifteen_percent_and_fails_closed() {
+        // 20 hunts at cost 10: the lens spent 200.
+        let hunts: Vec<_> = (0..20).map(|c| hunt(c, 0)).collect();
+        let s = summarize(&hunts, &[row(0, true, Outcome::Regression)]);
+        assert_eq!(s.cost, 200);
+        assert_eq!(s.bar(Some(ClaimSpend(1_334))), Bar::Met, "14.99%");
+        assert_eq!(s.bar(Some(ClaimSpend(1_333))), Bar::SpendOver, "15.004%");
+        let exactly = Summary {
+            cost: 15,
+            ..s.clone()
+        };
+        assert_eq!(
+            exactly.bar(Some(ClaimSpend(100))),
+            Bar::SpendOver,
+            "exactly 15%"
+        );
+        assert_eq!(s.bar(None), Bar::SpendUnassessed);
+        assert_eq!(s.bar(Some(ClaimSpend(0))), Bar::SpendUnassessed);
     }
 
     #[test]

@@ -20,6 +20,7 @@
 )]
 
 mod assignments;
+mod hunts;
 mod meters;
 mod probes;
 mod record;
@@ -40,8 +41,9 @@ use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
+use hunts::HuntRecord;
 use meters::MeterRecord;
-use orch_lens::alien::ProbeRow;
+use orch_lens::alien::{HuntRow, ProbeRow};
 use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
 
@@ -55,6 +57,8 @@ const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 const METERS_FILE: &str = "meters.mmap";
 /// Alien-lens probe rows (#708).
 const PROBES_FILE: &str = "probes.mmap";
+/// Completed alien-lens hunts, with or without probes (#708).
+const HUNTS_FILE: &str = "hunts.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -138,6 +142,7 @@ pub struct Store {
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     meters: GenericMmapStore<MeterRecord, ById, Revision>,
     probes: GenericMmapStore<ProbeRecord, ById, Revision>,
+    hunts: GenericMmapStore<HuntRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -176,6 +181,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(HUNTS_FILE);
+        let hunts = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -188,6 +199,7 @@ impl Store {
             legacy,
             meters,
             probes,
+            hunts,
             _lock: lock,
         })
     }
@@ -365,6 +377,54 @@ impl Store {
             self.probes.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
+    }
+
+    /// Save one completed hunt, replacing an earlier save of the same
+    /// (task, claim, candidate). Save it even when it wrote no probe, so
+    /// the §8 bar counts it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another hunt;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_hunt(&mut self, row: &HuntRow) -> Result<(), StoreError> {
+        let existing = self.hunts.get(hunts::key(row));
+        if let Some(r) = &existing {
+            if !r.is(row) {
+                return Err(StoreError::Corrupt(
+                    "hunt key holds another hunt".to_owned(),
+                ));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = HuntRecord::new(row, revision);
+        let written = if existing.is_none() {
+            self.hunts.insert(record).map_err(engine_error)
+        } else {
+            self.hunts.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// Every saved hunt, of `task` when given, sorted by task, claim and
+    /// candidate.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when a record does not check out.
+    pub fn hunts(&self, task: Option<&str>) -> Result<Vec<HuntRow>, StoreError> {
+        let mut rows = Vec::new();
+        for id in self.hunts.all_ids() {
+            let Some(record) = self.hunts.get(id) else {
+                continue;
+            };
+            let row = record.into_row()?;
+            if task.is_none_or(|t| t == row.task) {
+                rows.push(row);
+            }
+        }
+        rows.sort_by(|a, b| (&a.task, a.claim, a.candidate).cmp(&(&b.task, b.claim, b.candidate)));
+        Ok(rows)
     }
 
     /// Every saved probe row, of `task` when given, sorted by task, claim,

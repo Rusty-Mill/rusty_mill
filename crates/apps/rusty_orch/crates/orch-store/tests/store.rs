@@ -533,7 +533,7 @@ mod meters {
 }
 
 mod probes {
-    use orch_lens::alien::{Outcome, ProbeRow};
+    use orch_lens::alien::{summarize, Bar, HuntRow, Outcome, ProbeRow};
     use orch_store::Store;
 
     use super::dir;
@@ -548,7 +548,6 @@ mod probes {
             novel: true,
             outcome,
             runs: 2,
-            tokens: 1_234,
             probe_sha256: "ab".repeat(32),
         }
     }
@@ -586,5 +585,53 @@ mod probes {
         let fixed = row("t", 1, "a::f", Outcome::Regression);
         s.save_probe(&fixed).expect("second");
         assert_eq!(s.probes(None).expect("load"), [fixed]);
+    }
+
+    fn hunt(task: &str, claim: u64, probes: u32) -> HuntRow {
+        HuntRow {
+            task: task.to_owned(),
+            claim,
+            candidate: 9,
+            suspects: 4,
+            probes,
+            tokens: 500,
+            cost: 0,
+        }
+    }
+
+    #[test]
+    fn twenty_zero_probe_hunts_survive_reopening_and_are_judged() {
+        let d = dir("hunt_zero");
+        {
+            let mut s = Store::open(&d).expect("open");
+            for c in 0..20 {
+                s.save_hunt(&hunt("t", c, 0)).expect("save");
+            }
+            s.save_hunt(&hunt("t", 0, 0)).expect("save again");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let hunts = s.hunts(None).expect("hunts");
+        assert_eq!(hunts.len(), 20, "idempotent: one row per hunt");
+        let summary = summarize(&hunts, &s.probes(None).expect("probes"));
+        assert_eq!((summary.hunts, summary.probes), (20, 0));
+        assert_eq!(summary.bar(None), Bar::RateNotMet);
+    }
+
+    #[test]
+    fn a_mixed_cohort_counts_each_hunt_once() {
+        let d = dir("hunt_mixed");
+        let mut s = Store::open(&d).expect("open");
+        s.save_hunt(&hunt("t", 1, 1)).expect("hunt with a probe");
+        s.save_hunt(&hunt("t", 2, 0)).expect("hunt without");
+        s.save_hunt(&hunt("u", 1, 0)).expect("other task");
+        s.save_probe(&row("t", 1, "a::f", Outcome::Regression))
+            .expect("probe");
+        let all = summarize(&s.hunts(None).expect("h"), &s.probes(None).expect("p"));
+        assert_eq!((all.hunts, all.probes, all.regressions), (3, 1, 1));
+        let t = summarize(
+            &s.hunts(Some("t")).expect("h"),
+            &s.probes(Some("t")).expect("p"),
+        );
+        assert_eq!((t.hunts, t.probes, t.tokens), (2, 1, 1_000));
     }
 }
