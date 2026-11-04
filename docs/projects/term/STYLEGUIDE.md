@@ -42,7 +42,7 @@ so light and dark themes work alike.
 
 Target: surfaces and text use the fixed pack tokens (D5 dark, D25 light). The accent stays
 theme-derived, with pack verdigris as the fallback below 3:1. Search highlights stay as they
-are. Success is verdigris and failure is oxide (D7, Q8). (Pack D34, D35.)
+are. Success is verdigris and failure is oxide (D7, D36). (Pack D34, D35.)
 
 ## Size and layout
 
