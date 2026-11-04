@@ -83,6 +83,9 @@ Precise contracts used by this guide:
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 | D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
+| D67 | #599 watcher posts as a `watcher` roster role | [default] 2026-11-04 (#599) |
+| D68 | #599 maintenance tasks are opened by the human and named in `factory/apps/<app>.json` | [default] 2026-11-04 (#599) |
+| D69 | #599 lesson trigger 2 detects reverts from the action mark and git | [default] 2026-11-04 (#599) |
 
 ## D1. Lenses, not stages
 
@@ -581,3 +584,30 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_c00104fb2fa0499c8f471bddcbb64cbc
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
+
+## D67. #599 watcher posts as a `watcher` roster role
+
+**Decision.** `rusty_orch watch` posts each finding as a claim through a dedicated `watcher` role on the app's maintenance task. The role holds `post ∋ claim` and its own session credential, and every maintenance task's roster includes it. Because `min_authors` is 2, a watcher claim never accepts on the watcher's word alone.
+**Why.** Under the claims contract, only a roster role with `post ∋ claim` posts claims, using its session credential (addendum C-R1, roster rules). The host writes only board events. The human channel posts `answer` and `decision`, never claims (C-R10, Agent API item 4). A separate role also keeps the watcher's posts apart from the lenses' posts and their track records.
+**Rejected.** The host posting the claims (the contract doesn't allow it). The human channel posting them (same reason, and it would present machine findings as Nano's). Reusing a lens role (it would mix watcher posts into that lens's record).
+**Tag.** [default] · remind-me: pending
+**Key.** lel:599:watcher-role
+**Source.** let-em-loose-expert, 2026-11-04, answering the #599 build thread (plan §4), from addendum C-R1, C-R10 and the claims roster rule.
+
+## D68. #599 maintenance tasks are opened by the human and named in `factory/apps/<app>.json`
+
+**Decision.** The human opens each app's long-lived maintenance task with `bbp open --mode claims`, and `rusty_orch watch` never opens a task. The Factory registry is one file per app at `factory/apps/<app>.json`, beside the lens config, with the fields `{ app, repo, task, released_ref, profile, watch_usd }`. `task` holds the maintenance task id, and `profile` names the profile the canary re-runs on `released_ref`. `watch` must not reuse `rusty_orch maintain`'s task-creation path.
+**Why.** D55 says only D44 opens tasks and that #599 maintenance posts into tasks that already exist. D58 approves `apps/*.json` and `watch_usd`. Plan §4 lists the fields; `profile` is added because the canary needs it. A file per app is the easiest layout to change later.
+**Rejected.** `watch` opening its own task, which D55 forbids. Keeping the task id in orch-store, where a human can't read or edit it.
+**Tag.** [default] · remind-me: pending
+**Key.** lel:599:maintenance-task-registry
+**Source.** let-em-loose-expert, 2026-11-04, answering the #599 build thread, from D55, D58 and 599-build-plan.md §4.
+
+## D69. #599 lesson trigger 2 detects reverts from the action mark and git
+
+**Decision.** For "accepted claim reverted within 14 days", the merge receipt is the claim's action mark: `claim_acting(claim, epoch, ref)` followed by `claim_action_result(done)`. orch resolves the mark's `ref` to the merge commit and looks for a commit whose message reads `This reverts commit <sha>` for it. It times the gap from the two commits' git committer dates, and the lesson fires when the gap is 14 days or less. A manual undo with no revert commit is not detected.
+**Why.** The log has no wall time. C-R9 already records the action and names it through `ref`, so no log change is needed (D58). A missed lesson costs little, because lessons only inform (weight 2, never decide).
+**Rejected.** A new merge-revision field (a log change). Treating a later reopen or drop as a revert (that is already the claim's own history, not a revert).
+**Tag.** [default] · remind-me: pending
+**Key.** lel:599:revert-trigger
+**Source.** let-em-loose-expert, 2026-11-04, answering the #599 build thread (plan §3, trigger 2 [filled]), from addendum § Action marks and C-R9, and the card #599 design comment.
