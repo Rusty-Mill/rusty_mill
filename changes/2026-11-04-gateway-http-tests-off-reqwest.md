@@ -14,5 +14,5 @@ changelog: agentgateway HTTP test suites run on rusty_tokio with rusty_request; 
   must refuse (RFC 9112 §3.2). A caller's `Host` now replaces the one from the URL, and a
   cross-origin redirect drops it.
 - **Known limitations:** the MCP suites still use `rmcp`'s client and `tls.rs` still uses
-  `reqwest`, so `tokio`, `tokio-util`, `reqwest` and `rmcp` stay dev-dependencies until the
-  follow-up PRs.
+  `reqwest`, so `tokio`, `reqwest` and `rmcp` stay dev-dependencies until the follow-up PRs.
+  `tokio-util` is dropped here, since no suite uses its token any more.
