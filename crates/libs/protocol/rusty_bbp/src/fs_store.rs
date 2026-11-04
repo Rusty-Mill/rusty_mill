@@ -13,6 +13,14 @@
 //! events in all complete lines, and `append` rejects a caller whose expected
 //! revision is stale.
 //!
+//! Hash chain (#722): a line is `{"prev":"<hex>","events":[...]}`, where
+//! `prev` is the SHA-256 of the previous line's bytes (without its `\n`), or
+//! of every byte before it for the first chained line of a log that began
+//! unchained (zeros when there are none). Legacy lines are bare `[...]` arrays
+//! and may only precede the chain. Every load checks the chain, so an edited,
+//! removed, reordered or inserted line is `Corrupt`; [`verify_log`] reports
+//! the head without touching the file.
+//!
 //! Cross-process exclusion: every read-repair, revision check and append
 //! runs under an exclusive OS lock on `<root>/lock` (`std::fs::File::lock`,
 //! `flock` on Unix, `LockFileEx` on Windows), held for the operation only.
@@ -151,7 +159,7 @@ impl FsStore {
             if path.extension().and_then(|e| e.to_str()) != Some("log") {
                 continue;
             }
-            let events = load_log(&path)?;
+            let (events, _) = load_log(&path)?;
             // An empty log (a crash before its first batch) names no task.
             let Some(task) = task_of(&path, &events)? else {
                 continue;
@@ -208,7 +216,7 @@ impl FsStore {
         let path = self.log_path(task);
         let _lock = lock(&self.root)?;
         let events = if path.exists() {
-            load_log(&path)?
+            load_log(&path)?.0
         } else {
             Vec::new()
         };
@@ -218,48 +226,179 @@ impl FsStore {
 }
 
 /// Read all complete lines; truncate the file after the last newline if a
-/// partial line trails it. Each line is a JSON array of events.
-fn load_log(path: &Path) -> Result<Vec<Event>, FsError> {
+/// partial line trails it. Checks the hash chain, then decodes each line's
+/// events. Returns the events and the `prev` the next line must carry.
+fn load_log(path: &Path) -> Result<(Vec<Event>, Sha256), FsError> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
-    let complete = bytes
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let complete = complete_len(&bytes);
     if complete < bytes.len() {
         file.set_len(complete as u64)?;
         file.sync_all()?;
         bytes.truncate(complete);
     }
-    let text = String::from_utf8(bytes).map_err(|e| FsError::Corrupt {
+    let corrupt = |line: usize, detail: String| FsError::Corrupt {
         path: path.to_path_buf(),
-        line: 0,
-        detail: e.to_string(),
-    })?;
+        line,
+        detail,
+    };
+    let chain = check(&bytes).map_err(|e| corrupt(e.line, e.detail))?;
     let mut events = Vec::new();
-    for (i, line) in text.lines().enumerate() {
+    for (i, line) in split_lines(&bytes).enumerate() {
         if line.is_empty() {
             continue;
         }
-        let batch: Vec<Event> = rusty_serde::json::from_str(line).map_err(|e| {
+        let text =
+            std::str::from_utf8(events_of(line)).map_err(|e| corrupt(i + 1, e.to_string()))?;
+        let batch: Vec<Event> = rusty_serde::json::from_str(text).map_err(|e| {
             // A schema-1 `task_opened` has no `schema` field and fails to decode.
-            if i == 0 && line.contains("\"TaskOpened\"") && !line.contains("\"schema\"") {
+            if i == 0 && text.contains("\"TaskOpened\"") && !text.contains("\"schema\"") {
                 return FsError::UnsupportedSchema {
                     path: path.to_path_buf(),
                     found: None,
                 };
             }
-            FsError::Corrupt {
-                path: path.to_path_buf(),
-                line: i + 1,
-                detail: e.to_string(),
-            }
+            corrupt(i + 1, e.to_string())
         })?;
         events.extend(batch);
     }
-    Ok(events)
+    Ok((events, chain.next))
+}
+
+/// What [`check`] found in a log's bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chain {
+    /// SHA-256 of each complete line, without its `\n`, in order.
+    pub hashes: Vec<Sha256>,
+    /// Leading lines written before the log was chained.
+    pub unchained: usize,
+    /// The `prev` the next appended line must carry.
+    pub next: Sha256,
+    /// Bytes after the last `\n`: a crash mid-write, or a cut edit.
+    pub partial: bool,
+}
+
+impl Chain {
+    /// SHA-256 of the last complete line; zeros for an empty log.
+    pub fn head(&self) -> Sha256 {
+        self.hashes.last().copied().unwrap_or(GENESIS)
+    }
+}
+
+/// Where in the bytes the chain broke. `line` is 1-based.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChainError {
+    pub line: usize,
+    pub detail: String,
+}
+
+/// The `prev` of the first line of a log that has no bytes before it.
+pub const GENESIS: Sha256 = Sha256([0; 32]);
+
+const PREV_OPEN: &[u8] = b"{\"prev\":\"";
+const PREV_CLOSE: &[u8] = b"\",\"events\":";
+
+/// Check a log's hash chain. Pure: reads `bytes`, writes nothing.
+pub fn check(bytes: &[u8]) -> Result<Chain, ChainError> {
+    let complete = complete_len(bytes);
+    let mut chain = Chain {
+        hashes: Vec::new(),
+        unchained: 0,
+        next: GENESIS,
+        partial: complete < bytes.len(),
+    };
+    let mut offset = 0;
+    for (i, line) in split_lines(&bytes[..complete]).enumerate() {
+        let fail = |detail: String| ChainError {
+            line: i + 1,
+            detail,
+        };
+        let chained = chain.hashes.len() > chain.unchained;
+        match prev_of(line) {
+            None if chained => return Err(fail("unchained line after the chain began".into())),
+            None => chain.unchained += 1,
+            Some(_) if line.ends_with(b"\r") => {
+                return Err(fail("chained line ends in \\r".into()))
+            }
+            Some(prev) => {
+                let want = match (chained, offset) {
+                    (true, _) => chain.head(),
+                    (false, 0) => GENESIS,
+                    (false, _) => Sha256::of(&bytes[..offset]),
+                };
+                if prev != Some(want) {
+                    return Err(fail(format!("chain broken: prev should be {}", want.hex())));
+                }
+            }
+        }
+        chain.hashes.push(Sha256::of(line));
+        offset += line.len() + 1;
+    }
+    chain.next = match (chain.hashes.len() > chain.unchained, complete) {
+        (true, _) => chain.head(),
+        (false, 0) => GENESIS,
+        (false, _) => Sha256::of(&bytes[..complete]),
+    };
+    Ok(chain)
+}
+
+/// A chained line's `prev`: `Some(None)` when the framing is there but the
+/// hex is not, `None` for a legacy line.
+fn prev_of(line: &[u8]) -> Option<Option<Sha256>> {
+    let rest = line.strip_prefix(PREV_OPEN)?;
+    let hex = rest.get(..64).and_then(|h| std::str::from_utf8(h).ok());
+    let framed = rest.get(64..).is_some_and(|r| r.starts_with(PREV_CLOSE));
+    Some(hex.filter(|_| framed).and_then(Sha256::from_hex))
+}
+
+/// The events array of a line: the whole of a legacy line, the inner array
+/// of a chained one.
+fn events_of(line: &[u8]) -> &[u8] {
+    let start = PREV_OPEN.len() + 64 + PREV_CLOSE.len();
+    match prev_of(line) {
+        Some(Some(_)) => line
+            .get(start..line.len().saturating_sub(1))
+            .unwrap_or(line),
+        _ => line,
+    }
+}
+
+/// One chained line for `events`, with its `\n`.
+fn chained_line(prev: Sha256, events: &[Event]) -> Result<String, StoreError> {
+    let json = rusty_serde::json::to_string(&events.to_vec())
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+    Ok(format!(
+        "{{\"prev\":\"{}\",\"events\":{json}}}\n",
+        prev.hex()
+    ))
+}
+
+/// Bytes up to and including the last `\n`.
+fn complete_len(bytes: &[u8]) -> usize {
+    bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1)
+}
+
+/// The `\n`-terminated lines of `bytes`, without their `\n`. A trailing
+/// partial line is not yielded.
+fn split_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let complete = &bytes[..complete_len(bytes)];
+    complete
+        .split_inclusive(|b| *b == b'\n')
+        .map(|l| &l[..l.len() - 1])
+}
+
+/// Check one task's log as it stands on disk, under the directory lock,
+/// without repairing or otherwise changing it (`bbp verify`).
+pub fn verify_log(root: &Path, task: &TaskId) -> Result<Chain, FsError> {
+    let _lock = lock(root)?;
+    let path = log_path_for(root, task);
+    let bytes = fs::read(&path)?;
+    check(&bytes).map_err(|e| FsError::Corrupt {
+        path,
+        line: e.line,
+        detail: e.detail,
+    })
 }
 
 impl Store for FsStore {
@@ -274,10 +413,10 @@ impl Store for FsStore {
         // can slip a batch in between or repair ours away.
         let path = self.log_path(task);
         let _lock = lock(&self.root).map_err(StoreError::from)?;
-        let on_disk = if path.exists() {
+        let (on_disk, prev) = if path.exists() {
             load_log(&path).map_err(StoreError::from)?
         } else {
-            Vec::new()
+            (Vec::new(), GENESIS)
         };
         let actual = Rev(on_disk.len() as u64);
         if actual != expected_rev {
@@ -290,9 +429,7 @@ impl Store for FsStore {
         if events.is_empty() {
             return Ok(());
         }
-        let mut line = rusty_serde::json::to_string(&events.to_vec())
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        line.push('\n');
+        let line = chained_line(prev, events)?;
         let mut file = OpenOptions::new()
             .create(true)
             .append(true)

@@ -25,6 +25,7 @@
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
+//! bbp verify  --dir D --task T [--expect H]               check the log's hash chain without changing it; prints lines, unchained, head; H must be the hash of one of its lines
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
@@ -36,7 +37,7 @@
 use rusty_bbp::*;
 use rusty_bbp_host::{
     admin, admission, args::Args, broker, golden, grade, holdout, human, inbox, mcp, moderator,
-    pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens, why,
+    pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens, verify, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -81,7 +82,7 @@ fn with_holdout(
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
-        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|agents-check|grade|why|shadow|mod> ...",
+        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|agents-check|grade|why|verify|shadow|mod> ...",
     )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
@@ -394,6 +395,7 @@ fn run() -> Result<String, String> {
             };
             return why::json(&dir, &task, turn);
         }
+        "verify" => return verify::json(&dir, &task, a.flags.get("expect").map(String::as_str)),
         "shadow" => return shadow::json(&dir, &task),
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
