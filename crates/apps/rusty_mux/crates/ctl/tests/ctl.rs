@@ -30,6 +30,7 @@ fn shell() -> Config {
             args: vec!["/Q".into()],
             cwd: std::env::temp_dir().into_os_string(),
             console_host: ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST"),
+            state_dir: None,
             config_file: None,
         }
     } else {
@@ -38,6 +39,7 @@ fn shell() -> Config {
             args: Vec::new(),
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
+            state_dir: None,
             config_file: None,
         }
     }

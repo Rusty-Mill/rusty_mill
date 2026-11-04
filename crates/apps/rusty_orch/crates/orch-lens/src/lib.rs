@@ -8,7 +8,7 @@
 //! - [`round`]: one runner round: schedule, call, post, record.
 //! - [`call`]: one job over its fallback order, metered before each ask.
 //! - [`port`]: the [`Model`] port, one stateless question per call.
-//! - [`post`]: the strict reply protocol every adapter applies ([`parse`]).
+//! - [`post`]: the strict reply protocol every adapter applies ([`check`]).
 //! - [`config`]: providers, data classes, ceilings and lenses, checked at load.
 //! - [`card`] and [`context`]: a fresh, fitted context per job, blind first.
 //! - [`class`]: data classes; nothing above a provider's clearance reaches it.
@@ -17,6 +17,7 @@
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
+//! - [`saved`]: the scheduler's memory as plain data, for the store.
 
 #![cfg_attr(
     not(test),
@@ -33,10 +34,11 @@ pub mod port;
 pub mod post;
 pub mod record;
 pub mod round;
+pub mod saved;
 pub mod schedule;
 pub mod tier;
 
 pub use class::DataClass;
 pub use config::LensConfig;
-pub use port::{Answer, Model, Question, Usage};
-pub use post::{parse, Allowed, Post};
+pub use port::{Answer, Model, Question, Reply, Shape, Usage};
+pub use post::{check, parse, Allowed, Post};

@@ -834,6 +834,7 @@ fn real_server_with(udp: Option<Duration>) -> (PathBuf, Option<u16>) {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                state_dir: None,
                 config_file: None,
             };
             let Some(idle) = udp else {

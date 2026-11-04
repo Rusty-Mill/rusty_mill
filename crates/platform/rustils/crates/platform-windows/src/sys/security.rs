@@ -486,8 +486,21 @@ impl Drop for LocalSecurityDescriptor {
 /// `FILE_FLAG_OPEN_REPARSE_POINT`: an `AF_UNIX` socket file is a reparse
 /// point, and path-based calls that follow it fail.
 pub fn restrict_to_owner(path: &Path) -> Result<()> {
+    restrict(path, "")
+}
+
+/// [`restrict_to_owner`] for a directory, with the entry inherited
+/// (`OICI`) by the files and directories created in it from now on, so
+/// they are owner-only too. Entries already in it keep their own DACL.
+pub fn restrict_dir_to_owner(path: &Path) -> Result<()> {
+    restrict(path, "OICI")
+}
+
+/// Sets `path`'s DACL to one protected full-access entry for the current
+/// user, with ACE `flags`.
+fn restrict(path: &Path, flags: &str) -> Result<()> {
     let sid = UserSid::current()?.to_sid_string()?;
-    let sddl = to_wide_nul(OsStr::new(&format!("D:P(A;;FA;;;{sid})")));
+    let sddl = to_wide_nul(OsStr::new(&format!("D:P(A;{flags};FA;;;{sid})")));
     let mut raw: w::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and outlives the call; `raw` is a
     // valid out-pointer; the size out-pointer is optional.
