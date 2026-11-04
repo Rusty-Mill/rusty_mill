@@ -12,7 +12,7 @@ use rmcp::{
     ServiceExt, model::CallToolRequestParams, service::RunningService,
     transport::StreamableHttpClientTransport,
 };
-use tokio_util::sync::CancellationToken;
+use rusty_tokio::sync::CancellationToken;
 
 /// Path to the compiled fixture server.
 ///
@@ -52,7 +52,7 @@ impl Harness {
     /// Boot a gateway from `config_template`, with `{server}` replaced by the
     /// fixture path and `{port}` by a free port, then connect a client to it.
     async fn start(config_template: &str) -> Harness {
-        let port = free_port().await;
+        let port = free_port();
         let yaml = config_template
             .replace("{server}", &mock_server())
             .replace("{port}", &port.to_string());
@@ -292,7 +292,7 @@ async fn route_authorization_bans_one_target_but_not_the_other() {
 
 #[tokio::test]
 async fn a_route_that_does_not_match_is_a_404() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = TWO_TARGETS
         .replace("{server}", &mock_server())
         .replace("{port}", &port.to_string());

@@ -1,5 +1,5 @@
 //! Exponential backoff with jitter, shared by `rusty_request` and
-//! `rusty-acp`'s own retry policies.
+//! `rusty-ibm-acp`'s own retry policies.
 //!
 //! This crate is deliberately narrow: it computes *how long to wait*
 //! before a retry. It has no opinion on *whether* to retry -- which
@@ -9,16 +9,16 @@
 //! the HTTP-date form doesn't, since callers already pull in different
 //! date-parsing dependencies for other reasons). Each caller keeps that
 //! policy layer to itself -- `rusty_request`'s is HTTP-method-idempotency
-//! based, `rusty-acp`'s is ACP-request-type based, and forcing those to
+//! based, `rusty-ibm-acp`'s is ACP-request-type based, and forcing those to
 //! converge would change real behavior neither crate asked for.
 //!
 //! [`Backoff::Exponential`]'s `jitter` field unifies what were two
 //! independent representations before this crate existed:
 //! `rusty_request`'s `jitter: bool` (full jitter on/off) and
-//! `rusty-acp`'s `jitter: f64` (a randomized fraction of the delay). The
+//! `rusty-ibm-acp`'s `jitter: f64` (a randomized fraction of the delay). The
 //! `f64` form is a strict generalization -- `0.0` reproduces "no jitter",
 //! `1.0` reproduces `rusty_request`'s old "full jitter" (uniform over
-//! `[0, capped_delay)`), and anything between reproduces `rusty-acp`'s
+//! `[0, capped_delay)`), and anything between reproduces `rusty-ibm-acp`'s
 //! partial-jitter formula exactly.
 
 use std::time::{Duration, SystemTime};
@@ -254,8 +254,8 @@ mod tests {
         }
     }
 
-    // Mirrors rusty-acp's own `jitter_stays_within_the_backoff` -- pinning
-    // the exact behavior rusty-acp depends on now that this crate computes
+    // Mirrors rusty-ibm-acp's own `jitter_stays_within_the_backoff` -- pinning
+    // the exact behavior rusty-ibm-acp depends on now that this crate computes
     // it.
     #[test]
     fn half_jitter_stays_within_the_upper_half_of_the_backoff() {

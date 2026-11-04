@@ -57,7 +57,7 @@ members = [
     "crates/libs/async/rusty_tokio",
     "crates/libs/async/rusty_tokio/rusty_tokio-macros",
     "crates/foundation/rusty_libc",
-    "crates/libs/protocol/rusty_acp",
+    "crates/libs/protocol/rusty_ibm_acp",
     "crates/libs/net/rusty_tls",
     "crates/foundation/rusty_serde/rusty_serde",
     "crates/foundation/rusty_serde/rusty_serde_derive",
@@ -595,7 +595,7 @@ async-stream = "0.3"
 # now backwards-compat aliases for renamed internals, per sqlx's own
 # CHANGELOG). MSRV for 0.9 is 1.94.0; this workspace's toolchain is pinned
 # above that. Verified with `cargo check` on every direct sqlx consumer
-# (rp-core/rusty-db-sqlite/rusty-acp's postgres-store feature) plus the
+# (rp-core/rusty-db-sqlite/rusty-ibm-acp's postgres-store feature) plus the
 # nexus rusqlite consumers, not just `cargo metadata`.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
 syn = { version = "2", features = ["full"] }
@@ -691,7 +691,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     # reqwest 0.13 renamed the 0.12-era "rustls-tls"/"rustls-tls-native-roots"
     # features to a single "rustls" feature (native-cert loading is no
     # longer a separate opt-in); the workspace's other direct 0.13
-    # consumers (agentgateway*, rusty_acp, rusty_mcp_middleware) already use this name.
+    # consumers (agentgateway*, rusty_ibm_acp, rusty_mcp_middleware) already use this name.
     "rustls",
     "http2",
     # 0.13 also split RequestBuilder::query()/form() out from the

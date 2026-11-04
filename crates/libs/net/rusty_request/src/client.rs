@@ -175,6 +175,14 @@ impl ClientBuilder {
         Ok(self)
     }
 
+    /// Sends no `User-Agent` of the library's own: a request carries one
+    /// only if it sets it. For a proxy, which forwards a request as it
+    /// arrived, header for header.
+    pub fn no_user_agent(mut self) -> Self {
+        self.default_headers.remove("User-Agent");
+        self
+    }
+
     /// Sets `Authorization: Basic <base64(username:password)>` (RFC
     /// 7617) on every request built from the resulting [`Client`],
     /// unless a specific request overrides it with its own
@@ -1043,6 +1051,9 @@ fn prepare_redirect_hop(
         for name in ORIGIN_CREDENTIAL_HEADERS {
             hop_headers.remove(name);
         }
+        // A caller's `Host` named the origin being left; the next hop's
+        // comes from its own URL.
+        hop_headers.remove("Host");
     }
     redirect_method_and_body(status, method, body)
 }
@@ -1239,11 +1250,21 @@ struct RawResponse<S> {
 /// headers `build_wire_headers` already assembled) in their original
 /// order, plus the proxy's `Proxy-Authorization` when `target` forwards
 /// the request through one.
+///
+/// A caller-set `Host` replaces the one derived from the URL rather than
+/// joining it: a request with two `Host` fields is malformed, and a server
+/// must refuse it (RFC 9112 §3.2).
 fn build_request_head(request: &Request, target: &HopTarget) -> Result<RequestHead> {
     let mut headers = HeaderMap::new();
-    headers.insert("Host", &request.url.host_header())?;
+    let host = match request.headers.get("Host") {
+        Some(host) => host.to_string(),
+        None => request.url.host_header(),
+    };
+    headers.insert("Host", &host)?;
     for (name, value) in request.headers.iter() {
-        headers.append(name, value)?;
+        if !name.eq_ignore_ascii_case("Host") {
+            headers.append(name, value)?;
+        }
     }
     let forwarded = target.connect_tunnel.is_none();
     if let Some(authorization) = target.proxy_authorization.as_deref().filter(|_| forwarded) {

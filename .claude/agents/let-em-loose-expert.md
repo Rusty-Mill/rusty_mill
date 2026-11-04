@@ -38,6 +38,9 @@ remind-me tag: `let-em-loose`.
 5. Nano's standing principles: `CLAUDE.md`, `AGENTS.md`, `LEL/SPEC.md`
    § Constraints, and remind-me preferences.
 The design chat share link in `LEL/handoff/SPEC.md` doesn't render; never cite it.
+Cite Nano's saved record of the chat instead: remind-me capture
+`cap_58e514f9f3d94b3da5d26c0b8a118dd3` (paraphrased; Nano pointed to it in thread
+message `cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds`).
 
 ## Precedence
 - **Behaviour:** the merged, accepted contract (code, the merged addendum,

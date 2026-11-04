@@ -86,7 +86,7 @@ async fn convert_temperature(value: f64, to: String) -> Result<serde_json::Value
     ))
 }
 
-#[tokio::main]
+#[rusty_tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let use_http = args.iter().any(|a| a == "--http");

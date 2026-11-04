@@ -344,10 +344,14 @@ where
         };
         let work = async {
             let req = conn.read_request(head, options).await?;
-            Ok(shared.router.call(req.with_peer_addr(peer)).await)
+            let call = shared.router.call(req.with_peer_addr(peer));
+            Ok(until_hung_up(call, &mut conn.io, options.max_head_bytes).await)
         };
         let response = match ticket.within(work).await {
-            Some(Ok(response)) => response,
+            Some(Ok(Some(response))) => response,
+            // The client hung up mid-request: the handler is dropped, as on
+            // hyper, and there is no one to answer.
+            Some(Ok(None)) => return,
             Some(Err(e)) => return conn.refuse(&e).await,
             // The body may be partly read: answer, then close.
             None => {
@@ -362,6 +366,27 @@ where
         if !reusable {
             return;
         }
+    }
+}
+
+/// `call`'s response, or `None` if the client closes the connection
+/// first (card #408). Bytes it sends meanwhile, up to `max_buffered`, are
+/// kept for the next request. As on hyper's default, a client that only
+/// half-closes after its request counts as gone; a response ready on the
+/// same poll still wins.
+async fn until_hung_up<T, F>(
+    call: F,
+    io: &mut AsyncTransport<T>,
+    max_buffered: usize,
+) -> Option<Response>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+    F: Future<Output = Response>,
+{
+    rusty_tokio::select! {
+        biased;
+        response = call => Some(response),
+        () = io.closed(max_buffered) => None,
     }
 }
 

@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use adk_core::{AdkError, Result};
 use rusty_mcp_server::{serve_lines, StdioConfig};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use rusty_tokio::sync::mpsc;
+use rusty_tokio::task::AbortHandle;
 
 use crate::line_cap::{cap_error, LineCapped, MAX_LINE_BYTES};
 use crate::server::McpServer;
@@ -27,7 +28,7 @@ const BUFFERED_CHUNKS: usize = 8;
 
 /// Serves `server` over stdin and stdout until stdin closes.
 pub async fn serve_stdio(server: &McpServer) -> Result<()> {
-    serve_stream(server, tokio::io::stdin(), tokio::io::stdout()).await
+    serve_stream(server, rusty_tokio::io::stdin(), rusty_tokio::io::stdout()).await
 }
 
 /// Serves `server` over an arbitrary reader and writer, until the reader
@@ -58,7 +59,7 @@ where
     // Reader pump: ends at end of input, on a read error, or at the line cap;
     // dropping the reader then tells the peer to stop writing.
     let capped = LineCapped::new(reader, Arc::clone(&exceeded));
-    let pump_in = tokio::spawn(async move {
+    let pump_in = rusty_tokio::spawn(async move {
         let mut capped = capped;
         let mut buf = vec![0u8; CHUNK];
         loop {
@@ -74,7 +75,7 @@ where
     });
 
     // Writer pump: every chunk is written and flushed as it arrives.
-    let pump_out = tokio::spawn(async move {
+    let pump_out = rusty_tokio::spawn(async move {
         let mut writer = writer;
         while let Some(chunk) = out_rx.recv().await {
             if writer.write_all(&chunk).await.is_err() || writer.flush().await.is_err() {
@@ -83,11 +84,17 @@ where
         }
     });
 
+    // Ends the session if this future is dropped mid-way (its task aborted):
+    // stopping both pumps closes both channels, so the blocking loop's next
+    // read sees end of input and its next write fails, even if the peer has
+    // stopped reading.
+    let pumps = AbortOnDrop([pump_in.abort_handle(), pump_out.abort_handle()]);
+
     let config = StdioConfig {
         max_line_bytes: usize::try_from(MAX_LINE_BYTES).unwrap_or(usize::MAX),
         ..StdioConfig::default()
     };
-    let served = tokio::task::spawn_blocking(move || {
+    let served = rusty_tokio::spawn_blocking(move || {
         serve_lines(
             wire,
             BufReader::new(ChannelReader::new(in_rx)),
@@ -98,8 +105,10 @@ where
     .await;
 
     pump_in.abort();
-    // The writer pump ends once the loop (which owned the sender) is gone.
+    // The writer pump flushes what is left and ends once the loop (which
+    // owned the sender) is gone.
     let _ = pump_out.await;
+    drop(pumps);
 
     if exceeded.load(Ordering::Acquire) {
         return Err(AdkError::Other(cap_error()));
@@ -110,6 +119,15 @@ where
         Ok(Err(e)) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         Ok(Err(e)) => Err(AdkError::Other(format!("MCP session failed: {e}"))),
         Err(e) => Err(AdkError::Other(format!("MCP server task failed: {e}"))),
+    }
+}
+
+/// Aborts the tasks when dropped.
+struct AbortOnDrop<const N: usize>([AbortHandle; N]);
+
+impl<const N: usize> Drop for AbortOnDrop<N> {
+    fn drop(&mut self) {
+        self.0.iter().for_each(AbortHandle::abort);
     }
 }
 

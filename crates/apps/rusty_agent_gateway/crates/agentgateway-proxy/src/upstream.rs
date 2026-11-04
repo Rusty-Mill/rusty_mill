@@ -22,10 +22,9 @@ pub(crate) type SendError = rusty_request::Error;
 ///
 /// `Host` is not copied: `rusty_request` writes it from the URI, which the
 /// proxy has already pointed at the upstream. The `Content-Length` it
-/// writes is the body's own. A field the client sent replaces the one
-/// `rusty_request` would add by default (its `User-Agent`), and every value
-/// of a repeated field is kept; a request without a `User-Agent` goes up
-/// with `rusty_request`'s.
+/// writes is the body's own. Every value of a repeated field is kept. The
+/// client is built with `no_user_agent`, so a request without a
+/// `User-Agent` goes up without one, as it arrived.
 pub(crate) async fn send(
     client: &Client,
     request: &Request<Bytes>,

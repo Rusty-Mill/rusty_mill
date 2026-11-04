@@ -1,6 +1,6 @@
 # Let Em Loose: handoff spec
 
-Design chat: https://claude.ai/share/a3210fa6-8f48-4b63-bb9f-0f07c4e3771b (2026-11-03; the share page renders without the conversation, so nothing here is sourced from it)
+Design chat: Nano's saved record in remind-me, capture `cap_58e514f9f3d94b3da5d26c0b8a118dd3` ("Let Em Loose: full design discussion, 2026-11-01 to 11-04"; paraphrased, every exchange in order; pointed to in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds`). The share link https://claude.ai/share/a3210fa6-8f48-4b63-bb9f-0f07c4e3771b renders without the conversation; don't cite it.
 remind-me tag: let-em-loose (entity "Let Em Loose"; also project-handoff, project-expert)
 Tags: [stated] [agreed] [default] [open]. Pack built with project-handoff v1.2.0.
 

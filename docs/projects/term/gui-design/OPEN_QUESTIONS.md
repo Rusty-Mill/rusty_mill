@@ -1,0 +1,10 @@
+# Open questions — rusty_term GUI design
+Claude Code: if a question isn't blocking, add it here instead of stopping.
+Format: `- [ ] Q<n> (<date>, blocking? y/n): <question> — interim choice: <what you did>`
+
+- [ ] Q1 (2026-11-03, n): What exactly is a lease? Only "which client has input", or does it also cover resize and terminal control (C40)? — interim choice: show it as input ownership ("Agent has input").
+- [ ] Q2 (2026-11-03, n): Is "run" the right name for a command plus its output and result? — interim choice: "run".
+- [ ] Q3 (2026-11-03, n): Should "Take over" on an agent block act at once, or ask for confirmation first? — interim choice: design both in F3 and let Nano pick.
+- [x] Q4 (2026-11-03, n): Is a light theme needed? — interim choice: dark only. — ANSWERED 2026-11-03: yes, light theme wanted [stated], see D24, D25
+- [ ] Q5 (2026-11-03, n): Can OSC 7501 status carry free text ("Editing zoom.rs"), or only a state? — interim choice: free text, with a fallback to the state word.
+- [ ] Q6 (2026-11-03, n, code handoff only): Runs need shell integration (OSC 133-style prompt marks); does rusty_term_core parse those? — interim choice: assume yes in the design.

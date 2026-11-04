@@ -11,10 +11,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway_config::Config;
-use tokio_util::sync::CancellationToken;
+use rusty_tokio::sync::CancellationToken;
 
 mod common;
 use common::free_port;
+use common::http;
 
 /// An upstream that answers from a script.
 struct Upstream {
@@ -29,7 +30,7 @@ struct Upstream {
 async fn upstream(script: Vec<u16>) -> Upstream {
     use rusty_axum::{Router, StatusCode};
 
-    let port = free_port().await;
+    let port = free_port();
     let hits = Arc::new(AtomicUsize::new(0));
     let queue = Arc::new(Mutex::new(script.into_iter().collect::<Vec<_>>()));
 
@@ -52,7 +53,7 @@ async fn upstream(script: Vec<u16>) -> Upstream {
 }
 
 async fn start(route: &str) -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -78,7 +79,7 @@ binds:
     (format!("http://127.0.0.1:{port}"), shutdown)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_retryable_status_is_retried_until_it_succeeds() {
     let up = upstream(vec![503, 503]).await;
     let (base, shutdown) = start(&format!(
@@ -93,9 +94,7 @@ async fn a_retryable_status_is_retried_until_it_succeeds() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    let response = http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(
         response.status(),
         200,
@@ -110,7 +109,7 @@ async fn a_retryable_status_is_retried_until_it_succeeds() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn attempts_bounds_the_retries_and_the_last_failure_is_returned() {
     let up = upstream(vec![503, 503, 503, 503, 503]).await;
     let (base, shutdown) = start(&format!(
@@ -125,9 +124,7 @@ async fn attempts_bounds_the_retries_and_the_last_failure_is_returned() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    let response = http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(
         response.status(),
         503,
@@ -142,7 +139,7 @@ async fn attempts_bounds_the_retries_and_the_last_failure_is_returned() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_status_not_listed_is_not_retried() {
     let up = upstream(vec![500]).await;
     let (base, shutdown) = start(&format!(
@@ -157,9 +154,7 @@ async fn a_status_not_listed_is_not_retried() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    let response = http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(response.status(), 500);
     assert_eq!(
         up.hits.load(Ordering::Relaxed),
@@ -170,7 +165,7 @@ async fn a_status_not_listed_is_not_retried() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_successful_response_is_never_retried() {
     let up = upstream(vec![]).await;
     let (base, shutdown) = start(&format!(
@@ -185,15 +180,13 @@ async fn a_successful_response_is_never_retried() {
     ))
     .await;
 
-    reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(up.hits.load(Ordering::Relaxed), 1);
 
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_retry_tries_a_different_endpoint() {
     // Retrying the instance that just failed is the least likely way to
     // succeed, so each attempt takes the next endpoint in the ring.
@@ -212,9 +205,7 @@ async fn a_retry_tries_a_different_endpoint() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    let response = http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(
         response.status(),
         200,
@@ -226,11 +217,11 @@ async fn a_retry_tries_a_different_endpoint() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_connect_failure_is_retried_onto_a_live_endpoint() {
     // A connect failure never reached the upstream, so replaying it cannot
     // duplicate work -- the one transport error that is safe to retry.
-    let dead = free_port().await;
+    let dead = free_port();
     let live = upstream(vec![]).await;
     let (base, shutdown) = start(&format!(
         r#"          - name: proxy
@@ -244,9 +235,7 @@ async fn a_connect_failure_is_retried_onto_a_live_endpoint() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    let response = http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(response.status(), 200);
     assert_eq!(live.hits.load(Ordering::Relaxed), 1);
 
@@ -256,7 +245,7 @@ async fn a_connect_failure_is_retried_onto_a_live_endpoint() {
 /// An upstream that records each body it receives and answers `503` to
 /// the first, `200` after; and a gateway retrying `503` once in front of it.
 async fn recorded_retry() -> (String, CancellationToken, Arc<Mutex<Vec<String>>>) {
-    let port = free_port().await;
+    let port = free_port();
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let recorder = Arc::clone(&seen);
 
@@ -287,13 +276,13 @@ async fn recorded_retry() -> (String, CancellationToken, Arc<Mutex<Vec<String>>>
     (base, shutdown, seen)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_post_body_survives_a_retry() {
     // The whole reason bodies are buffered: a replayed attempt has to send the
     // same payload, not an empty one.
     let (base, shutdown, seen) = recorded_retry().await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(format!("{base}/"))
         .body("the payload")
         .send()
@@ -311,15 +300,15 @@ async fn a_post_body_survives_a_retry() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_chunked_body_is_retried_too() {
     // A body without a length is read whole like any other, so it is
     // replayed rather than sent once.
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use rusty_tokio::io::AsyncReadExt as _;
     let (base, shutdown, seen) = recorded_retry().await;
 
     let gateway = base.trim_start_matches("http://");
-    let mut client = tokio::net::TcpStream::connect(gateway)
+    let mut client = rusty_tokio::net::TcpStream::connect(gateway)
         .await
         .expect("connect");
     client
@@ -340,7 +329,7 @@ async fn a_chunked_body_is_retried_too() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn requests_over_the_rate_limit_get_429_with_retry_after() {
     let up = upstream(vec![]).await;
     let (base, shutdown) = start(&format!(
@@ -357,21 +346,14 @@ async fn requests_over_the_rate_limit_get_429_with_retry_after() {
     .await;
 
     for i in 0..2 {
-        let response = reqwest::get(format!("{base}/"))
-            .await
-            .expect("should answer");
+        let response = http::get(format!("{base}/")).await.expect("should answer");
         assert_eq!(response.status(), 200, "request {i} is inside the burst");
     }
 
-    let limited = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    let limited = http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(limited.status(), 429);
     assert_eq!(
-        limited
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok()),
+        limited.headers().get("retry-after"),
         Some("60"),
         "a 429 without Retry-After leaves the client guessing"
     );
@@ -384,7 +366,7 @@ async fn requests_over_the_rate_limit_get_429_with_retry_after() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rate_limited_request_is_refused_before_authentication() {
     // Rate limiting exists partly to protect the auth path: an unauthenticated
     // flood costs a signature verification each. So the limit must be checked
@@ -410,14 +392,10 @@ async fn a_rate_limited_request_is_refused_before_authentication() {
 
     // The first request is inside the limit, so it reaches auth and is refused
     // there for having no token.
-    let first = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    let first = http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(first.status(), 401);
 
-    let second = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
+    let second = http::get(format!("{base}/")).await.expect("should answer");
     assert_eq!(
         second.status(),
         429,
@@ -427,7 +405,7 @@ async fn a_rate_limited_request_is_refused_before_authentication() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn several_limits_all_have_to_permit_the_request() {
     // Burst of 5, sustained 1 per minute. The burst bucket alone would let
     // five straight through.
@@ -449,14 +427,14 @@ async fn several_limits_all_have_to_permit_the_request() {
     .await;
 
     assert_eq!(
-        reqwest::get(format!("{base}/"))
+        http::get(format!("{base}/"))
             .await
             .expect("should answer")
             .status(),
         200
     );
     assert_eq!(
-        reqwest::get(format!("{base}/"))
+        http::get(format!("{base}/"))
             .await
             .expect("should answer")
             .status(),
@@ -467,7 +445,7 @@ async fn several_limits_all_have_to_permit_the_request() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_route_without_a_limit_is_unaffected() {
     let up = upstream(vec![]).await;
     let (base, shutdown) = start(&format!(
@@ -480,7 +458,7 @@ async fn a_route_without_a_limit_is_unaffected() {
 
     for _ in 0..25 {
         assert_eq!(
-            reqwest::get(format!("{base}/"))
+            http::get(format!("{base}/"))
                 .await
                 .expect("should answer")
                 .status(),

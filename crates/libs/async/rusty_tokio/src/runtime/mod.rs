@@ -165,7 +165,7 @@ pub(crate) struct Shared {
     /// Every task spawned and not yet finished. The runtime owns its
     /// tasks through this, not only through their wakers, so a task with
     /// no stored waker stays alive until shutdown cancels it (#405).
-    pub(crate) owned: task::OwnedTasks,
+    pub(crate) owned: task::OwnedTasks<task::Task>,
     drain_lock: Mutex<()>,
     drain_condvar: Condvar,
     /// Per-worker counters backing [`RuntimeMetrics`] -- how many tasks
@@ -212,13 +212,13 @@ pub(crate) struct Shared {
     pub(crate) id: Id,
 }
 
-type PanicPayload = Box<dyn std::any::Any + Send>;
+pub(crate) type PanicPayload = Box<dyn std::any::Any + Send>;
 
 /// Keeps the first panic payload of a shutdown sweep. Later ones are
 /// leaked rather than dropped: a payload is arbitrary user data whose
 /// destructor could itself panic and cut the sweep short. Shutdown
 /// happens once per runtime, so the leak is bounded.
-fn keep_first_panic(first: &mut Option<PanicPayload>, payload: PanicPayload) {
+pub(crate) fn keep_first_panic(first: &mut Option<PanicPayload>, payload: PanicPayload) {
     if first.is_none() {
         *first = Some(payload);
     } else {
@@ -1292,27 +1292,36 @@ impl Runtime {
     }
 
     /// Cancels every task still alive on every `Shared` this runtime
-    /// owns; see [`Shared::cancel_all_tasks`]. Every core is swept before
-    /// the first panic, if any, is re-raised, unless this thread is
-    /// already unwinding, where a second panic would abort the process.
-    fn cancel_all_tasks(&self) {
+    /// owns; see [`Shared::cancel_all_tasks`]. Every core is swept, and
+    /// the first panic, if any, is returned for [`reraise`] once the rest
+    /// of teardown is done.
+    fn cancel_all_tasks(&self) -> Option<PanicPayload> {
         let mut first_panic = None;
         for shared in self.all_shared() {
             if let Some(payload) = shared.cancel_all_tasks() {
                 keep_first_panic(&mut first_panic, payload);
             }
         }
-        let Some(payload) = first_panic else {
-            return;
-        };
-        if std::thread::panicking() {
-            // See `keep_first_panic`: dropping it could panic again.
-            std::mem::forget(payload);
-            return;
-        }
-        std::panic::resume_unwind(payload);
+        first_panic
     }
+}
 
+/// Re-raises a panic a task's destructor threw during teardown, unless
+/// this thread is already unwinding, where a second panic would abort the
+/// process.
+fn reraise(first_panic: Option<PanicPayload>) {
+    let Some(payload) = first_panic else {
+        return;
+    };
+    if std::thread::panicking() {
+        // See `keep_first_panic`: dropping it could panic again.
+        std::mem::forget(payload);
+        return;
+    }
+    std::panic::resume_unwind(payload);
+}
+
+impl Runtime {
     /// Signals shutdown and returns immediately -- doesn't wait for
     /// outstanding tasks to finish, the blocking pool to drain, or even
     /// the worker threads themselves to exit. Dropping the worker
@@ -1339,7 +1348,7 @@ impl Runtime {
         self.take_workers();
         // Workers may still be mid-poll here; `Task::shutdown` leaves
         // those tasks for their poller to cancel when the poll returns.
-        self.cancel_all_tasks();
+        reraise(self.cancel_all_tasks());
     }
 
     /// Signals shutdown, then waits up to `timeout` for every
@@ -1372,14 +1381,17 @@ impl Runtime {
             return;
         }
         self.stop_scheduling_and_reactor();
+        for w in self.take_workers() {
+            let _ = w.join();
+        }
+        // Tasks first, as tokio: a blocking job may wait on something a
+        // task owns (a channel's sender), which only cancelling frees.
+        let first_panic = self.cancel_all_tasks();
         for shared in self.all_shared() {
             shared.blocking_pool.signal_shutdown();
             shared.blocking_pool.wait_for_drain(Some(deadline));
         }
-        for w in self.take_workers() {
-            let _ = w.join();
-        }
-        self.cancel_all_tasks();
+        reraise(first_panic);
     }
 }
 
@@ -1395,13 +1407,16 @@ impl Drop for Runtime {
             return;
         }
         self.stop_scheduling_and_reactor();
-        for shared in self.all_shared() {
-            shared.blocking_pool.shutdown();
-        }
         for w in self.take_workers() {
             let _ = w.join();
         }
-        self.cancel_all_tasks();
+        // Tasks first, as tokio: a blocking job may wait on something a
+        // task owns (a channel's sender), which only cancelling frees.
+        let first_panic = self.cancel_all_tasks();
+        for shared in self.all_shared() {
+            shared.blocking_pool.shutdown();
+        }
+        reraise(first_panic);
     }
 }
 

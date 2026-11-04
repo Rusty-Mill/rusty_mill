@@ -6,7 +6,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::{Context, Poll, Waker};
 
 enum JoinState<T> {
@@ -254,16 +254,26 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
+/// A panic payload as [`std::panic::catch_unwind`] returns it.
+type Panic = Box<dyn Any + Send + 'static>;
+
 /// Why a joined task didn't produce a value.
+///
+/// `Send + Sync`, as on tokio, so it fits `Sync` error types such as
+/// `anyhow::Error` or `Box<dyn Error + Send + Sync>` (card #404).
 pub struct JoinError {
-    panicked: Option<Box<dyn Any + Send + 'static>>,
+    /// In a `Mutex` only to make the payload, which is just `Send`, `Sync`.
+    /// Nothing reads it through `&self`; it is only ever moved out.
+    panicked: Option<Mutex<Panic>>,
 }
 
 impl JoinError {
     fn from_payload(payload: JoinErrorPayload) -> Self {
         match payload {
             JoinErrorPayload::Cancelled => JoinError { panicked: None },
-            JoinErrorPayload::Panicked(p) => JoinError { panicked: Some(p) },
+            JoinErrorPayload::Panicked(p) => JoinError {
+                panicked: Some(Mutex::new(p)),
+            },
         }
     }
 
@@ -295,7 +305,11 @@ impl JoinError {
     /// (rather than panicking) if this error doesn't actually wrap a
     /// panic.
     pub fn try_into_panic(self) -> Result<Box<dyn Any + Send + 'static>, Self> {
-        self.panicked.ok_or(JoinError { panicked: None })
+        match self.panicked {
+            // Never poisoned: nothing runs while the lock is held.
+            Some(payload) => Ok(payload.into_inner().unwrap_or_else(PoisonError::into_inner)),
+            None => Err(self),
+        }
     }
 }
 

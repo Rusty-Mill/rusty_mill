@@ -25,6 +25,9 @@ pub enum Action {
     PrevTab,
     OpenConfig,
     OpenSettings,
+    /// Reopen the first-run setup (O11). No default chord (D68): it is rare,
+    /// and `--setup` covers the command line.
+    OpenSetup,
     Search,
     OpenLinks,
     CopyMode,
@@ -223,6 +226,7 @@ pub fn parse_action(name: &str) -> Option<Action> {
         "prev_tab" => Action::PrevTab,
         "open_config" => Action::OpenConfig,
         "open_settings" => Action::OpenSettings,
+        "open_setup" => Action::OpenSetup,
         "search" => Action::Search,
         "open_links" => Action::OpenLinks,
         "copy_mode" => Action::CopyMode,
@@ -553,6 +557,7 @@ mod tests {
             Some(Action::ScrollPromptDown)
         );
         assert_eq!(parse_action("open_settings"), Some(Action::OpenSettings));
+        assert_eq!(parse_action("open_setup"), Some(Action::OpenSetup));
         assert_eq!(
             parse_action("toggle_fullscreen"),
             Some(Action::ToggleFullscreen)

@@ -69,10 +69,11 @@ def parse_disassembly(out: str):
 def anchors(path: str) -> list[tuple[str, int]]:
     """Every `(symbol, runtime address)` load anchor line in a report file."""
     found = []
-    for line in open(path, encoding="utf-8", errors="replace"):
-        m = ANCHOR.match(line.rstrip("\n"))
-        if m:
-            found.append((m.group(1), int(m.group(2), 16)))
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = ANCHOR.match(line.rstrip("\n"))
+            if m:
+                found.append((m.group(1), int(m.group(2), 16)))
     return found
 
 
@@ -95,18 +96,19 @@ def reports(path):
     """(address, function, stack) of every diagnostic: the top frame's address and function,
     and the function of every frame (top first)."""
     found, want_at = [], False
-    for line in open(path, encoding="utf-8", errors="replace"):
-        if DIAG.match(line):
-            want_at = True
-            continue
-        m = AT.match(line) if want_at else None
-        if m:
-            found.append((int(m.group(1), 16), m.group(2), [m.group(2)]))
-            want_at = False
-            continue
-        m = BY.match(line)
-        if m and found:
-            found[-1][2].append(m.group(1))
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if DIAG.match(line):
+                want_at = True
+                continue
+            m = AT.match(line) if want_at else None
+            if m:
+                found.append((int(m.group(1), 16), m.group(2), [m.group(2)]))
+                want_at = False
+                continue
+            m = BY.match(line)
+            if m and found:
+                found[-1][2].append(m.group(1))
     return found
 
 

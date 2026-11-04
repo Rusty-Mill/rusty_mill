@@ -66,7 +66,7 @@ impl Card {
 
 impl Card {
     /// The card from BBP's view of a claim (which carries its accept line
-    /// and each evidence item's note, D56) and the claim's own body
+    /// and each evidence item's note, D71) and the claim's own body
     /// (stakes, reversibility, the question it answers), which the view
     /// leaves out. The claim's class is the highest of its domains'
     /// classes; its evidence shares it.

@@ -246,7 +246,6 @@ dependencies = [
  "rusty_mcp_server",
  "rusty_tokio",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -375,12 +374,12 @@ dependencies = [
  "rusty_mcp_middleware",
  "rusty_mcp_server",
  "rusty_prost",
+ "rusty_request",
  "rusty_serve",
  "rusty_tokio",
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -5957,8 +5956,8 @@ name = "mcp-tool-server"
 version = "0.1.0"
 dependencies = [
  "rusty-adk",
+ "rusty_tokio",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -9234,7 +9233,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.20",
- "tokio",
  "toml 0.8.2",
 ]
 
@@ -9670,33 +9668,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
-name = "rusty-acp"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "criterion 0.8.2",
- "eventsource-stream",
- "futures-util",
- "metrics",
- "metrics-util",
- "redis",
- "reqwest 0.13.4",
- "rusty_base64",
- "rusty_log",
- "rusty_retry",
- "serde",
- "serde_json",
- "serde_norway",
- "sqlx",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
 name = "rusty-adk"
 version = "0.1.0"
 dependencies = [
@@ -9894,6 +9865,33 @@ version = "0.1.0"
 [[package]]
 name = "rusty-hister-vectorstore"
 version = "0.1.0"
+
+[[package]]
+name = "rusty-ibm-acp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
+ "criterion 0.8.2",
+ "eventsource-stream",
+ "futures-util",
+ "metrics",
+ "metrics-util",
+ "redis",
+ "reqwest 0.13.4",
+ "rusty_base64",
+ "rusty_log",
+ "rusty_retry",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sqlx",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
 
 [[package]]
 name = "rusty-mcp-client"
@@ -13907,7 +13905,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "libc 0.2.189",
  "pin-project-lite",
  "tokio",

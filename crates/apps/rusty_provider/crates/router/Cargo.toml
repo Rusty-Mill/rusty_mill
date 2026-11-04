@@ -21,7 +21,7 @@ rusty_stream.workspace = true
 prometheus.workspace = true
 rusty_sqlite.workspace = true
 # Shared exponential-backoff delay math, also used by rusty_request's and
-# rusty_acp's own retry policies -- `jitter: 0.0` reproduces the plain
+# rusty_ibm_acp's own retry policies -- `jitter: 0.0` reproduces the plain
 # doubling-capped-at-max formula webhook.rs's retry loop used to hand-roll.
 rusty_retry.workspace = true
 # ANSI stripping (the RTK pipeline's first stage): CSI, OSC and two-byte escapes.

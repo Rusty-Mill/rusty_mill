@@ -5,6 +5,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `async_tokio::AsyncTransport::closed(max_buffered)`: resolves when the peer
+  closes or the connection fails, reading ahead into the buffer (kept for the
+  next read) up to `max_buffered` bytes. Lets a server notice a client
+  hang-up while a handler runs.
 ### Changed
 ### Fixed
 - `head::parse_request_head`/`parse_response_head` now enforce
