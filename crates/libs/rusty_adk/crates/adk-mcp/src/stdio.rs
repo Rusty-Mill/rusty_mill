@@ -17,6 +17,7 @@ use adk_core::{AdkError, Result};
 use rusty_mcp_server::{serve_lines, StdioConfig};
 use rusty_tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use rusty_tokio::sync::mpsc;
+use rusty_tokio::task::AbortHandle;
 
 use crate::line_cap::{cap_error, LineCapped, MAX_LINE_BYTES};
 use crate::server::McpServer;
@@ -73,6 +74,11 @@ where
         }
     });
 
+    // Ends the session if this future is dropped mid-way (its task aborted):
+    // aborting the reader pump closes the input, which ends the blocking
+    // loop and, through it, the writer pump.
+    let stop_reader = AbortOnDrop(pump_in.abort_handle());
+
     // Writer pump: every chunk is written and flushed as it arrives.
     let pump_out = rusty_tokio::spawn(async move {
         let mut writer = writer;
@@ -97,7 +103,7 @@ where
     })
     .await;
 
-    pump_in.abort();
+    drop(stop_reader);
     // The writer pump ends once the loop (which owned the sender) is gone.
     let _ = pump_out.await;
 
@@ -110,6 +116,15 @@ where
         Ok(Err(e)) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         Ok(Err(e)) => Err(AdkError::Other(format!("MCP session failed: {e}"))),
         Err(e) => Err(AdkError::Other(format!("MCP server task failed: {e}"))),
+    }
+}
+
+/// Aborts a task when dropped.
+struct AbortOnDrop(AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
