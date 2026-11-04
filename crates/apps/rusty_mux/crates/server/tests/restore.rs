@@ -211,7 +211,13 @@ fn a_command_block_comes_back_read_only() {
             .expect("id"),
     );
     client.request(|req| Message::Attach { req, block });
-    client.wait_for(block, "CMD21");
+    // The command may print before the attach, into the checkpoint.
+    client.wait_ready(block);
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !client.text(block).contains("CMD21") {
+        assert!(std::time::Instant::now() < deadline, "no CMD21");
+        client.recv();
+    }
     drop(client);
     server.stop();
 
