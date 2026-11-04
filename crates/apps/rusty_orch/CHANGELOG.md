@@ -5,6 +5,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `orch-store`: `Store::save_meter`/`load_meter` keep one lens experiment meter per name in a new `meters.mmap` (`rusty_orch::MeterRecord::v1`); a name collision or a duplicated task is refused as corrupt. `orch-store` now depends on `orch-lens`.
 - `orch-lens`: `Meter::snapshot`/`restore` (held reservations settle at their amount and count as calls after a crash) and `Meter::release`. `call` saves the meter after every reservation, before the provider is asked; an unsaved reservation is released and ends the job as `End::Unsaved`.
 - `orch-lens`: `call::call` runs one lens job over its providers in fallback order. It fits the context to each window, reserves the worst case on the meter and caps output at `MAX_OUTPUT_TOKENS`. `Unavailable`, an unfit context and the experiment ceiling (paid only) pass to the next provider; `Permanent`, `Transient` and task ceilings end the job.
 - `rusty_orch lens check <config> [--assertions <file>] [--repo <dir>]`: loads the lens config and the operator's assertions, builds every provider and reports which would be admitted, including an HTTP provider whose key variable is unset, without calling a model or inspecting a container.

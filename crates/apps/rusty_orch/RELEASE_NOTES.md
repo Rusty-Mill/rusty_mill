@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## The lens meter is saved in the state directory
+**2026-11-04**
+
+- The lens money meter is now stored with the rest of rusty_orch's state
+  (#594), one record per experiment, so a restart picks up its spend and
+  charges any call that was in flight.
+- Don't roll rusty_orch back past this release once a meter is saved.
+
 ## The lens meter survives a restart
 **2026-11-03**
 
