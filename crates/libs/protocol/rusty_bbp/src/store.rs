@@ -148,10 +148,7 @@ impl<S: Store> Driver<S> {
             } => (blob, payload),
             Command::Runner { blob, payload, .. } => (blob, payload),
             Command::Open(o) => (&o.brief, &ArtifactPayload::Brief),
-            Command::Human { action, .. } => match revised_brief(action) {
-                Some(brief) => (brief, &ArtifactPayload::Brief),
-                None => return None,
-            },
+            Command::Human { action, .. } => (revised_brief(action)?, &ArtifactPayload::Brief),
             _ => return None,
         };
         let bytes = match self.store.blob_get(&blob.sha) {
