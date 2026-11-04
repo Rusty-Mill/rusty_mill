@@ -78,7 +78,9 @@ pub(crate) struct LocalTask {
 // `LocalTask::run`, which is only ever called from `LocalSet::
 // run_until`'s own loop (or `LocalRuntime::block_on`'s, which owns the
 // set) -- and `LocalSet` is `!Send + !Sync`, so those loops run on the
-// thread that created the set. So even though this
+// thread that created the set. The free `spawn_local` reaches a set only
+// through this thread's `CURRENT_LOCAL`, which only a `!Send` enter guard
+// sets or restores, so it cannot queue a future from another thread. So even though this
 // `Arc` -- and the cross-thread-capable `Waker` built from it, needed so
 // the reactor/timer background threads can wake a local task's I/O or
 // timer interest just like any other task's -- can be freely cloned,
@@ -333,14 +335,22 @@ thread_local! {
     static CURRENT_LOCAL: RefCell<Option<Weak<LocalShared>>> = const { RefCell::new(None) };
 }
 
+/// Restores the previously ambient set on drop. `!Send`: dropping it on
+/// another thread would install that set in the other thread's
+/// `CURRENT_LOCAL`, letting `spawn_local` there queue a `!Send` future
+/// onto a set owned by this thread.
 #[must_use]
 struct EnterGuard {
     previous: Option<Weak<LocalShared>>,
+    _not_send: PhantomData<*const ()>,
 }
 
 fn enter(shared: Arc<LocalShared>) -> EnterGuard {
     let previous = CURRENT_LOCAL.with(|c| c.borrow_mut().replace(Arc::downgrade(&shared)));
-    EnterGuard { previous }
+    EnterGuard {
+        previous,
+        _not_send: PhantomData,
+    }
 }
 
 impl Drop for EnterGuard {
@@ -353,6 +363,13 @@ impl Drop for EnterGuard {
 /// what it does. Dropping it (whether explicitly via `drop(guard)` or
 /// at the end of its scope) restores whichever `LocalSet` (if any) was
 /// ambient on this thread before `enter` was called.
+///
+/// `!Send`, so it is dropped on the thread that entered:
+///
+/// ```compile_fail,E0277
+/// fn assert_send<T: Send>() {}
+/// assert_send::<rusty_tokio::task::LocalEnterGuard>();
+/// ```
 #[must_use = "dropping this immediately un-enters the LocalSet"]
 pub struct LocalEnterGuard(
     // Never read -- held only for its `Drop` impl, which is what
@@ -393,9 +410,16 @@ where
 /// Like tokio's, a `LocalSet` is `!Send`: it holds `!Send` tasks, so it
 /// stays on the thread that created it.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0277
 /// fn assert_send<T: Send>() {}
 /// assert_send::<rusty_tokio::task::LocalSet>();
+/// ```
+///
+/// Nor is it `Sync`, so no other thread can reach it through a reference:
+///
+/// ```compile_fail,E0277
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<rusty_tokio::task::LocalSet>();
 /// ```
 pub struct LocalSet {
     shared: Arc<LocalShared>,
