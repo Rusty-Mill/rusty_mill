@@ -1,0 +1,11 @@
+---
+category: Added
+changelog: Data boundaries for cloud agents (filtered view, dry runs over real data, taint) and a pure cost breaker (#598).
+---
+## 2026-11-04 - Data boundaries and the cost breaker (#598)
+
+- **Added:** a harness sandbox may name `hide` globs (the factory's `sensitive_paths`). With `checkout`, its workspace is a copy of `HEAD` that leaves out every hidden path, names included. The copy is committed into a fresh repository, so its git holds no hidden blob. A diff the harness posts that touches a hidden path is refused `protected_path` before it is stored. A hiding sandbox may not grant any root that reaches the repository.
+- **Added:** `bbp dry-run --name N --data NAME=PATH,... --work DIR -- PROGRAM ARGS...` runs PROGRAM confined, with no network or socket endpoints. It reads only its `real_data` roots and the system roots, and it writes only its plan (`$BBP_PLAN`). The command prints the plan's path, digest and entry count, never the plan. Real writes stay an irreversible claim.
+- **Added:** `orch-lens::breaker`, which is pure. A window closes at 40 calls or $5. It trips when no claim settled in it and the claims' scores moved less than 4 in total. `observe` (the default) reports a would-trip; `enforce` returns the detail for `bbp pause --reason breaker`. The lens config takes an optional `breaker` key.
+- **Added:** `orch-lens::taint` raises a post's class to the highest class its lens's context admitted, and it never lowers one. `orch-store` keeps one taint table per BBP task in `taints.mmap` (`rusty_orch::TaintRecord::v1`).
+- **Known limitations:** the lens runner (`rusty_orch lens run`, #594) doesn't call the breaker or the taint table yet, and orch doesn't turn `sensitive_paths` and `real_data` into launcher `hide` globs and dry runs yet. The Survey and Intent lenses and `rusty_orch lens breaker` follow once the runner lands.
