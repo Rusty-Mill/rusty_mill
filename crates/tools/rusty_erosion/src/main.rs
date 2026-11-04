@@ -248,10 +248,17 @@ fn tree_paths(base: &str) -> Result<Vec<String>, String> {
 }
 
 /// The changed files' working-tree contents; deleted ones are left out.
+/// Only Rust is read: another language is just listed as `unmeasured` (D45),
+/// so its contents, or a failure to read them, never decide the result.
 fn worktree(changed: &BTreeSet<String>) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut out = Vec::new();
-    for path in changed.iter().filter(|p| classify(p) != FileClass::Ignored) {
-        match std::fs::read(path) {
+    for path in changed.iter() {
+        let read = match classify(path) {
+            FileClass::Ignored => continue,
+            FileClass::Unmeasured => std::fs::symlink_metadata(path).map(|_| Vec::new()),
+            FileClass::Rust => std::fs::read(path),
+        };
+        match read {
             Ok(bytes) => out.push((path.clone(), bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("{path}: {e}")),

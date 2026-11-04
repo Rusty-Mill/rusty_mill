@@ -28,6 +28,22 @@ pub fn grand(goods: &[Thing], pct: u32) -> u32 {
 }
 "#;
 
+#[cfg(unix)]
+#[test]
+fn an_unreadable_unsupported_file_never_blocks_enforcing() {
+    let repo = Repo::new("langread");
+    let base = repo.head();
+    // Reading this path fails (it is a directory), but it is not Rust.
+    std::os::unix::fs::symlink("src", repo.dir.join("tool.py")).expect("symlink");
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"unmeasured\":[\"tool.py\"]"),
+        "{}",
+        stdout(&out)
+    );
+}
+
 struct Repo {
     dir: PathBuf,
 }
