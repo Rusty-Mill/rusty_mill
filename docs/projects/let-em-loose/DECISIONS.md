@@ -77,7 +77,7 @@ Precise contracts used by this guide:
 | D58 | #599 §6 schema and API changes approved | [stated] 2026-11-04 (#599) |
 | D59 | #598 §6: task_paused, intent_revised and data classes approved | [stated] 2026-11-04 (#598) |
 | D60 | Tool-using agents join over MCP after v0 ships | [stated] 2026-11-04 (general) |
-| D61 | #708 alien review lens parked until v0 runs | [stated] 2026-11-04 (#708) |
+| D61 | #708 alien review lens parked until v0 runs (superseded by D74) | [stated] 2026-11-04 (#708) |
 | D62 | The rest of #598 §6 approved | [stated] 2026-11-04 (#598) |
 | D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
@@ -86,6 +86,10 @@ Precise contracts used by this guide:
 | D71 | #596 value score weights for stakes and reversibility | [default] 2026-11-04 (#596) |
 | D72 | #596 cost counts pending runs from orch's in-flight jobs | [default] 2026-11-04 (#596) |
 | D73 | #596 schema and API items are approved | [stated] 2026-11-02 (#596) |
+| D74 | #708 alien review lens unparked (supersedes D61) | [stated] 2026-11-04 (#708) |
+| D75 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
+| D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
+| D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
 
 ## D1. Lenses, not stages
 
@@ -538,6 +542,7 @@ Worked examples (concentration, duplication, in basis points):
 **Rejected.** Designing #708 now.
 **Tag.** [stated] · remind-me: mem_44c8bf81957240d8a0773acb5dc63f7f
 **Key.** lel:708:alien-lens-parked
+**Superseded.** By D74 (2026-11-04T20:16Z): Nano unparked #708.
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 7 "Park it until v0 runs". OPEN_QUESTIONS Q8.
 
 ## D62. The rest of #598 §6 approved
@@ -611,3 +616,45 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_f4df31cb57b840bc8f88e140b13ba3cc
 **Key.** lel:596:schema-api-approved
 **Source.** Nano's review of the #596 design, 2026-11-02, saved as mem_f4df31cb57b840bc8f88e140b13ba3cc ("Approved APIs: Policy trait, orch-store question+shadow records, --policy/--shadow, rusty_orch lens shadow, intents+holdouts in Factory"); card #596 status comment 2026-11-02 20:40Z ("Design and Phase B intents are approved"). The approved list is in card #596's design comment (2026-11-02).
+
+## D74. #708 alien review lens unparked (supersedes D61)
+
+**Decision.** #708 is unparked, replacing D61. Next: finish the design (the value threshold on #596's score, per-language defect lists, scoring, and how reproduced findings enter BBP), run the egm Goldfish review, and bring the design to Nano for approval. Build and open a PR for dottiusmaximus only after he approves it. The design is not approved yet (D25).
+**Why.** Nano chose this when asked whether his 20:11Z message "Spin off threads for each one with a design or partial design" (cmsg_014AqbZs58L565hMV2pFkCX59ZUnUW7emMuJZYMRh7Zqw9) covered #708.
+**Rejected.** Keeping it parked until v0 runs (D61), and designing and reviewing it without building until v0 runs.
+**Tag.** [stated] · remind-me: mem_80f2a194cf714d4586d27184e3522cc9 (supersedes mem_44c8bf81957240d8a0773acb5dc63f7f)
+**Key.** lel:708:alien-lens-unparked
+**Source.** Nano tapped option B "Unpark: design, review, then build" on decision card cmsg_014AqbZs58L565hMV2pFkCX59b5EzthujQuUWFyYCJrHdB ("Unpark the alien review lens (#708), which you parked this morning?"), 2026-11-04T20:16:21Z, thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Reopens OPEN_QUESTIONS Q8.
+
+## D75. #708 alien review lens design v1 approved (shadow-only)
+
+**Decision.** Nano approved the six points in §10 of `/mnt/project-files/let-em-loose-708/708-alien-lens-design.md`:
+1. v1 is shadow-only and changes nothing in BBP. Posting findings to BBP is a separate v2 design that comes back to Nano, since it is a BBP schema change.
+2. Q1: `min_value` is the Phase A 80th percentile of #596's value score. Until that exists, the lens runs on irreversible claims only; after that, a 1-in-10 random control sample is added.
+3. Q2: the Rust defect-mechanism list in §4.
+4. Q3: the ranking sort in §5.
+5. Q4 (v1): findings stay in orch-store. The v2 BBP route returns as its own design.
+6. The orch-lens port change `Question.shape: Shape { Posts(Allowed), Raw }` (§9.1), a public API change inside orch.
+The build is the four PRs in §9, with `--alien` off by default. v2 gets designed only if §8's bar is met: at least 1 new regression per 20 hunts, at under 15% of the lens's spend on those claims.
+**Why.** The Goldfish review of v0 (`708-goldfish-review.md`) found 3 blockers. Making v1 shadow-only removes them and leaves BBP unchanged until the lens shows its worth.
+**Rejected.** v0's shape, where reproduced findings block claims through BBP right away.
+**Tag.** [stated] · remind-me: mem_8088651b940e45a6a0c7bb6807c1d237
+**Key.** lel:708:design-v1-approved
+**Source.** Nano, "approved", thread message cmsg_014AqbZs58L565hMV2pFkCX5NbYhrp6skRZoUmd7dbZWP2 (2026-11-04T20:27:23Z), replying to cmsg_014AqbZs58L565hMV2pFkCX56Y25HTNtmVLdhS1nDojGpK, which asked him to approve §10. Thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Closes OPEN_QUESTIONS Q8.
+## D76. `lens run` merges as a disabled slice until the accept-line source lands
+
+**Decision.** PR #1467 (`rusty_orch lens run`) may merge with `lens run` refusing every invocation (`UNKNOWN_CLAIMS`) until BBP exposes the task's frozen accept line. The runner never assumes `ClaimsConfig::default()`. The accept-line source lands as its own small PR stacked on #1467. How BBP exposes it (`accept_at` on `ClaimView`, the whole `ClaimsConfig`, or an operator `--claims` file, bundled with Q12) is not settled here; it is open as Q14.
+**Why.** dottiusmaximus on #1467 (comment 6635856528) asked for owner acceptance of a disabled slice or to treat the source as a merge-readiness dependency. Nano chose the disabled slice.
+**Rejected.** Holding #1467 until the source lands. Assuming the default thresholds (accept_at 8 / strict 12) for tasks opened with custom `--claims`.
+**Tag.** [stated] · remind-me: mem_120c56253ad241ce954eb5602baabf53
+**Key.** lel:594:lens-run-disabled-slice
+**Source.** Nano's tap on hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE485HdWybMYAyN7zK64ZJGmR (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:46:52Z, option "Merge as disabled slice". Review and merge gates still apply.
+
+## D77. `claim_card` carries each claim's accept line and each evidence item's note and strength
+
+**Decision.** Nano chose a small additive `rusty_bbp` change: `accept_at` on each claim view and `note` and `strength` on each evidence item, so the #594 runner reads the task's frozen accept lines instead of assuming defaults (closes Q12 and Q14). Build detail, `[default]`: `ClaimView.accept_at: i64` is the claim's effective line, `ClaimRecord::accept_at(&book.config)` with strict already applied (one field, not both lines; the runner needs only the claim's own line, and the tier rule uses `accept_at / 2` of it). `EvidenceView` gains `strength: u8` and `note: String`; the existing `Sight` filter already omits unreadable evidence, so no new visibility rule. No log schema or `PROTOCOL_VERSION` bump: views are derived by the fold, not logged. The addendum's `claim_card` bullet (§ Reads, delta and subscriptions) and its Schema and API changes list gain the fields, citing this approval. With it, D54's `read(after)` note fill and D76's `UNKNOWN_CLAIMS` refusal are retired.
+**Why.** The #1467 reviewer refused `ClaimsConfig::default()` for tasks opened with custom `--claims`, and no host interface exposed the frozen config. A per-claim line is the smallest change and is computed by the host, so the runner can't misapply the strict rule. The addendum card already lists strength, so that part closes a gap with the merged contract.
+**Rejected.** The whole `ClaimsConfig` on the card (option b). An operator `--claims` file the runner can't check (option c). Both lines on every claim (redundant).
+**Tag.** [stated] · remind-me: mem_506f809db3894df0b29d8992879f373c
+**Key.** lel:594:claim-card-accept-line
+**Source.** Nano's tap on "a) Add accept line to claim view", hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Pksa1peJwFSFnWsRe6jtve (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:55:49Z; dottiusmaximus on #1467; `rusty_bbp/src/claims.rs` `ClaimView`, `EvidenceView`, `ClaimRecord::accept_at`; bbp-claims-addendum.md line on `claim_card`.

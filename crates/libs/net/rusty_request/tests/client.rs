@@ -479,6 +479,72 @@ fn no_user_agent_sends_none_unless_the_request_sets_one() {
     });
 }
 
+/// The `Host` fields a request arrived with.
+fn hosts(req: &common::TestRequest) -> Vec<String> {
+    req.headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.clone())
+        .collect()
+}
+
+#[test]
+fn a_caller_set_host_replaces_the_one_from_the_url() {
+    run(async {
+        let server = start_test_server(|req| {
+            let expected = req.header("x-expect").map(str::to_owned);
+            let hosts = hosts(req);
+            assert_eq!(hosts.len(), 1, "one Host field, got {hosts:?}");
+            if let Some(expected) = expected {
+                assert_eq!(hosts[0], expected);
+            }
+            http_response(200, "OK", &[], b"")
+        });
+        let client = Client::new();
+
+        client.get(&server.url("/")).unwrap().send().await.unwrap();
+        let resp = client
+            .get(&server.url("/"))
+            .unwrap()
+            .header("Host", "virtual.example")
+            .unwrap()
+            .header("X-Expect", "virtual.example")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    });
+}
+
+#[test]
+fn a_cross_origin_redirect_drops_a_caller_set_host() {
+    run(async {
+        let target = start_test_server(|req| {
+            let hosts = hosts(req);
+            assert_eq!(hosts.len(), 1, "one Host field, got {hosts:?}");
+            assert_ne!(hosts[0], "virtual.example");
+            http_response(200, "OK", &[], b"ok")
+        });
+        let target_url = target.url("/end");
+
+        let entry = start_test_server(move |req| {
+            assert_eq!(hosts(req), vec!["virtual.example".to_string()]);
+            http_response(302, "Found", &[("Location", target_url.as_str())], b"")
+        });
+
+        let resp = Client::new()
+            .get(&entry.url("/start"))
+            .unwrap()
+            .header("Host", "virtual.example")
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+    });
+}
+
 async fn assert_method_round_trips(method: &str, builder: rusty_request::RequestBuilder) {
     let resp = builder.body("payload").send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 200);

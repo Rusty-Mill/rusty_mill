@@ -8,7 +8,7 @@
 //! - [`round`]: one runner round: schedule, call, post, record.
 //! - [`call`]: one job over its fallback order, metered before each ask.
 //! - [`port`]: the [`Model`] port, one stateless question per call.
-//! - [`post`]: the strict reply protocol every adapter applies ([`parse`]).
+//! - [`post`]: the strict reply protocol every adapter applies ([`check`]).
 //! - [`config`]: providers, data classes, ceilings and lenses, checked at load.
 //! - [`card`] and [`context`]: a fresh, fitted context per job, blind first.
 //! - [`class`]: data classes; nothing above a provider's clearance reaches it.
@@ -43,5 +43,5 @@ pub mod value;
 pub use class::DataClass;
 pub use config::LensConfig;
 pub use policy::{EventDriven, Policy, ValueDriven};
-pub use port::{Answer, Model, Question, Usage};
-pub use post::{parse, Allowed, Post};
+pub use port::{Answer, Model, Question, Reply, Shape, Usage};
+pub use post::{check, parse, Allowed, Post};

@@ -11,11 +11,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway_config::Config;
+use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
 mod common;
 use common::free_port;
+use common::http;
 
 /// What the authorizer was asked.
 #[derive(Default, Clone)]
@@ -39,7 +40,7 @@ enum Verdict {
 async fn authorizer(verdict: Verdict) -> (u16, Arc<Mutex<Option<Asked>>>, Arc<AtomicUsize>) {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let asked = Arc::new(Mutex::new(None));
     let hits = Arc::new(AtomicUsize::new(0));
 
@@ -104,7 +105,7 @@ async fn upstream_recording(
 ) -> (u16, Arc<AtomicUsize>, Arc<Mutex<Vec<(String, String)>>>) {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let hits = Arc::new(AtomicUsize::new(0));
     let seen = Arc::new(Mutex::new(Vec::new()));
 
@@ -136,7 +137,7 @@ async fn upstream_recording(
 /// The policy arrives as bare YAML lines and is indented here, so a caller
 /// never has to get the nesting right in a `format!` string.
 async fn start(policy: &[String], upstream_port: u16) -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let policy = policy
         .iter()
         .map(|line| format!("                {line}"))
@@ -172,7 +173,7 @@ binds:
     (format!("http://127.0.0.1:{port}"), shutdown)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_allowed_request_reaches_the_upstream() {
     let (authz_port, asked, _) = authorizer(Verdict::Allow).await;
     let (up_port, up_hits, _) = upstream().await;
@@ -182,7 +183,7 @@ async fn an_allowed_request_reaches_the_upstream() {
     )
     .await;
 
-    let response = reqwest::get(format!("{base}/api/thing"))
+    let response = http::get(format!("{base}/api/thing"))
         .await
         .expect("should reach the gateway");
     assert_eq!(response.status(), 200);
@@ -197,7 +198,7 @@ async fn an_allowed_request_reaches_the_upstream() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_denied_request_never_reaches_the_upstream() {
     let (authz_port, _, _) = authorizer(Verdict::Deny(403)).await;
     let (up_port, up_hits, _) = upstream().await;
@@ -207,7 +208,7 @@ async fn a_denied_request_never_reaches_the_upstream() {
     )
     .await;
 
-    let response = reqwest::get(format!("{base}/api/thing"))
+    let response = http::get(format!("{base}/api/thing"))
         .await
         .expect("should reach the gateway");
 
@@ -221,7 +222,7 @@ async fn a_denied_request_never_reaches_the_upstream() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_authorizers_own_reason_reaches_the_caller() {
     // An authorizer answering `not in group` is telling the caller something a
     // generic "forbidden" would throw away.
@@ -233,25 +234,22 @@ async fn the_authorizers_own_reason_reaches_the_caller() {
     )
     .await;
 
-    let response = reqwest::get(format!("{base}/api/thing"))
+    let response = http::get(format!("{base}/api/thing"))
         .await
         .expect("should reach the gateway");
     assert_eq!(
-        response
-            .headers()
-            .get("www-authenticate")
-            .and_then(|v| v.to_str().ok()),
+        response.headers().get("www-authenticate"),
         Some("Bearer realm=\"agents\""),
         "a 401/403 without the challenge leaves the client nowhere to go"
     );
 
-    let body: Value = response.json().await.expect("should be JSON");
+    let body: Value = response.json().expect("should be JSON");
     assert_eq!(body["reason"], "not in group");
 
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn only_allow_listed_headers_travel_on_to_the_upstream() {
     // Without the list an authorizer could set any header the upstream trusts,
     // which turns authorization into impersonation.
@@ -266,7 +264,7 @@ async fn only_allow_listed_headers_travel_on_to_the_upstream() {
     )
     .await;
 
-    reqwest::get(format!("{base}/api/thing"))
+    http::get(format!("{base}/api/thing"))
         .await
         .expect("should reach the gateway");
 
@@ -292,7 +290,7 @@ async fn only_allow_listed_headers_travel_on_to_the_upstream() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn nothing_travels_on_without_an_allow_list() {
     let (authz_port, _, _) = authorizer(Verdict::Allow).await;
     let (up_port, _, up_headers) = upstream().await;
@@ -302,7 +300,7 @@ async fn nothing_travels_on_without_an_allow_list() {
     )
     .await;
 
-    reqwest::get(format!("{base}/api/thing"))
+    http::get(format!("{base}/api/thing"))
         .await
         .expect("should reach the gateway");
 
@@ -315,7 +313,7 @@ async fn nothing_travels_on_without_an_allow_list() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn only_allow_listed_request_headers_reach_the_authorizer() {
     let (authz_port, asked, _) = authorizer(Verdict::Allow).await;
     let (up_port, _, _) = upstream().await;
@@ -328,7 +326,7 @@ async fn only_allow_listed_request_headers_reach_the_authorizer() {
     )
     .await;
 
-    reqwest::Client::new()
+    http::Client::new()
         .get(format!("{base}/api/thing"))
         .header("authorization", "Bearer token")
         .header("cookie", "session=secret")
@@ -352,15 +350,15 @@ async fn only_allow_listed_request_headers_reach_the_authorizer() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unreachable_authorizer_denies_by_default() {
     // The decision this whole policy turns on: an authorization service that
     // is down must not become an open door.
-    let dead = free_port().await;
+    let dead = free_port();
     let (up_port, up_hits, _) = upstream().await;
     let (base, shutdown) = start(&[format!("target: \"http://127.0.0.1:{dead}\"")], up_port).await;
 
-    let response = reqwest::get(format!("{base}/api/thing"))
+    let response = http::get(format!("{base}/api/thing"))
         .await
         .expect("the gateway should still answer");
 
@@ -374,9 +372,9 @@ async fn an_unreachable_authorizer_denies_by_default() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn failing_open_has_to_be_asked_for() {
-    let dead = free_port().await;
+    let dead = free_port();
     let (up_port, up_hits, _) = upstream().await;
     let (base, shutdown) = start(
         &[
@@ -387,7 +385,7 @@ async fn failing_open_has_to_be_asked_for() {
     )
     .await;
 
-    let response = reqwest::get(format!("{base}/api/thing"))
+    let response = http::get(format!("{base}/api/thing"))
         .await
         .expect("should reach the gateway");
 
@@ -401,9 +399,9 @@ async fn failing_open_has_to_be_asked_for() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_slow_authorizer_hits_its_budget_and_denies() {
-    let port = free_port().await;
+    let port = free_port();
     let app = rusty_axum::Router::new().fallback(|| async {
         rusty_tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         "too late"
@@ -421,7 +419,7 @@ async fn a_slow_authorizer_hits_its_budget_and_denies() {
     .await;
 
     let started = std::time::Instant::now();
-    let response = reqwest::get(format!("{base}/api/thing"))
+    let response = http::get(format!("{base}/api/thing"))
         .await
         .expect("the gateway should answer");
 
@@ -436,10 +434,10 @@ async fn a_slow_authorizer_hits_its_budget_and_denies() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_target_that_is_not_a_url_fails_at_startup() {
     // Rather than turning every request into a confusing 503.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -467,8 +465,8 @@ fn payload() -> Value {
     json!({"method": "tools/call", "params": {"name": "delete_everything"}})
 }
 
-async fn post(url: &str, body: &Value) -> reqwest::Response {
-    reqwest::Client::new()
+async fn post(url: &str, body: &Value) -> http::Response {
+    http::Client::new()
         .post(url)
         .json(body)
         .send()
@@ -476,7 +474,7 @@ async fn post(url: &str, body: &Value) -> reqwest::Response {
         .expect("request should reach the gateway")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_authorizer_sees_the_body_when_the_route_asks_for_it() {
     // Some decisions need the payload -- which tool a JSON-RPC call names --
     // and none of that is in a header.
@@ -525,7 +523,7 @@ async fn the_authorizer_sees_the_body_when_the_route_asks_for_it() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn without_include_body_the_authorizer_is_shown_none() {
     // Buffering a payload nobody asked to see would make every route pay for
     // a feature one of them wanted.
@@ -558,7 +556,7 @@ async fn without_include_body_the_authorizer_is_shown_none() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_body_over_the_limit_is_refused_rather_than_truncated() {
     // Sending the first N bytes would ask the authorizer to decide on a
     // fragment, and a fragment of JSON does not parse -- so it would answer
@@ -591,7 +589,7 @@ async fn a_body_over_the_limit_is_refused_rather_than_truncated() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_body_exactly_at_the_limit_is_allowed() {
     // The bound is inclusive, so a config sized to the largest expected
     // payload does not refuse it.
@@ -623,7 +621,7 @@ async fn a_body_exactly_at_the_limit_is_allowed() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_authorizer_can_deny_on_what_it_read_in_the_body() {
     // The point of the whole feature: a refusal that depends on the payload.
     let (authz_port, _asked, _hits) = authorizer(Verdict::Deny(403)).await;
@@ -639,7 +637,7 @@ async fn an_authorizer_can_deny_on_what_it_read_in_the_body() {
 
     let response = post(&url, &payload()).await;
     assert_eq!(response.status(), 403);
-    let body: Value = response.json().await.expect("should be JSON");
+    let body: Value = response.json().expect("should be JSON");
     assert_eq!(
         body["reason"], "not in group",
         "the authorizer's own reason survives"

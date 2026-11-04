@@ -249,7 +249,7 @@ mod tests {
     use crate::config::Tools;
     use crate::meter::{Ceilings, Meter};
     use crate::policy::{EventDriven, ValueDriven};
-    use crate::port::{Answer, Model, Question, Usage};
+    use crate::port::{Answer, Model, Question, Reply, Usage};
     use crate::schedule::schedule;
 
     const USD: u64 = 1_000_000;
@@ -302,7 +302,7 @@ mod tests {
                 self.asked.push((id, tools, q.clone()));
             }
             self.reply.clone().map(|posts| Answer {
-                posts,
+                reply: Reply::Posts(posts),
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 10,
@@ -677,7 +677,7 @@ mod tests {
                 .expect("a scheduled lens");
             assert!(job.providers.contains(agent));
             assert_eq!(*tools, job.tools);
-            assert_eq!(q.allowed, job.allowed);
+            assert_eq!(q.shape, crate::port::Shape::Posts(job.allowed.clone()));
         }
     }
 }

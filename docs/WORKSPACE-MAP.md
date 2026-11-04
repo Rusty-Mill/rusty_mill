@@ -308,3 +308,4 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_yirp | sessionmgr-tui | The sessionmgr TUI: a grid of session panes over the daemon's public socket. Depends on sessionmgr-protocol only -- never sessionmgr-proc or sessionmgr-agents -- so a UI that cannot name a process type cannot accidentally spawn one. |
 | tools | rusty_baseline | rusty_baseline | Per-product baseline: binary size, dependency closure, clean and incremental build, startup, idle and peak RSS |
 | tools | rusty_boot | rusty_boot | A #![no_std] + alloc sovereign bootstrapper demonstrating kernel-to-application execution without Rust std |
+| tools | rusty_erosion | rusty_erosion | Code erosion metric: CC concentration and normalized duplication, in basis points |

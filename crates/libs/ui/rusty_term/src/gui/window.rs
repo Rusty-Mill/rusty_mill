@@ -60,6 +60,11 @@ use crate::keymap::{Action, Chord};
 
 /// Built-in defaults, overridable via the config file (`[window]` section).
 const FONT_PX: f32 = 18.0;
+/// The chrome's UI font size in logical px. Fixed: neither zoom nor the
+/// configured terminal `font_size` resizes the bars, only the display DPI
+/// does (STYLEGUIDE §Size). Equal to the default `FONT_PX`, so a default
+/// config looks as before.
+const UI_FONT_PX: f32 = 18.0;
 /// Step for the Ctrl+=/Ctrl+- runtime font zoom (`Action::FontSizeUp/Down`).
 const FONT_ZOOM_STEP: f32 = 1.0;
 const INIT_COLS: u16 = 80;
@@ -579,8 +584,8 @@ struct WindowState<'a> {
     font: FontCache,
     cell_w: usize,
     cell_h: usize,
-    /// The chrome bar's and status ribbon's font, at the configured size
-    /// (`ui_px`): the Ctrl+=/Ctrl+- zoom changes only `font`.
+    /// The chrome bar's and status ribbon's font, at `ui_px`: neither the
+    /// Ctrl+=/Ctrl+- zoom nor the configured font size changes it.
     ui_font: FontCache,
     /// `ui_font`'s cell size: one bar cell.
     bar_w: usize,
@@ -678,8 +683,10 @@ struct WindowState<'a> {
     overlay: Option<Overlay>,
     /// Current terminal font size in px, zoom included.
     font_px: f32,
-    /// The configured (unzoomed) font size in px at the current DPI: the
-    /// bars' size, and what Ctrl+0 resets the terminal font to.
+    /// The configured (unzoomed) terminal font size in px at the current
+    /// DPI: what Ctrl+0 resets the terminal font to.
+    base_px: f32,
+    /// The bars' font size in px: [`UI_FONT_PX`] at the current DPI.
     ui_px: f32,
     /// The window's current monitor DPI scale factor (1.0 = 100%), tracked so
     /// `WindowEvent::ScaleFactorChanged` can rescale `font_px` proportionally
@@ -2913,7 +2920,7 @@ impl WindowState<'_> {
     /// font changes: the chrome and status bars keep the UI font, and the
     /// configured size is untouched, so a zoom never persists.
     fn zoom_font(&mut self, zoom: Zoom) {
-        let px = zoom_px(zoom, self.font_px, self.ui_px, self.scale_factor);
+        let px = zoom_px(zoom, self.font_px, self.base_px, self.scale_factor);
         let ligatures = self.config.ligatures.unwrap_or(true);
         self.rebuild_font_at(px, ligatures);
     }
@@ -3507,7 +3514,7 @@ impl WindowState<'_> {
         let s = Settings::new(
             &self.config,
             &self.theme,
-            self.ui_px,
+            self.config_font_size(),
             &self.shells,
             opacity_supported,
         );
@@ -3527,7 +3534,7 @@ impl WindowState<'_> {
         let s = Settings::new(
             &self.config,
             &self.theme,
-            self.ui_px,
+            self.config_font_size(),
             &self.shells,
             opacity_supported,
         )
@@ -3995,9 +4002,17 @@ impl WindowState<'_> {
                 }
             }
             Field::FontSize => {
-                self.rebuild_font(font_size, font_size, self.config.ligatures.unwrap_or(true))
+                let px = physical_px(font_size, self.scale_factor);
+                if self.rebuild_fonts(px, self.config.ligatures.unwrap_or(true)) {
+                    self.base_px = px;
+                    self.config.font_size = Some(font_size);
+                }
             }
-            Field::Ligatures => self.rebuild_font(self.ui_px, self.font_px, ligatures),
+            Field::Ligatures => {
+                if self.rebuild_fonts(self.font_px, ligatures) {
+                    self.config.ligatures = Some(ligatures);
+                }
+            }
             Field::Cursor => {
                 self.config.cursor_style = Some(cursor);
                 let blink = self.config.cursor_blink.unwrap_or(false);
@@ -4132,23 +4147,21 @@ impl WindowState<'_> {
         }
     }
 
-    /// Rebuild both fonts, the bars' at `ui_px` and the panes' at `font_px`,
-    /// re-fit the grid to the new cell size, and rebuild the renderer (the
-    /// GPU atlas is font-bound). This is the user-driven entry point
-    /// (settings overlay font-size/ligatures fields): it persists `ui_px` as
-    /// the configured font size. A monitor-DPI change should *not* overwrite
-    /// that preference — see [`Self::on_scale_factor_changed`].
-    fn rebuild_font(&mut self, ui_px: f32, font_px: f32, ligatures: bool) {
-        if !self.rescale_ui_font(ui_px, ligatures) {
-            return;
-        }
-        if self.rebuild_font_at(font_px, ligatures) {
-            self.config.font_size = Some(ui_px);
-            self.config.ligatures = Some(ligatures);
-        }
+    /// The configured terminal font size in logical px, as the settings page
+    /// shows and saves it (not DPI-scaled, unlike `base_px`).
+    fn config_font_size(&self) -> f32 {
+        self.config.font_size.unwrap_or(FONT_PX)
     }
 
-    /// Core of [`Self::rebuild_font`], minus persisting to config: rebuild the
+    /// Rebuild both fonts, the bars' at their fixed `ui_px` and the panes' at
+    /// `font_px`, re-fit the grid and rebuild the renderer (the GPU atlas is
+    /// font-bound). The settings font-size and ligatures fields call this;
+    /// the caller persists the changed setting when it returns `true`.
+    fn rebuild_fonts(&mut self, font_px: f32, ligatures: bool) -> bool {
+        self.rescale_ui_font(self.ui_px, ligatures) && self.rebuild_font_at(font_px, ligatures)
+    }
+
+    /// Core of [`Self::rebuild_fonts`] for the panes alone: rebuild the
     /// glyph cache at `px` / `ligatures` (at the current `scale_factor`),
     /// re-fit the grid to the new cell size, and rebuild the renderer (the
     /// GPU atlas is font-bound). Returns whether the font actually rebuilt (a
@@ -4240,7 +4253,8 @@ impl WindowState<'_> {
         let ratio = new_scale / self.scale_factor;
         let ligatures = self.config.ligatures.unwrap_or(true);
         let px = ((self.font_px as f64) * ratio) as f32;
-        self.rescale_ui_font(((self.ui_px as f64) * ratio) as f32, ligatures);
+        self.base_px = ((self.base_px as f64) * ratio) as f32;
+        self.rescale_ui_font(physical_px(UI_FONT_PX, new_scale), ligatures);
         if self.rescale_font_cache(px, ligatures, new_scale) {
             self.after_font_rescale();
         }
@@ -5155,7 +5169,8 @@ impl WindowState<'_> {
             let ratio = target_scale / self.scale_factor;
             let px = ((self.font_px as f64) * ratio) as f32;
             let ligatures = self.config.ligatures.unwrap_or(true);
-            self.rescale_ui_font(((self.ui_px as f64) * ratio) as f32, ligatures);
+            self.base_px = ((self.base_px as f64) * ratio) as f32;
+            self.rescale_ui_font(physical_px(UI_FONT_PX, target_scale), ligatures);
             self.rescale_font_cache(px, ligatures, target_scale);
         }
         let width = (self.cols as usize * self.cell_w + 2 * self.pad) as u32;
@@ -5926,8 +5941,8 @@ impl<'a> App<'a> {
         )
         .ok_or("no monospace font found")?;
         let ligatures = self.config.ligatures.unwrap_or(true);
-        let ui_font =
-            FontCache::new(font_set.clone(), font_px, ligatures).ok_or("font failed to parse")?;
+        let ui_font = FontCache::new(font_set.clone(), UI_FONT_PX, ligatures)
+            .ok_or("font failed to parse")?;
         let font = FontCache::new(font_set, font_px, ligatures).ok_or("font failed to parse")?;
         let (cell_w, cell_h) = font.cell_size();
         let (bar_w, bar_h) = ui_font.cell_size();
@@ -5979,7 +5994,8 @@ impl<'a> App<'a> {
             shells: self.shells.clone(),
             overlay: None,
             font_px,
-            ui_px: font_px,
+            base_px: font_px,
+            ui_px: UI_FONT_PX,
             // Updated to the real value once the OS window exists (see
             // `ensure_window`); 1.0 is the correct assumption until then.
             scale_factor: 1.0,
@@ -6491,6 +6507,11 @@ fn zoom_px(zoom: Zoom, current: f32, base: f32, scale: f64) -> f32 {
     (current + step).clamp(lo, hi)
 }
 
+/// `logical` px at DPI `scale` (1.0 = 100%), in the physical px fonts use.
+fn physical_px(logical: f32, scale: f64) -> f32 {
+    ((logical as f64) * scale) as f32
+}
+
 /// Load the configured font set and build a glyph cache at `px`, `None` when
 /// no usable font is found.
 fn load_font(config: &Config, px: f32, ligatures: bool) -> Option<FontCache> {
@@ -6906,12 +6927,12 @@ mod tests {
     use super::{
         ConsumedKeys, Copied, Hit, ImeCommitTarget, KeyRelease, MenuKind, SETTINGS_CARDS_TOP,
         SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
-        SettingsHit, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text, display_path,
-        drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
+        SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
+        display_path, drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
         ime_cursor_area_origin, is_openable_url, mix, osc52_reply, pane_pixel_point,
-        path_from_file_uri, put_text, read_git_branch, release_input, route_key_down, settings_hit,
-        settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
-        tab_widths, visible_tab_range, widget_text, zoom_px,
+        path_from_file_uri, physical_px, put_text, read_git_branch, release_input, route_key_down,
+        settings_hit, settings_value_end, settings_visible, shell_menu_items, tab_drag_target,
+        tab_spans, tab_widths, visible_tab_range, widget_text, zoom_px,
     };
     use crate::core::Cell;
 
@@ -7694,6 +7715,13 @@ mod tests {
         // Configured 4 px at 100% (below FONT_MIN): reset is exact too.
         assert_eq!(zoom_px(Zoom::Reset, 10.0, 4.0, 1.0), 4.0);
         assert_eq!(zoom_px(Zoom::Out, 4.0, 4.0, 1.0), 4.0);
+    }
+
+    #[test]
+    fn physical_px_scales_logical_px_by_dpi() {
+        assert_eq!(physical_px(UI_FONT_PX, 1.0), 18.0);
+        assert_eq!(physical_px(UI_FONT_PX, 1.5), 27.0);
+        assert_eq!(physical_px(14.0, 2.0), 28.0);
     }
 
     #[test]

@@ -11,11 +11,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway_config::Config;
+use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
 mod common;
 use common::free_port;
+use common::http;
 
 /// An agent card as a real A2A agent would serve it.
 fn agent_card(name: &str, url: &str, skills: &[&str], streaming: bool) -> Value {
@@ -55,7 +56,7 @@ async fn agent(
 ) -> Agent {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let seen_headers = Arc::new(Mutex::new(Vec::new()));
     let seen_path = Arc::new(Mutex::new(String::new()));
@@ -156,7 +157,7 @@ async fn start_configured(
     agents: &[u16],
     extra_policies: &str,
 ) -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let backends: String = agents
         .iter()
         .map(|p| format!("              - host: \"127.0.0.1:{p}\"\n"))
@@ -201,21 +202,20 @@ binds:
 }
 
 async fn call(url: &str, method: &str) -> Value {
-    reqwest::Client::new()
+    http::Client::new()
         .post(url)
         .json(&json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}))
         .send()
         .await
         .expect("request should reach the gateway")
         .json()
-        .await
         .expect("should be JSON")
 }
 
 const CARD_POLICY: &str = r#"                agentCard:
                   url: "https://gateway.example.com/a2a""#;
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_permitted_method_reaches_the_agent() {
     let a = agent("Alpha", &["echo"], true, true).await;
     let (base, shutdown) = start(
@@ -237,7 +237,7 @@ async fn a_permitted_method_reaches_the_agent() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_denied_method_never_reaches_the_agent() {
     let a = agent("Alpha", &["echo"], true, true).await;
     let (base, shutdown) = start(
@@ -265,7 +265,7 @@ async fn a_denied_method_never_reaches_the_agent() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_allow_list_excludes_what_it_does_not_name() {
     let a = agent("Alpha", &["echo"], true, true).await;
     let (base, shutdown) = start("                allowMethods: [\"^message/\"]", &[a.port]).await;
@@ -277,14 +277,14 @@ async fn an_allow_list_excludes_what_it_does_not_name() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_non_json_rpc_body_is_passed_through() {
     // A2A also has REST and gRPC bindings; refusing what the gate cannot read
     // would break them for no security benefit.
     let a = agent("Alpha", &["echo"], true, true).await;
     let (base, shutdown) = start("                denyMethods: [\"^tasks/\"]", &[a.port]).await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(&base)
         .json(&json!({"message": {"role": "user", "parts": []}}))
         .send()
@@ -301,7 +301,7 @@ async fn a_non_json_rpc_body_is_passed_through() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_oversized_body_is_refused_before_it_is_buffered() {
     // Gating a JSON-RPC method needs the whole body read into memory, so it
     // is capped the same way `extAuthz.includeBody` is: refused past the
@@ -311,7 +311,7 @@ async fn an_oversized_body_is_refused_before_it_is_buffered() {
 
     // One byte past `agentgateway_llm::MAX_REQUEST_BYTES` (4 MiB).
     let oversized = vec![b'a'; 4 * 1024 * 1024 + 1];
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(&base)
         .header("content-type", "application/json")
         .body(oversized)
@@ -329,18 +329,17 @@ async fn an_oversized_body_is_refused_before_it_is_buffered() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_served_card_names_the_gateway_not_the_agent() {
     // The whole point of proxying a card: a client that reads the agent's own
     // URL goes around the gateway, past its auth and its audit trail.
     let a = agent("Alpha", &["echo"], true, true).await;
     let (base, shutdown) = start(CARD_POLICY, &[a.port]).await;
 
-    let card: Value = reqwest::get(format!("{base}/.well-known/agent-card.json"))
+    let card: Value = http::get(format!("{base}/.well-known/agent-card.json"))
         .await
         .expect("should reach the gateway")
         .json()
-        .await
         .expect("should be JSON");
 
     assert_eq!(
@@ -352,17 +351,16 @@ async fn the_served_card_names_the_gateway_not_the_agent() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn skills_from_several_agents_are_unioned() {
     let a = agent("Alpha", &["echo"], true, true).await;
     let b = agent("Beta", &["summarise"], true, true).await;
     let (base, shutdown) = start(CARD_POLICY, &[a.port, b.port]).await;
 
-    let card: Value = reqwest::get(format!("{base}/.well-known/agent-card.json"))
+    let card: Value = http::get(format!("{base}/.well-known/agent-card.json"))
         .await
         .expect("should reach the gateway")
         .json()
-        .await
         .expect("should be JSON");
 
     let ids: Vec<&str> = card["skills"]
@@ -376,7 +374,7 @@ async fn skills_from_several_agents_are_unioned() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn capabilities_are_intersected_across_agents() {
     // Advertising streaming because one agent has it sends a streaming client
     // to an agent that cannot, and the failure lands on the client.
@@ -384,11 +382,10 @@ async fn capabilities_are_intersected_across_agents() {
     let b = agent("Beta", &["summarise"], false, true).await;
     let (base, shutdown) = start(CARD_POLICY, &[a.port, b.port]).await;
 
-    let card: Value = reqwest::get(format!("{base}/.well-known/agent-card.json"))
+    let card: Value = http::get(format!("{base}/.well-known/agent-card.json"))
         .await
         .expect("should reach the gateway")
         .json()
-        .await
         .expect("should be JSON");
 
     assert_eq!(card["capabilities"]["streaming"], false, "got: {card}");
@@ -396,7 +393,7 @@ async fn capabilities_are_intersected_across_agents() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn one_malformed_card_does_not_break_discovery_for_the_rest() {
     // rusty_a2a's types are strict by design. A gateway aggregating cards from
     // agents it does not control has to be liberal about it.
@@ -404,12 +401,12 @@ async fn one_malformed_card_does_not_break_discovery_for_the_rest() {
     let bad = agent("Broken", &["nope"], true, false).await;
     let (base, shutdown) = start(CARD_POLICY, &[good.port, bad.port]).await;
 
-    let response = reqwest::get(format!("{base}/.well-known/agent-card.json"))
+    let response = http::get(format!("{base}/.well-known/agent-card.json"))
         .await
         .expect("should reach the gateway");
     assert_eq!(response.status(), 200);
 
-    let card: Value = response.json().await.expect("should be JSON");
+    let card: Value = response.json().expect("should be JSON");
     assert_eq!(card["name"], "Alpha");
     let ids: Vec<&str> = card["skills"]
         .as_array()
@@ -422,18 +419,17 @@ async fn one_malformed_card_does_not_break_discovery_for_the_rest() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_route_without_a_card_policy_forwards_discovery_to_the_agent() {
     // No `agentCard` means the gateway has no opinion, so the request is an
     // ordinary proxied GET.
     let a = agent("Alpha", &["echo"], true, true).await;
     let (base, shutdown) = start("                denyMethods: []", &[a.port]).await;
 
-    let card: Value = reqwest::get(format!("{base}/.well-known/agent-card.json"))
+    let card: Value = http::get(format!("{base}/.well-known/agent-card.json"))
         .await
         .expect("should reach the gateway")
         .json()
-        .await
         .expect("should be JSON");
 
     assert_eq!(
@@ -445,12 +441,12 @@ async fn a_route_without_a_card_policy_forwards_discovery_to_the_agent() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn every_agent_card_being_unusable_is_a_503_not_a_broken_card() {
     let bad = agent("Broken", &["nope"], true, false).await;
     let (base, shutdown) = start(CARD_POLICY, &[bad.port]).await;
 
-    let response = reqwest::get(format!("{base}/.well-known/agent-card.json"))
+    let response = http::get(format!("{base}/.well-known/agent-card.json"))
         .await
         .expect("should reach the gateway");
     assert_eq!(
@@ -462,24 +458,10 @@ async fn every_agent_card_being_unusable_is_a_503_not_a_broken_card() {
     shutdown.cancel();
 }
 
-/// The response headers the gateway returned for one request.
-async fn headers_of(response: reqwest::Response) -> Vec<(String, String)> {
-    response
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                v.to_str().unwrap_or_default().to_string(),
-            )
-        })
-        .collect()
-}
-
 /// A route whose `responseHeaderModifier` stamps every response.
 const STAMP: &str = "              responseHeaderModifier:\n                set:\n                  x-served-by: rusty\n                remove: [x-agent]";
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_modifier_reaches_a_proxied_a2a_response() {
     let agent = agent("Alpha", &["echo"], true, true).await;
     let (url, shutdown) = start_with(
@@ -489,13 +471,13 @@ async fn a_response_modifier_reaches_a_proxied_a2a_response() {
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(&url)
         .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
         .send()
         .await
         .expect("the gateway should answer");
-    let headers = headers_of(response).await;
+    let headers = response.header_pairs();
 
     assert!(
         headers
@@ -507,7 +489,7 @@ async fn a_response_modifier_reaches_a_proxied_a2a_response() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_modifier_reaches_an_a2a_refusal_the_gateway_answers_itself() {
     // A refusal never reaches the proxy, which is where the modifier used to
     // live -- so this is exactly the response it could not touch before.
@@ -519,13 +501,13 @@ async fn a_response_modifier_reaches_an_a2a_refusal_the_gateway_answers_itself()
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(&url)
         .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {}}))
         .send()
         .await
         .expect("the gateway should answer");
-    let headers = headers_of(response).await;
+    let headers = response.header_pairs();
 
     assert!(
         headers
@@ -537,7 +519,7 @@ async fn a_response_modifier_reaches_an_a2a_refusal_the_gateway_answers_itself()
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_modifier_reaches_the_merged_agent_card() {
     // Discovery is answered by the gateway rather than forwarded, so this is
     // the other response the proxy never saw.
@@ -549,13 +531,13 @@ async fn a_response_modifier_reaches_the_merged_agent_card() {
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .get(format!("{url}/.well-known/agent-card.json"))
         .send()
         .await
         .expect("the gateway should answer");
     assert!(response.status().is_success(), "{}", response.status());
-    let headers = headers_of(response).await;
+    let headers = response.header_pairs();
 
     assert!(
         headers
@@ -570,7 +552,7 @@ async fn a_response_modifier_reaches_the_merged_agent_card() {
 /// A `requestHeaderModifier` that touches all three operations.
 const TAG: &str = "              requestHeaderModifier:\n                set:\n                  x-tenant: acme\n                add:\n                  x-scope: agents\n                remove: [x-drop-me]";
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_modifier_reaches_a_proxied_a2a_agent() {
     // An `a2a` route dispatches through the same `host` proxy that has always
     // applied this, but nothing asserted it, and "already works" is exactly
@@ -583,7 +565,7 @@ async fn a_request_modifier_reaches_a_proxied_a2a_agent() {
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(&url)
         .header("x-drop-me", "please")
         .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
@@ -609,7 +591,7 @@ async fn a_request_modifier_reaches_a_proxied_a2a_agent() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_modifier_applies_to_a_call_the_a2a_policy_had_to_buffer() {
     // Gating reads the method out of the body, so an `a2a` route hands the
     // proxy an already-buffered request rather than a stream. The modifier has
@@ -622,7 +604,7 @@ async fn a_request_modifier_applies_to_a_call_the_a2a_policy_had_to_buffer() {
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(&url)
         .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
         .send()
@@ -640,7 +622,7 @@ async fn a_request_modifier_applies_to_a_call_the_a2a_policy_had_to_buffer() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_path_rewrite_reaches_a_proxied_a2a_agent() {
     // An `a2a` route dispatches through the same `host` proxy that has always
     // applied this. Asserted rather than assumed.
@@ -653,7 +635,7 @@ async fn a_path_rewrite_reaches_a_proxied_a2a_agent() {
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(format!("{url}/a2a/send"))
         .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
         .send()
@@ -670,7 +652,7 @@ async fn a_path_rewrite_reaches_a_proxied_a2a_agent() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_path_rewrite_survives_the_buffering_the_a2a_policy_forces() {
     // Gating reads the method out of the body, so the proxy is handed an
     // already-buffered request rather than a stream. The rewrite is applied on
@@ -684,7 +666,7 @@ async fn a_path_rewrite_survives_the_buffering_the_a2a_policy_forces() {
     )
     .await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .post(format!("{url}/a2a/anything"))
         .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
         .send()
@@ -697,14 +679,14 @@ async fn a_path_rewrite_survives_the_buffering_the_a2a_policy_forces() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_authority_rewrite_redirects_a2a_traffic_and_card_discovery_with_it() {
     // The backend address is a port with nothing on it; only the rewrite makes
     // this route work at all. Discovery has to follow, or the gateway serves a
     // card it fetched from an address it never sends traffic to -- and behind
     // an egress proxy that is the only route to the agents, no card at all.
     let real = agent("Alpha", &["echo"], true, true).await;
-    let dead = free_port().await;
+    let dead = free_port();
     let (url, shutdown) = start_with(
         &format!("                allowMethods: [\"message/send\"]\n{CARD_POLICY}"),
         &[dead],
@@ -716,13 +698,12 @@ async fn an_authority_rewrite_redirects_a2a_traffic_and_card_discovery_with_it()
     .await;
 
     // The merged card exists, which means the card fetch found the agent.
-    let card: Value = reqwest::Client::new()
+    let card: Value = http::Client::new()
         .get(format!("{url}/.well-known/agent-card.json"))
         .send()
         .await
         .expect("the gateway should answer")
         .json()
-        .await
         .expect("should be JSON");
     assert_eq!(
         card["skills"][0]["id"], "echo",
@@ -737,7 +718,7 @@ async fn an_authority_rewrite_redirects_a2a_traffic_and_card_discovery_with_it()
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_path_rewrite_does_not_move_agent_card_discovery() {
     // The well-known path is the A2A spec's, not the route's. Asking an agent
     // for its card somewhere else finds nothing.
@@ -749,13 +730,12 @@ async fn a_path_rewrite_does_not_move_agent_card_discovery() {
     )
     .await;
 
-    let card: Value = reqwest::Client::new()
+    let card: Value = http::Client::new()
         .get(format!("{url}/.well-known/agent-card.json"))
         .send()
         .await
         .expect("the gateway should answer")
         .json()
-        .await
         .expect("should be JSON");
     assert_eq!(
         card["skills"][0]["id"], "echo",
@@ -770,7 +750,7 @@ async fn a_path_rewrite_does_not_move_agent_card_discovery() {
 async fn flaky_agent(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>) {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let calls = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&calls);
 
@@ -825,7 +805,7 @@ async fn flaky_agent(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>) {
 const RETRY: &str =
     "              retry:\n                attempts: 2\n                codes: [503]";
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_listed_status_is_retried_on_an_a2a_route() {
     // An `a2a` route dispatches through the `host` proxy, which has always
     // retried. Asserted rather than assumed.
@@ -844,7 +824,7 @@ async fn a_listed_status_is_retried_on_an_a2a_route() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_retried_a2a_call_replays_the_body_the_policy_had_to_buffer() {
     // Gating reads the method out of the body, so the proxy is handed an
     // already-buffered request -- replayable by construction. An attempt after
@@ -867,7 +847,7 @@ async fn a_retried_a2a_call_replays_the_body_the_policy_had_to_buffer() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_refused_a2a_method_is_never_retried_because_it_is_never_sent() {
     // The refusal is the gateway's own response, produced before dispatch, so
     // there is no upstream attempt for a retry policy to repeat.
@@ -895,7 +875,7 @@ fn call_of_len(len: usize) -> String {
     frame(&"x".repeat(pad))
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn max_request_body_bytes_caps_an_a2a_call_below_the_protocol_bound() {
     let a = agent("Alpha", &["echo"], true, true).await;
     let (base, shutdown) = start_configured(
@@ -906,7 +886,7 @@ async fn max_request_body_bytes_caps_an_a2a_call_below_the_protocol_bound() {
         "",
     )
     .await;
-    let client = reqwest::Client::new();
+    let client = http::Client::new();
     let send = |body: String| {
         client
             .post(&base)

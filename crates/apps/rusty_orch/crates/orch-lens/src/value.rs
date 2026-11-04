@@ -4,10 +4,10 @@
 //!
 //! `value = uncertainty × stakes × reversibility × dependents × 100 / cost`
 //!
-//! - **Uncertainty**: the distance to the nearer settling line (accept or
-//!   drop), at least 1 while the claim is open. A claim past its accept
-//!   line can still be open (authors, grounding, a holdout run), so it
-//!   keeps a floor rather than starving.
+//! - **Uncertainty**: the accept line − |score|, at least 1 while the
+//!   claim is open. A claim past its accept line can still be open
+//!   (authors, grounding, a holdout run), so it keeps a floor rather than
+//!   starving.
 //! - **Stakes**: [`Stakes::factor`], the ratio budgets use (D71).
 //! - **Reversibility**: 1, or [`IRREVERSIBLE`] (D71).
 //! - **Dependents**: 1 + open claims that depend on this one, directly or
@@ -63,11 +63,12 @@ pub fn value(card: &Card, dependents: u64, in_flight: u64) -> u64 {
         / cost
 }
 
-/// Distance to the nearer settling line, at least 1.
+/// The accept line − |score|, at least 1.
 fn uncertainty(card: &Card) -> u64 {
-    let to_accept = card.accept_at.saturating_sub(card.score);
-    let to_drop = card.score.saturating_sub(card.drop_at);
-    u64::try_from(to_accept.min(to_drop)).unwrap_or(0).max(1)
+    card.accept_at
+        .unsigned_abs()
+        .saturating_sub(card.score.unsigned_abs())
+        .max(1)
 }
 
 /// For each claim, how many open claims depend on it, directly or
@@ -151,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertainty_is_the_nearer_line() {
+    fn uncertainty_is_the_line_less_the_scores_size() {
         let mut c = base(1, &[]);
         c.score = 5;
         assert_eq!(value(&c, 0, 0), 600);
