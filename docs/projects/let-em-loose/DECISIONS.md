@@ -30,7 +30,7 @@ Precise contracts used by this guide:
 | D11 | BBP is a pure protocol | Agreed 2026-10-11, reaffirmed 2026-11-02 |
 | D12 | orch is model-independent, via ports and adapters | Agreed 2026-11-02; providers refined in D34 |
 | D13 | No agent-to-agent calls | Agreed 2026-11-02 |
-| D14 | Tool-using agents join through the board over MCP | Proposed 2026-11-02 |
+| D14 | Tool-using agents join through the board over MCP | Proposed 2026-11-02; decided 2026-11-04, after v0 (D60) |
 | D15 | Concurrent, event-driven evidence posting | Agreed 2026-11-02 |
 | D16 | Value-driven scheduling is a shadow experiment | Agreed 2026-11-02 |
 | D17 | Build in the rusty_mill monorepo | Agreed 2026-11-02 |
@@ -70,8 +70,13 @@ Precise contracts used by this guide:
 | D51 | The expert is the single writer of settled answers | [default] 2026-11-03 (handoff) |
 | D52 | rusty_erosion location and core/adapter module split | [default] 2026-11-03 (#704) |
 | D53 | One host: everything deploys on BaileyAi | [stated] 2026-11-03 (#598, #599, #594) |
-| D54 | Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases | [stated] 2026-11-03 (#600) |
 | D55 | Orch-originated intents are parked | [stated] 2026-11-03 (general) |
+| D56 | Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases | [stated] 2026-11-03 (#600) |
+| D57 | #596 adds an erosion pass rule: no worse than baseline on 4 of 5 runs | [stated] 2026-11-04 (#596) |
+| D58 | #599 §6 schema and API changes approved | [stated] 2026-11-04 (#599) |
+| D59 | #598 §6: task_paused, intent_revised and data classes approved | [stated] 2026-11-04 (#598) |
+| D60 | Tool-using agents join over MCP after v0 ships | [stated] 2026-11-04 (general) |
+| D61 | #708 alien review lens parked until v0 runs | [stated] 2026-11-04 (#708) |
 
 ## D1. Lenses, not stages
 
@@ -158,6 +163,7 @@ Precise contracts used by this guide:
 **Why.** Tool-using agents don't fit a single request and reply.
 **Rejected.** Squeezing tool-using agents into the lens port.
 **Open.** How this fits whichever executor D20 settles on.
+**Status.** Decided by Nano 2026-11-04: yes, but not before v0 ships. See D60, which supersedes "Proposed".
 
 ## D15. Concurrent, event-driven evidence posting
 
@@ -453,15 +459,6 @@ Worked examples (concentration, duplication, in basis points):
 **Key.** lel:general:one-host-baileyai
 **Source.** Nano's saved record (cap_58e514f9f3d94b3da5d26c0b8a118dd3; dialog mem_77a1f7b27e1340d8a644b8b2062b8f6d, 11-03 "Nano chose all on BaileyAi"; summary mem_eb16b0dea2394f46990c384f69a2ac41 "all deployment on BaileyAi"), pointed to in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds (2026-11-04). Staged as R1 in PR #1446.
 
-## D54. Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases
-
-**Decision.** Windows-specific behaviour of the #600 dedup intent (mapped drives, UNC paths) is covered by a read-only shadow run on Nano's Windows machine plus golden cases he signs off there. The Linux sandbox covers everything else. Each Windows-specific intent line must map to one of these, or it counts as untested.
-**Why.** Claims runs execute only in the Linux sandbox, which can't exercise Windows path behaviour.
-**Rejected.** Treating the Linux sandbox as enough for Windows paths.
-**Tag.** [stated] · remind-me: mem_b33951241b4740a2b44f9cd73a09e2fe
-**Key.** lel:600:windows-shadow-run-golden
-**Source.** Nano's saved record (cap_58e514f9f3d94b3da5d26c0b8a118dd3; dialog mem_77a1f7b27e1340d8a644b8b2062b8f6d, 11-03 "a Windows shadow run plus golden cases for #600"; summary mem_eb16b0dea2394f46990c384f69a2ac41), pointed to in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds (2026-11-04). Staged as R2 in PR #1446.
-
 ## D55. Orch-originated intents are parked
 
 **Decision.** Neither the narrowed v0 nor the full design in orch-intents-design.md is approved. D44 cleanups open as already planned: orch writes the `consolidate` intent at half the drift limit or after 5 accepted claims, with no origin header, no `rules.toml` modes, no host rule check and no `would_open` table. Revisit when a second task-opening rule appears. The implementation defaults proposed for that design (key `lel:general:orch-intents-defaults`) were never adopted and don't apply.
@@ -470,3 +467,57 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_8727494da22f471998b4df97302c8de6
 **Key.** lel:general:orch-intents-parked
 **Source.** Nano chose "Neither, park it" on a decision card in thread "Discuss Let Em Loose design", 2026-11-03T22:54:11Z; mem_b6859bf1682b4b8c804edc23342f6746 (dsh-superagent review).
+
+## D56. Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases
+
+**Decision.** Windows-specific behaviour of the #600 dedup intent (mapped drives, UNC paths) is covered by a read-only shadow run on Nano's Windows machine plus golden cases he signs off there. The Linux sandbox covers everything else. Each Windows-specific intent line must map to one of these, or it counts as untested.
+**Why.** Claims runs execute only in the Linux sandbox, which can't exercise Windows path behaviour.
+**Rejected.** Treating the Linux sandbox as enough for Windows paths.
+**Tag.** [stated] · remind-me: mem_b33951241b4740a2b44f9cd73a09e2fe
+**Key.** lel:600:windows-shadow-run-golden
+**Source.** Nano's saved record (cap_58e514f9f3d94b3da5d26c0b8a118dd3; dialog mem_77a1f7b27e1340d8a644b8b2062b8f6d, 11-03 "a Windows shadow run plus golden cases for #600"; summary mem_eb16b0dea2394f46990c384f69a2ac41), pointed to in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds (2026-11-04). Staged as R2 in PR #1446.
+
+## D57. #596 adds an erosion pass rule: no worse than baseline on 4 of 5 runs
+
+**Decision.** The #596 pre-registered decision rule gains a fourth criterion: the treatment arm's erosion delta is no worse than the baseline arm's on 4 of 5 runs. It sits beside holdout 5/5, tokens ≤80% on ≥4/5 and escalations ≤ baseline (erosion-gate-design §6).
+**Why.** Value scheduling must not win by writing messier code. Pre-registering it before Phase B runs keeps the comparison honest.
+**Rejected.** Leaving erosion out of the #596 rule.
+**Tag.** [stated] · remind-me: mem_bff2870445d746e7b1b11f34cd9bb88e
+**Key.** lel:596:erosion-criterion
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 1 "Yes". OPEN_QUESTIONS Q2.
+
+## D58. #599 §6 schema and API changes approved
+
+**Decision.** The changes listed in 599-gaps-design.md §6 are approved: BBP `claim_history` and its `Step` type (read-only, no log change); `bbp why --claim/--at/--task`; a `canary` run on a released ref; `rusty_orch lessons`, `rusty_orch watch` and `rusty_orch lens why`; orch-store tables `lesson_written`, `lens_record` (replacing #594's unimplemented counts) and `watch_finding`; the `Watch` port with `cargo-deny`, `cargo-update`, `toolchain` and `canary` adapters (CLI calls, no new crates); Factory `apps/*.json`, the watched-versions file and `watch_usd`. remind-me needs no change, but check before building that its HTTP add route carries `project`; an additive fix there is flagged then.
+**Why.** All additive and dependency-free; this clears the ask-first schema/API gate for #599.
+**Rejected.** Holding §6 for further review.
+**Tag.** [stated] · remind-me: mem_69ede4b656794a0d8301818a68ce1957
+**Key.** lel:599:section6-approved
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 2 "Yes" (the question: "approve the new commands, tables and `Watch` port listed in its §6"). OPEN_QUESTIONS Q3.
+
+## D59. #598 §6: task_paused, intent_revised and data classes approved
+
+**Decision.** Approved from 598-gaps-design.md §6, as named in the question: the host write `task_paused { reason, detail }`, which moves the task to `escalated`; the human operation `intent_revised { brief, affects }` with the `intent_version` fold (omitted `affects` means `all`, an empty one is refused `bad_affects`); data-class labels, where `internal` may go to cloud models and `sensitive` stays local. The other §6 items weren't in the question and still need approval (OPEN_QUESTIONS Q5).
+**Why.** Schema and API changes are ask-first, so approval covers only what Nano was shown.
+**Rejected.** Reading the "Yes" as approval of all of §6.
+**Tag.** [stated] · remind-me: mem_eddc237646b843bd8069a0e7a86047a6
+**Key.** lel:598:section6-named-items-approved
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 4 "Yes". OPEN_QUESTIONS Q5.
+
+## D60. Tool-using agents join over MCP after v0 ships
+
+**Decision.** D14 is decided: tool-using agents (Claude Code, Codex) join the board through MCP, but not before v0 ships. This supersedes D14's "Proposed" status. How it fits the D20 executor stays open.
+**Why.** They don't fit a single request and reply (D14), and v0 ships first on the lens port.
+**Rejected.** Adding the MCP path before v0.
+**Tag.** [stated] · remind-me: mem_c6c6304576114e5fa962e49e720e081e
+**Key.** lel:general:mcp-agents-after-v0
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 5 "Yes" (to "yes, but not before v0 ships"). OPEN_QUESTIONS Q6.
+
+## D61. #708 alien review lens parked until v0 runs
+
+**Decision.** The #708 alien review lens is parked until v0 runs: trigger policy, per-language defect lists, scoring and how reproduced findings enter BBP stay undesigned and unapproved, and nothing is built.
+**Why.** Get v0 running before adding another lens kind.
+**Rejected.** Designing #708 now.
+**Tag.** [stated] · remind-me: mem_44c8bf81957240d8a0773acb5dc63f7f
+**Key.** lel:708:alien-lens-parked
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 7 "Park it until v0 runs". OPEN_QUESTIONS Q8.
