@@ -62,7 +62,7 @@ impl Retry {
     /// Doubles each time, matching the config docs, and is capped so a large
     /// `attempts` cannot produce a wait nobody will sit through. Delegates
     /// to [`rusty_retry::Backoff`], shared with `rusty_request`'s and
-    /// `rusty-acp`'s own retry policies -- `jitter: 0.0` reproduces this
+    /// `rusty-ibm-acp`'s own retry policies -- `jitter: 0.0` reproduces this
     /// exact plain-doubling formula, since the retry config this compiles
     /// is a wire-compatible mirror of an upstream schema that specifies no
     /// jitter.
