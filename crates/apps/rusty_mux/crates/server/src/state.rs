@@ -30,7 +30,11 @@ use crate::keys;
 use crate::outbox::Outbox;
 use crate::process;
 use crate::pty::{self, Process, Pty};
+use crate::store::{Started, Store};
 use crate::terminal;
+
+mod persist;
+pub(crate) use persist::save_periodically;
 
 pub(crate) type Shared = Rc<RefCell<State>>;
 
@@ -115,8 +119,6 @@ pub(crate) enum Pending {
 struct BlockRt {
     pty: Rc<Pty>,
     process: Process,
-    /// The program the block started, as configured, for `terminal.shell`.
-    program: String,
     grid: Grid,
     parser: AnsiParser,
     /// What the program reported with OSC 7501.
@@ -133,6 +135,59 @@ struct BlockRt {
     /// Tells the reader a key was written, so it drains when its grace ends.
     wake: Rc<Notify>,
     reader: JoinHandle<()>,
+    /// How the program was started: for `terminal.shell` and the store.
+    started: Started,
+    /// The grid changed since the store last saved it.
+    unsaved: bool,
+}
+
+/// What [`State::start`] starts a block's program with.
+struct Start<'a> {
+    block: BlockId,
+    session: rusty_mux_core::SessionId,
+    window: WindowId,
+    size: Size,
+    config: &'a Config,
+    started: Started,
+}
+
+/// A started program whose block has no screen or reader yet.
+struct Unscreened {
+    block: BlockId,
+    pty: Rc<Pty>,
+    process: Process,
+    foreground: Option<process::Foreground>,
+    echo: Echo,
+    started: Started,
+}
+
+impl Unscreened {
+    /// The block, reading its PTY into `grid` from now on.
+    fn screened(self, shared: &Shared, mut grid: Grid, parser: AnsiParser) -> BlockRt {
+        let wake = Rc::new(Notify::new());
+        let reader = rusty_tokio::task::spawn_local(pump(
+            shared.clone(),
+            self.block,
+            self.pty.clone(),
+            wake.clone(),
+        ));
+        grid.collect_program_status = true;
+        BlockRt {
+            pty: self.pty,
+            process: self.process,
+            grid,
+            parser,
+            status: Records::default(),
+            seen: terminal::Seen::default(),
+            foreground: self.foreground,
+            echo: self.echo,
+            waiting: Waiting::default(),
+            wake,
+            reader,
+            started: self.started,
+            unsaved: true,
+        }
+    }
 }
 
 impl BlockRt {
@@ -186,6 +241,12 @@ pub(crate) struct State {
     /// A reload is reading the file; one at a time, so a stalled
     /// filesystem holds one thread at most.
     reloading: bool,
+    /// Where sessions are saved across restarts, with `Config::state_dir`.
+    store: Option<Store>,
+    /// The event number the store last saved the model at.
+    saved_at: Option<u64>,
+    /// Numbers each save, newest highest.
+    generation: u64,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -231,6 +292,9 @@ impl State {
             stopping: false,
             loader: crate::settings::reloader(),
             reloading: false,
+            store: None,
+            saved_at: None,
+            generation: 0,
         }))
     }
 
@@ -315,6 +379,7 @@ impl State {
     /// block's program now, as dropping the block would. The consoles to
     /// wait for, which still hold the ones closing when this was called.
     pub(crate) fn stop(&mut self) -> pty::Hosts {
+        self.save_now();
         self.stopping = true;
         for (_, rt) in self.blocks.drain() {
             drop(rt.release(true));
@@ -1075,7 +1140,7 @@ impl State {
             "terminal.shell" => {
                 let pid = rt.process.pid().ok_or("the program has exited")?;
                 let activity = process::activity(pid, rt.pty.foreground());
-                terminal::shell(&rt.grid, &rt.program, activity)
+                terminal::shell(&rt.grid, &rt.started.program, activity)
             }
             "terminal.set-theme" | "terminal.clear" => {
                 self.mux
@@ -1226,8 +1291,46 @@ impl State {
             .session();
         // The id is chosen first so the program starts knowing it.
         let block = BlockId::from_uuid(Uuid::new_v4());
+        let started = Started {
+            shell: launch.program.is_none(),
+            program: config.program.to_string_lossy().into_owned(),
+            args: config
+                .args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+            cwd: config.cwd.to_string_lossy().into_owned(),
+        };
+        let rt = self.start(Start {
+            block,
+            session,
+            window,
+            size,
+            config: &config,
+            started,
+        })?;
+        match beside {
+            None => self.mux.add_block(block, window, size)?,
+            Some((target, side)) => self.mux.split_block(block, target, side, size)?,
+        }
+        let rt = rt.screened(shared, crate::checkpoint::grid(size), AnsiParser::new());
+        self.blocks.insert(block, rt);
+        Ok(Outcome::Done(Some(block.uuid())))
+    }
+
+    /// Starts `start.block`'s program, for the caller to give a screen
+    /// ([`Unscreened::screened`]) once the model holds the block.
+    fn start(&mut self, start: Start<'_>) -> Result<Unscreened, Refusal> {
+        let Start {
+            block,
+            session,
+            window,
+            size,
+            config,
+            started,
+        } = start;
         let env = self.block_env(session, window, block);
-        let (pty, process) = pty::spawn(&config, size, &env)
+        let (pty, process) = pty::spawn(config, size, &env)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
         self.hosts.track(&process);
         let pty = Rc::new(pty);
@@ -1240,34 +1343,15 @@ impl State {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         });
-        match beside {
-            None => self.mux.add_block(block, window, size)?,
-            Some((target, side)) => self.mux.split_block(block, target, side, size)?,
-        }
-        let wake = Rc::new(Notify::new());
-        let reader =
-            rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone(), wake.clone()));
         let echo = pty.echo();
-        let mut grid = crate::checkpoint::grid(size);
-        grid.collect_program_status = true;
-        self.blocks.insert(
+        Ok(Unscreened {
             block,
-            BlockRt {
-                pty,
-                process,
-                program: config.program.to_string_lossy().into_owned(),
-                grid,
-                parser: AnsiParser::new(),
-                status: Records::default(),
-                seen: terminal::Seen::default(),
-                foreground,
-                echo,
-                waiting: Waiting::default(),
-                wake,
-                reader,
-            },
-        );
-        Ok(Outcome::Done(Some(block.uuid())))
+            pty,
+            process,
+            foreground,
+            echo,
+            started,
+        })
     }
 
     /// Where a block's program is, for `rusty-mux-ctl` run inside it.
@@ -1421,6 +1505,7 @@ impl State {
             .get_mut(&block)
             .ok_or_else(|| format!("block {block} has no PTY"))?;
         rt.grid.resize(size.cols().into(), size.rows().into());
+        rt.unsaved = true;
         Ok(Outcome::Done(None))
     }
 
@@ -1434,6 +1519,7 @@ impl State {
             return Vec::new();
         };
         rt.parser.advance(&mut rt.grid, data);
+        rt.unsaved = true;
         let replies = rt.parser.take_responses();
         let status = terminal::absorb_status(&mut rt.grid, &mut rt.status);
         for id in status.removed {
@@ -1951,6 +2037,7 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    state_dir: None,
                     config_file: None,
                 },
                 None,
@@ -1974,6 +2061,7 @@ mod regression {
                 args: vec![],
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                state_dir: None,
                 config_file: None,
             },
             None,
@@ -2337,6 +2425,7 @@ mod regression {
             args: vec![],
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
+            state_dir: None,
             config_file: Some("/stalled.json".into()),
         };
         let shared = State::shared(base, None);
@@ -2529,6 +2618,7 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    state_dir: None,
                     config_file: None,
                 },
                 None,
