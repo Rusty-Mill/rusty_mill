@@ -15,6 +15,8 @@ Resolved items are checked and point to the D# or QA entry that answers them. On
 
 ## Waiting on Nano (sourced as open)
 
+- [ ] Q14 (2026-11-04, y for enabling `lens run`): How should BBP expose each claim's frozen accept line to the #594 runner? a) `accept_at` on `claim_card`'s `ClaimView`, bundled with Q12; b) the whole `ClaimsConfig` on the claims-mode card; c) operator `--claims` file (unverifiable). Recommended a. Public API change, ask-first; escalated 2026-11-04. — interim choice: `lens run` refuses (`UNKNOWN_CLAIMS`), merged as a disabled slice (D76).
+
 - [ ] Q4 (2026-11-02, n): Golden set sign-off for #600 and Phase B. (../QUESTIONS.md Q28) → 2026-11-04: Nano agreed to sign the golden sets off once drafted; not yet signed. Still open. Nano, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t` (2026-11-04 11:58Z).
 - [x] Q5 (2026-11-02, y for #598 build): Approval of the #598 schema and API items in 598-gaps-design.md §6 (`task_paused`, `intent_revised`, data classes). (card #598, 22:07Z) → Resolved 2026-11-04: all of §6 approved. `task_paused`, `intent_revised` and data classes in D59 (Nano, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t`, 11:58Z); the rest in D62 (Nano, decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE4Ppm26TJdNSuETWT9FqZp8E`, option A, 17:15Z).
 - [x] Q6 (2026-11-02, n): Do tool-using agents join the board over MCP? D14 is still Proposed. → Resolved 2026-11-04: yes, after v0 ships. D60; Nano, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t` (2026-11-04 11:58Z).

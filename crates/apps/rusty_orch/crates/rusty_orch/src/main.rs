@@ -142,7 +142,7 @@ fn maintain(argv: impl IntoIterator<Item = String>) -> ExitCode {
 }
 
 fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
-    use rusty_orch::lens::check;
+    use rusty_orch::lens::{check, run};
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -150,18 +150,31 @@ fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let options = match check::options(argv, cwd) {
+    let argv: Vec<String> = argv.into_iter().collect();
+    match argv.first().map(String::as_str) {
+        Some("run") => lens_command(run::USAGE, run::options(argv, cwd), run::run),
+        _ => lens_command(check::USAGE, check::options(argv, cwd), check::run),
+    }
+}
+
+/// Print a lens subcommand's usage, report or error.
+fn lens_command<O>(
+    usage: &str,
+    parsed: Result<O, ArgsError>,
+    run: fn(&O) -> Result<String, String>,
+) -> ExitCode {
+    let options = match parsed {
         Ok(options) => options,
         Err(ArgsError::Help) => {
-            println!("{}", check::USAGE);
+            println!("{usage}");
             return ExitCode::SUCCESS;
         }
         Err(ArgsError::Usage(message)) => {
-            eprintln!("rusty_orch: {message}\n{}", check::USAGE);
+            eprintln!("rusty_orch: {message}\n{usage}");
             return ExitCode::from(2);
         }
     };
-    match check::run(&options) {
+    match run(&options) {
         Ok(report) => {
             print!("{report}");
             ExitCode::SUCCESS
