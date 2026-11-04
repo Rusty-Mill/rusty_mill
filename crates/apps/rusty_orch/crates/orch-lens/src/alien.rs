@@ -153,17 +153,19 @@ pub fn eligible(claim: &Claim, trigger: Trigger) -> bool {
 /// The deterministic control sample: `sha256(task, claim) mod n == 0`.
 /// `n == 0` samples nothing.
 pub fn control(task: &str, claim: MsgId, n: u64) -> bool {
-    if n == 0 {
-        return false;
-    }
+    n != 0 && residue(task, claim, n) == 0
+}
+
+/// `sha256(task "\n" claim)`, the whole digest as a big-endian integer,
+/// mod `n` (non-zero). Reduced byte by byte in `u128`, so no overflow.
+fn residue(task: &str, claim: MsgId, n: u64) -> u64 {
     let digest = Sha256::of(format!("{task}\n{}", claim.0).as_bytes());
-    // The whole digest as a big-endian integer, reduced mod n byte by byte.
     let n = u128::from(n);
-    digest
+    let r = digest
         .0
         .iter()
-        .fold(0u128, |r, &b| (r * 256 + u128::from(b)) % n)
-        == 0
+        .fold(0u128, |r, &b| (r * 256 + u128::from(b)) % n);
+    u64::try_from(r).unwrap_or(u64::MAX) // r < n <= u64::MAX
 }
 
 /// One suspect from an enumerate reply.
@@ -260,11 +262,13 @@ pub fn unavailability(s: &Suspect, notes: &[String], list: &[Mechanism]) -> u8 {
 }
 
 /// Whether `note` names `site` whole: `store::write` does not match inside
-/// `store::write_all` or `my_store::write`.
+/// `store::write_all` or `my_store::write`, nor `src/a.rs` inside `x/src/a.rs`.
 fn names(note: &str, site: &str) -> bool {
-    let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    let word = |c: char| c.is_alphanumeric() || c == '_';
     note.match_indices(site).any(|(at, _)| {
-        !ident(note[..at].chars().next_back()) && !ident(note[at + site.len()..].chars().next())
+        let before = note[..at].chars().next_back();
+        let after = note[at + site.len()..].chars().next();
+        !before.is_some_and(|c| word(c) || c == '/') && !after.is_some_and(word)
     })
 }
 
@@ -407,6 +411,17 @@ mod tests {
         // sha256("t\n<claim>") as an integer, mod 10.
         assert!(control("t", MsgId(0), 10)); // digest 5b1d…2c46, mod 10 == 0
         assert!(!control("t", MsgId(2), 10)); // its first 8 bytes alone give 0
+                                              // Golden residues of sha256("t\n0"), computed in Python apart from
+                                              // this code, including moduli near u64::MAX.
+        for (n, r) in [
+            (1, 0),
+            (10, 0),
+            (1_000_003, 531_540),
+            (9_223_372_036_854_775_815, 7_131_217_979_231_520_140),
+            (u64::MAX, 16_742_479_330_715_611_685),
+        ] {
+            assert_eq!(residue("t", MsgId(0), n), r, "mod {n}");
+        }
         assert!(!control("t", MsgId(1), 0));
         assert!(control("t", MsgId(1), 1));
     }
@@ -520,11 +535,20 @@ mod tests {
                 "{longer}"
             );
         }
-        let whole = vec!["see store::write, line 3".to_owned()];
-        assert_eq!(
-            unavailability(&sus("store::write", "rs-path", 3), &whole, RUST),
-            1
-        );
+        for (note, site, named) in [
+            ("see Store::Write, line 3", "store::write", true),
+            ("(crate::store::write)", "store::write", true),
+            ("src/a.rs: fine.", "src/a.rs", true),
+            ("x/src/a.rs is fine", "src/a.rs", false),
+            ("src/a.rsx is fine", "src/a.rs", false),
+        ] {
+            let note = vec![note.to_owned()];
+            assert_eq!(
+                unavailability(&sus(site, "rs-cast", 3), &note, RUST),
+                2 - u8::from(named),
+                "{note:?} {site}"
+            );
+        }
     }
 
     #[test]
