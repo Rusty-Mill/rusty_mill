@@ -77,6 +77,7 @@ Precise contracts used by this guide:
 | D59 | #598 §6: task_paused, intent_revised and data classes approved | [stated] 2026-11-04 (#598) |
 | D60 | Tool-using agents join over MCP after v0 ships | [stated] 2026-11-04 (general) |
 | D61 | #708 alien review lens parked until v0 runs | [stated] 2026-11-04 (#708) |
+| D62 | The rest of #598 §6 approved | [stated] 2026-11-04 (#598) |
 
 ## D1. Lenses, not stages
 
@@ -497,7 +498,7 @@ Worked examples (concentration, duplication, in basis points):
 
 ## D59. #598 §6: task_paused, intent_revised and data classes approved
 
-**Decision.** Approved from 598-gaps-design.md §6, as named in the question: the host write `task_paused { reason, detail }`, which moves the task to `escalated`; the human operation `intent_revised { brief, affects }` with the `intent_version` fold (omitted `affects` means `all`, an empty one is refused `bad_affects`); data-class labels, where `internal` may go to cloud models and `sensitive` stays local. The other §6 items weren't in the question and still need approval (OPEN_QUESTIONS Q5).
+**Decision.** Approved from 598-gaps-design.md §6, as named in the question: the host write `task_paused { reason, detail }`, which moves the task to `escalated`; the human operation `intent_revised { brief, affects }` with the `intent_version` fold (omitted `affects` means `all`, an empty one is refused `bad_affects`); data-class labels, where `internal` may go to cloud models and `sensitive` stays local. The other §6 items weren't in the question; Nano approved them later the same day (D62).
 **Why.** Schema and API changes are ask-first, so approval covers only what Nano was shown.
 **Rejected.** Reading the "Yes" as approval of all of §6.
 **Tag.** [stated] · remind-me: mem_eddc237646b843bd8069a0e7a86047a6
@@ -521,3 +522,12 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_44c8bf81957240d8a0773acb5dc63f7f
 **Key.** lel:708:alien-lens-parked
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 7 "Park it until v0 runs". OPEN_QUESTIONS Q8.
+
+## D62. The rest of #598 §6 approved
+
+**Decision.** Every remaining item in 598-gaps-design.md §6 is approved as listed, completing D59. BBP: `task_opened.baseline_digest` (optional); `claim_reopened.by: intent`; the escalation reason `intent_changed`. Host: `bbp open --base` runs the baseline and can refuse `baseline_red`; the `base_test_changed` refusal; named sandbox profiles for lenses and builders, not just runs; the filtered view; the `shadow:` profile kind with read-only `real_data` mounts and a plan artifact. orch: the Survey and Intent lens kinds; `max_class` and `price` on providers, both required at load; orch-store tables for item classes, spend and reservations; `rusty_orch lens breaker`; `domain_classes` replacing #594's `sensitive_domains`. Factory: `domain_classes`, `sensitive_paths`, `real_data`, `price`, the ceilings and the breaker settings. No migration: no claims-mode logs exist outside tests.
+**Why.** All additive, and they implement answers Nano already gave on #598 (Q1, Q4, Q6). This clears the ask-first schema/API gate for the #598 build.
+**Rejected.** Going item by item (option B on the card).
+**Tag.** [stated] · remind-me: pending
+**Key.** lel:598:section6-remaining-approved
+**Source.** Nano tapped option A "Approve all as listed" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Ppm26TJdNSuETWT9FqZp8E ("Approve the rest of #598 §6, not just the three I listed?"), 2026-11-04T17:15:20Z. OPEN_QUESTIONS Q5.
