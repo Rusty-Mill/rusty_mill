@@ -653,8 +653,10 @@ mod tests {
         assert!(default[0].1.contains("(accepts at +8)"), "{}", default[0].1);
         let custom = ClaimsConfig {
             accept_at: 20,
+            accept_at_strict: 24,
             ..ClaimsConfig::default()
         };
+        assert_eq!(custom.invalid_field(), None, "a task BBP would open");
         let strict = asked_with(&custom);
         assert_eq!(strict[0].0, id("claude"), "contested under the task's 20");
         assert!(strict[0].1.contains("(accepts at +20)"), "{}", strict[0].1);
