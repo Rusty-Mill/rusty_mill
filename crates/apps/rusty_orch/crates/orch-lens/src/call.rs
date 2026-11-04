@@ -21,10 +21,11 @@ use std::collections::BTreeMap;
 use orch_core::AgentId;
 use orch_dispatch::{AgentError, ClassifiedError};
 
+use crate::class::DataClass;
 use crate::config::{Provider, Tools};
 use crate::context::{assemble, Parts, Refusal, Window};
 use crate::meter::{cost, worst_case, Meter, Stop};
-use crate::port::{Model, Question, Reply, Shape};
+use crate::port::{Answer, Model, Question, Reply, Shape};
 use crate::post::{allowance, Post};
 use crate::schedule::Job;
 
@@ -163,16 +164,81 @@ fn attempt(
     let Some(model) = models.get(id, job.tools) else {
         return Step::Pass("not built".to_owned());
     };
-    let bytes = (prefix.len() + body.len()) as u64;
-    let held = worst_case(bytes, MAX_OUTPUT_TOKENS, &provider.price);
+    let question = Question {
+        prefix,
+        body,
+        shape: Shape::Posts(job.allowed.clone()),
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+    };
+    match metered(&question, provider, model, ctx, unsaved) {
+        Metered::Pass(reason) => Step::Pass(reason),
+        Metered::Experiment => Step::Experiment,
+        Metered::End(end) => Step::End(end.with(id)),
+        Metered::Asked { answer, .. } => match answer.reply {
+            Reply::Posts(posts) => Step::End(End::Answered {
+                provider: id,
+                posts,
+            }),
+            // An adapter that ignored the question's shape.
+            Reply::Raw(_) => Step::End(End::Failed {
+                provider: id,
+                error: ClassifiedError::Permanent(AgentError(
+                    "raw reply to a posts question".to_owned(),
+                )),
+            }),
+        },
+    }
+}
+
+/// How one metered ask went, before its reply is read.
+enum Metered {
+    Pass(String),
+    Experiment,
+    End(Ended),
+    /// Answered within the output cap; `cost` is what was settled.
+    Asked {
+        answer: Answer,
+        cost: u64,
+    },
+}
+
+/// A metered ask that ended the job, before the provider is named.
+enum Ended {
+    Stopped(Stop),
+    Unsaved(String),
+    Failed(ClassifiedError),
+}
+
+impl Ended {
+    fn with(self, provider: AgentId) -> End {
+        match self {
+            Self::Stopped(stop) => End::Stopped(stop),
+            Self::Unsaved(e) => End::Unsaved(e),
+            Self::Failed(error) => End::Failed { provider, error },
+        }
+    }
+}
+
+/// Reserve `question`'s worst case, save, ask, settle what it cost and
+/// save again; refuse a reply over the output cap (its cost still
+/// settles). Shared by job calls and [`ask_raw`].
+fn metered(
+    question: &Question,
+    provider: &Provider,
+    model: &mut dyn Model,
+    ctx: &mut Ctx<'_>,
+    unsaved: &mut Option<String>,
+) -> Metered {
+    let bytes = (question.prefix.len() + question.body.len()) as u64;
+    let held = worst_case(bytes, question.max_output_tokens, &provider.price);
     let ticket = match ctx.meter.reserve(ctx.task, held) {
         Ok(t) => t,
-        Err(Stop::Experiment) => return Step::Experiment,
-        Err(stop) => return Step::End(End::Stopped(stop)),
+        Err(Stop::Experiment) => return Metered::Experiment,
+        Err(stop) => return Metered::End(Ended::Stopped(stop)),
     };
     if let Err(e) = (ctx.save)(ctx.meter) {
         ctx.meter.release(ticket);
-        return Step::End(End::Unsaved(e));
+        return Metered::End(Ended::Unsaved(e));
     }
     let settle = |amount: u64| {
         ctx.meter.settle(ticket, amount);
@@ -180,52 +246,168 @@ fn attempt(
             unsaved.get_or_insert(e);
         }
     };
-    let question = Question {
-        prefix,
-        body,
-        shape: Shape::Posts(job.allowed.clone()),
-        max_output_tokens: MAX_OUTPUT_TOKENS,
-    };
-    match model.ask(&question) {
+    match model.ask(question) {
         Ok(answer) => {
-            settle(cost(&answer.usage, &provider.price));
-            if answer.usage.output_tokens > u64::from(MAX_OUTPUT_TOKENS) {
-                let error = ClassifiedError::Permanent(AgentError(format!(
-                    "reply used {} output tokens, over {MAX_OUTPUT_TOKENS}",
-                    answer.usage.output_tokens
-                )));
-                return Step::End(End::Failed {
-                    provider: id,
-                    error,
-                });
+            let spent = cost(&answer.usage, &provider.price);
+            settle(spent);
+            if answer.usage.output_tokens > u64::from(question.max_output_tokens) {
+                return Metered::End(Ended::Failed(ClassifiedError::Permanent(AgentError(
+                    format!(
+                        "reply used {} output tokens, over {}",
+                        answer.usage.output_tokens, question.max_output_tokens
+                    ),
+                ))));
             }
-            match answer.reply {
-                Reply::Posts(posts) => Step::End(End::Answered {
-                    provider: id,
-                    posts,
-                }),
-                // An adapter that ignored the question's shape.
-                Reply::Raw(_) => Step::End(End::Failed {
-                    provider: id,
-                    error: ClassifiedError::Permanent(AgentError(
-                        "raw reply to a posts question".to_owned(),
-                    )),
-                }),
+            Metered::Asked {
+                answer,
+                cost: spent,
             }
         }
         Err(ClassifiedError::Unavailable(e)) => {
             settle(0);
-            Step::Pass(format!("unavailable: {e}"))
+            Metered::Pass(format!("unavailable: {e}"))
         }
         // Usage is unknown: settle the worst case, so a restart errs
         // toward stopping.
         Err(error) => {
             settle(held);
-            Step::End(End::Failed {
-                provider: id,
-                error,
-            })
+            Metered::End(Ended::Failed(error))
         }
+    }
+}
+
+/// One raw question for a caller-side parser (#708): what it is billed to
+/// and who may answer it.
+pub struct Raw<'a> {
+    /// Providers to try, in order.
+    pub providers: &'a [AgentId],
+    pub tools: Tools,
+    /// The highest data class in the question; a provider cleared below
+    /// it is passed over.
+    pub class: DataClass,
+    pub prefix: &'a str,
+    pub body: &'a str,
+}
+
+/// How a raw question ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawEnd {
+    Answered {
+        provider: AgentId,
+        text: String,
+        tokens: u64,
+        /// Micro-dollars settled for the call.
+        cost: u64,
+    },
+    Failed {
+        provider: AgentId,
+        error: ClassifiedError,
+    },
+    Stopped(Stop),
+    Exhausted,
+    Unsaved(String),
+}
+
+/// A raw question's call: the providers passed over, and how it ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawCalled {
+    pub passed: Vec<(AgentId, String)>,
+    pub end: RawEnd,
+    /// As [`Called::unsaved`].
+    pub unsaved: Option<String>,
+}
+
+/// Ask `raw` over its providers in order, metered and passed over exactly
+/// as a job's [`call`] is. A provider passes when it is not configured,
+/// cleared below `raw.class`, too small for the text, not built, stopped
+/// by the experiment ceiling, or unavailable.
+pub fn ask_raw(raw: &Raw<'_>, mut ctx: Ctx<'_>, models: &mut dyn Models) -> RawCalled {
+    let mut passed = Vec::new();
+    let mut experiment = false;
+    let mut unsaved = None;
+    let done = |passed, end, unsaved| RawCalled {
+        passed,
+        end,
+        unsaved,
+    };
+    for &id in raw.providers {
+        let reason = match raw_attempt(raw, id, &mut ctx, models, &mut unsaved) {
+            Ok(end) => return done(passed, end, unsaved),
+            Err(None) => {
+                experiment = true;
+                Stop::Experiment.to_string()
+            }
+            Err(Some(reason)) => reason,
+        };
+        passed.push((id, reason));
+        if let Some(e) = &unsaved {
+            let end = RawEnd::Unsaved(e.clone());
+            return done(passed, end, unsaved);
+        }
+    }
+    let end = if experiment {
+        RawEnd::Stopped(Stop::Experiment)
+    } else {
+        RawEnd::Exhausted
+    };
+    done(passed, end, unsaved)
+}
+
+/// `Ok` ends the call; `Err(Some(reason))` passes the provider over;
+/// `Err(None)` passes it over for the experiment ceiling.
+fn raw_attempt(
+    raw: &Raw<'_>,
+    id: AgentId,
+    ctx: &mut Ctx<'_>,
+    models: &mut dyn Models,
+    unsaved: &mut Option<String>,
+) -> Result<RawEnd, Option<String>> {
+    let providers = ctx.providers;
+    let provider = providers.get(&id).ok_or("not configured".to_owned())?;
+    if !crate::class::admit(raw.class, provider.max_class) {
+        return Err(Some(format!(
+            "question is {:?}, provider cleared for {:?}",
+            raw.class, provider.max_class
+        )));
+    }
+    let room = u64::from(provider.context_tokens.saturating_sub(MAX_OUTPUT_TOKENS))
+        * crate::context::BYTES_PER_TOKEN;
+    let needed = (raw.prefix.len() + raw.body.len()) as u64;
+    if needed > room {
+        return Err(Some(format!(
+            "context needs {needed} bytes, window holds {room}"
+        )));
+    }
+    let model = models.get(id, raw.tools).ok_or("not built".to_owned())?;
+    let question = Question {
+        prefix: raw.prefix.to_owned(),
+        body: raw.body.to_owned(),
+        shape: Shape::Raw,
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+    };
+    match metered(&question, provider, model, ctx, unsaved) {
+        Metered::Pass(reason) => Err(Some(reason)),
+        Metered::Experiment => Err(None),
+        Metered::End(Ended::Stopped(stop)) => Ok(RawEnd::Stopped(stop)),
+        Metered::End(Ended::Unsaved(e)) => Ok(RawEnd::Unsaved(e)),
+        Metered::End(Ended::Failed(error)) => Ok(RawEnd::Failed {
+            provider: id,
+            error,
+        }),
+        Metered::Asked { answer, cost } => match answer.reply {
+            Reply::Raw(text) => Ok(RawEnd::Answered {
+                provider: id,
+                text,
+                tokens: answer.usage.input_tokens + answer.usage.output_tokens,
+                cost,
+            }),
+            Reply::Posts(_) => Ok(RawEnd::Failed {
+                provider: id,
+                error: ClassifiedError::Permanent(AgentError(
+                    "posts reply to a raw question".to_owned(),
+                )),
+            }),
+        },
     }
 }
 
@@ -674,5 +856,120 @@ mod tests {
         assert_eq!(r.called.end, End::Unsaved("disk full".to_owned()));
         assert_eq!(r.called.unsaved, Some("disk full".to_owned()));
         assert!(r.fakes.asked("b").is_empty(), "no provider after it");
+    }
+
+    fn raw_answer(text: &str) -> Result<Answer, ClassifiedError> {
+        Ok(Answer {
+            reply: Reply::Raw(text.to_owned()),
+            usage: Usage {
+                input_tokens: 1_000,
+                output_tokens: 10,
+                cached_input_tokens: 0,
+            },
+        })
+    }
+
+    fn ask(
+        order: &[&str],
+        class: DataClass,
+        cfg: &BTreeMap<AgentId, Provider>,
+        fakes: &mut Fakes,
+        m: &mut Meter,
+    ) -> RawCalled {
+        let ids: Vec<AgentId> = order.iter().map(|n| id(n)).collect();
+        let raw = Raw {
+            providers: &ids,
+            tools: Tools::None,
+            class,
+            prefix: "p",
+            body: "b",
+        };
+        let mut save = |_: &Meter| Ok(());
+        let ctx = Ctx {
+            task: T,
+            providers: cfg,
+            meter: m,
+            save: &mut save,
+        };
+        ask_raw(&raw, ctx, fakes)
+    }
+
+    #[test]
+    fn a_raw_question_is_metered_and_answered_with_its_cost() {
+        let cfg = providers(&[("a", provider(32_768, PAID))]);
+        let mut fakes = Fakes::new(vec![("a", vec![raw_answer("{}")])]);
+        let mut m = meter(USD, 10);
+        let r = ask(&["a"], DataClass::Internal, &cfg, &mut fakes, &mut m);
+        let RawEnd::Answered {
+            provider,
+            text,
+            tokens,
+            cost,
+        } = r.end
+        else {
+            panic!("{:?}", r.end);
+        };
+        assert_eq!((provider, text.as_str(), tokens), (id("a"), "{}", 1_010));
+        assert!(cost > 0);
+        assert_eq!(m.task_spent(T), cost, "settled at what it cost");
+        assert_eq!(fakes.asked("a")[0].shape, Shape::Raw);
+    }
+
+    #[test]
+    fn a_raw_question_passes_over_uncleared_too_small_and_unbuilt_providers() {
+        let low = Provider {
+            max_class: DataClass::Public,
+            ..provider(32_768, FREE)
+        };
+        let cfg = providers(&[
+            ("low", low),
+            ("tiny", provider(4_096, FREE)),
+            ("gone", provider(32_768, FREE)),
+            ("ok", provider(32_768, FREE)),
+        ]);
+        let mut fakes = Fakes::new(vec![
+            ("low", vec![]),
+            ("tiny", vec![]),
+            ("ok", vec![raw_answer("x")]),
+        ]);
+        let mut m = meter(USD, 10);
+        let r = ask(
+            &["low", "tiny", "gone", "ok"],
+            DataClass::Internal,
+            &cfg,
+            &mut fakes,
+            &mut m,
+        );
+        assert!(
+            matches!(&r.end, RawEnd::Answered { provider, .. } if *provider == id("ok")),
+            "{:?}",
+            r.end
+        );
+        let why: Vec<&str> = r.passed.iter().map(|(_, w)| w.as_str()).collect();
+        assert!(
+            why[0].contains("cleared for")
+                && why[1].contains("window holds")
+                && why[2] == "not built",
+            "{why:?}"
+        );
+        assert!(fakes.asked("low").is_empty() && fakes.asked("tiny").is_empty());
+    }
+
+    #[test]
+    fn a_posts_reply_to_a_raw_question_fails_and_a_ceiling_stops_it() {
+        let cfg = providers(&[("a", provider(32_768, FREE))]);
+        let mut fakes = Fakes::new(vec![("a", vec![answer(10)])]);
+        let mut m = meter(USD, 10);
+        let r = ask(&["a"], DataClass::Internal, &cfg, &mut fakes, &mut m);
+        assert!(
+            matches!(&r.end, RawEnd::Failed { error: ClassifiedError::Permanent(e), .. } if e.0.contains("posts reply")),
+            "{:?}",
+            r.end
+        );
+        let mut none = meter(USD, 0);
+        let r = ask(&["a"], DataClass::Internal, &cfg, &mut fakes, &mut none);
+        assert!(matches!(r.end, RawEnd::Stopped(_)), "{:?}", r.end);
+        let r = ask(&[], DataClass::Internal, &cfg, &mut fakes, &mut m);
+        assert_eq!(r.end, RawEnd::Exhausted);
     }
 }
