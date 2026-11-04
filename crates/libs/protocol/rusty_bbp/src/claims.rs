@@ -737,7 +737,7 @@ pub struct ClaimView {
     pub status: ClaimStatus,
     pub score: i64,
     /// The score this claim accepts at: the task's frozen line, strict for
-    /// high stakes or an irreversible claim (#594, D71).
+    /// high stakes or an irreversible claim (#594, D77).
     pub accept_at: i64,
     pub confidence: u32,
     pub epoch: u32,

@@ -6,7 +6,7 @@
 //! - [`Session`]: the claims tools over any [`Rpc`]. It keeps what the
 //!   lens can see: claim bodies from incremental `read` pages (the card
 //!   view carries no stakes, reversibility or question), and the cards,
-//!   with their accept lines and evidence notes (D71), from
+//!   with their accept lines and evidence notes (D77), from
 //!   `claims_delta`. It is the lens's [`Board`]: posts go out under its
 //!   credential, with a stable op id so a retry replays.
 //!

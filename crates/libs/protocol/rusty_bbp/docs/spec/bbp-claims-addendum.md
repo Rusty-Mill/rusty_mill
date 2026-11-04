@@ -318,7 +318,7 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 10. **Fifth decision:** the claim's `current` candidate and `failing` profile set in claims-mode state and on `claim_card`. Derived by the fold from existing reports; no new record or event.
 11. **Interim test-change rule:** `test_paths` in the host profile set (claims mode), `tests_changed: [{path, change}]` on `Report`, and the `tests_unendorsed` code. Removed or relaxed when #597 holdouts land.
 12. **Holdout suites (#597, approved 2026-11-02):** `holdout_digest` on `open` and `task_opened`, `suite` on the candidate manifest (default `build`, not written), the role capability `holdout`, the `holdout_mismatch` code, `holdout_due` on `claim_card`, the host action and event `holdout_extended(digest)` and the human action and event `holdout_updated(digest)`. Host: `protected` globs in the profile set and the `protected_path` code; core: the `tests` domain's accept condition. All optional and not written at their defaults, so existing logs are byte-identical.
-13. **Accept line and evidence notes on the card (#594, approved 2026-11-04, D71):** `accept_at` on `claim_card`/`claims_delta` entries, and `strength` and `note` on each evidence item. Derived from the frozen config and the evidence messages; views only, no record, event or log change.
+13. **Accept line and evidence notes on the card (#594, approved 2026-11-04, D77):** `accept_at` on `claim_card`/`claims_delta` entries, and `strength` and `note` on each evidence item. Derived from the frozen config and the evidence messages; views only, no record, event or log change.
 
 No change to `rusty_crdt`, `coedit` or the stage-mode rules.
 
