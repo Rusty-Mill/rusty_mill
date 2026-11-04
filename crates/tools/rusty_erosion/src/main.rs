@@ -299,9 +299,10 @@ fn base_snapshot(base: &str) -> Result<Snapshot, String> {
 }
 
 /// The changed files in the working tree, read as git sees them: Rust is
-/// read only when it is a regular file reached through real directories (a
-/// symlinked or replaced ancestor means git sees it deleted), and anything
-/// else that is there is unreadable. Other languages are not touched at all
+/// read only when it is a regular file reached through real directories of
+/// this repository (a symlinked or replaced ancestor, or one inside a
+/// submodule, means git sees it deleted). A submodule itself is skipped, as
+/// in the base, and anything else that is there is unreadable. Other languages are not touched at all
 /// (D45), so nothing about them, not even a failed lookup, decides the
 /// result.
 fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Snapshot, String> {
@@ -331,7 +332,7 @@ fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Sn
 enum Entry {
     /// Deleted, as git sees it.
     Absent,
-    /// There, but not a regular file: a symlink, FIFO, socket or directory.
+    /// There, but not a regular file or directory: a symlink, FIFO or socket.
     Special,
     File(Vec<u8>),
 }
@@ -349,6 +350,11 @@ fn entry(path: &str) -> Result<Entry, String> {
     for part in parts {
         dir.push(part);
         match std::fs::symlink_metadata(&dir) {
+            // A nested repository (a submodule, staged or not) is a git
+            // boundary: what is under it is not this tree's.
+            Ok(m) if m.is_dir() && std::fs::symlink_metadata(dir.join(".git")).is_ok() => {
+                return Ok(Entry::Absent);
+            }
             Ok(m) if m.is_dir() => {}
             Ok(_) => return Ok(Entry::Absent),
             Err(e) if gone(&e) => return Ok(Entry::Absent),
@@ -360,6 +366,9 @@ fn entry(path: &str) -> Result<Entry, String> {
         Ok(m) if m.is_file() => std::fs::read(&dir)
             .map(Entry::File)
             .map_err(|e| format!("{path}: {e}")),
+        // Git lists a directory only as a submodule, which the base skips
+        // too, or as a file since replaced by one: never Rust source.
+        Ok(m) if m.is_dir() => Ok(Entry::Absent),
         Ok(_) => Ok(Entry::Special),
         Err(e) if gone(&e) => Ok(Entry::Absent),
         Err(e) => Err(format!("{path}: {e}")),

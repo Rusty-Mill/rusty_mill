@@ -277,6 +277,61 @@ fn a_symlinked_ancestor_is_a_deletion_not_a_redirect() {
     );
 }
 
+/// A one-commit repository at `dir` holding `files`.
+fn nested_repo(dir: &std::path::Path, files: &[(&str, &str)]) {
+    std::fs::create_dir_all(dir).expect("mkdir");
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).expect("write");
+    }
+    let git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git");
+        assert!(ok.success(), "git {args:?}");
+    };
+    git(&["init", "--quiet"]);
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "-m", "sub"]);
+}
+
+#[test]
+fn rust_replaced_by_a_submodule_is_a_deletion_not_read() {
+    let repo = Repo::new("subrepl");
+    let base = repo.head();
+    let rungs = "    if true { }\n".repeat(20);
+    std::fs::remove_dir_all(repo.dir.join("src")).expect("rm");
+    nested_repo(
+        &repo.dir.join("src"),
+        &[("a.rs", &format!("pub fn total() {{\n{rungs}}}\n"))],
+    );
+    repo.git(&["add", "src"]);
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    let line = stdout(&out);
+    assert!(line.contains("\"functions\":-1"), "{line}");
+    assert!(
+        line.contains("\"concentration_bp\":{\"base\":0,\"candidate\":0"),
+        "{line}"
+    );
+}
+
+#[test]
+fn an_updated_submodule_with_a_rust_name_is_skipped() {
+    let repo = Repo::new("subname");
+    let sub = repo.dir.join("vendor.rs");
+    nested_repo(&sub, &[("lib.rs", "pub fn v() {}\n")]);
+    repo.git(&["add", "vendor.rs"]);
+    commit(&repo);
+    let base = repo.head();
+    nested_repo(&sub, &[("lib.rs", "pub fn v() { if true {} }\n")]);
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(stdout(&out).contains("\"functions\":0"), "{}", stdout(&out));
+}
+
 fn commit(repo: &Repo) {
     repo.git(&["add", "-A"]);
     repo.git(&[
