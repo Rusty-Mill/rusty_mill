@@ -113,9 +113,11 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
 11. **C33 force-disconnect.** *Answered (Nano, project thread, 2026-11-04 12:25Z: "Concur"):*
     restricted to the session's owner before shared mode, as the first step of arc 1 (card 507).
     Nano to restate on this PR.
-12. **Clean room across the merged project.** Does "contamination is not a concern, licence
-    compatibility matters" (rusty_conhost) extend to rusty_mux and the core? *Recommend yes,
-    with the MIT notice rule.*
+12. **Clean room across the merged project.** *Answered (Nano, project thread, 2026-11-04 12:30Z:
+    "Yes"):* the rusty_conhost ruling covers rusty_mux and rusty_term_core too: licence
+    compatibility is the test, and MIT code is copied with its notice (as `rusty_conhost`'s
+    THIRD_PARTY_NOTICES.md does for microsoft/terminal). No copied code was found outside
+    rusty_conhost (grep, 2026-11-04). Nano to restate on this PR.
 13. **Smaller carry-overs:** snapshot encode speed against libghostty a hard target (no,
     recommended); a config key for mode 2027 clustering (yes, off by default); after Phase B,
     move rusty_term's ConPTY rollback backend onto platform-windows's wrapper (yes, recommended).
