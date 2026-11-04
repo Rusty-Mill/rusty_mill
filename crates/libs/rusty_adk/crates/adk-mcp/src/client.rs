@@ -10,12 +10,12 @@ use adk_tools::{SharedTool, Tool, ToolContext, Toolset};
 use async_trait::async_trait;
 use rusty_mcp_client::proto::{CallToolResult, ContentBlock, Tool as McpToolEntry};
 use rusty_mcp_client::{McpClient, McpClientError, McpServerSpec, McpTransport};
+use rusty_tokio::sync::Mutex;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 use crate::protocol::{from_wire, uppercase_types};
 

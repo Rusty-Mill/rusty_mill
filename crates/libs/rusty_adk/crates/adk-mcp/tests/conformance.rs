@@ -21,11 +21,11 @@ use adk_core::{InvocationContext, RunConfig, Schema, SchemaType, Services, Sessi
 use adk_mcp::{router, serve_stream, BoundMcpToolset, ConnectionParams, McpServer, McpToolset};
 use adk_sessions::InMemorySessionService;
 use adk_tools::{FunctionTool, SharedTool, ToolContext, Toolset};
+use rusty_tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream};
+use rusty_tokio::net::TcpStream;
+use rusty_tokio::task::JoinHandle;
+use rusty_tokio::time::timeout;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, DuplexStream};
-use tokio::net::TcpStream;
-use tokio::task::JoinHandle;
-use tokio::time::timeout;
 
 const ROLE: &str = "ADK_MCP_CONFORMANCE_ROLE";
 const VERSION: &str = "2025-06-18";
@@ -73,7 +73,7 @@ const CASES: &[(&str, Case)] = cases![
 ];
 
 fn main() {
-    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let runtime = rusty_tokio::runtime::Runtime::new().expect("rusty_tokio runtime");
     match std::env::var(ROLE).as_deref() {
         Ok("server") => runtime.block_on(serve_role()),
         Ok("stall") => runtime.block_on(stall_role()),
@@ -147,7 +147,8 @@ async fn serve_role() {
 }
 
 async fn stall_role() {
-    let _ = tokio::io::copy(&mut tokio::io::stdin(), &mut tokio::io::sink()).await;
+    let _ =
+        rusty_tokio::io::copy(&mut rusty_tokio::io::stdin(), &mut rusty_tokio::io::sink()).await;
 }
 
 async fn run_cases(args: &Args) -> i32 {
@@ -226,11 +227,11 @@ struct StdioPeer {
 
 impl StdioPeer {
     fn start() -> Self {
-        let (to_server, server_in) = tokio::io::duplex(1 << 16);
-        let (server_out, from_server) = tokio::io::duplex(1 << 16);
+        let (to_server, server_in) = rusty_tokio::io::duplex(1 << 16);
+        let (server_out, from_server) = rusty_tokio::io::duplex(1 << 16);
         let server = Arc::new(test_server());
         let server =
-            tokio::spawn(async move { serve_stream(&server, server_in, server_out).await });
+            rusty_tokio::spawn(async move { serve_stream(&server, server_in, server_out).await });
         Self {
             to_server,
             from_server: BufReader::new(from_server),
@@ -453,9 +454,9 @@ async fn stdio_oversized() -> Outcome {
         server,
     } = StdioPeer::start();
     // Keep draining the server's output so it can never block on a write.
-    let drain = tokio::spawn(async move {
+    let drain = rusty_tokio::spawn(async move {
         let mut from_server = from_server;
-        let _ = tokio::io::copy(&mut from_server, &mut tokio::io::sink()).await;
+        let _ = rusty_tokio::io::copy(&mut from_server, &mut rusty_tokio::io::sink()).await;
     });
     let chunk = vec![b'a'; 1 << 20];
     for _ in 0..17 {

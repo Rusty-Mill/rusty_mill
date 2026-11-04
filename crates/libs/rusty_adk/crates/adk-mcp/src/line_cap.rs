@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, ReadBuf};
+use rusty_tokio::io::{AsyncRead, ReadBuf};
 
 /// 16 MiB ceiling per line. A single JSON-RPC message larger than this is
 /// almost certainly a protocol bug or a misbehaving peer; failing the read
@@ -91,7 +91,7 @@ mod tests {
     use std::task::Waker;
 
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use rusty_tokio::io::AsyncReadExt;
 
     enum Step {
         Data(Vec<u8>),
@@ -176,7 +176,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn several_normal_lines_pass_through_unchanged() {
         let (result, exceeded) = read_all([
             Step::Data(b"one\ntwo\n".to_vec()),
@@ -188,7 +188,7 @@ mod tests {
         assert!(!exceeded);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn newlines_reset_the_count_so_long_streams_of_short_lines_pass() {
         let line = vec![b'a'; 1 << 20];
         let mut payload = Vec::new();
@@ -223,7 +223,7 @@ mod tests {
         assert!(!exceeded.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn exact_cap_completed_line_is_accepted_across_polls() {
         let line = vec![b'a'; MAX_LINE_BYTES as usize];
         let mut expected = line.clone();
@@ -233,7 +233,7 @@ mod tests {
         assert!(!exceeded);
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn exact_cap_prefix_then_extra_byte_and_newline_fails_cross_poll() {
         let (result, exceeded) = read_all([
             Step::Data(vec![b'a'; MAX_LINE_BYTES as usize]),
@@ -279,7 +279,7 @@ mod tests {
         assert!(exceeded.load(Ordering::Acquire));
     }
 
-    #[tokio::test]
+    #[rusty_tokio::test]
     async fn oversized_unfinished_suffix_fails_same_and_cross_poll() {
         let (result, exceeded) =
             read_all([Step::Data(vec![b'a'; MAX_LINE_BYTES as usize + 1])]).await;

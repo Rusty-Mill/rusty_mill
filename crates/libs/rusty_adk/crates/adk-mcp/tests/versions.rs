@@ -3,14 +3,15 @@
 //! up to `PROTOCOL_VERSION`, and answers a newer one with it.
 
 use adk_mcp::{serve_stream, serve_tools, PROTOCOL_VERSION};
+use rusty_tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 async fn negotiated(asked: &str) -> String {
-    let (mut to_server, server_in) = tokio::io::duplex(1 << 16);
-    let (server_out, from_server) = tokio::io::duplex(1 << 16);
+    let (mut to_server, server_in) = rusty_tokio::io::duplex(1 << 16);
+    let (server_out, from_server) = rusty_tokio::io::duplex(1 << 16);
     let server = serve_tools("versions", vec![]);
-    tokio::spawn(async move { serve_stream(&server, server_in, server_out).await });
+    let served =
+        rusty_tokio::spawn(async move { serve_stream(&server, server_in, server_out).await });
     let request = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "protocolVersion": asked, "capabilities": {},
         "clientInfo": {"name": "t", "version": "0"}}});
@@ -23,6 +24,9 @@ async fn negotiated(asked: &str) -> String {
         .read_line(&mut line)
         .await
         .unwrap();
+    // End the session: the server sees end of input and returns cleanly.
+    drop(to_server);
+    served.await.unwrap().unwrap();
     let reply: Value = serde_json::from_str(&line).unwrap();
     reply["result"]["protocolVersion"]
         .as_str()
@@ -30,13 +34,13 @@ async fn negotiated(asked: &str) -> String {
         .to_owned()
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_older_supported_revision_is_answered_as_asked() {
     assert_eq!(negotiated("2025-03-26").await, "2025-03-26");
     assert_eq!(negotiated("2024-11-05").await, "2024-11-05");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_newer_revision_is_answered_with_the_newest_supported() {
     assert_eq!(negotiated("2099-01-01").await, PROTOCOL_VERSION);
     assert_eq!(negotiated("2026-07-28").await, PROTOCOL_VERSION);
