@@ -237,9 +237,10 @@ impl CancellationToken {
     }
 
     /// Runs `fut` until it completes or this token is cancelled: `Some`
-    /// with its output, or `None` (dropping `fut`) on cancellation. A token
-    /// already cancelled returns `None` without polling `fut`, and
-    /// cancellation wins when both are ready, as on tokio-util.
+    /// with its output, or `None` (dropping `fut`) on cancellation. As on
+    /// tokio-util, a token already cancelled returns `None` without polling
+    /// `fut`; after that, `fut` is polled first, so an output that is ready
+    /// when the token is cancelled is still returned.
     pub async fn run_until_cancelled<F: Future>(&self, fut: F) -> Option<F::Output> {
         race_cancelled(self.cancelled(), fut).await
     }
@@ -251,8 +252,9 @@ impl CancellationToken {
     }
 }
 
-/// `None` once `cancelled` resolves, else `fut`'s output; `cancelled` is
-/// polled first.
+/// `None` once `cancelled` resolves, else `fut`'s output. `cancelled` is
+/// polled first only on the first poll, so an already-cancelled token never
+/// polls `fut`; later polls favour `fut`, as tokio-util does.
 async fn race_cancelled<C, F>(cancelled: C, fut: F) -> Option<F::Output>
 where
     C: Future<Output = ()>,
@@ -260,11 +262,15 @@ where
 {
     let mut cancelled = std::pin::pin!(cancelled);
     let mut fut = std::pin::pin!(fut);
+    let mut first = true;
     std::future::poll_fn(|cx| {
-        if cancelled.as_mut().poll(cx).is_ready() {
+        if std::mem::take(&mut first) && cancelled.as_mut().poll(cx).is_ready() {
             return Poll::Ready(None);
         }
-        fut.as_mut().poll(cx).map(Some)
+        if let Poll::Ready(output) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        cancelled.as_mut().poll(cx).map(|()| None)
     })
     .await
 }

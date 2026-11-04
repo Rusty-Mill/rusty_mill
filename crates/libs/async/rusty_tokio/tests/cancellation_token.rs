@@ -4,6 +4,8 @@
 use rusty_tokio::sync::{CancellationToken, WaitForCancellationFutureOwned};
 use rusty_tokio::time::{sleep, timeout};
 use std::future::Future;
+use std::pin::{pin, Pin};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 fn assert_send<T: Send>(_: &T) {}
@@ -283,6 +285,62 @@ fn run_until_cancelled_on_a_cancelled_token_never_polls_the_future() {
     let owned = token.clone().run_until_cancelled_owned(async { 1 });
     assert_static(&owned);
     assert_eq!(rt.block_on(owned), None);
+}
+
+/// Pending on its first poll, then ready with `7`.
+#[derive(Default)]
+struct ReadyOnSecondPoll {
+    polled: bool,
+}
+
+impl Future for ReadyOnSecondPoll {
+    type Output = i32;
+
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<i32> {
+        if std::mem::replace(&mut self.polled, true) {
+            Poll::Ready(7)
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+fn poll_once<F: Future>(fut: Pin<&mut F>) -> Poll<F::Output> {
+    fut.poll(&mut Context::from_waker(Waker::noop()))
+}
+
+#[test]
+fn run_until_cancelled_keeps_an_output_ready_when_the_token_is_cancelled() {
+    let token = CancellationToken::new();
+    let mut race = pin!(token.run_until_cancelled(ReadyOnSecondPoll::default()));
+    assert!(poll_once(race.as_mut()).is_pending());
+    token.cancel();
+    assert_eq!(poll_once(race.as_mut()), Poll::Ready(Some(7)));
+}
+
+#[test]
+fn run_until_cancelled_owned_keeps_an_output_ready_when_the_token_is_cancelled() {
+    let token = CancellationToken::new();
+    let mut race = pin!(token
+        .clone()
+        .run_until_cancelled_owned(ReadyOnSecondPoll::default()));
+    assert!(poll_once(race.as_mut()).is_pending());
+    token.cancel();
+    assert_eq!(poll_once(race.as_mut()), Poll::Ready(Some(7)));
+}
+
+#[test]
+fn run_until_cancelled_ends_a_still_pending_future_on_cancel() {
+    let token = CancellationToken::new();
+    let mut borrowed = pin!(token.run_until_cancelled(std::future::pending::<()>()));
+    let mut owned = pin!(token
+        .clone()
+        .run_until_cancelled_owned(std::future::pending::<()>()));
+    assert!(poll_once(borrowed.as_mut()).is_pending());
+    assert!(poll_once(owned.as_mut()).is_pending());
+    token.cancel();
+    assert_eq!(poll_once(borrowed.as_mut()), Poll::Ready(None));
+    assert_eq!(poll_once(owned.as_mut()), Poll::Ready(None));
 }
 
 #[test]
