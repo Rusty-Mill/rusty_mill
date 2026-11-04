@@ -72,6 +72,28 @@ fn setup_status_and_remove_round_trip_through_the_binary() {
 }
 
 #[test]
+fn the_installed_skill_reads_its_guide_from_this_binary() {
+    let dir = std::env::temp_dir().join(format!(
+        "rusty-mux-ctl-agent-skill-it-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let dir_arg = dir.to_str().expect("UTF-8");
+    assert!(ctl(&["agent", "setup", "--dir", dir_arg]).status.success());
+    let skill = std::fs::read_to_string(dir.join("skills/rusty-mux/SKILL.md")).expect("skill");
+    assert!(skill.contains("rusty-mux-ctl agent skill"), "{skill}");
+
+    let guide = ctl(&["agent", "skill"]);
+    assert!(guide.status.success(), "{guide:?}");
+    assert!(stdout(&guide).starts_with("# rusty_mux\n"), "{guide:?}");
+    assert!(
+        stdout(&guide).contains("rusty-mux-ctl api llms"),
+        "{guide:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_hook_is_silent_outside_a_block_and_names_it_inside() {
     let outside = ctl(&["agent", "hook"]);
     assert!(outside.status.success());

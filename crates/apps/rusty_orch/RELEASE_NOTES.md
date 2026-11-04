@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## `rusty_orch lens run`
+**2026-11-04**
+
+- New command that runs the configured lenses on one BBP claims task
+  until the board goes quiet (#594). It calls real models, so don't run it
+  until a live run is approved. A restart asks every lens's first pass
+  again until the runner's memory is saved (next change).
+- It refuses to start until BBP exposes each task's frozen accept lines,
+  rather than assume the defaults. It exits nonzero when the runner
+  itself fails (unsaved meter, refused post).
+
 ## Lens models are told how to answer
 **2026-11-04**
 
