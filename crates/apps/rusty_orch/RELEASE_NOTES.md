@@ -4,14 +4,6 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
-## The lens runner remembers its passes
-**2026-11-04**
-
-- `rusty_orch lens run` now saves what each lens has done on a task in
-  the state directory, after every round (#594). A restart picks up from
-  there instead of asking every lens's first pass again. A crash in the
-  middle of a round asks that round's jobs again.
-
 ## Lens cards show the task's accept line
 **2026-11-04**
 

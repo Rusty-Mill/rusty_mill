@@ -1,4 +1,8 @@
-//! The on-disk shape of one task's lens scheduler memory (#594).
+//! The on-disk shape of one BBP board's lens scheduler memory (#594).
+//!
+//! A board is a task in one BBP store directory: the caller names it, so
+//! two tasks of the same name in different directories never share a
+//! record.
 //!
 //! Positional bincode under the schema tag below: the v1 layout is the
 //! format, and any layout change needs a new tag (see `record.rs`). The
@@ -15,11 +19,11 @@ use serde::{Deserialize, Serialize};
 use crate::record::{ById, Revision};
 use crate::StoreError;
 
-/// Engine key for a task: a hash of its id. The id is stored too, so a
-/// collision is refused instead of read as another task's memory.
-pub fn key(task: &str) -> i64 {
+/// Engine key for a board: a hash of its identity. The identity is stored
+/// too, so a collision is refused instead of read as another board's memory.
+pub fn key(board: &str) -> i64 {
     let mut hash = Fnv1a64::new();
-    hash.update(task.as_bytes());
+    hash.update(board.as_bytes());
     hash.finish() as i64
 }
 
@@ -54,28 +58,28 @@ struct QuestionRow {
 pub struct LensStateRecord {
     id: i64,
     pub revision: i64,
-    pub task: String,
+    pub board: String,
     progress: Vec<ProgressRow>,
     questions: Vec<QuestionRow>,
 }
 
 impl LensStateRecord {
-    pub fn new(task: &str, saved: &Saved, revision: u64) -> Self {
+    pub fn new(board: &str, saved: &Saved, revision: u64) -> Self {
         Self {
-            id: key(task),
+            id: key(board),
             revision: revision as i64,
-            task: task.to_owned(),
+            board: board.to_owned(),
             progress: saved.progress.iter().map(progress_row).collect(),
             questions: saved.questions.iter().map(question_row).collect(),
         }
     }
 
-    /// The saved memory, once the record's task checks out.
-    pub fn into_saved(self, task: &str) -> Result<Saved, StoreError> {
-        if self.task != task {
+    /// The saved memory, once the record's board checks out.
+    pub fn into_saved(self, board: &str) -> Result<Saved, StoreError> {
+        if self.board != board {
             return Err(StoreError::Corrupt(format!(
-                "lens state key for {task:?} holds {:?}",
-                self.task
+                "lens state key for {board:?} holds {:?}",
+                self.board
             )));
         }
         Ok(Saved {

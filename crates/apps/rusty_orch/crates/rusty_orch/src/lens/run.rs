@@ -8,13 +8,16 @@
 //! that keeps failing transiently would otherwise be retried forever).
 //!
 //! The meter is restored from, and saved to, the orch state directory
-//! before every call. The scheduler's memory lives only as long as the
-//! process: a second run asks blind passes again.
+//! before every call. The scheduler's memory is restored at start and
+//! saved after every lens's round, under the board's identity: the
+//! canonical BBP store directory and the task id ([`board`]), so a task of
+//! the same name in another BBP directory starts with nothing remembered.
+//! A crash mid-round asks that round's jobs again.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use orch_core::AgentId;
 use orch_lens::call::{Ctx, Models};
@@ -259,6 +262,28 @@ pub fn outcome(ended: &Ended, mut log: String) -> Result<String, String> {
     }
 }
 
+/// The identity the scheduler's memory is saved under: the canonical BBP
+/// store directory and the task id, NUL-separated (neither can hold one).
+/// BBP task ids are scoped to their directory, so the id alone is not.
+///
+/// # Errors
+///
+/// A message when `dir` cannot be resolved.
+pub fn board(dir: &Path, task: &str) -> Result<String, String> {
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", dir.display()))?;
+    Ok(format!("{}\0{task}", dir.to_string_lossy()))
+}
+
+/// The scheduler's memory saved for `board`, or a fresh one.
+fn load_state(store: &Store, board: &str) -> Result<State, String> {
+    match store.load_lens_state(board).map_err(|e| e.to_string())? {
+        Some(saved) => State::restore(&saved).map_err(|e| format!("lens state: {e}")),
+        None => Ok(State::default()),
+    }
+}
+
 /// Run `o`: open the store and the sessions, build the providers, read
 /// the prompts, then [`passes`]. Returns the log and how it ended.
 pub fn run(o: &Options) -> Result<String, String> {
@@ -282,14 +307,8 @@ pub fn run(o: &Options) -> Result<String, String> {
     };
     let mut registry = Registry::build(&config, &o.repo, &grants)?;
     let store = RefCell::new(Store::open(&o.state).map_err(|e| e.to_string())?);
-    let mut state = match store
-        .borrow()
-        .load_lens_state(&o.task)
-        .map_err(|e| e.to_string())?
-    {
-        Some(saved) => State::restore(&saved).map_err(|e| format!("lens state: {e}"))?,
-        None => State::default(),
-    };
+    let board = board(&o.dir, &o.task)?;
+    let mut state = load_state(&store.borrow(), &board)?;
     let loaded = store
         .borrow()
         .load_meter(&o.experiment)
@@ -322,7 +341,7 @@ pub fn run(o: &Options) -> Result<String, String> {
     let mut keep = |s: &State| {
         store
             .borrow_mut()
-            .save_lens_state(&o.task, &s.saved())
+            .save_lens_state(&board, &s.saved())
             .map_err(|e| e.to_string())
     };
     let metering = Metering {
@@ -585,6 +604,61 @@ mod tests {
         );
         assert_eq!(ended, Ok(Ended::Quiet));
         assert_eq!(echo.1, 2, "no lens asked again: {log}");
+    }
+
+    #[test]
+    fn a_same_named_task_in_another_bbp_directory_starts_fresh() {
+        let root = std::env::temp_dir().join(format!("orch-lens-board-{}", std::process::id()));
+        let (a, b, orch) = (root.join("a"), root.join("b"), root.join("orch"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).expect("dir");
+        }
+        let (board_a, board_b) = (
+            board(&a, "task-1").expect("a"),
+            board(&b, "task-1").expect("b"),
+        );
+        assert_ne!(board_a, board_b);
+        let relative = a.join("..").join("a");
+        assert_eq!(board(&relative, "task-1").expect("same dir"), board_a);
+        let store = RefCell::new(Store::open(&orch).expect("store"));
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut keep = |s: &State| {
+            store
+                .borrow_mut()
+                .save_lens_state(&board_a, &s.saved())
+                .map_err(|e| e.to_string())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+
+        // Board B, same task id and claim ids: nothing of A's carries over.
+        let mut fresh = load_state(&store.borrow(), &board_b).expect("load b");
+        assert_eq!(fresh, State::default());
+        let (_, _) = go_from(&mut fresh, &mut |_| Ok(()), two_seats(), &mut echo, 10, 20);
+        assert_eq!(echo.1, 4, "B makes its own blind passes");
+
+        // Restarting A resumes where it stopped.
+        let mut resumed = load_state(&store.borrow(), &board_a).expect("load a");
+        assert_eq!(resumed.progress.len(), 2);
+        let (_, _) = go_from(
+            &mut resumed,
+            &mut |_| Ok(()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(echo.1, 4, "A asks nothing again");
+        drop(store);
+        std::fs::remove_dir_all(&root).expect("clean up");
     }
 
     #[test]

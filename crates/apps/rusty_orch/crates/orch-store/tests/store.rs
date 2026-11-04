@@ -564,7 +564,7 @@ mod lens_states {
     }
 
     #[test]
-    fn a_tasks_runner_memory_survives_reopening() {
+    fn a_boards_runner_memory_survives_reopening() {
         let d = dir("lens_state_reopen");
         {
             let mut s = Store::open(&d).expect("open");
@@ -573,7 +573,11 @@ mod lens_states {
         }
         let s = Store::open(&d).expect("reopen");
         assert_eq!(s.load_lens_state("task-1").expect("load"), Some(saved()));
-        assert_eq!(s.load_lens_state("task-2").expect("load"), None, "per task");
+        assert_eq!(
+            s.load_lens_state("task-2").expect("load"),
+            None,
+            "per board"
+        );
     }
 
     #[test]
