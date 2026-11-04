@@ -363,7 +363,6 @@ dependencies = [
  "jsonwebtoken 11.0.0",
  "rand 0.8.8",
  "rcgen",
- "reqwest 0.13.4",
  "rsa",
  "rusty_axum",
  "rusty_base64",
@@ -376,10 +375,10 @@ dependencies = [
  "rusty_prost",
  "rusty_request",
  "rusty_serve",
+ "rusty_tls",
  "rusty_tokio",
  "serde_json",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
