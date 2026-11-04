@@ -84,6 +84,7 @@ Precise contracts used by this guide:
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 | D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
+| D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
 
 ## D1. Lenses, not stages
 
@@ -591,3 +592,12 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_120c56253ad241ce954eb5602baabf53
 **Key.** lel:594:lens-run-disabled-slice
 **Source.** Nano's tap on hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE485HdWybMYAyN7zK64ZJGmR (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:46:52Z, option "Merge as disabled slice". Review and merge gates still apply.
+
+## D77. `claim_card` carries each claim's accept line and each evidence item's note and strength
+
+**Decision.** Nano chose a small additive `rusty_bbp` change: `accept_at` on each claim view and `note` and `strength` on each evidence item, so the #594 runner reads the task's frozen accept lines instead of assuming defaults (closes Q12 and Q14). Build detail, `[default]`: `ClaimView.accept_at: i64` is the claim's effective line, `ClaimRecord::accept_at(&book.config)` with strict already applied (one field, not both lines; the runner needs only the claim's own line, and the tier rule uses `accept_at / 2` of it). `EvidenceView` gains `strength: u8` and `note: String`; the existing `Sight` filter already omits unreadable evidence, so no new visibility rule. No log schema or `PROTOCOL_VERSION` bump: views are derived by the fold, not logged. The addendum's `claim_card` bullet (§ Reads, delta and subscriptions) and its Schema and API changes list gain the fields, citing this approval. With it, D54's `read(after)` note fill and D76's `UNKNOWN_CLAIMS` refusal are retired.
+**Why.** The #1467 reviewer refused `ClaimsConfig::default()` for tasks opened with custom `--claims`, and no host interface exposed the frozen config. A per-claim line is the smallest change and is computed by the host, so the runner can't misapply the strict rule. The addendum card already lists strength, so that part closes a gap with the merged contract.
+**Rejected.** The whole `ClaimsConfig` on the card (option b). An operator `--claims` file the runner can't check (option c). Both lines on every claim (redundant).
+**Tag.** [stated] · remind-me: mem_506f809db3894df0b29d8992879f373c
+**Key.** lel:594:claim-card-accept-line
+**Source.** Nano's tap on "a) Add accept line to claim view", hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Pksa1peJwFSFnWsRe6jtve (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:55:49Z; dottiusmaximus on #1467; `rusty_bbp/src/claims.rs` `ClaimView`, `EvidenceView`, `ClaimRecord::accept_at`; bbp-claims-addendum.md line on `claim_card`.
