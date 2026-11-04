@@ -50,10 +50,18 @@ struct Inner<T> {
     next_waiter: u64,
     recv_waker: Option<Waker>,
     senders_alive: usize,
-    receiver_alive: bool,
+    /// Cleared when the receiver is dropped or [`Receiver::close`]d: no
+    /// send succeeds after that.
+    open: bool,
 }
 
 impl<T> Inner<T> {
+    /// Nothing more can arrive: every sender is gone, or the channel is
+    /// closed and no permit is left to fill a slot.
+    fn finished(&self) -> bool {
+        self.senders_alive == 0 || (!self.open && self.reserved == 0)
+    }
+
     /// Wake the oldest waiting sender, if any. Returns the waker so the
     /// caller can wake it after unlocking.
     fn pop_send_waiter(&mut self) -> Option<Waker> {
@@ -143,6 +151,11 @@ impl<T> Shared<T> {
         let mut guard = self.inner.lock().unwrap();
         guard.reserved -= n;
         let mut woken = Vec::new();
+        // After `close`, the last permit going unused ends the channel:
+        // wake the receiver to see that.
+        if guard.queue.is_empty() && guard.finished() {
+            woken.extend(guard.recv_waker.take());
+        }
         for _ in 0..n {
             match guard.pop_send_waiter() {
                 Some(waker) => woken.push(waker),
@@ -202,7 +215,7 @@ pub fn channel<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
             next_waiter: 0,
             recv_waker: None,
             senders_alive: 1,
-            receiver_alive: true,
+            open: true,
         }),
     });
     (
@@ -229,7 +242,7 @@ impl<T> Sender<T> {
         let mut wait = SendWait::new(&self.shared);
         let sent = std::future::poll_fn(|cx| {
             let mut guard = self.shared.inner.lock().unwrap();
-            if !guard.receiver_alive {
+            if !guard.open {
                 wait.key = None;
                 return Poll::Ready(false);
             }
@@ -267,7 +280,7 @@ impl<T> Sender<T> {
     /// case via [`TrySendError`], not lost.
     pub fn try_send(&self, value: T) -> Result<(), TrySendError<T>> {
         let mut guard = self.shared.inner.lock().unwrap();
-        if !guard.receiver_alive {
+        if !guard.open {
             drop(guard);
             return Err(TrySendError::Closed(value));
         }
@@ -358,7 +371,7 @@ impl<T> Sender<T> {
     /// channel is either full or closed.
     pub fn try_reserve(&self) -> Result<Permit<'_, T>, TrySendError<()>> {
         let mut guard = self.shared.inner.lock().unwrap();
-        if !guard.receiver_alive {
+        if !guard.open {
             return Err(TrySendError::Closed(()));
         }
         if guard.queue.len() + guard.reserved < guard.capacity {
@@ -377,7 +390,7 @@ impl<T> Sender<T> {
     /// failure rather than losing it.
     pub fn try_reserve_owned(self) -> Result<OwnedPermit<T>, TrySendError<Self>> {
         let mut guard = self.shared.inner.lock().unwrap();
-        if !guard.receiver_alive {
+        if !guard.open {
             drop(guard);
             return Err(TrySendError::Closed(self));
         }
@@ -403,7 +416,7 @@ impl<T> Sender<T> {
         wait: &mut SendWait<'_, T>,
     ) -> Poll<bool> {
         let mut guard = self.shared.inner.lock().unwrap();
-        if !guard.receiver_alive {
+        if !guard.open {
             wait.key = None;
             return Poll::Ready(false);
         }
@@ -718,7 +731,7 @@ impl<T> Receiver<T> {
             }
             return Ok(v);
         }
-        if guard.senders_alive == 0 {
+        if guard.finished() {
             return Err(TryRecvError::Disconnected);
         }
         Err(TryRecvError::Empty)
@@ -754,7 +767,7 @@ impl<T> Receiver<T> {
             }
             return Poll::Ready(Some(v));
         }
-        if guard.senders_alive == 0 {
+        if guard.finished() {
             return Poll::Ready(None);
         }
         let stale = guard.recv_waker.replace(cx.waker().clone());
@@ -762,12 +775,27 @@ impl<T> Receiver<T> {
         drop(stale); // after unlocking: a waker may own a `Sender`
         Poll::Pending
     }
+
+    /// Closes the channel without dropping the receiver, as tokio's: every
+    /// later send or reserve fails, waiting senders wake to see that, and
+    /// values already queued, or sent through a permit taken before, can
+    /// still be received. [`recv`](Self::recv) returns `None` once they
+    /// are drained.
+    pub fn close(&mut self) {
+        let mut guard = self.shared.inner.lock().unwrap();
+        guard.open = false;
+        let waiters = std::mem::take(&mut guard.send_waiters);
+        drop(guard);
+        for (_, waker) in waiters {
+            waker.wake();
+        }
+    }
 }
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
         let mut guard = self.shared.inner.lock().unwrap();
-        guard.receiver_alive = false;
+        guard.open = false;
         let waiters = std::mem::take(&mut guard.send_waiters);
         // Undelivered values are dropped with the receiver, as tokio does, so
         // anything they own (a one-shot responder, say) closes too. Dropped
@@ -785,7 +813,16 @@ struct UnboundedInner<T> {
     queue: VecDeque<T>,
     recv_waker: Option<Waker>,
     senders_alive: usize,
-    receiver_alive: bool,
+    /// As [`Inner::open`].
+    open: bool,
+}
+
+impl<T> UnboundedInner<T> {
+    /// Nothing more can arrive: every sender is gone, or the channel is
+    /// closed.
+    fn finished(&self) -> bool {
+        self.senders_alive == 0 || !self.open
+    }
 }
 
 struct UnboundedShared<T> {
@@ -818,7 +855,7 @@ pub fn unbounded_channel<T>() -> (UnboundedSender<T>, UnboundedReceiver<T>) {
             queue: VecDeque::new(),
             recv_waker: None,
             senders_alive: 1,
-            receiver_alive: true,
+            open: true,
         }),
     });
     (
@@ -835,7 +872,7 @@ impl<T> UnboundedSender<T> {
     /// this is a plain synchronous method, not `async fn`.
     pub fn send(&self, value: T) -> Result<(), SendError<T>> {
         let mut guard = self.shared.inner.lock().unwrap();
-        if !guard.receiver_alive {
+        if !guard.open {
             drop(guard);
             return Err(SendError(value));
         }
@@ -924,7 +961,7 @@ impl<T> UnboundedReceiver<T> {
         if let Some(v) = guard.queue.pop_front() {
             return Ok(v);
         }
-        if guard.senders_alive == 0 {
+        if guard.finished() {
             return Err(TryRecvError::Disconnected);
         }
         Err(TryRecvError::Empty)
@@ -953,13 +990,19 @@ impl<T> UnboundedReceiver<T> {
         if let Some(v) = guard.queue.pop_front() {
             return Poll::Ready(Some(v));
         }
-        if guard.senders_alive == 0 {
+        if guard.finished() {
             return Poll::Ready(None);
         }
         let stale = guard.recv_waker.replace(cx.waker().clone());
         drop(guard);
         drop(stale); // after unlocking: a waker may own a `Sender`
         Poll::Pending
+    }
+
+    /// As [`Receiver::close`]: later sends fail, queued values can still
+    /// be received.
+    pub fn close(&mut self) {
+        self.shared.inner.lock().unwrap().open = false;
     }
 }
 
@@ -970,7 +1013,7 @@ impl<T> Drop for UnboundedReceiver<T> {
         // never anyone parked on this channel besides (at most) the
         // receiver itself, which is what's dropping right now.
         let mut guard = self.shared.inner.lock().unwrap();
-        guard.receiver_alive = false;
+        guard.open = false;
         // As the bounded Receiver's Drop: undelivered values go with it,
         // dropped after unlocking.
         let undelivered = std::mem::take(&mut guard.queue);

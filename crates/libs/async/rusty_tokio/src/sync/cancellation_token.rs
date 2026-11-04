@@ -227,6 +227,52 @@ impl CancellationToken {
             armed: true,
         }
     }
+
+    /// Like [`drop_guard`](Self::drop_guard), but borrows the token.
+    pub fn drop_guard_ref(&self) -> DropGuardRef<'_> {
+        DropGuardRef {
+            token: self,
+            armed: true,
+        }
+    }
+
+    /// Runs `fut` until it completes or this token is cancelled: `Some`
+    /// with its output, or `None` (dropping `fut`) on cancellation. As on
+    /// tokio-util, a token already cancelled returns `None` without polling
+    /// `fut`; after that, `fut` is polled first, so an output that is ready
+    /// when the token is cancelled is still returned.
+    pub async fn run_until_cancelled<F: Future>(&self, fut: F) -> Option<F::Output> {
+        race_cancelled(self.cancelled(), fut).await
+    }
+
+    /// Like [`run_until_cancelled`](Self::run_until_cancelled), but owns
+    /// the token, so the future is `'static` when `fut` is.
+    pub async fn run_until_cancelled_owned<F: Future>(self, fut: F) -> Option<F::Output> {
+        race_cancelled(self.cancelled_owned(), fut).await
+    }
+}
+
+/// `None` once `cancelled` resolves, else `fut`'s output. `cancelled` is
+/// polled first only on the first poll, so an already-cancelled token never
+/// polls `fut`; later polls favour `fut`, as tokio-util does.
+async fn race_cancelled<C, F>(cancelled: C, fut: F) -> Option<F::Output>
+where
+    C: Future<Output = ()>,
+    F: Future,
+{
+    let mut cancelled = std::pin::pin!(cancelled);
+    let mut fut = std::pin::pin!(fut);
+    let mut first = true;
+    std::future::poll_fn(|cx| {
+        if std::mem::take(&mut first) && cancelled.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(None);
+        }
+        if let Poll::Ready(output) = fut.as_mut().poll(cx) {
+            return Poll::Ready(Some(output));
+        }
+        cancelled.as_mut().poll(cx).map(|()| None)
+    })
+    .await
 }
 
 impl Default for CancellationToken {
@@ -359,6 +405,31 @@ impl DropGuard {
 }
 
 impl Drop for DropGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.token.cancel();
+        }
+    }
+}
+
+/// Cancels the token it borrows when dropped -- see
+/// [`CancellationToken::drop_guard_ref`].
+#[derive(Debug)]
+pub struct DropGuardRef<'a> {
+    token: &'a CancellationToken,
+    /// As [`DropGuard`]'s.
+    armed: bool,
+}
+
+impl<'a> DropGuardRef<'a> {
+    /// Returns the token without cancelling it.
+    pub fn disarm(mut self) -> &'a CancellationToken {
+        self.armed = false;
+        self.token
+    }
+}
+
+impl Drop for DropGuardRef<'_> {
     fn drop(&mut self) {
         if self.armed {
             self.token.cancel();
