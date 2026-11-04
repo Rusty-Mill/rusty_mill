@@ -620,12 +620,14 @@ Worked examples (concentration, duplication, in basis points):
 
 ## D70. #722 adds `bbp verify`
 
-**Decision.** `rusty_bbp_host` gets a new public CLI command, `bbp verify --dir --task [--expect <head hex>]`. It prints the line count, the unchained count and the head. It exits non-zero on a broken chain, or on a head that differs from `--expect`. It doesn't modify the log.
+**Decision.** `rusty_bbp_host` gets a new public CLI command, `bbp verify --dir D --task T [--expect H]`. It reads the one log at `log_path_for` under the directory lock, without going through `FsStore::open`, and never modifies the file. It prints `{"lines", "unchained", "head", "partial"}`. It exits non-zero if the chain is broken, if a trailing partial line exists (reported and left in place, never truncated), or if `--expect H` is given and H isn't the hash of any line. So a head saved earlier still verifies after legitimate appends, while a truncation or rewrite that drops H fails (design v1 § Checks).
+**Correction.** This entry first said `bbp verify` fails on "a head that differs from `--expect`", which is the design v0 wording. That was a transcription error, not a new decision: Nano approved design v1, whose § Checks has the ancestry rule above. PR #1485 review comment https://github.com/Rusty-Mill/rusty_mill/pull/1485#issuecomment-6643813583 flagged it.
 **Why.** New public commands are ask-first, and this one lets whoever keeps a head check the chain against it.
 **Rejected.** None was offered.
 **Tag.** [stated] · remind-me: mem_ea09aa6ec67b4829bd69b2910c7c2978
 **Key.** lel:722:bbp-verify-cli
 **Source.** Nano tapped option A "Approve all four as recommended" on decision card cmsg_014AqbZs58L565hMV2pFkCX59exuTYA3aBX2BcYCYExYmL ("Approve the #722 hash-chain design v1 as recommended?") in thread cmsg_014AqbZs58L565hMV2pFkCX5BMDsWTnkiWyUoTktyX3YZQ, 2026-11-04T20:23Z, as relayed by the coordinator. The recommendations are in /mnt/project-files/bbp-722/design.md § Questions for Nano, Q4.
+
 ## D74. #708 alien review lens unparked (supersedes D61)
 
 **Decision.** #708 is unparked, replacing D61. Next: finish the design (the value threshold on #596's score, per-language defect lists, scoring, and how reproduced findings enter BBP), run the egm Goldfish review, and bring the design to Nano for approval. Build and open a PR for dottiusmaximus only after he approves it. The design is not approved yet (D25).

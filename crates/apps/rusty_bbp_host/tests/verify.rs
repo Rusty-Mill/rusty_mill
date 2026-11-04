@@ -147,3 +147,41 @@ fn a_broken_chain_fails_with_its_line() {
     assert!(err.contains("chain broken"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `--expect` passes for the current head and for a genuine earlier head;
+/// it fails for a hash that was never a line and once a truncation drops
+/// the expected line (design v1 § Checks, D70).
+#[test]
+fn expect_accepts_current_and_earlier_heads_and_refuses_absent_or_truncated() {
+    let (dir, log) = store_with("expect", "slug-ed-1");
+    let d = dir.to_str().unwrap();
+    let head = |args: &[&str]| {
+        let (ok, out, err) = bbp(args);
+        assert!(ok, "{err}");
+        head_of(&out)
+    };
+    let verify = ["verify", "--dir", d, "--task", "slug-ed-1"];
+    append_one(&dir, "slug-ed-1");
+    let earlier = head(&verify);
+    let before_last = std::fs::metadata(&log).expect("meta").len();
+    append_one(&dir, "slug-ed-1");
+    let current = head(&verify);
+    assert_ne!(earlier, current);
+
+    let expect = |h: &str| bbp(&[&verify[..], &["--expect", h]].concat()).0;
+    assert!(expect(&current), "current head");
+    assert!(expect(&earlier), "earlier head after an append");
+    assert!(!expect(&"ab".repeat(32)), "a hash that was never a line");
+    assert!(!expect("not-hex"), "malformed --expect");
+
+    // Cut the last line off: the head saved after it no longer verifies,
+    // while the one before it still does.
+    let f = std::fs::File::options()
+        .write(true)
+        .open(&log)
+        .expect("open");
+    f.set_len(before_last).expect("truncate");
+    assert!(!expect(&current), "truncation dropped the expected line");
+    assert!(expect(&earlier), "the surviving prefix still verifies");
+    let _ = std::fs::remove_dir_all(&dir);
+}
