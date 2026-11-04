@@ -273,13 +273,7 @@ impl<R: Rpc> Session<R> {
     /// The revision is read first, so a change made meanwhile is seen again
     /// next time rather than missed.
     pub fn refresh(&mut self, config: &LensConfig) -> Result<(), String> {
-        let rev = match self.ask("task_card", map(vec![]))? {
-            Response::Card(c) => {
-                self.brief = c.brief;
-                c.rev
-            }
-            other => return Err(format!("task_card answered {other:?}")),
-        };
+        let rev = self.refresh_card()?;
         self.read_new()?;
         let domains = self.domains(config);
         if domains.is_empty() {
@@ -359,6 +353,34 @@ impl<R: Rpc> Session<R> {
                 Some(Card::from_view(v, body, &notes, config, claims))
             })
             .collect()
+    }
+
+    /// The task brief's text: the intent every lens prefix starts with.
+    /// Charged once per call (R11), so the shell reads it once per run.
+    pub fn brief(&mut self) -> Result<String, String> {
+        if self.brief.is_none() {
+            self.refresh_card()?;
+        }
+        let id = self.brief.ok_or("the task has no brief")?;
+        let text = self
+            .rpc
+            .call("get_artifact", map(vec![("id", id.0.into())]))?;
+        let v: Value = rusty_serde::json::from_str(&text)
+            .map_err(|e| format!("get_artifact: unreadable answer: {e}"))?;
+        v.get("content")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("get_artifact: brief {id} has no text"))
+    }
+
+    fn refresh_card(&mut self) -> Result<Rev, String> {
+        match self.ask("task_card", map(vec![]))? {
+            Response::Card(c) => {
+                self.brief = c.brief;
+                Ok(c.rev)
+            }
+            other => Err(format!("task_card answered {other:?}")),
+        }
     }
 
     /// One line per settled claim, newest first, at most [`MAX_LINES`].
@@ -958,6 +980,20 @@ mod tests {
         let err = s.post("adversary", &[counter("x")]).expect_err("rejected");
         assert!(err.contains("reassigned"), "{err}");
         assert_eq!(s.rpc.args("post").len(), 1);
+    }
+
+    #[test]
+    fn the_brief_is_read_once_from_its_artifact() {
+        let mut fake = Fake::default().on("task_card", task_card(5));
+        fake.replies
+            .entry("get_artifact".to_owned())
+            .or_default()
+            .push_back(Ok(
+                r#"{"id":1,"content":"Dedup 20 TB of photos."}"#.to_owned()
+            ));
+        let mut s = Session::new("adversary", fake, "r1");
+        assert_eq!(s.brief(), Ok("Dedup 20 TB of photos.".to_owned()));
+        assert_eq!(word(s.rpc.args("get_artifact")[0], "id"), "1");
     }
 
     #[test]

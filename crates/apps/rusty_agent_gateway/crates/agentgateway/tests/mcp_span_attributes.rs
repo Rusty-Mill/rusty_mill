@@ -11,11 +11,12 @@
 //! # One test, one binary
 //!
 //! Installing a `tracing` subscriber globally is once-per-process, and a
-//! thread-local one would not reach the tokio worker threads the gateway
+//! thread-local one would not reach the runtime worker threads the gateway
 //! serves requests on. So this file holds exactly one test, and `cargo test`
 //! gives it a binary of its own.
 
 mod common;
+use common::mcp;
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -23,11 +24,10 @@ use std::time::Duration;
 
 use agentgateway_config::Config;
 use agentgateway_mcp::{McpRequest, McpRequestResult, McpResponseResult, request_result};
-use rmcp::{ServiceExt, model::CallToolRequestParams, transport::StreamableHttpClientTransport};
 use rusty_mcp_middleware::otel::OtelConfig;
 use rusty_prost::Message as _;
 use rusty_prost::wkt::Value;
-use tokio_util::sync::CancellationToken;
+use rusty_tokio::sync::CancellationToken;
 
 /// Distinctive enough to find by scanning, and not a substring of anything
 /// else the exporter sends.
@@ -44,25 +44,26 @@ type Received = Arc<Mutex<Vec<u8>>>;
 /// that only reach these bytes by having been put on a span; scanning for them
 /// is enough to prove what this test needs to.
 async fn collector(received: Received) -> SocketAddr {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use rusty_tokio::io::AsyncWriteExt as _;
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+    let listener = rusty_tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("collector should bind");
     let addr = listener.local_addr().expect("should have an address");
 
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         loop {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return;
             };
             let received = Arc::clone(&received);
 
-            tokio::spawn(async move {
+            rusty_tokio::spawn(async move {
                 let mut request = Vec::new();
                 let mut buf = vec![0u8; 64 * 1024];
                 while !request_is_complete(&request) {
-                    match tokio::time::timeout(Duration::from_secs(2), socket.read(&mut buf)).await
+                    match rusty_tokio::time::timeout(Duration::from_secs(2), socket.read(&mut buf))
+                        .await
                     {
                         Ok(Ok(0) | Err(_)) | Err(_) => break,
                         Ok(Ok(n)) => request.extend_from_slice(&buf[..n]),
@@ -148,7 +149,7 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[rusty_tokio::test(flavor = "multi_thread")]
 async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
     use rusty_log::tracing_subscriber::prelude::*;
 
@@ -177,7 +178,7 @@ async fn a_guardrails_metadata_reaches_the_collector_as_span_attributes() {
 
     let (processor_host, stop_processor) = processor().await;
 
-    let port = common::free_port().await;
+    let port = common::free_port();
     let yaml = format!(
         r#"
 binds:
@@ -216,19 +217,16 @@ binds:
         .await
         .expect("gateway should bind");
 
-    let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        )))
+    let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
         .await
         .expect("client should complete the MCP handshake");
 
     client
-        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .call_tool("alpha_echo", None)
         .await
         .expect("the call should succeed");
 
-    let _ = client.cancel().await;
+    let _ = client.close().await;
     shutdown.cancel();
     stop_processor.cancel();
 
@@ -236,7 +234,7 @@ binds:
     // most common way to end up staring at an empty collector while insisting
     // the code is instrumented.
     guard.shutdown();
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    rusty_tokio::time::sleep(Duration::from_millis(500)).await;
 
     let bytes = received.lock().expect("lock").clone();
     assert!(

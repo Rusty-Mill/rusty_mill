@@ -83,7 +83,8 @@ Precise contracts used by this guide:
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 | D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
-| D76 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
+| D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
+| D78 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
 
 ## D1. Lenses, not stages
 
@@ -583,11 +584,20 @@ Worked examples (concentration, duplication, in basis points):
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
 
-## D76. #598 build defaults while 598-gaps-design.md is unavailable
+## D76. `lens run` merges as a disabled slice until the accept-line source lands
+
+**Decision.** PR #1467 (`rusty_orch lens run`) may merge with `lens run` refusing every invocation (`UNKNOWN_CLAIMS`) until BBP exposes the task's frozen accept line. The runner never assumes `ClaimsConfig::default()`. The accept-line source lands as its own small PR stacked on #1467. How BBP exposes it (`accept_at` on `ClaimView`, the whole `ClaimsConfig`, or an operator `--claims` file, bundled with Q12) is not settled here; it is open as Q14.
+**Why.** dottiusmaximus on #1467 (comment 6635856528) asked for owner acceptance of a disabled slice or to treat the source as a merge-readiness dependency. Nano chose the disabled slice.
+**Rejected.** Holding #1467 until the source lands. Assuming the default thresholds (accept_at 8 / strict 12) for tasks opened with custom `--claims`.
+**Tag.** [stated] · remind-me: mem_120c56253ad241ce954eb5602baabf53
+**Key.** lel:594:lens-run-disabled-slice
+**Source.** Nano's tap on hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE485HdWybMYAyN7zK64ZJGmR (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:46:52Z, option "Merge as disabled slice". Review and merge gates still apply.
+
+## D78. #598 build defaults while 598-gaps-design.md is unavailable
 
 **Decision.** Until the design file can be read, #598 is built with these choices inside the approved §6 (D59, D62). `task_paused.reason` is one of `spend_ceiling`, `call_ceiling` or `breaker`, and `detail` is free text. `intent_revised.affects` is `{all: true}` or `{claims: [..], domains: [..]}` (their union); an unknown claim, or both lists empty, is refused `bad_affects`. `intent_version` is a fold: 1 at `task_opened`, plus one per `intent_revised`. A claim's proven-against version is the `intent_version` at its latest acceptance, also a fold, with no stored field. An intent reopen follows C-R8's epoch and budget rules, with no automatic extension, and an acted-on claim escalates `intent_changed` instead of reopening. `bbp open --base <ref>` resolves the ref to a full commit id stored as the existing `profiles.baseline`. `baseline_digest` is the SHA-256 of the canonical baseline report at `<dir>/baseline/<task>.json`. `baseline_red` lists the red profile and test names plus a suggested profile-set edit as text, with no new skip field. `base_test_changed` refuses a candidate that modifies or deletes a `test_paths` file existing at `base`, unless its claim is `reversible: false`; such a candidate goes to the inbox, one item per candidate. Breaker settings are `window_calls` 40, `window_usd` 5, `min_score_move` 4 (sum of absolute score change in the window) and `mode` `observe`. `rusty_orch lens breaker` is a read-only report. `max_class` keeps the merged default by provider kind (ADR-0021) and `price` stays required. The shadow-run module is `shadow_run.rs`, because `shadow.rs` is #596's policy log.
 **Why.** These are implementation details inside an approved design. Each is the most reversible option consistent with card #598, D59/D62, QA.md § Gaps and the merged orch-lens code.
 **Rejected.** Waiting for the file; adding new profile-set or claim fields beyond §6 as recorded.
 **Tag.** [default] · remind-me: mem_6b6e898a0a3d4a4bb3d374fc8f9dae41
 **Key.** lel:598:build-defaults-without-design-doc
-**Source.** let-em-loose-expert, 2026-11-04, for the #598 build session; OPEN_QUESTIONS Q14.
+**Source.** let-em-loose-expert, 2026-11-04, for the #598 build session; OPEN_QUESTIONS Q16.

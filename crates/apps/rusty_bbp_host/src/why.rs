@@ -17,6 +17,7 @@
 
 use crate::open_driver;
 use crate::shadow;
+use rusty_bbp::history::History;
 use rusty_bbp::*;
 use rusty_serde::Serialize;
 use std::collections::BTreeMap;
@@ -261,4 +262,22 @@ pub fn of(dir: &Path, task: &TaskId, turn: Option<u64>) -> Result<Report, String
 /// [`of`] as one line of JSON.
 pub fn json(dir: &Path, task: &TaskId, turn: Option<u64>) -> Result<String, String> {
     rusty_serde::json::to_string(&of(dir, task, turn)?).map_err(|e| e.to_string())
+}
+
+/// `bbp why --claim`: how claim `claim` of `task` moved, through rev `at` if given.
+pub fn claim(dir: &Path, task: &TaskId, claim: MsgId, at: Option<Rev>) -> Result<History, String> {
+    let d = open_driver(dir, task)?;
+    if d.state.mode != Mode::Claims {
+        return Err(format!("{}: not a claims task", task.0));
+    }
+    let events = d.store.events(task, 0).map_err(|e| format!("{e:?}"))?;
+    claim_history(task, &events, claim, at).ok_or_else(|| match at {
+        Some(at) => format!("no claim {claim} by rev {}", at.0),
+        None => format!("no claim {claim}"),
+    })
+}
+
+/// [`claim`] as one line of JSON.
+pub fn claim_json(dir: &Path, task: &TaskId, id: MsgId, at: Option<Rev>) -> Result<String, String> {
+    rusty_serde::json::to_string(&claim(dir, task, id, at)?).map_err(|e| e.to_string())
 }

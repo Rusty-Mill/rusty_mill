@@ -10,16 +10,11 @@
 use std::net::SocketAddr;
 
 use agentgateway_config::Config;
-use rmcp::{
-    ServiceExt,
-    model::{GetPromptRequestParams, ReadResourceRequestParams},
-    service::RunningService,
-    transport::StreamableHttpClientTransport,
-};
-use tokio_util::sync::CancellationToken;
+use rusty_tokio::sync::CancellationToken;
 
 mod common;
 use common::free_port;
+use common::mcp;
 
 fn mock_server() -> String {
     let mut path = std::env::current_exe().expect("test binary should have a path");
@@ -38,14 +33,14 @@ fn mock_server() -> String {
 }
 
 struct Harness {
-    client: RunningService<rmcp::RoleClient, ()>,
+    client: mcp::Client,
     shutdown: CancellationToken,
 }
 
 impl Harness {
     /// Boot a gateway over the given YAML, substituting `{server}` and `{port}`.
     async fn start(body: &str) -> Harness {
-        let port = free_port().await;
+        let port = free_port();
         let yaml = format!(
             r#"
 binds:
@@ -72,10 +67,7 @@ binds:
             .await
             .expect("gateway should bind");
 
-        let client = ()
-            .serve(StreamableHttpClientTransport::from_uri(format!(
-                "http://127.0.0.1:{port}/mcp"
-            )))
+        let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
             .await
             .expect("client should complete the MCP handshake");
 
@@ -85,7 +77,7 @@ binds:
     async fn prompt_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .client
-            .list_all_prompts()
+            .list_prompts()
             .await
             .expect("prompts/list should work")
             .into_iter()
@@ -98,21 +90,16 @@ binds:
     async fn get_prompt(&self, name: &str) -> Result<String, String> {
         let result = self
             .client
-            .get_prompt(GetPromptRequestParams::new(name))
+            .get_prompt(name, None)
             .await
             .map_err(|err| err.to_string())?;
-        Ok(result
-            .messages
-            .iter()
-            .filter_map(|m| m.content.as_text().map(|t| t.text.clone()))
-            .collect::<Vec<_>>()
-            .join(""))
+        Ok(mcp::prompt_text(&result.messages))
     }
 
     async fn resource_uris(&self) -> Vec<String> {
         let mut uris: Vec<String> = self
             .client
-            .list_all_resources()
+            .list_resources()
             .await
             .expect("resources/list should work")
             .into_iter()
@@ -125,20 +112,18 @@ binds:
     async fn read_resource(&self, uri: &str) -> Result<(String, String), String> {
         let result = self
             .client
-            .read_resource(ReadResourceRequestParams::new(uri))
+            .read_resource(uri)
             .await
             .map_err(|err| err.to_string())?;
         let content = result.contents.first().expect("one content block");
         match content {
-            rmcp::model::ResourceContents::TextResourceContents { uri, text, .. } => {
-                Ok((uri.clone(), text.clone()))
-            }
+            mcp::proto::ResourceContents::Text { uri, text, .. } => Ok((uri.clone(), text.clone())),
             other => panic!("expected text contents, got {other:?}"),
         }
     }
 
     async fn stop(self) {
-        let _ = self.client.cancel().await;
+        let _ = self.client.close().await;
         self.shutdown.cancel();
     }
 }
@@ -164,7 +149,7 @@ const TWO_TARGETS: &str = r#"            backends:
                           MOCK_PROMPTS: "summarize"
                           MOCK_RESOURCES: "memo:notes""#;
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn prompts_are_federated_under_a_qualified_name() {
     let harness = Harness::start(TWO_TARGETS).await;
 
@@ -188,7 +173,7 @@ async fn prompts_are_federated_under_a_qualified_name() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn resources_are_federated_by_widening_the_uri_scheme() {
     let harness = Harness::start(TWO_TARGETS).await;
 
@@ -206,7 +191,7 @@ async fn resources_are_federated_by_widening_the_uri_scheme() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_resource_read_round_trips_through_the_gateway() {
     let harness = Harness::start(TWO_TARGETS).await;
 
@@ -228,7 +213,7 @@ async fn a_resource_read_round_trips_through_the_gateway() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_prompt_rule_gates_prompts_on_the_listing_and_the_fetch() {
     let harness = Harness::start(&format!(
         r#"            policies:
@@ -261,7 +246,7 @@ async fn a_prompt_rule_gates_prompts_on_the_listing_and_the_fetch() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_resource_rule_matches_on_the_targets_own_uri() {
     let harness = Harness::start(&format!(
         r#"            policies:
@@ -293,7 +278,7 @@ async fn a_resource_rule_matches_on_the_targets_own_uri() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_tool_allow_list_refuses_prompts_and_resources() {
     // The behaviour most likely to surprise, so it is pinned end to end.
     // Exactly one of `mcp.tool`, `mcp.prompt` and `mcp.resource` is bound per
@@ -318,7 +303,7 @@ async fn a_tool_allow_list_refuses_prompts_and_resources() {
     // Tools still work, which is what makes this a trap rather than an outage.
     let tools: Vec<String> = harness
         .client
-        .list_all_tools()
+        .list_tools()
         .await
         .expect("tools/list should work")
         .into_iter()
@@ -329,7 +314,7 @@ async fn a_tool_allow_list_refuses_prompts_and_resources() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_deny_list_leaves_prompts_and_resources_alone() {
     // The mirror image: a deny-list names what is refused, so what it does not
     // name survives regardless of kind.
@@ -355,7 +340,7 @@ async fn a_deny_list_leaves_prompts_and_resources_alone() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rule_can_gate_on_the_target_as_well_as_the_name() {
     let harness = Harness::start(&format!(
         r#"            policies:
@@ -377,7 +362,7 @@ async fn a_rule_can_gate_on_the_target_as_well_as_the_name() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn resource_templates_are_gated_on_their_template() {
     let harness = Harness::start(&format!(
         r#"            policies:
@@ -390,7 +375,7 @@ async fn resource_templates_are_gated_on_their_template() {
 
     let templates: Vec<String> = harness
         .client
-        .list_all_resource_templates()
+        .list_resource_templates()
         .await
         .expect("resources/templates/list should work")
         .into_iter()
@@ -407,7 +392,7 @@ async fn resource_templates_are_gated_on_their_template() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn capabilities_follow_what_the_targets_actually_have() {
     // Claiming prompts the federation cannot serve would have clients calling
     // `prompts/list` only to be told the method does not exist.
@@ -424,35 +409,35 @@ async fn capabilities_follow_what_the_targets_actually_have() {
     )
     .await;
 
-    let info = harness
+    let capabilities = harness
         .client
-        .peer_info()
+        .server_capabilities()
         .expect("the handshake should have carried server info");
-    assert!(info.capabilities.tools.is_some());
+    assert!(capabilities.tools.is_some());
     assert!(
-        info.capabilities.prompts.is_none(),
+        capabilities.prompts.is_none(),
         "no target has prompts, so the gateway must not advertise them"
     );
-    assert!(info.capabilities.resources.is_none());
+    assert!(capabilities.resources.is_none());
 
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn one_target_with_prompts_is_enough_to_advertise_them() {
     let harness = Harness::start(TWO_TARGETS).await;
 
-    let info = harness
+    let capabilities = harness
         .client
-        .peer_info()
+        .server_capabilities()
         .expect("the handshake should have carried server info");
-    assert!(info.capabilities.prompts.is_some());
-    assert!(info.capabilities.resources.is_some());
+    assert!(capabilities.prompts.is_some());
+    assert!(capabilities.resources.is_some());
 
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_target_without_prompts_is_skipped_rather_than_reported_as_faulty() {
     // A missing capability is not a fault, and a mixed federation is the
     // normal case rather than the exception.
@@ -481,7 +466,7 @@ async fn a_target_without_prompts_is_skipped_rather_than_reported_as_faulty() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unknown_prompt_or_resource_is_a_clean_error() {
     let harness = Harness::start(TWO_TARGETS).await;
 

@@ -7,6 +7,9 @@ use std::sync::{LazyLock, Mutex};
 
 use fs4::fs_std::FileExt;
 
+pub mod http;
+pub mod mcp;
+
 /// Render a filesystem path for splicing into a *double-quoted* YAML scalar.
 ///
 /// Inside double quotes the YAML scanner reads a backslash as the start of an
@@ -49,7 +52,7 @@ const FLOOR: u32 = 20_000;
 /// So each process draws from a band of its own, claimed by [`claim_band`].
 /// Every candidate is still probed, which covers anything outside this run
 /// holding a port.
-pub async fn free_port() -> u16 {
+pub fn free_port() -> u16 {
     static ISSUED: LazyLock<Mutex<HashSet<u16>>> = LazyLock::new(Default::default);
 
     if let Some(base) = band_base() {
@@ -61,7 +64,7 @@ pub async fn free_port() -> u16 {
             // Probing costs a bind and tells us the port is genuinely free,
             // which a band alone cannot: something outside this run may hold
             // it.
-            if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+            if let Ok(listener) = std::net::TcpListener::bind(("127.0.0.1", port)) {
                 drop(listener);
                 return port;
             }
@@ -71,9 +74,8 @@ pub async fn free_port() -> u16 {
     // No band, or a band that ran dry, falls back to what this used to do
     // rather than failing the run. Losing the guarantee is better than turning
     // a sizing mistake here into a suite that cannot pass at all.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("should bind an ephemeral port");
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("should bind an ephemeral port");
     let port = listener.local_addr().expect("should have an addr").port();
     drop(listener);
     ISSUED.lock().expect("lock").insert(port);
@@ -132,11 +134,10 @@ pub fn claim_band(directory: &Path) -> Option<(File, u32)> {
 /// The `rusty_tokio` runtime the gateway under test and its mock upstreams
 /// run on.
 ///
-/// The suites drive the gateway with tokio clients (`reqwest`, `rmcp`), while
-/// the gateway's own timers and sockets, and the `rusty_axum` mock upstreams,
-/// are `rusty_tokio`'s and need a runtime of their own. So the gateway is
-/// built and served here, and a test reaches it over sockets as any client
-/// would.
+/// Each test has a single-threaded runtime of its own, which ends with the
+/// test. The gateway instead runs multi-threaded, as it does in production, on
+/// this runtime shared by the whole binary, and a test reaches it over sockets
+/// as any client would.
 fn gateway_runtime() -> &'static rusty_tokio::Runtime {
     static RUNTIME: std::sync::OnceLock<rusty_tokio::Runtime> = std::sync::OnceLock::new();
     RUNTIME.get_or_init(|| {
@@ -169,7 +170,7 @@ pub async fn build(
 pub async fn serve(
     gateway: agentgateway::Gateway,
     addrs: Vec<std::net::SocketAddr>,
-    shutdown: tokio_util::sync::CancellationToken,
+    shutdown: rusty_tokio::sync::CancellationToken,
 ) -> anyhow::Result<impl std::future::Future<Output = ()> + Send> {
     serve_with_limits(gateway, addrs, shutdown, rusty_axum::Admission::new()).await
 }
@@ -179,7 +180,7 @@ pub async fn serve(
 pub async fn serve_with_limits(
     gateway: agentgateway::Gateway,
     addrs: Vec<std::net::SocketAddr>,
-    shutdown: tokio_util::sync::CancellationToken,
+    shutdown: rusty_tokio::sync::CancellationToken,
     limits: rusty_axum::Admission,
 ) -> anyhow::Result<impl std::future::Future<Output = ()> + Send> {
     let stop = rusty_tokio::sync::CancellationToken::new();
@@ -193,7 +194,6 @@ pub async fn serve_with_limits(
             .await
             .expect("serving should not panic")?
     };
-    // The test's token is tokio's; waiting on it needs no tokio runtime.
     gateway_runtime().spawn(async move {
         shutdown.cancelled().await;
         stop.cancel();
@@ -278,11 +278,11 @@ pub fn header_pairs(headers: &rusty_axum::HeaderMap) -> Vec<(String, String)> {
 #[allow(dead_code, reason = "only the guardrail suites run a processor")]
 pub async fn grpc_upstream<F>(
     reply: F,
-) -> (std::net::SocketAddr, tokio_util::sync::CancellationToken)
+) -> (std::net::SocketAddr, rusty_tokio::sync::CancellationToken)
 where
     F: Fn(&str, &[u8]) -> Vec<u8> + Clone + Send + Sync + 'static,
 {
-    let shutdown = tokio_util::sync::CancellationToken::new();
+    let shutdown = rusty_tokio::sync::CancellationToken::new();
     let stopping = shutdown.clone();
     let addr = gateway_runtime()
         .spawn(async move {

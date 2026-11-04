@@ -14,6 +14,7 @@ pub mod command;
 pub mod engine;
 pub mod event;
 pub mod fs_store;
+pub mod history;
 pub mod ids;
 pub mod metrics;
 pub mod policy;
@@ -40,6 +41,7 @@ pub use event::{
     LOG_SCHEMA_CLAIMS, LOG_SCHEMA_CONCURRENT, LOG_SCHEMA_EVENT_DRIVEN,
 };
 pub use fs_store::{log_path_for, FsError, FsStore};
+pub use history::claim_history;
 pub use ids::*;
 pub use policy::SchedulingPolicy;
 pub use record::*;

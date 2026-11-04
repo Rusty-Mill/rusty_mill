@@ -403,6 +403,25 @@ fn the_skill_carries_its_mark_after_the_front_matter() {
 }
 
 #[test]
+fn the_skill_is_a_stub_that_reads_the_guide_from_this_ctl() {
+    assert!(SKILL.contains("rusty-mux-ctl agent skill"), "{SKILL}");
+    assert!(SKILL.contains("not on PATH"), "{SKILL}");
+    // The guide lives only in the binary: none of its commands are in the stub.
+    assert!(!SKILL.contains("terminal.format"), "{SKILL}");
+    assert!(GUIDE.starts_with("# rusty_mux\n"));
+    assert!(!GUIDE.contains(MARK));
+    assert!(GUIDE.contains("rusty-mux-ctl api llms"));
+}
+
+#[test]
+fn agent_skill_prints_the_guide_anywhere() {
+    let mut out = Vec::new();
+    let exit = run(&AgentCommand::Skill, &env(CTL), false, &mut out, &|| None).expect("runs");
+    assert_eq!(exit, Exit::Ok);
+    assert_eq!(String::from_utf8(out).expect("UTF-8"), GUIDE);
+}
+
+#[test]
 fn only_the_exact_generated_command_is_ours() {
     for theirs in [
         "echo rusty-mux-ctl agent hook",
