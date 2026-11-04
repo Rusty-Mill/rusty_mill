@@ -87,6 +87,8 @@ Precise contracts used by this guide:
 | D75 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
 | D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
+| D84 | #599 track records score pivotal reviews against ground truth only | [stated] 2026-11-04 (#599) |
+| D85 | Let Em Loose designs live in the repo, in their first draft PR | [stated] 2026-11-04 (general) |
 
 ## D1. Lenses, not stages
 
@@ -628,3 +630,21 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [stated] · remind-me: mem_506f809db3894df0b29d8992879f373c
 **Key.** lel:594:claim-card-accept-line
 **Source.** Nano's tap on "a) Add accept line to claim view", hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Pksa1peJwFSFnWsRe6jtve (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:55:49Z; dottiusmaximus on #1467; `rusty_bbp/src/claims.rs` `ClaimView`, `EvidenceView`, `ClaimRecord::accept_at`; bbp-claims-addendum.md line on `claim_card`.
+
+## D84. #599 track records score pivotal reviews against ground truth only
+
+**Decision.** Option A plus ground truth. A pivotal review is one whose outcome flips once the lens's own evidence is removed. It is not scored against the board outcome, and each lens reports a pivotal count beside its points. Where the claim has ground truth (a golden-set test, a shadow-run result, a later Nano reversal), the pivotal review is scored against that instead. With no ground truth it is unscored and counted as pivotal. The 20-item calibration report shows, per lens: points, scored count, pivotal count, and pivotal-with-ground-truth count. Required tests: pivotal with no ground truth is unscored and counted; pivotal with ground truth is scored against the ground truth; a non-pivotal review is scored as before; a lens that flips an outcome it bet on earns nothing from the flip. This answers OPEN_QUESTIONS Q17, which is on #1491's branch.
+**Why.** Ground truth isn't moved by the lens's vote, so scoring against it can't be gamed. Reporting the counts keeps "unmeasured" visible, so it doesn't read as "bad".
+**Rejected.** Scoring pivotal reviews against the board outcome, which the lens itself moved. Leaving every pivotal review unscored, even where ground truth exists. The other Q17 options: pivotal reviews at w = 1, or dropping the pivotal rule.
+**Tag.** [stated] · remind-me: mem_3f1158fb8fe0485697a8a713fc86469f
+**Key.** lel:599:track-record-pivotal
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Track-record question: option A, plus ground truth". OPEN_QUESTIONS Q17 (card #599 Q2).
+
+## D85. Let Em Loose designs live in the repo, in their first draft PR
+
+**Decision.** Every Let Em Loose design goes into `docs/projects/let-em-loose/` as part of its first draft PR, never only in `/mnt/project-files/` or session scratch. The rule is in the let-em-loose-expert pack (sources, step 4) and the let-em-loose row of the scoped `CLAUDE.md` rule.
+**Why.** `/mnt/project-files/` doesn't survive between sessions: the #594 and #599 designs were both lost there.
+**Rejected.** Keeping designs in `/mnt/project-files/let-em-loose/` or in session scratch.
+**Tag.** [stated] · remind-me: mem_aff6060cd75743ef9807b92006c3f1c7
+**Key.** lel:general:designs-live-in-repo
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Design docs live in the repo, never in session scratch."
