@@ -30,7 +30,7 @@ Precise contracts used by this guide:
 | D11 | BBP is a pure protocol | Agreed 2026-10-11, reaffirmed 2026-11-02 |
 | D12 | orch is model-independent, via ports and adapters | Agreed 2026-11-02; providers refined in D34 |
 | D13 | No agent-to-agent calls | Agreed 2026-11-02 |
-| D14 | Tool-using agents join through the board over MCP | Proposed 2026-11-02 |
+| D14 | Tool-using agents join through the board over MCP | Proposed 2026-11-02; decided 2026-11-04, after v0 (D60) |
 | D15 | Concurrent, event-driven evidence posting | Agreed 2026-11-02 |
 | D16 | Value-driven scheduling is a shadow experiment | Agreed 2026-11-02 |
 | D17 | Build in the rusty_mill monorepo | Agreed 2026-11-02 |
@@ -69,7 +69,20 @@ Precise contracts used by this guide:
 | D50 | One decision log, D-numbering continues | [default] 2026-11-03 (handoff) |
 | D51 | The expert is the single writer of settled answers | [default] 2026-11-03 (handoff) |
 | D52 | rusty_erosion location and core/adapter module split | [default] 2026-11-03 (#704) |
+| D53 | One host: everything deploys on BaileyAi | [stated] 2026-11-03 (#598, #599, #594) |
 | D54 | Lens shell reaches BBP through one `bbp mcp` session per lens | [default] 2026-11-04 (#594) |
+| D55 | Orch-originated intents are parked | [stated] 2026-11-03 (general) |
+| D56 | Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases | [stated] 2026-11-03 (#600) |
+| D57 | #596 adds an erosion pass rule: no worse than baseline on 4 of 5 runs | [stated] 2026-11-04 (#596) |
+| D58 | #599 §6 schema and API changes approved | [stated] 2026-11-04 (#599) |
+| D59 | #598 §6: task_paused, intent_revised and data classes approved | [stated] 2026-11-04 (#598) |
+| D60 | Tool-using agents join over MCP after v0 ships | [stated] 2026-11-04 (general) |
+| D61 | #708 alien review lens parked until v0 runs | [stated] 2026-11-04 (#708) |
+| D62 | The rest of #598 §6 approved | [stated] 2026-11-04 (#598) |
+| D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
+| D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
+| D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
+| D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
 
 ## D1. Lenses, not stages
 
@@ -156,6 +169,7 @@ Precise contracts used by this guide:
 **Why.** Tool-using agents don't fit a single request and reply.
 **Rejected.** Squeezing tool-using agents into the lens port.
 **Open.** How this fits whichever executor D20 settles on.
+**Status.** Decided by Nano 2026-11-04: yes, but not before v0 ships. See D60, which supersedes "Proposed".
 
 ## D15. Concurrent, event-driven evidence posting
 
@@ -442,11 +456,128 @@ Worked examples (concentration, duplication, in basis points):
 **Key.** lel:704:rusty-erosion-layout
 **Source.** Caller question from the #704 slice 1 build thread, 2026-11-03; erosion-gate-design §2, §9, §10; card #704 Build 1.
 
+## D53. One host: everything deploys on BaileyAi
+
+**Decision.** The BBP host, claims runs, shadow-run tooling, the daily watcher, `orch-runner` and the `lel-codex` container all run on BaileyAi. The agentos container on the MS-01 (LXC 107) is dropped. Supersedes the card #598/#599 note of 2026-11-02 22:08Z (mem_f7c9785174124786b33031d3cc1407bc).
+**Why.** Nano resolved the conflict between that card note and his 2026-11-03 voice answer by choosing BaileyAi, where llama-swap already runs.
+**Rejected.** agentos on the MS-01 with BaileyAi as fallback.
+**Tag.** [stated] · remind-me: mem_5862c484286b46c9a3ff25d6ff2fde7e
+**Key.** lel:general:one-host-baileyai
+**Source.** Nano's saved record (cap_58e514f9f3d94b3da5d26c0b8a118dd3; dialog mem_77a1f7b27e1340d8a644b8b2062b8f6d, 11-03 "Nano chose all on BaileyAi"; summary mem_eb16b0dea2394f46990c384f69a2ac41 "all deployment on BaileyAi"), pointed to in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds (2026-11-04). Staged as R1 in PR #1446.
+
 ## D54. Lens shell reaches BBP through one `bbp mcp` session per lens
 
-**Decision.** The `rusty_orch lens run` shell spawns one `bbp mcp` stdio JSON-RPC child per lens for the run (`BBP_SESSION=yes`, `BBP_PRINCIPAL=<lens id>`) and uses its claims tools: `claims_delta` to wake, `claim_card` and `claim_line` for the card and settled lines, `post` for claims and evidence. `claim_card`'s `EvidenceView` carries author, direction, kind, delta, epoch and scoring but no note, so the shell fills each evidence note from an incremental `read(after)` on the same session, cached by message id (one read per wake, not per claim). (D53 is reserved for the staged orch-intents entry.)
+**Decision.** The `rusty_orch lens run` shell spawns one `bbp mcp` stdio JSON-RPC child per lens for the run (`BBP_SESSION=yes`, `BBP_PRINCIPAL=<lens id>`) and uses its claims tools: `claims_delta` to wake, `claim_card` and `claim_line` for the card and settled lines, `post` for claims and evidence. `claim_card`'s `EvidenceView` carries author, direction, kind, delta, epoch and scoring but no note, so the shell fills each evidence note from an incremental `read(after)` on the same session, cached by message id (one read per wake, not per claim).
 **Why.** Design rev 3 §5 makes each lens a BBP principal with one session credential, and §6 steps 1 and 7 call `claims_delta` and post with that credential; `bbp mcp` is the only existing credentialed claims path, so this needs no BBP change and keeps the session's `read_messages` filtering. A child process per lens is cheap to replace.
 **Rejected.** New finite `bbp` CLI subcommands for claims views and lens posts (new public CLI surface, ask-first). Linking `rusty_bbp` and opening `FsStore` in-process (bypasses the host's credential and visibility path). Adding `note` to `claim_card` (public API change to the addendum's card, ask-first; open question).
 **Tag.** [default] · remind-me: mem_fc34b139927341aabc53a249d2427f81
 **Key.** lel:594:lens-shell-bbp-transport
 **Source.** Caller question from the #594 shell slice, 2026-11-04; 594-lens-runner-design.md §5, §6; bbp-claims-addendum.md § Reads, delta and subscriptions and R11; `rusty_bbp/src/claims.rs` `EvidenceView`/`ClaimView`; `rusty_bbp_host/src/mcp/claims.rs`.
+
+## D55. Orch-originated intents are parked
+
+**Decision.** Neither the narrowed v0 nor the full design in orch-intents-design.md is approved. D44 cleanups open as already planned: orch writes the `consolidate` intent at half the drift limit or after 5 accepted claims, with no origin header, no `rules.toml` modes, no host rule check and no `would_open` table. Revisit when a second task-opening rule appears. The implementation defaults proposed for that design (key `lel:general:orch-intents-defaults`) were never adopted and don't apply.
+**Why.** Only D44 opens tasks today. #597 re-checks, #599 maintenance and #598 seeding all post into tasks that already exist, so an origin/mode mechanism would have one user.
+**Rejected.** The narrowed v0 (origin only for `consolidate`, through a separate host entry with modes off|auto). The full design (general origin header, rules engine, observe mode with a `would_open` table and `rusty_orch rules report`).
+**Tag.** [stated] · remind-me: mem_8727494da22f471998b4df97302c8de6
+**Key.** lel:general:orch-intents-parked
+**Source.** Nano chose "Neither, park it" on a decision card in thread "Discuss Let Em Loose design", 2026-11-03T22:54:11Z; mem_b6859bf1682b4b8c804edc23342f6746 (dsh-superagent review).
+
+## D56. Windows-specific #600 behaviour is tested by a Windows shadow run and golden cases
+
+**Decision.** Windows-specific behaviour of the #600 dedup intent (mapped drives, UNC paths) is covered by a read-only shadow run on Nano's Windows machine plus golden cases he signs off there. The Linux sandbox covers everything else. Each Windows-specific intent line must map to one of these, or it counts as untested.
+**Why.** Claims runs execute only in the Linux sandbox, which can't exercise Windows path behaviour.
+**Rejected.** Treating the Linux sandbox as enough for Windows paths.
+**Tag.** [stated] · remind-me: mem_b33951241b4740a2b44f9cd73a09e2fe
+**Key.** lel:600:windows-shadow-run-golden
+**Source.** Nano's saved record (cap_58e514f9f3d94b3da5d26c0b8a118dd3; dialog mem_77a1f7b27e1340d8a644b8b2062b8f6d, 11-03 "a Windows shadow run plus golden cases for #600"; summary mem_eb16b0dea2394f46990c384f69a2ac41), pointed to in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds (2026-11-04). Staged as R2 in PR #1446.
+
+## D57. #596 adds an erosion pass rule: no worse than baseline on 4 of 5 runs
+
+**Decision.** The #596 pre-registered decision rule gains a fourth criterion: the treatment arm's erosion delta is no worse than the baseline arm's on 4 of 5 runs. It sits beside holdout 5/5, tokens ≤80% on ≥4/5 and escalations ≤ baseline (erosion-gate-design §6).
+**Why.** Value scheduling must not win by writing messier code. Pre-registering it before Phase B runs keeps the comparison honest.
+**Rejected.** Leaving erosion out of the #596 rule.
+**Tag.** [stated] · remind-me: mem_bff2870445d746e7b1b11f34cd9bb88e
+**Key.** lel:596:erosion-criterion
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 1 "Yes". OPEN_QUESTIONS Q2.
+
+## D58. #599 §6 schema and API changes approved
+
+**Decision.** The changes listed in 599-gaps-design.md §6 are approved: BBP `claim_history` and its `Step` type (read-only, no log change); `bbp why --claim/--at/--task`; a `canary` run on a released ref; `rusty_orch lessons`, `rusty_orch watch` and `rusty_orch lens why`; orch-store tables `lesson_written`, `lens_record` (replacing #594's unimplemented counts) and `watch_finding`; the `Watch` port with `cargo-deny`, `cargo-update`, `toolchain` and `canary` adapters (CLI calls, no new crates); Factory `apps/*.json`, the watched-versions file and `watch_usd`. remind-me needs no change, but check before building that its HTTP add route carries `project`; an additive fix there is flagged then.
+**Why.** All additive and dependency-free; this clears the ask-first schema/API gate for #599.
+**Rejected.** Holding §6 for further review.
+**Tag.** [stated] · remind-me: mem_69ede4b656794a0d8301818a68ce1957
+**Key.** lel:599:section6-approved
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 2 "Yes" (the question: "approve the new commands, tables and `Watch` port listed in its §6"). OPEN_QUESTIONS Q3.
+
+## D59. #598 §6: task_paused, intent_revised and data classes approved
+
+**Decision.** Approved from 598-gaps-design.md §6, as named in the question: the host write `task_paused { reason, detail }`, which moves the task to `escalated`; the human operation `intent_revised { brief, affects }` with the `intent_version` fold (omitted `affects` means `all`, an empty one is refused `bad_affects`); data-class labels, where `internal` may go to cloud models and `sensitive` stays local. The other §6 items weren't in the question; Nano approved them later the same day (D62).
+**Why.** Schema and API changes are ask-first, so approval covers only what Nano was shown.
+**Rejected.** Reading the "Yes" as approval of all of §6.
+**Tag.** [stated] · remind-me: mem_eddc237646b843bd8069a0e7a86047a6
+**Key.** lel:598:section6-named-items-approved
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 4 "Yes". OPEN_QUESTIONS Q5.
+
+## D60. Tool-using agents join over MCP after v0 ships
+
+**Decision.** D14 is decided: tool-using agents (Claude Code, Codex) join the board through MCP, but not before v0 ships. This supersedes D14's "Proposed" status. How it fits the D20 executor stays open.
+**Why.** They don't fit a single request and reply (D14), and v0 ships first on the lens port.
+**Rejected.** Adding the MCP path before v0.
+**Tag.** [stated] · remind-me: mem_c6c6304576114e5fa962e49e720e081e
+**Key.** lel:general:mcp-agents-after-v0
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 5 "Yes" (to "yes, but not before v0 ships"). OPEN_QUESTIONS Q6.
+
+## D61. #708 alien review lens parked until v0 runs
+
+**Decision.** The #708 alien review lens is parked until v0 runs: trigger policy, per-language defect lists, scoring and how reproduced findings enter BBP stay undesigned and unapproved, and nothing is built.
+**Why.** Get v0 running before adding another lens kind.
+**Rejected.** Designing #708 now.
+**Tag.** [stated] · remind-me: mem_44c8bf81957240d8a0773acb5dc63f7f
+**Key.** lel:708:alien-lens-parked
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 7 "Park it until v0 runs". OPEN_QUESTIONS Q8.
+
+## D62. The rest of #598 §6 approved
+
+**Decision.** Every remaining item in 598-gaps-design.md §6 is approved as listed, completing D59. BBP: `task_opened.baseline_digest` (optional); `claim_reopened.by: intent`; the escalation reason `intent_changed`. Host: `bbp open --base` runs the baseline and can refuse `baseline_red`; the `base_test_changed` refusal; named sandbox profiles for lenses and builders, not just runs; the filtered view; the `shadow:` profile kind with read-only `real_data` mounts and a plan artifact. orch: the Survey and Intent lens kinds; `max_class` and `price` on providers, both required at load; orch-store tables for item classes, spend and reservations; `rusty_orch lens breaker`; `domain_classes` replacing #594's `sensitive_domains`. Factory: `domain_classes`, `sensitive_paths`, `real_data`, `price`, the ceilings and the breaker settings. No migration: no claims-mode logs exist outside tests.
+**Why.** All additive, and they implement answers Nano already gave on #598 (Q1, Q4, Q6). This clears the ask-first schema/API gate for the #598 build.
+**Rejected.** Going item by item (option B on the card).
+**Tag.** [stated] · remind-me: mem_fc5ad74f9fac448d8d22a9ff42f12bc3
+**Key.** lel:598:section6-remaining-approved
+**Source.** Nano tapped option A "Approve all as listed" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Ppm26TJdNSuETWT9FqZp8E ("Approve the rest of #598 §6, not just the three I listed?"), 2026-11-04T17:15:20Z. OPEN_QUESTIONS Q5.
+
+## D63. #600's Windows GUI is judged only on Windows
+
+**Decision.** The #600 desktop GUI (Windows-first) is judged only through the Windows shadow run and golden cases (D56). Linux claims runs check the engine and the web UI.
+**Why.** Claims runs are Linux-only and can't exercise a Windows GUI.
+**Rejected.** Judging the GUI in the Linux sandbox.
+**Tag.** [stated] · remind-me: mem_0793274b6343443fbbe7f34d9846e0bb
+**Key.** lel:600:windows-gui-judged-on-windows
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O1 "Yes".
+
+## D64. #600 builders are Claude CLI only in v0
+
+**Decision.** In v0, #600 builder sessions run the Claude CLI only. Codex in `lel-codex` doesn't build.
+**Why.** The holdout lens then keeps a model that no builder uses (D37), and isn't left with only local models.
+**Rejected.** Codex as a second builder in v0.
+**Tag.** [stated] · remind-me: mem_44f3236c741d4f3383370ac59299d664
+**Key.** lel:600:claude-only-builders
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O2 "Concur".
+
+## D65. A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen
+
+**Decision.** When the Windows shadow run contradicts a Linux pass, Nano reopens the claim with a human `decision reopen` (C-R8), after `budget_extended` only if the claim's budget is exhausted (claims_engine.rs, cl_48). It isn't posted as `executed` evidence, since it has no runner report bound to the claim's candidate (C-R4).
+**Why.** A real-data failure should stop acceptance, and only a reopen can do that. `cited` evidence never reopens a claim.
+**Rejected.** Posting it as `cited` evidence.
+**Tag.** [stated] · remind-me: mem_ed23f39443c2424d96b224556a54303f
+**Key.** lel:600:windows-contradiction-human-reopen
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O3 "Concur with recommendation" (option a).
+
+## D66. The #600 builder-session design is approved
+
+**Decision.** Nano approved the #600 builder-session design (`/mnt/project-files/let-em-loose/600-builder-session-design.md`) as a whole, together with D63–D65. Its §8 changes count as approved: the orch `Builder` job kind and its admission check; the config values `builders_per_claim`, `max_live_builders` and `builder_wall_secs`; the orch-store `builder_session` table; the open-time `untested` check for Windows intent lines; the orch-bbp builder launch profile with a pre-fetched dependency mirror; and a new local-only repo `dedup-manager` on BaileyAi. The #598 items it depends on are approved in D62. The §10 defaults (local-only repo, 45-minute wall clock, dependency mirror) stay `[default]`. #600 is built once #594 and #595 are in place.
+**Why.** Design first on every card (D25). This closes OPEN_QUESTIONS Q7.
+**Rejected.** Further changes before approval (the card's other option).
+**Tag.** [stated] · remind-me: mem_c00104fb2fa0499c8f471bddcbb64cbc
+**Key.** lel:600:builder-session-design-approved
+**Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
