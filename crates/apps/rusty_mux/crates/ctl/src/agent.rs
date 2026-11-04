@@ -2,7 +2,9 @@
 //! hook for Claude Code, Codex, OpenCode and Pi, for every project (each
 //! agent's own config directory) or for one (`--project`, under the current
 //! directory). `agent hook` is what the hooks run: inside a block it tells
-//! the agent where it is. Paths per agent: [`layout`].
+//! the agent where it is. The installed skill is a stub that runs `agent
+//! skill`, which prints the guide built into this ctl, so the guide always
+//! matches the ctl the agent drives (C73). Paths per agent: [`layout`].
 //!
 //! Claude Code and Codex take the hook in a JSON settings file, which setup
 //! edits, keeping everything else in it. Before its first edit of an
@@ -30,8 +32,10 @@ use crate::cli::{AgentArgs, AgentCommand, AgentKind, AgentScope, Defaults};
 use crate::{Env, Exit};
 use layout::{Ctl, Hook, Layout};
 
-/// The skill, our own text.
+/// The installed skill: a stub that sends the agent to `agent skill`.
 const SKILL: &str = include_str!("agent/SKILL.md");
+/// The guide `agent skill` prints, our own text.
+const GUIDE: &str = include_str!("agent/GUIDE.md");
 /// The line that marks a skill file as setup's.
 const MARK: &str = "<!-- Installed by `rusty-mux-ctl agent setup`";
 
@@ -98,6 +102,7 @@ pub(crate) fn run(
                 hook_text(&env.here, env.ctl.as_deref(), generated.as_deref()).unwrap_or_default();
             return print(out, &text);
         }
+        AgentCommand::Skill => return print(out, GUIDE.trim_end()),
         AgentCommand::Setup(args) => (args, setup(&layouts(args, env)?, args.dry_run)?, Exit::Ok),
         AgentCommand::Remove(args) => {
             let others = neighbours(env)?;

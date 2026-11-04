@@ -26,7 +26,7 @@ continue from the pack.
 
 ## Route first
 GUI **design** (look, layout, visual states, taste) belongs to
-`rusty-term-design-expert` and its pack `docs/projects/rusty_term/gui-design/`.
+`rusty-term-design-expert` and its pack `docs/projects/term/gui-design/`.
 If the question is GUI design, say so and stop: the caller routes it there.
 If that agent file doesn't exist, escalate the question (DECISIONS D10).
 GUI **code behaviour** (keys, zoom, renderers, repaint) is yours.

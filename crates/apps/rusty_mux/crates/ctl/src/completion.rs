@@ -49,6 +49,7 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
             "setup",
             "status",
             "remove",
+            "skill",
             "--agent",
             "--project",
             "--dir",

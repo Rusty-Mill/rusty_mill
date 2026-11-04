@@ -409,6 +409,10 @@ fn agent_verbs_take_agents_a_scope_and_dry_run() {
     assert_eq!(agent("agent hook"), naming(false));
     assert_eq!(agent("agent hook --name-session"), naming(true));
     assert_eq!(
+        agent("agent skill"),
+        Ok(Command::Agent(AgentCommand::Skill))
+    );
+    assert_eq!(
         agent("agent setup --name-session --agent codex"),
         Ok(Command::Agent(AgentCommand::Setup(AgentArgs {
             name_session: true,
@@ -423,6 +427,8 @@ fn agent_verbs_take_agents_a_scope_and_dry_run() {
         "agent install",
         "agent hook --dir x",
         "agent hook --agent codex",
+        "agent skill --project",
+        "agent skill show",
         "agent setup --to x",
         "agent setup x",
         "agent setup --agent cursor",
