@@ -120,6 +120,17 @@ mod tests {
     }
 
     #[test]
+    fn a_raw_question_returns_the_text_and_refuses_an_empty_one() {
+        let a = answer(completion("free text", Some(1), Some(1), None), &Shape::Raw).unwrap();
+        assert_eq!(a.reply, orch_lens::Reply::Raw("free text".to_owned()));
+        let err = answer(completion("  ", Some(1), Some(1), None), &Shape::Raw).unwrap_err();
+        assert!(
+            matches!(&err, ClassifiedError::Permanent(m) if m.0.contains("reply is empty")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
     fn unmeasured_usage_is_permanent() {
         for (input, output, cached) in [
             (None, None, None),

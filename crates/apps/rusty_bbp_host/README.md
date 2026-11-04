@@ -28,6 +28,7 @@ bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [-
 bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 bbp card    --dir D --task T              the core card plus the task's scheduling `policy`, as JSON
 bbp why     --dir D (--task T | T) [--turn N]   why each turn was granted, replayed from the log, as JSON
+bbp why     --dir D (--task T | T) --claim ID [--at REV]   how one claim moved and which rule fired, as JSON
 bbp tick    --dir D --task T              fire deadlines and grant the first turn; `bbp mod` does this itself
 bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
@@ -48,6 +49,8 @@ bbp human   --dir D --task T [--rev N] VERB ARGS...
 - `{"Unexplained": {"replayed": ...}}`: the replayed rule picks another role, so the reason is not known. This is not a match; it means the log or the build has drifted.
 
 The reason is reconstructed, not recorded, and `wake_rules` is the version of the build that replays, which may be newer than the one that ran. The pick rule is the core's `pick_from`, the function the engine's `pick_next` calls, so `bbp why` and the engine cannot disagree about it.
+
+`bbp why --claim ID` replays one claim of a claims task (#599): each step is an event that changed it (its post, an evidence message, a `claim_failing`, or a status change), with the status, score, confidence and epoch just after. A status change names its rule: `AcceptLine` or `DropLine` with the threshold and author count it met, `Human` for a decide, `Choose`, or the escalation, reopen, void or supersede cause the event carries. Human and line are told apart by the command: every human command ends with its `op_accepted`, so an accept or drop is the human's only if the same command decided that outcome on that claim. A `choose` that finds no other live candidate reads as a decide. `--at REV` replays only up to that rev. The fold is `rusty_bbp::claim_history`, pure and read-only.
 
 `--dir` and `--task` fall back to `BBP_DIR` and `BBP_TASK`. `reject`, `rerun`, `resume` and `cancel` take `--rev N`, the card revision the human saw (`bbp card` prints it), and refuse to run without it; the core answers `stale_rev` when the card has moved on, so a delayed command is refused rather than applied to newer work.
 

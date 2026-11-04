@@ -52,7 +52,8 @@ pub enum Command {
     Completion(Shell),
 }
 
-/// `agent`: each verb but `hook` acts on the chosen agents in one scope.
+/// `agent`: each verb but `hook` and `skill` acts on the chosen agents in
+/// one scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentCommand {
     /// With `dry_run`, reports what it would do and writes nothing.
@@ -66,6 +67,9 @@ pub enum AgentCommand {
     Hook {
         name_session: bool,
     },
+    /// Prints the guide the installed skill reads, so it always matches
+    /// this ctl (C73).
+    Skill,
 }
 
 /// Which agents an `agent` verb acts on, and where.
@@ -363,7 +367,7 @@ fn watch(args: &[String]) -> Result<Command, String> {
 }
 
 const AGENT_USAGE: &str = "usage: agent setup|status|remove [--agent claude|codex|opencode|pi|all]... \
-     [--project | --dir DIR] [--dry-run] [--name-session] | agent hook [--name-session]";
+     [--project | --dir DIR] [--dry-run] [--name-session] | agent hook [--name-session] | agent skill";
 
 fn agent(args: &[String]) -> Result<AgentCommand, String> {
     let (verb, rest) = args.split_first().ok_or(AGENT_USAGE)?;
@@ -379,6 +383,7 @@ fn agent(args: &[String]) -> Result<AgentCommand, String> {
             };
             return Ok(AgentCommand::Hook { name_session });
         }
+        "skill" if rest.is_empty() => return Ok(AgentCommand::Skill),
         _ => return Err(AGENT_USAGE.into()),
     };
     let mut agents = Vec::new();
@@ -728,7 +733,8 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  [--dry-run] [--name-session];\n\
          \x20                  Claude Code when no --agent; status exits 0 only when every\n\
          \x20                  item is current; --name-session has the agent name a session\n\
-         \x20                  that still has a generated name after its task",
+         \x20                  that still has a generated name after its task;\n\
+         \x20                  agent skill prints the guide the installed skill reads",
     ),
     (
         "bridge",

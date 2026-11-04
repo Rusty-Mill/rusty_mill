@@ -35,7 +35,7 @@ impl<C: CommandRunner> CodexAgent<C> {
     /// root, JSONL events on stdout (the reply and usage both come from
     /// them, so nothing is written to disk and the run can happen in a
     /// container), the prompt on stdin. No schema: the reply is checked by
-    /// [`orch_lens::parse`]. Public so tests and docs can pin it.
+    /// [`orch_lens::check`]. Public so tests and docs can pin it.
     pub fn lens_argv(&self) -> Vec<String> {
         let mut argv = self.base_argv(self.repo_root());
         argv.push("--json".to_owned());
@@ -47,7 +47,7 @@ impl<C: CommandRunner> CodexAgent<C> {
 impl<C: CommandRunner> Model for CodexAgent<C> {
     /// Refuse without both operator assertions, check the login, then
     /// ask with the prefix and body on stdin. A reply that does not pass
-    /// [`parse`] or lacks measured usage is `Permanent`.
+    /// [`check`] or lacks measured usage is `Permanent`.
     fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
         if !self.lens_no_overage {
             return Err(unavailable("the no-overage assertion (lens_no_overage)"));

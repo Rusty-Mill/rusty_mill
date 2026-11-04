@@ -11,16 +11,17 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway_config::Config;
+use rusty_request::TrustPolicy;
 use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
 
 mod common;
-use common::{free_port, yaml_path};
+use common::{free_port, http, yaml_path};
 
 /// A self-signed cert for `localhost`, written as PEM.
 struct Certificate {
     dir: tempfile::TempDir,
-    pem: String,
+    der: Vec<u8>,
 }
 
 fn certificate() -> Certificate {
@@ -33,7 +34,10 @@ fn certificate() -> Certificate {
     std::fs::write(dir.path().join("cert.pem"), &cert_pem).expect("should write the cert");
     std::fs::write(dir.path().join("key.pem"), &key_pem).expect("should write the key");
 
-    Certificate { dir, pem: cert_pem }
+    Certificate {
+        dir,
+        der: issued.cert.der().to_vec(),
+    }
 }
 
 /// An upstream that echoes the headers it saw.
@@ -97,30 +101,67 @@ binds:
     (port, shutdown)
 }
 
-/// A client that trusts exactly this certificate and nothing else.
-fn client(cert: &Certificate) -> reqwest::Client {
-    let anchor = reqwest::Certificate::from_pem(cert.pem.as_bytes())
-        .expect("the generated PEM should parse");
-    reqwest::Client::builder()
-        .add_root_certificate(anchor)
-        .build()
-        .expect("client should build")
+/// Trust exactly `certs` and nothing else.
+fn trusting(certs: &[&Certificate]) -> TrustPolicy {
+    rusty_request::pinned_anchors(certs.iter().map(|cert| cert.der.clone()))
 }
 
-#[tokio::test]
+/// An HTTP/1.1 client that trusts exactly this certificate.
+fn client(cert: &Certificate) -> http::Client {
+    http::Client::trusting(trusting(&[cert]))
+}
+
+/// `GET path` from `https://localhost:{port}` over HTTP/2, which a TLS client
+/// only gets by offering `h2` in ALPN and having the gateway pick it:
+/// `rusty_hyper` refuses a connection that did not negotiate `h2`. Answers
+/// the status and the body.
+async fn h2_get(cert: &Certificate, port: u16, path: &str) -> Result<(u16, Vec<u8>), String> {
+    let options = rusty_hyper::ConnectOptions {
+        trust: trusting(&[cert]),
+        ..rusty_hyper::ConnectOptions::default()
+    };
+    let connection = rusty_hyper::connect(&format!("https://localhost:{port}"), options)
+        .await
+        .map_err(|err| err.to_string())?;
+    let field = rusty_hyper::HeaderField::new;
+    let request = vec![
+        field(":method", "GET"),
+        field(":scheme", "https"),
+        field(":authority", format!("localhost:{port}").as_str()),
+        field(":path", path),
+    ];
+    let (_, response) = connection
+        .client()
+        .send_request(request, true)
+        .await
+        .map_err(|err| err.to_string())?;
+    let mut response = response.await.map_err(|err| err.to_string())?;
+    let status = response
+        .headers
+        .iter()
+        .find(|h| h.name == b":status")
+        .and_then(|h| std::str::from_utf8(&h.value).ok()?.parse().ok())
+        .ok_or("a response without a :status")?;
+    let mut body = Vec::new();
+    while let Some(piece) = response.body.next().await {
+        if let rusty_hyper::Body::Data(data) = piece.map_err(|err| err.to_string())? {
+            body.extend(data);
+        }
+    }
+    Ok((status, body))
+}
+
+#[rusty_tokio::test]
 async fn a_request_over_tls_reaches_the_backend() {
     let cert = certificate();
     let (upstream_port, hits) = upstream().await;
     let (port, shutdown) = start(&cert, upstream_port).await;
 
-    let body: Value = client(&cert)
-        .get(format!("https://localhost:{port}/over/tls"))
-        .send()
+    let (status, body) = h2_get(&cert, port, "/over/tls")
         .await
-        .expect("the TLS handshake and request should succeed")
-        .json()
-        .await
-        .expect("upstream should answer with JSON");
+        .expect("the TLS handshake and request should succeed");
+    assert_eq!(status, 200);
+    let body: Value = serde_json::from_slice(&body).expect("upstream should answer with JSON");
 
     assert_eq!(body["path"], "/over/tls");
     assert_eq!(
@@ -133,7 +174,7 @@ async fn a_request_over_tls_reaches_the_backend() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_upstream_is_told_the_client_used_https() {
     // An upstream generating absolute URLs from this header would emit
     // http:// links into an https:// page otherwise, and browsers block that
@@ -148,7 +189,6 @@ async fn the_upstream_is_told_the_client_used_https() {
         .await
         .expect("request should succeed")
         .json()
-        .await
         .expect("should be JSON");
 
     assert_eq!(
@@ -159,20 +199,21 @@ async fn the_upstream_is_told_the_client_used_https() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_plaintext_request_to_a_tls_port_does_not_get_through() {
     let cert = certificate();
     let (upstream_port, hits) = upstream().await;
     let (port, shutdown) = start(&cert, upstream_port).await;
 
-    let result = reqwest::Client::new()
+    let result = http::Client::new()
         .get(format!("http://localhost:{port}/"))
         .send()
         .await;
 
     assert!(
         result.is_err(),
-        "cleartext on a TLS listener must not be served, got {result:?}"
+        "cleartext on a TLS listener must not be served, got {:?}",
+        result.as_ref().map(http::Response::status)
     );
     assert_eq!(
         hits.load(Ordering::Relaxed),
@@ -183,7 +224,7 @@ async fn a_plaintext_request_to_a_tls_port_does_not_get_through() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_client_that_does_not_trust_the_certificate_is_refused() {
     // The handshake must fail on the client's own verification, which is what
     // proves the gateway is presenting a real certificate rather than
@@ -192,7 +233,7 @@ async fn a_client_that_does_not_trust_the_certificate_is_refused() {
     let (upstream_port, hits) = upstream().await;
     let (port, shutdown) = start(&cert, upstream_port).await;
 
-    let result = reqwest::Client::new()
+    let result = http::Client::new()
         .get(format!("https://localhost:{port}/"))
         .send()
         .await;
@@ -203,39 +244,34 @@ async fn a_client_that_does_not_trust_the_certificate_is_refused() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn alpn_negotiates_http2() {
     // Over TLS, ALPN is how the HTTP version is chosen. Without advertising
     // h2 the connection silently falls back to HTTP/1.1.
     //
-    // This test cannot catch a missing `hyper/http2` feature, and it is worth
-    // knowing why: cargo unifies features across a build, and the dev
-    // dependencies here (reqwest, rmcp's client) enable `hyper/http2`
-    // themselves. So the *test* binary always has it while the *shipped*
-    // binary only has what `[dependencies]` asks for. Removing the feature
-    // from Cargo.toml leaves this test green and breaks the real gateway --
-    // which is exactly what happened, and was caught by curl against the
-    // built binary, not here.
+    // `h2_get` offers `h2` and refuses the connection unless the gateway
+    // picks it, so getting an answer at all is the assertion.
+    //
+    // This test cannot catch a missing HTTP/2 feature in the gateway's own
+    // `[dependencies]`, and it is worth knowing why: cargo unifies features
+    // across a build, and a dev dependency here (`rusty_hyper`) can enable the
+    // same HTTP/2 stack itself. So the *test* binary may have it while the
+    // *shipped* binary only has what `[dependencies]` asks for. Removing the
+    // feature once left this test green and broke the real gateway, which was
+    // caught by curl against the built binary, not here.
     let cert = certificate();
     let (upstream_port, _) = upstream().await;
     let (port, shutdown) = start(&cert, upstream_port).await;
 
-    let response = client(&cert)
-        .get(format!("https://localhost:{port}/"))
-        .send()
+    let (status, _) = h2_get(&cert, port, "/")
         .await
-        .expect("request should succeed");
-
-    assert_eq!(
-        response.version(),
-        reqwest::Version::HTTP_2,
-        "the gateway advertises h2, so a capable client should get it"
-    );
+        .expect("the gateway advertises h2, so a client offering only h2 should get it");
+    assert_eq!(status, 200);
 
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_missing_certificate_file_stops_the_gateway_booting() {
     // Rather than failing every handshake at runtime, which reads like a
     // client problem.
@@ -266,7 +302,7 @@ binds:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_tls_listener_without_a_certificate_is_a_config_error() {
     let port = free_port();
     let yaml = format!(
@@ -292,7 +328,7 @@ binds:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn two_named_certificates_on_one_port_are_served_by_name() {
     // This used to be a startup refusal: without SNI selection, serving the
     // first listener's certificate to the second listener's clients is a
@@ -347,26 +383,89 @@ fn certificate_for(names: &[&str]) -> Certificate {
     std::fs::write(dir.path().join("cert.pem"), &cert_pem).expect("should write the cert");
     std::fs::write(dir.path().join("key.pem"), &key_pem).expect("should write the key");
 
-    Certificate { dir, pem: cert_pem }
+    Certificate {
+        dir,
+        der: issued.cert.der().to_vec(),
+    }
 }
 
-/// A client trusting both certificates, resolving every name to the gateway.
-fn client_trusting(certs: &[&Certificate], names: &[&str], port: u16) -> reqwest::Client {
-    // These hostnames are invented, so an ambient `HTTPS_PROXY` would send the
-    // request to a proxy rather than to the gateway under test.
-    let mut builder = reqwest::Client::builder().no_proxy();
-    for cert in certs {
-        builder = builder.add_root_certificate(
-            reqwest::Certificate::from_pem(cert.pem.as_bytes()).expect("PEM should parse"),
-        );
+/// A client trusting exactly `certs` that reaches the gateway on `port`
+/// under any name.
+fn client_trusting(certs: &[&Certificate], port: u16) -> NamedClient {
+    NamedClient {
+        trust: trusting(certs),
+        port,
     }
-    for name in names {
-        builder = builder.resolve(
-            name,
-            format!("127.0.0.1:{port}").parse().expect("should parse"),
-        );
+}
+
+/// Asks for an invented hostname the way a client resolving it to the gateway
+/// would: the connection goes to `127.0.0.1`, the name goes in SNI and `Host`.
+/// The request is HTTP/1.1 written by hand, since what is under test is which
+/// certificate (or route) the name chooses.
+struct NamedClient {
+    trust: TrustPolicy,
+    port: u16,
+}
+
+impl NamedClient {
+    /// `GET /` from `name`, or why the connection failed.
+    async fn get(&self, name: &str) -> Result<Reply, String> {
+        use rusty_tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let tcp = rusty_tokio::net::TcpStream::connect(("127.0.0.1", self.port))
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut tls = rusty_tls::AsyncTlsStream::new(tcp, name, &self.trust)
+            .map_err(|err| err.to_string())?;
+        let request = format!("GET / HTTP/1.1\r\nHost: {name}\r\nConnection: close\r\n\r\n");
+        tls.write_all(request.as_bytes())
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut raw = Vec::new();
+        match tls.read_to_end(&mut raw).await {
+            Ok(_) => {}
+            // The gateway closes the connection after the response without a
+            // TLS `close_notify`. That is harmless here: the response is
+            // framed, and `Reply::parse` refuses one cut short.
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof && !raw.is_empty() => {}
+            Err(err) => return Err(err.to_string()),
+        }
+        Reply::parse(&raw)
     }
-    builder.build().expect("client should build")
+}
+
+/// A response read off the wire.
+struct Reply {
+    status: u16,
+    body: Vec<u8>,
+}
+
+impl Reply {
+    fn parse(raw: &[u8]) -> Result<Reply, String> {
+        let mut wire = rusty_http::sync::SyncTransport::new(raw);
+        let head = wire
+            .read_response_head(64 * 1024)
+            .map_err(|err| err.to_string())?;
+        let framing = rusty_http::body::response_framing(
+            &head.headers,
+            &rusty_http::Method::Get,
+            head.status,
+        )
+        .map_err(|err| err.to_string())?;
+        let body = wire.read_body(framing).map_err(|err| err.to_string())?;
+        Ok(Reply {
+            status: head.status.as_u16(),
+            body,
+        })
+    }
+
+    fn is_success(&self) -> bool {
+        (200..300).contains(&self.status)
+    }
+
+    fn json(&self) -> serde_json::Result<Value> {
+        serde_json::from_slice(&self.body)
+    }
 }
 
 /// Boot a gateway with two named HTTPS listeners on one port.
@@ -421,7 +520,7 @@ binds:
     (port, shutdown)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn each_hostname_is_served_its_own_certificate() {
     // The name is read off the ClientHello before the handshake starts, so
     // each client is offered a certificate it trusts and nothing else.
@@ -433,28 +532,26 @@ async fn each_hostname_is_served_its_own_certificate() {
 
     // Each client trusts only its own certificate, so a handshake that
     // succeeds against the other one's would fail here.
-    let for_alpha = client_trusting(&[&alpha], &["alpha.test"], port);
-    let for_beta = client_trusting(&[&beta], &["beta.test"], port);
+    let for_alpha = client_trusting(&[&alpha], port);
+    let for_beta = client_trusting(&[&beta], port);
 
     let alpha_response = for_alpha
-        .get(format!("https://alpha.test:{port}/"))
-        .send()
+        .get("alpha.test")
         .await
         .expect("alpha should be served its own certificate");
-    assert!(alpha_response.status().is_success());
+    assert!(alpha_response.is_success());
 
     let beta_response = for_beta
-        .get(format!("https://beta.test:{port}/"))
-        .send()
+        .get("beta.test")
         .await
         .expect("beta should be served its own certificate");
-    assert!(beta_response.status().is_success());
+    assert!(beta_response.is_success());
 
     assert_eq!(hits.load(Ordering::Relaxed), 2);
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_client_trusting_only_one_certificate_cannot_reach_the_other_name() {
     // The other half of the test above: proves the selection is real rather
     // than one certificate happening to satisfy both.
@@ -464,11 +561,8 @@ async fn a_client_trusting_only_one_certificate_cannot_reach_the_other_name() {
     let (port, shutdown) =
         start_two(("alpha.test", &alpha), ("beta.test", &beta), upstream_port).await;
 
-    let only_alpha = client_trusting(&[&alpha], &["alpha.test", "beta.test"], port);
-    let refused = only_alpha
-        .get(format!("https://beta.test:{port}/"))
-        .send()
-        .await;
+    let only_alpha = client_trusting(&[&alpha], port);
+    let refused = only_alpha.get("beta.test").await;
     assert!(
         refused.is_err(),
         "beta's certificate is not one this client trusts"
@@ -477,7 +571,7 @@ async fn a_client_trusting_only_one_certificate_cannot_reach_the_other_name() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_wildcard_listener_answers_for_a_subdomain() {
     let exact = certificate_for(&["api.example.test"]);
     let wildcard = certificate_for(&["*.example.test", "other.example.test"]);
@@ -491,33 +585,29 @@ async fn a_wildcard_listener_answers_for_a_subdomain() {
 
     // The exact name wins over the wildcard, the same precedence route
     // hostnames follow.
-    let for_exact = client_trusting(&[&exact], &["api.example.test"], port);
+    let for_exact = client_trusting(&[&exact], port);
     assert!(
         for_exact
-            .get(format!("https://api.example.test:{port}/"))
-            .send()
+            .get("api.example.test")
             .await
             .expect("the exact listener should answer")
-            .status()
             .is_success()
     );
 
     // A sibling name only the wildcard covers.
-    let for_wildcard = client_trusting(&[&wildcard], &["other.example.test"], port);
+    let for_wildcard = client_trusting(&[&wildcard], port);
     assert!(
         for_wildcard
-            .get(format!("https://other.example.test:{port}/"))
-            .send()
+            .get("other.example.test")
             .await
             .expect("the wildcard listener should answer")
-            .status()
             .is_success()
     );
 
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_name_nothing_claims_falls_back_rather_than_being_refused() {
     // Refusing would turn a working deployment into a broken one the moment a
     // second listener was added.
@@ -529,20 +619,16 @@ async fn a_name_nothing_claims_falls_back_rather_than_being_refused() {
 
     // The handshake is what this is about: no listener claims the name, so
     // routing has nothing to match and the status is beside the point.
-    let client = client_trusting(&[&alpha], &["stranger.test"], port);
+    let client = client_trusting(&[&alpha], port);
     assert!(
-        client
-            .get(format!("https://stranger.test:{port}/"))
-            .send()
-            .await
-            .is_ok(),
+        client.get("stranger.test").await.is_ok(),
         "the first certificate should have answered the handshake"
     );
 
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn two_unnamed_certificates_on_one_port_still_fail_at_startup() {
     // A client's SNI name is what chooses between them, and neither claims
     // one: whichever sorted first would answer for both.
@@ -575,7 +661,7 @@ binds:
     assert!(err.to_string().contains("hostname"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn two_listeners_claiming_one_name_fail_at_startup() {
     // A client asking for that name could be given either.
     let alpha = certificate_for(&["same.test"]);
@@ -609,7 +695,7 @@ binds:
     assert!(err.to_string().contains("same.test"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn one_certificate_named_twice_is_still_one_certificate() {
     // Two listeners sharing a certificate have nothing for a name to choose
     // between, so this is not the ambiguous case.
@@ -740,7 +826,7 @@ async fn start_passthrough(routes: &[(&str, u16)]) -> (u16, CancellationToken) {
     (port, shutdown)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_passthrough_listener_forwards_to_the_upstream_holding_the_key() {
     // The gateway has no certificate at all here: the one the client validates
     // is the upstream's, which is what makes this passthrough rather than
@@ -749,13 +835,11 @@ async fn a_passthrough_listener_forwards_to_the_upstream_holding_the_key() {
     let (upstream_port, upstream_stop) = tls_upstream(&cert, "alpha").await;
     let (port, shutdown) = start_passthrough(&[("alpha.test", upstream_port)]).await;
 
-    let body: Value = client_trusting(&[&cert], &["alpha.test"], port)
-        .get(format!("https://alpha.test:{port}/"))
-        .send()
+    let body: Value = client_trusting(&[&cert], port)
+        .get("alpha.test")
         .await
         .expect("the connection should be forwarded")
         .json()
-        .await
         .expect("the upstream should answer");
 
     assert_eq!(body["who"], "alpha");
@@ -764,7 +848,7 @@ async fn a_passthrough_listener_forwards_to_the_upstream_holding_the_key() {
     upstream_stop.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn each_name_is_forwarded_to_its_own_upstream() {
     let alpha_cert = certificate_for(&["alpha.test"]);
     let beta_cert = certificate_for(&["beta.test"]);
@@ -778,13 +862,11 @@ async fn each_name_is_forwarded_to_its_own_upstream() {
         ("alpha.test", &alpha_cert, "alpha"),
         ("beta.test", &beta_cert, "beta"),
     ] {
-        let body: Value = client_trusting(&[cert], &[name], port)
-            .get(format!("https://{name}:{port}/"))
-            .send()
+        let body: Value = client_trusting(&[cert], port)
+            .get(name)
             .await
             .expect("the connection should be forwarded")
             .json()
-            .await
             .expect("the upstream should answer");
         assert_eq!(body["who"], expected);
     }
@@ -794,7 +876,7 @@ async fn each_name_is_forwarded_to_its_own_upstream() {
     beta_stop.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_name_no_route_claims_is_closed() {
     // Forwarding it to whichever route sorted first would send a connection
     // somewhere the operator never pointed that name.
@@ -802,29 +884,24 @@ async fn a_name_no_route_claims_is_closed() {
     let (upstream_port, upstream_stop) = tls_upstream(&cert, "alpha").await;
     let (port, shutdown) = start_passthrough(&[("alpha.test", upstream_port)]).await;
 
-    let refused = client_trusting(&[&cert], &["stranger.test"], port)
-        .get(format!("https://stranger.test:{port}/"))
-        .send()
-        .await;
+    let refused = client_trusting(&[&cert], port).get("stranger.test").await;
     assert!(refused.is_err(), "nothing claims that name");
 
     shutdown.cancel();
     upstream_stop.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_catch_all_route_takes_a_name_nothing_else_claims() {
     let cert = certificate_for(&["alpha.test", "stranger.test"]);
     let (upstream_port, upstream_stop) = tls_upstream(&cert, "fallback").await;
     let (port, shutdown) = start_passthrough(&[("", upstream_port)]).await;
 
-    let body: Value = client_trusting(&[&cert], &["stranger.test"], port)
-        .get(format!("https://stranger.test:{port}/"))
-        .send()
+    let body: Value = client_trusting(&[&cert], port)
+        .get("stranger.test")
         .await
         .expect("the catch-all should take it")
         .json()
-        .await
         .expect("the upstream should answer");
     assert_eq!(body["who"], "fallback");
 
@@ -832,7 +909,7 @@ async fn a_catch_all_route_takes_a_name_nothing_else_claims() {
     upstream_stop.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn check_says_a_passthrough_listener_applies_no_policy() {
     // Invisible in a file that simply has no `policies:` key.
     let config = Config::from_yaml(

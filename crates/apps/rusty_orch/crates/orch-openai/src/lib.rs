@@ -14,7 +14,7 @@
 //! - The API key, when one is configured, is read from its environment
 //!   variable at call time and never appears in an error.
 //! - [`OpenAiHttp`] implements the lens runner's [`orch_lens::Model`]:
-//!   [`answer`] checks the reply with [`orch_lens::parse`].
+//!   [`answer`] checks the reply with [`orch_lens::check`].
 
 #![cfg_attr(
     not(test),
