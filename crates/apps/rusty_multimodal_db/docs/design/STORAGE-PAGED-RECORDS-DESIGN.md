@@ -314,13 +314,21 @@ Loading a hint is O(entries in the segment).
 Writes:
 
 - **put:** assign the next `seq`, append, `sync_data` unless deferred, then
-  update the key directory. The previous location becomes dead.
+  set the id's key-directory value to the new entry's location and that same
+  `seq`. The previous location becomes dead.
 - **remove:** append a tombstone, `sync_data` unless deferred, then drop the
   id from the key directory.
 
-The key directory maps each id to `{ segment: u32, offset: u32, len: u32 }`,
-about 12 B plus the id. With W = 16 and hashbrown's overhead (one control
-byte, load factor 0.5–0.875), that is about 32–64 B per record.
+The key directory maps each id to
+`{ segment: u32, offset: u32, len: u32, seq: u64 }`, about 20 B plus the
+id. `seq` is the expected sequence of the live entry, kept independently of
+the bytes on disk so a read can tell the live version from an older,
+CRC-valid version of the same record. It is set by the write that created
+the entry, and at open from the winning row (§7.7 step 4), whether that row
+came from a trusted hint or a scan; compaction copies an entry with its
+`seq` unchanged (§7.8), so only its location changes. With W = 16 and
+hashbrown's overhead (one control byte, load factor 0.5–0.875), that is
+about 40–80 B per record, more if the id's alignment pads the entry.
 
 Accounting, in RAM per segment:
 
@@ -365,7 +373,8 @@ value:
    entry headers and check each CRC.
 3. Apply the recovery rule (§8.3).
 4. Build the key directory. The highest `seq` wins for each id; on equal
-   `seq`, the higher segment number wins and the other copy is dead. A
+   `seq`, the higher segment number wins and the other copy is dead. The
+   winning put's location and `seq` become the id's value (§7.5). A
    tombstone removes its id.
 5. Set the next `seq` to the larger of the active segment's first `seq` and
    the largest `seq` seen, plus 1. The active segment's first `seq` survives
@@ -696,7 +705,7 @@ median of 5 runs is at most 5% slower.
 | ID | What | How |
 |---|---|---|
 | PAGED-T1 | Equivalence | One generated operation sequence against a segment store and the `AosStore` oracle, with reopens, compactions, `update`s and deletes mixed in. Every query matches, and so does every index after reopen |
-| PAGED-T2 | Fault injection | New `test_support::Fault` variants: `SegmentWritePrefix(n)`, `SegmentTruncate`, `SegmentSync`, `HintInstall`, `SkipDirSync`, `ReadCrc`. Cases: failed then successful append; failed truncate (poison); failed sync (poison, outcome unknown); deferred batch crossing a seal; unsynced unlink (`SkipDirSync`) then tombstone drop; read CRC failure and a row pointing at another id's entry (`try_get` returns `Corrupt` through the full production stack, the error reaches the caller, and the next write returns `Poisoned`; a compile-fail doc test shows a `SegmentStore` stack has no `get`); equal-`seq` orphan after a compaction crash |
+| PAGED-T2 | Fault injection | New `test_support::Fault` variants: `SegmentWritePrefix(n)`, `SegmentTruncate`, `SegmentSync`, `HintInstall`, `SkipDirSync`, `ReadCrc`. Cases: failed then successful append; failed truncate (poison); failed sync (poison, outcome unknown); deferred batch crossing a seal; unsynced unlink (`SkipDirSync`) then tombstone drop; read CRC failure, a row pointing at another id's entry, and a key-directory value pointing at an older, CRC-valid entry of the same id with a lower `seq` (each: `try_get` returns `Corrupt` through the full production stack, the error reaches the caller, and the next write returns `Poisoned`; a compile-fail doc test shows a `SegmentStore` stack has no `get`); equal-`seq` orphan after a compaction crash |
 | PAGED-T3 | Process crash | `crash_writer` gains a segment mode with `segment_bytes = 64 KiB` and a `test-support` abort hook at named steps: mid-append, mid-seal, mid-hint-install, mid-compaction, mid-create. Each reopens to the acknowledged state |
 | PAGED-T4 | Power loss | `power_loss_trial.sh` gains a filesystem argument (ext4, XFS) and a segment-store mode. Its `dm-log-writes` replay is in order, so it covers prefix crashes, not sector reordering. Run before phase 3 merges; results go in the PR |
 | PAGED-T5 | Backup round trip | `Backup`, restore and reopen through the server, chunked snapshot included; temp files are skipped |
@@ -782,6 +791,10 @@ median of 5 runs is at most 5% slower.
     PAGED-FR-004). Reads also check the entry's id and `seq`.
   - **Migration lock:** the tool holds one `<dst>.lock` throughout, the
     emptiness check excludes it, and create and verify reuse the same lock.
+  - **Expected `seq`:** the key-directory value keeps the live entry's `seq`
+    (populated by writes, hint or scan load, and preserved by compaction),
+    so reads can reject an older version of the same id; RAM per record
+    updated to about 40–80 B.
   - **Rollback:** swapping back to `src` is limited to before the first
     write; after that, `migrate_to_map` is the lossless path.
   - **Lock:** a `&DirLock` parameter proved nothing (it could be dropped
