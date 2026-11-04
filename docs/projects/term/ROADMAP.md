@@ -76,7 +76,10 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
    becomes C73 and the next mux step. The installed `SKILL.md` is a stub that reads the text from
    `rusty-mux-ctl`; if ctl is not on PATH it says so, never a stale copy. The agent paths (K4) are
    reconfirmed on the C73 PR. Nano to restate on this PR.
-5. **Agent hook plus OSC 7501 status (O2).** Adopt? *Recommend yes, after O3.*
+5. **Agent hook plus OSC 7501 status (O2).** *Answered (Nano, project thread, 2026-11-04 12:12Z:
+   "Concur"):* adopt, built after C73. Hooks carry prompt, tool, reply and subagent state; OSC 7501
+   fills in where hooks are silent or missing. A new `Features` bit if peers see new events. Nano to
+   restate on this PR.
 6. **tmux shim (O4).** tmux compatibility is a CHARTER non-goal. Reverse it for a narrow shim
    covering only the commands Claude Code agent teams use? *Recommend no for now;* revisit if
    agent teams become a daily need.
