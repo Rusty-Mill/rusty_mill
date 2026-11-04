@@ -29,7 +29,7 @@ so light and dark themes work alike.
 | Muted text | `mix(fg, bg, 110)` |
 | Accent (active tab, selection bar, changed-value dot, running mark) | `theme.cursor` |
 | Success / failure / warning | palette 2 / 1 / 3 |
-| Search match / active match | `SearchColors::from_theme` (`render.rs`): whichever of the theme's yellow and the fixed amber stands out more from the background, and the same between a red-yellow orange from the theme and the fixed orange; glyphs keep 4.5:1 |
+| Search match / active match | `SearchColors::from_theme` (`render.rs`): whichever of the theme's yellow and the fixed amber stands out more from the background, and the same between a red-yellow orange from the theme and the fixed orange; the active match always differs from the rest; glyphs keep 4.5:1 |
 
 - A surface and its text are always used as a pair, and chrome text keeps 4.5:1 against its
   surface.
@@ -79,8 +79,9 @@ so light and dark themes work alike.
 
 ## Enforcement and review
 
-1. Tests for theme-derived colours run over every built-in preset (`config::PRESETS`), as
-   `search_colours_stay_legible_on_every_preset` does.
+1. Tests for theme-derived colours run over every built-in preset (`config::PRESETS`) and a
+   sweep of custom palettes, as `search_colours_stay_legible_on_every_preset` and
+   `search_colours_hold_for_a_sweep_of_custom_palettes` do.
 2. Chrome PRs attach xvfb screenshots in one dark and one light theme, CPU and GPU.
 3. Planned: a ratchet test counting colour literals in `src/gui` outside derivation code, and a
    contrast test for every chrome surface and text pair.

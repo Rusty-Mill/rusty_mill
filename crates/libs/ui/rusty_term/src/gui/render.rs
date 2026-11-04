@@ -79,10 +79,18 @@ impl SearchColors {
     pub(crate) fn from_theme(theme: &Theme) -> Self {
         let yellow = theme.palette16[3];
         let orange = blend(theme.palette16[1], yellow, 128);
-        let hit = pick(yellow, FIXED_HIT, theme.bg);
+        let mut hit = pick(yellow, FIXED_HIT, theme.bg);
         let mut current = pick(orange, FIXED_CURRENT, theme.bg);
+        // The active match must differ from the others. A fixed colour always
+        // meets its own guarantee, so step back to one: the fixed orange for
+        // the active match, or, when the theme's yellow already is that
+        // orange, the fixed amber for the others.
         if current == hit {
-            current = FIXED_CURRENT;
+            if hit == FIXED_CURRENT {
+                hit = FIXED_HIT;
+            } else {
+                current = FIXED_CURRENT;
+            }
         }
         Self {
             hit: (hit, glyph_on(hit)),
@@ -641,6 +649,73 @@ mod tests {
         theme.palette16[1] = theme.bg;
         let c = SearchColors::from_theme(&theme);
         assert_eq!((c.hit.0, c.current.0), (FIXED_HIT, FIXED_CURRENT));
+    }
+
+    /// A custom palette whose red and yellow are both the fixed orange made
+    /// every match look active (#1460 review). The others now step back to
+    /// the fixed amber, so the active match still stands apart.
+    #[test]
+    fn a_palette_equal_to_the_fixed_orange_keeps_the_active_match_distinct() {
+        let mut theme = Theme {
+            bg: 0xFFFFFF,
+            ..Theme::default()
+        };
+        theme.palette16[1] = FIXED_CURRENT;
+        theme.palette16[3] = FIXED_CURRENT;
+        let c = SearchColors::from_theme(&theme);
+        assert_eq!((c.hit.0, c.current.0), (FIXED_HIT, FIXED_CURRENT));
+        assert_ne!(c.hit, c.current);
+    }
+
+    /// A mid-grey highlight from a custom palette got a white glyph at about
+    /// 4.35:1 (#1460 review); black reaches 4.8:1 and is now chosen.
+    #[test]
+    fn a_mid_grey_custom_highlight_still_gets_a_legible_glyph() {
+        let mut theme = Theme {
+            bg: 0xFFFFFF,
+            ..Theme::default()
+        };
+        theme.palette16[3] = 0x797979;
+        let c = SearchColors::from_theme(&theme);
+        assert_eq!(c.hit.0, 0x797979);
+        let ratio = contrast_ratio(c.hit.1, c.hit.0);
+        assert!(
+            ratio >= GLYPH_MIN_CONTRAST,
+            "{:06x} on 797979: {ratio}",
+            c.hit.1
+        );
+    }
+
+    /// The two guarantees hold across a sweep of custom palettes, not only the
+    /// presets: glyphs keep 4.5:1, and the active match differs from the rest.
+    #[test]
+    fn search_colours_hold_for_a_sweep_of_custom_palettes() {
+        let steps = [0x00, 0x33, 0x66, 0x79, 0x99, 0xCC, 0xFF];
+        let grey = |v: u32| (v << 16) | (v << 8) | v;
+        let mut colours: Vec<u32> = steps.iter().map(|&v| grey(v)).collect();
+        colours.extend([FIXED_HIT, FIXED_CURRENT, 0xFF0000, 0xFFFF00, 0x808000]);
+        for &bg in &[0x000000, 0x797979, 0xFFFFFF] {
+            for &red in &colours {
+                for &yellow in &colours {
+                    let mut theme = Theme {
+                        bg,
+                        ..Theme::default()
+                    };
+                    theme.palette16[1] = red;
+                    theme.palette16[3] = yellow;
+                    let c = SearchColors::from_theme(&theme);
+                    let case = format!("bg {bg:06x} red {red:06x} yellow {yellow:06x}");
+                    assert_ne!(c.hit, c.current, "{case}");
+                    for (fill, glyph) in [c.hit, c.current] {
+                        let ratio = contrast_ratio(glyph, fill);
+                        assert!(
+                            ratio >= GLYPH_MIN_CONTRAST,
+                            "{case}: {glyph:06x} on {fill:06x}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Pages without a theme of their own keep today's amber and orange, with

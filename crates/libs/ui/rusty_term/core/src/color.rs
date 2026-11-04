@@ -350,7 +350,9 @@ pub fn ensure_contrast(fg: u32, bg: u32, min_ratio: f32) -> u32 {
     if min_ratio <= 1.0 || contrast_ratio(fg, bg) >= min_ratio {
         return fg;
     }
-    let pole: u32 = if luminance(bg) < 0.5 {
+    // Compare the poles' contrast, not `bg`'s luminance against 0.5: the two
+    // cross near luminance 0.18, so a mid-grey `bg` contrasts better with black.
+    let pole: u32 = if contrast_ratio(0xFFFFFF, bg) > contrast_ratio(0x000000, bg) {
         0xFFFFFF
     } else {
         0x000000
@@ -396,6 +398,21 @@ mod contrast_tests {
         // Already-fine combinations are untouched, and ratio 1.0 disables.
         assert_eq!(ensure_contrast(0xFFFFFF, 0x000000, 4.5), 0xFFFFFF);
         assert_eq!(ensure_contrast(0x333333, 0x000000, 1.0), 0x333333);
+    }
+
+    #[test]
+    fn ensure_contrast_blends_toward_the_pole_that_contrasts_more() {
+        // Mid-grey 0x797979 has luminance ~0.19, under 0.5 but past the ~0.18
+        // crossover: white reaches only ~4.35:1, black ~4.82:1.
+        let bg = 0x797979;
+        let fixed = ensure_contrast(0x101010, bg, 4.5);
+        assert!(contrast_ratio(fixed, bg) >= 4.5, "{fixed:06x}");
+        // Every grey background can reach 4.5:1 with the better pole.
+        for v in 0..=255u32 {
+            let bg = (v << 16) | (v << 8) | v;
+            let fixed = ensure_contrast(bg, bg, 4.5);
+            assert!(contrast_ratio(fixed, bg) >= 4.5, "{fixed:06x} on {bg:06x}");
+        }
     }
 
     #[test]
