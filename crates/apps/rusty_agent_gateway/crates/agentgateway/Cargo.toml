@@ -59,6 +59,8 @@ anyhow = { workspace = true }
 rusty_log = { workspace = true, features = ["subscriber"] }
 
 [dev-dependencies]
+# The HTTP client the suites drive the gateway with, behind `tests/common/http.rs`.
+rusty_request = { workspace = true }
 rusty_prost = { workspace = true }
 rmcp = { workspace = true, features = [
     "client",

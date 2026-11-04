@@ -374,6 +374,7 @@ dependencies = [
  "rusty_mcp_middleware",
  "rusty_mcp_server",
  "rusty_prost",
+ "rusty_request",
  "rusty_serve",
  "rusty_tokio",
  "serde_json",
