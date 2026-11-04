@@ -3,12 +3,18 @@
 //! `rusty-mux-ctl agent hook` by absolute path once when the agent starts
 //! and adds what it prints, nothing outside a block, to the system prompt.
 //! Inside a block it also reports the agent's turns and tools with
-//! `agent hook --event` (O2), without waiting for the answer. A file is ours
+//! `agent hook --event` (O2), without waiting for the answer and in order
+//! ([`ORDERED`]). A file is ours
 //! only when it starts with [`MARK`].
 
 use rusty_json::Value;
 
 use super::layout::Ctl;
+
+/// The sender both files use, so reports reach the server in order: one
+/// at a time, keeping only the newest while one runs. Plain JavaScript,
+/// so it is valid TypeScript too.
+pub(super) const ORDERED: &str = include_str!("ordered.js");
 
 /// The first line of every file this module writes.
 pub(super) const MARK: &str =
@@ -26,11 +32,14 @@ import {{ execFile }} from "node:child_process";
 
 const CTL = {ctl};
 
+{ORDERED}
+const send = ordered((args, done) => execFile(CTL, args, {{ timeout: 5000 }}, () => done()));
+
 const report = (state, msg, kind) => {{
   const args = ["agent", "hook", "--event", state, "--app", "opencode"];
   if (kind) args.push("--kind", kind);
   if (msg) args.push("--msg", String(msg));
-  execFile(CTL, args, {{ timeout: 5000 }}, () => {{}});
+  send(args);
 }};
 
 export const RustyMux = async () => {{
@@ -69,13 +78,17 @@ pub(super) fn pi(ctl: Ctl<'_>) -> String {
         r#"{MARK}// Tells Pi which rusty_mux block it runs in, and rusty_mux what Pi does.
 const CTL = {ctl};
 
+{ORDERED}
 export default function rustyMux(pi: any) {{
   let text = "";
+  const send = ordered((args, done) => {{
+    pi.exec(CTL, args, {{ timeout: 5000 }}).then(() => done(), () => done());
+  }});
   const report = (state: string, msg?: string) => {{
     if (!text) return;
     const args = ["agent", "hook", "--event", state, "--app", "pi"];
     if (msg) args.push("--msg", String(msg));
-    pi.exec(CTL, args, {{ timeout: 5000 }}).catch(() => {{}});
+    send(args);
   }};
   pi.on("agent_start", async () => {{ report("working"); }});
   pi.on("tool_call", async (event: any) => {{ report("working", event?.toolName); }});
