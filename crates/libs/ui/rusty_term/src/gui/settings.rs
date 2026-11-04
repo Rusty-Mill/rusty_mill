@@ -106,6 +106,33 @@ pub(crate) enum Field {
 }
 
 impl Field {
+    /// The config key this row persists to (its [`SettingEdit::key`]).
+    pub(crate) const fn key(self) -> &'static str {
+        match self {
+            Field::Theme => "theme",
+            Field::FontSize => "font_size",
+            Field::Ligatures => "ligatures",
+            Field::Cursor => "cursor_style",
+            Field::Blink => "cursor_blink",
+            Field::CursorTrail => "cursor_trail",
+            Field::MinContrast => "minimum_contrast",
+            Field::Shell => "shell",
+            Field::Scrollback => "scrollback",
+            Field::CopyHtml => "copy_html",
+            Field::Clipboard => "clipboard",
+            Field::ClickToMove => "click_to_move",
+            Field::Bell => "bell",
+            Field::CommandNotify => "command_notify_secs",
+            Field::Padding => "padding",
+            Field::StatusBar => "status_bar",
+            Field::CommandMarks => "command_marks",
+            Field::Opacity => "opacity",
+            Field::LaunchMode => "launch_mode",
+            Field::Cols => "cols",
+            Field::Rows => "rows",
+        }
+    }
+
     /// The rows of `cat`, in display order.
     pub(crate) const fn in_category(cat: Category) -> &'static [Field] {
         match cat {
@@ -233,11 +260,45 @@ pub(crate) struct Row {
 
 /// The settings page state: current values plus navigation (active category,
 /// highlighted row, scroll offset, hovered row).
+/// What first-run setup opened over. The page's widgets approximate some
+/// values (a custom theme shows as "default", an undetected shell as
+/// "(default)", 45 s as the nearest step), so the exact live values are kept
+/// too: leaving setup restores from them, never from the widgets.
+#[derive(Clone)]
+pub(crate) struct SetupBaseline {
+    /// The page as setup opened.
+    pub page: Settings,
+    /// The live configuration as setup opened.
+    pub config: Config,
+    /// The live theme as setup opened (may differ from `config.theme` when
+    /// `theme = "auto"` resolved it).
+    pub theme: Theme,
+}
+
+impl SetupBaseline {
+    /// Put setup row `f`'s exact opening value back into `live`. Returns
+    /// `false` for a row setup doesn't show (nothing to restore). The theme's
+    /// live recolour is the window's job; this restores its config value.
+    pub(crate) fn restore(&self, live: &mut Config, f: Field) -> bool {
+        let base = &self.config;
+        match f {
+            Field::Theme => live.theme = base.theme,
+            Field::Shell => live.shell = base.shell.clone(),
+            Field::Clipboard => live.clipboard = base.clipboard,
+            Field::CopyHtml => live.copy_html = base.copy_html,
+            Field::CommandNotify => live.command_notify_secs = base.command_notify_secs,
+            Field::Bell => live.bell = base.bell,
+            _ => return false,
+        }
+        true
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct Settings {
-    /// First-run setup mode: the values as setup opened, which skipping
-    /// restores. `None` is the ordinary settings page.
-    setup: Option<Box<Settings>>,
+    /// First-run setup mode: what setup opened over, which leaving without
+    /// a change restores. `None` is the ordinary settings page.
+    setup: Option<Box<SetupBaseline>>,
     /// Active section, an index into [`Self::sections`].
     pub cat: usize,
     /// Highlighted row within the active category.
@@ -253,9 +314,11 @@ pub(crate) struct Settings {
     /// In-progress text edit of the selected number row (click-to-type /
     /// Enter-to-edit). Committed by Enter or blur, cancelled by Esc.
     pub editing: Option<String>,
-    /// Whether any value changed since the page opened (gates the save and
-    /// drives the Saved/Modified header indicator).
-    pub dirty: bool,
+    /// The rows changed since the page opened, in first-change order. Only
+    /// these persist, so a value the page can only approximate (a custom
+    /// threshold, an undetected shell) is never rewritten by an unrelated
+    /// change.
+    touched: Vec<Field>,
     /// Whether the running renderer honors opacity (GPU yes, CPU no); when
     /// false the opacity row renders disabled and refuses changes rather
     /// than silently doing nothing.
@@ -347,7 +410,7 @@ impl Settings {
             hover: None,
             filter: None,
             editing: None,
-            dirty: false,
+            touched: Vec::new(),
             opacity_supported,
             theme,
             font_size,
@@ -375,9 +438,14 @@ impl Settings {
     }
 
     /// The same page in first-run setup mode: it shows [`SETUP_STEPS`] and
-    /// remembers the values it opened with, so skipping can restore them.
-    pub(crate) fn into_setup(mut self) -> Self {
-        self.setup = Some(Box::new(self.clone()));
+    /// keeps the exact live values it opened over (`live`, `theme`), so
+    /// leaving can restore them.
+    pub(crate) fn into_setup(mut self, live: &Config, theme: Theme) -> Self {
+        self.setup = Some(Box::new(SetupBaseline {
+            page: self.clone(),
+            config: live.clone(),
+            theme,
+        }));
         self
     }
 
@@ -386,9 +454,42 @@ impl Settings {
         self.setup.is_some()
     }
 
-    /// The values setup opened with; `None` on the settings page.
-    pub(crate) fn setup_baseline(&self) -> Option<&Settings> {
+    /// What setup opened over; `None` on the settings page.
+    pub(crate) fn setup_baseline(&self) -> Option<&SetupBaseline> {
         self.setup.as_deref()
+    }
+
+    /// Whether any value changed since the page opened (gates the save and
+    /// drives the Saved/Modified header indicator).
+    pub(crate) fn dirty(&self) -> bool {
+        !self.touched.is_empty()
+    }
+
+    /// The rows changed since the page opened.
+    pub(crate) fn touched(&self) -> &[Field] {
+        &self.touched
+    }
+
+    fn touch(&mut self, f: Field) {
+        if !self.touched.contains(&f) {
+            self.touched.push(f);
+        }
+    }
+
+    /// Finishing setup: drop the touched rows that ended where they started
+    /// (changed, then changed back) and return them. Their live value may be
+    /// the widget's approximation, so the caller restores each from the
+    /// baseline instead of writing it.
+    pub(crate) fn settle_setup(&mut self) -> Vec<Field> {
+        let Some(base) = self.setup.as_deref() else {
+            return Vec::new();
+        };
+        let (back, kept): (Vec<Field>, Vec<Field>) = self
+            .touched
+            .iter()
+            .partition(|&&f| self.widget(f) == base.page.widget(f));
+        self.touched = kept;
+        back
     }
 
     /// The sidebar entries: setup steps, or the settings categories.
@@ -403,16 +504,6 @@ impl Settings {
     /// Whether the active section is setup's last step (Enter finishes).
     pub(crate) fn on_last_step(&self) -> bool {
         self.is_setup() && self.cat + 1 == SETUP_STEPS.len()
-    }
-
-    /// The fields whose values differ from `other`'s, in page order: what
-    /// restoring `other` must re-apply live.
-    pub(crate) fn changed_from(&self, other: &Settings) -> Vec<Field> {
-        PAGE_SECTIONS
-            .iter()
-            .flat_map(|&(_, fields)| fields.iter().copied())
-            .filter(|&f| self.widget(f) != other.widget(f))
-            .collect()
     }
 
     /// The fields the page currently shows, each with its category's label:
@@ -571,7 +662,7 @@ impl Settings {
             Field::Rows => self.rows = buf.parse::<u16>().ok()?.clamp(10, 200),
             _ => return None,
         }
-        self.dirty = true;
+        self.touch(field);
         Some(field)
     }
 
@@ -824,7 +915,7 @@ impl Settings {
                 };
             }
         }
-        self.dirty = true;
+        self.touch(field);
         Some(field)
     }
 
@@ -968,11 +1059,19 @@ impl Settings {
         }
     }
 
-    /// Persistence edits for the whole managed set. A value equal to its
-    /// built-in default is written only if the file already names it, so the
-    /// page never clutters a minimal config with defaults; choices returning
-    /// to "default" (`shell`, `launch_mode`, contrast off) remove the key.
+    /// Persistence edits for the rows changed since the page opened; every
+    /// other key in the file stays as written. A value equal to its built-in
+    /// default is written only if the file already names it, so the page
+    /// never clutters a minimal config with defaults; choices returning to
+    /// "default" (`shell`, `launch_mode`, contrast off) remove the key.
     pub(crate) fn edits(&self) -> Vec<SettingEdit> {
+        let mut edits = self.all_edits();
+        edits.retain(|e| self.touched.iter().any(|f| f.key() == e.key));
+        edits
+    }
+
+    /// [`Self::edits`] for every managed row, touched or not.
+    fn all_edits(&self) -> Vec<SettingEdit> {
         let mut edits = vec![
             SettingEdit {
                 section: "",
@@ -1222,6 +1321,10 @@ mod tests {
         Settings::new(&Config::default(), &Theme::default(), 18.0, &shells(), true)
     }
 
+    fn setup_seeded() -> Settings {
+        seeded().into_setup(&Config::default(), Theme::default())
+    }
+
     /// Position the highlight on `f`, switching category as needed.
     fn select_field(s: &mut Settings, f: Field) {
         for (ci, (_, fields)) in s.sections().iter().enumerate() {
@@ -1236,7 +1339,7 @@ mod tests {
 
     #[test]
     fn setup_walks_its_steps_and_ends_on_the_last() {
-        let mut s = seeded().into_setup();
+        let mut s = setup_seeded();
         assert!(s.is_setup() && !seeded().is_setup());
         assert_eq!(s.sections().len(), SETUP_STEPS.len());
         assert_eq!(s.field(), Some(Field::Shell));
@@ -1263,7 +1366,7 @@ mod tests {
 
     #[test]
     fn setup_has_no_search() {
-        let mut s = seeded().into_setup();
+        let mut s = setup_seeded();
         s.start_filter();
         s.filter_input('x');
         assert!(s.filter.is_none());
@@ -1272,19 +1375,122 @@ mod tests {
 
     #[test]
     fn setup_remembers_what_skipping_restores() {
-        let mut s = seeded().into_setup();
+        let mut s = setup_seeded();
         s.cycle_category(true); // Theme
         s.change(true);
-        let base = s
-            .setup_baseline()
-            .expect("setup keeps its baseline")
-            .clone();
+        let base = s.setup_baseline().expect("setup keeps its baseline");
         assert!(
-            !base.is_setup(),
+            !base.page.is_setup(),
             "the baseline holds values, not another setup"
         );
-        assert_eq!(s.changed_from(&base), vec![Field::Theme]);
-        assert!(base.changed_from(&base).is_empty());
+        assert_eq!(s.touched(), [Field::Theme]);
+    }
+
+    /// A config whose setup rows the widgets can only approximate: custom
+    /// theme colours, a shell nobody detected, an off-step alert threshold.
+    fn customised() -> (Config, Theme) {
+        let mut theme = Theme::default();
+        theme.bg ^= 0x0001_0203;
+        let cfg = Config {
+            theme,
+            shell: Some("/opt/odd/bin/fish".to_string()),
+            command_notify_secs: Some(45),
+            minimum_contrast: Some(2.3),
+            ..Config::default()
+        };
+        (cfg, theme)
+    }
+
+    #[test]
+    fn skip_restores_exact_values_not_the_widgets_approximations() {
+        let (cfg, theme) = customised();
+        let mut s = Settings::new(&cfg, &theme, 18.0, &shells(), true).into_setup(&cfg, theme);
+        // Touch every setup row, applying each change live the way the
+        // window does, so `live` ends up holding the widgets' values.
+        let mut live = cfg.clone();
+        for (ci, (_, fields)) in SETUP_STEPS.iter().enumerate() {
+            s.set_category(ci);
+            for ri in 0..fields.len() {
+                s.sel = ri;
+                s.change(true);
+            }
+        }
+        live.theme = config::preset(s.theme_name()).expect("a preset");
+        live.shell = s.shell_path();
+        live.command_notify_secs = Some(s.command_notify_secs());
+        live.bell = Some(s.bell());
+        assert_ne!(live, cfg);
+        let base = s.setup_baseline().expect("setup");
+        for &f in s.touched() {
+            assert!(base.restore(&mut live, f), "{f:?} is a setup row");
+        }
+        assert_eq!(live, cfg, "custom theme, odd shell and 45 s all come back");
+        assert_eq!(base.theme, theme);
+        assert!(!base.restore(&mut live, Field::FontSize), "not a setup row");
+    }
+
+    #[test]
+    fn finishing_writes_only_real_changes() {
+        let (cfg, theme) = customised();
+        let fresh = || Settings::new(&cfg, &theme, 18.0, &shells(), true).into_setup(&cfg, theme);
+        // Enter through every step untouched: nothing to write.
+        let mut s = fresh();
+        for _ in 1..SETUP_STEPS.len() {
+            s.cycle_category(true);
+        }
+        assert!(s.settle_setup().is_empty());
+        assert!(s.edits().is_empty());
+        // Alert moved off 45 s and back: restored exactly, never written.
+        let mut s = fresh();
+        select_field(&mut s, Field::CommandNotify);
+        s.change(true);
+        s.change(false);
+        assert_eq!(s.settle_setup(), vec![Field::CommandNotify]);
+        assert!(s.edits().is_empty());
+        // One real change writes one key.
+        let mut s = fresh();
+        select_field(&mut s, Field::Bell);
+        s.change(true);
+        assert!(s.settle_setup().is_empty());
+        let keys: Vec<_> = s.edits().iter().map(|e| e.key).collect();
+        assert_eq!(keys, ["bell"]);
+    }
+
+    #[test]
+    fn an_unrelated_change_leaves_approximated_values_in_the_file() {
+        let (cfg, theme) = customised();
+        let dir = std::env::temp_dir().join(format!("rt_settings_{}", std::process::id()));
+        let path = dir.join("config.toml");
+        let text =
+            "shell = \"/opt/odd/bin/fish\"\nminimum_contrast = 2.3\ncommand_notify_secs = 45\n";
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(&path, text).expect("seed config");
+        let mut s = Settings::new(&cfg, &theme, 18.0, &shells(), true);
+        select_field(&mut s, Field::Bell);
+        s.change(true);
+        config::save_settings(&path, &s.edits()).expect("save");
+        let saved = std::fs::read_to_string(&path).expect("read back");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            saved.starts_with(text),
+            "untouched lines kept verbatim: {saved}"
+        );
+        assert!(saved.contains("bell = false"), "{saved}");
+    }
+
+    #[test]
+    fn every_row_persists_to_its_own_key() {
+        let edits = seeded().all_edits();
+        for (_, fields) in PAGE_SECTIONS {
+            for f in fields {
+                let n = edits.iter().filter(|e| e.key == f.key()).count();
+                assert_eq!(n, 1, "{f:?} -> {}", f.key());
+            }
+        }
+        assert_eq!(
+            edits.len(),
+            PAGE_SECTIONS.iter().map(|(_, f)| f.len()).sum::<usize>()
+        );
     }
 
     #[test]
@@ -1294,7 +1500,7 @@ mod tests {
         assert_eq!(s.command_notify_secs(), DEFAULT_NOTIFY_SECS);
         assert!(!s.rows()[s.sel].modified);
         let edit = |s: &Settings| {
-            s.edits()
+            s.all_edits()
                 .into_iter()
                 .find(|e| e.key == "command_notify_secs")
                 .expect("managed key")
@@ -1378,7 +1584,7 @@ mod tests {
         let mut s = seeded();
         s.change(false);
         assert_eq!(s.theme_name(), *config::PRESETS.last().unwrap());
-        assert!(s.dirty);
+        assert!(s.dirty());
     }
 
     #[test]
@@ -1647,7 +1853,7 @@ mod tests {
         );
         s.change(true);
         assert_eq!(s.opacity(), 1.0, "the value refuses to move");
-        assert!(!s.dirty, "a refused change is not a modification");
+        assert!(!s.dirty(), "a refused change is not a modification");
         // GPU renderer: same field is live.
         let mut s = Settings::new(&Config::default(), &Theme::default(), 18.0, &shells(), true);
         select_field(&mut s, Field::Opacity);
@@ -1797,7 +2003,7 @@ mod tests {
         assert_eq!(s.editing.as_deref(), Some("25000"));
         assert_eq!(s.commit_edit(), Some(Field::Scrollback));
         assert_eq!(s.scrollback(), 25_000);
-        assert!(s.dirty);
+        assert!(s.dirty());
         // Out-of-range input clamps instead of erroring.
         assert!(s.begin_edit(None));
         s.editing = Some("99999999".into());
@@ -1831,7 +2037,7 @@ mod tests {
         assert_eq!(s.editing.as_deref(), Some(""));
         assert_eq!(s.commit_edit(), None, "an empty buffer cancels");
         assert_eq!(s.font_size(), 18.0);
-        assert!(!s.dirty, "a cancelled edit is not a modification");
+        assert!(!s.dirty(), "a cancelled edit is not a modification");
         // Cancel puts the buffer down without touching the value.
         s.begin_edit(Some('9'));
         s.cancel_edit();
@@ -1913,7 +2119,11 @@ mod tests {
     #[test]
     fn default_shell_edit_removes_the_key() {
         let s = seeded(); // shell at "(default)"
-        let shell = s.edits().into_iter().find(|e| e.key == "shell").unwrap();
+        let shell = s
+            .all_edits()
+            .into_iter()
+            .find(|e| e.key == "shell")
+            .unwrap();
         assert!(
             shell.value.is_none() && !shell.insert,
             "default shell removes any existing line"

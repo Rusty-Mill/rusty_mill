@@ -318,6 +318,14 @@ pub fn is_first_run(args: &[String]) -> bool {
     plain_launch(args) && resolve_path(args).0.is_none() && Config::file_path(args).is_some()
 }
 
+/// Whether `--setup` asks for setup. Only rusty_term's own options count:
+/// a `--setup` after `--`, `-e` or `--command` belongs to the child command.
+pub fn wants_setup(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|a| !matches!(a.as_str(), "--" | "-e" | "--command"))
+        .any(|a| a == "--setup")
+}
+
 /// Whether `args` hold none of the flags that rule out a first-run setup:
 /// the pure half of [`is_first_run`].
 fn plain_launch(args: &[String]) -> bool {
@@ -1397,6 +1405,13 @@ color15 = "ffffff"
             &["--gui", "--profile=dev"],
         ] {
             assert!(!plain_launch(&args(ruled_out)), "{ruled_out:?}");
+        }
+        assert!(wants_setup(&args(&["--gui", "--setup"])));
+        assert!(wants_setup(&args(&["--setup", "--", "htop"])));
+        assert!(!wants_setup(&args(&["--gui"])));
+        for sep in ["--", "-e", "--command"] {
+            let child = args(&["--gui", sep, "program", "--setup"]);
+            assert!(!wants_setup(&child), "{sep}: --setup is the child's");
         }
         // An explicit config path is never a first run, even when missing.
         assert!(!is_first_run(&args(&[

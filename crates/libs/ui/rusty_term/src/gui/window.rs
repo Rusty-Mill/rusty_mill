@@ -47,7 +47,7 @@ use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::pace::Pacer;
 use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors};
-use super::settings::{Field, Settings, Widget};
+use super::settings::{Field, Settings, SetupBaseline, Widget};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -404,7 +404,7 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
     if opened == 0 {
         first.spawn_tab()?;
     }
-    if args.iter().any(|a| a == "--setup") || crate::config::is_first_run(&args) {
+    if crate::config::wants_setup(&args) || crate::config::is_first_run(&args) {
         first.open_setup();
     }
     app.windows.push(first);
@@ -3479,6 +3479,21 @@ impl WindowState<'_> {
 }
 
 impl WindowState<'_> {
+    /// The `[keys]` action bound to `key` with the current modifiers.
+    fn chord_action(&self, key: PhysicalKey) -> Option<Action> {
+        match key {
+            PhysicalKey::Code(code) => chord_key(code).and_then(|key| {
+                self.config.keys.action(Chord::new(
+                    self.mods.control_key(),
+                    self.mods.shift_key(),
+                    self.mods.alt_key(),
+                    key,
+                ))
+            }),
+            PhysicalKey::Unidentified(_) => None,
+        }
+    }
+
     /// Open the in-app settings page over the active tab, seeded from the live
     /// configuration. `Ctrl+,` and the dropdown's *Settings* entry route here.
     fn open_settings(&mut self) {
@@ -3516,41 +3531,36 @@ impl WindowState<'_> {
             &self.shells,
             opacity_supported,
         )
-        .into_setup();
+        .into_setup(&self.config, self.theme);
         self.overlay = Some(Overlay::Settings(s));
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
 
-    /// Leave setup without keeping its choices: restore and re-apply the
-    /// values it opened with, then make sure the config file exists (the
-    /// commented template, no setting switched on) so a first run doesn't
-    /// return on the next launch (O11 skip, D65; interim pending Nano).
+    /// Leave setup without keeping its choices: put every row it touched
+    /// back to its exact opening value, then make sure the config file
+    /// exists (the commented template, no setting switched on) so a first
+    /// run doesn't return on the next launch (O11 skip, D65; interim pending
+    /// Nano). An existing file is left as it was.
     fn skip_setup(&mut self) {
         let Some(Overlay::Settings(s)) = self.overlay.take() else {
             return;
         };
         if let Some(base) = s.setup_baseline() {
-            let changed = s.changed_from(base);
-            self.overlay = Some(Overlay::Settings(base.clone()));
-            for field in changed {
-                self.apply_setting(field);
+            for &field in s.touched() {
+                self.restore_setting(field, base);
             }
-            self.overlay = None;
         }
-        if let Some(path) = self.config_path.as_ref().filter(|p| !p.exists())
-            && let Err(e) = crate::config::save_settings(path, &[])
-        {
-            eprintln!("rusty_term: save setup: {e}");
-        }
+        self.ensure_config_file();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
 
-    /// Finish setup: save what it changed (only values off their defaults are
-    /// written, onto the commented template) and close.
+    /// Finish setup: save only the rows it really changed (onto the
+    /// commented template when there is no file yet) and close. A row
+    /// changed and changed back is restored exactly, never written.
     fn finish_setup(&mut self) {
         if let Some(Overlay::Settings(mut s)) = self.overlay.take() {
             if let Some(field) = s.commit_edit() {
@@ -3558,10 +3568,34 @@ impl WindowState<'_> {
                 self.apply_setting(field);
                 self.overlay = None;
             }
+            let back = s.settle_setup();
+            if let Some(base) = s.setup_baseline() {
+                for field in back {
+                    self.restore_setting(field, base);
+                }
+            }
             self.persist_settings(&s);
         }
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+    }
+
+    /// Put setup row `field` back to the exact value setup opened over,
+    /// recolouring live for the theme.
+    fn restore_setting(&mut self, field: Field, base: &SetupBaseline) {
+        if field == Field::Theme {
+            self.apply_theme_live(base.theme);
+        }
+        base.restore(&mut self.config, field);
+    }
+
+    /// Create the config file from the commented template if it is missing.
+    fn ensure_config_file(&self) {
+        if let Some(path) = self.config_path.as_ref().filter(|p| !p.exists())
+            && let Err(e) = crate::config::save_settings(path, &[])
+        {
+            eprintln!("rusty_term: create config: {e}");
         }
     }
 
@@ -3587,7 +3621,7 @@ impl WindowState<'_> {
             // A still-pending number edit commits like any blur; its live
             // apply comes from the reload watcher re-reading the save.
             s.commit_edit();
-            if s.dirty {
+            if s.dirty() {
                 self.persist_settings(&s);
             }
         }
@@ -3596,13 +3630,19 @@ impl WindowState<'_> {
         }
     }
 
-    /// Write the settings page's values to the config file. The live-reload
-    /// watcher re-reads the save; live application already happened per change.
+    /// Write the rows the page changed to the config file; with none, only
+    /// make sure the file exists. The live-reload watcher re-reads the save;
+    /// live application already happened per change.
     fn persist_settings(&self, s: &Settings) {
+        let edits = s.edits();
+        if edits.is_empty() {
+            self.ensure_config_file();
+            return;
+        }
         let Some(path) = &self.config_path else {
             return;
         };
-        if let Err(e) = crate::config::save_settings(path, &s.edits()) {
+        if let Err(e) = crate::config::save_settings(path, &edits) {
             eprintln!("rusty_term: save settings: {e}");
         }
     }
@@ -4549,7 +4589,7 @@ impl WindowState<'_> {
                 };
                 let status = if setup {
                     "saves when you finish"
-                } else if s.dirty {
+                } else if s.dirty() {
                     "modified - saves on close"
                 } else {
                     "saved"
@@ -4572,7 +4612,7 @@ impl WindowState<'_> {
                     hrow,
                     scol,
                     status,
-                    if s.dirty && !setup { fg } else { dim },
+                    if s.dirty() && !setup { fg } else { dim },
                     bg,
                 );
             }
@@ -5325,9 +5365,24 @@ impl WindowState<'_> {
                     }
                     return;
                 }
-                // A settings page / shell menu, if open, owns all key input.
+                // A settings page / shell menu, if open, owns all key input,
+                // except the chord that toggles the page closed again (it
+                // closes setup as a skip).
                 if self.overlay.is_some() {
-                    self.overlay_key(&event);
+                    let action = self.chord_action(event.physical_key);
+                    if overlay_passes_through(action) {
+                        let mut consumed = std::mem::take(&mut self.consumed_keys);
+                        route_key_down(
+                            &mut consumed,
+                            event.physical_key,
+                            event.repeat,
+                            action,
+                            |a| self.exec_action(a),
+                        );
+                        self.consumed_keys = consumed;
+                    } else {
+                        self.overlay_key(&event);
+                    }
                     return;
                 }
                 // In search mode, keys edit the query / step matches; nothing
@@ -5342,17 +5397,7 @@ impl WindowState<'_> {
                 // Terminal-owned shortcuts (configurable via the `[keys]` config
                 // section) are looked up before native encoding, so a bound chord
                 // never reaches the child.
-                let action = match event.physical_key {
-                    PhysicalKey::Code(code) => chord_key(code).and_then(|key| {
-                        self.config.keys.action(Chord::new(
-                            self.mods.control_key(),
-                            self.mods.shift_key(),
-                            self.mods.alt_key(),
-                            key,
-                        ))
-                    }),
-                    PhysicalKey::Unidentified(_) => None,
-                };
+                let action = self.chord_action(event.physical_key);
                 let mut consumed = std::mem::take(&mut self.consumed_keys);
                 let taken = route_key_down(
                     &mut consumed,
@@ -6250,6 +6295,13 @@ impl ConsumedKeys {
     }
 }
 
+/// Whether a key bound to `action` skips the open overlay's own key handling
+/// and runs as an action: only the settings toggle (`Ctrl+,` by default),
+/// which closes the page it opened, and setup as a skip.
+fn overlay_passes_through(action: Option<Action>) -> bool {
+    action == Some(Action::OpenSettings)
+}
+
 /// Route a keydown the keymap resolved to `action` (None: unbound). `exec`
 /// runs an action and returns whether it consumed the key. Returns whether
 /// the key is consumed; if not, it goes on to the child. Who owns a held key
@@ -6994,6 +7046,19 @@ mod tests {
         // A tiny window still returns 0 rather than wrapping.
         assert_eq!(settings_visible(0), 0);
         assert_eq!(settings_visible(SETTINGS_CARDS_TOP + SETTINGS_FOOTER_H), 0);
+    }
+
+    #[test]
+    fn the_settings_toggle_reaches_an_open_overlay() {
+        // Ctrl+, (the default chord) must close the page and skip setup, so
+        // it runs as an action even while the overlay owns the keyboard.
+        use crate::keymap::{Action, Chord, Key};
+        let ctrl_comma = Chord::new(true, false, false, Key::Char(','));
+        let action = crate::config::Config::default().keys.action(ctrl_comma);
+        assert!(super::overlay_passes_through(action));
+        for other in [None, Some(Action::OpenSetup), Some(Action::CopyOrSend)] {
+            assert!(!super::overlay_passes_through(other), "{other:?}");
+        }
     }
 
     #[test]
