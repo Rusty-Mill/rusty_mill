@@ -148,6 +148,132 @@ fn a_committed_rust_symlink_is_never_measured_as_source() {
     );
 }
 
+/// Runs `erosion` but gives up after 60 s, so a blocking read fails the test
+/// instead of hanging it.
+fn erosion_bounded(repo: &Repo, args: &[&str]) -> Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_erosion"))
+        .args(args)
+        .current_dir(&repo.dir)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run erosion");
+    let start = std::time::Instant::now();
+    while child.try_wait().expect("wait").is_none() {
+        if start.elapsed() > std::time::Duration::from_secs(60) {
+            let _ = child.kill();
+            panic!("erosion blocked");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    child.wait_with_output().expect("output")
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_replaced_by_a_fifo_is_unreadable_not_read() {
+    let repo = Repo::new("fifo");
+    let base = repo.head();
+    std::fs::remove_file(repo.dir.join("src/a.rs")).expect("rm");
+    let made = Command::new("mkfifo")
+        .arg(repo.dir.join("src/a.rs"))
+        .status()
+        .expect("mkfifo");
+    assert!(made.success());
+    let report = erosion_bounded(&repo, &["check", "--base", &base, "--report-only"]);
+    assert_eq!(report.status.code(), Some(0));
+    assert!(
+        stdout(&report).contains("\"unmeasured\":[\"src/a.rs\"]"),
+        "{}",
+        stdout(&report)
+    );
+    let enforced = erosion_bounded(&repo, &enforcing(&base));
+    assert_eq!(enforced.status.code(), Some(2), "{}", stdout(&enforced));
+    assert!(
+        stdout(&enforced).contains("src/a.rs"),
+        "{}",
+        stdout(&enforced)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rust_names_that_are_not_utf8_fail_enforcing_committed_or_changed() {
+    use std::os::unix::ffi::OsStrExt;
+    let bad = std::ffi::OsStr::from_bytes(b"src/\xff.rs");
+    for committed in [true, false] {
+        let repo = Repo::new(if committed { "namebase" } else { "namecand" });
+        if committed {
+            std::fs::write(repo.dir.join(bad), "pub fn b() {}\n").expect("write");
+            commit(&repo);
+        }
+        let base = repo.head();
+        if !committed {
+            std::fs::write(repo.dir.join(bad), "pub fn b() {}\n").expect("write");
+        }
+        let report = repo.erosion(&["check", "--base", &base, "--report-only"]);
+        assert_eq!(report.status.code(), Some(0));
+        assert!(
+            stdout(&report).contains("\"unmeasured\":[\"src/\u{fffd}.rs\"]"),
+            "{}",
+            stdout(&report)
+        );
+        let enforced = repo.erosion(&enforcing(&base));
+        assert_eq!(enforced.status.code(), Some(2), "{}", stdout(&enforced));
+    }
+}
+
+#[test]
+fn newlines_in_names_do_not_break_blob_framing() {
+    let repo = Repo::new("newline");
+    repo.write("x\ny.py", "print(1)\n");
+    repo.write(
+        "src/evil\n.rs",
+        "pub fn evil(x: u8) -> u8 { if x > 1 { 1 } else { 0 } }\n",
+    );
+    commit(&repo);
+    let base = repo.head();
+    // Unchanged: both Rust files are measured from the base.
+    let same = stdout(&repo.erosion(&enforcing(&base)));
+    assert!(same.contains("\"functions\":0"), "{same}");
+    // Deleting the newline-named file removes a function it measured.
+    std::fs::remove_file(repo.dir.join("src/evil\n.rs")).expect("rm");
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"functions\":-1"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(stdout(&out).contains("\"total_cc\":-2"), "{}", stdout(&out));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_ancestor_is_a_deletion_not_a_redirect() {
+    let repo = Repo::new("ancestor");
+    let base = repo.head();
+    let elsewhere = repo.dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+    let rungs = "    if true { }\n".repeat(20);
+    std::fs::write(
+        elsewhere.join("a.rs"),
+        format!("pub fn total() {{\n{rungs}}}\n"),
+    )
+    .expect("write");
+    std::fs::write(repo.dir.join(".gitignore"), "elsewhere/\n").expect("ignore");
+    std::fs::remove_dir_all(repo.dir.join("src")).expect("rm");
+    std::os::unix::fs::symlink("elsewhere", repo.dir.join("src")).expect("symlink");
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    let line = stdout(&out);
+    assert!(line.contains("\"functions\":-1"), "{line}");
+    assert!(
+        line.contains("\"concentration_bp\":{\"base\":0,\"candidate\":0"),
+        "{line}"
+    );
+}
+
 fn commit(repo: &Repo) {
     repo.git(&["add", "-A"]);
     repo.git(&[

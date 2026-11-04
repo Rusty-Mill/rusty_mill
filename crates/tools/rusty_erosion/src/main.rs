@@ -136,56 +136,47 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
         "--quiet",
         &format!("{}^{{commit}}", opts.base),
     ])?;
-    let changed = changed_paths(&opts.base)?;
+    let (changed, mangled) = changed_paths(&opts.base)?;
     let mut parser = Parser::new().map_err(|e| e.to_string())?;
-    let (base_paths, base_links) = tree_paths(&opts.base)?;
-    let base_files = blobs(&opts.base, &base_paths)?;
-    let base_measures = measure_all(&mut parser, &base_files)?;
-    let mut base_unmeasured = unmeasured(&base_files);
-    base_unmeasured.extend(base_links.iter().cloned());
-    let base = Report::build(base_measures.values().cloned().collect(), base_unmeasured);
-    let (cand_files, cand_links) = worktree(&changed)?;
+    let base_snap = base_snapshot(&opts.base)?;
+    let cand_snap = worktree(&changed, &mangled)?;
+    let base_measures = measure_all(&mut parser, &base_snap.rust)?;
+    let base = Report::build(
+        base_measures.values().cloned().collect(),
+        base_snap.unmeasured().cloned().collect(),
+    );
+    // Unchanged files are the base's entries; changed ones come from disk.
     let mut cand_measures = base_measures;
     cand_measures.retain(|path, _| !changed.contains(path));
-    cand_measures.extend(measure_all(&mut parser, &cand_files)?);
-    let mut cand_unmeasured = unmeasured(&base_files);
-    cand_unmeasured.extend(base_links.iter().cloned());
-    cand_unmeasured.retain(|p| !changed.contains(p));
-    cand_unmeasured.extend(unmeasured(&cand_files));
-    cand_unmeasured.extend(cand_links.iter().cloned());
-    cand_unmeasured.extend(
-        changed
-            .iter()
-            .filter(|p| classify(p) == FileClass::Unmeasured)
-            .cloned(),
-    );
+    cand_measures.extend(measure_all(&mut parser, &cand_snap.rust)?);
+    let cand_unmeasured = base_snap
+        .unmeasured()
+        .filter(|p| !changed.contains(*p))
+        .chain(cand_snap.unmeasured())
+        .cloned()
+        .collect();
     let cand = Report::build(cand_measures.into_values().collect(), cand_unmeasured);
-    // Rust it cannot measure as source in either snapshot: not UTF-8, or a
-    // symlink, in the base tree or a changed candidate file (unchanged ones
-    // are the base's entries).
-    let bad_rust: BTreeSet<String> = base_files
+    let bad_rust: BTreeSet<&String> = base_snap
+        .unreadable
         .iter()
-        .chain(&cand_files)
-        .filter(|(p, b)| classify(p) == FileClass::Rust && std::str::from_utf8(b).is_err())
-        .map(|(p, _)| p.clone())
-        .chain(base_links.iter().chain(&cand_links).cloned())
+        .chain(&cand_snap.unreadable)
         .collect();
     if opts.limits.is_some() && !bad_rust.is_empty() {
         // Supported code that cannot be read leaves a snapshot incomplete, a
         // measurement failure rather than `unmeasured` (D45 covers other
         // languages only): fail closed.
         return Err(format!(
-            "cannot measure Rust (not UTF-8, or a symlink): {}",
-            bad_rust.iter().cloned().collect::<Vec<_>>().join(", ")
+            "cannot measure Rust (not a regular file, or a name or contents that are not UTF-8): {}",
+            bad_rust
+                .iter()
+                .map(|p| p.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     // Changed code in another language (deleted included), and unreadable
     // Rust in either snapshot.
-    let unmeasured_paths: BTreeSet<&String> = changed
-        .iter()
-        .filter(|p| classify(p) == FileClass::Unmeasured)
-        .chain(&bad_rust)
-        .collect();
+    let unmeasured_paths: BTreeSet<&String> = cand_snap.other.iter().chain(bad_rust).collect();
     let changed_unmeasured: Vec<&String> = unmeasured_paths.into_iter().collect();
     let delta = base.delta(&cand);
     let within = opts.limits.is_none_or(|l| {
@@ -197,16 +188,10 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
 
 fn measure_all(
     parser: &mut Parser,
-    files: &[(String, Vec<u8>)],
+    files: &[(String, String)],
 ) -> Result<HashMap<String, FileMeasure>, String> {
     let mut out = HashMap::new();
-    for (path, bytes) in files {
-        if classify(path) != FileClass::Rust {
-            continue;
-        }
-        let Ok(src) = std::str::from_utf8(bytes) else {
-            continue;
-        };
+    for (path, src) in files {
         out.insert(
             path.clone(),
             parser.measure(path, src).map_err(|e| e.to_string())?,
@@ -215,97 +200,174 @@ fn measure_all(
     Ok(out)
 }
 
-/// Code files v0 cannot measure, including Rust that is not UTF-8.
-fn unmeasured(files: &[(String, Vec<u8>)]) -> Vec<String> {
-    files
-        .iter()
-        .filter(|(p, b)| match classify(p) {
-            FileClass::Unmeasured => true,
-            FileClass::Rust => std::str::from_utf8(b).is_err(),
-            FileClass::Ignored => false,
-        })
-        .map(|(p, _)| p.clone())
-        .collect()
+/// One side of the comparison, as far as v0 can read it.
+#[derive(Debug, Default)]
+struct Snapshot {
+    /// Rust source: regular files whose names and contents are UTF-8.
+    rust: Vec<(String, String)>,
+    /// Rust it cannot measure as source: not a regular file, or a name or
+    /// contents that are not UTF-8.
+    unreadable: BTreeSet<String>,
+    /// Code in another language (D45): listed, never read.
+    other: BTreeSet<String>,
+}
+
+impl Snapshot {
+    fn add_rust(&mut self, path: String, bytes: Vec<u8>) {
+        match String::from_utf8(bytes) {
+            Ok(src) => self.rust.push((path, src)),
+            Err(_) => {
+                self.unreadable.insert(path);
+            }
+        }
+    }
+
+    /// What its report lists as unmeasured.
+    fn unmeasured(&self) -> impl Iterator<Item = &String> {
+        self.other.iter().chain(&self.unreadable)
+    }
 }
 
 /// Paths the working tree changes against `base`: modified, added, deleted
-/// and untracked-unignored.
-fn changed_paths(base: &str) -> Result<BTreeSet<String>, String> {
-    let mut out = split_z(&git(&[
-        "diff",
-        "--name-only",
-        "--no-renames",
-        "-z",
-        base,
-        "--",
-    ])?);
-    out.extend(split_z(&git(&[
-        "ls-files",
-        "-z",
-        "--others",
-        "--exclude-standard",
-    ])?));
-    Ok(out.into_iter().collect())
-}
-
-/// Measured or unmeasured paths in `base`'s tree, and apart from them the
-/// Rust paths that are symlinks: a link's blob is its target path, not source.
-fn tree_paths(base: &str) -> Result<(Vec<String>, BTreeSet<String>), String> {
-    let mut paths = Vec::new();
-    let mut links = BTreeSet::new();
-    for entry in split_z(&git(&["ls-tree", "-r", "-z", base])?) {
-        // `<mode> <type> <object>\t<path>`
-        let (meta, path) = entry
-            .split_once('\t')
-            .ok_or_else(|| format!("git ls-tree: bad entry {entry:?}"))?;
-        match classify(path) {
-            FileClass::Ignored => {}
-            FileClass::Rust if meta.starts_with("120000 ") => {
-                links.insert(path.to_owned());
+/// and untracked-unignored. The second set holds those whose names are not
+/// UTF-8, as lossy text: they cannot be named exactly, so are never opened.
+fn changed_paths(base: &str) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+    let mut raw = git(&["diff", "--name-only", "--no-renames", "-z", base, "--"])?;
+    raw.push(0);
+    raw.extend(git(&["ls-files", "-z", "--others", "--exclude-standard"])?);
+    let mut all = BTreeSet::new();
+    let mut mangled = BTreeSet::new();
+    for name in split_z(&raw) {
+        match name {
+            Ok(path) => all.insert(path),
+            Err(lossy) => {
+                mangled.insert(lossy.clone());
+                all.insert(lossy)
             }
-            _ => paths.push(path.to_owned()),
-        }
-    }
-    Ok((paths, links))
-}
-
-/// Paths and contents.
-type Files = Vec<(String, Vec<u8>)>;
-
-/// The changed Rust files' working-tree contents, and apart from them the
-/// changed Rust paths that are symlinks. Deleted ones are left out, including
-/// those under a directory since replaced by a file. Other languages are not
-/// touched at all: they are only listed as `unmeasured` from the changed
-/// paths (D45), so nothing about them, not even a failed lookup, decides the
-/// result.
-fn worktree(changed: &BTreeSet<String>) -> Result<(Files, BTreeSet<String>), String> {
-    let mut out = Vec::new();
-    let mut links = BTreeSet::new();
-    for path in changed.iter().filter(|p| classify(p) == FileClass::Rust) {
-        let meta = match std::fs::symlink_metadata(path) {
-            Ok(meta) => meta,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                continue;
-            }
-            Err(e) => return Err(format!("{path}: {e}")),
         };
-        if meta.file_type().is_symlink() {
-            links.insert(path.clone());
+    }
+    Ok((all, mangled))
+}
+
+/// `base`'s tree. Rust blobs are read by object id, so no path name can
+/// break the batch framing; a Rust entry that is not a regular file (a
+/// symlink's blob is its target path) or has a name that is not UTF-8 is
+/// unreadable. Submodules are skipped; other languages are only listed.
+fn base_snapshot(base: &str) -> Result<Snapshot, String> {
+    let mut snap = Snapshot::default();
+    let mut wanted = Vec::new();
+    for entry in git(&["ls-tree", "-r", "-z", base])?.split(|b| *b == 0) {
+        if entry.is_empty() {
             continue;
         }
-        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-        out.push((path.clone(), bytes));
+        // `<mode> <type> <object>\t<path>`
+        let tab = entry
+            .iter()
+            .position(|b| *b == b'\t')
+            .ok_or("git ls-tree: bad entry")?;
+        let meta = std::str::from_utf8(&entry[..tab]).map_err(|_| "git ls-tree: bad entry")?;
+        let (path, exact) = match std::str::from_utf8(&entry[tab + 1..]) {
+            Ok(p) => (p.to_owned(), true),
+            Err(_) => (
+                String::from_utf8_lossy(&entry[tab + 1..]).into_owned(),
+                false,
+            ),
+        };
+        let fields: Vec<&str> = meta.split(' ').collect();
+        let [mode, _, oid] = fields[..] else {
+            return Err(format!("git ls-tree: bad entry {meta:?}"));
+        };
+        match classify(&path) {
+            FileClass::Ignored => {}
+            FileClass::Unmeasured => {
+                snap.other.insert(path);
+            }
+            FileClass::Rust if mode == "160000" => {}
+            FileClass::Rust if exact && matches!(mode, "100644" | "100755") => {
+                wanted.push((path, oid.to_owned()));
+            }
+            FileClass::Rust => {
+                snap.unreadable.insert(path);
+            }
+        }
     }
-    Ok((out, links))
+    let oids: Vec<&str> = wanted.iter().map(|(_, o)| o.as_str()).collect();
+    for ((path, _), bytes) in wanted.iter().zip(blobs(&oids)?) {
+        snap.add_rust(path.clone(), bytes);
+    }
+    Ok(snap)
 }
 
-/// `base:path` blobs through one `git cat-file --batch`.
-fn blobs(base: &str, paths: &[String]) -> Result<Vec<(String, Vec<u8>)>, String> {
+/// The changed files in the working tree, read as git sees them: Rust is
+/// read only when it is a regular file reached through real directories (a
+/// symlinked or replaced ancestor means git sees it deleted), and anything
+/// else that is there is unreadable. Other languages are not touched at all
+/// (D45), so nothing about them, not even a failed lookup, decides the
+/// result.
+fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Snapshot, String> {
+    let mut snap = Snapshot::default();
+    for path in changed {
+        match classify(path) {
+            FileClass::Ignored => {}
+            FileClass::Unmeasured => {
+                snap.other.insert(path.clone());
+            }
+            FileClass::Rust if mangled.contains(path) => {
+                snap.unreadable.insert(path.clone());
+            }
+            FileClass::Rust => match entry(path)? {
+                Entry::Absent => {}
+                Entry::Special => {
+                    snap.unreadable.insert(path.clone());
+                }
+                Entry::File(bytes) => snap.add_rust(path.clone(), bytes),
+            },
+        }
+    }
+    Ok(snap)
+}
+
+/// A working-tree path, without following any symlink.
+enum Entry {
+    /// Deleted, as git sees it.
+    Absent,
+    /// There, but not a regular file: a symlink, FIFO, socket or directory.
+    Special,
+    File(Vec<u8>),
+}
+
+fn entry(path: &str) -> Result<Entry, String> {
+    let gone = |e: &std::io::Error| {
+        matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        )
+    };
+    let mut dir = std::path::PathBuf::new();
+    let mut parts: Vec<&str> = path.split('/').collect();
+    let name = parts.pop().unwrap_or_default();
+    for part in parts {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => return Ok(Entry::Absent),
+            Err(e) if gone(&e) => return Ok(Entry::Absent),
+            Err(e) => return Err(format!("{path}: {e}")),
+        }
+    }
+    dir.push(name);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_file() => std::fs::read(&dir)
+            .map(Entry::File)
+            .map_err(|e| format!("{path}: {e}")),
+        Ok(_) => Ok(Entry::Special),
+        Err(e) if gone(&e) => Ok(Entry::Absent),
+        Err(e) => Err(format!("{path}: {e}")),
+    }
+}
+
+/// Blobs by object id through one `git cat-file --batch`, in order.
+fn blobs(oids: &[&str]) -> Result<Vec<Vec<u8>>, String> {
     let mut child = git_cmd()
         .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())
@@ -314,7 +376,7 @@ fn blobs(base: &str, paths: &[String]) -> Result<Vec<(String, Vec<u8>)>, String>
         .spawn()
         .map_err(|e| format!("git cat-file: {e}"))?;
     let mut stdin = child.stdin.take().ok_or("git cat-file: no stdin")?;
-    let request: String = paths.iter().map(|p| format!("{base}:{p}\n")).collect();
+    let request: String = oids.iter().map(|o| format!("{o}\n")).collect();
     let writer = std::thread::spawn(move || stdin.write_all(request.as_bytes()));
     let mut raw = Vec::new();
     child
@@ -331,36 +393,33 @@ fn blobs(base: &str, paths: &[String]) -> Result<Vec<(String, Vec<u8>)>, String>
     if !status.success() {
         return Err(format!("git cat-file exited {status}"));
     }
-    parse_batch(paths, &raw)
+    parse_batch(oids, &raw)
 }
 
-/// Splits `git cat-file --batch` output, one entry per requested path.
-fn parse_batch(paths: &[String], mut raw: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let mut out = Vec::with_capacity(paths.len());
-    for path in paths {
+/// Splits `git cat-file --batch` output: one blob per requested object, in
+/// order. A missing object or any other type is a measurement failure.
+fn parse_batch(oids: &[&str], mut raw: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut out = Vec::with_capacity(oids.len());
+    for oid in oids {
         let nl = raw
             .iter()
             .position(|b| *b == b'\n')
             .ok_or("git cat-file: truncated header")?;
         let header = std::str::from_utf8(&raw[..nl]).map_err(|_| "git cat-file: bad header")?;
         let fields: Vec<&str> = header.split(' ').collect();
-        if let [_, "missing"] = fields[..] {
-            // A gitlink (submodule) has no blob in this repository.
-            raw = &raw[nl + 1..];
-            continue;
-        }
-        let [_, kind, size] = fields[..] else {
-            return Err(format!("git cat-file: {path}: {header}"));
+        let [got, "blob", size] = fields[..] else {
+            return Err(format!("git cat-file: {oid}: {header}"));
         };
+        if got != *oid {
+            return Err(format!("git cat-file: asked for {oid}, got {header}"));
+        }
         let size: usize = size
             .parse()
             .map_err(|_| format!("git cat-file: bad size in {header}"))?;
         let body = raw
             .get(nl + 1..nl + 1 + size)
             .ok_or("git cat-file: truncated body")?;
-        if kind == "blob" {
-            out.push((path.clone(), body.to_vec()));
-        }
+        out.push(body.to_vec());
         raw = raw.get(nl + 2 + size..).unwrap_or_default();
     }
     Ok(out)
@@ -388,10 +447,11 @@ fn git_cmd() -> Command {
     cmd
 }
 
-fn split_z(raw: &[u8]) -> Vec<String> {
+/// NUL-separated names: `Ok` when UTF-8, else `Err` with lossy text.
+fn split_z(raw: &[u8]) -> Vec<Result<String, String>> {
     raw.split(|b| *b == 0)
         .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .map(|s| String::from_utf8(s.to_vec()).map_err(|_| String::from_utf8_lossy(s).into_owned()))
         .collect()
 }
 
@@ -535,15 +595,16 @@ mod tests {
     }
 
     #[test]
-    fn batch_output_is_split_per_path() {
-        let raw = b"aaa blob 3\nfoo\nbbb missing\nccc blob 0\n\n";
-        let paths = ["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()];
-        let got = parse_batch(&paths, raw);
-        let want = vec![
-            ("a.rs".to_string(), b"foo".to_vec()),
-            ("c.rs".to_string(), vec![]),
-        ];
-        assert_eq!(got, Ok(want));
-        assert!(parse_batch(&paths, b"aaa blob 9\nfoo\n").is_err());
+    fn batch_output_is_split_per_object() {
+        let raw = b"aaa blob 3\nfoo\nccc blob 0\n\n";
+        assert_eq!(
+            parse_batch(&["aaa", "ccc"], raw),
+            Ok(vec![b"foo".to_vec(), vec![]])
+        );
+        assert!(parse_batch(&["aaa"], b"aaa blob 9\nfoo\n").is_err());
+        // A missing object, another type or a reordered reply fails.
+        assert!(parse_batch(&["bbb"], b"bbb missing\n").is_err());
+        assert!(parse_batch(&["aaa"], b"aaa tree 0\n\n").is_err());
+        assert!(parse_batch(&["aaa", "ccc"], b"ccc blob 0\n\naaa blob 0\n\n").is_err());
     }
 }
