@@ -8,10 +8,6 @@
 use std::net::SocketAddr;
 
 use agentgateway_config::Config;
-use rmcp::{
-    ServiceExt, model::CallToolRequestParams, service::RunningService,
-    transport::StreamableHttpClientTransport,
-};
 use rusty_tokio::sync::CancellationToken;
 
 /// Path to the compiled fixture server.
@@ -42,9 +38,10 @@ fn mock_server() -> String {
 
 mod common;
 use common::free_port;
+use common::mcp;
 
 struct Harness {
-    client: RunningService<rmcp::RoleClient, ()>,
+    client: mcp::Client,
     shutdown: CancellationToken,
 }
 
@@ -74,10 +71,7 @@ impl Harness {
             .await
             .expect("gateway should bind");
 
-        let transport =
-            StreamableHttpClientTransport::from_uri(format!("http://127.0.0.1:{port}/mcp"));
-        let client = ()
-            .serve(transport)
+        let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
             .await
             .expect("client should complete the MCP handshake through the gateway");
 
@@ -87,7 +81,7 @@ impl Harness {
     async fn tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .client
-            .list_all_tools()
+            .list_tools()
             .await
             .expect("tools/list should succeed")
             .into_iter()
@@ -100,21 +94,16 @@ impl Harness {
     async fn call(&self, name: &str) -> Result<String, String> {
         let result = self
             .client
-            .call_tool(CallToolRequestParams::new(name.to_string()))
+            .call_tool(name, None)
             .await
             .map_err(|err| err.to_string())?;
 
-        let text = result
-            .content
-            .iter()
-            .filter_map(|block| block.as_text().map(|t| t.text.clone()))
-            .collect::<Vec<_>>()
-            .join("");
+        let text = mcp::text(&result.content);
         Ok(text)
     }
 
     async fn stop(self) {
-        let _ = self.client.cancel().await;
+        let _ = self.client.close().await;
         self.shutdown.cancel();
     }
 }
@@ -146,7 +135,7 @@ binds:
                           MOCK_LABEL: beta
 "#;
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn two_targets_federate_into_one_endpoint() {
     let harness = Harness::start(TWO_TARGETS).await;
 
@@ -159,7 +148,7 @@ async fn two_targets_federate_into_one_endpoint() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_call_reaches_the_target_that_owns_the_tool() {
     let harness = Harness::start(TWO_TARGETS).await;
 
@@ -175,7 +164,7 @@ async fn a_call_reaches_the_target_that_owns_the_tool() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unadvertised_tool_name_is_rejected() {
     let harness = Harness::start(TWO_TARGETS).await;
 
@@ -212,7 +201,7 @@ binds:
                           matcher: "^ping$"
 "#;
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_filtered_tool_is_hidden_and_uncallable() {
     let harness = Harness::start(FILTERED).await;
 
@@ -262,7 +251,7 @@ binds:
                           MOCK_LABEL: beta
 "#;
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn route_authorization_bans_one_target_but_not_the_other() {
     let harness = Harness::start(AUTHORIZED).await;
 
@@ -290,7 +279,7 @@ async fn route_authorization_bans_one_target_but_not_the_other() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_route_that_does_not_match_is_a_404() {
     let port = free_port();
     let yaml = TWO_TARGETS
@@ -309,7 +298,7 @@ async fn a_route_that_does_not_match_is_a_404() {
         .await
         .expect("gateway should bind");
 
-    let response = reqwest::Client::new()
+    let response = common::http::Client::new()
         .get(format!("http://127.0.0.1:{port}/not-the-mcp-route"))
         .send()
         .await

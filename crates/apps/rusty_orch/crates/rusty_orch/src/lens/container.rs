@@ -618,10 +618,10 @@ mod tests {
         Question {
             prefix: "p".to_owned(),
             body: "b".to_owned(),
-            allowed: Allowed {
+            shape: orch_lens::Shape::Posts(Allowed {
                 evidence: None,
                 claims: None,
-            },
+            }),
             max_output_tokens: 64,
         }
     }
@@ -630,7 +630,7 @@ mod tests {
     fn a_checked_container_runs_every_command_inside_it_by_id() {
         let (mut m, podman) = contained(exit(0, &inspect(MOUNTS, HOST, ENV), ""));
         let answer = m.ask(&question()).expect("answers");
-        assert!(answer.posts.is_empty());
+        assert_eq!(answer.reply, orch_lens::Reply::Posts(Vec::new()));
         let calls = podman.calls.lock().expect("lock").clone();
         assert_eq!(calls.len(), 3, "{calls:?}");
         assert_eq!(

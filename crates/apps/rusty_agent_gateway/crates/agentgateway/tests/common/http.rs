@@ -28,14 +28,20 @@ impl Default for Client {
 }
 
 impl Client {
-    /// A client with test defaults.
+    /// A client with test defaults, trusting the system's certificates.
     pub fn new() -> Self {
+        Self::trusting(rusty_request::TrustPolicy::default())
+    }
+
+    /// A client with test defaults, trusting what `policy` says.
+    pub fn trusting(policy: rusty_request::TrustPolicy) -> Self {
         let inner = rusty_request::Client::builder()
             .no_user_agent()
             .no_cookie_store()
             .no_proxy()
             .no_timeout()
             .max_response_body_len(u64::MAX)
+            .trust_policy(policy)
             .build();
         Self { inner }
     }

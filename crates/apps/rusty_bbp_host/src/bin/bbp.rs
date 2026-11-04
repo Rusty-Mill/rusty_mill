@@ -25,6 +25,7 @@
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
+//! bbp why     --dir D (--task T | T) --claim ID [--at REV] how one claim moved: each evidence and status change with the rule that fired, replayed from the log, as JSON
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp dry-run --name N --data NAME=PATH[,NAME=PATH...] --work DIR [--wall-secs N] -- PROGRAM ARGS...
@@ -436,11 +437,19 @@ fn run() -> Result<String, String> {
             );
         }
         "why" => {
-            let turn = match a.flags.get("turn") {
-                Some(v) => Some(v.parse().map_err(|_| "--turn must be a number")?),
-                None => None,
+            let num = |k: &str| -> Result<Option<u64>, String> {
+                a.flags
+                    .get(k)
+                    .map(|v| v.trim_start_matches("msg:").parse())
+                    .transpose()
+                    .map_err(|_| format!("--{k} must be a number"))
             };
-            return why::json(&dir, &task, turn);
+            return match (num("claim")?, num("turn")?) {
+                (Some(_), Some(_)) => Err("--claim and --turn are exclusive".into()),
+                (Some(c), None) => why::claim_json(&dir, &task, MsgId(c), num("at")?.map(Rev)),
+                (None, turn) if !a.flags.contains_key("at") => why::json(&dir, &task, turn),
+                (None, _) => Err("--at needs --claim".into()),
+            };
         }
         "shadow" => return shadow::json(&dir, &task),
         "runner" => {

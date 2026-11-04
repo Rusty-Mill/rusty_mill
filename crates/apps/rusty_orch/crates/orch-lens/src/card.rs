@@ -1,10 +1,9 @@
 //! The runner's view of one claim: what the shell reads from BBP (the claim
-//! card plus each evidence message's note), with orch's data class on every
-//! part. Pure data and its text rendering.
+//! card plus the claim's own body), with orch's data class on every part.
+//! Pure data and its text rendering.
 
 use rusty_bbp::{
-    ClaimBody, ClaimStatus, ClaimView, ClaimsConfig, Direction, EvidenceKind, MsgId, PrincipalId,
-    Stakes,
+    ClaimBody, ClaimStatus, ClaimView, Direction, EvidenceKind, MsgId, PrincipalId, Stakes,
 };
 
 use crate::class::{admit, DataClass};
@@ -66,25 +65,18 @@ impl Card {
 }
 
 impl Card {
-    /// The card from BBP's view of a claim, the claim's own body (stakes,
-    /// reversibility, the question it answers) and each evidence item's
-    /// note, which the view leaves out (`notes` gives `""` for one not yet
-    /// read). The claim's class is the highest of its domains' classes;
-    /// its evidence shares it.
-    pub fn from_view(
-        view: &ClaimView,
-        body: &ClaimBody,
-        notes: &dyn Fn(MsgId) -> String,
-        config: &LensConfig,
-        claims: &ClaimsConfig,
-    ) -> Self {
+    /// The card from BBP's view of a claim (which carries its accept line
+    /// and each evidence item's note, D77) and the claim's own body
+    /// (stakes, reversibility, the question it answers), which the view
+    /// leaves out. The claim's class is the highest of its domains'
+    /// classes; its evidence shares it.
+    pub fn from_view(view: &ClaimView, body: &ClaimBody, config: &LensConfig) -> Self {
         let class = view
             .domains
             .iter()
             .map(|d| config.domain_class(d))
             .max()
             .unwrap_or(DataClass::Internal);
-        let strict = body.stakes == Stakes::High || !body.reversible;
         let evidence = view
             .evidence
             .iter()
@@ -94,7 +86,7 @@ impl Card {
                 direction: e.direction,
                 kind: e.kind,
                 delta: e.delta,
-                note: notes(e.msg),
+                note: e.note.clone(),
                 class,
             })
             .collect();
@@ -104,11 +96,7 @@ impl Card {
             domains: view.domains.clone(),
             status: view.status,
             score: view.score,
-            accept_at: if strict {
-                claims.accept_at_strict
-            } else {
-                claims.accept_at
-            },
+            accept_at: view.accept_at,
             stakes: body.stakes,
             reversible: body.reversible,
             answers: body.answers,
@@ -319,13 +307,14 @@ mod tests {
         assert!(shown.contains("answers: msg:3\ndeps: msg:4\n"));
     }
 
-    fn view(domains: &[&str]) -> ClaimView {
+    fn view(domains: &[&str], accept_at: i64) -> ClaimView {
         ClaimView {
             id: MsgId(7),
             text: "Hash by size first".to_owned(),
             domains: domains.iter().map(|d| (*d).to_owned()).collect(),
             status: ClaimStatus::Open,
             score: -2,
+            accept_at,
             confidence: 40,
             epoch: 0,
             spent: 2,
@@ -335,6 +324,8 @@ mod tests {
                 author: PrincipalId("operator".to_owned()),
                 direction: Direction::Counter,
                 kind: EvidenceKind::Cited,
+                strength: 2,
+                note: "note 20".to_owned(),
                 delta: -2,
                 epoch: 0,
                 scoring: true,
@@ -367,14 +358,11 @@ mod tests {
     }
 
     #[test]
-    fn a_view_with_its_body_and_notes_is_the_fixture_card() {
-        let notes = |m: MsgId| format!("note {}", m.0);
+    fn a_view_with_its_body_is_the_fixture_card() {
         let got = Card::from_view(
-            &view(&["dedup"]),
+            &view(&["dedup"], 8),
             &body(Stakes::Medium, true),
-            &notes,
             &starter(),
-            &ClaimsConfig::default(),
         );
         let mut want = card(vec![item(
             20,
@@ -387,32 +375,24 @@ mod tests {
     }
 
     #[test]
-    fn strict_claims_accept_higher_and_the_top_domain_class_wins() {
-        let cfg = ClaimsConfig::default();
-        let none = |_: MsgId| String::new();
-        let high = Card::from_view(
-            &view(&["dedup", "real-data"]),
+    fn the_views_accept_line_and_the_top_domain_class_win() {
+        let task = Card::from_view(
+            &view(&["dedup", "real-data"], 20),
             &body(Stakes::High, true),
-            &none,
             &starter(),
-            &cfg,
         );
-        assert_eq!(high.accept_at, cfg.accept_at_strict);
-        assert_eq!(high.class, DataClass::Sensitive);
-        assert!(high
+        assert_eq!(
+            task.accept_at, 20,
+            "the task's frozen line, as BBP gives it"
+        );
+        assert_eq!(task.class, DataClass::Sensitive);
+        assert!(task
             .evidence
             .iter()
             .all(|i| i.class == DataClass::Sensitive));
-        assert_eq!(high.evidence[0].note, "");
-        let irreversible = Card::from_view(
-            &view(&[]),
-            &body(Stakes::Low, false),
-            &none,
-            &starter(),
-            &cfg,
-        );
-        assert_eq!(irreversible.accept_at, cfg.accept_at_strict);
-        assert_eq!(irreversible.class, DataClass::Internal);
+        assert_eq!(task.evidence[0].note, "note 20");
+        let plain = Card::from_view(&view(&[], 8), &body(Stakes::Low, false), &starter());
+        assert_eq!(plain.class, DataClass::Internal);
     }
 
     #[test]

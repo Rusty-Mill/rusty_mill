@@ -1504,3 +1504,55 @@ fn confined_golden_run_passes_and_reads_only_signed_fixtures() {
     println!("BBP_ACCEPTANCE PASS golden-confined");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `bbp why --claim` (#599): the claim's replay as JSON, `--at` cuts it, and
+/// an unknown claim or a bad flag pair is refused by name.
+#[test]
+fn why_replays_one_claim_and_names_the_rule() {
+    let dir = tempdir("why");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "flag", true);
+    cited(&dir, "b", c, 3);
+    cited(&dir, "a", c, 3);
+    let d = dir.to_str().unwrap();
+    let why = |extra: &[&str]| {
+        let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["why", "--dir", d, "--task", "C1"])
+            .args(extra)
+            .output()
+            .expect("run bbp");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let id = c.to_string();
+    let (ok, out, err) = why(&["--claim", &id]);
+    assert!(ok, "{err}");
+    let v: Value = rusty_serde::json::from_str(&out).unwrap();
+    let steps = match &v["steps"] {
+        Value::Seq(s) => s.clone(),
+        other => panic!("no steps: {other:?}"),
+    };
+    assert_eq!(steps.len(), 4, "{out}");
+    assert_eq!(steps[0]["change"].as_str(), Some("Posted"), "{out}");
+    assert!(
+        out.contains(r#""AcceptLine":{"accept_at":8,"support_authors":2}"#),
+        "{out}"
+    );
+    assert_eq!(steps[3]["status"].as_str(), Some("Accepted"), "{out}");
+
+    let at = steps[1]["rev"].as_u64().unwrap().to_string();
+    let (ok, cut, err) = why(&["--claim", &format!("msg:{id}"), "--at", &at]);
+    assert!(ok, "{err}");
+    assert_eq!(cut.matches("\"rev\":").count(), 2, "{cut}");
+
+    let (ok, _, err) = why(&["--claim", "999"]);
+    assert!(!ok && err.contains("no claim msg:999"), "{err}");
+    let (ok, _, err) = why(&["--claim", &id, "--turn", "1"]);
+    assert!(!ok && err.contains("exclusive"), "{err}");
+    let (ok, _, err) = why(&["--at", "3"]);
+    assert!(!ok && err.contains("--at needs --claim"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
