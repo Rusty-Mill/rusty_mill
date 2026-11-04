@@ -8,11 +8,11 @@
 //!   drop), at least 1 while the claim is open. A claim past its accept
 //!   line can still be open (authors, grounding, a holdout run), so it
 //!   keeps a floor rather than starving.
-//! - **Stakes**: [`Stakes::factor`], the ratio budgets use (D67).
-//! - **Reversibility**: 1, or [`IRREVERSIBLE`] (D67).
+//! - **Stakes**: [`Stakes::factor`], the ratio budgets use (D71).
+//! - **Reversibility**: 1, or [`IRREVERSIBLE`] (D71).
 //! - **Dependents**: 1 + open claims that depend on this one, directly or
 //!   through others, capped at [`DEPENDENTS_CAP`].
-//! - **Cost**: 1 + this claim's jobs in flight (D68), + [`UNBUILT`] when no
+//! - **Cost**: 1 + this claim's jobs in flight (D72), + [`UNBUILT`] when no
 //!   candidate names it. A question is never built, so it never pays
 //!   [`UNBUILT`]: its proposals are what make candidates. Today's round
 //!   runs its jobs one at a time and none is in flight when it picks, so
@@ -28,7 +28,7 @@ use rusty_bbp::{ClaimStatus, MsgId};
 use crate::card::Card;
 use crate::schedule::{is_question, State};
 
-/// The reversibility weight of an irreversible claim (D67).
+/// The reversibility weight of an irreversible claim (D71).
 pub const IRREVERSIBLE: u64 = 2;
 /// The dependents term never exceeds this.
 pub const DEPENDENTS_CAP: u64 = 8;
