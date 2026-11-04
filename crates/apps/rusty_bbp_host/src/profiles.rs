@@ -180,11 +180,18 @@ impl ProfileSet {
     /// `sh -c` command line counts too.
     fn check_erosion_base(&self, p: &Profile) -> Result<(), String> {
         let words: Vec<&str> = p.args.iter().flat_map(|a| a.split_whitespace()).collect();
-        let base = words
+        let bases: Vec<&str> = words
             .windows(2)
-            .find(|w| w[0] == "--base")
+            .filter(|w| w[0] == "--base")
             .map(|w| w[1])
-            .ok_or("the erosion profile names no --base commit")?;
+            .collect();
+        // One base only: `erosion` refuses a repeated flag, and the open must
+        // validate the base the run will use.
+        let base = match bases[..] {
+            [base] => base,
+            [] => return Err("the erosion profile names no --base commit".into()),
+            _ => return Err("the erosion profile names --base more than once".into()),
+        };
         if !is_commit_id(base) {
             return Err(format!("--base {base:?} is not a full commit id"));
         }
@@ -448,6 +455,13 @@ mod tests {
                 "full commit",
             ),
             (pinned, "pinned baseline"),
+            (
+                erosion_set(&format!(
+                    "check --base {c} --base {} --report-only",
+                    "f".repeat(40)
+                )),
+                "more than once",
+            ),
         ] {
             assert!(bad.check_erosion().is_err_and(|e| e.contains(why)), "{why}");
         }

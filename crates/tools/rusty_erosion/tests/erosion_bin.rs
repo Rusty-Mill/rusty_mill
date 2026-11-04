@@ -177,3 +177,33 @@ fn measurement_errors_never_block_report_only() {
     assert_eq!(repo.erosion(&enforcing(missing)).status.code(), Some(2));
     assert_eq!(repo.erosion(&["check"]).status.code(), Some(2));
 }
+
+#[test]
+fn a_nested_working_directory_measures_the_same_whole_tree() {
+    let repo = Repo::new("nested");
+    let base = repo.head();
+    repo.write("src/b.rs", PASTED);
+    let root = stdout(&repo.erosion(&["check", "--base", &base, "--report-only"]));
+    let nested = Command::new(env!("CARGO_BIN_EXE_erosion"))
+        .args(["check", "--base", &base, "--report-only"])
+        .current_dir(repo.dir.join("src"))
+        .output()
+        .expect("run erosion");
+    assert_eq!(stdout(&nested), root);
+    assert!(root.contains("\"candidate\":10000"), "{root}");
+    let enforced = Command::new(env!("CARGO_BIN_EXE_erosion"))
+        .args(enforcing(&base))
+        .current_dir(repo.dir.join("src"))
+        .output()
+        .expect("run erosion");
+    assert_eq!(enforced.status.code(), Some(1), "{}", stdout(&enforced));
+}
+
+#[test]
+fn changed_rust_that_is_not_utf8_is_reported_unmeasured() {
+    let repo = Repo::new("utf8");
+    let base = repo.head();
+    std::fs::write(repo.dir.join("src/bad.rs"), b"fn a() { \xff }\n").expect("write");
+    let line = stdout(&repo.erosion(&["check", "--base", &base, "--report-only"]));
+    assert!(line.contains("\"unmeasured\":[\"src/bad.rs\"]"), "{line}");
+}

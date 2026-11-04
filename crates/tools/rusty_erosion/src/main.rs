@@ -75,8 +75,15 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut base = None;
     let mut report_only = false;
     let (mut conc, mut dup) = (None, None);
+    let mut seen: Vec<&str> = Vec::new();
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
+        // A repeated flag is ambiguous: the host validates one `--base`, so
+        // the binary must not run another (D82).
+        if seen.contains(&flag.as_str()) {
+            return Err(format!("{flag} given more than once"));
+        }
+        seen.push(flag);
         let mut value = || it.next().cloned().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
             "--base" => base = Some(value()?),
@@ -115,6 +122,12 @@ fn is_commit_id(s: &str) -> bool {
 /// Measures both trees; returns the JSON line and whether the deltas are
 /// within the limits (true when there are none).
 fn check(opts: &Options) -> Result<(String, bool), String> {
+    // Every git and file path below is relative to the repository root, so
+    // work from there wherever the profile was started.
+    let top = git(&["rev-parse", "--show-toplevel"])?;
+    let top = String::from_utf8(top).map_err(|_| "repository root is not UTF-8".to_string())?;
+    std::env::set_current_dir(top.trim_end_matches('\n'))
+        .map_err(|e| format!("repository root: {e}"))?;
     git(&[
         "rev-parse",
         "--verify",
@@ -137,9 +150,12 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
     cand_unmeasured.retain(|p| !changed.contains(p));
     cand_unmeasured.extend(unmeasured(&cand_files));
     let cand = Report::build(cand_measures.into_values().collect(), cand_unmeasured);
+    // Changed code it cannot measure: another language (deleted included),
+    // or Rust that is not UTF-8.
+    let unreadable = unmeasured(&cand_files);
     let changed_unmeasured: Vec<&String> = changed
         .iter()
-        .filter(|p| classify(p) == FileClass::Unmeasured)
+        .filter(|p| classify(p) == FileClass::Unmeasured || unreadable.contains(p))
         .collect();
     let delta = base.delta(&cand);
     let within = opts.limits.is_none_or(|l| {
@@ -441,6 +457,8 @@ mod tests {
             format!("check --base {C} --report-only --max-duplication-bp 1"),
             "check --base HEAD --report-only".to_string(),
             format!("check --base {C} --report-only --oops"),
+            format!("check --base {C} --base {} --report-only", "f".repeat(40)),
+            format!("check --base {C} --report-only --report-only"),
             "measure".to_string(),
         ] {
             assert!(parse_args(&args(&bad)).is_err(), "{bad}");
