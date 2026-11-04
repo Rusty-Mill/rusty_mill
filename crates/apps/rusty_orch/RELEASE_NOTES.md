@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## The lens runner can run a round
+**2026-11-04**
+
+- The lens runner's core can now run one full round (#594): pick the
+  jobs the rules allow, ask each lens's providers, post the answers to
+  the board and remember what happened. It is not wired to a command or
+  to BBP yet.
+
 ## The lens meter is saved in the state directory
 **2026-11-04**
 

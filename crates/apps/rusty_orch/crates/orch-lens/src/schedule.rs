@@ -24,7 +24,7 @@ use orch_core::AgentId;
 use rusty_bbp::{ClaimStatus, MsgId, PrincipalId};
 
 use crate::card::Card;
-use crate::config::{Lens, LensConfig};
+use crate::config::{Lens, LensConfig, Tools};
 use crate::context::Phase;
 use crate::post::{Allowed, ClaimRule, EvidenceRule};
 use crate::tier::route;
@@ -75,6 +75,8 @@ pub struct Job {
     pub suffix: Option<&'static str>,
     /// Foreign evidence on the card when the job was made.
     pub foreign_seen: usize,
+    /// The lens's tool access, which picks the adapter variant.
+    pub tools: Tools,
 }
 
 /// A job the rules allow but no provider can take. For a proposal slot
@@ -167,6 +169,7 @@ pub fn schedule(config: &LensConfig, cards: &[Card], state: &State) -> (Vec<Job>
                 jobs.push(Job {
                     allowed: allowed(lens, card, slot),
                     foreign_seen: foreign(card, &lens.id),
+                    tools: lens.tools,
                     key,
                     phase,
                     providers,
@@ -405,6 +408,16 @@ impl State {
                     q.rebel_failures += 1;
                 }
             }
+        }
+    }
+
+    /// Drop a job that ended for a reason of the runner's, not the
+    /// provider's (a ceiling, an unsaved meter, a board that refused the
+    /// post): nothing is counted, and the rules ask for it again.
+    pub fn abandon(&mut self, job: &Job) {
+        self.in_flight.remove(&job.key);
+        if let Some(q) = self.questions.get_mut(&job.key.claim) {
+            q.running.remove(&job.key.slot);
         }
     }
 
@@ -689,6 +702,24 @@ mod tests {
         st.answered(&slot_job(&jobs, Slot::Rebel), id("codex"), 1, 0);
         st.failed(&slot_job(&jobs, Slot::Propose(0)));
         assert!(arch_jobs(&cfg, &q, &st).is_empty(), "every slot settled");
+    }
+
+    #[test]
+    fn an_abandoned_slot_is_asked_again_and_counts_nothing() {
+        let cfg = config();
+        let q = [question(3, &[])];
+        let mut st = State::default();
+        let jobs = arch_jobs(&cfg, &q, &st);
+        for j in &jobs {
+            st.start(j);
+        }
+        let rebel = slot_job(&jobs, Slot::Rebel);
+        st.abandon(&rebel);
+        let seen = &st.questions[&MsgId(3)];
+        assert_eq!(seen.rebel_failures, 0);
+        assert!(!seen.running.contains_key(&Slot::Rebel));
+        assert!(seen.tried.is_empty());
+        assert_eq!(arch_jobs(&cfg, &q, &st), [rebel]);
     }
 
     #[test]
