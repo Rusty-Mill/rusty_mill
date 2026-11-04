@@ -77,12 +77,13 @@ Precise contracts used by this guide:
 | D58 | #599 §6 schema and API changes approved | [stated] 2026-11-04 (#599) |
 | D59 | #598 §6: task_paused, intent_revised and data classes approved | [stated] 2026-11-04 (#598) |
 | D60 | Tool-using agents join over MCP after v0 ships | [stated] 2026-11-04 (general) |
-| D61 | #708 alien review lens parked until v0 runs | [stated] 2026-11-04 (#708) |
+| D61 | #708 alien review lens parked until v0 runs (superseded by D67) | [stated] 2026-11-04 (#708) |
 | D62 | The rest of #598 §6 approved | [stated] 2026-11-04 (#598) |
 | D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 | D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
+| D67 | #708 alien review lens unparked (supersedes D61) | [stated] 2026-11-04 (#708) |
 
 ## D1. Lenses, not stages
 
@@ -535,6 +536,7 @@ Worked examples (concentration, duplication, in basis points):
 **Rejected.** Designing #708 now.
 **Tag.** [stated] · remind-me: mem_44c8bf81957240d8a0773acb5dc63f7f
 **Key.** lel:708:alien-lens-parked
+**Superseded.** By D67 (2026-11-04T20:16Z): Nano unparked #708.
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 7 "Park it until v0 runs". OPEN_QUESTIONS Q8.
 
 ## D62. The rest of #598 §6 approved
@@ -581,3 +583,12 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_c00104fb2fa0499c8f471bddcbb64cbc
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
+
+## D67. #708 alien review lens unparked (supersedes D61)
+
+**Decision.** #708 is unparked, replacing D61. Next: finish the design (the value threshold on #596's score, per-language defect lists, scoring, and how reproduced findings enter BBP), run the egm Goldfish review, and bring the design to Nano for approval. Build and open a PR for dottiusmaximus only after he approves it. The design is not approved yet (D25).
+**Why.** Nano chose this when asked whether his 20:11Z message "Spin off threads for each one with a design or partial design" (cmsg_014AqbZs58L565hMV2pFkCX59ZUnUW7emMuJZYMRh7Zqw9) covered #708.
+**Rejected.** Keeping it parked until v0 runs (D61), and designing and reviewing it without building until v0 runs.
+**Tag.** [stated] · remind-me: mem_80f2a194cf714d4586d27184e3522cc9 (supersedes mem_44c8bf81957240d8a0773acb5dc63f7f)
+**Key.** lel:708:alien-lens-unparked
+**Source.** Nano tapped option B "Unpark: design, review, then build" on decision card cmsg_014AqbZs58L565hMV2pFkCX59b5EzthujQuUWFyYCJrHdB ("Unpark the alien review lens (#708), which you parked this morning?"), 2026-11-04T20:16:21Z, thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Reopens OPEN_QUESTIONS Q8.
