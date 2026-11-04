@@ -105,8 +105,9 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
     "Concur"):* the gate is moot; the ConPTY review a year after Phase B stays. The card itself
     stays open (Backlog) for its real remainder: Phase 1's acceptance suite on Windows on our host,
     lifting the Linux-only cfg on the 4 MiB reattach test if it passes. Nano to restate on this PR.
-11. **C33 force-disconnect.** Restrict to the session's owner before shared mode?
-    *Recommend yes, as the first step of arc 1.*
+11. **C33 force-disconnect.** *Answered (Nano, project thread, 2026-11-04 12:25Z: "Concur"):*
+    restricted to the session's owner before shared mode, as the first step of arc 1 (card 507).
+    Nano to restate on this PR.
 12. **Clean room across the merged project.** Does "contamination is not a concern, licence
     compatibility matters" (rusty_conhost) extend to rusty_mux and the core? *Recommend yes,
     with the MIT notice rule.*
