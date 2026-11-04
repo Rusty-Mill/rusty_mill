@@ -7193,6 +7193,7 @@ version = "0.1.0"
 dependencies = [
  "orch-core",
  "orch-dispatch",
+ "orch-lens",
  "rusty_multimodal_db_engine",
  "serde",
 ]

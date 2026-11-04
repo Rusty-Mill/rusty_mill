@@ -466,3 +466,68 @@ fn hosted_handle_gate_fence_and_charge_survive_a_store_reopen() {
     assert_eq!(loaded.ledger.calls(), 1);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+mod meters {
+    use orch_lens::meter::{Ceilings, Meter, Snapshot};
+    use orch_store::{Store, StoreError};
+
+    use super::dir;
+
+    const CEIL: Ceilings = Ceilings {
+        experiment: 100,
+        task: 50,
+        task_calls: 10,
+    };
+
+    fn snapshot() -> Snapshot {
+        let mut m = Meter::new(CEIL, 3);
+        let t = m.reserve("task-1", 4).expect("room");
+        m.settle(t, 2);
+        let _held = m.reserve("task-1", 5).expect("room");
+        m.snapshot()
+    }
+
+    #[test]
+    fn a_meter_survives_reopening_and_restores_held_reservations_as_spent() {
+        let d = dir("meter_reopen");
+        let snap = snapshot();
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert_eq!(s.load_meter("dedup").expect("load"), None);
+            s.save_meter("dedup", &snap).expect("save");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let loaded = s.load_meter("dedup").expect("load").expect("saved");
+        assert_eq!(loaded, snap);
+        let m = Meter::restore(CEIL, &loaded);
+        assert_eq!((m.task_spent("task-1"), m.calls("task-1")), (2 + 5, 2));
+        assert_eq!(m.reserved(), 0);
+        assert_eq!(s.load_meter("other").expect("load"), None, "per experiment");
+    }
+
+    #[test]
+    fn a_later_save_replaces_the_meter() {
+        let d = dir("meter_replace");
+        let mut s = Store::open(&d).expect("open");
+        s.save_meter("dedup", &snapshot()).expect("first");
+        let mut m = Meter::restore(CEIL, &snapshot());
+        let t = m.reserve("task-2", 1).expect("room");
+        m.settle(t, 1);
+        s.save_meter("dedup", &m.snapshot()).expect("second");
+        let loaded = s.load_meter("dedup").expect("load").expect("saved");
+        assert_eq!(loaded, m.snapshot());
+    }
+
+    #[test]
+    fn a_meter_listing_a_task_twice_is_refused() {
+        let d = dir("meter_dupe");
+        let mut s = Store::open(&d).expect("open");
+        let bad = Snapshot {
+            experiment_spent: 0,
+            tasks: vec![("t".to_owned(), 1, 1), ("t".to_owned(), 2, 2)],
+            reserved: Vec::new(),
+        };
+        s.save_meter("dedup", &bad).expect("save");
+        assert!(matches!(s.load_meter("dedup"), Err(StoreError::Corrupt(_))));
+    }
+}
