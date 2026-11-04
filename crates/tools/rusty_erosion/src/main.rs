@@ -151,6 +151,12 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
     let mut cand_unmeasured = unmeasured(&base_files);
     cand_unmeasured.retain(|p| !changed.contains(p));
     cand_unmeasured.extend(unmeasured(&cand_files));
+    cand_unmeasured.extend(
+        changed
+            .iter()
+            .filter(|p| classify(p) == FileClass::Unmeasured)
+            .cloned(),
+    );
     let cand = Report::build(cand_measures.into_values().collect(), cand_unmeasured);
     // Rust that is not UTF-8 in either snapshot: the base tree, or a
     // changed candidate file (unchanged ones are the base's bytes).
@@ -247,20 +253,22 @@ fn tree_paths(base: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// The changed files' working-tree contents; deleted ones are left out.
-/// Only Rust is read: another language is just listed as `unmeasured` (D45),
-/// so its contents, or a failure to read them, never decide the result.
+/// The changed Rust files' working-tree contents; deleted ones are left out.
+/// Other languages are not touched at all: they are only listed as
+/// `unmeasured` from the changed paths (D45), so nothing about them, not even
+/// a failed lookup, decides the result.
 fn worktree(changed: &BTreeSet<String>) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut out = Vec::new();
-    for path in changed.iter() {
-        let read = match classify(path) {
-            FileClass::Ignored => continue,
-            FileClass::Unmeasured => std::fs::symlink_metadata(path).map(|_| Vec::new()),
-            FileClass::Rust => std::fs::read(path),
-        };
-        match read {
+    for path in changed.iter().filter(|p| classify(p) == FileClass::Rust) {
+        match std::fs::read(path) {
             Ok(bytes) => out.push((path.clone(), bytes)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            // Deleted, unless the path itself is still there (a dangling
+            // symlink), which is Rust it cannot read: fail closed.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(path).is_ok() {
+                    return Err(format!("{path}: {e}"));
+                }
+            }
             Err(e) => return Err(format!("{path}: {e}")),
         }
     }

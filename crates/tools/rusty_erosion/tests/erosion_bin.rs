@@ -44,6 +44,54 @@ fn an_unreadable_unsupported_file_never_blocks_enforcing() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn an_unsupported_path_under_a_replaced_directory_never_blocks_enforcing() {
+    let repo = Repo::new("langdir");
+    std::fs::create_dir_all(repo.dir.join("scripts")).expect("mkdir");
+    repo.write("scripts/tool.py", "print(1)\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "--quiet",
+        "-m",
+        "py",
+    ]);
+    let base = repo.head();
+    // `scripts/tool.py` now cannot even be looked up (NotADirectory).
+    std::fs::remove_dir_all(repo.dir.join("scripts")).expect("rm");
+    repo.write("scripts", "not a dir\n");
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"unmeasured\":[\"scripts/tool.py\"]"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_rust_symlink_is_not_a_deletion() {
+    let repo = Repo::new("dangle");
+    let base = repo.head();
+    std::os::unix::fs::symlink("nowhere.rs", repo.dir.join("src/b.rs")).expect("symlink");
+    let enforced = repo.erosion(&enforcing(&base));
+    assert_eq!(enforced.status.code(), Some(2), "{}", stdout(&enforced));
+    assert!(
+        stdout(&enforced).contains("src/b.rs"),
+        "{}",
+        stdout(&enforced)
+    );
+    std::fs::remove_file(repo.dir.join("src/a.rs")).expect("rm");
+    std::os::unix::fs::symlink("nowhere.rs", repo.dir.join("src/a.rs")).expect("symlink");
+    assert_eq!(repo.erosion(&enforcing(&base)).status.code(), Some(2));
+}
+
 struct Repo {
     dir: PathBuf,
 }
