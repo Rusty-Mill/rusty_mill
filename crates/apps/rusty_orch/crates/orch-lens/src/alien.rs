@@ -262,14 +262,30 @@ pub fn unavailability(s: &Suspect, notes: &[String], list: &[Mechanism]) -> u8 {
 }
 
 /// Whether `note` names `site` whole: `store::write` does not match inside
-/// `store::write_all` or `my_store::write`, nor `src/a.rs` inside `x/src/a.rs`.
+/// `store::write_all`, `my_store::write` or `store::write::inner`, nor
+/// `src/a.rs` inside `x/src/a.rs`, `src/a.rs.old.rs` or `src/a.rs/b.rs`.
+/// Prose punctuation and a `:line` suffix still match.
 fn names(note: &str, site: &str) -> bool {
-    let word = |c: char| c.is_alphanumeric() || c == '_';
     note.match_indices(site).any(|(at, _)| {
         let before = note[..at].chars().next_back();
-        let after = note[at + site.len()..].chars().next();
-        !before.is_some_and(|c| word(c) || c == '/') && !after.is_some_and(word)
+        let after = &note[at + site.len()..];
+        !before.is_some_and(|c| word(c) || c == '/') && !continues(after)
     })
+}
+
+fn word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Whether `rest` carries on the identifier or path just before it.
+fn continues(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), _) if word(c) || c == '/' => true,
+        (Some('.'), Some(c)) => word(c),
+        (Some(':'), Some(':')) => true,
+        _ => false,
+    }
 }
 
 /// The suspects to hunt: sorted by unavailability, then coherence (both
@@ -539,7 +555,11 @@ mod tests {
             ("see Store::Write, line 3", "store::write", true),
             ("(crate::store::write)", "store::write", true),
             ("src/a.rs: fine.", "src/a.rs", true),
+            ("src/a.rs:42 is fine", "src/a.rs", true),
             ("x/src/a.rs is fine", "src/a.rs", false),
+            ("src/a.rs.old.rs is fine", "src/a.rs", false),
+            ("src/a.rs/other.rs is fine", "src/a.rs", false),
+            ("store::write::inner is fine", "store::write", false),
             ("src/a.rsx is fine", "src/a.rs", false),
         ] {
             let note = vec![note.to_owned()];
