@@ -380,7 +380,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -13906,7 +13905,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "libc 0.2.189",
  "pin-project-lite",
  "tokio",
