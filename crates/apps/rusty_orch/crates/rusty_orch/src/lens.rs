@@ -8,6 +8,7 @@
 //! - [`bbp`]: one `bbp mcp` session per lens, its view of the board and
 //!   its way to post.
 //! - [`check`]: `rusty_orch lens check`, a dry run of the above.
+//! - [`run`]: `rusty_orch lens run`, passes over every lens until quiet.
 //! - [`container`]: the dedicated container a host-cleared provider runs in.
 
 pub mod assertions;
@@ -15,3 +16,4 @@ pub mod bbp;
 pub mod check;
 pub mod container;
 pub mod registry;
+pub mod run;

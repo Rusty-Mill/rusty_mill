@@ -203,3 +203,24 @@ fn no_last_message_is_transient() {
     let err = a.ask(&question()).expect_err("refused");
     assert!(matches!(err, ClassifiedError::Transient(_)), "{err:?}");
 }
+
+#[test]
+fn a_raw_question_returns_the_text_and_refuses_an_empty_one() {
+    let raw = orch_lens::Question {
+        shape: orch_lens::Shape::Raw,
+        ..question()
+    };
+    let mut a = agent(replying("{\"probe\": null}", EVENTS));
+    let answer = a.ask(&raw).expect("answers");
+    assert_eq!(
+        answer.reply,
+        orch_lens::Reply::Raw("{\"probe\": null}".to_owned())
+    );
+
+    let mut a = agent(replying("``` ```", EVENTS));
+    let err = a.ask(&raw).expect_err("refused");
+    assert!(
+        matches!(&err, ClassifiedError::Permanent(m) if m.0.contains("reply is empty")),
+        "{err:?}"
+    );
+}

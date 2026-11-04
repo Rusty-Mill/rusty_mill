@@ -11,10 +11,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use agentgateway_config::Config;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
-use rmcp::{
-    ServiceExt, model::CallToolRequestParams, service::RunningService,
-    transport::StreamableHttpClientTransport,
-};
 use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
 
@@ -81,10 +77,11 @@ fn mock_server() -> String {
 }
 
 mod common;
+use common::mcp;
 use common::{free_port, yaml_path};
 
 struct Harness {
-    client: RunningService<rmcp::RoleClient, ()>,
+    client: mcp::Client,
     shutdown: CancellationToken,
     /// Holds the JWKS on disk for as long as the gateway is running.
     _jwks: Option<tempfile::TempDir>,
@@ -171,17 +168,13 @@ binds:
             .expect("gateway should bind");
 
         let uri = format!("http://127.0.0.1:{port}/mcp");
-        let mut config =
-            rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
-                uri,
-            );
-        if let Some(bearer) = bearer {
-            // The builder adds the `Bearer ` prefix itself.
-            config = config.auth_header(bearer);
-        }
-        let transport = StreamableHttpClientTransport::with_client(reqwest::Client::new(), config);
+        let mut config = mcp::HttpConfig::new(uri);
+        // Sent as `Authorization: Bearer <token>`.
+        config.bearer_token = bearer.map(str::to_owned);
 
-        let client = ().serve(transport).await.expect("client should complete the MCP handshake");
+        let client = mcp::connect_with(config)
+            .await
+            .expect("client should complete the MCP handshake");
 
         Harness {
             client,
@@ -193,7 +186,7 @@ binds:
     async fn tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .client
-            .list_all_tools()
+            .list_tools()
             .await
             .expect("tools/list should succeed")
             .into_iter()
@@ -206,24 +199,19 @@ binds:
     async fn call(&self, name: &str) -> Result<String, String> {
         let result = self
             .client
-            .call_tool(CallToolRequestParams::new(name.to_string()))
+            .call_tool(name, None)
             .await
             .map_err(|err| err.to_string())?;
-        Ok(result
-            .content
-            .iter()
-            .filter_map(|block| block.as_text().map(|t| t.text.clone()))
-            .collect::<Vec<_>>()
-            .join(""))
+        Ok(mcp::text(&result.content))
     }
 
     async fn stop(self) {
-        let _ = self.client.cancel().await;
+        let _ = self.client.close().await;
         self.shutdown.cancel();
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_allow_rule_permits_only_what_it_names() {
     let harness = Harness::start(&[r#"- 'mcp.tool.name == "echo"'"#], None).await;
 
@@ -237,7 +225,7 @@ async fn an_allow_rule_permits_only_what_it_names() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rule_is_enforced_on_the_call_not_only_the_listing() {
     // The failure this pins down: hiding a tool from the catalogue while
     // leaving it callable is strictly worse than not hiding it, because the
@@ -257,7 +245,7 @@ async fn a_rule_is_enforced_on_the_call_not_only_the_listing() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rule_matches_the_unqualified_name() {
     // `alpha_echo` is what the client sees; `echo` is what the rule sees. A
     // rule written against the federated name would never fire, and the route
@@ -277,7 +265,7 @@ async fn a_rule_matches_the_unqualified_name() {
     unqualified.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rule_can_name_the_target() {
     let harness = Harness::start(&[r#"- 'mcp.tool.target == "alpha"'"#], None).await;
 
@@ -291,7 +279,7 @@ async fn a_rule_can_name_the_target() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_deny_rule_alone_permits_everything_else() {
     let harness = Harness::start(&[r#"- deny: 'mcp.tool.name == "delete"'"#], None).await;
 
@@ -306,7 +294,7 @@ async fn a_deny_rule_alone_permits_everything_else() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn deny_beats_allow() {
     let harness = Harness::start(
         &["- 'true'", r#"- deny: 'mcp.tool.name == "delete"'"#],
@@ -321,7 +309,7 @@ async fn deny_beats_allow() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_claim_from_the_verified_token_reaches_a_rule() {
     // The wiring this file exists for: `jwt.sub` resolving to a claim the
     // gateway itself verified, not to anything the caller set.
@@ -338,7 +326,7 @@ async fn a_claim_from_the_verified_token_reaches_a_rule() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rule_refuses_a_caller_whose_claim_does_not_match() {
     let bearer = token(json!({"sub": "someone-else"}));
     let harness = Harness::start(
@@ -356,7 +344,7 @@ async fn a_rule_refuses_a_caller_whose_claim_does_not_match() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_nested_claim_resolves() {
     let bearer = token(json!({"sub": "u", "nested": {"key": "value"}}));
     let harness = Harness::start(&[r#"- 'jwt.nested.key == "value"'"#], Some(&bearer)).await;
@@ -367,7 +355,7 @@ async fn a_nested_claim_resolves() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_require_refuses_when_there_is_no_token_to_read() {
     // No `jwtAuth` on this route, so `jwt` never resolves. A `require` that
     // cannot be evaluated refuses -- which is the reason to prefer it to
@@ -380,7 +368,7 @@ async fn a_require_refuses_when_there_is_no_token_to_read() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rule_that_does_not_compile_stops_the_gateway_booting() {
     // Rather than skipping the rule, which would turn a typo in an allow rule
     // into a route that serves nothing and a typo in a deny rule into one that
@@ -415,7 +403,7 @@ binds:
     assert!(err.contains("rules[0]"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rule_naming_two_modes_is_rejected() {
     // `{allow: ..., deny: ...}` has no single meaning, and picking one would
     // quietly enforce something nobody wrote.
