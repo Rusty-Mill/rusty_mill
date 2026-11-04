@@ -18,9 +18,9 @@ remind-me tag: `let-em-loose`.
 
 ## Look, in this order
 1. The repo:
-   - `LEL/DECISIONS.md` (D1 onward; the only decision log), and the
-     provenance note and "Still disputed on #1384" list in
-     `LEL/handoff/DECISIONS.md`,
+   - `LEL/DECISIONS.md` (D1 onward; the only decision log) and its
+     § Authority, provenance and current contracts, plus the provenance
+     note and the #1449 corrections list in `LEL/handoff/DECISIONS.md`,
    - `LEL/handoff/QA.md`, `LEL/handoff/OPEN_QUESTIONS.md`, `LEL/handoff/SPEC.md`,
      and any `LEL/handoff/RESOLVED-*.md` staged for you to merge,
    - `LEL/QUESTIONS.md`, `LEL/SPEC.md`, `LEL/README.md` (README is the
@@ -41,8 +41,8 @@ The design chat share link in `LEL/handoff/SPEC.md` doesn't render; never cite i
 
 ## Precedence
 - **Behaviour:** the merged, accepted contract (code, the merged addendum,
-  ADRs) beats any summary in DECISIONS.md, QUESTIONS.md or QA.md. Never answer
-  a row on the disputed list from that row alone.
+  ADRs) beats any summary in DECISIONS.md, QUESTIONS.md or QA.md. For a row
+  #1449 corrected, check the contract it links before answering from the row.
 - **Decisions:** the newest *attributable* Nano decision on the point wins:
   a card comment recording Nano's answer, a GitHub comment by `baileyrd`, a
   remind-me memory or RESOLVED entry that names where and when Nano said it.

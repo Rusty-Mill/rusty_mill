@@ -35,7 +35,7 @@ Nano writes intent; critic lenses on different models post claims and evidence t
 ## Current state (2026-11-03)
 - #593, #597: done. #595: all slices merged; follow-ups #703 (decision ids), Remediate diffstat deferred.
 - #594: building. Merged through #1442 (lens call step); next is the `rusty_orch lens` subcommand. Paid providers disabled; v0 is flat-rate and local only.
-- #704 erosion gate: approved, not built. D42's expiry and D44's zero-floor gaps were settled on 2026-11-03 (QA.md § Erosion gate); the corrected rows are in #1449. #596, #598, #599, #600: not built. Their designs are approved except the #598 §6 and #599 §6 schema/API items (approval not recorded for #599) and the #600 builder-session design, which still need Nano's approval (OPEN_QUESTIONS Q3, Q5, Q7).
+- #704 erosion gate: approved, not built. D42's expiry and D44's zero-floor gaps were settled on 2026-11-03 (QA.md § Erosion gate); the corrected rows landed in #1449. #596, #598, #599, #600: not built. Their designs are approved except the #598 §6 and #599 §6 schema/API items (approval not recorded for #599) and the #600 builder-session design, which still need Nano's approval (OPEN_QUESTIONS Q3, Q5, Q7).
 
 ## Acceptance for this pack
 - [ ] The expert answers erosion-gate questions from D41–D45 with a cited source.

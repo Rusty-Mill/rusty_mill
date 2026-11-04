@@ -303,6 +303,30 @@ pub fn lock_path(dir: &Path, task: &TaskId) -> PathBuf {
     task_dir(dir, "mod", task).with_extension("lock")
 }
 
+/// Hold off evidence admission for `task` until the returned file is dropped.
+/// A capped first start holds it from its log check through writing the
+/// marker, and `bbp human extend` from its marker check through its append,
+/// so neither decides on a state the other is about to change. Both hold it
+/// briefly, so it blocks rather than refuses.
+///
+/// # Errors
+/// When the lock file cannot be created or locked.
+pub fn evidence_admission(dir: &Path, task: &TaskId) -> Result<File, String> {
+    let path = task_dir(dir, "mod", task).with_extension("admit");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let at = |e: std::io::Error| format!("{}: {e}", path.display());
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(at)?;
+    file.lock().map_err(at)?;
+    Ok(file)
+}
+
 /// Whether nothing `task`'s moderators started still runs: no moderator,
 /// no runner, and no recorded harness group with a live member. While a
 /// group's holder lives its members are killed here; once it is gone they
@@ -1091,8 +1115,21 @@ fn enforce_cap<S: Store>(
 /// its segment ([`record_evidence_segment`]) before it acts on the task, so
 /// `bbp pairs` can see a resumed run and count it as failed.
 fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
+    // Held through the marker write, so an extend cannot land in between.
+    let _admission = evidence_admission(&cfg.dir, &cfg.task)?;
     let file = evidence_marker_path(&cfg.dir, &cfg.task);
-    let recorded = std::fs::read_to_string(&file).ok();
+    // Only a specific not-found means no marker: an unreadable one must not
+    // be taken for a fresh task and overwritten.
+    let recorded = match std::fs::read_to_string(&file) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(format!(
+                "moderator: refusing to start: cannot read the evidence marker {}: {e}",
+                file.display()
+            ))
+        }
+    };
     let Some(cap) = &cfg.cost_cap else {
         return match recorded {
             None => Ok(()),
@@ -1114,6 +1151,15 @@ fn check_evidence_marker(cfg: &Config) -> Result<(), String> {
                 .any(|e| matches!(e, Event::TurnGranted { .. }))
             {
                 return Err("moderator: refusing to start: this task already ran without a cap, so it is not an evidence run; open a new task for the run".into());
+            }
+            // An evidence run runs under the budget it was opened with: a run
+            // on an extended task would be a failed run in `bbp pairs`, so refuse it
+            // before anything is spent.
+            if events
+                .iter()
+                .any(|e| matches!(e, Event::BudgetExtended { .. }))
+            {
+                return Err("moderator: refusing to start: this task's budget was extended, so it is not an evidence run; open a new task for the run".into());
             }
             write_evidence_marker(&cfg.dir, &cfg.task, cap.usd, &cap.criteria_sha256)?;
         }

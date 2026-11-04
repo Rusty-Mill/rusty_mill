@@ -27,3 +27,47 @@ the paths. Until `rusty-term-design-expert.md` lands, GUI visual-design question
   the pack's DECISIONS.md or remind-me decisions yourself; one writer keeps each answer recorded once.
 - Non-blocking? Take the expert's recommendation, keep going, and let the expert add the question to
   the pack's OPEN_QUESTIONS.md.
+
+## Memory: rusty-remind-me
+
+Use RemindMe for relevant prior decisions and context when it is available through
+configured connections. Cross-surface access depends on those connections and any
+opt-in sync; this file does not enable sharing. Current repository instructions,
+source and review/merge safeguards take precedence over memory. Note conflicting
+or stale entries rather than treating them as authority.
+
+### Search first
+
+- Before work about Nano, this repository, a past decision or a named crate, PR or
+  issue, search available RemindMe tools with the relevant project, crate or ID.
+- If the tools are not visible, search for `remind_me` tools when tool discovery is
+  available. If the connection or tools remain unavailable, continue unrelated
+  work using repository evidence and report the missing context or unsaved checkpoint.
+
+### Save relevant decisions and facts
+
+- When a relevant durable fact or decision is learned, save a terse entry with
+  `remind_me_add` if available and permitted by the user's instructions. Use one
+  fact per entry; set category (`fact` or `preference`), `memory_type: decision`
+  for decisions, tags (project, crate, PR/issue IDs), entities and
+  `metadata.rationale` explaining why.
+- Include relevant PR activity (opened, merged, blocked and why), subject to the
+  same privacy and availability rules. Verify the saved result before reporting
+  a checkpoint as recorded.
+
+### Capture at the end
+
+- For a substantive session, use `remind_me_auto_capture` when available and
+  permitted, with a descriptive title, tags, available relevant dialogue and a
+  terse summary of topics, decisions, facts, action items and PR activity.
+- Honor explicit do-not-save requests. Exclude secrets, tokens, credentials and
+  unrelated sensitive personal information from all memory writes. Do not rely
+  on credential scrubbing to remove other sensitive details. Never reconstruct
+  unavailable dialogue or submit a blanket full conversation.
+- For any mutating memory call, including capture, verify the saved result. If
+  a timeout or connection failure leaves the outcome uncertain, check for the
+  saved entry before retrying. Retry once only when the write is known not to
+  have succeeded and the failure has been addressed. If success cannot be
+  determined, report the uncertainty and do not risk a duplicate write.
+- If saving is unavailable, continue unrelated work and report the unsaved
+  checkpoint without claiming it was captured.
