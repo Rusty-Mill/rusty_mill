@@ -695,3 +695,38 @@ fn a_hiding_harness_sees_a_filtered_copy_and_cannot_post_into_what_it_hides() {
     let _ = std::fs::remove_dir_all(&root);
     println!("BBP_ACCEPTANCE PASS filtered-view");
 }
+
+#[test]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn a_dry_run_reads_its_real_data_and_writes_only_its_plan() {
+    let root = root("dry_run").canonicalize().expect("canonical");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).expect("mkdir");
+    std::fs::write(data.join("a.csv"), "row\n").expect("write");
+    let script = r#"cat "$BBP_DATA_CRM/a.csv" > /dev/null || exit 7
+if echo x > "$BBP_DATA_CRM/forged" 2>/dev/null; then exit 8; fi
+if cat /etc/hostname > /dev/null 2>&1; then exit 9; fi
+printf '{"set":1}\n{"set":2}\n' > "$BBP_PLAN""#;
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["dry-run", "--name", "crm-fix", "--data"])
+        .arg(format!("crm={}", data.display()))
+        .arg("--work")
+        .arg(root.join("work"))
+        .args(["--", "/bin/sh", "-c", script])
+        .output()
+        .expect("bbp");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{said}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(said.contains("\"entries\":2"), "{said}");
+    assert!(
+        !said.contains("\"set\""),
+        "the plan itself is never printed: {said}"
+    );
+    assert!(!data.join("forged").exists());
+    let _ = std::fs::remove_dir_all(&root);
+    println!("BBP_ACCEPTANCE PASS dry-run");
+}

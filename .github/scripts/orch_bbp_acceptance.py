@@ -60,6 +60,8 @@ CASES = (
          "a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone"),
     Case("filtered-view", "rusty_bbp_host", ("--test", "confined_harness"),
          "a_hiding_harness_sees_a_filtered_copy_and_cannot_post_into_what_it_hides"),
+    Case("dry-run", "rusty_bbp_host", ("--test", "confined_harness"),
+         "a_dry_run_reads_its_real_data_and_writes_only_its_plan"),
     Case("session-confined", "rusty_bbp_host", ("--test", "confined_harness"),
          "a_confined_session_keeps_its_home_and_one_fresh_workspace_across_turns"),
     Case("holdout-confined", "rusty_bbp_host", ("--test", "claims_host"),
