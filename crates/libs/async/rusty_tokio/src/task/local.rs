@@ -14,10 +14,9 @@
 //! `wake()` -- is safe from any thread. Only the boxed future itself
 //! (behind a plain, non-atomic [`RefCell`]) is genuinely `!Send`, and it
 //! is *never* actually touched except from [`LocalTask::run`], which is
-//! only ever invoked from [`LocalSet::run_until`]'s own loop --
-//! [`LocalSet`] asserts (`bind_or_check_thread`) that every
-//! `spawn_local`/`run_until` call on it happens on the one thread that
-//! first used it. See the `unsafe impl Send + Sync for LocalTask` below
+//! only ever invoked from [`LocalSet::run_until`]'s own loop -- and
+//! [`LocalSet`] is `!Send + !Sync`, so that loop always runs on the
+//! thread that created the set. See the `unsafe impl Send + Sync for LocalTask` below
 //! for the exact safety argument -- the same "documented exclusivity
 //! invariant instead of relying on the type system alone" shape as
 //! `sync::Mutex`/`sync::RwLock`'s own `unsafe impl`s.
@@ -35,28 +34,29 @@
 //!   too (the same "a synchronous call blocks whatever thread invokes
 //!   it" caveat any nested `block_on` already has), just without the
 //!   scheduler-level pinning tokio offers.
-//! - No graceful-shutdown/task-count draining -- a `LocalSet` going out
-//!   of scope simply drops whatever's left in its queue (and thus their
-//!   still-boxed futures) without delivering a `JoinError` to any
-//!   `JoinHandle` still awaiting them, which then just hangs forever if
-//!   polled again. `Runtime` no longer behaves this way: it owns its
-//!   tasks in a registry (`OwnedTasks`) and cancels what is left at
-//!   shutdown. `LocalSet` tasks are not in that registry, so a
-//!   `spawn_local` task pending with no stored waker can still be
-//!   dropped early.
+//! - A `LocalSet` owns every task spawned on it in a registry
+//!   (`OwnedTasks`, as `Runtime` does; card #591) until the task
+//!   finishes, so a task pending with no waker stored anywhere stays
+//!   alive. Dropping the `LocalSet` cancels whatever is left: each
+//!   future is dropped on the dropping thread and its `JoinHandle`
+//!   resolves to a cancelled `JoinError`. A `spawn_local` after that is
+//!   cancelled straight away. There is no graceful draining: nothing
+//!   runs again once the set drops.
 
 use super::id::{self, CurrentTask};
 use super::join::{JoinHandle, JoinInner, Outcome};
+use super::owned::OwnedTasks;
 use super::state::{Begin, State, StateSnapshot};
 use super::TaskId;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::task::{Context, Poll, Wake, Waker};
-use std::thread::{self, ThreadId};
+use std::thread;
 use std::time::Duration;
 
 type LocalBoxFuture = Pin<Box<dyn Future<Output = ()>>>;
@@ -75,11 +75,17 @@ pub(crate) struct LocalTask {
     abnormal_hook: RefCell<Option<LocalAbnormalHook>>,
 }
 
-// SAFETY: `future` and `abnormal_hook` are only ever touched from
-// `LocalTask::run`, which is only ever called from `LocalSet::
-// run_until`'s own loop -- and `LocalSet` asserts, via
-// `bind_or_check_thread`, that every `spawn_local`/`run_until` call
-// happens on the single thread that first used it. So even though this
+// SAFETY: `future` and `abnormal_hook` are only ever touched -- polled
+// by `LocalTask::run`, or dropped by `LocalTask::cancel` -- from
+// `LocalSet::run_until`'s own loop (or `LocalRuntime::block_on`'s, which
+// owns the set), from `spawn` when the set is already closed, or from
+// `LocalSet`'s `Drop`. `LocalSet` is `!Send + !Sync`, so all of those run
+// on the thread that created the set, its drop included; the set holds
+// every live task until then, so a `LocalTask` whose last `Arc` drops on
+// another thread holds no future by then. `abort` only schedules. The free
+// `spawn_local` reaches a set only through this thread's `CURRENT_LOCAL`,
+// which only a `!Send` enter guard sets or restores, so it cannot queue a
+// future from another thread. So even though this
 // `Arc` -- and the cross-thread-capable `Waker` built from it, needed so
 // the reactor/timer background threads can wake a local task's I/O or
 // timer interest just like any other task's -- can be freely cloned,
@@ -102,46 +108,34 @@ impl LocalTask {
         }
     }
 
-    /// Mirrors `Task::run` exactly (see that method's docs for the
-    /// state-machine reasoning) -- `Mutex::lock().unwrap()` swapped for
-    /// `RefCell::borrow_mut()`, and no `mark_finished()` call, since a
-    /// `LocalSet` doesn't track an active-task count the way `Runtime`
-    /// does (nothing here needs to wait for local tasks to drain).
+    /// Mirrors `Task::run` (see that method's docs for the state-machine
+    /// reasoning), with `Mutex::lock().unwrap()` swapped for
+    /// `RefCell::borrow_mut()`. Every terminal path releases the task from
+    /// its set's registry; a `LocalSet` keeps no alive-task count.
     ///
     /// `pub(crate)` (not just called from this module's own `drive`)
     /// so [`super::super::runtime::LocalRuntime::block_on`]'s own
     /// combined drive loop -- interleaving this set's tasks with
     /// `Handle::spawn`'d ones on the same thread -- can run a task it
     /// pulled off this set's queue directly. Still only ever safe to
-    /// call on the single thread `bind_or_check_thread` bound this set
-    /// to, same as from `drive` itself.
+    /// call on the thread that owns this set, same as from `drive`
+    /// itself.
     pub(crate) fn run(self: Arc<Self>) {
-        let begin = self.state.begin_poll();
-        // Only runtime shutdown makes an entry stale, and it never claims
-        // `LocalSet` tasks.
-        if begin == Begin::Stale {
-            return;
-        }
-        if begin == Begin::Aborted {
-            self.future.borrow_mut().take();
-            self.state.end_poll(true);
-            self.fire_abnormal_hook(Outcome::Aborted);
-            return;
+        match self.state.begin_poll() {
+            Begin::Poll => {}
+            Begin::Aborted => return self.cancel(),
+            // Dropping the `LocalSet` already finished this task.
+            Begin::Stale => return,
         }
 
         if self.state.is_aborted() {
-            self.future.borrow_mut().take();
-            self.state.end_poll(true);
-            self.fire_abnormal_hook(Outcome::Aborted);
-            return;
+            return self.cancel();
         }
 
         let mut slot = self.future.borrow_mut();
         let Some(mut future) = slot.take() else {
             drop(slot);
-            self.state.end_poll(true);
-            self.fire_abnormal_hook(Outcome::Aborted);
-            return;
+            return self.cancel();
         };
         drop(slot);
 
@@ -163,6 +157,7 @@ impl LocalTask {
             Ok(Poll::Ready(())) => {
                 self.state.end_poll(true);
                 self.abnormal_hook.borrow_mut().take();
+                self.release();
             }
             Ok(Poll::Pending) => {
                 *self.future.borrow_mut() = Some(future);
@@ -173,8 +168,42 @@ impl LocalTask {
             Err(payload) => {
                 *self.future.borrow_mut() = None;
                 self.state.end_poll(true);
+                self.release();
                 self.fire_abnormal_hook(Outcome::Panicked(payload));
             }
+        }
+    }
+
+    /// Same as `Task::cancel`: finishes a task this thread owns RUNNING
+    /// for without polling it again. A panicking destructor is caught and
+    /// reported through the `JoinHandle`; the task is released first.
+    fn cancel(&self) {
+        let future = self.future.borrow_mut().take();
+        // Taken in its own statement so the `RefCell` borrow ends before
+        // the future's drop runs arbitrary code.
+        let dropped = panic::catch_unwind(AssertUnwindSafe(move || drop(future)));
+        self.state.end_poll(true);
+        self.release();
+        self.fire_abnormal_hook(match dropped {
+            Ok(()) => Outcome::Aborted,
+            Err(payload) => Outcome::Panicked(payload),
+        });
+    }
+
+    /// Releases the task from its set's registry. The returned `Arc` is
+    /// dropped here, after the registry's lock is released.
+    fn release(&self) {
+        if let Some(shared) = self.scheduler.upgrade() {
+            drop(shared.owned.remove(self.id));
+        }
+    }
+
+    /// Cancels this task as part of dropping its `LocalSet`. Every task
+    /// is idle or queued then, since the set drops on its own thread and
+    /// never mid-poll, so `begin_shutdown` hands this thread RUNNING.
+    fn shutdown(&self) {
+        if self.state.begin_shutdown() {
+            self.cancel();
         }
     }
 
@@ -210,6 +239,8 @@ struct LocalShared {
     /// [`crate::runtime::LocalRuntime::block_on`] driving this set, which
     /// parks on the runtime's condvar rather than `park_condvar`.
     unpark: Mutex<Option<Waker>>,
+    /// Every task spawned on this set and not yet finished.
+    owned: OwnedTasks<LocalTask>,
 }
 
 impl LocalShared {
@@ -219,6 +250,7 @@ impl LocalShared {
             park_lock: Mutex::new(()),
             park_condvar: Condvar::new(),
             unpark: Mutex::new(None),
+            owned: OwnedTasks::new(),
         }
     }
 
@@ -298,7 +330,12 @@ where
         abnormal_hook: RefCell::new(Some(hook)),
     });
 
-    shared.schedule(task.clone());
+    if shared.owned.bind(task.id, &task) {
+        shared.schedule(task.clone());
+    } else {
+        // The set has dropped: nothing would ever run this task.
+        task.shutdown();
+    }
     handle.with_local_task(task)
 }
 
@@ -334,14 +371,22 @@ thread_local! {
     static CURRENT_LOCAL: RefCell<Option<Weak<LocalShared>>> = const { RefCell::new(None) };
 }
 
+/// Restores the previously ambient set on drop. `!Send`: dropping it on
+/// another thread would install that set in the other thread's
+/// `CURRENT_LOCAL`, letting `spawn_local` there queue a `!Send` future
+/// onto a set owned by this thread.
 #[must_use]
 struct EnterGuard {
     previous: Option<Weak<LocalShared>>,
+    _not_send: PhantomData<*const ()>,
 }
 
 fn enter(shared: Arc<LocalShared>) -> EnterGuard {
     let previous = CURRENT_LOCAL.with(|c| c.borrow_mut().replace(Arc::downgrade(&shared)));
-    EnterGuard { previous }
+    EnterGuard {
+        previous,
+        _not_send: PhantomData,
+    }
 }
 
 impl Drop for EnterGuard {
@@ -354,6 +399,13 @@ impl Drop for EnterGuard {
 /// what it does. Dropping it (whether explicitly via `drop(guard)` or
 /// at the end of its scope) restores whichever `LocalSet` (if any) was
 /// ambient on this thread before `enter` was called.
+///
+/// `!Send`, so it is dropped on the thread that entered:
+///
+/// ```compile_fail,E0277
+/// fn assert_send<T: Send>() {}
+/// assert_send::<rusty_tokio::task::LocalEnterGuard>();
+/// ```
 #[must_use = "dropping this immediately un-enters the LocalSet"]
 pub struct LocalEnterGuard(
     // Never read -- held only for its `Drop` impl, which is what
@@ -391,49 +443,43 @@ where
 /// work, and nothing runs until [`LocalSet::run_until`] actually drives
 /// it, on whichever thread calls `run_until`.
 ///
-/// A `LocalSet` binds itself to the first thread that calls
-/// `spawn_local` or `run_until` on it (not at [`LocalSet::new`] time),
-/// so it's fine to construct one on a thread that isn't the one
-/// eventually going to use it -- just not to use it concurrently from
-/// two different threads, which panics.
+/// Like tokio's, a `LocalSet` is `!Send`: it holds `!Send` tasks, so it
+/// stays on the thread that created it.
+///
+/// ```compile_fail,E0277
+/// fn assert_send<T: Send>() {}
+/// assert_send::<rusty_tokio::task::LocalSet>();
+/// ```
+///
+/// Nor is it `Sync`, so no other thread can reach it through a reference:
+///
+/// ```compile_fail,E0277
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<rusty_tokio::task::LocalSet>();
+/// ```
 pub struct LocalSet {
     shared: Arc<LocalShared>,
-    owner_thread: Cell<Option<ThreadId>>,
+    /// Keeps `LocalSet` `!Send` like tokio's: its tasks are `!Send`, so the
+    /// set must stay on the thread that created it.
+    _not_send: PhantomData<*const ()>,
 }
 
 impl LocalSet {
     pub fn new() -> Self {
         LocalSet {
             shared: Arc::new(LocalShared::new()),
-            owner_thread: Cell::new(None),
-        }
-    }
-
-    fn bind_or_check_thread(&self) {
-        let current = thread::current().id();
-        match self.owner_thread.get() {
-            Some(owner) => assert_eq!(
-                owner, current,
-                "a LocalSet may only be used (spawn_local/run_until) from the \
-                 single thread that first used it"
-            ),
-            None => self.owner_thread.set(Some(current)),
+            _not_send: PhantomData,
         }
     }
 
     /// Spawn a `!Send` future onto this set. It doesn't run until a
     /// [`LocalSet::run_until`] call on this same set actually drives it.
-    ///
-    /// # Panics
-    /// Panics if called from a different thread than whichever one
-    /// first called `spawn_local`/`run_until` on this set.
     #[track_caller]
     pub fn spawn_local<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + 'static,
         F::Output: 'static,
     {
-        self.bind_or_check_thread();
         spawn(&self.shared, future)
     }
 
@@ -444,12 +490,7 @@ impl LocalSet {
     /// call `run_until` again (with another future, even just `async {}`
     /// if nothing else needs driving right now) to keep making progress
     /// on them.
-    ///
-    /// # Panics
-    /// Panics if called from a different thread than whichever one
-    /// first called `spawn_local`/`run_until` on this set.
     pub fn run_until<F: Future>(&self, future: F) -> F::Output {
-        self.bind_or_check_thread();
         let _guard = enter(self.shared.clone());
         drive(&self.shared, future)
     }
@@ -462,13 +503,8 @@ impl LocalSet {
     /// call on this same set (on this same thread) drives it, whether
     /// that happens while this guard is still held or after it's
     /// dropped.
-    ///
-    /// # Panics
-    /// Panics if called from a different thread than whichever one
-    /// first called `spawn_local`/`run_until`/`enter` on this set.
     #[track_caller]
     pub fn enter(&self) -> LocalEnterGuard {
-        self.bind_or_check_thread();
         LocalEnterGuard(enter(self.shared.clone()))
     }
 
@@ -489,6 +525,35 @@ impl LocalSet {
     /// condvar runs a woken local task at once; `None` clears it.
     pub(crate) fn set_unpark(&self, waker: Option<Waker>) {
         *self.shared.unpark.lock().unwrap() = waker;
+    }
+}
+
+impl Drop for LocalSet {
+    /// Cancels every task still owned (see the module docs). Each task is
+    /// cancelled on its own: a panic from one join waker doesn't stop the
+    /// rest. The first is re-raised once all are done, unless this thread
+    /// is already unwinding.
+    fn drop(&mut self) {
+        let mut first_panic = None;
+        for task in self.shared.owned.close() {
+            let cancelled = panic::catch_unwind(AssertUnwindSafe(|| task.shutdown()));
+            if let Err(payload) = cancelled {
+                crate::runtime::keep_first_panic(&mut first_panic, payload);
+            }
+        }
+        // Every entry left is now stale; drop them rather than wait for
+        // the last `Arc<LocalShared>` to go.
+        let queued = std::mem::take(&mut *self.shared.queue.lock().unwrap());
+        drop(queued);
+        let Some(payload) = first_panic else {
+            return;
+        };
+        if thread::panicking() {
+            // See `keep_first_panic`: dropping it could panic again.
+            std::mem::forget(payload);
+            return;
+        }
+        panic::resume_unwind(payload);
     }
 }
 

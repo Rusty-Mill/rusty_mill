@@ -13,7 +13,7 @@ use adk_core::{AdkError, Result};
 use rusty_axum::routing::any;
 use rusty_axum::{BoxFuture, Request, Response, Router, ServeOptions, StatusCode};
 use rusty_mcp_server::{HttpConfig, HttpHandler, Mount};
-use tokio::sync::oneshot;
+use rusty_tokio::sync::oneshot;
 
 use crate::server::McpServer;
 
@@ -34,8 +34,7 @@ const JSON_ONLY: Duration = Duration::from_secs(24 * 60 * 60);
 /// `rusty_mcp_server`: the router cannot tell whether it is mounted on a
 /// loopback-only listener, and a loopback-only default would reject every
 /// remote client of a server bound to a public address. Call it from inside a
-/// tokio runtime: tool calls run on the runtime that was current here. Serve
-/// the router on a `rusty_tokio` runtime, as [`serve_http`] does.
+/// `rusty_tokio` runtime: tool calls run on the runtime that was current here.
 pub fn router(server: Arc<McpServer>, path: &str) -> Router {
     server.bind_runtime();
     let path = if path.is_empty() { "/" } else { path };
@@ -81,9 +80,9 @@ fn bounded(mcp: &Mount, req: Request) -> BoxFuture<'static, Response> {
 /// Serves `server` over HTTP on `addr` at `path`, until the returned future
 /// is dropped.
 ///
-/// Call it from inside a tokio runtime, which tool calls run on. The server
-/// itself runs on a `rusty_tokio` runtime on a thread of its own, so the
-/// caller's runtime never waits for it. Dropping the future (aborting its
+/// Call it from inside a `rusty_tokio` runtime, which tool calls run on. The
+/// server itself runs on a runtime on a thread of its own, so the caller's
+/// runtime never waits for it. Dropping the future (aborting its
 /// task, or shutting its runtime down) shuts the server down gracefully and
 /// releases the listener.
 pub async fn serve_http(server: Arc<McpServer>, addr: &str, path: &str) -> Result<()> {
@@ -144,13 +143,13 @@ mod tests {
     /// The status `router` answers a POST of `len` bytes to `/mcp` with, the
     /// way a host app that allows larger bodies would hand it over.
     fn status_for(len: usize) -> StatusCode {
-        let tokio = tokio::runtime::Builder::new_multi_thread()
+        let caller = rusty_tokio::Builder::new_multi_thread()
             .worker_threads(1)
             .build()
             .unwrap();
         let services = Services::new(Arc::new(InMemorySessionService::new()));
         let server = Arc::new(McpServer::new("test", Vec::new(), services));
-        let app = tokio.block_on(async { router(server, "/mcp") });
+        let app = caller.block_on(async { router(server, "/mcp") });
         let request = Request::new(Method::Post, "/mcp")
             .with_header("content-type", "application/json")
             .unwrap()
@@ -174,7 +173,7 @@ mod tests {
             let addr = std::net::TcpListener::bind("127.0.0.1:0")
                 .and_then(|probe| probe.local_addr())
                 .unwrap();
-            let tokio = tokio::runtime::Builder::new_multi_thread()
+            let caller = rusty_tokio::Builder::new_multi_thread()
                 .worker_threads(1)
                 .enable_all()
                 .build()
@@ -182,13 +181,13 @@ mod tests {
             let services = Services::new(Arc::new(InMemorySessionService::new()));
             let server = Arc::new(McpServer::new("test", Vec::new(), services));
             let task =
-                tokio.spawn(async move { serve_http(server, &addr.to_string(), "/mcp").await });
+                caller.spawn(async move { serve_http(server, &addr.to_string(), "/mcp").await });
             let up = (0..200).any(|_| {
                 std::thread::sleep(Duration::from_millis(10));
                 std::net::TcpStream::connect(addr).is_ok()
             });
             task.abort();
-            drop(tokio);
+            drop(caller);
             let released = (0..200).any(|_| {
                 std::thread::sleep(Duration::from_millis(10));
                 std::net::TcpListener::bind(addr).is_ok()

@@ -20,7 +20,8 @@ mod wait_list;
 pub use barrier::{Barrier, BarrierWaitResult};
 // tokio-util's, not tokio's (#901): here so a migration needs no second crate.
 pub use cancellation_token::{
-    CancellationToken, DropGuard, WaitForCancellationFuture, WaitForCancellationFutureOwned,
+    CancellationToken, DropGuard, DropGuardRef, WaitForCancellationFuture,
+    WaitForCancellationFutureOwned,
 };
 pub use mutex::{MappedMutexGuard, Mutex, MutexGuard, OwnedMappedMutexGuard, OwnedMutexGuard};
 pub use notify::{Notified, Notify, OwnedNotified};

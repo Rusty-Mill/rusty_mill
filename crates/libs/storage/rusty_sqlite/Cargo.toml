@@ -21,7 +21,7 @@ layer = "libs"
 # replaces), now driven by the nexus merge, which needs rusqlite 0.39 for
 # a feature nexus's own storage layer requires. 0.39 (-> libsqlite3-sys
 # ^0.37.0) still resolves to one shared libsqlite3-sys version across
-# rusty_acp's `sqlx`-sqlite path, inventory-core, and nexus's own
+# rusty_ibm_acp's `sqlx`-sqlite path, inventory-core, and nexus's own
 # consumers -- verified via `cargo metadata --all-features`.
 rusqlite = { version = "0.39", features = ["bundled"] }
 

@@ -488,7 +488,7 @@ mod tests {
     /// `ggml-tiny.en-q5_1.bin` is a real ~40MB Whisper model, never
     /// committed to any repo in this ecosystem (downloaded separately by
     /// whoever runs the app) -- connect-or-skip, same convention as
-    /// `rusty_acp`'s Redis/Postgres halves and `rusty_db`'s MySQL/Postgres
+    /// `rusty_ibm_acp`'s Redis/Postgres halves and `rusty_db`'s MySQL/Postgres
     /// driver tests: the resource may not be present in a given
     /// environment, so its absence is a skip, never a failure.
     macro_rules! model_or_skip {

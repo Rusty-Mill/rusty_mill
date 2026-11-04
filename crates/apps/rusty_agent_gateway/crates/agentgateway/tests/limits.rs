@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use agentgateway_config::Config;
 use rusty_axum::Admission;
+use rusty_tokio::sync::CancellationToken;
 use serde_json::json;
-use tokio_util::sync::CancellationToken;
 
 fn mock_server() -> String {
     let mut path = std::env::current_exe().expect("test binary should have a path");
@@ -41,13 +41,14 @@ fn mock_server() -> String {
 
 mod common;
 use common::free_port;
+use common::http;
 
 /// A gateway fronting one deliberately slow MCP target.
 ///
 /// `policies` is spliced into the route, and `global` under `config:`, so each
 /// test states only the knob it is about.
 async fn start(policies: &str, global: &str, delay_ms: u64) -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 {global}
@@ -104,7 +105,7 @@ binds:
 
 /// Complete the MCP handshake and return the session id.
 async fn open_session(url: &str) -> String {
-    let client = reqwest::Client::new();
+    let client = http::Client::new();
     let response = client
         .post(url)
         .header("content-type", "application/json")
@@ -124,7 +125,6 @@ async fn open_session(url: &str) -> String {
     let session = response
         .headers()
         .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
         .expect("the gateway should issue a session id")
         .to_string();
 
@@ -142,8 +142,8 @@ async fn open_session(url: &str) -> String {
 }
 
 /// Call the slow tool on an established session.
-async fn call_slow_tool(url: &str, session: &str) -> reqwest::Response {
-    reqwest::Client::new()
+async fn call_slow_tool(url: &str, session: &str) -> http::Response {
+    http::Client::new()
         .post(url)
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
@@ -165,7 +165,7 @@ fn sse_data(body: &str) -> String {
         .join("\n")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_backend_timeout_cuts_off_a_slow_tool_call() {
     let policies = "            policies:\n              timeout:\n                backendRequestTimeout: 200ms";
     let (url, shutdown) = start(policies, "", 5_000).await;
@@ -173,7 +173,7 @@ async fn a_backend_timeout_cuts_off_a_slow_tool_call() {
 
     let started = Instant::now();
     let response = call_slow_tool(&url, &session).await;
-    let body = response.text().await.expect("should read the body");
+    let body = response.text().expect("should read the body");
     let elapsed = started.elapsed();
 
     assert!(
@@ -193,7 +193,7 @@ async fn a_backend_timeout_cuts_off_a_slow_tool_call() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_fast_call_is_untouched_by_a_generous_backend_timeout() {
     let policies =
         "            policies:\n              timeout:\n                backendRequestTimeout: 30s";
@@ -203,7 +203,6 @@ async fn a_fast_call_is_untouched_by_a_generous_backend_timeout() {
     let body = call_slow_tool(&url, &session)
         .await
         .text()
-        .await
         .expect("should read the body");
     let data = sse_data(&body);
     assert!(
@@ -215,7 +214,7 @@ async fn a_fast_call_is_untouched_by_a_generous_backend_timeout() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_timeout_does_not_kill_a_long_stream() {
     // The non-obvious half of the distinction above, pinned so nobody
     // "fixes" requestTimeout into something that severs live subscriptions.
@@ -231,7 +230,7 @@ async fn a_request_timeout_does_not_kill_a_long_stream() {
         "the SSE response is produced immediately, well inside the budget"
     );
 
-    let body = response.text().await.expect("should read the body");
+    let body = response.text().expect("should read the body");
     assert!(
         sse_data(&body).contains("alpha:echo"),
         "the stream should still deliver its result after the budget elapsed"
@@ -240,7 +239,7 @@ async fn a_request_timeout_does_not_kill_a_long_stream() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_timeout_still_bounds_a_slow_response() {
     // A backend that is slow to *produce* a response is what requestTimeout
     // is for. An unsupported backend answers instantly, so use the route that
@@ -249,8 +248,11 @@ async fn a_request_timeout_still_bounds_a_slow_response() {
         "            policies:\n              timeout:\n                requestTimeout: 5s";
     let (url, shutdown) = start(policies, "", 0).await;
 
-    let response = reqwest::Client::new()
-        .get(format!("{url}/../nowhere"))
+    // A path beside the MCP route, not under it. `rusty_request` sends a path
+    // as written, so `/mcp/../nowhere` would still be under the route.
+    let nowhere = url.replace("/mcp", "/nowhere");
+    let response = http::Client::new()
+        .get(nowhere)
         .send()
         .await
         .expect("should reach the gateway");
@@ -259,7 +261,7 @@ async fn a_request_timeout_still_bounds_a_slow_response() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn nothing_is_shed_when_no_limit_is_configured() {
     // Off by default is deliberate: there is no concurrency number right for
     // everyone, and a default would be a silent regression for a gateway
@@ -271,7 +273,7 @@ async fn nothing_is_shed_when_no_limit_is_configured() {
     for _ in 0..8 {
         let url = url.clone();
         let session = session.clone();
-        handles.push(tokio::spawn(async move {
+        handles.push(rusty_tokio::spawn(async move {
             call_slow_tool(&url, &session).await.status().as_u16()
         }));
     }
@@ -285,13 +287,14 @@ async fn nothing_is_shed_when_no_limit_is_configured() {
 }
 
 /// Sends the head of a `POST /mcp` that promises a body, and none of it.
-async fn start_upload(url: &str) -> tokio::net::TcpStream {
-    use tokio::io::AsyncWriteExt as _;
+async fn start_upload(url: &str) -> rusty_tokio::net::TcpStream {
     let addr = url
         .trim_start_matches("http://")
         .trim_end_matches("/mcp")
         .to_string();
-    let mut tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    let tcp = rusty_tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connect");
     tcp.write_all(
         b"POST /mcp HTTP/1.1\r\nhost: localhost\r\ncontent-type: application/json\r\ncontent-length: 64\r\n\r\n",
     )
@@ -301,17 +304,17 @@ async fn start_upload(url: &str) -> tokio::net::TcpStream {
 }
 
 /// Everything the gateway sends on `tcp` until it closes it.
-async fn read_to_close(mut tcp: tokio::net::TcpStream) -> String {
-    use tokio::io::AsyncReadExt as _;
+async fn read_to_close(mut tcp: rusty_tokio::net::TcpStream) -> String {
+    use rusty_tokio::io::AsyncReadExt as _;
     let mut out = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), tcp.read_to_end(&mut out))
+    rusty_tokio::time::timeout(Duration::from_secs(5), tcp.read_to_end(&mut out))
         .await
         .expect("answered and closed promptly")
         .expect("read");
     String::from_utf8_lossy(&out).into_owned()
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_upload_in_progress_counts_against_the_limit_and_the_next_request_is_shed() {
     let global = "config:\n  limits:\n    maxConcurrentRequests: 1";
     let (url, shutdown) = start("", global, 0).await;
@@ -319,7 +322,7 @@ async fn an_upload_in_progress_counts_against_the_limit_and_the_next_request_is_
     // The one place is held by a request whose body has not arrived; the
     // server counts it from its head, not from when its body is read.
     let _uploading = start_upload(&url).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    rusty_tokio::time::sleep(Duration::from_millis(100)).await;
 
     // The next is shed at once, its body never read.
     let shed = read_to_close(start_upload(&url).await).await;
@@ -332,7 +335,7 @@ async fn an_upload_in_progress_counts_against_the_limit_and_the_next_request_is_
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_request_timeout_covers_a_slow_upload() {
     let global = "config:\n  limits:\n    requestTimeout: 200ms";
     let (url, shutdown) = start("", global, 0).await;
@@ -345,9 +348,9 @@ async fn the_request_timeout_covers_a_slow_upload() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn shutdown_stops_every_port_accepting_while_one_drains() {
-    let (first, second) = (free_port().await, free_port().await);
+    let (first, second) = (free_port(), free_port());
     let yaml = format!(
         r#"
 binds:
@@ -375,13 +378,13 @@ binds:
 
     // A request in flight on the first port holds its drain.
     let _held = start_upload(&format!("http://127.0.0.1:{first}/mcp")).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    rusty_tokio::time::sleep(Duration::from_millis(100)).await;
     shutdown.cancel();
 
     // The second port stops accepting all the same.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let refused = tokio::net::TcpStream::connect(("127.0.0.1", second))
+        let refused = rusty_tokio::net::TcpStream::connect(("127.0.0.1", second))
             .await
             .is_err();
         if refused {
@@ -391,7 +394,7 @@ binds:
             Instant::now() < deadline,
             "the second port is still accepting behind the first one's drain"
         );
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        rusty_tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 

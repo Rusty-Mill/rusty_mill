@@ -11,8 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway_config::Config;
+use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
 mod common;
 use common::{free_port, yaml_path};
@@ -40,7 +40,7 @@ fn certificate() -> Certificate {
 async fn upstream() -> (u16, Arc<AtomicUsize>) {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = Arc::clone(&hits);
 
@@ -63,7 +63,7 @@ async fn upstream() -> (u16, Arc<AtomicUsize>) {
 
 /// Boot a TLS gateway in front of `upstream_port`.
 async fn start(cert: &Certificate, upstream_port: u16) -> (u16, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -239,7 +239,7 @@ async fn alpn_negotiates_http2() {
 async fn a_missing_certificate_file_stops_the_gateway_booting() {
     // Rather than failing every handshake at runtime, which reads like a
     // client problem.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -268,7 +268,7 @@ binds:
 
 #[tokio::test]
 async fn a_tls_listener_without_a_certificate_is_a_config_error() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -300,7 +300,7 @@ async fn two_named_certificates_on_one_port_are_served_by_name() {
     // listeners are told apart now.
     let a = certificate();
     let b = certificate();
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -375,7 +375,7 @@ async fn start_two(
     second: (&str, &Certificate),
     upstream_port: u16,
 ) -> (u16, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -548,7 +548,7 @@ async fn two_unnamed_certificates_on_one_port_still_fail_at_startup() {
     // one: whichever sorted first would answer for both.
     let alpha = certificate_for(&["alpha.test"]);
     let beta = certificate_for(&["beta.test"]);
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -580,7 +580,7 @@ async fn two_listeners_claiming_one_name_fail_at_startup() {
     // A client asking for that name could be given either.
     let alpha = certificate_for(&["same.test"]);
     let beta = certificate_for(&["same.test"]);
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -615,7 +615,7 @@ async fn one_certificate_named_twice_is_still_one_certificate() {
     // between, so this is not the ambiguous case.
     let shared = certificate_for(&["localhost"]);
     let (upstream_port, _hits) = upstream().await;
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -664,7 +664,7 @@ binds:
 /// The point of a passthrough test: this is the thing holding the private key,
 /// not the gateway.
 async fn tls_upstream(cert: &Certificate, label: &'static str) -> (u16, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -700,7 +700,7 @@ binds:
 async fn upstream_for(label: &'static str) -> u16 {
     use rusty_axum::Router;
 
-    let port = free_port().await;
+    let port = free_port();
     let app =
         Router::new().fallback(move || async move { rusty_axum::Json(json!({"who": label})) });
     common::upstream(format!("127.0.0.1:{port}"), app).await;
@@ -709,7 +709,7 @@ async fn upstream_for(label: &'static str) -> u16 {
 
 /// A gateway that forwards by name to the given upstreams.
 async fn start_passthrough(routes: &[(&str, u16)]) -> (u16, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let mut yaml = format!(
         "binds:\n  - port: {port}\n    listeners:\n      - protocol: TLS\n        tcpRoutes:\n"
     );

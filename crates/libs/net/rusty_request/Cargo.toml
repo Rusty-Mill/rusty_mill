@@ -37,7 +37,7 @@ rusty_http = { path = "../rusty_http", features = [
 # via `rusty_tls`/the `rustls` dev-dependency below.
 rustls-pki-types = "1"
 # Exponential backoff math + Retry-After delta-seconds parsing, shared
-# with rusty-acp's own RetryPolicy. Retry *eligibility* (which statuses,
+# with rusty-ibm-acp's own RetryPolicy. Retry *eligibility* (which statuses,
 # methods, errors) stays here -- only the delay computation moved.
 rusty_retry = { workspace = true }
 # RFC 7617 Basic auth's `base64(username:password)`. This crate carried its

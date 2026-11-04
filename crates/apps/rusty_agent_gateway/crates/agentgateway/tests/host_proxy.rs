@@ -9,11 +9,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway_config::Config;
+use rusty_tokio::sync::CancellationToken;
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
 mod common;
 use common::free_port;
+use common::http;
 
 /// An upstream that reports what it received.
 struct Upstream {
@@ -25,7 +26,7 @@ struct Upstream {
 async fn upstream(name: &'static str) -> Upstream {
     use rusty_axum::{Request, Router};
 
-    let port = free_port().await;
+    let port = free_port();
     let hits = Arc::new(AtomicUsize::new(0));
 
     let counter = Arc::clone(&hits);
@@ -59,7 +60,7 @@ async fn start(route: &str) -> (String, CancellationToken) {
 
 /// The same, with a `services:`/`workloads:` inventory spliced in.
 async fn start_with_inventory(route: &str, inventory: &str) -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -87,15 +88,14 @@ binds:
 }
 
 async fn get(url: &str) -> Value {
-    reqwest::get(url)
+    http::get(url)
         .await
         .expect("request should reach the gateway")
         .json()
-        .await
         .expect("upstream should answer with JSON")
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_request_is_forwarded_to_the_host_backend() {
     let up = upstream("only").await;
     let (base, shutdown) = start(&format!(
@@ -118,7 +118,7 @@ async fn a_request_is_forwarded_to_the_host_backend() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_host_header_names_the_upstream_not_the_gateway() {
     // A name-based virtual host upstream serves the wrong site otherwise.
     let up = upstream("only").await;
@@ -140,7 +140,7 @@ async fn the_host_header_names_the_upstream_not_the_gateway() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_client_address_is_recorded_in_the_forwarded_chain() {
     let up = upstream("only").await;
     let (base, shutdown) = start(&format!(
@@ -161,7 +161,7 @@ async fn the_client_address_is_recorded_in_the_forwarded_chain() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn hop_by_hop_headers_do_not_reach_the_upstream() {
     let up = upstream("only").await;
     let (base, shutdown) = start(&format!(
@@ -172,7 +172,7 @@ async fn hop_by_hop_headers_do_not_reach_the_upstream() {
     ))
     .await;
 
-    let body: Value = reqwest::Client::new()
+    let body: Value = http::Client::new()
         .get(format!("{base}/"))
         .header("connection", "x-secret-hop")
         .header("x-secret-hop", "leaked")
@@ -180,7 +180,6 @@ async fn hop_by_hop_headers_do_not_reach_the_upstream() {
         .await
         .expect("request should reach the gateway")
         .json()
-        .await
         .expect("should be JSON");
 
     assert!(
@@ -192,7 +191,7 @@ async fn hop_by_hop_headers_do_not_reach_the_upstream() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn traffic_is_split_across_backends_by_weight() {
     let a = upstream("a").await;
     let b = upstream("b").await;
@@ -223,7 +222,7 @@ async fn traffic_is_split_across_backends_by_weight() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_zero_weight_backend_receives_nothing() {
     let drained = upstream("drained").await;
     let live = upstream("live").await;
@@ -252,7 +251,7 @@ async fn a_zero_weight_backend_receives_nothing() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_prefix_rewrite_rewrites_only_the_matched_prefix() {
     let up = upstream("only").await;
     let (base, shutdown) = start(&format!(
@@ -277,7 +276,7 @@ async fn a_prefix_rewrite_rewrites_only_the_matched_prefix() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn header_modifiers_apply_in_both_directions() {
     let up = upstream("only").await;
     let (base, shutdown) = start(&format!(
@@ -296,7 +295,7 @@ async fn header_modifiers_apply_in_both_directions() {
     ))
     .await;
 
-    let response = reqwest::Client::new()
+    let response = http::Client::new()
         .get(format!("{base}/"))
         .header("x-drop-me", "should not arrive")
         .send()
@@ -304,15 +303,12 @@ async fn header_modifiers_apply_in_both_directions() {
         .expect("request should reach the gateway");
 
     assert_eq!(
-        response
-            .headers()
-            .get("x-served-by")
-            .and_then(|v| v.to_str().ok()),
+        response.headers().get("x-served-by"),
         Some("gateway"),
         "response modifiers should apply on the way back"
     );
 
-    let body: Value = response.json().await.expect("should be JSON");
+    let body: Value = response.json().expect("should be JSON");
     assert_eq!(body["headers"]["x-gateway"], "rusty");
     assert!(
         body["headers"].get("x-drop-me").is_none(),
@@ -322,7 +318,7 @@ async fn header_modifiers_apply_in_both_directions() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_backend_key_replaces_the_clients_credential() {
     let up = upstream("only").await;
     let (base, shutdown) = start(&format!(
@@ -336,14 +332,13 @@ async fn a_backend_key_replaces_the_clients_credential() {
     ))
     .await;
 
-    let body: Value = reqwest::Client::new()
+    let body: Value = http::Client::new()
         .get(format!("{base}/"))
         .header("authorization", "Bearer client-token")
         .send()
         .await
         .expect("request should reach the gateway")
         .json()
-        .await
         .expect("should be JSON");
 
     assert_eq!(
@@ -354,11 +349,11 @@ async fn a_backend_key_replaces_the_clients_credential() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unreachable_upstream_is_a_502() {
     // 502, not 500: the gateway is fine, the upstream is not, and conflating
     // the two sends people to debug the wrong process.
-    let dead = free_port().await;
+    let dead = free_port();
     let (base, shutdown) = start(&format!(
         r#"          - name: proxy
             backends:
@@ -366,7 +361,7 @@ async fn an_unreachable_upstream_is_a_502() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
+    let response = http::get(format!("{base}/"))
         .await
         .expect("the gateway should still answer");
     assert_eq!(response.status(), 502);
@@ -374,11 +369,11 @@ async fn an_unreachable_upstream_is_a_502() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_slow_upstream_hits_the_backend_timeout() {
     // Unlike MCP, a proxied response is not produced until the upstream
     // answers, so this budget genuinely bounds the wait.
-    let port = free_port().await;
+    let port = free_port();
     let app = rusty_axum::Router::new().fallback(|| async {
         rusty_tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         "too late"
@@ -396,7 +391,7 @@ async fn a_slow_upstream_hits_the_backend_timeout() {
     .await;
 
     let started = std::time::Instant::now();
-    let response = reqwest::get(format!("{base}/"))
+    let response = http::get(format!("{base}/"))
         .await
         .expect("the gateway should answer");
 
@@ -410,7 +405,7 @@ async fn a_slow_upstream_hits_the_backend_timeout() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_route_mixing_host_with_an_unsupported_kind_is_refused() {
     // Silently dropping the unsupported share onto the hosts would send
     // traffic somewhere the operator never asked for.
@@ -426,7 +421,7 @@ async fn a_route_mixing_host_with_an_unsupported_kind_is_refused() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
+    let response = http::get(format!("{base}/"))
         .await
         .expect("the gateway should answer");
     assert_eq!(response.status(), 501);
@@ -456,7 +451,7 @@ fn inventory(ports: &[u16]) -> String {
     yaml
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_service_backend_reaches_the_workload_behind_it() {
     let up = upstream("service").await;
     let (base, shutdown) = start_with_inventory(
@@ -477,7 +472,7 @@ async fn a_service_backend_reaches_the_workload_behind_it() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_service_spreads_traffic_across_its_workloads() {
     let one = upstream("one").await;
     let two = upstream("two").await;
@@ -500,7 +495,7 @@ async fn a_service_spreads_traffic_across_its_workloads() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_service_beside_a_host_gets_half_the_traffic_not_two_thirds() {
     // The reason the weights are scaled rather than repeated per workload.
     let one = upstream("service-one").await;
@@ -534,7 +529,7 @@ async fn a_service_beside_a_host_gets_half_the_traffic_not_two_thirds() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unhealthy_workload_receives_nothing() {
     let good = upstream("good").await;
     let bad = upstream("bad").await;
@@ -564,11 +559,11 @@ async fn an_unhealthy_workload_receives_nothing() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_service_the_inventory_does_not_hold_fails_at_startup() {
     // A route that could never serve a request is a typo in a file-driven
     // inventory, not a cluster in flux.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -597,7 +592,7 @@ services:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_dynamic_route_dials_the_address_the_client_asked_for() {
     // The plain forward-proxy reading: the request's own authority.
     let up = upstream("chosen").await;
@@ -609,14 +604,13 @@ async fn a_dynamic_route_dials_the_address_the_client_asked_for() {
     .await;
 
     // `Host` names the upstream; the gateway is reached by address.
-    let answered: Value = reqwest::Client::new()
+    let answered: Value = http::Client::new()
         .get(format!("{base}/hello"))
         .header("host", format!("127.0.0.1:{}", up.port))
         .send()
         .await
         .expect("the gateway should answer")
         .json()
-        .await
         .expect("upstream should answer with JSON");
 
     assert_eq!(answered["upstream"], "chosen");
@@ -626,7 +620,7 @@ async fn a_dynamic_route_dials_the_address_the_client_asked_for() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_dynamic_target_expression_decides_instead() {
     // Where the address the client dialled is not the one to use: a trusted
     // hop's header picks the upstream.
@@ -641,14 +635,13 @@ async fn a_dynamic_target_expression_decides_instead() {
     ))
     .await;
 
-    let answered: Value = reqwest::Client::new()
+    let answered: Value = http::Client::new()
         .get(format!("{base}/"))
         .header("host", format!("127.0.0.1:{}", asked.port))
         .send()
         .await
         .expect("the gateway should answer")
         .json()
-        .await
         .expect("upstream should answer with JSON");
 
     assert_eq!(answered["upstream"], "computed");
@@ -661,7 +654,7 @@ async fn a_dynamic_target_expression_decides_instead() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_dynamic_expression_reading_a_header_chooses_per_request() {
     let one = upstream("one").await;
     let two = upstream("two").await;
@@ -674,14 +667,13 @@ async fn a_dynamic_expression_reading_a_header_chooses_per_request() {
     .await;
 
     for (port, expected) in [(one.port, "one"), (two.port, "two")] {
-        let answered: Value = reqwest::Client::new()
+        let answered: Value = http::Client::new()
             .get(format!("{base}/"))
             .header("x-upstream", format!("127.0.0.1:{port}"))
             .send()
             .await
             .expect("the gateway should answer")
             .json()
-            .await
             .expect("upstream should answer with JSON");
         assert_eq!(answered["upstream"], expected);
     }
@@ -689,7 +681,7 @@ async fn a_dynamic_expression_reading_a_header_chooses_per_request() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_dynamic_request_naming_nowhere_is_refused() {
     let (base, shutdown) = start(
         r#"          - name: forward
@@ -699,7 +691,7 @@ async fn a_dynamic_request_naming_nowhere_is_refused() {
     )
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
+    let response = http::get(format!("{base}/"))
         .await
         .expect("the gateway should answer");
     assert_eq!(response.status(), 400, "no guess is made");
@@ -707,7 +699,7 @@ async fn a_dynamic_request_naming_nowhere_is_refused() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_dynamic_backend_cannot_be_weighted_against_a_fixed_one() {
     // A share of "wherever the client asked for" is not a destination anyone
     // can reason about.
@@ -723,7 +715,7 @@ async fn a_dynamic_backend_cannot_be_weighted_against_a_fixed_one() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/"))
+    let response = http::get(format!("{base}/"))
         .await
         .expect("the gateway should answer");
     assert_eq!(response.status(), 501);
@@ -732,9 +724,9 @@ async fn a_dynamic_backend_cannot_be_weighted_against_a_fixed_one() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_dynamic_target_that_does_not_compile_fails_at_startup() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -755,7 +747,7 @@ binds:
     assert!(err.to_string().contains("CEL"), "got: {err}");
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn check_says_a_dynamic_route_lets_the_client_choose() {
     // Worth saying to anyone running `--check`, not only in the startup log of
     // a gateway already serving.
@@ -788,8 +780,8 @@ binds:
 
 /// Reads one request head from `stream`, returning its bytes and its
 /// `Content-Length` body; `None` once the client hangs up.
-async fn read_request(stream: &mut tokio::net::TcpStream) -> Option<(String, Vec<u8>)> {
-    use tokio::io::AsyncReadExt as _;
+async fn read_request(stream: &mut rusty_tokio::net::TcpStream) -> Option<(String, Vec<u8>)> {
+    use rusty_tokio::io::AsyncReadExt as _;
     let mut seen = Vec::new();
     let mut buf = [0u8; 4096];
     let head_end = loop {
@@ -827,20 +819,19 @@ type Received = Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 /// A keep-alive upstream that answers every request with `body`, counting
 /// the connections it accepts and recording the requests it receives.
 async fn raw_upstream(body: Vec<u8>) -> (u16, Arc<AtomicUsize>, Received) {
-    use tokio::io::AsyncWriteExt as _;
-    let port = free_port().await;
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+    let port = free_port();
+    let listener = rusty_tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
         .expect("upstream should bind");
     let accepted = Arc::new(AtomicUsize::new(0));
     let received: Received = Arc::default();
     let (counter, recorder) = (Arc::clone(&accepted), Arc::clone(&received));
     let body = Arc::new(body);
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             counter.fetch_add(1, Ordering::SeqCst);
             let (recorder, body) = (Arc::clone(&recorder), Arc::clone(&body));
-            tokio::spawn(async move {
+            rusty_tokio::spawn(async move {
                 while let Some(request) = read_request(&mut stream).await {
                     recorder.lock().expect("lock").push(request);
                     let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
@@ -879,18 +870,18 @@ fn route_to(port: u16) -> String {
     )
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn upstream_connections_are_reused_across_requests() {
     let (port, accepted, _) = raw_upstream(b"ok".to_vec()).await;
     let (base, shutdown) = start(&route_to(port)).await;
-    let client = reqwest::Client::new();
+    let client = http::Client::new();
     for _ in 0..3 {
         let response = client
             .get(format!("{base}/"))
             .send()
             .await
             .expect("should answer");
-        assert_eq!(response.text().await.expect("body"), "ok");
+        assert_eq!(response.text().expect("body"), "ok");
     }
     assert_eq!(
         accepted.load(Ordering::SeqCst),
@@ -900,22 +891,17 @@ async fn upstream_connections_are_reused_across_requests() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_large_response_streams_through_intact() {
     let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i: u32| (i % 251) as u8).collect();
     let (port, _, _) = raw_upstream(big.clone()).await;
     let (base, shutdown) = start(&route_to(port)).await;
-    let response = reqwest::get(format!("{base}/"))
-        .await
-        .expect("should answer");
-    assert_eq!(
-        response.bytes().await.expect("body").as_ref(),
-        big.as_slice()
-    );
+    let response = http::get(format!("{base}/")).await.expect("should answer");
+    assert_eq!(response.bytes(), big.as_slice());
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_body_over_max_request_body_bytes_is_refused() {
     let (port, _, received) = raw_upstream(b"ok".to_vec()).await;
     let (base, shutdown) = start_with_inventory(
@@ -923,7 +909,7 @@ async fn a_body_over_max_request_body_bytes_is_refused() {
         "config:\n  limits:\n    maxRequestBodyBytes: 16",
     )
     .await;
-    let client = reqwest::Client::new();
+    let client = http::Client::new();
     let at_cap = client
         .post(format!("{base}/"))
         .body("x".repeat(16))
@@ -946,13 +932,13 @@ async fn a_body_over_max_request_body_bytes_is_refused() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_chunked_request_body_is_forwarded_whole() {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use rusty_tokio::io::AsyncReadExt as _;
     let (port, _, received) = raw_upstream(b"ok".to_vec()).await;
     let (base, shutdown) = start(&route_to(port)).await;
     let gateway = base.trim_start_matches("http://");
-    let mut client = tokio::net::TcpStream::connect(gateway)
+    let mut client = rusty_tokio::net::TcpStream::connect(gateway)
         .await
         .expect("connect");
     client
@@ -969,18 +955,16 @@ async fn a_chunked_request_body_is_forwarded_whole() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn request_headers_reach_the_upstream_as_the_client_sent_them() {
     let (port, _, received) = raw_upstream(b"ok".to_vec()).await;
     let (base, shutdown) = start(&route_to(port)).await;
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert("user-agent", "caller/1".parse().expect("value"));
-    headers.append("x-multi", "a".parse().expect("value"));
-    headers.append("x-multi", "b".parse().expect("value"));
-    let client = reqwest::Client::new();
+    let client = http::Client::new();
     client
         .get(format!("{base}/"))
-        .headers(headers)
+        .header("user-agent", "caller/1")
+        .header_append("x-multi", "a")
+        .header_append("x-multi", "b")
         .send()
         .await
         .expect("should answer");
@@ -995,13 +979,13 @@ async fn request_headers_reach_the_upstream_as_the_client_sent_them() {
     assert_eq!(
         header_values(with_agent, "user-agent"),
         vec!["caller/1"],
-        "the client's User-Agent replaces the library's"
+        "the client's User-Agent goes up as it arrived"
     );
     assert_eq!(header_values(with_agent, "x-multi"), vec!["a", "b"]);
     let agent = header_values(without_agent, "user-agent");
     assert!(
-        agent.len() == 1 && agent[0].starts_with("rusty_request/"),
-        "a request without one goes up with rusty_request's: {agent:?}"
+        agent.is_empty(),
+        "a request without one goes up without one: {agent:?}"
     );
     shutdown.cancel();
 }

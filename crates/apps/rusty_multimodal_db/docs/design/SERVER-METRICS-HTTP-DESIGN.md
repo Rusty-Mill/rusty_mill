@@ -183,7 +183,7 @@ v0.56.0:
   pull tokio/axum in."* No workspace crate depends on `hyper`/`axum`-
   as-a-listening-server/`actix-web`/`warp`/`rocket` for a bound HTTP
   server; `axum` appears only inside two agent-protocol crates'
-  (`rusty_a2a`, `rusty-acp`) own optional server features, unrelated to
+  (`rusty_a2a`, `rusty-ibm-acp`) own optional server features, unrelated to
   this crate. `rusty_http` is the smaller, more consistent-with-
   `ADR-0010` choice of the two real options: it adds zero new
   dependency at all (an in-workspace sibling crate this repo already

@@ -107,3 +107,66 @@ fn shutdown_notified_is_unpin_send_and_sync() {
     let handle = rt.handle();
     assert_traits(&handle.shutdown_notified());
 }
+
+/// Runs `f` on its own thread and fails if it hasn't returned within
+/// `limit`, so a teardown deadlock fails the test instead of hanging it.
+fn within(limit: Duration, f: impl FnOnce() + Send + 'static) {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        f();
+        let _ = done.send(());
+    });
+    finished
+        .recv_timeout(limit)
+        .expect("runtime teardown deadlocked");
+}
+
+/// A blocking job waits on a channel whose sender a pending task owns;
+/// the runtime has to cancel that task before it can drain the pool.
+fn blocking_job_waiting_on_a_task(rt: &Runtime) -> std::sync::mpsc::Receiver<Option<()>> {
+    let (tx, rx) = rusty_tokio::sync::mpsc::channel::<()>(1);
+    let (ended, job_ended) = std::sync::mpsc::channel();
+    rt.block_on(async move {
+        rusty_tokio::spawn(async move {
+            let _tx = tx;
+            std::future::pending::<()>().await;
+        });
+        rusty_tokio::spawn_blocking(move || {
+            let mut rx = rx;
+            let _ = ended.send(rx.blocking_recv());
+        });
+    });
+    job_ended
+}
+
+#[test]
+fn dropping_a_runtime_cancels_tasks_before_waiting_on_blocking_jobs() {
+    for multi_thread in [true, false] {
+        within(Duration::from_secs(10), move || {
+            let rt = if multi_thread {
+                Runtime::new().unwrap()
+            } else {
+                rusty_tokio::Builder::new_current_thread().build().unwrap()
+            };
+            let job_ended = blocking_job_waiting_on_a_task(&rt);
+            drop(rt);
+            assert_eq!(
+                job_ended.try_recv(),
+                Ok(None),
+                "the job saw the channel close"
+            );
+        });
+    }
+}
+
+/// `shutdown_timeout` waits its deadline for the pending task, then
+/// cancels it, which frees the blocking job instead of leaving it behind.
+#[test]
+fn shutdown_timeout_cancels_tasks_before_waiting_on_blocking_jobs() {
+    within(Duration::from_secs(10), || {
+        let rt = Runtime::new().unwrap();
+        let job_ended = blocking_job_waiting_on_a_task(&rt);
+        rt.shutdown_timeout(Duration::from_millis(200));
+        assert_eq!(job_ended.recv_timeout(Duration::from_secs(2)), Ok(None));
+    });
+}

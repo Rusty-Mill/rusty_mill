@@ -24,7 +24,7 @@ use rmcp::{
 };
 use rusty_prost::Message as _;
 use rusty_prost::wkt::{Struct, Value};
-use tokio_util::sync::CancellationToken;
+use rusty_tokio::sync::CancellationToken;
 
 /// How the scripted processor should answer.
 #[derive(Clone)]
@@ -184,7 +184,7 @@ impl Harness {
     /// The same, with the processor naming its address however `reference`
     /// spells it, and `extra` appended at the top level.
     async fn start_referring(reference: &str, methods: &str, extra: &str) -> Harness {
-        let port = free_port().await;
+        let port = free_port();
         let yaml = format!(
             r#"
 binds:
@@ -397,7 +397,7 @@ async fn a_method_the_processor_is_not_keyed_on_is_not_sent_to_it() {
 async fn an_unreachable_processor_refuses_the_call() {
     // The whole policy turns on this: a policy service that is down must not
     // become an open door.
-    let dead = free_port().await;
+    let dead = free_port();
     let harness =
         Harness::start(&format!("127.0.0.1:{dead}"), r#"{ "tools/call": request }"#).await;
 
@@ -412,8 +412,8 @@ async fn an_unreachable_processor_refuses_the_call() {
 
 #[tokio::test]
 async fn failing_open_has_to_be_asked_for() {
-    let dead = free_port().await;
-    let port = free_port().await;
+    let dead = free_port();
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -477,7 +477,7 @@ binds:
 #[tokio::test]
 async fn a_processor_that_cannot_be_addressed_fails_at_startup() {
     // Rather than turning every call into a confusing refusal at runtime.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -562,7 +562,7 @@ async fn http_target_at(
     )))
     .at(mount);
 
-    let port = free_port().await;
+    let port = free_port();
     let seen: SeenHeaders = Arc::new(Mutex::new(Vec::new()));
     let paths: SeenPaths = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
@@ -607,7 +607,7 @@ async fn start_with_http_target(
     methods: &str,
     target_port: u16,
 ) -> (u16, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -994,7 +994,7 @@ async fn a_wildcard_can_hook_every_prompt_and_resource_method() {
 #[tokio::test]
 async fn an_unreachable_processor_refuses_a_prompt_fetch_too() {
     // Failing closed is not a tools-only property.
-    let dead = free_port().await;
+    let dead = free_port();
     let harness = Harness::start(
         &format!("127.0.0.1:{dead}"),
         r#"{ "prompts/get": request, "resources/read": request }"#,
@@ -1130,7 +1130,7 @@ async fn rules_are_applied_before_a_processor_is_consulted() {
     // to happen -- the same ordering tools use. Otherwise a guardrail would be
     // billed for traffic the route had already refused.
     let (host, seen, stop) = processor(Script::Pass).await;
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1224,7 +1224,7 @@ async fn the_response_phase_sees_a_resource_read_re_qualified() {
 impl Harness {
     /// Boot a gateway with one processor carrying `metadata` expressions.
     async fn with_metadata(host: &str, methods: &str, metadata: &str) -> Harness {
-        let port = free_port().await;
+        let port = free_port();
         let yaml = format!(
             r#"
 binds:
@@ -1417,7 +1417,7 @@ async fn with_modifier(
     modifier: &str,
     target_port: u16,
 ) -> (u16, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1615,7 +1615,7 @@ async fn the_route_wins_over_a_processors_header_mutation() {
 async fn a_bad_template_fails_at_startup() {
     // Rather than a header that silently never resolves, which reads exactly
     // like a guardrail that never ran.
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1689,7 +1689,7 @@ async fn the_startup_warm_up_carries_the_routes_static_headers() {
 
 /// Boot a gateway whose MCP route carries a response header modifier.
 async fn with_response_modifier(modifier: &str) -> (u16, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1811,7 +1811,7 @@ async fn a_response_modifier_add_appends_rather_than_replacing() {
 
 #[tokio::test]
 async fn a_bad_response_header_fails_at_startup() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1860,7 +1860,7 @@ async fn target_at(mount: &'static str) -> (u16, SeenPaths, CancellationToken) {
 async fn a_full_path_rewrite_moves_a_single_targets_endpoint() {
     let (target_port, paths, stop_target) = target_at("/elsewhere").await;
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1936,7 +1936,7 @@ async fn without_the_rewrite_the_targets_own_path_is_used() {
     // must not be reachable, or the test above proves nothing.
     let (target_port, _paths, stop_target) = target_at("/elsewhere").await;
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -1977,7 +1977,7 @@ async fn with_rewrite(
     configured_host: &str,
     configured_port: u16,
 ) -> Result<(u16, CancellationToken), String> {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2038,7 +2038,7 @@ async fn echo_through(port: u16) {
 #[tokio::test]
 async fn an_authority_rewrite_moves_a_single_targets_address() {
     let (real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
-    let dead = free_port().await;
+    let dead = free_port();
 
     // The target config points at a port nothing is listening on. Only the
     // rewrite can make this reachable.
@@ -2061,9 +2061,9 @@ async fn without_the_authority_rewrite_the_configured_address_is_used() {
     // The control: the same misconfiguration must fail without the rewrite,
     // or the test above proves nothing.
     let (_real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
-    let dead = free_port().await;
+    let dead = free_port();
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2112,7 +2112,7 @@ async fn an_authority_without_a_port_keeps_the_targets_own() {
 #[tokio::test]
 async fn authority_and_path_compose() {
     let (real_port, _headers, paths, stop_target) = http_target_at("/elsewhere").await;
-    let dead = free_port().await;
+    let dead = free_port();
 
     let (port, shutdown) = with_rewrite(
         &format!(
@@ -2186,7 +2186,7 @@ async fn with_prefix_rewrite(
     target_port: u16,
     target_path: &str,
 ) -> Result<(u16, CancellationToken), String> {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2255,7 +2255,7 @@ async fn without_the_prefix_rewrite_the_configured_path_is_used() {
     // so the same config without the rewrite must fail to come up.
     let (target_port, _headers, _paths, stop_target) = http_target_at("/rpc/v1").await;
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2346,7 +2346,7 @@ async fn a_prefix_rewrite_is_ignored_when_the_route_matches_several_prefixes() {
     // target keeps its configured path. `--check` reports the config.
     let (target_port, _headers, paths, stop_target) = http_target_at("/mcp/v1").await;
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2411,7 +2411,7 @@ async fn a_path_rewrite_moves_every_target_to_its_own_rewritten_path() {
     let (alpha_port, _ah, alpha_paths, stop_alpha) = http_target_at("/rpc/a").await;
     let (beta_port, _bh, beta_paths, stop_beta) = http_target_at("/rpc/b").await;
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2497,7 +2497,7 @@ async fn a_full_path_rewrite_gives_every_target_the_same_path_on_its_own_host() 
     let (alpha_port, _ah, alpha_paths, stop_alpha) = http_target_at("/rpc").await;
     let (beta_port, _bh, beta_paths, stop_beta) = http_target_at("/rpc").await;
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2567,7 +2567,7 @@ async fn an_authority_over_several_targets_is_reported_and_not_applied() {
     let (alpha_port, _ah, alpha_paths, stop_alpha) = http_target_at("/rpc/a").await;
     let (beta_port, _bh, beta_paths, stop_beta) = http_target_at("/rpc/b").await;
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2651,10 +2651,10 @@ async fn via_dials_every_target_through_one_address() {
     // targets name ports nothing listens on, so `via` is the only thing that
     // can make either reachable.
     let (egress_port, _headers, paths, stop_egress) = http_target_at("/a").await;
-    let dead_a = free_port().await;
-    let dead_b = free_port().await;
+    let dead_a = free_port();
+    let dead_b = free_port();
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2717,9 +2717,9 @@ binds:
 async fn without_via_the_configured_addresses_are_used() {
     // The control: the same config without `via` cannot reach anything.
     let (_egress_port, _headers, _paths, stop_egress) = http_target_at("/a").await;
-    let dead = free_port().await;
+    let dead = free_port();
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2752,7 +2752,7 @@ async fn via_keeps_each_targets_path() {
     // concerned.
     let (egress_port, _headers, paths, stop_egress) = http_target_at("/rpc").await;
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2801,9 +2801,9 @@ async fn via_wins_over_a_url_rewrite_authority() {
     // specific of the two and the one that names targets, so it wins -- and
     // the choice is deterministic rather than order-dependent.
     let (egress_port, _headers, paths, stop_egress) = http_target_at("/mcp").await;
-    let dead = free_port().await;
+    let dead = free_port();
 
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2847,7 +2847,7 @@ binds:
 
 #[tokio::test]
 async fn a_via_carrying_credentials_fails_at_startup() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:
@@ -2925,7 +2925,7 @@ async fn a_processor_can_name_a_service_instead_of_an_address() {
 
 #[tokio::test]
 async fn a_processor_naming_a_backend_that_does_not_exist_fails_at_startup() {
-    let port = free_port().await;
+    let port = free_port();
     let yaml = format!(
         r#"
 binds:

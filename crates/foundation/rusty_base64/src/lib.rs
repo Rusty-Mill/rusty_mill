@@ -2,7 +2,7 @@
 //! throughout OAuth/JOSE (PKCE challenges, JWT segments).
 //!
 //! Extracted from `rusty_oauth::encoding::base64`, which already had the
-//! complete surface (encode/decode, both alphabets) that `rusty_acp`,
+//! complete surface (encode/decode, both alphabets) that `rusty_ibm_acp`,
 //! `rusty-mcp`, and `rusty_a2a` each needed but were instead pulling from
 //! the external `base64` crate for. `rusty_request`'s own `src/base64.rs`
 //! was considered as a base for this instead, but it's private
@@ -12,7 +12,7 @@
 //!
 //! The chunking here uses `chunks_exact`/`remainder` rather than the
 //! newer `slice::as_chunks` that `rusty_oauth`'s original copy used --
-//! `as_chunks` is not yet stable at `rusty_acp`'s own `rust-version =
+//! `as_chunks` is not yet stable at `rusty_ibm_acp`'s own `rust-version =
 //! "1.86"` floor (confirmed against a real `+1.86` toolchain), and this
 //! crate needs to compile under every consumer's MSRV, not just the
 //! workspace root's.
