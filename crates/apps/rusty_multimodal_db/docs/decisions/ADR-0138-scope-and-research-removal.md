@@ -33,6 +33,8 @@ with seven consumers. It also found three problems:
    records no longer have to fit in RAM. The replacement for `bincode` 1
    (unmaintained, `RUSTSEC-2025-0141`) ships with it, as one format
    migration rather than two. Vectors and other new features come after.
+   *Amended by ADR-0139 (proposed): the codec ships first, on its own;
+   it is byte-identical, so it needs no migration.*
 3. **The research bucket is removed, not kept behind a flag.** This PR
    deletes the alternative backends, durability variants, concurrency
    strategies, spikes, their benches, `tests/cross_backend.rs`,
