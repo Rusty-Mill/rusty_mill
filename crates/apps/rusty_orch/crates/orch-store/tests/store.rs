@@ -550,6 +550,7 @@ mod lens_states {
                 }),
                 look_harder: None,
                 foreign_seen: 2,
+                epoch: 1,
             }],
             questions: vec![SavedQuestion {
                 claim: 3,

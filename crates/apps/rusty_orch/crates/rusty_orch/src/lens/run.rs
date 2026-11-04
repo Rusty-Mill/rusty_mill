@@ -410,6 +410,7 @@ mod tests {
             status: ClaimStatus::Open,
             score: 0,
             accept_at: 8,
+            epoch: 0,
             stakes: Stakes::Medium,
             reversible: true,
             answers: None,
@@ -687,6 +688,36 @@ mod tests {
             assert!(e.contains("not UTF-8"), "{e}");
         }
         std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn a_claim_reopened_between_runs_is_reviewed_again() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+        let mut restored = State::restore(&kept.expect("kept")).expect("restore");
+        let mut reopened = card(7);
+        reopened.epoch = 1;
+        let seats = vec![
+            ("adversary", FakeSeat::new(vec![reopened.clone()])),
+            ("operator", FakeSeat::new(vec![reopened])),
+        ];
+        let (ended, log) = go_from(&mut restored, &mut |_| Ok(()), seats, &mut echo, 10, 20);
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 4, "each lens looks at the new epoch blind: {log}");
     }
 
     #[test]

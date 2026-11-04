@@ -29,6 +29,7 @@ pub struct SavedProgress {
     pub blind: Option<SavedPass>,
     pub look_harder: Option<SavedPass>,
     pub foreign_seen: u64,
+    pub epoch: u32,
 }
 
 /// One question's proposals. A `tried` slot is `Some(n)` for the `n`th
@@ -110,6 +111,7 @@ fn save_progress(lens: &str, claim: MsgId, p: &Progress) -> SavedProgress {
         blind: p.blind.as_ref().map(save_pass),
         look_harder: p.look_harder.as_ref().map(save_pass),
         foreign_seen: p.foreign_seen as u64,
+        epoch: p.epoch,
     }
 }
 
@@ -161,6 +163,7 @@ fn restore_progress(p: &SavedProgress) -> Result<Progress, String> {
         blind: p.blind.as_ref().map(restore_pass).transpose()?,
         look_harder: p.look_harder.as_ref().map(restore_pass).transpose()?,
         foreign_seen: count(p.foreign_seen)?,
+        epoch: p.epoch,
     })
 }
 
@@ -223,6 +226,7 @@ mod tests {
                     found_counter: true,
                 }),
                 foreign_seen: 3,
+                epoch: 2,
             },
         );
         let mut q = Proposals {

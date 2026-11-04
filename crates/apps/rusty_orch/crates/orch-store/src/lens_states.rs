@@ -41,6 +41,7 @@ struct ProgressRow {
     blind: Option<PassRow>,
     look_harder: Option<PassRow>,
     foreign_seen: u64,
+    epoch: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +113,7 @@ fn progress_row(p: &SavedProgress) -> ProgressRow {
         blind: p.blind.as_ref().map(pass_row),
         look_harder: p.look_harder.as_ref().map(pass_row),
         foreign_seen: p.foreign_seen,
+        epoch: p.epoch,
     }
 }
 
@@ -122,6 +124,7 @@ fn progress(p: ProgressRow) -> SavedProgress {
         blind: p.blind.map(pass),
         look_harder: p.look_harder.map(pass),
         foreign_seen: p.foreign_seen,
+        epoch: p.epoch,
     }
 }
 

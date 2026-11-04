@@ -358,6 +358,7 @@ mod tests {
             },
             suffix: Some("Look harder."),
             foreign_seen: 0,
+            epoch: 0,
             tools: Tools::None,
         }
     }
