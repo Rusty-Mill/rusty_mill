@@ -97,9 +97,22 @@ impl Store {
         self.dir.join(format!("{block}.{SCREEN}"))
     }
 
+    fn spool_dir(&self, block: BlockId) -> PathBuf {
+        self.dir.join(format!("{block}.{SPOOL}"))
+    }
+
     /// Opens `block`'s history spool, making it if missing.
     pub(crate) fn spool(&self, block: BlockId) -> io::Result<Spool> {
-        Spool::open(self.dir.join(format!("{block}.{SPOOL}")))
+        Spool::open(self.spool_dir(block))
+    }
+
+    /// Deletes `block`'s spool, if any: the block closed. Its handle must be
+    /// dropped first, for Windows to let the files go.
+    pub(crate) fn remove_spool(&self, block: BlockId) -> io::Result<()> {
+        match fs::remove_dir_all(self.spool_dir(block)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        }
     }
 
     /// Opens the session records and returns what they hold, `Ok(None)`

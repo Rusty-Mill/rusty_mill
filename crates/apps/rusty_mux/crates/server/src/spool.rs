@@ -174,15 +174,6 @@ impl Spool {
         }
         Ok(out)
     }
-
-    /// Deletes the spool: its block closed.
-    pub(crate) fn remove(self) -> io::Result<()> {
-        drop(self.out);
-        match fs::remove_dir_all(&self.dir) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-            _ => Ok(()),
-        }
-    }
 }
 
 fn segment_path(dir: &Path, n: u64) -> PathBuf {
@@ -250,7 +241,8 @@ mod tests {
         let spool = Spool::open(dir.clone()).unwrap();
         assert_eq!(spool.lines(), 1200);
         assert_eq!(numbers(&spool.read(0, 1).unwrap()), [1199]);
-        spool.remove().unwrap();
+        drop(spool);
+        fs::remove_dir_all(&dir).unwrap();
         assert!(!dir.exists());
     }
 
@@ -275,7 +267,8 @@ mod tests {
         assert_eq!(newest, [n - 1]);
         let oldest = numbers(&spool.read(spool.lines() - 1, 1).unwrap())[0];
         assert!(oldest > 0, "oldest dropped");
-        spool.remove().unwrap();
+        drop(spool);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -293,6 +286,7 @@ mod tests {
         assert_eq!(spool.lines(), 2);
         spool.append(vec![line(3, 16)]).unwrap();
         assert_eq!(numbers(&spool.read(0, 10).unwrap()), [1, 2, 3]);
-        spool.remove().unwrap();
+        drop(spool);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

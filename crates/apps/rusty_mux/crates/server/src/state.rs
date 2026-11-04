@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::io;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
@@ -233,11 +234,32 @@ impl BlockRt {
         })
     }
 
+    /// Keeps the history this grid evicts in `spool`, starting with the
+    /// lines already waiting (a restore's marker pushes some out). Without a
+    /// spool, or once writing fails, the grid stops collecting them: spilling
+    /// is on exactly while `self.spool` is some.
+    fn keep_history(&mut self, block: BlockId, spool: io::Result<Spool>) {
+        let pending = self.grid.take_spilled();
+        let kept = spool.and_then(|mut spool| spool.append(pending).map(|()| spool));
+        match kept {
+            Ok(spool) => {
+                self.grid.spill_evicted(true);
+                self.spool = Some(spool);
+            }
+            Err(e) => {
+                eprintln!(
+                    "rusty-mux-server: block {block}'s history past scrollback will not be kept: {e}"
+                );
+                self.stop_history();
+            }
+        }
+    }
+
     /// Appends the lines the grid evicted to the spool. A spool that
     /// fails is dropped with a warning, and its history stops there.
     fn spill(&mut self, block: BlockId) {
         let Some(spool) = self.spool.as_mut() else {
-            return;
+            return self.stop_history();
         };
         let lines = self.grid.take_spilled();
         if lines.is_empty() {
@@ -245,9 +267,14 @@ impl BlockRt {
         }
         if let Err(e) = spool.append(lines) {
             eprintln!("rusty-mux-server: block {block}'s history past scrollback stops here: {e}");
-            self.spool = None;
-            self.grid.spill_evicted(false);
+            self.stop_history();
         }
+    }
+
+    /// Drops the spool and stops the grid collecting lines for it.
+    fn stop_history(&mut self) {
+        self.spool = None;
+        self.grid.spill_evicted(false);
     }
 
     fn pid(&self) -> Option<u32> {
@@ -1390,25 +1417,9 @@ impl State {
     /// Holds `rt` as `block`'s, spooling the history its grid evicts
     /// while the server keeps state (C70).
     fn adopt(&mut self, block: BlockId, mut rt: BlockRt) {
-        if let Some(store) = &self.store {
-            match store.spool(block) {
-                Ok(spool) => {
-                    // Lines a restore's marker pushed out already wait.
-                    let pending = rt.grid.take_spilled();
-                    rt.grid.spill_evicted(true);
-                    rt.spool = Some(spool);
-                    if let Some(spool) = rt.spool.as_mut()
-                        && let Err(e) = spool.append(pending)
-                    {
-                        eprintln!(
-                            "rusty-mux-server: block {block}'s restored history is short: {e}"
-                        );
-                    }
-                }
-                Err(e) => eprintln!(
-                    "rusty-mux-server: block {block}'s history past scrollback will not be kept: {e}"
-                ),
-            }
+        match &self.store {
+            Some(store) => rt.keep_history(block, store.spool(block)),
+            None => rt.stop_history(),
         }
         self.blocks.insert(block, rt);
     }
@@ -1783,6 +1794,14 @@ impl State {
         }
     }
 
+    /// Deletes closed `block`'s spool by its path, whether or not a handle
+    /// to it is left. A stopping server closes no block, so keeps them all.
+    fn forget_history(&self, block: BlockId) {
+        if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_spool(block)) {
+            eprintln!("rusty-mux-server: removing block {block}'s history: {e}");
+        }
+    }
+
     /// Broadcasts queued model events and releases closed blocks' PTYs,
     /// until a pass queues nothing new.
     fn flush(&mut self) {
@@ -1792,10 +1811,12 @@ impl State {
                 return;
             }
             for event in events {
-                if let Event::BlockClosed { block } = event
-                    && let Some(rt) = self.blocks.remove(&block)
-                {
-                    close(block, rt);
+                if let Event::BlockClosed { block } = event {
+                    // Its program may have hung up, or its spool failed, first.
+                    if let Some(rt) = self.blocks.remove(&block) {
+                        close(rt);
+                    }
+                    self.forget_history(block);
                 }
                 let seq = self.history.push(event.clone());
                 let (Some(plain), Some(numbered)) =
@@ -1818,11 +1839,9 @@ impl State {
     }
 }
 
-/// Lets a closed block's program go, to be reaped, and deletes its spool.
-fn close(block: BlockId, mut rt: BlockRt) {
-    if let Some(Err(e)) = rt.spool.take().map(Spool::remove) {
-        eprintln!("rusty-mux-server: removing block {block}'s history: {e}");
-    }
+/// Lets a closed block's program go, to be reaped, and its spool's files.
+fn close(mut rt: BlockRt) {
+    drop(rt.spool.take());
     if let Some(process) = rt.release(true) {
         rusty_tokio::task::spawn_local(process.reap());
     }
@@ -2827,5 +2846,70 @@ mod regression {
         ));
         let refused = reply("t", &[text(1, half), text(2, half)]);
         assert!(matches!(refused, Err(why) if why.reason.contains("exceeds")));
+    }
+
+    /// A read-only block whose 2-row grid keeps no scrollback, so every
+    /// line that scrolls off spills, as a revived one's does.
+    fn spilling_block() -> BlockRt {
+        let mut grid = Grid::new(10, 2);
+        grid.set_scrollback_max(0);
+        grid.spill_evicted(true);
+        let started = Started {
+            shell: true,
+            read_only: true,
+            program: "sh".into(),
+            args: vec![],
+            cwd: "/".into(),
+        };
+        BlockRt::read_only(grid, AnsiParser::new(), started)
+    }
+
+    /// Prints `n` lines into `rt`'s grid, as `output` does.
+    fn print(rt: &mut BlockRt, block: BlockId, n: usize) {
+        for i in 0..n {
+            rt.parser
+                .advance(&mut rt.grid, format!("line {i}\r\n").as_bytes());
+            rt.spill(block);
+        }
+    }
+
+    /// A spool directory, gone before anything is written to it.
+    fn vanished_spool(name: &str) -> Spool {
+        let dir = std::env::temp_dir().join(format!("rusty-mux-{name}-{}", std::process::id()));
+        let spool = Spool::open(dir.clone()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        spool
+    }
+
+    #[test]
+    fn a_spool_that_cannot_open_stops_the_grid_collecting_lines() {
+        let block = BlockId::from_uuid(Uuid::nil());
+        let mut rt = spilling_block();
+        rt.parser.advance(&mut rt.grid, b"a\r\nb\r\nc\r\n");
+        rt.keep_history(block, Err(io::Error::other("no room")));
+        print(&mut rt, block, 50);
+        assert!(rt.spool.is_none());
+        assert!(rt.grid.take_spilled().is_empty(), "nothing queued");
+        assert_eq!(rt.grid.line_text(0).as_deref(), Some("line 49"));
+    }
+
+    #[test]
+    fn a_spool_that_fails_to_write_is_dropped_and_collects_nothing_more() {
+        let block = BlockId::from_uuid(Uuid::nil());
+        // The lines a restore's marker pushed out fail to write.
+        let mut rt = spilling_block();
+        rt.parser.advance(&mut rt.grid, b"a\r\nb\r\nc\r\n");
+        rt.keep_history(block, Ok(vanished_spool("pending")));
+        assert!(rt.spool.is_none());
+        print(&mut rt, block, 50);
+        assert!(rt.grid.take_spilled().is_empty(), "nothing queued");
+        // Or later output does.
+        let mut rt = spilling_block();
+        rt.keep_history(block, Ok(vanished_spool("later")));
+        assert!(rt.spool.is_some(), "nothing to write yet");
+        print(&mut rt, block, 50);
+        assert!(rt.spool.is_none());
+        assert!(rt.grid.take_spilled().is_empty(), "nothing queued");
+        assert_eq!(rt.grid.line_text(0).as_deref(), Some("line 49"));
     }
 }
