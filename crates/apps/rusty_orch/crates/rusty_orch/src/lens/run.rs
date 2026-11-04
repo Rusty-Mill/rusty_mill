@@ -268,12 +268,17 @@ pub fn outcome(ended: &Ended, mut log: String) -> Result<String, String> {
 ///
 /// # Errors
 ///
-/// A message when `dir` cannot be resolved.
+/// A message when `dir` cannot be resolved, or when its canonical path is
+/// not UTF-8: a lossy string could name two directories, so such a
+/// directory is refused before any state is read or any provider asked.
 pub fn board(dir: &Path, task: &str) -> Result<String, String> {
-    let dir = dir
+    let canonical = dir
         .canonicalize()
         .map_err(|e| format!("cannot resolve {}: {e}", dir.display()))?;
-    Ok(format!("{}\0{task}", dir.to_string_lossy()))
+    let text = canonical
+        .to_str()
+        .ok_or_else(|| format!("BBP directory {} is not UTF-8", canonical.display()))?;
+    Ok(format!("{text}\0{task}"))
 }
 
 /// The scheduler's memory saved for `board`, or a fresh one.
@@ -658,6 +663,29 @@ mod tests {
         );
         assert_eq!(echo.1, 4, "A asks nothing again");
         drop(store);
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_whose_path_is_not_utf8_is_refused() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let root = std::env::temp_dir().join(format!("orch-lens-utf8-{}", std::process::id()));
+        let named =
+            |last: u8| root.join(OsString::from_vec(vec![b'b', b'o', b'a', b'r', b'd', last]));
+        let (x80, x81) = (named(0x80), named(0x81));
+        for d in [&x80, &x81] {
+            std::fs::create_dir_all(d).expect("dir");
+        }
+        assert_ne!(
+            x80.canonicalize().expect("x80"),
+            x81.canonicalize().expect("x81")
+        );
+        for d in [&x80, &x81] {
+            let e = board(d, "task-1").expect_err("lossy path refused");
+            assert!(e.contains("not UTF-8"), "{e}");
+        }
         std::fs::remove_dir_all(&root).expect("clean up");
     }
 
