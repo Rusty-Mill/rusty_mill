@@ -214,3 +214,27 @@ fn changed_rust_that_is_not_utf8_is_reported_unmeasured() {
         stdout(&enforced)
     );
 }
+
+#[test]
+fn modified_rust_that_is_not_utf8_fails_enforcing_only() {
+    let repo = Repo::new("utf8mod");
+    let base = repo.head();
+    std::fs::write(repo.dir.join("src/a.rs"), b"pub fn total() { \xff }\n").expect("write");
+    let line = stdout(&repo.erosion(&["check", "--base", &base, "--report-only"]));
+    assert!(line.contains("\"unmeasured\":[\"src/a.rs\"]"), "{line}");
+    assert_eq!(repo.erosion(&enforcing(&base)).status.code(), Some(2));
+}
+
+#[test]
+fn unsupported_language_changes_never_block_enforcing() {
+    let repo = Repo::new("lang");
+    let base = repo.head();
+    repo.write("tool.py", "print(1)\n");
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"unmeasured\":[\"tool.py\"]"),
+        "{}",
+        stdout(&out)
+    );
+}
