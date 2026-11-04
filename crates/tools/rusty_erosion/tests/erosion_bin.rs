@@ -148,6 +148,7 @@ fn a_committed_rust_symlink_is_never_measured_as_source() {
     );
 }
 
+#[cfg(unix)]
 /// Runs `erosion` but gives up after 60 s, so a blocking read fails the test
 /// instead of hanging it.
 fn erosion_bounded(repo: &Repo, args: &[&str]) -> Output {
@@ -223,6 +224,8 @@ fn rust_names_that_are_not_utf8_fail_enforcing_committed_or_changed() {
     }
 }
 
+// Windows file names cannot hold a newline.
+#[cfg(unix)]
 #[test]
 fn newlines_in_names_do_not_break_blob_framing() {
     let repo = Repo::new("newline");
@@ -489,17 +492,7 @@ fn modified_rust_that_is_not_utf8_fails_enforcing_only() {
 fn unreadable_base(name: &str) -> (Repo, String) {
     let repo = Repo::new(name);
     std::fs::write(repo.dir.join("src/bad.rs"), b"fn b() { \xff }\n").expect("write");
-    repo.git(&["add", "-A"]);
-    repo.git(&[
-        "-c",
-        "user.name=t",
-        "-c",
-        "user.email=t@t",
-        "commit",
-        "--quiet",
-        "-m",
-        "bad",
-    ]);
+    commit(&repo);
     let base = repo.head();
     (repo, base)
 }
