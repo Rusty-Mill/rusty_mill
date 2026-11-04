@@ -53,9 +53,14 @@ Each arc needs the owner's go before it starts, and its own plan.
    Then C36 upgrade without losing sessions and C69 auto-start, with Orca's endpoint-ownership
    rules (O6) first.
 4. **Let Em Loose on the mux (proposal).** No link exists today between `rusty_orch`/`rusty_bbp`
-   and rusty_mux. BBP stage 3 plans a sandboxed runner supervisor; if its agent runs were rusty_mux
-   blocks, Nano could watch or attach to any agent, and status would come from O2. Orchestration
-   logic stays in orch/BBP. Needs the Let Em Loose side's design (its expert) and Nano's go.
+   and rusty_mux. Agents are launched by the `bbp mod` harness launcher, which keeps their whole
+   lifecycle (process group, slot, grace, kill, reap); `bbp runner` only runs test profiles. So the
+   mux does not fork agents: that would be a new executor and needs Nano's go. Proposed v0 is a
+   watch-only agent pane: a block that tails the harness's turn log and polls `bbp card`, with
+   status from BBP's log, never written back into it. Inside the BBP sandbox Unix sockets are
+   blocked, so any status a confined agent sends the mux comes as OSC 7501 on the pty, not an O2
+   hook calling the mux socket. Open calls (agent blocks without the mux socket in their
+   environment; read-only attach) are in the convergence brief and need Nano.
 5. **Mux Phase 4 rest and Phase 5.** Web client, WebSocket API, device pairing, config
    migration, parking, encryption at rest, audit, plugins (C66 is a new crate). Order set when
    arc 2 is under way.
