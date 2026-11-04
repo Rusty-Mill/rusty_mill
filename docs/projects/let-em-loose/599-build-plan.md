@@ -152,7 +152,7 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
 - Findings are posted by the task's `watcher` role (D79) as low-stakes,
   reversible claims citing the brief. A claim needs a second author to
   accept, and a human still merges.
-- **Posted once, through the approved `watch_finding` table (D82).** Each
+- **Posted once, through the approved `watch_finding` table (D83).** Each
   finding has a stable key and a slot, the thing it is about:
 
   | Finding | Key | Slot |

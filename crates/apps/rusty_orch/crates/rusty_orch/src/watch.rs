@@ -10,7 +10,7 @@
 //! - Findings are posted by the task's `watcher` role (D79) through its
 //!   `bbp mcp` session. A claim never accepts on the watcher's word alone
 //!   (`min_authors`), and a human still merges.
-//! - Posted once (D82). Each finding has a stable `key` and a `slot`, the
+//! - Posted once (D83). Each finding has a stable `key` and a `slot`, the
 //!   thing it is about. Advisories and yanked crates are their own slot; the
 //!   update set is one slot per app (`updates`), and so is the toolchain
 //!   (`toolchain:rust`). The `watch_finding` table in orch-store keeps, per
