@@ -105,6 +105,63 @@ fn a_dangling_rust_symlink_is_not_a_deletion() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn rust_deleted_under_a_directory_replaced_by_a_file_is_a_deletion() {
+    let repo = Repo::new("rustdir");
+    std::fs::create_dir_all(repo.dir.join("src/m")).expect("mkdir");
+    repo.write("src/m/b.rs", "pub fn b() {}\n");
+    commit(&repo);
+    let base = repo.head();
+    std::fs::remove_dir_all(repo.dir.join("src/m")).expect("rm");
+    repo.write("src/m", "not a dir\n");
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"functions\":-1"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_committed_rust_symlink_is_never_measured_as_source() {
+    let repo = Repo::new("baselink");
+    std::os::unix::fs::symlink("nowhere.rs", repo.dir.join("src/b.rs")).expect("symlink");
+    commit(&repo);
+    let base = repo.head();
+    repo.write("src/a.rs", &format!("{ORIGINAL}\npub fn more() {{}}\n"));
+    let report = repo.erosion(&["check", "--base", &base, "--report-only"]);
+    assert_eq!(report.status.code(), Some(0));
+    assert!(
+        stdout(&report).contains("\"unmeasured\":[\"src/b.rs\"]"),
+        "{}",
+        stdout(&report)
+    );
+    let enforced = repo.erosion(&enforcing(&base));
+    assert_eq!(enforced.status.code(), Some(2), "{}", stdout(&enforced));
+    assert!(
+        stdout(&enforced).contains("src/b.rs"),
+        "{}",
+        stdout(&enforced)
+    );
+}
+
+fn commit(repo: &Repo) {
+    repo.git(&["add", "-A"]);
+    repo.git(&[
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit",
+        "--quiet",
+        "-m",
+        "next",
+    ]);
+}
+
 struct Repo {
     dir: PathBuf,
 }

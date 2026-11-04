@@ -138,19 +138,21 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
     ])?;
     let changed = changed_paths(&opts.base)?;
     let mut parser = Parser::new().map_err(|e| e.to_string())?;
-    let base_files = blobs(&opts.base, &tree_paths(&opts.base)?)?;
+    let (base_paths, base_links) = tree_paths(&opts.base)?;
+    let base_files = blobs(&opts.base, &base_paths)?;
     let base_measures = measure_all(&mut parser, &base_files)?;
-    let base = Report::build(
-        base_measures.values().cloned().collect(),
-        unmeasured(&base_files),
-    );
-    let cand_files = worktree(&changed)?;
+    let mut base_unmeasured = unmeasured(&base_files);
+    base_unmeasured.extend(base_links.iter().cloned());
+    let base = Report::build(base_measures.values().cloned().collect(), base_unmeasured);
+    let (cand_files, cand_links) = worktree(&changed)?;
     let mut cand_measures = base_measures;
     cand_measures.retain(|path, _| !changed.contains(path));
     cand_measures.extend(measure_all(&mut parser, &cand_files)?);
     let mut cand_unmeasured = unmeasured(&base_files);
+    cand_unmeasured.extend(base_links.iter().cloned());
     cand_unmeasured.retain(|p| !changed.contains(p));
     cand_unmeasured.extend(unmeasured(&cand_files));
+    cand_unmeasured.extend(cand_links.iter().cloned());
     cand_unmeasured.extend(
         changed
             .iter()
@@ -158,20 +160,22 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
             .cloned(),
     );
     let cand = Report::build(cand_measures.into_values().collect(), cand_unmeasured);
-    // Rust that is not UTF-8 in either snapshot: the base tree, or a
-    // changed candidate file (unchanged ones are the base's bytes).
+    // Rust it cannot measure as source in either snapshot: not UTF-8, or a
+    // symlink, in the base tree or a changed candidate file (unchanged ones
+    // are the base's entries).
     let bad_rust: BTreeSet<String> = base_files
         .iter()
         .chain(&cand_files)
         .filter(|(p, b)| classify(p) == FileClass::Rust && std::str::from_utf8(b).is_err())
         .map(|(p, _)| p.clone())
+        .chain(base_links.iter().chain(&cand_links).cloned())
         .collect();
     if opts.limits.is_some() && !bad_rust.is_empty() {
         // Supported code that cannot be read leaves a snapshot incomplete, a
         // measurement failure rather than `unmeasured` (D45 covers other
         // languages only): fail closed.
         return Err(format!(
-            "Rust is not UTF-8: {}",
+            "cannot measure Rust (not UTF-8, or a symlink): {}",
             bad_rust.iter().cloned().collect::<Vec<_>>().join(", ")
         ));
     }
@@ -244,35 +248,60 @@ fn changed_paths(base: &str) -> Result<BTreeSet<String>, String> {
     Ok(out.into_iter().collect())
 }
 
-/// Measured or unmeasured paths in `base`'s tree.
-fn tree_paths(base: &str) -> Result<Vec<String>, String> {
-    let all = split_z(&git(&["ls-tree", "-r", "-z", "--name-only", base])?);
-    Ok(all
-        .into_iter()
-        .filter(|p| classify(p) != FileClass::Ignored)
-        .collect())
-}
-
-/// The changed Rust files' working-tree contents; deleted ones are left out.
-/// Other languages are not touched at all: they are only listed as
-/// `unmeasured` from the changed paths (D45), so nothing about them, not even
-/// a failed lookup, decides the result.
-fn worktree(changed: &BTreeSet<String>) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let mut out = Vec::new();
-    for path in changed.iter().filter(|p| classify(p) == FileClass::Rust) {
-        match std::fs::read(path) {
-            Ok(bytes) => out.push((path.clone(), bytes)),
-            // Deleted, unless the path itself is still there (a dangling
-            // symlink), which is Rust it cannot read: fail closed.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                if std::fs::symlink_metadata(path).is_ok() {
-                    return Err(format!("{path}: {e}"));
-                }
+/// Measured or unmeasured paths in `base`'s tree, and apart from them the
+/// Rust paths that are symlinks: a link's blob is its target path, not source.
+fn tree_paths(base: &str) -> Result<(Vec<String>, BTreeSet<String>), String> {
+    let mut paths = Vec::new();
+    let mut links = BTreeSet::new();
+    for entry in split_z(&git(&["ls-tree", "-r", "-z", base])?) {
+        // `<mode> <type> <object>\t<path>`
+        let (meta, path) = entry
+            .split_once('\t')
+            .ok_or_else(|| format!("git ls-tree: bad entry {entry:?}"))?;
+        match classify(path) {
+            FileClass::Ignored => {}
+            FileClass::Rust if meta.starts_with("120000 ") => {
+                links.insert(path.to_owned());
             }
-            Err(e) => return Err(format!("{path}: {e}")),
+            _ => paths.push(path.to_owned()),
         }
     }
-    Ok(out)
+    Ok((paths, links))
+}
+
+/// Paths and contents.
+type Files = Vec<(String, Vec<u8>)>;
+
+/// The changed Rust files' working-tree contents, and apart from them the
+/// changed Rust paths that are symlinks. Deleted ones are left out, including
+/// those under a directory since replaced by a file. Other languages are not
+/// touched at all: they are only listed as `unmeasured` from the changed
+/// paths (D45), so nothing about them, not even a failed lookup, decides the
+/// result.
+fn worktree(changed: &BTreeSet<String>) -> Result<(Files, BTreeSet<String>), String> {
+    let mut out = Vec::new();
+    let mut links = BTreeSet::new();
+    for path in changed.iter().filter(|p| classify(p) == FileClass::Rust) {
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(e) => return Err(format!("{path}: {e}")),
+        };
+        if meta.file_type().is_symlink() {
+            links.insert(path.clone());
+            continue;
+        }
+        let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        out.push((path.clone(), bytes));
+    }
+    Ok((out, links))
 }
 
 /// `base:path` blobs through one `git cat-file --batch`.
