@@ -152,11 +152,34 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
 - Findings are posted by the task's `watcher` role (D79) as low-stakes,
   reversible claims citing the brief. A claim needs a second author to
   accept, and a human still merges.
-- **Posted once without a table.** Each finding's op id is a digest of the
-  app and the finding's key, and its text is built from the key alone. A
-  later run posting the same finding therefore replays the first post (BBP
-  R15) and returns the same claim id. That makes the approved
-  `watch_finding` table unnecessary, so it is not built.
+- **Posted once, through the approved `watch_finding` table (D82).** Each
+  finding has a stable key and a slot, the thing it is about:
+
+  | Finding | Key | Slot |
+  |---|---|---|
+  | Advisory | `advisory:<id>:<crate>` | the key |
+  | Yanked crate | `yanked:<crate>:<version>` | the key |
+  | Update set | `updates:<digest of the set>` | `updates` |
+  | Toolchain | `toolchain:rust:<watched version>` | `toolchain:rust` |
+
+  `watch_finding` (orch-store, `--state DIR`) keeps the key last posted and
+  its claim for each app and slot.
+  - The same key posts nothing, and the report gives the existing claim.
+  - A new key in a slot that already has a claim posts a claim with
+    `supersedes` naming the old one. Accepting the new claim retires the
+    stale one. Examples: a new update set, or a new watched Rust.
+  - An empty slot posts a new claim.
+
+  Details that change under a key are reported in `detail` and never
+  posted: an advisory's title or severity, or the app's current pin. The
+  claim text comes from the key alone, so it never goes stale.
+
+  BBP R15 covers a crash between the post and the table write:
+  - The op id is a digest of the app and the key.
+  - Every posted field comes from the key and the slot's previous claim.
+    `refs` cites the opening brief `art:1`, not the current brief.
+  - So the retry is byte-identical and replays the same claim. A changed
+    payload under one op would be refused with `OpConflict`.
 - An adapter that fails is reported in the JSON with its reason, the others
   still run, and the exit status is 1.
 

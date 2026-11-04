@@ -531,3 +531,43 @@ mod meters {
         assert!(matches!(s.load_meter("dedup"), Err(StoreError::Corrupt(_))));
     }
 }
+
+mod watch {
+    use orch_store::{Store, WatchFinding};
+
+    use super::dir;
+
+    fn found(key: &str, claim: u64) -> WatchFinding {
+        WatchFinding {
+            key: key.to_owned(),
+            claim,
+        }
+    }
+
+    #[test]
+    fn a_watched_finding_survives_reopening_and_is_per_app_and_slot() {
+        let d = dir("watch_reopen");
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert_eq!(s.watch_finding("demo", "updates").expect("load"), None);
+            s.save_watch_finding("demo", "updates", &found("updates:aa", 3))
+                .expect("save");
+        }
+        let mut s = Store::open(&d).expect("reopen");
+        let got = s.watch_finding("demo", "updates").expect("load");
+        assert_eq!(got, Some(found("updates:aa", 3)));
+        assert_eq!(s.watch_finding("other", "updates").expect("load"), None);
+        assert_eq!(
+            s.watch_finding("demo", "toolchain:rust").expect("load"),
+            None
+        );
+        s.save_watch_finding("demo", "updates", &found("updates:bb", 7))
+            .expect("replace");
+        let got = s.watch_finding("demo", "updates").expect("load");
+        assert_eq!(
+            got,
+            Some(found("updates:bb", 7)),
+            "a later save replaces it"
+        );
+    }
+}

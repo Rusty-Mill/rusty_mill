@@ -10,21 +10,38 @@
 //! - Findings are posted by the task's `watcher` role (D79) through its
 //!   `bbp mcp` session. A claim never accepts on the watcher's word alone
 //!   (`min_authors`), and a human still merges.
-//! - Posted once: each finding's op id is derived from the app and the
-//!   finding's key, and its text from the key alone, so posting it again on a
-//!   later day replays the first post instead of adding a claim (BBP R15).
+//! - Posted once (D82). Each finding has a stable `key` and a `slot`, the
+//!   thing it is about. Advisories and yanked crates are their own slot; the
+//!   update set is one slot per app (`updates`), and so is the toolchain
+//!   (`toolchain:rust`). The `watch_finding` table in orch-store keeps, per
+//!   app and slot, the key last posted and its claim:
+//!   - same key: nothing is posted, and the report gives the claim;
+//!   - a new key in a slot that has a claim (a new update set, a new watched
+//!     Rust): a new claim that `supersedes` the old one, so accepting it
+//!     retires the stale claim;
+//!   - an empty slot: a new claim.
+//!
+//!   Details that change under the same key (an advisory's title or
+//!   severity, the app's current pin) are in [`Finding::detail`], reported
+//!   and never posted, so the claim text never goes stale.
+//! - Crash safety is BBP's R15: the op id is a digest of the app and the key,
+//!   and every posted field is a function of the key and the slot's previous
+//!   claim (refs cite the opening brief `art:1`, not the current one). A post
+//!   whose table write was lost is therefore byte-identical next time, and
+//!   replays to the same claim.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use orch_cli::CommandRunner;
+use orch_store::{Store, WatchFinding};
 use rusty_bbp::{MsgId, Response};
 use rusty_serde::{Deserialize, Serialize, Value};
 
 use crate::args::ArgsError;
 use crate::lens::bbp::{CallError, Child, Rpc};
 
-pub const USAGE: &str = "usage: rusty_orch watch --factory DIR --bbp-dir DIR [--bbp PATH] [--app NAME] [--dry-run]\n\nFor each app in DIR/apps/*.json (or only NAME), run the watch adapters in its repo and post\neach new finding as a claim on its maintenance task, as the task's `watcher` role. Prints a\nJSON report. --dry-run posts nothing. Findings already posted replay instead of repeating.";
+pub const USAGE: &str = "usage: rusty_orch watch --factory DIR --bbp-dir DIR --state DIR [--bbp PATH] [--app NAME] [--dry-run]\n\nFor each app in DIR/apps/*.json (or only NAME), run the watch adapters in its repo and post\neach new finding as a claim on its maintenance task, as the task's `watcher` role. --state is\nthe orch state dir that remembers what was posted: a finding already posted is not posted\nagain, and a newer one in its slot supersedes it. Prints a JSON report. --dry-run posts nothing.";
 
 /// The role that posts findings (D79).
 pub const WATCHER: &str = "watcher";
@@ -60,11 +77,16 @@ pub struct Watched {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Finding {
     /// Stable identity, e.g. `advisory:RUSTSEC-2026-0001:foo`; the op id and
-    /// the claim text are built from it alone.
+    /// every posted field are built from it alone.
     pub key: String,
+    /// What the finding is about: a newer key in the same slot replaces it.
+    pub slot: String,
     /// The claim's domain.
     pub domain: &'static str,
+    /// The claim text: a function of `key` only.
     pub text: String,
+    /// What may change under the same key; in the report, never posted.
+    pub detail: String,
 }
 
 /// One watch adapter (D58's `Watch` port).
@@ -174,23 +196,31 @@ fn diagnostic(fields: &Value) -> Option<Finding> {
     let a = &fields["advisory"];
     if let Some(id) = a["id"].as_str() {
         let package = a["package"].as_str().or_else(|| krate["name"].as_str())?;
-        let title = a["title"].as_str().unwrap_or("security advisory");
+        let title = a["title"].as_str().unwrap_or_default();
+        let severity = a["cvss"]
+            .as_str()
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        let key = format!("advisory:{id}:{package}");
         return Some(Finding {
-            key: format!("advisory:{id}:{package}"),
+            slot: key.clone(),
+            key,
             domain: "security",
-            text: format!(
-                "Dependency {package} is affected by {id} ({title}); update or replace it."
-            ),
+            text: format!("Dependency {package} is affected by {id}; update or replace it."),
+            detail: format!("{title}{severity}"),
         });
     }
     if fields["code"].as_str() != Some("yanked") {
         return None;
     }
     let (name, version) = (krate["name"].as_str()?, krate["version"].as_str()?);
+    let key = format!("yanked:{name}:{version}");
     Some(Finding {
-        key: format!("yanked:{name}:{version}"),
+        slot: key.clone(),
+        key,
         domain: "dependencies",
         text: format!("Dependency {name} {version} was yanked; move to a published version."),
+        detail: String::new(),
     })
 }
 
@@ -225,18 +255,22 @@ pub fn updates(stderr: &str) -> Option<Finding> {
     };
     Some(Finding {
         key: format!("updates:{}", &digest[..16]),
+        slot: "updates".to_owned(),
         domain: "dependencies",
         text: format!(
             "The lockfile can take {} dependency updates: {shown}{more}. Run cargo update and re-run the tests.",
             moves.len()
         ),
+        detail: String::new(),
     })
 }
 
 /// Updates named in an update claim's text; the rest are counted.
 const SHOWN: usize = 8;
 
-/// A finding when `rust-toolchain.toml`'s channel is not `watched`.
+/// A finding when `rust-toolchain.toml`'s channel is not `watched`, keyed by
+/// `watched` alone: moving the pin to another old version is still the same
+/// thing to do.
 pub fn toolchain(file: &str, watched: &str) -> Option<Finding> {
     let channel = file.lines().find_map(|l| {
         let (k, v) = l.split_once('=')?;
@@ -244,8 +278,12 @@ pub fn toolchain(file: &str, watched: &str) -> Option<Finding> {
     })?;
     (channel != watched).then(|| Finding {
         key: format!("toolchain:rust:{watched}"),
+        slot: "toolchain:rust".to_owned(),
         domain: "platform",
-        text: format!("Rust {watched} is the current toolchain; the app pins {channel}. Move it and re-run its tests."),
+        text: format!(
+            "Rust {watched} is the current toolchain and the app pins another. Move it to {watched} and re-run its tests."
+        ),
+        detail: format!("pins {channel}"),
     })
 }
 
@@ -257,6 +295,60 @@ pub struct Posted {
     pub finding: Finding,
     /// The claim; `None` in a dry run.
     pub claim: Option<MsgId>,
+    /// Whether this run posted it (false: an earlier run did).
+    pub new: bool,
+    /// The slot's earlier claim that this one replaces once accepted.
+    pub supersedes: Option<MsgId>,
+}
+
+/// The `watch_finding` table (D58): per app and slot, the finding last
+/// posted and its claim.
+pub trait Seen {
+    fn get(&self, app: &str, slot: &str) -> Result<Option<WatchFinding>, String>;
+    fn put(&mut self, app: &str, slot: &str, found: &WatchFinding) -> Result<(), String>;
+}
+
+impl Seen for Store {
+    fn get(&self, app: &str, slot: &str) -> Result<Option<WatchFinding>, String> {
+        self.watch_finding(app, slot).map_err(|e| e.to_string())
+    }
+    fn put(&mut self, app: &str, slot: &str, found: &WatchFinding) -> Result<(), String> {
+        self.save_watch_finding(app, slot, found)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Post `finding` unless its slot already holds it, superseding the slot's
+/// older claim, and record what was posted.
+pub fn record(
+    rpc: &mut dyn Rpc,
+    seen: &mut dyn Seen,
+    app: &str,
+    finding: Finding,
+) -> Result<Posted, String> {
+    let prior = seen.get(app, &finding.slot)?;
+    if let Some(p) = prior.as_ref().filter(|p| p.key == finding.key) {
+        return Ok(Posted {
+            finding,
+            claim: Some(MsgId(p.claim)),
+            new: false,
+            supersedes: None,
+        });
+    }
+    let supersedes = prior.map(|p| MsgId(p.claim));
+    let claim = post(rpc, app, &finding, supersedes)?;
+    let found = WatchFinding {
+        key: finding.key.clone(),
+        claim: claim.0,
+    };
+    seen.put(app, &finding.slot, &found)
+        .map_err(|e| format!("{claim} posted, not recorded: {e}"))?;
+    Ok(Posted {
+        finding,
+        claim: Some(claim),
+        new: true,
+        supersedes,
+    })
 }
 
 /// One app's watch.
@@ -275,22 +367,32 @@ pub fn op_id(app: &str, finding: &Finding) -> String {
     format!("watch-{}", &digest.hex()[..32])
 }
 
+/// The brief `task_opened` stores first. A claim cites it rather than the
+/// current brief, so a repeated post stays byte-identical (R15).
+const OPENING_BRIEF: &str = "art:1";
+
 /// Post `finding` as a low-stakes, reversible claim on the session's task,
-/// citing the task's brief.
-pub fn post(rpc: &mut dyn Rpc, app: &str, finding: &Finding) -> Result<MsgId, String> {
-    let brief = match answer(rpc.call("task_card", map(vec![])))? {
-        Response::Card(c) => c.brief.ok_or("task_card: the task has no brief")?,
-        other => return Err(format!("task_card answered {other:?}")),
-    };
-    let args = map(vec![
+/// citing the opening brief. Every field comes from `app`, `finding.key` and
+/// `supersedes`, so a repeat is byte-identical and replays (R15).
+pub fn post(
+    rpc: &mut dyn Rpc,
+    app: &str,
+    finding: &Finding,
+    supersedes: Option<MsgId>,
+) -> Result<MsgId, String> {
+    let mut fields = vec![
         ("op", op_id(app, finding).into()),
         ("kind", "claim".into()),
         ("text", finding.text.as_str().into()),
         ("domains", Value::Seq(vec![finding.domain.into()])),
         ("stakes", "low".into()),
         ("reversible", Value::Bool(true)),
-        ("refs", Value::Seq(vec![format!("art:{}", brief.0).into()])),
-    ]);
+        ("refs", Value::Seq(vec![OPENING_BRIEF.into()])),
+    ];
+    if let Some(x) = supersedes {
+        fields.push(("supersedes", Value::UInt(x.0)));
+    }
+    let args = map(fields);
     let reply = match rpc.call("post", args.clone()) {
         Err(CallError::Lost(_)) => rpc.call("post", args),
         first => first,
@@ -314,13 +416,16 @@ fn map(pairs: Vec<(&str, Value)>) -> Value {
     Value::Map(pairs.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
 }
 
-/// Watch `app` with `adapters`; post each finding through `session` unless
+/// A claims session and the table of what it posted.
+pub type Session<'a> = (&'a mut dyn Rpc, &'a mut dyn Seen);
+
+/// Watch `app` with `adapters`; record each finding through `session` unless
 /// it is `None` (a dry run).
 pub fn watch_app(
     app: &App,
     adapters: &[&dyn Watch],
     run: &dyn CommandRunner,
-    mut session: Option<&mut dyn Rpc>,
+    mut session: Option<Session<'_>>,
 ) -> AppReport {
     let mut report = AppReport {
         app: app.app.clone(),
@@ -337,17 +442,20 @@ pub fn watch_app(
             }
         };
         for finding in found {
-            let claim = match session.as_deref_mut() {
-                None => None,
-                Some(rpc) => match post(rpc, &app.app, &finding) {
-                    Ok(id) => Some(id),
-                    Err(e) => {
-                        report.errors.push(format!("post {}: {e}", finding.key));
-                        continue;
-                    }
-                },
+            let Some((rpc, seen)) = session.as_mut() else {
+                report.findings.push(Posted {
+                    finding,
+                    claim: None,
+                    new: false,
+                    supersedes: None,
+                });
+                continue;
             };
-            report.findings.push(Posted { finding, claim });
+            let key = finding.key.clone();
+            match record(&mut **rpc, &mut **seen, &app.app, finding) {
+                Ok(p) => report.findings.push(p),
+                Err(e) => report.errors.push(format!("post {key}: {e}")),
+            }
         }
     }
     report
@@ -360,14 +468,17 @@ pub fn watch_app(
 pub struct Options {
     pub factory: PathBuf,
     pub bbp_dir: PathBuf,
+    /// The orch state dir holding the `watch_finding` table.
+    pub state: PathBuf,
     pub bbp: PathBuf,
     pub app: Option<String>,
     pub dry_run: bool,
 }
 
-/// Parse `--factory DIR --bbp-dir DIR [--bbp PATH] [--app NAME] [--dry-run]`.
+/// Parse `--factory DIR --bbp-dir DIR --state DIR [--bbp PATH] [--app NAME] [--dry-run]`.
 pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsError> {
-    let (mut factory, mut bbp_dir, mut bbp, mut app, mut dry_run) = (None, None, None, None, false);
+    let (mut factory, mut bbp_dir, mut state, mut bbp, mut app) = (None, None, None, None, None);
+    let mut dry_run = false;
     let mut args = argv.into_iter();
     while let Some(arg) = args.next() {
         let slot = match arg.as_str() {
@@ -378,6 +489,7 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
             }
             "--factory" => &mut factory,
             "--bbp-dir" => &mut bbp_dir,
+            "--state" => &mut state,
             "--bbp" => &mut bbp,
             "--app" => &mut app,
             _ => return Err(ArgsError::Usage(format!("unexpected argument {arg:?}"))),
@@ -397,6 +509,7 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
     Ok(Options {
         factory: need(factory, "--factory")?.into(),
         bbp_dir: need(bbp_dir, "--bbp-dir")?.into(),
+        state: need(state, "--state")?.into(),
         bbp: bbp.unwrap_or_else(|| "bbp".to_owned()).into(),
         app,
         dry_run,
@@ -446,20 +559,23 @@ pub fn run(options: &Options, runner: &dyn CommandRunner) -> Result<(String, boo
     let apps = apps(&options.factory, options.app.as_deref())?;
     let toolchain = Toolchain(watched(&options.factory)?);
     let adapters: [&dyn Watch; 3] = [&Advisories, &Updates, &toolchain];
+    let mut store = match options.dry_run {
+        true => None,
+        false => Some(Store::open(&options.state).map_err(|e| e.to_string())?),
+    };
     let mut reports = Vec::new();
     for app in &apps {
-        let report = if options.dry_run {
-            watch_app(app, &adapters, runner, None)
-        } else {
-            match Child::spawn(&options.bbp, &options.bbp_dir, &app.task, WATCHER) {
-                Ok(mut child) => watch_app(app, &adapters, runner, Some(&mut child)),
+        let report = match store.as_mut() {
+            None => watch_app(app, &adapters, runner, None),
+            Some(store) => match Child::spawn(&options.bbp, &options.bbp_dir, &app.task, WATCHER) {
+                Ok(mut child) => watch_app(app, &adapters, runner, Some((&mut child, store))),
                 Err(e) => AppReport {
                     app: app.app.clone(),
                     task: app.task.clone(),
                     findings: Vec::new(),
                     errors: vec![e],
                 },
-            }
+            },
         };
         reports.push(report);
     }
@@ -468,12 +584,15 @@ pub fn run(options: &Options, runner: &dyn CommandRunner) -> Result<(String, boo
     Ok((json, clean))
 }
 
+#[cfg(all(test, target_os = "linux"))]
+mod e2e;
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use orch_cli::fake::{exit, FakeCommand};
-    use rusty_bbp::{ArtId, TaskId, TaskState};
+    use rusty_bbp::{Code, Rejection};
     use std::collections::BTreeMap;
 
     const DENY: &str = r#"{"type":"diagnostic","fields":{"severity":"error","message":"x","advisory":{"id":"RUSTSEC-2026-0001","package":"foo","title":"Use after free"}}}
@@ -496,34 +615,49 @@ mod tests {
         }
     }
 
-    /// A claims session that answers `task_card` and each `post` in turn,
-    /// recording the post arguments.
+    /// A claims session with BBP's R15: a repeated op replays only with the
+    /// same payload, and a changed payload is refused with `OpConflict`.
+    /// Answers only `post`, so reading the current brief would panic.
     #[derive(Default)]
     struct Board {
         posts: Vec<Value>,
-        answers: BTreeMap<String, Response>,
+        ops: BTreeMap<String, (Value, Response)>,
         next: u64,
+    }
+
+    impl Board {
+        fn claims(&self) -> u64 {
+            self.next
+        }
     }
 
     impl Rpc for Board {
         fn call(&mut self, tool: &str, args: Value) -> Result<String, CallError> {
-            let resp = match tool {
-                "task_card" => {
-                    let mut st = TaskState::new(TaskId::from("maint-demo"));
-                    st.brief = Some(ArtId(1));
-                    Response::Card(st.card())
-                }
-                "post" => {
-                    let op = args["op"].as_str().unwrap().to_owned();
-                    self.posts.push(args);
+            assert_eq!(tool, "post", "the watcher only posts");
+            let op = args["op"].as_str().unwrap().to_owned();
+            self.posts.push(args.clone());
+            let resp = match self.ops.get(&op) {
+                Some((first, resp)) if *first == args => resp.clone(),
+                Some(_) => Response::Rejected(Rejection::new(
+                    Code::OpConflict,
+                    "op reused with a different payload",
+                )),
+                None => {
                     self.next += 1;
                     let fresh = Response::Posted(MsgId(10 + self.next));
-                    self.answers.entry(op).or_insert(fresh).clone()
+                    self.ops.insert(op, (args, fresh.clone()));
+                    fresh
                 }
-                other => panic!("unexpected {other}"),
             };
             Ok(rusty_serde::json::to_string(&resp).unwrap())
         }
+    }
+
+    /// One `cargo deny` advisory line.
+    fn advisory(title: &str, cvss: &str) -> String {
+        format!(
+            r#"{{"type":"diagnostic","fields":{{"severity":"error","advisory":{{"id":"RUSTSEC-2026-0001","package":"foo","title":"{title}","cvss":"{cvss}"}}}}}}"#
+        )
     }
 
     #[test]
@@ -533,7 +667,8 @@ mod tests {
         assert_eq!(f[0].key, "advisory:RUSTSEC-2026-0001:foo");
         assert_eq!(f[1].key, "yanked:bar:0.2.0");
         assert_eq!(f[0].domain, "security");
-        assert!(f[0].text.contains("Use after free"), "{}", f[0].text);
+        assert_eq!(f[0].detail, "Use after free");
+        assert!(!f[0].text.contains("Use after free"), "{}", f[0].text);
         assert!(advisories("not json\n").is_empty());
     }
 
@@ -566,24 +701,114 @@ mod tests {
         let pinned = "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\"]\n";
         let f = toolchain(pinned, "1.99.0").expect("finding");
         assert_eq!(f.key, "toolchain:rust:1.99.0");
+        assert_eq!(f.detail, "pins 1.98.1");
+        let moved = toolchain("channel = \"1.98.2\"\n", "1.99.0").expect("finding");
+        assert_eq!((&moved.key, &moved.text), (&f.key, &f.text), "same finding");
         assert!(toolchain(pinned, "1.98.1").is_none());
         assert!(toolchain("[toolchain]\n", "1.99.0").is_none());
     }
 
+    /// The `watch_finding` table in memory; `fail_put` loses the next write.
+    #[derive(Default)]
+    pub(super) struct MemSeen {
+        rows: BTreeMap<(String, String), WatchFinding>,
+        pub(super) fail_put: bool,
+    }
+
+    impl Seen for MemSeen {
+        fn get(&self, app: &str, slot: &str) -> Result<Option<WatchFinding>, String> {
+            Ok(self.rows.get(&(app.into(), slot.into())).cloned())
+        }
+        fn put(&mut self, app: &str, slot: &str, found: &WatchFinding) -> Result<(), String> {
+            if std::mem::take(&mut self.fail_put) {
+                return Err("disk full".into());
+            }
+            self.rows.insert((app.into(), slot.into()), found.clone());
+            Ok(())
+        }
+    }
+
     #[test]
-    fn a_finding_posts_once_under_a_stable_op() {
+    fn a_repeated_post_is_byte_identical_and_replays() {
         let f = &updates(UPDATE).expect("finding");
         assert_eq!(op_id("demo", f), op_id("demo", f));
         assert_ne!(op_id("demo", f), op_id("other", f));
         let mut board = Board::default();
-        let first = post(&mut board, "demo", f).unwrap();
-        let again = post(&mut board, "demo", f).unwrap();
+        let first = post(&mut board, "demo", f, None).unwrap();
+        let again = post(&mut board, "demo", f, None).unwrap();
         assert_eq!(first, again, "the second post replays the first");
         let p = &board.posts[0];
         assert_eq!(p["kind"].as_str(), Some("claim"));
         assert_eq!(p["stakes"].as_str(), Some("low"));
         assert_eq!(p["refs"][0].as_str(), Some("art:1"));
+        assert!(p.get("supersedes").is_none());
         assert_eq!(p, &board.posts[1], "same payload, so BBP replays it");
+        assert_eq!(board.claims(), 1);
+    }
+
+    #[test]
+    fn changed_details_keep_the_first_claim_and_post_nothing() {
+        let (mut board, mut seen) = (Board::default(), MemSeen::default());
+        let first = advisories(&advisory("Use after free", "CVSS:3.1/AV:N")).remove(0);
+        let revised = advisories(&advisory("Use after free in parser", "CVSS:3.1/AV:L")).remove(0);
+        assert_ne!(first.detail, revised.detail);
+        let a = record(&mut board, &mut seen, "demo", first).unwrap();
+        let b = record(&mut board, &mut seen, "demo", revised).unwrap();
+        assert!(a.new && !b.new, "title and severity changed");
+        assert_eq!(b.claim, a.claim);
+        let pin = |c: &str| toolchain(&format!("channel = \"{c}\"\n"), "1.99.0").unwrap();
+        let t = record(&mut board, &mut seen, "demo", pin("1.98.1")).unwrap();
+        let moved = record(&mut board, &mut seen, "demo", pin("1.98.2")).unwrap();
+        assert!(!moved.new && moved.claim == t.claim, "the pin moved");
+        assert_eq!(board.posts.len(), 2, "one post per finding");
+    }
+
+    #[test]
+    fn a_newer_finding_in_a_slot_supersedes_the_open_claim() {
+        let (mut board, mut seen) = (Board::default(), MemSeen::default());
+        let set = |to: &str| updates(&format!("    Updating foo v1.0.0 -> {to}\n")).unwrap();
+        let first = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
+        let next = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap();
+        assert!(next.new);
+        assert_eq!(next.supersedes, first.claim);
+        let sup = |i: usize| board.posts[i]["supersedes"].as_u64();
+        assert_eq!(sup(1), first.claim.map(|c| c.0));
+        let third = record(&mut board, &mut seen, "demo", set("v1.0.3")).unwrap();
+        assert_eq!(third.supersedes, next.claim, "always the slot's latest");
+        let rust = |w: &str| toolchain("channel = \"1.98.1\"\n", w).unwrap();
+        let old = record(&mut board, &mut seen, "demo", rust("1.99.0")).unwrap();
+        let new = record(&mut board, &mut seen, "demo", rust("1.100.0")).unwrap();
+        assert_eq!(new.supersedes, old.claim, "a new watched Rust");
+        assert_eq!(old.supersedes, None, "slots are separate");
+        let other = record(&mut board, &mut seen, "other", set("v1.0.1")).unwrap();
+        assert_eq!(other.supersedes, None, "apps are separate");
+    }
+
+    #[test]
+    fn a_post_whose_record_was_lost_replays_on_the_next_run() {
+        let (mut board, mut seen) = (Board::default(), MemSeen::default());
+        let set = |to: &str| updates(&format!("    Updating foo v1.0.0 -> {to}\n")).unwrap();
+        let first = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
+        seen.fail_put = true;
+        let e = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap_err();
+        assert!(e.contains("posted, not recorded"), "{e}");
+        let retry = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap();
+        assert_eq!(retry.supersedes, first.claim);
+        assert_eq!(board.claims(), 2, "the retry replayed the lost post");
+        assert_eq!(board.posts[1], board.posts[2]);
+    }
+
+    #[test]
+    fn the_board_refuses_a_changed_payload_under_one_op() {
+        let mut board = Board::default();
+        let f = updates(UPDATE).expect("finding");
+        post(&mut board, "demo", &f, None).unwrap();
+        let drifted = Finding {
+            text: format!("{} Now.", f.text),
+            ..f.clone()
+        };
+        let e = post(&mut board, "demo", &drifted, None).unwrap_err();
+        assert!(e.contains("OpConflict"), "{e}");
     }
 
     #[test]
@@ -596,8 +821,8 @@ mod tests {
             rust: Some("1.99.0".into()),
         });
         let adapters: [&dyn Watch; 2] = [&Updates, &tc];
-        let mut board = Board::default();
-        let r = watch_app(&app(&dir), &adapters, &run, Some(&mut board));
+        let (mut board, mut seen) = (Board::default(), MemSeen::default());
+        let r = watch_app(&app(&dir), &adapters, &run, Some((&mut board, &mut seen)));
         assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
         assert!(
             r.errors[0].starts_with("cargo-update: cargo update exited 101"),
@@ -652,7 +877,20 @@ mod tests {
     #[test]
     fn options_need_the_factory_and_bbp_dir() {
         let o = |a: &[&str]| options(a.iter().map(|s| (*s).to_owned()));
-        let ok = o(&["--factory", "f", "--bbp-dir", "d", "--dry-run"]).unwrap();
+        let ok = o(&[
+            "--factory",
+            "f",
+            "--bbp-dir",
+            "d",
+            "--state",
+            "s",
+            "--dry-run",
+        ])
+        .unwrap();
+        assert_eq!(ok.state, PathBuf::from("s"));
+        assert!(
+            matches!(o(&["--factory", "f", "--bbp-dir", "d"]), Err(ArgsError::Usage(m)) if m.contains("--state"))
+        );
         assert!(ok.dry_run);
         assert_eq!(ok.bbp, PathBuf::from("bbp"));
         assert!(

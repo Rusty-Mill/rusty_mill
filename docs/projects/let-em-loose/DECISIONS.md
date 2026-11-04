@@ -90,6 +90,7 @@ Precise contracts used by this guide:
 | D79 | #599 watcher posts as a `watcher` roster role | [default] 2026-11-04 (#599) |
 | D80 | #599 maintenance tasks are opened by the human and named in `factory/apps/<app>.json` | [default] 2026-11-04 (#599) |
 | D81 | #599 lesson trigger 2 detects reverts from the action mark and git | [default] 2026-11-04 (#599) |
+| D82 | #599 watcher dedups by finding key and slot in `watch_finding` | [default] 2026-11-04 (#599) |
 
 ## D1. Lenses, not stages
 
@@ -658,3 +659,12 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: pending
 **Key.** lel:599:revert-trigger
 **Source.** let-em-loose-expert, 2026-11-04, answering the #599 build thread (plan §3, trigger 2 [filled]), from addendum § Action marks and C-R9, and the card #599 design comment.
+
+## D82. #599 watcher dedups by finding key and slot in `watch_finding`
+
+**Decision.** `rusty_orch watch` gives each finding a stable key and a slot: an advisory is keyed `advisory:<id>:<crate>` and a yanked crate `yanked:<crate>:<version>`, each its own slot; the update set is keyed `updates:<16-hex digest of the sorted set>` in slot `updates`; the toolchain is keyed `toolchain:rust:<watched>` in slot `toolchain:rust`. D58's orch-store `watch_finding` table (`watch.mmap`, `WatchRecord::v1`, keyed by app and slot, under the new required `--state DIR`) holds the key last posted and its claim. If the key matches the row, nothing is posted and the report gives the existing claim (`new: false`). A new key in an occupied slot is posted with `supersedes: <row's claim>` and the row is updated, so accepting the new claim retires the stale one (addendum `supersedes`, CL-53). An empty slot is posted, then the row is written. Details that can change (an advisory's title and cvss, the app's current pin) go in the report's `detail` and are never posted. Crash safety comes from R15: the op id is `watch-` + sha256(app + "\n" + key)[..32], and every posted field (text, domain, low stakes, reversible, `refs` = `art:1`, `supersedes`) is a function of the key and the row's prior claim, so a post whose row write was lost replays the same claim on the next run. Known limit: an advisory that is fixed and later returns keeps its old row, so nothing new is posted even if that claim was settled; the report still lists it with its old claim id.
+**Why.** R15 replays only a byte-identical payload (`rusty_bbp/src/engine.rs` `replay`), so a key-only payload makes repeats safe. But a new update set or a new watched Rust is a new key, and with replay alone the earlier open claim would stay beside the new one. The slot row lets the new claim supersede it, which is what Nano asked for: an update or a supersede, not a second post.
+**Rejected.** R15 replay alone, without the table: rolling slots would leave old open claims beside new ones. The affected range or the current pin in the key: a detail edit would post a duplicate. The current brief in `refs`: a brief revision would turn repeats into `OpConflict`.
+**Tag.** [default] · remind-me: mem_c2072da6e00e4410a81be5011b9fa732
+**Key.** lel:599:watch-dedup-key
+**Source.** Nano asked for the dedup to be logged with its key and reason in thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), and dottiusmaximus's review comment 6643815580 (P2) on #1491 asked for the payload fix. let-em-loose-expert, 2026-11-04, answering the #599 build thread, found the rollover gap. Built in `rusty_orch/src/watch.rs` and `orch-store/src/watch.rs`; tests `watch::tests::changed_details_keep_the_first_claim_and_post_nothing`, `a_newer_finding_in_a_slot_supersedes_the_open_claim`, `a_post_whose_record_was_lost_replays_on_the_next_run`, `the_board_refuses_a_changed_payload_under_one_op`, `watch::e2e::findings_are_posted_once_and_superseded_through_a_real_bbp` (Orch BBP acceptance job `watch-replay`), and orch-store `watch::a_watched_finding_survives_reopening_and_is_per_app_and_slot`.

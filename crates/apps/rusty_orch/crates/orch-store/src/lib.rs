@@ -22,6 +22,7 @@
 mod assignments;
 mod meters;
 mod record;
+mod watch;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -41,6 +42,8 @@ use rusty_multimodal_db_engine::generic::GenericMmapStore;
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
 use meters::MeterRecord;
 use record::{ById, GoalRecord, Revision};
+pub use watch::WatchFinding;
+use watch::WatchRecord;
 
 /// The store's files inside its directory.
 const LOCK_FILE: &str = "lock";
@@ -50,6 +53,8 @@ const LEGACY_ASSIGNMENTS_FILE: &str = "assignments.mmap";
 const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 /// Lens experiment meters (#594).
 const METERS_FILE: &str = "meters.mmap";
+/// Watched findings (#599, `watch_finding`).
+const WATCH_FILE: &str = "watch.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -132,6 +137,7 @@ pub struct Store {
     assignments: GenericMmapStore<AssignmentRecord, ById, Revision>,
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     meters: GenericMmapStore<MeterRecord, ById, Revision>,
+    watch: GenericMmapStore<WatchRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -164,6 +170,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(WATCH_FILE);
+        let watch = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -175,6 +187,7 @@ impl Store {
             assignments,
             legacy,
             meters,
+            watch,
             _lock: lock,
         })
     }
@@ -322,6 +335,45 @@ impl Store {
             self.meters.insert(record).map_err(engine_error)
         } else {
             self.meters.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// The finding last posted for `app` in `slot`, or `None`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record under its key names another
+    /// app or slot.
+    pub fn watch_finding(&self, app: &str, slot: &str) -> Result<Option<WatchFinding>, StoreError> {
+        self.watch
+            .get(watch::key(app, slot))
+            .map(|r| r.into_finding(app, slot))
+            .transpose()
+    }
+
+    /// Record `found` as the finding last posted for `app` in `slot`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key holds another app or slot;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_watch_finding(
+        &mut self,
+        app: &str,
+        slot: &str,
+        found: &WatchFinding,
+    ) -> Result<(), StoreError> {
+        let existing = self.watch.get(watch::key(app, slot));
+        if let Some(r) = &existing {
+            r.check(app, slot)?;
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = WatchRecord::new(app, slot, found, revision);
+        let written = if existing.is_none() {
+            self.watch.insert(record).map_err(engine_error)
+        } else {
+            self.watch.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
     }
