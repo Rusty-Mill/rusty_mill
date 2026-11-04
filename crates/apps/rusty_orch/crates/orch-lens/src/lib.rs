@@ -5,6 +5,7 @@
 //! through the [`Model`] port and posts what comes back; everything it
 //! decides is decided here.
 //!
+//! - [`alien`]: the #708 alien review lens: trigger, suspects, ranking, probes.
 //! - [`round`]: one runner round: schedule, call, post, record.
 //! - [`call`]: one job over its fallback order, metered before each ask.
 //! - [`port`]: the [`Model`] port, one stateless question per call.
@@ -24,6 +25,7 @@
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+pub mod alien;
 pub mod call;
 pub mod card;
 pub mod class;
