@@ -483,7 +483,7 @@ fn workspace_form_block_handlers_without_commas() {
     });
 }
 
-/// rk-app `mcp_server.rs:114`, rusty_acp `routes.rs:514`/`:524`, and
+/// rk-app `mcp_server.rs:114`, rusty_ibm_acp `routes.rs:514`/`:524`, and
 /// rusty_tonic `streaming.rs:321` (a bare imported `select!` as the tail
 /// of an `async` block): `select!` as a value -- a function's tail with
 /// `?` chains in an expression handler, and an arm of an outer `match`
@@ -536,7 +536,7 @@ fn workspace_form_select_as_a_value() {
     });
 }
 
-/// rk-agui `lib.rs:212`, rusty_acp `agent.rs:366`/`mod.rs:1489`:
+/// rk-agui `lib.rs:212`, rusty_ibm_acp `agent.rs:366`/`mod.rs:1489`:
 /// `biased;` with refutable `Some(..)` patterns, `?` inside expression
 /// and block handlers, `&mut handle` of a `JoinHandle` as the future,
 /// `break <value>?` out of the loop, and `(&mut handle).await` in a

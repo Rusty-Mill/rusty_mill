@@ -186,7 +186,7 @@ impl WebhookNotifier {
         let policy = self.retry_policy;
         // No jitter -- a handful of webhook retries isn't a thundering-herd
         // concern at this scale. Delegates to rusty_retry::Backoff, shared
-        // with rusty_request's and rusty_acp's own retry policies.
+        // with rusty_request's and rusty_ibm_acp's own retry policies.
         let backoff = rusty_retry::Backoff::Exponential {
             base: policy.initial_backoff,
             max: policy.max_backoff,

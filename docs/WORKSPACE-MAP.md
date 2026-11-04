@@ -19,7 +19,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | foundation | rusty_aead | rusty_aead | Dependency-free ChaCha20-Poly1305 (RFC 8439) AEAD. Portable, no unsafe, no allocation. Stage 3 of the native ring replacement plan. |
 | foundation | rusty_ansder | rusty_ansder | ASN.1 BER/DER TLV encoder and decoder for Rusty Mill, built on rusty_wire |
 | foundation | rusty_atomic_file | rusty_atomic_file | Replace a file crash-atomically: sibling temp file, fsync, rename, directory fsync. The one std-path helper the workspace's whole-file writers share. |
-| foundation | rusty_base64 | rusty_base64 | Hand-rolled, dependency-free Base64 (RFC 4648) -- standard and URL-safe alphabets, encode and decode -- extracted from rusty_oauth's own encoding module so rusty_acp, rusty-mcp, and rusty_a2a can depend on it instead of the external base64 crate. |
+| foundation | rusty_base64 | rusty_base64 | Hand-rolled, dependency-free Base64 (RFC 4648) -- standard and URL-safe alphabets, encode and decode -- extracted from rusty_oauth's own encoding module so rusty_ibm_acp, rusty-mcp, and rusty_a2a can depend on it instead of the external base64 crate. |
 | foundation | rusty_codec | rusty_codec | A #![no_std] + alloc sovereign TOML configuration parser and binary buffer serialization crate |
 | foundation | rusty_compress | rusty_compress | A sans-IO stream compression and decompression abstraction crate for DEFLATE, Gzip, Zlib, and LZMA |
 | foundation | rusty_config | rusty_config | A zero-dependency, no_std INI and Key-Value configuration file parser for Rust |
@@ -42,7 +42,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | foundation | rusty_pk | rusty_pk | Dependency-free public-key primitives for the native TLS engine: RSA and ECDSA (P-256, P-384) and Ed25519 signature verification, Ed25519 signing, X25519, ECDH on P-256 and P-384. Portable, no unsafe. Stages 2 and 4 and gap 2 of the native ring replacement plan. |
 | foundation | rusty_rand | rusty_rand | OS-backed cryptographically secure random bytes (/dev/urandom on Unix, BCryptGenRandom on Windows), with no external dependencies -- the one CSPRNG plumbing rusty_oauth, rusty_uuid, and sessionmgr-proc each used to carry a copy of. |
 | foundation | rusty_regx | rusty_regx | A minimal, linear-time POSIX-ERE regex engine with no dependencies |
-| foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-acp. Deciding what's retryable stays with each caller. |
+| foundation | rusty_retry | rusty_retry | Exponential backoff with jitter, and Retry-After delta-seconds parsing -- the retry mechanism shared by rusty_request and rusty-ibm-acp. Deciding what's retryable stays with each caller. |
 | foundation | rusty_rsa | rusty_rsa | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256 -- the primitives rusty_oauth and rusty_rdp each independently reimplemented for their own RSA public-key verification/encryption. Named for the primary use case; BigUint is general-purpose (rusty_oauth's own ECC/ES256 code also builds on it) and SHA-256 is a general hash, not RSA-specific -- see lib.rs. |
 | foundation | rusty_serde | rusty_serde | A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format. |
 | foundation | rusty_serde | rusty_serde_derive | Hand-written #[derive(Serialize, Deserialize)] proc-macro for rusty_serde, built directly on proc_macro (no syn/quote). |
@@ -76,7 +76,6 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | platform | rustils_async | reactor-core | Runtime-agnostic async-io primitives (Rusty-Mill AKB ADR-0160: a provider framework, not a universal capability). No I/O, no unsafe, no hidden runtime. |
 | platform | rustils_async | threading | Minimal multithreading primitives: scoped-thread spawn with a decoded join outcome, and Mutex/RwLock with an explicit poisoning policy. No unsafe. |
 | libs | rusty_a2a | rusty_a2a | A reusable Rust implementation of the Agent2Agent (A2A) protocol (https://a2a-protocol.org) |
-| libs | rusty_acp | rusty-acp | Agent Communication Protocol (ACP) v0.2.0 for Rust: protocol types, an HTTP client, and a server framework for hosting agents. |
 | libs | rusty_adk | a2a-agent-server | Serves a Rust ADK agent over A2A, so agents in any language can talk to it |
 | libs | rusty_adk | adk-a2a | Serve a Rust ADK agent over the Agent2Agent (A2A) protocol |
 | libs | rusty_adk | adk-agents | Agents for the Rust ADK: LlmAgent, workflow agents, callbacks, and graph integration |
@@ -118,6 +117,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | libs | rusty_h2 | rusty_h2 | A from-scratch HTTP/2 (RFC 9113) implementation in Rust |
 | libs | rusty_http | rusty_http | One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem |
 | libs | rusty_hyper | rusty_hyper | HTTP/2-only client and server packaging over rusty_h2: connect(url) for plain h2c or TLS with ALPN h2, serve(listener, tls, handler), timeouts, keepalive and graceful shutdown. No HTTP/1.1. |
+| libs | rusty_ibm_acp | rusty-ibm-acp | IBM/BeeAI Agent Communication Protocol (ACP) v0.2.0 for Rust (not Zed's Agent Client Protocol): protocol types, an HTTP client, and a server framework for hosting agents. |
 | libs | rusty_journal | rusty_journal | Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio. |
 | libs | rusty_kafka | rusty_kafka | A hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on rusty_wire and rusty_tokio. |
 | libs | rusty_lines | rusty_lines | A hand-rolled readline alternative: emacs + vi keymaps, kill ring, undo, incremental/prefix history search, bracketed paste, completion/hint/highlight hooks, and a right-side prompt. |

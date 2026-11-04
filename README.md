@@ -96,7 +96,7 @@ repository's cloud session capture hook.
 | [`rusty_tokio`](crates/libs/async/rusty_tokio) | `crates/libs/async/rusty_tokio` | Hand-rolled, from-scratch async runtime: work-stealing scheduler, epoll/io_uring reactor, timers, async sync primitives |
 | [`rusty_tokio-macros`](crates/libs/async/rusty_tokio/rusty_tokio-macros) | `crates/libs/async/rusty_tokio/rusty_tokio-macros` | `rusty_tokio`'s `#[main]`/`#[test]` proc-macro attributes |
 | [`rusty_libc`](crates/foundation/rusty_libc) | `crates/foundation/rusty_libc` | `no_std`, zero-dependency, Linux-only raw-syscall replacement for the `libc` crate |
-| [`rusty_acp`](crates/libs/protocol/rusty_acp) | `crates/libs/protocol/rusty_acp` | Agent Communication Protocol (ACP) v0.2.0: protocol types, an HTTP client, and a server framework for hosting agents |
+| [`rusty_ibm_acp`](crates/libs/protocol/rusty_ibm_acp) | `crates/libs/protocol/rusty_ibm_acp` | IBM/BeeAI Agent Communication Protocol (ACP) v0.2.0 (not Zed's Agent Client Protocol): protocol types, an HTTP client, and a server framework for hosting agents |
 | [`rusty_tls`](crates/libs/net/rusty_tls) | `crates/libs/net/rusty_tls` | A `rustls`-based TLS library, with an optional `rusty_tokio`-backed async stream and an experimental hand-rolled record-layer engine |
 | [`rusty_serde`](crates/foundation/rusty_serde/rusty_serde) | `crates/foundation/rusty_serde/rusty_serde` | Hand-rolled, dependency-free `Serialize`/`Deserialize` data model plus JSON and RON-inspired formats |
 | [`rusty_serde_derive`](crates/foundation/rusty_serde/rusty_serde_derive) | `crates/foundation/rusty_serde/rusty_serde_derive` | `rusty_serde`'s `#[derive(Serialize, Deserialize)]` proc-macro, hand-written directly on `proc_macro` (no `syn`/`quote`) |
@@ -318,9 +318,9 @@ repository's cloud session capture hook.
 | [`rusty_dirs`](crates/foundation/rusty_dirs) | `crates/foundation/rusty_dirs` | Dependency-free per-user config directory lookup (`%APPDATA%`, `$XDG_CONFIG_HOME`, `~/.config`); used by `rusty_term` and `rusty-croc` |
 | [`rusty_percent`](crates/foundation/rusty_percent) | `crates/foundation/rusty_percent` | Hand-rolled, dependency-free percent-encoding for URL components and query strings (RFC 3986 unreserved encode; lenient, form and UTF-8-checked decode); the one copy behind the HTTP servers, gateways and MCP/LSP URI handling |
 | [`rusty_hex`](crates/foundation/rusty_hex) | `crates/foundation/rusty_hex` | Hand-rolled, dependency-free hex codec (lowercase out, either case in, fixed-size arrays for keys and digests); the one copy behind `ts-types`, `ts-key`, `rsi-core`, `rusty_term` and others |
-| [`rusty_base64`](crates/foundation/rusty_base64) | `crates/foundation/rusty_base64` | Hand-rolled, dependency-free Base64 (RFC 4648) codec (standard and URL-safe alphabets, encode/decode), extracted from `rusty_oauth` and now shared by `rusty_acp`/`rusty-mcp`/`rusty_a2a` |
+| [`rusty_base64`](crates/foundation/rusty_base64) | `crates/foundation/rusty_base64` | Hand-rolled, dependency-free Base64 (RFC 4648) codec (standard and URL-safe alphabets, encode/decode), extracted from `rusty_oauth` and now shared by `rusty_ibm_acp`/`rusty-mcp`/`rusty_a2a` |
 | [`rusty_rand`](crates/foundation/rusty_rand) | `crates/foundation/rusty_rand` | OS-backed cryptographically secure random bytes (`/dev/urandom`/`BCryptGenRandom`), the CSPRNG shared by `rusty_oauth`, `rusty_uuid`, and `sessionmgr-proc` |
-| [`rusty_retry`](crates/foundation/rusty_retry) | `crates/foundation/rusty_retry` | Exponential backoff with jitter and `Retry-After` delta-seconds parsing, the retry mechanism shared by `rusty_request` and `rusty_acp` |
+| [`rusty_retry`](crates/foundation/rusty_retry) | `crates/foundation/rusty_retry` | Exponential backoff with jitter and `Retry-After` delta-seconds parsing, the retry mechanism shared by `rusty_request` and `rusty_ibm_acp` |
 | [`rusty_rsa`](crates/foundation/rusty_rsa) | `crates/foundation/rusty_rsa` | Hand-rolled, dependency-free BigUint (RSA/ECC arithmetic) and SHA-256, the primitives `rusty_oauth` and `rusty_rdp` each independently reimplemented for RSA public-key verification/encryption |
 | [`rusty_kafka`](crates/libs/net/rusty_kafka) | `crates/libs/net/rusty_kafka` | Hand-rolled Kafka wire-protocol client: producer, consumer, and admin APIs, built on `rusty_wire` and `rusty_tokio` |
 | [`rusty-meshed-core`](crates/apps/rusty_meshed/crates/rusty-meshed-core) | `crates/apps/rusty_meshed/crates/rusty-meshed-core` | `rusty_meshed`'s shared platform config: env-prefixed settings loaded once and injected into every other `rusty_meshed` crate |
@@ -405,7 +405,7 @@ The second wave, merging in the same way, adds:
 [`rusty_tokio`](https://github.com/baileyrd/rusty_tokio) (plus its nested
 `rusty_tokio-macros` crate), [`rusty_rusqlite`](https://github.com/baileyrd/rusty_rusqlite),
 [`rusty_libc`](https://github.com/baileyrd/rusty_libc),
-[`rusty_acp`](https://github.com/baileyrd/rusty_acp),
+[`rusty_acp`](https://github.com/baileyrd/rusty_acp) (now `rusty_ibm_acp`),
 [`rusty_tls`](https://github.com/baileyrd/rusty_tls),
 [`rusty_serde`](https://github.com/baileyrd/rusty_serde),
 [`rusty_lsp`](https://github.com/baileyrd/rusty_lsp),
