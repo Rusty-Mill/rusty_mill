@@ -167,3 +167,54 @@ fn output_is_deterministic_and_order_independent() {
         assert_eq!(report(&reversed), first);
     }
 }
+
+fn flags(name: &str, value: &str) -> String {
+    let body: String = (0..12)
+        .map(|i| format!("    let x{i} = {value};\n"))
+        .collect();
+    format!("fn {name}() {{\n{body}}}\n")
+}
+
+#[test]
+fn booleans_are_normalized_like_other_literals() {
+    let r = report(&[
+        ("src/a.rs", &flags("a", "true")),
+        ("src/b.rs", &flags("b", "false")),
+    ]);
+    assert!(r.duplication.den > 100);
+    assert_eq!(r.duplication.num, r.duplication.den);
+}
+
+#[test]
+fn test_cfg_trivia_and_trailing_commas_are_still_test_code() {
+    for attr in [
+        "#[cfg(test,)]",
+        "#[cfg(/* why */ test)]",
+        "#[cfg(all(unix, test,))]",
+    ] {
+        let src = format!("{attr}\nfn t() {{ if a {{}} }}\nfn keep() {{}}\n");
+        let r = report(&[("src/a.rs", &src)]);
+        let keys: Vec<&str> = r.functions.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, ["src/a.rs::keep"], "{attr}");
+    }
+    for inner in ["#![cfg(test,)]", "#![cfg(/* why */ test)]"] {
+        let r = report(&[("src/x.rs", &format!("{inner}\nfn a() {{}}\n"))]);
+        assert!(r.functions.is_empty(), "{inner}");
+    }
+    for attr in [
+        "#[cfg(any(test, unix))]",
+        "#[cfg(not(test))]",
+        "#[cfg(all(unix, not(test),))]",
+    ] {
+        let r = report(&[("src/a.rs", &format!("{attr}\nfn prod() {{}}\n"))]);
+        assert_eq!(r.functions.len(), 1, "{attr}");
+    }
+}
+
+#[test]
+fn multiline_literals_count_their_nonblank_lines() {
+    let raw = "const S: &str = r#\"one\ntwo\n\nthree\nfour\"#;\n";
+    assert_eq!(report(&[("src/a.rs", raw)]).loc, 4);
+    let plain = "const S: &str = \"one\n\n  two\";\nfn a() {}\n";
+    assert_eq!(report(&[("src/a.rs", plain)]).loc, 3);
+}

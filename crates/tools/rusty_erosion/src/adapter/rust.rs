@@ -9,7 +9,7 @@
 //! macro invocations is tokens only and adds no CC.
 //!
 //! Tokens drop comments, map identifiers to `ID` and literals to `STR`,
-//! `CHAR` or `NUM`, and keep keywords and punctuation. Items marked
+//! `CHAR`, `NUM` or `BOOL`, and keep keywords and punctuation. Items marked
 //! `#[test]`, `#[cfg(test)]` or `#[cfg(all(test, ..))]` are skipped entirely,
 //! and so is a file with `#![cfg(test)]`.
 
@@ -59,6 +59,8 @@ struct Walk<'s> {
     scope: Vec<String>,
     tokens: Vec<NormTok>,
     rows: Vec<bool>,
+    /// Whitespace-only lines, which a multi-line literal does not count.
+    blank: Vec<bool>,
     functions: Vec<FunctionMetric>,
     seen: HashMap<String, u32>,
 }
@@ -66,12 +68,14 @@ struct Walk<'s> {
 impl<'s> Walk<'s> {
     fn new(path: &'s str, src: &'s str) -> Walk<'s> {
         let rows = vec![false; src.lines().count() + 1];
+        let blank = src.lines().map(|l| l.trim().is_empty()).collect();
         Walk {
             path,
             src,
             scope: Vec::new(),
             tokens: Vec::new(),
             rows,
+            blank,
             functions: Vec::new(),
             seen: HashMap::new(),
         }
@@ -102,7 +106,7 @@ impl<'s> Walk<'s> {
                 "attribute_item" => attrs.push(child),
                 "line_comment" | "block_comment" => {}
                 _ => {
-                    if !attrs.iter().any(|a| is_test_attr(self.text(*a))) {
+                    if !attrs.iter().any(|a| is_test_attr(&compact(*a, self.src))) {
                         for a in attrs.iter() {
                             self.visit(*a, cc.as_deref_mut());
                         }
@@ -147,8 +151,11 @@ impl<'s> Walk<'s> {
 
     fn token(&mut self, node: Node, class: NormTok) {
         self.tokens.push(class);
-        if let Some(r) = self.rows.get_mut(node.start_position().row) {
-            *r = true;
+        for row in node.start_position().row..=node.end_position().row {
+            let blank = self.blank.get(row).copied().unwrap_or(true);
+            if let Some(r) = self.rows.get_mut(row) {
+                *r |= !blank;
+            }
         }
     }
 
@@ -224,6 +231,7 @@ fn literal_class(kind: &str) -> Option<NormTok> {
         "string_literal" | "raw_string_literal" => Some("STR"),
         "char_literal" => Some("CHAR"),
         "integer_literal" | "float_literal" => Some("NUM"),
+        "boolean_literal" => Some("BOOL"),
         _ => None,
     }
 }
@@ -258,6 +266,28 @@ fn strip_generics(s: &str) -> String {
         .unwrap_or_default()
         .split_whitespace()
         .collect()
+}
+
+/// An attribute's tokens with no trivia: comments and whitespace dropped and
+/// trailing commas removed, so `cfg(/* why */ test,)` reads `cfg(test)`.
+fn compact(node: Node, src: &str) -> String {
+    let mut out = String::new();
+    leaves(node, src, &mut out);
+    out.replace(",)", ")")
+}
+
+fn leaves(node: Node, src: &str, out: &mut String) {
+    if matches!(node.kind(), "line_comment" | "block_comment") {
+        return;
+    }
+    if node.child_count() == 0 {
+        out.extend(src[node.byte_range()].split_whitespace());
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        leaves(child, src, out);
+    }
 }
 
 /// Whether an outer attribute marks its item as test-only.
@@ -309,8 +339,8 @@ fn file_is_test(root: Node, src: &str) -> bool {
     root.children(&mut cursor)
         .filter(|c| c.kind() == "inner_attribute_item")
         .any(|c| {
-            let t: String = src[c.byte_range()].split_whitespace().collect();
-            t.strip_prefix("#![")
+            compact(c, src)
+                .strip_prefix("#![")
                 .and_then(|t| t.strip_suffix(']'))
                 .is_some_and(is_test_cfg)
         })
