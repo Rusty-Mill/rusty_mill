@@ -61,18 +61,10 @@ rusty_log = { workspace = true, features = ["subscriber"] }
 [dev-dependencies]
 # The HTTP client the suites drive the gateway with, behind `tests/common/http.rs`.
 rusty_request = { workspace = true }
+# The MCP client they drive it with, behind `tests/common/mcp.rs`.
+rusty_mcp_client_native = { workspace = true, features = ["http"] }
 rusty_prost = { workspace = true }
-rmcp = { workspace = true, features = [
-    "client",
-    "server",
-    "transport-io",
-    "transport-child-process",
-    "transport-streamable-http-client",
-    "transport-streamable-http-client-reqwest",
-    "transport-streamable-http-server",
-] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "net", "io-util", "time"] }
-tokio-util = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }

@@ -364,13 +364,13 @@ dependencies = [
  "rand 0.8.8",
  "rcgen",
  "reqwest 0.13.4",
- "rmcp",
  "rsa",
  "rusty_axum",
  "rusty_base64",
  "rusty_http",
  "rusty_hyper",
  "rusty_log",
+ "rusty_mcp_client_native",
  "rusty_mcp_middleware",
  "rusty_mcp_server",
  "rusty_prost",
@@ -380,7 +380,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -13906,7 +13905,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "libc 0.2.189",
  "pin-project-lite",
  "tokio",
