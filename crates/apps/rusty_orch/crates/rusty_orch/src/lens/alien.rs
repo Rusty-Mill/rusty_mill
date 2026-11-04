@@ -4,12 +4,12 @@
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use orch_lens::alien::{summarize, Bar, HuntRow, ProbeRow, BAR_HUNTS, BAR_SPEND_PERCENT};
+use orch_lens::alien::{judge, summarize, Bar, HuntRow, ProbeRow, BAR_HUNTS, BAR_SPEND_PERCENT};
 use orch_store::Store;
 
 use crate::args::ArgsError;
 
-pub const USAGE: &str = "usage: rusty_orch lens alien report --state <orch state dir> [--task <task>]\n\nPrint the alien lens's probe rows and its shadow numbers: hunts (with or without probes),\nregressions no ordinary lens named, and the success bar. The bar needs 1 such regression per\n20 hunts and the lens under 15% of its claims' spend; claim spend is not tracked yet, so a\nmet finding rate reports the spend half as unassessed.";
+pub const USAGE: &str = "usage: rusty_orch lens alien report --state <orch state dir> [--task <task>]\n\nPrint the alien lens's probe rows and its shadow numbers: hunts (with or without probes),\nregressions no ordinary lens named, and the success bar. The bar is judged on the first 20\nhunts by start time: 1 such regression among them, and the lens under 15% of its claims'\nspend. Claim spend is not tracked yet, so a met finding rate reports the spend half as\nunassessed.";
 
 /// What to report.
 #[derive(Debug, PartialEq, Eq)]
@@ -63,8 +63,9 @@ pub fn run(o: &Options) -> Result<String, String> {
     Ok(render(&hunts, &probes))
 }
 
-/// One line per probe, then the totals and the bar. Claim spend is not
-/// tracked yet, so the bar's spend half is judged unassessed.
+/// One line per probe, then the totals over every hunt, then the bar over
+/// the first [`BAR_HUNTS`]. Claim spend is not tracked yet, so the bar's
+/// spend half is judged unassessed.
 pub fn render(hunts: &[HuntRow], rows: &[ProbeRow]) -> String {
     let mut out = String::new();
     for r in rows {
@@ -87,9 +88,9 @@ pub fn render(hunts: &[HuntRow], rows: &[ProbeRow]) -> String {
         "{} hunts, {} probes: {} regressions ({} novel), {} pre-existing, {} errors; {} runs, {} tokens, {} micro-dollars",
         s.hunts, s.probes, s.regressions, s.novel, s.pre_existing, s.errors, s.runs, s.tokens, s.cost
     );
-    let bar = match s.bar(None) {
+    let bar = match judge(hunts, rows, None) {
         Bar::TooFew => format!("bar: not judged before {BAR_HUNTS} hunts"),
-        Bar::RateNotMet => format!("bar: not met (under 1 novel regression per {BAR_HUNTS} hunts)"),
+        Bar::RateNotMet => format!("bar: not met (no novel regression in the first {BAR_HUNTS} hunts)"),
         Bar::SpendUnassessed => format!(
             "bar: not met yet: finding rate met, spend under {BAR_SPEND_PERCENT}% of claim spend not assessed (claim spend unknown)"
         ),
@@ -154,6 +155,7 @@ mod tests {
             probes: u32::from(claim == 7),
             tokens: 900,
             cost: 0,
+            started: claim,
         };
         assert_eq!(
             render(&[hunt(7), hunt(8)], std::slice::from_ref(&row)),
@@ -169,6 +171,6 @@ mod tests {
             "{met_rate}"
         );
         assert!(render(&twenty, &[])
-            .ends_with("bar: not met (under 1 novel regression per 20 hunts)\n"));
+            .ends_with("bar: not met (no novel regression in the first 20 hunts)\n"));
     }
 }

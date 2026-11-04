@@ -533,7 +533,7 @@ mod meters {
 }
 
 mod probes {
-    use orch_lens::alien::{summarize, Bar, HuntRow, Outcome, ProbeRow};
+    use orch_lens::alien::{judge, summarize, Bar, HuntRow, Outcome, ProbeRow};
     use orch_store::Store;
 
     use super::dir;
@@ -596,6 +596,7 @@ mod probes {
             probes,
             tokens: 500,
             cost: 0,
+            started: 100 + claim,
         }
     }
 
@@ -614,7 +615,8 @@ mod probes {
         assert_eq!(hunts.len(), 20, "idempotent: one row per hunt");
         let summary = summarize(&hunts, &s.probes(None).expect("probes"));
         assert_eq!((summary.hunts, summary.probes), (20, 0));
-        assert_eq!(summary.bar(None), Bar::RateNotMet);
+        assert_eq!(judge(&hunts, &[], None), Bar::RateNotMet);
+        assert_eq!(hunts[0].started, 100, "start time survives reopening");
     }
 
     #[test]

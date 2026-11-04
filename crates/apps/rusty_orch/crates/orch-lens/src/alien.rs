@@ -345,15 +345,17 @@ impl Outcome {
     }
 }
 
-/// Classify a probe. `base` is `None` when the candidate run made base's
-/// irrelevant (it errored or passed).
-pub fn outcome(candidate: Run, base: Option<Run>) -> Outcome {
+/// Classify a probe. `base` may be `None` only when the candidate run made
+/// base's irrelevant (it errored or passed); a candidate failure without a
+/// base run is refused, since it could be any of three outcomes.
+pub fn outcome(candidate: Run, base: Option<Run>) -> Result<Outcome, String> {
     match (candidate, base) {
-        (Run::BuildError, _) => Outcome::Error,
-        (Run::Passed, _) => Outcome::Pass,
-        (Run::Failed, Some(Run::Passed)) => Outcome::Regression,
-        (Run::Failed, Some(Run::Failed)) => Outcome::PreExisting,
-        (Run::Failed, Some(Run::BuildError) | None) => Outcome::NewCodeFail,
+        (Run::BuildError, _) => Ok(Outcome::Error),
+        (Run::Passed, _) => Ok(Outcome::Pass),
+        (Run::Failed, Some(Run::Passed)) => Ok(Outcome::Regression),
+        (Run::Failed, Some(Run::Failed)) => Ok(Outcome::PreExisting),
+        (Run::Failed, Some(Run::BuildError)) => Ok(Outcome::NewCodeFail),
+        (Run::Failed, None) => Err("the candidate failed but base was not run".to_owned()),
     }
 }
 
@@ -372,6 +374,8 @@ pub struct HuntRow {
     pub tokens: u64,
     /// What the hunt cost the lens's meter, in micro-dollars.
     pub cost: u64,
+    /// When the hunt began, Unix milliseconds: orders the §8 cohort.
+    pub started: u64,
 }
 
 /// One probe's record (design §6): what was hunted, what it showed.
@@ -463,11 +467,39 @@ pub fn summarize(hunts: &[HuntRow], probes: &[ProbeRow]) -> Summary {
     }
 }
 
+/// The §8 cohort: the first [`BAR_HUNTS`] hunt rows by start time (ties by
+/// task, claim, candidate) and their probes. Later hunts never change it.
+/// A probe without a hunt row has no start time, so it is not in it.
+pub fn cohort(hunts: &[HuntRow], probes: &[ProbeRow]) -> Summary {
+    let mut first: Vec<&HuntRow> = hunts.iter().collect();
+    first.sort_by(|a, b| {
+        (a.started, &a.task, a.claim, a.candidate).cmp(&(b.started, &b.task, b.claim, b.candidate))
+    });
+    first.truncate(BAR_HUNTS);
+    let keys: BTreeSet<_> = first
+        .iter()
+        .map(|h| (&h.task, h.claim, h.candidate))
+        .collect();
+    let hunts: Vec<HuntRow> = first.into_iter().cloned().collect();
+    let probes: Vec<ProbeRow> = probes
+        .iter()
+        .filter(|r| keys.contains(&(&r.task, r.claim, r.candidate)))
+        .cloned()
+        .collect();
+    summarize(&hunts, &probes)
+}
+
+/// Judge the §8 bar over the [`cohort`] of `hunts` and `probes`.
+pub fn judge(hunts: &[HuntRow], probes: &[ProbeRow], spend: Option<ClaimSpend>) -> Bar {
+    cohort(hunts, probes).bar(spend)
+}
+
 impl Summary {
-    /// The §8 bar: at least [`BAR_HUNTS`] hunts, at least one novel
-    /// regression per [`BAR_HUNTS`] of them, and the lens's cost under
-    /// [`BAR_SPEND_PERCENT`]% of `spend`.
-    pub fn bar(&self, spend: Option<ClaimSpend>) -> Bar {
+    /// The §8 bar on this summary taken as the cohort: at least
+    /// [`BAR_HUNTS`] hunts, at least one novel regression per
+    /// [`BAR_HUNTS`] of them, and the lens's cost under
+    /// [`BAR_SPEND_PERCENT`]% of `spend`. Callers use [`judge`].
+    fn bar(&self, spend: Option<ClaimSpend>) -> Bar {
         if self.hunts < BAR_HUNTS {
             return Bar::TooFew;
         }
@@ -746,13 +778,13 @@ mod tests {
     #[test]
     fn outcomes_follow_the_candidate_then_base() {
         use Run::*;
-        assert_eq!(outcome(BuildError, None), Outcome::Error);
-        assert_eq!(outcome(BuildError, Some(Failed)), Outcome::Error);
-        assert_eq!(outcome(Passed, None), Outcome::Pass);
-        assert_eq!(outcome(Failed, Some(Passed)), Outcome::Regression);
-        assert_eq!(outcome(Failed, Some(Failed)), Outcome::PreExisting);
-        assert_eq!(outcome(Failed, Some(BuildError)), Outcome::NewCodeFail);
-        assert_eq!(outcome(Failed, None), Outcome::NewCodeFail);
+        assert_eq!(outcome(BuildError, None), Ok(Outcome::Error));
+        assert_eq!(outcome(BuildError, Some(Failed)), Ok(Outcome::Error));
+        assert_eq!(outcome(Passed, None), Ok(Outcome::Pass));
+        assert_eq!(outcome(Failed, Some(Passed)), Ok(Outcome::Regression));
+        assert_eq!(outcome(Failed, Some(Failed)), Ok(Outcome::PreExisting));
+        assert_eq!(outcome(Failed, Some(BuildError)), Ok(Outcome::NewCodeFail));
+        assert!(outcome(Failed, None).is_err(), "base never ran");
     }
 
     #[test]
@@ -792,6 +824,7 @@ mod tests {
             probes,
             tokens: 100,
             cost: 10,
+            started: 1_000 + claim,
         }
     }
 
@@ -835,19 +868,29 @@ mod tests {
         let mut hunts: Vec<_> = (0..20).map(|c| hunt(c, 0)).collect();
         let mut probes = vec![row(0, true, Outcome::Regression)];
         let spend = Some(ClaimSpend(1_000_000));
-        assert_eq!(summarize(&hunts, &probes).bar(spend), Bar::Met);
-        hunts.push(hunt(20, 0));
-        assert_eq!(
-            summarize(&hunts, &probes).bar(spend),
-            Bar::RateNotMet,
-            "1 in 21"
-        );
+        assert_eq!(judge(&hunts, &probes, spend), Bar::Met);
         probes[0].novel = false;
-        assert_eq!(
-            summarize(&hunts[..20], &probes).bar(spend),
-            Bar::RateNotMet,
-            "not novel"
-        );
+        assert_eq!(judge(&hunts, &probes, spend), Bar::RateNotMet, "not novel");
+        probes[0].novel = true;
+        hunts.truncate(19);
+        assert_eq!(judge(&hunts, &probes, spend), Bar::TooFew);
+    }
+
+    #[test]
+    fn the_bar_is_frozen_to_the_first_twenty_hunts() {
+        let spend = Some(ClaimSpend(1_000_000));
+        let mut hunts: Vec<_> = (0..20).map(|c| hunt(c, 0)).collect();
+        let found = vec![row(0, true, Outcome::Regression)];
+        hunts.push(hunt(20, 0));
+        assert_eq!(judge(&hunts, &found, spend), Bar::Met, "a 21st hunt");
+        let c = cohort(&hunts, &found);
+        assert_eq!((c.hunts, c.novel), (20, 1));
+        assert_eq!(summarize(&hunts, &found).hunts, 21, "totals keep it");
+        let late = vec![row(20, true, Outcome::Regression)];
+        assert_eq!(judge(&hunts, &late, spend), Bar::RateNotMet, "too late");
+        // Start time orders the cohort, not the claim id.
+        hunts[0].started = 5_000;
+        assert_eq!(judge(&hunts, &found, spend), Bar::RateNotMet, "hunt 0 last");
     }
 
     #[test]

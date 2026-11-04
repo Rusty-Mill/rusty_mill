@@ -34,6 +34,7 @@ pub struct HuntRecord {
     probes: u32,
     tokens: u64,
     cost: u64,
+    started: u64,
 }
 
 impl HuntRecord {
@@ -48,6 +49,7 @@ impl HuntRecord {
             probes: row.probes,
             tokens: row.tokens,
             cost: row.cost,
+            started: row.started,
         }
     }
 
@@ -66,6 +68,7 @@ impl HuntRecord {
             probes: self.probes,
             tokens: self.tokens,
             cost: self.cost,
+            started: self.started,
         };
         if key(&row) != self.id {
             return Err(StoreError::Corrupt(format!(
@@ -119,6 +122,7 @@ mod tests {
             probes: 0,
             tokens: 5,
             cost: 0,
+            started: 7,
         };
         assert_eq!(HuntRecord::new(&row, 1).into_row().expect("valid"), row);
         let mut moved = HuntRecord::new(&row, 1);
