@@ -3539,10 +3539,9 @@ impl WindowState<'_> {
     }
 
     /// Leave setup without keeping its choices: put every row it touched
-    /// back to its exact opening value, then make sure the config file
-    /// exists (the commented template, no setting switched on) so a first
-    /// run doesn't return on the next launch (O11 skip, D65; interim pending
-    /// Nano). An existing file is left as it was.
+    /// back to its exact opening value. Skip writes nothing (D65): a missing
+    /// config stays missing, so a first run's setup returns on the next
+    /// plain launch, and an existing one stays byte-identical.
     fn skip_setup(&mut self) {
         let Some(Overlay::Settings(s)) = self.overlay.take() else {
             return;
@@ -3552,7 +3551,6 @@ impl WindowState<'_> {
                 self.restore_setting(field, base);
             }
         }
-        self.ensure_config_file();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
