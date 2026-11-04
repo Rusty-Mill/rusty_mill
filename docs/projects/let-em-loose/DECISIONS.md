@@ -70,6 +70,7 @@ Precise contracts used by this guide:
 | D51 | The expert is the single writer of settled answers | [default] 2026-11-03 (handoff) |
 | D52 | rusty_erosion location and core/adapter module split | [default] 2026-11-03 (#704) |
 | D54 | Lens shell reaches BBP through one `bbp mcp` session per lens | [default] 2026-11-04 (#594) |
+| D55 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
 
 ## D1. Lenses, not stages
 
@@ -450,3 +451,12 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [default] · remind-me: mem_fc34b139927341aabc53a249d2427f81
 **Key.** lel:594:lens-shell-bbp-transport
 **Source.** Caller question from the #594 shell slice, 2026-11-04; 594-lens-runner-design.md §5, §6; bbp-claims-addendum.md § Reads, delta and subscriptions and R11; `rusty_bbp/src/claims.rs` `EvidenceView`/`ClaimView`; `rusty_bbp_host/src/mcp/claims.rs`.
+
+## D55. `lens run` merges as a disabled slice until the accept-line source lands
+
+**Decision.** PR #1467 (`rusty_orch lens run`) may merge with `lens run` refusing every invocation (`UNKNOWN_CLAIMS`) until BBP exposes the task's frozen accept line. The runner never assumes `ClaimsConfig::default()`. The accept-line source lands as its own small PR stacked on #1467. How BBP exposes it (`accept_at` on `ClaimView`, the whole `ClaimsConfig`, or an operator `--claims` file, bundled with Q12) is not settled here; it is open as Q13.
+**Why.** dottiusmaximus on #1467 (comment 6635856528) asked for owner acceptance of a disabled slice or to treat the source as a merge-readiness dependency. Nano chose the disabled slice.
+**Rejected.** Holding #1467 until the source lands. Assuming the default thresholds (accept_at 8 / strict 12) for tasks opened with custom `--claims`.
+**Tag.** [stated] · remind-me: mem_120c56253ad241ce954eb5602baabf53
+**Key.** lel:594:lens-run-disabled-slice
+**Source.** Nano's tap on hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE485HdWybMYAyN7zK64ZJGmR (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:46:52Z, option "Merge as disabled slice". Review and merge gates still apply.
