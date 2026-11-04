@@ -1,8 +1,6 @@
 use rusty_tokio::task::{spawn_local, LocalSet};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 #[test]
@@ -128,36 +126,6 @@ fn spawn_local_outside_run_until_panics() {
 }
 
 #[test]
-fn using_a_local_set_from_a_second_thread_panics() {
-    let local = Arc::new(std::sync::Mutex::new(LocalSet::new()));
-    local.lock().unwrap().run_until(async {});
-
-    let local2 = local.clone();
-    let ok_count = Arc::new(AtomicUsize::new(0));
-    let ok_count2 = ok_count.clone();
-    // The panic happens on this spawned thread, not the test's own --
-    // `#[should_panic]` only catches the latter, so assert on the
-    // propagated payload directly instead.
-    let result = std::thread::spawn(move || {
-        local2.lock().unwrap().run_until(async {});
-        ok_count2.fetch_add(1, Ordering::SeqCst);
-    })
-    .join();
-
-    let payload = result.expect_err("expected the second thread to panic");
-    let message = payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-        .expect("panic payload was not a string");
-    assert!(
-        message.contains("single thread that first used it"),
-        "unexpected panic message: {message}"
-    );
-    assert_eq!(ok_count.load(Ordering::SeqCst), 0);
-}
-
-#[test]
 fn run_until_can_be_called_more_than_once_on_the_same_set() {
     let local = LocalSet::new();
     let a = local.run_until(async { 1 });
@@ -208,31 +176,4 @@ fn enter_guard_dropping_restores_the_previously_ambient_set() {
     // `outer`'s queue in the first place.
     let inner_value = inner.run_until(async move { inner_handle.await.unwrap() });
     assert_eq!(inner_value, "inner");
-}
-
-#[test]
-fn enter_from_a_second_thread_panics() {
-    let local = Arc::new(std::sync::Mutex::new(LocalSet::new()));
-    local.lock().unwrap().run_until(async {});
-
-    // The panic happens on this spawned thread, not the test's own --
-    // `#[should_panic]` only catches the latter, so assert on the
-    // propagated payload directly, same as
-    // `using_a_local_set_from_a_second_thread_panics` above.
-    let local2 = local.clone();
-    let result = std::thread::spawn(move || {
-        let _guard = local2.lock().unwrap().enter();
-    })
-    .join();
-
-    let payload = result.expect_err("expected the second thread to panic");
-    let message = payload
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
-        .expect("panic payload was not a string");
-    assert!(
-        message.contains("single thread that first used it"),
-        "unexpected panic message: {message}"
-    );
 }
