@@ -52,7 +52,7 @@ struct QuestionRow {
     tried: Vec<(Option<u8>, Vec<String>)>,
     rebel_landed: bool,
     rebel_failures: u32,
-    attacks: Vec<(u64, u32)>,
+    attacks: Vec<(u64, u32, u32)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use orch_core::AgentId;
 use rusty_bbp::MsgId;
 
-use crate::schedule::{Pass, Progress, Proposals, Slot, State};
+use crate::schedule::{Attacks, Pass, Progress, Proposals, Slot, State};
 
 /// One blind or look-harder pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +42,8 @@ pub struct SavedQuestion {
     pub tried: Vec<(Option<u8>, Vec<String>)>,
     pub rebel_landed: bool,
     pub rebel_failures: u32,
-    pub attacks: Vec<(u64, u32)>,
+    /// Per candidate: its id, the epoch of the passes, the passes.
+    pub attacks: Vec<(u64, u32, u32)>,
 }
 
 /// The scheduler's memory for one task, without its jobs in flight.
@@ -138,7 +139,11 @@ fn save_question(claim: MsgId, q: &Proposals) -> SavedQuestion {
             .collect(),
         rebel_landed: q.rebel_landed,
         rebel_failures: q.rebel_failures,
-        attacks: q.attacks.iter().map(|(c, n)| (c.0, *n)).collect(),
+        attacks: q
+            .attacks
+            .iter()
+            .map(|(c, a)| (c.0, a.epoch, a.passes))
+            .collect(),
     }
 }
 
@@ -180,8 +185,12 @@ fn restore_question(q: &SavedQuestion) -> Result<Proposals, String> {
         }
     }
     let mut attacks = BTreeMap::new();
-    for (c, n) in &q.attacks {
-        if attacks.insert(MsgId(*c), *n).is_some() {
+    for (c, epoch, passes) in &q.attacks {
+        let a = Attacks {
+            epoch: *epoch,
+            passes: *passes,
+        };
+        if attacks.insert(MsgId(*c), a).is_some() {
             return Err(format!(
                 "question msg:{} lists candidate msg:{c} twice",
                 q.claim
@@ -234,7 +243,23 @@ mod tests {
             settled: [0, 1].into(),
             rebel_landed: false,
             rebel_failures: 1,
-            attacks: [(MsgId(11), 2), (MsgId(12), 1)].into(),
+            attacks: [
+                (
+                    MsgId(11),
+                    Attacks {
+                        epoch: 1,
+                        passes: 2,
+                    },
+                ),
+                (
+                    MsgId(12),
+                    Attacks {
+                        epoch: 0,
+                        passes: 1,
+                    },
+                ),
+            ]
+            .into(),
             ..Proposals::default()
         };
         q.tried.insert(Slot::Propose(1), [id("local")].into());
@@ -289,7 +314,7 @@ mod tests {
         saved.questions[0].tried.push(first);
         assert!(State::restore(&saved).is_err(), "slot twice");
         let mut saved = busy().saved();
-        saved.questions[0].attacks.push((11, 5));
+        saved.questions[0].attacks.push((11, 0, 5));
         assert!(State::restore(&saved).is_err(), "candidate twice");
     }
 }

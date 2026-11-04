@@ -152,7 +152,7 @@ fn settle(
             }
             state.answered(job, *provider, posts.len(), counters(posts));
             if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
-                state.attacked(q, card.id);
+                state.attacked(q, card.id, card.epoch);
             }
             None
         }
@@ -496,7 +496,7 @@ mod tests {
         );
         assert_eq!(out.report.halt, None);
         let attacks = &out.state.questions[&MsgId(3)].attacks;
-        assert!(attacks[&MsgId(10)] > 0);
+        assert!(attacks[&MsgId(10)].passes > 0);
         assert_eq!(attacks[&MsgId(10)], attacks[&MsgId(11)]);
     }
 }

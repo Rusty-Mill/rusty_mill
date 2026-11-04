@@ -124,8 +124,17 @@ pub struct Proposals {
     pub tried: BTreeMap<Slot, BTreeSet<AgentId>>,
     pub rebel_landed: bool,
     pub rebel_failures: u32,
-    /// Attack passes per candidate.
-    pub attacks: BTreeMap<MsgId, u32>,
+    /// Attack passes per candidate, in the candidate's epoch.
+    pub attacks: BTreeMap<MsgId, Attacks>,
+}
+
+/// Attack passes on one candidate. Passes from an earlier epoch of the
+/// candidate do not count: a reopened candidate re-earns settlement, so
+/// its old passes must not hold its new review back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Attacks {
+    pub epoch: u32,
+    pub passes: u32,
 }
 
 /// The runner's memory for one task.
@@ -320,7 +329,13 @@ fn attack_ready(card: &Card, q: MsgId, by_id: &BTreeMap<MsgId, &Card>, state: &S
     if question.candidates.len() < 2 || !rebel_settled {
         return false;
     }
-    let passes = |c: &MsgId| seen.attacks.get(c).copied().unwrap_or(0);
+    let passes = |c: &MsgId| {
+        let epoch = by_id.get(c).map_or(0, |c| c.epoch);
+        seen.attacks
+            .get(c)
+            .filter(|a| a.epoch == epoch)
+            .map_or(0, |a| a.passes)
+    };
     let least = open.iter().map(passes).min().unwrap_or(0);
     passes(&card.id) <= least
 }
@@ -454,15 +469,20 @@ impl State {
         }
     }
 
-    /// Count an attack pass on a candidate of `question`.
-    pub fn attacked(&mut self, question: MsgId, candidate: MsgId) {
-        *self
+    /// Count an attack pass on a candidate of `question` in the
+    /// candidate's `epoch`; passes from an earlier epoch are dropped.
+    pub fn attacked(&mut self, question: MsgId, candidate: MsgId, epoch: u32) {
+        let a = self
             .questions
             .entry(question)
             .or_default()
             .attacks
             .entry(candidate)
-            .or_default() += 1;
+            .or_default();
+        if a.epoch != epoch {
+            *a = Attacks { epoch, passes: 0 };
+        }
+        a.passes += 1;
     }
 }
 
@@ -908,7 +928,7 @@ mod tests {
         let q = st.questions.entry(MsgId(3)).or_default();
         q.rebel_landed = true;
         q.settled = [0, 1].into();
-        st.attacked(MsgId(3), MsgId(10));
+        st.attacked(MsgId(3), MsgId(10), 0);
         let two = [question(3, &[10, 11]), candidate(10, 3), candidate(11, 3)];
         let (jobs, _) = schedule(&cfg, &two, &st);
         assert!(
@@ -916,7 +936,7 @@ mod tests {
             "10 is ahead"
         );
         assert!(jobs.iter().any(|j| j.key.claim == MsgId(11)));
-        st.attacked(MsgId(3), MsgId(11));
+        st.attacked(MsgId(3), MsgId(11), 0);
         let (jobs, _) = schedule(&cfg, &two, &st);
         assert!(jobs.iter().any(|j| j.key.claim == MsgId(10)));
     }

@@ -783,6 +783,76 @@ mod tests {
         );
     }
 
+    /// Question 3 with candidates 10 and 11, proposals settled.
+    fn question_board(epoch_10: u32) -> (Vec<Card>, State) {
+        let mut q = card(3);
+        q.domains = vec![orch_lens::schedule::QUESTION_DOMAIN.to_owned()];
+        q.candidates = vec![MsgId(10), MsgId(11)];
+        let candidate = |n: u64, epoch: u32| {
+            let mut c = card(n);
+            c.answers = Some(MsgId(3));
+            c.epoch = epoch;
+            c
+        };
+        let mut st = State::default();
+        let p = st.questions.entry(MsgId(3)).or_default();
+        p.settled = [0, 1].into();
+        p.rebel_landed = true;
+        (vec![q, candidate(10, epoch_10), candidate(11, 0)], st)
+    }
+
+    #[test]
+    fn a_reopened_candidate_is_not_held_back_by_its_old_attack_count() {
+        let mut echo = echo(Ok(vec![]));
+        let (cards, mut st) = question_board(0);
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(&mut st, &mut keep, seats_with(&cards), &mut echo, 10, 20);
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(
+            echo.1, 8,
+            "blind and look-harder, two lenses, two candidates"
+        );
+        let mut saved = kept.expect("kept");
+        // Make the old counts unequal: 10 is ahead of 11.
+        let attacks = &mut saved.questions[0].attacks;
+        attacks.iter_mut().find(|a| a.0 == 10).expect("10").2 += 1;
+
+        let mut same = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut same,
+            &mut |_| Ok(()),
+            seats_with(&cards),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 8, "same epoch: nothing to do: {log}");
+
+        let (reopened, _) = question_board(1);
+        let mut restored = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            seats_with(&reopened),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(
+            echo.1, 12,
+            "10's new epoch: blind and look-harder per lens: {log}"
+        );
+        assert_eq!(log.matches("msg:10 Review").count(), 2, "{log}");
+        assert_eq!(log.matches("msg:10 LookHarder").count(), 2, "{log}");
+        assert_eq!(log.matches("msg:11").count(), 0, "{log}");
+    }
+
     #[test]
     fn memory_that_cannot_be_kept_is_an_error() {
         let mut echo = echo(Ok(vec![counter()]));

@@ -559,7 +559,7 @@ mod lens_states {
                 tried: vec![(None, vec!["local".to_owned()])],
                 rebel_landed: false,
                 rebel_failures: 1,
-                attacks: vec![(11, 2)],
+                attacks: vec![(11, 1, 2)],
             }],
         }
     }
