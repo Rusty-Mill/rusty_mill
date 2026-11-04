@@ -56,6 +56,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::task::{Context, Poll, Wake, Waker};
+use std::thread;
 use std::time::Duration;
 
 type LocalBoxFuture = Pin<Box<dyn Future<Output = ()>>>;
@@ -74,13 +75,17 @@ pub(crate) struct LocalTask {
     abnormal_hook: RefCell<Option<LocalAbnormalHook>>,
 }
 
-// SAFETY: `future` and `abnormal_hook` are only ever touched from
-// `LocalTask::run`, which is only ever called from `LocalSet::
-// run_until`'s own loop (or `LocalRuntime::block_on`'s, which owns the
-// set) -- and `LocalSet` is `!Send + !Sync`, so those loops run on the
-// thread that created the set. The free `spawn_local` reaches a set only
-// through this thread's `CURRENT_LOCAL`, which only a `!Send` enter guard
-// sets or restores, so it cannot queue a future from another thread. So even though this
+// SAFETY: `future` and `abnormal_hook` are only ever touched -- polled
+// by `LocalTask::run`, or dropped by `LocalTask::cancel` -- from
+// `LocalSet::run_until`'s own loop (or `LocalRuntime::block_on`'s, which
+// owns the set), from `spawn` when the set is already closed, or from
+// `LocalSet`'s `Drop`. `LocalSet` is `!Send + !Sync`, so all of those run
+// on the thread that created the set, its drop included; the set holds
+// every live task until then, so a `LocalTask` whose last `Arc` drops on
+// another thread holds no future by then. `abort` only schedules. The free
+// `spawn_local` reaches a set only through this thread's `CURRENT_LOCAL`,
+// which only a `!Send` enter guard sets or restores, so it cannot queue a
+// future from another thread. So even though this
 // `Arc` -- and the cross-thread-capable `Waker` built from it, needed so
 // the reactor/timer background threads can wake a local task's I/O or
 // timer interest just like any other task's -- can be freely cloned,
