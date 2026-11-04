@@ -531,7 +531,7 @@ Worked examples (concentration, duplication, in basis points):
 **Decision.** Every remaining item in 598-gaps-design.md §6 is approved as listed, completing D59. BBP: `task_opened.baseline_digest` (optional); `claim_reopened.by: intent`; the escalation reason `intent_changed`. Host: `bbp open --base` runs the baseline and can refuse `baseline_red`; the `base_test_changed` refusal; named sandbox profiles for lenses and builders, not just runs; the filtered view; the `shadow:` profile kind with read-only `real_data` mounts and a plan artifact. orch: the Survey and Intent lens kinds; `max_class` and `price` on providers, both required at load; orch-store tables for item classes, spend and reservations; `rusty_orch lens breaker`; `domain_classes` replacing #594's `sensitive_domains`. Factory: `domain_classes`, `sensitive_paths`, `real_data`, `price`, the ceilings and the breaker settings. No migration: no claims-mode logs exist outside tests.
 **Why.** All additive, and they implement answers Nano already gave on #598 (Q1, Q4, Q6). This clears the ask-first schema/API gate for the #598 build.
 **Rejected.** Going item by item (option B on the card).
-**Tag.** [stated] · remind-me: pending
+**Tag.** [stated] · remind-me: mem_fc5ad74f9fac448d8d22a9ff42f12bc3
 **Key.** lel:598:section6-remaining-approved
 **Source.** Nano tapped option A "Approve all as listed" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Ppm26TJdNSuETWT9FqZp8E ("Approve the rest of #598 §6, not just the three I listed?"), 2026-11-04T17:15:20Z. OPEN_QUESTIONS Q5.
 
@@ -540,7 +540,7 @@ Worked examples (concentration, duplication, in basis points):
 **Decision.** The #600 desktop GUI (Windows-first) is judged only through the Windows shadow run and golden cases (D56). Linux claims runs check the engine and the web UI.
 **Why.** Claims runs are Linux-only and can't exercise a Windows GUI.
 **Rejected.** Judging the GUI in the Linux sandbox.
-**Tag.** [stated] · remind-me: pending
+**Tag.** [stated] · remind-me: mem_0793274b6343443fbbe7f34d9846e0bb
 **Key.** lel:600:windows-gui-judged-on-windows
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O1 "Yes".
 
@@ -549,15 +549,15 @@ Worked examples (concentration, duplication, in basis points):
 **Decision.** In v0, #600 builder sessions run the Claude CLI only. Codex in `lel-codex` doesn't build.
 **Why.** The holdout lens then keeps a model that no builder uses (D37), and isn't left with only local models.
 **Rejected.** Codex as a second builder in v0.
-**Tag.** [stated] · remind-me: pending
+**Tag.** [stated] · remind-me: mem_44f3236c741d4f3383370ac59299d664
 **Key.** lel:600:claude-only-builders
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O2 "Concur".
 
 ## D65. A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen
 
-**Decision.** When the Windows shadow run contradicts a Linux pass, Nano reopens the claim with a human `decision reopen` (C-R8), which needs `budget_extended` first. It isn't posted as `executed` evidence, since it has no runner report bound to the claim's candidate (C-R4).
+**Decision.** When the Windows shadow run contradicts a Linux pass, Nano reopens the claim with a human `decision reopen` (C-R8), after `budget_extended` only if the claim's budget is exhausted (claims_engine.rs, cl_48). It isn't posted as `executed` evidence, since it has no runner report bound to the claim's candidate (C-R4).
 **Why.** A real-data failure should stop acceptance, and only a reopen can do that. `cited` evidence never reopens a claim.
 **Rejected.** Posting it as `cited` evidence.
-**Tag.** [stated] · remind-me: pending
+**Tag.** [stated] · remind-me: mem_ed23f39443c2424d96b224556a54303f
 **Key.** lel:600:windows-contradiction-human-reopen
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4MwQzj2Aawhe7Q5axWeGqTY (2026-11-04T17:16:45Z), "01 Yes. 02. Concur. 03. Concur with recommendation", answering cmsg_01WgyiM31RsSnZTgNuPX2VE497rAQtVYv9PGh6V7rgu8pq and 600-builder-session-design.md §11, O3 "Concur with recommendation" (option a).
