@@ -308,6 +308,7 @@ fn open_task(dir: &Path, id: &str) -> Driver<FsStore> {
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::default(),
         holdout_digest: None,
+        baseline_digest: None,
     });
     assert!(matches!(
         d.dispatch(&cmd, Time(1)).expect("open"),

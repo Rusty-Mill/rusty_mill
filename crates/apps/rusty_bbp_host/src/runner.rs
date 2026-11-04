@@ -229,6 +229,46 @@ pub fn prepare(repo: &Path, work: &Path, base: &str, diffs: &[Vec<u8>]) -> Resul
     git(work, &["write-tree"])
 }
 
+/// #598: the frozen build suite on a clean checkout of `base`, no diffs,
+/// executed by `exec` exactly as a candidate run is. Nothing is reported to
+/// the task; the caller decides whether it may open.
+pub fn baseline<E: Executor>(
+    exec: &E,
+    set: &ProfileSet,
+    repo: &Path,
+    work: &Path,
+    base: &str,
+) -> crate::baseline::Baseline
+where
+    E::Error: std::fmt::Display,
+{
+    let checked_out = prepare(repo, work, base, &[]).and_then(|tree| {
+        let tests = crate::baseline::test_files(work, &set.test_paths)?;
+        Ok((tree, tests))
+    });
+    match checked_out {
+        Ok((tree, tests)) => {
+            let o = execute(exec, set, work);
+            crate::baseline::Baseline {
+                base: base.to_owned(),
+                tree: Some(Sha256::of(tree.as_bytes())),
+                status: o.status,
+                profiles: o.profiles,
+                tests,
+                error: None,
+            }
+        }
+        Err(e) => crate::baseline::Baseline {
+            base: base.to_owned(),
+            tree: None,
+            status: RunStatus::Error,
+            profiles: vec![],
+            tests: vec![],
+            error: Some(format!("prepare: {e}")),
+        },
+    }
+}
+
 struct Outcome {
     status: RunStatus,
     profiles: Vec<ProfileResult>,

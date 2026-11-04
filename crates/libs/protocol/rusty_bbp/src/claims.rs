@@ -448,6 +448,9 @@ pub struct ClaimsBook {
     pub holdout_retired: BTreeSet<Sha256>,
     /// #598: `intent_revised` events so far.
     pub revisions: u32,
+    /// SHA-256 of the green baseline report (#598): the task changes
+    /// existing code and was opened with `--base`.
+    pub baseline_digest: Option<Sha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

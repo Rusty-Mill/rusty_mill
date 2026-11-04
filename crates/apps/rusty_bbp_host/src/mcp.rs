@@ -820,12 +820,15 @@ impl Server {
             .map_err(|e| format!("{e:?}"))
     }
 
-    /// #597: the protected-path rule for candidate `m`, when the task has
-    /// protected paths: its baseline and the paths its diffs touch.
+    /// #597, #598: the rules for candidate `m` that read the host's files,
+    /// when the task has protected paths, a pinned baseline or a brownfield
+    /// baseline report: its base, the paths its diffs touch and the base
+    /// tests they change.
     fn protected(&self, m: &Candidate) -> Result<Option<crate::protect::Guard>, String> {
         let st = &self.driver.state;
         let set = crate::profiles::load(&self.binding.dir, &self.binding.task, st.profile_digest)?;
-        if set.protected.is_empty() {
+        let brownfield = st.claims.baseline_digest;
+        if set.protected.is_empty() && set.baseline.is_none() && brownfield.is_none() {
             return Ok(None);
         }
         set.check_protected()?;
@@ -845,12 +848,20 @@ impl Server {
                 None => Ok(Vec::new()),
             }
         })?;
+        let base_tests = match brownfield {
+            Some(d) => crate::baseline::changed_base_tests(
+                &crate::baseline::load(&self.binding.dir, &self.binding.task, d)?.tests,
+                &touched,
+            ),
+            None => vec![],
+        };
         Ok(Some(crate::protect::Guard {
             refused: crate::protect::off_baseline(set.baseline.as_deref(), m)
                 .or_else(|| crate::protect::unresolved(st, m)),
             protected: set.protected,
             touched,
             claim: m.claim,
+            base_tests,
         }))
     }
 

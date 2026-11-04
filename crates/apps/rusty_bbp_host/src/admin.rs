@@ -94,7 +94,7 @@ pub fn open_task_live(
         roster,
         max_live_turns,
         policy,
-        (Mode::Stages, None, None),
+        (Mode::Stages, None, None, None),
     )
 }
 
@@ -109,7 +109,12 @@ fn open_mode(
     roster: Vec<Role>,
     max_live_turns: u32,
     policy: SchedulingPolicy,
-    (mode, claims, holdout_digest): (Mode, Option<ClaimsConfig>, Option<Sha256>),
+    (mode, claims, holdout_digest, baseline_digest): (
+        Mode,
+        Option<ClaimsConfig>,
+        Option<Sha256>,
+        Option<Sha256>,
+    ),
 ) -> Result<Response, String> {
     let master = crate::master::ensure(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
@@ -145,6 +150,7 @@ fn open_mode(
         human: human.clone(),
         policy,
         holdout_digest,
+        baseline_digest,
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
@@ -158,6 +164,10 @@ fn open_mode(
 /// is written. Claims mode grants no turns: one live turn, turn-based.
 /// `holdout`, if given, is staged and frozen as the task's holdout suite
 /// (#597); the core then waits for a holdout pass before acceptance.
+/// `baseline`, if given, is the build suite's run on the task's base
+/// (#598, `bbp open --base`): anything but green refuses the open
+/// `baseline_red`; a green one is stored, its commit becomes the profile
+/// set's `baseline`, and its digest goes in `task_opened`.
 #[allow(clippy::too_many_arguments)]
 pub fn open_claims_task(
     dir: &Path,
@@ -169,6 +179,7 @@ pub fn open_claims_task(
     holdout: Option<&crate::holdout::HoldoutSet>,
     roster: Vec<Role>,
     cfg: ClaimsConfig,
+    baseline: Option<&crate::baseline::Baseline>,
     sandbox: impl FnOnce() -> Result<(), String>,
 ) -> Result<Response, String> {
     let refuse = |detail: String| {
@@ -185,6 +196,29 @@ pub fn open_claims_task(
     if set.test_paths.is_empty() {
         return refuse("test_paths: the profile set must name its test paths".into());
     }
+    let based;
+    let set = match baseline {
+        None => set,
+        Some(b) if !b.green() => {
+            return Ok(Response::Rejected(Rejection::new(
+                Code::BaselineRed,
+                b.red_detail(),
+            )))
+        }
+        Some(b) if set.baseline.as_ref().is_some_and(|x| *x != b.base) => {
+            return refuse(format!(
+                "baseline: the profile set pins {:?}, but --base resolved to {}",
+                set.baseline, b.base
+            ))
+        }
+        Some(b) => {
+            based = ProfileSet {
+                baseline: Some(b.base.clone()),
+                ..set.clone()
+            };
+            &based
+        }
+    };
     if let Err(e) = set.check_protected() {
         return refuse(format!("protected: {e}"));
     }
@@ -200,6 +234,10 @@ pub fn open_claims_task(
         Some(hs) => Some(crate::holdout::stage(dir, task, hs)?),
         None => None,
     };
+    let baseline_digest = match baseline {
+        Some(b) => Some(crate::baseline::store(dir, task, b)?),
+        None => None,
+    };
     open_mode(
         dir,
         task,
@@ -210,7 +248,7 @@ pub fn open_claims_task(
         roster,
         1,
         SchedulingPolicy::TurnBased,
-        (Mode::Claims, Some(cfg), holdout_digest),
+        (Mode::Claims, Some(cfg), holdout_digest, baseline_digest),
     )
 }
 

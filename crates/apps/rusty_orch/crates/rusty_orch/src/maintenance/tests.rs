@@ -744,6 +744,7 @@ fn persist_task(dir: &Path, name: &str, repo: &Path, terminal: bool) {
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::default(),
         holdout_digest: None,
+        baseline_digest: None,
     }];
     if terminal {
         events.push(Event::StateChanged {

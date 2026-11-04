@@ -55,6 +55,7 @@ fn open_as(dir: &Path, t: &TaskId, set: &ProfileSet, probe: Result<(), String>) 
         None,
         vec![lens("a", 0), lens("b", 1)],
         ClaimsConfig::default(),
+        None,
         || probe,
     )
     .expect("open")
@@ -984,6 +985,114 @@ fn intent_stores_the_new_brief_and_reopens_or_escalates_what_it_affects() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------------------------------------------------------------- brownfield baseline (#598)
+
+/// Open the claims task on `repo`'s base with the suite already run there.
+fn open_on_base(dir: &Path, b: &rusty_bbp_host::baseline::Baseline) -> Response {
+    admin::open_claims_task(
+        dir,
+        &task(),
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &profiles(),
+        None,
+        vec![lens("a", 0), lens("b", 1)],
+        ClaimsConfig::default(),
+        Some(b),
+        || Ok(()),
+    )
+    .expect("open")
+}
+
+#[test]
+fn a_red_base_refuses_the_open_and_writes_nothing() {
+    let dir = tempdir("base-red");
+    let (repo, base) = repo(&dir);
+    let b = runner::baseline(&Unconfined, &profiles(), &repo, &dir.join("work"), &base);
+    assert_eq!(b.status, RunStatus::Failed, "flag.txt says no at the base");
+    let (code, detail) = rejected(open_on_base(&dir, &b));
+    assert_eq!(code, Code::BaselineRed);
+    assert!(
+        detail.contains("test (exit 1)") && detail.contains("edit profile `test`"),
+        "{detail}"
+    );
+    assert!(!dir.join("master").exists(), "nothing written");
+    assert!(!rusty_bbp_host::profiles::path(&dir, &task()).exists());
+    assert!(!rusty_bbp_host::baseline::path(&dir, &task()).exists());
+    assert!(rusty_bbp_host::baseline::resolve(&repo, "no-such-ref").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_green_base_pins_candidates_and_guards_its_tests() {
+    let dir = tempdir("base-green");
+    let (repo, _) = repo(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let base = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let b = runner::baseline(&Unconfined, &profiles(), &repo, &dir.join("work"), &base);
+    assert!(b.green(), "{b:?}");
+    assert_eq!(b.tests, ["tests/core.txt", "tests/old.txt"]);
+    assert!(matches!(open_on_base(&dir, &b), Response::Stored(_)));
+    for who in ["a", "b"] {
+        admin::assign(
+            &dir,
+            &task(),
+            &RoleId::from(who),
+            &PrincipalId(who.into()),
+            "v",
+        )
+        .unwrap();
+    }
+    let st = state(&dir);
+    assert!(st.claims.baseline_digest.is_some());
+    assert_eq!(
+        rusty_bbp_host::profiles::pinned_base(&dir, &task()).unwrap(),
+        Some(base.clone())
+    );
+    let reversible = claim(&dir, "a", "keep", true);
+    let irreversible = claim(&dir, "a", "rewrite", false);
+    let mut s = server(&dir, "a");
+    let body = rusty_serde::json::to_string(&DIFF.to_owned()).unwrap();
+    let diff = id_of(&ok(
+        &mut s,
+        "put_artifact",
+        &format!(r#"{{"op":"d1","kind":"diff","body":{body}}}"#),
+    ));
+    let put = |s: &mut Server, op: &str, base: &str, c: u64| {
+        call(
+            s,
+            "put_artifact",
+            &format!(
+                r#"{{"op":"{op}","kind":"candidate","base":"{base}","diffs":[{diff}],"claim":{c}}}"#
+            ),
+        )
+        .0
+    };
+    let refused = put(&mut s, "k1", &base, reversible);
+    assert!(refused.contains("BaseTestChanged"), "{refused}");
+    assert!(
+        refused.contains("tests/core.txt") && refused.contains("tests/old.txt"),
+        "{refused}"
+    );
+    assert!(
+        !refused.contains("tests/new.txt"),
+        "an added test is no change to the base: {refused}"
+    );
+    let off = put(&mut s, "k2", &"b".repeat(40), irreversible);
+    assert!(
+        off.contains("baseline"),
+        "a pinned base holds without protected paths: {off}"
+    );
+    let stored = put(&mut s, "k3", &base, irreversible);
+    assert!(
+        stored.contains("Stored"),
+        "an irreversible claim goes to Nano: {stored}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- protected paths (#597)
 
 /// Store `diff` as `who` and a candidate of it naming claim `c`.
@@ -1155,6 +1264,7 @@ fn open_holdout(
         Some(hs),
         vec![lens("a", 0), lens("b", 1), holdout_lens()],
         ClaimsConfig::default(),
+        None,
         || Ok(()),
     )
     .expect("open")

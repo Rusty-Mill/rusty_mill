@@ -341,6 +341,11 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
             Code::BadClaimsConfig,
             "holdout_digest: a holdout suite needs claims mode",
         ));
+    } else if o.baseline_digest.is_some() {
+        return Err(rej(
+            Code::BadClaimsConfig,
+            "baseline_digest: a baseline needs claims mode",
+        ));
     }
     let roster = Roster::for_mode(o.roster.clone(), o.mode)
         .map_err(|e| rej(Code::BadRoster, e.to_string()))?;
@@ -383,6 +388,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         mode: o.mode,
         claims: claims.then(|| o.claims.unwrap_or_default()),
         holdout_digest: o.holdout_digest,
+        baseline_digest: o.baseline_digest,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {

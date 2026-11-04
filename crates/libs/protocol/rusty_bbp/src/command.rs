@@ -100,6 +100,10 @@ pub struct OpenTask {
     /// opens a task without one.
     #[rusty_serde(default)]
     pub holdout_digest: Option<Sha256>,
+    /// Claims mode only (#598): SHA-256 of the green baseline report the
+    /// host ran on the task's base before opening. `None` is greenfield.
+    #[rusty_serde(default)]
+    pub baseline_digest: Option<Sha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,4 +361,10 @@ pub enum Code {
     /// #598: `intent_revised` names no claim and no domain, or a claim that
     /// is not a claim on the task.
     BadAffects,
+    /// Host (#598): `open --base` ran the build suite on the base and it
+    /// was not green; nothing is written.
+    BaselineRed,
+    /// Host (#598): a candidate on a task opened with `--base` modifies or
+    /// deletes a test that exists at the base, and its claim is reversible.
+    BaseTestChanged,
 }
