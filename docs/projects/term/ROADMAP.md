@@ -52,7 +52,11 @@ Each arc needs the owner's go before it starts, and its own plan.
    (scrollback spooled to disk), pulled forward from Phase 5 (question 2); it gates arc 2.
    Then C36 upgrade without losing sessions and C69 auto-start, with Orca's endpoint-ownership
    rules (O6) first.
-4. **Mux Phase 4 rest and Phase 5.** Web client, WebSocket API, device pairing, config
+4. **Let Em Loose on the mux (proposal).** No link exists today between `rusty_orch`/`rusty_bbp`
+   and rusty_mux. BBP stage 3 plans a sandboxed runner supervisor; if its agent runs were rusty_mux
+   blocks, Nano could watch or attach to any agent, and status would come from O2. Orchestration
+   logic stays in orch/BBP. Needs the Let Em Loose side's design (its expert) and Nano's go.
+5. **Mux Phase 4 rest and Phase 5.** Web client, WebSocket API, device pairing, config
    migration, parking, encryption at rest, audit, plugins (C66 is a new crate). Order set when
    arc 2 is under way.
 
@@ -84,8 +88,12 @@ Each has a recommendation. Answer on the PR so the reviewer can accept it.
    CHARTER non-goal stands. Agents split panes through the skill's `split-block`; Claude Code's
    built-in team panes stay in-process. Revisit if team panes become a daily need. Nano to restate
    on this PR.
-7. **Agent orchestration (O7/O8).** Should rusty_mux grow ask/reply, gates and worktrees, or
-   stay a substrate other tools run on? *Recommend substrate, plus O7 worktree-per-session.*
+7. **Agent orchestration (O7/O8).** *Answered (Nano, project thread, 2026-11-04 12:18Z: "I concur,
+   HOWEVER take a look at Rusty_orch and Rusty_bbp"):* rusty_mux stays a substrate, plus O7
+   `create-session --worktree`. Orchestration already has a home: `rusty_orch` plans goals into
+   task cards and `rusty_bbp` is the blackboard with store-enforced roles, budgets and human gates
+   (Let Em Loose). So O8 is not built in the mux; the mux's job is to be a good place for those
+   agents to run (see arc 4). Nano to restate on this PR.
 8. **FreeBSD** as a server target? *Recommend not now.*
 9. **Version mismatch (with C36).** Refuse, warn, or negotiate down when client and server
    differ? *Recommend negotiate via `Features`, refuse only below a floor.*
