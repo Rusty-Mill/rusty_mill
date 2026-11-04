@@ -30,6 +30,7 @@ pub mod args;
 pub mod broker;
 pub mod clean_tree;
 pub mod confine;
+pub mod filtered;
 pub mod golden;
 pub mod grade;
 pub mod groups;

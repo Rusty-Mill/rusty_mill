@@ -627,3 +627,71 @@ fn a_confined_codex_launcher_checks_its_turn_and_plans_from_a_shared_clone() {
     let _ = std::fs::remove_dir_all(&root);
     println!("BBP_ACCEPTANCE PASS launcher-confined");
 }
+
+/// Reports what it sees of the filtered view, then posts a diff that adds a
+/// file under the hidden directory and prints the answer.
+const HIDDEN: &str = r##"#!/bin/sh
+secret="$1"
+if [ -e secrets ]; then echo "secrets: seen"; else echo "secrets: absent"; fi
+echo "flag: $(cat flag.txt)"
+if git cat-file -e "$secret" 2>/dev/null; then echo "blob: leaked"; else echo "blob: absent"; fi
+if git diff --quiet; then echo "view: clean"; else echo "view: dirty"; fi
+"$BBP_BIN" mcp <<'RPC'
+{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"sh","version":"0"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"d1","kind":"diff","body":"diff --git a/secrets/new.txt b/secrets/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/secrets/new.txt\n@@ -0,0 +1 @@\n+x\n"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"put_artifact","arguments":{"op":"p1","kind":"spec","brief":1,"body":"# Spec\nAC1 flag says ok."}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"post","arguments":{"op":"p2","kind":"request_decision","to":["human"],"refs":["art:2"],"body":"Approve the plan?","gate":true}}}
+RPC
+"##;
+
+#[test]
+#[ignore = "requires enforced Linux sandbox; required acceptance job"]
+fn a_hiding_harness_sees_a_filtered_copy_and_cannot_post_into_what_it_hides() {
+    let root = root("hidden");
+    let repo = root.join("repo");
+    std::fs::create_dir_all(repo.join("secrets")).expect("mkdir");
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("flag.txt"), "no\n").expect("write");
+    std::fs::write(repo.join("secrets/token.txt"), "hunter2\n").expect("write");
+    git(&repo, &["add", "."]);
+    let who = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+    git(&repo, &[&who[..], &["commit", "-qm", "base"]].concat());
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "HEAD:secrets/token.txt"])
+        .output()
+        .expect("git");
+    let secret = String::from_utf8(out.stdout)
+        .expect("utf8")
+        .trim()
+        .to_owned();
+    let root = root.canonicalize().expect("canonical");
+    let sandbox = HarnessSandbox {
+        checkout: true,
+        hide: vec!["secrets".into()],
+        ..scripts(&root)
+    };
+    let said = plan(setup(&root, "T1", HIDDEN, vec![secret], Some(sandbox)));
+    println!("{said}");
+    for line in [
+        "secrets: absent",
+        "flag: no",
+        "blob: absent",
+        "view: clean",
+        "ProtectedPath",
+        "paths hidden from this agent: secrets/new.txt",
+    ] {
+        assert!(said.contains(line), "{line}:\n{said}");
+    }
+    let workspace = root
+        .join("work/turns")
+        .join(Sha256::of(b"T1").hex())
+        .join("turn-1");
+    assert!(
+        !workspace.exists(),
+        "the filtered copy is removed after the turn"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    println!("BBP_ACCEPTANCE PASS filtered-view");
+}

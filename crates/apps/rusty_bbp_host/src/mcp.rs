@@ -51,7 +51,14 @@ pub struct Binding {
     pub principal: PrincipalId,
     /// The one turn a per-turn server speaks for; `None` for a session.
     pub turn: Option<TurnId>,
+    /// #598: globs of paths this principal's diffs may not touch, from
+    /// [`HIDDEN_ENV`] (the confined harness's `hide`).
+    pub hidden: Vec<String>,
 }
+
+/// The broker's env var carrying a confined harness's `hide` globs, one per
+/// line. Set by the moderator, outside the harness's reach.
+pub const HIDDEN_ENV: &str = "BBP_HIDDEN";
 
 impl Binding {
     /// Read `BBP_DIR`, `BBP_TASK`, `BBP_PRINCIPAL`, and either `BBP_TURN` or
@@ -74,6 +81,12 @@ impl Binding {
             task: TaskId(var("BBP_TASK")?),
             principal: PrincipalId(var("BBP_PRINCIPAL")?),
             turn,
+            hidden: std::env::var(HIDDEN_ENV)
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_owned)
+                .collect(),
         })
     }
 }
@@ -790,6 +803,9 @@ impl Server {
     /// core refuses the call with `bad_credential`.
     fn call_claims(&mut self, name: &str, args: &Value) -> Result<Response, String> {
         let Translated { op, action, bytes } = claims::action(name, args)?;
+        if let Some(refused) = self.hidden_diff(&action, &bytes)? {
+            return Ok(Response::Rejected(refused));
+        }
         let key = (self.binding.principal.clone(), op.clone());
         let guard = match &action {
             AgentAction::PutArtifact {
@@ -818,6 +834,38 @@ impl Server {
         self.driver
             .dispatch_guarded(&cmd, now(), judge)
             .map_err(|e| format!("{e:?}"))
+    }
+
+    /// #598: a diff that touches a path hidden from this principal.
+    fn hidden_diff(
+        &self,
+        action: &AgentAction,
+        bytes: &Option<(ArtifactPayload, Vec<u8>)>,
+    ) -> Result<Option<Rejection>, String> {
+        let hide = &self.binding.hidden;
+        let is_diff = matches!(
+            action,
+            AgentAction::PutArtifact {
+                payload: ArtifactPayload::Diff,
+                ..
+            }
+        );
+        let Some((_, patch)) = bytes.as_ref().filter(|_| is_diff && !hide.is_empty()) else {
+            return Ok(None);
+        };
+        let scratch = self.binding.dir.join("scratch").join("protect");
+        std::fs::create_dir_all(&scratch).map_err(|e| format!("scratch: {e}"))?;
+        let paths = crate::protect::patch_paths(&scratch, patch)?;
+        let hit = crate::filtered::refused(hide, &paths);
+        Ok((!hit.is_empty()).then(|| {
+            Rejection::new(
+                Code::ProtectedPath,
+                format!(
+                    "paths hidden from this agent: {}; a sensitive path changes only through an agent cleared to see it",
+                    hit.join(", ")
+                ),
+            )
+        }))
     }
 
     /// #597: the protected-path rule for candidate `m`, when the task has
@@ -865,6 +913,9 @@ impl Server {
             action: mut act,
             bytes,
         } = action(name, args)?;
+        if let Some(refused) = self.hidden_diff(&act, &bytes)? {
+            return Ok(Response::Rejected(refused));
+        }
         let free = matches!(act, AgentAction::TaskCard);
         let turn = match self.binding.turn {
             Some(t) => Some(t),
@@ -1098,6 +1149,7 @@ mod tests {
             task: task.clone(),
             principal: PrincipalId("coder".into()),
             turn: None,
+            hidden: vec![],
         })
         .expect("server");
         // With the recheck past the timeout, only the log watch can wake it.

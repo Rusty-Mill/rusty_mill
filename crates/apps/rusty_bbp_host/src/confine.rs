@@ -60,6 +60,13 @@ pub struct HarnessSandbox {
     /// may write only its own worktree.
     #[rusty_serde(default)]
     pub checkout: bool,
+    /// #598: globs of paths this harness must not see or touch (the
+    /// factory's `sensitive_paths`, for a cloud harness). With `checkout`
+    /// the workspace is then a [filtered copy](crate::filtered) of `HEAD`
+    /// in a fresh repository instead of a worktree, and a diff it posts that
+    /// touches a hidden path is refused.
+    #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hide: Vec<String>,
 }
 
 /// One confined turn's places: the workspace it may write, the pipes of its
@@ -71,6 +78,9 @@ pub(crate) struct Turn {
     scratch: PathBuf,
     /// The repository the workspace is a worktree of, with `checkout`.
     repo: Option<Repo>,
+    /// The sandbox's `hide` globs: the workspace is a filtered copy, removed
+    /// at [`Turn::finish`], and the broker refuses diffs touching them.
+    hide: Vec<String>,
     pub pipes: PathBuf,
     pub mcp_config: PathBuf,
     /// The turn's launch [`Facts`], readable but not writable by the harness.
@@ -109,8 +119,8 @@ impl Turn {
         for dir in [&base, &scratch] {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let repo = sandbox
-            .checkout
+        let filtered = sandbox.checkout && !sandbox.hide.is_empty();
+        let repo = (sandbox.checkout && !filtered)
             .then(|| Repo::open(&cfg.repo))
             .transpose()?;
         // What a session's earlier turn left, if its cleanup never ran.
@@ -126,6 +136,9 @@ impl Turn {
         let repo = if let Some(repo) = repo {
             repo.add_detached(&workspace, "HEAD")?;
             Some(repo)
+        } else if filtered {
+            crate::filtered::copy(&cfg.repo, "HEAD", &workspace, &sandbox.hide)?;
+            None
         } else {
             std::fs::create_dir_all(&workspace)
                 .map_err(|e| format!("{}: {e}", workspace.display()))?;
@@ -151,6 +164,7 @@ impl Turn {
             workspace,
             scratch,
             repo,
+            hide: sandbox.hide.clone(),
             pipes,
             mcp_config,
             facts: facts_path,
@@ -252,6 +266,7 @@ impl Turn {
             .env("BBP_TASK", &cfg.task.0)
             .env("BBP_PRINCIPAL", &principal.0)
             .env("BBP_TURN", turn.0.to_string())
+            .env(crate::mcp::HIDDEN_ENV, self.hide.join("\n"))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(log);
@@ -268,9 +283,14 @@ impl Turn {
     /// Remove the turn's worktree, if it has one: its edits reached the task
     /// through MCP, and the object store keeps nothing of them.
     pub fn finish(&self) -> Result<(), String> {
-        self.repo
-            .as_ref()
-            .map_or(Ok(()), |repo| repo.remove(&self.workspace))
+        if let Some(repo) = &self.repo {
+            return repo.remove(&self.workspace);
+        }
+        if self.hide.is_empty() || !self.workspace.exists() {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(&self.workspace)
+            .map_err(|e| format!("{}: {e}", self.workspace.display()))
     }
 
     /// Why the helper refused to run the harness, if it did.
@@ -340,6 +360,9 @@ pub fn refuse_swappable(
     if sandboxes.iter().any(|s| s.checkout) {
         roots.push(resolved(&Repo::open(repo)?.git_dir())?);
     }
+    for s in sandboxes.iter().filter(|s| !s.hide.is_empty()) {
+        refuse_seeing(s, repo)?;
+    }
     let work = resolved(&std::path::absolute(work).map_err(|e| e.to_string())?)?;
     for write in &writes {
         if write.starts_with(&work) {
@@ -353,6 +376,26 @@ pub fn refuse_swappable(
                 "harness sandbox: {} lies beneath write root {}, which a harness could swap",
                 root.display(),
                 write.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A sandbox with `hide` must name valid globs and grant no root that
+/// reaches the repository, whose files and object store hold what it hides.
+fn refuse_seeing(s: &HarnessSandbox, repo: &Path) -> Result<(), String> {
+    for g in &s.hide {
+        crate::profiles::check_glob(g).map_err(|e| format!("harness sandbox: hide {g:?}: {e}"))?;
+    }
+    let repo = resolved(&std::path::absolute(repo).map_err(|e| e.to_string())?)?;
+    for root in s.read.iter().chain(&s.write) {
+        let root = resolved(Path::new(root))?;
+        if repo.starts_with(&root) || root.starts_with(&repo) {
+            return Err(format!(
+                "harness sandbox: {} reaches the repository {}, which holds the paths it hides",
+                root.display(),
+                repo.display()
             ));
         }
     }
@@ -442,6 +485,25 @@ mod tests {
             .with("a", launcher(&[], &[&src]))
             .with("b", launcher(&[&src, &root.join("tools")], &[]));
         assert_eq!(check(&root, shared), Ok(()));
+    }
+
+    #[test]
+    fn a_hiding_sandbox_may_not_reach_the_repository_or_name_a_bad_glob() {
+        let root = dir("hide");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let hiding = |read: &[&Path], hide: &str| {
+            let mut l = launcher(read, &[]);
+            if let Some(s) = l.sandbox.as_mut() {
+                s.hide = vec![hide.into()];
+            }
+            Launchers::default().with("a", l)
+        };
+        let e = check(&root, hiding(&[&root], "secrets")).unwrap_err();
+        assert!(e.contains("reaches the repository"), "{e}");
+        let e = check(&root, hiding(&[], "a/[b]")).unwrap_err();
+        assert!(e.contains("hide"), "{e}");
+        assert!(check(&root, hiding(&[], "secrets/**")).is_ok());
     }
 
     #[test]
