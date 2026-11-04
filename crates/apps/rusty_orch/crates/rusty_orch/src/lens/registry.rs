@@ -366,10 +366,10 @@ mod tests {
         Question {
             prefix: "rules".to_owned(),
             body: "claim".to_owned(),
-            allowed: Allowed {
+            shape: orch_lens::Shape::Posts(Allowed {
                 evidence: None,
                 claims: None,
-            },
+            }),
             max_output_tokens: 256,
         }
     }

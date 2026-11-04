@@ -3462,6 +3462,67 @@ fn cl_101_another_claims_holdout_of_equal_code_does_not_count() {
     );
 }
 
+#[test]
+fn cl_102_the_card_carries_the_claims_own_accept_line() {
+    let mut cx = Cx::with(ClaimsConfig {
+        accept_at: 10,
+        accept_at_strict: 14,
+        ..ClaimsConfig::default()
+    });
+    let low = cx.low();
+    let high = cx.claim(
+        "a",
+        ClaimBody {
+            stakes: Stakes::High,
+            ..body("high")
+        },
+    );
+    let once = cx.claim(
+        "a",
+        ClaimBody {
+            reversible: false,
+            ..body("once")
+        },
+    );
+    assert_eq!(card_all(&cx.st, low).accept_at, 10, "the task's line");
+    assert_eq!(
+        card_all(&cx.st, high).accept_at,
+        14,
+        "strict for high stakes"
+    );
+    assert_eq!(
+        card_all(&cx.st, once).accept_at,
+        14,
+        "strict when irreversible"
+    );
+}
+
+#[test]
+fn cl_103_the_card_shows_each_evidence_items_strength_and_note() {
+    let mut cx = Cx::new();
+    let c = cx.low();
+    let b = cx.brief;
+    let mut d = cx.evidence_draft(
+        c,
+        Direction::Support,
+        EvidenceKind::Cited,
+        2,
+        vec![Ref::art(b)],
+    );
+    if let Body::Evidence(e) = &mut d.body {
+        e.note = "the brief asks for this".into();
+    }
+    posted(cx.agent("b", AgentAction::Post(d)));
+    ok(cx.opinion("c", c, Direction::Counter));
+    let card = card_all(&cx.st, c);
+    let shown: Vec<(u8, &str)> = card
+        .evidence
+        .iter()
+        .map(|e| (e.strength, e.note.as_str()))
+        .collect();
+    assert_eq!(shown, [(2, "the brief asks for this"), (1, "")]);
+}
+
 // ---------------------------------------------------------------- replay (#599)
 
 mod replay {
