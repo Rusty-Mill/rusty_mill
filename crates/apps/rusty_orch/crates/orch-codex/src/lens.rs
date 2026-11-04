@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use orch_cli::{excerpt, CommandRunner};
 use orch_dispatch::{AgentError, ClassifiedError};
-use orch_lens::{parse, Answer, Model, Question, Usage};
+use orch_lens::{check, Answer, Model, Question, Usage};
 use rusty_json::Value;
 
 use crate::agent::{CodexAgent, SCRUBBED_ENV};
@@ -65,10 +65,10 @@ impl<C: CommandRunner> Model for CodexAgent<C> {
         let text = last_message(events).map_err(|e| {
             ClassifiedError::Transient(AgentError(format!("codex: {e}: {}", excerpt(&exit.stderr))))
         })?;
-        let posts = parse(&text, &q.allowed)
+        let reply = check(&text, &q.shape)
             .map_err(|e| refuse(format!("{e}: {}", excerpt(text.as_bytes()))))?;
         let usage = usage(events).map_err(refuse)?;
-        Ok(Answer { posts, usage })
+        Ok(Answer { reply, usage })
     }
 }
 

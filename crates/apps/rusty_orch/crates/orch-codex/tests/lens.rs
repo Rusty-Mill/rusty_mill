@@ -43,10 +43,10 @@ fn question() -> Question {
     Question {
         prefix: "intent and rules".to_owned(),
         body: "claim C-1".to_owned(),
-        allowed: Allowed {
+        shape: orch_lens::Shape::Posts(Allowed {
             evidence: None,
             claims: None,
-        },
+        }),
         max_output_tokens: 256,
     }
 }
@@ -94,7 +94,7 @@ fn a_question_runs_in_the_repo_and_returns_posts_and_usage() {
 
     let answer = a.ask(&question()).expect("answers");
 
-    assert!(answer.posts.is_empty());
+    assert_eq!(answer.reply, orch_lens::Reply::Posts(Vec::new()));
     assert_eq!(
         answer.usage,
         Usage {

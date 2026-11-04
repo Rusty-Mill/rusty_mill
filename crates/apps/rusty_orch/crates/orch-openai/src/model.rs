@@ -6,14 +6,14 @@
 //! before-call cost bound.
 
 use orch_dispatch::{AgentError, ClassifiedError};
-use orch_lens::{parse, Allowed, Answer, Model, Question};
+use orch_lens::{check, Answer, Model, Question, Shape};
 
 use crate::client::{OpenAiHttp, Resolve};
 use crate::wire::{Completion, Prompt, Usage};
 
 impl<R: Resolve> Model for OpenAiHttp<R> {
     /// One chat completion: the question's prefix as the system message,
-    /// its body as the user message. The reply must pass [`parse`] and
+    /// its body as the user message. The reply must pass [`check`] and
     /// report its usage; the check runs inside the key-redaction boundary.
     fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
         let prompt = Prompt {
@@ -21,19 +21,19 @@ impl<R: Resolve> Model for OpenAiHttp<R> {
             user: &q.body,
             max_output_tokens: q.max_output_tokens,
         };
-        self.complete_then(&prompt, |c| answer(c, &q.allowed))
+        self.complete_then(&prompt, |c| answer(c, &q.shape))
     }
 }
 
-/// Check a completion against what the job may post.
+/// Check a completion against the question's shape.
 ///
 /// `Permanent`, so nothing unverified reaches the board or the meter, when
-/// the reply does not pass [`parse`], or when its usage is not a measured
+/// the reply does not pass [`check`], or when its usage is not a measured
 /// count: input or output missing, or more cached tokens than input.
-pub fn answer(c: Completion, allowed: &Allowed) -> Result<Answer, ClassifiedError> {
+pub fn answer(c: Completion, shape: &Shape) -> Result<Answer, ClassifiedError> {
     let usage = usage(c.usage).map_err(refuse)?;
-    let posts = parse(&c.text, allowed).map_err(refuse)?;
-    Ok(Answer { posts, usage })
+    let reply = check(&c.text, shape).map_err(refuse)?;
+    Ok(Answer { reply, usage })
 }
 
 fn refuse(e: String) -> ClassifiedError {
@@ -63,11 +63,11 @@ fn usage(u: Usage) -> Result<orch_lens::Usage, String> {
 mod tests {
     use super::*;
 
-    fn none() -> Allowed {
-        Allowed {
+    fn none() -> Shape {
+        Shape::Posts(orch_lens::Allowed {
             evidence: None,
             claims: None,
-        }
+        })
     }
 
     fn completion(
@@ -91,7 +91,7 @@ mod tests {
     #[test]
     fn a_conforming_reply_becomes_an_answer_with_usage() {
         let a = answer(completion(EMPTY, Some(40), Some(5), Some(30)), &none()).unwrap();
-        assert!(a.posts.is_empty());
+        assert_eq!(a.reply, orch_lens::Reply::Posts(Vec::new()));
         assert_eq!(
             a.usage,
             orch_lens::Usage {
