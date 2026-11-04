@@ -136,7 +136,7 @@ them as `cited` evidence (weight 2): a lesson informs and never decides.
 `rusty_orch watch --factory DIR --bbp-dir DIR [--bbp PATH] [--app NAME]
 [--dry-run]` (`crates/apps/rusty_orch/crates/rusty_orch/src/watch.rs`) runs
 daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
-`factory/apps/<app>.json` (D68) and `factory/watched-versions.json`
+`factory/apps/<app>.json` (D80) and `factory/watched-versions.json`
 (`{ "rust": "1.99.0" }`; absent means nothing watched).
 
 - Adapters (the `Watch` port), all CLI calls with no new crates:
@@ -149,7 +149,7 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
     Rust version.
   - `canary`: a re-run of `profile` on `released_ref`, capped by `watch_usd`.
     This is a later step, since it needs the BBP host's canary run.
-- Findings are posted by the task's `watcher` role (D67) as low-stakes,
+- Findings are posted by the task's `watcher` role (D79) as low-stakes,
   reversible claims citing the brief. A claim needs a second author to
   accept, and a human still merges.
 - **Posted once without a table.** Each finding's op id is a digest of the
@@ -168,7 +168,7 @@ the job, lens, model and cost behind each evidence post.
 ## PR order
 
 1. BBP: `history` module + `bbp why --claim/--at`. Merged as #1483.
-2. orch: the watcher with three adapters, plus the expert's D67 to D69.
+2. orch: the watcher with three adapters, plus the expert's D79 to D81 and Q17.
 3. orch: track records, lessons and `lens why`. This waits for the #594 stack
    (#1467, #1479), which owns the lens run state these read. Lessons also wait
    on the remind-me HTTP `project` check (D58).

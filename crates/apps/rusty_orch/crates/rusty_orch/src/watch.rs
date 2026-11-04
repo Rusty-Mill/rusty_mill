@@ -1,13 +1,13 @@
 //! `rusty_orch watch` (#599 maintenance): look at each shipped app once and
 //! post what changed under it as claims on the app's maintenance task.
 //!
-//! - The registry is one `factory/apps/<app>.json` per app (D68). The human
+//! - The registry is one `factory/apps/<app>.json` per app (D80). The human
 //!   opens each maintenance task with `bbp open --mode claims`; `watch` never
 //!   opens a task.
 //! - Each [`Watch`] adapter is a CLI call (D58): `cargo deny` advisories,
 //!   `cargo update --dry-run`, and the toolchain against the watched-versions
 //!   file. The canary re-run on the released ref is a later step.
-//! - Findings are posted by the task's `watcher` role (D67) through its
+//! - Findings are posted by the task's `watcher` role (D79) through its
 //!   `bbp mcp` session. A claim never accepts on the watcher's word alone
 //!   (`min_authors`), and a human still merges.
 //! - Posted once: each finding's op id is derived from the app and the
@@ -26,13 +26,13 @@ use crate::lens::bbp::{CallError, Child, Rpc};
 
 pub const USAGE: &str = "usage: rusty_orch watch --factory DIR --bbp-dir DIR [--bbp PATH] [--app NAME] [--dry-run]\n\nFor each app in DIR/apps/*.json (or only NAME), run the watch adapters in its repo and post\neach new finding as a claim on its maintenance task, as the task's `watcher` role. Prints a\nJSON report. --dry-run posts nothing. Findings already posted replay instead of repeating.";
 
-/// The role that posts findings (D67).
+/// The role that posts findings (D79).
 pub const WATCHER: &str = "watcher";
 
 /// How long one adapter command may run.
 const ADAPTER_DEADLINE: Duration = Duration::from_secs(600);
 
-/// One shipped app (`factory/apps/<app>.json`, D68).
+/// One shipped app (`factory/apps/<app>.json`, D80).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct App {
     pub app: String,
