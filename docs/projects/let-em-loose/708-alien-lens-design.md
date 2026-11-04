@@ -1,6 +1,6 @@
 # #708 Alien review lens: design v1
 
-Status: approved by Nano 2026-11-04 (D68). Unparked by D67 (2026-11-04). v0 went through a Goldfish review
+Status: approved by Nano 2026-11-04 (D75). Unparked by D74 (2026-11-04). v0 went through a Goldfish review
 (project files `let-em-loose-708/708-goldfish-review.md`: 3 blockers, 7 majors); v1 answers every item, mostly by
 taking the reviewer's biggest simplification (M4): **v1 is shadow-only and changes nothing in BBP.**
 Depends on #594 (lens runner) and #596 (value score, `Policy`; D36).
