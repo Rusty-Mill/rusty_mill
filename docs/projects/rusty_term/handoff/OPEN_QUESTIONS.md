@@ -28,3 +28,4 @@ Resolved items are checked and point to the D# that answers them.
 ## Added by the expert
 
 - [ ] Q17 (2026-11-04, n): O11 (D65) lists a "right-click (Windows)" setup step but also "no new settings"; rusty_term has no right-click config key today (`config.rs` key list), so that step needs a new setting. — interim choice: D66 defers it; the first PR has no right-click step.
+- [ ] Q18 (2026-11-04, n): A separate, explicit "Create a config template" action (writes the commented template on request), which the owner's relayed confirmation in PR #1471 comment 6639089600 named as a possible later follow-up. Starting it, plus its name and surface (a keymap action, a setup or settings button, a CLI flag), is Nano's call. — interim choice: not built; Skip writes nothing (D65, QA "May O11 setup's Skip write anything").
