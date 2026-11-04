@@ -297,7 +297,7 @@ Task-level state in claims mode:
 - `claims_delta(after_rev, domains)` is a pure function over `TaskState`: the claims whose status, score or evidence changed after `after_rev`, restricted to claims with a domain in `domains`, plus any claim that depends on one of those. It is what a host's subscription polls or wakes on (the host's push waker already watches the log). It replaces `wake_set` for claims mode and names no role.
 - **Visibility.** `claims_delta`, `claim_card` and `claim_line` show claim text and evidence, so they follow the same rule as `read`. On the Agent API they need the session credential and return only claims and evidence the caller's `read_messages` allows. A `scoped` role sees a claim only if the human addressed it to that role, and it never sees other agents' evidence. A claim it may not read is not returned, not counted, and cannot be fetched by id. The filter applies to nested content too: inside a returned card, evidence items, dependencies, candidates (`answers`) and candidate artifacts the caller may not read are omitted, and a `claim_line` or `claims_delta` entry for a hidden dependency is omitted rather than summarised. Artifact details also need `read_artifacts`. Stage-mode visibility is unchanged. The unfiltered views are on the human channel and the host side only (the moderator, and orch as the host that assembles lens contexts), never on the Agent API.
 - `claim_card(claim)` and `claim_line(claim)` are free (no charge) and are the human-readable views:
-  - card: text, status, score, confidence, evidence list with direction/kind/strength/author, deps, candidates;
+  - card: text, status, score, `accept_at` (the claim's own line: `accept_at_strict` for high stakes or an irreversible claim, else `accept_at`, from the task's frozen config), confidence, evidence list with direction/kind/strength/note/author, deps, candidates;
   - line, for compaction: `msg:17 ACCEPTED +12 (90%) 5 evd · One shared HTTP client covers all 7 call sites…`. orch uses the line form for settled claims in a lens's context.
 
 ## Concurrency
@@ -318,6 +318,7 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 10. **Fifth decision:** the claim's `current` candidate and `failing` profile set in claims-mode state and on `claim_card`. Derived by the fold from existing reports; no new record or event.
 11. **Interim test-change rule:** `test_paths` in the host profile set (claims mode), `tests_changed: [{path, change}]` on `Report`, and the `tests_unendorsed` code. Removed or relaxed when #597 holdouts land.
 12. **Holdout suites (#597, approved 2026-11-02):** `holdout_digest` on `open` and `task_opened`, `suite` on the candidate manifest (default `build`, not written), the role capability `holdout`, the `holdout_mismatch` code, `holdout_due` on `claim_card`, the host action and event `holdout_extended(digest)` and the human action and event `holdout_updated(digest)`. Host: `protected` globs in the profile set and the `protected_path` code; core: the `tests` domain's accept condition. All optional and not written at their defaults, so existing logs are byte-identical.
+13. **Accept line and evidence notes on the card (#594, approved 2026-11-04, D56):** `accept_at` on `claim_card`/`claims_delta` entries, and `strength` and `note` on each evidence item. Derived from the frozen config and the evidence messages; views only, no record, event or log change.
 
 No change to `rusty_crdt`, `coedit` or the stage-mode rules.
 
@@ -412,6 +413,8 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-99 | Holdout task. A holdout run of K fails `holdout:api`; H1's holdout run passes it with a modified test; another holdout run fails it again; `c` endorses K | The block stays: H1's pass is older than the latest failure of `holdout:api`, though `failing_from` names the first |
 | CL-100 | Holdout task. K's build report tested T1; a holdout run of K fails `holdout:api`; another passes it on T2 (unendorsed without a test change, or with a modified test and then `c` endorses K) | The block stays either way: a holdout pass clears only on the tree the current candidate tested. A pass on T1 clears it |
 | CL-101 | Holdout task. Claims X and Y; Y's candidate has X's base and diffs. X's holdout passes; Y's holdout run then fails `holdout:api` | Y is blocked; X is neither blocked nor `holdout_due`: only candidates naming a claim speak for it |
+| CL-102 | A task opened with `accept_at` 10 and `accept_at_strict` 14; a low-stakes claim, a high-stakes claim and an irreversible claim | Their cards show `accept_at` 10, 14 and 14 |
+| CL-103 | Cited support of strength 2 with a note, then an opinion counter with none | The card's evidence shows (2, the note) and (1, "") |
 | CL-44 | Host test (`rusty_bbp_host`): open a claims-mode task on a host with no sandbox configured; on a sandboxed host, inspect where a candidate's run executes | `bad_claims_config(sandbox)`, nothing written; the run's process is inside the `rusty_sandbox` profile |
 
 ## Owner answers (2026-11-02)
