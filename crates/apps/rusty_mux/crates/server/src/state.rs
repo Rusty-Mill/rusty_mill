@@ -30,7 +30,11 @@ use crate::keys;
 use crate::outbox::Outbox;
 use crate::process;
 use crate::pty::{self, Process, Pty};
+use crate::store::{Started, Store};
 use crate::terminal;
+
+mod persist;
+pub(crate) use persist::save_periodically;
 
 pub(crate) type Shared = Rc<RefCell<State>>;
 
@@ -113,10 +117,10 @@ pub(crate) enum Pending {
 }
 
 struct BlockRt {
-    pty: Rc<Pty>,
-    process: Process,
-    /// The program the block started, as configured, for `terminal.shell`.
-    program: String,
+    /// `None` for a read-only block: one restored after a restart whose
+    /// command was not run again (C45). It shows its saved screen until
+    /// closed and refuses anything that needs a program.
+    live: Option<Live>,
     grid: Grid,
     parser: AnsiParser,
     /// What the program reported with OSC 7501.
@@ -130,22 +134,115 @@ struct BlockRt {
     echo: Echo,
     /// Keys awaiting their echo ack.
     waiting: Waiting,
+    /// How the program was started: for `terminal.shell` and the store.
+    started: Started,
+    /// The grid changed since the store last saved it.
+    unsaved: bool,
+}
+
+/// A block's running program: its PTY and the task reading it.
+struct Live {
+    pty: Rc<Pty>,
+    process: Process,
     /// Tells the reader a key was written, so it drains when its grace ends.
     wake: Rc<Notify>,
     reader: JoinHandle<()>,
 }
 
+/// What [`State::start`] starts a block's program with.
+struct Start<'a> {
+    block: BlockId,
+    session: rusty_mux_core::SessionId,
+    window: WindowId,
+    size: Size,
+    config: &'a Config,
+    started: Started,
+}
+
+/// A started program whose block has no screen or reader yet.
+struct Unscreened {
+    block: BlockId,
+    pty: Rc<Pty>,
+    process: Process,
+    foreground: Option<process::Foreground>,
+    echo: Echo,
+    started: Started,
+}
+
+impl Unscreened {
+    /// The block, reading its PTY into `grid` from now on.
+    fn screened(self, shared: &Shared, grid: Grid, parser: AnsiParser) -> BlockRt {
+        let wake = Rc::new(Notify::new());
+        let reader = rusty_tokio::task::spawn_local(pump(
+            shared.clone(),
+            self.block,
+            self.pty.clone(),
+            wake.clone(),
+        ));
+        let live = Live {
+            pty: self.pty,
+            process: self.process,
+            wake,
+            reader,
+        };
+        BlockRt {
+            foreground: self.foreground,
+            echo: self.echo,
+            ..BlockRt::read_only(grid, parser, self.started)
+        }
+        .with(live)
+    }
+}
+
 impl BlockRt {
+    /// A block with no program, showing `grid`.
+    fn read_only(mut grid: Grid, parser: AnsiParser, started: Started) -> Self {
+        grid.collect_program_status = true;
+        Self {
+            live: None,
+            grid,
+            parser,
+            status: Records::default(),
+            seen: terminal::Seen::default(),
+            foreground: None,
+            echo: Echo::Unknown,
+            waiting: Waiting::default(),
+            started,
+            unsaved: true,
+        }
+    }
+
+    fn with(self, live: Live) -> Self {
+        Self {
+            live: Some(live),
+            ..self
+        }
+    }
+
+    /// The program, or a refusal saying the block is read-only.
+    fn live(&self) -> Result<&Live, Refusal> {
+        self.live.as_ref().ok_or_else(|| {
+            "the block is read-only: it was restored after a server restart and its command was not run again"
+                .into()
+        })
+    }
+
+    fn pid(&self) -> Option<u32> {
+        self.live.as_ref().and_then(|l| l.process.pid())
+    }
+
     /// Stops reading (unless the reader is the caller), releases the PTY's
     /// output whatever other handles remain and closes this handle on the
-    /// master. The program, for the caller to reap.
-    fn release(self, abort_reader: bool) -> Process {
+    /// master. The program, for the caller to reap; `None` for a
+    /// read-only block.
+    fn release(self, abort_reader: bool) -> Option<Process> {
+        let live = self.live?;
         if abort_reader {
-            self.reader.abort();
+            live.reader.abort();
         }
-        self.pty.release();
-        drop(self.pty);
-        self.process
+        live.pty.release();
+        drop(live.pty);
+        Some(live.process)
     }
 }
 
@@ -186,6 +283,12 @@ pub(crate) struct State {
     /// A reload is reading the file; one at a time, so a stalled
     /// filesystem holds one thread at most.
     reloading: bool,
+    /// Where sessions are saved across restarts, with `Config::state_dir`.
+    store: Option<Store>,
+    /// The event number the store last saved the model at.
+    saved_at: Option<u64>,
+    /// Numbers each save, newest highest.
+    generation: u64,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -231,6 +334,9 @@ impl State {
             stopping: false,
             loader: crate::settings::reloader(),
             reloading: false,
+            store: None,
+            saved_at: None,
+            generation: 0,
         }))
     }
 
@@ -315,6 +421,7 @@ impl State {
     /// block's program now, as dropping the block would. The consoles to
     /// wait for, which still hold the ones closing when this was called.
     pub(crate) fn stop(&mut self) -> pty::Hosts {
+        self.save_now();
         self.stopping = true;
         for (_, rt) in self.blocks.drain() {
             drop(rt.release(true));
@@ -1037,18 +1144,19 @@ impl State {
                 let data = keys::encode(keys, rt.grid.app_cursor_keys)
                     .map_err(|e| format!("{method}: {e}"))?;
                 return Ok(Outcome::Write(PtyWrite {
-                    pty: rt.pty.clone(),
+                    pty: rt.live()?.pty.clone(),
                     data,
                     key: None,
                 }));
             }
-            "terminal.pwd" => terminal::pwd(&rt.grid, rt.process.pid())
+            "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
             "terminal.title" => rt.grid.title.clone(),
             "terminal.status" => rt.status.bodies().join("\n"),
             "terminal.process" => {
-                let pid = rt.process.pid().ok_or("the program has exited")?;
-                process::text(&process::chain(pid, rt.pty.foreground(), process::lookup))
+                let live = rt.live()?;
+                let pid = live.process.pid().ok_or("the program has exited")?;
+                process::text(&process::chain(pid, live.pty.foreground(), process::lookup))
             }
             "terminal.size" => format!("{}x{}", rt.grid.cols, rt.grid.rows),
             "terminal.reset" => {
@@ -1073,9 +1181,10 @@ impl State {
             }
             "terminal.modes" => terminal::modes(&rt.grid),
             "terminal.shell" => {
-                let pid = rt.process.pid().ok_or("the program has exited")?;
-                let activity = process::activity(pid, rt.pty.foreground());
-                terminal::shell(&rt.grid, &rt.program, activity)
+                let live = rt.live()?;
+                let pid = live.process.pid().ok_or("the program has exited")?;
+                let activity = process::activity(pid, live.pty.foreground());
+                terminal::shell(&rt.grid, &rt.started.program, activity)
             }
             "terminal.set-theme" | "terminal.clear" => {
                 self.mux
@@ -1226,8 +1335,47 @@ impl State {
             .session();
         // The id is chosen first so the program starts knowing it.
         let block = BlockId::from_uuid(Uuid::new_v4());
+        let started = Started {
+            shell: launch.program.is_none(),
+            read_only: false,
+            program: config.program.to_string_lossy().into_owned(),
+            args: config
+                .args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect(),
+            cwd: config.cwd.to_string_lossy().into_owned(),
+        };
+        let rt = self.start(Start {
+            block,
+            session,
+            window,
+            size,
+            config: &config,
+            started,
+        })?;
+        match beside {
+            None => self.mux.add_block(block, window, size)?,
+            Some((target, side)) => self.mux.split_block(block, target, side, size)?,
+        }
+        let rt = rt.screened(shared, crate::checkpoint::grid(size), AnsiParser::new());
+        self.blocks.insert(block, rt);
+        Ok(Outcome::Done(Some(block.uuid())))
+    }
+
+    /// Starts `start.block`'s program, for the caller to give a screen
+    /// ([`Unscreened::screened`]) once the model holds the block.
+    fn start(&mut self, start: Start<'_>) -> Result<Unscreened, Refusal> {
+        let Start {
+            block,
+            session,
+            window,
+            size,
+            config,
+            started,
+        } = start;
         let env = self.block_env(session, window, block);
-        let (pty, process) = pty::spawn(&config, size, &env)
+        let (pty, process) = pty::spawn(config, size, &env)
             .map_err(|e| format!("spawning the block's program: {e}"))?;
         self.hosts.track(&process);
         let pty = Rc::new(pty);
@@ -1240,34 +1388,15 @@ impl State {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         });
-        match beside {
-            None => self.mux.add_block(block, window, size)?,
-            Some((target, side)) => self.mux.split_block(block, target, side, size)?,
-        }
-        let wake = Rc::new(Notify::new());
-        let reader =
-            rusty_tokio::task::spawn_local(pump(shared.clone(), block, pty.clone(), wake.clone()));
         let echo = pty.echo();
-        let mut grid = crate::checkpoint::grid(size);
-        grid.collect_program_status = true;
-        self.blocks.insert(
+        Ok(Unscreened {
             block,
-            BlockRt {
-                pty,
-                process,
-                program: config.program.to_string_lossy().into_owned(),
-                grid,
-                parser: AnsiParser::new(),
-                status: Records::default(),
-                seen: terminal::Seen::default(),
-                foreground,
-                echo,
-                waiting: Waiting::default(),
-                wake,
-                reader,
-            },
-        );
-        Ok(Outcome::Done(Some(block.uuid())))
+            pty,
+            process,
+            foreground,
+            echo,
+            started,
+        })
     }
 
     /// Where a block's program is, for `rusty-mux-ctl` run inside it.
@@ -1304,6 +1433,7 @@ impl State {
             .blocks
             .get(&block)
             .ok_or_else(|| format!("block {block} has no PTY"))?
+            .live()?
             .pty
             .clone();
         self.check_echo(block);
@@ -1337,7 +1467,9 @@ impl State {
             return;
         };
         rt.waiting.written(client, req, at);
-        rt.wake.notify_one();
+        if let Some(live) = &rt.live {
+            live.wake.notify_one();
+        }
     }
 
     /// When the reader should next drain `block` for an ack.
@@ -1363,7 +1495,10 @@ impl State {
         let Some(rt) = self.blocks.get_mut(&block) else {
             return false;
         };
-        let mode = rt.pty.echo();
+        let Some(live) = &rt.live else {
+            return false;
+        };
+        let mode = live.pty.echo();
         if std::mem::replace(&mut rt.echo, mode) == mode {
             return false;
         }
@@ -1410,9 +1545,12 @@ impl State {
             .blocks
             .get(&block)
             .ok_or_else(|| format!("block {block} has no PTY"))?;
-        rt.pty
-            .resize(size)
-            .map_err(|e| format!("resizing the PTY: {e}"))?;
+        // A read-only block's grid resizes alone.
+        if let Some(live) = &rt.live {
+            live.pty
+                .resize(size)
+                .map_err(|e| format!("resizing the PTY: {e}"))?;
+        }
         self.mux
             .resize_block(client, block, size)
             .map_err(Refusal::from)?;
@@ -1421,6 +1559,7 @@ impl State {
             .get_mut(&block)
             .ok_or_else(|| format!("block {block} has no PTY"))?;
         rt.grid.resize(size.cols().into(), size.rows().into());
+        rt.unsaved = true;
         Ok(Outcome::Done(None))
     }
 
@@ -1434,6 +1573,7 @@ impl State {
             return Vec::new();
         };
         rt.parser.advance(&mut rt.grid, data);
+        rt.unsaved = true;
         let replies = rt.parser.take_responses();
         let status = terminal::absorb_status(&mut rt.grid, &mut rt.status);
         for id in status.removed {
@@ -1505,7 +1645,8 @@ impl State {
         let Some(rt) = self.blocks.get_mut(&block) else {
             return;
         };
-        let (Some(pid), Some(seen)) = (rt.pty.foreground(), rt.foreground.as_mut()) else {
+        let foreground = rt.live.as_ref().and_then(|l| l.pty.foreground());
+        let (Some(pid), Some(seen)) = (foreground, rt.foreground.as_mut()) else {
             return;
         };
         if !seen.observe(pid, refresh, process::lookup) {
@@ -1530,7 +1671,7 @@ impl State {
     /// reader that is calling this. Its program, to reap; `None` if a
     /// client closed the block first.
     fn hang_up(&mut self, block: BlockId) -> Option<Process> {
-        self.blocks.remove(&block).map(|rt| rt.release(false))
+        self.blocks.remove(&block).and_then(|rt| rt.release(false))
     }
 
     /// The block's program ended: announce how, if known, and close the
@@ -1601,9 +1742,10 @@ impl State {
             }
             for event in events {
                 if let Event::BlockClosed { block } = event
-                    && let Some(rt) = self.blocks.remove(&block)
+                    && let Some(process) =
+                        self.blocks.remove(&block).and_then(|rt| rt.release(true))
                 {
-                    rusty_tokio::task::spawn_local(rt.release(true).reap());
+                    rusty_tokio::task::spawn_local(process.reap());
                 }
                 let seq = self.history.push(event.clone());
                 let (Some(plain), Some(numbered)) =
@@ -1951,6 +2093,7 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    state_dir: None,
                     config_file: None,
                 },
                 None,
@@ -1974,6 +2117,7 @@ mod regression {
                 args: vec![],
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                state_dir: None,
                 config_file: None,
             },
             None,
@@ -2337,6 +2481,7 @@ mod regression {
             args: vec![],
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
+            state_dir: None,
             config_file: Some("/stalled.json".into()),
         };
         let shared = State::shared(base, None);
@@ -2529,6 +2674,7 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    state_dir: None,
                     config_file: None,
                 },
                 None,
