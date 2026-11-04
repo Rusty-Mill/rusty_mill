@@ -151,7 +151,9 @@ pub(crate) struct Capture {
 /// as it does a typed space, and dropping a typed one would lose text.
 /// `trim` leaves out blank lines at either end. `None` if the text,
 /// trimmed, would pass `max` bytes: a capture is whole or refused, never
-/// cut short.
+/// cut short. A wrapped run is refused once it holds more than `2 * max`
+/// cells, before its text is built: every cell of it but a wide glyph's
+/// second prints, unless the run ends in blanks.
 pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> Option<String> {
     let scrollback = grid.scrollback_len();
     let history = usize::try_from(capture.history).unwrap_or(usize::MAX);
@@ -166,8 +168,12 @@ pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> Option<String
             break;
         };
         if capture.unwrap && wrapped && abs + 1 < end {
-            cells.resize(grid.cols.max(cells.len()), Cell::blank());
+            // A soft-wrapped row is stored whole, at the width it had when
+            // it wrapped: a history row can be narrower than the grid.
             run.append(&mut cells);
+            if run.len() / 2 > max {
+                return None;
+            }
             continue;
         }
         run.append(&mut cells);

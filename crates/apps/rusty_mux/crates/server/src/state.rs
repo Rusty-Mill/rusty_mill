@@ -2034,6 +2034,16 @@ fn history(spool: Option<&Spool>, named: &[(&str, Value)]) -> Result<String, Ref
     let read = spool
         .read(lines(named, "skip").into(), capture.history.into())
         .map_err(|e| format!("reading the history: {e}"))?;
+    format_history(&read, capture, REPLY_MAX)
+}
+
+/// Spilled lines `read`, oldest first, as `terminal.format` shows them
+/// with `capture`, refused past `max` bytes.
+fn format_history(
+    read: &[Vec<u8>],
+    capture: terminal::Capture,
+    max: usize,
+) -> Result<String, Refusal> {
     let Some(above) = read.len().checked_sub(1) else {
         return Ok(String::new());
     };
@@ -2044,8 +2054,8 @@ fn history(spool: Option<&Spool>, named: &[(&str, Value)]) -> Result<String, Ref
         history: u32::try_from(above).unwrap_or(u32::MAX),
         ..capture
     };
-    terminal::format(&grid, capture, REPLY_MAX)
-        .ok_or_else(|| format!("terminal.history reply exceeds {REPLY_MAX} bytes").into())
+    terminal::format(&grid, capture, max)
+        .ok_or_else(|| format!("terminal.history reply exceeds {max} bytes").into())
 }
 
 /// Encodes the messages answering a `what` request, all or nothing: a reply
@@ -2911,5 +2921,64 @@ mod regression {
         assert!(rt.spool.is_none());
         assert!(rt.grid.take_spilled().is_empty(), "nothing queued");
         assert_eq!(rt.grid.line_text(0).as_deref(), Some("line 49"));
+    }
+
+    /// Every line `text` leaves a grid `cols` wide, spilled: a 2-row grid
+    /// keeping no scrollback, the cursor's row pushed off at the end.
+    fn spilled(cols: usize, text: &str) -> Vec<Vec<u8>> {
+        let mut grid = Grid::new(cols, 2);
+        grid.set_scrollback_max(0);
+        grid.spill_evicted(true);
+        let mut parser = AnsiParser::new();
+        parser.advance(&mut grid, text.as_bytes());
+        parser.advance(&mut grid, b"\r\n\r\n");
+        grid.take_spilled()
+    }
+
+    fn capture(unwrap: bool, trim: bool, vt: bool) -> terminal::Capture {
+        terminal::Capture {
+            history: u32::MAX,
+            trim,
+            unwrap,
+            vt,
+        }
+    }
+
+    #[test]
+    fn history_unwraps_narrow_rows_beside_a_wide_one_without_padding() {
+        // `abcd` wraps into `ef` at 4 columns; an unrelated row is 400 wide.
+        let mut read = spilled(4, "\x1b[31mabcdef\x1b[0m");
+        read.extend(spilled(400, &"w".repeat(400)));
+        let wide = "w".repeat(400);
+        let text = |c| format_history(&read, c, REPLY_MAX).unwrap();
+        let plain = text(capture(true, true, false));
+        assert_eq!(plain.lines().collect::<Vec<_>>(), ["abcdef", wide.as_str()]);
+        let rows = text(capture(false, true, false));
+        assert_eq!(
+            rows.lines().collect::<Vec<_>>(),
+            ["abcd", "ef", wide.as_str()]
+        );
+        let vt = text(capture(true, true, true));
+        let first = vt.lines().next().unwrap();
+        assert!(
+            first.contains("abcdef") && first.contains("\x1b[0m"),
+            "{first:?}"
+        );
+        assert!(!first.contains("  "), "no padding: {first:?}");
+        // Without trim the blank rows the cursor left stay.
+        let untrimmed = text(capture(true, false, false));
+        assert!(untrimmed.starts_with("abcdef\n"), "{untrimmed:?}");
+    }
+
+    #[test]
+    fn a_long_wrapped_history_run_is_refused_before_it_is_built() {
+        // One logical line of 2,000 cells, wrapped every 20.
+        let read = spilled(20, &"x".repeat(2_000));
+        assert!(format_history(&read, capture(true, true, false), 4_000).is_ok());
+        let refused = format_history(&read, capture(true, true, false), 500).unwrap_err();
+        assert!(refused.reason.contains("exceeds 500"), "{}", refused.reason);
+        // Row by row, the reply is the same 2,099 bytes.
+        assert!(format_history(&read, capture(false, true, false), 500).is_err());
+        assert!(format_history(&read, capture(false, true, false), 2_200).is_ok());
     }
 }
