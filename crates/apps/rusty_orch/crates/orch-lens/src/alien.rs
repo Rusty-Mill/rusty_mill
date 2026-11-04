@@ -281,6 +281,154 @@ pub fn rank(suspects: Vec<Suspect>, notes: &[String], list: &[Mechanism]) -> Vec
         .collect()
 }
 
+/// How one probe run ended (design §6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Run {
+    /// The probe did not build (`cargo test --no-run` failed).
+    BuildError,
+    Passed,
+    /// It built and at least one test failed.
+    Failed,
+}
+
+/// What a probe showed, from its run on the candidate and on `base`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Outcome {
+    /// It did not build on the candidate: not a finding.
+    Error,
+    /// The candidate passes it.
+    Pass,
+    /// It fails on the candidate and on base: the defect predates the diff.
+    PreExisting,
+    /// It passes on base and fails on the candidate: the only finding.
+    Regression,
+    /// It fails on the candidate and does not build on base: new code.
+    NewCodeFail,
+}
+
+impl Outcome {
+    /// The record word.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Error => "error",
+            Self::Pass => "pass",
+            Self::PreExisting => "pre-existing",
+            Self::Regression => "regression",
+            Self::NewCodeFail => "new-code-fail",
+        }
+    }
+
+    /// Parse a record word.
+    pub fn parse(word: &str) -> Option<Self> {
+        [
+            Self::Error,
+            Self::Pass,
+            Self::PreExisting,
+            Self::Regression,
+            Self::NewCodeFail,
+        ]
+        .into_iter()
+        .find(|o| o.name() == word)
+    }
+}
+
+/// Classify a probe. `base` is `None` when the candidate run made base's
+/// irrelevant (it errored or passed).
+pub fn outcome(candidate: Run, base: Option<Run>) -> Outcome {
+    match (candidate, base) {
+        (Run::BuildError, _) => Outcome::Error,
+        (Run::Passed, _) => Outcome::Pass,
+        (Run::Failed, Some(Run::Passed)) => Outcome::Regression,
+        (Run::Failed, Some(Run::Failed)) => Outcome::PreExisting,
+        (Run::Failed, Some(Run::BuildError) | None) => Outcome::NewCodeFail,
+    }
+}
+
+/// One probe's record (design §6): what was hunted, what it showed, what
+/// it cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeRow {
+    pub task: String,
+    pub claim: u64,
+    /// The candidate artifact the probe ran against.
+    pub candidate: u64,
+    pub site: String,
+    pub mechanism: String,
+    /// [`unavailability`] was 2: no ordinary evidence named the site or
+    /// the mechanism.
+    pub novel: bool,
+    pub outcome: Outcome,
+    /// Sandbox runs debited to the lens, and model tokens spent.
+    pub runs: u32,
+    pub tokens: u64,
+    /// SHA-256 of the probe file, hex.
+    pub probe_sha256: String,
+}
+
+/// Hunts before the success bar is judged (design §8).
+pub const BAR_HUNTS: usize = 20;
+
+/// The shadow numbers over a set of probe rows (design §8).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// Distinct (task, claim, candidate).
+    pub hunts: usize,
+    pub probes: usize,
+    pub regressions: usize,
+    /// Regressions no ordinary lens had named.
+    pub novel: usize,
+    pub pre_existing: usize,
+    pub errors: usize,
+    pub runs: u64,
+    pub tokens: u64,
+}
+
+/// Whether the shadow run has earned a v2 design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bar {
+    /// Fewer than [`BAR_HUNTS`] hunts so far.
+    TooFew,
+    /// At least one novel regression per [`BAR_HUNTS`] hunts.
+    Met,
+    NotMet,
+}
+
+/// Sum `rows`.
+pub fn summarize(rows: &[ProbeRow]) -> Summary {
+    let hunts: BTreeSet<_> = rows
+        .iter()
+        .map(|r| (&r.task, r.claim, r.candidate))
+        .collect();
+    let count = |o: Outcome| rows.iter().filter(|r| r.outcome == o).count();
+    Summary {
+        hunts: hunts.len(),
+        probes: rows.len(),
+        regressions: count(Outcome::Regression),
+        novel: rows
+            .iter()
+            .filter(|r| r.novel && r.outcome == Outcome::Regression)
+            .count(),
+        pre_existing: count(Outcome::PreExisting),
+        errors: count(Outcome::Error),
+        runs: rows.iter().map(|r| u64::from(r.runs)).sum(),
+        tokens: rows.iter().map(|r| r.tokens).sum(),
+    }
+}
+
+impl Summary {
+    /// The §8 bar: judged only after [`BAR_HUNTS`] hunts.
+    pub fn bar(&self) -> Bar {
+        if self.hunts < BAR_HUNTS {
+            return Bar::TooFew;
+        }
+        if self.novel.saturating_mul(BAR_HUNTS) >= self.hunts {
+            Bar::Met
+        } else {
+            Bar::NotMet
+        }
+    }
+}
+
 fn only<'a>(v: &'a Value, keys: &[&str], what: &str) -> Result<&'a Map, String> {
     let o = v.as_object().ok_or(format!("{what} is not an object"))?;
     if let Some(k) = o.keys().find(|k| !keys.contains(&k.as_str())) {
@@ -520,6 +668,85 @@ mod tests {
             [("a::y", "rs-err"), ("a::z", "rs-conc"), ("a::x", "rs-time")]
         );
         assert!(rank(Vec::new(), &notes, RUST).is_empty());
+    }
+
+    #[test]
+    fn outcomes_follow_the_candidate_then_base() {
+        use Run::*;
+        assert_eq!(outcome(BuildError, None), Outcome::Error);
+        assert_eq!(outcome(BuildError, Some(Failed)), Outcome::Error);
+        assert_eq!(outcome(Passed, None), Outcome::Pass);
+        assert_eq!(outcome(Failed, Some(Passed)), Outcome::Regression);
+        assert_eq!(outcome(Failed, Some(Failed)), Outcome::PreExisting);
+        assert_eq!(outcome(Failed, Some(BuildError)), Outcome::NewCodeFail);
+        assert_eq!(outcome(Failed, None), Outcome::NewCodeFail);
+    }
+
+    #[test]
+    fn outcome_words_round_trip() {
+        for o in [
+            Outcome::Error,
+            Outcome::Pass,
+            Outcome::PreExisting,
+            Outcome::Regression,
+            Outcome::NewCodeFail,
+        ] {
+            assert_eq!(Outcome::parse(o.name()), Some(o));
+        }
+        assert_eq!(Outcome::parse("found"), None);
+    }
+
+    fn row(claim: u64, novel: bool, outcome: Outcome) -> ProbeRow {
+        ProbeRow {
+            task: "t".to_owned(),
+            claim,
+            candidate: 1,
+            site: format!("a::f{claim}"),
+            mechanism: "rs-cast".to_owned(),
+            novel,
+            outcome,
+            runs: 2,
+            tokens: 100,
+            probe_sha256: "00".to_owned(),
+        }
+    }
+
+    #[test]
+    fn summary_counts_hunts_once_and_only_novel_regressions() {
+        let rows = vec![
+            row(1, true, Outcome::Regression),
+            row(1, false, Outcome::Regression),
+            row(1, true, Outcome::PreExisting),
+            row(2, true, Outcome::Error),
+        ];
+        let s = summarize(&rows);
+        assert_eq!(
+            s,
+            Summary {
+                hunts: 2,
+                probes: 4,
+                regressions: 2,
+                novel: 1,
+                pre_existing: 1,
+                errors: 1,
+                runs: 8,
+                tokens: 400,
+            }
+        );
+        assert_eq!(s.bar(), Bar::TooFew);
+        assert_eq!(summarize(&[]), Summary::default());
+    }
+
+    #[test]
+    fn the_bar_needs_one_novel_regression_per_twenty_hunts() {
+        let mut rows: Vec<_> = (0..20).map(|c| row(c, true, Outcome::Pass)).collect();
+        assert_eq!(summarize(&rows).bar(), Bar::NotMet);
+        rows[0].outcome = Outcome::Regression;
+        assert_eq!(summarize(&rows).bar(), Bar::Met);
+        rows.push(row(20, true, Outcome::Pass));
+        assert_eq!(summarize(&rows).bar(), Bar::NotMet, "1 in 21");
+        rows[0].novel = false;
+        assert_eq!(summarize(&rows[..20]).bar(), Bar::NotMet, "not novel");
     }
 
     #[test]

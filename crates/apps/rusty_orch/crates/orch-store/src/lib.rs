@@ -21,6 +21,7 @@
 
 mod assignments;
 mod meters;
+mod probes;
 mod record;
 
 use std::fmt;
@@ -35,11 +36,13 @@ use orch_lens::meter::Snapshot;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
-use rusty_multimodal_db_engine::generic::query::GetById;
+use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
 use meters::MeterRecord;
+use orch_lens::alien::ProbeRow;
+use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
 
 /// The store's files inside its directory.
@@ -50,6 +53,8 @@ const LEGACY_ASSIGNMENTS_FILE: &str = "assignments.mmap";
 const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 /// Lens experiment meters (#594).
 const METERS_FILE: &str = "meters.mmap";
+/// Alien-lens probe rows (#708).
+const PROBES_FILE: &str = "probes.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -132,6 +137,7 @@ pub struct Store {
     assignments: GenericMmapStore<AssignmentRecord, ById, Revision>,
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     meters: GenericMmapStore<MeterRecord, ById, Revision>,
+    probes: GenericMmapStore<ProbeRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -164,6 +170,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(PROBES_FILE);
+        let probes = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -175,6 +187,7 @@ impl Store {
             assignments,
             legacy,
             meters,
+            probes,
             _lock: lock,
         })
     }
@@ -324,6 +337,63 @@ impl Store {
             self.meters.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
+    }
+}
+
+impl Store {
+    /// Save one alien-lens probe row, replacing an earlier save of the
+    /// same probe (task, claim, candidate, site, mechanism).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another probe;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_probe(&mut self, row: &ProbeRow) -> Result<(), StoreError> {
+        let existing = self.probes.get(probes::key(row));
+        if let Some(r) = &existing {
+            if !r.is(row) {
+                return Err(StoreError::Corrupt(
+                    "probe key holds another probe".to_owned(),
+                ));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = ProbeRecord::new(row, revision);
+        let written = if existing.is_none() {
+            self.probes.insert(record).map_err(engine_error)
+        } else {
+            self.probes.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// Every saved probe row, of `task` when given, sorted by task, claim,
+    /// candidate, site and mechanism.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when a record does not check out.
+    pub fn probes(&self, task: Option<&str>) -> Result<Vec<ProbeRow>, StoreError> {
+        let mut rows = Vec::new();
+        for id in self.probes.all_ids() {
+            let Some(record) = self.probes.get(id) else {
+                continue;
+            };
+            let row = record.into_row()?;
+            if task.is_none_or(|t| t == row.task) {
+                rows.push(row);
+            }
+        }
+        rows.sort_by(|a, b| {
+            (&a.task, a.claim, a.candidate, &a.site, &a.mechanism).cmp(&(
+                &b.task,
+                b.claim,
+                b.candidate,
+                &b.site,
+                &b.mechanism,
+            ))
+        });
+        Ok(rows)
     }
 }
 

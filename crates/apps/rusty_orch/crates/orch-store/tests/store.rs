@@ -531,3 +531,60 @@ mod meters {
         assert!(matches!(s.load_meter("dedup"), Err(StoreError::Corrupt(_))));
     }
 }
+
+mod probes {
+    use orch_lens::alien::{Outcome, ProbeRow};
+    use orch_store::Store;
+
+    use super::dir;
+
+    fn row(task: &str, claim: u64, site: &str, outcome: Outcome) -> ProbeRow {
+        ProbeRow {
+            task: task.to_owned(),
+            claim,
+            candidate: 9,
+            site: site.to_owned(),
+            mechanism: "rs-path".to_owned(),
+            novel: true,
+            outcome,
+            runs: 2,
+            tokens: 1_234,
+            probe_sha256: "ab".repeat(32),
+        }
+    }
+
+    #[test]
+    fn probe_rows_survive_reopening_sorted_and_filtered_by_task() {
+        let d = dir("probe_reopen");
+        let rows = [
+            row("t2", 1, "a::f", Outcome::Pass),
+            row("t1", 7, "b::g", Outcome::Regression),
+            row("t1", 3, "a::f", Outcome::PreExisting),
+        ];
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert!(s.probes(None).expect("empty").is_empty());
+            for r in &rows {
+                s.save_probe(r).expect("save");
+            }
+        }
+        let s = Store::open(&d).expect("reopen");
+        assert_eq!(
+            s.probes(None).expect("all"),
+            [rows[2].clone(), rows[1].clone(), rows[0].clone()]
+        );
+        assert_eq!(s.probes(Some("t2")).expect("t2"), [rows[0].clone()]);
+        assert!(s.probes(Some("t3")).expect("none").is_empty());
+    }
+
+    #[test]
+    fn saving_the_same_probe_again_replaces_it() {
+        let d = dir("probe_replace");
+        let mut s = Store::open(&d).expect("open");
+        s.save_probe(&row("t", 1, "a::f", Outcome::Error))
+            .expect("first");
+        let fixed = row("t", 1, "a::f", Outcome::Regression);
+        s.save_probe(&fixed).expect("second");
+        assert_eq!(s.probes(None).expect("load"), [fixed]);
+    }
+}
