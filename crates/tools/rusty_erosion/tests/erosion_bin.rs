@@ -361,6 +361,26 @@ fn a_gitlink_with_a_non_utf8_name_never_hides_a_real_directory() {
     assert!(stdout(&out).contains("\"functions\":1"), "{}", stdout(&out));
 }
 
+#[cfg(unix)]
+#[test]
+fn an_updated_submodule_with_a_non_utf8_rust_name_is_skipped() {
+    use std::os::unix::ffi::OsStrExt;
+    let repo = Repo::new("subffrs");
+    let sub = repo.dir.join(std::ffi::OsStr::from_bytes(b"\xff.rs"));
+    nested_repo(&sub, &[("lib.rs", "pub fn v() {}\n")]);
+    commit(&repo);
+    assert!(repo.git(&["ls-files", "-s"]).contains("160000 "));
+    let base = repo.head();
+    nested_repo(&sub, &[("lib.rs", "pub fn v() { if true {} }\n")]);
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("\"unmeasured\":[]"),
+        "{}",
+        stdout(&out)
+    );
+}
+
 #[test]
 fn an_updated_submodule_with_a_rust_name_is_skipped() {
     let repo = Repo::new("subname");

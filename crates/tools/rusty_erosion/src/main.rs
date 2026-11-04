@@ -229,23 +229,30 @@ impl Snapshot {
 }
 
 /// Paths the working tree changes against `base`: modified, added, deleted
-/// and untracked-unignored. The second set holds those whose names are not
-/// UTF-8, as lossy text for diagnostics only: they cannot be named exactly,
-/// so are never opened, and never mixed with the exact names.
-fn changed_paths(base: &str) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
+/// and untracked-unignored. The second map holds those whose names are not
+/// UTF-8, by their raw bytes, with lossy text for diagnostics only: they
+/// cannot be opened by name, and lossy text is never used as identity.
+fn changed_paths(base: &str) -> Result<(BTreeSet<String>, Mangled), String> {
     let mut raw = git(&["diff", "--name-only", "--no-renames", "-z", base, "--"])?;
     raw.push(0);
     raw.extend(git(&["ls-files", "-z", "--others", "--exclude-standard"])?);
     let mut all = BTreeSet::new();
-    let mut mangled = BTreeSet::new();
-    for name in split_z(&raw) {
-        match name {
-            Ok(path) => all.insert(path),
-            Err(lossy) => mangled.insert(lossy),
-        };
+    let mut mangled = Mangled::new();
+    for name in raw.split(|b| *b == 0).filter(|n| !n.is_empty()) {
+        match std::str::from_utf8(name) {
+            Ok(path) => {
+                all.insert(path.to_owned());
+            }
+            Err(_) => {
+                mangled.insert(name.to_vec(), String::from_utf8_lossy(name).into_owned());
+            }
+        }
     }
     Ok((all, mangled))
 }
+
+/// Changed names that are not UTF-8: raw bytes to lossy display text.
+type Mangled = std::collections::BTreeMap<Vec<u8>, String>;
 
 /// `base`'s tree. Rust blobs are read by object id, so no path name can
 /// break the batch framing; a Rust entry that is not a regular file (a
@@ -305,11 +312,15 @@ fn base_snapshot(base: &str) -> Result<Snapshot, String> {
 /// directory that holds a nested repository. Other languages are not touched at all
 /// (D45), so nothing about them, not even a failed lookup, decides the
 /// result.
-fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Snapshot, String> {
+fn worktree(changed: &BTreeSet<String>, mangled: &Mangled) -> Result<Snapshot, String> {
     let gitlinks = index_gitlinks()?;
     let mut snap = Snapshot::default();
-    // Names that are not UTF-8 are listed by their lossy text, never opened.
-    for name in mangled {
+    // Names that are not UTF-8 are listed by their lossy text, never opened;
+    // a gitlink, or a path under one, is matched by its raw bytes first.
+    for (raw, name) in mangled {
+        if in_gitlink(raw, &gitlinks) {
+            continue;
+        }
         match classify(name) {
             FileClass::Ignored => {}
             FileClass::Unmeasured => {
@@ -321,13 +332,15 @@ fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Sn
         }
     }
     for path in changed {
+        if in_gitlink(path.as_bytes(), &gitlinks) {
+            continue;
+        }
         match classify(path) {
             FileClass::Ignored => {}
             FileClass::Unmeasured => {
                 snap.other.insert(path.clone());
             }
-            FileClass::Rust if gitlinks.contains(path) => {}
-            FileClass::Rust => match entry(path, &gitlinks)? {
+            FileClass::Rust => match entry(path)? {
                 Entry::Absent => {}
                 Entry::Special => {
                     snap.unreadable.insert(path.clone());
@@ -339,22 +352,32 @@ fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Sn
     Ok(snap)
 }
 
-/// Index entries with mode `160000`: the candidate's submodules.
-fn index_gitlinks() -> Result<BTreeSet<String>, String> {
+/// Index entries with mode `160000`, the candidate's submodules, by their
+/// raw path bytes so identity stays exact whatever the encoding.
+fn index_gitlinks() -> Result<BTreeSet<Vec<u8>>, String> {
     let mut out = BTreeSet::new();
     for entry in git(&["ls-files", "-s", "-z"])?.split(|b| *b == 0) {
         // `<mode> <object> <stage>\t<path>`
         let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
             continue;
         };
-        // Only exact names: they are matched against exact source paths,
-        // and a lossy one could equal a different, real directory.
-        let exact = std::str::from_utf8(&entry[tab + 1..]);
-        if let (true, Ok(path)) = (entry.starts_with(b"160000 "), exact) {
-            out.insert(path.to_owned());
+        if entry.starts_with(b"160000 ") {
+            out.insert(entry[tab + 1..].to_vec());
         }
     }
     Ok(out)
+}
+
+/// Whether `path` is a gitlink or lies under one: the submodule's tree, not
+/// this one's, so not this tree's source (in the base, gitlinks are skipped
+/// the same way).
+fn in_gitlink(path: &[u8], gitlinks: &BTreeSet<Vec<u8>>) -> bool {
+    let prefixes = path
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b == b'/')
+        .map(|(i, _)| &path[..i]);
+    prefixes.chain([path]).any(|p| gitlinks.contains(p))
 }
 
 /// A working-tree path, without following any symlink.
@@ -366,7 +389,7 @@ enum Entry {
     File(Vec<u8>),
 }
 
-fn entry(path: &str, gitlinks: &BTreeSet<String>) -> Result<Entry, String> {
+fn entry(path: &str) -> Result<Entry, String> {
     let gone = |e: &std::io::Error| {
         matches!(
             e.kind(),
@@ -376,17 +399,8 @@ fn entry(path: &str, gitlinks: &BTreeSet<String>) -> Result<Entry, String> {
     let mut dir = std::path::PathBuf::new();
     let mut parts: Vec<&str> = path.split('/').collect();
     let name = parts.pop().unwrap_or_default();
-    let mut prefix = String::new();
     for part in parts {
         dir.push(part);
-        if !prefix.is_empty() {
-            prefix.push('/');
-        }
-        prefix.push_str(part);
-        // Under a gitlink is the submodule's tree, not this one's.
-        if gitlinks.contains(&prefix) {
-            return Ok(Entry::Absent);
-        }
         match std::fs::symlink_metadata(&dir) {
             Ok(m) if m.is_dir() => {}
             Ok(_) => return Ok(Entry::Absent),
@@ -486,14 +500,6 @@ fn git_cmd() -> Command {
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null");
     cmd
-}
-
-/// NUL-separated names: `Ok` when UTF-8, else `Err` with lossy text.
-fn split_z(raw: &[u8]) -> Vec<Result<String, String>> {
-    raw.split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8(s.to_vec()).map_err(|_| String::from_utf8_lossy(s).into_owned()))
-        .collect()
 }
 
 /// The one JSON line the run log carries for the inbox (slice 3).
