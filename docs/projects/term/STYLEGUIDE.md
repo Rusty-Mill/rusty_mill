@@ -9,6 +9,10 @@ Informed by Orca's MIT-licensed style guide (`stablyai/orca` `docs/STYLEGUIDE.md
 2026-11-03); the rules here are our own wording. Code paths are under
 `crates/libs/ui/rusty_term/src/gui/`.
 
+This guide describes the chrome as built. The GUI design pack (`docs/projects/term/gui-design/`)
+is the target; "Target:" lines mark where the two differ until the pack's implementation
+handoff lands (pack D31).
+
 ## Identity
 
 - **Quiet.** Neutral surfaces and text carry the chrome; the terminal is the subject.
@@ -36,6 +40,10 @@ so light and dark themes work alike.
 - A theme-independent colour is allowed only with a stated reason and a test, as the search
   fallback has.
 
+Target: surfaces and text use the fixed pack tokens (D5 dark, D25 light). The accent stays
+theme-derived, with pack verdigris as the fallback below 3:1. Search highlights stay as they
+are. Success is verdigris and failure is oxide (D7, D36). (Pack D34, D35.)
+
 ## Size and layout
 
 - **Fixed chrome scale (owner, 2026-11-03).** Font zoom (Ctrl+= / Ctrl+-) and the configured
@@ -44,6 +52,7 @@ so light and dark themes work alike.
   zoom leaves alone (`ui_font`, #1388); the configured `font-size` still sets both,
   and decoupling it is the remaining step.
 - **Face.** The chrome uses the terminal's monospace face.
+  Target: interface text in Instrument Sans, terminal text in JetBrains Mono (pack D6).
 - **Spacing.** Chrome sits on a 4 px grid inside the padding band (`[window] padding`,
   default 8 px); gutter marks stay in that band.
 - **Elevation, three levels:** flat (surface plus a hairline) for the strip, ribbon and dock;
@@ -60,6 +69,10 @@ so light and dark themes work alike.
 | Notice | A transient result (copied, reloaded) fades by itself; an error the user must act on stays inline until dismissed |
 | Prompt | Blocking decisions only. Anything asking for trust (multi-line paste, OSC 52 read, opening a link in another app, C63) uses one trust surface themes cannot restyle |
 
+Target: states follow the pack's state matrix (D26). The focus ring is 2 px with a 2 px offset
+in the theme accent, at 3:1 or better (D27, D34). First-run setup reuses the settings overlay
+with numbered steps (D32, D33).
+
 ## UX rules
 
 - **Copy never overclaims.** Result words ("copied", "saved", "reloaded") only once the result
@@ -75,6 +88,8 @@ so light and dark themes work alike.
 - **Back-out is quiet:** Close, Cancel and Dismiss get no colour, chip or animation.
 - **Platform labels match the binding** (Ctrl+Shift on Linux and Windows; ⌘ and ⇧ on macOS).
 - **Motion only for continuity**, and none under the OS reduced-motion setting.
+  Target: only a spinner and a blinking cursor animate; under reduced motion both go static
+  (pack D16, D27).
 - **Missing data offers a way to get it** (no shell found leads to the shell picker).
 
 ## Enforcement and review
