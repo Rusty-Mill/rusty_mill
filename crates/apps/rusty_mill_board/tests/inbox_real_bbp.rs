@@ -64,7 +64,8 @@ fn run(bin: &Path, args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> 
 
 /// A claims task `task` under `root` whose message total is cut to one and
 /// then crossed by two claims, so it pauses with a task-total escalation.
-fn paused_task(bin: &Path, root: &Path, task: &str) {
+/// A claims task `task` with lenses `a` and `b` assigned.
+fn claims_task(bin: &Path, root: &Path, task: &str) {
     let files = root.join(format!("{task}-files"));
     fs::create_dir_all(&files).unwrap();
     for (name, body) in [
@@ -123,6 +124,12 @@ fn paused_task(bin: &Path, root: &Path, task: &str) {
         );
         assert!(r.contains("Ok"), "assign {who}: {r}");
     }
+}
+
+/// A claims task stopped on its messages total.
+fn paused_task(bin: &Path, root: &Path, task: &str) {
+    claims_task(bin, root, task);
+    let dir = root.to_str().unwrap();
     let r = run(
         bin,
         &[
@@ -300,6 +307,32 @@ fn the_inbox_drives_a_real_bbp_host() {
     assert!(cli.open(&["C2".into()]).unwrap().is_empty());
     let after = card(&bin, &root, "C2");
     assert!(after.contains(r#""state":"Open""#), "{after}");
+
+    // A host pause (#598): the row says why, and Approve resumes it open.
+    claims_task(&bin, &root, "C3");
+    let dir = root.to_str().unwrap();
+    let paused = run(
+        &bin,
+        &[
+            "pause", "--dir", dir, "--task", "C3", "--reason", "breaker", "--op", "p1", "--detail",
+            "flat",
+        ],
+        &[],
+        None,
+    );
+    assert!(paused.contains("Ok"), "pause: {paused}");
+    let row = only_row(&cli, "C3");
+    assert_eq!(row.reason, Reason::TaskPaused);
+    assert_eq!(
+        row.pause.as_ref().map(|p| p.reason.as_str()),
+        Some("Breaker")
+    );
+    assert_eq!(
+        cli.act(&row, &Action::Approve, "owner").unwrap(),
+        Outcome::Done
+    );
+    assert!(cli.open(&["C3".into()]).unwrap().is_empty());
+    assert!(card(&bin, &root, "C3").contains(r#""state":"Open""#));
 
     drop(scratch);
     println!("BBP_ACCEPTANCE PASS millboard-inbox");

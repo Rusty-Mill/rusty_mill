@@ -9,6 +9,7 @@
 //!                                          [--holdout-profiles FILE --holdout-root DIR] freezes a holdout suite (#597): holdout:/golden: profiles over the files under DIR
 //!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
 //! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
+//! bbp pause   --dir D --task T --reason spend_ceiling|call_ceiling|breaker --op OP [--detail TEXT]   #598: the host pauses an open claims task (task_paused); prints the response JSON, a refusal included; the same OP replays
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
@@ -16,6 +17,7 @@
 //! bbp tick    --dir D --task T
 //! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
 //!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST
+//!                                          | intent FILE [claims=msg:1,msg:2] [domains=a,b] (#598: new brief; no list = every claim)
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
@@ -262,6 +264,13 @@ fn run() -> Result<String, String> {
                 policy,
             )?
         }
+        "pause" => admin::pause(
+            &dir,
+            &task,
+            admin::pause_reason(a.flag("reason")?)?,
+            a.flags.get("detail").map_or("", String::as_str),
+            OpId(a.flag("op")?.to_owned()),
+        )?,
         "holdout" => {
             return with_holdout(&a, |next| {
                 let next =

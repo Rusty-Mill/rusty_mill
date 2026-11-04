@@ -26,8 +26,8 @@ pub mod store;
 pub mod wake;
 
 pub use claims::{
-    ClaimBody, ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimView, ClaimsConfig, Direction,
-    EvidenceBody, EvidenceKind, MarkOutcome, Mode, ReopenCause, Stakes,
+    Affects, ClaimBody, ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimView, ClaimsConfig,
+    Direction, EvidenceBody, EvidenceKind, MarkOutcome, Mode, PauseReason, ReopenCause, Stakes,
 };
 pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
 pub use coedit::{Doc, LineId, LineOp, Missing, SpecEdit, Version};

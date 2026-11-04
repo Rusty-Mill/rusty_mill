@@ -183,8 +183,75 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
         "holdout-updated" => HumanAction::HoldoutUpdated {
             digest: Sha256::from_hex(a(0)?).ok_or("holdout digest must be 64 hex digits")?,
         },
+        // #598 C-R11: `intent FILE [claims=msg:1,msg:2] [domains=a,b]`. The
+        // caller stores FILE first ([`stage_brief`]), so here it is `SHA:LEN`.
+        "intent" => HumanAction::IntentRevised {
+            brief: blob_ref(a(0)?)?,
+            affects: affects(args.get(1..).unwrap_or(&[]))?,
+        },
         other => return Err(format!("unknown human action {other}")),
     })
+}
+
+/// A stored blob as `SHA:LEN`, which [`stage_brief`] writes.
+fn blob_ref(s: &str) -> Result<BlobRef, String> {
+    let bad = || format!("intent: brief must be a file (staged as SHA:LEN), got {s}");
+    let (sha, len) = s.split_once(':').ok_or_else(bad)?;
+    Ok(BlobRef {
+        sha: Sha256::from_hex(sha).ok_or_else(bad)?,
+        len: len.parse().map_err(|_| bad())?,
+    })
+}
+
+/// `claims=msg:1,msg:2` and `domains=a,b`, each at most once; neither is
+/// every claim. One argument per list, comma-separated, because repeated
+/// flags would keep only the last and narrow what the human stated.
+fn affects(args: &[&str]) -> Result<Affects, String> {
+    if args.is_empty() {
+        return Ok(Affects::All);
+    }
+    let (mut claims, mut domains) = (None, None);
+    for arg in args {
+        let (key, list) = arg
+            .split_once('=')
+            .ok_or_else(|| format!("intent: expected claims=… or domains=…, got {arg}"))?;
+        let items = || list.split(',').filter(|x| !x.is_empty());
+        let twice = match key {
+            "claims" => claims
+                .replace(items().map(msg).collect::<Result<Vec<_>, _>>()?)
+                .is_some(),
+            "domains" => domains
+                .replace(items().map(str::to_owned).collect::<Vec<_>>())
+                .is_some(),
+            other => return Err(format!("intent: unknown list {other}")),
+        };
+        if twice {
+            return Err(format!("intent: {key}= given twice"));
+        }
+    }
+    Ok(Affects::Some {
+        claims: claims.unwrap_or_default(),
+        domains: domains.unwrap_or_default(),
+    })
+}
+
+/// #598: `intent FILE …` stores FILE's bytes as a blob and names it
+/// `SHA:LEN` for [`action`]. Any other verb passes through unchanged.
+fn stage_brief(
+    dir: &Path,
+    task: &TaskId,
+    verb: &str,
+    args: &[&str],
+) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    if verb != "intent" {
+        return Ok(out);
+    }
+    let file = args.first().ok_or("intent: missing the brief FILE")?;
+    let bytes = std::fs::read(file).map_err(|e| format!("intent: {file}: {e}"))?;
+    let b = open_driver(dir, task)?.store.blob_put(&bytes);
+    out[0] = format!("{}:{}", b.sha.hex(), b.len);
+    Ok(out)
 }
 
 /// Who answered when the op carries no label.
@@ -366,7 +433,9 @@ pub fn preview_fenced(
 ) -> Result<Preview, String> {
     let d = open_driver(dir, task)?;
     let rev_now = d.state.rev;
-    let cmd = match command(verb, args, rev, by, fence, op)? {
+    let staged = stage_brief(dir, task, verb, args)?;
+    let staged: Vec<&str> = staged.iter().map(String::as_str).collect();
+    let cmd = match command(verb, &staged, rev, by, fence, op)? {
         Ok(cmd) => cmd,
         Err(rej) => {
             return Ok(Preview {
@@ -410,7 +479,9 @@ pub fn perform_fenced(
     fence: Option<Rev>,
     op: Option<OpId>,
 ) -> Result<Response, String> {
-    let cmd = match command(verb, args, rev, by, fence, op)? {
+    let staged = stage_brief(dir, task, verb, args)?;
+    let staged: Vec<&str> = staged.iter().map(String::as_str).collect();
+    let cmd = match command(verb, &staged, rev, by, fence, op)? {
         Ok(cmd) => cmd,
         Err(rej) => return Ok(Response::Rejected(rej)),
     };

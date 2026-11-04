@@ -197,6 +197,8 @@ pub enum ClaimEscalation {
     ReopenedAfterAction,
     /// Carries the mark id.
     ActionUnconfirmed(u64),
+    /// #598: the intent changed under a claim that was acted on.
+    IntentChanged,
 }
 
 /// What reopened a claim.
@@ -208,6 +210,47 @@ pub enum ReopenCause {
     Evidence(MsgId),
     /// The dep that left `accepted`.
     Dep(MsgId),
+    /// #598: an `intent_revised` that affects the claim.
+    Intent,
+}
+
+/// #598: the claims an `intent_revised` affects. Absent reads as `All`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Affects {
+    #[default]
+    All,
+    /// The union of these claims and every claim with one of these domains.
+    /// Both empty is `bad_affects`; a domain no claim has matches nothing.
+    Some {
+        claims: Vec<MsgId>,
+        domains: Vec<String>,
+    },
+}
+
+impl Affects {
+    /// Whether `c` is affected.
+    pub fn covers(&self, c: &ClaimRecord) -> bool {
+        match self {
+            Affects::All => true,
+            Affects::Some { claims, domains } => {
+                claims.contains(&c.id) || c.body.domains.iter().any(|d| domains.contains(d))
+            }
+        }
+    }
+}
+
+/// Longest `task_paused` detail, in characters (R8's message limit).
+pub const PAUSE_DETAIL_MAX: usize = 1_200;
+
+/// #598: why the host paused a task (`task_paused`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PauseReason {
+    /// The task's spend ceiling.
+    SpendCeiling,
+    /// The task's call ceiling.
+    CallCeiling,
+    /// The cost breaker: spend rose while confidence stayed flat.
+    Breaker,
 }
 
 /// Human outcomes on one claim (C-R8).
@@ -276,6 +319,8 @@ pub struct ClaimRecord {
     pub changed: Rev,
     /// Score at the last settlement, for the card.
     pub last_score: i64,
+    /// #598: the intent version at the claim's latest acceptance.
+    pub proven_at: Option<u32>,
 }
 
 impl ClaimRecord {
@@ -296,6 +341,7 @@ impl ClaimRecord {
             sole_candidate: false,
             changed: rev,
             last_score: 0,
+            proven_at: None,
         }
     }
 
@@ -400,6 +446,8 @@ pub struct ClaimsBook {
     /// Every holdout digest the task has left behind (#597). A retired suite
     /// is never adopted again: its old passes would count once more.
     pub holdout_retired: BTreeSet<Sha256>,
+    /// #598: `intent_revised` events so far.
+    pub revisions: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -411,6 +459,11 @@ pub struct ClaimRun {
 }
 
 impl ClaimsBook {
+    /// #598: 1 at `task_opened`, plus one per `intent_revised`.
+    pub fn intent_version(&self) -> u32 {
+        self.revisions.saturating_add(1)
+    }
+
     pub fn get(&self, id: MsgId) -> Option<&ClaimRecord> {
         self.claims.get(&id)
     }
@@ -583,6 +636,7 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
         E::ClaimFailing { claim, .. } => book.latest_claim_report(*claim),
         _ => None,
     };
+    let version = book.intent_version();
     let mut touch = |id: &MsgId, f: &mut dyn FnMut(&mut ClaimRecord)| {
         if let Some(c) = book.claims.get_mut(id) {
             f(c);
@@ -599,6 +653,7 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
             c.status = ClaimStatus::Accepted;
             c.last_score = *score;
             c.sole_candidate = *sole_candidate;
+            c.proven_at = Some(version);
         }),
         E::ClaimDropped { claim, score, .. } => touch(claim, &mut |c| {
             c.status = ClaimStatus::Dropped;
@@ -623,7 +678,7 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
                 let wakes = match by {
                     ReopenCause::Evidence(m) => i.msg == *m,
                     ReopenCause::Human => i.dormant,
-                    ReopenCause::Dep(_) => false,
+                    ReopenCause::Dep(_) | ReopenCause::Intent => false,
                 };
                 if wakes {
                     i.epoch = *epoch;
@@ -685,6 +740,7 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
                 c.changed = rev;
             }
         }
+        E::IntentRevised { .. } => book.revisions = book.revisions.saturating_add(1),
         E::ClaimActionResult { mark, outcome } => {
             for c in book.claims.values_mut() {
                 if let Some(m) = c.marks.iter_mut().find(|m| m.id == *mark) {
@@ -746,6 +802,17 @@ pub struct ClaimView {
     /// The task has a holdout suite and the current candidate has no passed
     /// holdout run on it yet: the accept line waits for one (#597).
     pub holdout_due: bool,
+    /// #598: shown once the task's intent has been revised.
+    #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent: Option<IntentView>,
+}
+
+/// #598: the task's intent version and the one a claim was proven against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentView {
+    pub current: u32,
+    /// The version at the claim's latest acceptance, if it was ever accepted.
+    pub proven_at: Option<u32>,
 }
 
 /// A failing profile and the report that set it (hidden if unreadable).
@@ -844,6 +911,10 @@ pub fn card(st: &crate::state::TaskState, c: &ClaimRecord, sight: &Sight) -> Cla
         tests_changed,
         endorsement,
         holdout_due: !crate::claims_engine::holdout_passed(st, c),
+        intent: (book.revisions > 0).then_some(IntentView {
+            current: book.intent_version(),
+            proven_at: c.proven_at,
+        }),
     }
 }
 

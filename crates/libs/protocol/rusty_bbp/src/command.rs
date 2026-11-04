@@ -65,6 +65,11 @@ pub enum HostAction {
     /// #597 G3: a new holdout suite version that only adds files to the
     /// current one. The host checks that before writing it.
     HoldoutExtended { digest: Sha256 },
+    /// #598: pause the task on a spend or call ceiling or the cost breaker.
+    TaskPaused {
+        reason: crate::claims::PauseReason,
+        detail: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -211,6 +216,13 @@ pub enum HumanAction {
     HoldoutUpdated {
         digest: Sha256,
     },
+    /// Claims mode (#598): a new brief, reopening the accepted claims it
+    /// affects (C-R11). `brief` must be in the store, like `open`'s.
+    IntentRevised {
+        brief: BlobRef,
+        #[rusty_serde(default)]
+        affects: crate::claims::Affects,
+    },
 }
 
 /// What a command returns. Stored with the accepted op so replays reproduce it.
@@ -342,4 +354,7 @@ pub enum Code {
     /// Host (#597): a golden set's files do not match its MANIFEST, or its
     /// SIGNOFF does not name the set digest.
     BadGolden,
+    /// #598: `intent_revised` names no claim and no domain, or a claim that
+    /// is not a claim on the task.
+    BadAffects,
 }

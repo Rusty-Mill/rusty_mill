@@ -3461,3 +3461,314 @@ fn cl_101_another_claims_holdout_of_equal_code_does_not_count() {
         "y's failure does not decide x"
     );
 }
+
+// ---------------------------------------------------------------- #598 intent versions and pauses
+
+fn revise(cx: &mut Cx, tag: &str, affects: Affects) -> Response {
+    cx.human(HumanAction::IntentRevised {
+        brief: blob(tag),
+        affects,
+    })
+}
+
+fn some(claims: Vec<MsgId>, domains: &[&str]) -> Affects {
+    Affects::Some {
+        claims,
+        domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+    }
+}
+
+fn reopened_by_intent(cx: &Cx, c: MsgId) -> bool {
+    cx.log.iter().any(
+        |e| matches!(e, Event::ClaimReopened { claim, by: ReopenCause::Intent, .. } if *claim == c),
+    )
+}
+
+#[test]
+fn cl_102_intent_revised_reopens_accepted_claims_in_a_new_epoch() {
+    let mut cx = Cx::new();
+    let x = cx.low();
+    accept(&mut cx, x);
+    assert_eq!(cx.st.claims.intent_version(), 1);
+    assert_eq!(
+        card_all(&cx.st, x).intent,
+        None,
+        "no intent view before a revision"
+    );
+    let brief = stored(revise(&mut cx, "brief v2", Affects::All));
+    assert_eq!(cx.st.claims.intent_version(), 2);
+    assert_eq!(cx.st.brief, Some(brief), "the new brief is the current one");
+    assert_eq!(cx.status(x), ClaimStatus::Open);
+    assert_eq!(cx.rec(x).epoch, 2);
+    assert_eq!(cx.score(x), 0, "old-epoch evidence does not score");
+    assert!(reopened_by_intent(&cx, x));
+    assert_eq!(
+        card_all(&cx.st, x).intent,
+        Some(rusty_bbp::claims::IntentView {
+            current: 2,
+            proven_at: Some(1)
+        })
+    );
+    accept(&mut cx, x);
+    assert_eq!(
+        cx.rec(x).proven_at,
+        Some(2),
+        "proven against the new intent"
+    );
+}
+
+#[test]
+fn cl_103_an_acted_on_claim_escalates_intent_changed_in_any_epoch() {
+    let mut cx = Cx::new();
+    let x = cx.low();
+    accept(&mut cx, x);
+    let m = cx.mark(x, "pr-1");
+    ok(cx.host(HostAction::ActionResult {
+        mark: m,
+        outcome: MarkOutcome::Done,
+    }));
+    // Acted on in epoch 1, reopened and accepted again in epoch 2.
+    ok(cx.decide(x, ClaimOutcome::Reopen));
+    accept(&mut cx, x);
+    assert_eq!(cx.rec(x).epoch, 2);
+    ok(revise(&mut cx, "brief v2", Affects::All));
+    assert_eq!(cx.status(x), ClaimStatus::Escalated);
+    assert!(!reopened_by_intent(&cx, x));
+    assert!(cx.log.iter().any(|e| matches!(
+        e,
+        Event::ClaimEscalated { claim, reason: ClaimEscalation::IntentChanged } if *claim == x
+    )));
+}
+
+#[test]
+fn cl_104_affects_is_the_union_of_claims_and_domains() {
+    let mut cx = Cx::new();
+    let by_id = cx.low();
+    let by_domain = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec!["db".into()],
+            ..body("db")
+        },
+    );
+    let other = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec!["ui".into()],
+            ..body("ui")
+        },
+    );
+    let open = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec!["db".into()],
+            ..body("open")
+        },
+    );
+    let dropped = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec!["db".into()],
+            ..body("dropped")
+        },
+    );
+    for c in [by_id, by_domain, other] {
+        accept(&mut cx, c);
+    }
+    drop_claim(&mut cx, dropped);
+    ok(revise(
+        &mut cx,
+        "brief v2",
+        some(vec![by_id], &["db", "nobody-has-this"]),
+    ));
+    assert_eq!(cx.status(by_id), ClaimStatus::Open);
+    assert_eq!(cx.status(by_domain), ClaimStatus::Open);
+    assert_eq!(cx.status(other), ClaimStatus::Accepted, "not affected");
+    assert_eq!(cx.status(open), ClaimStatus::Open);
+    assert_eq!(cx.rec(open).epoch, 1, "an open claim carries on");
+    assert_eq!(
+        cx.status(dropped),
+        ClaimStatus::Dropped,
+        "dropped stays dropped"
+    );
+}
+
+#[test]
+fn cl_105_bad_affects_is_refused_and_writes_nothing() {
+    let mut cx = Cx::new();
+    let x = cx.low();
+    accept(&mut cx, x);
+    let before = cx.log.len();
+    assert_eq!(
+        rejected(revise(&mut cx, "v2", some(vec![], &[]))),
+        Code::BadAffects
+    );
+    assert_eq!(
+        rejected(revise(&mut cx, "v2", some(vec![MsgId(9_999)], &[]))),
+        Code::BadAffects
+    );
+    assert_eq!(
+        cx.log.len(),
+        before + 2,
+        "only the two rejections are logged"
+    );
+    assert_eq!(cx.st.claims.intent_version(), 1);
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+}
+
+#[test]
+fn cl_106_an_intent_reopen_carries_to_dependents() {
+    let mut cx = Cx::new();
+    let a = cx.low();
+    let b = cx.claim(
+        "b",
+        ClaimBody {
+            domains: vec!["ui".into()],
+            ..dep_on("b", vec![a])
+        },
+    );
+    let c = cx.claim(
+        "c",
+        ClaimBody {
+            domains: vec!["ui".into()],
+            ..dep_on("c", vec![a])
+        },
+    );
+    accept(&mut cx, a);
+    accept(&mut cx, b);
+    accept(&mut cx, c);
+    let m = cx.mark(c, "pr-c");
+    ok(cx.host(HostAction::ActionResult {
+        mark: m,
+        outcome: MarkOutcome::Done,
+    }));
+    // Only `a` (domain http) is affected; its dependents follow Dependencies.
+    ok(revise(&mut cx, "v2", some(vec![], &["http"])));
+    assert_eq!(cx.status(a), ClaimStatus::Open);
+    assert_eq!(
+        cx.status(b),
+        ClaimStatus::Open,
+        "an unacted dependent reopens"
+    );
+    assert!(cx.log.iter().any(|e| matches!(
+        e,
+        Event::ClaimReopened { claim, by: ReopenCause::Dep(d), .. } if *claim == b && *d == a
+    )));
+    assert_eq!(
+        cx.status(c),
+        ClaimStatus::Escalated,
+        "an acted-on dependent escalates"
+    );
+}
+
+#[test]
+fn cl_107_a_refine_answer_refs_the_current_brief() {
+    let mut cx = Cx::new();
+    let old = cx.brief;
+    let new = stored(revise(&mut cx, "v2", Affects::All));
+    let answer =
+        |b: ArtId| HumanAction::Post(Draft::new(MessageKind::Answer, "x").refs(vec![Ref::art(b)]));
+    assert_eq!(rejected(cx.human(answer(old))), Code::RefsRequired);
+    posted(cx.human(answer(new)));
+}
+
+#[test]
+fn cl_108_task_paused_escalates_the_task_until_resumed_open() {
+    let mut cx = Cx::new();
+    let x = cx.low();
+    let pause = HostAction::TaskPaused {
+        reason: PauseReason::CallCeiling,
+        detail: "400 of 400 calls".into(),
+    };
+    let op = cx.op();
+    let cmd = Command::Host {
+        op,
+        action: pause.clone(),
+    };
+    ok(cx.run(cmd.clone()));
+    assert_eq!(cx.st.state, State::Escalated);
+    assert_eq!(cx.count(|e| matches!(e, Event::TaskPaused { .. })), 1);
+    let replay = cx.run(cmd);
+    ok(replay);
+    assert_eq!(
+        cx.count(|e| matches!(e, Event::TaskPaused { .. })),
+        1,
+        "R15 replay"
+    );
+    assert_eq!(
+        rejected(cx.opinion("a", x, Support)),
+        Code::WrongState,
+        "agent writes wait while paused"
+    );
+    assert_eq!(
+        rejected(cx.host(pause)),
+        Code::WrongState,
+        "a paused task cannot pause again"
+    );
+    let rev = cx.rev();
+    ok(cx.human(HumanAction::Resume {
+        target: State::Open,
+        expected_rev: rev,
+    }));
+    assert_eq!(cx.st.state, State::Open);
+    ok(cx.opinion("a", x, Support));
+}
+
+#[test]
+fn cl_109_pause_detail_is_bounded() {
+    let mut cx = Cx::new();
+    let long = "x".repeat(rusty_bbp::claims::PAUSE_DETAIL_MAX + 1);
+    assert_eq!(
+        rejected(cx.host(HostAction::TaskPaused {
+            reason: PauseReason::Breaker,
+            detail: long,
+        })),
+        Code::BodyTooLong
+    );
+    assert_eq!(cx.st.state, State::Open);
+}
+
+#[test]
+fn cl_110_intent_and_pause_are_claims_mode_only() {
+    let mut st = TaskState::new(TaskId::from("t"));
+    let run = |st: &mut TaskState, cmd: Command| {
+        let h = handle(st, &cmd, Time(1_000));
+        for e in &h.events {
+            st.apply(e);
+        }
+        h.response
+    };
+    ok(run(
+        &mut st,
+        Command::Open(open_task(Mode::Stages, None, stage_roster())),
+    ));
+    let human = Command::Human {
+        op: OpId("op1".into()),
+        action: HumanAction::IntentRevised {
+            brief: blob("v2"),
+            affects: Affects::All,
+        },
+    };
+    assert!(matches!(run(&mut st, human), Response::Rejected(_)));
+    let host = Command::Host {
+        op: OpId("op2".into()),
+        action: HostAction::TaskPaused {
+            reason: PauseReason::Breaker,
+            detail: String::new(),
+        },
+    };
+    assert_eq!(rejected(run(&mut st, host)), Code::WrongMode);
+}
+
+#[test]
+fn cl_111_affects_absent_on_the_wire_reads_as_all() {
+    let e: Event =
+        rusty_serde::json::from_str(r#"{"IntentRevised":{"brief":3}}"#).expect("decodes");
+    assert_eq!(
+        e,
+        Event::IntentRevised {
+            brief: ArtId(3),
+            affects: Affects::All
+        }
+    );
+}

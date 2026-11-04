@@ -732,6 +732,7 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            intent: None,
         }
     }
 

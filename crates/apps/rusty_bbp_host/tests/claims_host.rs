@@ -890,6 +890,100 @@ fn a_task_total_row_names_the_field_its_limit_and_one_allowance() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------------------------------------------------------------- intent versions and pauses (#598)
+
+#[test]
+fn a_host_pause_shows_in_the_inbox_and_resume_open_clears_it() {
+    let dir = tempdir("pause");
+    claims_task(&dir);
+    let pause = || {
+        admin::pause(
+            &dir,
+            &task(),
+            admin::pause_reason("call_ceiling").unwrap(),
+            "400 of 400 calls",
+            OpId("pause-1".into()),
+        )
+        .unwrap()
+    };
+    assert_eq!(pause(), Response::Ok);
+    assert_eq!(pause(), Response::Ok, "the same op replays");
+    assert_eq!(state(&dir).state, State::Escalated);
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].reason, inbox::Reason::TaskPaused);
+    assert!(rows[0].totals.is_empty(), "no total is exhausted");
+    assert_eq!(
+        rows[0].pause,
+        Some(inbox::Pause {
+            reason: PauseReason::CallCeiling,
+            detail: "400 of 400 calls".into()
+        })
+    );
+    human_ok(&dir, "resume", &["open"]);
+    assert_eq!(state(&dir).state, State::Open);
+    assert!(inbox::read(&dir, &[task()]).unwrap().is_empty());
+    assert!(admin::pause_reason("bored").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn intent_stores_the_new_brief_and_reopens_or_escalates_what_it_affects() {
+    let dir = tempdir("intent");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "plain", true);
+    let y = claim(&dir, "a", "shipped", true);
+    for c in [x, y] {
+        human_ok(&dir, "claim", &[&format!("msg:{c}"), "accept"]);
+    }
+    let epoch = state(&dir).claims.get(MsgId(y)).unwrap().epoch;
+    let mark = Command::Host {
+        op: OpId("mark-y".into()),
+        action: HostAction::Acting {
+            claim: MsgId(y),
+            epoch,
+            reference: "pr-9".into(),
+        },
+    };
+    open_driver(&dir, &task())
+        .unwrap()
+        .dispatch(&mark, now())
+        .unwrap();
+    let old = brief(&dir);
+    let file = dir.join("brief-v2.md");
+    std::fs::write(&file, "Make the flag say ok, in green.").unwrap();
+    let path = file.to_str().unwrap();
+    // Lists are comma-separated, one argument each; a repeat is refused.
+    let rev = state(&dir).rev;
+    let twice = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path, "claims=msg:1", "claims=msg:2"],
+        Some(rev),
+        "owner",
+        Some(rev),
+        None,
+    );
+    assert!(matches!(twice, Ok(Response::Rejected(r)) if r.code == Code::BadHumanInput));
+    human_ok(&dir, "intent", &[path, &format!("claims=msg:{x},msg:{y}")]);
+    let st = state(&dir);
+    assert_ne!(st.brief.unwrap().0, old, "the new brief is current");
+    assert_eq!(st.claims.intent_version(), 2);
+    assert_eq!(st.claims.get(MsgId(x)).unwrap().status, ClaimStatus::Open);
+    assert_eq!(
+        st.claims.get(MsgId(y)).unwrap().status,
+        ClaimStatus::Escalated
+    );
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert!(
+        rows.iter().any(|r| r.reason == inbox::Reason::IntentChanged
+            && r.claim.as_ref().map(|c| c.id) == Some(MsgId(y))),
+        "{rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- protected paths (#597)
 
 /// Store `diff` as `who` and a candidate of it naming claim `c`.
