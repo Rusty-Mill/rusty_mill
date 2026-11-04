@@ -10954,6 +10954,7 @@ dependencies = [
  "rusty_conhost",
  "rusty_crypto_key",
  "rusty_libc",
+ "rusty_multimodal_db_engine",
  "rusty_mux_core",
  "rusty_mux_proto",
  "rusty_mux_script",
@@ -10963,6 +10964,8 @@ dependencies = [
  "rusty_term_core",
  "rusty_tokio",
  "rusty_uuid",
+ "serde",
+ "uuid",
 ]
 
 [[package]]

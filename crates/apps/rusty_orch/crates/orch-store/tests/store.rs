@@ -532,6 +532,78 @@ mod meters {
     }
 }
 
+mod lens_states {
+    use orch_lens::saved::{Saved, SavedPass, SavedProgress, SavedQuestion};
+    use orch_store::Store;
+
+    use super::dir;
+
+    fn saved() -> Saved {
+        Saved {
+            progress: vec![SavedProgress {
+                lens: "adversary".to_owned(),
+                claim: 7,
+                blind: Some(SavedPass {
+                    provider: "claude".to_owned(),
+                    posted: 1,
+                    found_counter: true,
+                }),
+                look_harder: None,
+                foreign_seen: 2,
+                epoch: 1,
+            }],
+            questions: vec![SavedQuestion {
+                claim: 3,
+                used: vec!["codex".to_owned()],
+                settled: vec![0],
+                tried: vec![(None, vec!["local".to_owned()])],
+                rebel_landed: false,
+                rebel_failures: 1,
+                attacks: vec![(11, 1, 2)],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_boards_runner_memory_survives_reopening() {
+        let d = dir("lens_state_reopen");
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert_eq!(s.load_lens_state("task-1").expect("load"), None);
+            s.save_lens_state("task-1", &saved()).expect("save");
+        }
+        let s = Store::open(&d).expect("reopen");
+        assert_eq!(s.load_lens_state("task-1").expect("load"), Some(saved()));
+        assert_eq!(
+            s.load_lens_state("task-2").expect("load"),
+            None,
+            "per board"
+        );
+    }
+
+    #[test]
+    fn a_later_save_replaces_the_memory() {
+        let d = dir("lens_state_replace");
+        let mut s = Store::open(&d).expect("open");
+        s.save_lens_state("task-1", &saved()).expect("first");
+        s.save_lens_state("task-1", &Saved::default())
+            .expect("second");
+        assert_eq!(
+            s.load_lens_state("task-1").expect("load"),
+            Some(Saved::default())
+        );
+    }
+
+    #[test]
+    fn the_memory_and_a_meter_of_the_same_name_are_kept_apart() {
+        let d = dir("lens_state_meter");
+        let mut s = Store::open(&d).expect("open");
+        s.save_lens_state("dedup", &saved()).expect("save");
+        assert!(matches!(s.load_meter("dedup"), Ok(None)));
+        assert_eq!(s.load_lens_state("dedup").expect("load"), Some(saved()));
+    }
+}
+
 mod probes {
     use orch_lens::alien::{judge, summarize, Bar, HuntRow, Outcome, ProbeRow};
     use orch_store::Store;

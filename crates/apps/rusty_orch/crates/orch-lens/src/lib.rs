@@ -18,6 +18,7 @@
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
+//! - [`saved`]: the scheduler's memory as plain data, for the store.
 
 #![cfg_attr(
     not(test),
@@ -35,6 +36,7 @@ pub mod port;
 pub mod post;
 pub mod record;
 pub mod round;
+pub mod saved;
 pub mod schedule;
 pub mod tier;
 
