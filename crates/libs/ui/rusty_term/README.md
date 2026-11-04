@@ -105,6 +105,7 @@ the TUI mode never loads them. If one is missing, `--gui` exits with
 | `--gpu` | `gui-gpu`   | Use the `wgpu` GPU renderer in the window (CPU fallback on failure). |
 | `--config <path>` | — | Read the configuration file from `<path>` (see below). |
 | `--list-shells` | — | Print the shells detected on this machine and exit. |
+| `--setup` | `gui` | Open the first-run setup (below) even when a config file exists. |
 | `--cwd <dir>` / `--starting-directory <dir>` | — | Starting working directory for the spawned shell. A missing directory fails the spawn cleanly (nonzero exit) rather than crashing. |
 | `--title <t>` | `gui` | Seed the window's initial title; the child's own OSC 0/2 title still wins once it emits one. |
 | `--maximized` / `--fullscreen` | `gui` | Open the window maximized or borderless-fullscreen. `--fullscreen` wins if both are given. |
@@ -247,7 +248,7 @@ the key to the shell), `paste`, `new_tab`, `new_window`, `fold_output`,
 `resize_left`, `resize_right`, `resize_up`, `resize_down`, `zoom_pane`,
 `scroll_page_up`, `scroll_page_down`, `scroll_prompt_up`, `scroll_prompt_down`,
 `toggle_fullscreen`, `font_size_up`, `font_size_down`, `font_size_reset`,
-`toggle_dock`; a
+`toggle_dock`, `open_setup` (no default chord); a
 chord is `+`-separated modifiers (`ctrl`/`shift`/`alt`) plus one key — a
 printable character, or `comma`/`tab`/`pageup`/`pagedown`/`left`/`right`/`up`/
 `down`/`space`/`home`/`end`/`enter` (or `return`)/`insert` (or `ins`)/`delete`
@@ -283,6 +284,7 @@ window edges to resize.
 | Ctrl+Shift+V (and Ctrl+V on Windows) | Paste the clipboard into the shell (bracketed-paste aware). Plain Ctrl+V pastes on Windows only, as in Windows Terminal; to send a raw ^V there instead, set `paste = "Ctrl+Shift+V"` under `[keys]`. |
 | Ctrl+Shift+F | Open the in-window search bar (incremental match highlighting; Ctrl+R toggles regex, Alt+C toggles case sensitivity, Ctrl+V/middle-click pastes into the query). |
 | Ctrl+Shift+, | Open the config file in your editor (created from a template on first use). |
+| first launch / `--setup` | **First-run setup**: a plain `--gui` launch with no config file at the default location (no `--config`, `$RUSTY_TERM_CONFIG`, command, session or profile) opens four steps of the settings page: shell, theme (previewed live), clipboard, and alerts (`t` sends a test notification). `Enter` goes to the next step and finishes on the last, saving only what you changed; `Esc`, the tab's `×` or `Ctrl+,` skips: the values it opened with come back and no file is written, so after a skip on a first run, setup opens again on the next plain launch. Finishing writes the commented config template plus your changes, so setup doesn't return. Reopen it with `--setup` or the `open_setup` action. |
 | Ctrl+, / `▾` menu | Toggle the in-app **settings page** (it opens as its own tab in the strip): an Appearance / Terminal / Window sidebar covering theme, font, cursor, contrast, shell, scrollback, clipboard, padding, opacity, launch size, and more, each with a one-line description. `Tab` switches category, `↑`/`↓` pick a row, `←`/`→` (or a click on the value) change it — `Shift` steps numbers ×10, `Home`/`End` jump to the bound, `Enter` (or a typed digit) edits a number directly — type (or `/` / `Ctrl+F`) to search across every category, the wheel scrolls, `Esc` saves & closes; changes apply live. |
 | Ctrl+Shift+T / `+` | Open a new tab with the configured shell; the `▾` dropdown launches any detected shell (PowerShell, cmd, WSL, bash, …) in a new tab instead. |
 | Ctrl+Shift+W / tab `×` / tab middle-click | Close the focused pane, or the whole tab via its `×` button or a middle-click on the tab (the last pane / tab closes the window). |

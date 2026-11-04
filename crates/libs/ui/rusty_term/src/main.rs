@@ -56,6 +56,7 @@ const KNOWN_FLAGS: &[(&str, bool)] = &[
     ("--gui", false),
     ("--gpu", false),
     ("--single-instance", false),
+    ("--setup", false),
 ];
 
 fn print_help() {
@@ -84,6 +85,7 @@ fn print_help() {
         "        --gpu                     Use the wgpu GPU renderer (--gui only, gui-gpu build)"
     );
     println!("        --single-instance         Hand off to a running --gui instance");
+    println!("        --setup                   Open first-run setup (--gui only)");
     println!();
     println!("Anything after `--`, `-e`, or `--command` is run as the child command,");
     println!("replacing the configured shell, e.g. `rusty_term -- htop`.");
@@ -399,6 +401,7 @@ mod tests {
             "--gui",
             "--gpu",
             "--single-instance",
+            "--setup",
             "--list-shells",
             "--help",
             "-h",

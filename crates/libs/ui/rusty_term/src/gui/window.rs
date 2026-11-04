@@ -47,7 +47,7 @@ use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::pace::Pacer;
 use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors};
-use super::settings::{CATEGORIES, Field, Settings, Widget};
+use super::settings::{Field, Settings, SetupBaseline, Widget};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -403,6 +403,9 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
     }
     if opened == 0 {
         first.spawn_tab()?;
+    }
+    if crate::config::wants_setup(&args) || crate::config::is_first_run(&args) {
+        first.open_setup();
     }
     app.windows.push(first);
     event_loop.run_app(&mut app)?;
@@ -2035,6 +2038,10 @@ impl WindowState<'_> {
         // The settings page's own chip: rendered exactly like an active tab
         // (terminal bg, bold, accent underline) with its × closing the page.
         if settings_open {
+            let chip_label = match &self.overlay {
+                Some(Overlay::Settings(s)) if s.is_setup() => " Setup",
+                _ => " Settings",
+            };
             let start = col;
             let end = (col + SETTINGS_TAB_W).min(btn0);
             let bg = self.theme.bg;
@@ -2051,7 +2058,7 @@ impl WindowState<'_> {
                 &mut hits,
                 &mut tcol,
                 label_end,
-                " Settings",
+                chip_label,
                 self.theme.fg,
                 bg,
                 Hit::SettingsTab,
@@ -2769,7 +2776,10 @@ impl WindowState<'_> {
             }
             badge = true;
         }
-        let threshold = self.config.command_notify_secs.unwrap_or(10);
+        let threshold = self
+            .config
+            .command_notify_secs
+            .unwrap_or(super::settings::DEFAULT_NOTIFY_SECS);
         for (exit, runtime) in finished {
             if threshold != 0 && runtime.as_secs() >= threshold && unseen {
                 let status = match exit {
@@ -2853,6 +2863,7 @@ impl WindowState<'_> {
             Action::PrevTab => self.cycle_tab(false),
             Action::OpenConfig => self.open_config(),
             Action::OpenSettings => self.open_settings(),
+            Action::OpenSetup => self.open_setup(),
             Action::Search => self.start_search(),
             Action::OpenLinks => self.open_links_menu(),
             Action::SplitRight => self.split_pane(Dir::Vertical),
@@ -3468,6 +3479,21 @@ impl WindowState<'_> {
 }
 
 impl WindowState<'_> {
+    /// The `[keys]` action bound to `key` with the current modifiers.
+    fn chord_action(&self, key: PhysicalKey) -> Option<Action> {
+        match key {
+            PhysicalKey::Code(code) => chord_key(code).and_then(|key| {
+                self.config.keys.action(Chord::new(
+                    self.mods.control_key(),
+                    self.mods.shift_key(),
+                    self.mods.alt_key(),
+                    key,
+                ))
+            }),
+            PhysicalKey::Unidentified(_) => None,
+        }
+    }
+
     /// Open the in-app settings page over the active tab, seeded from the live
     /// configuration. `Ctrl+,` and the dropdown's *Settings* entry route here.
     fn open_settings(&mut self) {
@@ -3491,6 +3517,86 @@ impl WindowState<'_> {
         }
     }
 
+    /// Open the first-run setup (O11): the settings page in setup mode, a few
+    /// rows one step at a time. Opens by itself on a first run (see
+    /// [`crate::config::is_first_run`]), and from `--setup` or the
+    /// `open_setup` action at any time; replaces whatever overlay is open.
+    fn open_setup(&mut self) {
+        self.close_overlay();
+        let opacity_supported = self.renderer.as_ref().is_some_and(|r| r.supports_opacity());
+        let s = Settings::new(
+            &self.config,
+            &self.theme,
+            self.ui_px,
+            &self.shells,
+            opacity_supported,
+        )
+        .into_setup(&self.config, self.theme);
+        self.overlay = Some(Overlay::Settings(s));
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Leave setup without keeping its choices: put every row it touched
+    /// back to its exact opening value. Skip writes nothing (D65): a missing
+    /// config stays missing, so a first run's setup returns on the next
+    /// plain launch, and an existing one stays byte-identical.
+    fn skip_setup(&mut self) {
+        let Some(Overlay::Settings(s)) = self.overlay.take() else {
+            return;
+        };
+        if let Some(base) = s.setup_baseline() {
+            for &field in s.touched() {
+                self.restore_setting(field, base);
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Finish setup: save only the rows it really changed (onto the
+    /// commented template when there is no file yet) and close. A row
+    /// changed and changed back is restored exactly, never written.
+    fn finish_setup(&mut self) {
+        if let Some(Overlay::Settings(mut s)) = self.overlay.take() {
+            if let Some(field) = s.commit_edit() {
+                self.overlay = Some(Overlay::Settings(s.clone()));
+                self.apply_setting(field);
+                self.overlay = None;
+            }
+            let back = s.settle_setup();
+            if let Some(base) = s.setup_baseline() {
+                for field in back {
+                    self.restore_setting(field, base);
+                }
+            }
+            self.persist_settings(&s);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Put setup row `field` back to the exact value setup opened over,
+    /// recolouring live for the theme.
+    fn restore_setting(&mut self, field: Field, base: &SetupBaseline) {
+        if field == Field::Theme {
+            self.apply_theme_live(base.theme);
+        }
+        base.restore(&mut self.config, field);
+    }
+
+    /// Create the config file from the commented template if it is missing.
+    fn ensure_config_file(&self) {
+        if let Some(path) = self.config_path.as_ref().filter(|p| !p.exists())
+            && let Err(e) = crate::config::save_settings(path, &[])
+        {
+            eprintln!("rusty_term: create config: {e}");
+        }
+    }
+
     /// Open the shell-launcher dropdown (the `▾` button): the detected shells
     /// plus *Settings* and *Open config file* entries.
     fn open_menu(&mut self) {
@@ -3502,12 +3608,18 @@ impl WindowState<'_> {
     }
 
     /// Close any open overlay, persisting settings changes on the way out.
+    /// Closing setup any way but finishing it (Esc, its tab's ×, another
+    /// page) is a skip.
     fn close_overlay(&mut self) {
+        if matches!(&self.overlay, Some(Overlay::Settings(s)) if s.is_setup()) {
+            self.skip_setup();
+            return;
+        }
         if let Some(Overlay::Settings(mut s)) = self.overlay.take() {
             // A still-pending number edit commits like any blur; its live
             // apply comes from the reload watcher re-reading the save.
             s.commit_edit();
-            if s.dirty {
+            if s.dirty() {
                 self.persist_settings(&s);
             }
         }
@@ -3516,13 +3628,19 @@ impl WindowState<'_> {
         }
     }
 
-    /// Write the settings page's values to the config file. The live-reload
-    /// watcher re-reads the save; live application already happened per change.
+    /// Write the rows the page changed to the config file; with none, only
+    /// make sure the file exists. The live-reload watcher re-reads the save;
+    /// live application already happened per change.
     fn persist_settings(&self, s: &Settings) {
+        let edits = s.edits();
+        if edits.is_empty() {
+            self.ensure_config_file();
+            return;
+        }
         let Some(path) = &self.config_path else {
             return;
         };
-        if let Err(e) = crate::config::save_settings(path, &s.edits()) {
+        if let Err(e) = crate::config::save_settings(path, &edits) {
             eprintln!("rusty_term: save settings: {e}");
         }
     }
@@ -3580,6 +3698,11 @@ impl WindowState<'_> {
                     if let Some(field) = field {
                         self.apply_setting(field);
                     }
+                } else if s.on_last_step() {
+                    self.finish_setup();
+                } else if s.is_setup() {
+                    // Enter is setup's primary action: the next step.
+                    s.cycle_category(true);
                 } else if !s.begin_edit(None) {
                     // Not an editable number: Enter cycles, mirroring →.
                     self.overlay_change(true);
@@ -3615,6 +3738,14 @@ impl WindowState<'_> {
             }
             Key::Character(text) => {
                 let Some(c) = text.chars().next() else { return };
+                if s.is_setup() && !editing {
+                    // Setup has no search; `t` on its notifications step
+                    // sends a test, so the user sees what an alert looks like.
+                    if c.eq_ignore_ascii_case(&'t') && on_notify_step(s) {
+                        notify("rusty_term", "This is how a finished command is announced.");
+                    }
+                    return;
+                }
                 if self.mods.control_key() {
                     // Ctrl+F opens the search, matching the find bar.
                     if text.as_str() == "f"
@@ -3787,7 +3918,16 @@ impl WindowState<'_> {
                 apply.extend(s.commit_edit());
                 let grid_rows = self.rows as usize;
                 let grid_cols = self.cols as usize;
-                match settings_hit(col, grid_row, grid_cols, grid_rows, s.scroll, s.len()) {
+                let sections = s.sections().len();
+                match settings_hit(
+                    col,
+                    grid_row,
+                    grid_cols,
+                    grid_rows,
+                    s.scroll,
+                    s.len(),
+                    sections,
+                ) {
                     SettingsHit::Category(i) => s.set_category(i),
                     SettingsHit::Search => s.start_filter(),
                     SettingsHit::Row(i) => {
@@ -3840,6 +3980,7 @@ impl WindowState<'_> {
         let clipboard = s.clipboard();
         let click_to_move = s.click_to_move();
         let bell = s.bell();
+        let command_notify = s.command_notify_secs();
         let padding = s.padding();
         let status_bar = s.status_bar();
         let command_marks = s.command_marks();
@@ -3891,6 +4032,7 @@ impl WindowState<'_> {
             Field::Clipboard => self.config.clipboard = Some(clipboard),
             Field::ClickToMove => self.config.click_to_move = Some(click_to_move),
             Field::Bell => self.config.bell = Some(bell),
+            Field::CommandNotify => self.config.command_notify_secs = Some(command_notify),
             Field::Padding => {
                 self.config.padding = Some(padding);
                 self.pad = padding as usize;
@@ -4169,7 +4311,8 @@ impl WindowState<'_> {
                 // accent dot. While a search is on, results span categories,
                 // so no sidebar entry is "the" active one.
                 let filtering = s.filter.is_some();
-                for (i, (cat, label)) in CATEGORIES.iter().enumerate() {
+                let setup = s.is_setup();
+                for (i, (label, _)) in s.sections().iter().enumerate() {
                     let r = SETTINGS_TOP + i * 2;
                     if r >= footer_top {
                         break;
@@ -4182,8 +4325,14 @@ impl WindowState<'_> {
                     } else {
                         (dim, bg)
                     };
-                    write_row(&mut g, r, 2, label, cfg, cbg);
-                    if s.category_modified(*cat) {
+                    // Setup numbers its steps, so the order reads as a path.
+                    let label = if setup {
+                        format!("{}  {label}", i + 1)
+                    } else {
+                        label.to_string()
+                    };
+                    write_row(&mut g, r, 2, &label, cfg, cbg);
+                    if s.section_modified(i) {
                         let dcol = 2 + label.chars().count() + 1;
                         write_row(&mut g, r, dcol, "\u{2022}", accent, cbg);
                     }
@@ -4224,11 +4373,18 @@ impl WindowState<'_> {
                         1 => "1 result".to_string(),
                         n => format!("{n} results"),
                     }
+                } else if setup {
+                    format!(
+                        "Set up rusty_term: step {} of {}",
+                        s.cat + 1,
+                        s.sections().len()
+                    )
                 } else {
-                    CATEGORIES[s.cat].1.to_string()
+                    s.sections()[s.cat].0.to_string()
                 };
                 write_row(&mut g, SETTINGS_TOP, SETTINGS_CARD_X, &title, fg, bg);
                 match &s.filter {
+                    _ if setup => {} // no search in setup
                     Some(q) => {
                         let qcol = value_end.saturating_sub(q.chars().count() + 2);
                         write_row(&mut g, SETTINGS_TOP, qcol, &format!("/{q}"), fg, bg);
@@ -4398,6 +4554,21 @@ impl WindowState<'_> {
                 // "modified" is a promise, not a warning.
                 let hints: &[(&str, &str)] = if s.editing.is_some() {
                     &[("Enter", "apply"), ("Esc", "keep old value")]
+                } else if setup && s.on_last_step() {
+                    // Most-needed first: a narrow window drops the tail.
+                    &[
+                        ("Enter", "finish"),
+                        ("t", "test alert"),
+                        ("Esc", "skip setup"),
+                        ("Left/Right", "change"),
+                    ]
+                } else if setup {
+                    &[
+                        ("Enter", "next step"),
+                        ("Esc", "skip setup"),
+                        ("Left/Right", "change"),
+                        ("Shift+Tab", "back"),
+                    ]
                 } else if filtering {
                     &[
                         ("type", "to refine"),
@@ -4414,7 +4585,9 @@ impl WindowState<'_> {
                         ("Esc", "close & save"),
                     ]
                 };
-                let status = if s.dirty {
+                let status = if setup {
+                    "saves when you finish"
+                } else if s.dirty() {
                     "modified - saves on close"
                 } else {
                     "saved"
@@ -4437,7 +4610,7 @@ impl WindowState<'_> {
                     hrow,
                     scol,
                     status,
-                    if s.dirty { fg } else { dim },
+                    if s.dirty() && !setup { fg } else { dim },
                     bg,
                 );
             }
@@ -4477,6 +4650,11 @@ fn shell_menu_items(
     items
 }
 
+/// Whether setup is on its notifications step (where `t` sends a test).
+fn on_notify_step(s: &Settings) -> bool {
+    s.is_setup() && s.sections()[s.cat].1.contains(&Field::CommandNotify)
+}
+
 /// How many setting cards fit in a `grid_rows`-tall overlay grid.
 fn settings_visible(grid_rows: usize) -> usize {
     grid_rows.saturating_sub(SETTINGS_CARDS_TOP + SETTINGS_FOOTER_H) / SETTINGS_ROW_H
@@ -4508,6 +4686,7 @@ fn settings_hit(
     grid_rows: usize,
     scroll: usize,
     len: usize,
+    sections: usize,
 ) -> SettingsHit {
     let footer = grid_rows.saturating_sub(SETTINGS_FOOTER_H);
     if row < SETTINGS_TOP || row >= footer {
@@ -4517,7 +4696,7 @@ fn settings_hit(
         // Sidebar entries sit on every other row, and the whole strip is
         // clickable: the gap row belongs to the entry above it.
         let i = (row - SETTINGS_TOP) / 2;
-        if i < CATEGORIES.len() {
+        if i < sections {
             return SettingsHit::Category(i);
         }
         return SettingsHit::None;
@@ -5184,9 +5363,24 @@ impl WindowState<'_> {
                     }
                     return;
                 }
-                // A settings page / shell menu, if open, owns all key input.
+                // A settings page / shell menu, if open, owns all key input,
+                // except the chord that toggles the page closed again (it
+                // closes setup as a skip).
                 if self.overlay.is_some() {
-                    self.overlay_key(&event);
+                    let action = self.chord_action(event.physical_key);
+                    if overlay_passes_through(action) {
+                        let mut consumed = std::mem::take(&mut self.consumed_keys);
+                        route_key_down(
+                            &mut consumed,
+                            event.physical_key,
+                            event.repeat,
+                            action,
+                            |a| self.exec_action(a),
+                        );
+                        self.consumed_keys = consumed;
+                    } else {
+                        self.overlay_key(&event);
+                    }
                     return;
                 }
                 // In search mode, keys edit the query / step matches; nothing
@@ -5201,17 +5395,7 @@ impl WindowState<'_> {
                 // Terminal-owned shortcuts (configurable via the `[keys]` config
                 // section) are looked up before native encoding, so a bound chord
                 // never reaches the child.
-                let action = match event.physical_key {
-                    PhysicalKey::Code(code) => chord_key(code).and_then(|key| {
-                        self.config.keys.action(Chord::new(
-                            self.mods.control_key(),
-                            self.mods.shift_key(),
-                            self.mods.alt_key(),
-                            key,
-                        ))
-                    }),
-                    PhysicalKey::Unidentified(_) => None,
-                };
+                let action = self.chord_action(event.physical_key);
                 let mut consumed = std::mem::take(&mut self.consumed_keys);
                 let taken = route_key_down(
                     &mut consumed,
@@ -5446,6 +5630,7 @@ impl WindowState<'_> {
                             grid_rows,
                             s.scroll,
                             s.len(),
+                            s.sections().len(),
                         ) {
                             SettingsHit::Row(i) => Some(i),
                             _ => None,
@@ -6106,6 +6291,13 @@ impl ConsumedKeys {
         self.0.swap_remove(i);
         true
     }
+}
+
+/// Whether a key bound to `action` skips the open overlay's own key handling
+/// and runs as an action: only the settings toggle (`Ctrl+,` by default),
+/// which closes the page it opened, and setup as a skip.
+fn overlay_passes_through(action: Option<Action>) -> bool {
+    action == Some(Action::OpenSettings)
 }
 
 /// Route a keydown the keymap resolved to `action` (None: unbound). `exec`
@@ -6855,6 +7047,33 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_toggle_reaches_an_open_overlay() {
+        // Ctrl+, (the default chord) must close the page and skip setup, so
+        // it runs as an action even while the overlay owns the keyboard.
+        use crate::keymap::{Action, Chord, Key};
+        let ctrl_comma = Chord::new(true, false, false, Key::Char(','));
+        let action = crate::config::Config::default().keys.action(ctrl_comma);
+        assert!(super::overlay_passes_through(action));
+        for other in [None, Some(Action::OpenSetup), Some(Action::CopyOrSend)] {
+            assert!(!super::overlay_passes_through(other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn settings_hit_reaches_every_setup_step_in_the_sidebar() {
+        let (cols, rows) = (100, 30);
+        let fourth = super::SETTINGS_TOP + 3 * 2;
+        assert_eq!(
+            settings_hit(2, fourth, cols, rows, 0, 1, 3),
+            SettingsHit::None
+        );
+        assert_eq!(
+            settings_hit(2, fourth, cols, rows, 0, 1, 4),
+            SettingsHit::Category(3)
+        );
+    }
+
+    #[test]
     fn settings_value_end_caps_the_card_column_on_a_wide_window() {
         // Narrow window: the right pad governs.
         assert_eq!(settings_value_end(80), 77);
@@ -6867,75 +7086,81 @@ mod tests {
     fn settings_hit_maps_sidebar_cards_search_and_dead_space() {
         let (cols, rows) = (100, 24); // 6 visible cards (see above)
         // The top-pad row is dead everywhere.
-        assert_eq!(settings_hit(2, 0, cols, rows, 0, 7), SettingsHit::None);
+        assert_eq!(settings_hit(2, 0, cols, rows, 0, 7, 3), SettingsHit::None);
         // Sidebar: categories every other row, with the gap row belonging to
         // the entry above it — the whole strip is clickable.
         let t = super::SETTINGS_TOP;
         assert_eq!(
-            settings_hit(2, t, cols, rows, 0, 7),
+            settings_hit(2, t, cols, rows, 0, 7, 3),
             SettingsHit::Category(0)
         );
         assert_eq!(
-            settings_hit(2, t + 1, cols, rows, 0, 7),
+            settings_hit(2, t + 1, cols, rows, 0, 7, 3),
             SettingsHit::Category(0)
         );
         assert_eq!(
-            settings_hit(0, t + 2, cols, rows, 0, 7),
+            settings_hit(0, t + 2, cols, rows, 0, 7, 3),
             SettingsHit::Category(1)
         );
         assert_eq!(
-            settings_hit(2, t + 4, cols, rows, 0, 7),
+            settings_hit(2, t + 4, cols, rows, 0, 7, 3),
             SettingsHit::Category(2)
         );
         // Below the last category the strip is dead.
-        assert_eq!(settings_hit(2, t + 6, cols, rows, 0, 7), SettingsHit::None);
+        assert_eq!(
+            settings_hit(2, t + 6, cols, rows, 0, 7, 3),
+            SettingsHit::None
+        );
         // The title row's right end is the search affordance; its left is dead.
         let value_end = settings_value_end(cols);
         assert_eq!(
-            settings_hit(value_end - 1, t, cols, rows, 0, 7),
+            settings_hit(value_end - 1, t, cols, rows, 0, 7, 3),
             SettingsHit::Search
         );
         assert_eq!(
-            settings_hit(value_end - SETTINGS_SEARCH_W, t, cols, rows, 0, 7),
+            settings_hit(value_end - SETTINGS_SEARCH_W, t, cols, rows, 0, 7, 3),
             SettingsHit::Search,
         );
         assert_eq!(
-            settings_hit(SETTINGS_SIDEBAR_W + 4, t, cols, rows, 0, 7),
+            settings_hit(SETTINGS_SIDEBAR_W + 4, t, cols, rows, 0, 7, 3),
             SettingsHit::None
         );
         // Card area starts below the title + rule; the rule row and the
         // spacer between cards are dead.
         let x = SETTINGS_SIDEBAR_W + 4;
-        assert_eq!(settings_hit(x, t + 1, cols, rows, 0, 7), SettingsHit::None);
         assert_eq!(
-            settings_hit(x, SETTINGS_CARDS_TOP, cols, rows, 0, 7),
-            SettingsHit::Row(0)
-        );
-        assert_eq!(
-            settings_hit(x, SETTINGS_CARDS_TOP + 1, cols, rows, 0, 7),
-            SettingsHit::Row(0)
-        );
-        assert_eq!(
-            settings_hit(x, SETTINGS_CARDS_TOP + 2, cols, rows, 0, 7),
+            settings_hit(x, t + 1, cols, rows, 0, 7, 3),
             SettingsHit::None
         );
         assert_eq!(
-            settings_hit(x, SETTINGS_CARDS_TOP + SETTINGS_ROW_H, cols, rows, 0, 7),
+            settings_hit(x, SETTINGS_CARDS_TOP, cols, rows, 0, 7, 3),
+            SettingsHit::Row(0)
+        );
+        assert_eq!(
+            settings_hit(x, SETTINGS_CARDS_TOP + 1, cols, rows, 0, 7, 3),
+            SettingsHit::Row(0)
+        );
+        assert_eq!(
+            settings_hit(x, SETTINGS_CARDS_TOP + 2, cols, rows, 0, 7, 3),
+            SettingsHit::None
+        );
+        assert_eq!(
+            settings_hit(x, SETTINGS_CARDS_TOP + SETTINGS_ROW_H, cols, rows, 0, 7, 3),
             SettingsHit::Row(1),
         );
         // Scroll offsets the list index the same card resolves to.
         assert_eq!(
-            settings_hit(x, SETTINGS_CARDS_TOP, cols, rows, 3, 7),
+            settings_hit(x, SETTINGS_CARDS_TOP, cols, rows, 3, 7, 3),
             SettingsHit::Row(3)
         );
         // Past the end of a short list: dead.
         assert_eq!(
-            settings_hit(x, SETTINGS_CARDS_TOP + SETTINGS_ROW_H, cols, rows, 0, 1),
+            settings_hit(x, SETTINGS_CARDS_TOP + SETTINGS_ROW_H, cols, rows, 0, 1, 3),
             SettingsHit::None,
         );
         // Footer rows never hit.
         assert_eq!(
-            settings_hit(x, rows - 1, cols, rows, 0, 7),
+            settings_hit(x, rows - 1, cols, rows, 0, 7, 3),
             SettingsHit::None
         );
     }
