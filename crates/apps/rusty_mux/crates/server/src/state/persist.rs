@@ -1,11 +1,12 @@
 //! Sessions that survive a restart (C45): restoring the store at start,
 //! and saving what changed every [`SAVE_EVERY`] and on a clean stop.
 //!
-//! A restored block's program died with the old server, so it gets a fresh
-//! copy of the configured program in its last working directory, under its
-//! saved screen and a one-line marker. A block started with a command of
-//! its own gets the configured program too: running the command again
-//! could repeat what it did (a build, a deploy, an agent's turn).
+//! A restored block's program died with the old server. A shell block gets
+//! a fresh copy of the configured program in its last working directory,
+//! under its saved screen and a one-line marker. A block started with a
+//! command of its own comes back read-only, showing its saved screen until
+//! closed: running the command again could repeat what it did (a build, a
+//! deploy, an agent's turn). Owner's pick, rusty_term D72.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -108,17 +109,39 @@ impl State {
         out
     }
 
+    /// Brings `revive.block` back: a shell block with a fresh copy of the
+    /// configured program, a command block read-only (D72). Either shows
+    /// its saved screen under a marker, written once per block.
     fn revive(&mut self, shared: &Shared, revive: Revive) -> Result<(), super::Refusal> {
         crate::checkpoint::validate_size(revive.size)?;
-        let mut config = self.config.clone();
-        if let Some(cwd) = revive.before.as_ref().map(|b| &b.cwd)
-            && Path::new(cwd).is_absolute()
-            && Path::new(cwd).is_dir()
-        {
-            config.cwd = cwd.into();
+        let (cols, rows) = (revive.size.cols().into(), revive.size.rows().into());
+        let (mut grid, mut parser) = revive
+            .screen
+            .unwrap_or_else(|| (Grid::new(cols, rows), AnsiParser::new()));
+        if (grid.cols, grid.rows) != (cols, rows) {
+            grid.resize(cols, rows);
         }
+        let before = revive.before;
+        let already = before.as_ref().is_some_and(|b| b.read_only);
+        if !already {
+            parser.advance(&mut grid, marker(before.as_ref()).as_bytes());
+            // Queries in the saved screen were answered in the old run.
+            drop(parser.take_responses());
+        }
+        let cwd = before.as_ref().map(|b| b.cwd.clone());
+        if let Some(command) = before.filter(|b| !b.shell) {
+            let started = Started {
+                read_only: true,
+                ..command
+            };
+            let rt = super::BlockRt::read_only(grid, parser, started);
+            self.blocks.insert(revive.block, rt);
+            return Ok(());
+        }
+        let config = self.config_in(cwd.as_deref());
         let started = Started {
             shell: true,
+            read_only: false,
             program: config.program.to_string_lossy().into_owned(),
             args: config
                 .args
@@ -135,19 +158,21 @@ impl State {
             config: &config,
             started,
         })?;
-        let (cols, rows) = (revive.size.cols().into(), revive.size.rows().into());
-        let (mut grid, mut parser) = revive
-            .screen
-            .unwrap_or_else(|| (Grid::new(cols, rows), AnsiParser::new()));
-        if (grid.cols, grid.rows) != (cols, rows) {
-            grid.resize(cols, rows);
-        }
-        parser.advance(&mut grid, marker(revive.before.as_ref()).as_bytes());
-        // Queries in the saved screen were answered by the old program's run.
-        drop(parser.take_responses());
         let rt = unscreened.screened(shared, grid, parser);
         self.blocks.insert(revive.block, rt);
         Ok(())
+    }
+
+    /// The configured program, in `cwd` when that is an absolute directory.
+    fn config_in(&self, cwd: Option<&str>) -> crate::Config {
+        let mut config = self.config.clone();
+        if let Some(cwd) = cwd
+            && Path::new(cwd).is_absolute()
+            && Path::new(cwd).is_dir()
+        {
+            config.cwd = cwd.into();
+        }
+        config
     }
 
     /// What changed since the last save, or `None` when nothing did, no
@@ -179,8 +204,8 @@ impl State {
             .blocks
             .iter()
             .map(|(block, rt)| {
-                let cwd = terminal::pwd(&rt.grid, rt.process.pid())
-                    .unwrap_or_else(|| rt.started.cwd.clone());
+                let cwd =
+                    terminal::pwd(&rt.grid, rt.pid()).unwrap_or_else(|| rt.started.cwd.clone());
                 (
                     *block,
                     Started {
@@ -273,7 +298,7 @@ fn marker(before: Option<&Started>) -> String {
                 .collect::<Vec<_>>()
                 .join(" ");
             let command: String = command.chars().filter(|c| !c.is_control()).collect();
-            format!("restored after a server restart; `{command}` was not run again")
+            format!("restored after a server restart, read-only: `{command}` was not run again")
         }
         _ => "restored after a server restart".into(),
     };

@@ -1,34 +1,59 @@
 //! Sessions that survive a server restart (C45): the store directory holds
-//! a [`manifest`] and one RTCP v6 screen per block (`<block>.rtcp`).
+//! the model as `rusty_multimodal_db_engine` records (`sessions.mmap` and
+//! its companions; rusty_term D73) and one RTCP v6 screen per block
+//! (`<block>.rtcp`). Screens are files, not records: the engine keeps every
+//! record in memory and logs each change, and a screen is megabytes that
+//! the server already holds as a grid (D76).
 //!
-//! Each file is written whole to a `.tmp` beside it and renamed over the
-//! old one; the manifest goes last, so a run that dies midway leaves the
-//! previous manifest with screens at least as new. A store that cannot be
-//! read is moved aside and the server starts empty: a bad store never
-//! stops a start.
+//! A save writes screens first, each to a `.tmp` beside it renamed over the
+//! old one, then the changed session records, so a run that dies midway
+//! leaves records with screens at least as new. The directory is locked
+//! while a server holds it. A store that cannot be read is moved aside and
+//! the server starts empty: a bad store never stops a start.
 
-pub(crate) mod manifest;
+mod record;
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use rusty_multimodal_db_engine::dir_lock::DirLock;
+use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
+use rusty_multimodal_db_engine::generic::{
+    DeleteError, GenericMmapStore, InsertError, ReplaceError,
+};
 use rusty_mux_core::BlockId;
 use rusty_term_core::{AnsiParser, Grid};
 
-pub(crate) use manifest::{Manifest, Started};
+use record::{ByGenerated, ByOrder, SessionRecord};
+pub(crate) use record::{Manifest, Started};
 
-const MANIFEST: &str = "manifest";
+const SESSIONS: &str = "sessions.mmap";
+const LOCK: &str = "server.lock";
 const SCREEN: &str = "rtcp";
+/// Saves between compactions of the engine's insert log.
+const COMPACT_EVERY: u32 = 64;
 
-/// A store directory, made owner-only. Clones share it.
-#[derive(Debug, Clone)]
+type Sessions = GenericMmapStore<SessionRecord, ByGenerated, ByOrder>;
+
+/// A store directory, made owner-only and locked. Clones share it.
+#[derive(Clone)]
 pub(crate) struct Store {
     dir: PathBuf,
+    inner: Arc<Mutex<Inner>>,
+}
+
+struct Inner {
+    /// `None` until [`Store::load`] opens it.
+    sessions: Option<Sessions>,
     /// The newest save written, so saves land one at a time and an older
     /// one finishing late never overwrites a newer one.
-    written: Arc<Mutex<u64>>,
+    written: u64,
+    saves: u32,
+    /// `None` only while [`Store::set_aside`] moves the directory.
+    lock: Option<DirLock>,
 }
 
 /// What a store held: the manifest and each block's screen it could read.
@@ -38,29 +63,58 @@ pub(crate) struct Loaded {
 }
 
 impl Store {
-    /// Opens `dir`, making it (and its parents) if missing.
+    /// Opens `dir`, making it (and its parents) if missing, and locks it;
+    /// refused while another server holds it.
     pub(crate) fn open(dir: PathBuf) -> io::Result<Self> {
         make_private_dir(&dir)?;
+        let lock = DirLock::acquire(&dir, LOCK).map_err(io::Error::other)?;
+        let inner = Inner {
+            sessions: None,
+            written: 0,
+            saves: 0,
+            lock: Some(lock),
+        };
         Ok(Self {
             dir,
-            written: Arc::default(),
+            inner: Arc::new(Mutex::new(inner)),
         })
+    }
+
+    fn inner(&self) -> io::Result<MutexGuard<'_, Inner>> {
+        self.inner
+            .lock()
+            .map_err(|_| io::Error::other("an earlier save panicked"))
     }
 
     fn screen(&self, block: BlockId) -> PathBuf {
         self.dir.join(format!("{block}.{SCREEN}"))
     }
 
-    /// The saved state, `Ok(None)` when there is none. A manifest that
-    /// cannot be read is an error; a screen that cannot be read is skipped
-    /// with a warning, so its block restarts blank.
+    /// Opens the session records and returns what they hold, `Ok(None)`
+    /// when they hold no session. Records that cannot be read are an error; a screen
+    /// that cannot be read is skipped with a warning, so its block
+    /// restarts blank.
     pub(crate) fn load(&self) -> Result<Option<Loaded>, String> {
-        let text = match fs::read_to_string(self.dir.join(MANIFEST)) {
-            Ok(text) => text,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(format!("reading the manifest: {e}")),
-        };
-        let manifest = manifest::decode(&text).map_err(|e| e.to_string())?;
+        let mut inner = self.inner().map_err(|e| e.to_string())?;
+        let path = self.dir.join(SESSIONS);
+        if !path.exists() {
+            let empty = Sessions::create(Vec::new(), &path)
+                .map_err(|e| format!("creating {SESSIONS}: {e}"))?;
+            inner.sessions = Some(empty);
+            return Ok(None);
+        }
+        let sessions =
+            Sessions::open_portable(&path).map_err(|e| format!("reading {SESSIONS}: {e}"))?;
+        let records: Vec<_> = sessions
+            .all_ids()
+            .into_iter()
+            .filter_map(|id| sessions.get(id))
+            .collect();
+        inner.sessions = Some(sessions);
+        if records.is_empty() {
+            return Ok(None);
+        }
+        let manifest = record::manifest(records)?;
         let screens = manifest
             .started
             .keys()
@@ -81,42 +135,51 @@ impl Store {
         }
     }
 
-    /// Writes the screens given, then the manifest, then removes screens
-    /// of blocks the manifest no longer holds; skipped, and `Ok`, when a
-    /// save numbered `generation` or later has been written already.
+    /// Writes the screens given, then the session records that changed,
+    /// then removes screens of blocks the manifest no longer holds;
+    /// skipped, and `Ok`, when a save numbered `generation` or later has
+    /// been written already.
     pub(crate) fn save(
         &self,
         generation: u64,
         manifest: &Manifest,
         screens: &[(BlockId, Vec<u8>)],
     ) -> io::Result<()> {
-        let mut written = self
-            .written
-            .lock()
-            .map_err(|_| io::Error::other("an earlier save panicked"))?;
-        if generation <= *written {
+        let mut inner = self.inner()?;
+        if generation <= inner.written {
             return Ok(());
         }
         for (block, data) in screens {
             replace(&self.screen(*block), data)?;
         }
-        replace(
-            &self.dir.join(MANIFEST),
-            manifest::encode(manifest).as_bytes(),
-        )?;
+        let sessions = inner
+            .sessions
+            .as_mut()
+            .ok_or_else(|| io::Error::other("the store was never loaded"))?;
+        sync(sessions, record::records(manifest))?;
+        inner.saves += 1;
+        if inner.saves % COMPACT_EVERY == 0
+            && let Some(sessions) = inner.sessions.as_mut()
+        {
+            sessions.compact().map_err(io::Error::other)?;
+        }
         for entry in fs::read_dir(&self.dir)? {
             let path = entry?.path();
             if is_stale(&path, manifest) {
                 fs::remove_file(&path)?;
             }
         }
-        *written = generation;
+        inner.written = generation;
         Ok(())
     }
 
     /// Moves an unreadable store to `<dir>.bad-<seconds>` and starts a
-    /// new empty one in its place.
+    /// new empty one in its place, locked again.
     pub(crate) fn set_aside(&self) -> io::Result<PathBuf> {
+        let mut inner = self.inner()?;
+        inner.sessions = None;
+        // Windows renames no directory with a file open in it.
+        inner.lock = None;
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
@@ -125,8 +188,42 @@ impl Store {
         let aside = PathBuf::from(aside);
         fs::rename(&self.dir, &aside)?;
         make_private_dir(&self.dir)?;
+        inner.lock = Some(DirLock::acquire(&self.dir, LOCK).map_err(io::Error::other)?);
+        let path = self.dir.join(SESSIONS);
+        inner.sessions = Some(Sessions::create(Vec::new(), &path).map_err(io::Error::other)?);
         Ok(aside)
     }
+}
+
+/// Makes the stored sessions `records`: inserts the new, replaces the
+/// changed, deletes the gone; an unchanged session writes nothing.
+fn sync(sessions: &mut Sessions, records: Vec<SessionRecord>) -> io::Result<()> {
+    let keep: BTreeSet<_> = records.iter().map(|r| r.id).collect();
+    for record in records {
+        match sessions.get(record.id) {
+            Some(old) if old == record => {}
+            Some(_) => sessions.replace(record).map_err(|e| match e {
+                ReplaceError::NotFound(id) => io::Error::other(format!("session {id} vanished")),
+                ReplaceError::Durability(e) => io::Error::other(e),
+            })?,
+            None => sessions.insert(record).map_err(|e| match e {
+                InsertError::Duplicate(id) => io::Error::other(format!("session {id} twice")),
+                InsertError::Durability(e) => io::Error::other(e),
+            })?,
+        }
+    }
+    let gone: Vec<_> = sessions
+        .all_ids()
+        .into_iter()
+        .filter(|id| !keep.contains(id))
+        .collect();
+    for id in gone {
+        sessions.delete(id).map_err(|e| match e {
+            DeleteError::NotFound(id) => io::Error::other(format!("session {id} vanished")),
+            DeleteError::Durability(e) => io::Error::other(e),
+        })?;
+    }
+    Ok(())
 }
 
 fn warn<T>(block: BlockId, why: &str) -> Option<T> {

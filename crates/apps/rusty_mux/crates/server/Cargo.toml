@@ -31,6 +31,12 @@ rusty_uuid = { workspace = true }
 # Compares takeover tokens in constant time.
 rusty_crypto_key = { workspace = true }
 platform = { workspace = true }
+# The session store (C45): sessions, windows, layouts and blocks as records
+# (owner's pick, rusty_term D73). Its record bound needs serde derives, and
+# its ids are the `uuid` crate's.
+rusty_multimodal_db_engine = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
 
 # Linux and Windows (ConPTY or rusty_conhost, over AF_UNIX); other targets
 # build a stub.

@@ -1,6 +1,7 @@
 //! C45: a server started on the store an earlier one saved restores its
-//! sessions, windows, layouts and screens, by id, each block with a fresh
-//! shell; an unreadable store is moved aside and the server starts empty.
+//! sessions, windows, layouts and screens, by id: a shell block with a
+//! fresh shell, a command block read-only (D72). An unreadable store is
+//! moved aside and the server starts empty.
 
 mod common;
 
@@ -149,7 +150,7 @@ fn names(entries: &[Entry]) -> Vec<(String, String)> {
 fn an_unreadable_store_is_set_aside() {
     let dir = state_dir("bad");
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("manifest"), "rusty_mux state 99\n").unwrap();
+    std::fs::write(dir.join("sessions.mmap"), b"not a slot file").unwrap();
     let server = Server::start(&dir);
     let mut client = inspecting(&server.socket);
     assert!(
@@ -170,9 +171,80 @@ fn an_unreadable_store_is_set_aside() {
         .map(|e| e.path())
         .collect();
     assert_eq!(aside.len(), 1, "moved aside once");
-    assert!(aside[0].join("manifest").exists());
+    assert!(aside[0].join("sessions.mmap").exists());
     drop(client);
     server.stop();
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&aside[0]);
+}
+
+/// A block started with a command of its own is not run again: it comes
+/// back read-only, showing what it printed, and refuses input until closed,
+/// through any number of restarts.
+#[cfg(unix)]
+#[test]
+fn a_command_block_comes_back_read_only() {
+    use rusty_mux_proto::{Launch, Program};
+    let dir = state_dir("command");
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(
+        &server.socket,
+        Features::CHECKPOINT_V6.union(Features::LAUNCH),
+        None,
+    );
+    let window = common::window_for(&mut client);
+    let launch = Launch {
+        program: Some(Program {
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo CMD$((3*7)); exec sleep 600".into()],
+        }),
+        cwd: None,
+    };
+    let block = rusty_mux_core::BlockId::from_uuid(
+        client
+            .request(|req| Message::CreateBlock {
+                req,
+                window,
+                size: rusty_mux_core::Size::new(80, 24).unwrap(),
+                launch,
+            })
+            .expect("id"),
+    );
+    client.request(|req| Message::Attach { req, block });
+    client.wait_for(block, "CMD21");
+    drop(client);
+    server.stop();
+
+    for run in 0..2 {
+        let server = Server::start(&dir);
+        let mut client = Client::connect(&server.socket);
+        client.request(|req| Message::Attach { req, block });
+        client.wait_ready(block);
+        let text = client.text(block);
+        assert!(text.contains("CMD21"), "run {run}: {text}");
+        assert_eq!(
+            text.matches("read-only").count(),
+            1,
+            "one marker, run {run}: {text}"
+        );
+        client.request(|req| Message::AcquireLease { req, block });
+        client.send(&Message::Input {
+            req: 900,
+            block,
+            data: b"echo nope\r".to_vec(),
+        });
+        let refused = loop {
+            match client.recv() {
+                Message::Failed {
+                    req: 900, reason, ..
+                } => break reason,
+                Message::Done { req: 900, .. } => panic!("input to a read-only block taken"),
+                _ => {}
+            }
+        };
+        assert!(refused.contains("read-only"), "{refused}");
+        drop(client);
+        server.stop();
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

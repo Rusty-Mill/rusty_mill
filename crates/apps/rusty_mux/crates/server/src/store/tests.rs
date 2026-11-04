@@ -30,6 +30,7 @@ fn one_block() -> (Manifest, BlockId) {
     let block = mux.create_block(w, Size::new(20, 4).unwrap()).unwrap();
     let started = Started {
         shell: true,
+        read_only: false,
         program: "/bin/sh".into(),
         args: Vec::new(),
         cwd: "/".into(),
@@ -57,6 +58,7 @@ fn an_empty_store_holds_nothing() {
 fn saves_and_loads_the_manifest_and_screens() {
     let store = Scratch::new("round");
     let (manifest, block) = one_block();
+    assert!(store.0.load().unwrap().is_none(), "a new store");
     store
         .0
         .save(1, &manifest, &[(block, screen(b"hello"))])
@@ -75,6 +77,7 @@ fn a_bad_screen_restarts_blank_and_a_closed_block_loses_its_screen() {
     let store = Scratch::new("stale");
     let (manifest, block) = one_block();
     fs::write(store.0.screen(block), b"not RTCP").unwrap();
+    assert!(store.0.load().unwrap().is_none());
     store.0.save(1, &manifest, &[]).unwrap();
     assert!(store.0.load().unwrap().unwrap().screens.is_empty());
     store.0.save(2, &Manifest::default(), &[]).unwrap();
@@ -88,6 +91,7 @@ fn a_bad_screen_restarts_blank_and_a_closed_block_loses_its_screen() {
 fn an_older_save_never_overwrites_a_newer_one() {
     let store = Scratch::new("order");
     let (manifest, _) = one_block();
+    store.0.load().unwrap();
     store.0.save(2, &manifest, &[]).unwrap();
     store.0.save(1, &Manifest::default(), &[]).unwrap();
     assert_eq!(store.0.load().unwrap().unwrap().manifest, manifest);
@@ -96,12 +100,32 @@ fn an_older_save_never_overwrites_a_newer_one() {
 #[test]
 fn a_bad_manifest_is_an_error_and_can_be_set_aside() {
     let store = Scratch::new("bad");
-    fs::write(store.0.dir.join(MANIFEST), "rusty_mux state 9\n").unwrap();
+    fs::write(store.0.dir.join(SESSIONS), b"not a slot file").unwrap();
     assert!(store.0.load().is_err());
     let aside = store.0.set_aside().unwrap();
-    assert!(aside.join(MANIFEST).exists());
+    assert!(aside.join(SESSIONS).exists());
     assert!(store.0.load().unwrap().is_none());
     fs::remove_dir_all(aside).unwrap();
+}
+
+#[test]
+fn a_store_has_one_server_at_a_time() {
+    let store = Scratch::new("lock");
+    assert!(Store::open(store.0.dir.clone()).is_err(), "locked");
+}
+
+#[test]
+fn many_saves_compact_and_still_load() {
+    let store = Scratch::new("compact");
+    store.0.load().unwrap();
+    let (mut manifest, _) = one_block();
+    for n in 1..=u64::from(COMPACT_EVERY) + 1 {
+        manifest.saved.sessions[0].name = format!("work {n}");
+        store.0.save(n, &manifest, &[]).unwrap();
+    }
+    drop(store.0.inner().unwrap().sessions.take());
+    let loaded = store.0.load().unwrap().unwrap();
+    assert_eq!(loaded.manifest, manifest);
 }
 
 #[cfg(unix)]
