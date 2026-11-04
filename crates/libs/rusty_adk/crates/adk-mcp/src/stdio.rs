@@ -74,11 +74,6 @@ where
         }
     });
 
-    // Ends the session if this future is dropped mid-way (its task aborted):
-    // aborting the reader pump closes the input, which ends the blocking
-    // loop and, through it, the writer pump.
-    let stop_reader = AbortOnDrop(pump_in.abort_handle());
-
     // Writer pump: every chunk is written and flushed as it arrives.
     let pump_out = rusty_tokio::spawn(async move {
         let mut writer = writer;
@@ -88,6 +83,12 @@ where
             }
         }
     });
+
+    // Ends the session if this future is dropped mid-way (its task aborted):
+    // stopping both pumps closes both channels, so the blocking loop's next
+    // read sees end of input and its next write fails, even if the peer has
+    // stopped reading.
+    let pumps = AbortOnDrop([pump_in.abort_handle(), pump_out.abort_handle()]);
 
     let config = StdioConfig {
         max_line_bytes: usize::try_from(MAX_LINE_BYTES).unwrap_or(usize::MAX),
@@ -103,9 +104,11 @@ where
     })
     .await;
 
-    drop(stop_reader);
-    // The writer pump ends once the loop (which owned the sender) is gone.
+    pump_in.abort();
+    // The writer pump flushes what is left and ends once the loop (which
+    // owned the sender) is gone.
     let _ = pump_out.await;
+    drop(pumps);
 
     if exceeded.load(Ordering::Acquire) {
         return Err(AdkError::Other(cap_error()));
@@ -119,12 +122,12 @@ where
     }
 }
 
-/// Aborts a task when dropped.
-struct AbortOnDrop(AbortHandle);
+/// Aborts the tasks when dropped.
+struct AbortOnDrop<const N: usize>([AbortHandle; N]);
 
-impl Drop for AbortOnDrop {
+impl<const N: usize> Drop for AbortOnDrop<N> {
     fn drop(&mut self) {
-        self.0.abort();
+        self.0.iter().for_each(AbortHandle::abort);
     }
 }
 

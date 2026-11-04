@@ -13,8 +13,10 @@ changelog: "Breaking: adk-mcp runs on rusty_tokio; mcp-tool-server no longer dep
   Both transports were smoke-tested with a real `tools/call`.
 - **Changed:** the version-negotiation tests now close the session and check that the server
   returns cleanly, instead of leaving it running when the runtime drops.
-- **Fixed:** dropping or aborting a `serve_stream` session mid-way now ends it: the reader
-  pump is aborted, which closes the input and ends the blocking loop and the writer pump.
-  Teardown tests keep the peer's input open and check that both an aborted server task and a
+- **Fixed:** dropping or aborting a `serve_stream` session mid-way now ends it: both pumps are
+  aborted, which closes both channels and ends the blocking loop, even when the peer has
+  stopped reading. A normal end of input still flushes every reply.
+  Teardown tests keep the peer's input open (one also stalls its output) and check that an
+  aborted server task and a
   dropped runtime (multi-thread and current-thread) end the session within a deadline. The
   runtime case needs the teardown-order fix in #1468 (card #720).
