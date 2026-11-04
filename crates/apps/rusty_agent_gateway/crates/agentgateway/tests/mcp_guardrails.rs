@@ -16,12 +16,6 @@ use agentgateway_mcp::{
     AuthorizationError, McpRequest, McpRequestResult, McpResponse, McpResponseResult,
     authorization_error, request_result, response_result,
 };
-use rmcp::{
-    ServiceExt,
-    model::{CallToolRequestParams, GetPromptRequestParams, ReadResourceRequestParams},
-    service::RunningService,
-    transport::StreamableHttpClientTransport,
-};
 use rusty_prost::Message as _;
 use rusty_prost::wkt::{Struct, Value};
 use rusty_tokio::sync::CancellationToken;
@@ -64,6 +58,7 @@ fn flatten(context: Option<Struct>) -> Vec<(String, String)> {
 
 mod common;
 use common::free_port;
+use common::mcp;
 
 fn mock_server() -> String {
     let mut path = std::env::current_exe().expect("test binary should have a path");
@@ -171,7 +166,7 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
 }
 
 struct Harness {
-    client: RunningService<rmcp::RoleClient, ()>,
+    client: mcp::Client,
     shutdown: CancellationToken,
 }
 
@@ -230,10 +225,7 @@ binds:
             .await
             .expect("gateway should bind");
 
-        let client = ()
-            .serve(StreamableHttpClientTransport::from_uri(format!(
-                "http://127.0.0.1:{port}/mcp"
-            )))
+        let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
             .await
             .expect("client should complete the MCP handshake");
 
@@ -243,7 +235,7 @@ binds:
     async fn tool_names(&self) -> Result<Vec<String>, String> {
         let mut names: Vec<String> = self
             .client
-            .list_all_tools()
+            .list_tools()
             .await
             .map_err(|err| err.to_string())?
             .into_iter()
@@ -256,24 +248,19 @@ binds:
     async fn call(&self, name: &str) -> Result<String, String> {
         let result = self
             .client
-            .call_tool(CallToolRequestParams::new(name.to_string()))
+            .call_tool(name, None)
             .await
             .map_err(|err| err.to_string())?;
-        Ok(result
-            .content
-            .iter()
-            .filter_map(|block| block.as_text().map(|t| t.text.clone()))
-            .collect::<Vec<_>>()
-            .join(""))
+        Ok(mcp::text(&result.content))
     }
 
     async fn stop(self) {
-        let _ = self.client.cancel().await;
+        let _ = self.client.close().await;
         self.shutdown.cancel();
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_sees_the_call_and_lets_it_through() {
     let (host, seen, stop) = processor(Script::Pass).await;
     let harness = Harness::start(&host, r#"{ "tools/call": full }"#).await;
@@ -295,7 +282,7 @@ async fn a_processor_sees_the_call_and_lets_it_through() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_refusal_stops_the_call_before_the_upstream() {
     let (host, seen, stop) = processor(Script::Refuse("blocked by policy")).await;
     let harness = Harness::start(&host, r#"{ "tools/call": request }"#).await;
@@ -315,7 +302,7 @@ async fn a_refusal_stops_the_call_before_the_upstream() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_rewrite_the_request() {
     // The point of a guardrail rather than a gate: redirecting `echo` to
     // `ping` is not something a yes/no answer can express.
@@ -332,7 +319,7 @@ async fn a_processor_can_rewrite_the_request() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_rewrite_the_result() {
     let (host, _, stop) = processor(Script::Rewrite(
         r#"{"content":[{"type":"text","text":"[redacted]"}],"isError":false}"#.into(),
@@ -350,7 +337,7 @@ async fn a_processor_can_rewrite_the_result() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_filter_the_catalogue_on_the_response_side() {
     let (host, seen, stop) = processor(Script::Rewrite(
         r#"{"tools":[{"name":"alpha_echo","description":"","inputSchema":{"type":"object"}}]}"#
@@ -377,7 +364,7 @@ async fn a_processor_can_filter_the_catalogue_on_the_response_side() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_method_the_processor_is_not_keyed_on_is_not_sent_to_it() {
     let (host, seen, stop) = processor(Script::Pass).await;
     let harness = Harness::start(&host, r#"{ "tools/call": full }"#).await;
@@ -393,7 +380,7 @@ async fn a_method_the_processor_is_not_keyed_on_is_not_sent_to_it() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unreachable_processor_refuses_the_call() {
     // The whole policy turns on this: a policy service that is down must not
     // become an open door.
@@ -410,7 +397,7 @@ async fn an_unreachable_processor_refuses_the_call() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn failing_open_has_to_be_asked_for() {
     let dead = free_port();
     let port = free_port();
@@ -452,29 +439,21 @@ binds:
         .await
         .expect("gateway should bind");
 
-    let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        )))
+    let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
         .await
         .expect("client should complete the MCP handshake");
 
     let result = client
-        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .call_tool("alpha_echo", None)
         .await
         .expect("failOpen serves what the processor never approved -- deliberately");
-    assert!(
-        result
-            .content
-            .iter()
-            .any(|block| block.as_text().is_some_and(|t| t.text == "alpha:echo"))
-    );
+    assert!(mcp::text(&result.content) == "alpha:echo");
 
-    let _ = client.cancel().await;
+    let _ = client.close().await;
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_that_cannot_be_addressed_fails_at_startup() {
     // Rather than turning every call into a confusing refusal at runtime.
     let port = free_port();
@@ -593,7 +572,7 @@ async fn http_target_at(
 
     let shutdown = CancellationToken::new();
     let stopping = shutdown.clone();
-    tokio::spawn(async move {
+    rusty_tokio::spawn(async move {
         stopping.cancelled().await;
         upstream.stop().await;
     });
@@ -649,33 +628,25 @@ binds:
     (port, shutdown)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_header_mutation_reaches_the_upstream_request() {
     // The load-bearing assumption of the whole feature: the change rides in
-    // the request's extensions, which rmcp carries in memory from the peer
-    // down to the transport. Nothing but a real call proves that.
+    // the request's extensions, which the gateway's MCP client carries in
+    // memory from the peer down to the transport. Nothing but a real call proves that.
     let (target_port, target_headers, stop_target) = http_target().await;
     let (host, _, stop_proc) = processor(Script::SetHeaders).await;
     let (port, shutdown) =
         start_with_http_target(&host, r#"{ "tools/call": request }"#, target_port).await;
 
-    let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        )))
+    let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
         .await
         .expect("client should complete the MCP handshake");
 
     let result = client
-        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .call_tool("alpha_echo", None)
         .await
         .expect("the call should succeed");
-    assert!(
-        result
-            .content
-            .iter()
-            .any(|b| b.as_text().is_some_and(|t| t.text == "served"))
-    );
+    assert!(mcp::text(&result.content) == "served");
 
     let seen = target_headers.lock().expect("lock").clone();
     let last = seen.last().expect("the target should have been called");
@@ -694,13 +665,13 @@ async fn a_header_mutation_reaches_the_upstream_request() {
         "the header should not have leaked onto the connection: {handshake:?}"
     );
 
-    let _ = client.cancel().await;
+    let _ = client.close().await;
     shutdown.cancel();
     stop_proc.cancel();
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_header_mutation_on_a_stdio_target_is_dropped_not_fatal() {
     // A pipe has no headers. The call should still succeed rather than
     // failing because a processor asked for something that cannot apply.
@@ -727,7 +698,7 @@ impl Harness {
     async fn prompt_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .client
-            .list_all_prompts()
+            .list_prompts()
             .await
             .expect("prompts/list should work")
             .into_iter()
@@ -740,21 +711,16 @@ impl Harness {
     async fn get_prompt(&self, name: &str) -> Result<String, String> {
         let result = self
             .client
-            .get_prompt(GetPromptRequestParams::new(name))
+            .get_prompt(name, None)
             .await
             .map_err(|err| err.to_string())?;
-        Ok(result
-            .messages
-            .iter()
-            .filter_map(|m| m.content.as_text().map(|t| t.text.clone()))
-            .collect::<Vec<_>>()
-            .join(""))
+        Ok(mcp::prompt_text(&result.messages))
     }
 
     async fn resource_uris(&self) -> Vec<String> {
         let mut uris: Vec<String> = self
             .client
-            .list_all_resources()
+            .list_resources()
             .await
             .expect("resources/list should work")
             .into_iter()
@@ -767,17 +733,17 @@ impl Harness {
     async fn read_resource(&self, uri: &str) -> Result<String, String> {
         let result = self
             .client
-            .read_resource(ReadResourceRequestParams::new(uri))
+            .read_resource(uri)
             .await
             .map_err(|err| err.to_string())?;
         match result.contents.first().expect("one content block") {
-            rmcp::model::ResourceContents::TextResourceContents { text, .. } => Ok(text.clone()),
+            mcp::proto::ResourceContents::Text { text, .. } => Ok(text.clone()),
             other => panic!("expected text contents, got {other:?}"),
         }
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_sees_a_prompt_fetch_by_its_unmuxed_name() {
     let (host, seen, stop) = processor(Script::Pass).await;
     let harness = Harness::start(&host, r#"{ "prompts/get": full }"#).await;
@@ -801,7 +767,7 @@ async fn a_processor_sees_a_prompt_fetch_by_its_unmuxed_name() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_sees_a_resource_read_by_its_unmuxed_uri() {
     // The same split as names, and the one most likely to be got wrong: a
     // processor matching on `alpha+memo:insights` would never fire.
@@ -825,7 +791,7 @@ async fn a_processor_sees_a_resource_read_by_its_unmuxed_uri() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_refuse_a_prompt_before_the_upstream() {
     let (host, seen, stop) = processor(Script::Refuse("prompts are off")).await;
     let harness = Harness::start(&host, r#"{ "prompts/get": request }"#).await;
@@ -845,7 +811,7 @@ async fn a_processor_can_refuse_a_prompt_before_the_upstream() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_refuse_a_resource_read() {
     let (host, _, stop) = processor(Script::Refuse("that one is sealed")).await;
     let harness = Harness::start(&host, r#"{ "resources/read": request }"#).await;
@@ -860,7 +826,7 @@ async fn a_processor_can_refuse_a_resource_read() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_redact_a_resource_it_let_through() {
     // The case that makes this a guardrail rather than a gate: the read is
     // allowed, and what comes back is not what the upstream sent.
@@ -880,7 +846,7 @@ async fn a_processor_can_redact_a_resource_it_let_through() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_rewrite_a_prompts_messages() {
     let (host, _, stop) = processor(Script::Rewrite(
         r#"{"messages":[{"role":"user","content":{"type":"text","text":"replaced"}}]}"#.into(),
@@ -897,7 +863,7 @@ async fn a_processor_can_rewrite_a_prompts_messages() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_filter_the_prompt_listing() {
     let (host, seen, stop) = processor(Script::Rewrite(
         r#"{"prompts":[{"name":"alpha_summarize","description":"kept"}]}"#.into(),
@@ -918,7 +884,7 @@ async fn a_processor_can_filter_the_prompt_listing() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_filter_the_resource_listing() {
     let (host, seen, stop) = processor(Script::Rewrite(
         r#"{"resources":[{"uri":"alpha+memo:insights","name":"memo:insights"}]}"#.into(),
@@ -942,7 +908,7 @@ async fn a_processor_can_filter_the_resource_listing() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_wildcard_can_hook_every_prompt_and_resource_method() {
     // The point of the `prefix/*` form: one processor over a whole namespace.
     let (host, seen, stop) = processor(Script::Pass).await;
@@ -952,7 +918,7 @@ async fn a_wildcard_can_hook_every_prompt_and_resource_method() {
     harness.read_resource("alpha+memo:insights").await.ok();
     let _ = harness
         .client
-        .list_all_resource_templates()
+        .list_resource_templates()
         .await
         .expect("resources/templates/list should work");
 
@@ -991,7 +957,7 @@ async fn a_wildcard_can_hook_every_prompt_and_resource_method() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unreachable_processor_refuses_a_prompt_fetch_too() {
     // Failing closed is not a tools-only property.
     let dead = free_port();
@@ -1016,7 +982,7 @@ async fn an_unreachable_processor_refuses_a_prompt_fetch_too() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_list_rewrite_on_the_request_phase_is_discarded_for_prompts_too() {
     // `prompts/list` carries no params, so there is nothing to rewrite on the
     // way in. The listing should come back whole rather than mangled.
@@ -1032,7 +998,7 @@ async fn a_list_rewrite_on_the_request_phase_is_discarded_for_prompts_too() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_header_mutation_applies_to_a_resource_read() {
     // Header changes are a request-phase property of the chain, not of
     // tools/call -- but a stdio target has no headers, so this only checks the
@@ -1049,7 +1015,7 @@ async fn a_header_mutation_applies_to_a_resource_read() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_rewrite_which_prompt_is_fetched() {
     // The request phase can redirect, not only refuse. Upstream is explicit
     // that a rewrite is not re-authorized, so this is a deliberate hole in the
@@ -1067,7 +1033,7 @@ async fn a_processor_can_rewrite_which_prompt_is_fetched() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_rewrite_which_resource_is_read() {
     let (host, _, stop) = processor(Script::Rewrite(r#"{"uri":"file:///secret"}"#.into())).await;
     let harness = Harness::start(&host, r#"{ "resources/read": request }"#).await;
@@ -1081,7 +1047,7 @@ async fn a_processor_can_rewrite_which_resource_is_read() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_rewritten_uri_that_carries_the_targets_own_prefix_is_unwrapped() {
     // A processor handed `memo:insights` may well hand back the federated form
     // it saw on the listing. The upstream only knows its own URIs, so the
@@ -1099,7 +1065,7 @@ async fn a_rewritten_uri_that_carries_the_targets_own_prefix_is_unwrapped() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_refuse_a_listing_outright() {
     for (methods, refused) in [
         (r#"{ "prompts/list": request }"#, "prompts"),
@@ -1110,9 +1076,9 @@ async fn a_processor_can_refuse_a_listing_outright() {
         let harness = Harness::start(&host, methods).await;
 
         let err = match refused {
-            "prompts" => harness.client.list_prompts(None).await.err(),
-            "resources" => harness.client.list_resources(None).await.err(),
-            _ => harness.client.list_resource_templates(None).await.err(),
+            "prompts" => harness.client.list_prompts().await.err(),
+            "resources" => harness.client.list_resources().await.err(),
+            _ => harness.client.list_resource_templates().await.err(),
         };
         let err = err
             .expect("a refused listing should not succeed")
@@ -1124,7 +1090,7 @@ async fn a_processor_can_refuse_a_listing_outright() {
     }
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn rules_are_applied_before_a_processor_is_consulted() {
     // A processor should only be asked about calls that were otherwise going
     // to happen -- the same ordering tools use. Otherwise a guardrail would be
@@ -1172,15 +1138,12 @@ binds:
         .await
         .expect("gateway should bind");
 
-    let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        )))
+    let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
         .await
         .expect("client should complete the MCP handshake");
 
     let err = client
-        .get_prompt(GetPromptRequestParams::new("alpha_leak"))
+        .get_prompt("alpha_leak", None)
         .await
         .expect_err("the rule should have refused this")
         .to_string();
@@ -1191,12 +1154,12 @@ binds:
         "a processor must not be consulted about a call the rules already refused"
     );
 
-    let _ = client.cancel().await;
+    let _ = client.close().await;
     shutdown.cancel();
     stop.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_response_phase_sees_a_resource_read_re_qualified() {
     // The asymmetry: the request phase shows a processor the upstream's own
     // URI, the response phase shows what the client will get. A filter written
@@ -1269,10 +1232,7 @@ binds:
             .await
             .expect("gateway should bind");
 
-        let client = ()
-            .serve(StreamableHttpClientTransport::from_uri(format!(
-                "http://127.0.0.1:{port}/mcp"
-            )))
+        let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
             .await
             .expect("client should complete the MCP handshake");
 
@@ -1286,7 +1246,7 @@ fn sent(seen: &Seen, index: usize) -> Vec<(String, String)> {
     fields
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn metadata_names_the_prompt_end_to_end() {
     let (host, seen, stop) = processor(Script::Pass).await;
     let harness = Harness::with_metadata(
@@ -1314,7 +1274,7 @@ async fn metadata_names_the_prompt_end_to_end() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn metadata_names_the_resource_end_to_end() {
     let (host, seen, stop) = processor(Script::Pass).await;
     let harness = Harness::with_metadata(
@@ -1336,7 +1296,7 @@ async fn metadata_names_the_resource_end_to_end() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn metadata_names_the_tool_end_to_end() {
     let (host, seen, stop) = processor(Script::Pass).await;
     let harness = Harness::with_metadata(
@@ -1357,7 +1317,7 @@ async fn metadata_names_the_tool_end_to_end() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_listing_sends_no_subject_but_keeps_the_rest() {
     let (host, seen, stop) = processor(Script::Pass).await;
     let harness = Harness::with_metadata(
@@ -1379,7 +1339,7 @@ async fn a_listing_sends_no_subject_but_keeps_the_rest() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_response_phase_names_what_was_actually_fetched() {
     // A request-phase rewrite changes what the result is about, and the
     // response phase should describe the result it is looking at rather than
@@ -1467,29 +1427,23 @@ binds:
 /// would be the handshake or a listing, and every header assertion below would
 /// be checking the wrong request.
 async fn call_through(port: u16) {
-    let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        )))
+    let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
         .await
         .expect("client should complete the MCP handshake");
 
     let result = client
-        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .call_tool("alpha_echo", None)
         .await
         .expect("the call should succeed");
     assert!(
-        result
-            .content
-            .iter()
-            .any(|b| b.as_text().is_some_and(|t| t.text == "served")),
+        mcp::text(&result.content) == "served",
         "and should have reached the HTTP target"
     );
 
-    let _ = client.cancel().await;
+    let _ = client.close().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_guardrails_value_reaches_the_upstream_as_a_header() {
     // The whole point: a processor classifies a call in-band, and the MCP
     // server behind the gateway is told, without speaking to the processor.
@@ -1524,7 +1478,7 @@ async fn a_guardrails_value_reaches_the_upstream_as_a_header() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_unresolved_template_sends_no_header_at_all() {
     // Rather than sending `{{mcpGuardrails.absent}}` upstream as though it
     // were data.
@@ -1553,7 +1507,7 @@ async fn an_unresolved_template_sends_no_header_at_all() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_modifier_applies_without_any_guardrail_at_all() {
     // `requestHeaderModifier` used to parse and do nothing on an MCP route.
     // A static header must work with no processor in the picture.
@@ -1581,7 +1535,7 @@ async fn a_modifier_applies_without_any_guardrail_at_all() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_route_wins_over_a_processors_header_mutation() {
     let (target_port, target_headers, stop_target) = http_target().await;
     let (host, _, stop_proc) = processor(Script::SetHeaders).await;
@@ -1611,7 +1565,7 @@ async fn the_route_wins_over_a_processors_header_mutation() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_bad_template_fails_at_startup() {
     // Rather than a header that silently never resolves, which reads exactly
     // like a guardrail that never ran.
@@ -1647,7 +1601,7 @@ binds:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn the_startup_warm_up_carries_the_routes_static_headers() {
     // The gateway lists tools once at startup to build its name index. An
     // upstream that requires a static header would reject that one request if
@@ -1663,7 +1617,7 @@ async fn the_startup_warm_up_carries_the_routes_static_headers() {
     .await;
 
     // Give the warm-up a moment; it runs as the federation comes up.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    rusty_tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let seen = target_headers.lock().expect("lock").clone();
     assert!(
@@ -1733,7 +1687,7 @@ binds:
 /// The headers on the gateway's own HTTP response to an MCP request.
 async fn response_headers(port: u16) -> Vec<(String, String)> {
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
-    let response = reqwest::Client::new()
+    let response = common::http::Client::new()
         .post(format!("http://127.0.0.1:{port}/mcp"))
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
@@ -1748,22 +1702,13 @@ async fn response_headers(port: u16) -> Vec<(String, String)> {
         response.status()
     );
 
-    response
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                v.to_str().unwrap_or_default().to_string(),
-            )
-        })
-        .collect()
+    response.header_pairs()
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_modifier_reaches_the_client() {
-    // An MCP route has no upstream HTTP response to modify -- rmcp's transport
-    // consumes those -- so the modifier acts on the response the gateway
+    // An MCP route has no upstream HTTP response to modify -- the gateway's MCP
+    // transport consumes those -- so the modifier acts on the response the gateway
     // itself produces, which is the only one a client ever sees.
     let (port, shutdown) =
         with_response_modifier("                set:\n                  x-served-by: 'rusty'")
@@ -1780,7 +1725,7 @@ async fn a_response_modifier_reaches_the_client() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_modifier_can_strip_a_header_the_gateway_would_have_sent() {
     let (port, shutdown) =
         with_response_modifier("                remove: ['mcp-session-id']").await;
@@ -1794,7 +1739,7 @@ async fn a_response_modifier_can_strip_a_header_the_gateway_would_have_sent() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_response_modifier_add_appends_rather_than_replacing() {
     let (port, shutdown) =
         with_response_modifier("                add:\n                  x-tag: 'one'").await;
@@ -1809,7 +1754,7 @@ async fn a_response_modifier_add_appends_rather_than_replacing() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_bad_response_header_fails_at_startup() {
     let port = free_port();
     let yaml = format!(
@@ -1856,7 +1801,7 @@ async fn target_at(mount: &'static str) -> (u16, SeenPaths, CancellationToken) {
     (port, paths, shutdown)
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_full_path_rewrite_moves_a_single_targets_endpoint() {
     let (target_port, paths, stop_target) = target_at("/elsewhere").await;
 
@@ -1901,22 +1846,14 @@ binds:
         .await
         .expect("gateway should bind");
 
-    let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        )))
+    let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
         .await
         .expect("client should complete the MCP handshake");
     let result = client
-        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .call_tool("alpha_echo", None)
         .await
         .expect("the call should reach the target");
-    assert!(
-        result
-            .content
-            .iter()
-            .any(|b| b.as_text().is_some_and(|t| t.text == "served"))
-    );
+    assert!(mcp::text(&result.content) == "served");
 
     let seen = paths.lock().expect("lock").clone();
     assert!(
@@ -1925,12 +1862,12 @@ binds:
     );
     assert!(!seen.is_empty(), "the target should have been reached");
 
-    let _ = client.cancel().await;
+    let _ = client.close().await;
     shutdown.cancel();
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn without_the_rewrite_the_targets_own_path_is_used() {
     // The control: the same target mounted somewhere the config does not name
     // must not be reachable, or the test above proves nothing.
@@ -2016,26 +1953,18 @@ binds:
 }
 
 async fn echo_through(port: u16) {
-    let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        )))
+    let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
         .await
         .expect("client should complete the MCP handshake");
     let result = client
-        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .call_tool("alpha_echo", None)
         .await
         .expect("the call should reach the target");
-    assert!(
-        result
-            .content
-            .iter()
-            .any(|b| b.as_text().is_some_and(|t| t.text == "served"))
-    );
-    let _ = client.cancel().await;
+    assert!(mcp::text(&result.content) == "served");
+    let _ = client.close().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_authority_rewrite_moves_a_single_targets_address() {
     let (real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
     let dead = free_port();
@@ -2056,7 +1985,7 @@ async fn an_authority_rewrite_moves_a_single_targets_address() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn without_the_authority_rewrite_the_configured_address_is_used() {
     // The control: the same misconfiguration must fail without the rewrite,
     // or the test above proves nothing.
@@ -2089,7 +2018,7 @@ binds:
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_authority_without_a_port_keeps_the_targets_own() {
     // The target names a port explicitly and the override did not, so
     // dropping to 80 would break a config that only meant to move hosts.
@@ -2109,7 +2038,7 @@ async fn an_authority_without_a_port_keeps_the_targets_own() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn authority_and_path_compose() {
     let (real_port, _headers, paths, stop_target) = http_target_at("/elsewhere").await;
     let dead = free_port();
@@ -2136,7 +2065,7 @@ async fn authority_and_path_compose() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_authority_carrying_credentials_fails_at_startup() {
     // An authority may legally hold `user:password@`, but putting a credential
     // in an upstream URI hides it somewhere nobody looks and sends it on every
@@ -2158,7 +2087,7 @@ async fn an_authority_carrying_credentials_fails_at_startup() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_malformed_authority_fails_at_startup() {
     let (real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
 
@@ -2225,7 +2154,7 @@ binds:
     Ok((port, shutdown))
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_prefix_rewrite_replaces_the_matched_prefix_of_the_targets_path() {
     // The target's configured path is `/mcp/v1`; the route matches `/mcp` and
     // rewrites that prefix to `/rpc`, so the upstream is dialled at `/rpc/v1`.
@@ -2249,7 +2178,7 @@ async fn a_prefix_rewrite_replaces_the_matched_prefix_of_the_targets_path() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn without_the_prefix_rewrite_the_configured_path_is_used() {
     // The control: the target is mounted only where the rewrite would put it,
     // so the same config without the rewrite must fail to come up.
@@ -2284,7 +2213,7 @@ binds:
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_prefix_rewrite_degenerates_to_a_full_replacement_with_nothing_after_it() {
     // Target path `/mcp`, route prefix `/mcp`: there is no remainder, so the
     // replacement stands alone. Worth pinning because it is the common shape
@@ -2307,7 +2236,7 @@ async fn a_prefix_rewrite_degenerates_to_a_full_replacement_with_nothing_after_i
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_path_not_carrying_the_prefix_is_prepended_rather_than_replaced() {
     // The proxy's rule, unchanged, and the one worth knowing about: when the
     // path does not start with the matched prefix there is nothing to strip,
@@ -2340,7 +2269,7 @@ async fn a_path_not_carrying_the_prefix_is_prepended_rather_than_replaced() {
     stop_target.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_prefix_rewrite_is_ignored_when_the_route_matches_several_prefixes() {
     // Which prefix a request matched is not knowable at startup, so the
     // target keeps its configured path. `--check` reports the config.
@@ -2404,7 +2333,7 @@ binds:
 // `urlRewrite` over a federation of several targets
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_path_rewrite_moves_every_target_to_its_own_rewritten_path() {
     // Each target keeps its own host and gets its own path transformed, which
     // is what makes a path rewrite generalise where an authority cannot.
@@ -2457,15 +2386,12 @@ binds:
         .await
         .expect("gateway should bind");
 
-    let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        )))
+    let client = mcp::connect(format!("http://127.0.0.1:{port}/mcp"))
         .await
         .expect("client should complete the MCP handshake");
 
     let names: Vec<String> = client
-        .list_all_tools()
+        .list_tools()
         .await
         .expect("tools/list should work")
         .into_iter()
@@ -2484,13 +2410,13 @@ binds:
         "{seen_b:?}"
     );
 
-    let _ = client.cancel().await;
+    let _ = client.close().await;
     shutdown.cancel();
     stop_alpha.cancel();
     stop_beta.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_full_path_rewrite_gives_every_target_the_same_path_on_its_own_host() {
     // A fleet of identical servers on different hosts is a normal shape, and
     // `full` is how you point at all of them at once.
@@ -2537,7 +2463,7 @@ binds:
         .await
         .expect("gateway should bind");
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    rusty_tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     assert!(
         alpha_paths
@@ -2559,7 +2485,7 @@ binds:
     stop_beta.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn an_authority_over_several_targets_is_reported_and_not_applied() {
     // Pointing every target at one server is a collapse, not a redirect: a
     // target's address is what distinguishes it from the others. The path half
@@ -2619,7 +2545,7 @@ binds:
         .await
         .expect("gateway should bind");
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    rusty_tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // beta was reached on its own port, not collapsed onto alpha's.
     assert!(
@@ -2645,7 +2571,7 @@ binds:
 // `mcp.via` — collapsing a federation onto one address
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn via_dials_every_target_through_one_address() {
     // One server answering both paths, standing in for an egress proxy. Both
     // targets name ports nothing listens on, so `via` is the only thing that
@@ -2703,7 +2629,7 @@ binds:
         .await
         .expect("gateway should bind");
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    rusty_tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(
         !paths.lock().expect("lock").is_empty(),
         "the egress address should have been dialled"
@@ -2713,7 +2639,7 @@ binds:
     stop_egress.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn without_via_the_configured_addresses_are_used() {
     // The control: the same config without `via` cannot reach anything.
     let (_egress_port, _headers, _paths, stop_egress) = http_target_at("/a").await;
@@ -2745,7 +2671,7 @@ binds:
     stop_egress.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn via_keeps_each_targets_path() {
     // What tells the targets apart once collapsed. `/rpc/a` and `/rpc/b` on
     // one address are two distinct servers as far as the federation is
@@ -2795,7 +2721,7 @@ binds:
     stop_egress.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn via_wins_over_a_url_rewrite_authority() {
     // Both land in the same place. The backend's own field is the more
     // specific of the two and the one that names targets, so it wins -- and
@@ -2845,7 +2771,7 @@ binds:
     stop_egress.cancel();
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_via_carrying_credentials_fails_at_startup() {
     let port = free_port();
     let yaml = format!(
@@ -2877,7 +2803,7 @@ binds:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_name_a_backend_instead_of_an_address() {
     // The address is written once at the top level and referred to by name,
     // which is what upstream's `backends:` list is for.
@@ -2896,7 +2822,7 @@ async fn a_processor_can_name_a_backend_instead_of_an_address() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_can_name_a_service_instead_of_an_address() {
     let (host, seen, stop) = processor(Script::Pass).await;
     let port: u16 = host
@@ -2923,7 +2849,7 @@ async fn a_processor_can_name_a_service_instead_of_an_address() {
     harness.stop().await;
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn a_processor_naming_a_backend_that_does_not_exist_fails_at_startup() {
     let port = free_port();
     let yaml = format!(
@@ -2958,7 +2884,7 @@ backends:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn check_reports_a_processor_that_names_no_address() {
     let config = Config::from_yaml(
         r#"
@@ -2984,7 +2910,7 @@ binds:
     );
 }
 
-#[tokio::test]
+#[rusty_tokio::test]
 async fn check_reports_a_processor_that_names_two_addresses() {
     // Naming two says two different things, and picking either is a guess.
     let config = Config::from_yaml(

@@ -8,6 +8,7 @@ use std::sync::{LazyLock, Mutex};
 use fs4::fs_std::FileExt;
 
 pub mod http;
+pub mod mcp;
 
 /// Render a filesystem path for splicing into a *double-quoted* YAML scalar.
 ///
@@ -133,7 +134,7 @@ pub fn claim_band(directory: &Path) -> Option<(File, u32)> {
 /// The `rusty_tokio` runtime the gateway under test and its mock upstreams
 /// run on.
 ///
-/// The MCP suites still drive the gateway with tokio clients (`rmcp`), while
+/// `tls.rs` still drives the gateway with a tokio client (`reqwest`), while
 /// the gateway's own timers and sockets, and the `rusty_axum` mock upstreams,
 /// are `rusty_tokio`'s and need a runtime of their own. So the gateway is
 /// built and served here, and a test reaches it over sockets as any client
