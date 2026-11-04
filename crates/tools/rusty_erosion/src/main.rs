@@ -300,12 +300,15 @@ fn base_snapshot(base: &str) -> Result<Snapshot, String> {
 
 /// The changed files in the working tree, read as git sees them: Rust is
 /// read only when it is a regular file reached through real directories of
-/// this repository (a symlinked or replaced ancestor, or one inside a
-/// submodule, means git sees it deleted). A submodule itself is skipped, as
-/// in the base, and anything else that is there is unreadable. Other languages are not touched at all
+/// this repository (a symlinked or replaced ancestor, or a gitlink one,
+/// means git sees it deleted). A gitlink itself is skipped, as in the base,
+/// and anything else that is there is unreadable. Gitlinks come from the
+/// index, not from finding a `.git`: the parent can still track files in a
+/// directory that holds a nested repository. Other languages are not touched at all
 /// (D45), so nothing about them, not even a failed lookup, decides the
 /// result.
 fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Snapshot, String> {
+    let gitlinks = index_gitlinks()?;
     let mut snap = Snapshot::default();
     for path in changed {
         match classify(path) {
@@ -313,10 +316,11 @@ fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Sn
             FileClass::Unmeasured => {
                 snap.other.insert(path.clone());
             }
+            FileClass::Rust if gitlinks.contains(path) => {}
             FileClass::Rust if mangled.contains(path) => {
                 snap.unreadable.insert(path.clone());
             }
-            FileClass::Rust => match entry(path)? {
+            FileClass::Rust => match entry(path, &gitlinks)? {
                 Entry::Absent => {}
                 Entry::Special => {
                     snap.unreadable.insert(path.clone());
@@ -328,6 +332,21 @@ fn worktree(changed: &BTreeSet<String>, mangled: &BTreeSet<String>) -> Result<Sn
     Ok(snap)
 }
 
+/// Index entries with mode `160000`: the candidate's submodules.
+fn index_gitlinks() -> Result<BTreeSet<String>, String> {
+    let mut out = BTreeSet::new();
+    for entry in git(&["ls-files", "-s", "-z"])?.split(|b| *b == 0) {
+        // `<mode> <object> <stage>\t<path>`
+        let Some(tab) = entry.iter().position(|b| *b == b'\t') else {
+            continue;
+        };
+        if entry.starts_with(b"160000 ") {
+            out.insert(String::from_utf8_lossy(&entry[tab + 1..]).into_owned());
+        }
+    }
+    Ok(out)
+}
+
 /// A working-tree path, without following any symlink.
 enum Entry {
     /// Deleted, as git sees it.
@@ -337,7 +356,7 @@ enum Entry {
     File(Vec<u8>),
 }
 
-fn entry(path: &str) -> Result<Entry, String> {
+fn entry(path: &str, gitlinks: &BTreeSet<String>) -> Result<Entry, String> {
     let gone = |e: &std::io::Error| {
         matches!(
             e.kind(),
@@ -347,14 +366,18 @@ fn entry(path: &str) -> Result<Entry, String> {
     let mut dir = std::path::PathBuf::new();
     let mut parts: Vec<&str> = path.split('/').collect();
     let name = parts.pop().unwrap_or_default();
+    let mut prefix = String::new();
     for part in parts {
         dir.push(part);
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(part);
+        // Under a gitlink is the submodule's tree, not this one's.
+        if gitlinks.contains(&prefix) {
+            return Ok(Entry::Absent);
+        }
         match std::fs::symlink_metadata(&dir) {
-            // A nested repository (a submodule, staged or not) is a git
-            // boundary: what is under it is not this tree's.
-            Ok(m) if m.is_dir() && std::fs::symlink_metadata(dir.join(".git")).is_ok() => {
-                return Ok(Entry::Absent);
-            }
             Ok(m) if m.is_dir() => {}
             Ok(_) => return Ok(Entry::Absent),
             Err(e) if gone(&e) => return Ok(Entry::Absent),
@@ -366,8 +389,7 @@ fn entry(path: &str) -> Result<Entry, String> {
         Ok(m) if m.is_file() => std::fs::read(&dir)
             .map(Entry::File)
             .map_err(|e| format!("{path}: {e}")),
-        // Git lists a directory only as a submodule, which the base skips
-        // too, or as a file since replaced by one: never Rust source.
+        // A file since replaced by a directory: git sees it deleted.
         Ok(m) if m.is_dir() => Ok(Entry::Absent),
         Ok(_) => Ok(Entry::Special),
         Err(e) if gone(&e) => Ok(Entry::Absent),

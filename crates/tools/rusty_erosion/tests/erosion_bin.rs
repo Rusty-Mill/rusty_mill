@@ -302,12 +302,17 @@ fn rust_replaced_by_a_submodule_is_a_deletion_not_read() {
     let repo = Repo::new("subrepl");
     let base = repo.head();
     let rungs = "    if true { }\n".repeat(20);
+    repo.git(&["rm", "--cached", "--quiet", "src/a.rs"]);
     std::fs::remove_dir_all(repo.dir.join("src")).expect("rm");
     nested_repo(
         &repo.dir.join("src"),
         &[("a.rs", &format!("pub fn total() {{\n{rungs}}}\n"))],
     );
     repo.git(&["add", "src"]);
+    // The intended case: `src` is a gitlink and `src/a.rs` left the index.
+    assert!(repo.git(&["ls-files", "-s", "src"]).starts_with("160000 "));
+    let status = repo.git(&["diff", "--name-status", "--no-renames", &base]);
+    assert!(status.contains("D\tsrc/a.rs"), "{status}");
     let out = repo.erosion(&enforcing(&base));
     assert_eq!(out.status.code(), Some(0), "{}", stdout(&out));
     let line = stdout(&out);
@@ -316,6 +321,22 @@ fn rust_replaced_by_a_submodule_is_a_deletion_not_read() {
         line.contains("\"concentration_bp\":{\"base\":0,\"candidate\":0"),
         "{line}"
     );
+}
+
+#[test]
+fn parent_tracked_rust_beside_a_nested_git_is_still_measured() {
+    let repo = Repo::new("subkeep");
+    let base = repo.head();
+    // A nested repository in `src`, while the parent still tracks src/a.rs.
+    nested_repo(&repo.dir.join("src"), &[("note.txt", "x\n")]);
+    assert!(
+        repo.git(&["ls-files", "-s", "src/a.rs"])
+            .starts_with("100644 ")
+    );
+    repo.write("src/a.rs", &format!("{ORIGINAL}{PASTED}"));
+    let out = repo.erosion(&enforcing(&base));
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(stdout(&out).contains("\"functions\":1"), "{}", stdout(&out));
 }
 
 #[test]
