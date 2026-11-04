@@ -36,7 +36,7 @@ Precise contracts used by this guide:
 | D17 | Build in the rusty_mill monorepo | Agreed 2026-11-02 |
 | D18 | The dedup experiment gets a fresh repo and intent only | Agreed 2026-11-01 |
 | D19 | The Factory repo holds process and config only | Agreed 2026-11-02 |
-| D20 | No fourth executor: extend orch | Agreed 2026-11-02 |
+| D20 | No fourth executor: extend orch (reopened by D81) | Agreed 2026-11-02; reopened 2026-11-04 (D81) |
 | D21 | Thin slice first, then let it build itself | Agreed 2026-11-01 |
 | D22 | Ground truth sits outside the agents' loop | Agreed 2026-11-02; designed in D37 |
 | D23 | Defer existing code and the smaller gaps | Agreed 2026-11-02 |
@@ -82,12 +82,15 @@ Precise contracts used by this guide:
 | D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
-| D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
+| D66 | The #600 builder-session design is approved (launch path reopened by D81) | [stated] 2026-11-04 (#600); reopened 2026-11-04 (D81) |
 | D74 | #708 alien review lens unparked (supersedes D61) | [stated] 2026-11-04 (#708) |
 | D75 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
 | D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
-| D78 | Design mux-hosted agent ptys (D20 and D66's launch path reopened for that design) | [stated] 2026-11-04 (mux, #600) |
+| D78 | Design mux-hosted agent ptys (D20 and D66's launch path reopened for that design) (superseded by D81) | [stated] 2026-11-04 (mux, #600) |
+| D79 | Tools go through the gateway, and the agent process is jailed | [stated] 2026-11-04 (#726) |
+| D80 | orch and the gateway stay separate | [stated] 2026-11-04 (#726) |
+| D81 | Agents get mux-hosted ptys (supersedes D78; reopens D20 and D66) | [stated] 2026-11-04 (mux, #600, #726) |
 
 ## D1. Lenses, not stages
 
@@ -213,6 +216,7 @@ Precise contracts used by this guide:
 **Why.** A fourth would deepen the duplication the consolidation audit is trying to remove.
 **Rejected.** A new standalone executor.
 **Resolved 2026-11-02.** The reconnaissance found super-board already retired (2026-10-28), so two executors remain. The lens runner extends orch, next to the dispatcher on orch's existing model port. mill-runner is left alone.
+**Reopened 2026-11-04 (D81).** Nano: "Option C [stated]. Agents get mux-hosted ptys. This deliberately reopens D20 and D66; log both as reopened, with this as the reason." (thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z)). The text above stands until the D81 design is approved; that design must show D20's guarantees still hold with orch deciding and the mux hosting.
 
 ## D21. Thin slice first, then let it build itself
 
@@ -587,6 +591,7 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_c00104fb2fa0499c8f471bddcbb64cbc
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
+**Reopened 2026-11-04 (D81).** Nano reopened D66 together with D20 for mux-hosted agent ptys (thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z)), quoted in D20. The builder launch path (the orch-bbp builder launch profile) is what the D81 design revisits; the rest of D66 stands until that design is approved.
 
 ## D74. #708 alien review lens unparked (supersedes D61)
 
@@ -638,3 +643,38 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [stated] · remind-me: mem_8d721e801bdf4d65a98e6035ad7c6b37
 **Key.** lel:mux:hosted-agents-design
 **Source.** Nano tapped option C "Design mux-hosted agents" ("The mux hosts agent ptys. This reopens D20 (no fourth executor) and the approved #600 design.") on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4MQRCC8E9wvaXezDJg8oqev ("Choose how agents should appear in rusty_mux panes"), 2026-11-04T22:28:51Z; preceded by thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4Nuc7mwNdskgzVg6vK8gWfC (20:07Z), "could the lens runner not be a mux hosted agent?". Context: remind-me mem_d92731e7311c4e90ae9256036eff3cd1 (rusty_mux stays an agent substrate, no orchestration), PR #1470 roadmap arc 4.
+**Superseded 2026-11-04 by D81.** Nano decided that agents get mux-hosted ptys, so D78's "design only; doesn't decide that the mux hosts" framing no longer holds. Design first (D25) still applies.
+
+## D79. Tools go through the gateway, and the agent process is jailed
+
+**Decision.** #726's "every action passes through the sandbox via ACP" is replaced by two parts. First, tools go through the gateway: it extends agentgateway-mcp, not rp-mcp, and enforces per call on everything that leaves the jail (push, PR, merge, board, secrets, network). Second, the agent process is jailed, which limits what it can reach: namespaces and a cgroup, overlayfs mounts plus rusty_sandbox Landlock, egress denied by default except to the gateway, and seccomp. No secrets go inside; the agent gets only a short-lived token scoped to the lens and the claim. An agent_cloud microVM around it is optional, and required for untrusted agents. The agent's built-in tools stay on; edits inside the jail land only in the agent's own throwaway layer. Audit comes from a witness outside the jail, not from the agent: the upper-layer diff, an exec log (audit/eBPF by cgroup) and the gateway's tool-call log, posted on the claim as hashed digests. Denials and out-of-scope writes are posted right away. ACP `session/update` is self-reported and low-trust; a mismatch with the witness counts as evidence against the claim. ACP is the adapter orch uses to drive agent sessions (compared with the existing executors on #594), not a security boundary. Holes to plug: shared `.git` (a read-only object store, with a per-agent clone via `objects/info/alternates`) and shared sccache (read-only for critics, content-keyed writes for builders).
+**Why.** Spike #727 showed ACP can't enforce anything: the Claude Code adapter stopped delegating fs and terminal in v0.18.0, Codex runs commands in its own sandbox, ACP v2 drops client fs and terminal, and `request_permission` is only a prompt. Risky actions all leave the jail through tools or the network, where the gateway and egress rules can govern them.
+**Rejected.** Every action passing through the sandbox via ACP. Building the gateway on rp-mcp.
+**Tag.** [stated] · remind-me: mem_b37d92b6e738462b95873adb4d4250ea
+**Key.** lel:726:gateway-and-jailed-agent
+**Source.** Mill Board card #726, comment by claude-cloud at 1793816610843 ms, "Decisions, Nano, 2026-11-04 (after spike #727)", D-a. Nano asked for it to be in this file in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z).
+
+## D80. orch and the gateway stay separate
+
+**Decision.** orch decides: it composes the lens, picks the model, drives the ACP session and mints the token. The gateway enforces: it checks the token, applies the TOML lens policy, filters tools and passes identity upstream. The gateway runs as its own process, as a security boundary, while orch stays a monolith. Neither imports the other; their shared contract is the lens/policy schema plus the token's claims, kept in Factory config. The gateway also serves callers orch didn't launch. Upstream modes: stateless servers are pooled, with identity sent on each call (remind-me, Mill Board, Tick, web); GitHub is pooled per credential; stateful servers get a session per agent (sandbox fs/shell, browser, REA); unknown servers default to per-session. Gmail, Drive and Calendar aren't exposed. The gateway sets the actor on Mill Board and `written_by` on remind-me from the token, and strips any actor value the agent supplies. Build order (from #727): session tied to token (S), identity passed upstream (M), per-session upstream connections and teardown (L+M), TOML lens policy (M), sandbox fs/shell MCP (M), process jail (L), skill libraries (M).
+**Why.** Separation of duties: a bug or prompt injection in orch can't bypass enforcement. Hard fault isolation around a security boundary is a valid reason to run a separate service.
+**Rejected.** Enforcement inside orch. Either side importing the other.
+**Tag.** [stated] · remind-me: mem_4c1e425c3d2b4903b3cd6f6aae5e37e6
+**Key.** lel:726:orch-gateway-separate
+**Source.** Mill Board card #726, comment by claude-cloud at 1793816610843 ms, "Decisions, Nano, 2026-11-04 (after spike #727)", D-b. Nano asked for it to be in this file in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z).
+
+## D81. Agents get mux-hosted ptys (supersedes D78; reopens D20 and D66)
+
+**Decision.** Let Em Loose agents run in rusty_mux-hosted ptys. This supersedes D78's narrower "design only, doesn't decide that the mux hosts" framing, and deliberately reopens D20 and D66 (see their Reopened notes). The design follows six constraints:
+1. **orch decides, mux hosts.** orch requests a block. The block's process is the jail launcher (rusty_sandbox plus #726's mounts, seccomp and token, D79), which execs the agent. The design specifies the mux API orch needs (open, kill, quiesce, process-group and slot-hold semantics) and shows that D20's guarantees still hold.
+2. **The mux socket never enters the jail.** The `RUSTY_MUX_SOCKET` scrub stays in orch-bbp's SCRUB. The pty crosses the boundary; the control socket doesn't (D13).
+3. **Human input is off by default.** Takeover is explicit, and every takeover and input batch is recorded on the board against the claim. The design proposes the BBP event shape as an ask-first schema change.
+4. **Record vs. display.** The block shows orch's ACP `session/update` stream and the live pty. Evidence stays the witness diff and exec log plus the gateway log (D79). Mux scrollback is never evidence.
+5. **Topology.** The mux server runs on BaileyAi (D53); rusty_term on Nano's desktop attaches remotely. The design checks whether rusty_mux supports remote attach and, if not, sizes the work.
+6. **Scope.** #600 builders first, then lens sessions under #726. Codex stays a one-shot lens in v0 (D64).
+Design first (D25): the design doc goes in `docs/projects/let-em-loose/` for Nano's approval; no code. Rusty Term owns the mux and term side, LEL owns orch launch, the jail and board events: one cross-project card, one PR per side.
+**Why.** Nano wants agents to live in mux blocks, one environment instead of a watcher over logs. Keeping orch as the decider, the jail as the block's process and the witness as the only evidence keeps D13, D3 and D22 intact.
+**Rejected.** A watch-only card after #600 or now (D78's options A and B). Treating mux scrollback or the ACP stream as evidence.
+**Tag.** [stated] · remind-me: mem_833a5f7ac502415a90e7747bb23fc815 (supersedes mem_8d721e801bdf4d65a98e6035ad7c6b37 and mem_ed61a2115b084bbf8798285bcbeeac86)
+**Key.** lel:mux:agents-get-mux-hosted-ptys
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z), thread cmsg_01WgyiM31RsSnZTgNuPX2VE4KPB5ARgEwMpYqdBDPfmTDb: "Nano decision 2026-11-04: Option C [stated]. Agents get mux-hosted ptys. This deliberately reopens D20 and D66; log both as reopened, with this as the reason."

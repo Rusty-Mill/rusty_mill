@@ -1,8 +1,8 @@
 ---
 category: Changed
-changelog: Let Em Loose records D78 (design mux-hosted agents) and the rusty_term pack records the mux hosting assessment.
+changelog: Let Em Loose records D79–D81 (gateway and jail, orch/gateway split, mux-hosted agent ptys) and adds the mux-hosted agents design.
 ---
-## 2026-11-04 - Let Em Loose: D78, design mux-hosted agents
+## 2026-11-04 - Let Em Loose: mux-hosted agent ptys design
 
-- **Changed:** `docs/projects/let-em-loose/DECISIONS.md` adds D78: Nano chose to design mux-hosted agents, reopening D20 and D66's launch path for that design only. `docs/projects/rusty_term/handoff/QA.md` records the rusty-term-expert's assessment of how the mux could host agents on today's code. The design is on Mill Board card #732.
-- **Known limitations:** docs only; nothing is built until Nano approves the design.
+- **Changed:** `docs/projects/let-em-loose/DECISIONS.md` adds D78 (superseded), D79 and D80 (#726 D-a and D-b) and D81 (agents get mux-hosted ptys; D20 and D66 marked reopened). `docs/projects/let-em-loose/mux-hosted-agents-design.md` is the design for Nano's approval: orch decides, the mux hosts the jail launcher's pty, the control socket stays out of the jail, takeover is recorded on the board, and the mux API orch needs.
+- **Known limitations:** docs only; nothing is built until Nano approves. The takeover events are a proposed, unapproved BBP schema change.
