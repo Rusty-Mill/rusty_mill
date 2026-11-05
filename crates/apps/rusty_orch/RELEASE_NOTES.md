@@ -4,6 +4,16 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Scheduled erosion cleanups
+**2026-11-06**
+
+- New `rusty_orch consolidate`. After 5 accepted claims on a repo, it
+  opens a claims task that must lower erosion without raising the other
+  share (D44). It prints a plan unless `--execute` is given. When both
+  shares are already zero, it records a skip instead.
+- Only the claim count triggers a cleanup for now. The half-limit trigger
+  Nano chose (D114) follows in its own PR.
+
 ## Track records read the full claim history
 **2026-11-05**
 
