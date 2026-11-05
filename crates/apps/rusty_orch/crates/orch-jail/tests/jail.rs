@@ -414,3 +414,44 @@ fn a_root_swapped_after_the_check_grants_only_the_checked_directory() {
         "the checked root was granted: {log}"
     );
 }
+
+/// #1506 review: the launcher's pinned handles (one per root, the cwd and
+/// the token) are setup descriptors, gone at the exec, so they don't count
+/// against the agent's open-file limit even when they outnumber it.
+#[test]
+fn pinned_handles_do_not_spend_the_agents_open_file_budget() {
+    let _serial = serial();
+    let mut fx = Fixture::new("nofile");
+    let cgroup = match fx.make_cgroup() {
+        Ok(cgroup) => cgroup,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let more: Vec<PathBuf> = (0..16)
+        .map(|i| {
+            let dir = fx.root.join(format!("ro-{i}"));
+            std::fs::create_dir(&dir).unwrap();
+            dir
+        })
+        .collect();
+    let spec = fx.write_spec_with(&cgroup, &more, &fx.token());
+    let json = std::fs::read_to_string(&spec).unwrap();
+    std::fs::write(
+        &spec,
+        json.replace(r#""open_files": 256"#, r#""open_files": 16"#),
+    )
+    .unwrap();
+    let slot = File::create(fx.root.join("slot.lock")).unwrap();
+    let (acp, _orch) = UnixStream::pair().unwrap();
+    let out = run_jail(&spec, &[slot.as_raw_fd(), acp.as_raw_fd()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let log = format!(
+        "{stdout}{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        fx.status()
+    );
+    if log.contains("Landlock filesystem confinement is NotEnforced") {
+        return eprintln!("kernel without Landlock; skipping: {log}");
+    }
+    assert!(out.status.success(), "{log}");
+    assert!(stdout.contains("fds=0,1,2,3,4\n"), "{log}");
+}
