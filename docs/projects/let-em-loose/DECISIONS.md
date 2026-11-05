@@ -106,7 +106,7 @@ Precise contracts used by this guide:
 | D98 | #708 alien hunt reads the candidate and its diffs through `get_artifact` | [default] 2026-11-05 (#708) |
 | D99 | #708 slice 4c: `lens run --alien`, its config entry and its trigger | [default] 2026-11-05 (#708) |
 | D111 | #599 `rusty_orch lens record`: read-only calibration report command | [stated] 2026-11-05 (#599) |
-| D112 | #599 `claim_history` gains `min_authors`, passed golden results and evidence refs | [stated] 2026-11-05 (#599) |
+| D112 | #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance | [stated] 2026-11-05 (#599) |
 
 ## D1. Lenses, not stages
 
@@ -871,11 +871,18 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Key.** lel:599:lens-record-command
 **Source.** Nano tapped option A, "Add lens record command", on decision card cmsg_014AqbZs58L565hMV2pFkCX524Ybpagn8gHAPAfimMrHys (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:06Z (tap message cmsg_014AqbZs58L565hMV2pFkCX574JBwmkjmMnGTFTzf3n9MZ). Closes OPEN_QUESTIONS Q34.
 
-## D112. #599 `claim_history` gains `min_authors`, passed golden results and evidence refs
+## D112. #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance
 
-**Decision.** One additive view change to `rusty_bbp::history`, shown by `bbp why`, with the three fields the card listed: `min_authors` on `Rule::AcceptLine` and `Rule::DropLine`; passed golden results; and refs on evidence steps. It changes neither the log nor the schema (like D77). It goes in a follow-up PR after #1520, and D92's interim limits 1 (author minimum) and 4 (citation) end when it lands, along with the passed-golden half of limit 3. The card didn't list woken items on reopen steps, candidate steps, or the candidate each `Failing` report tested, which Q35 gained afterwards. They are not approved here and stay open in Q35, so D92's interim limit 2 and the provenance half of limit 3 remain.
-**Why.** It is view-only and closes the gaps behind D92's interim limits in one change. It is a public API change, so it needed Nano's go-ahead.
-**Rejected.** Only `min_authors`. No change, keeping the interim limits.
+**Decision.** One additive view change to `rusty_bbp::history`, shown by `bbp why`, in one follow-up PR after #1520. It changes neither the log nor the schema (like D77). It adds:
+- `min_authors` on `Rule::AcceptLine` and `Rule::DropLine`;
+- passed golden results;
+- refs on evidence steps;
+- on each reopen step, the items it woke;
+- candidate steps;
+- on each `Failing` step, the candidate its report tested.
+The first three were approved first. The last three were added to Q35 after that card and approved on a second card. When the PR lands, all four of D92's interim limits end: golden truth is then tied to the candidate current at settlement and works on the `bbp why` path.
+**Why.** It is view-only and closes every gap behind D92's interim limits in one change. Without the reopen wakes and candidate provenance, lines after a human reopen stay pivotal and golden truth can't be tied to the code current at settlement. It is a public API change, so it needed Nano's go-ahead.
+**Rejected.** Only `min_authors`. No change, keeping the interim limits. Only the first three fields, keeping the interim limits for reopen wakes and golden provenance.
 **Tag.** [stated] · remind-me: mem_2bc7a496ac8c4d8aa821bfa826891f85
 **Key.** lel:599:history-track-record-fields
-**Source.** Nano tapped option A, "All three fields", on decision card cmsg_014AqbZs58L565hMV2pFkCX5SMdL73WvySEECojiZphZ7g (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:10Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5HzE9svLMYjuftbZk7JHiYM). The card was posted 2026-11-05T18:20:06Z, before Q35's extension. Answers part of OPEN_QUESTIONS Q35.
+**Source.** Nano tapped option A, "All three fields", on decision card cmsg_014AqbZs58L565hMV2pFkCX5SMdL73WvySEECojiZphZ7g (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:10Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5HzE9svLMYjuftbZk7JHiYM). The card was posted 2026-11-05T18:20:06Z, before Q35's extension. The rest: Nano tapped option A, "Yes, same follow-up PR", on decision card cmsg_014AqbZs58L565hMV2pFkCX553uoAaCJ8FP2tp7oU1ibhQ ("Should the BBP history change also carry reopen wakes and candidate provenance?", same thread), 2026-11-05T21:35:55Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5EJLCSPUm4HnqqKv3SmRqby). Closes OPEN_QUESTIONS Q35.
