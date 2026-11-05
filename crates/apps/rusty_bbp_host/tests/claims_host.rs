@@ -2863,3 +2863,33 @@ fn racing_report_only_opens_cannot_overshoot() {
     assert_eq!(stored, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #704 D42 (D88): a torn ledger append (a valid-looking last line without
+/// its newline) refuses the next report-only open, which publishes nothing
+/// and is not run into the torn record.
+#[test]
+fn a_torn_ledger_refuses_the_next_report_only_open() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-torn");
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    let torn = format!("{} FAILED", now().0);
+    std::fs::write(erosion_window::path(&dir), &torn).expect("seed");
+    let t = TaskId("SUCCESS".into());
+    let opened = admin::open_claims_task(
+        &dir,
+        &t,
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &erosion_profiles("--report-only"),
+        None,
+        vec![lens("a", 0), lens("b", 1)],
+        ClaimsConfig::default(),
+        || Ok(()),
+    );
+    assert!(opened.is_err_and(|e| e.contains("torn")));
+    assert!(!log_path_for(&dir, &t).exists());
+    let ledger = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(ledger, torn);
+    let _ = std::fs::remove_dir_all(&dir);
+}

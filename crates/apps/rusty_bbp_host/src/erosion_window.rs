@@ -90,9 +90,13 @@ pub fn report_only_open(dir: &Path, store: &FsStore, task: &TaskId) -> Result<bo
     }
 }
 
-/// Parse the ledger. A malformed line is an error, so a damaged ledger
-/// refuses opens rather than restarting the clock.
+/// Parse the ledger. A malformed line, or a last line without its `\n`
+/// (a torn append the next line would run into), is an error, so a damaged
+/// ledger refuses opens rather than restarting the clock or losing a task.
 pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
+    if !text.is_empty() && !text.ends_with('\n') {
+        return Err("erosion ledger: the last line has no newline (a torn append)".into());
+    }
     text.lines()
         .enumerate()
         .map(|(i, line)| {
@@ -221,7 +225,15 @@ mod tests {
     fn the_ledger_parses_and_a_damaged_line_is_an_error() {
         let ok = parse("12 a\n34 task with spaces\n").expect("parse");
         assert_eq!(ok, vec![entry(12, "a"), entry(34, "task with spaces")]);
-        for bad in ["x a\n", "12\n", "12 \n", "-1 a\n"] {
+        assert_eq!(parse(""), Ok(vec![]));
+        for bad in [
+            "x a\n",
+            "12\n",
+            "12 \n",
+            "-1 a\n",
+            "100 FAILED",
+            "1 a\n100 FAILED",
+        ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
     }
@@ -246,6 +258,11 @@ mod tests {
         drop(other);
         let broken = TaskId("a\nb".into());
         assert!(admit(&dir, &broken, Time(8)).is_err());
+        // A torn, valid-looking tail refuses, and nothing is run into it.
+        std::fs::write(path(&dir), "7 C1\n100 FAILED").expect("write");
+        assert!(admit(&dir, &TaskId("SUCCESS".into()), Time(9)).is_err());
+        let text = std::fs::read_to_string(path(&dir)).expect("ledger");
+        assert_eq!(text, "7 C1\n100 FAILED", "a torn ledger is not appended to");
         std::fs::write(path(&dir), "garbage\n").expect("write");
         assert!(
             admit(&dir, &t, Time(8)).is_err(),
