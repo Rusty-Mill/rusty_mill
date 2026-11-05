@@ -21,6 +21,7 @@ mod access;
 #[doc(hidden)]
 pub mod bench;
 mod boxdraw;
+mod chrome;
 pub mod control;
 mod cpu;
 mod damage;
