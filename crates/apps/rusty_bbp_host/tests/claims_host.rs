@@ -898,6 +898,245 @@ fn a_task_total_row_names_the_field_its_limit_and_one_allowance() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------------------------------------------------------------- intent versions and pauses (#598)
+
+#[test]
+fn a_host_pause_shows_in_the_inbox_and_resume_open_clears_it() {
+    let dir = tempdir("pause");
+    claims_task(&dir);
+    let pause = || {
+        admin::pause(
+            &dir,
+            &task(),
+            admin::pause_reason("call_ceiling").unwrap(),
+            "400 of 400 calls",
+            OpId("pause-1".into()),
+        )
+        .unwrap()
+    };
+    assert_eq!(pause(), Response::Ok);
+    assert_eq!(pause(), Response::Ok, "the same op replays");
+    assert_eq!(state(&dir).state, State::Escalated);
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].reason, inbox::Reason::TaskPaused);
+    assert!(rows[0].totals.is_empty(), "no total is exhausted");
+    assert_eq!(
+        rows[0].pause,
+        Some(inbox::Pause {
+            reason: PauseReason::CallCeiling,
+            detail: "400 of 400 calls".into()
+        })
+    );
+    human_ok(&dir, "resume", &["open"]);
+    assert_eq!(state(&dir).state, State::Open);
+    assert!(inbox::read(&dir, &[task()]).unwrap().is_empty());
+    assert!(admin::pause_reason("bored").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn intent_stores_the_new_brief_and_reopens_or_escalates_what_it_affects() {
+    let dir = tempdir("intent");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "plain", true);
+    let y = claim(&dir, "a", "shipped", true);
+    for c in [x, y] {
+        human_ok(&dir, "claim", &[&format!("msg:{c}"), "accept"]);
+    }
+    let epoch = state(&dir).claims.get(MsgId(y)).unwrap().epoch;
+    let mark = Command::Host {
+        op: OpId("mark-y".into()),
+        action: HostAction::Acting {
+            claim: MsgId(y),
+            epoch,
+            reference: "pr-9".into(),
+        },
+    };
+    open_driver(&dir, &task())
+        .unwrap()
+        .dispatch(&mark, now())
+        .unwrap();
+    let old = brief(&dir);
+    let file = dir.join("brief-v2.md");
+    std::fs::write(&file, "Make the flag say ok, in green.").unwrap();
+    let path = file.to_str().unwrap();
+    // Lists are comma-separated, one argument each; a repeat is refused.
+    let rev = state(&dir).rev;
+    let twice = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path, "claims=msg:1", "claims=msg:2"],
+        Some(rev),
+        "owner",
+        Some(rev),
+        None,
+    );
+    assert!(matches!(twice, Ok(Response::Rejected(r)) if r.code == Code::BadHumanInput));
+    human_ok(&dir, "intent", &[path, &format!("claims=msg:{x},msg:{y}")]);
+    let st = state(&dir);
+    assert_ne!(st.brief.unwrap().0, old, "the new brief is current");
+    assert_eq!(st.claims.intent_version(), 2);
+    assert_eq!(st.claims.get(MsgId(x)).unwrap().status, ClaimStatus::Open);
+    assert_eq!(
+        st.claims.get(MsgId(y)).unwrap().status,
+        ClaimStatus::Escalated
+    );
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert!(
+        rows.iter().any(|r| r.reason == inbox::Reason::IntentChanged
+            && r.claim.as_ref().map(|c| c.id) == Some(MsgId(y))),
+        "{rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every file under `dir` with its bytes, except `skip`.
+fn files_under(dir: &Path, skip: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if p != skip {
+                out.insert(p.clone(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
+    let dir = tempdir("intent_dry");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "plain", true);
+    human_ok(&dir, "claim", &[&format!("msg:{x}"), "accept"]);
+    let file = dir.join("brief-v2.md");
+    std::fs::write(&file, "A brief only previewed.").unwrap();
+    let path = file.to_str().unwrap();
+    let sha = Sha256::of(b"A brief only previewed.");
+    let before = files_under(&dir, &file);
+    let rev = state(&dir).rev;
+    let op = || Some(OpId("intent-1".into()));
+    let preview = |args: &[&str], fence: Rev| {
+        human::preview_fenced(
+            &dir,
+            &task(),
+            "intent",
+            args,
+            Some(rev),
+            "owner",
+            Some(fence),
+            op(),
+        )
+        .unwrap()
+    };
+    let fresh = preview(&[path], rev);
+    assert!(matches!(fresh.response, Response::Stored(_)), "{fresh:?}");
+    let unknown = preview(&[path, "claims=msg:999"], rev);
+    assert!(
+        matches!(&unknown.response, Response::Rejected(r) if r.code == Code::BadAffects),
+        "{unknown:?}"
+    );
+    let stale = preview(&[path], Rev(rev.0 - 1));
+    assert!(matches!(stale.response, Response::Rejected(_)), "{stale:?}");
+    assert_eq!(files_under(&dir, &file), before, "no preview wrote a file");
+    assert!(open_driver(&dir, &task())
+        .unwrap()
+        .store
+        .blob_get(&sha)
+        .is_err());
+
+    let applied = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path],
+        Some(rev),
+        "owner",
+        Some(rev),
+        op(),
+    )
+    .unwrap();
+    assert_eq!(
+        applied, fresh.response,
+        "the apply answers as its preview did"
+    );
+    assert_eq!(state(&dir).rev.0, rev.0 + fresh.events.len() as u64);
+    let stored = open_driver(&dir, &task())
+        .unwrap()
+        .store
+        .blob_get(&sha)
+        .unwrap();
+    assert_eq!(stored, b"A brief only previewed.");
+
+    // Refused applies, each with fresh bytes of its own, and a retry of the
+    // applied op with other bytes: none stores its brief or moves the log.
+    let rev = state(&dir).rev;
+    let apply = |name: &str, extra: &[&str], fence: Rev, op: &str| {
+        let file = dir.join(name);
+        std::fs::write(&file, format!("brief {name}")).unwrap();
+        let path = file.to_str().unwrap().to_owned();
+        let args: Vec<&str> = std::iter::once(path.as_str())
+            .chain(extra.iter().copied())
+            .collect();
+        let r = human::perform_fenced(
+            &dir,
+            &task(),
+            "intent",
+            &args,
+            Some(fence),
+            "owner",
+            Some(fence),
+            Some(OpId(op.into())),
+        )
+        .unwrap();
+        (r, Sha256::of(format!("brief {name}").as_bytes()))
+    };
+    let absent = |sha: &Sha256| {
+        open_driver(&dir, &task())
+            .unwrap()
+            .store
+            .blob_get(sha)
+            .is_err()
+    };
+    let (r, sha) = apply("unknown.md", &["claims=msg:999"], rev, "intent-2");
+    assert!(
+        matches!(&r, Response::Rejected(x) if x.code == Code::BadAffects),
+        "{r:?}"
+    );
+    assert!(absent(&sha), "a refused apply stores nothing");
+    let (r, sha) = apply("stale.md", &[], Rev(rev.0 - 1), "intent-3");
+    assert!(matches!(r, Response::Rejected(_)), "{r:?}");
+    assert!(absent(&sha), "a stale fence stores nothing");
+    let (r, sha) = apply("retry.md", &[], rev, "intent-1");
+    assert!(
+        matches!(&r, Response::Rejected(x) if x.code == Code::OpConflict),
+        "{r:?}"
+    );
+    assert!(absent(&sha), "a retry with other bytes stores none of them");
+    assert_eq!(state(&dir).rev, rev, "nothing was written");
+    // The same retry with the same bytes replays the stored answer.
+    let again = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path],
+        Some(Rev(rev.0 - fresh.events.len() as u64)),
+        "owner",
+        Some(Rev(rev.0 - fresh.events.len() as u64)),
+        op(),
+    )
+    .unwrap();
+    assert_eq!(again, applied, "an idempotent retry replays");
+    assert_eq!(state(&dir).rev, rev, "and writes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- protected paths (#597)
 
 /// Store `diff` as `who` and a candidate of it naming claim `c`.

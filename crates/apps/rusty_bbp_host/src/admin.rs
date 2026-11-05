@@ -258,6 +258,27 @@ pub fn adopt_holdout(
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
 
+/// `bbp pause` (#598 C-R12): the host pauses an open claims task on a
+/// ceiling or the cost breaker. `op` makes a retry a replay (R15), so orch
+/// passes the same op for the same pause.
+pub fn pause(
+    dir: &Path,
+    task: &TaskId,
+    reason: PauseReason,
+    detail: &str,
+    op: OpId,
+) -> Result<Response, String> {
+    let mut d = open_driver(dir, task)?;
+    let cmd = Command::Host {
+        op,
+        action: HostAction::TaskPaused {
+            reason,
+            detail: detail.to_owned(),
+        },
+    };
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
 /// D82: record one batch of takeover input as the mux delivered it. orch
 /// computes `sha256` with [`rusty_bbp::claims::input_chain`]; the core checks
 /// order, size, expiry and the chain.
@@ -315,6 +336,18 @@ fn host(dir: &Path, task: &TaskId, action: HostAction) -> Result<Response, Strin
         action,
     };
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
+/// A `--reason` of `bbp pause`.
+pub fn pause_reason(s: &str) -> Result<PauseReason, String> {
+    match s {
+        "spend_ceiling" => Ok(PauseReason::SpendCeiling),
+        "call_ceiling" => Ok(PauseReason::CallCeiling),
+        "breaker" => Ok(PauseReason::Breaker),
+        other => Err(format!(
+            "--reason must be spend_ceiling, call_ceiling or breaker, got {other}"
+        )),
+    }
 }
 
 pub fn assign(

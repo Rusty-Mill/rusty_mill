@@ -1,7 +1,7 @@
 //! Storage port and the in-memory adapter used for stage 1.
 
 use crate::codec::decode_artifact;
-use crate::command::{AgentAction, Code, Command, Rejection, Response};
+use crate::command::{AgentAction, Code, Command, HumanAction, Rejection, Response};
 use crate::engine::handle;
 use crate::event::{log_schema, schema_supported, Event};
 use crate::ids::*;
@@ -133,6 +133,14 @@ impl<S: Store> Driver<S> {
     }
 
     fn check_boundary(&self, cmd: &Command) -> Option<Rejection> {
+        /// #598: the new brief an `intent_revised` stores, fenced or not.
+        fn revised_brief(a: &HumanAction) -> Option<&BlobRef> {
+            match a {
+                HumanAction::IntentRevised { brief, .. } => Some(brief),
+                HumanAction::Fenced { action, .. } => revised_brief(action),
+                _ => None,
+            }
+        }
         let (blob, payload) = match cmd {
             Command::Agent {
                 action: AgentAction::PutArtifact { blob, payload },
@@ -140,6 +148,7 @@ impl<S: Store> Driver<S> {
             } => (blob, payload),
             Command::Runner { blob, payload, .. } => (blob, payload),
             Command::Open(o) => (&o.brief, &ArtifactPayload::Brief),
+            Command::Human { action, .. } => (revised_brief(action)?, &ArtifactPayload::Brief),
             _ => return None,
         };
         let bytes = match self.store.blob_get(&blob.sha) {
