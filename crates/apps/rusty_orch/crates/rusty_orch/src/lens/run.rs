@@ -29,6 +29,7 @@ use orch_lens::round::{round, Board, Halt, View};
 use orch_lens::schedule::State;
 use orch_lens::{LensConfig, Model};
 use orch_store::Store;
+use rusty_bbp::ArtId;
 
 use super::assertions::{self, Grants};
 use super::bbp::{run_id, Child, Rpc, Session};
@@ -124,6 +125,11 @@ pub fn options(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<O
 /// One lens's way onto the board.
 pub trait Seat {
     fn refresh(&mut self, config: &LensConfig) -> Result<(), String>;
+    /// The task's current brief, as of the last refresh (#598: a revised
+    /// intent names a new one).
+    fn brief_id(&self) -> Option<ArtId>;
+    /// The current brief's text.
+    fn brief(&mut self) -> Result<String, String>;
     fn cards(&self, config: &LensConfig) -> Vec<Card>;
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String>;
     fn board(&mut self) -> &mut dyn Board;
@@ -132,6 +138,12 @@ pub trait Seat {
 impl<R: Rpc> Seat for Session<R> {
     fn refresh(&mut self, config: &LensConfig) -> Result<(), String> {
         Session::refresh(self, config)
+    }
+    fn brief_id(&self) -> Option<ArtId> {
+        Session::brief_id(self)
+    }
+    fn brief(&mut self) -> Result<String, String> {
+        Session::brief(self)
     }
     fn cards(&self, config: &LensConfig) -> Vec<Card> {
         Session::cards(self, config)
@@ -168,11 +180,44 @@ pub enum Ended {
     Halted(Halt),
 }
 
-/// The lenses to run: the config, and each lens's seat and prefix by id.
+/// The lenses to run: the config, and each lens's seat and prompt by id.
 pub struct Lenses<'a> {
     pub config: &'a LensConfig,
     pub seats: &'a mut BTreeMap<String, Box<dyn Seat>>,
-    pub prefixes: &'a BTreeMap<String, String>,
+    pub prompts: &'a Prompts,
+}
+
+/// What every lens prefix is built from besides the intent.
+pub struct Prompts {
+    /// The board rules, shared by every lens.
+    pub rules: String,
+    /// Each lens's own prompt, by lens id.
+    pub lens: BTreeMap<String, String>,
+}
+
+/// Each lens's prefix, rebuilt whenever its seat sees a new brief (#598):
+/// after an intent revision no call goes out under the old intent.
+#[derive(Default)]
+struct Prefixes {
+    text: BTreeMap<String, String>,
+    built_on: BTreeMap<String, Option<ArtId>>,
+}
+
+impl Prefixes {
+    fn update(&mut self, lens: &str, seat: &mut dyn Seat, prompts: &Prompts) -> Result<(), String> {
+        let Some(prompt) = prompts.lens.get(lens) else {
+            return Ok(()); // the round halts with NoPrefix
+        };
+        let id = seat.brief_id();
+        if self.built_on.get(lens) == Some(&id) {
+            return Ok(());
+        }
+        let intent = seat.brief()?;
+        self.text
+            .insert(lens.to_owned(), prefix(&intent, &prompts.rules, prompt));
+        self.built_on.insert(lens.to_owned(), id);
+        Ok(())
+    }
 }
 
 /// Run up to `max` passes over every lens until one starts no job. A lens
@@ -191,9 +236,10 @@ pub fn passes(
     let Lenses {
         config,
         seats,
-        prefixes,
+        prompts,
     } = lenses;
     let records = BTreeMap::new();
+    let mut prefixes = Prefixes::default();
     for pass in 1..=max {
         let mut started = 0;
         for lens in &config.lenses {
@@ -201,6 +247,9 @@ pub fn passes(
                 .get_mut(&lens.id)
                 .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             seat.refresh(config)
+                .map_err(|e| format!("{}: {e}", lens.id))?;
+            prefixes
+                .update(&lens.id, seat.as_mut(), prompts)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
             let cards = seat.cards(config);
             let lines = seat
@@ -213,7 +262,7 @@ pub fn passes(
             let view = View {
                 cards: &cards,
                 lines: &lines,
-                prefixes,
+                prefixes: &prefixes.text,
                 records: &records,
             };
             let ctx = Ctx {
@@ -323,18 +372,22 @@ pub fn run(o: &Options) -> Result<String, String> {
         None => Meter::new(config.ceilings, 0),
     };
     let mut seats: BTreeMap<String, Box<dyn Seat>> = BTreeMap::new();
-    let mut prefixes = BTreeMap::new();
+    let mut prompts = Prompts {
+        rules,
+        lens: BTreeMap::new(),
+    };
     let run = run_id()?;
     let _ = writeln!(log, "run {run}");
     for lens in &config.lenses {
-        let child = Child::spawn(&o.bbp, &o.dir, &o.task, &lens.id)?;
-        let mut session = Session::new(&lens.id, child, &run);
-        let intent = session.brief().map_err(|e| format!("{}: {e}", lens.id))?;
         let path = base.join(&lens.prompt);
         let prompt = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        prefixes.insert(lens.id.clone(), prefix(&intent, &rules, &prompt));
-        seats.insert(lens.id.clone(), Box::new(session));
+        prompts.lens.insert(lens.id.clone(), prompt);
+        let child = Child::spawn(&o.bbp, &o.dir, &o.task, &lens.id)?;
+        seats.insert(
+            lens.id.clone(),
+            Box::new(Session::new(&lens.id, child, &run)),
+        );
     }
     let experiment = o.experiment.clone();
     let mut save = |m: &Meter| {
@@ -357,7 +410,7 @@ pub fn run(o: &Options) -> Result<String, String> {
     let lenses = Lenses {
         config: &config,
         seats: &mut seats,
-        prefixes: &prefixes,
+        prompts: &prompts,
     };
     let ended = passes(
         lenses,
@@ -431,6 +484,10 @@ mod tests {
         refreshes: u32,
         posts: Vec<Post>,
         refresh_error: Option<String>,
+        /// The brief, and from which refresh on it is revised (and the
+        /// cards reopened) to the second one.
+        briefs: [(Option<ArtId>, &'static str); 2],
+        revise_at: Option<u32>,
     }
 
     impl FakeSeat {
@@ -441,7 +498,16 @@ mod tests {
                 refreshes: 0,
                 posts: vec![],
                 refresh_error: None,
+                briefs: [(Some(ArtId(1)), "intent"), (Some(ArtId(9)), "intent v2")],
+                revise_at: None,
             }
+        }
+    }
+
+    impl FakeSeat {
+        fn current(&self) -> (Option<ArtId>, &'static str) {
+            let revised = self.revise_at.is_some_and(|at| self.refreshes >= at);
+            self.briefs[usize::from(revised)]
         }
     }
 
@@ -455,7 +521,18 @@ mod tests {
     impl Seat for FakeSeat {
         fn refresh(&mut self, _: &LensConfig) -> Result<(), String> {
             self.refreshes += 1;
+            if self.revise_at == Some(self.refreshes) {
+                for c in &mut self.cards {
+                    c.epoch += 1;
+                }
+            }
             self.refresh_error.clone().map_or(Ok(()), Err)
+        }
+        fn brief_id(&self) -> Option<ArtId> {
+            self.current().0
+        }
+        fn brief(&mut self) -> Result<String, String> {
+            Ok(self.current().1.to_owned())
         }
         fn cards(&self, config: &LensConfig) -> Vec<Card> {
             let built = self
@@ -478,11 +555,13 @@ mod tests {
         u32,
         Vec<(AgentId, String)>,
         Option<AgentId>,
+        Vec<String>,
     );
 
     impl Model for Echo {
         fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
             self.1 += 1;
+            self.4.push(q.prefix.clone());
             if let Some(id) = self.3 {
                 self.2.push((id, q.body.clone()));
             }
@@ -501,7 +580,7 @@ mod tests {
     }
 
     fn echo(reply: Result<Vec<Post>, ClassifiedError>) -> Echo {
-        Echo(reply, 0, vec![], None)
+        Echo(reply, 0, vec![], None, vec![])
     }
 
     fn counter() -> Post {
@@ -547,11 +626,14 @@ mod tests {
             .into_iter()
             .map(|(l, s)| (l.to_owned(), Box::new(s) as Box<dyn Seat>))
             .collect();
-        let prefixes = cfg
-            .lenses
-            .iter()
-            .map(|l| (l.id.clone(), prefix("intent", "", &l.id)))
-            .collect();
+        let prompts = Prompts {
+            rules: String::new(),
+            lens: cfg
+                .lenses
+                .iter()
+                .map(|l| (l.id.clone(), l.id.clone()))
+                .collect(),
+        };
         let mut ceilings = cfg.ceilings;
         ceilings.task_calls = task_calls;
         let mut meter = Meter::new(ceilings, 0);
@@ -564,7 +646,7 @@ mod tests {
         let lenses = Lenses {
             config: &cfg,
             seats: &mut boxed,
-            prefixes: &prefixes,
+            prompts: &prompts,
         };
         let mut log = String::new();
         let ended = passes(lenses, state, keep, metering, echo, max, &mut log);
@@ -718,6 +800,31 @@ mod tests {
         let (ended, log) = go_from(&mut restored, &mut |_| Ok(()), seats, &mut echo, 10, 20);
         assert_eq!(ended, Ok(Ended::Quiet));
         assert_eq!(echo.1, 4, "each lens looks at the new epoch blind: {log}");
+    }
+
+    #[test]
+    fn a_revised_intent_rebuilds_the_prefix_before_the_next_call() {
+        let mut echo = echo(Ok(vec![counter()]));
+        // Revised (and the claim reopened) at the second pass's refresh.
+        let seats = ["adversary", "operator"].map(|lens| {
+            let mut seat = FakeSeat::new(vec![card(7)]);
+            seat.revise_at = Some(2);
+            (lens, seat)
+        });
+        let (ended, log) = go(seats.into(), &mut echo, 10, 20);
+        assert_eq!(ended, Ok(Ended::Quiet), "{log}");
+        assert_eq!(
+            echo.4.len(),
+            4,
+            "each lens asked blind on each epoch: {log}"
+        );
+        for (i, p) in echo.4.iter().enumerate() {
+            let want = if i < 2 { "intent" } else { "intent v2" };
+            assert!(
+                p.starts_with(&format!("# Intent\n{want}\n")),
+                "call {i} carries the intent of its pass: {p}"
+            );
+        }
     }
 
     fn seats_with(cards: &[Card]) -> Vec<(&'static str, FakeSeat)> {
@@ -961,6 +1068,8 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            intent: None,
+            human_touched: false,
         };
         let body = rusty_bbp::ClaimBody {
             text: view.text.clone(),

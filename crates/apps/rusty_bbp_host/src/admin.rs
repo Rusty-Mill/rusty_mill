@@ -272,6 +272,98 @@ pub fn adopt_holdout(
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
 
+/// `bbp pause` (#598 C-R12): the host pauses an open claims task on a
+/// ceiling or the cost breaker. `op` makes a retry a replay (R15), so orch
+/// passes the same op for the same pause.
+pub fn pause(
+    dir: &Path,
+    task: &TaskId,
+    reason: PauseReason,
+    detail: &str,
+    op: OpId,
+) -> Result<Response, String> {
+    let mut d = open_driver(dir, task)?;
+    let cmd = Command::Host {
+        op,
+        action: HostAction::TaskPaused {
+            reason,
+            detail: detail.to_owned(),
+        },
+    };
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
+/// D82: record one batch of takeover input as the mux delivered it. orch
+/// computes `sha256` with [`rusty_bbp::claims::input_chain`]; the core checks
+/// order, size, expiry and the chain.
+pub fn takeover_input(
+    dir: &Path,
+    task: &TaskId,
+    takeover: u64,
+    seq: u64,
+    bytes: Vec<u8>,
+    sha256: Sha256,
+) -> Result<Response, String> {
+    host(
+        dir,
+        task,
+        HostAction::TakeoverInput {
+            takeover,
+            seq,
+            bytes: rusty_bbp::Base64Bytes(bytes),
+            sha256,
+        },
+    )
+}
+
+/// D82: orch writes a takeover's one end: after a release or the task's end
+/// has closed it and the delivered input is drained, or for its own reasons.
+pub fn takeover_ended(
+    dir: &Path,
+    task: &TaskId,
+    takeover: u64,
+    reason: TakeoverEnd,
+) -> Result<Response, String> {
+    host(dir, task, HostAction::TakeoverEnded { takeover, reason })
+}
+
+/// The `--reason` of `bbp takeover-ended`.
+pub fn parse_takeover_end(s: &str) -> Result<TakeoverEnd, String> {
+    Ok(match s {
+        "expired" => TakeoverEnd::Expired,
+        "revoked" => TakeoverEnd::Revoked,
+        "turn-ended" => TakeoverEnd::TurnEnded,
+        "mux-lost" => TakeoverEnd::MuxLost,
+        "released" => TakeoverEnd::Released,
+        other => {
+            return Err(format!(
+                "reason must be released, expired, revoked, turn-ended or mux-lost, got {other}"
+            ))
+        }
+    })
+}
+
+fn host(dir: &Path, task: &TaskId, action: HostAction) -> Result<Response, String> {
+    let mut d = open_driver(dir, task)?;
+    let cmd = Command::Host {
+        op: crate::fresh_op(),
+        action,
+    };
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
+/// A `--reason` of `bbp pause`.
+pub fn pause_reason(s: &str) -> Result<PauseReason, String> {
+    match s {
+        "spend_ceiling" => Ok(PauseReason::SpendCeiling),
+        "call_ceiling" => Ok(PauseReason::CallCeiling),
+        "breaker" => Ok(PauseReason::Breaker),
+        other => Err(format!(
+            "--reason must be spend_ceiling, call_ceiling or breaker, got {other}"
+        )),
+    }
+}
+
 pub fn assign(
     dir: &Path,
     task: &TaskId,

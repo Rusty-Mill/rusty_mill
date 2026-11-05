@@ -1339,3 +1339,40 @@ fn codex_on_windows_refuses_a_path_its_shells_misread() {
     let err = setup(&[codex], false).err().expect("refused");
     assert!(err.contains("Program Files"), "{err}");
 }
+
+/// The hook files' sender, run with Node against a fake exec: reports
+/// reach the ctl in order, one at a time, keeping only the newest while
+/// one is in flight.
+#[test]
+fn ordered_reports_keep_their_order() {
+    let script = format!("{}\n{}", scripts::ORDERED, include_str!("ordered_test.js"));
+    let output = std::process::Command::new("node")
+        .args(["--input-type=module", "-e", &script])
+        .output()
+        .expect("node runs (the OpenCode plugin's runtime; CI runners have it)");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+}
+
+#[test]
+fn both_hook_files_send_through_the_ordered_sender() {
+    let ctl = plain("/opt/rusty-mux-ctl");
+    for text in [scripts::opencode(ctl), scripts::pi(ctl)] {
+        assert!(text.contains(scripts::ORDERED), "{text}");
+        assert!(text.contains("send(args);"), "{text}");
+        assert!(!text.contains(".catch(() => {})"), "{text}");
+    }
+}
+
+/// The OpenCode plugin as written is a module Node can load.
+#[test]
+fn the_opencode_plugin_is_valid_javascript() {
+    let file = scratch().join("rusty-mux.mjs");
+    fs::write(&file, scripts::opencode(plain("/opt/rusty-mux-ctl"))).expect("write");
+    let output = std::process::Command::new("node")
+        .arg("--check")
+        .arg(&file)
+        .output()
+        .expect("node runs");
+    assert!(output.status.success(), "{output:?}");
+}

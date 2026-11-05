@@ -27,9 +27,11 @@ pub mod store;
 pub mod wake;
 
 pub use claims::{
-    ClaimBody, ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimView, ClaimsConfig, Direction,
-    EvidenceBody, EvidenceKind, MarkOutcome, Mode, ReopenCause, Stakes,
+    Affects, ClaimBody, ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimView, ClaimsConfig,
+    Direction, EvidenceBody, EvidenceKind, MarkOutcome, Mode, PauseReason, ReopenCause, Stakes,
+    Takeover, TakeoverEnd, TakeoverPhase,
 };
+pub use claims_engine::{MAX_TAKEOVER_BATCH, MAX_TAKEOVER_MINUTES, TAKEOVER_DRAIN_MS};
 pub use codec::{decode_artifact, encode_artifact, spec_markdown, SpecFile};
 pub use coedit::{Doc, LineId, LineOp, Missing, SpecEdit, Version};
 pub use command::{

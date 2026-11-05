@@ -62,6 +62,14 @@ impl Line {
         }
     }
 
+    /// The row, repeats expanded, cut or padded with default blanks to
+    /// `cols`: for a grid whose fresh style table still has id 0 blank.
+    pub(crate) fn padded_to(&self, cols: usize) -> Self {
+        let mut cells = self.padded().into_owned();
+        cells.resize(cols, PackedCell::blank());
+        Line::new(cells, self.wrapped, self.attr)
+    }
+
     /// The row's cell buffer, for reuse; its contents are not meaningful.
     pub(crate) fn into_cells(self) -> Vec<PackedCell> {
         self.cells

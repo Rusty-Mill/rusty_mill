@@ -124,6 +124,9 @@ impl State {
         let before = revive.before;
         let already = before.as_ref().is_some_and(|b| b.read_only);
         if !already {
+            // What the marker scrolls out of a full scrollback goes to the
+            // spool (C70), which `adopt` opens.
+            grid.spill_evicted(self.store.is_some());
             mark(&mut grid, &mut parser, before.as_ref());
             // Queries in the saved screen were answered in the old run.
             drop(parser.take_responses());
@@ -135,7 +138,7 @@ impl State {
                 ..command
             };
             let rt = super::BlockRt::read_only(grid, parser, started);
-            self.blocks.insert(revive.block, rt);
+            self.adopt(revive.block, rt);
             return Ok(());
         }
         let config = self.config_in(cwd.as_deref());
@@ -159,7 +162,7 @@ impl State {
             started,
         })?;
         let rt = unscreened.screened(shared, grid, parser);
-        self.blocks.insert(revive.block, rt);
+        self.adopt(revive.block, rt);
         Ok(())
     }
 
