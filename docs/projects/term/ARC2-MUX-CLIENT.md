@@ -26,9 +26,10 @@ can't live in `rusty_term`. Ports and adapters instead:
   stream and input sink per block, and lease and status events. Today's local panes become one
   adapter behind it, with no behaviour change.
 - **`rusty_mux_client` (new lib, apps/rusty_mux):** the attach protocol now in
-  `rusty_mux_tui`'s `main.rs` (connect, attach, take over, reach, welcome, upgrade), plus
-  `checkpoint::Receiver` and `style::Style` moved out of the server, so no client links the
-  server. The TUI switches to it.
+  `rusty_mux_tui`'s `main.rs` (connect, attach, take over, reach, welcome). The checkpoint
+  assembler and the cell style codec move out of the server into `rusty_mux_proto`, behind its
+  `screen` feature, so no client links the server. The TUI switches to it. `upgrade` (SSH to
+  UDP) stays in the TUI with the path code it drives.
 - **`rusty_mux_gui` (new binary, apps/rusty_mux):** links `rusty_term` with `gui` and the client,
   and implements the port over the mux. It is the one mux crate that links the `rusty_term`
   front-end (D96, superseding D22). Every other mux crate still links only `rusty_term_core`,

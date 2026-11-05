@@ -18,7 +18,7 @@
 //! The server runs on Linux (PTYs) and Windows (ConPTY over AF_UNIX);
 //! [`serve`] reports `Unsupported` elsewhere.
 
-pub mod checkpoint;
+pub use rusty_mux_proto::checkpoint;
 #[cfg(any(target_os = "linux", windows))]
 mod conn;
 #[cfg(any(target_os = "linux", windows))]
@@ -45,7 +45,7 @@ mod spool;
 mod state;
 #[cfg(any(target_os = "linux", windows))]
 mod store;
-pub mod style;
+pub use rusty_mux_proto::style;
 #[cfg(any(target_os = "linux", windows))]
 mod terminal;
 

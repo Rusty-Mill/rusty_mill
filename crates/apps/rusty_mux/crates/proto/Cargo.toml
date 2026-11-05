@@ -15,3 +15,11 @@ layer = "apps"
 rusty_mux_core = { workspace = true }
 rusty_uuid = { workspace = true }
 rusty_wire = { workspace = true }
+# The terminal engine, without `l13`, for the `screen` modules only.
+rusty_term_core = { workspace = true, optional = true }
+
+[features]
+# RTCP v6 checkpoint assembly and the cell style codec, shared by the server
+# and the attach clients. Off by default so ctl, mcp and script never build
+# the terminal engine.
+screen = ["dep:rusty_term_core"]

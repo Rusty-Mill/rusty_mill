@@ -1,0 +1,20 @@
+[package]
+name = "rusty_mux_client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT"
+description = "rusty_mux's attach protocol for clients: connecting, the handshake, takeover and reading a window's layout. Shared by the terminal and GUI clients; links no server."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[dependencies]
+rusty_mux_core = { workspace = true }
+rusty_mux_proto = { workspace = true, features = ["screen"] }
+rusty_uuid = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+platform-windows = { workspace = true }
