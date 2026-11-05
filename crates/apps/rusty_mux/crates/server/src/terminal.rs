@@ -152,7 +152,9 @@ pub(crate) struct Capture {
 /// as it does a typed space, and dropping a typed one would lose text.
 /// `trim` leaves out blank lines at either end. `None` if the text,
 /// trimmed, would pass `max` bytes: a capture is whole or refused, never
-/// cut short.
+/// cut short. A wrapped run is refused once it holds more than `2 * max`
+/// cells, before its text is built: every cell of it but a wide glyph's
+/// second prints, unless the run ends in blanks.
 pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> Option<String> {
     let scrollback = grid.scrollback_len();
     let history = usize::try_from(capture.history).unwrap_or(usize::MAX);
@@ -167,19 +169,26 @@ pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> Option<String
             break;
         };
         if capture.unwrap && wrapped && abs + 1 < end {
-            cells.resize(grid.cols.max(cells.len()), Cell::blank());
+            // A soft-wrapped row is stored whole, at the width it had when
+            // it wrapped: a history row can be narrower than the grid.
             run.append(&mut cells);
+            if run.len() / 2 > max {
+                return None;
+            }
             continue;
         }
         run.append(&mut cells);
-        let line = line(&run, &grid.clusters, capture.vt);
+        let breaks = held + usize::from(lines > 0);
+        // What the line may add; a blank one `trim` holds back adds nothing.
+        let room = max.saturating_sub(text.len() + breaks);
+        let line = line(&run, &grid.clusters, capture.vt, room)?;
         run.clear();
         if capture.trim && line.is_empty() {
             // Leading blanks are dropped, later ones held.
             held += usize::from(lines > 0);
             continue;
         }
-        for _ in 0..held + usize::from(lines > 0) {
+        for _ in 0..breaks {
             text.push('\n');
         }
         lines += held + 1;
@@ -195,15 +204,14 @@ pub(crate) fn format(grid: &Grid, capture: Capture, max: usize) -> Option<String
 /// `cells` as text without trailing blanks; with `vt`, each change of
 /// style as one SGR sequence that resets first, so a non-empty line opens
 /// with one even in the default style and ends in the default style; it
-/// prints the same under any pen.
-fn line(cells: &[Cell], clusters: &[String], vt: bool) -> String {
-    let len = match vt {
-        true => cells
-            .iter()
-            .rposition(|c| !is_padding(c))
-            .map_or(0, |i| i + 1),
-        false => cells.len(),
+/// prints the same under any pen. `None` once it passes `max` bytes, before
+/// it grows further.
+fn line(cells: &[Cell], clusters: &[String], vt: bool, max: usize) -> Option<String> {
+    let ends = |c: &Cell| match vt {
+        true => !is_padding(c),
+        false => !c.ch.is_whitespace() || c.cluster != 0,
     };
+    let len = cells.iter().rposition(ends).map_or(0, |i| i + 1);
     let blank = Style::of(&Cell::blank());
     // `None` until the first cell, which always sets its style.
     let mut style = None;
@@ -221,6 +229,9 @@ fn line(cells: &[Cell], clusters: &[String], vt: bool) -> String {
         {
             text.push_str(rest);
         }
+        if text.len() > max {
+            return None;
+        }
     }
     if style.is_some_and(|s| s != blank) {
         text.push_str("\x1b[0m");
@@ -228,7 +239,7 @@ fn line(cells: &[Cell], clusters: &[String], vt: bool) -> String {
     if !vt {
         text.truncate(text.trim_end().len());
     }
-    text
+    Some(text)
 }
 
 /// A blank in the default style, which ends no line.

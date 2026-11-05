@@ -517,6 +517,13 @@ pub struct Grid {
     /// The live scrollback cap: [`SCROLLBACK_MAX`] unless overridden by the
     /// `scrollback` config key via [`Grid::set_scrollback_max`].
     pub(crate) scrollback_max: usize,
+    /// Lines evicted from [`Grid::scrollback`] since the last
+    /// [`Grid::take_spilled`], each encoded alone, while
+    /// [`Grid::spill_evicted`] is on; `None`, the default, keeps nothing.
+    /// Not checkpointed: whoever turned it on turns it on again.
+    spilled: Option<Vec<Vec<u8>>>,
+    /// Evicted lines that could not be encoded, so never spilled.
+    pub spill_failed: u64,
     /// How many lines the viewport is scrolled up into [`Grid::scrollback`].
     /// `0` is the live view (bottom); the renderer composites history above the
     /// live grid when this is non-zero.
@@ -1488,6 +1495,8 @@ impl Grid {
             scrollback: VecDeque::new(),
             untrimmed: 0,
             scrollback_max: SCROLLBACK_MAX,
+            spilled: None,
+            spill_failed: 0,
             view_offset: 0,
             selection: None,
             #[cfg(any(test, feature = "gui"))]
@@ -2362,6 +2371,7 @@ impl Grid {
             self.touch_hist();
             if self.scrollback.len() > self.scrollback_max {
                 if let Some(evicted) = self.scrollback.pop_front() {
+                    self.spill(&evicted);
                     self.styles.note_evicted(evicted.cells().len());
                     self.screen[bottom] = evicted;
                 }
@@ -3631,12 +3641,56 @@ impl Grid {
         self.untrimmed > 0
     }
 
+    /// Keep each line evicted from scrollback from now on, encoded alone
+    /// ([`crate::checkpoint::spilled_grid`] reads them), for
+    /// [`Grid::take_spilled`]; off drops any not yet taken. Lines a resize
+    /// rewraps past the cap are not spilled.
+    pub fn spill_evicted(&mut self, on: bool) {
+        self.spilled = on.then(Vec::new);
+    }
+
+    /// The lines spilled since the last call, oldest first.
+    pub fn take_spilled(&mut self) -> Vec<Vec<u8>> {
+        self.spilled
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Encodes `line`, leaving scrollback, while spilling is on.
+    fn spill(&mut self, line: &Line) {
+        let Some(spilled) = self.spilled.as_mut() else {
+            return;
+        };
+        match crate::checkpoint::encode_spilled(line, &self.styles) {
+            Ok(bytes) => spilled.push(bytes),
+            Err(_) => self.spill_failed += 1,
+        }
+    }
+
+    /// Makes this fresh grid show spilled lines: `table` their styles,
+    /// `history` its scrollback, `last` its one screen row.
+    pub(crate) fn adopt_spilled(
+        &mut self,
+        table: StyleTable,
+        history: Vec<Line>,
+        last: Option<Line>,
+    ) {
+        self.styles = table;
+        self.scrollback_max = history.len();
+        self.scrollback = history.into();
+        if let Some(last) = last {
+            self.screen[0] = last;
+        }
+    }
+
     /// Override the scrollback line cap (the `scrollback` config key). `0`
     /// disables history. An already-overfull buffer is trimmed immediately.
     pub fn set_scrollback_max(&mut self, max: usize) {
         self.scrollback_max = max;
         while self.scrollback.len() > max {
             if let Some(evicted) = self.scrollback.pop_front() {
+                self.spill(&evicted);
                 self.styles.note_evicted(evicted.cells().len());
             }
             self.touch_hist();

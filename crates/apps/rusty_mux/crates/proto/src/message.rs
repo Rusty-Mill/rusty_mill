@@ -171,6 +171,11 @@ impl Features {
     /// knows it.
     pub const AGENT_STATUS: Self = Self(1 << 33);
 
+    /// The block method `terminal.history`: lines older than the
+    /// scrollback, from the block's spool on disk (C70). It travels as
+    /// [`Message::BlockCall`], so the bit only says the server knows it.
+    pub const TERMINAL_HISTORY: Self = Self(1 << 34);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
