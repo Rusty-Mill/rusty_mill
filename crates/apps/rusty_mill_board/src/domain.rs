@@ -258,6 +258,8 @@ pub struct Plan {
     pub superseded_by: Option<Vec<Uuid>>,
     /// Cards worth reading alongside this one.
     pub related: Option<Vec<Uuid>>,
+    /// When the card should be done, Unix ms: `Some(None)` clears it.
+    pub target_ms: Option<Option<i64>>,
 }
 
 impl Plan {
@@ -398,6 +400,9 @@ pub struct Card {
     /// and with it the roadmap and metrics, is left as it was.
     #[serde(default)]
     pub restored_ms: Option<i64>,
+    /// When the card should be done, Unix ms, if planned: what the roadmap draws ahead of today.
+    #[serde(default)]
+    pub target_ms: Option<i64>,
 }
 
 /// Stable cross-component ids for the one logical execution a card may own.
@@ -643,6 +648,7 @@ impl Card {
             done_ms: None,
             archived_ms: None,
             restored_ms: None,
+            target_ms: None,
         })
     }
 
@@ -883,12 +889,12 @@ impl Card {
         Ok(next)
     }
 
-    /// Apply a [`Plan`]: priority and links, each left as it is when `None`. Repeated ids
+    /// Apply a [`Plan`]: priority, links and target date, each left as it is when `None`. Repeated ids
     /// in a list are dropped.
     ///
     /// # Errors
-    /// A priority outside [`PRIORITIES`], a card linking to itself, or more than
-    /// [`MAX_DEPS`] ids in one list.
+    /// A priority outside [`PRIORITIES`], a card linking to itself, more than
+    /// [`MAX_DEPS`] ids in one list, or a target that is not a positive time.
     pub fn plan(&self, plan: &Plan, now_ms: i64) -> Result<Self, BoardError> {
         let mut next = self.next(now_ms);
         if let Some(p) = plan.priority {
@@ -905,6 +911,14 @@ impl Card {
         }
         if let Some(r) = &plan.related {
             next.related = self.links(r)?;
+        }
+        if let Some(t) = plan.target_ms {
+            if t.is_some_and(|ms| ms <= 0) {
+                return Err(BoardError::Invalid(
+                    "target_ms must be a positive Unix time in ms",
+                ));
+            }
+            next.target_ms = t;
         }
         Ok(next)
     }

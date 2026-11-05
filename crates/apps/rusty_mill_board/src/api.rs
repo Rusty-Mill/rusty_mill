@@ -10,6 +10,7 @@ use crate::board::Board;
 use crate::domain::{
     Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, ExecutionLink, Plan, Shelf,
 };
+use crate::milestones::MilestoneEdit;
 use crate::store::Store;
 
 /// The board every surface shares.
@@ -231,6 +232,32 @@ struct MetricsArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct MilestoneAddArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// The project (see `board_projects`).
+    project: String,
+    /// What is reached, 1 to 200 characters.
+    title: String,
+    /// When it should be reached, Unix ms.
+    target_ms: i64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct MilestoneUpdateArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// The milestone's id.
+    id: String,
+    /// A new title.
+    title: Option<String>,
+    /// A new target, Unix ms.
+    target_ms: Option<i64>,
+    /// `true` closes it (done), `false` reopens it.
+    done: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct OwnsArgs {
     /// The project (see `board_projects`).
     project: String,
@@ -276,6 +303,16 @@ struct PlanArgs {
     superseded_by: Option<Vec<String>>,
     /// Ids or numbers of cards worth reading alongside this one; replaces the list.
     related: Option<Vec<String>>,
+    /// When the card should be done, Unix ms; `null` clears it. Left out, it is unchanged.
+    #[serde(default, deserialize_with = "present")]
+    target_ms: Option<Option<i64>>,
+}
+
+/// A field that is present, even as `null`: with `#[serde(default)]`, absent stays `None`.
+fn present<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    T::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -514,6 +551,53 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "board_milestones",
+            "Milestones the caller may see, optionally one project or one repository's projects, by target date: {milestones: [{id, project, title, target_ms, done_ms}]}. A milestone is a project's dated goal; the roadmap draws it ahead of today. `done_ms` is set once it is closed.",
+            |b, i, a: MetricsArgs| {
+                checked_project(b, scope(i), a.project.as_deref())?;
+                let projects = b.projects();
+                if let Some(r) = a.repo.as_deref()
+                    && !projects.repos().any(|(name, _)| name == r)
+                {
+                    return Err(BoardError::Invalid("unknown repository"));
+                }
+                let milestones = b.milestones(|m| {
+                    in_scope(scope(i), &m.project)
+                        && a.project.as_deref().is_none_or(|p| m.project == p)
+                        && a.repo
+                            .as_deref()
+                            .is_none_or(|r| projects.repo_of(&m.project) == Some(r))
+                })?;
+                to_json(json!({ "milestones": milestones }))
+            },
+        ),
+        op(
+            "milestone_add",
+            "Add a milestone to a project (needs Triage): a title and the date it should be reached (`target_ms`, Unix ms). Milestones are never deleted; close one with milestone_update `done: true`. {milestone}.",
+            |b, i, a: MilestoneAddArgs| {
+                let who = acting(b, i, &a.who)?;
+                checked_project(b, scope(i), Some(&a.project))?;
+                to_json(
+                    json!({ "milestone": b.add_milestone(&who, &a.project, &a.title, a.target_ms)? }),
+                )
+            },
+        ),
+        op(
+            "milestone_update",
+            "Change a milestone (needs Triage): its `title`, its `target_ms`, or `done` (true closes it, false reopens it). Fields left out are unchanged. {milestone}.",
+            |b, i, a: MilestoneUpdateArgs| {
+                let who = acting(b, i, &a.who)?;
+                let edit = MilestoneEdit {
+                    title: a.title,
+                    target_ms: a.target_ms,
+                    done: a.done,
+                };
+                let milestone =
+                    b.edit_milestone(&who, id(&a.id)?, &edit, |p| in_scope(scope(i), p))?;
+                to_json(json!({ "milestone": milestone }))
+            },
+        ),
+        op(
             "board_owns",
             "Which of `files` (repository paths, `/`-separated) the project does NOT own: those belonging to another project of its repository. Answers from the whole registry, so a runner limited to one project can still tell when work strays into a sibling's paths: {foreign: [paths]}.",
             |b, i, a: OwnsArgs| {
@@ -706,7 +790,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_plan",
-            "Set a card's priority and links (needs Triage): `deps` (waits on), `superseded_by` (newer cards that replace it) and `related`. Each list replaces the current one; `[]` clears it. `card_take` takes higher priority first, skips a card until its dependencies are Done, and never hands out a superseded card. After marking a card superseded, close it (move it to done) or re-scope it and clear `superseded_by`.",
+            "Set a card's priority, links and target date (needs Triage): `deps` (waits on), `superseded_by` (newer cards that replace it), `related`, and `target_ms` (when it should be done; `null` clears it). Each list replaces the current one; `[]` clears it. `card_take` takes higher priority first, skips a card until its dependencies are Done, and never hands out a superseded card. After marking a card superseded, close it (move it to done) or re-scope it and clear `superseded_by`.",
             |b, i, a: PlanArgs| {
                 let who = acting(b, i, &a.who)?;
                 let refs = |l: Option<Vec<String>>| {
@@ -722,6 +806,7 @@ pub fn ops() -> Vec<Op> {
                     deps: refs(a.deps)?,
                     superseded_by: refs(a.superseded_by)?,
                     related: refs(a.related)?,
+                    target_ms: a.target_ms,
                 };
                 card(b.plan(card_ref(b, &a.id)?, &who, &plan)?)
             },
@@ -1382,6 +1467,116 @@ mod tests {
                 json!({"repo": "nope"})
             ),
             Err(CallError::Board(BoardError::Invalid("unknown repository")))
+        ));
+    }
+
+    #[test]
+    fn a_target_date_is_set_kept_when_left_out_and_cleared_by_null() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let human = ident("nano", "human");
+        let plan = |args: Value| {
+            call_as(&board, Some(&human), "card_plan", args)
+                .map(|out| out["card"]["target_ms"].clone())
+        };
+        let added =
+            call_as(&board, Some(&human), "card_add", json!({"title": "dated"})).expect("add");
+        let id = added["card"]["id"].as_str().expect("id").to_owned();
+        assert_eq!(
+            plan(json!({"id": id, "target_ms": 1_800_000_000_000_i64})).expect("set"),
+            json!(1_800_000_000_000_i64)
+        );
+        assert_eq!(
+            plan(json!({"id": id, "priority": 3})).expect("left out"),
+            json!(1_800_000_000_000_i64)
+        );
+        assert_eq!(
+            plan(json!({"id": id, "target_ms": null})).expect("clear"),
+            Value::Null
+        );
+        assert!(matches!(
+            plan(json!({"id": id, "target_ms": -1})),
+            Err(CallError::Board(BoardError::Invalid(_)))
+        ));
+    }
+
+    #[test]
+    fn milestones_are_added_listed_by_scope_and_closed() {
+        use crate::projects::Projects;
+        let projects = Projects::parse(r#"{"rl": ["a"], "orch": ["b"]}"#).expect("projects");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        let human = ident("nano", "human");
+        let add = |project: &str, title: &str, at: i64| {
+            call_as(
+                &board,
+                Some(&human),
+                "milestone_add",
+                json!({"project": project, "title": title, "target_ms": at}),
+            )
+        };
+        let late = add("rl", "Launch", 3_000).expect("add")["milestone"].clone();
+        add("rl", "Beta", 2_000).expect("add");
+        add("orch", "Cutover", 1_000).expect("add");
+        assert!(matches!(
+            add("nope", "x", 1),
+            Err(CallError::Board(BoardError::Invalid(_)))
+        ));
+
+        let titles = |args: Value| -> Vec<String> {
+            call_as(&board, Some(&human), "board_milestones", args).expect("list")["milestones"]
+                .as_array()
+                .expect("array")
+                .iter()
+                .map(|m| m["title"].as_str().expect("title").to_owned())
+                .collect()
+        };
+        assert_eq!(
+            titles(json!({})),
+            ["Cutover", "Beta", "Launch"],
+            "by target date"
+        );
+        assert_eq!(titles(json!({"project": "rl"})), ["Beta", "Launch"]);
+
+        let scoped = Identity {
+            projects: Some(vec!["orch".into()]),
+            ..ident("dev", "human")
+        };
+        let seen = call_as(&board, Some(&scoped), "board_milestones", json!({})).expect("list");
+        assert_eq!(
+            seen["milestones"].as_array().map(Vec::len),
+            Some(1),
+            "only its projects"
+        );
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&scoped),
+                "milestone_update",
+                json!({"id": late["id"], "done": true})
+            ),
+            Err(CallError::Board(BoardError::OutOfScope(_)))
+        ));
+
+        let closed = call_as(
+            &board,
+            Some(&human),
+            "milestone_update",
+            json!({"id": late["id"], "done": true}),
+        )
+        .expect("close");
+        assert!(closed["milestone"]["done_ms"].is_i64());
+        let builder = ident("claude", "builder");
+        assert!(matches!(
+            call_as(
+                &board,
+                Some(&builder),
+                "milestone_add",
+                json!({"project": "rl", "title": "x", "target_ms": 1})
+            ),
+            Err(CallError::Board(BoardError::Forbidden(_)))
         ));
     }
 }

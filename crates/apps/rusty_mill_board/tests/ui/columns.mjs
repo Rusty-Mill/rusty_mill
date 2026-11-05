@@ -21,7 +21,7 @@ page.on("pageerror", (e) => errors.push(String(e)));
 page.on("dialog", (d) => d.accept());
 await page.goto(`${BASE}/#token=${TOKEN}`);
 await page.waitForSelector("#board .col");
-const headingsOf = (p) => p.$$eval("#board .col h2", (hs) => hs.map((h) => h.textContent));
+const headingsOf = (p) => p.$$eval("#board .col h2 .label", (hs) => hs.map((h) => h.textContent));
 const headings = () => headingsOf(page);
 // A second, already-open client: it must follow column changes made elsewhere without a reload.
 const other = await browser.newPage({ viewport: { width: 1300, height: 900 } });
@@ -53,7 +53,7 @@ await last.getByLabel("from").selectOption("backlog");
 await last.getByLabel("to").selectOption("design");
 await last.getByLabel("capability").selectOption("build");
 await dialog.getByRole("button", { name: "Save columns" }).click();
-await page.waitForFunction(() => [...document.querySelectorAll("#board .col h2")].some((h) => h.textContent === "Design"));
+await page.waitForFunction(() => [...document.querySelectorAll("#board .col h2 .label")].some((h) => h.textContent === "Design"));
 const heads = await headings();
 check(heads.join(",") === "Backlog,Approved,Building,QA,Review,Design,Done,Blocked", `new column before Done, Ready relabelled (${heads})`);
 const flow = (await api("board_columns")).body;
@@ -65,13 +65,13 @@ check((await api("card_move", { id: card.id, to: "design" })).status === 200, "a
 await page.waitForFunction(() => [...document.querySelectorAll("#board .col[data-col=design] .card")].length === 1);
 check(await otherShows(() => document.querySelectorAll("#board .col[data-col=design] .card").length === 1),
   "an open client shows the new column and the card moved into it");
-check(await otherShows(() => [...document.querySelectorAll("#board .col h2")].some((h) => h.textContent === "Approved")),
+check(await otherShows(() => [...document.querySelectorAll("#board .col h2 .label")].some((h) => h.textContent === "Approved")),
   "and the relabel");
 // A relabel alone (no card moves) still reaches the open client.
 const relabelled = (await api("board_columns")).body;
 relabelled.columns.find((c) => c.id === "design").label = "Designing";
 check((await api("settings_workflow_set", { workflow: relabelled })).status === 200, "relabel over the API");
-check(await otherShows(() => [...document.querySelectorAll("#board .col h2")].some((h) => h.textContent === "Designing")),
+check(await otherShows(() => [...document.querySelectorAll("#board .col h2 .label")].some((h) => h.textContent === "Designing")),
   "an open client follows a relabel with no card event");
 const row = dialog.locator("tr", { hasText: "design" }).first();
 await row.getByRole("button", { name: "Remove" }).click();

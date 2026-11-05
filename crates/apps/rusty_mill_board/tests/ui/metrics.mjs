@@ -34,7 +34,7 @@ await page.waitForSelector(".card");
 await page.click("#metrics");
 await page.waitForSelector(".metrics h3");
 const kpi = async (name) => page.locator(".kpi").filter({ hasText: name }).locator("b").innerText();
-const panel = (name) => page.locator(".metrics .col").filter({ has: page.locator(`h2:text-is("${name}")`) });
+const panel = (name) => page.locator(".metrics .col").filter({ has: page.locator("h2", { hasText: new RegExp(`^${name}$`, "i") }) });
 const bar = async (name, row) => panel(name).locator(".bar").filter({ hasText: row }).locator("span").last().innerText();
 check((await page.locator(".metrics h3").innerText()).endsWith("all projects"), "no selection covers the whole board");
 check((await kpi("open")) === "3", "three open cards");
@@ -42,7 +42,7 @@ check((await bar("open by project", "rl")) === "2", "per-project counts");
 check((await bar("open by priority", "High")) === "1", "per-priority counts");
 check((await panel("idle longest").locator(".card b").allInnerTexts()).join() === "Ready card", "idle lists cards past backlog");
 
-await page.locator("#nav1 .item").filter({ hasText: /^games\d/ }).first().click();
+await page.selectOption("#repo", "games");
 await page.waitForFunction(() => document.querySelector(".metrics h3")?.textContent.endsWith("games"));
 check((await kpi("open")) === "2", "a chosen repository narrows the metrics");
 check((await panel("open by project").count()) === 1, "per-project panel shown for a repository");
