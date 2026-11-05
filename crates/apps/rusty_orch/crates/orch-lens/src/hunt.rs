@@ -23,10 +23,10 @@ use crate::class::DataClass;
 use crate::config::Tools;
 use crate::meter::Stop;
 
-/// The candidate one hunt is about.
+/// The candidate one hunt is about. Its task is the call context's
+/// ([`Ctx::task`]), so the rows name the task the calls were billed to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target<'a> {
-    pub task: &'a str,
     pub claim: MsgId,
     /// The candidate artifact hunted.
     pub candidate: u64,
@@ -111,7 +111,8 @@ pub fn hunt(
     models: &mut dyn Models,
     probes: &mut dyn Probes,
 ) -> Result<Hunted, Unrecorded> {
-    let spent_before = ctx.meter.task_spent(target.task);
+    let task = ctx.task;
+    let spent_before = ctx.meter.task_spent(task);
     let mut tokens = 0;
     let mut notes = Vec::new();
     let body = enumerate_body(target, list);
@@ -129,7 +130,12 @@ pub fn hunt(
         RawEnd::Stopped(stop) => return Err(Unrecorded::Stopped(stop)),
         RawEnd::Exhausted => return Err(Unrecorded::Exhausted(called.passed)),
         RawEnd::Unsaved(e) => return Err(Unrecorded::Unsaved(e)),
-        RawEnd::Failed { provider, error } => {
+        RawEnd::Failed {
+            provider,
+            error,
+            tokens: t,
+        } => {
+            tokens += t.unwrap_or(0);
             notes.push(format!("enumerate: {provider}: {error:?}"));
             Vec::new()
         }
@@ -150,13 +156,22 @@ pub fn hunt(
                 notes.push(format!("hunt {n}: stopped: {stop}"));
                 break;
             }
+            RawEnd::Failed {
+                provider,
+                error,
+                tokens: t,
+            } => {
+                tokens += t.unwrap_or(0);
+                notes.push(format!("hunt {n}: {provider}: {error:?}"));
+                continue;
+            }
             other => {
                 notes.push(format!("hunt {n}: {other:?}"));
                 continue;
             }
         };
         match parse_probe(&text) {
-            Ok(Some(source)) => match probe(target, n, &s, &source, list, probes) {
+            Ok(Some(source)) => match probe(task, target, n, &s, &source, list, probes) {
                 Ok(row) => rows.push(row),
                 Err(e) => notes.push(format!("probe {n}: not run: {e}")),
             },
@@ -165,16 +180,13 @@ pub fn hunt(
         }
     }
     let hunt = HuntRow {
-        task: target.task.to_owned(),
+        task: task.to_owned(),
         claim: target.claim.0,
         candidate: target.candidate,
         suspects: u32::try_from(named).unwrap_or(u32::MAX),
         probes: u32::try_from(rows.len()).unwrap_or(u32::MAX),
         tokens,
-        cost: ctx
-            .meter
-            .task_spent(target.task)
-            .saturating_sub(spent_before),
+        cost: ctx.meter.task_spent(task).saturating_sub(spent_before),
         started: target.started,
     };
     Ok(Hunted {
@@ -213,6 +225,7 @@ fn ask(
 
 /// Run probe `n` and classify it.
 fn probe(
+    task: &str,
     target: &Target<'_>,
     n: u32,
     s: &Suspect,
@@ -228,7 +241,7 @@ fn probe(
     })?;
     let outcome = outcome(runs.candidate, runs.base)?;
     Ok(ProbeRow {
-        task: target.task.to_owned(),
+        task: task.to_owned(),
         claim: target.claim.0,
         candidate: target.candidate,
         site: s.site.clone(),
@@ -373,7 +386,6 @@ mod tests {
 
     fn target() -> Target<'static> {
         Target {
-            task: T,
             claim: MsgId(7),
             candidate: 3,
             claim_text: "Write the store atomically",
@@ -448,6 +460,11 @@ mod tests {
         );
         assert!(h.hunt.cost > 0, "the meter's spend is the hunt's cost");
         let p = &h.probes[0];
+        assert_eq!(
+            (h.hunt.task.as_str(), p.task.as_str()),
+            (T, T),
+            "billed task"
+        );
         assert_eq!((p.outcome, p.novel, p.runs), (Outcome::Regression, true, 2));
         assert_eq!(p.probe_sha256, Sha256::of(b"#[test] fn t() {}").hex());
         assert!(h.notes.is_empty(), "{:?}", h.notes);

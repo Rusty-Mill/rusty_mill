@@ -206,7 +206,11 @@ enum Metered {
 enum Ended {
     Stopped(Stop),
     Unsaved(String),
-    Failed(ClassifiedError),
+    /// `tokens` is the call's measured usage, `None` when unknown.
+    Failed {
+        error: ClassifiedError,
+        tokens: Option<u64>,
+    },
 }
 
 impl Ended {
@@ -214,7 +218,7 @@ impl Ended {
         match self {
             Self::Stopped(stop) => End::Stopped(stop),
             Self::Unsaved(e) => End::Unsaved(e),
-            Self::Failed(error) => End::Failed { provider, error },
+            Self::Failed { error, .. } => End::Failed { provider, error },
         }
     }
 }
@@ -251,12 +255,14 @@ fn metered(
             let spent = cost(&answer.usage, &provider.price);
             settle(spent);
             if answer.usage.output_tokens > u64::from(question.max_output_tokens) {
-                return Metered::End(Ended::Failed(ClassifiedError::Permanent(AgentError(
-                    format!(
-                        "reply used {} output tokens, over {}",
-                        answer.usage.output_tokens, question.max_output_tokens
-                    ),
-                ))));
+                let error = ClassifiedError::Permanent(AgentError(format!(
+                    "reply used {} output tokens, over {}",
+                    answer.usage.output_tokens, question.max_output_tokens
+                )));
+                return Metered::End(Ended::Failed {
+                    error,
+                    tokens: Some(answer.usage.input_tokens + answer.usage.output_tokens),
+                });
             }
             Metered::Asked {
                 answer,
@@ -271,7 +277,10 @@ fn metered(
         // toward stopping.
         Err(error) => {
             settle(held);
-            Metered::End(Ended::Failed(error))
+            Metered::End(Ended::Failed {
+                error,
+                tokens: None,
+            })
         }
     }
 }
@@ -302,6 +311,9 @@ pub enum RawEnd {
     Failed {
         provider: AgentId,
         error: ClassifiedError,
+        /// The call's measured usage when the provider reported it (a
+        /// refused reply still used tokens); `None` when unknown.
+        tokens: Option<u64>,
     },
     Stopped(Stop),
     Exhausted,
@@ -390,9 +402,10 @@ fn raw_attempt(
         Metered::Experiment => Err(None),
         Metered::End(Ended::Stopped(stop)) => Ok(RawEnd::Stopped(stop)),
         Metered::End(Ended::Unsaved(e)) => Ok(RawEnd::Unsaved(e)),
-        Metered::End(Ended::Failed(error)) => Ok(RawEnd::Failed {
+        Metered::End(Ended::Failed { error, tokens }) => Ok(RawEnd::Failed {
             provider: id,
             error,
+            tokens,
         }),
         Metered::Asked { answer, cost } => match answer.reply {
             Reply::Raw(text) => Ok(RawEnd::Answered {
@@ -406,6 +419,7 @@ fn raw_attempt(
                 error: ClassifiedError::Permanent(AgentError(
                     "posts reply to a raw question".to_owned(),
                 )),
+                tokens: Some(answer.usage.input_tokens + answer.usage.output_tokens),
             }),
         },
     }
@@ -953,6 +967,30 @@ mod tests {
             "{why:?}"
         );
         assert!(fakes.asked("low").is_empty() && fakes.asked("tiny").is_empty());
+    }
+
+    #[test]
+    fn a_refused_raw_reply_keeps_its_measured_tokens_and_an_error_has_none() {
+        let cfg = providers(&[("a", provider(32_768, FREE))]);
+        let over = u64::from(MAX_OUTPUT_TOKENS) + 1;
+        let big = Ok(Answer {
+            reply: Reply::Raw("x".to_owned()),
+            usage: Usage {
+                input_tokens: 1_000,
+                output_tokens: over,
+                cached_input_tokens: 0,
+            },
+        });
+        let boom = Err(ClassifiedError::Permanent(AgentError("boom".to_owned())));
+        let mut fakes = Fakes::new(vec![("a", vec![big, answer(10), boom])]);
+        let mut m = meter(USD, 10);
+        let mut tokens = || match ask(&["a"], DataClass::Internal, &cfg, &mut fakes, &mut m).end {
+            RawEnd::Failed { tokens, .. } => tokens,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(tokens(), Some(1_000 + over), "over the cap");
+        assert_eq!(tokens(), Some(1_010), "a posts reply");
+        assert_eq!(tokens(), None, "an error: usage unknown");
     }
 
     #[test]
