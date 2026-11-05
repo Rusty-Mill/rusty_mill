@@ -6,16 +6,21 @@
 //! (`lel-jail` writes itself into it), and a cgroup can't be left with
 //! `setsid` or `setpgid`. Three pieces replace the process-group ones:
 //!
-//! - [`open`] records the cgroup as `mod/<task>.cgroups/<key>` and only then
-//!   creates it, so no crash leaves a cgroup without a record.
+//! - [`open`] claims the path for one task (`mod/cgroup-owners/<key>`,
+//!   created exclusively), records it as `mod/<task>.cgroups/<key>` and only
+//!   then creates the cgroup, also exclusively, so no crash leaves a cgroup
+//!   without a record and no two sessions share a path. It runs under the
+//!   task's cgroup lock and refuses an ended task.
 //! - [`hold`] is `bbp slot-hold --cgroup`: it keeps the slot until stdin is
-//!   closed and the cgroup is empty, and at a deadline writes `cgroup.kill`.
-//!   It never signals a process group.
-//! - [`settle`] is what `bbp quiesce` does with each record: a populated
-//!   cgroup is killed, an empty one removed with its record. A cgroup path
-//!   names one session only, so killing it by path is safe even after its
-//!   holder is gone.
+//!   closed and the cgroup is known to be empty, and from a deadline on
+//!   writes `cgroup.kill`. An error is reported and retried, never taken
+//!   for emptiness. It never signals a process group.
+//! - [`settle`] is what `bbp quiesce` does with each record, under the same
+//!   lock: a populated cgroup is killed, an empty one removed with its claim
+//!   and record. A record whose task doesn't own the path is dropped without
+//!   touching the cgroup, so only its owner's quiesce can kill a session.
 
+use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -31,6 +36,33 @@ const POLL: Duration = Duration::from_millis(100);
 /// Where `task`'s session cgroups are recorded.
 fn dir_of(dir: &Path, task: &TaskId) -> PathBuf {
     task_dir(dir, "mod", task).with_extension("cgroups")
+}
+
+/// Which task owns each session cgroup path, one file per path.
+fn owners(dir: &Path) -> PathBuf {
+    dir.join("mod").join("cgroup-owners")
+}
+
+/// Take `task`'s cgroup lock, waiting for it: [`open`] holds it from its
+/// liveness check through creating the cgroup, and `bbp quiesce` while it
+/// settles the records, so neither sees the other half done.
+///
+/// # Errors
+/// When the lock file can't be created or locked.
+pub fn lock(dir: &Path, task: &TaskId) -> Result<File, String> {
+    let path = task_dir(dir, "mod", task).with_extension("cgroups.lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let at = |e: std::io::Error| format!("{}: {e}", path.display());
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(at)?;
+    file.lock().map_err(at)?;
+    Ok(file)
 }
 
 /// A session cgroup path: absolute, below [`CGROUP_ROOT`], without `..`.
@@ -55,25 +87,106 @@ fn key(cgroup: &Path) -> String {
     Sha256::of(cgroup.as_os_str().as_encoded_bytes()).hex()
 }
 
-/// Record `cgroup` for `task`, then create it. A cgroup that already exists
-/// is refused: each session gets a path no earlier one used.
+/// Claim `cgroup` for `task`, record it, then create it. A path some
+/// session already claimed, or a cgroup that already exists, is refused:
+/// each session gets a path no earlier one used.
 ///
 /// # Errors
-/// When the path is not a session cgroup, it exists, or the record or the
-/// directory cannot be written.
+/// When the path is not a session cgroup, the task has ended, the path is
+/// claimed or exists, or the claim, record or directory can't be written.
 pub fn open(dir: &Path, task: &TaskId, cgroup: &Path) -> Result<PathBuf, String> {
+    open_with(dir, task, cgroup, || {})
+}
+
+/// [`open`], calling `after_record` once the record is written and before
+/// the cgroup is created: the seam the interleaving tests pause in.
+#[doc(hidden)]
+pub fn open_with(
+    dir: &Path,
+    task: &TaskId,
+    cgroup: &Path,
+    after_record: impl FnOnce(),
+) -> Result<PathBuf, String> {
     let cgroup = checked(cgroup)?;
-    if cgroup.exists() {
-        return Err(format!("{} already exists", cgroup.display()));
+    let _lock = lock(dir, task)?;
+    if crate::open_driver(dir, task)?.state.state.terminal() {
+        return Err(format!("task {} has ended", task.0));
     }
+    let key = key(&cgroup);
+    let owner = claim(dir, task, &cgroup, &key)?;
     let records = dir_of(dir, task);
-    std::fs::create_dir_all(&records).map_err(|e| format!("{}: {e}", records.display()))?;
-    let record = records.join(key(&cgroup));
-    let text = cgroup.to_str().ok_or("non-UTF-8 cgroup path")?;
-    rusty_atomic_file::write(&record, text.as_bytes())
-        .map_err(|e| format!("{}: {e}", record.display()))?;
-    std::fs::create_dir_all(&cgroup).map_err(|e| format!("{}: {e}", cgroup.display()))?;
+    let record = records.join(&key);
+    let written = std::fs::create_dir_all(&records)
+        .map_err(|e| format!("{}: {e}", records.display()))
+        .and_then(|()| {
+            cgroup
+                .to_str()
+                .ok_or_else(|| "non-UTF-8 cgroup path".to_owned())
+        })
+        .and_then(|text| {
+            rusty_atomic_file::write(&record, text.as_bytes())
+                .map_err(|e| format!("{}: {e}", record.display()))
+        });
+    if let Err(e) = written {
+        return Err(undo(e, None, &owner));
+    }
+    after_record();
+    if let Err(e) = create(&cgroup) {
+        return Err(undo(e, Some(&record), &owner));
+    }
     Ok(cgroup)
+}
+
+/// The claim file for `cgroup`, created only if no task has claimed it.
+fn claim(dir: &Path, task: &TaskId, cgroup: &Path, key: &str) -> Result<PathBuf, String> {
+    let owners = owners(dir);
+    std::fs::create_dir_all(&owners).map_err(|e| format!("{}: {e}", owners.display()))?;
+    let owner = owners.join(key);
+    let mut file = match File::options().write(true).create_new(true).open(&owner) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let by = std::fs::read_to_string(&owner).unwrap_or_default();
+            return Err(format!(
+                "{} already exists: task {by} owns it",
+                cgroup.display()
+            ));
+        }
+        Err(e) => return Err(format!("{}: {e}", owner.display())),
+    };
+    let wrote =
+        std::io::Write::write_all(&mut file, task.0.as_bytes()).and_then(|()| file.sync_all());
+    if let Err(e) = wrote {
+        return Err(undo(format!("{}: {e}", owner.display()), None, &owner));
+    }
+    Ok(owner)
+}
+
+/// Creates the cgroup itself exclusively: one that exists already, made
+/// outside this protocol, is refused rather than shared.
+fn create(cgroup: &Path) -> Result<(), String> {
+    if let Some(parent) = cgroup.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    std::fs::create_dir(cgroup).map_err(|e| format!("{}: {e}", cgroup.display()))
+}
+
+/// A failed open takes back its record, then its claim, and says so if it
+/// can't: a record or claim left behind is still safe, as it names a path
+/// only its own task can settle.
+fn undo(error: String, record: Option<&Path>, owner: &Path) -> String {
+    let left: Vec<String> = record
+        .into_iter()
+        .chain([owner])
+        .filter_map(|p| {
+            std::fs::remove_file(p)
+                .err()
+                .map(|e| format!("{}: {e}", p.display()))
+        })
+        .collect();
+    if left.is_empty() {
+        return error;
+    }
+    format!("{error} (and undoing it: {})", left.join("; "))
 }
 
 /// One recorded session cgroup.
@@ -81,6 +194,10 @@ pub fn open(dir: &Path, task: &TaskId, cgroup: &Path) -> Result<PathBuf, String>
 pub struct Record {
     path: PathBuf,
     cgroup: PathBuf,
+    /// Its claim file, and the task that must own it for this record to
+    /// touch the cgroup.
+    owner: PathBuf,
+    task: String,
 }
 
 impl Record {
@@ -91,7 +208,7 @@ impl Record {
     }
 }
 
-/// Every session cgroup recorded for `task`. Run with the moderator lock held.
+/// Every session cgroup recorded for `task`. Run with [`lock`] held.
 ///
 /// # Errors
 /// When a record cannot be read or names something that is not a session
@@ -110,7 +227,13 @@ pub fn records(dir: &Path, task: &TaskId) -> Result<Vec<Record>, String> {
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let cgroup = checked(Path::new(text.trim()))
                 .map_err(|e| format!("cgroup record {}: {e}", path.display()))?;
-            Ok(Record { path, cgroup })
+            let owner = owners(dir).join(key(&cgroup));
+            Ok(Record {
+                path,
+                cgroup,
+                owner,
+                task: task.0.clone(),
+            })
         })
         .collect()
 }
@@ -153,37 +276,81 @@ pub fn kill(cgroup: &Path) -> Result<(), String> {
     }
 }
 
-/// Settle one record: `true` once its cgroup is empty, removed and the
-/// record gone. A populated cgroup is killed and is not quiet yet.
+/// Settle one record, with [`lock`] held: `true` once its cgroup is empty
+/// and removed, then its claim and the record. A populated cgroup is killed
+/// and is not quiet yet. A record whose task doesn't own the path is only
+/// dropped: its cgroup is someone else's or gone.
 ///
 /// # Errors
-/// When the cgroup can't be read, killed or removed, or the record removed.
+/// When the claim or cgroup can't be read, killed or removed, or the record
+/// removed.
 pub fn settle(record: &Record) -> Result<bool, String> {
-    if populated(&record.cgroup)? {
-        kill(&record.cgroup)?;
-        return Ok(false);
+    if owns(record)? {
+        if populated(&record.cgroup)? {
+            kill(&record.cgroup)?;
+            return Ok(false);
+        }
+        remove(&record.cgroup, |p| std::fs::remove_dir(p))?;
+        remove(&record.owner, |p| std::fs::remove_file(p))?;
     }
-    match std::fs::remove_dir(&record.cgroup) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(format!("{}: {e}", record.cgroup.display())),
-    }
-    std::fs::remove_file(&record.path).map_err(|e| format!("{}: {e}", record.path.display()))?;
+    remove(&record.path, |p| std::fs::remove_file(p))?;
     Ok(true)
 }
 
+/// Whether the record's task holds the claim on its cgroup.
+fn owns(record: &Record) -> Result<bool, String> {
+    match std::fs::read_to_string(&record.owner) {
+        Ok(by) => Ok(by == record.task),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", record.owner.display())),
+    }
+}
+
+/// `how(path)`, where a path that is already gone is done.
+fn remove(path: &Path, how: impl Fn(&Path) -> std::io::Result<()>) -> Result<(), String> {
+    match how(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
+}
+
+/// What the holder needs of a cgroup; a seam for failure injection.
+pub trait Watched {
+    /// Whether any process is in it.
+    ///
+    /// # Errors
+    /// When that can't be established.
+    fn populated(&self) -> Result<bool, String>;
+    /// SIGKILL everything in it.
+    ///
+    /// # Errors
+    /// When the kill can't be written.
+    fn kill(&self) -> Result<(), String>;
+}
+
+impl Watched for Path {
+    fn populated(&self) -> Result<bool, String> {
+        populated(self)
+    }
+
+    fn kill(&self) -> Result<(), String> {
+        kill(self)
+    }
+}
+
 /// `bbp slot-hold --cgroup`: return once `stdin` is at end of file and
-/// `cgroup` is empty; the slot lock, the caller's stdout, stays open until
-/// then. At `deadline` the cgroup is killed, and the hold ends as soon as it
-/// is empty, whether or not stdin was closed.
-///
-/// # Errors
-/// When the cgroup can't be read or killed.
-pub fn hold(
-    cgroup: &Path,
+/// `cgroup` is known to be empty; the slot lock, the caller's stdout, stays
+/// open until then. From `deadline` on the cgroup is killed at every look
+/// that doesn't find it empty, and the hold ends as soon as it is, whether
+/// or not stdin was closed. An error is passed to `report` (once until it
+/// changes) and the look retried: uncertainty never frees the slot.
+pub fn hold<C: Watched + ?Sized>(
+    cgroup: &C,
     deadline: Option<SystemTime>,
     stdin: impl std::io::Read + Send + 'static,
-) -> Result<(), String> {
+    report: &mut dyn FnMut(&str),
+) {
     let (closed, done) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut stdin = stdin;
@@ -192,15 +359,27 @@ pub fn hold(
         let _ = closed.send(());
     });
     let mut stdin_closed = false;
-    let mut killed = false;
+    let mut last: Option<String> = None;
+    let mut tell = |e: String| {
+        if last.as_ref() != Some(&e) {
+            report(&e);
+            last = Some(e);
+        }
+    };
     loop {
         stdin_closed |= done.try_recv().is_ok();
-        if !killed && deadline.is_some_and(|d| SystemTime::now() >= d) {
-            kill(cgroup)?;
-            killed = true;
-        }
-        if (stdin_closed || killed) && !populated(cgroup)? {
-            return Ok(());
+        let past = deadline.is_some_and(|d| SystemTime::now() >= d);
+        if stdin_closed || past {
+            match cgroup.populated() {
+                Ok(false) => return,
+                Ok(true) => {}
+                Err(e) => tell(e),
+            }
+            if past {
+                if let Err(e) = cgroup.kill() {
+                    tell(e);
+                }
+            }
         }
         std::thread::sleep(POLL);
     }
@@ -231,6 +410,173 @@ mod tests {
         let gone = Path::new("/sys/fs/cgroup/lel-test-never-made-0");
         assert_eq!(populated(gone), Ok(false));
         assert_eq!(kill(gone), Ok(()));
+    }
+
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// A cgroup whose reads fail until `empty` is set, then report it empty;
+    /// `kill` fails its first `kill_fails` calls.
+    #[derive(Default)]
+    struct Flaky {
+        empty: AtomicBool,
+        looks: AtomicUsize,
+        kills: AtomicUsize,
+        kill_fails: usize,
+        reads_fail: bool,
+    }
+
+    impl Watched for Flaky {
+        fn populated(&self) -> Result<bool, String> {
+            self.looks.fetch_add(1, Ordering::SeqCst);
+            if self.empty.load(Ordering::SeqCst) {
+                return Ok(false);
+            }
+            if self.reads_fail {
+                return Err("cgroup.events: injected read failure".into());
+            }
+            Ok(true)
+        }
+
+        fn kill(&self) -> Result<(), String> {
+            let n = self.kills.fetch_add(1, Ordering::SeqCst);
+            if n < self.kill_fails {
+                return Err("cgroup.kill: injected denial".into());
+            }
+            Ok(())
+        }
+    }
+
+    /// stdin that never reaches end of file: the caller keeps it open.
+    struct Open(std::sync::mpsc::Receiver<()>);
+
+    impl std::io::Read for Open {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.0.recv();
+            Ok(0)
+        }
+    }
+
+    /// A slot lock taken here, and whether some other open of it is refused.
+    fn slot(tag: &str) -> (PathBuf, File) {
+        let path = std::env::temp_dir().join(format!("bbp-cg-slot-{}-{tag}", std::process::id()));
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .expect("slot");
+        file.lock().expect("lock");
+        (path, file)
+    }
+
+    fn held(path: &Path) -> bool {
+        let file = File::options().write(true).open(path).expect("slot");
+        matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+    }
+
+    fn wait_for(what: &str, done: impl Fn() -> bool) {
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(
+                std::time::Instant::now() < end,
+                "timed out waiting for {what}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Runs `hold` on a thread that owns the slot lock, as `bbp slot-hold`
+    /// owns it on its stdout; the agent keeps no copy. Returns the reports.
+    fn holding(
+        cg: Arc<Flaky>,
+        deadline: Option<SystemTime>,
+        stdin: impl std::io::Read + Send + 'static,
+        lock: File,
+    ) -> std::thread::JoinHandle<Vec<String>> {
+        std::thread::spawn(move || {
+            let mut reports = Vec::new();
+            hold(&*cg, deadline, stdin, &mut |e| reports.push(e.to_owned()));
+            drop(lock);
+            reports
+        })
+    }
+
+    #[test]
+    fn a_failed_look_keeps_the_slot_until_the_cgroup_is_known_empty() {
+        let (path, lock) = slot("look");
+        let cg = Arc::new(Flaky {
+            reads_fail: true,
+            ..Flaky::default()
+        });
+        let holder = holding(cg.clone(), None, std::io::empty(), lock);
+        wait_for("several failed looks", || {
+            cg.looks.load(Ordering::SeqCst) >= 5
+        });
+        assert!(!holder.is_finished(), "the hold ended on an error");
+        assert!(held(&path), "the slot was freed on an error");
+        cg.empty.store(true, Ordering::SeqCst);
+        let reports = holder.join().expect("holder");
+        assert!(!held(&path));
+        assert_eq!(
+            reports,
+            ["cgroup.events: injected read failure"],
+            "reported once"
+        );
+        assert_eq!(cg.kills.load(Ordering::SeqCst), 0, "no deadline, no kill");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_failed_kill_is_retried_and_the_slot_kept_while_members_remain() {
+        let (path, lock) = slot("kill");
+        let cg = Arc::new(Flaky {
+            kill_fails: 3,
+            ..Flaky::default()
+        });
+        // The caller still holds stdin open; only the deadline applies.
+        let (_caller, open) = std::sync::mpsc::channel();
+        let past = SystemTime::now() - Duration::from_secs(1);
+        let holder = holding(cg.clone(), Some(past), Open(open), lock);
+        wait_for("the kill to succeed", || {
+            cg.kills.load(Ordering::SeqCst) >= 5
+        });
+        assert!(!holder.is_finished(), "the hold ended with members left");
+        assert!(held(&path), "the slot was freed with members left");
+        cg.empty.store(true, Ordering::SeqCst);
+        let reports = holder.join().expect("holder");
+        assert!(!held(&path));
+        assert_eq!(reports, ["cgroup.kill: injected denial"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_record_whose_task_does_not_own_the_path_never_touches_the_cgroup() {
+        let base = std::env::temp_dir().join(format!("bbp-cg-own-{}", std::process::id()));
+        let cgroup = base.join("cg");
+        std::fs::create_dir_all(&cgroup).expect("cg");
+        std::fs::write(cgroup.join("cgroup.events"), "populated 1\n").expect("events");
+        let owner = base.join("owner");
+        std::fs::write(&owner, "A").expect("owner");
+        let path = base.join("record");
+        std::fs::write(&path, "x").expect("record");
+        let record = Record {
+            path: path.clone(),
+            cgroup: cgroup.clone(),
+            owner: owner.clone(),
+            task: "B".into(),
+        };
+        assert_eq!(settle(&record), Ok(true));
+        assert!(!path.exists(), "the stray record is dropped");
+        assert!(
+            !cgroup.join("cgroup.kill").exists(),
+            "A's session was not killed"
+        );
+        assert!(
+            cgroup.is_dir() && owner.exists(),
+            "A's cgroup and claim stay"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

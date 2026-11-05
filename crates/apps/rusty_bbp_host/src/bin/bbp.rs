@@ -105,7 +105,9 @@ fn run() -> Result<String, String> {
             .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
         if let Some(cgroup) = a.flags.get("cgroup") {
             let cgroup = rusty_bbp_host::cgroups::checked(std::path::Path::new(cgroup))?;
-            rusty_bbp_host::cgroups::hold(&cgroup, deadline, std::io::stdin())?;
+            rusty_bbp_host::cgroups::hold(cgroup.as_path(), deadline, std::io::stdin(), &mut |e| {
+                eprintln!("bbp slot-hold: {e}; still holding")
+            });
             return Ok(String::new());
         }
         slots::hold_while_alive(deadline);

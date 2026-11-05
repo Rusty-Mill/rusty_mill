@@ -1731,6 +1731,112 @@ fn the_cgroup_holder_kills_the_cgroup_at_the_deadline() {
     assert!(quiet && !cgroup.exists());
 }
 
+/// D86 (#1507 review): an open paused between its record and its cgroup
+/// is a claim no other task's open can take, so exactly one task owns the
+/// path, the loser leaves no record, and its quiesce can't touch the winner.
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_opens_of_one_path_have_exactly_one_owner() {
+    let cgroup = match session_cgroup("race") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-race");
+    claims_task(&dir);
+    let other = TaskId("C2".into());
+    claims_task_as(&dir, &other);
+    let (paused, resume) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let winner = {
+        let (dir, cgroup) = (dir.clone(), cgroup.clone());
+        let (tell, wait) = (paused.0, resume.1);
+        std::thread::spawn(move || {
+            rusty_bbp_host::cgroups::open_with(&dir, &task(), &cgroup, || {
+                tell.send(()).expect("paused");
+                wait.recv().expect("resume");
+            })
+        })
+    };
+    paused.1.recv().expect("winner paused after its record");
+    let lost = rusty_bbp_host::cgroups::open(&dir, &other, &cgroup).expect_err("second owner");
+    assert!(lost.contains("task C1 owns it"), "{lost}");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &other)
+        .unwrap()
+        .is_empty());
+    resume.0.send(()).expect("resume");
+    winner.join().expect("winner").expect("winner opens");
+    assert!(cgroup.is_dir());
+    // The loser's task ends and quiesces: nothing of the winner's is touched.
+    let mut agent = sleeper_in(&cgroup);
+    let rev = open_driver(&dir, &other).expect("driver").state.rev;
+    human::perform(&dir, &other, "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &other), Ok(true));
+    assert!(
+        agent.try_wait().expect("wait").is_none(),
+        "the winner's agent lives"
+    );
+    assert!(cgroup.is_dir());
+    agent.kill().expect("kill");
+    agent.wait().expect("reap");
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(!cgroup.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// D86 (#1507 review): an open paused after its record while the task
+/// ends: quiesce waits for it rather than settling a half-made session, so
+/// a quiesce that returns `true` leaves no cgroup behind; and once the task
+/// has ended no open succeeds.
+#[cfg(target_os = "linux")]
+#[test]
+fn quiesce_waits_for_a_paused_open_and_an_ended_task_opens_nothing() {
+    use std::time::Duration;
+    let cgroup = match session_cgroup("pause") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-pause");
+    claims_task(&dir);
+    let (paused, resume) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let opening = {
+        let (dir, cgroup) = (dir.clone(), cgroup.clone());
+        let (tell, wait) = (paused.0, resume.1);
+        std::thread::spawn(move || {
+            rusty_bbp_host::cgroups::open_with(&dir, &task(), &cgroup, || {
+                tell.send(()).expect("paused");
+                wait.recv().expect("resume");
+            })
+        })
+    };
+    paused.1.recv().expect("open paused after its record");
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    let quiescing = {
+        let dir = dir.clone();
+        std::thread::spawn(move || rusty_bbp_host::moderator::quiesce(&dir, &task()))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !quiescing.is_finished(),
+        "quiesce settled a half-made session"
+    );
+    resume.0.send(()).expect("resume");
+    opening
+        .join()
+        .expect("open")
+        .expect("the paused open completes");
+    assert_eq!(quiescing.join().expect("quiesce"), Ok(true));
+    assert!(!cgroup.exists(), "a successful quiesce left a cgroup");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    let late = rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect_err("ended task");
+    assert!(late.contains("has ended"), "{late}");
+    assert!(!cgroup.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- erosion profile (#704)
 
 const ORIGINAL_RS: &str = "pub fn total(items: &[Item], rate: u32) -> u32 {
