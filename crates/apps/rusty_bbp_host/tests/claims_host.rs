@@ -1837,6 +1837,205 @@ fn quiesce_waits_for_a_paused_open_and_an_ended_task_opens_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------------------------------------------------------------- takeover (D82)
+
+fn bbp(dir: &Path, args: &[&str], stdin: impl AsRef<[u8]>) -> String {
+    use std::io::Write;
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .args(["--task", "C1"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("bbp");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(stdin.as_ref())
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// The human starts a takeover with `bbp human takeover`, orch records the
+/// typed batches with `bbp takeover-input` (text on stdin, chained by
+/// SHA-256) and ends it with `bbp takeover-ended`; the board keeps it all.
+/// After `bbp human takeover-release`, orch drains and ends it as released.
+#[test]
+fn a_takeover_is_recorded_from_start_to_end_through_the_cli() {
+    let dir = tempdir("takeover-cli");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "one", true);
+    let r = human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[
+            &format!("msg:{c}"),
+            "agent:C1:1:1",
+            "nano",
+            "10",
+            "steer",
+            "it",
+        ],
+        None,
+    )
+    .expect("takeover");
+    assert_eq!(r, Response::TakenOver(1));
+    let sha = rusty_bbp::claims::input_chain(None, b"ls\n").hex();
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "ls\n",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    // A replayed or forged batch is refused by the core, not written.
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "ls\n",
+    );
+    assert!(out.contains("OpConflict"), "{out}");
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-ended",
+            "--takeover",
+            "takeover:1",
+            "--reason",
+            "released",
+        ],
+        "",
+    );
+    assert!(out.contains("Forbidden"), "{out}");
+    let out = bbp(
+        &dir,
+        &["takeover-ended", "--takeover", "1", "--reason", "mux-lost"],
+        "",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    let t = state(&dir)
+        .claims
+        .takeovers
+        .get(&1)
+        .cloned()
+        .expect("takeover");
+    assert_eq!(t.batches, 1);
+    assert_eq!(t.phase, TakeoverPhase::Ended(TakeoverEnd::MuxLost));
+
+    let r = human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[&format!("msg:{c}"), "agent:C1:1:1", "nano", "10", "again"],
+        None,
+    )
+    .expect("takeover");
+    assert_eq!(r, Response::TakenOver(2));
+    human::perform(&dir, &task(), "takeover-release", &["takeover:2"], None).expect("release");
+    // Delivered before the release, posted after it.
+    let sha = rusty_bbp::claims::input_chain(None, b"q").hex();
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "2",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "q",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    let end = ["takeover-ended", "--takeover", "2", "--reason", "released"];
+    assert!(bbp(&dir, &end, "").contains("Ok"));
+    assert!(bbp(&dir, &end, "").contains("NotOpen"), "ends once");
+    let t = state(&dir).claims.takeovers[&2].clone();
+    assert_eq!(t.batches, 1);
+    assert_eq!(t.phase, TakeoverPhase::Ended(TakeoverEnd::Released));
+}
+
+/// `bbp takeover-input` records stdin byte for byte: invalid UTF-8, a
+/// multibyte character split across batches, and exactly 4096 bytes are
+/// kept; 4097 is refused before anything is written.
+#[test]
+fn takeover_input_keeps_raw_bytes_and_refuses_an_oversized_batch() {
+    use rusty_bbp::claims::input_chain;
+    let dir = tempdir("takeover-bytes");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "one", true);
+    let msg = format!("msg:{c}");
+    human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[&msg, "s1", "nano", "10", "steer"],
+        None,
+    )
+    .expect("takeover");
+    let full = vec![b'a'; 4096];
+    let batches: [&[u8]; 4] = [b"\xff\xfe", b"caf\xc3", b"\xa9\r", &full];
+    let mut prev = None;
+    for (seq, batch) in (1u64..).zip(batches) {
+        let sha = input_chain(prev, batch);
+        let (seq, hex) = (seq.to_string(), sha.hex());
+        let flags = [
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            &seq,
+            "--sha256",
+            &hex,
+        ];
+        let out = bbp(&dir, &flags, batch);
+        assert!(out.contains("Ok"), "batch {seq}: {out}");
+        prev = Some(sha);
+    }
+    let big = vec![b'b'; 4097];
+    let hex = input_chain(prev, &big).hex();
+    let flags = [
+        "takeover-input",
+        "--takeover",
+        "1",
+        "--seq",
+        "5",
+        "--sha256",
+        &hex,
+    ];
+    let out = bbp(&dir, &flags, &big);
+    assert!(out.contains("over 4096 bytes"), "{out}");
+    let st = state(&dir);
+    let t = st.claims.takeovers.get(&1).expect("takeover");
+    assert_eq!((t.batches, t.last), (4, prev));
+}
+
 // ---------------------------------------------------------------- erosion profile (#704)
 
 const ORIGINAL_RS: &str = "pub fn total(items: &[Item], rate: u32) -> u32 {
