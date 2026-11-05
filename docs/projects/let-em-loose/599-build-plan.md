@@ -174,12 +174,23 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
   posted: an advisory's title or severity, or the app's current pin. The
   claim text comes from the key alone, so it never goes stale.
 
-  BBP R15 covers a crash between the post and the table write:
-  - The op id is a digest of the app and the key.
-  - Every posted field comes from the key and the slot's previous claim.
-    `refs` cites the opening brief `art:1`, not the current brief.
-  - So the retry is byte-identical and replays the same claim. A changed
-    payload under one op would be refused with `OpConflict`.
+  A crash between the post and the table write is covered by writing the
+  post down first:
+  - Before a post is sent, its exact arguments are saved in the slot as
+    pending. Once BBP answers, the claim replaces them.
+  - The next run resends a pending post before anything else in that slot.
+    BBP replays it if it landed (R15: same op, same bytes) or posts it now.
+    Either way its claim becomes the slot's, so the next finding, even a
+    different one, supersedes it instead of leaving it orphaned. A resend
+    BBP refuses never posted; it is dropped and reported.
+  - A post is identified by the app, the key and the slot's previous claim.
+    The op id is a digest of all three, and every posted field comes from
+    the key and that claim; `refs` cites the opening brief `art:1`.
+  - A key that comes back after another (A, then B, then A) has a different
+    previous claim, so it is a new op: a new claim that supersedes B, not a
+    conflict with A's first post.
+  - The toolchain channel is read as TOML (`[toolchain] channel`, basic or
+    literal string, optional trailing comment).
 - An adapter that fails is reported in the JSON with its reason, the others
   still run, and the exit status is 1.
 

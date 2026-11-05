@@ -1,15 +1,16 @@
 //! R15 replay through a real `bbp` host: the watcher's posts on a claims
 //! task, with no model calls. Run by the Orch BBP acceptance job.
-use super::tests::MemSeen;
+use super::tests::{set, MemSeen};
 use super::*;
 
 use std::process::Command;
 
 fn bbp(bin: &Path, args: &[&str]) {
     let out = Command::new(bin).args(args).output().expect("run bbp");
+    let said = String::from_utf8_lossy(&out.stdout);
     assert!(
-        out.status.success(),
-        "bbp {args:?}: {}",
+        out.status.success() && !said.contains("Rejected"),
+        "bbp {args:?}: {said} {}",
         String::from_utf8_lossy(&out.stderr)
     );
 }
@@ -40,8 +41,9 @@ fn open_task(root: &Path, bin: &Path) -> PathBuf {
     let mut profiles: Value =
         rusty_serde::json::from_str(&std::fs::read_to_string(shipped).unwrap()).unwrap();
     if let Value::Map(m) = &mut profiles {
-        m.retain(|(k, _)| k != "test_paths");
+        m.retain(|(k, _)| k != "test_paths" && k != "erosion");
         m.push(("test_paths".into(), Value::Seq(vec!["tests/**".into()])));
+        m.push(("erosion".into(), "off".into()));
     }
     let role = |id: &str, order: u32| {
         format!(
@@ -106,7 +108,8 @@ fn findings_are_posted_once_and_superseded_through_a_real_bbp() {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let dir = open_task(&root, &bin);
-    let mut child = Child::spawn(&bin, &dir, "maint-demo", WATCHER).unwrap();
+    let session = || Child::spawn(&bin, &dir, "maint-demo", WATCHER).unwrap();
+    let mut child = session();
     let mut seen = MemSeen::default();
 
     // Changed details: the first claim stands and nothing is posted.
@@ -133,23 +136,36 @@ fn findings_are_posted_once_and_superseded_through_a_real_bbp() {
     assert!(a.new && !b.new && a.claim == b.claim, "{a:?} {b:?}");
 
     // A new update set supersedes the open claim; the host admits it.
-    let set = |to: &str| updates(&format!("    Updating foo v1.0.0 -> {to}\n")).unwrap();
     let first = record(&mut child, &mut seen, "demo", set("v1.0.1")).unwrap();
     let next = record(&mut child, &mut seen, "demo", set("v1.0.2")).unwrap();
     assert!(next.new && next.supersedes == first.claim, "{next:?}");
 
-    // A post whose table write was lost is byte-identical and replays.
-    let f = set("v1.0.2");
-    let again = post(&mut child, "demo", &f, first.claim).unwrap();
-    assert_eq!(Some(again), next.claim);
+    // A key that comes back (A, B, A) is a new op over B: a new claim.
+    let back = record(&mut child, &mut seen, "demo", set("v1.0.1")).unwrap();
+    assert!(back.new && back.supersedes == next.claim, "{back:?}");
+    assert_ne!(back.claim, first.claim);
+
+    // C posts but its settling write is lost, and the process restarts.
+    seen.fail_after = Some(1);
+    let lost = record(&mut child, &mut seen, "demo", set("v1.0.3")).unwrap_err();
+    assert!(lost.contains("recorded next run"), "{lost}");
+    drop(child);
+    let mut child = session();
+    // The next run sees D: C's resend replays, and D supersedes C, not A.
+    let d = record(&mut child, &mut seen, "demo", set("v1.0.4")).unwrap();
+    let c = d.supersedes.expect("supersedes C");
+    assert_ne!(Some(c), back.claim, "C was recovered first");
+    let again = post(&mut child, "demo", &set("v1.0.3"), back.claim).unwrap();
+    assert_eq!(again, c, "C's post replays to the recovered claim");
 
     // The host really compares payloads: drifted text under the same op is
-    // refused, so the replay above is not a lenient double.
+    // refused, so the replays above are not a lenient double.
+    let f = set("v1.0.3");
     let drifted = Finding {
         text: format!("{} Now.", f.text),
         ..f
     };
-    let e = post(&mut child, "demo", &drifted, first.claim).unwrap_err();
+    let e = post(&mut child, "demo", &drifted, back.claim).unwrap_err();
     assert!(e.contains("OpConflict"), "{e}");
     drop(child);
     let _ = std::fs::remove_dir_all(&root);

@@ -1,5 +1,6 @@
 //! The on-disk shape of one watched finding (#599, D58's `watch_finding`):
-//! for an app and a finding slot, the key last posted and its claim.
+//! for an app and a finding slot, the key last posted and its claim, and a
+//! post written down before it was sent.
 //!
 //! Positional bincode under the schema tag below: the v1 layout is the
 //! format, and any layout change needs a new tag (see `record.rs`).
@@ -29,19 +30,22 @@ pub struct WatchRecord {
     pub revision: i64,
     pub app: String,
     pub slot: String,
-    finding: String,
-    claim: u64,
+    posted: Option<(String, u64)>,
+    pending: Option<(String, String)>,
 }
 
 impl WatchRecord {
-    pub fn new(app: &str, slot: &str, found: &WatchFinding, revision: u64) -> Self {
+    pub fn new(app: &str, slot: &str, row: &WatchSlot, revision: u64) -> Self {
         Self {
             id: key(app, slot),
             revision: revision as i64,
             app: app.to_owned(),
             slot: slot.to_owned(),
-            finding: found.key.clone(),
-            claim: found.claim,
+            posted: row.posted.as_ref().map(|p| (p.key.clone(), p.claim)),
+            pending: row
+                .pending
+                .as_ref()
+                .map(|p| (p.key.clone(), p.post.clone())),
         }
     }
 
@@ -56,21 +60,38 @@ impl WatchRecord {
         )))
     }
 
-    pub fn into_finding(self, app: &str, slot: &str) -> Result<WatchFinding, StoreError> {
+    pub fn into_slot(self, app: &str, slot: &str) -> Result<WatchSlot, StoreError> {
         self.check(app, slot)?;
-        Ok(WatchFinding {
-            key: self.finding,
-            claim: self.claim,
+        Ok(WatchSlot {
+            posted: self.posted.map(|(key, claim)| WatchFinding { key, claim }),
+            pending: self.pending.map(|(key, post)| PendingPost { key, post }),
         })
     }
 }
 
-/// The finding last posted in a slot, and the claim it got.
+/// One app's slot: the finding last posted there, and a post sent (or about
+/// to be) whose claim is not recorded yet.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchSlot {
+    pub posted: Option<WatchFinding>,
+    pub pending: Option<PendingPost>,
+}
+
+/// A finding posted in a slot, and the claim it got.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WatchFinding {
     pub key: String,
     /// The BBP claim's message id.
     pub claim: u64,
+}
+
+/// A post written down before it is sent, so a later run can resend it
+/// byte for byte (BBP replays it) and learn its claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingPost {
+    pub key: String,
+    /// The exact `post` arguments, as JSON.
+    pub post: String,
 }
 
 impl Record for WatchRecord {

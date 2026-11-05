@@ -17,24 +17,29 @@
 //!   app and slot, the key last posted and its claim:
 //!   - same key: nothing is posted, and the report gives the claim;
 //!   - a new key in a slot that has a claim (a new update set, a new watched
-//!     Rust): a new claim that `supersedes` the old one, so accepting it
-//!     retires the stale claim;
+//!     Rust, or an earlier key coming back): a new claim that `supersedes`
+//!     the slot's claim, so accepting it retires the stale one;
 //!   - an empty slot: a new claim.
 //!
 //!   Details that change under the same key (an advisory's title or
 //!   severity, the app's current pin) are in [`Finding::detail`], reported
 //!   and never posted, so the claim text never goes stale.
-//! - Crash safety is BBP's R15: the op id is a digest of the app and the key,
-//!   and every posted field is a function of the key and the slot's previous
-//!   claim (refs cite the opening brief `art:1`, not the current one). A post
-//!   whose table write was lost is therefore byte-identical next time, and
-//!   replays to the same claim.
+//! - Crash safety. Before a post is sent, its exact arguments are saved in
+//!   the slot as pending; once BBP answers, the claim replaces it. A run that
+//!   dies in between leaves the pending post, and the next run resends it
+//!   before anything else in that slot: BBP replays it if it landed (R15:
+//!   the same op and bytes) or posts it now. Either way its claim becomes the
+//!   slot's, so the next finding supersedes it instead of orphaning it. A
+//!   post is identified by the app, the key and the slot's previous claim
+//!   (the op id is a digest of all three, and refs cite the opening brief
+//!   `art:1`), so a key that comes back after another (A, B, A) is a new op
+//!   over B, not a conflict with A's first post.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use orch_cli::CommandRunner;
-use orch_store::{Store, WatchFinding};
+use orch_store::{PendingPost, Store, WatchFinding, WatchSlot};
 use rusty_bbp::{MsgId, Response};
 use rusty_serde::{Deserialize, Serialize, Value};
 
@@ -272,10 +277,7 @@ const SHOWN: usize = 8;
 /// `watched` alone: moving the pin to another old version is still the same
 /// thing to do.
 pub fn toolchain(file: &str, watched: &str) -> Option<Finding> {
-    let channel = file.lines().find_map(|l| {
-        let (k, v) = l.split_once('=')?;
-        (k.trim() == "channel").then(|| v.trim().trim_matches('"').to_owned())
-    })?;
+    let channel = channel(file)?;
     (channel != watched).then(|| Finding {
         key: format!("toolchain:rust:{watched}"),
         slot: "toolchain:rust".to_owned(),
@@ -285,6 +287,32 @@ pub fn toolchain(file: &str, watched: &str) -> Option<Finding> {
         ),
         detail: format!("pins {channel}"),
     })
+}
+
+/// `[toolchain] channel` from a `rust-toolchain.toml`: a basic or literal
+/// TOML string, with an optional trailing comment. Anything else (a bare or
+/// escaped value, a key outside `[toolchain]`) is not read as a channel.
+fn channel(file: &str) -> Option<String> {
+    let mut table = "";
+    for line in file.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            table = name.trim();
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        if table != "toolchain" || k.trim() != "channel" {
+            continue;
+        }
+        let v = v.trim_start();
+        let quote = v.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+        let (value, rest) = v[1..].split_once(quote)?;
+        let rest = rest.trim_start();
+        let clean = !(quote == '"' && value.contains('\\'));
+        return (clean && (rest.is_empty() || rest.starts_with('#'))).then(|| value.to_owned());
+    }
+    None
 }
 
 // ---------------------------------------------------------------- posting
@@ -304,51 +332,109 @@ pub struct Posted {
 /// The `watch_finding` table (D58): per app and slot, the finding last
 /// posted and its claim.
 pub trait Seen {
-    fn get(&self, app: &str, slot: &str) -> Result<Option<WatchFinding>, String>;
-    fn put(&mut self, app: &str, slot: &str, found: &WatchFinding) -> Result<(), String>;
+    fn get(&self, app: &str, slot: &str) -> Result<WatchSlot, String>;
+    fn put(&mut self, app: &str, slot: &str, row: &WatchSlot) -> Result<(), String>;
 }
 
 impl Seen for Store {
-    fn get(&self, app: &str, slot: &str) -> Result<Option<WatchFinding>, String> {
-        self.watch_finding(app, slot).map_err(|e| e.to_string())
+    fn get(&self, app: &str, slot: &str) -> Result<WatchSlot, String> {
+        self.watch_slot(app, slot).map_err(|e| e.to_string())
     }
-    fn put(&mut self, app: &str, slot: &str, found: &WatchFinding) -> Result<(), String> {
-        self.save_watch_finding(app, slot, found)
+    fn put(&mut self, app: &str, slot: &str, row: &WatchSlot) -> Result<(), String> {
+        self.save_watch_slot(app, slot, row)
             .map_err(|e| e.to_string())
     }
 }
 
 /// Post `finding` unless its slot already holds it, superseding the slot's
-/// older claim, and record what was posted.
+/// claim. The post is written down before it is sent and settled after, so
+/// a run that dies in between is finished by the next one (see [`recover`]).
 pub fn record(
     rpc: &mut dyn Rpc,
     seen: &mut dyn Seen,
     app: &str,
     finding: Finding,
 ) -> Result<Posted, String> {
-    let prior = seen.get(app, &finding.slot)?;
-    if let Some(p) = prior.as_ref().filter(|p| p.key == finding.key) {
+    let slot = finding.slot.clone();
+    let mut row = recover(rpc, seen, app, &slot)?;
+    if let Some(p) = row.posted.as_ref().filter(|p| p.key == finding.key) {
         return Ok(Posted {
-            finding,
             claim: Some(MsgId(p.claim)),
+            finding,
             new: false,
             supersedes: None,
         });
     }
-    let supersedes = prior.map(|p| MsgId(p.claim));
-    let claim = post(rpc, app, &finding, supersedes)?;
-    let found = WatchFinding {
+    let supersedes = row.posted.as_ref().map(|p| MsgId(p.claim));
+    let args = post_args(app, &finding, supersedes);
+    row.pending = Some(PendingPost {
+        key: finding.key.clone(),
+        post: rusty_serde::json::to_string(&args).map_err(|e| e.to_string())?,
+    });
+    seen.put(app, &slot, &row)
+        .map_err(|e| format!("not sent, the pending post was not saved: {e}"))?;
+    let claim = match send(rpc, &args)? {
+        Sent::Posted(c) => c,
+        Sent::Refused(e) => {
+            row.pending = None;
+            let cleared = seen.put(app, &slot, &row);
+            return Err(match cleared {
+                Ok(()) => e,
+                Err(c) => format!("{e}; the pending post stays until a later run: {c}"),
+            });
+        }
+    };
+    row.posted = Some(WatchFinding {
         key: finding.key.clone(),
         claim: claim.0,
-    };
-    seen.put(app, &finding.slot, &found)
-        .map_err(|e| format!("{claim} posted, not recorded: {e}"))?;
+    });
+    row.pending = None;
+    seen.put(app, &slot, &row)
+        .map_err(|e| format!("{claim} posted, recorded next run: {e}"))?;
     Ok(Posted {
         finding,
         claim: Some(claim),
         new: true,
         supersedes,
     })
+}
+
+/// The slot, with a post an earlier run wrote down but did not settle
+/// resent first. BBP replays it if it landed (the same op and bytes) or
+/// posts it now, and either way its claim becomes the slot's, so the next
+/// finding supersedes it rather than leaving it orphaned. A refused resend
+/// never posted; it is dropped and reported.
+pub fn recover(
+    rpc: &mut dyn Rpc,
+    seen: &mut dyn Seen,
+    app: &str,
+    slot: &str,
+) -> Result<WatchSlot, String> {
+    let mut row = seen.get(app, slot)?;
+    let Some(p) = row.pending.take() else {
+        return Ok(row);
+    };
+    let args: Value = rusty_serde::json::from_str(&p.post)
+        .map_err(|e| format!("pending post for {}: {e}", p.key))?;
+    let refused = match send(rpc, &args)? {
+        Sent::Posted(c) => {
+            row.posted = Some(WatchFinding {
+                key: p.key.clone(),
+                claim: c.0,
+            });
+            None
+        }
+        Sent::Refused(e) => Some(e),
+    };
+    seen.put(app, slot, &row)
+        .map_err(|e| format!("pending post for {} not settled: {e}", p.key))?;
+    match refused {
+        None => Ok(row),
+        Some(e) => Err(format!(
+            "pending post for {} was refused and dropped: {e}",
+            p.key
+        )),
+    }
 }
 
 /// One app's watch.
@@ -361,9 +447,11 @@ pub struct AppReport {
     pub errors: Vec<String>,
 }
 
-/// The op id of `finding` on `app`: the same finding always maps to it.
-pub fn op_id(app: &str, finding: &Finding) -> String {
-    let digest = rusty_bbp::Sha256::of(format!("{app}\n{}", finding.key).as_bytes());
+/// The op id of posting `finding` on `app` over the slot's claim
+/// `supersedes`: the same post always maps to it, and nothing else does.
+pub fn op_id(app: &str, finding: &Finding, supersedes: Option<MsgId>) -> String {
+    let prior = supersedes.map_or(String::new(), |c| c.0.to_string());
+    let digest = rusty_bbp::Sha256::of(format!("{app}\n{}\n{prior}", finding.key).as_bytes());
     format!("watch-{}", &digest.hex()[..32])
 }
 
@@ -371,17 +459,12 @@ pub fn op_id(app: &str, finding: &Finding) -> String {
 /// current brief, so a repeated post stays byte-identical (R15).
 const OPENING_BRIEF: &str = "art:1";
 
-/// Post `finding` as a low-stakes, reversible claim on the session's task,
+/// The `post` arguments for `finding` as a low-stakes, reversible claim,
 /// citing the opening brief. Every field comes from `app`, `finding.key` and
 /// `supersedes`, so a repeat is byte-identical and replays (R15).
-pub fn post(
-    rpc: &mut dyn Rpc,
-    app: &str,
-    finding: &Finding,
-    supersedes: Option<MsgId>,
-) -> Result<MsgId, String> {
+pub fn post_args(app: &str, finding: &Finding, supersedes: Option<MsgId>) -> Value {
     let mut fields = vec![
-        ("op", op_id(app, finding).into()),
+        ("op", op_id(app, finding, supersedes).into()),
         ("kind", "claim".into()),
         ("text", finding.text.as_str().into()),
         ("domains", Value::Seq(vec![finding.domain.into()])),
@@ -392,22 +475,46 @@ pub fn post(
     if let Some(x) = supersedes {
         fields.push(("supersedes", Value::UInt(x.0)));
     }
-    let args = map(fields);
-    let reply = match rpc.call("post", args.clone()) {
-        Err(CallError::Lost(_)) => rpc.call("post", args),
-        first => first,
-    };
-    match answer(reply)? {
-        Response::Posted(id) => Ok(id),
-        other => Err(format!("post answered {other:?}")),
+    map(fields)
+}
+
+/// Post `finding` (see [`post_args`]); a refusal is an error.
+pub fn post(
+    rpc: &mut dyn Rpc,
+    app: &str,
+    finding: &Finding,
+    supersedes: Option<MsgId>,
+) -> Result<MsgId, String> {
+    match send(rpc, &post_args(app, finding, supersedes))? {
+        Sent::Posted(id) => Ok(id),
+        Sent::Refused(e) => Err(e),
     }
 }
 
-fn answer(reply: Result<String, CallError>) -> Result<Response, String> {
-    let text = reply.map_err(|e| e.to_string())?;
+/// How a sent post ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Sent {
+    Posted(MsgId),
+    /// BBP answered and refused it: nothing was posted.
+    Refused(String),
+}
+
+/// Send `post` once more if the first answer was lost. `Err` means no answer
+/// arrived, so it may or may not have landed.
+pub fn send(rpc: &mut dyn Rpc, args: &Value) -> Result<Sent, String> {
+    let reply = match rpc.call("post", args.clone()) {
+        Err(CallError::Lost(_)) => rpc.call("post", args.clone()),
+        first => first,
+    };
+    let text = match reply {
+        Ok(t) => t,
+        Err(CallError::Answered(e)) => return Ok(Sent::Refused(e)),
+        Err(CallError::Lost(e)) => return Err(format!("no answer: {e}")),
+    };
     match rusty_serde::json::from_str::<Response>(&text) {
-        Ok(Response::Rejected(r)) => Err(format!("{:?}: {}", r.code, r.detail)),
-        Ok(r) => Ok(r),
+        Ok(Response::Posted(id)) => Ok(Sent::Posted(id)),
+        Ok(Response::Rejected(r)) => Ok(Sent::Refused(format!("{:?}: {}", r.code, r.detail))),
+        Ok(other) => Err(format!("post answered {other:?}")),
         Err(e) => Err(format!("unreadable answer: {e}")),
     }
 }
@@ -623,6 +730,8 @@ mod tests {
         posts: Vec<Value>,
         ops: BTreeMap<String, (Value, Response)>,
         next: u64,
+        /// Refuse the next post, as BBP does a `bad_claim`.
+        refuse: bool,
     }
 
     impl Board {
@@ -636,8 +745,13 @@ mod tests {
             assert_eq!(tool, "post", "the watcher only posts");
             let op = args["op"].as_str().unwrap().to_owned();
             self.posts.push(args.clone());
+            if std::mem::take(&mut self.refuse) {
+                let no = Rejection::new(Code::BadClaim, "supersedes target closed");
+                return Ok(rusty_serde::json::to_string(&Response::Rejected(no)).unwrap());
+            }
             let resp = match self.ops.get(&op) {
-                Some((first, resp)) if *first == args => resp.clone(),
+                // BBP sees the wire bytes, so compare those.
+                Some((first, resp)) if wire(first) == wire(&args) => resp.clone(),
                 Some(_) => Response::Rejected(Rejection::new(
                     Code::OpConflict,
                     "op reused with a different payload",
@@ -651,6 +765,10 @@ mod tests {
             };
             Ok(rusty_serde::json::to_string(&resp).unwrap())
         }
+    }
+
+    fn wire(v: &Value) -> String {
+        rusty_serde::json::to_string(v).unwrap()
     }
 
     /// One `cargo deny` advisory line.
@@ -696,34 +814,79 @@ mod tests {
             .contains(" and 2 more."));
     }
 
+    /// A `rust-toolchain.toml` pinning `channel`.
+    pub(super) fn pin(channel: &str) -> String {
+        format!("[toolchain]\nchannel = \"{channel}\"\n")
+    }
+
+    /// The update-set finding for one move of `foo`.
+    pub(super) fn set(to: &str) -> Finding {
+        updates(&format!("    Updating foo v1.0.0 -> {to}\n")).unwrap()
+    }
+
     #[test]
     fn toolchain_flags_only_a_different_channel() {
         let pinned = "[toolchain]\nchannel = \"1.98.1\"\ncomponents = [\"clippy\"]\n";
         let f = toolchain(pinned, "1.99.0").expect("finding");
         assert_eq!(f.key, "toolchain:rust:1.99.0");
         assert_eq!(f.detail, "pins 1.98.1");
-        let moved = toolchain("channel = \"1.98.2\"\n", "1.99.0").expect("finding");
+        let moved = toolchain(&pin("1.98.2"), "1.99.0").expect("finding");
         assert_eq!((&moved.key, &moved.text), (&f.key, &f.text), "same finding");
         assert!(toolchain(pinned, "1.98.1").is_none());
         assert!(toolchain("[toolchain]\n", "1.99.0").is_none());
     }
 
-    /// The `watch_finding` table in memory; `fail_put` loses the next write.
+    #[test]
+    fn the_channel_is_read_as_toml() {
+        let current = [
+            "[toolchain]\nchannel = '1.99.0'\n",
+            "[toolchain]\nchannel = \"1.99.0\" # pinned\n",
+            "# rust\n[toolchain]\n  channel='1.99.0'  # pinned\nprofile = \"minimal\"\n",
+        ];
+        for file in current {
+            assert_eq!(channel(file).as_deref(), Some("1.99.0"), "{file:?}");
+            assert!(toolchain(file, "1.99.0").is_none(), "{file:?}");
+        }
+        let old = toolchain("[toolchain]\nchannel = '1.98.1' # old\n", "1.99.0").unwrap();
+        assert_eq!(old.detail, "pins 1.98.1");
+        let unread = [
+            "channel = \"1.98.1\"\n",
+            "[other]\nchannel = \"1.98.1\"\n",
+            "[toolchain]\nchannel = 1.98\n",
+            "[toolchain]\nchannel = \"1.98.1\" trailing\n",
+            "[toolchain]\nchannel = \"1.98\\u002e1\"\n",
+        ];
+        for file in unread {
+            assert_eq!(channel(file), None, "{file:?}");
+        }
+    }
+
+    /// The `watch_finding` table in memory. `fail_after: Some(n)` lets `n`
+    /// writes through and loses the next one.
     #[derive(Default)]
     pub(super) struct MemSeen {
-        rows: BTreeMap<(String, String), WatchFinding>,
-        pub(super) fail_put: bool,
+        rows: BTreeMap<(String, String), WatchSlot>,
+        pub(super) fail_after: Option<usize>,
     }
 
     impl Seen for MemSeen {
-        fn get(&self, app: &str, slot: &str) -> Result<Option<WatchFinding>, String> {
-            Ok(self.rows.get(&(app.into(), slot.into())).cloned())
+        fn get(&self, app: &str, slot: &str) -> Result<WatchSlot, String> {
+            Ok(self
+                .rows
+                .get(&(app.into(), slot.into()))
+                .cloned()
+                .unwrap_or_default())
         }
-        fn put(&mut self, app: &str, slot: &str, found: &WatchFinding) -> Result<(), String> {
-            if std::mem::take(&mut self.fail_put) {
-                return Err("disk full".into());
+        fn put(&mut self, app: &str, slot: &str, row: &WatchSlot) -> Result<(), String> {
+            match self.fail_after {
+                Some(0) => {
+                    self.fail_after = None;
+                    return Err("disk full".into());
+                }
+                Some(n) => self.fail_after = Some(n - 1),
+                None => {}
             }
-            self.rows.insert((app.into(), slot.into()), found.clone());
+            self.rows.insert((app.into(), slot.into()), row.clone());
             Ok(())
         }
     }
@@ -731,8 +894,9 @@ mod tests {
     #[test]
     fn a_repeated_post_is_byte_identical_and_replays() {
         let f = &updates(UPDATE).expect("finding");
-        assert_eq!(op_id("demo", f), op_id("demo", f));
-        assert_ne!(op_id("demo", f), op_id("other", f));
+        assert_eq!(op_id("demo", f, None), op_id("demo", f, None));
+        assert_ne!(op_id("demo", f, None), op_id("other", f, None));
+        assert_ne!(op_id("demo", f, None), op_id("demo", f, Some(MsgId(4))));
         let mut board = Board::default();
         let first = post(&mut board, "demo", f, None).unwrap();
         let again = post(&mut board, "demo", f, None).unwrap();
@@ -756,9 +920,9 @@ mod tests {
         let b = record(&mut board, &mut seen, "demo", revised).unwrap();
         assert!(a.new && !b.new, "title and severity changed");
         assert_eq!(b.claim, a.claim);
-        let pin = |c: &str| toolchain(&format!("channel = \"{c}\"\n"), "1.99.0").unwrap();
-        let t = record(&mut board, &mut seen, "demo", pin("1.98.1")).unwrap();
-        let moved = record(&mut board, &mut seen, "demo", pin("1.98.2")).unwrap();
+        let pinned = |c: &str| toolchain(&pin(c), "1.99.0").unwrap();
+        let t = record(&mut board, &mut seen, "demo", pinned("1.98.1")).unwrap();
+        let moved = record(&mut board, &mut seen, "demo", pinned("1.98.2")).unwrap();
         assert!(!moved.new && moved.claim == t.claim, "the pin moved");
         assert_eq!(board.posts.len(), 2, "one post per finding");
     }
@@ -766,7 +930,6 @@ mod tests {
     #[test]
     fn a_newer_finding_in_a_slot_supersedes_the_open_claim() {
         let (mut board, mut seen) = (Board::default(), MemSeen::default());
-        let set = |to: &str| updates(&format!("    Updating foo v1.0.0 -> {to}\n")).unwrap();
         let first = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
         let next = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap();
         assert!(next.new);
@@ -775,7 +938,7 @@ mod tests {
         assert_eq!(sup(1), first.claim.map(|c| c.0));
         let third = record(&mut board, &mut seen, "demo", set("v1.0.3")).unwrap();
         assert_eq!(third.supersedes, next.claim, "always the slot's latest");
-        let rust = |w: &str| toolchain("channel = \"1.98.1\"\n", w).unwrap();
+        let rust = |w: &str| toolchain(&pin("1.98.1"), w).unwrap();
         let old = record(&mut board, &mut seen, "demo", rust("1.99.0")).unwrap();
         let new = record(&mut board, &mut seen, "demo", rust("1.100.0")).unwrap();
         assert_eq!(new.supersedes, old.claim, "a new watched Rust");
@@ -785,17 +948,79 @@ mod tests {
     }
 
     #[test]
-    fn a_post_whose_record_was_lost_replays_on_the_next_run() {
+    fn a_post_whose_record_was_lost_is_settled_before_the_slot_moves_on() {
         let (mut board, mut seen) = (Board::default(), MemSeen::default());
-        let set = |to: &str| updates(&format!("    Updating foo v1.0.0 -> {to}\n")).unwrap();
-        let first = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
-        seen.fail_put = true;
+        let a = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
+        // B posts, but its settling write is lost.
+        seen.fail_after = Some(1);
         let e = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap_err();
-        assert!(e.contains("posted, not recorded"), "{e}");
-        let retry = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap();
-        assert_eq!(retry.supersedes, first.claim);
-        assert_eq!(board.claims(), 2, "the retry replayed the lost post");
-        assert_eq!(board.posts[1], board.posts[2]);
+        assert!(e.contains("posted, recorded next run"), "{e}");
+        let b = board.next;
+        // The next run sees C: B is recovered first, and C supersedes it.
+        let c = record(&mut board, &mut seen, "demo", set("v1.0.3")).unwrap();
+        assert_eq!(c.supersedes, Some(MsgId(10 + b)), "not A ({:?})", a.claim);
+        assert_eq!(board.claims(), 3, "B's resend replayed");
+        assert_eq!(
+            wire(&board.posts[1]),
+            wire(&board.posts[2]),
+            "byte for byte"
+        );
+        // Seeing B itself again after a lost write posts nothing new.
+        seen.fail_after = Some(1);
+        record(&mut board, &mut seen, "demo", set("v1.0.4")).unwrap_err();
+        let again = record(&mut board, &mut seen, "demo", set("v1.0.4")).unwrap();
+        assert!(!again.new && board.claims() == 4, "{again:?}");
+    }
+
+    #[test]
+    fn a_post_that_was_never_written_down_is_never_sent() {
+        let (mut board, mut seen) = (Board::default(), MemSeen::default());
+        seen.fail_after = Some(0);
+        let e = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap_err();
+        assert!(e.contains("not sent"), "{e}");
+        assert!(board.posts.is_empty());
+    }
+
+    #[test]
+    fn a_refused_post_leaves_the_slot_as_it_was() {
+        let (mut board, mut seen) = (Board::default(), MemSeen::default());
+        let a = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
+        board.refuse = true;
+        let e = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap_err();
+        assert!(e.contains("BadClaim"), "{e}");
+        let row = seen.get("demo", "updates").unwrap();
+        assert_eq!(row.pending, None);
+        assert_eq!(row.posted.map(|p| p.claim), a.claim.map(|c| c.0));
+        // A pending post whose resend is refused is dropped and reported
+        // once; the run after that goes on from the slot's claim.
+        seen.fail_after = Some(1);
+        record(&mut board, &mut seen, "demo", set("v1.0.3")).unwrap_err();
+        board.refuse = true;
+        let e = record(&mut board, &mut seen, "demo", set("v1.0.4")).unwrap_err();
+        assert!(e.contains("refused and dropped"), "{e}");
+        let next = record(&mut board, &mut seen, "demo", set("v1.0.4")).unwrap();
+        assert!(next.new && next.supersedes == a.claim, "{next:?}");
+    }
+
+    #[test]
+    fn a_key_that_returns_supersedes_the_slots_claim_without_a_conflict() {
+        let (mut board, mut seen) = (Board::default(), MemSeen::default());
+        let a = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
+        let b = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap();
+        let back = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
+        assert!(back.new, "{back:?}");
+        assert_eq!(back.supersedes, b.claim);
+        assert_ne!(back.claim, a.claim, "a new claim over B, not A's op");
+        let again = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
+        assert!(!again.new && again.claim == back.claim, "then it settles");
+        let rust = |w: &str| toolchain(&pin("1.98.1"), w).unwrap();
+        let old = record(&mut board, &mut seen, "demo", rust("1.99.0")).unwrap();
+        record(&mut board, &mut seen, "demo", rust("1.100.0")).unwrap();
+        let rolled_back = record(&mut board, &mut seen, "demo", rust("1.99.0")).unwrap();
+        assert!(
+            rolled_back.new && rolled_back.claim != old.claim,
+            "watched Rust rolled back"
+        );
     }
 
     #[test]
@@ -815,7 +1040,7 @@ mod tests {
     fn a_failing_adapter_is_reported_and_the_others_still_run() {
         let dir = std::env::temp_dir().join(format!("orch_watch_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("rust-toolchain.toml"), "channel = \"1.98.1\"\n").unwrap();
+        std::fs::write(dir.join("rust-toolchain.toml"), pin("1.98.1")).unwrap();
         let run = FakeCommand::new(Ok(exit(101, "", "error: no Cargo.lock\n")));
         let tc = Toolchain(Watched {
             rust: Some("1.99.0".into()),

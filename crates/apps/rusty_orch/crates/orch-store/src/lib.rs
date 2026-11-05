@@ -50,8 +50,8 @@ use meters::MeterRecord;
 use orch_lens::alien::{HuntRow, ProbeRow};
 use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
-pub use watch::WatchFinding;
 use watch::WatchRecord;
+pub use watch::{PendingPost, WatchFinding, WatchSlot};
 
 /// The store's files inside its directory.
 const LOCK_FILE: &str = "lock";
@@ -377,37 +377,37 @@ impl Store {
         written.map_err(StoreError::Engine)
     }
 
-    /// The finding last posted for `app` in `slot`, or `None`.
+    /// The slot `slot` of `app`; empty when nothing was saved for it.
     ///
     /// # Errors
     ///
     /// [`StoreError::Corrupt`] when the record under its key names another
     /// app or slot.
-    pub fn watch_finding(&self, app: &str, slot: &str) -> Result<Option<WatchFinding>, StoreError> {
+    pub fn watch_slot(&self, app: &str, slot: &str) -> Result<WatchSlot, StoreError> {
         self.watch
             .get(watch::key(app, slot))
-            .map(|r| r.into_finding(app, slot))
-            .transpose()
+            .map_or(Ok(WatchSlot::default()), |r| r.into_slot(app, slot))
     }
 
-    /// Record `found` as the finding last posted for `app` in `slot`.
+    /// Save `row` as the slot `slot` of `app`. A successful return means it
+    /// is durable.
     ///
     /// # Errors
     ///
     /// [`StoreError::Corrupt`] when the key holds another app or slot;
     /// [`StoreError::Engine`] when the write fails.
-    pub fn save_watch_finding(
+    pub fn save_watch_slot(
         &mut self,
         app: &str,
         slot: &str,
-        found: &WatchFinding,
+        row: &WatchSlot,
     ) -> Result<(), StoreError> {
         let existing = self.watch.get(watch::key(app, slot));
         if let Some(r) = &existing {
             r.check(app, slot)?;
         }
         let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
-        let record = WatchRecord::new(app, slot, found, revision);
+        let record = WatchRecord::new(app, slot, row, revision);
         let written = if existing.is_none() {
             self.watch.insert(record).map_err(engine_error)
         } else {
