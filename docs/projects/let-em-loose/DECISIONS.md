@@ -94,6 +94,7 @@ Precise contracts used by this guide:
 | D82 | The mux-hosted agent ptys design is approved (re-closes D20 and D66) | [stated] 2026-11-05 (mux, #600, #726, #732) |
 | D83 | Takeover events go under claims log schema 5, with no schema 6 bump | [default] 2026-11-05 (mux, #732) |
 | D84 | `human_touched` is derived in the fold, not stored | [default] 2026-11-05 (mux, #732) |
+| D85 | `lel-jail` v0 launch contract: `orch-jail` crate, `jail.json` fields, setup order, tests | [default] 2026-11-05 (#600, #732) |
 
 ## D1. Lenses, not stages
 
@@ -721,3 +722,17 @@ Each side may now start its PR under card #732 (§11). Review and merge gates st
 **Tag.** [default] · remind-me: mem_2d7809b2d14348079cb2974291b865d6
 **Key.** lel:mux:human-touched-derived-in-fold
 **Source.** Caller question from the #732 LEL build, 2026-11-05; mux-hosted-agents-design.md §5 "Effect on claims (v0)"; D82.
+
+## D85. `lel-jail` v0 launch contract: `orch-jail` crate, `jail.json` fields, setup order, tests
+
+**Decision.** Implementation defaults for the v0 jail launcher inside the approved design (D82 item 7; mux-hosted-agents-design.md §2 step 5, §4, §8 item 1):
+1. **Crate.** `crates/apps/rusty_orch/crates/orch-jail`: a lib with `JailSpec` (sans-IO parse and validate of `jail.json` through `rusty_serde`) and the bin `lel-jail`. orch-bbp's builder launch (slice 6) writes the spec with the same type. Design §11's "in orch-bbp" is the PR's work split, not a crate layout.
+2. **`jail.json` v0 fields.** `cgroup` (absolute, under `/sys/fs/cgroup/`, no `..`), `status`, `cwd`, `read`, `write` (absolute roots; `cwd` inside a write root), `limits` {`cpu_secs`, `memory_bytes`, `file_bytes`, `open_files`, `processes`}, `env` (exact name/value list; any `RUSTY_MUX_*` name is refused, D13), optional `token` {`file`, `var`} (the file is outside every read and write root; `var` must not repeat an `env` name), `program`, `args`. Unknown fields are refused. There is no `sockets` field: v0 is fixed to `Sockets::InternetOnly`, so the file can't weaken it. Mounts, overlay and the network namespace are added later behind the same file (§8).
+3. **Setup order.** Validate; require fds 3 and 4 open (fail closed); join the cgroup through `<cgroup>/cgroup.procs`; `close_range(5, max)`; read the token; hand off to `rusty_sandbox::run_helper` with `Sockets::InternetOnly` (the same profile the bbp_host harness uses, `rusty_bbp_host/src/confine.rs`). A failure before the handoff writes the status file, prints to stderr (the pty) and exits 125 (`SETUP_FAILED`). v0 unshares no namespaces: §2 step 5's namespace list is the #726 target, and D82 item 7 and §8 put those layers later.
+4. **Tests in this slice.** Spec unit tests (happy path, relative path, unknown field, `cwd` outside the write roots, a `RUSTY_MUX_*` env name, a token file inside a root). A Linux integration test that runs the built `lel-jail` and checks the exec'd program sees only fds 0–4, `RUSTY_MUX_SOCKET` is unset and `socket(AF_UNIX)` fails, plus fail-closed when fd 3 or 4 is missing. It skips with a printed reason when no writable cgroup is available. §4's "the socket path doesn't exist" test waits for the mount namespace; in v0 Landlock keeps the path out of reach. Holder tests are slice 5.
+**Known v0 gap.** `InternetOnly` allows any IPv4/IPv6 egress. 600-builder-session-design §4.3 wants none except the Claude endpoint, and the mirror makes dependencies offline. Enforcing that needs the network namespace, which D82 item 7 (newer and [stated]) defers with gateway-only egress. This is not a reversal.
+**Why.** A separate crate keeps Linux and `rusty_sandbox` dependencies out of orch-bbp, which has none today, and gives the writer and the reader one type. Reusing the existing helper and socket profile is the most reversible choice inside the approved design.
+**Rejected.** A bin inside orch-bbp. A configurable `sockets` field in v0.
+**Tag.** [default] · remind-me: mem_bfc73721060b45989e4f32393bcd3c52
+**Key.** lel:600:lel-jail-v0-launch-contract
+**Source.** Caller question from the D82 slice 4 thread (`lel-jail` v0), 2026-11-05; mux-hosted-agents-design.md §2, §4, §8, §10 item 7; D79, D82; `rusty_sandbox/src/helper.rs`; `rusty_bbp_host/src/confine.rs`.
