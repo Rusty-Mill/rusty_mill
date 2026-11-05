@@ -685,7 +685,6 @@ orch-claude = { path = "crates/apps/rusty_orch/crates/orch-claude" }
 orch-store = { path = "crates/apps/rusty_orch/crates/orch-store" }
 orch-lens = { path = "crates/apps/rusty_orch/crates/orch-lens" }
 orch-openai = { path = "crates/apps/rusty_orch/crates/orch-openai" }
-orch-jail = { path = "crates/apps/rusty_orch/crates/orch-jail" }
 serde_yaml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.13", default-features = false, features = [
