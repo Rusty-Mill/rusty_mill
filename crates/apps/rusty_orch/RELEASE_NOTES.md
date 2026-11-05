@@ -4,6 +4,16 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Alien lens runs its probes in a sandbox
+**2026-11-05**
+
+- orch can now build and run the alien review lens's probe tests itself,
+  with no network, on a scratch copy of the candidate and, when a probe
+  fails there, of its base (#708, D96). Nothing calls it yet;
+  `lens run --alien` will.
+- A hang or a killed run is never counted as a finding, and a candidate
+  can't affect the base run or write outside its scratch tree.
+
 ## Lens cards show the task's accept line
 **2026-11-04**
 
