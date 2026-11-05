@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Alien lens hunts in `lens run --alien`
+**2026-11-05**
+
+- `lens run --alien` runs the #708 alien review lens after the ordinary
+  passes: one hunt per eligible claim it has not hunted yet, with its
+  probes run sandboxed, and the rows kept for `lens alien report` (D99).
+  It is off by default and posts nothing to the board.
+- Until #596's value score exists only irreversible claims are hunted,
+  and only once every review lens has had its blind look. A claim it
+  can't hunt is reported on stderr and tried again on the next run.
+
 ## Alien lens runs its probes in a sandbox
 **2026-11-05**
 
@@ -33,6 +44,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 - Taint marks what a lens posts with the most sensitive class it was
   shown, so a cleared local lens can't pass sensitive input on to a
   cloud lens. Each task's taint table is stored in `taints.mmap`.
+
+## Alien lens hunt pipeline
+**2026-11-04**
+
+- orch-lens can run one alien-lens hunt over the model port: list
+  suspects, rank them, ask for up to 3 probe tests, and classify each
+  probe's runs (#708). Nothing called it until `lens run --alien`.
+- A hunt that spent its first call is always recorded, so its calls are
+  never spent twice.
 
 ## Lens cards show the task's accept line
 **2026-11-04**

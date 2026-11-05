@@ -32,15 +32,16 @@ use orch_store::Store;
 use rusty_bbp::ArtId;
 
 use super::assertions::{self, Grants};
-use super::bbp::{run_id, Child, Rpc, Session};
+use super::bbp::{run_id, Child, Diffs, Rpc, Session};
 use super::check::DEFAULT_ASSERTIONS;
+use super::hunts::{Kit, Ordinary};
 use super::registry::Registry;
 use crate::args::ArgsError;
 
 /// Passes when none is named.
 pub const DEFAULT_MAX_PASSES: u32 = 20;
 
-pub const USAGE: &str = "usage: rusty_orch lens run <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --state <orch state dir> --experiment <name> [--rules <file>] [--assertions <file>]\n           [--repo <dir>] [--max-passes <n>]\n\nRun the configured lenses on one BBP claims task until a pass starts no job. Each lens\nreads and posts through its own `bbp mcp` session. Calls the configured models: their\nadmission follows the operator's assertions, as `lens check` reports.";
+pub const USAGE: &str = "usage: rusty_orch lens run <config.json> --bbp <bbp binary> --dir <bbp dir> --task <task>\n           --state <orch state dir> --experiment <name> [--rules <file>] [--assertions <file>]\n           [--repo <dir>] [--max-passes <n>] [--alien]\n\nRun the configured lenses on one BBP claims task until a pass starts no job. Each lens\nreads and posts through its own `bbp mcp` session. Calls the configured models: their\nadmission follows the operator's assertions, as `lens check` reports.\n\n--alien  then run the config's alien lens (#708): one hunt per eligible claim not hunted\n         yet, with each probe built and run sandboxed, offline and with no network, in a\n         scratch tree of --repo under --state. Posts nothing; `lens alien report` reads\n         the rows. Needs `rustc` and the dependencies in the cargo home already.";
 
 /// What to run.
 #[derive(Debug, PartialEq, Eq)]
@@ -55,6 +56,8 @@ pub struct Options {
     pub assertions: PathBuf,
     pub repo: PathBuf,
     pub max_passes: u32,
+    /// Run the alien lens's pass after the ordinary passes (#708).
+    pub alien: bool,
 }
 
 /// Parse `run <config> --bbp … --dir … --task … --state … --experiment …`.
@@ -66,6 +69,7 @@ pub fn options(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<O
         Some(other) => return Err(ArgsError::Usage(format!("unknown lens command {other:?}"))),
     }
     let mut config = None;
+    let mut alien = false;
     let mut flags: BTreeMap<&'static str, String> = BTreeMap::new();
     const FLAGS: [&str; 9] = [
         "--bbp",
@@ -81,6 +85,13 @@ pub fn options(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<O
     while let Some(arg) = args.next() {
         if arg == "-h" || arg == "--help" {
             return Err(ArgsError::Help);
+        }
+        if arg == "--alien" {
+            if alien {
+                return Err(ArgsError::Usage("duplicate --alien".to_owned()));
+            }
+            alien = true;
+            continue;
         }
         if let Some(flag) = FLAGS.iter().find(|f| **f == arg) {
             let value = args
@@ -119,6 +130,7 @@ pub fn options(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<O
             .unwrap_or_else(|| PathBuf::from(DEFAULT_ASSERTIONS)),
         repo: take("--repo").map(PathBuf::from).unwrap_or(cwd),
         max_passes,
+        alien,
     })
 }
 
@@ -133,6 +145,9 @@ pub trait Seat {
     fn cards(&self, config: &LensConfig) -> Vec<Card>;
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String>;
     fn board(&mut self) -> &mut dyn Board;
+    /// Code candidate `id`'s base and diffs, as far as the role may read
+    /// them (D98).
+    fn candidate(&mut self, id: ArtId) -> Result<Diffs, String>;
 }
 
 impl<R: Rpc> Seat for Session<R> {
@@ -153,6 +168,9 @@ impl<R: Rpc> Seat for Session<R> {
     }
     fn board(&mut self) -> &mut dyn Board {
         self
+    }
+    fn candidate(&mut self, id: ArtId) -> Result<Diffs, String> {
+        Session::candidate_diffs(self, id)
     }
 }
 
@@ -339,7 +357,8 @@ fn load_state(store: &Store, board: &str) -> Result<State, String> {
 }
 
 /// Run `o`: open the store and the sessions, build the providers, read
-/// the prompts, then [`passes`]. Returns the log and how it ended.
+/// the prompts, then [`passes`] and, with `--alien`, the alien lens's
+/// pass ([`Kit::sweep`]). Returns the log and how it ended.
 pub fn run(o: &Options) -> Result<String, String> {
     let text = std::fs::read_to_string(&o.config)
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
@@ -389,6 +408,11 @@ pub fn run(o: &Options) -> Result<String, String> {
             Box::new(Session::new(&lens.id, child, &run)),
         );
     }
+    let mut alien = if o.alien {
+        Some(Kit::open(&config, o, &board, &base, &run)?)
+    } else {
+        None
+    };
     let experiment = o.experiment.clone();
     let mut save = |m: &Meter| {
         store
@@ -421,6 +445,26 @@ pub fn run(o: &Options) -> Result<String, String> {
         o.max_passes,
         &mut log,
     )?;
+    if let Some(kit) = alien.as_mut() {
+        if !matches!(ended, Ended::Quiet | Ended::MaxPasses) {
+            let _ = writeln!(log, "alien: not run after {ended:?}");
+            return outcome(&ended, log);
+        }
+        let ordinary = Ordinary {
+            config: &config,
+            state: &state,
+            rules: &prompts.rules,
+        };
+        let metering = Metering {
+            task: &o.task,
+            meter: &mut meter,
+            save: &mut save,
+        };
+        if let Err(e) = kit.sweep(ordinary, &store, metering, &mut registry, &mut log) {
+            let _ = writeln!(log, "alien: {e}");
+            return Err(log);
+        }
+    }
     outcome(&ended, log)
 }
 
@@ -547,6 +591,9 @@ mod tests {
         }
         fn board(&mut self) -> &mut dyn Board {
             self
+        }
+        fn candidate(&mut self, id: ArtId) -> Result<Diffs, String> {
+            Err(format!("no candidate {id} in this test"))
         }
     }
 
@@ -1138,6 +1185,15 @@ mod tests {
         assert_eq!(o.assertions, PathBuf::from(DEFAULT_ASSERTIONS));
         assert_eq!(o.repo, PathBuf::from("/cwd"));
         assert_eq!(o.rules, None);
+        assert!(!o.alien, "the alien lens is off by default");
+        let on = options(
+            argv("run c.json --alien --bbp /b --dir /d --task t1 --state /s --experiment e"),
+            PathBuf::new(),
+        )
+        .expect("options");
+        assert!(on.alien);
+        let twice = options(argv("run c.json --alien --alien"), PathBuf::new());
+        assert!(matches!(twice, Err(ArgsError::Usage(m)) if m.contains("duplicate --alien")));
         let missing = options(
             argv("run c.json --bbp /b --dir /d --state /s --experiment e"),
             PathBuf::new(),

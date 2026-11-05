@@ -103,6 +103,7 @@ Precise contracts used by this guide:
 | D96 | #708 orch runs the alien lens's probes itself, sandboxed | [stated] 2026-11-05 (#708) |
 | D97 | #708 slice 4d: probe scratch trees and cargo time limit | [default] 2026-11-05 (#708) |
 | D98 | #708 alien hunt reads the candidate and its diffs through `get_artifact` | [default] 2026-11-05 (#708) |
+| D99 | #708 slice 4c: `lens run --alien`, its config entry and its trigger | [default] 2026-11-05 (#708) |
 
 ## D1. Lenses, not stages
 
@@ -813,3 +814,18 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_17ea768d43f24f95944d46d7abb9836d
 **Key.** lel:708:alien-candidate-reads
 **Source.** let-em-loose-expert, 2026-11-05, answering the #708 build thread's slice 4b questions. `708-alien-lens-design.md` §2–§3, D75, D78; `claims_engine.rs` `get_artifact` (R11 per principal and artifact); `engine.rs` `get_artifact_record`; `bbp-claims-addendum.md` § Budgets and § Reads, delta and subscriptions. Drafted as D87 and renumbered D98 on 2026-11-05 to avoid colliding with #1496; meaning, key and tags unchanged.
+
+## D99. #708 slice 4c: `lens run --alien`, its config entry and its trigger
+
+**Decision.** Build detail inside D75, D78, D96 and D98.
+1. **Config.** The lens config takes an optional `"alien": {"id", "prompt", "providers"}`. Its id is its own BBP role and may not be an ordinary lens's id. Its providers must be CLI ones, because its calls use read-only tools (design §3). It follows every domain and has no `may_post`, so it posts nothing. Its prefix is intent, rules and its prompt, with no post protocol (`context::raw_prefix`).
+2. **When.** `lens run --alien` (off by default) runs one alien pass after the ordinary passes, and only when they end quiet or at `--max-passes`. It does not run after a halted round or a task ceiling. Before any pass, it checks the `alien` entry, the task id (one path component), the toolchain and the `--repo` repository, opens the lens's session and removes leftover `<state>/alien/probes/` (D97), so a missing piece costs nothing.
+3. **Trigger.** Until #596's value score exists, only irreversible claims are hunted, and there is no control sample (D75 Q1). "Every review lens has recorded its blind outcome and owed look-harder" (§2) means this: each lens that may post evidence and follows the claim has a blind pass in the claim's current epoch, and no look-harder is still owed under the scheduler's own rule (`schedule::reviews_settled`). A claim that no review lens follows is not settled. The cheap checks come first, then the candidate is read (D98).
+4. **Skips.** If no alien provider is cleared for the claim's class, the base is not a full lowercase commit id (it reaches `git worktree add`), the probes cannot be set up (item 6), or no provider takes the enumerate call, the claim is skipped as D98 skips one: one stderr line, no row, and a retry next run. A ceiling before the enumerate call ends the pass. The probe rows are saved before the hunt row, which is the "hunted" marker (D78).
+5. **Memory key.** "Already hunted" is keyed by task id, claim and candidate, as the meter is keyed by task id. So that a same-named task from another BBP directory cannot be mixed in, `--alien` binds each task in a state dir to one board (`<state>/alien/boards/<task>` holds `run::board`'s identity) and refuses another. Keying the rows by board would change the hunt row's schema; the binding needs no schema change. The state root is made absolute, since the sandbox refuses relative paths.
+6. **Preflight.** Before the first call of a hunt, the candidate tree (base plus every diff) is built once and removed. A base missing from `--repo` or a diff that does not apply is then a skip (item 4), not a recorded hunt whose probes could never run.
+**Why.** These are implementation choices inside the approved design, and each is the most reversible one. Ordinary lenses must have `may_post`, so the alien lens needs its own entry. A skip that records nothing can't hide a claim for good. Running after a halt would spend while the runner is failing.
+**Rejected.** Making the alien lens an ordinary lens with an empty `may_post`, which config forbids and which would mix it into the scheduler (D78). Running the pass after a halt or a task ceiling. A new `HuntRow` key field. Building the candidate tree only inside the probe runs, which records a hunt whose probes could not run. Items 5 and 6 were amended 2026-11-05 after Codex review of PR #1524.
+**Tag.** [default] · remind-me: mem_cbd770c24a464ce881d6173e02d28402
+**Key.** lel:708:alien-run-pass
+**Source.** The #708 slice 4c build, 2026-11-05 (builder default, not a Nano decision). `708-alien-lens-design.md` §2–§4, D75, D78, D96, D97, D98. `orch-lens` `src/config.rs`, `src/schedule.rs`. `rusty_orch` `src/lens/hunts.rs`, `src/lens/run.rs`. Last number in this thread's D96–D99 allocation.
