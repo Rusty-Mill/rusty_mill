@@ -1,7 +1,8 @@
 //! C45: a server started on the store an earlier one saved restores its
 //! sessions, windows, layouts and screens, by id: a shell block with a
 //! fresh shell, a command block read-only (D72). An unreadable store is
-//! moved aside and the server starts empty.
+//! moved aside and the server starts empty. C70: a block's history past
+//! its scrollback is spooled to the store and read with `terminal.history`.
 
 mod common;
 
@@ -210,17 +211,12 @@ fn a_cursor_above_saved_text_overwrites_none_of_it() {
 /// restarts the server twice: each time the block shows every one of
 /// `needles` once, a single read-only marker,
 /// and refuses input.
+/// A block running `sh -c script` in a new window, attached. The client
+/// needs [`Features::LAUNCH`].
 #[cfg(unix)]
-fn restarted_read_only(name: &str, script: &str, needles: &[&str]) {
+fn command_block(client: &mut Client, script: &str) -> rusty_mux_core::BlockId {
     use rusty_mux_proto::{Launch, Program};
-    let dir = state_dir(name);
-    let server = Server::start(&dir);
-    let mut client = Client::connect_with(
-        &server.socket,
-        Features::CHECKPOINT_V6.union(Features::LAUNCH),
-        None,
-    );
-    let window = common::window_for(&mut client);
+    let window = common::window_for(client);
     let launch = Launch {
         program: Some(Program {
             command: "/bin/sh".into(),
@@ -239,6 +235,19 @@ fn restarted_read_only(name: &str, script: &str, needles: &[&str]) {
             .expect("id"),
     );
     client.request(|req| Message::Attach { req, block });
+    block
+}
+
+#[cfg(unix)]
+fn restarted_read_only(name: &str, script: &str, needles: &[&str]) {
+    let dir = state_dir(name);
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(
+        &server.socket,
+        Features::CHECKPOINT_V6.union(Features::LAUNCH),
+        None,
+    );
+    let block = command_block(&mut client, script);
     // The command may print before the attach, into the checkpoint.
     client.wait_ready(block);
     let deadline = std::time::Instant::now() + PATIENCE;
@@ -288,5 +297,157 @@ fn restarted_read_only(name: &str, script: &str, needles: &[&str]) {
         drop(client);
         server.stop();
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+fn history(client: &mut Client, block: rusty_mux_core::BlockId, n: u32, skip: u32) -> String {
+    use rusty_mux_proto::schema::Value;
+    let args = vec![
+        ("history".to_owned(), Value::Lines(n)),
+        ("skip".to_owned(), Value::Lines(skip)),
+    ];
+    match client
+        .answer(|req| Message::BlockCall {
+            req,
+            block,
+            method: "terminal.history".into(),
+            args,
+        })
+        .as_slice()
+    {
+        [Message::Text { text, .. }] => text.clone(),
+        other => panic!("expected Text, got {other:?}"),
+    }
+}
+
+/// Lines past the 10,000 of scrollback go to the spool, survive a restart
+/// and go with their block.
+#[cfg(unix)]
+#[test]
+fn history_past_scrollback_is_spooled_and_survives_a_restart() {
+    let dir = state_dir("spool");
+    let features = Features::CHECKPOINT_V6
+        .union(Features::BLOCK_CALL)
+        .union(Features::TERMINAL_HISTORY);
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(&server.socket, features, None);
+    let block = block_for(&mut client);
+    client.input(block, b"seq 12000 | sed 's/^/L/'; echo DONE$((6*7))\r");
+    client.wait_for(block, "DONE42");
+    let all = history(&mut client, block, 100_000, 0);
+    let lines: Vec<&str> = all.lines().collect();
+    assert!(
+        lines.contains(&"L2") && lines.contains(&"L1500"),
+        "{:?}",
+        &lines[..lines.len().min(5)]
+    );
+    assert!(!lines.contains(&"L11000"), "still in scrollback");
+    let newest = history(&mut client, block, 1, 0);
+    assert_eq!(Some(newest.as_str()), lines.last().copied());
+    let paged = history(&mut client, block, 2, 1);
+    assert_eq!(
+        paged.lines().collect::<Vec<_>>(),
+        lines[lines.len() - 3..lines.len() - 1]
+    );
+    drop(client);
+    server.stop();
+
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(&server.socket, features, None);
+    // The restart marker scrolls a few more lines out of the scrollback.
+    let after = history(&mut client, block, 100_000, 0);
+    assert!(
+        after.starts_with(&all) && after.len() > all.len(),
+        "kept, then the lines the marker pushed out"
+    );
+    client.request(|req| Message::CloseBlock { req, block });
+    gone(&dir.join(format!("{block}.spool")));
+    drop(client);
+    server.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Waits for `path` to be deleted.
+#[cfg(unix)]
+fn gone(path: &Path) {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} not removed",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// A block's spool goes when its program ends by itself, shell or command.
+#[cfg(unix)]
+#[test]
+fn a_spool_goes_when_its_program_exits() {
+    let dir = state_dir("spool-exit");
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(
+        &server.socket,
+        Features::CHECKPOINT_V6.union(Features::LAUNCH),
+        None,
+    );
+    let shell = block_for(&mut client);
+    let shell_spool = dir.join(format!("{shell}.spool"));
+    assert!(shell_spool.is_dir(), "opened with the block");
+    client.input(shell, b"exit\r");
+    gone(&shell_spool);
+    // Holding the command back until its spool is seen.
+    let script = "read go; seq 12000";
+    let command = command_block(&mut client, script);
+    let command_spool = dir.join(format!("{command}.spool"));
+    assert!(command_spool.is_dir(), "opened with the block");
+    client.request(|req| Message::AcquireLease {
+        req,
+        block: command,
+    });
+    client.input(command, b"go\r");
+    gone(&command_spool);
+    drop(client);
+    server.stop();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A spool that failed to write is dropped, and its files still go with
+/// the block.
+#[cfg(unix)]
+#[test]
+fn a_failed_spool_still_goes_with_its_block() {
+    let dir = state_dir("spool-failed");
+    let features = Features::CHECKPOINT_V6
+        .union(Features::BLOCK_CALL)
+        .union(Features::TERMINAL_HISTORY);
+    let server = Server::start(&dir);
+    let mut client = Client::connect_with(&server.socket, features, None);
+    let block = block_for(&mut client);
+    let spool = dir.join(format!("{block}.spool"));
+    // Its first segment cannot be opened for writing.
+    std::fs::create_dir(spool.join("0000000000.seg")).unwrap();
+    client.input(block, b"seq 12000; echo DONE$((6*7))\r");
+    client.wait_for(block, "DONE42");
+    let refused = client.answer(|req| Message::BlockCall {
+        req,
+        block,
+        method: "terminal.history".into(),
+        args: vec![(
+            "history".to_owned(),
+            rusty_mux_proto::schema::Value::Lines(10),
+        )],
+    });
+    assert!(
+        matches!(refused.as_slice(), [Message::Failed { reason, .. }] if reason.contains("no history")),
+        "{refused:?}"
+    );
+    assert!(spool.is_dir(), "left by the failure");
+    client.request(|req| Message::CloseBlock { req, block });
+    gone(&spool);
+    drop(client);
+    server.stop();
     let _ = std::fs::remove_dir_all(&dir);
 }

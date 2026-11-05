@@ -88,6 +88,31 @@ fn a_bad_screen_restarts_blank_and_a_closed_block_loses_its_screen() {
 }
 
 #[test]
+fn a_spool_outlives_a_restart_until_its_block_is_gone() {
+    let store = Scratch::new("spool");
+    let (manifest, block) = one_block();
+    store.0.load().unwrap();
+    store.0.save(1, &manifest, &[]).unwrap();
+    store
+        .0
+        .spool(block)
+        .unwrap()
+        .append(vec![b"line".to_vec()])
+        .unwrap();
+    let orphan = BlockId::from_uuid(rusty_uuid::Uuid::new_v4());
+    store.0.spool(orphan).unwrap();
+    store.0.load().unwrap();
+    assert_eq!(store.0.spool(block).unwrap().lines(), 1, "kept");
+    assert!(
+        !store.0.dir.join(format!("{orphan}.spool")).exists(),
+        "orphan removed"
+    );
+    store.0.save(2, &Manifest::default(), &[]).unwrap();
+    store.0.load().unwrap();
+    assert!(!store.0.dir.join(format!("{block}.spool")).exists());
+}
+
+#[test]
 fn an_older_save_never_overwrites_a_newer_one() {
     let store = Scratch::new("order");
     let (manifest, _) = one_block();

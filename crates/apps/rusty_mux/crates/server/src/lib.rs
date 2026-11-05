@@ -40,6 +40,8 @@ mod pty;
 #[cfg(any(target_os = "linux", windows))]
 mod settings;
 #[cfg(any(target_os = "linux", windows))]
+mod spool;
+#[cfg(any(target_os = "linux", windows))]
 mod state;
 #[cfg(any(target_os = "linux", windows))]
 mod store;
