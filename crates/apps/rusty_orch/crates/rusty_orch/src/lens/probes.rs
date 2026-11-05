@@ -34,8 +34,13 @@ use rusty_worktree::Repo;
 /// Wall-clock limit on each cargo invocation, the build and the run (D97).
 pub const PROBE_CARGO_LIMIT: Duration = Duration::from_secs(10 * 60);
 
-/// Granted read-write: std opens it whenever a child gets a null stdio.
-const DEV_NULL: &str = "/dev/null";
+/// Granted read-write on Unix: std opens it whenever a child gets a null
+/// stdio. Windows has no such path (`NUL` is a device name), and a sandbox
+/// spec takes only absolute paths.
+#[cfg(unix)]
+const DEV_NULL: Option<&str> = Some("/dev/null");
+#[cfg(not(unix))]
+const DEV_NULL: Option<&str> = None;
 /// System directories every toolchain reads.
 const SYSTEM_ROOTS: [&str; 5] = ["/bin", "/usr", "/lib", "/lib64", "/etc"];
 /// What cargo's registry and git caches are called under a cargo home.
@@ -256,14 +261,15 @@ where
     }
 
     /// Read the toolchain and the tree; write the tree, its target dir,
-    /// its own temp dir (holding its private cargo home), and `/dev/null`.
+    /// its own temp dir (holding its private cargo home), and `/dev/null`
+    /// on Unix.
     fn spec(&self, tree: &Tree, target: &Path) -> Result<SandboxSpec, String> {
         let tmp = &tree.tmp;
         let t = self.toolchain;
         let mut read: Vec<PathBuf> = SYSTEM_ROOTS
             .iter()
             .map(PathBuf::from)
-            .filter(|p| p.exists())
+            .filter(|p| p.is_absolute() && p.exists())
             .collect();
         read.push(t.sysroot.clone());
         read.extend(
@@ -293,12 +299,8 @@ where
             4096,
         )
         .map_err(|e| e.to_string())?;
-        let write = vec![
-            tree.src.clone(),
-            target.to_path_buf(),
-            tmp.clone(),
-            PathBuf::from(DEV_NULL),
-        ];
+        let mut write = vec![tree.src.clone(), target.to_path_buf(), tmp.clone()];
+        write.extend(DEV_NULL.map(PathBuf::from));
         SandboxSpec::new(read, write, tree.src.clone(), env, limits).map_err(|e| e.to_string())
     }
 }
@@ -1108,12 +1110,8 @@ mod tests {
             tmp: tmp.clone(),
         };
         let spec = probes.spec(&tree, &root.join("target")).expect("spec");
-        let write: Vec<PathBuf> = vec![
-            root.join("tree"),
-            root.join("target"),
-            tmp.clone(),
-            PathBuf::from(DEV_NULL),
-        ];
+        let mut write: Vec<PathBuf> = vec![root.join("tree"), root.join("target"), tmp.clone()];
+        write.extend(DEV_NULL.map(PathBuf::from));
         assert_eq!(spec.write_roots(), write.as_slice());
         assert!(spec.read_roots().contains(&root.join("tc")));
         let env: std::collections::BTreeMap<_, _> = spec.env().iter().cloned().collect();
