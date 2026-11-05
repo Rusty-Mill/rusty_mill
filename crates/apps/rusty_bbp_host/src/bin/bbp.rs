@@ -6,6 +6,7 @@
 //! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
 //! bbp open    --mode claims --dir D --task T --repo R --brief FILE --roster FILE --profiles FILE [--claims FILE] [--human ID] [--confine sandbox|none]
 //!                                          claims mode: the profile set names test_paths and an erosion profile or "erosion":"off"; a host that cannot sandbox refuses (bad_claims_config)
+//!                                          [--base REF --repo-path PATH --work DIR] brownfield (#598): runs the suite on REF sandboxed first; red refuses (baseline_red), green pins REF as the baseline
 //!                                          [--holdout-profiles FILE --holdout-root DIR] freezes a holdout suite (#597): holdout:/golden: profiles over the files under DIR
 //!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
 //! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
@@ -33,6 +34,9 @@
 //! bbp verify  --dir D --task T [--expect H]               check the log's hash chain without changing it; prints lines, unchained, head; H must be the hash of one of its lines
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
+//! bbp dry-run --name N --data NAME=PATH[,NAME=PATH...] --work DIR [--wall-secs N] -- PROGRAM ARGS...
+//!                                          #598: run PROGRAM confined (no endpoints), reading only the real_data roots, writing only its plan ($BBP_PLAN);
+//!                                          prints the plan's path, digest and entry count, never the plan
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
@@ -44,8 +48,9 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, admission, args::Args, broker, golden, grade, holdout, human, inbox, mcp, moderator,
-    pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens, verify, why,
+    admin, admission, args::Args, baseline, broker, dry_run, golden, grade, holdout, human, inbox,
+    mcp, moderator, pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens,
+    verify, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -87,6 +92,48 @@ fn with_holdout(
     }
 }
 
+/// `bbp dry-run FLAGS -- PROGRAM ARGS...`, always sandboxed.
+fn dry_run(argv: &[String]) -> Result<String, String> {
+    let split = argv
+        .iter()
+        .position(|x| x == "--")
+        .ok_or("usage: bbp dry-run --name N --data NAME=PATH,... --work DIR -- PROGRAM ARGS...")?;
+    let a = Args::parse(argv[..split].iter().cloned());
+    let (program, args) = argv[split + 1..]
+        .split_first()
+        .ok_or("bbp dry-run: no program after --")?;
+    let data = a
+        .flag("data")?
+        .split(',')
+        .map(|kv| {
+            kv.split_once('=')
+                .map(|(k, v)| (k.to_owned(), PathBuf::from(v)))
+                .ok_or_else(|| format!("--data {kv}: NAME=PATH required"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let wall = a
+        .flags
+        .get("wall-secs")
+        .map(|s| {
+            s.parse::<u64>()
+                .map_err(|_| "--wall-secs: a number".to_owned())
+        })
+        .transpose()?
+        .unwrap_or(3600);
+    let req = dry_run::Request {
+        name: a.flag("name")?.to_owned(),
+        data,
+        work: PathBuf::from(a.flag("work")?),
+        program: program.clone(),
+        args: args.to_vec(),
+        wall: std::time::Duration::from_secs(wall),
+    };
+    runner::probe_host().map_err(|e| format!("bbp dry-run needs a sandbox: {e}"))?;
+    let state = dry_run::state_dir(&req.work)?;
+    let summary = dry_run::run(&runner::sandboxed(&state)?, &req)?;
+    rusty_serde::json::to_string(&summary).map_err(|e| e.to_string())
+}
+
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
@@ -97,6 +144,9 @@ fn run() -> Result<String, String> {
         let err = rusty_sandbox::run_helper(&rest);
         eprintln!("bbp __sandbox: {err}");
         std::process::exit(i32::from(rusty_sandbox::SETUP_FAILED));
+    }
+    if sub == "dry-run" {
+        return dry_run(&argv[1..]);
     }
     let a = Args::parse(argv.into_iter().skip(1));
     if sub == "slot-hold" {
@@ -245,6 +295,33 @@ fn run() -> Result<String, String> {
                     Some(other) => Err(format!("--confine {other}")),
                 };
                 return with_holdout(&a, |holdout| {
+                    // #598: `--base REF --repo-path PATH --work DIR` runs the
+                    // build suite on REF, sandboxed, before anything is
+                    // written, and only once the holdout is known isolated.
+                    let baseline = match a.flags.get("base") {
+                        None => None,
+                        Some(r) => {
+                            probe()?;
+                            let repo = PathBuf::from(a.flag("repo-path")?);
+                            let work = PathBuf::from(a.flag("work")?);
+                            let base = baseline::resolve(&repo, r)?;
+                            let exec = runner::sandboxed(&dir.join("sandbox-state"))?;
+                            let checked = runner::isolated_baseline(
+                                &exec,
+                                &set,
+                                holdout.as_ref(),
+                                &repo,
+                                &work,
+                                &base,
+                            );
+                            match checked {
+                                Ok(b) => Some(b),
+                                Err(refused) => {
+                                    return Ok(response_json(&Response::Rejected(refused)))
+                                }
+                            }
+                        }
+                    };
                     admin::open_claims_task(
                         &dir,
                         &task,
@@ -255,6 +332,7 @@ fn run() -> Result<String, String> {
                         holdout.as_ref(),
                         roster,
                         cfg,
+                        baseline.as_ref(),
                         probe,
                     )
                     .map(|r| response_json(&r))

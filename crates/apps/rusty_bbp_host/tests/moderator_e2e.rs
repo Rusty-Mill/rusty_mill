@@ -2525,6 +2525,7 @@ fn quiet_planner_task(tag: &str, poll: Duration) -> (PathBuf, TaskId, Config) {
                 human: "human".into(),
                 policy: SchedulingPolicy::TurnBased,
                 holdout_digest: None,
+                baseline_digest: None,
             }),
             rusty_bbp_host::now()
         )

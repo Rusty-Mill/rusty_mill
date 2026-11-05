@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use orch_core::AgentId;
 use rusty_json::{Map, Value};
 
+use crate::breaker::{Breaker, Mode};
 use crate::class::DataClass;
 use crate::meter::{Ceilings, Price};
 use crate::post::DirectionKey;
@@ -89,13 +90,29 @@ impl Lens {
     }
 }
 
+/// The #708 alien lens (D75, D99): a shadow lens that hunts defects and
+/// posts nothing, so it has no domains and no `may_post`. Its calls use
+/// read-only tools (design §3), so each provider must be a CLI one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Alien {
+    /// Its BBP role id and principal; no ordinary lens may share it.
+    pub id: String,
+    pub prompt: String,
+    /// In fallback order.
+    pub providers: Vec<AgentId>,
+}
+
 /// The whole configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LensConfig {
     pub providers: BTreeMap<AgentId, Provider>,
     pub domain_classes: BTreeMap<String, DataClass>,
     pub ceilings: Ceilings,
+    /// The cost breaker; its defaults when the key is absent.
+    pub breaker: Breaker,
     pub lenses: Vec<Lens>,
+    /// The alien lens, when configured; `lens run --alien` needs it.
+    pub alien: Option<Alien>,
 }
 
 impl LensConfig {
@@ -105,12 +122,20 @@ impl LensConfig {
         let top = obj(&v, "config")?;
         only(
             top,
-            &["providers", "domain_classes", "ceilings", "lenses"],
+            &[
+                "providers",
+                "domain_classes",
+                "ceilings",
+                "breaker",
+                "lenses",
+                "alien",
+            ],
             "config",
         )?;
         let providers = providers(field(top, "providers")?)?;
         let domain_classes = domain_classes(top.get("domain_classes"))?;
         let ceilings = ceilings(field(top, "ceilings")?)?;
+        let breaker = top.get("breaker").map_or(Ok(Breaker::default()), breaker)?;
         let lenses = arr(field(top, "lenses")?, "lenses")?
             .iter()
             .enumerate()
@@ -119,11 +144,17 @@ impl LensConfig {
         check_unique_lenses(&lenses)?;
         check_one_proposer(&lenses)?;
         check_diversity(&lenses)?;
+        let alien = match top.get("alien") {
+            None => None,
+            Some(a) => Some(alien(a, &providers, &lenses).map_err(|e| format!("alien.{e}"))?),
+        };
         Ok(Self {
             providers,
             domain_classes,
             ceilings,
+            breaker,
             lenses,
+            alien,
         })
     }
 
@@ -242,6 +273,47 @@ fn ceilings(v: &Value) -> Result<Ceilings, String> {
     })
 }
 
+/// `breaker {window_calls, window_usd, min_score_move, mode}`, each
+/// optional, defaults from [`Breaker::default`].
+fn breaker(v: &Value) -> Result<Breaker, String> {
+    let m = obj(v, "breaker")?;
+    only(
+        m,
+        &["window_calls", "window_usd", "min_score_move", "mode"],
+        "breaker",
+    )?;
+    let d = Breaker::default();
+    let num = |k: &str, default: u64| match m.get(k) {
+        None => Ok(default),
+        Some(_) => uint(m, k)
+            .and_then(|n| {
+                if n == 0 {
+                    Err(format!("{k}: must be above 0"))
+                } else {
+                    Ok(n)
+                }
+            })
+            .map_err(|e| format!("breaker.{e}")),
+    };
+    let window_calls = u32::try_from(num("window_calls", u64::from(d.window_calls))?)
+        .map_err(|_| "breaker.window_calls: too large".to_owned())?;
+    let window_spend = num("window_usd", d.window_spend / USD)?
+        .checked_mul(USD)
+        .ok_or_else(|| "breaker.window_usd: too large".to_owned())?;
+    let mode = match m.get("mode").map(|v| v.as_str()) {
+        None => d.mode,
+        Some(Some("observe")) => Mode::Observe,
+        Some(Some("enforce")) => Mode::Enforce,
+        Some(_) => return Err("breaker.mode: \"observe\" or \"enforce\" required".to_owned()),
+    };
+    Ok(Breaker {
+        window_calls,
+        window_spend,
+        min_score_move: num("min_score_move", d.min_score_move)?,
+        mode,
+    })
+}
+
 const LENS_KEYS: &[&str] = &[
     "id",
     "prompt",
@@ -321,6 +393,39 @@ fn lens(v: &Value, providers: &BTreeMap<AgentId, Provider>) -> Result<Lens, Stri
         rebel,
         tools,
         diversity_group,
+    })
+}
+
+fn alien(
+    v: &Value,
+    providers: &BTreeMap<AgentId, Provider>,
+    lenses: &[Lens],
+) -> Result<Alien, String> {
+    let m = obj(v, "alien")?;
+    only(m, &["id", "prompt", "providers"], "alien")?;
+    let id = string(m, "id")?;
+    AgentId::new(id).map_err(|e| format!("id: {e}"))?;
+    if lenses.iter().any(|l| l.id == id) {
+        return Err(format!("id: {id:?} is already a lens"));
+    }
+    let list = ids(m, "providers")?;
+    if list.is_empty() {
+        return Err("providers: at least one required".to_owned());
+    }
+    for p in &list {
+        let Some(provider) = providers.get(p) else {
+            return Err(format!("providers: provider {p} is not configured"));
+        };
+        if !provider.kind.has_tools() {
+            return Err(format!(
+                "providers: the alien lens uses read-only tools, and {p} is not a CLI provider"
+            ));
+        }
+    }
+    Ok(Alien {
+        id: id.to_owned(),
+        prompt: string(m, "prompt")?.to_owned(),
+        providers: list,
     })
 }
 
@@ -542,6 +647,37 @@ pub(crate) mod tests {
         assert!(arch.follows("anything"));
     }
 
+    #[test]
+    fn the_breaker_defaults_to_observe_and_reads_its_fields() {
+        let c = LensConfig::parse(STARTER).expect("loads");
+        assert_eq!(c.breaker, Breaker::default());
+        let text = STARTER.replacen(
+            r#""lenses": ["#,
+            r#""breaker": {"window_calls": 20, "window_usd": 2, "mode": "enforce"},
+      "lenses": ["#,
+            1,
+        );
+        let b = LensConfig::parse(&text).expect("loads").breaker;
+        assert_eq!(
+            (b.window_calls, b.window_spend, b.min_score_move, b.mode),
+            (20, 2 * USD, 4, Mode::Enforce)
+        );
+        let bad = |breaker: &str, expected: &str| {
+            let text = STARTER.replacen(r#""lenses": ["#, &format!("{breaker},\n\"lenses\": ["), 1);
+            let e = LensConfig::parse(&text).expect_err(expected);
+            assert!(e.contains(expected), "{expected:?} not in {e:?}");
+        };
+        bad(r#""breaker": {"mode": "loud"}"#, "breaker.mode");
+        bad(
+            r#""breaker": {"window_calls": 0}"#,
+            "breaker.window_calls: must be above 0",
+        );
+        bad(
+            r#""breaker": {"windows": 3}"#,
+            "breaker: unknown field \"windows\"",
+        );
+    }
+
     fn refused(from: &str, to: &str, expected: &str) {
         let text = STARTER.replacen(from, to, 1);
         assert_ne!(text, STARTER, "fixture edit {from:?} did not apply");
@@ -643,5 +779,53 @@ pub(crate) mod tests {
             r#""task_cals": 400"#,
             "unknown field \"task_cals\"",
         );
+    }
+
+    /// STARTER with an alien lens added.
+    fn with_alien(alien: &str) -> String {
+        let at = STARTER.rfind(']').expect("lenses end");
+        format!("{}],\n  \"alien\": {alien}\n}}", &STARTER[..at])
+    }
+
+    #[test]
+    fn the_alien_lens_is_optional_and_checked() {
+        assert_eq!(LensConfig::parse(STARTER).expect("loads").alien, None);
+        let good =
+            r#"{"id": "alien", "prompt": "lenses/alien.md", "providers": ["codex", "claude"]}"#;
+        let c = LensConfig::parse(&with_alien(good)).expect("loads");
+        let a = c.alien.expect("alien");
+        assert_eq!(a.id, "alien");
+        assert_eq!(a.prompt, "lenses/alien.md");
+        let ids: Vec<&str> = a.providers.iter().map(AgentId::as_str).collect();
+        assert_eq!(ids, ["codex", "claude"]);
+        for (alien, expected) in [
+            (
+                r#"{"id": "adversary", "prompt": "p", "providers": ["codex"]}"#,
+                "alien.id: \"adversary\" is already a lens",
+            ),
+            (
+                r#"{"id": "alien", "prompt": "p", "providers": []}"#,
+                "alien.providers: at least one required",
+            ),
+            (
+                r#"{"id": "alien", "prompt": "p", "providers": ["gemini"]}"#,
+                "alien.providers: provider gemini is not configured",
+            ),
+            (
+                r#"{"id": "alien", "prompt": "p", "providers": ["local"]}"#,
+                "local is not a CLI provider",
+            ),
+            (
+                r#"{"id": "alien", "providers": ["codex"]}"#,
+                "alien.prompt: non-empty string required",
+            ),
+            (
+                r#"{"id": "alien", "prompt": "p", "providers": ["codex"], "domains": ["*"]}"#,
+                "alien: unknown field \"domains\"",
+            ),
+        ] {
+            let e = LensConfig::parse(&with_alien(alien)).expect_err(expected);
+            assert!(e.contains(expected), "{expected:?} not in {e:?}");
+        }
     }
 }

@@ -8,6 +8,7 @@
 //! escalation of the same claim has a different id. Every action the inbox
 //! takes is fenced on `rev`.
 
+use crate::erosion_detail::{self, ErosionDetail};
 use crate::open_driver;
 use rusty_bbp::claims::{card, ClaimView, EvidenceView, Sight};
 use rusty_bbp::engine::exhausted_fields;
@@ -85,6 +86,10 @@ pub struct Escalation {
     /// `task_paused`: why the host paused it. A ceiling pause recurs on
     /// resume unless that ceiling was raised in the Factory config.
     pub pause: Option<Pause>,
+    /// The claim's erosion measurement: per-metric deltas, the worst-affected
+    /// functions and `unmeasured` code (#704, D43, D45, D91). Filled by
+    /// [`read`], which can read the run log.
+    pub erosion: Option<ErosionDetail>,
 }
 
 /// Why the host paused a task (#598).
@@ -121,7 +126,14 @@ pub fn read(dir: &Path, tasks: &[TaskId]) -> Result<Vec<Escalation>, String> {
     for (n, task) in tasks.iter().enumerate() {
         let d = open_driver(dir, task)?;
         let events = d.store.events(task, 0).map_err(|e| format!("{e:?}"))?;
-        out.extend(open(&d.state, &events).into_iter().map(|e| (n, e)));
+        let blob = |b: &BlobRef| d.store.blob_get(&b.sha).ok();
+        out.extend(open(&d.state, &events).into_iter().map(|mut e| {
+            e.erosion = e
+                .claim
+                .as_ref()
+                .and_then(|c| erosion_detail::for_claim(&d.state, c, blob));
+            (n, e)
+        }));
     }
     out.sort_by_key(|(n, e)| (e.reversible != Some(false), *n, e.seq, e.id.clone()));
     Ok(out.into_iter().map(|(_, e)| e).collect())
@@ -225,6 +237,7 @@ pub fn open(st: &TaskState, events: &[Event]) -> Vec<Escalation> {
             acted: vec![],
             totals: totals(st, opened.unwrap_or(st.budget)),
             pause,
+            erosion: None,
         });
     }
     out
@@ -292,6 +305,7 @@ fn of_claim(st: &TaskState, c: MsgId, seq: usize, reason: Reason) -> Escalation 
         acted,
         totals: vec![],
         pause: None,
+        erosion: None,
     }
 }
 

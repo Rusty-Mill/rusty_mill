@@ -54,7 +54,7 @@ mod watch;
 use std::io::{self, Write};
 use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusty_mux_core::Event;
 use rusty_mux_proto::schema::{CATALOG, Returns, Value};
@@ -247,12 +247,91 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
     let mut err = io::stderr();
     let bridged = match cli::parse(args, &env.here) {
         Ok(invocation) if matches!(invocation.command, Command::Bridge) => invocation,
+        Ok(Invocation {
+            command: Command::Agent(AgentCommand::Report(mut hook)),
+            ref socket,
+            ..
+        }) if hook.tool_from_stdin => {
+            // One budget for the whole hook: stdin gets the first part of
+            // it, so a writer that never closes still leaves time to report.
+            let stop = Stop::after(HOOK_PATIENCE);
+            let input = hook_input_within(io::stdin, HOOK_INPUT_PATIENCE);
+            hook.msg = input.and_then(|input| hook_tool_name(&input));
+            let socket = socket.clone().or_else(|| env.socket.clone());
+            return send_hook_report(socket.as_deref(), env, &hook, &stop);
+        }
         _ => return run(args, env, &mut io::stdout(), &mut err),
     };
     match socket(&bridged, env) {
         Ok(socket) => finish(bridge(&socket), &socket, &mut err),
         Err(reason) => report(&mut err, Exit::Usage, reason),
     }
+}
+
+/// Sends an agent's event-hook report for the block it runs in. A hook
+/// must never fail, print or hold the agent up (Claude Code adds some hook
+/// output to the model's context, Codex fails a `Stop` hook that prints), so
+/// a report that cannot be sent is dropped: the program's own OSC 7501
+/// status still shows.
+fn send_hook_report(socket: Option<&Path>, env: &Env, hook: &HookReport, stop: &Stop) -> Exit {
+    if let (Some(socket), Some(block)) = (socket, env.here.block) {
+        let _dropped = hook_report(socket, block, hook, stop);
+    }
+    Exit::Ok
+}
+
+/// How long `--tool-from-stdin` waits for the event's input to end: half of
+/// [`HOOK_PATIENCE`], so the report keeps the rest.
+const HOOK_INPUT_PATIENCE: Duration = Duration::from_secs(1);
+
+/// The most of a hook event's stdin `--tool-from-stdin` reads.
+const HOOK_INPUT_LIMIT: usize = 1 << 20;
+
+/// A hook event's input, read up to [`HOOK_INPUT_LIMIT`] bytes, or `None`
+/// when it is longer, cannot be read or has not ended within `budget`. It is
+/// read on a thread of its own, so a writer that never closes the pipe
+/// holds the hook no longer than `budget`; that thread drains the rest of a
+/// longer input, so the writer never blocks on a full pipe, until the
+/// process exits.
+fn hook_input_within<R: io::Read + 'static>(
+    open: impl FnOnce() -> R + Send + 'static,
+    budget: Duration,
+) -> Option<Vec<u8>> {
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::Builder::new()
+        .name("hook-input".into())
+        .spawn(move || {
+            let mut input = open();
+            let _gone = sent.send(read_hook_input(&mut input));
+            let _drained = io::copy(&mut input, &mut io::sink());
+        });
+    reader.ok()?;
+    received.recv_timeout(budget).ok().flatten()
+}
+
+/// `input` up to [`HOOK_INPUT_LIMIT`] bytes; `None` when it is longer or
+/// cannot be read.
+fn read_hook_input(input: &mut impl io::Read) -> Option<Vec<u8>> {
+    use io::Read as _;
+    let mut bytes = Vec::new();
+    let read = input
+        .take(HOOK_INPUT_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (read <= HOOK_INPUT_LIMIT).then_some(bytes)
+}
+
+/// The longest tool name a report carries.
+const MAX_TOOL_NAME: usize = 128;
+
+/// The `tool_name` of a hook event's JSON, when it can be a report's
+/// message: 1 to [`MAX_TOOL_NAME`] bytes with no control characters (D89).
+/// A name that cannot leaves the report without one rather than dropping it.
+pub fn hook_tool_name(input: &[u8]) -> Option<String> {
+    let value = rusty_json::Value::from_json_str(std::str::from_utf8(input).ok()?).ok()?;
+    let name = value.get("tool_name")?.as_str()?;
+    let fits = (1..=MAX_TOOL_NAME).contains(&name.len()) && !name.chars().any(char::is_control);
+    fits.then(|| name.to_owned())
 }
 
 /// The socket `invocation` names, else `$RUSTY_MUX_SOCKET`.
@@ -293,14 +372,7 @@ pub fn run_until(
         }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
         Command::Agent(AgentCommand::Report(hook)) => {
-            // An agent's event hook must never fail, print or hold the agent
-            // up (Claude Code adds hook output to the model's context), so
-            // a report that cannot be sent is dropped: the program's own
-            // OSC 7501 status still shows.
-            if let (Some(socket), Some(block)) = (hook_socket.as_deref(), env.here.block) {
-                let _dropped = hook_report(socket, block, &hook, stop);
-            }
-            return Exit::Ok;
+            return send_hook_report(hook_socket.as_deref(), env, &hook, stop);
         }
         Command::Agent(command) => {
             let generated_name = || {
@@ -973,6 +1045,72 @@ fn require_sync(features: Features) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hook_tool_name_is_kept_only_when_a_report_can_carry_it() {
+        let name = |json: &str| hook_tool_name(json.as_bytes());
+        assert_eq!(name(r#"{"tool_name":"Bash"}"#), Some("Bash".into()));
+        assert_eq!(
+            name(r#"{"tool_name":"mcp__github__get_me","tool_input":{}}"#),
+            Some("mcp__github__get_me".into())
+        );
+        let long = format!(r#"{{"tool_name":"{}"}}"#, "a".repeat(MAX_TOOL_NAME + 1));
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            "{}",
+            r#"{"tool_name":7}"#,
+            r#"{"tool_name":""}"#,
+            r#"{"tool_name":"a\nb"}"#,
+            r#"{"tool_name":"a\u001bb"}"#,
+            &long,
+        ] {
+            assert_eq!(name(bad), None, "{bad}");
+        }
+        assert_eq!(hook_tool_name(b"{\"tool_name\":\"\xff\"}"), None);
+    }
+
+    #[test]
+    fn hook_input_is_read_up_to_its_limit() {
+        let at_limit = vec![b'x'; HOOK_INPUT_LIMIT];
+        assert_eq!(
+            read_hook_input(&mut at_limit.as_slice()),
+            Some(at_limit.clone())
+        );
+        let over = vec![b'x'; HOOK_INPUT_LIMIT + 5];
+        assert_eq!(read_hook_input(&mut over.as_slice()), None);
+    }
+
+    /// Review on #1516: an input that never ends holds the hook only for
+    /// its budget.
+    #[test]
+    fn hook_input_that_never_ends_gives_up_within_its_budget() {
+        struct Endless;
+        impl io::Read for Endless {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                std::thread::sleep(Duration::from_secs(3600));
+                Ok(0)
+            }
+        }
+        let started = Instant::now();
+        assert_eq!(
+            hook_input_within(|| Endless, Duration::from_millis(100)),
+            None
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let small = || io::Cursor::new(br#"{"tool_name":"Bash"}"#.to_vec());
+        assert_eq!(
+            hook_input_within(small, Duration::from_secs(5)),
+            Some(br#"{"tool_name":"Bash"}"#.to_vec())
+        );
+        let over = || io::Cursor::new(vec![b'x'; HOOK_INPUT_LIMIT + 5]);
+        assert_eq!(hook_input_within(over, Duration::from_secs(5)), None);
+    }
 
     fn parsed(line: &str) -> Call {
         let args: Vec<String> = line.split_whitespace().map(String::from).collect();
