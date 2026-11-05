@@ -100,6 +100,7 @@ Precise contracts used by this guide:
 | D86 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
 | D88 | #704 D42 expiry pause: go-live, count, what pauses, opt-out | [default] 2026-11-05 (#704) |
 | D91 | #704 slice 3: erosion escalation detail in the inbox | [default] 2026-11-05 (#704) |
+| D92 | #599 track records: job rows, pivotal scope, ground truth, weight, PR split | [default] 2026-11-05 (#599) |
 | D93 | #599 track records score pivotal reviews against ground truth only | [stated] 2026-11-04 (#599) |
 | D94 | Let Em Loose designs live in the repo, in their first draft PR | [stated] 2026-11-04 (general) |
 | D96 | #708 orch runs the alien lens's probes itself, sandboxed | [stated] 2026-11-05 (#708) |
@@ -116,6 +117,8 @@ Precise contracts used by this guide:
 | D107 | `lel-jail` v0 launch contract: `orch-jail` crate, `jail.json` fields, setup order, tests | [default] 2026-11-05 (#600, #732) |
 | D108 | #600 cgroup holder, slot hand-off and cgroup `quiesce` | [default] 2026-11-05 (#600, #732) |
 | D109 | Takeover end drains delivered input through `takeover_closing` (amends D104 item 2) | [stated] 2026-11-05 (mux, #732, PR #1502) |
+| D111 | #599 `rusty_orch lens record`: read-only calibration report command | [stated] 2026-11-05 (#599) |
+| D112 | #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance | [stated] 2026-11-05 (#599) |
 
 ## D1. Lenses, not stages
 
@@ -798,6 +801,35 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Key.** lel:704:escalation-detail-build-defaults
 **Source.** Questions Q1–Q4 from the #704 slice 3 build thread, 2026-11-05; D30, D41, D43, D45, D82; QA.md § Erosion gate; card #704 Build 3 and Done when; `rusty_bbp_host` `src/inbox.rs` `Escalation`, `Reason`; `rusty_erosion` `src/main.rs` `render`. Numbered D91 because open PR branches already use D89–D90. Its open question is Q23 because open #1520 uses Q21–Q22.
 
+## D92. #599 track records: job rows, pivotal scope, ground truth, weight, PR split
+
+**Decision.** Build detail for #599 track records (599-build-plan.md §2), inside D58 and D93:
+- **Job rows.** The D58 orch-store table `lens_record` holds one row per answered blind `Review` or `LookHarder` job: task, lens, claim, epoch, slot, the MsgIds the job posted, and an `unsure` flag. A job answered with nothing, or whose reply the protocol refused, is a row with no items and counts 0 in the denominator, so refusing isn't free. `Skipped` jobs and jobs no provider could answer are not written. A row is saved before the scheduler state. Saving the same job key again unions its items, so a job rerun after a crash keeps every item it posted, and leave-one-out removes them all together.
+  - **Partial posts.** When a post fails partway (`PostError { posted, unsure, error }`) after something landed, or after an answer was lost, the job is recorded as answered with the posts that landed. Its row keeps their ids, the scheduler marks it answered over that prefix, and it is never asked again. That way no fresh evidence is posted next to what is already on the board. An answer counts as lost when the one same-op resend didn't return it, which means the post may have landed under an unknown id. The row is then marked `unsure`, and the flag stays set when the row is saved again. A job with nothing landed and no lost answer is abandoned and asked again as before.
+    - **Remaining window:** a crash after the row is saved but before the scheduler state is kept. The job can then be asked again from the older state. Its new items are added to the same row, the union rule above, and a sticky `unsure` keeps it unscored.
+  - **Write-ahead.** Before a job's first post, its row is saved with `pending` set and no items. So is every other row an attempt saves, an empty answer's or a refused reply's included, so a save that clears `pending` always completes its own attempt. The post-round save clears `pending` and adds the job's items to the row. If a job's write-ahead finds its row still `pending`, an earlier attempt crashed or failed its save and may have posted under ids nobody knows, so the row is marked `unsure` and the flag stays set. A row still `pending` when scored is treated like an unsure job: never scored, pivotal on a line settlement, and kept in `assigned`. A crash before any post leaves a pending row with nothing on the board, which is unscored too. That is conservative: it costs a point the lens may have earned, and it never awards one. `pending` is part of the v1 row with a serde default, because the table hasn't shipped.
+  - **Unsure jobs.** An unsure job is never scored. Its lost item could change all of these:
+    - its direction, since the item may go the other way;
+    - whether it cites the golden report, since the item may be `executed`;
+    - its weight, since `upset` is judged from its first own item.
+
+    So scoring its known items, even against golden or a `Human` or `Choose` outcome, could award points the record doesn't support. On a line settlement it counts as pivotal, and it is not pivotal on a `Human` or `Choose` settlement. Either way it stays in `assigned` and is never in `scored`. No id is inferred, and nothing is replayed under a new op.
+  - **Other details.** `unsure` is part of the v1 row, because the table hasn't shipped. Points are folded from the rows and `claim_history` when read, never stored. `Record`'s `found_problems`, `found_nothing_twice` and `refused` fields are left as they are, not wired and not deleted, in this PR.
+- **Pivotal scope.** A claim's settlement is its latest `Status` step that changed its status. A step that leaves the status unchanged, such as an `ActionUnconfirmed` escalation that leaves it `Accepted`, settles nothing. If that settlement isn't `Accepted` or `Dropped`, the job is pending. Leave-one-out applies only when the settlement is `AcceptLine` or `DropLine`. A `Human` or `Choose` settlement didn't depend on the score, so the job is never pivotal and is scored against that outcome. That is how a later Nano reversal acts as ground truth: no separate reversal source is needed, and golden and reversal can't conflict.
+- **Ground truth for a pivotal job.** The final `golden:` report (not `holdout:`, which a model wrote) on `current(c)`'s code at settlement: passed means accept was right, failed means drop was right. It doesn't count for a job whose own items cite that report. There is no shadow-run source yet; #598's approved `shadow:` profile kind (D62) is the expected producer. Ground truth is an internal function in `orch-lens::record`, with no new port.
+- **Weight.** A pivotal job scored against ground truth uses the same `w = 1 + contested + 2·upset`, with its own items removed and `upset` judged against the ground truth.
+- **PR split.** Track records are a PR of their own; lessons (§3) and `lens why` (§5) follow in later PRs.
+- **Interim limits (2026-11-05, until Q35).** `claim_history` doesn't carry everything the rules above need, so the first build is conservative. Each limit only makes more jobs unscored-pivotal. None scores a job against the board outcome, and all of them show in the `pivotal` count. The code and 599-build-plan.md §2 note them.
+  1. *Author minimum.* A line rule doesn't carry `min_authors`. If removing the job's items would remove the lens as a distinct author, the job counts as pivotal.
+  2. *Woken items.* The history keeps a woken item's append-time epoch and `scoring` flag, and has no `dormant` flag. An `Evidence(m)` reopen counts item m as live in the new epoch. `Dep` and `Intent` reopens wake nothing. A `Human` reopen wakes dormant items. BBP marks an item dormant only when it is `executed` evidence posted against a closed claim's status (counter while accepted, support while dropped) while a dep was closed, and the history doesn't show the dep. So if a `Human` reopen into the settlement's epoch exists and any item on the claim, from any author, fits the kind, direction and status test, every job on that line settlement counts as pivotal.
+  3. *Golden provenance.* Only a `Failing` step shows a `golden:` result, so a passed golden set isn't visible. BBP keeps `failing` when `current` changes, and the history has no candidate steps, so a failing step can't be tied to the candidate current at settlement. The pure rule gives golden ground truth (drop was right) only when the failing report tested the candidate current at settlement. The `bbp why` path carries neither, so golden truth is withheld there until Q35. D93's required test runs on the pure rule.
+  4. *Citation.* Evidence steps carry no refs, so a job whose own items include `executed` evidence gets no golden ground truth. This stands in for "its items cite that report".
+**Why.** These are implementation details inside the approved design. Each is the most reversible option: scores are computed when read, so a later rule change recomputes them from the stored rows. Only `golden:` sets are signed off by Nano, and a holdout lens can't be judged by its own report. A port would add to D58's approved list, which the build plan says nothing does.
+**Rejected.** Storing points. Leave-one-out on human settlements. Treating a reversal as a separate source, ranked against golden. `holdout:` reports as ground truth. A `GroundTruth` port now. One PR for track records, lessons and `lens why`. Inferring an unknown post's id, or replaying it under a new op. Scoring an unsure job's known items against ground truth. Leaving the post-before-save window as an interim limit. Letting a retry's save clear an earlier attempt's `pending` without marking the row `unsure`, including a retry that posts nothing (an empty answer or a refusal).
+**Tag.** [default] · remind-me: mem_6f0738d7778847d0b13fac1f7d458b68
+**Key.** lel:599:track-record-build-defaults
+**Source.** let-em-loose-expert, 2026-11-05, answering questions 1–4 and 6 from the #599 track-record build thread; D58, D93 (PR #1518), 599-build-plan.md §2, `bbp-claims-addendum.md` § Holdout suites (G1), `rusty_bbp::history::Rule`. Question 5 (a `lens record` subcommand) is OPEN_QUESTIONS Q34. Interim limits: coordinator follow-ups A and B, 2026-11-05; `claims_engine.rs` `accept_line`/`drop_line`; `rusty_bbp::history` `Change`, `Rule`; OPEN_QUESTIONS Q35. PR #1520 Codex findings on reopen activation and golden provenance, 2026-11-05; `claims.rs` item append (`dormant`), `ClaimReopened` fold, `on_artifact`. PR #1520 review fixes on the settlement step and partial posts, 2026-11-05 (commits 89490a8f1, 619b735c5); `Board::post` `PostError`. dottiusmaximus's re-review question on PR #1520, 2026-11-05 (commit 5fcf62541). PR #1520 Codex finding on duplicate board effects, 2026-11-05 (commit 570e88396, `round::partial`). PR #1520 Codex finding on posts lost before the row save, 2026-11-05 (run.rs:295-299, discussion_r4485013131); dottiusmaximus's follow-up on retries that post nothing, 2026-11-05 (comment 6667319872).
+
 ## D93. #599 track records score pivotal reviews against ground truth only
 
 **Decision.** Option A plus ground truth. A pivotal review is one whose outcome flips once the lens's own evidence is removed. It is not scored against the board outcome, and each lens reports a pivotal count beside its points. Where the claim has ground truth (a golden-set test, a shadow-run result, a later Nano reversal), the pivotal review is scored against that instead. With no ground truth it is unscored and counted as pivotal. The 20-item calibration report shows, per lens: points, scored count, pivotal count, and pivotal-with-ground-truth count. Required tests: pivotal with no ground truth is unscored and counted; pivotal with ground truth is scored against the ground truth; a non-pivotal review is scored as before; a lens that flips an outcome it bet on earns nothing from the flip. This answers OPEN_QUESTIONS Q17.
@@ -993,3 +1025,28 @@ Still under claims schema 5 (D105): no bump. D104's events, verb, visibility and
 **Tag.** [stated] · remind-me: mem_b63239cb445d4a49a078d1a45590fa4e
 **Key.** lel:mux:takeover-closing-drain
 **Source.** Nano tapped option A, "Add a takeover_closing event", on thread decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE46GHhPehbN6LFb6VXZh2ZpE` at 2026-11-05T03:14:32Z. The card asked: "How should #1502 keep the last typed batch when you release a takeover or close the task?" Earlier, and first recorded: owner approval relayed by dottiusmaximus in a GitHub comment on PR #1502, https://github.com/Rusty-Mill/rusty_mill/pull/1502#issuecomment-6646844427 (2026-11-05T01:13Z), quoting the exchange: "#1502 needs a small audit-schema decision: delivered input can be lost when a takeover ends. I recommend adding a closing state that briefly drains already-delivered input before the host records the end. Are you okay with that?" Owner: "👍". Built in PR #1502 (head b5dd857e) and PR #1504 (head e4050a03). Numbered D87 on PR #1496's branch; moved to D109 on 2026-11-05 because main assigned D78–D88 first.
+
+## D111. #599 `rusty_orch lens record`: read-only calibration report command
+
+**Decision.** Add a read-only subcommand, `rusty_orch lens record`, that prints one JSON line per lens: points, scored, pivotal and pivotal-with-ground-truth (D93's calibration report). It goes in a follow-up PR after #1520. Until then the record shows in each lens's context line (D92). The approval covers this one command only.
+**Why.** D93 asks for a per-lens calibration report Nano can read, and no approved command fits it. A new public CLI command is on the ask-first list.
+**Rejected.** The context line only, with no new command.
+**Tag.** [stated] · remind-me: mem_55db68a49aa14242b83c4150dc738edf
+**Key.** lel:599:lens-record-command
+**Source.** Nano tapped option A, "Add lens record command", on decision card cmsg_014AqbZs58L565hMV2pFkCX524Ybpagn8gHAPAfimMrHys (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:06Z (tap message cmsg_014AqbZs58L565hMV2pFkCX574JBwmkjmMnGTFTzf3n9MZ). Closes OPEN_QUESTIONS Q34.
+
+## D112. #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance
+
+**Decision.** One additive view change to `rusty_bbp::history`, shown by `bbp why`, in one follow-up PR after #1520. It changes neither the log nor the schema (like D77). It adds:
+- `min_authors` on `Rule::AcceptLine` and `Rule::DropLine`;
+- passed golden results;
+- refs on evidence steps;
+- on each reopen step, the items it woke;
+- candidate steps;
+- on each `Failing` step, the candidate its report tested.
+The first three were approved first. The last three were added to Q35 after that card and approved on a second card. When the PR lands, all four of D92's interim limits end: golden truth is then tied to the candidate current at settlement and works on the `bbp why` path.
+**Why.** It is view-only and closes every gap behind D92's interim limits in one change. Without the reopen wakes and candidate provenance, lines after a human reopen stay pivotal and golden truth can't be tied to the code current at settlement. It is a public API change, so it needed Nano's go-ahead.
+**Rejected.** Only `min_authors`. No change, keeping the interim limits. Only the first three fields, keeping the interim limits for reopen wakes and golden provenance.
+**Tag.** [stated] · remind-me: mem_2bc7a496ac8c4d8aa821bfa826891f85
+**Key.** lel:599:history-track-record-fields
+**Source.** Nano tapped option A, "All three fields", on decision card cmsg_014AqbZs58L565hMV2pFkCX5SMdL73WvySEECojiZphZ7g (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:10Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5HzE9svLMYjuftbZk7JHiYM). The card was posted 2026-11-05T18:20:06Z, before Q35's extension. The rest: Nano tapped option A, "Yes, same follow-up PR", on decision card cmsg_014AqbZs58L565hMV2pFkCX553uoAaCJ8FP2tp7oU1ibhQ ("Should the BBP history change also carry reopen wakes and candidate provenance?", same thread), 2026-11-05T21:35:55Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5EJLCSPUm4HnqqKv3SmRqby). Closes OPEN_QUESTIONS Q35.

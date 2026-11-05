@@ -475,10 +475,10 @@ mod tests {
     use orch_lens::context::Line;
     use orch_lens::hunt::{Probe, Runs};
     use orch_lens::meter::Meter;
-    use orch_lens::round::Board;
+    use orch_lens::round::{Board, PostError};
     use orch_lens::schedule::{Pass, Progress};
     use orch_lens::{Answer, DataClass, Model, Post, Question, Reply, Usage};
-    use rusty_bbp::{ClaimStatus, Stakes};
+    use rusty_bbp::{ClaimStatus, MsgId, Stakes};
 
     use super::*;
 
@@ -552,8 +552,11 @@ mod tests {
     }
 
     impl Board for FakeSeat {
-        fn post(&mut self, _: &str, _: &[Post]) -> Result<(), String> {
-            Err("the alien lens posts nothing".to_owned())
+        fn post(&mut self, _: &str, _: &[Post]) -> Result<Vec<MsgId>, PostError> {
+            Err(PostError::refused(
+                Vec::new(),
+                "the alien lens posts nothing",
+            ))
         }
     }
 
