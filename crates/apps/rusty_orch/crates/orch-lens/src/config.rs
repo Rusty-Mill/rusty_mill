@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use orch_core::AgentId;
 use rusty_json::{Map, Value};
 
+use crate::breaker::{Breaker, Mode};
 use crate::class::DataClass;
 use crate::meter::{Ceilings, Price};
 use crate::post::DirectionKey;
@@ -107,6 +108,8 @@ pub struct LensConfig {
     pub providers: BTreeMap<AgentId, Provider>,
     pub domain_classes: BTreeMap<String, DataClass>,
     pub ceilings: Ceilings,
+    /// The cost breaker; its defaults when the key is absent.
+    pub breaker: Breaker,
     pub lenses: Vec<Lens>,
     /// The alien lens, when configured; `lens run --alien` needs it.
     pub alien: Option<Alien>,
@@ -119,12 +122,20 @@ impl LensConfig {
         let top = obj(&v, "config")?;
         only(
             top,
-            &["providers", "domain_classes", "ceilings", "lenses", "alien"],
+            &[
+                "providers",
+                "domain_classes",
+                "ceilings",
+                "breaker",
+                "lenses",
+                "alien",
+            ],
             "config",
         )?;
         let providers = providers(field(top, "providers")?)?;
         let domain_classes = domain_classes(top.get("domain_classes"))?;
         let ceilings = ceilings(field(top, "ceilings")?)?;
+        let breaker = top.get("breaker").map_or(Ok(Breaker::default()), breaker)?;
         let lenses = arr(field(top, "lenses")?, "lenses")?
             .iter()
             .enumerate()
@@ -141,6 +152,7 @@ impl LensConfig {
             providers,
             domain_classes,
             ceilings,
+            breaker,
             lenses,
             alien,
         })
@@ -258,6 +270,47 @@ fn ceilings(v: &Value) -> Result<Ceilings, String> {
         task: usd("task_usd")?,
         task_calls: u32::try_from(uint(m, "task_calls").map_err(|e| format!("ceilings.{e}"))?)
             .map_err(|_| "ceilings.task_calls: too large".to_owned())?,
+    })
+}
+
+/// `breaker {window_calls, window_usd, min_score_move, mode}`, each
+/// optional, defaults from [`Breaker::default`].
+fn breaker(v: &Value) -> Result<Breaker, String> {
+    let m = obj(v, "breaker")?;
+    only(
+        m,
+        &["window_calls", "window_usd", "min_score_move", "mode"],
+        "breaker",
+    )?;
+    let d = Breaker::default();
+    let num = |k: &str, default: u64| match m.get(k) {
+        None => Ok(default),
+        Some(_) => uint(m, k)
+            .and_then(|n| {
+                if n == 0 {
+                    Err(format!("{k}: must be above 0"))
+                } else {
+                    Ok(n)
+                }
+            })
+            .map_err(|e| format!("breaker.{e}")),
+    };
+    let window_calls = u32::try_from(num("window_calls", u64::from(d.window_calls))?)
+        .map_err(|_| "breaker.window_calls: too large".to_owned())?;
+    let window_spend = num("window_usd", d.window_spend / USD)?
+        .checked_mul(USD)
+        .ok_or_else(|| "breaker.window_usd: too large".to_owned())?;
+    let mode = match m.get("mode").map(|v| v.as_str()) {
+        None => d.mode,
+        Some(Some("observe")) => Mode::Observe,
+        Some(Some("enforce")) => Mode::Enforce,
+        Some(_) => return Err("breaker.mode: \"observe\" or \"enforce\" required".to_owned()),
+    };
+    Ok(Breaker {
+        window_calls,
+        window_spend,
+        min_score_move: num("min_score_move", d.min_score_move)?,
+        mode,
     })
 }
 
@@ -592,6 +645,37 @@ pub(crate) mod tests {
         let arch = c.lens("architect").expect("architect");
         assert_eq!(arch.rebel, AgentId::new("codex").ok());
         assert!(arch.follows("anything"));
+    }
+
+    #[test]
+    fn the_breaker_defaults_to_observe_and_reads_its_fields() {
+        let c = LensConfig::parse(STARTER).expect("loads");
+        assert_eq!(c.breaker, Breaker::default());
+        let text = STARTER.replacen(
+            r#""lenses": ["#,
+            r#""breaker": {"window_calls": 20, "window_usd": 2, "mode": "enforce"},
+      "lenses": ["#,
+            1,
+        );
+        let b = LensConfig::parse(&text).expect("loads").breaker;
+        assert_eq!(
+            (b.window_calls, b.window_spend, b.min_score_move, b.mode),
+            (20, 2 * USD, 4, Mode::Enforce)
+        );
+        let bad = |breaker: &str, expected: &str| {
+            let text = STARTER.replacen(r#""lenses": ["#, &format!("{breaker},\n\"lenses\": ["), 1);
+            let e = LensConfig::parse(&text).expect_err(expected);
+            assert!(e.contains(expected), "{expected:?} not in {e:?}");
+        };
+        bad(r#""breaker": {"mode": "loud"}"#, "breaker.mode");
+        bad(
+            r#""breaker": {"window_calls": 0}"#,
+            "breaker.window_calls: must be above 0",
+        );
+        bad(
+            r#""breaker": {"windows": 3}"#,
+            "breaker: unknown field \"windows\"",
+        );
     }
 
     fn refused(from: &str, to: &str, expected: &str) {

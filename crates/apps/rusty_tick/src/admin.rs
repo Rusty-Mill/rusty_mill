@@ -2,6 +2,7 @@
 //! over [`Registry`]; a running server sees the change within a second.
 
 use crate::backend::{LOCK_FILE, USERS_DIR, USERS_FILE};
+use crate::oauth;
 use crate::users::{Registry, UserKey};
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use std::path::Path;
@@ -122,8 +123,9 @@ fn lock(dir: &Path, name: &str, busy: &str) -> Result<DirLock, String> {
     })
 }
 
-/// Rename everything in `from` that belongs to the store (all but the users
-/// file, the users directory and the lock files) into `to`.
+/// Rename everything in `from` that belongs to the store into `to`: all but
+/// the users file, the users directory, the lock files and the OAuth grants,
+/// which the server reads from the data directory in either mode.
 fn move_store(from: &Path, to: &Path) -> Result<(), String> {
     let io = |what: &Path, e: std::io::Error| format!("{}: {e}", what.display());
     std::fs::create_dir_all(to).map_err(|e| io(to, e))?;
@@ -133,6 +135,7 @@ fn move_store(from: &Path, to: &Path) -> Result<(), String> {
         USERS_DIR,
         LOCK_FILE,
         EDIT_LOCK,
+        oauth::STATE_FILE,
     ];
     for entry in std::fs::read_dir(from).map_err(|e| io(from, e))? {
         let entry = entry.map_err(|e| io(from, e))?;
@@ -272,6 +275,19 @@ mod tests {
         assert!(registry(dir.path()).authenticate(&token).is_some());
         // The lock file stays: it belongs to the directory, not the store.
         assert!(dir.path().join(LOCK_FILE).exists());
+    }
+
+    #[test]
+    fn adopt_leaves_the_oauth_grants_where_the_server_reads_them() {
+        let dir = single_user_dir();
+        std::fs::write(dir.path().join(oauth::STATE_FILE), "grants").unwrap();
+        run_in(dir.path(), "adopt default").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join(oauth::STATE_FILE)).unwrap(),
+            "grants"
+        );
+        let home = dir.path().join(USERS_DIR).join("default");
+        assert!(!home.join(oauth::STATE_FILE).exists());
     }
 
     #[test]
