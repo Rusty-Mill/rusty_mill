@@ -2,15 +2,24 @@
 //!
 //! The order is the v0 contract (LEL D85): validate the spec, require the
 //! slot lock (fd 3) and the ACP socket (fd 4), join the session's cgroup,
-//! close every other descriptor, resolve every path and check the token is
-//! out of reach on the resolved ones, read the token, then hand off to
-//! rusty_sandbox's helper, which sets rlimits, Landlock and seccomp and
-//! execs. Any failure stops before the exec: nothing runs unconfined.
+//! close every other descriptor, pin every root, the cwd and the token with
+//! an `O_PATH` descriptor and check the token is out of reach on what those
+//! descriptors are, read the token through its descriptor, then hand off
+//! to rusty_sandbox's helper with `/proc/self/fd/N` for each path. The
+//! helper's Landlock rules then land on the pinned objects, which no later
+//! rename or symlink, by a confined peer or anyone else, can redirect. It
+//! sets rlimits, Landlock and seccomp and execs. Any failure stops before
+//! the exec: nothing runs unconfined.
 
-use std::os::unix::fs::MetadataExt;
+use std::os::fd::IntoRawFd;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
-use crate::spec::JailSpec;
+use crate::spec::{JailSpec, Resolved};
+
+/// `O_PATH` (Linux, the same value on every architecture this builds for):
+/// a handle for the object itself, usable as a path through procfs.
+const O_PATH: i32 = 0o10_000_000;
 
 /// The slot lock the cgroup holder shares (design §2 step 4).
 pub const SLOT_FD: i32 = 3;
@@ -23,12 +32,22 @@ pub const ACP_FD: i32 = 4;
 /// parsed is also written to its status file (the helper writes its own).
 #[must_use]
 pub fn launch(path: &Path) -> String {
+    launch_with(path, || {})
+}
+
+/// [`launch`], calling `before_handoff` once every path is pinned and
+/// checked and just before the helper installs its rules: the seam the
+/// swap tests pause in.
+#[doc(hidden)]
+#[must_use]
+pub fn launch_with(path: &Path, before_handoff: impl FnOnce()) -> String {
     let spec = match read_spec(path) {
         Ok(spec) => spec,
         Err(error) => return error,
     };
     match prepare(&spec) {
         Ok((spec, token)) => {
+            before_handoff();
             rusty_sandbox::run_helper(&spec.helper_request(token).encode()).to_string()
         }
         Err(error) => {
@@ -53,18 +72,35 @@ fn prepare(spec: &JailSpec) -> Result<(JailSpec, Option<String>), String> {
     keep_inherited(ACP_FD, "ACP socket")?;
     join_cgroup(spec.cgroup())?;
     close_others()?;
-    let spec = spec.resolve(real)?;
+    let spec = spec.resolve(pin)?;
     let token = spec.token().map(|t| read_token(&t.file)).transpose()?;
     Ok((spec, token))
 }
 
-/// `path` with every symlink resolved, refused unless no one but root and
-/// this user could swap any part of it before Landlock opens it: each
-/// component is owned by one of them, and each directory above it is
-/// writable by no one else unless sticky.
-fn real(path: &Path) -> Result<PathBuf, String> {
-    let real =
-        std::fs::canonicalize(path).map_err(|e| format!("resolving {}: {e}", path.display()))?;
+/// Opens `path` once, as an `O_PATH` descriptor kept until the agent's exec
+/// (it is close-on-exec), and judges it by what that descriptor is: its
+/// link in `/proc/self/fd` names the object it holds, which no later rename
+/// or symlink changes. The handle given back is that link, so the helper
+/// opens the same object. Refused unless no one but root and this user owns
+/// a part of its path, and no directory above it is writable by anyone else
+/// unless sticky.
+fn pin(path: &Path) -> Result<Resolved, String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_PATH)
+        .open(path)
+        .map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let handle = PathBuf::from(format!("/proc/self/fd/{}", file.into_raw_fd()));
+    let real = std::fs::read_link(&handle)
+        .map_err(|e| format!("resolving {} ({}): {e}", path.display(), handle.display()))?;
+    if !real.is_absolute() {
+        return Err(format!("{} resolves to {}", path.display(), real.display()));
+    }
+    owned_path(path, &real)?;
+    Ok(Resolved { real, handle })
+}
+
+fn owned_path(path: &Path, real: &Path) -> Result<(), String> {
     let me = rusty_libc::process::geteuid();
     for part in real.ancestors() {
         let meta = std::fs::symlink_metadata(part)
@@ -78,7 +114,7 @@ fn real(path: &Path) -> Result<PathBuf, String> {
             ));
         }
     }
-    Ok(real)
+    Ok(())
 }
 
 /// Fails closed when `fd` is missing, and clears close-on-exec so the agent

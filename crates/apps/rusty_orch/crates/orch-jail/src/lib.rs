@@ -14,4 +14,4 @@ pub mod spec;
 #[cfg(target_os = "linux")]
 pub mod launch;
 
-pub use spec::{FileLimits, FileToken, JailFile, JailSpec, Token, CGROUP_ROOT};
+pub use spec::{FileLimits, FileToken, JailFile, JailSpec, Resolved, Token, CGROUP_ROOT};

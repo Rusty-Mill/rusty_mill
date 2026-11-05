@@ -3,8 +3,10 @@
 //! Sans-IO. [`JailFile`] is the wire shape (unknown fields refused);
 //! [`JailSpec::parse`] validates it once, at the boundary, so the launcher
 //! only ever sees a spec that holds the v0 contract (LEL D85).
-//! [`JailSpec::resolve`] repeats the token exclusion on the paths the
-//! filesystem resolves them to, with the resolver passed in.
+//! [`JailSpec::resolve`] repeats the token exclusion on what the paths
+//! resolve to, with the resolver passed in. The resolver also hands back a
+//! handle for each path, which the helper then opens instead of the name,
+//! so the objects that were checked are the objects the rules land on.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -75,10 +77,29 @@ pub struct FileToken {
 /// A token the launcher reads and hands over in one variable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Token {
-    /// File holding the token.
+    /// File holding the token; after [`JailSpec::resolve`], its handle.
     pub file: PathBuf,
     /// Variable the agent receives it in.
     pub var: String,
+}
+
+/// A path as the filesystem resolved it, and a name for that same object
+/// that no rename or symlink can redirect (the launcher's is an `O_PATH`
+/// descriptor's `/proc/self/fd/N`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Resolved {
+    /// Where the object is: what the exclusion is judged on.
+    pub real: PathBuf,
+    /// What the helper opens to reach it.
+    pub handle: PathBuf,
+}
+
+/// The handles [`JailSpec::resolve`] produced, in the sandbox's order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Handles {
+    read: Vec<PathBuf>,
+    write: Vec<PathBuf>,
+    cwd: PathBuf,
 }
 
 /// A validated jail spec.
@@ -87,6 +108,7 @@ pub struct JailSpec {
     cgroup: PathBuf,
     status: PathBuf,
     sandbox: SandboxSpec,
+    handles: Option<Handles>,
     token: Option<Token>,
     program: OsString,
     args: Vec<OsString>,
@@ -143,6 +165,7 @@ impl JailSpec {
             cgroup,
             status,
             sandbox,
+            handles: None,
             token,
             program: file.program.into(),
             args: file.args.into_iter().map(Into::into).collect(),
@@ -161,20 +184,31 @@ impl JailSpec {
         &self.status
     }
 
-    /// The same spec on the paths `real` resolves the roots, `cwd` and the
-    /// token file to, so the exclusion holds for what the helper will
-    /// actually grant: hand the result, not `self`, to the helper. `real`
-    /// must fail for a path it can't resolve; a failure refuses the launch.
+    /// The same spec checked on what `real` resolves the roots, `cwd` and
+    /// the token file to, and granted through the handles it returns, so the
+    /// exclusion holds for the objects the helper's rules will land on. Hand
+    /// the result, not `self`, to the helper. `real` must fail for a path it
+    /// can't resolve; a failure refuses the launch.
     ///
     /// # Errors
     /// When a path doesn't resolve, or the resolved token file or its
     /// directory is inside a resolved root.
-    pub fn resolve(&self, real: impl Fn(&Path) -> Result<PathBuf, String>) -> Result<Self, String> {
+    pub fn resolve(
+        &self,
+        real: impl Fn(&Path) -> Result<Resolved, String>,
+    ) -> Result<Self, String> {
         let all = |roots: &[PathBuf]| roots.iter().map(|r| real(r)).collect::<Result<Vec<_>, _>>();
-        let sandbox = SandboxSpec::new(
+        let (read, write, cwd) = (
             all(self.sandbox.read_roots())?,
             all(self.sandbox.write_roots())?,
             real(self.sandbox.cwd())?,
+        );
+        let reals = |r: &[Resolved]| r.iter().map(|r| r.real.clone()).collect::<Vec<_>>();
+        let handles = |r: &[Resolved]| r.iter().map(|r| r.handle.clone()).collect::<Vec<_>>();
+        let sandbox = SandboxSpec::new(
+            reals(&read),
+            reals(&write),
+            cwd.real.clone(),
             self.sandbox.env().to_vec(),
             *self.sandbox.limits(),
         )
@@ -186,6 +220,11 @@ impl JailSpec {
             .transpose()?;
         Ok(Self {
             sandbox,
+            handles: Some(Handles {
+                read: handles(&read),
+                write: handles(&write),
+                cwd: cwd.handle,
+            }),
             token,
             ..self.clone()
         })
@@ -207,16 +246,24 @@ impl JailSpec {
         if let (Some(token), Some(value)) = (&self.token, token_value) {
             env.push((token.var.clone(), value));
         }
+        let (read, write, cwd) = match &self.handles {
+            Some(h) => (h.read.clone(), h.write.clone(), h.cwd.clone()),
+            None => (
+                self.sandbox.read_roots().to_vec(),
+                self.sandbox.write_roots().to_vec(),
+                self.sandbox.cwd().clone(),
+            ),
+        };
         HelperRequest {
             status: self.status.clone(),
-            cwd: self.sandbox.cwd().clone(),
+            cwd,
             cpu_secs: limits.cpu().as_secs(),
             memory_bytes: limits.memory_bytes(),
             file_bytes: limits.file_bytes(),
             open_files: limits.open_files(),
             processes: limits.processes(),
-            read: self.sandbox.read_roots().to_vec(),
-            write: self.sandbox.write_roots().to_vec(),
+            read,
+            write,
             env,
             sockets: Sockets::InternetOnly,
             program: self.program.clone(),
@@ -258,13 +305,14 @@ fn beneath_a_root(sandbox: &SandboxSpec, path: &Path) -> bool {
 }
 
 /// D85: neither the token file nor the directory of tokens it sits in may
-/// be reachable, judged on resolved paths on both sides.
+/// be reachable, judged on resolved paths on both sides. The token is then
+/// read through its handle.
 fn resolved_token(
     sandbox: &SandboxSpec,
     token: &Token,
-    real: &impl Fn(&Path) -> Result<PathBuf, String>,
+    real: &impl Fn(&Path) -> Result<Resolved, String>,
 ) -> Result<Token, String> {
-    let file = real(&token.file)?;
+    let Resolved { real: file, handle } = real(&token.file)?;
     let dir = file
         .parent()
         .ok_or_else(|| format!("token.file: {} has no directory", file.display()))?;
@@ -276,7 +324,7 @@ fn resolved_token(
         ));
     }
     Ok(Token {
-        file,
+        file: handle,
         var: token.var.clone(),
     })
 }
@@ -371,14 +419,20 @@ mod tests {
     /// A resolver that maps `alias` prefixes to their targets, as symlinks would.
     fn links<'a>(
         aliases: &'a [(&'a str, &'a str)],
-    ) -> impl Fn(&Path) -> Result<PathBuf, String> + 'a {
+    ) -> impl Fn(&Path) -> Result<Resolved, String> + 'a {
         move |p: &Path| {
-            for (alias, target) in aliases {
-                if let Ok(rest) = p.strip_prefix(alias) {
-                    return Ok(Path::new(target).join(rest));
-                }
-            }
-            Ok(p.to_path_buf())
+            let real = aliases
+                .iter()
+                .find_map(|(alias, target)| {
+                    p.strip_prefix(alias)
+                        .ok()
+                        .map(|rest| Path::new(target).join(rest))
+                })
+                .unwrap_or_else(|| p.to_path_buf());
+            Ok(Resolved {
+                handle: real.clone(),
+                real,
+            })
         }
     }
 
@@ -415,9 +469,30 @@ mod tests {
         assert!(req.read.contains(&PathBuf::from("/usr/lib64")));
         assert_eq!(real.token().unwrap().file, Path::new("/run/t/c-1"));
         let err = spec
-            .resolve(|p: &Path| Err(format!("{}: gone", p.display())))
+            .resolve(|p: &Path| Err::<Resolved, _>(format!("{}: gone", p.display())))
             .unwrap_err();
         assert!(err.contains("gone"), "{err}");
+    }
+
+    #[test]
+    fn the_helper_is_given_the_handles_not_the_names() {
+        let spec = JailSpec::parse(&good()).unwrap();
+        let n = std::cell::Cell::new(10);
+        let pinned = spec
+            .resolve(|p: &Path| {
+                n.set(n.get() + 1);
+                Ok(Resolved {
+                    real: p.to_path_buf(),
+                    handle: PathBuf::from(format!("/proc/self/fd/{}", n.get())),
+                })
+            })
+            .unwrap();
+        let req = pinned.helper_request(None);
+        let fd = |n: u32| PathBuf::from(format!("/proc/self/fd/{n}"));
+        assert_eq!(req.read, [fd(11), fd(12)]);
+        assert_eq!(req.write, [fd(13)]);
+        assert_eq!(req.cwd, fd(14));
+        assert_eq!(pinned.token().unwrap().file, fd(15));
     }
 
     #[test]

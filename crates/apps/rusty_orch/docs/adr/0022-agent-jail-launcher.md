@@ -28,11 +28,17 @@ before the agent's code runs (mux-hosted-agents-design.md §2 step 5, §4).
   variables are refused (D13), and the token file must lie outside every
   root the agent can reach. That is checked twice: on the paths as written
   (no `..` anywhere), then on what they resolve to, where neither the
-  token nor its directory may be in or below a root. Resolution fails
-  closed. Every part of a resolved path must be owned by root or the
-  launcher's user, and every directory above it writable by no one else
-  unless sticky, so no other user can swap a root between the check and
-  Landlock opening it. The token file must have exactly one link.
+  token nor its directory may be in or below a root.
+- The second check is made on pinned objects. The launcher opens every
+  root, the cwd and the token once as an `O_PATH` descriptor, judges each
+  by its own `/proc/self/fd/N` link, and gives the helper those links in
+  place of the names. Landlock's rules then land on exactly the objects
+  that were checked, and the token is read through its descriptor. A peer,
+  confined or not, that renames a root or swaps a symlink in after the
+  check redirects only the name, never a rule. Resolution fails closed.
+  As a further check, every part of a resolved path must be owned by root
+  or the launcher's user, every directory above it must be writable by no
+  one else unless sticky, and the token file must have exactly one link.
 
 ## Consequences
 
@@ -42,10 +48,9 @@ before the agent's code runs (mux-hosted-agents-design.md §2 step 5, §4).
 - The mux socket is kept out by the environment, the fd rule, seccomp and
   Landlock, not yet by a mount namespace, so the "socket path doesn't
   exist" test waits for that layer.
-- The resolved check trusts root and the launcher's own user: a process
-  running as that user outside any jail could still swap a root in the
-  gap between the check and Landlock. Closing that gap needs Landlock
-  rules opened from the checked descriptors, which is a rusty_sandbox
-  change and comes later.
+- Pinning fixes which objects are granted, not where they sit later. A
+  token directory moved into a granted root after the launch would be
+  reachable, so the token directory's parent must not be writable by any
+  agent; orch must keep it outside every write root it grants.
 - Which credential the Claude CLI uses inside the jail is open (LEL Q15);
   the `token` slot carries only an orch-minted token until it's answered.
