@@ -155,7 +155,9 @@ fn open_mode(
 /// with `bad_claims_config(sandbox)` unless `sandbox` (the host's probe of
 /// its sandbox) succeeds, and with `bad_claims_config(test_paths)` unless
 /// the profile set names its `test_paths`. Both checks come before anything
-/// is written. Claims mode grants no turns: one live turn, turn-based.
+/// is written. A report-only erosion profile is recorded in the report-only
+/// ledger before the open, and refused once report-only has expired (D42,
+/// [`crate::erosion_window`]). Claims mode grants no turns: one live turn, turn-based.
 /// `holdout`, if given, is staged and frozen as the task's holdout suite
 /// (#597); the core then waits for a holdout pass before acceptance.
 #[allow(clippy::too_many_arguments)]
@@ -199,6 +201,18 @@ pub fn open_claims_task(
     if let Some(Err(e)) = holdout.map(|hs| hs.isolated_from(set, dirs)) {
         return refuse(format!("holdout: {e}"));
     }
+    // Held until the open below has published its log (D88).
+    let _admission = match set.erosion_report_only() {
+        false => None,
+        true => match crate::erosion_window::admit(dir, task, crate::now())? {
+            Ok(admission) => Some(admission),
+            Err(why) => {
+                return refuse(format!(
+                    "erosion: report-only has expired ({why}); new report-only tasks pause until Nano approves limits from the calibration numbers (D42)"
+                ))
+            }
+        },
+    };
     let holdout_digest = match holdout {
         Some(hs) => Some(crate::holdout::stage(dir, task, hs)?),
         None => None,
@@ -254,6 +268,27 @@ pub fn adopt_holdout(
     let cmd = Command::Host {
         op: crate::fresh_op(),
         action: HostAction::HoldoutExtended { digest },
+    };
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
+/// `bbp pause` (#598 C-R12): the host pauses an open claims task on a
+/// ceiling or the cost breaker. `op` makes a retry a replay (R15), so orch
+/// passes the same op for the same pause.
+pub fn pause(
+    dir: &Path,
+    task: &TaskId,
+    reason: PauseReason,
+    detail: &str,
+    op: OpId,
+) -> Result<Response, String> {
+    let mut d = open_driver(dir, task)?;
+    let cmd = Command::Host {
+        op,
+        action: HostAction::TaskPaused {
+            reason,
+            detail: detail.to_owned(),
+        },
     };
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
@@ -315,6 +350,18 @@ fn host(dir: &Path, task: &TaskId, action: HostAction) -> Result<Response, Strin
         action,
     };
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
+/// A `--reason` of `bbp pause`.
+pub fn pause_reason(s: &str) -> Result<PauseReason, String> {
+    match s {
+        "spend_ceiling" => Ok(PauseReason::SpendCeiling),
+        "call_ceiling" => Ok(PauseReason::CallCeiling),
+        "breaker" => Ok(PauseReason::Breaker),
+        other => Err(format!(
+            "--reason must be spend_ceiling, call_ceiling or breaker, got {other}"
+        )),
+    }
 }
 
 pub fn assign(

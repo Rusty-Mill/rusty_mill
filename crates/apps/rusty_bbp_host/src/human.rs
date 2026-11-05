@@ -197,8 +197,70 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
         "holdout-updated" => HumanAction::HoldoutUpdated {
             digest: Sha256::from_hex(a(0)?).ok_or("holdout digest must be 64 hex digits")?,
         },
+        // #598 C-R11: `intent FILE [claims=msg:1,msg:2] [domains=a,b]`. The
+        // caller stores FILE first ([`stage_brief`]), so here it is `SHA:LEN`.
+        "intent" => HumanAction::IntentRevised {
+            brief: blob_ref(a(0)?)?,
+            affects: affects(args.get(1..).unwrap_or(&[]))?,
+        },
         other => return Err(format!("unknown human action {other}")),
     })
+}
+
+/// A stored blob as `SHA:LEN`, which [`stage_brief`] writes.
+fn blob_ref(s: &str) -> Result<BlobRef, String> {
+    let bad = || format!("intent: brief must be a file (staged as SHA:LEN), got {s}");
+    let (sha, len) = s.split_once(':').ok_or_else(bad)?;
+    Ok(BlobRef {
+        sha: Sha256::from_hex(sha).ok_or_else(bad)?,
+        len: len.parse().map_err(|_| bad())?,
+    })
+}
+
+/// `claims=msg:1,msg:2` and `domains=a,b`, each at most once; neither is
+/// every claim. One argument per list, comma-separated, because repeated
+/// flags would keep only the last and narrow what the human stated.
+fn affects(args: &[&str]) -> Result<Affects, String> {
+    if args.is_empty() {
+        return Ok(Affects::All);
+    }
+    let (mut claims, mut domains) = (None, None);
+    for arg in args {
+        let (key, list) = arg
+            .split_once('=')
+            .ok_or_else(|| format!("intent: expected claims=… or domains=…, got {arg}"))?;
+        let items = || list.split(',').filter(|x| !x.is_empty());
+        let twice = match key {
+            "claims" => claims
+                .replace(items().map(msg).collect::<Result<Vec<_>, _>>()?)
+                .is_some(),
+            "domains" => domains
+                .replace(items().map(str::to_owned).collect::<Vec<_>>())
+                .is_some(),
+            other => return Err(format!("intent: unknown list {other}")),
+        };
+        if twice {
+            return Err(format!("intent: {key}= given twice"));
+        }
+    }
+    Ok(Affects::Some {
+        claims: claims.unwrap_or_default(),
+        domains: domains.unwrap_or_default(),
+    })
+}
+
+/// `intent FILE ...` read and hashed: the args with FILE replaced by its
+/// `SHA:LEN` blob ref, and the bytes to store before that ref is committed.
+/// Reads only; any other verb passes through with no bytes.
+fn brief_ref(verb: &str, args: &[&str]) -> Result<(Vec<String>, Option<Vec<u8>>), String> {
+    let mut out: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    if verb != "intent" {
+        return Ok((out, None));
+    }
+    let file = args.first().ok_or("intent: missing the brief FILE")?;
+    let bytes = std::fs::read(file).map_err(|e| format!("intent: {file}: {e}"))?;
+    out[0] = format!("{}:{}", Sha256::of(&bytes).hex(), bytes.len());
+    Ok((out, Some(bytes)))
 }
 
 /// A takeover id as `bbp human` and `bbp takeover-*` take it: `N` or
@@ -388,7 +450,10 @@ pub fn preview_fenced(
 ) -> Result<Preview, String> {
     let d = open_driver(dir, task)?;
     let rev_now = d.state.rev;
-    let cmd = match command(verb, args, rev, by, fence, op)? {
+    // A preview stores nothing: the brief is hashed, never written.
+    let (args, _) = brief_ref(verb, args)?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let cmd = match command(verb, &args, rev, by, fence, op)? {
         Ok(cmd) => cmd,
         Err(rej) => {
             return Ok(Preview {
@@ -432,7 +497,9 @@ pub fn perform_fenced(
     fence: Option<Rev>,
     op: Option<OpId>,
 ) -> Result<Response, String> {
-    let cmd = match command(verb, args, rev, by, fence, op)? {
+    let (args, brief) = brief_ref(verb, args)?;
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let cmd = match command(verb, &args, rev, by, fence, op)? {
         Ok(cmd) => cmd,
         Err(rej) => return Ok(Response::Rejected(rej)),
     };
@@ -447,9 +514,21 @@ pub fn perform_fenced(
         Err(rej) if fence.is_some() => return Ok(Response::Rejected(rej)),
         Err(rej) => return Err(rej.detail),
     };
-    open_driver(dir, task)?
-        .dispatch(&cmd, now())
-        .map_err(|e| format!("{e:?}"))
+    let mut d = open_driver(dir, task)?;
+    if let Some(bytes) = &brief {
+        // Judge the command before its brief is published: a refusal (bad
+        // affects, a stale fence, the wrong state) and a replay of an op
+        // already answered store nothing. Blobs before references: what
+        // passes stores the brief just before the command that names it.
+        // Only a write racing in between can still refuse it, and then the
+        // stored blob is unreferenced, never a reference without its blob.
+        let judged = handle(&d.state, &cmd, now());
+        if matches!(judged.response, Response::Rejected(_)) || judged.events.is_empty() {
+            return Ok(judged.response);
+        }
+        d.store.blob_put(bytes);
+    }
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
 
 #[cfg(test)]
