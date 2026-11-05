@@ -1182,6 +1182,67 @@ fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
         .blob_get(&sha)
         .unwrap();
     assert_eq!(stored, b"A brief only previewed.");
+
+    // Refused applies, each with fresh bytes of its own, and a retry of the
+    // applied op with other bytes: none stores its brief or moves the log.
+    let rev = state(&dir).rev;
+    let apply = |name: &str, extra: &[&str], fence: Rev, op: &str| {
+        let file = dir.join(name);
+        std::fs::write(&file, format!("brief {name}")).unwrap();
+        let path = file.to_str().unwrap().to_owned();
+        let args: Vec<&str> = std::iter::once(path.as_str())
+            .chain(extra.iter().copied())
+            .collect();
+        let r = human::perform_fenced(
+            &dir,
+            &task(),
+            "intent",
+            &args,
+            Some(fence),
+            "owner",
+            Some(fence),
+            Some(OpId(op.into())),
+        )
+        .unwrap();
+        (r, Sha256::of(format!("brief {name}").as_bytes()))
+    };
+    let absent = |sha: &Sha256| {
+        open_driver(&dir, &task())
+            .unwrap()
+            .store
+            .blob_get(sha)
+            .is_err()
+    };
+    let (r, sha) = apply("unknown.md", &["claims=msg:999"], rev, "intent-2");
+    assert!(
+        matches!(&r, Response::Rejected(x) if x.code == Code::BadAffects),
+        "{r:?}"
+    );
+    assert!(absent(&sha), "a refused apply stores nothing");
+    let (r, sha) = apply("stale.md", &[], Rev(rev.0 - 1), "intent-3");
+    assert!(matches!(r, Response::Rejected(_)), "{r:?}");
+    assert!(absent(&sha), "a stale fence stores nothing");
+    let (r, sha) = apply("retry.md", &[], rev, "intent-1");
+    assert!(
+        matches!(&r, Response::Rejected(x) if x.code == Code::OpConflict),
+        "{r:?}"
+    );
+    assert!(absent(&sha), "a retry with other bytes stores none of them");
+    assert_eq!(state(&dir).rev, rev, "nothing was written");
+    // The same retry with the same bytes replays the stored answer.
+    let again = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path],
+        Some(Rev(rev.0 - fresh.events.len() as u64)),
+        "owner",
+        Some(Rev(rev.0 - fresh.events.len() as u64)),
+        op(),
+    )
+    .unwrap();
+    assert_eq!(again, applied, "an idempotent retry replays");
+    assert_eq!(state(&dir).rev, rev, "and writes nothing");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
