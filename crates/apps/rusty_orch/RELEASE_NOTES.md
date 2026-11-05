@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Alien lens reads the candidate's diffs
+**2026-11-05**
+
+- The lens runner can now read a claim's current code candidate and its
+  diffs, and tell whether they touch Rust, for the #708 alien review
+  lens (D98). Nothing calls it yet; `lens run --alien` will.
+- Reads are charged to the lens, not the claim. A lens role that may not
+  read candidates makes the claim ineligible instead of failing the run.
+
 ## Lens cards show the task's accept line
 **2026-11-04**
 
