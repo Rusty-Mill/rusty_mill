@@ -24,7 +24,7 @@ This is the calibration that D42 requires before the erosion gate leaves report-
 
   A run takes about 15 seconds per PR on 4 cores. `prs.sh` lists the PRs merged when it runs, so this measures today's population, not the recorded one.
 
-  To reproduce the recorded run, build `rusty_erosion` at `f407699455`. Then replace `"$C/prs.sh"` above with the frozen manifest, which is the first three columns of the saved rows:
+  To reproduce the recorded run, build `rusty_erosion` at `f407699455`. Then run the pipeline above into a fresh, empty `OUT` (`measure.sh` skips any PR already in `OUT`), and replace `"$C/prs.sh"` with the frozen manifest, which is the first three columns of the saved rows:
 
   ```sh
   tail -n +2 docs/projects/let-em-loose/erosion-calibration-2026-11-05.tsv | cut -f1-3
