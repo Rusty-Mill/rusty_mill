@@ -926,6 +926,17 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_state_dir_becomes_absolute() {
+        let rel = PathBuf::from(format!("orch_hunts_rel_{}", std::process::id()));
+        assert!(rel.is_relative());
+        let got = absolute(&rel.join("alien"));
+        let _ = std::fs::remove_dir_all(&rel);
+        let got = got.expect("absolute");
+        assert!(got.is_absolute(), "{}", got.display());
+        assert!(got.ends_with(rel.join("alien")));
+    }
+
+    #[test]
     fn helpers_check_paths_commits_and_joins() {
         assert!(one_component("task-1"));
         for bad in ["", ".", "..", "a/b", "/abs", "a/.."] {
