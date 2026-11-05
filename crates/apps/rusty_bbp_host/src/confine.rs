@@ -538,10 +538,19 @@ fn git_storage(repo: &Path) -> Result<Vec<PathBuf>, String> {
                 ))
             }
         };
+        // As git reads it: entries split at LF only, so a CR stays part of
+        // the path; empty and `#` lines skipped. A quoted entry is
+        // C-unquoted by git, which this does not do, so it fails closed.
         for line in text
-            .lines()
+            .split('\n')
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
         {
+            if line.starts_with('"') {
+                return Err(format!(
+                    "harness sandbox: {}: a quoted entry, so a hiding sandbox cannot be checked against it",
+                    file.display()
+                ));
+            }
             alternates.push(canonical(&store.join(line))?);
         }
     }
@@ -770,6 +779,28 @@ mod tests {
         std::fs::create_dir(root.join("repo/.git/objects/info/alternates")).unwrap();
         let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
         assert!(e.contains("alternates"), "{e}");
+        // Git splits alternates at LF only: a CRLF entry names the store
+        // whose name ends in CR, which is what is held, not its CR-less twin.
+        let root = dir("crlf_alternate");
+        let (plain, cr) = (root.join("store"), root.join("store\r"));
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(&cr).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git/objects/info")).unwrap();
+        std::fs::write(
+            root.join("repo/.git/objects/info/alternates"),
+            format!("{}\r\n", plain.display()),
+        )
+        .unwrap();
+        let e = check(&root, hiding(&cr)).unwrap_err();
+        assert!(e.contains("reaches"), "{e}");
+        // A quoted entry, which git unquotes, fails closed.
+        std::fs::write(
+            root.join("repo/.git/objects/info/alternates"),
+            "\"/elsewhere\"\n",
+        )
+        .unwrap();
+        let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
+        assert!(e.contains("quoted"), "{e}");
         // Layouts it cannot follow fail closed.
         let root = dir("gitdir_file");
         std::fs::create_dir_all(root.join("repo")).unwrap();

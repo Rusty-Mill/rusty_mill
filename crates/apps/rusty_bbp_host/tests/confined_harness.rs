@@ -1041,3 +1041,39 @@ fn a_hiding_sandbox_is_refused_when_an_alternate_is_not_utf8() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Git splits `alternates` at LF only, so a CRLF entry borrows the store
+/// whose name ends in CR, not its CR-less twin. A harness granted that
+/// store is refused before anything runs or is copied.
+#[test]
+fn a_hiding_sandbox_is_refused_when_a_crlf_alternate_names_its_grant() {
+    let root = root("hidden_crlf_alternate")
+        .canonicalize()
+        .expect("canonical");
+    let repo = root.join("repo");
+    secret_repo(&repo);
+    let plain = root.join("external").join("store");
+    let cr = root.join("external").join("store\r");
+    std::fs::create_dir_all(&plain).expect("mkdir store");
+    std::fs::create_dir_all(&cr).expect("mkdir store CR");
+    std::fs::write(
+        repo.join(".git/objects/info/alternates"),
+        format!("{}\r\n", plain.display()),
+    )
+    .expect("alternates");
+    let mut sandbox = HarnessSandbox {
+        checkout: true,
+        hide: vec!["secrets".into()],
+        ..scripts(&root)
+    };
+    sandbox.read.push(cr.to_string_lossy().into_owned());
+    let cfg = setup(&root, "T1", HIDDEN, vec!["x".into()], Some(sandbox));
+    let error = moderator::run(&cfg).expect_err("the moderator refuses to launch");
+    assert!(error.contains("reaches"), "{error}");
+    assert!(planner_log(&cfg.dir, &cfg.task).is_empty(), "nothing ran");
+    assert!(
+        !root.join("work/turns").exists(),
+        "no filtered copy was made"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
