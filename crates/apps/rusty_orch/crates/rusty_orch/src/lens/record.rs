@@ -98,15 +98,11 @@ fn change(v: &Value) -> Result<Change, String> {
         }));
     }
     if let Some(s) = v.get("Status") {
-        return rule(&s["rule"], &s["woke"]).map(Change::Status);
-    }
-    if let Some(c) = v.get("Candidate") {
-        return Ok(Change::Candidate(art(&c["candidate"], "candidate")?));
+        return rule(s).map(Change::Status);
     }
     if let Some(r) = v.get("Report") {
         return Ok(Change::Report(Report {
             report: art(&r["report"], "report")?,
-            candidate: art(&r["candidate"], "report candidate")?,
             passed: names(&r["passed"], "passed")?,
             failed: names(&r["failed"], "failed")?,
         }));
@@ -136,9 +132,15 @@ fn names(v: &Value, what: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// The rule as the record reads it; a reopen with the items it woke
-/// (`woke`, left out when empty).
-fn rule(v: &Value, woke: &Value) -> Result<Rule, String> {
+/// The rule of status step `s` as the record reads it: a line with the
+/// holdout report that spoke for the code then (`holdout`, left out when
+/// none), a reopen with the items it woke (`woke`, left out when empty).
+fn rule(s: &Value) -> Result<Rule, String> {
+    let v = &s["rule"];
+    let holdout = match s.get("holdout") {
+        None => None,
+        Some(h) => Some(art(h, "holdout report")?),
+    };
     let num = |l: &Value, key: &str| l[key].as_i64().ok_or_else(|| format!("line has no {key}"));
     let count = |l: &Value, key: &str| {
         num(l, key).and_then(|n| u32::try_from(n).map_err(|e| format!("{key}: {e}")))
@@ -148,6 +150,7 @@ fn rule(v: &Value, woke: &Value) -> Result<Rule, String> {
             at: num(l, at)?,
             authors: count(l, authors)?,
             min_authors: count(l, "min_authors")?,
+            holdout,
         })
     };
     if let Some(l) = v.get("AcceptLine") {
@@ -160,7 +163,7 @@ fn rule(v: &Value, woke: &Value) -> Result<Rule, String> {
         return Ok(Rule::Human);
     }
     if v.get("Reopen").is_some() {
-        let woke = woke.as_seq().unwrap_or(&[]);
+        let woke = s["woke"].as_seq().unwrap_or(&[]);
         let woke = woke.iter().map(|m| id(m).map(MsgId));
         return woke
             .collect::<Option<_>>()
@@ -230,6 +233,7 @@ mod tests {
                 from: ClaimStatus::Accepted,
                 rule: BbpRule::Reopen(by),
                 woke: woke.iter().copied().map(MsgId).collect(),
+                holdout: None,
             },
             ClaimStatus::Open,
             0,
@@ -315,6 +319,7 @@ mod tests {
                             min_authors: 2,
                         },
                         woke: vec![],
+                        holdout: Some(ArtId(50)),
                     },
                     ClaimStatus::Dropped,
                     -8,
@@ -324,6 +329,7 @@ mod tests {
                         from: ClaimStatus::Dropped,
                         rule: BbpRule::Human { accept: true },
                         woke: vec![],
+                        holdout: None,
                     },
                     ClaimStatus::Accepted,
                     -8,
@@ -337,12 +343,11 @@ mod tests {
         let t = trail(&json).unwrap();
         let changes: Vec<&Change> = t.steps.iter().map(|s| &s.change).collect();
         assert_eq!(changes[0], &Change::Other);
-        assert_eq!(changes[1], &Change::Candidate(ArtId(9)));
+        assert_eq!(changes[1], &Change::Other, "candidate steps aren't read");
         assert_eq!(
             changes[2],
             &Change::Report(Report {
                 report: ArtId(50),
-                candidate: ArtId(9),
                 passed: names(&["golden:cases"]),
                 failed: names(&["holdout:api"]),
             })
@@ -368,7 +373,8 @@ mod tests {
             &Change::Status(Rule::Line {
                 at: -8,
                 authors: 2,
-                min_authors: 2
+                min_authors: 2,
+                holdout: Some(ArtId(50)),
             })
         );
         assert_eq!(changes[7], &Change::Status(Rule::Human));

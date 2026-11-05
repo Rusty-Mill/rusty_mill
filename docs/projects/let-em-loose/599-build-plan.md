@@ -37,11 +37,14 @@ was not posted by `at`. See `crates/libs/protocol/rusty_bbp/src/history.rs`.
   after the event. `confidence` is for JSON readers; no rule reads it.
 - `Change`: `Posted`, `Evidence { msg, author, kind, direction, delta,
   scoring, refs }` (`scoring` as appended; a later reopen can wake it),
-  `Status { from, rule, woke }` (`woke`: the items a reopen made scoring in
-  its new epoch), `Failing { profiles, candidate }` (the current candidate
+  `Status { from, rule, woke, holdout }` (`woke`: the items a reopen made
+  scoring in its new epoch; `holdout`: the `Report` still speaking for the
+  current code when the status changed, under the suite and tested tree of
+  that moment), `Failing { profiles, candidate }` (the current candidate
   the set is on), `Candidate { candidate }` (a build candidate became
   current), `Report { report, candidate, passed, failed }` (a final holdout
-  report under the task's holdout suite on the current code's tested tree).
+  report under the task's holdout suite on the current code's tested tree,
+  not a runner error).
 - `Rule`: `AcceptLine { accept_at, support_authors, min_authors }`,
   `DropLine { drop_at, counter_authors, min_authors }`, `Human { accept }`,
   `Choose { question }`, `Escalation`, `Reopen`, `Void { by }`,
@@ -145,10 +148,9 @@ As built (D93, D92):
 - **Settlement.** The latest status step that changed the status; an
   escalation that leaves a claim accepted settles nothing.
 - **History fields (D112).** The record reads each line's `min_authors`,
-  the items each reopen woke, and golden truth from the `Report` steps: the
-  latest report with a golden profile on the candidate current at
-  settlement (any golden profile failed: drop was right; passed: accept was
-  right). A job whose items cite that report gets no truth from it. This
+  the items each reopen woke, and golden truth from the `Report` the line
+  settlement names in `holdout` (any golden profile failed: drop was right;
+  all passed: accept was right). A job whose items cite that report gets no truth from it. This
   ends D92's four interim limits; a history without `min_authors` (an older
   `bbp`) is refused, not read conservatively.
 - The lens sees `record: P points over N blind reviews (S scored, V

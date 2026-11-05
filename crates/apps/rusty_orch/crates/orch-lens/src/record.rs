@@ -76,17 +76,14 @@ pub enum Change {
     Status(Rule),
     /// A final holdout report on the current code.
     Report(Report),
-    /// A candidate became the claim's current one.
-    Candidate(ArtId),
     Other,
 }
 
-/// A final holdout report that speaks for `candidate`'s code, with its
-/// profiles that passed and failed.
+/// A final holdout report on the claim's current code, with its profiles
+/// that passed and failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub report: ArtId,
-    pub candidate: ArtId,
     pub passed: Vec<String>,
     pub failed: Vec<String>,
 }
@@ -122,11 +119,14 @@ pub struct Item {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rule {
     /// The accept or drop line, with the line it crossed, the distinct
-    /// authors behind it and the minimum it needed.
+    /// authors behind it and the minimum it needed. `holdout` is the
+    /// [`Report`] that still spoke for the current code when it settled:
+    /// BBP checks its suite and tested tree then.
     Line {
         at: i64,
         authors: u32,
         min_authors: u32,
+        holdout: Option<ArtId>,
     },
     /// A human `decide` or `choose`.
     Human,
@@ -322,6 +322,7 @@ fn pivotal(trail: &Trail, settled: usize, own: &Own) -> bool {
         at,
         authors,
         min_authors,
+        ..
     }) = step.change
     else {
         return false;
@@ -355,17 +356,19 @@ fn pivotal(trail: &Trail, settled: usize, own: &Own) -> bool {
     !(crossed && enough && grounded)
 }
 
-/// Ground truth for the claim at settlement, and the report it comes
-/// from: the latest holdout report with a golden profile on the candidate
-/// current at settlement (D92). None without a candidate or such a report.
+/// Ground truth for a line settlement, and the report it comes from: the
+/// golden profiles of the holdout report the settlement names, the one BBP
+/// found still speaking for the current code then (D92, D112). None
+/// without one, or when it has no golden profile.
 fn golden(trail: &Trail, settled: usize) -> Option<(Direction, ArtId)> {
-    let before = &trail.steps[..settled];
-    let current = before.iter().rev().find_map(|s| match s.change {
-        Change::Candidate(a) => Some(a),
-        _ => None,
-    })?;
-    before.iter().rev().find_map(|s| match &s.change {
-        Change::Report(r) if r.candidate == current => r.truth().map(|t| (t, r.report)),
+    let Change::Status(Rule::Line {
+        holdout: Some(id), ..
+    }) = &trail.steps[settled].change
+    else {
+        return None;
+    };
+    trail.steps[..settled].iter().find_map(|s| match &s.change {
+        Change::Report(r) if r.report == *id => r.truth().map(|t| (t, r.report)),
         _ => None,
     })
 }
@@ -522,16 +525,15 @@ mod tests {
         }
     }
 
-    /// Report 50 on `candidate`, with `profile` passed or failed.
-    fn report(profile: &str, candidate: u64, passed: bool) -> Change {
+    /// Report `id`, with `profile` passed or failed.
+    fn report(id: u64, profile: &str, passed: bool) -> Change {
         let (passed, failed) = if passed {
             (vec![profile.into()], vec![])
         } else {
             (vec![], vec![profile.into()])
         };
         Change::Report(Report {
-            report: ArtId(50),
-            candidate: ArtId(candidate),
+            report: ArtId(id),
             passed,
             failed,
         })
@@ -553,6 +555,17 @@ mod tests {
             at,
             authors,
             min_authors: 2,
+            holdout: None,
+        })
+    }
+
+    /// A line that settled while report `holdout` spoke for the code.
+    fn line_on(at: i64, authors: u32, holdout: u64) -> Change {
+        Change::Status(Rule::Line {
+            at,
+            authors,
+            min_authors: 2,
+            holdout: Some(ArtId(holdout)),
         })
     }
 
@@ -631,11 +644,10 @@ mod tests {
         // The lens's counter drops the claim, and a golden set failed on it.
         let t = trail(
             vec![
-                Change::Candidate(ArtId(9)),
-                report("golden:cases", 9, false),
+                report(50, "golden:cases", false),
                 ev(2, "a", Counter, -4),
                 ev(3, LENS, Counter, -4),
-                line(-8, 2),
+                line_on(-8, 2, 50),
             ],
             ClaimStatus::Dropped,
         );
@@ -654,7 +666,7 @@ mod tests {
         // Not for a job citing that report; citing another is fine.
         let cite = |id: u64| {
             let mut t = t.clone();
-            if let Change::Item(i) = &mut t.steps[3].change {
+            if let Change::Item(i) = &mut t.steps[2].change {
                 i.cites = vec![ArtId(id)];
             }
             score(&review(&[3]), &t)
@@ -663,81 +675,82 @@ mod tests {
         assert_eq!(cite(51), s);
         // A holdout failure is not ground truth.
         let mut holdout = t.clone();
-        holdout.steps[1].change = report("holdout:api", 9, false);
+        holdout.steps[0].change = report(50, "holdout:api", false);
         assert_eq!(
             score(&review(&[3]), &holdout),
             Scored::Unscored { pivotal: true }
         );
     }
 
+    /// Truth comes only from the report the settlement names: BBP leaves
+    /// out one from a retired suite, another tree or another candidate.
     #[test]
-    fn a_golden_failure_is_truth_only_for_the_candidate_it_tested() {
-        let with = |changes: Vec<Change>| {
-            let mut all = changes;
-            all.extend([
+    fn a_golden_report_is_truth_only_if_the_settlement_names_it() {
+        let with = |settle: Change| {
+            let all = vec![
+                report(50, "golden:cases", false),
                 ev(2, "a", Counter, -4),
                 ev(3, LENS, Counter, -4),
-                line(-8, 2),
-            ]);
+                settle,
+            ];
             score(&review(&[3]), &trail(all, ClaimStatus::Dropped))
         };
         let unscored = Scored::Unscored { pivotal: true };
-        // Candidate 9 failed, then 10 became current: 9's failure isn't
-        // truth about 10.
-        assert_eq!(
-            with(vec![
-                Change::Candidate(ArtId(9)),
-                report("golden:cases", 9, false),
-                Change::Candidate(ArtId(10)),
-            ]),
-            unscored
-        );
-        // No candidate step at all.
-        assert_eq!(with(vec![report("golden:cases", 9, false)]), unscored);
+        assert_eq!(with(line(-8, 2)), unscored);
+        assert_eq!(with(line_on(-8, 2, 51)), unscored);
     }
 
-    /// A passed golden set says accept was right, and the latest golden
-    /// report on the current candidate is the one that counts.
+    /// A passed golden set says accept was right; the report the
+    /// settlement names is the one that counts.
     #[test]
     fn a_passed_golden_set_is_truth_that_accept_was_right() {
-        let with = |reports: Vec<Change>| {
-            let mut all = vec![Change::Candidate(ArtId(9))];
-            all.extend(reports);
-            all.extend([ev(2, "a", Support, 4), ev(3, LENS, Support, 4), line(8, 2)]);
+        let with = |reports: Vec<Change>, named: u64| {
+            let mut all = reports;
+            all.extend([
+                ev(2, "a", Support, 4),
+                ev(3, LENS, Support, 4),
+                line_on(8, 2, named),
+            ]);
             score(&review(&[3]), &trail(all, ClaimStatus::Accepted))
         };
         let right = Scored::Points {
             points: 1,
             pivotal: true,
         };
-        assert_eq!(with(vec![report("golden:cases", 9, true)]), right);
-        // Failed, then passed on a later run: the later pass counts.
-        assert_eq!(
-            with(vec![
-                report("golden:cases", 9, false),
-                report("golden:cases", 9, true)
-            ]),
-            right
-        );
+        assert_eq!(with(vec![report(50, "golden:cases", true)], 50), right);
+        // Failed, then passed on a later run: the later pass is named.
+        let fail_then_pass = || {
+            vec![
+                report(50, "golden:cases", false),
+                report(51, "golden:cases", true),
+            ]
+        };
+        assert_eq!(with(fail_then_pass(), 51), right);
         // Passed, then failed: accept was wrong. Upset: the score before
         // the job was 4, against the drop: w = 3.
         assert_eq!(
-            with(vec![
-                report("golden:cases", 9, true),
-                report("golden:cases", 9, false)
-            ]),
+            with(
+                vec![
+                    report(50, "golden:cases", true),
+                    report(51, "golden:cases", false)
+                ],
+                51
+            ),
             Scored::Points {
                 points: -3,
                 pivotal: true
             }
         );
-        // A later report with no golden profile changes nothing.
+        // The named report has no golden profile: no truth.
         assert_eq!(
-            with(vec![
-                report("golden:cases", 9, true),
-                report("holdout:api", 9, false)
-            ]),
-            right
+            with(
+                vec![
+                    report(50, "golden:cases", true),
+                    report(51, "holdout:api", false)
+                ],
+                51
+            ),
+            Scored::Unscored { pivotal: true }
         );
     }
 
@@ -839,6 +852,7 @@ mod tests {
                     at: 8,
                     authors: 3,
                     min_authors: min,
+                    holdout: None,
                 }),
             ]
         };
@@ -927,12 +941,10 @@ mod tests {
         human.steps[4].change = Change::Status(Rule::Human);
         assert_eq!(score(&unsure, &human), Scored::Unscored { pivotal: false });
         let mut golden = t.clone();
+        golden.steps[4].change = line_on(8, 4, 50);
         golden
             .steps
-            .insert(0, Change::Candidate(ArtId(9)).into_step());
-        golden
-            .steps
-            .insert(1, report("golden:cases", 9, false).into_step());
+            .insert(0, report(50, "golden:cases", true).into_step());
         assert_eq!(score(&unsure, &golden), Scored::Unscored { pivotal: true });
     }
 

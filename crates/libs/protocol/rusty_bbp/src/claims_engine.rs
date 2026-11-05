@@ -364,6 +364,31 @@ pub(crate) fn holdout_passed(st: &TaskState, c: &ClaimRecord) -> bool {
     latest.is_some_and(|(_, rep)| rep.status == RunStatus::Passed && rep.tree == Some(tested))
 }
 
+/// The latest final holdout report that speaks for `c`'s current code now,
+/// as ground truth reads it (#599, D112): under the task's current holdout
+/// digest, on the tree the current candidate's latest report tested, and
+/// not a runner error. `None` without a holdout suite, a current candidate,
+/// a tested tree or such a report.
+pub(crate) fn holdout_truth(st: &TaskState, c: &ClaimRecord) -> Option<ArtId> {
+    let digest = st.claims.holdout_digest?;
+    let cur = c.current?;
+    let tested = latest_report(st, cur).and_then(|r| r.tree)?;
+    st.claims
+        .runs
+        .values()
+        .filter(|r| r.candidate != cur && builds_current(st, c, r.candidate))
+        .filter_map(|r| r.report)
+        .filter(|id| *id > cur)
+        .filter(|id| {
+            report_of(st, *id).is_some_and(|rep| {
+                rep.profile_digest == digest
+                    && rep.status != RunStatus::Error
+                    && rep.tree == Some(tested)
+            })
+        })
+        .max()
+}
+
 /// A run may start on an open claim or re-check a settled one.
 fn runnable(s: ClaimStatus) -> bool {
     matches!(

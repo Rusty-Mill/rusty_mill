@@ -4111,6 +4111,41 @@ mod replay {
         );
     }
 
+    /// The holdout report a status step names: the one still speaking for
+    /// the current code when the status changed, not one from a retired
+    /// suite.
+    fn holdouts(h: &History) -> Vec<Option<ArtId>> {
+        h.steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Status { holdout, .. } => Some(*holdout),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_settlement_names_the_holdout_report_still_valid_then() {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let kx = cx.candidate("a", x);
+        let px = stored(cx.report_profiles(kx, &[("unit", 0)], vec![]));
+        let hx = stored(cx.holdout_run(kx, &[("golden:cases", 0)]));
+        ok(cx.executed("a", x, Support, px));
+        ok(cx.executed("b", x, Support, px));
+        assert_eq!(holdouts(&history(&cx, x)), vec![Some(hx)]);
+        // A report under a suite since replaced speaks for nothing.
+        let y = cx.low();
+        let ky = cx.candidate("a", y);
+        stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(ky, &[("golden:cases", 1)]));
+        ok(cx.host(HostAction::HoldoutExtended {
+            digest: Sha256::of(b"holdout suite v2"),
+        }));
+        drop_claim(&mut cx, y);
+        assert_eq!(holdouts(&history(&cx, y)), vec![None]);
+    }
+
     #[test]
     fn at_stops_the_replay_and_an_unposted_claim_has_none() {
         let mut cx = Cx::new();

@@ -27,10 +27,10 @@ use crate::claims::{
     confidence_pct, ClaimBody, ClaimEscalation, ClaimOutcome, ClaimRecord, ClaimStatus, Direction,
     EvidenceKind, ReopenCause,
 };
-use crate::claims_engine::{builds_current, manifest, on_tested_tree, report_of};
+use crate::claims_engine::{builds_current, holdout_truth, manifest, on_tested_tree, report_of};
 use crate::event::Event;
 use crate::ids::{ArtId, MsgId, PrincipalId, Rev, TaskId};
-use crate::record::{ArtifactPayload, Body, Ref, Suite};
+use crate::record::{ArtifactPayload, Body, Ref, RunStatus, Suite};
 use crate::state::TaskState;
 use rusty_serde::Serialize;
 use std::collections::BTreeMap;
@@ -83,6 +83,12 @@ pub enum Change {
         /// Empty for any other change.
         #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
         woke: Vec<MsgId>,
+        /// The [`Change::Report`] that spoke for the current code when the
+        /// status changed: the latest that is not a runner error, under the
+        /// task's holdout digest then, on the tree the current candidate was
+        /// tested on then. `None` without one.
+        #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+        holdout: Option<ArtId>,
     },
     /// The profiles failing on the current candidate; non-empty blocks accept.
     Failing {
@@ -97,7 +103,9 @@ pub enum Change {
     },
     /// A final holdout report that speaks for the current code: a holdout
     /// candidate of `candidate`'s code, run under the task's holdout suite
-    /// on the tree `candidate` was tested on. Its profiles, passed and failed.
+    /// on the tree `candidate` was tested on, and not a runner error. Its
+    /// profiles, passed and failed. A later suite or tested tree can stop it
+    /// speaking for the code; a status step's `holdout` says which still did.
     Report {
         report: ArtId,
         candidate: ArtId,
@@ -349,6 +357,7 @@ fn change(
                 from: before.status,
                 rule: rule?,
                 woke: woke(before, after),
+                holdout: holdout_truth(st, after),
             })
         }
     }
@@ -375,6 +384,7 @@ fn holdout_report(st: &TaskState, c: &ClaimRecord, k: ArtId, report: ArtId) -> O
     let current = c.current?;
     let rep = report_of(st, report)?;
     let speaks = manifest(st, k).is_some_and(|m| m.suite == Suite::Holdout)
+        && rep.status != RunStatus::Error
         && Some(rep.profile_digest) == st.claims.holdout_digest
         && builds_current(st, c, k)
         && on_tested_tree(st, c.id, k, rep);

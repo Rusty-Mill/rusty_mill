@@ -1055,6 +1055,7 @@ mod tests {
                 at: -8,
                 authors: 2,
                 min_authors: 2,
+                holdout: None,
             }),
         ];
         let mut so_far = 0;
