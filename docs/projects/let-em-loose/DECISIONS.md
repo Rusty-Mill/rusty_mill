@@ -92,6 +92,8 @@ Precise contracts used by this guide:
 | D80 | orch and the gateway stay separate | [stated] 2026-11-04 (#726) |
 | D81 | Agents get mux-hosted ptys (supersedes D78; reopens D20 and D66) | [stated] 2026-11-04 (mux, #600, #726) |
 | D82 | The mux-hosted agent ptys design is approved (re-closes D20 and D66) | [stated] 2026-11-05 (mux, #600, #726, #732) |
+| D83 | Takeover events go under claims log schema 5, with no schema 6 bump | [default] 2026-11-05 (mux, #732) |
+| D84 | `human_touched` is derived in the fold, not stored | [default] 2026-11-05 (mux, #732) |
 
 ## D1. Lenses, not stages
 
@@ -695,8 +697,27 @@ Design first (D25): the design doc goes in `docs/projects/let-em-loose/` for Nan
 7. #600 starts `lel-jail` on rusty_sandbox, seccomp and cgroup; the #726 layers (overlay, gateway-only egress, the witness) come later behind the same `jail.json`.
 8. Lens sessions in blocks (the D8 and D54 conflicts) are decided when #726 reaches lens sessions. Nothing changes now; lenses stay orch-side and one-shot.
 Each side may now start its PR under card #732 (§11). Review and merge gates still apply.
+**Build note (D83, D84).** Item 2's "log schema 6" is implemented as new claims-mode events under schema 5, with no bump (D83), and `human_touched` is derived in the fold (D84). The events, the verb, payloads, visibility and the byte-identical guarantee are as approved.
 **Why.** Design first (D25) on D81. Both experts checked the design against the code. orch stays the only executor and the mux only hosts ptys, so D20's guarantees and D13 hold, and evidence stays the witness (D79). This closes OPEN_QUESTIONS Q13 (design §6: builder session files under `<dir>/builders/<claim>/<n>/`).
 **Rejected.** Approving the design but holding the takeover schema for a separate review (option B). Changes first (option C). Write-ahead recording.
 **Tag.** [stated] · remind-me: mem_fe60aaf6dae240b8b820ef918c6dca4f
 **Key.** lel:mux:hosted-agent-ptys-design-approved
 **Source.** Nano tapped option A "Approve as recommended" ("§10 items 1-8 take the recommended answers, the takeover schema change is approved, and each side can start its PR.") on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra ("Approve the mux-hosted agent ptys design with all eight recommendations?"), 2026-11-05T00:00:23Z, thread cmsg_01WgyiM31RsSnZTgNuPX2VE4KPB5ARgEwMpYqdBDPfmTDb.
+
+## D83. Takeover events go under claims log schema 5, with no schema 6 bump
+
+**Decision.** `takeover_started`, `takeover_input` and `takeover_ended` (D82 item 2) are added as claims-mode events under `LOG_SCHEMA_CLAIMS` = 5 and written only when a takeover happens. There is no log schema 6. The event names, the human verb `takeover`, payloads and visibility are as approved; only D82's "log schema 6" wording changes.
+**Why.** The design's aim was "earlier logs stay byte-identical; nothing is written when there's no takeover", and this meets it with a smaller change. #597 set the precedent under the accepted contract: `HoldoutExtended`, `HoldoutUpdated` and `holdout_digest` were added under schema 5 (addendum § Schema and API changes item 12). `Event` is an externally tagged serde enum with no catch-all, so a build that predates takeover refuses a log containing one rather than misreading it; the variant is the fence. A bump would make every new claims task unreadable to older builds even with no takeover, and `state.rs` takes claims mode from `schema == LOG_SCHEMA_CLAIMS`. Nano can't tell the two apart without reading the code.
+**Rejected.** Log schema 6 for every new claims task. An open-time opt-in flag.
+**Tag.** [default] · remind-me: mem_6385fa126f2349c09e26b166d4e2c5e7
+**Key.** lel:mux:takeover-events-under-schema-5
+**Source.** Caller question from the #732 LEL build, 2026-11-05; `rusty_bbp/src/event.rs` (`LOG_SCHEMA_CLAIMS`, `HoldoutExtended`, `HoldoutUpdated`), `src/state.rs`; bbp-claims-addendum.md § Schema and API changes items 1 and 12; D82.
+
+## D84. `human_touched` is derived in the fold, not stored
+
+**Decision.** `human_touched` (D82 item 2) is computed by the claims fold and shown on `claim_card` and in the inbox; it isn't a stored field on the candidate manifest. A candidate submitted for claim c is `human_touched` when a `takeover_started` on c in the same epoch comes before it, whether or not that takeover is still active when the candidate is submitted. Scoring is unchanged, and a takeover doesn't count toward `min authors`.
+**Why.** Nano sees the same flag either way, and a derived flag writes nothing to the log, so it can change without a schema change. Design §5 marks a candidate "stored from a session that had a takeover", so a takeover that ended before submission still counts; "active at submission" would miss it. Over-marking is the safe direction.
+**Rejected.** A stored `human_touched` manifest field. Marking only candidates submitted while a takeover is active.
+**Tag.** [default] · remind-me: mem_2d7809b2d14348079cb2974291b865d6
+**Key.** lel:mux:human-touched-derived-in-fold
+**Source.** Caller question from the #732 LEL build, 2026-11-05; mux-hosted-agents-design.md §5 "Effect on claims (v0)"; D82.

@@ -101,7 +101,7 @@ So the mux never decides to start or stop an agent. It forks one only when orch 
 - **Effect on claims (v0):** a candidate stored from a session that had a takeover carries `human_touched: true` on its manifest and on `claim_card`. The inbox shows it. Scoring is unchanged. The takeover doesn't count Nano as a second author toward `min authors`.
 - **Visibility:** the human channel and the host only, never the Agent API (like credentials), so agents can't read Nano's typing back.
 - **Budget:** human writes are uncharged.
-- **Schema:** this needs log schema 6 for claims tasks with these events; earlier logs stay byte-identical. It also needs one new human verb, `takeover`. Nothing is written when there's no takeover.
+- **Schema:** the events are added under claims schema 5, as #597's holdout events were (D83): there's no schema bump. An older build refuses a log that contains one, and earlier logs stay byte-identical. It also needs one new human verb, `takeover`. Nothing is written when there's no takeover. `human_touched` is derived in the fold: a candidate for claim c is touched when a `takeover_started` on c in the same epoch precedes it (D84).
 - **Caution:** typed text is recorded verbatim, so never type a secret into an agent pane.
 
 ## 6. What's displayed and what's recorded
@@ -158,7 +158,7 @@ fd passing can't cross the C26 relay or SSH. orch talks to the account server's 
 
 Recommendations are in **bold**.
 1. **Approve this design as a whole.** It re-closes D20 as "orch is the only executor; the mux hosts ptys", and D66 with launch through `Launch`.
-2. Approve the BBP takeover events in §5 (an ask-first schema change, log schema 6): **yes, as shaped**.
+2. Approve the BBP takeover events in §5 (an ask-first schema change; built under schema 5, D83): **yes, as shaped**.
 3. Recording mode: **as-delivered with a hash chain**, or write-ahead.
 4. Start the mux rows 1, 2, 3, 5 and 8 now (rusty-term-expert option a): **yes; defer 4 and 6, and use a viewer program for 6**.
 5. Should a granted lease survive a client reconnect (rusty_term D44's 30 s grace) until its `until`, and be refused on re-ask once revoked (D46)? **Yes**, which keeps D44 and D46.
