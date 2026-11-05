@@ -11,7 +11,7 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   review job and shows each lens `record: P points over N blind reviews
   (S scored, V pivotal)`. A review that decided the outcome itself is
   scored only against ground truth (a failing golden set), and is
-  otherwise counted as pivotal and left unscored (D84, D89).
+  otherwise counted as pivotal and left unscored (D84, D92).
 
 ## Lens cards show the task's accept line
 **2026-11-04**

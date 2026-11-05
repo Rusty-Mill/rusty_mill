@@ -1,4 +1,4 @@
-//! The lens track record's shell (#599 §2, D89): each claim's history read
+//! The lens track record's shell (#599 §2, D92): each claim's history read
 //! through `bbp why --claim` (the host CLI; orch never reads BBP's store in
 //! process, D54), trimmed to the [`Trail`] the pure rule in
 //! [`orch_lens::record`] scores.

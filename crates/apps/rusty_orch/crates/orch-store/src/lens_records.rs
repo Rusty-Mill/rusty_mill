@@ -1,5 +1,5 @@
 //! The on-disk shape of one blind review job for a lens's track record
-//! (#599, D58's `lens_record`, D89): what the job posted. Points are not
+//! (#599, D58's `lens_record`, D92): what the job posted. Points are not
 //! stored; they are computed from these rows whenever the record is read.
 //!
 //! Positional bincode under the schema tag below: the v1 layout is the

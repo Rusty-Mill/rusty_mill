@@ -1,7 +1,7 @@
 //! A lens's track record on one task: informational only (#599 Q2). It is
 //! shown to the lens as one line and never weights a score.
 //!
-//! The rule (599-build-plan.md §2, D84, D89), per blind review job:
+//! The rule (599-build-plan.md §2, D84, D92), per blind review job:
 //!
 //! - The job's direction is the net sign of its items; a job that posted
 //!   nothing or posted both ways scores 0 and is not counted as scored.
@@ -180,7 +180,7 @@ impl Own {
 
     /// Whether the job posted executed evidence. The history carries no
     /// refs, so this stands in for "the job cites the golden report": a
-    /// lens can't be judged by its own report (D89, until Q22).
+    /// lens can't be judged by its own report (D92, until Q23).
     fn executed(&self, trail: &Trail) -> bool {
         self.steps
             .iter()
