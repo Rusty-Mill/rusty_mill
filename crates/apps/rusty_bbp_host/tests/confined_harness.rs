@@ -1006,3 +1006,38 @@ fn a_hiding_sandbox_is_refused_when_it_reaches_storage_linked_twice() {
     }
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// An alternate whose path is not UTF-8, beneath a UTF-8 parent the harness
+/// is granted: git reads `alternates` as bytes, so the borrowed store is
+/// real, and the check cannot read it as text. It refuses before anything
+/// runs or is copied rather than dropping the store.
+#[test]
+fn a_hiding_sandbox_is_refused_when_an_alternate_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt;
+    let root = root("hidden_byte_alternate")
+        .canonicalize()
+        .expect("canonical");
+    let repo = root.join("repo");
+    secret_repo(&repo);
+    let parent = root.join("external-stores");
+    let store = parent.join(std::ffi::OsStr::from_bytes(b"store-\xff"));
+    std::fs::create_dir_all(&store).expect("mkdir store");
+    let mut line = store.as_os_str().as_bytes().to_vec();
+    line.push(b'\n');
+    std::fs::write(repo.join(".git/objects/info/alternates"), line).expect("alternates");
+    let mut sandbox = HarnessSandbox {
+        checkout: true,
+        hide: vec!["secrets".into()],
+        ..scripts(&root)
+    };
+    sandbox.read.push(parent.to_string_lossy().into_owned());
+    let cfg = setup(&root, "T1", HIDDEN, vec!["x".into()], Some(sandbox));
+    let error = moderator::run(&cfg).expect_err("the moderator refuses to launch");
+    assert!(error.contains("alternates"), "{error}");
+    assert!(planner_log(&cfg.dir, &cfg.task).is_empty(), "nothing ran");
+    assert!(
+        !root.join("work/turns").exists(),
+        "no filtered copy was made"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
