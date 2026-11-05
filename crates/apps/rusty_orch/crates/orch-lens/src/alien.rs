@@ -23,7 +23,7 @@ pub const MAX_FIELD: usize = 300;
 /// Longest reproducer test, in bytes.
 pub const MAX_PROBE: usize = 16 * 1024;
 /// Longest candidate diff text a hunt is run on, in bytes (about 32k
-/// tokens). A longer one is skipped, never truncated (D87).
+/// tokens). A longer one is skipped, never truncated (D98).
 pub const MAX_DIFF: usize = 128 * 1024;
 
 /// One defect mechanism a suspect can name.
@@ -173,7 +173,7 @@ fn residue(task: &str, claim: MsgId, n: u64) -> u64 {
 
 /// Does this diff text touch a `.rs` file? Any `--- a/`, `+++ b/`,
 /// `rename from`, `rename to` or `diff --git` path ending in `.rs` counts;
-/// `/dev/null` does not (D87).
+/// `/dev/null` does not (D98).
 pub fn touches_rs(diff: &str) -> bool {
     diff.lines()
         .flat_map(header_paths)

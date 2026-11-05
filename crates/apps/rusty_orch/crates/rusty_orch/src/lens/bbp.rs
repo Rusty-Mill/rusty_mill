@@ -373,7 +373,7 @@ impl<R: Rpc> Session<R> {
     /// The text of each of code candidate `id`'s diffs, in the candidate's
     /// order, so each can be applied on its own.
     /// Each artifact's first read is charged once to the lens (R11), not
-    /// to the claim's budget (D87). A role that may not read the candidate
+    /// to the claim's budget (D98). A role that may not read the candidate
     /// or a diff gives [`Diffs::Forbidden`]; any other failure is an error.
     pub fn candidate_diffs(&mut self, id: ArtId) -> Result<Diffs, String> {
         let (rec, _) = match self.artifact(id)? {
@@ -498,7 +498,7 @@ pub enum Diffs {
     /// Each diff's text, in the candidate's order.
     Text(Vec<String>),
     /// The lens's role may not read the candidate or one of its diffs
-    /// (D87): the claim is not eligible. Nothing was charged.
+    /// (D98): the claim is not eligible. Nothing was charged.
     Forbidden(String),
 }
 
