@@ -263,7 +263,7 @@ pub fn takeover_input(
     task: &TaskId,
     takeover: u64,
     seq: u64,
-    text: String,
+    bytes: Vec<u8>,
     sha256: Sha256,
 ) -> Result<Response, String> {
     host(
@@ -272,7 +272,7 @@ pub fn takeover_input(
         HostAction::TakeoverInput {
             takeover,
             seq,
-            text,
+            bytes: rusty_bbp::Base64Bytes(bytes),
             sha256,
         },
     )

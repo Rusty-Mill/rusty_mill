@@ -1557,7 +1557,7 @@ fn why_replays_one_claim_and_names_the_rule() {
 
 // ---------------------------------------------------------------- takeover (D82)
 
-fn bbp(dir: &Path, args: &[&str], stdin: &str) -> String {
+fn bbp(dir: &Path, args: &[&str], stdin: impl AsRef<[u8]>) -> String {
     use std::io::Write;
     let mut child = Proc::new(env!("CARGO_BIN_EXE_bbp"))
         .args(args)
@@ -1573,7 +1573,7 @@ fn bbp(dir: &Path, args: &[&str], stdin: &str) -> String {
         .stdin
         .take()
         .expect("stdin")
-        .write_all(stdin.as_bytes())
+        .write_all(stdin.as_ref())
         .expect("write");
     let out = child.wait_with_output().expect("wait");
     format!(
@@ -1607,7 +1607,7 @@ fn a_takeover_is_recorded_from_start_to_end_through_the_cli() {
     )
     .expect("takeover");
     assert_eq!(r, Response::TakenOver(1));
-    let sha = rusty_bbp::claims::input_chain(None, "ls\n").hex();
+    let sha = rusty_bbp::claims::input_chain(None, b"ls\n").hex();
     let out = bbp(
         &dir,
         &[
@@ -1663,4 +1663,59 @@ fn a_takeover_is_recorded_from_start_to_end_through_the_cli() {
         .expect("takeover");
     assert_eq!(t.batches, 1);
     assert_eq!(t.ended, Some(TakeoverEnd::MuxLost));
+}
+
+/// `bbp takeover-input` records stdin byte for byte: invalid UTF-8, a
+/// multibyte character split across batches, and exactly 4096 bytes are
+/// kept; 4097 is refused before anything is written.
+#[test]
+fn takeover_input_keeps_raw_bytes_and_refuses_an_oversized_batch() {
+    use rusty_bbp::claims::input_chain;
+    let dir = tempdir("takeover-bytes");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "one", true);
+    let msg = format!("msg:{c}");
+    human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[&msg, "s1", "nano", "10", "steer"],
+        None,
+    )
+    .expect("takeover");
+    let full = vec![b'a'; 4096];
+    let batches: [&[u8]; 4] = [b"\xff\xfe", b"caf\xc3", b"\xa9\r", &full];
+    let mut prev = None;
+    for (seq, batch) in (1u64..).zip(batches) {
+        let sha = input_chain(prev, batch);
+        let (seq, hex) = (seq.to_string(), sha.hex());
+        let flags = [
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            &seq,
+            "--sha256",
+            &hex,
+        ];
+        let out = bbp(&dir, &flags, batch);
+        assert!(out.contains("Ok"), "batch {seq}: {out}");
+        prev = Some(sha);
+    }
+    let big = vec![b'b'; 4097];
+    let hex = input_chain(prev, &big).hex();
+    let flags = [
+        "takeover-input",
+        "--takeover",
+        "1",
+        "--seq",
+        "5",
+        "--sha256",
+        &hex,
+    ];
+    let out = bbp(&dir, &flags, &big);
+    assert!(out.contains("over 4096 bytes"), "{out}");
+    let st = state(&dir);
+    let t = st.claims.takeovers.get(&1).expect("takeover");
+    assert_eq!((t.batches, t.last), (4, prev));
 }

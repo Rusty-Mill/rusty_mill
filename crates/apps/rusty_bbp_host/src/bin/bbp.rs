@@ -9,7 +9,7 @@
 //!                                          [--holdout-profiles FILE --holdout-root DIR] freezes a holdout suite (#597): holdout:/golden: profiles over the files under DIR
 //!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
 //! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
-//! bbp takeover-input --dir D --task T --takeover N --seq S --sha256 HEX   D82: one batch of takeover input, as UTF-8 text on stdin; HEX chains it to the last batch
+//! bbp takeover-input --dir D --task T --takeover N --seq S --sha256 HEX   D82: one batch of takeover input, the raw bytes on stdin, at most 4096; HEX chains it to the last batch
 //! bbp takeover-ended --dir D --task T --takeover N --reason expired|revoked|turn-ended|mux-lost   D82: orch ends a takeover (the human releases one with `bbp human takeover-release N`)
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
@@ -267,9 +267,7 @@ fn run() -> Result<String, String> {
         }
         // D82: orch records takeover input (text on stdin) and ends takeovers.
         "takeover-input" => {
-            let mut text = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
-                .map_err(|e| format!("stdin: takeover input must be UTF-8 text: {e}"))?;
+            let bytes = takeover_batch(std::io::stdin().lock())?;
             let num = |k: &str| -> Result<u64, String> {
                 a.flag(k)?
                     .parse()
@@ -280,7 +278,7 @@ fn run() -> Result<String, String> {
                 &task,
                 human::takeover_id(a.flag("takeover")?)?,
                 num("seq")?,
-                text,
+                bytes,
                 Sha256::from_hex(a.flag("sha256")?).ok_or("--sha256 must be 64 hex digits")?,
             )?
         }
@@ -556,4 +554,18 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// D82: one takeover batch from `input`, read whole but never past
+/// [`rusty_bbp::MAX_TAKEOVER_BATCH`] + 1 bytes, so an oversized batch is
+/// refused without buffering it. The bytes are kept exactly as delivered.
+fn takeover_batch(input: impl std::io::Read) -> Result<Vec<u8>, String> {
+    let max = rusty_bbp::MAX_TAKEOVER_BATCH;
+    let mut bytes = Vec::with_capacity(max + 1);
+    std::io::Read::read_to_end(&mut input.take(max as u64 + 1), &mut bytes)
+        .map_err(|e| format!("stdin: {e}"))?;
+    if bytes.len() > max {
+        return Err(format!("takeover input batch is over {max} bytes"));
+    }
+    Ok(bytes)
 }
