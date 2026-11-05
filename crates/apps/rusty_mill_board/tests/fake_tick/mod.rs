@@ -227,6 +227,7 @@ impl FakeTick {
                     "priority": body.get("priority").cloned().unwrap_or(json!(0)),
                     "tags": lower_tags(&body["tags"]),
                     "sortOrder": body.get("sortOrder").cloned().unwrap_or(json!(0)),
+                    "dueMs": body.get("dueMs").cloned().unwrap_or(Value::Null),
                     "createdMs": now,
                     "updatedMs": now,
                     "deletedMs": null,

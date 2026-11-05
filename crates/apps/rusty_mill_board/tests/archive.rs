@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
-    Actor, BoardError, Capability, Card, Column, Event, EventKind, Shelf,
+    Actor, BoardError, Capability, Card, Column, Event, EventKind, Plan, Shelf,
 };
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::{MemStore, Store};
@@ -381,4 +381,26 @@ fn bulk_archive_skips_a_card_archived_or_restored_meanwhile() {
         "a card restored just now is no longer old enough"
     );
     assert_eq!(b.get(restored_meanwhile).expect("get").archived_ms, None);
+}
+
+#[test]
+fn archiving_and_restoring_keep_a_cards_target_date() {
+    let b = Board::new(MemStore::default(), Roles::default());
+    let nano = who(&b, "nano", "human");
+    let c = b
+        .add_done_in(&nano, "default", "dated", "", vec![])
+        .expect("done");
+    let target = Plan {
+        target_ms: Some(Some(1_800_000_000_000)),
+        ..Plan::default()
+    };
+    b.plan(c.id, &nano, &target).expect("plan");
+    assert_eq!(
+        b.archive(c.id, &nano).expect("archive").target_ms,
+        Some(1_800_000_000_000)
+    );
+    assert_eq!(
+        b.restore(c.id, &nano).expect("restore").target_ms,
+        Some(1_800_000_000_000)
+    );
 }

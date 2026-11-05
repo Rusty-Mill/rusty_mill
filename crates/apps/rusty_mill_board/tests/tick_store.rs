@@ -2,7 +2,10 @@
 //! owner's edits in rusty_tick reach the board (ADR-0012).
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind, Plan, Shelf, Span};
+use rusty_mill_board::domain::{
+    BoardError, Card, Column, Dates, Event, EventKind, Plan, Shelf, Span,
+};
+use rusty_mill_board::milestones::{MilestoneEdit, MilestoneStore};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::Store;
 use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
@@ -306,6 +309,35 @@ fn links_live_in_the_board_document_and_are_left_out_while_empty() {
         (read.superseded_by, read.related),
         (vec![newer.id], vec![newer.id])
     );
+}
+
+#[test]
+fn a_target_date_lives_in_the_board_document_and_is_left_out_while_unset() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "dated", "", vec![]).expect("add");
+    let target = |t: Option<i64>| Plan {
+        target_ms: Some(t),
+        ..Plan::default()
+    };
+    board
+        .plan(card.id, &human, &target(Some(1_800_000_000_000)))
+        .expect("set");
+    assert_eq!(
+        tick.doc("board", card.id).expect("doc")["targetMs"],
+        json!(1_800_000_000_000_i64)
+    );
+    assert_eq!(
+        board.get(card.id).expect("get").target_ms,
+        Some(1_800_000_000_000)
+    );
+    board.plan(card.id, &human, &target(None)).expect("clear");
+    let doc = tick.doc("board", card.id).expect("doc");
+    assert!(
+        doc.get("targetMs").is_none(),
+        "an unset target is left out: {doc}"
+    );
+    assert_eq!(board.get(card.id).expect("get").target_ms, None);
 }
 
 #[test]
@@ -699,5 +731,129 @@ fn moved_in_reads_rusty_tick_move_history_across_pages() {
     assert_eq!(
         boxed.moved_in(span(Some(0), Some(200))).expect("moved"),
         [early.id].into()
+    );
+}
+
+#[test]
+fn a_milestone_is_a_dated_task_tagged_milestone_and_never_a_card() {
+    let (board, tick) = board();
+    let board = board.with_milestones(Box::new(TickStore::new(tick.clone())));
+    let human = board.roles().actor("nano", "human").expect("role");
+    let beta = board
+        .add_milestone(&human, "orch", "Beta", 1_800_000_000_000)
+        .expect("add");
+    let task = tick.task(beta.id);
+    assert_eq!(
+        (&task["tags"], &task["dueMs"], &task["status"]),
+        (
+            &json!(["milestone"]),
+            &json!(1_800_000_000_000_i64),
+            &json!("open")
+        )
+    );
+    assert!(board.list(None).expect("list").is_empty(), "not a card");
+    let listed = board.milestones(|_| true).expect("milestones");
+    assert_eq!(listed, vec![beta.clone()]);
+
+    let close = MilestoneEdit {
+        done: Some(true),
+        target_ms: Some(1_900_000_000_000),
+        ..MilestoneEdit::default()
+    };
+    board
+        .edit_milestone(&human, beta.id, &close, |_| true)
+        .expect("close");
+    let read = TickStore::new(tick.clone())
+        .milestone(beta.id)
+        .expect("read")
+        .expect("there");
+    assert_eq!(read.target_ms, 1_900_000_000_000);
+    assert!(read.done_ms.is_some(), "closed in rusty_tick");
+
+    // A card that happens to carry the tag is still a card, not a milestone.
+    let card = board
+        .add(&human, "tagged", "", vec!["milestone".into()])
+        .expect("add");
+    let ids: Vec<_> = board
+        .milestones(|_| true)
+        .expect("milestones")
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert!(!ids.contains(&card.id));
+}
+
+#[test]
+fn a_milestone_save_is_fenced_on_the_version_its_scope_was_checked_at() {
+    let (board, tick) = board();
+    let store = TickStore::new(tick.clone());
+    let board = board.with_milestones(Box::new(TickStore::new(tick.clone())));
+    let human = board.roles().actor("nano", "human").expect("role");
+    let beta = board
+        .add_milestone(&human, "orch", "Beta", 1_800_000_000_000)
+        .expect("add");
+    let read = store.milestone(beta.id).expect("read").expect("there");
+    // The owner moves it to another list in rusty_tick after the read.
+    tick.owner_edit(beta.id, |t| t["listId"] = json!(uuid::Uuid::now_v7()));
+    let everything = MilestoneEdit {
+        title: Some("Renamed".into()),
+        target_ms: Some(1_900_000_000_000),
+        done: Some(true),
+    };
+    let next = read.edited(&everything, 1).expect("edit");
+    assert!(matches!(
+        store.save_milestone(&read, &next),
+        Err(BoardError::Conflict)
+    ));
+    let task = tick.task(beta.id);
+    assert_eq!(
+        (&task["title"], &task["dueMs"], &task["status"]),
+        (
+            &json!("Beta"),
+            &json!(1_800_000_000_000_i64),
+            &json!("open")
+        ),
+        "title, date and completion are all unchanged"
+    );
+    // A fresh read sees the move, so the scope check runs on where it is now.
+    let again = store.milestone(beta.id).expect("read").expect("there");
+    assert_eq!(
+        again.project, "default",
+        "an unknown list reads as the Inbox"
+    );
+    assert!(again.rev > read.rev);
+}
+
+#[test]
+fn a_restarted_boxed_board_lists_moves_from_tick_history_not_its_fresh_event_log() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let moved = board.add(&human, "moved", "", vec![]).expect("add");
+    let quiet = board.add(&human, "quiet", "", vec![]).expect("add");
+    tick.record_move(moved.id, 10);
+    // A restart: a new board over a boxed store, as the server runs, with an empty event log.
+    let fresh = Board::with_clock(
+        Box::new(TickStore::new(tick.clone())) as Box<dyn Store>,
+        Roles::default(),
+        clock,
+    );
+    let human = fresh.roles().actor("nano", "human").expect("role");
+    fresh
+        .comment(quiet.id, &human, "just a note")
+        .expect("comment");
+    let mut cards = fresh.list(None).expect("list");
+    let dates = Dates {
+        moved: Span {
+            from: Some(0),
+            to: None,
+        },
+        ..Dates::default()
+    };
+    fresh.retain_dates(&mut cards, &dates).expect("dates");
+    let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["moved"],
+        "the recorded move counts; a comment after the restart is not a move"
     );
 }

@@ -1,4 +1,4 @@
-//! `lel-jail JAIL.json`: the program a mux agent block runs (LEL D82).
+//! `lel-jail JAIL.json`: the program a mux agent block runs (LEL D104).
 //!
 //! Exits 125 (rusty_sandbox's `SETUP_FAILED`) with the reason on stderr,
 //! which is the pty, when the jail can't be set up; otherwise it becomes

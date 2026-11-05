@@ -43,10 +43,13 @@ use crate::domain::{
     next_event_id, reserved_tag,
 };
 use crate::http::Http;
+use crate::milestones::{Milestone, MilestoneStore};
 use crate::store::Store;
 
 /// The tag that puts a task on the board.
 pub const AGENT_TAG: &str = "agent";
+/// The tag that makes a rusty_tick task a milestone (see [`crate::milestones`]).
+pub const MILESTONE_TAG: &str = "milestone";
 /// rusty_tick's Inbox, which every store has: the `default` project.
 const INBOX: Uuid = Uuid::from_u128(0x0000_0000_0000_7000_8000_0000_0000_0001);
 /// Who a comment written in rusty_tick itself is shown as.
@@ -193,6 +196,8 @@ struct Task {
     updated_ms: i64,
     #[serde(default)]
     completed_ms: Option<i64>,
+    #[serde(default)]
+    due_ms: Option<i64>,
     deleted_ms: Option<i64>,
     etag: String,
 }
@@ -206,6 +211,14 @@ impl Task {
 
     fn on_board(&self) -> bool {
         self.deleted_ms.is_none() && self.tags.iter().any(|t| t == AGENT_TAG)
+    }
+
+    /// A milestone: tagged `milestone`, never `agent` (that would make it a card), with a date.
+    fn is_milestone(&self) -> bool {
+        self.deleted_ms.is_none()
+            && self.due_ms.is_some()
+            && self.tags.iter().any(|t| t == MILESTONE_TAG)
+            && !self.tags.iter().any(|t| t == AGENT_TAG)
     }
 }
 
@@ -247,6 +260,8 @@ struct BoardDoc {
     synced_text: Option<u64>,
     #[serde(default)]
     execution: Option<ExecutionLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_ms: Option<i64>,
 }
 
 impl BoardDoc {
@@ -258,6 +273,7 @@ impl BoardDoc {
             issue: card.issue,
             synced_text: card.synced_text,
             execution: card.execution.clone(),
+            target_ms: card.target_ms,
         }
     }
 
@@ -382,6 +398,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         done_ms: task.completed_ms.filter(|_| task.status == "done"),
         archived_ms,
         restored_ms,
+        target_ms: doc.target_ms,
     })
 }
 
@@ -920,5 +937,93 @@ impl<T: TickApi> Store for TickStore<T> {
                 "rusty_tick health is {status}"
             )))
         }
+    }
+}
+
+/// Milestones in rusty_tick: tasks tagged `milestone` in the project's list, `dueMs` the target,
+/// closed when done.
+impl<T: TickApi> TickStore<T> {
+    fn milestone_of(projects: &Projects, task: Task) -> Option<Milestone> {
+        let target_ms = task.due_ms?;
+        let rev = task.version().ok()?;
+        Some(Milestone {
+            rev,
+            id: task.id,
+            project: projects.of(&task),
+            done_ms: task.completed_ms.filter(|_| task.status == "done"),
+            title: task.title,
+            target_ms,
+        })
+    }
+}
+
+impl<T: TickApi> MilestoneStore for TickStore<T> {
+    fn milestones(&self) -> Result<Vec<Milestone>, BoardError> {
+        let tasks: Vec<Task> = Self::decode(
+            self.call(
+                TickRequest::new("GET", format!("/tags/{MILESTONE_TAG}/tasks")),
+                200,
+            )?,
+            "tasks",
+        )?;
+        let projects = self.projects()?;
+        Ok(tasks
+            .into_iter()
+            .filter(Task::is_milestone)
+            .filter_map(|t| Self::milestone_of(&projects, t))
+            .collect())
+    }
+
+    fn milestone(&self, id: Uuid) -> Result<Option<Milestone>, BoardError> {
+        let Some(task) = self.task(id)?.filter(Task::is_milestone) else {
+            return Ok(None);
+        };
+        Ok(Self::milestone_of(&self.projects()?, task))
+    }
+
+    fn add_milestone(&self, milestone: &Milestone) -> Result<u64, BoardError> {
+        let body = json!({
+            "id": milestone.id,
+            "listId": self.list_for(&milestone.project)?,
+            "title": milestone.title,
+            "tags": [MILESTONE_TAG],
+            "dueMs": milestone.target_ms,
+        });
+        let (status, created) = self
+            .tick
+            .send(&TickRequest::new("POST", "/tasks").body(body))?;
+        match status {
+            201 => serde_json::from_value::<Task>(created)
+                .map_err(|e| BoardError::Storage(format!("rusty_tick sent a bad task: {e}")))?
+                .version(),
+            409 => Err(BoardError::Conflict),
+            _ => Err(BoardError::Storage(format!(
+                "rusty_tick answered {status} creating a milestone"
+            ))),
+        }
+    }
+
+    fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<u64, BoardError> {
+        let mut patch = serde_json::Map::new();
+        if next.title != current.title {
+            patch.insert("title".into(), json!(next.title));
+        }
+        if next.target_ms != current.target_ms {
+            patch.insert("dueMs".into(), json!(next.target_ms));
+        }
+        if next.done_ms.is_some() != current.done_ms.is_some() {
+            let status = if next.done_ms.is_some() {
+                "done"
+            } else {
+                "open"
+            };
+            patch.insert("status".into(), json!(status));
+        }
+        if patch.is_empty() {
+            return Ok(current.rev);
+        }
+        // Fenced on the version the caller's scope check read: if the task moved meanwhile (to
+        // another project's list, say), rusty_tick refuses with 412 and the edit must start over.
+        self.patch_task(current.id, Value::Object(patch), current.rev)
     }
 }

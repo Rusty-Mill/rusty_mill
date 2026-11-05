@@ -329,7 +329,7 @@ pub fn evidence_admission(dir: &Path, task: &TaskId) -> Result<File, String> {
 
 /// Whether nothing `task`'s moderators started still runs: no moderator,
 /// no runner, no recorded harness group with a live member, and no recorded
-/// session cgroup (D82) that isn't empty and removed; a populated one is
+/// session cgroup (D104) that isn't empty and removed; a populated one is
 /// killed. While a
 /// group's holder lives its members are killed here; once it is gone they
 /// are left alone and the group is not quiet until none remains (see

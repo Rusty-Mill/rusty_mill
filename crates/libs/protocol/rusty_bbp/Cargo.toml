@@ -22,7 +22,7 @@ rusty_serde = { workspace = true }
 rusty_rsa = { workspace = true }
 # Crash-atomic blob files: temp, fsync, rename, directory fsync.
 rusty_atomic_file = { workspace = true }
-# Takeover input bytes as base64 in the event log (D82). First-party, no dependencies.
+# Takeover input bytes as base64 in the event log (D104). First-party, no dependencies.
 rusty_base64 = { workspace = true }
 # Line diff (Myers) for the spec-authoring metrics. First-party, no dependencies.
 rusty_diff = { workspace = true }

@@ -16,6 +16,7 @@ use crate::domain::{
 };
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
+use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore};
 use crate::projects::Projects;
 use crate::roadmap::{Roadmap, roadmap};
 use crate::store::Store;
@@ -103,6 +104,8 @@ pub struct Board<S> {
     clock: fn() -> i64,
     /// The decision inbox's source (#595); `None` when no BBP host is configured.
     escalations: Option<Arc<dyn Escalations>>,
+    /// The projects' milestones, drawn on the roadmap.
+    milestones: Box<dyn MilestoneStore>,
 }
 
 /// A read guard even if a writer panicked: the data is plain values, always consistent.
@@ -136,6 +139,7 @@ impl<S: Store> Board<S> {
             numbering: Mutex::new(()),
             clock,
             escalations: None,
+            milestones: Box::new(MemMilestones::default()),
         }
     }
 
@@ -163,6 +167,13 @@ impl<S: Store> Board<S> {
             .workflow
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = workflow;
+        self
+    }
+
+    /// Keep milestones in `store` instead of in memory.
+    #[must_use]
+    pub fn with_milestones(mut self, store: Box<dyn MilestoneStore>) -> Self {
+        self.milestones = store;
         self
     }
 
@@ -652,6 +663,73 @@ impl<S: Store> Board<S> {
             project,
             (self.clock)(),
         ))
+    }
+
+    /// The milestones `keep` selects, by target date.
+    ///
+    /// # Errors
+    /// If the store fails.
+    pub fn milestones(
+        &self,
+        keep: impl Fn(&Milestone) -> bool,
+    ) -> Result<Vec<Milestone>, BoardError> {
+        let mut all = self.milestones.milestones()?;
+        all.retain(|m| keep(m));
+        all.sort_by(|a, z| (a.target_ms, &a.title).cmp(&(z.target_ms, &z.title)));
+        Ok(all)
+    }
+
+    /// Add a milestone to `project`. Needs `Triage`: dates are planning decisions.
+    ///
+    /// # Errors
+    /// A missing capability, an unknown project, or see [`Milestone::new`].
+    pub fn add_milestone(
+        &self,
+        by: &Actor,
+        project: &str,
+        title: &str,
+        target_ms: i64,
+    ) -> Result<Milestone, BoardError> {
+        if !by.caps.contains(&Capability::Triage) {
+            return Err(BoardError::Forbidden(Capability::Triage));
+        }
+        if !self.projects().contains(project) {
+            return Err(BoardError::Invalid("unknown project"));
+        }
+        let mut milestone = Milestone::new(project, title, target_ms)?;
+        milestone.rev = self.milestones.add_milestone(&milestone)?;
+        Ok(milestone)
+    }
+
+    /// Change a milestone: its title, target, or whether it is done. Needs `Triage`; `in_scope`
+    /// says whether the caller may touch its project.
+    ///
+    /// The save is fenced on the version the scope check read, so a milestone moved to another
+    /// project meanwhile is refused with [`BoardError::Conflict`] rather than written.
+    ///
+    /// # Errors
+    /// A missing capability, a missing or out-of-scope milestone, a conflict, or see
+    /// [`Milestone::edited`].
+    pub fn edit_milestone(
+        &self,
+        by: &Actor,
+        id: Uuid,
+        edit: &MilestoneEdit,
+        in_scope: impl Fn(&str) -> bool,
+    ) -> Result<Milestone, BoardError> {
+        if !by.caps.contains(&Capability::Triage) {
+            return Err(BoardError::Forbidden(Capability::Triage));
+        }
+        let current = self
+            .milestones
+            .milestone(id)?
+            .ok_or(BoardError::NotFound(id))?;
+        if !in_scope(&current.project) {
+            return Err(BoardError::OutOfScope(current.project));
+        }
+        let mut next = current.edited(edit, (self.clock)())?;
+        next.rev = self.milestones.save_milestone(&current, &next)?;
+        Ok(next)
     }
 
     /// The metrics, as of now, of the cards `keep` selects (see
@@ -1329,7 +1407,7 @@ impl<S: Store> Board<S> {
         }
         if plan.is_empty() {
             return Err(BoardError::Invalid(
-                "give a priority, deps, superseded_by or related",
+                "give a priority, deps, superseded_by, related or target_ms",
             ));
         }
         for linked in plan.linked() {
