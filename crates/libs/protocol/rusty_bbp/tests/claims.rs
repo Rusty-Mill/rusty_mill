@@ -66,6 +66,8 @@ struct Cx {
     brief: ArtId,
     /// The tree the runner reports.
     tree: Option<Sha256>,
+    /// The runner's next reports are runner errors (a timeout, exit 124).
+    erring: bool,
 }
 
 fn pid(s: &str) -> PrincipalId {
@@ -81,6 +83,7 @@ impl Cx {
             ops: 0,
             brief: ArtId(0),
             tree: Some(Sha256::of(b"tree")),
+            erring: false,
         };
         let r = cx.run(Command::Open(open_task(Mode::Claims, Some(cfg), roster())));
         let Response::Stored(brief) = r else {
@@ -330,7 +333,9 @@ impl Cx {
             candidate: k,
             run,
             profile_digest: digest,
-            status: if failed {
+            status: if self.erring {
+                RunStatus::Error
+            } else if failed {
                 RunStatus::Failed
             } else {
                 RunStatus::Passed
@@ -4144,6 +4149,64 @@ mod replay {
         }));
         drop_claim(&mut cx, y);
         assert_eq!(holdouts(&history(&cx, y)), vec![None]);
+    }
+
+    /// The current candidate rerun on a moved base: a holdout report on the
+    /// old tree no longer speaks for it, and a fresh one on the new tree does.
+    #[test]
+    fn a_moved_tested_tree_needs_a_fresh_holdout_report() {
+        let mut cx = holdout_cx();
+        let rerun = |cx: &mut Cx, k: ArtId| {
+            cx.tree = Some(Sha256::of(b"moved tree"));
+            let rev = cx.rev();
+            ok(cx.human(HumanAction::Rerun {
+                candidate: k,
+                expected_rev: rev,
+            }));
+            stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        };
+        let y = cx.low();
+        let ky = cx.candidate("a", y);
+        stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(ky, &[("golden:cases", 1)]));
+        rerun(&mut cx, ky);
+        drop_claim(&mut cx, y);
+        assert_eq!(holdouts(&history(&cx, y)), vec![None], "stale tree");
+        cx.tree = Some(Sha256::of(b"tree"));
+        let z = cx.low();
+        let kz = cx.candidate("a", z);
+        stored(cx.report_profiles(kz, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(kz, &[("golden:cases", 1)]));
+        rerun(&mut cx, kz);
+        let fresh = stored(cx.holdout_run(kz, &[("golden:cases", 1)]));
+        drop_claim(&mut cx, z);
+        assert_eq!(holdouts(&history(&cx, z)), vec![Some(fresh)]);
+    }
+
+    /// A runner error (a timeout or an executor failure) is no report on
+    /// the code: no `Report` step, and it doesn't displace a genuine one.
+    #[test]
+    fn a_runner_error_is_never_a_holdout_report() {
+        let mut cx = holdout_cx();
+        let y = cx.low();
+        let k = cx.candidate("a", y);
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        let genuine = stored(cx.holdout_run(k, &[("golden:cases", 1)]));
+        cx.erring = true;
+        let error = stored(cx.holdout_run(k, &[("golden:cases", 1)]));
+        cx.erring = false;
+        drop_claim(&mut cx, y);
+        let h = history(&cx, y);
+        let reports: Vec<ArtId> = h
+            .steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Report { report, .. } => Some(*report),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reports, vec![genuine], "not {error:?}");
+        assert_eq!(holdouts(&h), vec![Some(genuine)]);
     }
 
     #[test]
