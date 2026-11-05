@@ -9,9 +9,17 @@
 //! execs the agent. v0 adds no namespaces; the #726 layers come later
 //! behind the same file (D85).
 
+//!
+//! Linux only: a jail spec names Linux paths (`/sys/fs/cgroup/...`, roots
+//! Landlock confines), and `rusty_sandbox` judges them by the host's path
+//! rules, so the spec and the launcher are built for Linux and nowhere
+//! else (D85). Elsewhere `lel-jail` refuses with exit code 125.
+
+#[cfg(target_os = "linux")]
 pub mod spec;
 
 #[cfg(target_os = "linux")]
 pub mod launch;
 
+#[cfg(target_os = "linux")]
 pub use spec::{FileLimits, FileToken, JailFile, JailSpec, Resolved, Token, CGROUP_ROOT};
