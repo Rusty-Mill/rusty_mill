@@ -192,7 +192,7 @@ fn lens_command<O>(
 }
 
 /// `rusty_orch __sandbox ...`: the helper `rusty_sandbox` re-invokes to
-/// confine an alien-lens probe (D92). It confines itself and `exec`s the
+/// confine an alien-lens probe (D96). It confines itself and `exec`s the
 /// probe, so it returns only when that failed. Not for hands.
 fn sandbox_helper() -> ! {
     let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(2).collect();

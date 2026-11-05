@@ -1,4 +1,4 @@
-//! The alien lens's probe runner (#708, D92, D93): orch builds and runs
+//! The alien lens's probe runner (#708, D96, D97): orch builds and runs
 //! each model-written reproducer itself, sandboxed with no network.
 //!
 //! [`SandboxProbes`] is the shell's [`Probes`]. Per probe it makes a
@@ -9,12 +9,12 @@
 //! base tree. Both trees are removed when the probe is done, whatever
 //! happened.
 //!
-//! How runs map (D93): on the candidate, a timeout or a kill by signal is
+//! How runs map (D97): on the candidate, a timeout or a kill by signal is
 //! [`Run::BuildError`], so a hang is an `error` row and never a finding;
 //! on base, either is an `Err`, in the build or the run, so the probe gets
 //! no row. Failures to set up a tree or the sandbox are `Err` too.
 //!
-//! Isolation (D93): each tree has its own temp dir, `HOME` and cargo
+//! Isolation (D97): each tree has its own temp dir, `HOME` and cargo
 //! home, and base builds into its own target dir, so nothing the candidate
 //! wrote reaches the base run. Host-side writes into a tree refuse to go
 //! through a symlink, since the candidate's diffs can add them.
@@ -31,7 +31,7 @@ use rusty_sandbox::{
 };
 use rusty_worktree::Repo;
 
-/// Wall-clock limit on each cargo invocation, the build and the run (D93).
+/// Wall-clock limit on each cargo invocation, the build and the run (D97).
 pub const PROBE_CARGO_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 /// Granted read-write: std opens it whenever a child gets a null stdio.
@@ -312,7 +312,7 @@ fn cargo_args(pkg: &str, probe: &Probe<'_>, no_run: bool) -> Vec<String> {
     args
 }
 
-/// `probe_<claim>_<n>.rs` as the D93 directory name `<claim>-<n>`.
+/// `probe_<claim>_<n>.rs` as the D97 directory name `<claim>-<n>`.
 fn probe_dir(file: &str) -> Result<String, String> {
     file.strip_prefix("probe_")
         .and_then(|s| s.strip_suffix(".rs"))
