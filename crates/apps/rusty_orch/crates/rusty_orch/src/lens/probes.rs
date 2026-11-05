@@ -11,8 +11,13 @@
 //!
 //! How runs map (D90): on the candidate, a timeout or a kill by signal is
 //! [`Run::BuildError`], so a hang is an `error` row and never a finding;
-//! on base, either is an `Err`, so the probe gets no row. Failures to set
-//! up a tree or the sandbox are `Err` too.
+//! on base, either is an `Err`, in the build or the run, so the probe gets
+//! no row. Failures to set up a tree or the sandbox are `Err` too.
+//!
+//! Isolation (D90): each tree has its own temp dir, `HOME` and cargo
+//! home, and base builds into its own target dir, so nothing the candidate
+//! wrote reaches the base run. Host-side writes into a tree refuse to go
+//! through a symlink, since the candidate's diffs can add them.
 
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
@@ -122,7 +127,8 @@ pub struct Candidate {
 pub struct Dirs {
     /// `<state>/alien/probes/<task>`: one `<claim>-<n>` per probe.
     pub probes: PathBuf,
-    /// `<state>/alien/target`: the build cache, kept between probes.
+    /// The candidate's build cache, kept between this hunt's probes only
+    /// (`<state>/alien/target/<task>/<claim>`). Base never uses it.
     pub target: PathBuf,
 }
 
@@ -158,15 +164,15 @@ where
     fn runs(&self, probe: &Probe<'_>, trees: &mut Trees<'_>) -> Result<Runs, String> {
         let cand = trees.add("candidate", &self.candidate.base)?;
         for (i, diff) in self.candidate.diffs.iter().enumerate() {
-            apply(self.repo, &cand, diff).map_err(|e| format!("diff {}: {e}", i + 1))?;
+            apply(self.repo, &cand.src, diff).map_err(|e| format!("diff {}: {e}", i + 1))?;
         }
-        let Some(pkg) = place(&cand, probe)? else {
+        let Some(pkg) = place(&cand.src, probe)? else {
             return Ok(Runs {
                 candidate: Run::BuildError,
                 base: None,
             });
         };
-        let candidate = match self.cargo(&cand, &pkg, probe, &trees.tmp)? {
+        let candidate = match self.cargo(&cand, &self.dirs.target, &pkg, probe)? {
             Ran::Built(Termination::Exited(0)) => Run::Passed,
             Ran::Built(Termination::Exited(_)) => Run::Failed,
             Ran::Built(_) | Ran::Unbuilt(_) => Run::BuildError,
@@ -178,11 +184,12 @@ where
             });
         }
         let base = trees.add("base", &self.candidate.base)?;
-        let base = match place(&base, probe)? {
+        let target = base.tmp.join("target");
+        let base = match place(&base.src, probe)? {
             None => Run::BuildError,
-            Some(pkg) => match self.cargo(&base, &pkg, probe, &trees.tmp)? {
-                Ran::Unbuilt(Termination::TimedOut) => {
-                    return Err("timed out building on base".to_owned());
+            Some(pkg) => match self.cargo(&base, &target, &pkg, probe)? {
+                Ran::Unbuilt(t @ (Termination::TimedOut | Termination::Signaled(_))) => {
+                    return Err(format!("building on base: {t:?}"));
                 }
                 Ran::Unbuilt(_) => Run::BuildError,
                 Ran::Built(Termination::Exited(0)) => Run::Passed,
@@ -197,8 +204,14 @@ where
     }
 
     /// Build the probe, then, if it built, run it.
-    fn cargo(&self, tree: &Path, pkg: &str, probe: &Probe<'_>, tmp: &Path) -> Result<Ran, String> {
-        let spec = self.spec(tree, tmp)?;
+    fn cargo(
+        &self,
+        tree: &Tree,
+        target: &Path,
+        pkg: &str,
+        probe: &Probe<'_>,
+    ) -> Result<Ran, String> {
+        let spec = self.spec(tree, target)?;
         let program = self.toolchain.bin.join("cargo");
         let program = program.to_str().ok_or("non-UTF-8 cargo path")?;
         let built = self.exec(&spec, program, &cargo_args(pkg, probe, true))?;
@@ -221,9 +234,10 @@ where
             .map_err(|e| format!("sandbox: {e}"))
     }
 
-    /// Read the toolchain and the tree; write the tree, the build cache,
-    /// the private cargo home and temp dir, and `/dev/null`.
-    fn spec(&self, tree: &Path, tmp: &Path) -> Result<SandboxSpec, String> {
+    /// Read the toolchain and the tree; write the tree, its target dir,
+    /// its own temp dir (holding its private cargo home), and `/dev/null`.
+    fn spec(&self, tree: &Tree, target: &Path) -> Result<SandboxSpec, String> {
+        let tmp = &tree.tmp;
         let t = self.toolchain;
         let mut read: Vec<PathBuf> = SYSTEM_ROOTS
             .iter()
@@ -239,13 +253,12 @@ where
         );
         let home = tmp.join("cargo-home");
         cargo_home(&home, &t.cargo_home)?;
-        std::fs::create_dir_all(&self.dirs.target)
-            .map_err(|e| format!("{}: {e}", self.dirs.target.display()))?;
+        std::fs::create_dir_all(target).map_err(|e| format!("{}: {e}", target.display()))?;
         let path = |p: &Path| p.to_string_lossy().into_owned();
         let env = vec![
             ("PATH".to_owned(), format!("{}:/usr/bin:/bin", path(&t.bin))),
             ("CARGO_HOME".to_owned(), path(&home)),
-            ("CARGO_TARGET_DIR".to_owned(), path(&self.dirs.target)),
+            ("CARGO_TARGET_DIR".to_owned(), path(target)),
             ("HOME".to_owned(), path(tmp)),
             ("TMPDIR".to_owned(), path(tmp)),
             ("CARGO_TERM_COLOR".to_owned(), "never".to_owned()),
@@ -260,12 +273,12 @@ where
         )
         .map_err(|e| e.to_string())?;
         let write = vec![
-            tree.to_path_buf(),
-            self.dirs.target.clone(),
-            tmp.to_path_buf(),
+            tree.src.clone(),
+            target.to_path_buf(),
+            tmp.clone(),
             PathBuf::from(DEV_NULL),
         ];
-        SandboxSpec::new(read, write, tree.to_path_buf(), env, limits).map_err(|e| e.to_string())
+        SandboxSpec::new(read, write, tree.src.clone(), env, limits).map_err(|e| e.to_string())
     }
 }
 
@@ -313,11 +326,16 @@ fn probe_dir(file: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{file:?} is not a probe file name"))
 }
 
+/// One scratch tree: its source and its own temp dir.
+struct Tree {
+    src: PathBuf,
+    tmp: PathBuf,
+}
+
 /// One probe's scratch trees, removed when dropped, whatever happened.
 struct Trees<'a> {
     repo: &'a Repo,
     root: PathBuf,
-    tmp: PathBuf,
     added: Vec<PathBuf>,
 }
 
@@ -326,25 +344,26 @@ impl<'a> Trees<'a> {
         if root.symlink_metadata().is_ok() {
             std::fs::remove_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
         }
-        let tmp = root.join("tmp");
-        std::fs::create_dir_all(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        let tmp = tmp
-            .canonicalize()
-            .map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
         Ok(Self {
             repo,
             root,
-            tmp,
             added: Vec::new(),
         })
     }
 
-    /// A fresh worktree `name` detached at `rev`.
-    fn add(&mut self, name: &str, rev: &str) -> Result<PathBuf, String> {
+    /// A fresh worktree `name` detached at `rev`, with a new, empty temp
+    /// dir `<name>-tmp` beside it.
+    fn add(&mut self, name: &str, rev: &str) -> Result<Tree, String> {
         let dir = self.root.join(name);
-        let tree = self.repo.add_detached(&dir, rev)?;
+        let src = self.repo.add_detached(&dir, rev)?;
         self.added.push(dir);
-        Ok(tree)
+        let tmp = self.root.join(format!("{name}-tmp"));
+        std::fs::create_dir(&tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        let tmp = tmp
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", tmp.display()))?;
+        Ok(Tree { src, tmp })
     }
 }
 
@@ -402,19 +421,56 @@ fn apply(repo: &Repo, tree: &Path, diff: &str) -> Result<(), String> {
 
 /// Write the probe into the crate its site names in `tree`, and give that
 /// crate's package name. `None` when no crate in the tree matches, which
-/// is a probe that cannot build there.
+/// is a probe that cannot build there. Refuses to write through a
+/// symlink: every directory down to `tests` must be a real one, and the
+/// file must be new.
 fn place(tree: &Path, probe: &Probe<'_>) -> Result<Option<String>, String> {
     let Some((dir, pkg)) = crate_of(tree, probe.site)? else {
         return Ok(None);
     };
     let tests = dir.join("tests");
-    std::fs::create_dir_all(&tests).map_err(|e| format!("{}: {e}", tests.display()))?;
-    let file = tests.join(&probe.file);
-    if file.symlink_metadata().is_ok() {
-        return Err(format!("{} already exists", file.display()));
+    match tests.symlink_metadata() {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Err(format!("{} is not a directory", tests.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir(&tests).map_err(|e| format!("{}: {e}", tests.display()))?;
+        }
+        Err(e) => return Err(format!("{}: {e}", tests.display())),
     }
-    std::fs::write(&file, probe.source).map_err(|e| format!("{}: {e}", file.display()))?;
+    if !real_dirs(tree, &tests) {
+        return Err(format!("{} is reached through a symlink", tests.display()));
+    }
+    let file = tests.join(&probe.file);
+    // `create_new` (O_CREAT | O_EXCL) fails on any existing entry,
+    // symlinks included, without following it.
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    use std::io::Write;
+    out.write_all(probe.source.as_bytes())
+        .map_err(|e| format!("{}: {e}", file.display()))?;
     Ok(Some(pkg))
+}
+
+/// Whether `dir` is `tree` or under it with every directory on the way,
+/// `dir` included, a real directory and not a symlink.
+fn real_dirs(tree: &Path, dir: &Path) -> bool {
+    let Ok(rel) = dir.strip_prefix(tree) else {
+        return false;
+    };
+    let mut at = tree.to_path_buf();
+    for part in rel.components() {
+        let Component::Normal(name) = part else {
+            return false;
+        };
+        at.push(name);
+        if !at.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The crate `site` names in `tree`: for a file path, the nearest package
@@ -433,6 +489,9 @@ fn crate_of(tree: &Path, site: &str) -> Result<Option<(PathBuf, String)>, String
     }
     let mut dir = tree.join(rel);
     while dir.pop() && dir.starts_with(tree) {
+        if !real_dirs(tree, &dir) {
+            continue;
+        }
         if let Some(name) = package_name(&dir.join("Cargo.toml"))? {
             return Ok(Some((dir, name)));
         }
@@ -490,15 +549,16 @@ fn package_name(manifest: &Path) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-/// A private cargo home at `home`: the user's registry and git caches
+/// A new private cargo home at `home`: the user's registry and git caches
 /// linked in (read-only through the sandbox), so cargo's lock and any
-/// state it writes stay in the probe's temp dir.
+/// state it writes stay in the tree's temp dir. `home` must not exist yet,
+/// so nothing a sandboxed run left there is followed.
 fn cargo_home(home: &Path, user: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
+    std::fs::create_dir(home).map_err(|e| format!("{}: {e}", home.display()))?;
     for cache in CARGO_CACHES {
-        let (from, to) = (user.join(cache), home.join(cache));
-        if from.exists() && to.symlink_metadata().is_err() {
-            symlink(&from, &to)?;
+        let from = user.join(cache);
+        if from.exists() {
+            symlink(&from, &home.join(cache))?;
         }
     }
     Ok(())
@@ -578,18 +638,44 @@ mod tests {
         probe_there: bool,
     }
 
-    /// Answers each exec by (tree, build?).
+    /// What one exec's environment held: its temp and target dirs, and
+    /// whether a marker a candidate run leaves in its temp dir was there.
+    #[derive(Debug, Clone)]
+    struct Seen {
+        tree: String,
+        tmp: String,
+        target: String,
+        marker: bool,
+    }
+
+    /// Answers each exec by (tree, build?). Each candidate run also acts
+    /// like hostile code: it leaves a marker in its temp dir and, given
+    /// `outside`, swaps its cargo home for a symlink there.
     struct Fake {
         answer: Answer,
+        outside: Option<PathBuf>,
         calls: RefCell<Vec<Call>>,
+        seen: RefCell<Vec<Seen>>,
     }
 
     impl Fake {
         fn new(answer: Answer) -> Self {
             Self {
                 answer,
+                outside: None,
                 calls: RefCell::new(Vec::new()),
+                seen: RefCell::new(Vec::new()),
             }
+        }
+
+        fn hostile(&self, env: &std::collections::BTreeMap<String, String>) {
+            std::fs::write(Path::new(&env["TMPDIR"]).join("marker"), "x").expect("marker");
+            let Some(outside) = &self.outside else {
+                return;
+            };
+            let home = Path::new(&env["CARGO_HOME"]);
+            let _ = std::fs::remove_dir_all(home);
+            std::os::unix::fs::symlink(outside, home).expect("symlink");
         }
     }
 
@@ -609,6 +695,16 @@ mod tests {
                 .into_owned();
             let lib = std::fs::read_to_string(cwd.join("crates/a/src/lib.rs")).unwrap_or_default();
             let no_run = args.iter().any(|a| a == "--no-run");
+            let env: std::collections::BTreeMap<_, _> = spec.env().iter().cloned().collect();
+            self.seen.borrow_mut().push(Seen {
+                tree: tree.clone(),
+                tmp: env["TMPDIR"].clone(),
+                target: env["CARGO_TARGET_DIR"].clone(),
+                marker: Path::new(&env["TMPDIR"]).join("marker").exists(),
+            });
+            if tree == "candidate" && !no_run {
+                self.hostile(&env);
+            }
             self.calls.borrow_mut().push(Call {
                 tree: tree.clone(),
                 no_run,
@@ -652,25 +748,55 @@ mod tests {
     ) -> (Result<Runs, String>, Vec<Call>, bool) {
         let (root, repo) = repo(tag);
         let exec = Fake::new(answer);
-        let tc = toolchain(&root);
+        let (got, gone) = run_with(&root, &repo, &exec, site, diffs);
+        let calls = exec.calls.borrow().clone();
+        let _ = std::fs::remove_dir_all(&root);
+        (got, calls, gone)
+    }
+
+    /// [`run`] on a given repo and executor; the result and whether the
+    /// probe's scratch dir is gone afterwards.
+    fn run_with(
+        root: &Path,
+        repo: &Repo,
+        exec: &Fake,
+        site: &str,
+        diffs: &[&str],
+    ) -> (Result<Runs, String>, bool) {
+        let tc = toolchain(root);
         let dirs = Dirs {
             probes: root.join("state/alien/probes/t"),
             target: root.join("state/alien/target"),
         };
         let candidate = Candidate {
-            base: base(&repo),
+            base: base(repo),
             diffs: diffs.iter().map(|d| (*d).to_owned()).collect(),
         };
-        let mut probes = SandboxProbes::new(&exec, &repo, &tc, candidate, dirs.clone());
+        let mut probes = SandboxProbes::new(exec, repo, &tc, candidate, dirs.clone());
         let got = probes.run(&Probe {
             file: "probe_7_1.rs".to_owned(),
             site,
             source: PROBE,
         });
-        let gone = !dirs.probes.join("7-1").exists();
-        let calls = exec.calls.borrow().clone();
-        let _ = std::fs::remove_dir_all(&root);
-        (got, calls, gone)
+        (got, !dirs.probes.join("7-1").exists())
+    }
+
+    /// A diff adding `path` as a symlink to `to`.
+    fn link_diff(path: &str, to: &Path) -> String {
+        let to = to.to_string_lossy();
+        format!(
+            "diff --git a/{path} b/{path}\nnew file mode 120000\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+{to}\n\\ No newline at end of file\n"
+        )
+    }
+
+    /// Every entry under `dir`, sorted.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(dir)
+            .expect("read_dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        out.sort();
+        out
     }
 
     fn ok(_: &str, _: bool) -> Termination {
@@ -801,7 +927,7 @@ mod tests {
         };
         assert_eq!(got, Ok(want));
 
-        let hangs: [Answer; 2] = [
+        let hangs: [Answer; 3] = [
             |tree, no_run| match (tree, no_run) {
                 ("candidate", false) => Termination::Exited(101),
                 ("base", true) => Termination::TimedOut,
@@ -810,6 +936,11 @@ mod tests {
             |tree, no_run| match (tree, no_run) {
                 ("candidate", false) => Termination::Exited(101),
                 ("base", false) => Termination::Signaled(24),
+                _ => Termination::Exited(0),
+            },
+            |tree, no_run| match (tree, no_run) {
+                ("candidate", false) => Termination::Exited(101),
+                ("base", true) => Termination::Signaled(9),
                 _ => Termination::Exited(0),
             },
         ];
@@ -891,7 +1022,12 @@ mod tests {
         };
         let probes = SandboxProbes::new(&exec, &repo, &tc, candidate, dirs);
         let tmp = root.join("tmp");
-        let spec = probes.spec(&root.join("tree"), &tmp).expect("spec");
+        std::fs::create_dir_all(&tmp).expect("mkdir");
+        let tree = Tree {
+            src: root.join("tree"),
+            tmp: tmp.clone(),
+        };
+        let spec = probes.spec(&tree, &root.join("target")).expect("spec");
         let write: Vec<PathBuf> = vec![
             root.join("tree"),
             root.join("target"),
@@ -915,6 +1051,97 @@ mod tests {
             )
             .expect("limits")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn base_gets_fresh_temp_cargo_home_and_target_whatever_the_candidate_did() {
+        let (root, repo) = repo("isolate");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        let mut exec = Fake::new(|tree, no_run| match (tree, no_run) {
+            ("candidate", false) => Termination::Exited(101),
+            _ => Termination::Exited(0),
+        });
+        exec.outside = Some(outside.clone());
+        let (got, gone) = run_with(&root, &repo, &exec, "my_crate::f", &[DIFF]);
+        let want = Runs {
+            candidate: Run::Failed,
+            base: Some(Run::Passed),
+        };
+        assert_eq!(got, Ok(want));
+        assert!(gone);
+        let seen = exec.seen.borrow().clone();
+        let (cand, base): (Vec<_>, Vec<_>) = seen.iter().partition(|s| s.tree == "candidate");
+        assert_eq!((cand.len(), base.len()), (2, 2), "{seen:?}");
+        for b in &base {
+            assert!(!b.marker, "base saw the candidate's temp: {b:?}");
+            assert_ne!(b.tmp, cand[0].tmp);
+            assert_ne!(b.target, cand[0].target);
+        }
+        assert!(listing(&outside).is_empty(), "nothing was linked outside");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_symlinked_tests_dir_is_refused_before_anything_runs() {
+        let (root, repo) = repo("linktests");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).expect("mkdir");
+        std::fs::write(outside.join("sentinel"), "s").expect("write");
+        let exec = Fake::new(ok);
+        let diff = link_diff("crates/a/tests", &outside);
+        let (got, gone) = run_with(&root, &repo, &exec, "my_crate::f", &[&diff]);
+        let err = got.expect_err("refused");
+        assert!(err.contains("not a directory"), "{err}");
+        assert!(exec.calls.borrow().is_empty());
+        assert!(gone);
+        assert_eq!(listing(&outside), ["sentinel"]);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel")).expect("read"),
+            "s"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_site_under_a_symlinked_dir_names_no_crate() {
+        let (root, repo) = repo("linksite");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(outside.join("src")).expect("mkdir");
+        std::fs::write(
+            outside.join("Cargo.toml"),
+            "[package]\nname = \"evil\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write");
+        let exec = Fake::new(ok);
+        let diff = link_diff("crates/b", &outside);
+        let (got, gone) = run_with(&root, &repo, &exec, "crates/b/src/lib.rs", &[&diff]);
+        let want = Runs {
+            candidate: Run::BuildError,
+            base: None,
+        };
+        assert_eq!(got, Ok(want));
+        assert!(exec.calls.borrow().is_empty());
+        assert!(gone);
+        assert_eq!(listing(&outside), ["Cargo.toml", "src"]);
+        let (got, _) = run_with(&root, &repo, &exec, "evil::f", &[&diff]);
+        assert_eq!(got.map(|r| r.candidate), Ok(Run::BuildError));
+        assert_eq!(listing(&outside), ["Cargo.toml", "src"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn real_dirs_refuses_symlinks_and_escapes() {
+        let (root, _repo) = repo("realdirs");
+        let tree = root.join("repo");
+        std::os::unix::fs::symlink(tree.join("crates/a"), tree.join("crates/l")).expect("link");
+        assert!(real_dirs(&tree, &tree));
+        assert!(real_dirs(&tree, &tree.join("crates/a/src")));
+        assert!(!real_dirs(&tree, &tree.join("crates/l")));
+        assert!(!real_dirs(&tree, &tree.join("crates/l/src")));
+        assert!(!real_dirs(&tree, &tree.join("crates/a/missing")));
+        assert!(!real_dirs(&tree, &root));
         let _ = std::fs::remove_dir_all(&root);
     }
 
