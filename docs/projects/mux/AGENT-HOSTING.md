@@ -82,10 +82,45 @@ may disconnect anyone" for owner connections only, which is the first step of ca
 
 orch treats its own restart as a crash anyway: it aborts the turn and kills the cgroup (LEL §3).
 
+**The owner's connection: `rusty-mux-ctl own`.** Ownership belongs to one live connection, so
+orch must keep one open for as long as it controls its blocks. Today's ctl calls can't do that:
+each `execute` opens a fresh connection (`ctl/src/lib.rs:480`), and `run` returns as soon as the
+block starts unless it waits (`ctl/src/wait.rs:302-345`). The connection, and the client the
+server made owner, are gone at once, and `--wait` gives no way to send further requests.
+- **Route.** C46 adds a long-lived ctl mode, `rusty-mux-ctl own`, which orch runs as a child
+  process.
+  - It holds one connection, and every block it launches is owned by that connection.
+  - It reads one JSON request per line on stdin: `launch` (C75's fields), `grant`, `revoke`,
+    `signal`, `release` and `close`.
+  - It writes one JSON line per answer and per owner message on stdout: `InputBatch`,
+    `grant-changed`, `program-exited` and `lease-changed` for its blocks.
+  - orch passes its descriptors to the child by inheritance, and `own` forwards them as
+    `SCM_RIGHTS` on `launch`.
+  - This keeps orch at its process boundary with the mux: no crate edge.
+  - `orch-bbp` depending on `rusty_mux_ctl` in-process is **not** an option. Both are `apps`
+    crates in different families, and `check_workspace_layers.py:98-101` rejects that edge.
+    Moving a client library into `libs` would be a new boundary decision, which stays gated and
+    isn't proposed here.
+- **Lifetime.** One `own` process for each orch process, owning all of that orch's agent blocks.
+  Its stdin closing is orch's "I'm done": `own` closes its connection, and its blocks orphan after
+  the grace, exactly as if orch had crashed.
+- **Reconnect.** If the connection to the server drops, `own` reconnects with its TAKEOVER token
+  inside D44's 30 s grace, so the client and its ownership stay the same, and it tells orch with
+  a `reconnected` line. The token stays inside `own` and is never printed. If `own` itself dies,
+  the client is gone and its blocks orphan; orch sees EOF and treats it as a crash. Handing
+  ownership to a new process is not proposed.
+
 **Tests.**
 - A second client of the same uid can't rename, close, split, signal or disconnect the owner.
 - The owner can.
 - Ownership survives a 5 s reconnect, and the block is orphaned after 30 s.
+- **Acceptance, beyond the grace.** One `own` process launches an owned, `owner-only` block. For
+  more than 90 s, through a forced reconnect at about 20 s:
+  - it grants a lease to a second client;
+  - it receives that client's `InputBatch` at 0 s and again past 60 s;
+  - it signals and releases the block past 60 s.
+
+  The server's client id for `own` never changes, and the block is never orphaned.
 
 ## C75. Agent launch: exact environment and passed descriptors
 
@@ -103,19 +138,39 @@ orch treats its own restart as a crash anyway: it aborts the turn and kills the 
   A caller entry named `RUSTY_MUX_*` is refused (`bad_launch(env)`), so a caller's mistake can't
   bring the socket path back. This is a new field on the existing `EnvSpec::Explicit` path, with
   no platform work.
-- **`fds: Vec<u32>`.** These are target descriptor numbers in the child. The frame carrying the
-  `Launch` brings exactly that many descriptors as `SCM_RIGHTS`, in order. They are accepted only
-  on a direct `Peer::Allowed` socket connection, and refused on `Peer::Forwarded` (the C26 relay,
-  `server/src/lib.rs:181`) and on datagram streams. The server also refuses the launch, and closes
-  whatever arrived, when the counts differ, a target is below 3 or repeated, or there are more
-  than 8 targets (`bad_launch(fds)`). An `ssh -L` forward can't carry descriptors at all, since
-  sshd never sends `SCM_RIGHTS`.
+- **`fds: u8`.** A count, n, from 0 to 8. The frame that carries the `Launch` brings exactly n
+  descriptors as `SCM_RIGHTS`. The child gets them, in order, at 3, 4, … 3+n−1, and nothing else
+  above 2.
+  - Targets are fixed and contiguous rather than chosen, so there are no holes and no
+    target-to-target collisions to handle. orch's fd 3 (the slot lock) and fd 4 (ACP) are the
+    first two.
+  - Descriptors are accepted only on a direct `Peer::Allowed` socket connection. They are refused
+    on `Peer::Forwarded` (the C26 relay, `server/src/lib.rs:181`) and on datagram streams. An
+    `ssh -L` forward can't carry them at all, since sshd never sends `SCM_RIGHTS`.
+  - The launch is refused (`bad_launch(fds)`) when the number received differs from n, or when
+    the control message was truncated (`MSG_CTRUNC`). Every descriptor that did arrive is
+    closed.
 
-**Child side (Unix).**
-- `platform::process::Command` (`platform/src/process.rs:122`) gains an fd map.
-- The Linux spawn adds `posix_spawn_file_actions_adddup2` for each target and
-  `posix_spawn_file_actions_addclosefrom_np` above the highest target.
-- The server closes its own copies once the spawn has returned, whether it succeeded or failed.
+**Receiving.** The server calls `recvmsg` with `MSG_CMSG_CLOEXEC`, so every received descriptor
+is close-on-exec from the moment it exists, and wraps each one in an `OwnedFd` at once. Every
+error path, including refusal, truncation and a failed spawn, then closes them by drop.
+
+**Child side (Unix).** `platform::process::Command` (`platform/src/process.rs:122`) gains an
+ordered list of inherited descriptors, and the Linux spawn maps them without collisions:
+1. **Stage.** In the server, before the spawn, `fcntl(F_DUPFD_CLOEXEC, 3+n)` copies each received
+   descriptor to a fresh number at or above 3+n. A staged number can't equal any target, and
+   because staging happens in the parent, no source is overwritten mid-mapping, whatever numbers
+   the received descriptors had (some may already be 3 or 4).
+2. **Map.** In the spawn's file actions, `adddup2(staged_i, 3+i)` for each i. dup2 clears
+   close-on-exec on the target only.
+3. **Close the rest.** `addclosefrom_np(3+n)` closes the staged copies and everything else above
+   the targets in the child. Below 3+n, 0–2 are the pty and 3…3+n−1 are the targets, so no other
+   descriptor can survive.
+
+   The server's own descriptors are all close-on-exec as well (std's default, and
+   `MSG_CMSG_CLOEXEC` for received ones), so closing is enforced twice.
+4. **Clean up.** The staged and received `OwnedFd`s drop in the server once the spawn returns,
+   whether it succeeded or not.
 
 **Windows.** `env` works. `fds` is refused (`unsupported`), because AF_UNIX on Windows has no
 `SCM_RIGHTS`.
@@ -136,14 +191,22 @@ dependency, but it is public API in three crate sets (question B).
 **Framing.** ctl sends the whole `Launch` frame in one `sendmsg`. The server takes descriptors
 only at a frame boundary, and refuses a frame that brings descriptors it didn't ask for.
 
-**ctl.** `rusty-mux-ctl run --env-exact K=V … --fd 3=FD …`. orch-bbp calls ctl in-process
-(`rusty_mux_ctl::run_until`) or as a child process, so it needs no new crate edge.
+**ctl.** orch launches through `rusty-mux-ctl own` (C46), passing `env` and descriptors it
+inherited. A one-shot `rusty-mux-ctl run --env-exact K=V … --fds N` (the first N descriptors it
+inherited from 3) is offered for tests and scripts only, because a one-shot launch has no owner
+connection afterwards.
 
 **Tests.**
 - The child sees exactly the given environment, with no `RUSTY_MUX_SOCKET`.
 - A passed lock file is still held while the child lives: `flock` from a second process fails.
-- No other descriptor is open in the child (it lists `/proc/self/fd`).
-- Each refusal case is refused and leaks no descriptor.
+- The child's `/proc/self/fd` lists exactly 0–2 and 3…3+n−1, for n = 0, 1, 2 and 8.
+- **Overlap.** The server is made to receive the descriptors at numbers 4 and 3, swapped, and
+  then at 3+n and above. The child still gets them in launch order (checked by inode).
+- **Sparse.** With unrelated descriptors open in the server at 5 and 9 before the launch, neither
+  reaches the child.
+- **Refusals.** A count mismatch, a truncated control message (9 sent), and a forwarded or
+  datagram connection are each refused. Afterwards the server's open-descriptor count is back
+  where it started, and a failed spawn leaves no staged copy.
 
 ## C78. Hold on exit
 
@@ -264,10 +327,15 @@ a rule with no use.
    socket.
    - **If it does,** port `ssh.rs` and `remote()` to Windows. The private directory gets the
      owner-only DACL from R10, and the version floor is checked at start with a clear error.
-   - **If it doesn't,** add `rusty-mux-ctl bridge SOCKET`, run as `ssh HOST rusty-mux-ctl bridge
-     SOCKET`. It copies stdio to the server socket on the remote side, and the client speaks the
-     protocol over the `ssh` child's pipes, which `Conn` can already take. `bridge` is a new ctl
-     subcommand with no wire change, and it serves Unix clients without `-L` too.
+   - **If it doesn't,** use the existing `rusty-mux-ctl bridge` (`ctl/src/bridge.rs`,
+     `ctl/src/lib.rs:21-23,244-253`), run as `ssh HOST rusty-mux-ctl bridge`. It already joins its
+     stdin and stdout to the server's socket, byte for byte, for exactly this case. Nothing new is
+     needed on the ctl side. The missing work is all in the Windows client:
+     - a Windows route that spawns `ssh … rusty-mux-ctl bridge` and runs `Conn` over the child's
+       pipes (`Conn<S: Read + Write>` already takes any stream);
+     - porting the rejoin path (`SshPath`, `Route`, today `cfg(unix)`) to respawn that child;
+     - a Windows build of the parts of the `ssh` module it reuses (argument building, hostname
+       lookup), without the `std::os::unix` socket-directory code, which bridge doesn't need.
 2. **UDP stays Unix-only** in this row. A Windows client stays on the SSH path. Windows UDP is a
    separate row if it's wanted.
 3. **rusty_term.** Nano opens a rusty_term tab running `rusty-mux --ssh baileyai FRONT_DOOR_SOCKET`,
@@ -296,7 +364,10 @@ D82 starts these rows. These still need Nano's or a reviewer's go on the PR that
 - **Wire review for each row:** the `Launch` fields, client types 0x21 onward, server type 0x8e,
   event kind 33, and bits 35–39 (D27).
 - **Public API:** `rusty_libc`, `rusty_tokio`, and rustils `platform`/`platform-linux` (C75), plus
-  the new ctl `bridge` subcommand if the C79 spike needs it.
+  the new `rusty-mux-ctl own` mode and its JSON line protocol (C46). C79 reuses the existing
+  `bridge` and adds no ctl surface.
+- **Crate boundary:** orch reaches the mux only as a `rusty-mux-ctl own` child process. Any
+  in-process client for orch is a new boundary decision, which stays gated.
 - **Security review:** descriptor passing, the input gate and ownership.
 - **Writes on BaileyAi:** the front door, the map file and the account server's unit (C79).
 
