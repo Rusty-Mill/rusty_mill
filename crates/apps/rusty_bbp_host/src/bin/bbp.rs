@@ -21,7 +21,7 @@
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
-//! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner or harness group of it runs; kills groups a dead moderator left
+//! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner, harness group or session cgroup of it runs; kills groups a dead moderator left and populated cgroups
 //! bbp profiles rust-lld --sysroot PATH     pre-task, bounded Rust/LLD test profile
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
@@ -33,6 +33,9 @@
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
+//! bbp slot-hold --cgroup PATH [--deadline-ms N]   D82: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
+//! bbp cgroup-scope --dir D                 D82: the cgroup name this control directory's sessions must sit below
+//! bbp cgroup-open --dir D --task T --cgroup PATH   D82: records a mux-hosted session's cgroup for the task, then creates it (refused if it exists or isn't below the scope)
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
@@ -103,6 +106,9 @@ fn run() -> Result<String, String> {
             })
             .transpose()?
             .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+        if let Some(cgroup) = a.flags.get("cgroup") {
+            return cgroup_hold(cgroup, deadline);
+        }
         slots::hold_while_alive(deadline);
         return Ok(String::new());
     }
@@ -178,6 +184,9 @@ fn run() -> Result<String, String> {
         return broker::broker(&pipes, mcp::Binding::from_env()?, harness).map(|()| String::new());
     }
     let dir = PathBuf::from(a.flag_or_env("dir", "BBP_DIR")?);
+    if sub == "cgroup-scope" {
+        return cgroup_scope(&dir);
+    }
     // `bbp why TASK` names the task positionally too.
     let task = match (sub.as_str(), a.positional.first()) {
         ("why", Some(t)) => TaskId(t.clone()),
@@ -187,6 +196,9 @@ fn run() -> Result<String, String> {
         let mut tasks: Vec<TaskId> = task.0.split(',').map(|t| TaskId(t.to_owned())).collect();
         tasks.extend(a.positional.iter().map(|t| TaskId(t.clone())));
         return inbox::json(&dir, &tasks);
+    }
+    if sub == "cgroup-open" {
+        return cgroup_open(&dir, &task, &PathBuf::from(a.flag("cgroup")?));
     }
     if sub == "quiesce" {
         return moderator::quiesce(&dir, &task).map(|quiet| quiet.to_string());
@@ -569,3 +581,54 @@ fn takeover_batch(input: impl std::io::Read) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
+
+/// `bbp slot-hold --cgroup PATH`: holds until the cgroup is empty.
+#[cfg(target_os = "linux")]
+fn cgroup_hold(cgroup: &str, deadline: Option<std::time::SystemTime>) -> Result<String, String> {
+    use rusty_bbp_host::cgroups::{checked, hold, Session};
+    let cgroup = checked(std::path::Path::new(cgroup))?;
+    // Opened once and held: a cgroup made again at the path is not this one.
+    let session = loop {
+        match Session::open(&cgroup) {
+            Ok(session) => break session,
+            Err(e) => eprintln!("bbp slot-hold: {e}; still holding"),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    hold(&session, deadline, std::io::stdin(), &mut |e| {
+        eprintln!("bbp slot-hold: {e}; still holding")
+    });
+    Ok(String::new())
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_scope(dir: &std::path::Path) -> Result<String, String> {
+    rusty_bbp_host::cgroups::scope(dir)
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_open(
+    dir: &std::path::Path,
+    task: &TaskId,
+    cgroup: &std::path::Path,
+) -> Result<String, String> {
+    rusty_bbp_host::cgroups::open(dir, task, cgroup).map(|c| c.display().to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_hold(_: &str, _: Option<std::time::SystemTime>) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_scope(_: &std::path::Path) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_open(_: &std::path::Path, _: &TaskId, _: &std::path::Path) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+const CGROUPS_LINUX_ONLY: &str = "session cgroups are Linux only";
