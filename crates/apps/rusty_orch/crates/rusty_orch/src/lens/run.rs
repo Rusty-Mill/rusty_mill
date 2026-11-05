@@ -235,7 +235,8 @@ impl Prefixes {
 /// Run up to `max` passes over every lens until one starts no job. A lens
 /// without a seat is an error. Each job's outcome is written to `log`.
 /// `state` goes to `keep` after every lens's round, so a restart resumes
-/// from it; a failed keep is an error.
+/// from it; a failed keep is an error. The round's review rows are saved
+/// first, so no job is kept as done without its row.
 #[allow(clippy::too_many_arguments)]
 pub fn passes(
     lenses: Lenses<'_>,
@@ -292,10 +293,12 @@ pub fn passes(
                 save: &mut *metering.save,
             };
             let report = round(&one, &view, state, ctx, models, seat.board());
-            keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
+            // Rows before state: a job kept as done must have its row, and a
+            // row saved for a job that then reruns is replaced by its key.
             for r in &report.reviews {
                 (records.save)(r).map_err(|e| format!("track record not saved: {e}"))?;
             }
+            keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
             started += report.ran.len();
             for (key, end) in &report.ran {
                 let _ = writeln!(
@@ -786,6 +789,34 @@ mod tests {
             "{log}"
         );
         assert_eq!(e.1, 2, "both lenses still asked");
+    }
+
+    #[test]
+    fn a_failed_row_save_keeps_no_state_so_the_job_reruns() {
+        let mut save_review = |_: &Review| Err("disk full".to_owned());
+        let mut read_records = || Ok(BTreeMap::new());
+        let records = Records {
+            save: &mut save_review,
+            read: &mut read_records,
+        };
+        let mut kept = 0;
+        let mut keep = |_: &State| {
+            kept += 1;
+            Ok(())
+        };
+        let mut e = echo(Ok(vec![counter()]));
+        let (ended, log) = go_with(
+            &mut State::default(),
+            &mut keep,
+            records,
+            two_seats(),
+            &mut e,
+            10,
+            1,
+        );
+        let err = ended.expect_err("a lost row stops the run");
+        assert!(err.contains("track record not saved: disk full"), "{err}");
+        assert_eq!(kept, 0, "state not kept past an unsaved row: {log}");
     }
 
     fn two_seats() -> Vec<(&'static str, FakeSeat)> {
