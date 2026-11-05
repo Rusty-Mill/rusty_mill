@@ -88,6 +88,7 @@ main.metrics{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(26
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
 dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
 dialog form{display:grid;gap:8px}
+.prompt{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center}.prompt textarea{grid-column:1/-1;font-family:ui-monospace,monospace}
 .cm div{border-top:1px solid var(--line);padding:6px 0}
 .banner{border:1px solid var(--acc);border-radius:6px;padding:6px 8px}.banner:empty{display:none}
 @media (max-width:640px){main{grid-auto-flow:row;grid-auto-columns:auto}}
@@ -417,21 +418,26 @@ function pickAgent(agent){sel={...sel,agent};render()}
 
 /* The card dialog is built once and then kept in step with the board without ever
    touching what the person is typing. `dlg.base` is the card as they last saw it. */
-const snap=k=>({rev:k.rev,title:k.title,body:k.body,tags:k.tags.join(", ")});
-const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,tags:dlg.f.g.value});
-const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.tags===b.tags;
-function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s.tags}
+const snap=k=>({rev:k.rev,title:k.title,body:k.body,prompt:k.prompt??"",tags:k.tags.join(", ")});
+const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,prompt:dlg.f.q.value,tags:dlg.f.g.value});
+const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.prompt===b.prompt&&a.tags===b.tags;
+function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s.prompt;dlg.f.g.value=s.tags}
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select")};
   for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
   [5,3,1,0].forEach(v=>f.pr.append(new Option("Priority: "+PRIORITY[v],v)));
   f.pr.setAttribute("aria-label","priority");f.pr.value=k.priority;
   f.pr.onchange=()=>act("card_plan",{id,priority:+f.pr.value});
-  f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
+  f.b.rows=6;f.g.placeholder="tags, comma separated";
+  // The prompt: instructions for whoever takes the card, kept apart from the description.
+  f.q.rows=4;f.q.placeholder="Prompt for whoever takes this card";f.q.setAttribute("aria-label","prompt");
+  const copy=el("button","Copy prompt");copy.type="button";
+  copy.onclick=async()=>{try{await navigator.clipboard.writeText(f.q.value);toast("Prompt copied")}catch{toast("Copy failed")}};
+  const promptRow=el("div","","prompt");promptRow.append(el("label","Prompt "),copy,f.q);f.ci.placeholder="Comment, then Enter";
   dlg={id,base:snap(k),f};setFields(dlg.base);
   const row=el("div");
   const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b," ")};
@@ -440,13 +446,13 @@ function show(id){
   f.ar=el("button");f.ar.type="button";f.ar.onclick=()=>{const c=cards.find(x=>x.id===id);if(c)act(shelved(c)?"card_restore":"card_archive",{id})};row.append(f.ar," ");
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
-  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
+  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,promptRow,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
 async function save(){
   const d=dlg,t=typed();
-  const r=await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
+  const r=await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,prompt:t.prompt,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
   if(r&&dlg===d)d.base=snap(r.card);   // the dialog may have been closed or reopened on another card meanwhile
 }
 function syncDialog(){

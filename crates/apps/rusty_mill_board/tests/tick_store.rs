@@ -2,12 +2,28 @@
 //! owner's edits in rusty_tick reach the board (ADR-0012).
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind, Plan, Shelf};
+use rusty_mill_board::domain::{BoardError, Card, Column, Edit, Event, EventKind, Plan, Shelf};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::Store;
 use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
 use serde_json::json;
 use std::sync::{Arc, Barrier};
+
+/// An edit of the title only.
+fn title(t: &str) -> Edit<'_> {
+    Edit {
+        title: Some(t),
+        ..Edit::default()
+    }
+}
+
+/// An edit of the prompt only.
+fn prompt(p: &str) -> Edit<'_> {
+    Edit {
+        prompt: Some(p),
+        ..Edit::default()
+    }
+}
 
 /// A plan of a priority and dependencies only.
 fn plan(priority: Option<u8>, deps: Option<Vec<uuid::Uuid>>) -> Plan {
@@ -523,14 +539,7 @@ fn a_write_in_two_steps_returns_the_revision_a_read_sees_and_the_next_edit_names
         .expect("import");
     assert_eq!(imported.rev, board.get(imported.id).expect("get").rev);
     board
-        .edit_at(
-            imported.id,
-            &human,
-            Some(imported.rev),
-            Some("t"),
-            None,
-            None,
-        )
+        .edit_at(imported.id, &human, Some(imported.rev), &title("t"))
         .expect("edit at the returned revision");
 
     // So is a plan with a priority and dependencies.
@@ -541,7 +550,7 @@ fn a_write_in_two_steps_returns_the_revision_a_read_sees_and_the_next_edit_names
         .expect("plan");
     assert_eq!(planned.rev, board.get(card.id).expect("get").rev);
     let edited = board
-        .edit_at(card.id, &human, Some(planned.rev), Some("t"), None, None)
+        .edit_at(card.id, &human, Some(planned.rev), &title("t"))
         .expect("edit at the returned revision");
     assert_eq!(edited.rev, board.get(card.id).expect("get").rev);
 }
@@ -664,4 +673,41 @@ fn restoring_an_aged_out_card_persists_its_restore_time_in_rusty_tick() {
             .expect("tags")
             .contains(&json!("restored:42"))
     );
+}
+
+#[test]
+fn a_prompt_is_kept_in_the_board_document_and_read_back() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board
+        .add(&human, "a", "the description", vec![])
+        .expect("add");
+    assert!(
+        tick.docs("board").is_empty(),
+        "no prompt and no links: no document"
+    );
+    let edited = board
+        .edit_at(card.id, &human, None, &prompt("Do the thing."))
+        .expect("set prompt");
+    assert_eq!(edited.prompt, "Do the thing.");
+    assert_eq!(tick.docs("board")[0]["prompt"], "Do the thing.");
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.prompt.as_str(), read.body.as_str()),
+        ("Do the thing.", "the description"),
+        "the prompt is apart from the body"
+    );
+    let cleared = board
+        .edit_at(card.id, &human, None, &prompt(""))
+        .expect("clear");
+    assert!(cleared.prompt.is_empty());
+    assert!(
+        tick.docs("board")[0].get("prompt").is_none(),
+        "an empty prompt is left out of the document"
+    );
+    let too_long = "x".repeat(32 * 1024 + 1);
+    assert!(matches!(
+        board.edit_at(card.id, &human, None, &prompt(&too_long)),
+        Err(BoardError::Invalid(_))
+    ));
 }

@@ -236,6 +236,8 @@ struct BoardDoc {
     synced_text: Option<u64>,
     #[serde(default)]
     execution: Option<ExecutionLink>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    prompt: String,
 }
 
 impl BoardDoc {
@@ -247,6 +249,7 @@ impl BoardDoc {
             issue: card.issue,
             synced_text: card.synced_text,
             execution: card.execution.clone(),
+            prompt: card.prompt.clone(),
         }
     }
 
@@ -352,6 +355,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         rev,
         title: task.title,
         body: task.notes,
+        prompt: doc.prompt,
         column,
         claim,
         tags,

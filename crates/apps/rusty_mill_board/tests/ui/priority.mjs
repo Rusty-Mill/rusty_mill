@@ -52,7 +52,7 @@ check(plain.priority === 3, "choosing Medium in the dialog sets priority 3");
 check(await page.locator(".card", { hasText: "Plain card" }).locator(".tag.p3", { hasText: "Medium" }).count() === 1, "the board shows the Medium badge");
 
 // 3. A change made elsewhere reaches the open dialog.
-await page.locator("#dlg").locator("textarea").focus();
+await page.locator("#dlg").locator("textarea").first().focus();
 await api("card_plan", { id: plain.id, priority: 1 });
 await sleep(3500);   // > two polls
 check((await pick.inputValue()) === "1", "a remote priority change updates the open dialog");
