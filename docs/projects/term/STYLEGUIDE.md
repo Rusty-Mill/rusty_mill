@@ -69,9 +69,15 @@ code (pack D34 to D39):
 | Notice | A transient result (copied, reloaded) fades by itself; an error the user must act on stays inline until dismissed |
 | Prompt | Blocking decisions only. Anything asking for trust (multi-line paste, OSC 52 read, opening a link in another app, C63) uses one trust surface themes cannot restyle |
 
-Target: states follow the pack's state matrix (D26). The focus ring is 2 px with a 2 px offset
-in the theme accent, at 3:1 or better (D27, D34). First-run setup reuses the settings overlay
-with numbered steps (D32, D33).
+States (D26, D43): hover raises a control one surface step; pressed (mouse down on a tab, ×,
+`+`, `▾` or a caption button, held through a tab drag) is `line` with full text, since muted text
+fails there; a disabled settings row draws its text at 45% over its surface and takes no hover.
+In a keyboard-driven list the selected row (raised fill plus accent bar) is the focus mark; the
+strip and caption buttons take no keyboard focus.
+
+Target: standalone controls that can take keyboard focus get a 2 px ring with a 2 px offset in
+the theme accent, at 3:1 or better (D27, D34). First-run setup reuses the settings overlay with
+numbered steps (D32, D33).
 
 ## UX rules
 

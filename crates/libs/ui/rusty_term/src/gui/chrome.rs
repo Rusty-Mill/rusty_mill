@@ -311,6 +311,15 @@ mod tests {
         assert!(contrast_ratio(split.running, chrome.line) >= ACCENT_MIN);
     }
 
+    /// Pressed controls draw on `line` with full text (D43); slate would fail.
+    #[test]
+    fn pressed_text_is_legible_on_line() {
+        for pack in [DARK, LIGHT] {
+            let r = contrast_ratio(pack.bone, pack.line);
+            assert!(r >= TEXT_MIN, "text on line {:06x} = {r:.2}", pack.line);
+        }
+    }
+
     #[test]
     fn dark_and_light_backgrounds_pick_their_pack() {
         let dark = Chrome::from_theme(&Theme {
