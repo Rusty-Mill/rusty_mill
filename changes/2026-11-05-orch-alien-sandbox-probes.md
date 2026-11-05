@@ -8,4 +8,5 @@ changelog: The alien lens runs its probes itself, sandboxed with no network, on 
 - **Added:** a hang or a kill by signal on the candidate is a build error, so it is an `error` row and never a finding. On base, either one means the probe did not run, so it gets no row. A site that names no crate in the tree cannot build.
 - **Added:** `rusty_orch __sandbox` is the sandbox helper that `rusty_sandbox` re-invokes. It is not for direct use.
 - **Changed:** `rusty_orch` depends on the in-workspace crates `rusty_sandbox` and `rusty_worktree`.
+- **Changed:** `rusty_worktree::git_path` is public, so a caller that runs git itself can spell a Windows verbatim path in the form git reads. The probe runner's `git apply` uses it.
 - **Known limitations:** nothing calls the runner yet; the `--alien` runner pass wires it in. Probes build `--offline`, so their dependencies must already be in the user's cargo caches, which the sandbox can read but not write.
