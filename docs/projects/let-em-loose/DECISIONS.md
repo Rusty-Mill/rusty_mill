@@ -88,6 +88,7 @@ Precise contracts used by this guide:
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
 | D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
 | D82 | #704 slice 2: erosion profile recognition, invocation, opt-out, base, measured set and modes | [default] 2026-11-04 (#704) |
+| D83 | A GUI shows the LEL stage strip as a derived read-only display and the product intent as a read-only brief | [stated] 2026-11-04 (general) |
 
 ## D1. Lenses, not stages
 
@@ -644,3 +645,12 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_cc7bf0c6331140d8816112c351b44ed6
 **Key.** lel:704:erosion-profile-build-defaults
 **Source.** Questions Q1–Q6 from the #704 slice 2 build thread, 2026-11-04; D41, D42, D43, D62; QA.md § Erosion gate; card #704 Build 2 and Time box; `rusty_bbp_host` `src/profiles.rs` `ProfileSet`, `src/admin.rs` `open_claims_task`. Numbered D82 because open PR branches already use D78–D81. Invocation contract amended 2026-11-04 from the #704 slice 2 build thread, answering dottiusmaximus's review of PR #1494; `rusty_bbp_host` `src/profiles.rs` `check_erosion_base`.
+
+## D83. A GUI shows the LEL stage strip as a derived read-only display and the product intent as a read-only brief
+
+**Decision.** (1) A GUI's 5-stage strip (Intent, Skeletons, Under attack, Shadow run, Living app) is a derived, read-only display the GUI computes from claim and evidence facts. BBP and orch gain no stage field. (2) The shared product-intent layer is out of scope: the GUI shows the task brief read-only, and intent versioning stays on #598.
+**Why.** D1, D9 and D27 say there is no stage state machine, so a derived view keeps them intact and needs no ask-first change. #598 already holds intent versioning and nothing is designed.
+**Rejected.** A real product-level stage field in orch/BBP (reopens D1/D9). A structured, versioned, GUI-editable product-intent object now.
+**Tag.** [stated] · remind-me: mem_28731854176542ec9a596164bb9ef8a9 (written by the rusty_term design expert; records Nano's AskUserQuestion answers, 2026-11-04; it is not LEL-tagged)
+**Key.** lel:general:gui-stage-strip-derived-intent-readonly
+**Source.** Nano via AskUserQuestion, 2026-11-04, relayed by the coordinator and verified in mem_28731854176542ec9a596164bb9ef8a9. Asked in the LEL full-app SVG review (README § Full-application interface, D1, D9, D27, D35, #598).

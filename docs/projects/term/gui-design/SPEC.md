@@ -14,6 +14,8 @@ not code. [stated] Implementing the frames in `crates/libs/ui/rusty_term` is a l
 - Out: Rust or GUI code changes; wire protocol changes; marketing
   pages.
 
+- Added 2026-11-04 [stated] (D37-D41): Let Em Loose full-app view (stage strip, read-only intent brief, claims map, decision inbox) as a dedicated LEL tab plus an inbox chip in every window's top strip; frames L1-L3 planned on `assets/html/lel.html`; no new colour; no BBP/orch change.
+
 ## Constraints
 - One interface serves rusty_term and rusty_mux together. [stated]
 - The server owns the layout: a session holds windows, and each window holds a split tree of blocks.

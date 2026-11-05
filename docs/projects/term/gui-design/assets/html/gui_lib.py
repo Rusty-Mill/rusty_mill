@@ -173,6 +173,42 @@ body{margin:0;background:#E9EDEC;font-family:var(--ui);color:#182024}
 .dock{height:36px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 14px 0 12px;background:var(--sunk);border-top:1px solid var(--line);font-size:12px;color:var(--slate)}
 .dock .l,.dock .r{display:flex;align-items:center;gap:8px}.dock .r{gap:16px}.dock .r>span{display:flex;align-items:center;gap:6px}
 .cmp{width:1100px;border-collapse:collapse;font-size:13px;color:var(--bone)}.cmp th,.cmp td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--line);vertical-align:top}.cmp th{font-size:12px;font-weight:500;color:var(--slate)}.cmp td:first-child{font-weight:500;width:200px}
+.frame,.sheet{--accent:var(--verd)}
+.lel{flex:1;display:flex;flex-direction:column;min-height:0;padding:0 8px 8px;gap:8px;position:relative}
+.stages{display:flex;gap:8px;height:44px;flex:none}
+.stg{flex:1;display:flex;align-items:center;gap:10px;padding:0 14px;border:1px solid var(--line);border-radius:9px;background:var(--base);color:var(--slate);font-size:13px}
+.stg b{font-weight:500}.stg .w{margin-left:auto;font-size:12px;font-weight:500}.stg .num{font-family:var(--mono);font-size:12px}
+.stg.done{color:var(--bone)}.stg.done .ic{color:var(--verd)}
+.stg.now{border:2px solid var(--accent);color:var(--bone);padding:0 13px}.stg.now .ic{color:var(--accent)}
+.stg.later{border-style:dashed}
+.lrow{flex:1;display:flex;gap:8px;min-height:0}
+.lp{background:var(--base);border:1px solid var(--line);border-radius:9px;display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden}
+.lp .ph{height:38px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 12px 0 14px;border-bottom:1px solid var(--line)}
+.lp .ph b{font-weight:500}.lp .ph .g{display:flex;align-items:center;gap:8px}
+.lp .pb{flex:1;padding:12px 14px;display:flex;flex-direction:column;gap:8px;overflow:hidden}
+.lp .pf{flex:none;padding:10px 14px;border-top:1px solid var(--line);font-size:12px;color:var(--slate);background:var(--sunk)}
+.kv{display:flex;gap:10px;font-size:13px;line-height:20px;align-items:flex-start}.kv .k{width:64px;flex:none}
+.grp{font-size:11px;color:var(--slate);margin-top:4px}
+.feat{display:flex;align-items:center;gap:10px;height:30px;font-size:13px;color:var(--bone)}.feat .ic{color:var(--slate)}
+.cl{display:grid;grid-template-columns:1fr 110px 44px 118px;align-items:center;gap:12px;min-height:46px;padding:0 12px;border:1px solid var(--line);border-radius:7px;color:var(--bone)}
+.cl .nm{display:flex;flex-direction:column;gap:1px}.cl .nm b{font-weight:500;font-size:13px}.cl .nm span{font-size:11px;color:var(--slate)}
+.cl .pc{font-family:var(--mono);font-size:12px;text-align:right}
+.cl .st{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:500}
+.cl .bar{width:100%}.cl .bar i{background:var(--bone)}
+.cl.settled,.cl.settled .nm b{color:var(--slate)}.cl.settled .bar i{background:var(--slate)}
+.cl.open{border-style:dashed}
+.cl.yours{border:1.5px solid var(--accent)}.cl.yours .bar i,.cl.contested .bar i{background:var(--accent)}
+.cl.contested{border:1.5px dashed var(--accent)}
+.cl.gather{border-style:dashed;color:var(--slate)}.cl.gather .nm b{color:var(--slate)}
+.cl.is-focus{outline:2px solid var(--verd);outline-offset:2px}
+.card{background:var(--raised);border:1px solid var(--line);border-radius:9px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.card .th{display:flex;align-items:center;justify-content:space-between}.card .th b{font-weight:500;font-size:13px}
+.card p{margin:0;font-size:12px;line-height:18px;color:var(--slate)}
+.card .acts{display:flex;gap:8px;flex-wrap:wrap}
+.cand{display:flex;align-items:center;gap:10px;min-height:32px;padding:0 10px;border:1px solid var(--line);border-radius:7px;background:var(--base);font-size:12px}
+.dry{font-family:var(--mono);font-size:12px;line-height:19px;color:var(--slate);background:var(--sunk);border:1px solid var(--line);border-radius:7px;padding:8px 10px;white-space:pre-wrap}
+.lp.act{border:1.5px solid var(--accent)}
+.rsn{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;color:var(--bone)}
 """
 
 SPRITE = """<svg width="0" height="0" style="position:absolute"><defs>
@@ -196,6 +232,10 @@ SPRITE = """<svg width="0" height="0" style="position:absolute"><defs>
 <symbol id="i-gear" viewBox="0 0 16 16"><path d="M8 5.8a2.2 2.2 0 1 0 0 4.4 2.2 2.2 0 0 0 0-4.4zM8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></symbol>
 <symbol id="i-sidebar" viewBox="0 0 16 16"><path d="M2.5 3.5h11v9h-11zM6.5 3.5v9"/></symbol>
 <symbol id="i-lock" viewBox="0 0 16 16"><path d="M4 7.5h8v5.5H4zM5.5 7.5V5.5a2.5 2.5 0 0 1 5 0v2"/></symbol>
+<symbol id="i-inbox" viewBox="0 0 16 16"><path d="M2.5 9.5l2-6h7l2 6v3h-11zM2.5 9.5h3.5l.8 1.5h2.4l.8-1.5h3.5"/></symbol>
+<symbol id="i-now" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="2" style="fill:currentColor"/></symbol>
+<symbol id="i-later" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" style="stroke-dasharray:2.4 2.2"/></symbol>
+<symbol id="i-you" viewBox="0 0 16 16"><path d="M8 7.8a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8zM3.2 13.3c.5-2.5 2.3-3.8 4.8-3.8s4.3 1.3 4.8 3.8"/></symbol>
 </defs></svg>"""
 
 
@@ -232,6 +272,7 @@ def thumb(cells: list[tuple[float, float, float, float, bool]]) -> str:
 T_BUILD = [(0, 0, .6, 1, False), (.6, 0, .4, .55, True), (.6, .55, .4, .45, False)]
 T_AGENTS = [(0, 0, .5, 1, True), (.5, 0, .5, 1, True)]
 T_ONE = [(0, 0, 1, 1, False)]
+T_LEL = [(0, 0, .3, 1, False), (.3, 0, .4, 1, True), (.7, 0, .3, 1, False)]
 
 
 def tab(n: int, name: str, cells, sel: bool = False, state: str = "", bell: bool = False) -> str:
@@ -240,13 +281,20 @@ def tab(n: int, name: str, cells, sel: bool = False, state: str = "", bell: bool
     return f'<span class="{cls}">{thumb(cells)}<span>{n}  {escape(name)}</span>{b}</span>'
 
 
-def strip(sel: int = 1, detached: int = 0, cells: dict | None = None) -> str:
-    cells = cells or {1: T_BUILD, 2: T_AGENTS, 3: T_ONE}
+def strip(sel: int = 1, detached: int = 0, cells: dict | None = None, lel: bool = False,
+          inbox: int | None = None, inbox_open: bool = False) -> str:
+    """Top strip. `lel` adds the Let Em Loose tab (D37); `inbox` is the decision count chip, shown in every window."""
+    cells = dict(cells or {1: T_BUILD, 2: T_AGENTS, 3: T_ONE})
     names = {1: "build", 2: "agents", 3: "baileyai"}
-    tabs_html = "".join(tab(i, names[i], cells[i], sel=(i == sel)) for i in (1, 2, 3))
+    if lel:
+        cells[4], names[4] = T_LEL, "let em loose"
+    tabs_html = "".join(tab(i, names[i], cells[i], sel=(i == sel)) for i in sorted(names))
     chip = ""
     if detached:
         chip = f'<span class="chip is-open" style="margin-right:16px">{ic("zoom")}{detached} detached{ic("chevdown")}</span>'
+    if inbox is not None:
+        label = "No decisions waiting" if inbox == 0 else f"{inbox} decision{'s' if inbox != 1 else ''} waiting"
+        chip += f'<span class="chip{" is-open" if inbox_open else ""}" style="margin-right:16px">{ic("inbox")}{label}{ic("chevdown")}</span>'
     return (f'<div class="strip"><div class="l"><div class="dots"><i></i><i></i><i></i></div>'
             f'<div class="sess">{ic("server")}<b>rusty_mill</b><span>on baileyai</span>{ic("chevdown")}</div>'
             f'<div class="vdiv"></div><div class="tabs">{tabs_html}<span class="plus">{ic("plus")}</span></div></div>'
