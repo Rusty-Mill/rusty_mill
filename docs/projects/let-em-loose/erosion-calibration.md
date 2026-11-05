@@ -8,16 +8,20 @@ This is the calibration that D42 requires before the erosion gate leaves report-
   - The **strict set** (108 PRs) is the branches not under `claude/`, `codex/` or `import/`, as the closest available proxy for human PRs.
   - The **wide set** (1,145 PRs) is every non-bot PR except the 37 `import/` subtree imports.
 - **Measurement.** Each PR's merge commit (its squash commit for older PRs) is measured against its first parent with `erosion check --base <first parent> --report-only`, from the same binary the profile runs. Every PR was measured; none errored.
-- **Reproducing it.** Run the scripts in `crates/tools/rusty_erosion/calibrate/` against a full-history clone (`git fetch --unshallow origin main`):
+- **Recorded run.** The tables below are one fixed run: the 1,182 PRs merged from #10 to #1521 that `prs.sh` listed on 2026-11-05. The binary was built from the `rusty_erosion` source of commit `f407699455`, which is unchanged through this report's commit.
+- **Reproducing it.** From the repository root, in a full-history clone (`git fetch --unshallow origin main`):
 
   ```sh
   cargo build --release -p rusty_erosion
-  calibrate/prs.sh | tr '\t' ' ' | xargs -P 4 -L 1 sh -c \
-    'calibrate/measure.sh "$PWD/target/release/erosion" "$PWD" OUT "$0" "$1" "$2"'
-  python3 -I calibrate/summarize.py OUT
+  BIN="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)/release/erosion"
+  C=crates/tools/rusty_erosion/calibrate
+  OUT="$PWD/erosion-calibration" && mkdir -p "$OUT"
+  "$C/prs.sh" | tr '\t' ' ' | xargs -P 4 -L 1 sh -c \
+    "$C/measure.sh"' "$0" "$1" "$2" "$3" "$4" "$5"' "$BIN" "$PWD" "$OUT"
+  python3 -I "$C/summarize.py" "$OUT"
   ```
 
-  A run takes about 15 seconds per PR on 4 cores. `prs.sh` lists the PRs merged by the time you run it, so later runs include newer PRs.
+  A run takes about 15 seconds per PR on 4 cores. `prs.sh` lists every PR merged when it runs, so a later run includes newer PRs and won't match the tables exactly. To reproduce the recorded run, keep only PRs up to #1521 and build `rusty_erosion` at `f407699455`.
 
 ## Results
 
