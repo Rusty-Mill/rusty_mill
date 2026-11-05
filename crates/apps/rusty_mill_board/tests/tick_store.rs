@@ -743,6 +743,31 @@ fn a_prompt_is_kept_in_the_board_document_and_read_back() {
 }
 
 #[test]
+fn a_prompt_that_escapes_past_the_document_limit_is_refused_before_any_write() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    // Within 32 KiB as typed, but every quote doubles once stored as JSON.
+    let quotes = "\"".repeat(32 * 1024);
+    let edit = Edit {
+        title: Some("b"),
+        prompt: Some(&quotes),
+        ..Edit::default()
+    };
+    assert!(matches!(
+        board.edit_at(card.id, &human, None, &edit),
+        Err(BoardError::Invalid(_))
+    ));
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.title.as_str(), read.rev),
+        ("a", card.rev),
+        "the title is not applied without the prompt"
+    );
+    assert!(tick.docs("board").is_empty());
+}
+
+#[test]
 fn a_milestone_is_a_dated_task_tagged_milestone_and_never_a_card() {
     let (board, tick) = board();
     let board = board.with_milestones(Box::new(TickStore::new(tick.clone())));
