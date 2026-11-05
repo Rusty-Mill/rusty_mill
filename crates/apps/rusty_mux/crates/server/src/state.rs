@@ -15,7 +15,7 @@ use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
     Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Takeover, encode,
 };
-use rusty_mux_status::Records;
+use rusty_mux_status::{Parts, Status};
 use rusty_term_core::{AnsiParser, Grid};
 use rusty_tokio::sync::{Notify, oneshot};
 use rusty_tokio::task::JoinHandle;
@@ -87,7 +87,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::SESSION_NAMES)
     .union(Features::NAME_SESSION)
     .union(Features::TERMINAL_MORE)
-    .union(Features::TERMINAL_SHELL);
+    .union(Features::TERMINAL_SHELL)
+    .union(Features::AGENT_STATUS);
 
 /// Fresh randomness to pick a generated session name with.
 fn name_seed() -> u64 {
@@ -123,8 +124,9 @@ struct BlockRt {
     live: Option<Live>,
     grid: Grid,
     parser: AnsiParser,
-    /// What the program reported with OSC 7501.
-    status: Records,
+    /// What the program reported with OSC 7501 and the agent's hooks
+    /// with `terminal.report-status`.
+    status: Status,
     /// The working directory and title last announced.
     seen: terminal::Seen,
     /// The foreground process group last announced, at first the program's;
@@ -202,7 +204,7 @@ impl BlockRt {
             live: None,
             grid,
             parser,
-            status: Records::default(),
+            status: Status::default(),
             seen: terminal::Seen::default(),
             foreground: None,
             echo: Echo::Unknown,
@@ -1152,7 +1154,7 @@ impl State {
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
                 .ok_or("the program's working directory is unknown")?,
             "terminal.title" => rt.grid.title.clone(),
-            "terminal.status" => rt.status.bodies().join("\n"),
+            "terminal.status" => rt.status.shown().bodies().join("\n"),
             "terminal.process" => {
                 let live = rt.live()?;
                 let pid = live.process.pid().ok_or("the program has exited")?;
@@ -1180,6 +1182,7 @@ impl State {
                 return Ok(Outcome::Done(None));
             }
             "terminal.modes" => terminal::modes(&rt.grid),
+            "terminal.report-status" => return self.report_status(block, &named),
             "terminal.shell" => {
                 let live = rt.live()?;
                 let pid = live.process.pid().ok_or("the program has exited")?;
@@ -1563,6 +1566,40 @@ impl State {
         Ok(Outcome::Done(None))
     }
 
+    /// Applies an agent hook's report (`terminal.report-status`) to
+    /// `block`'s status and announces what that changed in what is shown.
+    fn report_status(
+        &mut self,
+        block: BlockId,
+        named: &[(&str, Value)],
+    ) -> Result<Outcome, Refusal> {
+        let text = |name: &str| {
+            named.iter().find_map(|(n, v)| match v {
+                Value::Text(t) if *n == name => Some(t.as_str()),
+                _ => None,
+            })
+        };
+        let parts = Parts {
+            id: text("id"),
+            state: text("state").unwrap_or_default(),
+            kind: text("kind"),
+            app: text("app"),
+            msg: text("msg"),
+        };
+        let report = parts
+            .report()
+            .ok_or("terminal.report-status: the fields are not a valid OSC 7501 report")?;
+        let rt = self
+            .blocks
+            .get_mut(&block)
+            .ok_or(rusty_mux_core::Error::UnknownBlock(block))?;
+        let before = rt.status.shown().states();
+        rt.status.hook(report, Instant::now());
+        let status = terminal::absorbed(&before, &rt.status.shown().states());
+        announce_status(&mut self.mux, block, status);
+        Ok(Outcome::Done(None))
+    }
+
     /// Feeds PTY output to the block's grid and tees it to attached clients.
     /// Returns the terminal's replies to queries, for the PTY.
     fn output(&mut self, block: BlockId, data: &[u8]) -> Vec<u8> {
@@ -1575,13 +1612,8 @@ impl State {
         rt.parser.advance(&mut rt.grid, data);
         rt.unsaved = true;
         let replies = rt.parser.take_responses();
-        let status = terminal::absorb_status(&mut rt.grid, &mut rt.status);
-        for id in status.removed {
-            in_step("status removed", self.mux.note_status_removed(block, id));
-        }
-        if status.changed {
-            in_step("status", self.mux.note_status(block));
-        }
+        let status = terminal::absorb_status(&mut rt.grid, &mut rt.status, Instant::now());
+        announce_status(&mut self.mux, block, status);
         let (pwd, title) = rt.seen.changes(&rt.grid);
         if pwd {
             in_step("pwd", self.mux.note_pwd(block));
@@ -1841,6 +1873,16 @@ fn client_entry(client: &rusty_mux_core::Client) -> Entry {
 
 /// Reports a model call that fails only if the server's state and the
 /// model's disagree.
+/// Announces the status records that ended, then a state change, if any.
+fn announce_status(mux: &mut Mux, block: BlockId, status: terminal::Absorbed) {
+    for id in status.removed {
+        in_step("status removed", mux.note_status_removed(block, id));
+    }
+    if status.changed {
+        in_step("status", mux.note_status(block));
+    }
+}
+
 fn in_step(what: &str, result: Result<(), rusty_mux_core::Error>) {
     if let Err(err) = result {
         eprintln!("rusty-mux-server: model out of step on {what}: {err}");
@@ -2628,7 +2670,13 @@ mod regression {
                 replies.starts_with(b"\x1b]7501;?\x1b\\\x1b["),
                 "{replies:?}"
             );
-            assert!(shared.borrow().blocks[&block].status.bodies().is_empty());
+            assert!(
+                shared.borrow().blocks[&block]
+                    .status
+                    .shown()
+                    .bodies()
+                    .is_empty()
+            );
             State::request(&shared, client, Message::CloseBlock { req: 99, block });
         });
     }
