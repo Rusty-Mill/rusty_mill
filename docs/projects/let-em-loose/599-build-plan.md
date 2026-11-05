@@ -130,7 +130,7 @@ As built (D93, D92):
   and saving the same job again unions its items, so a job rerun after a
   crash keeps every item it posted. A post that fails partway keeps the
   ids that were answered; one whose answer was lost marks the job
-  `unsure`, and an unsure job is scored only against ground truth.
+  `unsure`, and an unsure job is never scored (pivotal on a line).
 - **Settlement.** The latest status step that changed the status; an
   escalation that leaves a claim accepted settles nothing.
 - **Interim limits, until OPEN_QUESTIONS Q35 (D92).** Each limit only adds

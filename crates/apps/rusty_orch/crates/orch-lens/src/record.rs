@@ -163,12 +163,18 @@ pub fn score(review: &Review, trail: &Trail) -> Scored {
         return Scored::Pending;
     };
     let own = Own::of(review, trail);
-    let Some(direction) = own.direction(trail) else {
+    // An unsure job's own items aren't all known, so neither are its
+    // direction, citation or weight: it is never scored, and on a line
+    // settlement it counts as pivotal (D92).
+    if review.unsure {
         return Scored::Unscored {
-            pivotal: review.unsure && line_settled(trail, settled),
+            pivotal: line_settled(trail, settled),
         };
+    }
+    let Some(direction) = own.direction(trail) else {
+        return Scored::Unscored { pivotal: false };
     };
-    let pivotal = pivotal(trail, settled, &own, review.unsure);
+    let pivotal = pivotal(trail, settled, &own);
     let truth = if pivotal {
         match golden(trail, settled).filter(|_| !own.executed(trail)) {
             Some(t) => t,
@@ -342,9 +348,8 @@ fn line_settled(trail: &Trail, settled: usize) -> bool {
 
 /// Whether the line that settled the claim would not have held without the
 /// job's own items. A human settlement is never pivotal. A line counts as
-/// pivotal when the job's own items aren't all known (`unsure`) or a human
-/// reopen may have changed the live items (D92).
-fn pivotal(trail: &Trail, settled: usize, own: &Own, unsure: bool) -> bool {
+/// pivotal when a human reopen may have changed the live items (D92).
+fn pivotal(trail: &Trail, settled: usize, own: &Own) -> bool {
     let step = &trail.steps[settled];
     let Change::Status(Rule::Line {
         at,
@@ -354,7 +359,7 @@ fn pivotal(trail: &Trail, settled: usize, own: &Own, unsure: bool) -> bool {
     else {
         return false;
     };
-    if unsure || maybe_woken(trail, settled) {
+    if maybe_woken(trail, settled) {
         return true;
     }
     let way = match step.status {
@@ -552,6 +557,18 @@ mod tests {
         match wake {
             Wake::Item(MsgId(3)) => 8,
             _ => 0,
+        }
+    }
+
+    impl Change {
+        /// An open step at score 0, epoch 0.
+        fn into_step(self) -> Step {
+            Step {
+                change: self,
+                status: ClaimStatus::Open,
+                score: 0,
+                epoch: 0,
+            }
         }
     }
 
@@ -897,7 +914,8 @@ mod tests {
     }
 
     /// A non-pivotal win, but one of the job's posts was lost and may have
-    /// landed: it counts as pivotal, scored only against ground truth.
+    /// landed: its direction, citation and weight aren't known, so it is
+    /// never scored, and on a line it counts as pivotal.
     #[test]
     fn a_job_with_a_lost_post_is_never_scored_against_the_outcome() {
         let t = trail(
@@ -923,14 +941,19 @@ mod tests {
             score(&nothing_known, &t),
             Scored::Unscored { pivotal: true }
         );
-        // A human settlement didn't depend on the score: the known items
-        // are scored against it.
+        // Not on a human settlement either, nor against golden truth: the
+        // lost item may have gone the other way or cited the report.
         let mut human = t.clone();
         human.steps[4].change = Change::Status(Rule::Human);
-        assert!(matches!(
-            score(&unsure, &human),
-            Scored::Points { pivotal: false, .. }
-        ));
+        assert_eq!(score(&unsure, &human), Scored::Unscored { pivotal: false });
+        let mut golden = t.clone();
+        golden
+            .steps
+            .insert(0, Change::Candidate(ArtId(9)).into_step());
+        golden
+            .steps
+            .insert(1, failing("golden:cases", Some(9)).into_step());
+        assert_eq!(score(&unsure, &golden), Scored::Unscored { pivotal: true });
     }
 
     #[test]
