@@ -347,6 +347,11 @@ impl<R: Rpc> Session<R> {
             .collect()
     }
 
+    /// The task's brief as of the last refresh.
+    pub fn brief_id(&self) -> Option<ArtId> {
+        self.brief
+    }
+
     /// The task brief's text: the intent every lens prefix starts with.
     /// Charged once per call (R11), so the shell reads it once per run.
     pub fn brief(&mut self) -> Result<String, String> {
@@ -839,6 +844,7 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            intent: None,
             human_touched: false,
         }
     }

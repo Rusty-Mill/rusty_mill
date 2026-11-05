@@ -541,7 +541,9 @@ function renderDecisions(){
     }
     const acts=el("div",null,"acts"),btn=(t,f)=>{const x=el("button",t);x.onclick=f;acts.append(x)};
     btn("Approve",()=>decide(it,{action:"approve"}));
-    btn("Reject",()=>{const reason=it.reason==="TaskTotal"?prompt("Why cancel this task?"):null;if(it.reason!=="TaskTotal"||reason)decide(it,{action:"reject",...(reason&&{reason})})});
+    // A whole-task stop (a spent total or a #598 pause) is cancelled with a reason; cancelling the prompt sends nothing.
+    const task=it.reason==="TaskTotal"||it.reason==="TaskPaused";
+    btn("Reject",()=>{const reason=task?prompt("Why cancel this task?"):null;if(!task||reason)decide(it,{action:"reject",...(reason&&{reason})})});
     btn("Refine intent",()=>{const note=prompt("What should the lenses know? (1 to 1200 characters)");if(note)decide(it,{action:"refine",note})});
     s.append(acts);b.append(s);
   }
