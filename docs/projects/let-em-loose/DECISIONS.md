@@ -101,6 +101,8 @@ Precise contracts used by this guide:
 | D88 | #704 D42 expiry pause: go-live, count, what pauses, opt-out | [default] 2026-11-05 (#704) |
 | D91 | #704 slice 3: erosion escalation detail in the inbox | [default] 2026-11-05 (#704) |
 | D92 | #599 track records: job rows, pivotal scope, ground truth, weight, PR split | [default] 2026-11-05 (#599) |
+| D93 | #599 track records score pivotal reviews against ground truth only | [stated] 2026-11-04 (#599) |
+| D94 | Let Em Loose designs live in the repo, in their first draft PR | [stated] 2026-11-04 (general) |
 | D96 | #708 orch runs the alien lens's probes itself, sandboxed | [stated] 2026-11-05 (#708) |
 | D97 | #708 slice 4d: probe scratch trees and cargo time limit | [default] 2026-11-05 (#708) |
 | D98 | #708 alien hunt reads the candidate and its diffs through `get_artifact` | [default] 2026-11-05 (#708) |
@@ -813,6 +815,24 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_6f0738d7778847d0b13fac1f7d458b68
 **Key.** lel:599:track-record-build-defaults
 **Source.** let-em-loose-expert, 2026-11-05, answering questions 1–4 and 6 from the #599 track-record build thread; D58, D93 (PR #1518), 599-build-plan.md §2, `bbp-claims-addendum.md` § Holdout suites (G1), `rusty_bbp::history::Rule`. Question 5 (a `lens record` subcommand) is OPEN_QUESTIONS Q34. Interim limits: coordinator follow-ups A and B, 2026-11-05; `claims_engine.rs` `accept_line`/`drop_line`; `rusty_bbp::history` `Change`, `Rule`; OPEN_QUESTIONS Q35. PR #1520 Codex findings on reopen activation and golden provenance, 2026-11-05; `claims.rs` item append (`dormant`), `ClaimReopened` fold, `on_artifact`. PR #1520 review fixes on the settlement step and partial posts, 2026-11-05 (commits 89490a8f1, 619b735c5); `Board::post` `PostError`. dottiusmaximus's re-review question on PR #1520, 2026-11-05 (commit 5fcf62541). PR #1520 Codex finding on duplicate board effects, 2026-11-05 (commit 570e88396, `round::partial`). PR #1520 Codex finding on posts lost before the row save, 2026-11-05 (run.rs:295-299, discussion_r4485013131); dottiusmaximus's follow-up on retries that post nothing, 2026-11-05 (comment 6667319872).
+
+## D93. #599 track records score pivotal reviews against ground truth only
+
+**Decision.** Option A plus ground truth. A pivotal review is one whose outcome flips once the lens's own evidence is removed. It is not scored against the board outcome, and each lens reports a pivotal count beside its points. Where the claim has ground truth (a golden-set test, a shadow-run result, a later Nano reversal), the pivotal review is scored against that instead. With no ground truth it is unscored and counted as pivotal. The 20-item calibration report shows, per lens: points, scored count, pivotal count, and pivotal-with-ground-truth count. Required tests: pivotal with no ground truth is unscored and counted; pivotal with ground truth is scored against the ground truth; a non-pivotal review is scored as before; a lens that flips an outcome it bet on earns nothing from the flip. This answers OPEN_QUESTIONS Q17.
+**Why.** Ground truth isn't moved by the lens's vote, so scoring against it can't be gamed. Reporting the counts keeps "unmeasured" visible, so it doesn't read as "bad".
+**Rejected.** Scoring pivotal reviews against the board outcome, which the lens itself moved. Leaving every pivotal review unscored, even where ground truth exists. The other Q17 options: pivotal reviews at w = 1, or dropping the pivotal rule.
+**Tag.** [stated] · remind-me: mem_3f1158fb8fe0485697a8a713fc86469f
+**Key.** lel:599:track-record-pivotal
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Track-record question: option A, plus ground truth". OPEN_QUESTIONS Q17 (card #599 Q2). Numbered D93 (first drafted as D84) under the 2026-11-05 allocation that gives this thread's open PRs D92–D95. Confirmed by Nano's tap of option A, "Keep, report a pivotal count", on decision card cmsg_014AqbZs58L565hMV2pFkCX5FmbGRzqBvub8s2BWcnKhkV (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:17Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5E4QqeAo7EVN379KMrdxNJa). The card was posted before the 11-04 message and doesn't mention ground truth. The ground-truth scoring was confirmed when Nano told dottiusmaximus directly "1518 and 1520 I approve", after the queue had explained D93's pivotal-review ground-truth scoring. dottiusmaximus recorded this on PR #1518 (comment 6669751039, 2026-11-05T21:15:38Z) and PR #1520 (comment 6669752737, 2026-11-05T21:15:43Z). Neither comment claims the 11-04 thread message was retrieved independently.
+
+## D94. Let Em Loose designs live in the repo, in their first draft PR
+
+**Decision.** Every Let Em Loose design goes into `docs/projects/let-em-loose/` as part of its first draft PR, never only in `/mnt/project-files/` or session scratch. The rule is in the let-em-loose-expert pack (sources, step 4) and the let-em-loose row of the scoped `CLAUDE.md` rule.
+**Why.** `/mnt/project-files/` doesn't survive between sessions: the #594 and #599 designs were both lost there.
+**Rejected.** Keeping designs in `/mnt/project-files/let-em-loose/` or in session scratch.
+**Tag.** [stated] · remind-me: mem_aff6060cd75743ef9807b92006c3f1c7
+**Key.** lel:general:designs-live-in-repo
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Design docs live in the repo, never in session scratch." Numbered D94 (first drafted as D85) under the same allocation. Confirmed when Nano told dottiusmaximus directly "1518 and 1520 I approve", after the queue had explained D94's designs-in-repo rule. dottiusmaximus recorded this on PR #1518 (comment 6669751039, 2026-11-05T21:15:38Z), which doesn't claim the 11-04 thread message was retrieved independently.
 
 ## D96. #708 orch runs the alien lens's probes itself, sandboxed
 
