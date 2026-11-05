@@ -1546,7 +1546,7 @@ fn pause(w: &mut Work, reason: PauseReason, detail: &str, now: Time) -> R<Respon
     Ok(Response::Ok)
 }
 
-// ---------------------------------------------------------------- takeover (D82)
+// ---------------------------------------------------------------- takeover (D104)
 
 /// The longest takeover one `takeover` grants.
 pub const MAX_TAKEOVER_MINUTES: u32 = 60;
@@ -1571,7 +1571,7 @@ fn bounded(field: &str, value: &str, max: usize) -> R<()> {
     Ok(())
 }
 
-/// D82: written before any input is possible; one live takeover per session.
+/// D104: written before any input is possible; one live takeover per session.
 fn takeover_start(
     w: &mut Work,
     claim: MsgId,
@@ -1652,7 +1652,7 @@ fn input_cutoff(t: &Takeover) -> Time {
     stopped.plus(TAKEOVER_DRAIN_MS)
 }
 
-/// D82: the audit writes a closing takeover still takes on a terminal task,
+/// D104: the audit writes a closing takeover still takes on a terminal task,
 /// and nothing else: its drained input and its one end.
 pub(crate) fn closing_audit(st: &TaskState, a: &HostAction) -> bool {
     let id = match a {
@@ -1667,7 +1667,7 @@ pub(crate) fn closing_audit(st: &TaskState, a: &HostAction) -> bool {
         .is_some_and(|t| matches!(t.phase, TakeoverPhase::Closing { .. }))
 }
 
-/// D82: batches arrive in order and extend the chain. orch posts what the
+/// D104: batches arrive in order and extend the chain. orch posts what the
 /// mux delivered every 2 s, so a batch delivered just before input stopped
 /// may be posted after it: see [`input_cutoff`]. Never once it has ended.
 fn takeover_input(
@@ -1715,7 +1715,7 @@ fn takeover_input(
     Ok(Response::Ok)
 }
 
-/// D82: input stops now; the host drains and writes the end.
+/// D104: input stops now; the host drains and writes the end.
 fn close_takeover(w: &mut Work, id: u64, reason: TakeoverEnd, now: Time) {
     w.emit(Event::TakeoverClosing {
         takeover: id,
@@ -1724,7 +1724,7 @@ fn close_takeover(w: &mut Work, id: u64, reason: TakeoverEnd, now: Time) {
     });
 }
 
-/// D82: a task that ends stops input on every live takeover first, so no
+/// D104: a task that ends stops input on every live takeover first, so no
 /// one types into a finished task; each still ends once, by the host.
 pub(crate) fn close_live_takeovers(w: &mut Work, now: Time) {
     let live: Vec<u64> =
@@ -1739,7 +1739,7 @@ pub(crate) fn close_live_takeovers(w: &mut Work, now: Time) {
     }
 }
 
-/// D82: only the host ends a takeover, and the totals come from the fold. A
+/// D104: only the host ends a takeover, and the totals come from the fold. A
 /// closing one ends for the reason it closed with; a live one for the
 /// host's own reasons, never as the human's release.
 fn takeover_end(w: &mut Work, id: u64, reason: TakeoverEnd, now: Time) -> R<Response> {

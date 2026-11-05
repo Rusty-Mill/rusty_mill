@@ -1,6 +1,6 @@
 //! What `lel-jail` does between the mux's fork and the agent's exec.
 //!
-//! The order is the v0 contract (LEL D85): validate the spec, require the
+//! The order is the v0 contract (LEL D107): validate the spec, require the
 //! slot lock (fd 3) and the ACP socket (fd 4), join the session's cgroup,
 //! close every other descriptor, pin every root, the cwd and the token with
 //! an `O_PATH` descriptor and check the token is out of reach on what those
@@ -23,7 +23,7 @@ const O_PATH: i32 = 0o10_000_000;
 
 /// The slot lock the cgroup holder shares (design §2 step 4).
 pub const SLOT_FD: i32 = 3;
-/// orch's end of the ACP socketpair.
+/// The agent's end of the ACP socketpair; orch keeps the other end.
 pub const ACP_FD: i32 = 4;
 
 /// Confines this process per the spec at `path` and execs the agent.
