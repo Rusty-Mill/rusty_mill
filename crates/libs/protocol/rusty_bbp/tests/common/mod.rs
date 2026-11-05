@@ -244,6 +244,7 @@ impl<S: Store> Fx<S> {
             human: PrincipalId("human".into()),
             policy,
             holdout_digest: None,
+            baseline_digest: None,
         });
         fx.run(&open);
         for r in roles.iter().filter(|r| !skip.contains(&r.id.0.as_str())) {

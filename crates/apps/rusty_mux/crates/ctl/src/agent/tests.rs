@@ -28,6 +28,16 @@ fn ours() -> String {
     settings::command(plain(CTL))
 }
 
+/// Just the session-start hook running `command`, as setup wrote it before
+/// the status hooks.
+fn start(command: &str, windows: Option<&str>) -> Vec<settings::Entry> {
+    vec![settings::Entry {
+        event: "SessionStart",
+        command: command.to_owned(),
+        windows: windows.map(str::to_owned),
+    }]
+}
+
 /// A fresh, empty agent config directory.
 fn scratch() -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -95,7 +105,7 @@ fn adding_keeps_every_other_setting_and_hook() {
     let before = json(
         r#"{"model":"x","hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"echo hi"}]}],"Stop":[]}}"#,
     );
-    let after = settings::with_hook(before.clone(), &ours(), None).expect("adds");
+    let after = settings::with_hook(before.clone(), &start(&ours(), None)).expect("adds");
     assert_eq!(after["model"], before["model"]);
     assert_eq!(after["hooks"]["Stop"], before["hooks"]["Stop"]);
     let groups = after["hooks"]["SessionStart"].as_array().expect("array");
@@ -104,9 +114,12 @@ fn adding_keeps_every_other_setting_and_hook() {
         groups[1]["hooks"][0]["command"].as_str(),
         Some(ours().as_str())
     );
-    assert_eq!(settings::state(&after, &ours(), None), Ok(State::Installed));
     assert_eq!(
-        settings::with_hook(after.clone(), &ours(), None),
+        settings::state(&after, &start(&ours(), None)),
+        Ok(State::Installed)
+    );
+    assert_eq!(
+        settings::with_hook(after.clone(), &start(&ours(), None)),
         Ok(after),
         "idempotent"
     );
@@ -116,24 +129,29 @@ fn adding_keeps_every_other_setting_and_hook() {
 fn a_moved_ctl_is_updated_in_place_not_added_twice() {
     let old = settings::with_hook(
         json("{}"),
-        &settings::command(plain("/old/rusty-mux-ctl")),
-        None,
+        &start(&settings::command(plain("/old/rusty-mux-ctl")), None),
     )
     .expect("adds");
-    assert_eq!(settings::state(&old, &ours(), None), Ok(State::Outdated));
-    let new = settings::with_hook(old, &ours(), None).expect("updates");
+    assert_eq!(
+        settings::state(&old, &start(&ours(), None)),
+        Ok(State::Outdated)
+    );
+    let new = settings::with_hook(old, &start(&ours(), None)).expect("updates");
     let groups = new["hooks"]["SessionStart"].as_array().expect("array");
     assert_eq!(groups.len(), 1);
-    assert_eq!(settings::state(&new, &ours(), None), Ok(State::Installed));
+    assert_eq!(
+        settings::state(&new, &start(&ours(), None)),
+        Ok(State::Installed)
+    );
 }
 
 #[test]
 fn removing_drops_only_ours_and_the_containers_it_empties() {
     let mine =
         json(r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo hi"}]}]}}"#);
-    let with = settings::with_hook(mine.clone(), &ours(), None).expect("adds");
+    let with = settings::with_hook(mine.clone(), &start(&ours(), None)).expect("adds");
     assert_eq!(settings::without_hook(with, None), Ok(mine.clone()));
-    let alone = settings::with_hook(json(r#"{"a":1}"#), &ours(), None).expect("adds");
+    let alone = settings::with_hook(json(r#"{"a":1}"#), &start(&ours(), None)).expect("adds");
     assert_eq!(settings::without_hook(alone, None), Ok(json(r#"{"a":1}"#)));
     // A group shared with someone else's hook keeps theirs.
     let shared = json(&format!(
@@ -144,10 +162,73 @@ fn removing_drops_only_ours_and_the_containers_it_empties() {
 }
 
 #[test]
+fn ours_counts_only_when_it_runs_on_every_event_alone_and_in_order() {
+    let ours_hook = |extra: &str| {
+        format!(
+            r#"{{"type":"command","command":{}{extra}}}"#,
+            Value::from(ours()).to_json_string()
+        )
+    };
+    let with = |group: &str| json(&format!(r#"{{"hooks":{{"SessionStart":[{group}]}}}}"#));
+    let theirs = r#"{"type":"command","command":"echo hi"}"#;
+    let entries = start(&ours(), None);
+    for (fine, group) in [
+        (true, format!(r#"{{"hooks":[{}]}}"#, ours_hook(""))),
+        (
+            true,
+            format!(r#"{{"matcher":"","hooks":[{}]}}"#, ours_hook("")),
+        ),
+        (
+            true,
+            format!(r#"{{"matcher":"*","hooks":[{}]}}"#, ours_hook("")),
+        ),
+        (
+            true,
+            format!(r#"{{"hooks":[{}]}}"#, ours_hook(r#","timeout":30"#)),
+        ),
+        (
+            true,
+            format!(r#"{{"hooks":[{}]}}"#, ours_hook(r#","async":false"#)),
+        ),
+        (
+            false,
+            format!(r#"{{"matcher":"startup","hooks":[{}]}}"#, ours_hook("")),
+        ),
+        (
+            false,
+            format!(r#"{{"hooks":[{}]}}"#, ours_hook(r#","async":true"#)),
+        ),
+        (
+            false,
+            format!(r#"{{"hooks":[{theirs},{}]}}"#, ours_hook("")),
+        ),
+    ] {
+        let settings = with(&group);
+        let state = settings::state(&settings, &entries).expect("state");
+        assert_eq!(state == State::Installed, fine, "{group}");
+        let repaired = settings::with_hook(settings, &entries).expect("repairs");
+        assert_eq!(
+            settings::state(&repaired, &entries),
+            Ok(State::Installed),
+            "{group}"
+        );
+        if !fine {
+            // Our hook moves to a group of its own; anything else stays.
+            let groups = repaired["hooks"]["SessionStart"].as_array().expect("array");
+            let last = groups.last().expect("ours");
+            assert!(last.get("matcher").is_none(), "{group}");
+            assert_eq!(last["hooks"].as_array().map(Vec::len), Some(1), "{group}");
+            let kept = groups.iter().any(|g| g["hooks"][0] == json(theirs));
+            assert_eq!(kept, group.contains("echo hi"), "{group}");
+        }
+    }
+}
+
+#[test]
 fn a_shape_it_cannot_edit_is_refused() {
     for bad in [r"[]", r#"{"hooks":[]}"#, r#"{"hooks":{"SessionStart":{}}}"#] {
         assert!(
-            settings::with_hook(json(bad), &ours(), None).is_err(),
+            settings::with_hook(json(bad), &start(&ours(), None)).is_err(),
             "{bad}"
         );
         assert!(settings::without_hook(json(bad), None).is_err(), "{bad}");
@@ -179,6 +260,164 @@ fn setup_then_remove_leaves_an_empty_directory_empty() {
     );
     assert!(files_in(&dir).is_empty(), "{:?}", files_in(&dir));
     assert_eq!(agent(AgentCommand::Status, &dir, CTL).0, Exit::Failed);
+}
+
+/// The command each event's group runs, as setup wrote it in `settings`.
+fn commands(settings: &Value) -> Vec<(String, String)> {
+    let hooks = settings["hooks"].as_object().expect("hooks");
+    let mut found = Vec::new();
+    for (event, groups) in hooks {
+        for group in groups.as_array().expect("groups") {
+            assert!(group.get("matcher").is_none(), "{event}: no matcher");
+            for hook in group["hooks"].as_array().expect("hooks") {
+                let command = hook["command"].as_str().expect("command");
+                assert!(hook.get("async").is_none(), "{event}: in order");
+                found.push((event.clone(), command.to_owned()));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// O2 part 2 (D89): Claude Code gets a status hook per event beside the
+/// session-start hook, all one item to setup, status and remove.
+#[test]
+fn claude_gets_a_status_hook_per_event_as_one_item() {
+    let dir = scratch();
+    assert_eq!(agent(AgentCommand::Setup, &dir, CTL).0, Exit::Ok);
+    let written = json(&fs::read_to_string(dir.join("settings.json")).expect("settings"));
+    let quoted = format!("'{CTL}' agent hook");
+    let want = [
+        (
+            "PermissionRequest",
+            " --event blocked --kind permission --app claude --tool-from-stdin",
+        ),
+        ("PostToolBatch", " --event working --app claude"),
+        (
+            "PreToolUse",
+            " --event working --app claude --tool-from-stdin",
+        ),
+        ("SessionStart", ""),
+        ("Stop", " --event idle --app claude"),
+        ("StopFailure", " --event error --app claude"),
+        ("UserPromptSubmit", " --event working --app claude"),
+    ]
+    .map(|(event, args)| (event.to_owned(), format!("{quoted}{args}")));
+    assert_eq!(commands(&written), want.to_vec());
+
+    // An install from before the status hooks is outdated, and setup adds
+    // the rest without a second session-start hook.
+    let old = settings::with_hook(json("{}"), &start(&ours(), None)).expect("adds");
+    fs::write(dir.join("settings.json"), old.to_json_string()).expect("write");
+    let (exit, out) = agent(AgentCommand::Status, &dir, CTL);
+    assert_eq!(exit, Exit::Failed);
+    assert!(out.contains("hook   outdated"), "{out}");
+    let (_, out) = agent(AgentCommand::Setup, &dir, CTL);
+    assert!(out.contains("hook   updated"), "{out}");
+    let updated = json(&fs::read_to_string(dir.join("settings.json")).expect("settings"));
+    assert_eq!(commands(&updated), want.to_vec());
+
+    // One status hook gone or changed makes the whole item outdated.
+    let entries = settings::entries(AgentKind::Claude, plain(CTL), false).expect("entries");
+    assert_eq!(settings::state(&updated, &entries), Ok(State::Installed));
+    assert_eq!(
+        settings::state(&updated, &entries[..3]),
+        Ok(State::Outdated)
+    );
+    let mut moved = entries.clone();
+    moved[4].command = moved[4].command.replace(CTL, "/old/rusty-mux-ctl");
+    assert_eq!(settings::state(&updated, &moved), Ok(State::Outdated));
+
+    let (exit, _) = agent(AgentCommand::Remove, &dir, CTL);
+    assert_eq!(exit, Exit::Ok);
+    assert!(files_in(&dir).is_empty(), "{:?}", files_in(&dir));
+}
+
+/// An install with the per-tool events an earlier ctl wrote is outdated,
+/// and setup and remove take those hooks out.
+#[test]
+fn per_tool_completion_hooks_from_an_earlier_ctl_are_retired() {
+    let entries = settings::entries(AgentKind::Claude, plain(CTL), false).expect("entries");
+    let mut earlier = entries.clone();
+    for event in ["PostToolUse", "PostToolUseFailure", "PermissionDenied"] {
+        let mut entry = entries[1].clone();
+        entry.event = event;
+        earlier.push(entry);
+    }
+    let old = settings::with_hook(json("{}"), &earlier).expect("adds");
+    assert_eq!(settings::state(&old, &entries), Ok(State::Outdated));
+    let updated = settings::with_hook(old.clone(), &entries).expect("updates");
+    assert_eq!(settings::state(&updated, &entries), Ok(State::Installed));
+    let events: Vec<String> = commands(&updated).into_iter().map(|(e, _)| e).collect();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.starts_with("PostToolUse") || e == "PermissionDenied"),
+        "{events:?}"
+    );
+    assert_eq!(settings::without_hook(old, None), Ok(json("{}")));
+}
+
+/// Codex reports as Claude Code does, from its own events (D89, Q21).
+#[test]
+fn codex_gets_its_status_hooks() {
+    let entries = settings::entries(AgentKind::Codex, plain(CTL), false).expect("entries");
+    let events: Vec<&str> = entries.iter().map(|e| e.event).collect();
+    assert_eq!(
+        events,
+        [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "Stop",
+            "Interrupt"
+        ]
+    );
+    assert!(
+        entries[3].command.ends_with(
+            " agent hook --event blocked --kind permission --app codex --tool-from-stdin"
+        )
+    );
+    assert!(entries.iter().all(|e| e.windows.is_none()));
+    let windows = settings::entries(AgentKind::Codex, plain(r"C:\bin\rusty-mux-ctl.exe"), true)
+        .expect("entries");
+    assert_eq!(
+        windows[4].windows.as_deref(),
+        Some("C:/bin/rusty-mux-ctl.exe agent hook --event idle --app codex")
+    );
+    // Claude Code runs hooks in a POSIX shell everywhere: no Windows command.
+    let claude = settings::entries(AgentKind::Claude, plain(CTL), true).expect("entries");
+    assert!(claude.iter().all(|e| e.windows.is_none()));
+}
+
+/// A status command is ours only in a shape setup writes.
+#[test]
+fn only_status_commands_setup_writes_are_ours() {
+    let with = |command: &str| {
+        json(&format!(
+            r#"{{"hooks":{{"Stop":[{{"hooks":[{{"type":"command","command":{}}}]}}]}}}}"#,
+            Value::from(command).to_json_string()
+        ))
+    };
+    let ours = format!("'{CTL}' agent hook --event idle --app claude");
+    assert!(settings::has_hook(&with(&ours)).expect("readable"));
+    for theirs in [
+        format!("'{CTL}' agent hook --event idle --app evil"),
+        format!("'{CTL}' agent hook --event idle"),
+        format!("'{CTL}' agent hook --event idle --app claude; echo hi"),
+        "rusty-mux-ctl agent hook --event idle --app claude".to_owned(),
+    ] {
+        let settings = with(&theirs);
+        assert!(
+            !settings::has_hook(&settings).expect("readable"),
+            "{theirs}"
+        );
+        assert_eq!(settings::without_hook(settings.clone(), None), Ok(settings));
+    }
+    // An event setup writes under must hold an array.
+    assert!(settings::has_hook(&json(r#"{"hooks":{"Stop":{}}}"#)).is_err());
 }
 
 #[test]
@@ -368,12 +607,18 @@ fn the_naming_hook_is_ours_and_another_version_of_the_plain_one() {
         command.ends_with("' agent hook --name-session"),
         "{command}"
     );
-    let with = settings::with_hook(json("{}"), &command, None).expect("adds");
+    let with = settings::with_hook(json("{}"), &start(&command, None)).expect("adds");
     assert!(settings::has_hook(&with).expect("readable"));
-    assert_eq!(settings::state(&with, &command, None), Ok(State::Installed));
-    assert_eq!(settings::state(&with, &ours(), None), Ok(State::Outdated));
+    assert_eq!(
+        settings::state(&with, &start(&command, None)),
+        Ok(State::Installed)
+    );
+    assert_eq!(
+        settings::state(&with, &start(&ours(), None)),
+        Ok(State::Outdated)
+    );
     // Setting up the plain hook over it replaces it rather than adding one.
-    let plain_again = settings::with_hook(with, &ours(), None).expect("replaces");
+    let plain_again = settings::with_hook(with, &start(&ours(), None)).expect("replaces");
     let text = plain_again.to_json_string();
     assert_eq!(text.matches("agent hook").count(), 1, "{text}");
     assert!(!text.contains("--name-session"), "{text}");
@@ -439,11 +684,11 @@ fn only_the_exact_generated_command_is_ours() {
             Value::from(theirs).to_json_string()
         ));
         assert_eq!(
-            settings::state(&settings, &ours(), None),
+            settings::state(&settings, &start(&ours(), None)),
             Ok(State::Missing),
             "{theirs}"
         );
-        let added = settings::with_hook(settings.clone(), &ours(), None).expect("adds");
+        let added = settings::with_hook(settings.clone(), &start(&ours(), None)).expect("adds");
         assert_eq!(
             added["hooks"]["SessionStart"][0], settings["hooks"]["SessionStart"][0],
             "{theirs}"
@@ -455,10 +700,10 @@ fn only_the_exact_generated_command_is_ours() {
         );
     }
     for moved in ["/it's/rusty-mux-ctl", r"C:\Program Files\rusty-mux-ctl.exe"] {
-        let old =
-            settings::with_hook(json("{}"), &settings::command(plain(moved)), None).expect("adds");
+        let old = settings::with_hook(json("{}"), &start(&settings::command(plain(moved)), None))
+            .expect("adds");
         assert_eq!(
-            settings::state(&old, &ours(), None),
+            settings::state(&old, &start(&ours(), None)),
             Ok(State::Outdated),
             "{moved}"
         );
@@ -1284,25 +1529,28 @@ fn codex_gets_a_windows_command_every_windows_shell_runs() {
     }
     // Ours with the Windows command, and updated when it changes.
     let windows = "C:/new/rusty-mux-ctl.exe agent hook";
-    let added = settings::with_hook(json("{}"), &ours(), Some(windows)).expect("adds");
+    let added = settings::with_hook(json("{}"), &start(&ours(), Some(windows))).expect("adds");
     let hook = &added["hooks"]["SessionStart"][0]["hooks"][0];
     assert_eq!(hook["commandWindows"].as_str(), Some(windows));
     assert_eq!(
-        settings::state(&added, &ours(), Some(windows)),
+        settings::state(&added, &start(&ours(), Some(windows))),
         Ok(State::Installed)
     );
-    assert_eq!(settings::state(&added, &ours(), None), Ok(State::Outdated));
-    let other = "C:/old/rusty-mux-ctl.exe agent hook";
     assert_eq!(
-        settings::state(&added, &ours(), Some(other)),
+        settings::state(&added, &start(&ours(), None)),
         Ok(State::Outdated)
     );
-    let moved = settings::with_hook(added, &ours(), Some(other)).expect("updates");
+    let other = "C:/old/rusty-mux-ctl.exe agent hook";
     assert_eq!(
-        settings::state(&moved, &ours(), Some(other)),
+        settings::state(&added, &start(&ours(), Some(other))),
+        Ok(State::Outdated)
+    );
+    let moved = settings::with_hook(added, &start(&ours(), Some(other))).expect("updates");
+    assert_eq!(
+        settings::state(&moved, &start(&ours(), Some(other))),
         Ok(State::Installed)
     );
-    let back = settings::with_hook(moved, &ours(), None).expect("updates");
+    let back = settings::with_hook(moved, &start(&ours(), None)).expect("updates");
     let hook = &back["hooks"]["SessionStart"][0]["hooks"][0];
     assert!(hook.get("commandWindows").is_none(), "{back:?}");
     assert_eq!(settings::without_hook(back, None), Ok(json("{}")));
@@ -1326,12 +1574,16 @@ fn codex_on_windows_refuses_a_path_its_shells_misread() {
     assert!(on_windows(AgentKind::Claude, spaced).unsupported.is_none());
     let plain = on_windows(AgentKind::Codex, r"C:\bin\rusty-mux-ctl.exe");
     assert!(plain.unsupported.is_none());
-    let Hook::Settings { windows, .. } = &plain.hook else {
+    let Hook::Settings { entries, .. } = &plain.hook else {
         panic!("Codex takes a settings hook");
     };
     assert_eq!(
-        windows.as_deref(),
+        entries[0].windows.as_deref(),
         Some("C:/bin/rusty-mux-ctl.exe agent hook")
+    );
+    assert_eq!(
+        entries[1].windows.as_deref(),
+        Some("C:/bin/rusty-mux-ctl.exe agent hook --event working --app codex")
     );
 
     let lines = status(std::slice::from_ref(&codex));
