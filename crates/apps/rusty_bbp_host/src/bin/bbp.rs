@@ -6,6 +6,7 @@
 //! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
 //! bbp open    --mode claims --dir D --task T --repo R --brief FILE --roster FILE --profiles FILE [--claims FILE] [--human ID] [--confine sandbox|none]
 //!                                          claims mode: the profile set names test_paths and an erosion profile or "erosion":"off"; a host that cannot sandbox refuses (bad_claims_config)
+//!                                          [--base REF --repo-path PATH --work DIR] brownfield (#598): runs the suite on REF sandboxed first; red refuses (baseline_red), green pins REF as the baseline
 //!                                          [--holdout-profiles FILE --holdout-root DIR] freezes a holdout suite (#597): holdout:/golden: profiles over the files under DIR
 //!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
 //! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
@@ -44,8 +45,9 @@
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
-    admin, admission, args::Args, broker, golden, grade, holdout, human, inbox, mcp, moderator,
-    pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens, verify, why,
+    admin, admission, args::Args, baseline, broker, golden, grade, holdout, human, inbox, mcp,
+    moderator, pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens, verify,
+    why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -245,6 +247,33 @@ fn run() -> Result<String, String> {
                     Some(other) => Err(format!("--confine {other}")),
                 };
                 return with_holdout(&a, |holdout| {
+                    // #598: `--base REF --repo-path PATH --work DIR` runs the
+                    // build suite on REF, sandboxed, before anything is
+                    // written, and only once the holdout is known isolated.
+                    let baseline = match a.flags.get("base") {
+                        None => None,
+                        Some(r) => {
+                            probe()?;
+                            let repo = PathBuf::from(a.flag("repo-path")?);
+                            let work = PathBuf::from(a.flag("work")?);
+                            let base = baseline::resolve(&repo, r)?;
+                            let exec = runner::sandboxed(&dir.join("sandbox-state"))?;
+                            let checked = runner::isolated_baseline(
+                                &exec,
+                                &set,
+                                holdout.as_ref(),
+                                &repo,
+                                &work,
+                                &base,
+                            );
+                            match checked {
+                                Ok(b) => Some(b),
+                                Err(refused) => {
+                                    return Ok(response_json(&Response::Rejected(refused)))
+                                }
+                            }
+                        }
+                    };
                     admin::open_claims_task(
                         &dir,
                         &task,
@@ -255,6 +284,7 @@ fn run() -> Result<String, String> {
                         holdout.as_ref(),
                         roster,
                         cfg,
+                        baseline.as_ref(),
                         probe,
                     )
                     .map(|r| response_json(&r))

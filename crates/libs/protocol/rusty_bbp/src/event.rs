@@ -129,6 +129,10 @@ pub enum Event {
         /// only when present.
         #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
         holdout_digest: Option<Sha256>,
+        /// Claims mode (#598): SHA-256 of the green baseline report. Written
+        /// only when present.
+        #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+        baseline_digest: Option<Sha256>,
     },
     Assigned {
         role: RoleId,

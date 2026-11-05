@@ -330,6 +330,7 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 
 14. **Human takeover (mux-hosted agent ptys, approved 2026-11-05, D104):** the events `takeover_started`, `takeover_input`, `takeover_closing` and `takeover_ended`, the human actions `Takeover` and `TakeoverRelease`, the host actions `TakeoverInput` and `TakeoverEnded`, the response `TakenOver(id)`, and `human_touched` on `claim_card`: true when the current candidate was stored after a `takeover_started` on its claim in the same epoch (D106). Scoring and author counts are unchanged. They are added under schema 5 like item 12, so a log with no takeover is byte-identical and an older build refuses a log that has one (D105). No Agent API view returns takeover events or typed text; agents see only `human_touched` on the card.
 15. **#598 intent versions and pauses (approved 2026-11-04, D59 and D62):** the human action and event `intent_revised { brief, affects }` with the `intent_version` fold and each claim's proven-at version (on `claim_card` as `intent`, written only once the intent was revised); `claim_reopened.by: intent`; the escalation reason `intent_changed`; the `bad_affects` code; the host action and event `task_paused { reason, detail }`. Nothing is written until used, so existing logs are byte-identical.
+16. **#598 brownfield (approved 2026-11-04, D62):** the optional `baseline_digest` on `open` and `task_opened` (claims mode only, written only when present), and the host refusals `baseline_red` (`bbp open --base` ran the frozen build suite on the base and it was not green; nothing is written) and `base_test_changed` (a candidate on a task with a baseline modifies or deletes a `test_paths` file that exists at the base, and its claim is reversible). The base becomes the profile set's `baseline`, which every candidate must build on whether or not the task has protected paths.
 
 No change to `rusty_crdt`, `coedit` or the stage-mode rules.
 
@@ -436,6 +437,8 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 | CL-111 | `task_paused` with a 1,201-character detail | `body_too_long`; the task stays `open` |
 | CL-112 | A stage task receives `intent_revised` and `task_paused` | Both refused (`wrong_mode` for the host write) |
 | CL-113 | An `intent_revised` event with no `affects` on the wire | Reads as `affects: all` |
+| CL-114 | A stage task opens with `baseline_digest`; a claims task opens with one; a claims task opens without | `bad_claims_config`; the fold keeps the digest and `task_opened` carries it; without one nothing is written |
+| CL-44b | Host tests (`rusty_bbp_host`): `--base` on a red base; on a green one, a reversible candidate that modifies and deletes base tests, an irreversible one, and one off the base | `baseline_red` naming the red profile and the edit, nothing written; `base_test_changed` naming the changed base tests but not added ones; the irreversible one is stored; the off-base one is refused |
 | CL-44 | Host test (`rusty_bbp_host`): open a claims-mode task on a host with no sandbox configured; on a sandboxed host, inspect where a candidate's run executes | `bad_claims_config(sandbox)`, nothing written; the run's process is inside the `rusty_sandbox` profile |
 
 ## Owner answers (2026-11-02)
