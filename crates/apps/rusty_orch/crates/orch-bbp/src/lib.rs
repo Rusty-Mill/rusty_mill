@@ -27,6 +27,9 @@ use std::time::Duration;
 
 /// Subscription CLIs authenticate themselves; inherited API/push credentials
 /// must not select a different billing path or reach spawned workloads.
+/// `RUSTY_MUX_SOCKET` would make a spawned agent a full mux client that can
+/// read and type into other blocks, so it never crosses into a workload (D13,
+/// D81 §4).
 pub const SCRUB: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
@@ -37,6 +40,7 @@ pub const SCRUB: &[&str] = &[
     "BBP_TASK",
     "BBP_PRINCIPAL",
     "BBP_TURN",
+    "RUSTY_MUX_SOCKET",
 ];
 /// How often a cancel re-reads the task when another writer moved its
 /// revision in between.

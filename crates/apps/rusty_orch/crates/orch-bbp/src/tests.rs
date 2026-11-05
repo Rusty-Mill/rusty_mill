@@ -150,6 +150,7 @@ impl CommandRunner for Contract {
         assert!(cwd.is_none() && stdin.is_empty());
         assert_eq!(timeout, Duration::from_secs(30));
         assert!(scrub.contains(&"GH_TOKEN") && scrub.contains(&"ANTHROPIC_API_KEY"));
+        assert!(scrub.contains(&"RUSTY_MUX_SOCKET"));
         self.calls.borrow_mut().push(argv.to_vec());
         let reply = self
             .replies
@@ -938,4 +939,17 @@ fn an_unleased_task_refuses_a_leased_holder() {
     ));
     assert_eq!(command.calls.borrow().len(), calls, "BBP was never asked");
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A mux socket inherited by orch must not reach a spawned workload (D13).
+#[test]
+fn scrubbed_command_drops_the_mux_socket() {
+    let mut cmd = std::process::Command::new("true");
+    cmd.env("RUSTY_MUX_SOCKET", "/run/user/1/rusty-mux.sock");
+    orch_cli::scrub_env(&mut cmd, SCRUB);
+    let kept = cmd
+        .get_envs()
+        .find(|(k, _)| *k == "RUSTY_MUX_SOCKET")
+        .and_then(|(_, v)| v);
+    assert_eq!(kept, None);
 }

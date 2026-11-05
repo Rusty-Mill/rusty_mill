@@ -25,6 +25,7 @@ ORCH_OLLAMA_MODEL=llama3.2 cargo run -p orch-codex --example research_review -- 
 | `crates/orch-claude` | The `claude` provider over `claude -p --tools Read,Grep,Glob --restricted`, schema-constrained reply read from the JSON result envelope, a `claude auth status` probe before each run, `ANTHROPIC_API_KEY` and provider overrides scrubbed ([ADR-0012](./docs/adr/0012-claude-adapter.md)). |
 | `crates/orch-lens` | The lens runner's pure core (Let Em Loose #594): `Model` port, strict reply protocol, config checks, context assembly, data classes, tiering, money meter, scheduler ([ADR-0021](./docs/adr/0021-lens-runner-core.md)). |
 | `crates/orch-openai` | One OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only, on `rusty_http`. For llama-swap in the lens runner ([ADR-0020](./docs/adr/0020-openai-http-adapter.md)). |
+| `crates/orch-jail` | `jail.json` and `lel-jail`, the program a mux agent block runs: joins the session's cgroup, keeps fds 0-4 only, then confines itself with `rusty_sandbox` and execs the agent (Let Em Loose D82, [ADR-0022](./docs/adr/0022-agent-jail-launcher.md)). |
 | `crates/orch-store` | Persistence: one snapshot record per goal (plan, board, ledger, goal-file fingerprint) in `rusty_multimodal_db_engine`, rebuilt on load through the domain's constructors. The family's one crate with registry dependencies ([ADR-0010](./docs/adr/0010-persistence-on-multimodal-db.md)). |
 
 ## Architecture
