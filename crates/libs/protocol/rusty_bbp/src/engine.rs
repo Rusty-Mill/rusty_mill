@@ -1849,6 +1849,9 @@ pub(crate) fn transition(w: &mut Work, to: State, now: Time) {
     for id in live_ids(&w.st) {
         end_turn_only(w, id, TurnEnd::Revoked);
     }
+    if to.terminal() {
+        crate::claims_engine::end_live_takeovers(w);
+    }
     w.emit(Event::StateChanged { from, to });
     entry(w, now);
 }

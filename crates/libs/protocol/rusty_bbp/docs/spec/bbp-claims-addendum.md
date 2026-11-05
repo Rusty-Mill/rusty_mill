@@ -286,8 +286,8 @@ This is the path from a prototype to `executed` evidence, using the normal APIs.
 | `run_started` | moderator | candidate id, run id (existing event, also emitted in claims mode on candidate storage) |
 | `credential_issued` | moderator | role, principal, credential digest (the secret itself is never logged) |
 | `takeover_started` | human | takeover id, claim, epoch, session (mux block), client, until, reason. Written before any input is possible; one live takeover per session (D82) |
-| `takeover_input` | host | takeover, seq (from 1, no gaps), text (at most 4096 bytes), sha256 = SHA-256(previous value, or 32 zero bytes, followed by the text) (D82) |
-| `takeover_ended` | host or human | takeover, reason (`released` by the human only; `expired` only once `until` has passed; `revoked`, `turn_ended`, `mux_lost`), batches and last chain value from the fold (D82) |
+| `takeover_input` | host | takeover, seq (from 1, no gaps), bytes (the raw batch as the mux delivered it, standard base64, at most 4096 bytes decoded), sha256 = SHA-256(previous value, or 32 zero bytes, followed by the bytes). Accepted while the takeover is live and until `until` + 10 s (`TAKEOVER_DRAIN_MS`), so a batch delivered before expiry can be posted (D82) |
+| `takeover_ended` | host or human | takeover, reason (`released` by the human only; `expired` only once `until` has passed; `revoked`, `turn_ended`, `mux_lost`), batches and last chain value from the fold. Closing or cancelling the task writes `turn_ended` for every live takeover before the state change (D82) |
 
 Task-level state in claims mode:
 - A claim escalation does **not** change the task state. Only that claim waits for the human; turnless posting on other claims continues. The inbox (#595) reads `claim_escalated` events.

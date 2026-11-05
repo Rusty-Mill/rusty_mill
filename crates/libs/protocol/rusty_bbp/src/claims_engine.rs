@@ -1456,9 +1456,9 @@ pub(crate) fn host(w: &mut Work, a: &HostAction, now: Time) -> R<Response> {
         HostAction::TakeoverInput {
             takeover,
             seq,
-            text,
+            bytes,
             sha256,
-        } => takeover_input(w, *takeover, *seq, text, *sha256, now),
+        } => takeover_input(w, *takeover, *seq, &bytes.0, *sha256, now),
         HostAction::TakeoverEnded { takeover, reason } => {
             if *reason == TakeoverEnd::Released {
                 return Err(rej(Code::Forbidden, "only the human releases a takeover"));
@@ -1472,8 +1472,11 @@ pub(crate) fn host(w: &mut Work, a: &HostAction, now: Time) -> R<Response> {
 
 /// The longest takeover one `takeover` grants.
 pub const MAX_TAKEOVER_MINUTES: u32 = 60;
-/// The largest input batch, in bytes of text.
+/// The largest input batch, in raw bytes as delivered.
 pub const MAX_TAKEOVER_BATCH: usize = 4096;
+/// How long after `until` delivered input may still be posted: orch posts
+/// every 2 s, so this covers a batch delivered just before expiry.
+pub const TAKEOVER_DRAIN_MS: u64 = 10_000;
 /// The longest session or client name.
 const MAX_TAKEOVER_NAME: usize = 128;
 /// The longest reason.
@@ -1552,17 +1555,20 @@ fn live_takeover(w: &Work, id: u64) -> R<&Takeover> {
     Ok(t)
 }
 
-/// D82: batches arrive in order and extend the chain; none after `until`.
+/// D82: batches arrive in order and extend the chain. orch posts what the
+/// mux delivered every 2 s, so a batch delivered just before `until` may be
+/// posted after it: input is accepted until `until` plus
+/// [`TAKEOVER_DRAIN_MS`], and never once the takeover has ended.
 fn takeover_input(
     w: &mut Work,
     id: u64,
     seq: u64,
-    text: &str,
+    batch: &[u8],
     sha256: Sha256,
     now: Time,
 ) -> R<Response> {
     let t = live_takeover(w, id)?;
-    if now > t.until {
+    if now > t.until.plus(TAKEOVER_DRAIN_MS) {
         return Err(rej(
             Code::TokenExpired,
             format!("takeover {id} expired; end it"),
@@ -1574,16 +1580,16 @@ fn takeover_input(
             format!("takeover {id} expects batch {}, not {seq}", t.batches + 1),
         ));
     }
-    if text.is_empty() {
+    if batch.is_empty() {
         return Err(rej(Code::BadHumanInput, "empty input batch"));
     }
-    if text.len() > MAX_TAKEOVER_BATCH {
+    if batch.len() > MAX_TAKEOVER_BATCH {
         return Err(rej(
             Code::TooLarge,
             format!("input batch is over {MAX_TAKEOVER_BATCH} bytes"),
         ));
     }
-    if input_chain(t.last, text) != sha256 {
+    if input_chain(t.last, batch) != sha256 {
         return Err(rej(
             Code::PayloadMismatch,
             format!("batch {seq} does not extend the chain of takeover {id}"),
@@ -1592,10 +1598,33 @@ fn takeover_input(
     w.emit(Event::TakeoverInput {
         takeover: id,
         seq,
-        text: text.to_owned(),
+        bytes: crate::ids::Base64Bytes(batch.to_vec()),
         sha256,
     });
     Ok(Response::Ok)
+}
+
+/// D82: a task that ends ends every live takeover first, so each one closes
+/// with exactly one `takeover_ended` and no takeover outlives its task.
+pub(crate) fn end_live_takeovers(w: &mut Work) {
+    let live: Vec<u64> =
+        w.st.claims
+            .takeovers
+            .iter()
+            .filter(|(_, t)| t.live())
+            .map(|(id, _)| *id)
+            .collect();
+    for id in live {
+        if let Some(t) = w.st.claims.takeovers.get(&id) {
+            let (batches, last) = (t.batches, t.last);
+            w.emit(Event::TakeoverEnded {
+                takeover: id,
+                reason: TakeoverEnd::TurnEnded,
+                batches,
+                last,
+            });
+        }
+    }
 }
 
 /// D82: the totals come from the fold, not the caller.
