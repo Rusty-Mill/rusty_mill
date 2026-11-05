@@ -41,7 +41,16 @@ fn a_reconnect_keeps_the_client_its_screen_and_its_lease() {
     assert_eq!(new.id(), old.id(), "the same client");
     assert_ne!(new.token, old.token, "a fresh token");
     new.wait_ready(block);
-    assert!(new.text(block).contains(&seen), "the screen came along");
+    let screen = new.text(block);
+    // On failure, old's own screen and raw output tell a checkpoint that
+    // lost the text from a terminal that no longer shows it.
+    assert!(
+        screen.contains(&seen),
+        "the screen came along: {seen:?} missing from the checkpoint's screen:\n{screen}\n\
+         -- the old client's screen:\n{}\n-- its raw output: {:?}",
+        old.text(block),
+        String::from_utf8_lossy(old.output(block)),
+    );
 
     old.wait_closed();
     let names: Vec<_> = new
