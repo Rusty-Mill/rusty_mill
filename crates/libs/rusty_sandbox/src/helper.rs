@@ -276,6 +276,12 @@ fn confine_and_exec(request: &HelperRequest) -> Error {
     if let Err(error) = confine(request) {
         return error;
     }
+    // Last, so the descriptors the helper's caller and Landlock hold for
+    // setup (close-on-exec, gone at the exec) don't count against the
+    // program's budget.
+    if let Err(error) = set_open_files(request) {
+        return error;
+    }
     let exec_error = std::process::Command::new(&request.program)
         .args(&request.args)
         .env_clear()
@@ -296,8 +302,7 @@ fn confine_and_exec(_request: &HelperRequest) -> Error {
 #[cfg(target_os = "linux")]
 fn set_limits(request: &HelperRequest) -> Result<(), Error> {
     use rusty_libc::rlimit::{
-        setrlimit, Rlimit, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_NOFILE,
-        RLIMIT_NPROC,
+        setrlimit, Rlimit, RLIMIT_AS, RLIMIT_CORE, RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_NPROC,
     };
     // CPU: SIGXCPU at the soft limit, SIGKILL one second later at the hard one.
     let limits = [
@@ -320,12 +325,6 @@ fn set_limits(request: &HelperRequest) -> Result<(), Error> {
             "file size",
         ),
         (
-            RLIMIT_NOFILE,
-            request.open_files,
-            request.open_files,
-            "open files",
-        ),
-        (
             RLIMIT_NPROC,
             request.processes,
             request.processes,
@@ -338,6 +337,18 @@ fn set_limits(request: &HelperRequest) -> Result<(), Error> {
             .map_err(|errno| Error::Sandbox(format!("setting the {name} limit: {errno}")))?;
     }
     Ok(())
+}
+
+/// The open-file limit, set once confinement no longer opens anything.
+#[cfg(target_os = "linux")]
+fn set_open_files(request: &HelperRequest) -> Result<(), Error> {
+    use rusty_libc::rlimit::{setrlimit, Rlimit, RLIMIT_NOFILE};
+    let limit = Rlimit {
+        cur: request.open_files,
+        max: request.open_files,
+    };
+    setrlimit(RLIMIT_NOFILE, &limit)
+        .map_err(|errno| Error::Sandbox(format!("setting the open files limit: {errno}")))
 }
 
 #[cfg(target_os = "linux")]

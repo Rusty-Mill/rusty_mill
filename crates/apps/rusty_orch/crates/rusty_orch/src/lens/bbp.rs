@@ -749,6 +749,7 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            human_touched: false,
         }
     }
 
@@ -1056,6 +1057,24 @@ while :; do
 done
 "#;
 
+    /// Spawn the stand-in. Another test thread that forks while
+    /// [`stand_in`] holds the script open for writing keeps that descriptor
+    /// until its own exec, so exec here can briefly fail with ETXTBSY; that
+    /// is retried, nothing else is.
+    #[cfg(unix)]
+    fn spawn(bin: &std::path::Path, dir: &std::path::Path) -> Result<Child, String> {
+        let mut tries = 0;
+        loop {
+            match Child::spawn(bin, dir, "t", "adversary") {
+                Err(e) if e.contains("Text file busy") && tries < 50 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+    }
+
     /// Write `script` as an executable stand-in `bbp` in a fresh dir.
     #[cfg(unix)]
     fn stand_in(name: &str, script: &str) -> std::path::PathBuf {
@@ -1072,7 +1091,7 @@ done
     #[test]
     fn unrelated_replies_do_not_extend_the_deadline() {
         let dir = stand_in("chatty", CHATTY);
-        let mut child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+        let mut child = spawn(&dir.join("bbp"), &dir)
             .expect("spawn")
             .with_deadline(Duration::from_millis(300));
         let started = Instant::now();
@@ -1093,7 +1112,7 @@ done
     fn a_child_session_answers_by_id_and_reports_its_exit() {
         let dir = stand_in("once", SCRIPT);
         let bin = dir.join("bbp");
-        let mut child = Child::spawn(&bin, &dir, "t", "adversary").expect("spawn");
+        let mut child = spawn(&bin, &dir).expect("spawn");
         assert_eq!(
             child.call("task_card", map(vec![])),
             Ok("adversary yes scrubbed".to_owned())
@@ -1173,7 +1192,7 @@ done
         let posted = rendered(&Response::Posted(MsgId(30)));
         let script = logging_script(Some(rendered(&Response::Rejected(reassigned()))), posted);
         let dir = stand_in("refused", &script);
-        let child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+        let child = spawn(&dir.join("bbp"), &dir)
             .expect("spawn")
             .with_deadline(Duration::from_millis(300));
         let mut s = Session::new("adversary", child, "r1");
@@ -1189,7 +1208,7 @@ done
     fn a_lost_answer_through_the_child_is_resent_with_the_same_op() {
         let script = logging_script(None, rendered(&Response::Posted(MsgId(30))));
         let dir = stand_in("lost", &script);
-        let child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+        let child = spawn(&dir.join("bbp"), &dir)
             .expect("spawn")
             .with_deadline(Duration::from_millis(300));
         let mut s = Session::new("adversary", child, "r1");

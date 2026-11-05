@@ -10,7 +10,9 @@
 //! - [`check`]: `rusty_orch lens check`, a dry run of the above.
 //! - [`run`]: `rusty_orch lens run`, passes over every lens until quiet.
 //! - [`container`]: the dedicated container a host-cleared provider runs in.
+//! - [`alien`]: `rusty_orch lens alien report`, the #708 alien lens's shadow numbers.
 
+pub mod alien;
 pub mod assertions;
 pub mod bbp;
 pub mod check;

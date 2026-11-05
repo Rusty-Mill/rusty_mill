@@ -29,6 +29,8 @@ pub mod admin;
 pub mod admission;
 pub mod args;
 pub mod broker;
+#[cfg(target_os = "linux")]
+pub mod cgroups;
 pub mod clean_tree;
 pub mod confine;
 pub mod golden;
