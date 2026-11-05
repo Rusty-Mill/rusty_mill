@@ -88,6 +88,7 @@ fn open_task() -> OpenTask {
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::TurnBased,
         holdout_digest: None,
+        baseline_digest: None,
     }
 }
 
