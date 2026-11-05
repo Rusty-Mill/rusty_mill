@@ -39,7 +39,10 @@ Deltas are in basis points of a repo-wide share. A limit fails a PR when a delta
 | --- | --- |
 | 0 / 0 | 8 (7.4%) |
 | 1 / 1 | 2 (1.9%) |
-| 2 / 2 | 0 |
+| 2 / 2 | 0 (0.0%) |
+| 5 / 5 | 0 (0.0%) |
+| 10 / 10 | 0 (0.0%) |
+| 25 / 25 | 0 (0.0%) |
 
 - **Unmeasured (D45).** 30 PRs changed 96 files erosion can't measure: py 52, sh 15, ps1 11, ts 8, jsx 5 and js 2.
 - **Gaming signal.** 6 PRs lowered concentration while adding functions or CC.
