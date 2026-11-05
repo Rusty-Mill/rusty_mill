@@ -297,9 +297,14 @@ fn specs() -> Vec<Spec> {
                     .into_iter()
                     .collect();
                 for key in SEARCH_DATES {
-                    if let Some(ms) = args.get(key).and_then(Value::as_i64) {
-                        params.push(format!("{key}={ms}"));
-                    }
+                    let Some(value) = args.get(key).filter(|v| !v.is_null()) else {
+                        continue;
+                    };
+                    // Refused, not dropped: a bound left out would widen the search silently.
+                    let ms = value
+                        .as_i64()
+                        .ok_or_else(|| format!("{key} must be Unix milliseconds (an integer)"))?;
+                    params.push(format!("{key}={ms}"));
                 }
                 if params.is_empty() {
                     return Err("query or a date range is required".into());
@@ -384,5 +389,11 @@ mod tests {
         let (_, target, _) = search_route(json!({"updatedFrom": 7})).unwrap();
         assert_eq!(target, "/api/v1/search?updatedFrom=7");
         assert!(search_route(json!({})).is_err(), "needs a query or a date");
+        for bad in [json!("soon"), json!(1.5), json!(u64::MAX)] {
+            assert!(
+                search_route(json!({"query": "plan", "createdFrom": bad.clone()})).is_err(),
+                "an unusable bound is refused, not dropped: {bad:?}"
+            );
+        }
     }
 }

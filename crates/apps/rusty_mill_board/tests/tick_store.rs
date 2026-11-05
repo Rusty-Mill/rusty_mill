@@ -693,4 +693,11 @@ fn moved_in_reads_rusty_tick_move_history_across_pages() {
             .expect("moved")
             .is_empty()
     );
+    // The server runs over a boxed store: it must reach rusty_tick's history too, not the
+    // default that reads the (here empty) event log.
+    let boxed: Box<dyn Store> = Box::new(TickStore::new(tick.clone()));
+    assert_eq!(
+        boxed.moved_in(span(Some(0), Some(200))).expect("moved"),
+        [early.id].into()
+    );
 }

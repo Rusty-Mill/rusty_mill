@@ -213,4 +213,7 @@ impl<T: Store + ?Sized> Store for Box<T> {
     fn durable(&self) -> bool {
         (**self).durable()
     }
+    fn moved_in(&self, span: Span) -> Result<BTreeSet<Uuid>, BoardError> {
+        (**self).moved_in(span)
+    }
 }
