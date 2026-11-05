@@ -247,12 +247,66 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
     let mut err = io::stderr();
     let bridged = match cli::parse(args, &env.here) {
         Ok(invocation) if matches!(invocation.command, Command::Bridge) => invocation,
+        Ok(Invocation {
+            command: Command::Agent(AgentCommand::Report(mut hook)),
+            ref socket,
+            ..
+        }) if hook.tool_from_stdin => {
+            hook.msg = read_hook_input(io::stdin().lock()).and_then(|input| hook_tool_name(&input));
+            let socket = socket.clone().or_else(|| env.socket.clone());
+            return send_hook_report(socket.as_deref(), env, &hook, &Stop::default());
+        }
         _ => return run(args, env, &mut io::stdout(), &mut err),
     };
     match socket(&bridged, env) {
         Ok(socket) => finish(bridge(&socket), &socket, &mut err),
         Err(reason) => report(&mut err, Exit::Usage, reason),
     }
+}
+
+/// Sends an agent's event-hook report for the block it runs in. A hook
+/// must never fail, print or hold the agent up (Claude Code adds some hook
+/// output to the model's context, Codex fails a `Stop` hook that prints), so
+/// a report that cannot be sent is dropped: the program's own OSC 7501
+/// status still shows.
+fn send_hook_report(socket: Option<&Path>, env: &Env, hook: &HookReport, stop: &Stop) -> Exit {
+    if let (Some(socket), Some(block)) = (socket, env.here.block) {
+        let _dropped = hook_report(socket, block, hook, stop);
+    }
+    Exit::Ok
+}
+
+/// The most of a hook event's stdin `--tool-from-stdin` reads.
+const HOOK_INPUT_LIMIT: usize = 1 << 20;
+
+/// A hook event's stdin, read up to [`HOOK_INPUT_LIMIT`] bytes and the rest
+/// drained, so the agent writing it never blocks; `None` when it is longer
+/// or cannot be read.
+fn read_hook_input(mut input: impl io::Read) -> Option<Vec<u8>> {
+    use io::Read as _;
+    let mut bytes = Vec::new();
+    let read = (&mut input)
+        .take(HOOK_INPUT_LIMIT as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if read > HOOK_INPUT_LIMIT {
+        let _drained = io::copy(&mut input, &mut io::sink());
+        return None;
+    }
+    Some(bytes)
+}
+
+/// The longest tool name a report carries.
+const MAX_TOOL_NAME: usize = 128;
+
+/// The `tool_name` of a hook event's JSON, when it can be a report's
+/// message: 1 to [`MAX_TOOL_NAME`] bytes with no control characters (D87).
+/// A name that cannot leaves the report without one rather than dropping it.
+pub fn hook_tool_name(input: &[u8]) -> Option<String> {
+    let value = rusty_json::Value::from_json_str(std::str::from_utf8(input).ok()?).ok()?;
+    let name = value.get("tool_name")?.as_str()?;
+    let fits = (1..=MAX_TOOL_NAME).contains(&name.len()) && !name.chars().any(char::is_control);
+    fits.then(|| name.to_owned())
 }
 
 /// The socket `invocation` names, else `$RUSTY_MUX_SOCKET`.
@@ -293,14 +347,7 @@ pub fn run_until(
         }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
         Command::Agent(AgentCommand::Report(hook)) => {
-            // An agent's event hook must never fail, print or hold the agent
-            // up (Claude Code adds hook output to the model's context), so
-            // a report that cannot be sent is dropped: the program's own
-            // OSC 7501 status still shows.
-            if let (Some(socket), Some(block)) = (hook_socket.as_deref(), env.here.block) {
-                let _dropped = hook_report(socket, block, &hook, stop);
-            }
-            return Exit::Ok;
+            return send_hook_report(hook_socket.as_deref(), env, &hook, stop);
         }
         Command::Agent(command) => {
             let generated_name = || {
@@ -973,6 +1020,40 @@ fn require_sync(features: Features) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hook_tool_name_is_kept_only_when_a_report_can_carry_it() {
+        let name = |json: &str| hook_tool_name(json.as_bytes());
+        assert_eq!(name(r#"{"tool_name":"Bash"}"#), Some("Bash".into()));
+        assert_eq!(
+            name(r#"{"tool_name":"mcp__github__get_me","tool_input":{}}"#),
+            Some("mcp__github__get_me".into())
+        );
+        let long = format!(r#"{{"tool_name":"{}"}}"#, "a".repeat(MAX_TOOL_NAME + 1));
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            "{}",
+            r#"{"tool_name":7}"#,
+            r#"{"tool_name":""}"#,
+            r#"{"tool_name":"a\nb"}"#,
+            r#"{"tool_name":"a\u001bb"}"#,
+            &long,
+        ] {
+            assert_eq!(name(bad), None, "{bad}");
+        }
+        assert_eq!(hook_tool_name(b"{\"tool_name\":\"\xff\"}"), None);
+    }
+
+    #[test]
+    fn hook_input_is_read_up_to_its_limit_and_the_rest_drained() {
+        let at_limit = vec![b'x'; HOOK_INPUT_LIMIT];
+        assert_eq!(read_hook_input(at_limit.as_slice()), Some(at_limit.clone()));
+        let mut over = io::Cursor::new(vec![b'x'; HOOK_INPUT_LIMIT + 5]);
+        assert_eq!(read_hook_input(&mut over), None);
+        assert_eq!(over.position() as usize, HOOK_INPUT_LIMIT + 5, "drained");
+    }
 
     fn parsed(line: &str) -> Call {
         let args: Vec<String> = line.split_whitespace().map(String::from).collect();

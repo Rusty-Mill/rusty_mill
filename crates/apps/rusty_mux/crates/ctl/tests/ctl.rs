@@ -246,6 +246,56 @@ fn an_event_hook_reports_status_silently_and_never_fails() {
     );
 }
 
+/// O2 part 2 (D87): Claude Code's `PreToolUse` and `PermissionRequest`
+/// hooks name the tool from the event's JSON on stdin, and a hook whose
+/// stdin holds no usable name still reports its state.
+#[test]
+fn an_event_hook_takes_the_tool_name_from_stdin() {
+    let socket = start_server();
+    let block = block(&socket);
+    let hook = |stdin: &[u8], args: &[&str]| {
+        let mut all = vec!["agent", "hook", "--event"];
+        all.extend(args);
+        let mut child = ctl_command(&socket, &all)
+            .env("RUSTY_MUX_BLOCK", &block)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run rusty-mux-ctl");
+        let mut input = child.stdin.take().expect("stdin");
+        let _ = input.write_all(stdin);
+        drop(input);
+        let output = child.wait_with_output().expect("wait");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        ok(&socket, &["terminal.status", "--block", &block])
+    };
+    let event = br#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}"#;
+    let args = [
+        "blocked",
+        "--kind",
+        "permission",
+        "--app",
+        "claude",
+        "--tool-from-stdin",
+    ];
+    // "Bash", base64: the tool name only, never its input.
+    assert_eq!(
+        hook(event, &args),
+        "state=blocked:kind=permission:app=claude:msg=QmFzaA=="
+    );
+    let working = ["working", "--app", "claude", "--tool-from-stdin"];
+    assert_eq!(hook(b"not json", &working), "state=working:app=claude");
+    let control = br#"{"tool_name":"a\u0007b"}"#;
+    assert_eq!(hook(control, &working), "state=working:app=claude");
+    let huge = vec![b' '; (1 << 20) + 10];
+    assert_eq!(hook(&huge, &working), "state=working:app=claude");
+}
+
 fn rename(socket: &Path, session: &str, name: &str) {
     ok(
         socket,
