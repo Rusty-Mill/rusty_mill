@@ -377,7 +377,9 @@ fn absolute(dir: &Path) -> Result<PathBuf, String> {
 
 /// Bind `task`'s alien rows in this state dir to one board (D99): they are
 /// keyed by task id, so a same-named task from another BBP directory
-/// (`board` is [`super::run::board`]) is refused, not mixed in.
+/// (`board` is [`super::run::board`]) is refused, not mixed in. The
+/// binding is published atomically, so an interrupted first write leaves
+/// no partial binding to refuse later runs.
 fn bind(root: &Path, task: &str, board: &str) -> Result<(), String> {
     let dir = root.join("boards");
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -390,7 +392,7 @@ fn bind(root: &Path, task: &str, board: &str) -> Result<(), String> {
             root.display()
         )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::write(&file, board).map_err(at)
+            rusty_atomic_file::write(&file, board.as_bytes()).map_err(at)
         }
         Err(e) => Err(at(e)),
     }
