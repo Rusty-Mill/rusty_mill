@@ -1,54 +1,207 @@
-//! The session-start hook in Claude Code's `settings.json` or Codex's
-//! `hooks.json` (one shape), as pure edits of
-//! the parsed file: everything else in it is kept as it was.
+//! The hooks in Claude Code's `settings.json` or Codex's `hooks.json` (one
+//! shape), as pure edits of the parsed file: everything else in it is kept
+//! as it was.
 //!
-//! The hook is one group in `hooks.SessionStart` whose single command runs
-//! `rusty-mux-ctl agent hook`. A hook is ours only in the exact shape
+//! Setup writes one group per [`Entry`]: the session-start hook under
+//! `hooks.SessionStart`, and a status hook under each event the agent
+//! reports from ([`events`], O2). Each group's single command runs
+//! `rusty-mux-ctl agent hook ...`. A hook is ours only in an exact shape
 //! [`command`] writes, a quoted path to an executable named `rusty-mux-ctl`
-//! then ` agent hook`, so a ctl that moved is found and updated rather than
-//! added twice, and nobody else's hook is ever taken for ours.
+//! then one of the argument lists setup uses, so a ctl that moved is found
+//! and updated rather than added twice, and nobody else's hook is ever taken
+//! for ours. The entries are installed, updated and removed as one hook.
 
 use rusty_json::{Map, Value};
 
 use super::State;
 use super::layout::Ctl;
+use crate::cli::AgentKind;
 
-const EVENT: &str = "SessionStart";
+/// The session-start event, run by every agent setup writes settings for.
+const SESSION_START: &str = "SessionStart";
 
-/// The command after the ctl's path, for `ctl`.
-fn suffix(ctl: Ctl<'_>) -> String {
-    format!(" {}", ctl.args().join(" "))
+/// One group setup writes: `command` (and on Windows, for Codex,
+/// `windows`) under `hooks.<event>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Entry {
+    pub event: &'static str,
+    pub command: String,
+    pub windows: Option<String>,
 }
 
-/// Every suffix a hook of ours may have, whether or not it names sessions.
-const SUFFIXES: [&str; 2] = [" agent hook", " agent hook --name-session"];
+/// An event an agent's status hook runs on, with the words after
+/// `agent hook`.
+type Event = (&'static str, &'static [&'static str]);
 
-/// The hook command that runs `ctl`, quoted for the POSIX shell Claude
-/// Code runs hooks in (Git Bash on Windows).
+/// Claude Code's status hooks (D89). A permission prompt shows `blocked`
+/// until the batch of tools it is in ends (`PostToolBatch`), the next tool
+/// starts or the turn ends. Not `PostToolUse`: it fires for each of a
+/// parallel batch's tools, and one finishing would hide another's pending
+/// prompt. `PreToolUse` and `PermissionRequest` name the tool from the
+/// event's stdin.
+const CLAUDE: &[Event] = &[
+    (
+        "UserPromptSubmit",
+        &["--event", "working", "--app", "claude"],
+    ),
+    (
+        "PreToolUse",
+        &["--event", "working", "--app", "claude", "--tool-from-stdin"],
+    ),
+    (
+        "PermissionRequest",
+        &[
+            "--event",
+            "blocked",
+            "--kind",
+            "permission",
+            "--app",
+            "claude",
+            "--tool-from-stdin",
+        ],
+    ),
+    ("PostToolBatch", &["--event", "working", "--app", "claude"]),
+    ("Stop", &["--event", "idle", "--app", "claude"]),
+    ("StopFailure", &["--event", "error", "--app", "claude"]),
+];
+
+/// Codex's status hooks (events from `openai/codex` `codex-rs/hooks`): as
+/// Claude Code's, less the batch and failure events, plus `Interrupt`,
+/// which ends a turn without `Stop`. Not `PostToolUse`, for the reason
+/// Claude Code's has none; an approved tool shows `blocked` until the next
+/// tool starts or the turn ends.
+const CODEX: &[Event] = &[
+    (
+        "UserPromptSubmit",
+        &["--event", "working", "--app", "codex"],
+    ),
+    (
+        "PreToolUse",
+        &["--event", "working", "--app", "codex", "--tool-from-stdin"],
+    ),
+    (
+        "PermissionRequest",
+        &[
+            "--event",
+            "blocked",
+            "--kind",
+            "permission",
+            "--app",
+            "codex",
+            "--tool-from-stdin",
+        ],
+    ),
+    ("Stop", &["--event", "idle", "--app", "codex"]),
+    ("Interrupt", &["--event", "idle", "--app", "codex"]),
+];
+
+/// The status hooks of `agent`, or none for an agent without settings.
+fn events(agent: AgentKind) -> &'static [Event] {
+    match agent {
+        AgentKind::Claude => CLAUDE,
+        AgentKind::Codex => CODEX,
+        AgentKind::OpenCode | AgentKind::Pi => &[],
+    }
+}
+
+/// Events an earlier ctl wrote status hooks under and this one does not,
+/// so setup and remove still take those hooks out.
+const RETIRED: &[&str] = &["PostToolUse", "PostToolUseFailure", "PermissionDenied"];
+
+/// Every event setup may write under or take hooks out of, once each; they
+/// must hold arrays to be edited.
+fn known_events() -> Vec<&'static str> {
+    let all = std::iter::once(SESSION_START)
+        .chain(CLAUDE.iter().chain(CODEX).map(|(e, _)| *e))
+        .chain(RETIRED.iter().copied());
+    let mut events = Vec::new();
+    for event in all {
+        if !events.contains(&event) {
+            events.push(event);
+        }
+    }
+    events
+}
+
+/// The session-start hook's words after the ctl's path, for `ctl`.
+const START_ARGS: [&[&str]; 2] = [&["agent", "hook"], &["agent", "hook", "--name-session"]];
+
+/// Every argument list a hook of ours may have, after the ctl's path.
+fn ours_args() -> impl Iterator<Item = Vec<&'static str>> {
+    let starts = START_ARGS.iter().map(|args| args.to_vec());
+    let events = CLAUDE
+        .iter()
+        .chain(CODEX)
+        .map(|(_, args)| status_args(args));
+    starts.chain(events)
+}
+
+fn status_args(args: &[&'static str]) -> Vec<&'static str> {
+    ["agent", "hook"]
+        .into_iter()
+        .chain(args.iter().copied())
+        .collect()
+}
+
+/// The entries setup writes for `agent` running `ctl`; `windows` asks for
+/// Codex's Windows commands, failing on a path they cannot carry.
+pub(crate) fn entries(agent: AgentKind, ctl: Ctl<'_>, windows: bool) -> Result<Vec<Entry>, String> {
+    let start = (SESSION_START, ctl.args().to_vec());
+    let status = events(agent)
+        .iter()
+        .map(|(event, args)| (*event, status_args(args)));
+    std::iter::once(start)
+        .chain(status)
+        .map(|(event, args)| {
+            let windows = match windows && agent == AgentKind::Codex {
+                true => Some(windows_line(ctl.path, &args)?),
+                false => None,
+            };
+            Ok(Entry {
+                event,
+                command: posix_line(ctl.path, &args),
+                windows,
+            })
+        })
+        .collect()
+}
+
+/// The session-start hook command that runs `ctl`, quoted for the POSIX
+/// shell Claude Code runs hooks in (Git Bash on Windows).
+#[cfg(test)]
 pub(crate) fn command(ctl: Ctl<'_>) -> String {
-    format!("'{}'{}", ctl.path.replace('\'', r"'\''"), suffix(ctl))
+    posix_line(ctl.path, ctl.args())
+}
+
+fn posix_line(path: &str, args: &[&str]) -> String {
+    format!("'{}' {}", path.replace('\'', r"'\''"), args.join(" "))
 }
 
 /// The key of the Windows command Codex runs instead of `command` there.
 const WINDOWS: &str = "commandWindows";
+
+/// The session-start hook's Windows command for Codex; see [`windows_line`].
+#[cfg(test)]
+pub(crate) fn windows_command(ctl: Ctl<'_>) -> Result<String, String> {
+    windows_line(ctl.path, ctl.args())
+}
 
 /// The Windows command for Codex, which runs a hook's command with the
 /// session's shell: PowerShell, `cmd.exe` or Git Bash. No quoting works in
 /// all three, so the path goes unquoted, with `/` for `\` (which all three
 /// take in an absolute path), and a path with any character one of them
 /// would read specially is refused.
-pub(crate) fn windows_command(ctl: Ctl<'_>) -> Result<String, String> {
-    let path = ctl.path.replace('\\', "/");
+fn windows_line(path: &str, args: &[&str]) -> Result<String, String> {
+    let plain_path = path.replace('\\', "/");
     let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '/' | ':' | '.' | '-' | '_');
-    if path.is_empty() || !path.chars().all(plain) {
+    if plain_path.is_empty() || !plain_path.chars().all(plain) {
         return Err(format!(
-            "{}: Codex on Windows runs hooks in the session's shell, and this path \
+            "{path}: Codex on Windows runs hooks in the session's shell, and this path \
              needs quoting there; put rusty-mux-ctl in a directory whose path has only \
-             letters, digits, `-`, `_` and `.`",
-            ctl.path
+             letters, digits, `-`, `_` and `.`"
         ));
     }
-    Ok(format!("{path}{}", suffix(ctl)))
+    Ok(format!("{plain_path} {}", args.join(" ")))
 }
 
 fn is_ours(hook: &Value) -> bool {
@@ -59,11 +212,11 @@ fn is_ours(hook: &Value) -> bool {
             .is_some_and(is_ours_command)
 }
 
-/// Whether [`command`] wrote `command`, for a ctl at any path.
+/// Whether [`posix_line`] wrote `command` for one of [`ours_args`], for a
+/// ctl at any path.
 fn is_ours_command(command: &str) -> bool {
-    let Some(path) = SUFFIXES
-        .iter()
-        .find_map(|suffix| command.strip_suffix(suffix))
+    let Some(path) = ours_args()
+        .find_map(|args| command.strip_suffix(&format!(" {}", args.join(" "))))
         .and_then(unquote)
     else {
         return false;
@@ -72,7 +225,7 @@ fn is_ours_command(command: &str) -> bool {
     matches!(name, "rusty-mux-ctl" | "rusty-mux-ctl.exe") && name.len() < path.len()
 }
 
-/// The word that [`command`]'s quoting turns into `word`, if it is one.
+/// The word that [`posix_line`]'s quoting turns into `word`, if it is one.
 fn unquote(word: &str) -> Option<String> {
     let inner = word.strip_prefix('\'')?.strip_suffix('\'')?;
     let parts: Vec<&str> = inner.split(r"'\''").collect();
@@ -82,23 +235,73 @@ fn unquote(word: &str) -> Option<String> {
     }
 }
 
-/// The `SessionStart` groups, if any; fails on a file whose shape setup
-/// cannot edit without losing something.
-fn groups(settings: &Value) -> Result<&[Value], String> {
+/// The `hooks` object, if any; fails on a file whose shape setup cannot
+/// edit without losing something: a root or `hooks` that is not an object,
+/// or an event setup writes under that is not an array.
+fn hooks(settings: &Value) -> Result<Option<&Map>, String> {
     let root = settings
         .as_object()
         .ok_or("the settings are not a JSON object")?;
     let Some(hooks) = root.get("hooks") else {
-        return Ok(&[]);
+        return Ok(None);
     };
     let hooks = hooks.as_object().ok_or("`hooks` is not an object")?;
-    match hooks.get(EVENT) {
-        None => Ok(&[]),
-        Some(groups) => groups
-            .as_array()
-            .map(Vec::as_slice)
-            .ok_or_else(|| format!("`hooks.{EVENT}` is not an array")),
+    for event in known_events() {
+        if hooks
+            .get(event)
+            .is_some_and(|groups| groups.as_array().is_none())
+        {
+            return Err(format!("`hooks.{event}` is not an array"));
+        }
     }
+    Ok(Some(hooks))
+}
+
+/// A hook of ours as found: its event, its group and the hook itself.
+struct Found<'a> {
+    event: &'static str,
+    group: &'a Value,
+    hook: &'a Value,
+}
+
+impl Found<'_> {
+    /// Whether this hook runs as setup wrote it: alone in a group that
+    /// fires on every occurrence of its event, and not asynchronously
+    /// (statuses must land in order). Fields others add, such as
+    /// `timeout`, are left alone.
+    fn runs_as_written(&self) -> bool {
+        let every = self
+            .group
+            .get("matcher")
+            .is_none_or(|matcher| matches!(matcher.as_str(), Some("" | "*")));
+        let alone = hooks_of(self.group).len() == 1;
+        let in_order = self.hook.get("async").and_then(Value::as_bool) != Some(true);
+        every && alone && in_order
+    }
+
+    fn is(&self, entry: &Entry) -> bool {
+        self.event == entry.event
+            && self.hook.get("command").and_then(Value::as_str) == Some(entry.command.as_str())
+            && self.hook.get(WINDOWS).and_then(Value::as_str) == entry.windows.as_deref()
+            && self.runs_as_written()
+    }
+}
+
+/// Our hooks, in the events setup writes under.
+fn ours(settings: &Value) -> Result<Vec<Found<'_>>, String> {
+    let Some(hooks) = hooks(settings)? else {
+        return Ok(Vec::new());
+    };
+    let mut found = Vec::new();
+    for event in known_events() {
+        let groups = hooks.get(event).and_then(Value::as_array);
+        for group in groups.into_iter().flatten() {
+            for hook in hooks_of(group).iter().filter(|hook| is_ours(hook)) {
+                found.push(Found { event, group, hook });
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// The hooks of a group, skipping a group of a shape this does not know.
@@ -111,92 +314,81 @@ fn hooks_of(group: &Value) -> &[Value] {
 
 /// Whether `settings` hold a hook of ours, whatever its command.
 pub(crate) fn has_hook(settings: &Value) -> Result<bool, String> {
-    Ok(groups(settings)?.iter().flat_map(hooks_of).any(is_ours))
+    Ok(!ours(settings)?.is_empty())
 }
 
-/// Whether `settings` hold the hook that runs `command`, and on Windows
-/// `windows` (absent when `None`).
-pub(crate) fn state(
-    settings: &Value,
-    command: &str,
-    windows: Option<&str>,
-) -> Result<State, String> {
-    let ours: Vec<&Value> = groups(settings)?
-        .iter()
-        .flat_map(hooks_of)
-        .filter(|h| is_ours(h))
-        .collect();
-    let current = |h: &&Value| {
-        h.get("command").and_then(Value::as_str) == Some(command)
-            && h.get(WINDOWS).and_then(Value::as_str) == windows
-    };
-    Ok(match ours.as_slice() {
-        [] => State::Missing,
-        hooks if hooks.iter().all(current) => State::Installed,
-        _ => State::Outdated,
+/// Whether `settings` hold exactly `entries` among our hooks: installed
+/// when each is there as written and nothing else of ours is, outdated when
+/// some of ours differ, are missing, are extra, or run other than as
+/// written (a matcher, `async`, or a group shared with other hooks).
+pub(crate) fn state(settings: &Value, entries: &[Entry]) -> Result<State, String> {
+    let ours = ours(settings)?;
+    if ours.is_empty() {
+        return Ok(State::Missing);
+    }
+    let exact = ours.len() == entries.len()
+        && entries
+            .iter()
+            .all(|entry| ours.iter().filter(|found| found.is(entry)).count() == 1);
+    Ok(match exact {
+        true => State::Installed,
+        false => State::Outdated,
     })
 }
 
-/// `settings` with the hook running `command`: an outdated one is pointed
-/// at `command`, a missing one appended as a group of its own.
-pub(crate) fn with_hook(
-    mut settings: Value,
-    command: &str,
-    windows: Option<&str>,
-) -> Result<Value, String> {
-    let had = state(&settings, command, windows)?;
-    let groups = groups_mut(&mut settings)?;
-    match had {
-        State::Installed | State::Foreign | State::Unreadable | State::Unsupported => {}
-        State::Outdated => {
-            for hook in groups.iter_mut().flat_map(hooks_of_mut) {
-                if is_ours(hook) {
-                    set_commands(hook, command, windows);
-                }
-            }
-        }
-        State::Missing => groups.push(group(command, windows)),
+/// `settings` with exactly `entries` of ours: unchanged when already so,
+/// otherwise every hook of ours is taken out (other hooks in its group
+/// stay) and each entry appended as a group of its own.
+pub(crate) fn with_hook(settings: Value, entries: &[Entry]) -> Result<Value, String> {
+    if state(&settings, entries)? == State::Installed {
+        return Ok(settings);
+    }
+    let before = settings.clone();
+    let mut settings = without_hook(settings, Some(&before))?;
+    for entry in entries {
+        groups_mut(&mut settings, entry.event)?.push(group(entry));
     }
     Ok(settings)
 }
 
-/// `settings` without the hook, dropping the group, and `SessionStart` and
-/// `hooks` where it leaves them empty unless `before` (the settings as they
-/// were before setup) had them.
+/// `settings` without our hooks, dropping their groups, and an event or
+/// `hooks` that this leaves empty unless `before` (the settings as they were
+/// before setup) had it.
 pub(crate) fn without_hook(mut settings: Value, before: Option<&Value>) -> Result<Value, String> {
+    hooks(&settings)?;
     let had_hooks = before.and_then(|b| b.get("hooks"));
-    let had_event = had_hooks.and_then(|h| h.get(EVENT)).is_some();
-    let had_hooks = had_hooks.is_some();
-    groups(&settings)?;
+    let had_event = |event: &str| had_hooks.and_then(|h| h.get(event)).is_some();
     let root = settings
         .as_object_mut()
         .ok_or("the settings are not a JSON object")?;
     let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
         return Ok(settings);
     };
-    let Some(groups) = hooks.get_mut(EVENT).and_then(Value::as_array_mut) else {
-        return Ok(settings);
-    };
-    groups.retain_mut(|group| {
-        let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-            return true;
+    for event in known_events() {
+        let Some(groups) = hooks.get_mut(event).and_then(Value::as_array_mut) else {
+            continue;
         };
-        let before = hooks.len();
-        hooks.retain(|h| !is_ours(h));
-        hooks.len() == before || !hooks.is_empty()
-    });
-    if groups.is_empty() && !had_event {
-        hooks.remove(EVENT);
+        groups.retain_mut(|group| {
+            let Some(hooks) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let count = hooks.len();
+            hooks.retain(|h| !is_ours(h));
+            hooks.len() == count || !hooks.is_empty()
+        });
+        if groups.is_empty() && !had_event(event) {
+            hooks.remove(event);
+        }
     }
-    if hooks.is_empty() && !had_hooks {
+    if hooks.is_empty() && had_hooks.is_none() {
         root.remove("hooks");
     }
     Ok(settings)
 }
 
-/// The `SessionStart` array, created if absent, after [`groups`] passed.
-fn groups_mut(settings: &mut Value) -> Result<&mut Vec<Value>, String> {
-    groups(settings)?;
+/// The array of `event`, created if absent, after [`hooks`] passed.
+fn groups_mut<'a>(settings: &'a mut Value, event: &str) -> Result<&'a mut Vec<Value>, String> {
+    hooks(settings)?;
     settings
         .as_object_mut()
         .and_then(|root| {
@@ -206,40 +398,22 @@ fn groups_mut(settings: &mut Value) -> Result<&mut Vec<Value>, String> {
         })
         .and_then(|hooks| {
             hooks
-                .entry(EVENT.into())
+                .entry(event.into())
                 .or_insert_with(|| Value::Array(Vec::new()))
                 .as_array_mut()
         })
-        .ok_or_else(|| format!("cannot add to `hooks.{EVENT}`"))
+        .ok_or_else(|| format!("cannot add to `hooks.{event}`"))
 }
 
-fn hooks_of_mut(group: &mut Value) -> impl Iterator<Item = &mut Value> {
-    group
-        .get_mut("hooks")
-        .and_then(Value::as_array_mut)
-        .into_iter()
-        .flatten()
-}
-
-/// A group with no matcher, so it runs on every kind of session start.
-fn group(command: &str, windows: Option<&str>) -> Value {
+/// A group with no matcher, so it runs on every occurrence of its event.
+fn group(entry: &Entry) -> Value {
     let mut hook = Map::new();
     hook.insert("type".into(), "command".into());
-    let mut hook = Value::Object(hook);
-    set_commands(&mut hook, command, windows);
+    hook.insert("command".into(), entry.command.as_str().into());
+    if let Some(windows) = &entry.windows {
+        hook.insert(WINDOWS.into(), windows.as_str().into());
+    }
     let mut group = Map::new();
-    group.insert("hooks".into(), Value::Array(vec![hook]));
+    group.insert("hooks".into(), Value::Array(vec![Value::Object(hook)]));
     Value::Object(group)
-}
-
-/// Points our `hook` at `command`, with `windows` or without one.
-fn set_commands(hook: &mut Value, command: &str, windows: Option<&str>) {
-    let Some(hook) = hook.as_object_mut() else {
-        return;
-    };
-    hook.insert("command".into(), command.into());
-    match windows {
-        Some(windows) => hook.insert(WINDOWS.into(), windows.into()),
-        None => hook.remove(WINDOWS),
-    };
 }
