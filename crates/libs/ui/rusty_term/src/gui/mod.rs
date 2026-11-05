@@ -31,6 +31,7 @@ mod gpu;
 mod hotkey;
 pub(crate) mod input;
 mod layout;
+mod motion;
 mod mouse;
 mod pace;
 mod render;

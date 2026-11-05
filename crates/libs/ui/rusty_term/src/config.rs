@@ -30,6 +30,16 @@ pub enum LaunchMode {
     Fullscreen,
 }
 
+/// Reduced motion override (`[window] reduce_motion`, pack D27/D51). Absent
+/// means "system": follow the OS accessibility setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReduceMotion {
+    /// Always reduce: the cursor stops blinking and leaves no trail.
+    On,
+    /// Never reduce, whatever the OS says.
+    Off,
+}
+
 /// OSC 52 clipboard policy (`clipboard` config key). A child program can ask
 /// the terminal to read the system clipboard back to it (`52;c;?`) — with no
 /// gate, `curl https://evil | cat` printing that escape sequence silently
@@ -120,6 +130,9 @@ pub struct Config {
     /// Whether the cursor leaves a brief fading trail when it jumps
     /// (`cursor_trail`; default off) — pure renderer eye candy (G36).
     pub cursor_trail: Option<bool>,
+    /// Reduced motion override (`[window] reduce_motion`); `None` follows the
+    /// OS setting.
+    pub reduce_motion: Option<ReduceMotion>,
     /// Command gutter marks (windowed front-end): a thin colored stripe
     /// beside each OSC 133 command block — green success, red failure, the
     /// accent while running (`[window] command_marks`; default on).
@@ -293,6 +306,7 @@ impl Config {
 # quake_height = 0.4       # dropdown-window height fraction (rusty_term ctl quake)
 # quake_hotkey = "win+grave" # global hotkey toggling the quake window (Windows only)
 # status_bar = false        # hide the bottom status ribbon (default on)
+# reduce_motion = "on"      # "system" (default, follow the OS), "on" or "off"
 # command_marks = false     # hide the per-command gutter marks (default on)
 
 # copy_html = false         # don't add styled HTML to Ctrl+Shift+C copies
@@ -804,6 +818,15 @@ fn apply(cfg: &mut Config, section: &str, key: &str, value: Value) -> Result<(),
                 "fullscreen" | "full" => LaunchMode::Fullscreen,
                 _ => return Err(format!("unknown {key} `{name}` (maximized or fullscreen)")),
             });
+        }
+        ("window", "reduce_motion") => {
+            let name = expect_str(key, value)?;
+            cfg.reduce_motion = match name.to_ascii_lowercase().as_str() {
+                "system" => None,
+                "on" => Some(ReduceMotion::On),
+                "off" => Some(ReduceMotion::Off),
+                _ => return Err(format!("unknown {key} `{name}` (system, on or off)")),
+            };
         }
         ("window", "font_size") => {
             let px = match value {
@@ -1548,6 +1571,21 @@ color15 = "ffffff"
         let (cfg3, warns3) = parse("[window]\nlaunch_mode = \"bogus\"\n");
         assert_eq!(cfg3.launch_mode, None);
         assert_eq!(warns3.len(), 1);
+    }
+
+    #[test]
+    fn reduce_motion_key_parses_system_on_off() {
+        let (cfg, warns) = parse("[window]\nreduce_motion = \"on\"\n");
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(cfg.reduce_motion, Some(ReduceMotion::On));
+        let (cfg, _) = parse("[window]\nreduce_motion = \"Off\"\n");
+        assert_eq!(cfg.reduce_motion, Some(ReduceMotion::Off));
+        let (cfg, warns) = parse("[window]\nreduce_motion = \"system\"\n");
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(cfg.reduce_motion, None);
+        let (cfg, warns) = parse("[window]\nreduce_motion = \"sometimes\"\n");
+        assert_eq!(cfg.reduce_motion, None);
+        assert_eq!(warns.len(), 1);
     }
 
     #[test]

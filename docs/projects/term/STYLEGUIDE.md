@@ -93,9 +93,12 @@ numbered steps (D32, D33).
   Esc backs out, default focus lands on the likely field, long lists are searchable.
 - **Back-out is quiet:** Close, Cancel and Dismiss get no colour, chip or animation.
 - **Platform labels match the binding** (Ctrl+Shift on Linux and Windows; ⌘ and ⇧ on macOS).
-- **Motion only for continuity**, and none under the OS reduced-motion setting.
-  Target: only a spinner and a blinking cursor animate; under reduced motion both go static
-  (pack D16, D27).
+- **Motion only for continuity.** Reduced motion (`gui/motion.rs`, pack D27, D50 to D52) is
+  `[window] reduce_motion` = `system` (default, the OS setting read at startup), `on` or `off`,
+  also on the settings page. Under it the cursor draws solid (whoever asked it to blink) and
+  leaves no trail; program output such as Kitty image animations keeps playing.
+  Target: a spinner for running commands, static under reduced motion, and a live re-read of
+  the OS setting (pack D16, D52).
 - **Missing data offers a way to get it** (no shell found leads to the shell picker).
 
 ## Enforcement and review
