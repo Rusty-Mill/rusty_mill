@@ -997,6 +997,23 @@ mod tests {
         assert!(err.error.contains("reassigned"), "{err:?}");
     }
 
+    /// The second post's answer is lost twice: only the id the host
+    /// returned is kept, and the lost one isn't guessed.
+    #[test]
+    fn a_post_lost_partway_keeps_only_the_ids_that_were_answered() {
+        let fake = Fake::default()
+            .on("post", Response::Posted(MsgId(41)))
+            .fail("post", "timed out")
+            .fail("post", "timed out");
+        let mut s = Session::new("adversary", fake, "r1");
+        let err = s
+            .post("adversary", &[counter("x"), counter("y")])
+            .expect_err("lost");
+        assert_eq!(err.posted, [MsgId(41)]);
+        assert!(err.error.contains("timed out"), "{err:?}");
+        assert_eq!(s.rpc.args("post").len(), 3, "one resend of the lost post");
+    }
+
     #[test]
     fn a_rejected_post_is_not_retried() {
         let fake = Fake::default().refuse("post", reassigned());
