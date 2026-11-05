@@ -10,7 +10,7 @@
 //!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
 //! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
 //! bbp takeover-input --dir D --task T --takeover N --seq S --sha256 HEX   D82: one batch of takeover input, the raw bytes on stdin, at most 4096; HEX chains it to the last batch
-//! bbp takeover-ended --dir D --task T --takeover N --reason expired|revoked|turn-ended|mux-lost   D82: orch ends a takeover (the human releases one with `bbp human takeover-release N`)
+//! bbp takeover-ended --dir D --task T --takeover N --reason released|expired|revoked|turn-ended|mux-lost   D82: orch ends a takeover (`released` only after `bbp human takeover-release N`)
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V

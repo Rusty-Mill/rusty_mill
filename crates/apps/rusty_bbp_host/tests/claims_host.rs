@@ -1586,6 +1586,7 @@ fn bbp(dir: &Path, args: &[&str], stdin: impl AsRef<[u8]>) -> String {
 /// The human starts a takeover with `bbp human takeover`, orch records the
 /// typed batches with `bbp takeover-input` (text on stdin, chained by
 /// SHA-256) and ends it with `bbp takeover-ended`; the board keeps it all.
+/// After `bbp human takeover-release`, orch drains and ends it as released.
 #[test]
 fn a_takeover_is_recorded_from_start_to_end_through_the_cli() {
     let dir = tempdir("takeover-cli");
@@ -1648,7 +1649,7 @@ fn a_takeover_is_recorded_from_start_to_end_through_the_cli() {
         ],
         "",
     );
-    assert!(out.contains("only the human releases"), "{out}");
+    assert!(out.contains("Forbidden"), "{out}");
     let out = bbp(
         &dir,
         &["takeover-ended", "--takeover", "1", "--reason", "mux-lost"],
@@ -1662,7 +1663,40 @@ fn a_takeover_is_recorded_from_start_to_end_through_the_cli() {
         .cloned()
         .expect("takeover");
     assert_eq!(t.batches, 1);
-    assert_eq!(t.ended, Some(TakeoverEnd::MuxLost));
+    assert_eq!(t.phase, TakeoverPhase::Ended(TakeoverEnd::MuxLost));
+
+    let r = human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[&format!("msg:{c}"), "agent:C1:1:1", "nano", "10", "again"],
+        None,
+    )
+    .expect("takeover");
+    assert_eq!(r, Response::TakenOver(2));
+    human::perform(&dir, &task(), "takeover-release", &["takeover:2"], None).expect("release");
+    // Delivered before the release, posted after it.
+    let sha = rusty_bbp::claims::input_chain(None, b"q").hex();
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "2",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "q",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    let end = ["takeover-ended", "--takeover", "2", "--reason", "released"];
+    assert!(bbp(&dir, &end, "").contains("Ok"));
+    assert!(bbp(&dir, &end, "").contains("NotOpen"), "ends once");
+    let t = state(&dir).claims.takeovers[&2].clone();
+    assert_eq!(t.batches, 1);
+    assert_eq!(t.phase, TakeoverPhase::Ended(TakeoverEnd::Released));
 }
 
 /// `bbp takeover-input` records stdin byte for byte: invalid UTF-8, a

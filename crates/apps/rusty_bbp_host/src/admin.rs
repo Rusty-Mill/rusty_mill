@@ -278,7 +278,8 @@ pub fn takeover_input(
     )
 }
 
-/// D82: orch ends a takeover; only the human releases one.
+/// D82: orch writes a takeover's one end: after a release or the task's end
+/// has closed it and the delivered input is drained, or for its own reasons.
 pub fn takeover_ended(
     dir: &Path,
     task: &TaskId,
@@ -295,12 +296,10 @@ pub fn parse_takeover_end(s: &str) -> Result<TakeoverEnd, String> {
         "revoked" => TakeoverEnd::Revoked,
         "turn-ended" => TakeoverEnd::TurnEnded,
         "mux-lost" => TakeoverEnd::MuxLost,
-        "released" => {
-            return Err("only the human releases a takeover: `bbp human takeover-release N`".into())
-        }
+        "released" => TakeoverEnd::Released,
         other => {
             return Err(format!(
-                "reason must be expired, revoked, turn-ended or mux-lost, got {other}"
+                "reason must be released, expired, revoked, turn-ended or mux-lost, got {other}"
             ))
         }
     })
