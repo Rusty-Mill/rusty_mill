@@ -141,13 +141,13 @@ So the mux never decides to start or stop an agent. It forks one only when orch 
 
 ## 9. The mux API orch needs (brief for Rusty Term)
 
-From rusty-term-expert. None of it exists today. Each item is a new capability row (C74 onward) that Nano starts (rusty_term D36, D37). Features bits start at 33 (D27); the numbers here are proposals.
+From rusty-term-expert. None of it exists today. Each item is a new capability row that Nano starts (rusty_term D36, D37). This table gives shapes only. Capability rows, features bits, message types and event kinds are allocated in [`docs/projects/mux/AGENT-HOSTING.md`](../mux/AGENT-HOSTING.md) (features bits 35–39, D27), which wins over any number this design used earlier: bits 33 and 34 are already `AGENT_STATUS` and `TERMINAL_HISTORY` on main.
 
 | # | Capability | Shape | Size |
 |---|---|---|---|
-| 1 | **Agent launch** | bit 33 `AGENT_LAUNCH`. `Launch` gains `env: Option<Vec<(k, v)>>` (exact: no inheritance and no `RUSTY_MUX_*`), `fds: Vec<u32>` (target numbers, with SCM_RIGHTS on that frame, Unix socket only, through `rusty_libc`), `hold`, and `input`. The child dup2's its fds and closes the rest. | M |
-| 2 | **Signal and release** | `SignalBlock{block, signal}` to the pty's process group. `Release{block}` closes the master with no SIGKILL. bit 34. | S |
-| 3 | **Input gate** | bit 35 `INPUT_GATE`. With `input: owner-only`, `AcquireLease` is refused without a grant. Owner-only `GrantLease{block, client, until}` and `RevokeLease`. `InputBatch{block, client, seq, bytes}` goes to the owner only. | M |
+| 1 | **Agent launch** | `Launch` gains `env: Option<Vec<(k, v)>>` (exact: no inheritance and no `RUSTY_MUX_*`), `fds: Vec<u32>` (target numbers, with SCM_RIGHTS on that frame, Unix socket only, through `rusty_libc`), `hold`, and `input`. The child dup2's its fds and closes the rest. | M |
+| 2 | **Signal and release** | `SignalBlock{block, signal}` to the pty's process group. `Release{block}` closes the master with no SIGKILL. | S |
+| 3 | **Input gate** | With `input: owner-only`, `AcquireLease` is refused without a grant. Owner-only `GrantLease{block, client, until}` and `RevokeLease`. `InputBatch{block, client, seq, bytes}` goes to the owner only. | M |
 | 5 | **Hold on exit** | With `hold`, the grid stays after exit, `ProgramExited` is sent, and the block waits for an explicit close. | S |
 | 8 | **Ownership** | The launching connection owns the block (C46). Other clients can't rename, close or kick the owner, or take a lease on it. | M |
 | 7 | **Remote viewer** | Windows `--ssh` plus the C26 map entry (§7 a) | M |
