@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Event,
-    EventKind, ExecutionLink, MoveRules, Shelf, import_id, text_hash,
+    EventKind, ExecutionLink, MoveRules, Plan, Shelf, import_id, text_hash,
 };
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
@@ -956,6 +956,9 @@ impl<S: Store> Board<S> {
         {
             return Err(waits_on_deps());
         }
+        if let Some(named) = id.and_then(|i| cards.iter().find(|c| c.id == i)) {
+            check_not_superseded(named)?;
+        }
         let mut candidates: Vec<Card> = cards
             .into_iter()
             .filter(|c| id.is_none_or(|i| c.id == i))
@@ -963,6 +966,7 @@ impl<S: Store> Board<S> {
             .filter(|c| rank(c).is_some() && flow.actionable(&c.column, &by.caps))
             .filter(|c| id.is_some() || c.claim.as_deref().is_none_or(|h| h == by.name))
             .filter(|c| !waiting.contains(&c.id))
+            .filter(|c| c.superseded_by.is_empty())
             .collect();
         // Nearest Done first; within a queue the highest priority, then the manual order,
         // then the oldest.
@@ -1010,7 +1014,7 @@ impl<S: Store> Board<S> {
         if !works(&current.column) {
             return Err(BoardError::Conflict);
         }
-        self.check_deps_done(&current)?;
+        self.check_takeable(&current)?;
         // Refuse before writing anything: a claimed card must not be half-taken.
         if let Some(holder) = current.claim.as_ref().filter(|h| **h != by.name) {
             return Err(BoardError::Claimed(holder.clone()));
@@ -1020,7 +1024,7 @@ impl<S: Store> Board<S> {
                 if !works(&c.column) {
                     return Err(BoardError::Conflict);
                 }
-                self.check_deps_done(c)?;
+                self.check_takeable(c)?;
                 c.claim(by, now)
             });
         };
@@ -1035,7 +1039,7 @@ impl<S: Store> Board<S> {
             if c.column != current.column {
                 return Err(BoardError::Conflict);
             }
-            self.check_deps_done(c)?;
+            self.check_takeable(c)?;
             // Checked on the card being committed, not the earlier read.
             if let Some(holder) = c.claim.as_ref().filter(|h| **h != by.name) {
                 return Err(BoardError::Claimed(holder.clone()));
@@ -1046,6 +1050,13 @@ impl<S: Store> Board<S> {
                 ..entered
             })
         })
+    }
+
+    /// Refuse `card` while it is superseded or waits on a dependency. Checked on the card
+    /// being committed, so links planned after `take` listed it still count.
+    fn check_takeable(&self, card: &Card) -> Result<(), BoardError> {
+        check_not_superseded(card)?;
+        self.check_deps_done(card)
     }
 
     /// Refuse `card` while any of its dependencies is not Done. Checked on the card being
@@ -1291,33 +1302,28 @@ impl<S: Store> Board<S> {
         })
     }
 
-    /// Set a card's priority and dependencies (each optional). Needs `Triage`:
-    /// what is taken first, and what waits, is a planning decision.
+    /// Set a card's priority and links (see [`Plan`]). Needs `Triage`: what is taken
+    /// first, what waits, and what a newer card replaces are planning decisions.
     ///
     /// # Errors
-    /// A missing capability, a dependency that is not a card, or see [`Card::plan`].
-    pub fn plan(
-        &self,
-        id: Uuid,
-        by: &Actor,
-        priority: Option<u8>,
-        deps: Option<Vec<Uuid>>,
-    ) -> Result<Card, BoardError> {
+    /// A missing capability, an empty plan, a linked id that is not a card, or see
+    /// [`Card::plan`].
+    pub fn plan(&self, id: Uuid, by: &Actor, plan: &Plan) -> Result<Card, BoardError> {
         if !by.caps.contains(&Capability::Triage) {
             return Err(BoardError::Forbidden(Capability::Triage));
         }
-        for dep in deps.iter().flatten() {
-            if *dep != id && self.store.get(*dep)?.is_none() {
-                return Err(BoardError::NotFound(*dep));
+        if plan.is_empty() {
+            return Err(BoardError::Invalid(
+                "give a priority, deps, superseded_by or related",
+            ));
+        }
+        for linked in plan.linked() {
+            if *linked != id && self.store.get(*linked)?.is_none() {
+                return Err(BoardError::NotFound(*linked));
             }
         }
-        if priority.is_none() && deps.is_none() {
-            return Err(BoardError::Invalid("give a priority, deps or both"));
-        }
         // One commit: `Card::plan` validates the whole request before anything changes.
-        self.apply(id, by, EventKind::Edited, |c, now| {
-            c.plan(priority, deps.clone(), now)
-        })
+        self.apply(id, by, EventKind::Edited, |c, now| c.plan(plan, now))
     }
 
     /// Comment on a card.
@@ -1348,12 +1354,23 @@ fn placed(flow: &Workflow, card: Card) -> Card {
     }
 }
 
-/// Ids of the cards that wait on a dependency that is not Done. A dependency
-/// that is no longer on the board does not hold anything up.
 fn waits_on_deps() -> BoardError {
     BoardError::Refused("card waits on cards that are not done".into())
 }
 
+/// Refuse a card a newer one replaces: its work would redo or undo the newer card's.
+fn check_not_superseded(card: &Card) -> Result<(), BoardError> {
+    if card.superseded_by.is_empty() {
+        return Ok(());
+    }
+    Err(BoardError::Refused(
+        "card is superseded by a newer card: close it, or re-scope it and clear superseded_by"
+            .into(),
+    ))
+}
+
+/// Ids of the cards that wait on a dependency that is not Done. A dependency
+/// that is no longer on the board does not hold anything up.
 fn waiting_on_deps(cards: &[Card]) -> BTreeSet<Uuid> {
     let open: BTreeSet<Uuid> = cards
         .iter()
