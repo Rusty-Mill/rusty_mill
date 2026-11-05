@@ -43,7 +43,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{KeyCode, KeyLocation, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, Window, WindowId};
 
-use super::chrome::Chrome;
+use super::chrome::{Chrome, Marks};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::pace::Pacer;
@@ -1508,12 +1508,14 @@ impl WindowState<'_> {
             self.trail = None;
         }
         // Command gutter marks (per pane): resolve each row's BlockMark to a
-        // chrome color — fixed success and failure, running in the accent.
+        // pack color resolved against the theme background (D41).
         let marks_on = self.config.command_marks.unwrap_or(true);
+        // The marks sit on the theme background, so they resolve against it.
+        let marks = Marks::for_theme(&self.theme, &tokens);
         let mark_color = |m: crate::core::BlockMark| match m {
-            crate::core::BlockMark::Success => tokens.success,
-            crate::core::BlockMark::Error => tokens.failure,
-            crate::core::BlockMark::Running => tokens.accent,
+            crate::core::BlockMark::Success => marks.success,
+            crate::core::BlockMark::Error => marks.failure,
+            crate::core::BlockMark::Running => marks.running,
         };
         let search = SearchColors::from_theme(&self.theme);
         let mut frames: Vec<PaneFrame> = snaps

@@ -7,7 +7,7 @@
 //! stands in (D35); success and failure are always verdigris and oxide (D36).
 //! Program output is not chrome: the grid keeps the theme's own colours.
 
-use crate::core::{Theme, contrast_ratio};
+use crate::core::{Theme, contrast_ratio, ensure_contrast};
 
 /// Contrast the accent must keep against the surface it marks (D27 floor).
 const ACCENT_MIN: f32 = 3.0;
@@ -112,6 +112,44 @@ impl Chrome {
     }
 }
 
+/// Command gutter mark colours. The marks sit in the padding band on the
+/// theme's own background, not on a chrome surface, so they are resolved
+/// against `theme.bg` (pack D41).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Marks {
+    pub success: u32,
+    pub failure: u32,
+    pub running: u32,
+}
+
+impl Marks {
+    /// Success and failure: whichever pack mode's token stands out more from
+    /// `theme.bg`. Running: the theme cursor when it is visible on `theme.bg`,
+    /// else the chrome accent. Any of them still under [`ACCENT_MIN`] (a
+    /// mid-grey background no pack token can clear) is nudged until it holds.
+    pub(crate) fn for_theme(theme: &Theme, chrome: &Chrome) -> Self {
+        let bg = theme.bg;
+        let best = |a: u32, b: u32| {
+            if contrast_ratio(a, bg) >= contrast_ratio(b, bg) {
+                a
+            } else {
+                b
+            }
+        };
+        let running = if contrast_ratio(theme.cursor, bg) >= ACCENT_MIN {
+            theme.cursor
+        } else {
+            chrome.accent
+        };
+        let hold = |c: u32| ensure_contrast(c, bg, ACCENT_MIN);
+        Self {
+            success: hold(best(DARK.verdigris, LIGHT.verdigris)),
+            failure: hold(best(DARK.oxide, LIGHT.oxide)),
+            running: hold(running),
+        }
+    }
+}
+
 /// Whether `bg` reads as a light background: dark text stands out more on it
 /// than white does.
 fn is_light(bg: u32) -> bool {
@@ -202,6 +240,52 @@ mod tests {
                 assert_legible(&theme, &format!("bg {grey:06x} cursor {cursor:06x}"));
             }
         }
+    }
+
+    /// Gutter marks hold 3:1 on the theme background itself, mid-grey
+    /// included, and stay pack tokens wherever a pack token can.
+    #[test]
+    fn gutter_marks_are_visible_on_any_background() {
+        for step in 0..=32u32 {
+            let v = (step * 255 / 32) & 0xFF;
+            let bg = v << 16 | v << 8 | v;
+            for cursor in [0x000000, 0xFFFFFF, 0x808080, bg] {
+                let theme = Theme {
+                    bg,
+                    cursor,
+                    ..Theme::default()
+                };
+                let m = Marks::for_theme(&theme, &Chrome::from_theme(&theme));
+                for (label, c) in [
+                    ("success", m.success),
+                    ("failure", m.failure),
+                    ("running", m.running),
+                ] {
+                    let r = contrast_ratio(c, bg);
+                    assert!(r >= ACCENT_MIN, "{label} {c:06x} on {bg:06x} = {r:.2}");
+                }
+            }
+        }
+        for name in crate::config::PRESETS {
+            let theme = crate::config::preset(name).expect("a preset");
+            let m = Marks::for_theme(&theme, &Chrome::from_theme(&theme));
+            let pack = [DARK.verdigris, LIGHT.verdigris, DARK.oxide, LIGHT.oxide];
+            assert!(
+                pack.contains(&m.success) && pack.contains(&m.failure),
+                "{name}: pack tokens"
+            );
+        }
+    }
+
+    #[test]
+    fn a_visible_theme_cursor_marks_running_commands() {
+        let theme = Theme {
+            bg: 0x777777,
+            cursor: 0xFFFFFF,
+            ..Theme::default()
+        };
+        let m = Marks::for_theme(&theme, &Chrome::from_theme(&theme));
+        assert_eq!(m.running, 0xFFFFFF);
     }
 
     #[test]
