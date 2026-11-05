@@ -951,3 +951,58 @@ fn a_hiding_sandbox_is_refused_when_it_reaches_a_linked_git_directory() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// A supported, composed layout: `.git/objects` linked to an object store
+/// whose `pack` and one loose-object directory are linked again elsewhere.
+/// A harness granted only one of those final places is refused before
+/// anything runs or is copied.
+#[test]
+fn a_hiding_sandbox_is_refused_when_it_reaches_storage_linked_twice() {
+    let base = root("hidden_linked_twice")
+        .canonicalize()
+        .expect("canonical");
+    let layout = |root: &Path| -> (PathBuf, PathBuf) {
+        let repo = root.join("repo");
+        secret_repo(&repo);
+        let store = root.join("object-store");
+        std::fs::rename(repo.join(".git/objects"), &store).expect("move objects");
+        std::os::unix::fs::symlink(&store, repo.join(".git/objects")).expect("link objects");
+        let packs = root.join("separate-packs");
+        std::fs::rename(store.join("pack"), &packs).expect("move pack");
+        std::os::unix::fs::symlink(&packs, store.join("pack")).expect("link pack");
+        let fan = std::fs::read_dir(&store)
+            .expect("store")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .find(|n| n.len() == 2 && n.chars().all(|c| c.is_ascii_hexdigit()))
+            .expect("a loose-object directory");
+        let loose = root.join("separate-loose");
+        std::fs::rename(store.join(&fan), &loose).expect("move loose");
+        std::os::unix::fs::symlink(&loose, store.join(&fan)).expect("link loose");
+        (packs, loose)
+    };
+    for (case, pick) in [("packs", 0), ("loose", 1)] {
+        let root = base.join(case);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let (packs, loose) = layout(&root);
+        let granted = [&packs, &loose][pick];
+        let mut sandbox = HarnessSandbox {
+            checkout: true,
+            hide: vec!["secrets".into()],
+            ..scripts(&root)
+        };
+        sandbox.read.push(granted.to_string_lossy().into_owned());
+        let cfg = setup(&root, "T1", HIDDEN, vec!["x".into()], Some(sandbox));
+        let error = moderator::run(&cfg).expect_err("the moderator refuses to launch");
+        let name = granted.file_name().expect("name").to_string_lossy();
+        assert!(error.contains(name.as_ref()), "{case}: {error}");
+        assert!(
+            planner_log(&cfg.dir, &cfg.task).is_empty(),
+            "{case}: nothing ran"
+        );
+        assert!(
+            !root.join("work/turns").exists(),
+            "{case}: no filtered copy was made"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}

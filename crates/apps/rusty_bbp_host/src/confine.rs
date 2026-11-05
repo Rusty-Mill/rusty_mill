@@ -466,8 +466,14 @@ fn refuse_exposing(roots: &[&Path], repo: &Path) -> Result<(), String> {
 }
 
 /// Every resolved place that holds `repo`'s files or objects, `repo`
-/// included. Fails closed on a layout it cannot follow: a `.git` that is
-/// not a directory (a `gitdir:` file) or one that names a `commondir`.
+/// included: `.git`, the target of every link reached from it, followed
+/// transitively through linked directories (a linked `objects` whose `pack`
+/// is linked again), and the object stores it borrows
+/// (`objects/info/alternates`, also transitively). What has been scanned is
+/// kept apart from what is held, so holding a place never skips scanning it,
+/// and each place is scanned once, so link cycles end. Fails closed on a
+/// layout it cannot follow: a `.git` that is not a directory (a `gitdir:`
+/// file), one that names a `commondir`, or a directory it cannot read.
 fn git_storage(repo: &Path) -> Result<Vec<PathBuf>, String> {
     let dot_git = repo.join(".git");
     let refuse = |why: &str| {
@@ -483,18 +489,35 @@ fn git_storage(repo: &Path) -> Result<Vec<PathBuf>, String> {
         return refuse("its storage is shared through commondir");
     }
     let git = canonical(&dot_git)?;
-    let mut held = vec![repo.to_path_buf(), git.clone()];
-    held.extend(link_targets(&git)?);
+    let mut held = vec![repo.to_path_buf()];
+    let mut scanned = std::collections::BTreeSet::new();
+    let mut stores = std::collections::BTreeSet::new();
+    let mut todo = vec![git.clone()];
     let objects = git.join("objects");
-    let mut stores = match objects.symlink_metadata() {
+    let mut alternates = match objects.symlink_metadata() {
         Ok(_) => vec![canonical(&objects)?],
         Err(_) => Vec::new(),
     };
-    while let Some(store) = stores.pop() {
-        if !held.contains(&store) {
-            held.extend(link_targets(&store)?);
-            held.push(store.clone());
+    loop {
+        if let Some(d) = todo.pop() {
+            if scanned.insert(d.clone()) {
+                for target in link_targets(&d)? {
+                    if target.is_dir() {
+                        todo.push(target.clone());
+                    }
+                    held.push(target);
+                }
+                held.push(d);
+            }
+            continue;
         }
+        let Some(store) = alternates.pop() else {
+            break;
+        };
+        if !stores.insert(store.clone()) {
+            continue;
+        }
+        todo.push(store.clone());
         let Ok(text) = std::fs::read_to_string(store.join("info/alternates")) else {
             continue;
         };
@@ -502,10 +525,7 @@ fn git_storage(repo: &Path) -> Result<Vec<PathBuf>, String> {
             .lines()
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
         {
-            let alt = canonical(&store.join(line))?;
-            if !held.contains(&alt) {
-                stores.push(alt);
-            }
+            alternates.push(canonical(&store.join(line))?);
         }
     }
     Ok(held)
@@ -703,6 +723,21 @@ mod tests {
         assert!(check(&root, hiding(&second))
             .unwrap_err()
             .contains("second"));
+        assert!(check(&root, hiding(&root.join("bin"))).is_ok());
+        // Linked twice: `objects` to a store whose `pack` and a loose-object
+        // directory are linked again, with a link cycle back into the store.
+        let root = dir("linked_twice");
+        let (store, packs, loose) = (root.join("store"), root.join("packs"), root.join("loose"));
+        for d in [&store, &packs, &loose] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        symlink(&store, root.join("repo/.git/objects")).unwrap();
+        symlink(&packs, store.join("pack")).unwrap();
+        symlink(&loose, store.join("ab")).unwrap();
+        symlink(&store, packs.join("back")).unwrap();
+        assert!(check(&root, hiding(&packs)).unwrap_err().contains("packs"));
+        assert!(check(&root, hiding(&loose)).unwrap_err().contains("loose"));
         assert!(check(&root, hiding(&root.join("bin"))).is_ok());
         // Layouts it cannot follow fail closed.
         let root = dir("gitdir_file");
