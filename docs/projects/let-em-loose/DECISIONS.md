@@ -91,6 +91,7 @@ Precise contracts used by this guide:
 | D75 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
 | D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
+| D78 | #708 alien hunt runs as a runner pass, outside the scheduler | [default] 2026-11-04 (#708) |
 | D79 | #599 watcher posts as a `watcher` roster role | [default] 2026-11-04 (#599) |
 | D80 | #599 maintenance tasks are opened by the human and named in `factory/apps/<app>.json` | [default] 2026-11-04 (#599) |
 | D81 | #599 lesson trigger 2 detects reverts from the action mark and git | [default] 2026-11-04 (#599) |
@@ -659,6 +660,7 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [stated] · remind-me: mem_8088651b940e45a6a0c7bb6807c1d237
 **Key.** lel:708:design-v1-approved
 **Source.** Nano, "approved", thread message cmsg_014AqbZs58L565hMV2pFkCX5NbYhrp6skRZoUmd7dbZWP2 (2026-11-04T20:27:23Z), replying to cmsg_014AqbZs58L565hMV2pFkCX56Y25HTNtmVLdhS1nDojGpK, which asked him to approve §10. Thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Closes OPEN_QUESTIONS Q8.
+
 ## D76. `lens run` merges as a disabled slice until the accept-line source lands
 
 **Decision.** PR #1467 (`rusty_orch lens run`) may merge with `lens run` refusing every invocation (`UNKNOWN_CLAIMS`) until BBP exposes the task's frozen accept line. The runner never assumes `ClaimsConfig::default()`. The accept-line source lands as its own small PR stacked on #1467. How BBP exposes it (`accept_at` on `ClaimView`, the whole `ClaimsConfig`, or an operator `--claims` file, bundled with Q12) is not settled here; it is open as Q14.
@@ -676,6 +678,15 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [stated] · remind-me: mem_506f809db3894df0b29d8992879f373c
 **Key.** lel:594:claim-card-accept-line
 **Source.** Nano's tap on "a) Add accept line to claim view", hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Pksa1peJwFSFnWsRe6jtve (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:55:49Z; dottiusmaximus on #1467; `rusty_bbp/src/claims.rs` `ClaimView`, `EvidenceView`, `ClaimRecord::accept_at`; bbp-claims-addendum.md line on `claim_card`.
+
+## D78. #708 alien hunt runs as a runner pass, outside the scheduler
+
+**Decision.** Slice 4 runs the alien hunt as a separate pass in the lens runner instead of adding `Slot::Enumerate`, `Slot::Hunt(u8)` and `State.hunts` to the orch-lens scheduler (design §9.2). The saved `lens_states` scheduler record keeps its schema tag. orch-store holds the durable "already hunted this candidate" memory as an additive record under its own tag, or a per-(task, claim, candidate) hunt marker. It is written even when a hunt keeps no suspects or produces no probe, so an empty hunt is not run again. Eligibility, limits and the §6/§8 numbers do not change.
+**Why.** This is an internal layout choice inside the approved design (D75), and Nano would see the same results either way. It is more reversible, because it avoids a schema-tag bump on a record that just merged. Probe rows (#1495) can't mark an empty hunt, so they alone are not enough.
+**Rejected.** The §9.2 scheduler slots, which bump the `lens_states` tag. Probe rows as the only hunt memory.
+**Tag.** [default] · remind-me: mem_a35f69e5146a4a51b93b1097e9608d5e
+**Key.** lel:708:alien-pass-outside-scheduler
+**Source.** let-em-loose-expert default, 2026-11-04, question 3 from the #708 build thread on slice 4. Numbered D78 because origin/main already has D76 and D77.
 
 ## D79. #599 watcher posts as a `watcher` roster role
 
