@@ -204,7 +204,7 @@ pub fn open_with(
     after_record();
     let id = match create(&cgroup) {
         Ok(id) => id,
-        Err(e) => return Err(undo(e, &[&record, &owner])),
+        Err(e) => return Err(undo(e, &[&owner, &record])),
     };
     // Only now is the cgroup known to be this session's own, and which one.
     let text = format!("{}\n{CREATED} {id}\n", cgroup.display());
@@ -215,7 +215,7 @@ pub fn open_with(
             Ok(()) => e,
             Err(rm) => format!("{e} (and removing {}: {rm})", cgroup.display()),
         };
-        return Err(undo(e, &[&record, &owner]));
+        return Err(undo(e, &[&owner, &record]));
     }
     Ok(cgroup)
 }
@@ -313,18 +313,17 @@ fn create(cgroup: &Path) -> Result<u64, String> {
     std::fs::metadata(cgroup).map(|m| m.ino()).map_err(at)
 }
 
-/// A failed open takes back its record, then its claim, and says so if it
-/// can't: a record or claim left behind is still safe, as it names a path
-/// only its own task can settle.
+/// A failed open takes back what it made, in the order given (its claim
+/// before its record), and stops at the first that can't be removed, saying
+/// so: the record stays as long as the claim does, so a crash or failure
+/// part way never leaves a claim no quiesce can find.
 fn undo(error: String, made: &[&Path]) -> String {
-    let left: Vec<String> = made
-        .iter()
-        .filter_map(|p| remove(p, |p| std::fs::remove_file(p)).err())
-        .collect();
-    if left.is_empty() {
-        return error;
+    for path in made {
+        if let Err(left) = remove(path, |p| std::fs::remove_file(p)) {
+            return format!("{error} (and undoing it: {left})");
+        }
     }
-    format!("{error} (and undoing it: {})", left.join("; "))
+    error
 }
 
 /// One recorded session cgroup.
@@ -1045,6 +1044,28 @@ mod tests {
         assert_eq!(settle(&record), Ok(true));
         assert!(!path.exists(), "the record is dropped");
         assert!(cgroup.is_dir(), "the cgroup is untouched");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_failed_undo_keeps_the_record_while_the_claim_stays() {
+        let base = std::env::temp_dir().join(format!("bbp-cg-undo-{}", std::process::id()));
+        // A claim that can't be removed (a directory), then its record.
+        let owner = base.join("claim");
+        std::fs::create_dir_all(&owner).expect("claim");
+        let record = base.join("record");
+        std::fs::write(&record, "x").expect("record");
+        let said = undo("boom".into(), &[&owner, &record]);
+        assert!(said.starts_with("boom (and undoing it: "), "{said}");
+        assert!(
+            record.exists(),
+            "the record that leads back to the claim stays"
+        );
+        // Once the claim goes, so does the record.
+        std::fs::remove_dir(&owner).expect("rmdir");
+        std::fs::write(&owner, "c").expect("claim");
+        assert_eq!(undo("boom".into(), &[&owner, &record]), "boom");
+        assert!(!owner.exists() && !record.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
 }
