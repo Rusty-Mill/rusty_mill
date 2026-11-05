@@ -126,12 +126,23 @@ As built (D93, D92):
   `holdout:` profiles are model-written). The weight `w` is unchanged, with
   `upset` judged against the truth. There's no shadow-run source yet: its
   expected producer is #598's approved `shadow:` profile kind (D62).
-- **Interim limits, until OPEN_QUESTIONS Q35.** BBP's history has no
-  `min_authors`, so a job whose removal also removes its lens as an author
-  counts as pivotal. Only a failing golden set is visible, which means drop
-  was right. A job that posted `executed` evidence gets no golden truth,
-  standing in for "cites that report". Each limit only adds unscored
-  pivotal jobs.
+- **Rows before state.** A job's row is saved before the scheduler state,
+  and saving the same job again unions its items, so a job rerun after a
+  crash keeps every item it posted.
+- **Interim limits, until OPEN_QUESTIONS Q35 (D92).** Each limit only adds
+  unscored pivotal jobs:
+  - BBP's history has no `min_authors`, so a job whose removal also removes
+    its lens as an author counts as pivotal.
+  - Reopen steps don't name what a human reopen woke. If one leads into the
+    settlement's epoch and any item could have been dormant (executed,
+    against the closed status), every job on that line counts as pivotal.
+    An evidence reopen's own item counts as live.
+  - The history has no candidate steps, and a failing step doesn't name the
+    candidate it tested, so golden truth is withheld on the `bbp why` path.
+    The rule gives it only for a golden failure on the candidate current at
+    settlement; a passed golden set isn't visible at all.
+  - A job that posted `executed` evidence gets no golden truth, standing in
+    for "cites that report".
 - The lens sees `record: P points over N blind reviews (S scored, V
   pivotal)`. A per-lens report command waits on Q34.
 

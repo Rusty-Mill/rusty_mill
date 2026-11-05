@@ -785,7 +785,7 @@ mod lens_records {
                 .expect("save");
         }
         let mut s = Store::open(&d).expect("reopen");
-        // Asked again after a refused reply: the job's row is replaced.
+        // Asked again after a refused reply: the job's row gains the post.
         s.save_lens_review("b1", &review("sec", 7, false, &[14]))
             .expect("replace");
         assert_eq!(
@@ -799,6 +799,31 @@ mod lens_records {
         assert_eq!(
             s.lens_reviews("b2").expect("load"),
             [review("sec", 7, false, &[13])]
+        );
+    }
+
+    /// The row was saved but the scheduler state wasn't, so after a restart
+    /// the job ran again and posted anew: the reopened store holds the job
+    /// once, with every item it posted.
+    #[test]
+    fn a_job_rerun_after_a_crash_keeps_every_item_once() {
+        let d = dir("lens_records_rerun");
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &review("sec", 7, false, &[11, 12]))
+                .expect("save");
+        }
+        {
+            let mut s = Store::open(&d).expect("reopen");
+            s.save_lens_review("b1", &review("sec", 7, false, &[12, 15]))
+                .expect("save again");
+            s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                .expect("save empty");
+        }
+        let s = Store::open(&d).expect("reopen");
+        assert_eq!(
+            s.lens_reviews("b1").expect("load"),
+            [review("sec", 7, false, &[11, 12, 15])]
         );
     }
 }

@@ -7,7 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
 
-use orch_lens::record::{tallies, Change, Item, MsgId, Review, Rule, Step, Tally, Trail};
+use orch_lens::record::{
+    tallies, Change, Failing, Item, MsgId, Review, Rule, Step, Tally, Trail, Wake,
+};
 use rusty_bbp::{ClaimStatus, Direction};
 use rusty_serde::Value;
 
@@ -100,12 +102,15 @@ fn change(v: &Value) -> Result<Change, String> {
     }
     if let Some(f) = v.get("Failing") {
         let profiles = f["profiles"].as_seq().ok_or("failing has no profiles")?;
-        return Ok(Change::Failing(
-            profiles
+        // The history doesn't name the candidate the report tested, nor
+        // when the current candidate changes: no golden truth (D92, Q35).
+        return Ok(Change::Failing(Failing {
+            profiles: profiles
                 .iter()
                 .filter_map(|p| p.as_str().map(str::to_owned))
                 .collect(),
-        ));
+            candidate: None,
+        }));
     }
     Ok(Change::Other)
 }
@@ -130,7 +135,23 @@ fn rule(v: &Value) -> Rule {
     if v.get("Human").is_some() || v.get("Choose").is_some() {
         return Rule::Human;
     }
+    if let Some(r) = v.get("Reopen") {
+        return Rule::Reopen(wake(r));
+    }
     Rule::Other
+}
+
+/// What a reopen woke. An unreadable cause is read as a human reopen,
+/// which only makes jobs more pivotal.
+fn wake(v: &Value) -> Wake {
+    if let Some(m) = v.get("Evidence").and_then(id) {
+        return Wake::Item(MsgId(m));
+    }
+    match v.as_str() {
+        Some("Intent") => Wake::None,
+        _ if v.get("Dep").is_some() => Wake::None,
+        _ => Wake::Dormant,
+    }
 }
 
 fn status(s: &str) -> Result<ClaimStatus, String> {
@@ -155,7 +176,7 @@ fn id(v: &Value) -> Option<u64> {
 mod tests {
     use super::*;
     use rusty_bbp::history::{Change as BbpChange, History, Rule as BbpRule, Step as BbpStep};
-    use rusty_bbp::{ClaimBody, EvidenceKind, PrincipalId, Rev, Stakes};
+    use rusty_bbp::{ClaimBody, EvidenceKind, PrincipalId, ReopenCause, Rev, Stakes};
 
     fn step(change: BbpChange, status: ClaimStatus, score: i64) -> BbpStep {
         BbpStep {
@@ -183,6 +204,17 @@ mod tests {
             delta,
             scoring: true,
         }
+    }
+
+    fn reopen(by: ReopenCause) -> BbpStep {
+        step(
+            BbpChange::Status {
+                from: ClaimStatus::Accepted,
+                rule: BbpRule::Reopen(by),
+            },
+            ClaimStatus::Open,
+            0,
+        )
     }
 
     /// The history `bbp why` prints, read back as a trail.
@@ -238,13 +270,23 @@ mod tests {
                     ClaimStatus::Accepted,
                     -8,
                 ),
+                reopen(ReopenCause::Evidence(MsgId(3))),
+                reopen(ReopenCause::Human),
+                reopen(ReopenCause::Dep(MsgId(9))),
+                reopen(ReopenCause::Intent),
             ],
         };
         let json = rusty_serde::json::to_string(&history).unwrap();
         let t = trail(&json).unwrap();
         let changes: Vec<&Change> = t.steps.iter().map(|s| &s.change).collect();
         assert_eq!(changes[0], &Change::Other);
-        assert_eq!(changes[1], &Change::Failing(vec!["golden:cases".into()]));
+        assert_eq!(
+            changes[1],
+            &Change::Failing(Failing {
+                profiles: vec!["golden:cases".into()],
+                candidate: None
+            })
+        );
         assert_eq!(
             changes[2],
             &Change::Item(Item {
@@ -270,6 +312,16 @@ mod tests {
         );
         assert_eq!(changes[5], &Change::Status(Rule::Human));
         assert_eq!(t.steps[5].status, ClaimStatus::Accepted);
+        let wakes: Vec<&Change> = changes[6..].to_vec();
+        assert_eq!(
+            wakes,
+            [
+                &Change::Status(Rule::Reopen(Wake::Item(MsgId(3)))),
+                &Change::Status(Rule::Reopen(Wake::Dormant)),
+                &Change::Status(Rule::Reopen(Wake::None)),
+                &Change::Status(Rule::Reopen(Wake::None)),
+            ]
+        );
         assert_eq!(t.steps[3].score, -8);
     }
 

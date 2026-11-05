@@ -577,8 +577,9 @@ impl Store {
 }
 
 impl Store {
-    /// Save one blind review job of `board` for its lens's track record,
-    /// replacing an earlier save of the same job.
+    /// Save one blind review job of `board` for its lens's track record. A
+    /// job saved again (re-asked after a refusal, or rerun after a crash)
+    /// keeps the union of its items, so a restart never drops or doubles one.
     ///
     /// # Errors
     ///
@@ -592,7 +593,17 @@ impl Store {
             ));
         }
         let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
-        let record = LensRecordRecord::new(board, row, revision);
+        // A job rerun after a crash posts again: keep every item it posted.
+        let mut merged = match existing.clone() {
+            Some(r) => r.into_row()?,
+            None => row.clone(),
+        };
+        for m in &row.items {
+            if !merged.items.contains(m) {
+                merged.items.push(*m);
+            }
+        }
+        let record = LensRecordRecord::new(board, &merged, revision);
         let written = if existing.is_none() {
             self.lens_records.insert(record).map_err(engine_error)
         } else {

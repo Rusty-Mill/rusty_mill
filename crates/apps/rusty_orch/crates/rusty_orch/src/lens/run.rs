@@ -819,6 +819,47 @@ mod tests {
         assert_eq!(kept, 0, "state not kept past an unsaved row: {log}");
     }
 
+    /// A crash between the row saves and the state keep: the restart from
+    /// the last kept state reruns the jobs, and the reopened store holds each
+    /// job once, with every item it posted.
+    #[test]
+    fn a_crash_before_the_keep_reruns_and_records_each_job_once() {
+        let d = std::env::temp_dir().join(format!("orch-lens-rerun-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let run = |keep: &mut dyn FnMut(&State) -> Result<(), String>| {
+            let mut store = Store::open(&d).expect("store");
+            let mut save_review =
+                |r: &Review| store.save_lens_review("b", r).map_err(|e| e.to_string());
+            let mut read_records = || Ok(BTreeMap::new());
+            let records = Records {
+                save: &mut save_review,
+                read: &mut read_records,
+            };
+            let mut e = echo(Ok(vec![counter()]));
+            go_with(
+                &mut State::default(),
+                keep,
+                records,
+                two_seats(),
+                &mut e,
+                10,
+                1,
+            )
+            .0
+        };
+        let crashed = run(&mut |_| Err("killed".to_owned()));
+        assert!(crashed.is_err());
+        assert!(run(&mut |_| Ok(())).is_ok());
+        let rows = Store::open(&d)
+            .expect("reopen")
+            .lens_reviews("b")
+            .expect("rows");
+        let lenses: Vec<&str> = rows.iter().map(|r| r.lens.as_str()).collect();
+        assert_eq!(lenses, ["adversary", "operator"], "{rows:?}");
+        assert!(rows.iter().all(|r| !r.items.is_empty()), "{rows:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     fn two_seats() -> Vec<(&'static str, FakeSeat)> {
         vec![
             ("adversary", FakeSeat::new(vec![card(7)])),

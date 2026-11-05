@@ -23,8 +23,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Claim and message ids, as stored rows hold them.
-pub use rusty_bbp::MsgId;
+/// Claim and message ids, as stored rows hold them; candidate ids.
+pub use rusty_bbp::{ArtId, MsgId};
 use rusty_bbp::{ClaimStatus, Direction};
 
 /// Reviews before a lens's calibration report is due (Q2).
@@ -67,8 +67,18 @@ pub enum Change {
     /// A status change and the rule behind it.
     Status(Rule),
     /// The profiles failing on the current candidate.
-    Failing(Vec<String>),
+    Failing(Failing),
+    /// A candidate became the claim's current one.
+    Candidate(ArtId),
     Other,
+}
+
+/// A failing-profile change and the candidate its report tested, if the
+/// history says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Failing {
+    pub profiles: Vec<String>,
+    pub candidate: Option<ArtId>,
 }
 
 /// An evidence item on the claim.
@@ -98,7 +108,23 @@ pub enum Rule {
     },
     /// A human `decide` or `choose`.
     Human,
+    /// A reopen, and which earlier items it woke into the new epoch.
+    Reopen(Wake),
     Other,
+}
+
+/// The items a reopen moves into the new epoch as scoring (BBP's
+/// `ClaimReopened`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wake {
+    /// The evidence item that reopened the claim.
+    Item(MsgId),
+    /// A human reopen wakes dormant items, which the history doesn't mark:
+    /// executed evidence posted against a closed status while a dep was
+    /// closed (the dep isn't in the history).
+    Dormant,
+    /// Nothing wakes (a dep or intent reopen).
+    None,
 }
 
 /// How one job scored.
@@ -230,18 +256,72 @@ fn item(s: &Step) -> Option<&Item> {
 }
 
 /// The scoring items live when step `settled` settled the claim, with
-/// their step numbers.
+/// their step numbers: those posted scoring in its epoch, and any a reopen
+/// into that epoch woke by name.
 fn live(trail: &Trail, settled: usize) -> impl Iterator<Item = (usize, &Item)> {
-    let epoch = trail.steps[settled].epoch;
+    let woke = woken(trail, settled);
     trail.steps[..settled]
         .iter()
         .enumerate()
-        .filter(move |(_, s)| s.epoch == epoch)
-        .filter_map(|(n, s)| item(s).filter(|i| i.scoring).map(|i| (n, i)))
+        .filter_map(|(n, s)| item(s).map(|i| (n, s, i)))
+        .filter(move |(_, s, i)| {
+            (s.epoch == trail.steps[settled].epoch && i.scoring) || woke.contains(&i.msg)
+        })
+        .map(|(n, _, i)| (n, i))
+}
+
+/// The reopens into the settlement's epoch.
+fn reopens(trail: &Trail, settled: usize) -> impl Iterator<Item = Wake> + '_ {
+    let epoch = trail.steps[settled].epoch;
+    trail.steps[..settled]
+        .iter()
+        .filter(move |s| s.epoch == epoch)
+        .filter_map(|s| match s.change {
+            Change::Status(Rule::Reopen(w)) => Some(w),
+            _ => None,
+        })
+}
+
+/// The items a reopen into the settlement's epoch woke by name.
+fn woken(trail: &Trail, settled: usize) -> BTreeSet<MsgId> {
+    reopens(trail, settled)
+        .filter_map(|w| match w {
+            Wake::Item(m) => Some(m),
+            Wake::Dormant | Wake::None => None,
+        })
+        .collect()
+}
+
+/// Whether a human reopen into the settlement's epoch may have woken an
+/// item, from any author: the history doesn't mark dormant items, so any
+/// item that could have been dormant leaves the line's live items unknown.
+fn maybe_woken(trail: &Trail, settled: usize) -> bool {
+    if !reopens(trail, settled).any(|w| w == Wake::Dormant) {
+        return false;
+    }
+    let live: BTreeSet<usize> = live(trail, settled).map(|(n, _)| n).collect();
+    trail.steps[..settled]
+        .iter()
+        .enumerate()
+        .any(|(n, s)| !live.contains(&n) && could_be_dormant(s))
+}
+
+/// BBP marks an item dormant only if it is executed evidence against the
+/// claim's closed status: counter while accepted, support while dropped.
+fn could_be_dormant(s: &Step) -> bool {
+    item(s).is_some_and(|i| {
+        i.executed
+            && matches!(
+                (s.status, i.direction),
+                (ClaimStatus::Accepted, Direction::Counter)
+                    | (ClaimStatus::Dropped, Direction::Support)
+            )
+    })
 }
 
 /// Whether the line that settled the claim would not have held without the
-/// job's own items. A human settlement is never pivotal.
+/// job's own items. A human settlement is never pivotal. A line whose live
+/// items a human reopen may have changed counts as pivotal (D92).
 fn pivotal(trail: &Trail, settled: usize, own: &Own) -> bool {
     let step = &trail.steps[settled];
     let Change::Status(Rule::Line {
@@ -252,6 +332,9 @@ fn pivotal(trail: &Trail, settled: usize, own: &Own) -> bool {
     else {
         return false;
     };
+    if maybe_woken(trail, settled) {
+        return true;
+    }
     let way = match step.status {
         ClaimStatus::Accepted => Direction::Support,
         _ => Direction::Counter,
@@ -284,21 +367,26 @@ fn pivotal(trail: &Trail, settled: usize, own: &Own) -> bool {
     !(crossed && enough && grounded)
 }
 
-/// Ground truth for the claim at settlement: a failing golden set means
-/// drop was right. (A passed golden set is not in the history yet.)
+/// Ground truth for the claim at settlement: a golden set failing on the
+/// candidate current at settlement means drop was right. A report whose
+/// candidate isn't known gives none. (A passed golden set is not in the
+/// history yet.)
 fn golden(trail: &Trail, settled: usize) -> Option<Direction> {
+    let before = &trail.steps[..settled];
+    let current = before.iter().rev().find_map(|s| match s.change {
+        Change::Candidate(a) => Some(a),
+        _ => None,
+    })?;
     let epoch = trail.steps[settled].epoch;
-    let failing = trail.steps[..settled]
+    let failing = before
         .iter()
         .rev()
         .take_while(|s| s.epoch == epoch)
         .find_map(|s| match &s.change {
-            Change::Failing(p) => Some(p),
+            Change::Failing(f) => Some(f),
             _ => None,
         })?;
-    failing
-        .iter()
-        .any(|p| p.starts_with(GOLDEN))
+    (failing.candidate == Some(current) && failing.profiles.iter().any(|p| p.starts_with(GOLDEN)))
         .then_some(Direction::Counter)
 }
 
@@ -401,28 +489,67 @@ mod tests {
         })
     }
 
-    /// A trail from changes, keeping a running score and ending `status`.
+    /// A trail from changes, keeping a running score. A line settles by its
+    /// sign, another status change settles `end`, and a reopen starts the
+    /// next epoch, open.
     fn trail(changes: Vec<Change>, end: ClaimStatus) -> Trail {
         let mut score = 0;
         let mut status = ClaimStatus::Open;
+        let mut epoch = 0;
         let steps = changes
             .into_iter()
             .map(|change| {
-                if let Change::Item(i) = &change {
-                    score += i.delta;
-                }
-                if let Change::Status(_) = change {
-                    status = end;
+                match &change {
+                    Change::Item(i) if i.scoring => score += i.delta,
+                    Change::Status(Rule::Reopen(wake)) => {
+                        epoch += 1;
+                        status = ClaimStatus::Open;
+                        score = woke(wake);
+                    }
+                    Change::Status(Rule::Line { at, .. }) if *at < 0 => {
+                        status = ClaimStatus::Dropped;
+                    }
+                    Change::Status(Rule::Line { .. }) => status = ClaimStatus::Accepted,
+                    Change::Status(_) => status = end,
+                    _ => {}
                 }
                 Step {
                     change,
                     status,
                     score,
-                    epoch: 0,
+                    epoch,
                 }
             })
             .collect();
         Trail { steps }
+    }
+
+    /// The opening score of a reopened epoch: the woken item's delta. The
+    /// tests wake only item 3, at +8.
+    fn woke(wake: &Wake) -> i64 {
+        match wake {
+            Wake::Item(MsgId(3)) => 8,
+            _ => 0,
+        }
+    }
+
+    fn failing(profile: &str, candidate: Option<u64>) -> Change {
+        Change::Failing(Failing {
+            profiles: vec![profile.into()],
+            candidate: candidate.map(ArtId),
+        })
+    }
+
+    /// Executed `ev`, posted while the claim was closed: not scoring.
+    fn closed_ev(msg: u64, author: &str, direction: Direction, delta: i64) -> Change {
+        match ev(msg, author, direction, delta) {
+            Change::Item(i) => Change::Item(Item {
+                scoring: false,
+                executed: true,
+                ..i
+            }),
+            other => other,
+        }
     }
 
     fn line(at: i64, authors: u32) -> Change {
@@ -506,7 +633,8 @@ mod tests {
         // The lens's counter drops the claim, and a golden set failed on it.
         let t = trail(
             vec![
-                Change::Failing(vec!["golden:cases".into()]),
+                Change::Candidate(ArtId(9)),
+                failing("golden:cases", Some(9)),
                 ev(2, "a", Counter, -4),
                 ev(3, LENS, Counter, -4),
                 line(-8, 2),
@@ -527,7 +655,7 @@ mod tests {
         assert_eq!((tally.pivotal, tally.pivotal_with_truth), (1, 1));
         // Nor for a job with executed evidence, which may cite that report.
         let mut cites = t.clone();
-        if let Change::Item(i) = &mut cites.steps[2].change {
+        if let Change::Item(i) = &mut cites.steps[3].change {
             i.executed = true;
         }
         assert_eq!(
@@ -536,11 +664,123 @@ mod tests {
         );
         // A holdout failure is not ground truth.
         let mut holdout = t.clone();
-        holdout.steps[0].change = Change::Failing(vec!["holdout:api".into()]);
+        holdout.steps[1].change = failing("holdout:api", Some(9));
         assert_eq!(
             score(&review(&[3]), &holdout),
             Scored::Unscored { pivotal: true }
         );
+    }
+
+    #[test]
+    fn a_golden_failure_is_truth_only_for_the_candidate_it_tested() {
+        let with = |changes: Vec<Change>| {
+            let mut all = changes;
+            all.extend([
+                ev(2, "a", Counter, -4),
+                ev(3, LENS, Counter, -4),
+                line(-8, 2),
+            ]);
+            score(&review(&[3]), &trail(all, ClaimStatus::Dropped))
+        };
+        let unscored = Scored::Unscored { pivotal: true };
+        // Candidate 9 failed, then 10 became current: 9's failure isn't
+        // truth about 10.
+        assert_eq!(
+            with(vec![
+                Change::Candidate(ArtId(9)),
+                failing("golden:cases", Some(9)),
+                Change::Candidate(ArtId(10)),
+            ]),
+            unscored
+        );
+        // The report's candidate is unknown, as `bbp why` prints it today.
+        assert_eq!(
+            with(vec![
+                Change::Candidate(ArtId(9)),
+                failing("golden:cases", None)
+            ]),
+            unscored
+        );
+        // No candidate step at all.
+        assert_eq!(with(vec![failing("golden:cases", Some(9))]), unscored);
+    }
+
+    #[test]
+    fn an_item_woken_by_its_own_reopen_counts_in_the_new_epoch() {
+        // Dropped; the lens's executed support (posted closed) reopened it
+        // and then carried the accept line with one other supporter.
+        let t = trail(
+            vec![
+                ev(2, "x", Counter, -8),
+                line(-8, 2),
+                closed_ev(3, LENS, Support, 8),
+                Change::Status(Rule::Reopen(Wake::Item(MsgId(3)))),
+                ev(4, "a", Support, 8),
+                line(8, 2),
+            ],
+            ClaimStatus::Accepted,
+        );
+        // Without the woken item the score is 0 and the authors 1: pivotal.
+        assert_eq!(score(&review(&[3]), &t), Scored::Unscored { pivotal: true });
+    }
+
+    #[test]
+    fn a_human_reopen_that_may_wake_any_item_makes_the_line_pivotal() {
+        let changes = |wake, closed: Change| {
+            vec![
+                ev(2, "x", Counter, -8),
+                line(-8, 2),
+                closed,
+                Change::Status(Rule::Reopen(wake)),
+                ev(3, LENS, Support, 4),
+                ev(4, "a", Support, 4),
+                ev(5, "b", Support, 4),
+                line(8, 3),
+            ]
+        };
+        let maybe = || closed_ev(6, "c", Support, 1);
+        let unscored = Scored::Unscored { pivotal: true };
+        // Another author's executed support, posted while dropped, may have
+        // woken: the lens's job on the line is pivotal.
+        let human = trail(changes(Wake::Dormant, maybe()), ClaimStatus::Accepted);
+        assert_eq!(score(&review(&[3]), &human), unscored);
+        // A dep reopen wakes nothing, and neither can a non-executed item.
+        let dep = trail(changes(Wake::None, maybe()), ClaimStatus::Accepted);
+        let cited = match maybe() {
+            Change::Item(i) => Change::Item(Item {
+                executed: false,
+                ..i
+            }),
+            other => other,
+        };
+        let no_dormant = trail(changes(Wake::Dormant, cited), ClaimStatus::Accepted);
+        for t in [dep, no_dormant] {
+            assert!(matches!(
+                score(&review(&[3]), &t),
+                Scored::Points { pivotal: false, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn a_dep_reopen_leaves_a_closed_item_out() {
+        let changes = |wake| {
+            vec![
+                ev(2, "x", Counter, -8),
+                line(-8, 2),
+                closed_ev(3, LENS, Support, 1),
+                Change::Status(Rule::Reopen(wake)),
+                ev(4, "a", Support, 5),
+                ev(5, "b", Support, 5),
+                line(8, 2),
+            ]
+        };
+        // A dep reopen wakes nothing: the lens's closed item never counted.
+        let dep = trail(changes(Wake::None), ClaimStatus::Accepted);
+        assert!(matches!(
+            score(&review(&[3]), &dep),
+            Scored::Points { pivotal: false, .. }
+        ));
     }
 
     #[test]
