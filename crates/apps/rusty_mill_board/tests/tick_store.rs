@@ -757,14 +757,31 @@ fn a_milestone_save_is_fenced_on_the_version_its_scope_was_checked_at() {
     let read = store.milestone(beta.id).expect("read").expect("there");
     // The owner moves it to another list in rusty_tick after the read.
     tick.owner_edit(beta.id, |t| t["listId"] = json!(uuid::Uuid::now_v7()));
-    let rename = MilestoneEdit {
+    let everything = MilestoneEdit {
         title: Some("Renamed".into()),
-        ..MilestoneEdit::default()
+        target_ms: Some(1_900_000_000_000),
+        done: Some(true),
     };
-    let next = read.edited(&rename, 1).expect("edit");
+    let next = read.edited(&everything, 1).expect("edit");
     assert!(matches!(
         store.save_milestone(&read, &next),
         Err(BoardError::Conflict)
     ));
-    assert_eq!(tick.task(beta.id)["title"], "Beta", "nothing written");
+    let task = tick.task(beta.id);
+    assert_eq!(
+        (&task["title"], &task["dueMs"], &task["status"]),
+        (
+            &json!("Beta"),
+            &json!(1_800_000_000_000_i64),
+            &json!("open")
+        ),
+        "title, date and completion are all unchanged"
+    );
+    // A fresh read sees the move, so the scope check runs on where it is now.
+    let again = store.milestone(beta.id).expect("read").expect("there");
+    assert_eq!(
+        again.project, "default",
+        "an unknown list reads as the Inbox"
+    );
+    assert!(again.rev > read.rev);
 }
