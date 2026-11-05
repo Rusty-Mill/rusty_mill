@@ -9,13 +9,15 @@
 //!                                          [--holdout-profiles FILE --holdout-root DIR] freezes a holdout suite (#597): holdout:/golden: profiles over the files under DIR
 //!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
 //! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
+//! bbp takeover-input --dir D --task T --takeover N --seq S --sha256 HEX   D82: one batch of takeover input, as UTF-8 text on stdin; HEX chains it to the last batch
+//! bbp takeover-ended --dir D --task T --takeover N --reason expired|revoked|turn-ended|mux-lost   D82: orch ends a takeover (the human releases one with `bbp human takeover-release N`)
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
 //! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
-//!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST
+//!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST | takeover MSG SESSION CLIENT MINUTES REASON | takeover-release N
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
@@ -263,6 +265,31 @@ fn run() -> Result<String, String> {
                 policy,
             )?
         }
+        // D82: orch records takeover input (text on stdin) and ends takeovers.
+        "takeover-input" => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)
+                .map_err(|e| format!("stdin: takeover input must be UTF-8 text: {e}"))?;
+            let num = |k: &str| -> Result<u64, String> {
+                a.flag(k)?
+                    .parse()
+                    .map_err(|_| format!("--{k} must be a number"))
+            };
+            admin::takeover_input(
+                &dir,
+                &task,
+                human::takeover_id(a.flag("takeover")?)?,
+                num("seq")?,
+                text,
+                Sha256::from_hex(a.flag("sha256")?).ok_or("--sha256 must be 64 hex digits")?,
+            )?
+        }
+        "takeover-ended" => admin::takeover_ended(
+            &dir,
+            &task,
+            human::takeover_id(a.flag("takeover")?)?,
+            admin::parse_takeover_end(a.flag("reason")?)?,
+        )?,
         "holdout" => {
             return with_holdout(&a, |next| {
                 let next =

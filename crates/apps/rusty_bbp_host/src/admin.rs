@@ -255,6 +255,66 @@ pub fn adopt_holdout(
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
 
+/// D82: record one batch of takeover input as the mux delivered it. orch
+/// computes `sha256` with [`rusty_bbp::claims::input_chain`]; the core checks
+/// order, size, expiry and the chain.
+pub fn takeover_input(
+    dir: &Path,
+    task: &TaskId,
+    takeover: u64,
+    seq: u64,
+    text: String,
+    sha256: Sha256,
+) -> Result<Response, String> {
+    host(
+        dir,
+        task,
+        HostAction::TakeoverInput {
+            takeover,
+            seq,
+            text,
+            sha256,
+        },
+    )
+}
+
+/// D82: orch ends a takeover; only the human releases one.
+pub fn takeover_ended(
+    dir: &Path,
+    task: &TaskId,
+    takeover: u64,
+    reason: TakeoverEnd,
+) -> Result<Response, String> {
+    host(dir, task, HostAction::TakeoverEnded { takeover, reason })
+}
+
+/// The `--reason` of `bbp takeover-ended`.
+pub fn parse_takeover_end(s: &str) -> Result<TakeoverEnd, String> {
+    Ok(match s {
+        "expired" => TakeoverEnd::Expired,
+        "revoked" => TakeoverEnd::Revoked,
+        "turn-ended" => TakeoverEnd::TurnEnded,
+        "mux-lost" => TakeoverEnd::MuxLost,
+        "released" => {
+            return Err("only the human releases a takeover: `bbp human takeover-release N`".into())
+        }
+        other => {
+            return Err(format!(
+                "reason must be expired, revoked, turn-ended or mux-lost, got {other}"
+            ))
+        }
+    })
+}
+
+fn host(dir: &Path, task: &TaskId, action: HostAction) -> Result<Response, String> {
+    let mut d = open_driver(dir, task)?;
+    let cmd = Command::Host {
+        op: crate::fresh_op(),
+        action,
+    };
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
 pub fn assign(
     dir: &Path,
     task: &TaskId,

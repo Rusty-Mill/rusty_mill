@@ -1554,3 +1554,113 @@ fn why_replays_one_claim_and_names_the_rule() {
     assert!(!ok && err.contains("--at needs --claim"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------- takeover (D82)
+
+fn bbp(dir: &Path, args: &[&str], stdin: &str) -> String {
+    use std::io::Write;
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .args(["--task", "C1"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("bbp");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(stdin.as_bytes())
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// The human starts a takeover with `bbp human takeover`, orch records the
+/// typed batches with `bbp takeover-input` (text on stdin, chained by
+/// SHA-256) and ends it with `bbp takeover-ended`; the board keeps it all.
+#[test]
+fn a_takeover_is_recorded_from_start_to_end_through_the_cli() {
+    let dir = tempdir("takeover-cli");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "one", true);
+    let r = human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[
+            &format!("msg:{c}"),
+            "agent:C1:1:1",
+            "nano",
+            "10",
+            "steer",
+            "it",
+        ],
+        None,
+    )
+    .expect("takeover");
+    assert_eq!(r, Response::TakenOver(1));
+    let sha = rusty_bbp::claims::input_chain(None, "ls\n").hex();
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "ls\n",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    // A replayed or forged batch is refused by the core, not written.
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "ls\n",
+    );
+    assert!(out.contains("OpConflict"), "{out}");
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-ended",
+            "--takeover",
+            "takeover:1",
+            "--reason",
+            "released",
+        ],
+        "",
+    );
+    assert!(out.contains("only the human releases"), "{out}");
+    let out = bbp(
+        &dir,
+        &["takeover-ended", "--takeover", "1", "--reason", "mux-lost"],
+        "",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    let t = state(&dir)
+        .claims
+        .takeovers
+        .get(&1)
+        .cloned()
+        .expect("takeover");
+    assert_eq!(t.batches, 1);
+    assert_eq!(t.ended, Some(TakeoverEnd::MuxLost));
+}
