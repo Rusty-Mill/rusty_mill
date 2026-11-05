@@ -36,7 +36,7 @@ Precise contracts used by this guide:
 | D17 | Build in the rusty_mill monorepo | Agreed 2026-11-02 |
 | D18 | The dedup experiment gets a fresh repo and intent only | Agreed 2026-11-01 |
 | D19 | The Factory repo holds process and config only | Agreed 2026-11-02 |
-| D20 | No fourth executor: extend orch (reopened by D81) | Agreed 2026-11-02; reopened 2026-11-04 (D81) |
+| D20 | No fourth executor: extend orch (reopened by D81, re-closed by D82) | Agreed 2026-11-02; reopened 2026-11-04 (D81); re-closed 2026-11-05 (D82) |
 | D21 | Thin slice first, then let it build itself | Agreed 2026-11-01 |
 | D22 | Ground truth sits outside the agents' loop | Agreed 2026-11-02; designed in D37 |
 | D23 | Defer existing code and the smaller gaps | Agreed 2026-11-02 |
@@ -82,7 +82,7 @@ Precise contracts used by this guide:
 | D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
-| D66 | The #600 builder-session design is approved (launch path reopened by D81) | [stated] 2026-11-04 (#600); reopened 2026-11-04 (D81) |
+| D66 | The #600 builder-session design is approved (launch path reopened by D81, re-closed by D82) | [stated] 2026-11-04 (#600); reopened 2026-11-04 (D81); re-closed 2026-11-05 (D82) |
 | D74 | #708 alien review lens unparked (supersedes D61) | [stated] 2026-11-04 (#708) |
 | D75 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
@@ -91,6 +91,7 @@ Precise contracts used by this guide:
 | D79 | Tools go through the gateway, and the agent process is jailed | [stated] 2026-11-04 (#726) |
 | D80 | orch and the gateway stay separate | [stated] 2026-11-04 (#726) |
 | D81 | Agents get mux-hosted ptys (supersedes D78; reopens D20 and D66) | [stated] 2026-11-04 (mux, #600, #726) |
+| D82 | The mux-hosted agent ptys design is approved (re-closes D20 and D66) | [stated] 2026-11-05 (mux, #600, #726, #732) |
 
 ## D1. Lenses, not stages
 
@@ -217,6 +218,7 @@ Precise contracts used by this guide:
 **Rejected.** A new standalone executor.
 **Resolved 2026-11-02.** The reconnaissance found super-board already retired (2026-10-28), so two executors remain. The lens runner extends orch, next to the dispatcher on orch's existing model port. mill-runner is left alone.
 **Reopened 2026-11-04 (D81).** Nano: "Option C [stated]. Agents get mux-hosted ptys. This deliberately reopens D20 and D66; log both as reopened, with this as the reason." (thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z)). The text above stands until the D81 design is approved; that design must show D20's guarantees still hold with orch deciding and the mux hosting.
+**Re-closed 2026-11-05 (D82).** orch is the only executor; the mux hosts ptys. The mux forks an agent only when orch asks and never kills one on its own; each `bbp mod` guarantee maps as in mux-hosted-agents-design.md §3. Nano approved it on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra, 2026-11-05T00:00:23Z.
 
 ## D21. Thin slice first, then let it build itself
 
@@ -592,6 +594,7 @@ Worked examples (concentration, duplication, in basis points):
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
 **Reopened 2026-11-04 (D81).** Nano reopened D66 together with D20 for mux-hosted agent ptys (thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z)), quoted in D20. The builder launch path (the orch-bbp builder launch profile) is what the D81 design revisits; the rest of D66 stands until that design is approved.
+**Re-closed 2026-11-05 (D82).** The #600 builder launch goes through the mux `Launch` (jail launcher as the block's process) in place of a direct spawn. Its lease, sandbox, wall clock and mirror are unchanged. Nano approved it on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra, 2026-11-05T00:00:23Z.
 
 ## D74. #708 alien review lens unparked (supersedes D61)
 
@@ -678,3 +681,22 @@ Design first (D25): the design doc goes in `docs/projects/let-em-loose/` for Nan
 **Tag.** [stated] · remind-me: mem_833a5f7ac502415a90e7747bb23fc815 (supersedes mem_8d721e801bdf4d65a98e6035ad7c6b37 and mem_ed61a2115b084bbf8798285bcbeeac86)
 **Key.** lel:mux:agents-get-mux-hosted-ptys
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z), thread cmsg_01WgyiM31RsSnZTgNuPX2VE4KPB5ARgEwMpYqdBDPfmTDb: "Nano decision 2026-11-04: Option C [stated]. Agents get mux-hosted ptys. This deliberately reopens D20 and D66; log both as reopened, with this as the reason."
+**Approved 2026-11-05 (D82).** The design for this decision is approved; see D82.
+
+## D82. The mux-hosted agent ptys design is approved (re-closes D20 and D66)
+
+**Decision.** Nano approved `docs/projects/let-em-loose/mux-hosted-agents-design.md` with all eight §10 recommendations:
+1. The design is approved as a whole. D20 is re-closed as "orch is the only executor; the mux hosts ptys" (§3). D66 is re-closed with the #600 builder launch through the mux `Launch`; its lease, sandbox, wall clock and mirror are unchanged.
+2. The BBP takeover events in §5 are approved as shaped: `takeover_started`, `takeover_input` and `takeover_ended`, the human verb `takeover`, log schema 6 for claims tasks (earlier logs byte-identical), and `human_touched` on the candidate manifest and `claim_card`. This clears that ask-first schema change; scoring is unchanged and takeover doesn't count toward `min authors`.
+3. Takeover input is recorded as-delivered with a hash chain, not write-ahead.
+4. Mux §9 rows 1, 2, 3, 5 and 8 start now; 4 and 6 are deferred, with a viewer program for 6. This is also a Rusty Term decision: this is the LEL view, and the Rusty Term pack records its own.
+5. A granted input lease survives rusty_term's reconnect grace until its `until`, and is refused on re-ask once revoked. This keeps rusty_term D44 and D46.
+6. Remote attach: (a) Windows `--ssh` plus the C26 map entry `nano → orch-runner` first; (b) a mux client inside rusty_term later.
+7. #600 starts `lel-jail` on rusty_sandbox, seccomp and cgroup; the #726 layers (overlay, gateway-only egress, the witness) come later behind the same `jail.json`.
+8. Lens sessions in blocks (the D8 and D54 conflicts) are decided when #726 reaches lens sessions. Nothing changes now; lenses stay orch-side and one-shot.
+Each side may now start its PR under card #732 (§11). Review and merge gates still apply.
+**Why.** Design first (D25) on D81. Both experts checked the design against the code. orch stays the only executor and the mux only hosts ptys, so D20's guarantees and D13 hold, and evidence stays the witness (D79). This closes OPEN_QUESTIONS Q13 (design §6: builder session files under `<dir>/builders/<claim>/<n>/`).
+**Rejected.** Approving the design but holding the takeover schema for a separate review (option B). Changes first (option C). Write-ahead recording.
+**Tag.** [stated] · remind-me: mem_fe60aaf6dae240b8b820ef918c6dca4f
+**Key.** lel:mux:hosted-agent-ptys-design-approved
+**Source.** Nano tapped option A "Approve as recommended" ("§10 items 1-8 take the recommended answers, the takeover schema change is approved, and each side can start its PR.") on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra ("Approve the mux-hosted agent ptys design with all eight recommendations?"), 2026-11-05T00:00:23Z, thread cmsg_01WgyiM31RsSnZTgNuPX2VE4KPB5ARgEwMpYqdBDPfmTDb.

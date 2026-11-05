@@ -1,6 +1,6 @@
 # Mux-hosted agent ptys: design
 
-Let Em Loose × rusty_mux, 2026-11-04. Status: **design for Nano's approval; no code** (D25).
+Let Em Loose × rusty_mux, 2026-11-04. Status: **approved 2026-11-05 (D82)**, all eight §10 recommendations (decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra`).
 
 - **Decision it implements:** D81 [stated]. Agents get mux-hosted ptys. It reopens D20 and D66 and supersedes D78. Nano, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG`, 2026-11-04T23:51Z.
 - **Builds on:** D79 (the gateway enforces and the agent is jailed; #726 D-a) and D80 (orch and the gateway stay separate; #726 D-b).
@@ -154,7 +154,7 @@ From rusty-term-expert. None of it exists today. Each item is a new capability r
 
 fd passing can't cross the C26 relay or SSH. orch talks to the account server's local socket on BaileyAi, so that isn't a problem.
 
-## 10. Decisions for Nano
+## 10. Decisions for Nano (approved as recommended, D82)
 
 Recommendations are in **bold**.
 1. **Approve this design as a whole.** It re-closes D20 as "orch is the only executor; the mux hosts ptys", and D66 with launch through `Launch`.
