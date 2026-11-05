@@ -11,7 +11,7 @@
 //! - [`run`]: `rusty_orch lens run`, passes over every lens until quiet.
 //! - [`container`]: the dedicated container a host-cleared provider runs in.
 //! - [`alien`]: `rusty_orch lens alien report`, the #708 alien lens's shadow numbers.
-//! - [`probes`]: the #708 alien lens's sandboxed probe runner (D89).
+//! - [`probes`]: the #708 alien lens's sandboxed probe runner (D92).
 
 pub mod alien;
 pub mod assertions;
