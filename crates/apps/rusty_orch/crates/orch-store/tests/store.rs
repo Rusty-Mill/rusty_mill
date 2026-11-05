@@ -2,7 +2,7 @@
 //! trips, and the store refuses what it should.
 
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use orch_core::board::{Author, Board, Confidence, EntryKind, NewEntry, Verdict};
 use orch_core::task::{AgentId, Plan, Role, TaskSpec};
@@ -899,14 +899,62 @@ mod lens_records {
         Store::open(&d)
             .and_then(|mut s| s.save_lens_review("b1", &review("sec", 7, false, &[11])))
             .expect("saved");
-        assert_eq!(
-            Store::read_lens_reviews(&d, "b1").expect("read"),
-            [review("sec", 7, false, &[11])]
-        );
         std::fs::remove_file(d.join("lens-records.mmap")).expect("rm");
+        let before = files(&d);
         let err = Store::read_lens_reviews(&d, "b1").expect_err("no table");
         assert_eq!(err.to_string(), missing("lens-records.mmap"));
-        assert!(!d.join("lens-records.mmap").exists());
+        assert_eq!(files(&d), before, "nothing made");
+    }
+
+    /// The read leaves every file byte for byte as it was, while still
+    /// recovering the rows only the insert log holds: an insert, and a
+    /// replacement that turned a pending row unsure.
+    #[test]
+    fn lens_reviews_read_recovers_the_insert_log_and_writes_nothing() {
+        let d = dir("lens_records_read_log");
+        Store::open(&d)
+            .expect("make")
+            .save_lens_review("b1", &ahead("ops", 7))
+            .expect("folded");
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &review("sec", 7, false, &[11]))
+                .expect("insert");
+            s.save_lens_review("b1", &ahead("ops", 7)).expect("replace");
+        }
+        let before = files(&d);
+        assert!(
+            before
+                .keys()
+                .any(|f| f.starts_with("lens-records") && f.ends_with("inserts")),
+            "the fixture has a pending insert log: {:?}",
+            before.keys()
+        );
+        let unsure = Review {
+            unsure: true,
+            pending: true,
+            ..review("ops", 7, false, &[])
+        };
+        let clean = review("sec", 7, false, &[11]);
+        assert_eq!(
+            Store::read_lens_reviews(&d, "b1").expect("read"),
+            [unsure.clone(), clean.clone()]
+        );
+        assert_eq!(files(&d), before, "the read changed nothing");
+        let s = Store::open(&d).expect("recover");
+        assert_eq!(s.lens_reviews("b1").expect("load"), [unsure, clean]);
+    }
+
+    /// Every file in `d` by name, with its bytes.
+    fn files(d: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(d)
+            .expect("ls")
+            .map(|e| {
+                let e = e.expect("entry");
+                let bytes = std::fs::read(e.path()).expect("read");
+                (e.file_name().to_string_lossy().into_owned(), bytes)
+            })
+            .collect()
     }
 
     /// D92 write-ahead: the save after the posts clears `pending` and keeps

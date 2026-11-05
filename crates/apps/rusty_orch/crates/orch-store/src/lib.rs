@@ -629,29 +629,39 @@ impl Store {
     ///
     /// [`StoreError::Corrupt`] when a record does not check out.
     pub fn lens_reviews(&self, board: &str) -> Result<Vec<Review>, StoreError> {
-        reviews(&self.lens_records, board)
+        let ids = self.lens_records.all_ids();
+        reviews(
+            ids.into_iter().filter_map(|id| self.lens_records.get(id)),
+            board,
+        )
     }
 
-    /// [`Store::lens_reviews`] for the store in `dir`, read without making
-    /// anything: unlike [`Store::open`], it opens only the lens record
-    /// table, under the directory's lock, and refuses a store missing it.
+    /// [`Store::lens_reviews`] for the store in `dir`, read without changing
+    /// anything: it takes the directory's existing lock, making no file, and
+    /// reads the lens record table's saved records and insert log as
+    /// [`Store::open`] would recover them, writing nothing back.
     ///
     /// # Errors
     ///
     /// [`StoreError::Missing`] when `dir` has no lock or lens record file;
     /// [`StoreError::Locked`] when another process holds `dir`;
+    /// [`StoreError::Lock`] when the lock cannot be opened;
     /// [`StoreError::Engine`] or [`StoreError::Corrupt`] when the table
     /// cannot be read.
     pub fn read_lens_reviews(dir: &Path, board: &str) -> Result<Vec<Review>, StoreError> {
-        for file in [LOCK_FILE, LENS_RECORDS_FILE] {
-            let path = dir.join(file);
-            if !path.is_file() {
-                return Err(StoreError::Missing(path));
+        let _lock = DirLock::acquire_existing(dir, LOCK_FILE).map_err(|e| match e {
+            DirLockError::Io(path, e) if e.kind() == std::io::ErrorKind::NotFound => {
+                StoreError::Missing(path)
             }
+            e => e.into(),
+        })?;
+        let path = dir.join(LENS_RECORDS_FILE);
+        if !path.is_file() {
+            return Err(StoreError::Missing(path));
         }
-        let _lock = DirLock::acquire(dir, LOCK_FILE)?;
-        let records = GenericMmapStore::open_portable(&dir.join(LENS_RECORDS_FILE))?;
-        reviews(&records, board)
+        let records =
+            GenericMmapStore::<LensRecordRecord, ById, Revision>::read_portable_records(&path)?;
+        reviews(records, board)
     }
 
     /// BBP task `task`'s taint table; empty when none was saved.
@@ -721,14 +731,11 @@ fn merge(mut old: Review, row: &Review) -> Review {
 /// Every blind review job in `records` saved for `board`, sorted by lens,
 /// claim, epoch and kind.
 fn reviews(
-    records: &GenericMmapStore<LensRecordRecord, ById, Revision>,
+    records: impl IntoIterator<Item = LensRecordRecord>,
     board: &str,
 ) -> Result<Vec<Review>, StoreError> {
     let mut rows = Vec::new();
-    for id in records.all_ids() {
-        let Some(record) = records.get(id) else {
-            continue;
-        };
+    for record in records {
         if record.board() == board {
             rows.push(record.into_row()?);
         }
