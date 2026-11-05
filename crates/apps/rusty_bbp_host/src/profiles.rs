@@ -176,6 +176,14 @@ impl ProfileSet {
         }
     }
 
+    /// Whether the set's `erosion` profile runs report-only (D42). Meaningful
+    /// once [`ProfileSet::check_erosion`] has passed.
+    pub fn erosion_report_only(&self) -> bool {
+        self.profiles
+            .iter()
+            .any(|p| p.name == EROSION_PROFILE && p.args.iter().any(|a| a == "--report-only"))
+    }
+
     /// The profile runs the `erosion` bin directly (D82): no shell, `env` or
     /// `cargo run`, so the argv checked here is the argv that runs. The args
     /// parse as the bin's own do: `check`, then `--base COMMIT` and either
