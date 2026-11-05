@@ -274,7 +274,9 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
             if let Some(r) = replay(&w.st, &p, op, &payload_hash(action)?)? {
                 return Ok(Flow::Replay(r));
             }
-            terminal(&w.st)?;
+            if !crate::claims_engine::closing_audit(&w.st, action) {
+                terminal(&w.st)?;
+            }
             crate::claims_engine::host(w, action, now).map(Flow::Done)
         }
     }
@@ -1850,7 +1852,7 @@ pub(crate) fn transition(w: &mut Work, to: State, now: Time) {
         end_turn_only(w, id, TurnEnd::Revoked);
     }
     if to.terminal() {
-        crate::claims_engine::end_live_takeovers(w);
+        crate::claims_engine::close_live_takeovers(w, now);
     }
     w.emit(Event::StateChanged { from, to });
     entry(w, now);

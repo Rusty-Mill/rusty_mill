@@ -347,7 +347,16 @@ pub enum Event {
         bytes: crate::ids::Base64Bytes,
         sha256: Sha256,
     },
-    /// D82: the takeover is over; the totals close the chain.
+    /// D82: input permission ended at `at`, by the human's release or the
+    /// task's end. The host may record batches already delivered for
+    /// [`crate::TAKEOVER_DRAIN_MS`], then writes the one `takeover_ended`.
+    TakeoverClosing {
+        takeover: u64,
+        reason: crate::claims::TakeoverEnd,
+        at: Time,
+    },
+    /// D82: the takeover is over; the totals close the chain. Always the
+    /// host's, after `takeover_closing` or for its own reasons.
     TakeoverEnded {
         takeover: u64,
         reason: crate::claims::TakeoverEnd,
