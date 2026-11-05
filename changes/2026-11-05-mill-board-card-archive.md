@@ -5,8 +5,9 @@ changelog: Mill Board archives Done cards: card_archive, card_restore, card_arch
 ## 2026-11-05 - Mill Board card archive
 
 - **Added:** Done cards can be archived. `card_archive` and `card_restore` (need `close`) and the bulk
-  `card_archive_done` (needs `triage`) set or clear one `archived:<ms>` tag on the card's rusty_tick task,
-  beside `number:<n>`, so there is no migration. An archived card is still Done: `card_get`, the roadmap,
+  `card_archive_done` (needs `triage`) keep an `archived:<ms>` or `restored:<ms>` tag on the card's rusty_tick
+  task, beside `number:<n>`, so there is no migration. Restoring starts a card's Done window again without
+  changing its ship time; the bulk archive checks each card again as it commits. An archived card is still Done: `card_get`, the roadmap,
   metrics and dependencies see it as before.
 - **Changed:** `board_list` leaves out Done cards that are archived or were done more than 14 days ago.
   `archived: "include" | "only"` brings them back or lists only them, and `done_days` changes the window

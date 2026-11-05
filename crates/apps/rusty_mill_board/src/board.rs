@@ -1,6 +1,7 @@
 //! The service: resolves actors from roles, applies domain operations and
 //! commits them through a [`Store`], retrying on revision conflicts.
 
+use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
@@ -10,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
-    MoveRules, Shelf, import_id, text_hash,
+    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Event,
+    EventKind, ExecutionLink, MoveRules, Shelf, import_id, text_hash,
 };
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
@@ -1170,7 +1171,8 @@ impl<S: Store> Board<S> {
         self.apply(id, by, EventKind::Archived, |c, now| c.archive(now))
     }
 
-    /// Put an archived card back on the default views. Needs `Close`.
+    /// Put a shelved card (archived, or past the default Done window) back on the default
+    /// views: see [`Card::restore`]. Needs `Close`.
     ///
     /// # Errors
     /// A missing capability, or a missing card.
@@ -1178,12 +1180,18 @@ impl<S: Store> Board<S> {
         if !by.caps.contains(&Capability::Close) {
             return Err(BoardError::Forbidden(Capability::Close));
         }
-        self.apply(id, by, EventKind::Restored, |c, now| Ok(c.restore(now)))
+        let window = window_ms(DONE_WINDOW_DAYS);
+        self.apply(id, by, EventKind::Restored, |c, now| {
+            Ok(c.restore(now, window))
+        })
     }
 
-    /// Archive every Done card not yet archived that was done at least `older_than_days`
-    /// ago, in `project` or in every project `by` may work in. Needs `Triage`: it is a
-    /// board-wide tidy-up. Returns the cards archived.
+    /// Archive every Done card not yet archived whose window ([`Card::shelf_since_ms`])
+    /// started at least `older_than_days` ago, in `project` or in every project `by` may work
+    /// in. Needs `Triage`: it is a board-wide tidy-up. Returns the cards archived.
+    ///
+    /// The selection is checked again on the card each commit is made from, so a card moved to
+    /// another project, archived, restored or removed meanwhile is skipped, never archived.
     ///
     /// # Errors
     /// A missing capability, or a storage failure; the cards archived before it stay archived.
@@ -1196,15 +1204,37 @@ impl<S: Store> Board<S> {
         if !by.caps.contains(&Capability::Triage) {
             return Err(BoardError::Forbidden(Capability::Triage));
         }
-        let now = (self.clock)();
         let window = window_ms(older_than_days).unwrap_or(0);
-        self.list(Some(&Column::DONE))?
-            .into_iter()
-            .filter(|c| c.archived_ms.is_none() && by.may_work_in(&c.project))
-            .filter(|c| project.is_none_or(|p| c.project == p))
-            .filter(|c| now.saturating_sub(c.done_ms.unwrap_or(c.updated_ms)) >= window)
-            .map(|c| self.apply(c.id, by, EventKind::Archived, |c, now| c.archive(now)))
-            .collect()
+        let wanted = |c: &Card, now: i64| {
+            c.column == Column::DONE
+                && c.archived_ms.is_none()
+                && by.may_work_in(&c.project)
+                && project.is_none_or(|p| c.project == p)
+                && now.saturating_sub(c.shelf_since_ms()) >= window
+        };
+        let listed_at = (self.clock)();
+        let mut archived = Vec::new();
+        for card in self.list(Some(&Column::DONE))? {
+            if !wanted(&card, listed_at) {
+                continue;
+            }
+            let took = Cell::new(false);
+            let result = self.apply(card.id, by, EventKind::Archived, |c, now| {
+                // Each attempt decides afresh on the card it read.
+                took.set(wanted(c, now));
+                if took.get() {
+                    c.archive(now)
+                } else {
+                    Ok(c.clone())
+                }
+            });
+            match result {
+                Ok(c) if took.get() => archived.push(c),
+                Ok(_) | Err(BoardError::NotFound(_) | BoardError::OutOfScope(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(archived)
     }
 
     /// Claim a card.

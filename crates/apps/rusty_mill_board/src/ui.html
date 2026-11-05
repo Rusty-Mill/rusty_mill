@@ -140,10 +140,11 @@ const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
 /* A Done card is shelved, off the board and in the Archive view, once archived or 14 days after it
-   was done (closed without shipping: after its last change). The server's Card::shelved, with
-   board_list's default window; kept here so the board reads every card once. */
+   was done (closed without shipping: after its last change) or last restored. The server's
+   Card::shelved, with board_list's default window; kept here so the board reads every card once. */
 const SHELF_DAYS=14,isDone=k=>FLOW.columns.find(c=>c.id===k.column)?.kind==="done";
-const shelved=k=>isDone(k)&&(k.archived_ms!=null||Date.now()-(k.done_ms??k.updated_ms)>SHELF_DAYS*864e5);
+const since=k=>Math.max(k.done_ms??k.updated_ms,k.restored_ms??-Infinity);
+const shelved=k=>isDone(k)&&(k.archived_ms!=null||Date.now()-since(k)>SHELF_DAYS*864e5);
 const listed=f=>count(k=>!shelved(k)&&f(k));
 /* One colour per agent, the same on every card and in the panel. Twelve hues 30 degrees apart; a name
    prefers the slot its hash picks and takes the next free one if another agent has it, so two agents
@@ -384,7 +385,7 @@ function colHead(c,name){
 }
 
 /* The Archive: shelved Done cards in view, newest first, searchable by number, title or tag.
-   Restore puts an archived card back; one that only aged out stays here until it is archived and restored. */
+   Restore puts any of them back on the board for another 14 days, whether archived or aged out. */
 let archQ="";
 function renderArchive(){
   mapSeq++;
@@ -400,10 +401,8 @@ function renderArchive(){
       const m=el("div",null,"meta");
       if(projects().length>1)m.append(el("span",label(k.project),"tag proj"));
       m.append(el("span",(k.done_ms?"shipped ":"closed ")+new Date(k.done_ms??k.updated_ms).toLocaleDateString()));
-      if(k.archived_ms!=null){
-        m.append(el("span"," · archived "+new Date(k.archived_ms).toLocaleDateString()+" "));
-        const r=el("button","Restore");r.type="button";r.onclick=e=>{e.stopPropagation();act("card_restore",{id:k.id})};m.append(r);
-      }
+      if(k.archived_ms!=null)m.append(el("span"," · archived "+new Date(k.archived_ms).toLocaleDateString()));
+      const r=el("button","Restore");r.type="button";r.onclick=e=>{e.stopPropagation();act("card_restore",{id:k.id})};m.append(" ",r);
       d.append(m);d.onclick=()=>show(k.id);return d;
     }));
     if(!hits.length)list.append(el("p",all.length?"No match.":"Nothing archived.","meta"));
@@ -438,7 +437,7 @@ function show(id){
   const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b," ")};
   btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
   // Archive or Restore, for a Done card; syncDialog keeps the label in step with the board.
-  f.ar=el("button");f.ar.type="button";f.ar.onclick=()=>{const c=cards.find(x=>x.id===id);if(c)act(c.archived_ms!=null?"card_restore":"card_archive",{id})};row.append(f.ar," ");
+  f.ar=el("button");f.ar.type="button";f.ar.onclick=()=>{const c=cards.find(x=>x.id===id);if(c)act(shelved(c)?"card_restore":"card_archive",{id})};row.append(f.ar," ");
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
   const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
@@ -456,7 +455,7 @@ function syncDialog(){
   if(!k){f.banner.textContent="This card no longer exists.";return}
   // Display-only parts follow the board; the inputs are never rebuilt.
   f.meta.textContent=(k.number?"#"+k.number+" · ":"")+colLabel(k.column)+(k.archived_ms!=null?" · archived":"")+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
-  f.ar.hidden=!isDone(k);f.ar.textContent=k.archived_ms!=null?"Restore":"Archive";
+  f.ar.hidden=!isDone(k);f.ar.textContent=shelved(k)?"Restore":"Archive";
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);

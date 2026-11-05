@@ -256,12 +256,13 @@ pub fn reserved_tag(tag: &str) -> bool {
         || tag.starts_with("claim:")
         || tag.starts_with("number:")
         || tag.starts_with("archived:")
+        || tag.starts_with("restored:")
 }
 
 fn check_tags(tags: &[String]) -> Result<(), BoardError> {
     if tags.iter().any(|t| reserved_tag(t)) {
         return Err(BoardError::Invalid(
-            "tags `agent`, `board:…`, `claim:…`, `number:…` and `archived:…` are the board's own",
+            "tags `agent`, `board:…`, `claim:…`, `number:…`, `archived:…` and `restored:…` are the board's own",
         ));
     }
     Ok(())
@@ -355,6 +356,11 @@ pub struct Card {
     /// views. It is still Done, so roadmap, metrics and dependencies count it as before.
     #[serde(default)]
     pub archived_ms: Option<i64>,
+    /// When the card was last put back from the archive, Unix ms. The Done window counts from
+    /// it rather than from `done_ms`, so a restored card stays on the board while its ship time,
+    /// and with it the roadmap and metrics, is left as it was.
+    #[serde(default)]
+    pub restored_ms: Option<i64>,
 }
 
 /// Stable cross-component ids for the one logical execution a card may own.
@@ -597,6 +603,7 @@ impl Card {
             updated_ms: now_ms,
             done_ms: None,
             archived_ms: None,
+            restored_ms: None,
         })
     }
 
@@ -770,25 +777,35 @@ impl Card {
         }
         Ok(Self {
             archived_ms: Some(now_ms),
+            restored_ms: None,
             ..self.next(now_ms)
         })
     }
 
-    /// Put an archived card back. Unchanged if it is not archived.
+    /// Put a shelved card (see [`Card::shelved`]) back on the default views: no longer archived,
+    /// and its Done window starts again at `now_ms`. Unchanged if it is not shelved.
     #[must_use]
-    pub fn restore(&self, now_ms: i64) -> Self {
-        if self.archived_ms.is_none() {
+    pub fn restore(&self, now_ms: i64, window_ms: Option<i64>) -> Self {
+        if !self.shelved(now_ms, window_ms) {
             return self.clone();
         }
         Self {
             archived_ms: None,
+            restored_ms: Some(now_ms),
             ..self.next(now_ms)
         }
     }
 
-    /// Whether the card is off the board's default views at `now_ms`: archived, or Done for
-    /// longer than `window_ms`, when there is a window. A card closed without shipping has no
-    /// ship time, so its last change stands in.
+    /// Where a Done card's window starts: its ship time (or, closed without shipping, its last
+    /// change), or its last restore if later.
+    pub fn shelf_since_ms(&self) -> i64 {
+        let closed_ms = self.done_ms.unwrap_or(self.updated_ms);
+        self.restored_ms.map_or(closed_ms, |r| r.max(closed_ms))
+    }
+
+    /// Whether the card is off the board's default views at `now_ms`: a Done card that is
+    /// archived, or whose window ([`Card::shelf_since_ms`]) is older than `window_ms`, when
+    /// there is a window.
     pub fn shelved(&self, now_ms: i64, window_ms: Option<i64>) -> bool {
         if self.column != Column::DONE {
             return false;
@@ -796,8 +813,7 @@ impl Card {
         if self.archived_ms.is_some() {
             return true;
         }
-        let closed_ms = self.done_ms.unwrap_or(self.updated_ms);
-        window_ms.is_some_and(|w| now_ms.saturating_sub(closed_ms) > w)
+        window_ms.is_some_and(|w| now_ms.saturating_sub(self.shelf_since_ms()) > w)
     }
 
     /// Replace title/body/tags (each optional).

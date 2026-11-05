@@ -828,6 +828,56 @@ mod tests {
     }
 
     #[test]
+    fn card_restore_puts_an_aged_out_card_back_in_board_list() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static NOW: AtomicI64 = AtomicI64::new(0);
+        let board: Shared =
+            Board::with_clock(Box::new(MemStore::default()), Roles::default(), || {
+                NOW.load(Ordering::SeqCst)
+            });
+        let human = |extra: Value| {
+            let mut args = json!({"actor": "nano", "role": "human"});
+            args.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            args
+        };
+        call_as(
+            &board,
+            None,
+            "card_add",
+            human(json!({"title": "old", "done": true})),
+        )
+        .expect("add done");
+        let count = |args: Value| {
+            call_as(&board, None, "board_list", args).expect("list")["cards"]
+                .as_array()
+                .expect("cards")
+                .len()
+        };
+        NOW.store(20 * 86_400_000, Ordering::SeqCst);
+        assert_eq!(
+            (count(json!({})), count(json!({"archived": "only"}))),
+            (0, 1)
+        );
+        assert_eq!(count(json!({"done_days": 30})), 1);
+
+        call_as(&board, None, "card_restore", human(json!({"id": "#1"}))).expect("restore");
+        assert_eq!(
+            (count(json!({})), count(json!({"archived": "only"}))),
+            (1, 0)
+        );
+        let bulk = call_as(
+            &board,
+            None,
+            "card_archive_done",
+            human(json!({"older_than_days": 5})),
+        )
+        .expect("bulk");
+        assert_eq!(bulk["archived"], 0, "the window counts from the restore");
+    }
+
+    #[test]
     fn a_card_is_named_by_id_or_by_number() {
         let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
         let add = json!({"actor": "nano", "role": "human", "title": "t"});

@@ -3,7 +3,7 @@
 //!
 //! **Mapping.** A card is a task: title, notes (body), priority, sort order, and
 //! tags carrying the board's state (`board:<column>`, `claim:<actor>`, `number:<n>`,
-//! `archived:<ms>`) beside
+//! `archived:<ms>`, `restored:<ms>`) beside
 //! the card's own tags, which rusty_tick keeps lowercase. Its project is the
 //! task's list, named like the project; the Inbox is the `default` project. A
 //! closed task (done or won't do) is Done. The
@@ -289,6 +289,7 @@ fn task_tags(card: &Card) -> Vec<String> {
     tags.extend(card.claim.iter().map(|c| format!("claim:{c}")));
     tags.extend(card.number.iter().map(|n| format!("number:{n}")));
     tags.extend(card.archived_ms.iter().map(|ms| format!("archived:{ms}")));
+    tags.extend(card.restored_ms.iter().map(|ms| format!("restored:{ms}")));
     tags.extend(card.tags.iter().cloned());
     tags
 }
@@ -320,13 +321,17 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .iter()
         .find_map(|t| t.strip_prefix("number:"))
         .and_then(|n| n.parse().ok());
-    // Only a Done card is archived; the tag added by hand to an open task means nothing.
-    let archived_ms = task
-        .tags
-        .iter()
-        .find_map(|t| t.strip_prefix("archived:"))
-        .and_then(|ms| ms.parse().ok())
-        .filter(|_| column == Column::DONE);
+    // Only a Done card is archived or restored; such a tag added by hand to an open task
+    // means nothing.
+    let shelf_tag = |prefix: &str| -> Option<i64> {
+        task.tags
+            .iter()
+            .find_map(|t| t.strip_prefix(prefix))
+            .and_then(|ms| ms.parse().ok())
+            .filter(|_| column == Column::DONE)
+    };
+    let archived_ms = shelf_tag("archived:");
+    let restored_ms = shelf_tag("restored:");
     let tags = task
         .tags
         .iter()
@@ -356,6 +361,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         // Only shipped work has a ship date; won't-do is closed but never shipped.
         done_ms: task.completed_ms.filter(|_| task.status == "done"),
         archived_ms,
+        restored_ms,
     })
 }
 
