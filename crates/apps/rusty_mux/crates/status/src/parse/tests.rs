@@ -206,23 +206,59 @@ fn parts_refuse_what_a_body_would_and_smuggled_pairs() {
 }
 
 #[test]
-fn a_malformed_id_never_falls_back_to_the_root() {
-    for (state, id) in [
-        ("clear", "bad id"),
-        ("working", "bad id"),
-        ("clear", " sub"),
-    ] {
-        let parts = Parts {
-            id: Some(id),
+fn a_malformed_id_is_refused_and_never_falls_back_to_the_root() {
+    let report = |state, id| {
+        Parts {
+            id,
             state,
             ..Parts::default()
-        };
-        assert_eq!(parts.report(), None, "{parts:?}");
+        }
+        .report()
+    };
+    let mut records = crate::Records::default();
+    records.apply(report("working", None).expect("absent id is the root"));
+    records.apply(report("blocked", Some("sub/1")).expect("valid child"));
+    let before = records.states();
+    assert_eq!(before.len(), 2);
+    let long_segment = "a".repeat(33);
+    let deep = ["a"; 9].join("/");
+    let long = ["a".repeat(32).as_str(); 5].join("/");
+    let malformed = [
+        "",
+        "bad id",
+        " sub",
+        "sub ",
+        "sub\t1",
+        "sub\n1",
+        "sub\u{7}",
+        "sub\u{1b}[0m",
+        "a//b",
+        "/a",
+        "a/",
+        "a,b",
+        "a=b",
+        "a:b",
+        "sub;1",
+        "sub*",
+        "\u{e9}",
+        &long_segment,
+        &deep,
+        &long,
+    ];
+    let accepted: Vec<_> = malformed
+        .into_iter()
+        .flat_map(|id| ["clear", "working"].map(|state| (state, id)))
+        .filter_map(|(state, id)| Some((state, id, report(state, Some(id))?)))
+        .collect();
+    for (_, _, report) in &accepted {
+        records.apply(report.clone());
     }
-    let spaced = Parts {
-        state: "working",
+    assert!(accepted.is_empty(), "accepted: {accepted:?}");
+    assert_eq!(records.states(), before, "root and child unchanged");
+    let spaced_kind = Parts {
+        state: "blocked",
         kind: Some("per mission"),
         ..Parts::default()
     };
-    assert_eq!(spaced.report(), None);
+    assert_eq!(spaced_kind.report(), None);
 }
