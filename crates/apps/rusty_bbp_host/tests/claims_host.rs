@@ -2893,3 +2893,31 @@ fn a_torn_ledger_refuses_the_next_report_only_open() {
     assert_eq!(ledger, torn);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #704 D42 (D88): a report-only open with an empty task id fails without
+/// writing to the ledger, so later report-only opens still work.
+#[test]
+fn an_empty_task_id_does_not_poison_the_ledger() {
+    let dir = tempdir("erosion-empty-id");
+    let report_only = erosion_profiles("--report-only");
+    let empty = admin::open_claims_task(
+        &dir,
+        &TaskId(String::new()),
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &report_only,
+        None,
+        vec![lens("a", 0), lens("b", 1)],
+        ClaimsConfig::default(),
+        || Ok(()),
+    );
+    assert!(empty.is_err());
+    assert!(!rusty_bbp_host::erosion_window::path(&dir).exists());
+    let t = TaskId("AFTER".into());
+    assert!(matches!(
+        open_as(&dir, &t, &report_only, Ok(())),
+        Response::Stored(_)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}

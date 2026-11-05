@@ -125,8 +125,13 @@ pub struct Admission(#[allow(dead_code)] File);
 /// open that follows is always on the clock, and the returned [`Admission`]
 /// keeps the lock for the open itself.
 pub fn admit(dir: &Path, task: &TaskId, now: Time) -> Result<Result<Admission, String>, String> {
-    if task.0.contains(['\n', '\r']) {
-        return Err(format!("task id {:?} has a line break", task.0));
+    // Only ids that round-trip through `parse` are written: one bad line
+    // would refuse every later report-only open.
+    if task.0.is_empty() || task.0.contains(['\n', '\r']) {
+        return Err(format!(
+            "task id {:?} can't be recorded in the erosion ledger",
+            task.0
+        ));
     }
     let mut file = open_locked(dir)?;
     let mut text = String::new();
@@ -256,8 +261,16 @@ mod tests {
         drop(held);
         assert!(other.try_lock().is_ok(), "dropping it releases the lock");
         drop(other);
-        let broken = TaskId("a\nb".into());
-        assert!(admit(&dir, &broken, Time(8)).is_err());
+        let before = std::fs::read_to_string(path(&dir)).expect("ledger");
+        for bad in ["a\nb", "a\r", ""] {
+            assert!(
+                admit(&dir, &TaskId(bad.into()), Time(8)).is_err(),
+                "{bad:?}"
+            );
+        }
+        let after = std::fs::read_to_string(path(&dir)).expect("ledger");
+        assert_eq!(after, before, "an unrecordable id writes nothing");
+        assert!(parse(&after).is_ok());
         // A torn, valid-looking tail refuses, and nothing is run into it.
         std::fs::write(path(&dir), "7 C1\n100 FAILED").expect("write");
         assert!(admit(&dir, &TaskId("SUCCESS".into()), Time(9)).is_err());
