@@ -562,6 +562,21 @@ const TERMINAL_MORE: Features = Features::BLOCK_CALL.union(Features::TERMINAL_MO
 /// What `terminal.shell` needs.
 const TERMINAL_SHELL: Features = Features::BLOCK_CALL.union(Features::TERMINAL_SHELL);
 
+/// What `terminal.report-status` needs.
+const AGENT_STATUS: Features = Features::BLOCK_CALL.union(Features::AGENT_STATUS);
+
+/// An optional parameter of `terminal.report-status`.
+const fn status_part(name: &'static str, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty: Ty::Text,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::AGENT_STATUS,
+        },
+    }
+}
+
 /// What `terminal.history` needs.
 const TERMINAL_HISTORY: Features = Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY);
 
@@ -1298,6 +1313,38 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_SHELL,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.shell"),
+    },
+    Method {
+        name: "terminal.report-status",
+        doc: "Report the block's status for an agent's hooks, as one OSC 7501 report given \
+              field by field. Hook reports are shown instead of the program's own, and \
+              announced by `BlockStatus` like them, until the hooks have been silent for 120 \
+              seconds and the program reports something else; the next hook report takes \
+              the block back. A new prompt and a reset end them as they do the program's. \
+              Refused when the fields are not a valid report.",
+        params: &[
+            BLOCK,
+            Param {
+                name: "state",
+                ty: Ty::Text,
+                doc: "`idle`, `working`, `blocked`, `done`, `error`, or `clear` to remove \
+                      the record and those beneath it.",
+                presence: Presence::Required,
+            },
+            status_part(
+                "id",
+                "The record's path, such as `subagent/2`; the root record when absent.",
+            ),
+            status_part(
+                "kind",
+                "Why a blocked agent waits: `permission`, `question` or `auth`.",
+            ),
+            status_part("app", "The agent's stable identifier, such as `opencode`."),
+            status_part("msg", "One line for people, such as the tool in use."),
+        ],
+        needs: AGENT_STATUS,
+        returns: Returns::Nothing,
+        build: |req, a| block_call(req, a, "terminal.report-status"),
     },
     Method {
         name: "terminal.history",

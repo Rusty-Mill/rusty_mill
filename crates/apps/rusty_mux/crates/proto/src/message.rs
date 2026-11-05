@@ -164,6 +164,13 @@ impl Features {
     /// [`Message::BlockCall`], so the bit only says the server knows it.
     pub const TERMINAL_SHELL: Self = Self(1 << 32);
 
+    /// The block method `terminal.report-status`, by which an agent's hooks
+    /// report its status beside what the program sends with OSC 7501. It
+    /// travels as [`Message::BlockCall`] and what it reports reaches
+    /// clients as [`Event::BlockStatus`], so the bit only says the server
+    /// knows it.
+    pub const AGENT_STATUS: Self = Self(1 << 33);
+
     /// The block method `terminal.history`: lines older than the
     /// scrollback, from the block's spool on disk (C70). It travels as
     /// [`Message::BlockCall`], so the bit only says the server knows it.

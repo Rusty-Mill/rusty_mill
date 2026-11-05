@@ -70,6 +70,21 @@ pub enum AgentCommand {
     /// Prints the guide the installed skill reads, so it always matches
     /// this ctl (C73).
     Skill,
+    /// What an agent's event hooks run (`agent hook --event STATE ...`):
+    /// reports the agent's status for the block it runs in (O2).
+    Report(HookReport),
+}
+
+/// An agent hook's status report, field by field as
+/// `terminal.report-status` takes them; the server checks them.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HookReport {
+    /// `idle`, `working`, `blocked`, `done`, `error` or `clear`.
+    pub state: String,
+    pub id: Option<String>,
+    pub kind: Option<String>,
+    pub app: Option<String>,
+    pub msg: Option<String>,
 }
 
 /// Which agents an `agent` verb acts on, and where.
@@ -367,7 +382,8 @@ fn watch(args: &[String]) -> Result<Command, String> {
 }
 
 const AGENT_USAGE: &str = "usage: agent setup|status|remove [--agent claude|codex|opencode|pi|all]... \
-     [--project | --dir DIR] [--dry-run] [--name-session] | agent hook [--name-session] | agent skill";
+     [--project | --dir DIR] [--dry-run] [--name-session] | agent hook [--name-session] | agent hook --event STATE [--id ID] \
+     [--kind KIND] [--app APP] [--msg TEXT] | agent skill";
 
 fn agent(args: &[String]) -> Result<AgentCommand, String> {
     let (verb, rest) = args.split_first().ok_or(AGENT_USAGE)?;
@@ -375,6 +391,9 @@ fn agent(args: &[String]) -> Result<AgentCommand, String> {
         "setup" => AgentCommand::Setup,
         "status" => AgentCommand::Status,
         "remove" => AgentCommand::Remove,
+        "hook" if rest.first().is_some_and(|f| f.starts_with("--event")) => {
+            return hook_report(rest).map(AgentCommand::Report);
+        }
         "hook" => {
             let name_session = match rest {
                 [] => false,
@@ -417,6 +436,27 @@ fn agent(args: &[String]) -> Result<AgentCommand, String> {
         dry_run,
         name_session,
     }))
+}
+
+/// `agent hook --event STATE ...`: each flag once, `--event` required.
+fn hook_report(rest: &[String]) -> Result<HookReport, String> {
+    let mut report = HookReport::default();
+    let mut state = None;
+    for (key, text) in flags("agent hook", rest, |_| false)? {
+        let slot = match key {
+            "event" => &mut state,
+            "id" => &mut report.id,
+            "kind" => &mut report.kind,
+            "app" => &mut report.app,
+            "msg" => &mut report.msg,
+            _ => return Err(AGENT_USAGE.into()),
+        };
+        if slot.replace(text.to_owned()).is_some() {
+            return Err(format!("agent hook: --{key} given twice"));
+        }
+    }
+    report.state = state.ok_or(AGENT_USAGE)?;
+    Ok(report)
 }
 
 /// The agents `--agent NAME` names.
@@ -734,7 +774,9 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  Claude Code when no --agent; status exits 0 only when every\n\
          \x20                  item is current; --name-session has the agent name a session\n\
          \x20                  that still has a generated name after its task;\n\
-         \x20                  agent skill prints the guide the installed skill reads",
+         \x20                  agent skill prints the guide the installed skill reads;\n\
+         \x20                  agent hook --event STATE [--id ID] [--kind KIND] [--app APP]\n\
+         \x20                  [--msg TEXT] reports an agent's status for its block, silently",
     ),
     (
         "bridge",

@@ -127,6 +127,7 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             "terminal.modes",
             "terminal.clear",
             "terminal.shell",
+            "terminal.report-status",
             "terminal.history"
         ]
     );
@@ -139,13 +140,17 @@ fn block_methods_take_the_block_first_and_send_the_rest() {
             (true, _, _) => Features::BLOCK_CALL.union(Features::TERMINAL_CONTROL),
             (_, true, _) => Features::BLOCK_CALL.union(Features::TERMINAL_MORE),
             (_, _, "terminal.shell") => Features::BLOCK_CALL.union(Features::TERMINAL_SHELL),
+            (_, _, "terminal.report-status") => Features::BLOCK_CALL.union(Features::AGENT_STATUS),
             (_, _, "terminal.history") => Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY),
             _ => Features::BLOCK_CALL,
         };
         assert_eq!(method.needs, needs, "{name}");
         let returns = match name {
             "terminal.send-keys" => Returns::Unanswered,
-            "terminal.reset" | "terminal.set-theme" | "terminal.clear" => Returns::Nothing,
+            "terminal.reset"
+            | "terminal.set-theme"
+            | "terminal.clear"
+            | "terminal.report-status" => Returns::Nothing,
             _ => Returns::Text,
         };
         assert_eq!(method.returns, returns, "{name}");
@@ -314,6 +319,10 @@ fn optional_parameters_add_their_features_only_when_given() {
             "background",
             "cursor",
             "palette",
+            "id",
+            "kind",
+            "app",
+            "msg",
             "skip",
             "trim",
             "unwrap",
