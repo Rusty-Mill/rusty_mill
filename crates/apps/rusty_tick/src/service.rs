@@ -139,6 +139,40 @@ pub struct TagPatch {
     pub sort_order: Option<i64>,
 }
 
+/// A half-open range of Unix milliseconds, `[from, to)`; either end may be open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Span {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+impl Span {
+    pub fn contains(&self, ms: i64) -> bool {
+        self.from.is_none_or(|f| ms >= f) && self.to.is_none_or(|t| ms < t)
+    }
+
+    fn is_bounded(&self) -> bool {
+        self.from.is_some() || self.to.is_some()
+    }
+}
+
+/// Which tasks a search keeps, by when they were created and last changed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Window {
+    pub created: Span,
+    pub updated: Span,
+}
+
+impl Window {
+    pub fn is_bounded(&self) -> bool {
+        self.created.is_bounded() || self.updated.is_bounded()
+    }
+
+    pub fn holds(&self, task: &Task) -> bool {
+        self.created.contains(task.created_ms) && self.updated.contains(task.updated_ms)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListOrderBy {
     Manual,
@@ -667,17 +701,28 @@ impl Service {
     // ---- search and smart lists --------------------------------------
 
     /// Tasks matching any of the whitespace-separated `terms` in title or
-    /// notes; each term also matches as a prefix (type-ahead).
-    pub fn search(&self, query: &str) -> Vec<Task> {
+    /// notes, within `window`; each term also matches as a prefix (type-ahead).
+    /// With no terms, every task within a bounded `window`; with neither,
+    /// nothing. Trashed tasks never match.
+    pub fn search(&self, query: &str, window: &Window) -> Vec<Task> {
         let terms: Vec<&str> = query.split_whitespace().collect();
-        if terms.is_empty() {
-            return Vec::new();
-        }
-        self.tasks
-            .search(&terms)
-            .into_iter()
-            .filter_map(|id| self.tasks.get(id))
-            .collect()
+        let tasks: Vec<Task> = match (terms.is_empty(), window.is_bounded()) {
+            (true, false) => return Vec::new(),
+            // The index leaves out the trash; so does a search by date alone.
+            (true, true) => self
+                .tasks
+                .all()
+                .into_iter()
+                .filter(|t| !t.is_deleted())
+                .collect(),
+            (false, _) => self
+                .tasks
+                .search(&terms)
+                .into_iter()
+                .filter_map(|id| self.tasks.get(id))
+                .collect(),
+        };
+        tasks.into_iter().filter(|t| window.holds(t)).collect()
     }
 
     pub fn with_tag(&self, tag: &str) -> Vec<Task> {

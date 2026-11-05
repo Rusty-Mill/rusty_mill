@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::board::Board;
 use crate::domain::{
-    Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Edit, ExecutionLink, Plan,
-    Shelf,
+    Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit, ExecutionLink,
+    Plan, Shelf, Span,
 };
 use crate::milestones::MilestoneEdit;
 use crate::store::Store;
@@ -205,6 +205,30 @@ struct ListArgs {
     /// Days a Done card stays on the board before it is shelved without being archived.
     /// Default 14; 0 shelves only archived cards.
     done_days: Option<u32>,
+    /// Only cards created at or after this time (Unix ms).
+    created_from: Option<i64>,
+    /// Only cards created before this time (Unix ms).
+    created_to: Option<i64>,
+    /// Only cards last changed at or after this time (Unix ms).
+    updated_from: Option<i64>,
+    /// Only cards last changed before this time (Unix ms).
+    updated_to: Option<i64>,
+    /// Only cards that changed column at or after this time (Unix ms); with `moved_to`, in
+    /// that range. Entering the board counts as a move.
+    moved_from: Option<i64>,
+    /// Only cards that changed column before this time (Unix ms).
+    moved_to: Option<i64>,
+}
+
+impl ListArgs {
+    fn dates(&self) -> Dates {
+        let span = |from, to| Span { from, to };
+        Dates {
+            created: span(self.created_from, self.created_to),
+            updated: span(self.updated_from, self.updated_to),
+            moved: span(self.moved_from, self.moved_to),
+        }
+    }
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -492,7 +516,7 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`.",
+            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`. `created_*`, `updated_*` and `moved_*` (Unix ms, `from` inclusive, `to` exclusive) keep cards created, last changed or moved column in a range.",
             |b, i, a: ListArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
                 let days = a.done_days.unwrap_or(DONE_WINDOW_DAYS);
@@ -501,6 +525,7 @@ pub fn ops() -> Vec<Op> {
                     in_scope(scope(i), &c.project)
                         && a.project.as_deref().is_none_or(|p| c.project == p)
                 });
+                b.retain_dates(&mut cards, &a.dates())?;
                 to_json(json!({ "cards": cards }))
             },
         ),
@@ -924,6 +949,74 @@ mod tests {
             call_as(&board, None, "card_archive", with(json!({"id": "#1"}))),
             Err(CallError::Board(BoardError::Invalid(_)))
         ));
+    }
+
+    #[test]
+    fn board_list_keeps_cards_by_created_updated_and_moved_dates() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static NOW: AtomicI64 = AtomicI64::new(10);
+        let board: Shared =
+            Board::with_clock(Box::new(MemStore::default()), Roles::default(), || {
+                NOW.load(Ordering::SeqCst)
+            });
+        let human = |extra: Value| {
+            let mut args = json!({"actor": "nano", "role": "human"});
+            args.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            args
+        };
+        let add = |title: &str| {
+            call_as(&board, None, "card_add", human(json!({ "title": title }))).expect("add")
+        };
+        add("first");
+        NOW.store(20, Ordering::SeqCst);
+        add("second");
+        NOW.store(30, Ordering::SeqCst);
+        call_as(
+            &board,
+            None,
+            "card_comment",
+            human(json!({"id": "#1", "text": "hi"})),
+        )
+        .expect("comment");
+        NOW.store(40, Ordering::SeqCst);
+        call_as(
+            &board,
+            None,
+            "card_move",
+            human(json!({"id": "#2", "to": "blocked"})),
+        )
+        .expect("move");
+        let titles = |args: Value| -> Vec<String> {
+            call_as(&board, None, "board_list", args).expect("list")["cards"]
+                .as_array()
+                .expect("cards")
+                .iter()
+                .map(|c| c["title"].as_str().expect("title").to_owned())
+                .collect()
+        };
+        assert_eq!(titles(json!({"created_from": 15})), ["second"]);
+        assert_eq!(
+            titles(json!({"created_to": 20})),
+            ["first"],
+            "`to` is exclusive"
+        );
+        assert_eq!(
+            titles(json!({"updated_from": 25, "updated_to": 35})),
+            ["first"]
+        );
+        assert_eq!(
+            titles(json!({"moved_from": 35})),
+            ["second"],
+            "a comment is not a move"
+        );
+        assert_eq!(
+            titles(json!({"moved_from": 0, "moved_to": 15})),
+            ["first"],
+            "entering the board counts"
+        );
+        assert_eq!(titles(json!({})).len(), 2);
     }
 
     #[test]

@@ -117,6 +117,7 @@ Precise contracts used by this guide:
 | D107 | `lel-jail` v0 launch contract: `orch-jail` crate, `jail.json` fields, setup order, tests | [default] 2026-11-05 (#600, #732) |
 | D108 | #600 cgroup holder, slot hand-off and cgroup `quiesce` | [default] 2026-11-05 (#600, #732) |
 | D109 | Takeover end drains delivered input through `takeover_closing` (amends D104 item 2) | [stated] 2026-11-05 (mux, #732, PR #1502) |
+| D110 | #704 slices 4–5: cleanup trigger and calibration build defaults | [default] 2026-11-05 (#704) |
 | D111 | #599 `rusty_orch lens record`: read-only calibration report command | [stated] 2026-11-05 (#599) |
 | D112 | #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance | [stated] 2026-11-05 (#599) |
 
@@ -1025,6 +1026,20 @@ Still under claims schema 5 (D105): no bump. D104's events, verb, visibility and
 **Tag.** [stated] · remind-me: mem_b63239cb445d4a49a078d1a45590fa4e
 **Key.** lel:mux:takeover-closing-drain
 **Source.** Nano tapped option A, "Add a takeover_closing event", on thread decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE46GHhPehbN6LFb6VXZh2ZpE` at 2026-11-05T03:14:32Z. The card asked: "How should #1502 keep the last typed batch when you release a takeover or close the task?" Earlier, and first recorded: owner approval relayed by dottiusmaximus in a GitHub comment on PR #1502, https://github.com/Rusty-Mill/rusty_mill/pull/1502#issuecomment-6646844427 (2026-11-05T01:13Z), quoting the exchange: "#1502 needs a small audit-schema decision: delivered input can be lost when a takeover ends. I recommend adding a closing state that briefly drains already-delivered input before the host records the end. Are you okay with that?" Owner: "👍". Built in PR #1502 (head b5dd857e) and PR #1504 (head e4050a03). Numbered D87 on PR #1496's branch; moved to D109 on 2026-11-05 because main assigned D78–D88 first.
+
+## D110. #704 slices 4–5: cleanup trigger and calibration build defaults
+
+**Decision.**
+- Slice 5 (calibration) goes before slice 4. It depends on no open definition, and Nano needs its numbers before the D88 time box ends.
+- Calibration runs `erosion check` locally over git history, with no provider calls. The candidate is each merge commit and the base is its first parent. The report gives per-PR deltas, p50 and p90 for each metric, `unmeasured` counts (D45) and gaming signals (function count or total CC rising while concentration falls). It proposes p90 limits only; Nano sets them (D42, Q9, Q20). It goes in `docs/projects/let-em-loose/erosion-calibration.md` with the command that reproduces it, in slice 5's PR, and is then posted to Nano on card #704. Which PRs count as "human" is Q36; interim: report both sets and propose from the strict one.
+- Slice 4 lives in `rusty_orch` as a `consolidate` module behind an opt-in `rusty_orch consolidate [--repo DIR] [--bbp CONFIG] [--execute]`, read-only plan by default like `maintain`. "Writes a `consolidate` intent" means orch opens a new claims task whose brief is the consolidate intent, through the host's existing `admin::open_claims_task`, with no origin header, `rules.toml` or host rule check (D55). That task's erosion profile enforces the D44 cleanup predicate whether or not ordinary limits are still report-only.
+- The count leg counts accepted claims on claims tasks for the same repo, across tasks, since the last cleanup marker. Claims on consolidate tasks don't count. The marker is orch's write-ahead journal record of the last consolidate open or zero-floor skip. No new trigger fires while a consolidate task is open.
+- With no approved limits (report-only), the half-limit leg can't fire, because D42 forbids inventing limits; only the count leg runs. How that leg is defined across two metrics, and what "cumulative erosion since the last cleanup" measures, is escalated to Nano (card #704 Open).
+**Why.** These choices sit inside D42, D44, D45 and D55. They reuse the `maintain` opt-in pattern and the open path D55 keeps. Counting per repo matches D44's "since the last cleanup". A local git computation is not on the ask-first list.
+**Rejected.** Building the half-limit leg on a guessed definition. Counting per task. Delivering calibration after the cleanup trigger.
+**Tag.** [default] · remind-me: mem_2da162204bbf46b8a4020870babaadb5
+**Key.** lel:704:cleanup-calibration-build-defaults
+**Source.** Questions Q1–Q6 from the #704 slices 4–5 build thread, 2026-11-05; D42, D44, D45, D55, D88; card #704 Builds 4–5, Time box and Open; `rusty_orch` `src/maintenance.rs`; `rusty_bbp_host` `src/admin.rs` `open_claims_task`. Numbered D110 because open PR branches already use up to D109 (#1496). Its open question is Q36 because #1520 uses Q34–Q35.
 
 ## D111. #599 `rusty_orch lens record`: read-only calibration report command
 

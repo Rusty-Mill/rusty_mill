@@ -21,7 +21,7 @@
 //! | PATCH, DELETE | `/tags/{name}` | |
 //! | POST | `/tags/{name}/rename` | `{"label"}` renames on every task |
 //! | GET | `/tags/{name}/tasks` | |
-//! | GET | `/search?q=` | whole-word match on title and notes |
+//! | GET | `/search?q=` | prefix match on title and notes; optional `createdFrom`, `createdTo`, `updatedFrom`, `updatedTo` (Unix ms, `[from, to)`); dates alone list every task in range |
 //! | GET | `/smart/{today,next7,overdue}?utcOffsetMin=` | |
 //! | GET | `/docs/{kind}` | client-owned JSON: habits, focus records, prefs |
 //! | GET, PUT, DELETE | `/docs/{kind}/{id}` | PUT also takes `If-None-Match: *` (only if absent); a `board` document's PUT requires `If-Task-Match: <task etag>` |
@@ -40,7 +40,8 @@ use crate::dto::{
     PatchTask, Purged, RenameTag, SetOrder, SnapshotDto, TagDto, Tags, TaskDto, Tasks,
 };
 use crate::service::{
-    ListOrderBy, ListPatch, NewList, NewTask, Service, ServiceError, TagPatch, TaskPatch,
+    ListOrderBy, ListPatch, NewList, NewTask, Service, ServiceError, Span, TagPatch, TaskPatch,
+    Window,
 };
 use crate::task::{Priority, Status};
 use crate::users::{RegistryFile, UserKey};
@@ -458,13 +459,15 @@ fn route(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> 
             Ok(Response::json(StatusCode::OK, &Purged { purged }))
         }
         ["search"] if cx.method == &Method::Get => {
-            let q = cx
-                .query
-                .get("q")
-                .ok_or_else(|| ApiError::BadRequest("q is required".into()))?;
+            let window = search_window(cx.query)?;
+            let q = match cx.query.get("q") {
+                Some(q) => q,
+                None if window.is_bounded() => "",
+                None => return Err(ApiError::BadRequest("q or a date range is required".into())),
+            };
             Ok(Response::json(
                 StatusCode::OK,
-                &Tasks::new(service.search(q)),
+                &Tasks::new(service.search(q, &window)),
             ))
         }
         ["smart", which] if cx.method == &Method::Get => {
@@ -832,6 +835,21 @@ fn query_number<T: std::str::FromStr>(query: &Query, key: &str) -> Result<Option
                 .map_err(|_| ApiError::BadRequest(format!("{key} must be a number")))
         })
         .transpose()
+}
+
+/// `/search`'s optional date range: `createdFrom`, `createdTo`, `updatedFrom`,
+/// `updatedTo`, Unix ms, each range `[from, to)`.
+fn search_window(query: &Query) -> Result<Window> {
+    let span = |from: &str, to: &str| -> Result<Span> {
+        Ok(Span {
+            from: query_number(query, from)?,
+            to: query_number(query, to)?,
+        })
+    };
+    Ok(Window {
+        created: span("createdFrom", "createdTo")?,
+        updated: span("updatedFrom", "updatedTo")?,
+    })
 }
 
 fn parse_priority(value: u8) -> Result<Priority> {

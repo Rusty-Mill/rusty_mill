@@ -2,7 +2,9 @@
 //! owner's edits in rusty_tick reach the board (ADR-0012).
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{BoardError, Card, Column, Edit, Event, EventKind, Plan, Shelf};
+use rusty_mill_board::domain::{
+    BoardError, Card, Column, Dates, Edit, Event, EventKind, Plan, Shelf, Span,
+};
 use rusty_mill_board::milestones::{MilestoneEdit, MilestoneStore};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::Store;
@@ -768,6 +770,42 @@ fn a_prompt_that_escapes_past_the_document_limit_is_refused_before_any_write() {
 }
 
 #[test]
+fn moved_in_reads_rusty_tick_move_history_across_pages() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let early = board.add(&human, "early", "", vec![]).expect("add");
+    let late = board.add(&human, "late", "", vec![]).expect("add");
+    tick.record_move(early.id, 100);
+    // More than one page of moves, so the adapter has to follow `next`.
+    for at in 0..1_500 {
+        tick.record_move(late.id, 500 + at);
+    }
+    let store = TickStore::new(tick.clone());
+    let span = |from, to| Span { from, to };
+    assert_eq!(
+        store.moved_in(span(Some(0), Some(200))).expect("moved"),
+        [early.id].into()
+    );
+    assert_eq!(
+        store.moved_in(span(Some(1_900), None)).expect("moved"),
+        [late.id].into()
+    );
+    assert!(
+        store
+            .moved_in(span(Some(5_000), None))
+            .expect("moved")
+            .is_empty()
+    );
+    // The server runs over a boxed store: it must reach rusty_tick's history too, not the
+    // default that reads the (here empty) event log.
+    let boxed: Box<dyn Store> = Box::new(TickStore::new(tick.clone()));
+    assert_eq!(
+        boxed.moved_in(span(Some(0), Some(200))).expect("moved"),
+        [early.id].into()
+    );
+}
+
+#[test]
 fn a_milestone_is_a_dated_task_tagged_milestone_and_never_a_card() {
     let (board, tick) = board();
     let board = board.with_milestones(Box::new(TickStore::new(tick.clone())));
@@ -855,4 +893,38 @@ fn a_milestone_save_is_fenced_on_the_version_its_scope_was_checked_at() {
         "an unknown list reads as the Inbox"
     );
     assert!(again.rev > read.rev);
+}
+
+#[test]
+fn a_restarted_boxed_board_lists_moves_from_tick_history_not_its_fresh_event_log() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let moved = board.add(&human, "moved", "", vec![]).expect("add");
+    let quiet = board.add(&human, "quiet", "", vec![]).expect("add");
+    tick.record_move(moved.id, 10);
+    // A restart: a new board over a boxed store, as the server runs, with an empty event log.
+    let fresh = Board::with_clock(
+        Box::new(TickStore::new(tick.clone())) as Box<dyn Store>,
+        Roles::default(),
+        clock,
+    );
+    let human = fresh.roles().actor("nano", "human").expect("role");
+    fresh
+        .comment(quiet.id, &human, "just a note")
+        .expect("comment");
+    let mut cards = fresh.list(None).expect("list");
+    let dates = Dates {
+        moved: Span {
+            from: Some(0),
+            to: None,
+        },
+        ..Dates::default()
+    };
+    fresh.retain_dates(&mut cards, &dates).expect("dates");
+    let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["moved"],
+        "the recorded move counts; a comment after the restart is not a move"
+    );
 }

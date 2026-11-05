@@ -30,6 +30,9 @@ use uuid::Uuid;
 /// Where MCP is served.
 pub const MCP_PATH: &str = "/mcp";
 
+/// `search_tasks`' date-range arguments, passed through as `/search` parameters.
+const SEARCH_DATES: [&str; 4] = ["createdFrom", "createdTo", "updatedFrom", "updatedTo"];
+
 /// The whole HTTP surface: `/mcp` and the OAuth endpoints without the
 /// backend's lock (a tool call takes it, per call), everything else under
 /// it, as before.
@@ -280,11 +283,37 @@ fn specs() -> Vec<Spec> {
         },
         Spec {
             name: SEARCH_TASKS,
-            description: "Tasks whose title or notes contain a word starting with the query.",
-            schema: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
+            description: "Tasks whose title or notes contain a word starting with the query, optionally only those created or last changed in a date range. Dates alone list every task in range.",
+            schema: json!({"type": "object", "properties": {
+                "query": {"type": "string"},
+                "createdFrom": {"type": "integer", "description": "Created at or after (Unix ms)"},
+                "createdTo": {"type": "integer", "description": "Created before (Unix ms)"},
+                "updatedFrom": {"type": "integer", "description": "Last changed at or after (Unix ms)"},
+                "updatedTo": {"type": "integer", "description": "Last changed before (Unix ms)"}
+            }}),
             route: |args| {
-                let q = text(args, "query").ok_or("query is required")?;
-                Ok((Method::Get, format!("/api/v1/search?q={}", query(q)), None))
+                let mut params: Vec<String> = text(args, "query")
+                    .map(|q| format!("q={}", query(q)))
+                    .into_iter()
+                    .collect();
+                for key in SEARCH_DATES {
+                    let Some(value) = args.get(key).filter(|v| !v.is_null()) else {
+                        continue;
+                    };
+                    // Refused, not dropped: a bound left out would widen the search silently.
+                    let ms = value
+                        .as_i64()
+                        .ok_or_else(|| format!("{key} must be Unix milliseconds (an integer)"))?;
+                    params.push(format!("{key}={ms}"));
+                }
+                if params.is_empty() {
+                    return Err("query or a date range is required".into());
+                }
+                Ok((
+                    Method::Get,
+                    format!("/api/v1/search?{}", params.join("&")),
+                    None,
+                ))
             },
         },
         Spec {
@@ -336,4 +365,35 @@ fn specs() -> Vec<Spec> {
             route: |args| on_task(args, Method::Delete, ""),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn search_route(args: Value) -> Route {
+        let spec = specs()
+            .into_iter()
+            .find(|s| s.name == SEARCH_TASKS)
+            .expect("search_tasks");
+        (spec.route)(&args)
+    }
+
+    #[test]
+    fn search_tasks_passes_query_and_dates_through() {
+        let (method, target, body) =
+            search_route(json!({"query": "a b", "createdFrom": 5, "updatedTo": 9})).unwrap();
+        assert_eq!(method, Method::Get);
+        assert_eq!(target, "/api/v1/search?q=a+b&createdFrom=5&updatedTo=9");
+        assert!(body.is_none());
+        let (_, target, _) = search_route(json!({"updatedFrom": 7})).unwrap();
+        assert_eq!(target, "/api/v1/search?updatedFrom=7");
+        assert!(search_route(json!({})).is_err(), "needs a query or a date");
+        for bad in [json!("soon"), json!(1.5), json!(u64::MAX)] {
+            assert!(
+                search_route(json!({"query": "plan", "createdFrom": bad.clone()})).is_err(),
+                "an unusable bound is refused, not dropped: {bad:?}"
+            );
+        }
+    }
 }

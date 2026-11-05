@@ -69,7 +69,7 @@ Errors are `{"error":{"code","message"}}`: 400 malformed request, 401, 404,
 | POST | `/api/v1/tasks/{id}/complete`, `/reopen`, `/restore` | `DELETE /tasks/{id}` moves to the trash; `?purge=true` removes it for good |
 | DELETE | `/api/v1/trash` | empties the trash |
 | PUT | `/api/v1/tasks/{id}/order` | `{"sortOrder": n}`: one durable slot write |
-| GET | `/api/v1/search?q=` | any term, as a prefix, in title or notes (`grocer` finds `groceries`) |
+| GET | `/api/v1/search?q=` | any term, as a prefix, in title or notes (`grocer` finds `groceries`); optional `createdFrom`, `createdTo`, `updatedFrom`, `updatedTo` (Unix ms, `[from, to)`), and dates alone list every task in range |
 | GET, POST | `/api/v1/tags` | PATCH `/tags/{name}`, POST `/tags/{name}/rename` |
 | GET | `/api/v1/tags/{tag}/tasks` | |
 | POST | `/api/v1/fetch-ics` | `{"url"}` → `{"text"}`: the server fetches a calendar feed for the web UI (browsers cannot read most). `https://` or `webcal://`, port 443, public addresses only (checked before connecting, redirects re-checked), 4 MiB, 6 s per step; 422 for a URL it refuses, 502 for a feed that fails, 503 when 4 fetches are already running. It runs after the server's request lock is released, so a slow feed holds up no other request |

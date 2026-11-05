@@ -47,7 +47,7 @@ use super::chrome::{Chrome, Marks};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::pace::Pacer;
-use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors};
+use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors, blend};
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
@@ -157,6 +157,10 @@ struct Trail {
     to: (usize, usize),
     since: Instant,
 }
+
+/// Text coverage of a disabled settings row: 45% (pack D26), standing in for
+/// opacity since a cell has no alpha.
+const DISABLED_ALPHA: u8 = 115;
 
 /// What a click on a given chrome-bar cell does.
 #[derive(Clone, Copy, PartialEq)]
@@ -628,6 +632,9 @@ struct WindowState<'a> {
     hits: Vec<Hit>,
     /// An in-progress tab drag (press on a tab arms it; releasing clears).
     tab_drag: Option<TabDrag>,
+    /// The chrome control the left button went down on, drawn pressed until
+    /// the button is released (D26, D43).
+    pressed: Option<Hit>,
     /// Chrome-bar element under the pointer, for hover feedback. `None` when
     /// the pointer is below the bar or over an inert (drag-strip) cell.
     hover: Option<Hit>,
@@ -1822,6 +1829,12 @@ impl WindowState<'_> {
         let hover_bg = tokens.raised;
         let btn_hover_bg = tokens.raised;
         let accent = tokens.accent;
+        // Pressed is one more surface step, `line`, with full text on it
+        // (slate fails there): D26, D43.
+        let pressed = self.pressed;
+        // A chip's × already hovers at `line` (one step above the chip), so
+        // its pressed look is the same step.
+        let is_pressed = |hit: Hit| pressed == Some(hit);
         let mut row: Vec<Cell> = vec![Cell::blank(); paint_cols];
         for c in &mut row {
             c.fg = tokens.text;
@@ -1927,7 +1940,9 @@ impl WindowState<'_> {
             let tab_hovered = hover == Some(Hit::Tab(i)) || hover == Some(Hit::CloseTab(i));
             // The active tab is a `base` chip; inactive ones are muted text on
             // the strip and rise one surface step under the pointer.
-            let (fg, bg) = if is_active {
+            let (fg, bg) = if is_pressed(Hit::Tab(i)) {
+                (tokens.text, tokens.line)
+            } else if is_active {
                 (tokens.text, tokens.base)
             } else if tab_hovered {
                 (tokens.text, hover_bg)
@@ -1998,7 +2013,8 @@ impl WindowState<'_> {
             );
             if has_close {
                 let mut ccol = tab_end - close_w;
-                let (cfg, cbg) = if hover == Some(Hit::CloseTab(i)) {
+                let (cfg, cbg) = if is_pressed(Hit::CloseTab(i)) || hover == Some(Hit::CloseTab(i))
+                {
                     (tokens.text, tokens.line)
                 } else {
                     (fg, bg)
@@ -2029,7 +2045,9 @@ impl WindowState<'_> {
             }
         }
         if hidden > 0 {
-            let (ifg, ibg) = if hover == Some(Hit::MoreTabs) {
+            let (ifg, ibg) = if is_pressed(Hit::MoreTabs) {
+                (tokens.text, tokens.line)
+            } else if hover == Some(Hit::MoreTabs) {
                 (tokens.text, btn_hover_bg)
             } else {
                 (dim_fg, bar_bg)
@@ -2081,7 +2099,8 @@ impl WindowState<'_> {
                 bg,
                 Hit::SettingsTab,
             );
-            let (cfg, cbg) = if hover == Some(Hit::CloseSettings) {
+            let (cfg, cbg) = if is_pressed(Hit::CloseSettings) || hover == Some(Hit::CloseSettings)
+            {
                 (tokens.text, tokens.line)
             } else {
                 (tokens.text, bg)
@@ -2107,14 +2126,16 @@ impl WindowState<'_> {
             }
         }
         let btn_fg = |hit: Hit| {
-            if hover == Some(hit) {
+            if hover == Some(hit) || is_pressed(hit) {
                 tokens.text
             } else {
                 dim_fg
             }
         };
         let btn_bg = |hit: Hit| {
-            if hover == Some(hit) {
+            if is_pressed(hit) {
+                tokens.line
+            } else if hover == Some(hit) {
                 btn_hover_bg
             } else {
                 bar_bg
@@ -2536,6 +2557,10 @@ impl WindowState<'_> {
         let Some(window) = self.window.clone() else {
             return;
         };
+        if self.hits[col] != Hit::Drag {
+            self.pressed = Some(self.hits[col]);
+            window.request_redraw();
+        }
         match self.hits[col] {
             Hit::Tab(i) => {
                 self.close_overlay();
@@ -4464,7 +4489,8 @@ impl WindowState<'_> {
                 for (vi, row) in list.iter().enumerate().skip(scroll).take(visible) {
                     let top = SETTINGS_CARDS_TOP + (vi - scroll) * SETTINGS_ROW_H;
                     let selected = vi == s.sel;
-                    let hovered = s.hover == Some(vi);
+                    // A disabled row takes no hover (D26).
+                    let hovered = s.hover == Some(vi) && !row.disabled;
                     let rbg = if selected {
                         sel_bg
                     } else if hovered {
@@ -4486,7 +4512,10 @@ impl WindowState<'_> {
                     if selected {
                         write_row(&mut g, top, SETTINGS_SIDEBAR_W + 2, "\u{258C}", accent, rbg);
                     }
-                    let label_fg = if row.disabled { dim } else { fg };
+                    // Disabled = 45% opacity (D26, D43), blended since a cell
+                    // has no alpha; exempt from the contrast floor.
+                    let disabled_fg = blend(rbg, fg, DISABLED_ALPHA);
+                    let label_fg = if row.disabled { disabled_fg } else { fg };
                     write_row(&mut g, top, SETTINGS_CARD_X, row.label, label_fg, rbg);
                     // An accent dot marks a value changed from its default —
                     // the same gate that decides what lands in the config
@@ -4542,7 +4571,7 @@ impl WindowState<'_> {
                     let wlen = wtext.chars().count();
                     let wcol = value_end.saturating_sub(wlen);
                     let wfg = if row.disabled {
-                        dim
+                        disabled_fg
                     } else {
                         match row.widget {
                             Widget::Toggle(false) if !editing_this => dim,
@@ -5323,6 +5352,9 @@ impl WindowState<'_> {
                 // cursor renders only while focused, and regaining focus
                 // clears the active tab's attention badge (in `chrome_row`).
                 self.focused = focused;
+                // A release that lands after focus moves away never reaches
+                // us, so drop the pressed look here rather than leave it stuck.
+                self.pressed = pressed_after_focus(self.pressed, focused);
                 if let Some(p) = self.pane_mut()
                     && p.grid.lock().focus_reporting
                 {
@@ -5626,6 +5658,7 @@ impl WindowState<'_> {
                     }
                     if to != from {
                         self.reorder_tab(from, to);
+                        self.pressed = pressed_after_reorder(self.pressed, from, to);
                     }
                 }
                 // Chrome-bar hover feedback: track the element under the
@@ -5802,6 +5835,11 @@ impl WindowState<'_> {
                                 self.copy_selection_primary(); // copy-on-select
                             }
                             self.tab_drag = None; // a reorder drag ends with the button
+                            if self.pressed.take().is_some()
+                                && let Some(window) = &self.window
+                            {
+                                window.request_redraw();
+                            }
                         }
                         if self.mouse_button_down == Some(kind) {
                             self.mouse_button_down = None;
@@ -5998,6 +6036,7 @@ impl<'a> App<'a> {
             consumed_keys: ConsumedKeys::default(),
             hits: Vec::new(),
             tab_drag: None,
+            pressed: None,
             last_strip_click: None,
             cursor_blink_on: true,
             last_blink: Instant::now(),
@@ -6592,6 +6631,21 @@ fn tab_spans(hits: &[Hit]) -> Vec<(usize, usize, usize)> {
 /// position. Midpoint-based so unequal adaptive widths can't oscillate — a
 /// swap only fires once the pointer is past the point where swapping back
 /// would immediately retrigger. `from` when nothing was crossed.
+/// Losing focus cancels the pressed look: the release that would end it may
+/// land in another window and never reach this one.
+fn pressed_after_focus(pressed: Option<Hit>, focused: bool) -> Option<Hit> {
+    if focused { pressed } else { None }
+}
+
+/// The pressed look follows the dragged tab when it moves from `from` to `to`
+/// (D43); any other pressed control is untouched.
+fn pressed_after_reorder(pressed: Option<Hit>, from: usize, to: usize) -> Option<Hit> {
+    match pressed {
+        Some(Hit::Tab(i)) if i == from => Some(Hit::Tab(to)),
+        other => other,
+    }
+}
+
 fn tab_drag_target(col: usize, spans: &[(usize, usize, usize)], from: usize) -> usize {
     let Some(pos) = spans.iter().position(|&(i, _, _)| i == from) else {
         return from;
@@ -6943,9 +6997,10 @@ mod tests {
         SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
         display_path, drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
         ime_cursor_area_origin, is_openable_url, osc52_reply, pane_pixel_point, path_from_file_uri,
-        physical_px, put_text, read_git_branch, release_input, route_key_down, settings_hit,
-        settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
-        tab_widths, visible_tab_range, widget_text, zoom_px,
+        physical_px, pressed_after_focus, pressed_after_reorder, put_text, read_git_branch,
+        release_input, route_key_down, settings_hit, settings_value_end, settings_visible,
+        shell_menu_items, tab_drag_target, tab_spans, tab_widths, visible_tab_range, widget_text,
+        zoom_px,
     };
     use crate::core::Cell;
 
@@ -7804,6 +7859,26 @@ mod tests {
             Hit::NewTab,
         ];
         assert_eq!(tab_spans(&hits), vec![(0, 0, 4), (1, 5, 7)]);
+    }
+
+    #[test]
+    fn focus_loss_without_release_clears_pressed() {
+        // press -> focus lost -> focus back, with no release in between
+        let pressed = Some(Hit::Tab(0));
+        let lost = pressed_after_focus(pressed, false);
+        assert!(lost.is_none());
+        assert!(pressed_after_focus(lost, true).is_none());
+        // gaining focus alone never cancels a live press
+        assert!(pressed_after_focus(pressed, true) == pressed);
+    }
+
+    #[test]
+    fn pressed_tab_follows_a_reorder() {
+        let after = |p: Option<Hit>| pressed_after_reorder(p, 1, 3);
+        assert!(after(Some(Hit::Tab(1))) == Some(Hit::Tab(3)));
+        assert!(after(Some(Hit::Tab(2))) == Some(Hit::Tab(2)));
+        assert!(after(Some(Hit::MoreTabs)) == Some(Hit::MoreTabs));
+        assert!(after(None).is_none());
     }
 
     #[test]
