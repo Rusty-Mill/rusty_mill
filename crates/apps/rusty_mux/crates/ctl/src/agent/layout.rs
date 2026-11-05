@@ -3,8 +3,8 @@
 //!
 //! | agent    | skill (user scope)                | hook (user scope)                      |
 //! |----------|-----------------------------------|----------------------------------------|
-//! | claude   | `~/.claude/skills/rusty-mux/`     | `SessionStart` in `~/.claude/settings.json` |
-//! | codex    | `~/.agents/skills/rusty-mux/`     | `SessionStart` in `~/.codex/hooks.json` |
+//! | claude   | `~/.claude/skills/rusty-mux/`     | `SessionStart` and status events in `~/.claude/settings.json` |
+//! | codex    | `~/.agents/skills/rusty-mux/`     | `SessionStart` and status events in `~/.codex/hooks.json` |
 //! | opencode | `~/.agents/skills/rusty-mux/`     | plugin `~/.config/opencode/plugins/rusty-mux.js` |
 //! | pi       | `~/.agents/skills/rusty-mux/`     | extension `~/.pi/agent/extensions/rusty-mux.ts` |
 //!
@@ -18,6 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use super::scripts;
+use super::settings::Entry;
 use crate::AgentHomes;
 use crate::cli::{AgentKind, AgentScope};
 
@@ -49,17 +50,15 @@ pub(super) struct Layout {
     pub unsupported: Option<String>,
 }
 
-/// The session-start hook, as the agent wants it.
+/// The agent's hooks, as it wants them.
 pub(super) enum Hook {
-    /// One command hook merged into a JSON settings file, whose original
-    /// bytes setup keeps in `backup`.
+    /// Command hooks merged into a JSON settings file, whose original
+    /// bytes setup keeps in `backup`: the session-start hook and the
+    /// agent's status hooks, as one.
     Settings {
         file: PathBuf,
         backup: PathBuf,
-        command: String,
-        /// Codex's command for Windows, where it runs hooks in the
-        /// session's shell rather than a POSIX one.
-        windows: Option<String>,
+        entries: Vec<Entry>,
     },
     /// A whole file setup writes: a plugin or an extension.
     Script { file: PathBuf, text: String },
@@ -101,17 +100,16 @@ pub(super) fn layout_on(
     };
     let skill = skill_base.join("skills").join("rusty-mux").join("SKILL.md");
     let mut unsupported = None;
+    let mut settings = |file: PathBuf| {
+        let entries = super::settings::entries(agent, ctl, windows).unwrap_or_else(|reason| {
+            unsupported = Some(reason);
+            Vec::new()
+        });
+        settings_hook(file, entries)
+    };
     let hook = match agent {
-        AgentKind::Claude => settings(roots.claude()?.join("settings.json"), ctl, None),
-        AgentKind::Codex => {
-            let command = match windows {
-                true => super::settings::windows_command(ctl)
-                    .map_err(|reason| unsupported = Some(reason))
-                    .ok(),
-                false => None,
-            };
-            settings(roots.codex()?.join("hooks.json"), ctl, command)
-        }
+        AgentKind::Claude => settings(roots.claude()?.join("settings.json")),
+        AgentKind::Codex => settings(roots.codex()?.join("hooks.json")),
         AgentKind::OpenCode => Hook::Script {
             file: roots.opencode()?.join("rusty-mux.js"),
             text: scripts::opencode(ctl),
@@ -129,14 +127,13 @@ pub(super) fn layout_on(
     })
 }
 
-fn settings(file: PathBuf, ctl: Ctl<'_>, windows: Option<String>) -> Hook {
+fn settings_hook(file: PathBuf, entries: Vec<Entry>) -> Hook {
     let mut backup = file.clone().into_os_string();
     backup.push(".rusty-mux.bak");
     Hook::Settings {
         file,
         backup: backup.into(),
-        command: super::settings::command(ctl),
-        windows,
+        entries,
     }
 }
 

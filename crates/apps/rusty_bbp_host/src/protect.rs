@@ -269,6 +269,9 @@ pub struct Guard {
     /// A refusal that holds in every state: the candidate leaves the task's
     /// baseline, or names a diff not stored when `touched` was read.
     pub refused: Option<Rejection>,
+    /// #598: the tests existing at a brownfield task's base that the diffs
+    /// modify or delete.
+    pub base_tests: Vec<String>,
 }
 
 impl Guard {
@@ -277,6 +280,7 @@ impl Guard {
         self.refused
             .clone()
             .or_else(|| verdict(st, &self.protected, &self.touched, self.claim))
+            .or_else(|| crate::baseline::verdict(st, &self.base_tests, self.claim))
     }
 }
 
@@ -384,6 +388,7 @@ mod tests {
             touched: vec![t(5, &[])],
             claim: None,
             refused: unresolved(&st, &m),
+            base_tests: vec![],
         };
         assert!(guard
             .judge(&st)

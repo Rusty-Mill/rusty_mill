@@ -598,6 +598,7 @@ fn assignment_grants_nothing_until_the_first_tick() {
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::default(),
         holdout_digest: None,
+        baseline_digest: None,
     });
     assert!(matches!(
         d.dispatch(&open, Time(1)).expect("open"),

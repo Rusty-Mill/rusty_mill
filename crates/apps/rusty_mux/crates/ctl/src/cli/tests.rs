@@ -420,6 +420,16 @@ fn agent_verbs_take_agents_a_scope_and_dry_run() {
             kind: Some("permission".into()),
             app: Some("pi".into()),
             msg: Some("hi".into()),
+            tool_from_stdin: false,
+        })))
+    );
+    assert_eq!(
+        agent("agent hook --event working --app claude --tool-from-stdin"),
+        Ok(Command::Agent(AgentCommand::Report(HookReport {
+            state: "working".into(),
+            app: Some("claude".into()),
+            tool_from_stdin: true,
+            ..HookReport::default()
         })))
     );
     assert_eq!(
@@ -446,6 +456,9 @@ fn agent_verbs_take_agents_a_scope_and_dry_run() {
         "agent hook --agent codex",
         "agent skill --project",
         "agent hook --event idle --event done",
+        "agent hook --event idle --tool-from-stdin --tool-from-stdin",
+        "agent hook --event idle --tool-from-stdin=no",
+        "agent hook --event idle --tool-from-stdin --msg hi",
         "agent hook --event idle --name-session",
         "agent hook --event",
         "agent hook --app pi",

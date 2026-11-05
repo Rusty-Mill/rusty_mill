@@ -124,7 +124,10 @@ impl Turn {
             }
         }
         let repo = if let Some(repo) = repo {
-            repo.add_detached(&workspace, "HEAD")?;
+            // A pinned baseline (#597, #598) is what every candidate must
+            // build on, so the builder starts there, not at HEAD.
+            let at = crate::profiles::pinned_base(&cfg.dir, &cfg.task)?;
+            repo.add_detached(&workspace, at.as_deref().unwrap_or("HEAD"))?;
             Some(repo)
         } else {
             std::fs::create_dir_all(&workspace)
