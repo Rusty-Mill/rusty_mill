@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::Command;
 
 use orch_lens::record::{
-    tallies, Change, Failing, Item, MsgId, Review, Rule, Step, Tally, Trail, Wake,
+    tallies, ArtId, Change, Item, MsgId, Report, Review, Rule, Step, Tally, Trail,
 };
 use rusty_bbp::{ClaimStatus, Direction};
 use rusty_serde::Value;
@@ -92,39 +92,63 @@ fn change(v: &Value) -> Result<Change, String> {
                 other => return Err(format!("unknown direction {other:?}")),
             },
             grounded: e["kind"].as_str() != Some("Opinion"),
-            executed: e["kind"].as_str() == Some("Executed"),
+            cites: cites(&e["refs"])?,
             delta: e["delta"].as_i64().ok_or("evidence has no delta")?,
             scoring: e["scoring"].as_bool().ok_or("evidence has no scoring")?,
         }));
     }
     if let Some(s) = v.get("Status") {
-        return Ok(Change::Status(rule(&s["rule"])));
+        return rule(&s["rule"], &s["woke"]).map(Change::Status);
     }
-    if let Some(f) = v.get("Failing") {
-        let profiles = f["profiles"].as_seq().ok_or("failing has no profiles")?;
-        // The history doesn't name the candidate the report tested, nor
-        // when the current candidate changes: no golden truth (D92, Q35).
-        return Ok(Change::Failing(Failing {
-            profiles: profiles
-                .iter()
-                .filter_map(|p| p.as_str().map(str::to_owned))
-                .collect(),
-            candidate: None,
+    if let Some(c) = v.get("Candidate") {
+        return Ok(Change::Candidate(art(&c["candidate"], "candidate")?));
+    }
+    if let Some(r) = v.get("Report") {
+        return Ok(Change::Report(Report {
+            report: art(&r["report"], "report")?,
+            candidate: art(&r["candidate"], "report candidate")?,
+            passed: names(&r["passed"], "passed")?,
+            failed: names(&r["failed"], "failed")?,
         }));
     }
     Ok(Change::Other)
 }
 
-/// The rule as the record reads it. The history doesn't carry the task's
-/// `min_authors` yet, so a line's minimum is unknown.
-fn rule(v: &Value) -> Rule {
-    let line = |l: &Value, at: &str, authors: &str| Rule::Line {
-        at: l[at].as_i64().unwrap_or(0),
-        authors: l[authors]
-            .as_u64()
-            .and_then(|a| u32::try_from(a).ok())
-            .unwrap_or(0),
-        min_authors: None,
+/// The artifacts an evidence item's refs name; message refs are left out.
+fn cites(v: &Value) -> Result<Vec<ArtId>, String> {
+    let refs = v.as_seq().ok_or("evidence has no refs")?;
+    Ok(refs
+        .iter()
+        .filter_map(|r| r.get("Art"))
+        .filter_map(|a| a["id"].as_u64().map(ArtId))
+        .collect())
+}
+
+fn art(v: &Value, what: &str) -> Result<ArtId, String> {
+    v.as_u64().map(ArtId).ok_or_else(|| format!("no {what} id"))
+}
+
+fn names(v: &Value, what: &str) -> Result<Vec<String>, String> {
+    let seq = v.as_seq().ok_or_else(|| format!("report has no {what}"))?;
+    Ok(seq
+        .iter()
+        .filter_map(|p| p.as_str().map(str::to_owned))
+        .collect())
+}
+
+/// The rule as the record reads it; a reopen with the items it woke
+/// (`woke`, left out when empty).
+fn rule(v: &Value, woke: &Value) -> Result<Rule, String> {
+    let num = |l: &Value, key: &str| l[key].as_i64().ok_or_else(|| format!("line has no {key}"));
+    let count = |l: &Value, key: &str| {
+        num(l, key).and_then(|n| u32::try_from(n).map_err(|e| format!("{key}: {e}")))
+    };
+    let line = |l: &Value, at: &str, authors: &str| {
+        Ok(Rule::Line {
+            at: num(l, at)?,
+            authors: count(l, authors)?,
+            min_authors: count(l, "min_authors")?,
+        })
     };
     if let Some(l) = v.get("AcceptLine") {
         return line(l, "accept_at", "support_authors");
@@ -133,25 +157,17 @@ fn rule(v: &Value) -> Rule {
         return line(l, "drop_at", "counter_authors");
     }
     if v.get("Human").is_some() || v.get("Choose").is_some() {
-        return Rule::Human;
+        return Ok(Rule::Human);
     }
-    if let Some(r) = v.get("Reopen") {
-        return Rule::Reopen(wake(r));
+    if v.get("Reopen").is_some() {
+        let woke = woke.as_seq().unwrap_or(&[]);
+        let woke = woke.iter().map(|m| id(m).map(MsgId));
+        return woke
+            .collect::<Option<_>>()
+            .map(Rule::Reopen)
+            .ok_or_else(|| "reopen woke an unreadable id".to_owned());
     }
-    Rule::Other
-}
-
-/// What a reopen woke. An unreadable cause is read as a human reopen,
-/// which only makes jobs more pivotal.
-fn wake(v: &Value) -> Wake {
-    if let Some(m) = v.get("Evidence").and_then(id) {
-        return Wake::Item(MsgId(m));
-    }
-    match v.as_str() {
-        Some("Intent") => Wake::None,
-        _ if v.get("Dep").is_some() => Wake::None,
-        _ => Wake::Dormant,
-    }
+    Ok(Rule::Other)
 }
 
 fn status(s: &str) -> Result<ClaimStatus, String> {
@@ -176,7 +192,7 @@ fn id(v: &Value) -> Option<u64> {
 mod tests {
     use super::*;
     use rusty_bbp::history::{Change as BbpChange, History, Rule as BbpRule, Step as BbpStep};
-    use rusty_bbp::{ClaimBody, EvidenceKind, PrincipalId, ReopenCause, Rev, Stakes};
+    use rusty_bbp::{ClaimBody, EvidenceKind, PrincipalId, Ref, ReopenCause, Rev, Stakes};
 
     fn step(change: BbpChange, status: ClaimStatus, score: i64) -> BbpStep {
         BbpStep {
@@ -195,6 +211,7 @@ mod tests {
         direction: Direction,
         kind: EvidenceKind,
         delta: i64,
+        refs: Vec<Ref>,
     ) -> BbpChange {
         BbpChange::Evidence {
             msg: MsgId(msg),
@@ -203,18 +220,24 @@ mod tests {
             direction,
             delta,
             scoring: true,
+            refs,
         }
     }
 
-    fn reopen(by: ReopenCause) -> BbpStep {
+    fn reopen(by: ReopenCause, woke: &[u64]) -> BbpStep {
         step(
             BbpChange::Status {
                 from: ClaimStatus::Accepted,
                 rule: BbpRule::Reopen(by),
+                woke: woke.iter().copied().map(MsgId).collect(),
             },
             ClaimStatus::Open,
             0,
         )
+    }
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|p| (*p).to_owned()).collect()
     }
 
     /// The history `bbp why` prints, read back as a trail.
@@ -235,19 +258,51 @@ mod tests {
             steps: vec![
                 step(BbpChange::Posted, ClaimStatus::Open, 0),
                 step(
-                    BbpChange::Failing {
-                        profiles: vec!["golden:cases".into()],
+                    BbpChange::Candidate {
+                        candidate: ArtId(9),
                     },
                     ClaimStatus::Open,
                     0,
                 ),
                 step(
-                    evidence(2, "sec", Direction::Counter, EvidenceKind::Opinion, -4),
+                    BbpChange::Report {
+                        report: ArtId(50),
+                        candidate: ArtId(9),
+                        passed: names(&["golden:cases"]),
+                        failed: names(&["holdout:api"]),
+                    },
+                    ClaimStatus::Open,
+                    0,
+                ),
+                step(
+                    BbpChange::Failing {
+                        profiles: names(&["holdout:api"]),
+                        candidate: Some(ArtId(9)),
+                    },
+                    ClaimStatus::Open,
+                    0,
+                ),
+                step(
+                    evidence(
+                        2,
+                        "sec",
+                        Direction::Counter,
+                        EvidenceKind::Opinion,
+                        -4,
+                        vec![Ref::Msg(MsgId(1))],
+                    ),
                     ClaimStatus::Open,
                     -4,
                 ),
                 step(
-                    evidence(3, "ops", Direction::Counter, EvidenceKind::Executed, -4),
+                    evidence(
+                        3,
+                        "ops",
+                        Direction::Counter,
+                        EvidenceKind::Executed,
+                        -4,
+                        vec![Ref::art(ArtId(50))],
+                    ),
                     ClaimStatus::Open,
                     -8,
                 ),
@@ -257,7 +312,9 @@ mod tests {
                         rule: BbpRule::DropLine {
                             drop_at: -8,
                             counter_authors: 2,
+                            min_authors: 2,
                         },
+                        woke: vec![],
                     },
                     ClaimStatus::Dropped,
                     -8,
@@ -266,63 +323,65 @@ mod tests {
                     BbpChange::Status {
                         from: ClaimStatus::Dropped,
                         rule: BbpRule::Human { accept: true },
+                        woke: vec![],
                     },
                     ClaimStatus::Accepted,
                     -8,
                 ),
-                reopen(ReopenCause::Evidence(MsgId(3))),
-                reopen(ReopenCause::Human),
-                reopen(ReopenCause::Dep(MsgId(9))),
-                reopen(ReopenCause::Intent),
+                reopen(ReopenCause::Evidence(MsgId(3)), &[3]),
+                reopen(ReopenCause::Human, &[2, 3]),
+                reopen(ReopenCause::Dep(MsgId(9)), &[]),
             ],
         };
         let json = rusty_serde::json::to_string(&history).unwrap();
         let t = trail(&json).unwrap();
         let changes: Vec<&Change> = t.steps.iter().map(|s| &s.change).collect();
         assert_eq!(changes[0], &Change::Other);
-        assert_eq!(
-            changes[1],
-            &Change::Failing(Failing {
-                profiles: vec!["golden:cases".into()],
-                candidate: None
-            })
-        );
+        assert_eq!(changes[1], &Change::Candidate(ArtId(9)));
         assert_eq!(
             changes[2],
+            &Change::Report(Report {
+                report: ArtId(50),
+                candidate: ArtId(9),
+                passed: names(&["golden:cases"]),
+                failed: names(&["holdout:api"]),
+            })
+        );
+        assert_eq!(changes[3], &Change::Other, "the report step carries truth");
+        assert_eq!(
+            changes[4],
             &Change::Item(Item {
                 msg: MsgId(2),
                 author: "sec".into(),
                 direction: Direction::Counter,
                 grounded: false,
-                executed: false,
+                cites: vec![],
                 delta: -4,
                 scoring: true,
             })
         );
         assert!(
-            matches!(changes[3], Change::Item(i) if i.grounded && i.executed && i.msg == MsgId(3))
+            matches!(changes[5], Change::Item(i) if i.grounded && i.cites == [ArtId(50)] && i.msg == MsgId(3))
         );
         assert_eq!(
-            changes[4],
+            changes[6],
             &Change::Status(Rule::Line {
                 at: -8,
                 authors: 2,
-                min_authors: None
+                min_authors: 2
             })
         );
-        assert_eq!(changes[5], &Change::Status(Rule::Human));
-        assert_eq!(t.steps[5].status, ClaimStatus::Accepted);
-        let wakes: Vec<&Change> = changes[6..].to_vec();
+        assert_eq!(changes[7], &Change::Status(Rule::Human));
+        assert_eq!(t.steps[7].status, ClaimStatus::Accepted);
         assert_eq!(
-            wakes,
+            changes[8..],
             [
-                &Change::Status(Rule::Reopen(Wake::Item(MsgId(3)))),
-                &Change::Status(Rule::Reopen(Wake::Dormant)),
-                &Change::Status(Rule::Reopen(Wake::None)),
-                &Change::Status(Rule::Reopen(Wake::None)),
+                &Change::Status(Rule::Reopen(vec![MsgId(3)])),
+                &Change::Status(Rule::Reopen(vec![MsgId(2), MsgId(3)])),
+                &Change::Status(Rule::Reopen(vec![])),
             ]
         );
-        assert_eq!(t.steps[3].score, -8);
+        assert_eq!(t.steps[5].score, -8);
     }
 
     #[test]
@@ -330,5 +389,8 @@ mod tests {
         assert!(trail("{}").unwrap_err().contains("no steps"));
         let bad = r#"{"steps":[{"change":"Posted","status":"Gone","score":0,"epoch":0}]}"#;
         assert!(trail(bad).unwrap_err().contains("Gone"));
+        // A line without its minimum is an older `bbp`: not read as a guess.
+        let old = r#"{"steps":[{"change":{"Status":{"from":"Open","rule":{"AcceptLine":{"accept_at":8,"support_authors":2}}}},"status":"Accepted","score":8,"epoch":1}]}"#;
+        assert_eq!(trail(old).unwrap_err(), "line has no min_authors");
     }
 }

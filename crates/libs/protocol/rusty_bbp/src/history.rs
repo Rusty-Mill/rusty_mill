@@ -17,17 +17,20 @@
 //! - Escalations, reopenings, voids and supersessions name their cause in the
 //!   event.
 //!
-//! Steps come from the claim's own message, its evidence messages, and the
-//! status and `claim_failing` events naming it. Budget, run-debit and action
-//! mark events change no score or status and make no step.
+//! Steps come from the claim's own message, its evidence messages, the
+//! status and `claim_failing` events naming it, each build candidate that
+//! becomes its current one, and each final holdout report that speaks for
+//! the current code (D112). Budget, run-debit and action mark events change
+//! no score or status and make no step.
 
 use crate::claims::{
     confidence_pct, ClaimBody, ClaimEscalation, ClaimOutcome, ClaimRecord, ClaimStatus, Direction,
     EvidenceKind, ReopenCause,
 };
+use crate::claims_engine::{builds_current, manifest, on_tested_tree, report_of};
 use crate::event::Event;
-use crate::ids::{MsgId, PrincipalId, Rev, TaskId};
-use crate::record::Body;
+use crate::ids::{ArtId, MsgId, PrincipalId, Rev, TaskId};
+use crate::record::{ArtifactPayload, Body, Ref, Suite};
 use crate::state::TaskState;
 use rusty_serde::Serialize;
 use std::collections::BTreeMap;
@@ -68,14 +71,38 @@ pub enum Change {
         direction: Direction,
         delta: i64,
         scoring: bool,
+        /// The refs the message cites, as posted: an executed item names
+        /// the report it read.
+        refs: Vec<Ref>,
     },
     Status {
         from: ClaimStatus,
         rule: Rule,
+        /// The earlier items a reopen made scoring in its new epoch: the
+        /// reopening evidence, or the dormant items a human reopen woke.
+        /// Empty for any other change.
+        #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
+        woke: Vec<MsgId>,
     },
     /// The profiles failing on the current candidate; non-empty blocks accept.
     Failing {
         profiles: Vec<String>,
+        /// The current candidate the set is on: the code its latest report
+        /// tested (a holdout report tests a holdout candidate of that code).
+        candidate: Option<ArtId>,
+    },
+    /// A build candidate naming the claim became its current one.
+    Candidate {
+        candidate: ArtId,
+    },
+    /// A final holdout report that speaks for the current code: a holdout
+    /// candidate of `candidate`'s code, run under the task's holdout suite
+    /// on the tree `candidate` was tested on. Its profiles, passed and failed.
+    Report {
+        report: ArtId,
+        candidate: ArtId,
+        passed: Vec<String>,
+        failed: Vec<String>,
     },
 }
 
@@ -86,11 +113,14 @@ pub enum Rule {
     AcceptLine {
         accept_at: i64,
         support_authors: u32,
+        /// The task's distinct-author minimum the line compared against.
+        min_authors: u32,
     },
     /// Score reached the drop line with enough distinct countering authors.
     DropLine {
         drop_at: i64,
         counter_authors: u32,
+        min_authors: u32,
     },
     /// A human `decide` accept (or drop) on this claim.
     Human {
@@ -130,15 +160,14 @@ pub fn claim_history(
         if command_starts(events, i) {
             decided = decisions(&st, &events[i..]);
         }
-        let before = touches(e, claim)
-            .then(|| st.claims.get(claim).cloned())
-            .flatten();
+        let named = touches(e, claim, &st);
+        let before = named.then(|| st.claims.get(claim).cloned()).flatten();
         let rule = rule(e, before.as_ref(), &st, &decided);
         st.apply(e);
-        let Some(after) = touches(e, claim).then(|| st.claims.get(claim)).flatten() else {
+        let Some(after) = named.then(|| st.claims.get(claim)).flatten() else {
             continue;
         };
-        if let Some(change) = change(e, before.as_ref(), after, rule) {
+        if let Some(change) = change(e, before.as_ref(), after, rule, &st) {
             steps.push(step(st.rev, change, after));
         }
     }
@@ -212,9 +241,16 @@ fn decisions(st: &TaskState, rest: &[Event]) -> Decided {
         .collect()
 }
 
-/// The event names `claim`.
-fn touches(e: &Event, claim: MsgId) -> bool {
+/// The event names `claim`. Read before the event is applied, so a report
+/// names it through its already stored candidate.
+fn touches(e: &Event, claim: MsgId, st: &TaskState) -> bool {
     match e {
+        Event::ArtifactStored(a) => {
+            matches!(&a.payload, ArtifactPayload::Candidate(k) if k.claim == Some(claim))
+        }
+        Event::TestReportStored { candidate, .. } => {
+            st.claims.candidates.get(candidate) == Some(&claim)
+        }
         Event::MessageAppended(m) => match &m.draft.body {
             Body::Claim(_) => m.id == claim,
             Body::Evidence(b) => b.claim == claim,
@@ -252,12 +288,14 @@ fn rule(
             Rule::AcceptLine {
                 accept_at: c.accept_at(cfg),
                 support_authors: count(Direction::Support),
+                min_authors: cfg.min_authors,
             },
         )),
         Event::ClaimDropped { claim, .. } => {
             Some(human(claim, ClaimOutcome::Drop).unwrap_or(Rule::DropLine {
                 drop_at: cfg.drop_at,
                 counter_authors: count(Direction::Counter),
+                min_authors: cfg.min_authors,
             }))
         }
         Event::ClaimVoided { by, .. } => Some(Rule::Void { by: *by }),
@@ -269,11 +307,13 @@ fn rule(
 }
 
 /// The step's change, from the event and the claim before and after it.
+/// `st` is the state just after the event.
 fn change(
     e: &Event,
     before: Option<&ClaimRecord>,
     after: &ClaimRecord,
     rule: Option<Rule>,
+    st: &TaskState,
 ) -> Option<Change> {
     match e {
         Event::MessageAppended(m) => match &m.draft.body {
@@ -287,16 +327,70 @@ fn change(
                     direction: b.direction,
                     delta: item.delta,
                     scoring: item.scoring,
+                    refs: m.draft.evidence.clone(),
                 })
             }
             _ => None,
         },
         Event::ClaimFailing { failing, .. } => Some(Change::Failing {
             profiles: failing.clone(),
+            candidate: after.current,
         }),
-        _ => Some(Change::Status {
-            from: before?.status,
-            rule: rule?,
-        }),
+        Event::ArtifactStored(_) => {
+            let current = after.current?;
+            (before?.current != Some(current)).then_some(Change::Candidate { candidate: current })
+        }
+        Event::TestReportStored {
+            candidate, report, ..
+        } => holdout_report(st, after, *candidate, *report),
+        _ => {
+            let before = before?;
+            Some(Change::Status {
+                from: before.status,
+                rule: rule?,
+                woke: woke(before, after),
+            })
+        }
     }
+}
+
+/// The items a reopen made scoring in its new epoch. Reopening moves only
+/// the items it wakes to the new epoch, and items are only ever appended.
+fn woke(before: &ClaimRecord, after: &ClaimRecord) -> Vec<MsgId> {
+    if after.epoch == before.epoch {
+        return Vec::new();
+    }
+    before
+        .items
+        .iter()
+        .zip(&after.items)
+        .filter(|(b, a)| a.scoring && a.epoch == after.epoch && b.epoch != a.epoch)
+        .map(|(_, a)| a.msg)
+        .collect()
+}
+
+/// A [`Change::Report`] for `report` of holdout candidate `k`, if it speaks
+/// for `c`'s current code under the task's holdout suite.
+fn holdout_report(st: &TaskState, c: &ClaimRecord, k: ArtId, report: ArtId) -> Option<Change> {
+    let current = c.current?;
+    let rep = report_of(st, report)?;
+    let speaks = manifest(st, k).is_some_and(|m| m.suite == Suite::Holdout)
+        && Some(rep.profile_digest) == st.claims.holdout_digest
+        && builds_current(st, c, k)
+        && on_tested_tree(st, c.id, k, rep);
+    if !speaks {
+        return None;
+    }
+    let failed = rep.failed_profiles();
+    let passed = rep
+        .listed_profiles()
+        .into_iter()
+        .filter(|p| !failed.contains(p))
+        .collect();
+    Some(Change::Report {
+        report,
+        candidate: current,
+        passed,
+        failed,
+    })
 }

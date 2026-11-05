@@ -36,15 +36,22 @@ was not posted by `at`. See `crates/libs/protocol/rusty_bbp/src/history.rs`.
 - `Step { rev, change, status, score, confidence, epoch }`, the claim just
   after the event. `confidence` is for JSON readers; no rule reads it.
 - `Change`: `Posted`, `Evidence { msg, author, kind, direction, delta,
-  scoring }` (`scoring` as appended; a later reopen can wake it), `Status {
-  from, rule }`, `Failing { profiles }`.
-- `Rule`: `AcceptLine { accept_at, support_authors }`, `DropLine { drop_at,
-  counter_authors }`, `Human { accept }`, `Choose { question }`,
-  `Escalation`, `Reopen`, `Void { by }`, `Superseded { by }`.
+  scoring, refs }` (`scoring` as appended; a later reopen can wake it),
+  `Status { from, rule, woke }` (`woke`: the items a reopen made scoring in
+  its new epoch), `Failing { profiles, candidate }` (the current candidate
+  the set is on), `Candidate { candidate }` (a build candidate became
+  current), `Report { report, candidate, passed, failed }` (a final holdout
+  report under the task's holdout suite on the current code's tested tree).
+- `Rule`: `AcceptLine { accept_at, support_authors, min_authors }`,
+  `DropLine { drop_at, counter_authors, min_authors }`, `Human { accept }`,
+  `Choose { question }`, `Escalation`, `Reopen`, `Void { by }`,
+  `Superseded { by }`.
 
 Steps come from the claim's message, its evidence messages, `claim_failing`,
-and the status events naming it. Budget, run-debit and action-mark events
-change no score or status and make no step.
+the status events naming it, each build candidate that becomes current, and
+each final holdout report on the current code. Budget, run-debit and
+action-mark events change no score or status and make no step. The fields
+after `scoring`, `from, rule` and `profiles` were added by D112.
 
 Rule attribution, from the log alone (no log change, D58). Every human
 command ends with its `op_accepted` (engine.rs), so the events between two of
@@ -137,22 +144,15 @@ As built (D93, D92):
   attempt may have posted under ids nobody knows.
 - **Settlement.** The latest status step that changed the status; an
   escalation that leaves a claim accepted settles nothing.
-- **Interim limits, until OPEN_QUESTIONS Q35 (D92).** Each limit only adds
-  unscored pivotal jobs:
-  - BBP's history has no `min_authors`, so a job whose removal also removes
-    its lens as an author counts as pivotal.
-  - Reopen steps don't name what a human reopen woke. If one leads into the
-    settlement's epoch and any item could have been dormant (executed,
-    against the closed status), every job on that line counts as pivotal.
-    An evidence reopen's own item counts as live.
-  - The history has no candidate steps, and a failing step doesn't name the
-    candidate it tested, so golden truth is withheld on the `bbp why` path.
-    The rule gives it only for a golden failure on the candidate current at
-    settlement; a passed golden set isn't visible at all.
-  - A job that posted `executed` evidence gets no golden truth, standing in
-    for "cites that report".
+- **History fields (D112).** The record reads each line's `min_authors`,
+  the items each reopen woke, and golden truth from the `Report` steps: the
+  latest report with a golden profile on the candidate current at
+  settlement (any golden profile failed: drop was right; passed: accept was
+  right). A job whose items cite that report gets no truth from it. This
+  ends D92's four interim limits; a history without `min_authors` (an older
+  `bbp`) is refused, not read conservatively.
 - The lens sees `record: P points over N blind reviews (S scored, V
-  pivotal)`. A per-lens report command waits on Q34.
+  pivotal)`. `rusty_orch lens record` (D111, PR #1533) prints the per-lens report.
 
 ## 3. Lessons
 

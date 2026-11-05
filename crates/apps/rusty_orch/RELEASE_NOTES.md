@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Track records read the full claim history
+**2026-11-05**
+
+- `bbp why --claim` now shows each line's author minimum, what each
+  reopen woke, evidence refs, candidate changes and holdout report results
+  (#599, D112). Lens track records read them, so the conservative
+  stand-ins of the first build are gone: golden sets now count as ground
+  truth, passed or failed, and fewer jobs are left pivotal and unscored.
+
 ## Lens track records
 **2026-11-05**
 

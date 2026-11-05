@@ -3877,7 +3877,8 @@ mod replay {
             rules(&h),
             vec![Rule::AcceptLine {
                 accept_at: 8,
-                support_authors: 2
+                support_authors: 2,
+                min_authors: 2
             }]
         );
         let last = h.steps.last().expect("step");
@@ -3906,7 +3907,8 @@ mod replay {
             rules(&h),
             vec![Rule::DropLine {
                 drop_at: -8,
-                counter_authors: 2
+                counter_authors: 2,
+                min_authors: 2
             }]
         );
         let last = h.steps.last().expect("step");
@@ -3968,7 +3970,8 @@ mod replay {
                 Rule::Reopen(ReopenCause::Human),
                 Rule::AcceptLine {
                     accept_at: 8,
-                    support_authors: 2
+                    support_authors: 2,
+                    min_authors: 2
                 }
             ],
             "{got:?}"
@@ -3996,6 +3999,116 @@ mod replay {
         let chose = Rule::Choose { question: q };
         assert_eq!(rules(&history(&cx, b)), vec![chose.clone()]);
         assert_eq!(rules(&history(&cx, a)), vec![chose]);
+    }
+
+    /// The status step of each reopen, with what it woke.
+    fn reopens(h: &History) -> Vec<(ReopenCause, Vec<MsgId>)> {
+        h.steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Status {
+                    rule: Rule::Reopen(by),
+                    woke,
+                    ..
+                } => Some((*by, woke.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_evidence_reopen_names_the_item_it_woke() {
+        let mut cx = Cx::new();
+        let x = cx.low();
+        drop_claim(&mut cx, x);
+        let pass = cx.tested("c", x, true);
+        let m = posted(cx.executed("c", x, Support, pass));
+        let h = history(&cx, x);
+        assert_eq!(reopens(&h), vec![(ReopenCause::Evidence(m), vec![m])]);
+        let refs = h.steps.iter().find_map(|s| match &s.change {
+            Change::Evidence { msg, refs, .. } if *msg == m => Some(refs.clone()),
+            _ => None,
+        });
+        assert_eq!(refs, Some(vec![Ref::art(pass)]), "an item names its report");
+        let status_steps = h
+            .steps
+            .iter()
+            .filter(|s| matches!(&s.change, Change::Status { woke, .. } if woke.is_empty()));
+        assert_eq!(status_steps.count(), 1, "only the reopen wakes anything");
+    }
+
+    /// A human reopen wakes the dormant items: executed evidence posted
+    /// against the closed status while a dep was closed.
+    #[test]
+    fn a_human_reopen_names_the_dormant_items_it_woke() {
+        let mut cx = Cx::new();
+        let a = cx.low();
+        let b = cx.claim("b", dep_on("b", vec![a]));
+        let pass = cx.tested("c", b, true);
+        drop_claim(&mut cx, b);
+        drop_claim(&mut cx, a);
+        let m1 = posted(cx.executed("c", b, Support, pass));
+        let m2 = posted(cx.executed("a", b, Support, pass));
+        ok(cx.decide(a, ClaimOutcome::Reopen));
+        accept(&mut cx, a);
+        ok(cx.decide(b, ClaimOutcome::Reopen));
+        assert_eq!(
+            reopens(&history(&cx, b)),
+            vec![(ReopenCause::Human, vec![m1, m2])]
+        );
+    }
+
+    /// Candidate steps, the candidate a failing set is on, and each final
+    /// holdout report on the current code with its passed and failed profiles.
+    #[test]
+    fn candidates_and_holdout_reports_are_steps() {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        let fail = stored(cx.holdout_run(k, &[("golden:cases", 1), ("holdout:api", 0)]));
+        let k2 = cx.candidate("b", x);
+        stored(cx.report_profiles(k2, &[("unit", 0)], vec![]));
+        let pass = stored(cx.holdout_run(k2, &[("golden:cases", 0)]));
+        let names = |v: &[&str]| v.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        let got: Vec<Change> = history(&cx, x)
+            .steps
+            .into_iter()
+            .map(|s| s.change)
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Candidate { .. } | Change::Report { .. } | Change::Failing { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                Change::Candidate { candidate: k },
+                Change::Report {
+                    report: fail,
+                    candidate: k,
+                    passed: names(&["holdout:api"]),
+                    failed: names(&["golden:cases"]),
+                },
+                Change::Failing {
+                    profiles: names(&["golden:cases"]),
+                    candidate: Some(k),
+                },
+                Change::Candidate { candidate: k2 },
+                Change::Report {
+                    report: pass,
+                    candidate: k2,
+                    passed: names(&["golden:cases"]),
+                    failed: vec![],
+                },
+                Change::Failing {
+                    profiles: vec![],
+                    candidate: Some(k2),
+                },
+            ]
+        );
     }
 
     #[test]

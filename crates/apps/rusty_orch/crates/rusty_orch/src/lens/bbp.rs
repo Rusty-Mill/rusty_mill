@@ -1200,7 +1200,7 @@ mod tests {
                 author: author.into(),
                 direction: Direction::Counter,
                 grounded: true,
-                executed: false,
+                cites: vec![],
                 delta,
                 scoring: true,
             })
@@ -1213,7 +1213,7 @@ mod tests {
             Change::Status(Rule::Line {
                 at: -8,
                 authors: 2,
-                min_authors: Some(2),
+                min_authors: 2,
             }),
         ];
         let mut score_so_far = 0;
