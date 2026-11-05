@@ -33,7 +33,7 @@ pub(crate) struct Entry {
 /// `agent hook`.
 type Event = (&'static str, &'static [&'static str]);
 
-/// Claude Code's status hooks (D87). A permission prompt shows `blocked`
+/// Claude Code's status hooks (D89). A permission prompt shows `blocked`
 /// until the tool runs, fails or is denied; `PreToolUse` and
 /// `PermissionRequest` name the tool from the event's stdin.
 const CLAUDE: &[Event] = &[
@@ -255,17 +255,47 @@ fn hooks(settings: &Value) -> Result<Option<&Map>, String> {
     Ok(Some(hooks))
 }
 
-/// Our hooks, each with its event, in the events setup writes under.
-fn ours(settings: &Value) -> Result<Vec<(&'static str, &Value)>, String> {
+/// A hook of ours as found: its event, its group and the hook itself.
+struct Found<'a> {
+    event: &'static str,
+    group: &'a Value,
+    hook: &'a Value,
+}
+
+impl Found<'_> {
+    /// Whether this hook runs as setup wrote it: alone in a group that
+    /// fires on every occurrence of its event, and not asynchronously
+    /// (statuses must land in order). Fields others add, such as
+    /// `timeout`, are left alone.
+    fn runs_as_written(&self) -> bool {
+        let every = self
+            .group
+            .get("matcher")
+            .is_none_or(|matcher| matches!(matcher.as_str(), Some("" | "*")));
+        let alone = hooks_of(self.group).len() == 1;
+        let in_order = self.hook.get("async").and_then(Value::as_bool) != Some(true);
+        every && alone && in_order
+    }
+
+    fn is(&self, entry: &Entry) -> bool {
+        self.event == entry.event
+            && self.hook.get("command").and_then(Value::as_str) == Some(entry.command.as_str())
+            && self.hook.get(WINDOWS).and_then(Value::as_str) == entry.windows.as_deref()
+            && self.runs_as_written()
+    }
+}
+
+/// Our hooks, in the events setup writes under.
+fn ours(settings: &Value) -> Result<Vec<Found<'_>>, String> {
     let Some(hooks) = hooks(settings)? else {
         return Ok(Vec::new());
     };
     let mut found = Vec::new();
     for event in known_events() {
         let groups = hooks.get(event).and_then(Value::as_array);
-        for hook in groups.into_iter().flatten().flat_map(hooks_of) {
-            if is_ours(hook) {
-                found.push((event, hook));
+        for group in groups.into_iter().flatten() {
+            for hook in hooks_of(group).iter().filter(|hook| is_ours(hook)) {
+                found.push(Found { event, group, hook });
             }
         }
     }
@@ -287,21 +317,17 @@ pub(crate) fn has_hook(settings: &Value) -> Result<bool, String> {
 
 /// Whether `settings` hold exactly `entries` among our hooks: installed
 /// when each is there as written and nothing else of ours is, outdated when
-/// some of ours differ, are missing or are extra.
+/// some of ours differ, are missing, are extra, or run other than as
+/// written (a matcher, `async`, or a group shared with other hooks).
 pub(crate) fn state(settings: &Value, entries: &[Entry]) -> Result<State, String> {
     let ours = ours(settings)?;
     if ours.is_empty() {
         return Ok(State::Missing);
     }
-    let matches = |entry: &Entry, (event, hook): &(&str, &Value)| {
-        *event == entry.event
-            && hook.get("command").and_then(Value::as_str) == Some(entry.command.as_str())
-            && hook.get(WINDOWS).and_then(Value::as_str) == entry.windows.as_deref()
-    };
     let exact = ours.len() == entries.len()
         && entries
             .iter()
-            .all(|entry| ours.iter().filter(|hook| matches(entry, hook)).count() == 1);
+            .all(|entry| ours.iter().filter(|found| found.is(entry)).count() == 1);
     Ok(match exact {
         true => State::Installed,
         false => State::Outdated,
@@ -309,8 +335,8 @@ pub(crate) fn state(settings: &Value, entries: &[Entry]) -> Result<State, String
 }
 
 /// `settings` with exactly `entries` of ours: unchanged when already so,
-/// otherwise every hook of ours is taken out and each entry appended as a
-/// group of its own.
+/// otherwise every hook of ours is taken out (other hooks in its group
+/// stay) and each entry appended as a group of its own.
 pub(crate) fn with_hook(settings: Value, entries: &[Entry]) -> Result<Value, String> {
     if state(&settings, entries)? == State::Installed {
         return Ok(settings);

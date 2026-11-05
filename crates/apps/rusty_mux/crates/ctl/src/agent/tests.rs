@@ -162,6 +162,69 @@ fn removing_drops_only_ours_and_the_containers_it_empties() {
 }
 
 #[test]
+fn ours_counts_only_when_it_runs_on_every_event_alone_and_in_order() {
+    let ours_hook = |extra: &str| {
+        format!(
+            r#"{{"type":"command","command":{}{extra}}}"#,
+            Value::from(ours()).to_json_string()
+        )
+    };
+    let with = |group: &str| json(&format!(r#"{{"hooks":{{"SessionStart":[{group}]}}}}"#));
+    let theirs = r#"{"type":"command","command":"echo hi"}"#;
+    let entries = start(&ours(), None);
+    for (fine, group) in [
+        (true, format!(r#"{{"hooks":[{}]}}"#, ours_hook(""))),
+        (
+            true,
+            format!(r#"{{"matcher":"","hooks":[{}]}}"#, ours_hook("")),
+        ),
+        (
+            true,
+            format!(r#"{{"matcher":"*","hooks":[{}]}}"#, ours_hook("")),
+        ),
+        (
+            true,
+            format!(r#"{{"hooks":[{}]}}"#, ours_hook(r#","timeout":30"#)),
+        ),
+        (
+            true,
+            format!(r#"{{"hooks":[{}]}}"#, ours_hook(r#","async":false"#)),
+        ),
+        (
+            false,
+            format!(r#"{{"matcher":"startup","hooks":[{}]}}"#, ours_hook("")),
+        ),
+        (
+            false,
+            format!(r#"{{"hooks":[{}]}}"#, ours_hook(r#","async":true"#)),
+        ),
+        (
+            false,
+            format!(r#"{{"hooks":[{theirs},{}]}}"#, ours_hook("")),
+        ),
+    ] {
+        let settings = with(&group);
+        let state = settings::state(&settings, &entries).expect("state");
+        assert_eq!(state == State::Installed, fine, "{group}");
+        let repaired = settings::with_hook(settings, &entries).expect("repairs");
+        assert_eq!(
+            settings::state(&repaired, &entries),
+            Ok(State::Installed),
+            "{group}"
+        );
+        if !fine {
+            // Our hook moves to a group of its own; anything else stays.
+            let groups = repaired["hooks"]["SessionStart"].as_array().expect("array");
+            let last = groups.last().expect("ours");
+            assert!(last.get("matcher").is_none(), "{group}");
+            assert_eq!(last["hooks"].as_array().map(Vec::len), Some(1), "{group}");
+            let kept = groups.iter().any(|g| g["hooks"][0] == json(theirs));
+            assert_eq!(kept, group.contains("echo hi"), "{group}");
+        }
+    }
+}
+
+#[test]
 fn a_shape_it_cannot_edit_is_refused() {
     for bad in [r"[]", r#"{"hooks":[]}"#, r#"{"hooks":{"SessionStart":{}}}"#] {
         assert!(
@@ -217,7 +280,7 @@ fn commands(settings: &Value) -> Vec<(String, String)> {
     found
 }
 
-/// O2 part 2 (D87): Claude Code gets a status hook per event beside the
+/// O2 part 2 (D89): Claude Code gets a status hook per event beside the
 /// session-start hook, all one item to setup, status and remove.
 #[test]
 fn claude_gets_a_status_hook_per_event_as_one_item() {
@@ -273,7 +336,7 @@ fn claude_gets_a_status_hook_per_event_as_one_item() {
     assert!(files_in(&dir).is_empty(), "{:?}", files_in(&dir));
 }
 
-/// Codex reports as Claude Code does, from its own events (D87, Q21).
+/// Codex reports as Claude Code does, from its own events (D89, Q21).
 #[test]
 fn codex_gets_its_status_hooks() {
     let entries = settings::entries(AgentKind::Codex, plain(CTL), false).expect("entries");

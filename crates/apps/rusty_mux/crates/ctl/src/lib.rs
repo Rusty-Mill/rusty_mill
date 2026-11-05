@@ -54,7 +54,7 @@ mod watch;
 use std::io::{self, Write};
 use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rusty_mux_core::Event;
 use rusty_mux_proto::schema::{CATALOG, Returns, Value};
@@ -252,9 +252,13 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
             ref socket,
             ..
         }) if hook.tool_from_stdin => {
-            hook.msg = read_hook_input(io::stdin().lock()).and_then(|input| hook_tool_name(&input));
+            // One budget for the whole hook: stdin gets the first part of
+            // it, so a writer that never closes still leaves time to report.
+            let stop = Stop::after(HOOK_PATIENCE);
+            let input = hook_input_within(io::stdin, HOOK_INPUT_PATIENCE);
+            hook.msg = input.and_then(|input| hook_tool_name(&input));
             let socket = socket.clone().or_else(|| env.socket.clone());
-            return send_hook_report(socket.as_deref(), env, &hook, &Stop::default());
+            return send_hook_report(socket.as_deref(), env, &hook, &stop);
         }
         _ => return run(args, env, &mut io::stdout(), &mut err),
     };
@@ -276,31 +280,52 @@ fn send_hook_report(socket: Option<&Path>, env: &Env, hook: &HookReport, stop: &
     Exit::Ok
 }
 
+/// How long `--tool-from-stdin` waits for the event's input to end: half of
+/// [`HOOK_PATIENCE`], so the report keeps the rest.
+const HOOK_INPUT_PATIENCE: Duration = Duration::from_secs(1);
+
 /// The most of a hook event's stdin `--tool-from-stdin` reads.
 const HOOK_INPUT_LIMIT: usize = 1 << 20;
 
-/// A hook event's stdin, read up to [`HOOK_INPUT_LIMIT`] bytes and the rest
-/// drained, so the agent writing it never blocks; `None` when it is longer
-/// or cannot be read.
-fn read_hook_input(mut input: impl io::Read) -> Option<Vec<u8>> {
+/// A hook event's input, read up to [`HOOK_INPUT_LIMIT`] bytes, or `None`
+/// when it is longer, cannot be read or has not ended within `budget`. It is
+/// read on a thread of its own, so a writer that never closes the pipe
+/// holds the hook no longer than `budget`; that thread drains the rest of a
+/// longer input, so the writer never blocks on a full pipe, until the
+/// process exits.
+fn hook_input_within<R: io::Read + 'static>(
+    open: impl FnOnce() -> R + Send + 'static,
+    budget: Duration,
+) -> Option<Vec<u8>> {
+    let (sent, received) = std::sync::mpsc::sync_channel(1);
+    let reader = std::thread::Builder::new()
+        .name("hook-input".into())
+        .spawn(move || {
+            let mut input = open();
+            let _gone = sent.send(read_hook_input(&mut input));
+            let _drained = io::copy(&mut input, &mut io::sink());
+        });
+    reader.ok()?;
+    received.recv_timeout(budget).ok().flatten()
+}
+
+/// `input` up to [`HOOK_INPUT_LIMIT`] bytes; `None` when it is longer or
+/// cannot be read.
+fn read_hook_input(input: &mut impl io::Read) -> Option<Vec<u8>> {
     use io::Read as _;
     let mut bytes = Vec::new();
-    let read = (&mut input)
+    let read = input
         .take(HOOK_INPUT_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    if read > HOOK_INPUT_LIMIT {
-        let _drained = io::copy(&mut input, &mut io::sink());
-        return None;
-    }
-    Some(bytes)
+    (read <= HOOK_INPUT_LIMIT).then_some(bytes)
 }
 
 /// The longest tool name a report carries.
 const MAX_TOOL_NAME: usize = 128;
 
 /// The `tool_name` of a hook event's JSON, when it can be a report's
-/// message: 1 to [`MAX_TOOL_NAME`] bytes with no control characters (D87).
+/// message: 1 to [`MAX_TOOL_NAME`] bytes with no control characters (D89).
 /// A name that cannot leaves the report without one rather than dropping it.
 pub fn hook_tool_name(input: &[u8]) -> Option<String> {
     let value = rusty_json::Value::from_json_str(std::str::from_utf8(input).ok()?).ok()?;
@@ -1047,12 +1072,44 @@ mod tests {
     }
 
     #[test]
-    fn hook_input_is_read_up_to_its_limit_and_the_rest_drained() {
+    fn hook_input_is_read_up_to_its_limit() {
         let at_limit = vec![b'x'; HOOK_INPUT_LIMIT];
-        assert_eq!(read_hook_input(at_limit.as_slice()), Some(at_limit.clone()));
-        let mut over = io::Cursor::new(vec![b'x'; HOOK_INPUT_LIMIT + 5]);
-        assert_eq!(read_hook_input(&mut over), None);
-        assert_eq!(over.position() as usize, HOOK_INPUT_LIMIT + 5, "drained");
+        assert_eq!(
+            read_hook_input(&mut at_limit.as_slice()),
+            Some(at_limit.clone())
+        );
+        let over = vec![b'x'; HOOK_INPUT_LIMIT + 5];
+        assert_eq!(read_hook_input(&mut over.as_slice()), None);
+    }
+
+    /// Review on #1516: an input that never ends holds the hook only for
+    /// its budget.
+    #[test]
+    fn hook_input_that_never_ends_gives_up_within_its_budget() {
+        struct Endless;
+        impl io::Read for Endless {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                std::thread::sleep(Duration::from_secs(3600));
+                Ok(0)
+            }
+        }
+        let started = Instant::now();
+        assert_eq!(
+            hook_input_within(|| Endless, Duration::from_millis(100)),
+            None
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        let small = || io::Cursor::new(br#"{"tool_name":"Bash"}"#.to_vec());
+        assert_eq!(
+            hook_input_within(small, Duration::from_secs(5)),
+            Some(br#"{"tool_name":"Bash"}"#.to_vec())
+        );
+        let over = || io::Cursor::new(vec![b'x'; HOOK_INPUT_LIMIT + 5]);
+        assert_eq!(hook_input_within(over, Duration::from_secs(5)), None);
     }
 
     fn parsed(line: &str) -> Call {
