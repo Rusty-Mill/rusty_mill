@@ -2,7 +2,7 @@
 //! owner's edits in rusty_tick reach the board (ADR-0012).
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind};
+use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind, Shelf};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::Store;
 use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
@@ -527,4 +527,98 @@ fn a_card_that_keeps_moving_under_its_reads_is_a_conflict() {
     tick.race_after("GET", "/docs/board", 1_000, read.id, raced);
 
     assert_eq!(a.get(read.id), Err(BoardError::Conflict));
+}
+
+#[test]
+fn an_archived_card_is_one_tag_on_its_closed_task() {
+    let (board, tick) = board();
+    let builder = board.roles().actor("claude", "builder").expect("role");
+    let card = board
+        .add_done_in(&builder, "default", "shipped", "", vec![])
+        .expect("add done");
+    board.archive(card.id, &builder).expect("archive");
+    assert!(
+        tick.task(card.id)["tags"]
+            .as_array()
+            .expect("tags")
+            .contains(&json!("archived:42"))
+    );
+    assert_eq!(tick.task(card.id)["status"], "done");
+    let read = board.get(card.id).expect("get");
+    assert_eq!((read.archived_ms, read.tags.len()), (Some(42), 0));
+
+    board.restore(card.id, &builder).expect("restore");
+    assert_eq!(board.get(card.id).expect("get").archived_ms, None);
+    assert!(
+        !tick.task(card.id)["tags"]
+            .as_array()
+            .expect("tags")
+            .iter()
+            .any(|t| t.as_str().is_some_and(|t| t.starts_with("archived:")))
+    );
+
+    // Only a Done card is archived: the tag added by hand to an open task means nothing.
+    let open = board.add(&builder, "open", "", vec![]).expect("add");
+    tick.owner_edit(open.id, |t| {
+        t["tags"] = json!(["agent", "board:backlog", "archived:7"]);
+    });
+    assert_eq!(board.get(open.id).expect("get").archived_ms, None);
+}
+
+#[test]
+fn the_archived_tag_is_the_boards_own() {
+    let (board, _tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    assert!(matches!(
+        board.add(&human, "a", "", vec!["archived:1".into()]),
+        Err(BoardError::Invalid(_))
+    ));
+}
+
+#[test]
+fn restoring_an_aged_out_card_persists_its_restore_time_in_rusty_tick() {
+    let (board, tick) = board();
+    let builder = board.roles().actor("claude", "builder").expect("role");
+    let card = board
+        .add_done_in(&builder, "default", "old", "", vec![])
+        .expect("add done");
+    // Shipped 30 days before the board's clock.
+    tick.owner_edit(card.id, |t| {
+        t["completedMs"] = json!(42 - 30 * 86_400_000_i64)
+    });
+    let listed = |shelf| board.list_shelf(None, shelf, 14).expect("list").len();
+    assert_eq!(listed(Shelf::Exclude), 0);
+
+    board.restore(card.id, &builder).expect("restore");
+    assert!(
+        tick.task(card.id)["tags"]
+            .as_array()
+            .expect("tags")
+            .contains(&json!("restored:42"))
+    );
+    let read = board.get(card.id).expect("reload");
+    assert_eq!(
+        (read.restored_ms, read.done_ms),
+        (Some(42), Some(42 - 30 * 86_400_000))
+    );
+    assert_eq!(
+        listed(Shelf::Exclude),
+        1,
+        "back on the board after a reload"
+    );
+
+    // Archiving again drops the restore time.
+    board.archive(card.id, &builder).expect("archive");
+    let tags = tick.task(card.id)["tags"].clone();
+    assert!(
+        tags.as_array()
+            .expect("tags")
+            .contains(&json!("archived:42"))
+    );
+    assert!(
+        !tags
+            .as_array()
+            .expect("tags")
+            .contains(&json!("restored:42"))
+    );
 }

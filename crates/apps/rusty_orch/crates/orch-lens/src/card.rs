@@ -20,6 +20,9 @@ pub struct Card {
     /// The score that accepts this claim (strict for high stakes or
     /// irreversible claims).
     pub accept_at: i64,
+    /// The claim's epoch: a reopen starts a new one, and what a lens did
+    /// in an earlier epoch no longer counts.
+    pub epoch: u32,
     pub stakes: Stakes,
     pub reversible: bool,
     /// The question this claim answers, when it is a candidate.
@@ -97,6 +100,7 @@ impl Card {
             status: view.status,
             score: view.score,
             accept_at: view.accept_at,
+            epoch: view.epoch,
             stakes: body.stakes,
             reversible: body.reversible,
             answers: body.answers,
@@ -228,6 +232,7 @@ pub(crate) mod fixtures {
             status: ClaimStatus::Open,
             score: 0,
             accept_at: 8,
+            epoch: 0,
             stakes: Stakes::Medium,
             reversible: true,
             answers: Some(MsgId(3)),
@@ -338,6 +343,7 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            human_touched: false,
         }
     }
 

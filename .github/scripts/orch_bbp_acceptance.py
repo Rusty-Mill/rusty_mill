@@ -62,6 +62,8 @@ CASES = (
          "a_confined_session_keeps_its_home_and_one_fresh_workspace_across_turns"),
     Case("holdout-confined", "rusty_bbp_host", ("--test", "claims_host"),
          "confined_holdout_run_passes_and_builds_cannot_read_the_suite"),
+    Case("erosion-confined", "rusty_bbp_host", ("--test", "claims_host"),
+         "confined_erosion_profile_reports_then_blocks_a_pasted_duplicate"),
     Case("golden-confined", "rusty_bbp_host", ("--test", "claims_host"),
          "confined_golden_run_passes_and_reads_only_signed_fixtures"),
     Case("millboard-inbox", "rusty_mill_board", ("--test", "inbox_real_bbp"),

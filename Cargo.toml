@@ -227,6 +227,7 @@ members = [
     "crates/apps/rusty_orch/crates/orch-lens",
     "crates/apps/rusty_orch/crates/orch-openai",
     "crates/apps/rusty_orch/crates/orch-store",
+    "crates/apps/rusty_orch/crates/orch-jail",
     "crates/apps/rusty_orch/crates/rusty_orch",
     "crates/apps/rusty_key/crates/config",
     "crates/apps/rusty_key/crates/observe",

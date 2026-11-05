@@ -40,7 +40,11 @@ mod pty;
 #[cfg(any(target_os = "linux", windows))]
 mod settings;
 #[cfg(any(target_os = "linux", windows))]
+mod spool;
+#[cfg(any(target_os = "linux", windows))]
 mod state;
+#[cfg(any(target_os = "linux", windows))]
+mod store;
 pub mod style;
 #[cfg(any(target_os = "linux", windows))]
 mod terminal;
@@ -74,6 +78,9 @@ pub struct Config {
     /// and `cwd` (see [`rusty_mux_script::Defaults`]), read at start and on
     /// `reload-config`; `None` reads none and refuses a reload.
     pub config_file: Option<std::path::PathBuf>,
+    /// The store directory sessions are saved to and restored from across
+    /// restarts (C45); `None` saves nothing.
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 /// The Windows console host behind each block.
@@ -273,7 +280,9 @@ async fn serve_for(
         .borrow_mut()
         .load_config()
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    state.borrow_mut().restore(&state);
     rusty_tokio::task::spawn_local(state::watch_processes(std::rc::Rc::downgrade(&state)));
+    rusty_tokio::task::spawn_local(state::save_periodically(std::rc::Rc::downgrade(&state)));
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed, owner) => result,
         () = stop => Ok(()),
