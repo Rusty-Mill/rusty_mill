@@ -6,7 +6,9 @@
 //! set, or else the latest report on its current candidate that ran the
 //! profile, so `unmeasured` code is visible even while report-only. The
 //! parse is host-side and tolerant: a log that can't be read or has no
-//! version-1 line gives no detail, and the inbox still answers.
+//! version-1 line gives no detail, and the inbox still answers. A log whose
+//! erosion markers are ambiguous (another profile printed some) gives an
+//! error detail instead of a section that may be forged.
 
 use rusty_bbp::claims::ClaimView;
 use rusty_bbp::*;
@@ -92,7 +94,10 @@ pub fn for_claim(
         _ => return None,
     };
     let bytes = blob(&st.artifacts.get(&log)?.blob)?;
-    let (error, line) = parse(section(&String::from_utf8_lossy(&bytes))?)?;
+    let (error, line) = match section(&String::from_utf8_lossy(&bytes))? {
+        Ok(found) => parse(found)?,
+        Err(why) => (Some(why), None),
+    };
     Some(ErosionDetail {
         report,
         failing: failing.is_some(),
@@ -113,15 +118,47 @@ fn latest_run(st: &TaskState, candidate: ArtId) -> Option<ArtId> {
     })
 }
 
-/// The bin's JSON line in the erosion section of a run log.
-pub fn section(log: &str) -> Option<&str> {
+/// The bin's JSON line in the run log's erosion section, `None` when there is
+/// none. The log concatenates every profile's output, and other profiles can
+/// run candidate code that prints marker-like lines, so the section must be
+/// the log's only one: one header, then one closer, with one JSON line
+/// between. Anything else is ambiguous and an error, never a guess.
+pub fn section(log: &str) -> Option<Result<&str, String>> {
     let open = format!("=== {PROFILE} : ");
     let close = format!("--- {PROFILE}: ");
-    log.lines()
-        .skip_while(|l| !l.starts_with(&open))
-        .skip(1)
-        .take_while(|l| !l.starts_with(&close))
-        .find(|l| l.starts_with("{\"erosion\":"))
+    let lines: Vec<&str> = log.lines().collect();
+    let at = |prefix: &str| -> Vec<usize> {
+        (0..lines.len())
+            .filter(|&i| lines[i].starts_with(prefix))
+            .collect()
+    };
+    let (heads, closes) = (at(&open), at(&close));
+    let (&[head], &[end]) = (heads.as_slice(), closes.as_slice()) else {
+        return (!heads.is_empty()).then(|| Err(ambiguous(heads.len(), closes.len())));
+    };
+    if end < head {
+        return Some(Err(ambiguous(1, 1)));
+    }
+    let found: Vec<&str> = lines[head + 1..end]
+        .iter()
+        .copied()
+        .filter(|l| l.starts_with("{\"erosion\":"))
+        .collect();
+    match found.as_slice() {
+        [] => None,
+        [one] => Some(Ok(one)),
+        _ => Some(Err(format!(
+            "the erosion section has {} result lines; none is shown",
+            found.len()
+        ))),
+    }
+}
+
+fn ambiguous(heads: usize, closes: usize) -> String {
+    format!(
+        "the run log has {heads} erosion headers and {closes} closers in an order the \
+         runner doesn't write (another profile may have printed markers); none is shown"
+    )
 }
 
 /// Parse a version-1 line into the bin's error or its measurement. Any other
@@ -195,9 +232,35 @@ mod tests {
              === erosion : /usr/local/bin/erosion check --base a --report-only\n\
              note\n{ENFORCING}\n--- erosion: exit 1 in 2ms\n"
         );
-        assert_eq!(section(&log), Some(ENFORCING));
+        assert_eq!(section(&log), Some(Ok(ENFORCING)));
         assert_eq!(section("=== test : x\n--- test: exit 0\n"), None);
         let empty = "=== erosion : x\n--- erosion: exit 0\n{\"erosion\":1}\n";
         assert_eq!(section(empty), None, "a line after the section is not it");
+    }
+
+    #[test]
+    fn markers_printed_by_another_profile_make_the_section_an_error() {
+        let real = format!("=== erosion : e\n{ENFORCING}\n--- erosion: exit 1 in 2ms\n");
+        let forged = "=== erosion : e\n{\"erosion\":1,\"error\":\"forged\"}\n--- erosion: exit 0\n";
+        // A profile before or after erosion prints a whole fake section.
+        for log in [
+            format!("=== test : t\n{forged}--- test: exit 0\n{real}"),
+            format!("{real}=== test : t\n{forged}--- test: exit 0\n"),
+        ] {
+            assert!(matches!(section(&log), Some(Err(_))), "{log}");
+        }
+        // A stray closer, or a closer before the header.
+        let stray = format!("=== test : t\n--- erosion: exit 0\n--- test: exit 0\n{real}");
+        assert!(matches!(section(&stray), Some(Err(_))));
+        let backwards = format!("--- erosion: exit 0\n=== erosion : e\n{ENFORCING}\n");
+        assert!(matches!(section(&backwards), Some(Err(_))));
+        // Two result lines in the one section.
+        let two = format!("=== erosion : e\n{ENFORCING}\n{ENFORCING}\n--- erosion: exit 1\n");
+        assert!(matches!(section(&two), Some(Err(_))));
+        // A stray closer alone, with no erosion header, is no section.
+        assert_eq!(
+            section("=== test : t\n--- erosion: x\n--- test: exit 0\n"),
+            None
+        );
     }
 }
