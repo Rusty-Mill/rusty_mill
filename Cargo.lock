@@ -7150,6 +7150,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "orch-jail"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+ "rusty_sandbox",
+ "rusty_serde",
+]
+
+[[package]]
 name = "orch-lens"
 version = "0.1.0"
 dependencies = [

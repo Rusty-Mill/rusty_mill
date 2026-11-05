@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## `lel-jail`, the agent jail launcher
+**2026-11-05**
+
+- New `lel-jail` program for agents hosted in mux blocks (Let Em Loose
+  D82). It puts the agent in its session's cgroup, passes it only the
+  pty, the slot lock and the ACP socket, and confines it before it runs.
+  Nothing launches it yet: the builder launch comes in a later PR.
+
 ## Lens cards show the task's accept line
 **2026-11-04**
 
