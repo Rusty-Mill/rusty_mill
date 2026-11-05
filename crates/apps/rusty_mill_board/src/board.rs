@@ -681,16 +681,20 @@ impl<S: Store> Board<S> {
         if !self.projects().contains(project) {
             return Err(BoardError::Invalid("unknown project"));
         }
-        let milestone = Milestone::new(project, title, target_ms)?;
-        self.milestones.add_milestone(&milestone)?;
+        let mut milestone = Milestone::new(project, title, target_ms)?;
+        milestone.rev = self.milestones.add_milestone(&milestone)?;
         Ok(milestone)
     }
 
     /// Change a milestone: its title, target, or whether it is done. Needs `Triage`; `in_scope`
     /// says whether the caller may touch its project.
     ///
+    /// The save is fenced on the version the scope check read, so a milestone moved to another
+    /// project meanwhile is refused with [`BoardError::Conflict`] rather than written.
+    ///
     /// # Errors
-    /// A missing capability, a missing or out-of-scope milestone, or see [`Milestone::edited`].
+    /// A missing capability, a missing or out-of-scope milestone, a conflict, or see
+    /// [`Milestone::edited`].
     pub fn edit_milestone(
         &self,
         by: &Actor,
@@ -708,8 +712,8 @@ impl<S: Store> Board<S> {
         if !in_scope(&current.project) {
             return Err(BoardError::OutOfScope(current.project));
         }
-        let next = current.edited(edit, (self.clock)())?;
-        self.milestones.save_milestone(&current, &next)?;
+        let mut next = current.edited(edit, (self.clock)())?;
+        next.rev = self.milestones.save_milestone(&current, &next)?;
         Ok(next)
     }
 

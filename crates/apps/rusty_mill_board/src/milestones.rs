@@ -32,6 +32,9 @@ pub struct Milestone {
     pub target_ms: i64,
     /// When it was reached, Unix ms; `None` while open.
     pub done_ms: Option<i64>,
+    /// The stored version this was read at: a save is refused once it has moved on, so a scope
+    /// check made on this read still holds when the write lands.
+    pub rev: u64,
 }
 
 /// A change to a milestone: each `None` field is left as it is.
@@ -57,6 +60,7 @@ impl Milestone {
             title: valid_title(title)?,
             target_ms: valid_target(target_ms)?,
             done_ms: None,
+            rev: 0,
         })
     }
 
@@ -115,16 +119,18 @@ pub trait MilestoneStore: Send + Sync {
     /// # Errors
     /// If the store fails.
     fn milestone(&self, id: Uuid) -> Result<Option<Milestone>, BoardError>;
-    /// Record a new milestone.
+    /// Record a new milestone; returns the version stored.
     ///
     /// # Errors
     /// [`BoardError::Conflict`] if its id exists, or if the store fails.
-    fn add_milestone(&self, milestone: &Milestone) -> Result<(), BoardError>;
-    /// Record a milestone's new state, from `current`.
+    fn add_milestone(&self, milestone: &Milestone) -> Result<u64, BoardError>;
+    /// Record a milestone's new state, from `current`, only if it is still at `current.rev`
+    /// (a compare-and-swap); returns the version stored.
     ///
     /// # Errors
-    /// [`BoardError::NotFound`] if it does not exist, or if the store fails.
-    fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<(), BoardError>;
+    /// [`BoardError::Conflict`] if it moved since `current` was read, [`BoardError::NotFound`]
+    /// if it does not exist, or if the store fails.
+    fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<u64, BoardError>;
 }
 
 /// Milestones in memory, for a board without rusty_tick and for tests.
@@ -149,22 +155,33 @@ impl MilestoneStore for MemMilestones {
         Ok(self.with(|m| m.get(&id).cloned()))
     }
 
-    fn add_milestone(&self, milestone: &Milestone) -> Result<(), BoardError> {
+    fn add_milestone(&self, milestone: &Milestone) -> Result<u64, BoardError> {
         self.with(|m| match m.contains_key(&milestone.id) {
             true => Err(BoardError::Conflict),
             false => {
-                m.insert(milestone.id, milestone.clone());
-                Ok(())
+                m.insert(
+                    milestone.id,
+                    Milestone {
+                        rev: 1,
+                        ..milestone.clone()
+                    },
+                );
+                Ok(1)
             }
         })
     }
 
-    fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<(), BoardError> {
+    fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<u64, BoardError> {
         self.with(|m| match m.get_mut(&current.id) {
-            Some(slot) => {
-                *slot = next.clone();
-                Ok(())
+            Some(slot) if slot.rev == current.rev => {
+                let rev = slot.rev + 1;
+                *slot = Milestone {
+                    rev,
+                    ..next.clone()
+                };
+                Ok(rev)
             }
+            Some(_) => Err(BoardError::Conflict),
             None => Err(BoardError::NotFound(current.id)),
         })
     }
@@ -202,5 +219,30 @@ mod tests {
         };
         assert_eq!(closed.edited(&reopen, 99).expect("reopen").done_ms, None);
         assert!(m.edited(&MilestoneEdit::default(), 1).is_err());
+    }
+
+    #[test]
+    fn a_save_from_a_stale_read_is_refused() {
+        let store = MemMilestones::default();
+        let m = Milestone::new("rl", "Beta", 10).expect("new");
+        let read = Milestone {
+            rev: store.add_milestone(&m).expect("add"),
+            ..m
+        };
+        let rename = |t: &str| MilestoneEdit {
+            title: Some(t.into()),
+            ..MilestoneEdit::default()
+        };
+        let first = read.edited(&rename("One"), 1).expect("edit");
+        assert_eq!(store.save_milestone(&read, &first).expect("save"), 2);
+        let late = read.edited(&rename("Two"), 2).expect("edit");
+        assert!(matches!(
+            store.save_milestone(&read, &late),
+            Err(BoardError::Conflict)
+        ));
+        assert_eq!(
+            store.milestone(read.id).expect("get").map(|m| m.title),
+            Some("One".into())
+        );
     }
 }

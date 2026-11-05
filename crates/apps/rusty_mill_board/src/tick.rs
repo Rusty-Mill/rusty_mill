@@ -906,7 +906,9 @@ impl<T: TickApi> Store for TickStore<T> {
 impl<T: TickApi> TickStore<T> {
     fn milestone_of(projects: &Projects, task: Task) -> Option<Milestone> {
         let target_ms = task.due_ms?;
+        let rev = task.version().ok()?;
         Some(Milestone {
+            rev,
             id: task.id,
             project: projects.of(&task),
             done_ms: task.completed_ms.filter(|_| task.status == "done"),
@@ -940,7 +942,7 @@ impl<T: TickApi> MilestoneStore for TickStore<T> {
         Ok(Self::milestone_of(&self.projects()?, task))
     }
 
-    fn add_milestone(&self, milestone: &Milestone) -> Result<(), BoardError> {
+    fn add_milestone(&self, milestone: &Milestone) -> Result<u64, BoardError> {
         let body = json!({
             "id": milestone.id,
             "listId": self.list_for(&milestone.project)?,
@@ -948,11 +950,13 @@ impl<T: TickApi> MilestoneStore for TickStore<T> {
             "tags": [MILESTONE_TAG],
             "dueMs": milestone.target_ms,
         });
-        let (status, _) = self
+        let (status, created) = self
             .tick
             .send(&TickRequest::new("POST", "/tasks").body(body))?;
         match status {
-            201 => Ok(()),
+            201 => serde_json::from_value::<Task>(created)
+                .map_err(|e| BoardError::Storage(format!("rusty_tick sent a bad task: {e}")))?
+                .version(),
             409 => Err(BoardError::Conflict),
             _ => Err(BoardError::Storage(format!(
                 "rusty_tick answered {status} creating a milestone"
@@ -960,7 +964,7 @@ impl<T: TickApi> MilestoneStore for TickStore<T> {
         }
     }
 
-    fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<(), BoardError> {
+    fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<u64, BoardError> {
         let mut patch = serde_json::Map::new();
         if next.title != current.title {
             patch.insert("title".into(), json!(next.title));
@@ -977,12 +981,10 @@ impl<T: TickApi> MilestoneStore for TickStore<T> {
             patch.insert("status".into(), json!(status));
         }
         if patch.is_empty() {
-            return Ok(());
+            return Ok(current.rev);
         }
-        self.call(
-            TickRequest::new("PATCH", format!("/tasks/{}", current.id)).body(Value::Object(patch)),
-            200,
-        )
-        .map(|_| ())
+        // Fenced on the version the caller's scope check read: if the task moved meanwhile (to
+        // another project's list, say), rusty_tick refuses with 412 and the edit must start over.
+        self.patch_task(current.id, Value::Object(patch), current.rev)
     }
 }

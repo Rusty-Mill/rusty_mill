@@ -744,3 +744,27 @@ fn a_milestone_is_a_dated_task_tagged_milestone_and_never_a_card() {
         .collect();
     assert!(!ids.contains(&card.id));
 }
+
+#[test]
+fn a_milestone_save_is_fenced_on_the_version_its_scope_was_checked_at() {
+    let (board, tick) = board();
+    let store = TickStore::new(tick.clone());
+    let board = board.with_milestones(Box::new(TickStore::new(tick.clone())));
+    let human = board.roles().actor("nano", "human").expect("role");
+    let beta = board
+        .add_milestone(&human, "orch", "Beta", 1_800_000_000_000)
+        .expect("add");
+    let read = store.milestone(beta.id).expect("read").expect("there");
+    // The owner moves it to another list in rusty_tick after the read.
+    tick.owner_edit(beta.id, |t| t["listId"] = json!(uuid::Uuid::now_v7()));
+    let rename = MilestoneEdit {
+        title: Some("Renamed".into()),
+        ..MilestoneEdit::default()
+    };
+    let next = read.edited(&rename, 1).expect("edit");
+    assert!(matches!(
+        store.save_milestone(&read, &next),
+        Err(BoardError::Conflict)
+    ));
+    assert_eq!(tick.task(beta.id)["title"], "Beta", "nothing written");
+}
