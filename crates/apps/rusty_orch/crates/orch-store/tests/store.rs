@@ -778,3 +778,174 @@ mod watch {
         assert_eq!(got, row("updates:bb", 7, None), "a later save replaces it");
     }
 }
+
+mod lens_records {
+    use super::*;
+    use orch_lens::record::{MsgId, Review};
+
+    fn review(lens: &str, claim: u64, look_harder: bool, items: &[u64]) -> Review {
+        Review {
+            lens: lens.to_owned(),
+            claim: MsgId(claim),
+            epoch: 0,
+            look_harder,
+            items: items.iter().copied().map(MsgId).collect(),
+            unsure: false,
+            pending: false,
+        }
+    }
+
+    fn ahead(lens: &str, claim: u64) -> Review {
+        Review {
+            pending: true,
+            ..review(lens, claim, false, &[])
+        }
+    }
+
+    #[test]
+    fn lens_reviews_survive_reopening_per_board_and_replace_the_same_job() {
+        let d = dir("lens_records_reopen");
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert!(s.lens_reviews("b1").expect("load").is_empty());
+            s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                .expect("save");
+            s.save_lens_review("b1", &review("ops", 7, false, &[11]))
+                .expect("save");
+            s.save_lens_review("b1", &review("sec", 7, true, &[12]))
+                .expect("save");
+            s.save_lens_review("b2", &review("sec", 7, false, &[13]))
+                .expect("save");
+        }
+        let mut s = Store::open(&d).expect("reopen");
+        // Asked again after a refused reply: the job's row gains the post.
+        s.save_lens_review("b1", &review("sec", 7, false, &[14]))
+            .expect("replace");
+        assert_eq!(
+            s.lens_reviews("b1").expect("load"),
+            [
+                review("ops", 7, false, &[11]),
+                review("sec", 7, false, &[14]),
+                review("sec", 7, true, &[12]),
+            ]
+        );
+        assert_eq!(
+            s.lens_reviews("b2").expect("load"),
+            [review("sec", 7, false, &[13])]
+        );
+    }
+
+    /// The row was saved but the scheduler state wasn't, so after a restart
+    /// the job ran again and posted anew: the reopened store holds the job
+    /// once, with every item it posted.
+    #[test]
+    fn a_job_rerun_after_a_crash_keeps_every_item_once() {
+        let d = dir("lens_records_rerun");
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &review("sec", 7, false, &[11, 12]))
+                .expect("save");
+        }
+        {
+            let mut s = Store::open(&d).expect("reopen");
+            s.save_lens_review("b1", &review("sec", 7, false, &[12, 15]))
+                .expect("save again");
+            s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                .expect("save empty");
+        }
+        let s = Store::open(&d).expect("reopen");
+        assert_eq!(
+            s.lens_reviews("b1").expect("load"),
+            [review("sec", 7, false, &[11, 12, 15])]
+        );
+    }
+
+    /// A lost post may have landed: once a save says so, the job stays
+    /// unsure through every later save and reopen.
+    #[test]
+    fn a_lost_post_keeps_the_job_unsure() {
+        let d = dir("lens_records_unsure");
+        {
+            let mut s = Store::open(&d).expect("open");
+            let lost = Review {
+                unsure: true,
+                ..review("sec", 7, false, &[11])
+            };
+            s.save_lens_review("b1", &lost).expect("save");
+            s.save_lens_review("b1", &review("sec", 7, false, &[16]))
+                .expect("retry");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let want = Review {
+            unsure: true,
+            ..review("sec", 7, false, &[11, 16])
+        };
+        assert_eq!(s.lens_reviews("b1").expect("load"), [want]);
+    }
+
+    /// D92 write-ahead: the save after the posts clears `pending` and keeps
+    /// the items; a second write-ahead over a row still pending follows an
+    /// attempt that may have posted, so the job turns unsure for good.
+    #[test]
+    fn a_write_ahead_over_a_pending_row_makes_the_job_unsure() {
+        let d = dir("lens_records_ahead");
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead");
+            s.save_lens_review("b1", &review("sec", 7, false, &[11]))
+                .expect("posted");
+            s.save_lens_review("b1", &ahead("ops", 7)).expect("ahead");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let still = Review {
+            pending: true,
+            ..review("ops", 7, false, &[])
+        };
+        let clean = review("sec", 7, false, &[11]);
+        assert_eq!(s.lens_reviews("b1").expect("load"), [still, clean]);
+        drop(s);
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &ahead("ops", 7)).expect("rerun");
+            s.save_lens_review("b1", &review("ops", 7, false, &[12]))
+                .expect("posted");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let unsure = Review {
+            unsure: true,
+            ..review("ops", 7, false, &[12])
+        };
+        let clean = review("sec", 7, false, &[11]);
+        assert_eq!(s.lens_reviews("b1").expect("load"), [unsure, clean]);
+    }
+
+    /// An interrupted attempt is recovered as unsure even when the retry
+    /// posts nothing, and the ids an earlier attempt saved are kept. Here:
+    /// attempt 1 saved 11; attempt 2 wrote ahead and posted, then crashed
+    /// before its row; attempt 3 writes ahead and ends with an empty row.
+    #[test]
+    fn a_retry_with_nothing_posted_keeps_an_interrupted_job_unsure() {
+        {
+            let d = dir("lens_records_recover");
+            {
+                let mut s = Store::open(&d).expect("open");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 1");
+                s.save_lens_review("b1", &review("sec", 7, false, &[11]))
+                    .expect("row 1");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 2");
+            }
+            {
+                let mut s = Store::open(&d).expect("restart");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 3");
+                s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                    .expect("row 3");
+            }
+            let s = Store::open(&d).expect("reopen");
+            let want = Review {
+                unsure: true,
+                ..review("sec", 7, false, &[11])
+            };
+            assert_eq!(s.lens_reviews("b1").expect("load"), [want]);
+        }
+    }
+}

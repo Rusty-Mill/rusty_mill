@@ -1,0 +1,5 @@
+mocks/
+questions/
+review/
+hook.cache.json
+config.local.json

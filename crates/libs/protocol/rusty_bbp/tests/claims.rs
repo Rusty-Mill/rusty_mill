@@ -4047,8 +4047,8 @@ fn cl_114_baseline_digest_is_claims_mode_only_and_folds() {
     assert_eq!(cx.st.claims.baseline_digest, None);
 }
 
-/// D82: human takeover of an agent session, recorded on the board (D83: under
-/// schema 5; D84: `human_touched` derived in the fold).
+/// D104: human takeover of an agent session, recorded on the board (D105: under
+/// schema 5; D106: `human_touched` derived in the fold).
 mod takeover {
     use super::*;
     use rusty_bbp::claims::input_chain;

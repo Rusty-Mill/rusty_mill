@@ -28,6 +28,7 @@ use rusty_mill_board::bbp_cli::BbpCli;
 use rusty_mill_board::board::{Board, Roles, system_ms};
 use rusty_mill_board::drain::{InFlight, begin_stop, serve_until_drained};
 use rusty_mill_board::mcp;
+use rusty_mill_board::milestones::{MemMilestones, MilestoneStore};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::retag;
 use rusty_mill_board::settings::{
@@ -325,13 +326,20 @@ fn run(cli: Cli) -> Result<(), String> {
         println!("{}", Projects::load(path)?.file_json()?);
         return Ok(());
     }
-    let store: Box<dyn Store> = match &cli.tick_url {
+    // Cards and milestones live in rusty_tick when it is given, each through its own port.
+    let (store, milestones): (Box<dyn Store>, Box<dyn MilestoneStore>) = match &cli.tick_url {
         Some(url) => {
             let token = std::env::var("RUSTY_TICK_TOKEN")
                 .map_err(|_| "--tick-url needs RUSTY_TICK_TOKEN in the environment".to_owned())?;
-            Box::new(TickStore::new(TickHttp::new(url, &token)?))
+            (
+                Box::new(TickStore::new(TickHttp::new(url, &token)?)),
+                Box::new(TickStore::new(TickHttp::new(url, &token)?)),
+            )
         }
-        None => Box::new(MemStore::default()),
+        None => (
+            Box::new(MemStore::default()),
+            Box::new(MemMilestones::default()),
+        ),
     };
     if cli.retag_columns.is_some() || cli.undo_retag.is_some() {
         return run_retag(&cli, store.as_ref());
@@ -362,7 +370,8 @@ fn run(cli: Cli) -> Result<(), String> {
     let mut board = Board::new(store, roles.clone())
         .with_projects(projects.clone())
         .with_move_rules(rules)
-        .with_workflow(workflow);
+        .with_workflow(workflow)
+        .with_milestones(milestones);
     if let Some(path) = &files.projects {
         board = board.with_projects_sink(projects_sink(path.clone()));
     }

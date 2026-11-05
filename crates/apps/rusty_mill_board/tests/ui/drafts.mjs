@@ -30,7 +30,7 @@ await page.fill("#actor", "tester"); // an open board has no credential, so the 
 await page.locator(".card", { hasText: "Draft test" }).click();
 const dialog = page.locator("#dlg");
 const [title, body, tags] = [dialog.locator("input").nth(0), dialog.locator("textarea").nth(0), dialog.locator("input").nth(1)];
-const commentBox = dialog.locator("input").nth(2);
+const commentBox = dialog.locator("input[placeholder^=Comment]");
 
 // 1. Unsaved edits and a half-typed comment survive unrelated board activity.
 await title.fill("My unsaved title");

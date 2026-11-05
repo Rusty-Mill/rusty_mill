@@ -1,5 +1,5 @@
 //! `lel-jail` end to end: the built launcher, the way the mux will run it
-//! (LEL D85 tests; mux-hosted-agents-design.md §4).
+//! (LEL D107 tests; mux-hosted-agents-design.md §4).
 //!
 //! The confined program is this test binary again, run as the `probe` test
 //! with `LEL_JAIL_PROBE` set: it reports what it can see and exits.
@@ -319,7 +319,7 @@ fn launch_refused(fx: &mut Fixture, spec: impl Fn(&Fixture, &Path) -> PathBuf) -
     Some(fx.status())
 }
 
-/// D85: a root that is a symlink to the token directory, or a token path
+/// D107: a root that is a symlink to the token directory, or a token path
 /// that is a symlink into a root, passes the spelled-out check but not the
 /// resolved one, and no agent starts with the dummy token in reach.
 #[test]
@@ -364,7 +364,7 @@ fn a_parent_component_in_a_root_refuses_the_launch() {
     }
 }
 
-/// D85 (#1506 review): a root checked and then swapped, before the rules go
+/// D107 (#1506 review): a root checked and then swapped, before the rules go
 /// in, for a symlink to the token directory, as a peer with write access to
 /// its parent could do. The rules land on the directory that was checked,
 /// so the agent reaches it under its new name and never reaches the tokens.

@@ -36,7 +36,7 @@ Precise contracts used by this guide:
 | D17 | Build in the rusty_mill monorepo | Agreed 2026-11-02 |
 | D18 | The dedup experiment gets a fresh repo and intent only | Agreed 2026-11-01 |
 | D19 | The Factory repo holds process and config only | Agreed 2026-11-02 |
-| D20 | No fourth executor: extend orch | Agreed 2026-11-02 |
+| D20 | No fourth executor: extend orch (reopened by D103, re-closed by D104) | Agreed 2026-11-02; reopened 2026-11-04 (D103); re-closed 2026-11-05 (D104) |
 | D21 | Thin slice first, then let it build itself | Agreed 2026-11-01 |
 | D22 | Ground truth sits outside the agents' loop | Agreed 2026-11-02; designed in D37 |
 | D23 | Defer existing code and the smaller gaps | Agreed 2026-11-02 |
@@ -82,7 +82,7 @@ Precise contracts used by this guide:
 | D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
-| D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
+| D66 | The #600 builder-session design is approved (launch path reopened by D103, re-closed by D104) | [stated] 2026-11-04 (#600); reopened 2026-11-04 (D103); re-closed 2026-11-05 (D104) |
 | D67 | #722 drops the claim/evidence hash DAG; a linear per-line chain only | [stated] 2026-11-04 (#722) |
 | D68 | #722: a broken chain fails every load | [stated] 2026-11-04 (#722) |
 | D69 | #722: chained line framing, no BBP schema bump | [stated] 2026-11-04 (#722) |
@@ -100,10 +100,25 @@ Precise contracts used by this guide:
 | D86 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
 | D88 | #704 D42 expiry pause: go-live, count, what pauses, opt-out | [default] 2026-11-05 (#704) |
 | D91 | #704 slice 3: erosion escalation detail in the inbox | [default] 2026-11-05 (#704) |
+| D92 | #599 track records: job rows, pivotal scope, ground truth, weight, PR split | [default] 2026-11-05 (#599) |
+| D93 | #599 track records score pivotal reviews against ground truth only | [stated] 2026-11-04 (#599) |
+| D94 | Let Em Loose designs live in the repo, in their first draft PR | [stated] 2026-11-04 (general) |
 | D96 | #708 orch runs the alien lens's probes itself, sandboxed | [stated] 2026-11-05 (#708) |
 | D97 | #708 slice 4d: probe scratch trees and cargo time limit | [default] 2026-11-05 (#708) |
 | D98 | #708 alien hunt reads the candidate and its diffs through `get_artifact` | [default] 2026-11-05 (#708) |
 | D99 | #708 slice 4c: `lens run --alien`, its config entry and its trigger | [default] 2026-11-05 (#708) |
+| D100 | Design mux-hosted agent ptys (D20 and D66's launch path reopened for that design) (superseded by D103) | [stated] 2026-11-04 (mux, #600) |
+| D101 | Tools go through the gateway, and the agent process is jailed | [stated] 2026-11-04 (#726) |
+| D102 | orch and the gateway stay separate | [stated] 2026-11-04 (#726) |
+| D103 | Agents get mux-hosted ptys (supersedes D100; reopens D20 and D66) | [stated] 2026-11-04 (mux, #600, #726) |
+| D104 | The mux-hosted agent ptys design is approved (re-closes D20 and D66) | [stated] 2026-11-05 (mux, #600, #726, #732) |
+| D105 | Takeover events go under claims log schema 5, with no schema 6 bump | [default] 2026-11-05 (mux, #732) |
+| D106 | `human_touched` is derived in the fold, not stored | [default] 2026-11-05 (mux, #732) |
+| D107 | `lel-jail` v0 launch contract: `orch-jail` crate, `jail.json` fields, setup order, tests | [default] 2026-11-05 (#600, #732) |
+| D108 | #600 cgroup holder, slot hand-off and cgroup `quiesce` | [default] 2026-11-05 (#600, #732) |
+| D109 | Takeover end drains delivered input through `takeover_closing` (amends D104 item 2) | [stated] 2026-11-05 (mux, #732, PR #1502) |
+| D111 | #599 `rusty_orch lens record`: read-only calibration report command | [stated] 2026-11-05 (#599) |
+| D112 | #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance | [stated] 2026-11-05 (#599) |
 
 ## D1. Lenses, not stages
 
@@ -229,6 +244,8 @@ Precise contracts used by this guide:
 **Why.** A fourth would deepen the duplication the consolidation audit is trying to remove.
 **Rejected.** A new standalone executor.
 **Resolved 2026-11-02.** The reconnaissance found super-board already retired (2026-10-28), so two executors remain. The lens runner extends orch, next to the dispatcher on orch's existing model port. mill-runner is left alone.
+**Reopened 2026-11-04 (D103).** Nano: "Option C [stated]. Agents get mux-hosted ptys. This deliberately reopens D20 and D66; log both as reopened, with this as the reason." (thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z)). The text above stands until the D103 design is approved; that design must show D20's guarantees still hold with orch deciding and the mux hosting.
+**Re-closed 2026-11-05 (D104).** orch is the only executor; the mux hosts ptys. The mux forks an agent only when orch asks and never kills one on its own; each `bbp mod` guarantee maps as in mux-hosted-agents-design.md §3. Nano approved it on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra, 2026-11-05T00:00:23Z.
 
 ## D21. Thin slice first, then let it build itself
 
@@ -603,6 +620,8 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_c00104fb2fa0499c8f471bddcbb64cbc
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
+**Reopened 2026-11-04 (D103).** Nano reopened D66 together with D20 for mux-hosted agent ptys (thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z)), quoted in D20. The builder launch path (the orch-bbp builder launch profile) is what the D103 design revisits; the rest of D66 stands until that design is approved.
+**Re-closed 2026-11-05 (D104).** The #600 builder launch goes through the mux `Launch` (jail launcher as the block's process) in place of a direct spawn. Its lease, sandbox, wall clock and mirror are unchanged. Nano approved it on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra, 2026-11-05T00:00:23Z.
 
 ## D67. #722 drops the claim/evidence hash DAG; a linear per-line chain only
 
@@ -782,6 +801,53 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Key.** lel:704:escalation-detail-build-defaults
 **Source.** Questions Q1–Q4 from the #704 slice 3 build thread, 2026-11-05; D30, D41, D43, D45, D82; QA.md § Erosion gate; card #704 Build 3 and Done when; `rusty_bbp_host` `src/inbox.rs` `Escalation`, `Reason`; `rusty_erosion` `src/main.rs` `render`. Numbered D91 because open PR branches already use D89–D90. Its open question is Q23 because open #1520 uses Q21–Q22.
 
+## D92. #599 track records: job rows, pivotal scope, ground truth, weight, PR split
+
+**Decision.** Build detail for #599 track records (599-build-plan.md §2), inside D58 and D93:
+- **Job rows.** The D58 orch-store table `lens_record` holds one row per answered blind `Review` or `LookHarder` job: task, lens, claim, epoch, slot, the MsgIds the job posted, and an `unsure` flag. A job answered with nothing, or whose reply the protocol refused, is a row with no items and counts 0 in the denominator, so refusing isn't free. `Skipped` jobs and jobs no provider could answer are not written. A row is saved before the scheduler state. Saving the same job key again unions its items, so a job rerun after a crash keeps every item it posted, and leave-one-out removes them all together.
+  - **Partial posts.** When a post fails partway (`PostError { posted, unsure, error }`) after something landed, or after an answer was lost, the job is recorded as answered with the posts that landed. Its row keeps their ids, the scheduler marks it answered over that prefix, and it is never asked again. That way no fresh evidence is posted next to what is already on the board. An answer counts as lost when the one same-op resend didn't return it, which means the post may have landed under an unknown id. The row is then marked `unsure`, and the flag stays set when the row is saved again. A job with nothing landed and no lost answer is abandoned and asked again as before.
+    - **Remaining window:** a crash after the row is saved but before the scheduler state is kept. The job can then be asked again from the older state. Its new items are added to the same row, the union rule above, and a sticky `unsure` keeps it unscored.
+  - **Write-ahead.** Before a job's first post, its row is saved with `pending` set and no items. So is every other row an attempt saves, an empty answer's or a refused reply's included, so a save that clears `pending` always completes its own attempt. The post-round save clears `pending` and adds the job's items to the row. If a job's write-ahead finds its row still `pending`, an earlier attempt crashed or failed its save and may have posted under ids nobody knows, so the row is marked `unsure` and the flag stays set. A row still `pending` when scored is treated like an unsure job: never scored, pivotal on a line settlement, and kept in `assigned`. A crash before any post leaves a pending row with nothing on the board, which is unscored too. That is conservative: it costs a point the lens may have earned, and it never awards one. `pending` is part of the v1 row with a serde default, because the table hasn't shipped.
+  - **Unsure jobs.** An unsure job is never scored. Its lost item could change all of these:
+    - its direction, since the item may go the other way;
+    - whether it cites the golden report, since the item may be `executed`;
+    - its weight, since `upset` is judged from its first own item.
+
+    So scoring its known items, even against golden or a `Human` or `Choose` outcome, could award points the record doesn't support. On a line settlement it counts as pivotal, and it is not pivotal on a `Human` or `Choose` settlement. Either way it stays in `assigned` and is never in `scored`. No id is inferred, and nothing is replayed under a new op.
+  - **Other details.** `unsure` is part of the v1 row, because the table hasn't shipped. Points are folded from the rows and `claim_history` when read, never stored. `Record`'s `found_problems`, `found_nothing_twice` and `refused` fields are left as they are, not wired and not deleted, in this PR.
+- **Pivotal scope.** A claim's settlement is its latest `Status` step that changed its status. A step that leaves the status unchanged, such as an `ActionUnconfirmed` escalation that leaves it `Accepted`, settles nothing. If that settlement isn't `Accepted` or `Dropped`, the job is pending. Leave-one-out applies only when the settlement is `AcceptLine` or `DropLine`. A `Human` or `Choose` settlement didn't depend on the score, so the job is never pivotal and is scored against that outcome. That is how a later Nano reversal acts as ground truth: no separate reversal source is needed, and golden and reversal can't conflict.
+- **Ground truth for a pivotal job.** The final `golden:` report (not `holdout:`, which a model wrote) on `current(c)`'s code at settlement: passed means accept was right, failed means drop was right. It doesn't count for a job whose own items cite that report. There is no shadow-run source yet; #598's approved `shadow:` profile kind (D62) is the expected producer. Ground truth is an internal function in `orch-lens::record`, with no new port.
+- **Weight.** A pivotal job scored against ground truth uses the same `w = 1 + contested + 2·upset`, with its own items removed and `upset` judged against the ground truth.
+- **PR split.** Track records are a PR of their own; lessons (§3) and `lens why` (§5) follow in later PRs.
+- **Interim limits (2026-11-05, until Q35).** `claim_history` doesn't carry everything the rules above need, so the first build is conservative. Each limit only makes more jobs unscored-pivotal. None scores a job against the board outcome, and all of them show in the `pivotal` count. The code and 599-build-plan.md §2 note them.
+  1. *Author minimum.* A line rule doesn't carry `min_authors`. If removing the job's items would remove the lens as a distinct author, the job counts as pivotal.
+  2. *Woken items.* The history keeps a woken item's append-time epoch and `scoring` flag, and has no `dormant` flag. An `Evidence(m)` reopen counts item m as live in the new epoch. `Dep` and `Intent` reopens wake nothing. A `Human` reopen wakes dormant items. BBP marks an item dormant only when it is `executed` evidence posted against a closed claim's status (counter while accepted, support while dropped) while a dep was closed, and the history doesn't show the dep. So if a `Human` reopen into the settlement's epoch exists and any item on the claim, from any author, fits the kind, direction and status test, every job on that line settlement counts as pivotal.
+  3. *Golden provenance.* Only a `Failing` step shows a `golden:` result, so a passed golden set isn't visible. BBP keeps `failing` when `current` changes, and the history has no candidate steps, so a failing step can't be tied to the candidate current at settlement. The pure rule gives golden ground truth (drop was right) only when the failing report tested the candidate current at settlement. The `bbp why` path carries neither, so golden truth is withheld there until Q35. D93's required test runs on the pure rule.
+  4. *Citation.* Evidence steps carry no refs, so a job whose own items include `executed` evidence gets no golden ground truth. This stands in for "its items cite that report".
+**Why.** These are implementation details inside the approved design. Each is the most reversible option: scores are computed when read, so a later rule change recomputes them from the stored rows. Only `golden:` sets are signed off by Nano, and a holdout lens can't be judged by its own report. A port would add to D58's approved list, which the build plan says nothing does.
+**Rejected.** Storing points. Leave-one-out on human settlements. Treating a reversal as a separate source, ranked against golden. `holdout:` reports as ground truth. A `GroundTruth` port now. One PR for track records, lessons and `lens why`. Inferring an unknown post's id, or replaying it under a new op. Scoring an unsure job's known items against ground truth. Leaving the post-before-save window as an interim limit. Letting a retry's save clear an earlier attempt's `pending` without marking the row `unsure`, including a retry that posts nothing (an empty answer or a refusal).
+**Tag.** [default] · remind-me: mem_6f0738d7778847d0b13fac1f7d458b68
+**Key.** lel:599:track-record-build-defaults
+**Source.** let-em-loose-expert, 2026-11-05, answering questions 1–4 and 6 from the #599 track-record build thread; D58, D93 (PR #1518), 599-build-plan.md §2, `bbp-claims-addendum.md` § Holdout suites (G1), `rusty_bbp::history::Rule`. Question 5 (a `lens record` subcommand) is OPEN_QUESTIONS Q34. Interim limits: coordinator follow-ups A and B, 2026-11-05; `claims_engine.rs` `accept_line`/`drop_line`; `rusty_bbp::history` `Change`, `Rule`; OPEN_QUESTIONS Q35. PR #1520 Codex findings on reopen activation and golden provenance, 2026-11-05; `claims.rs` item append (`dormant`), `ClaimReopened` fold, `on_artifact`. PR #1520 review fixes on the settlement step and partial posts, 2026-11-05 (commits 89490a8f1, 619b735c5); `Board::post` `PostError`. dottiusmaximus's re-review question on PR #1520, 2026-11-05 (commit 5fcf62541). PR #1520 Codex finding on duplicate board effects, 2026-11-05 (commit 570e88396, `round::partial`). PR #1520 Codex finding on posts lost before the row save, 2026-11-05 (run.rs:295-299, discussion_r4485013131); dottiusmaximus's follow-up on retries that post nothing, 2026-11-05 (comment 6667319872).
+
+## D93. #599 track records score pivotal reviews against ground truth only
+
+**Decision.** Option A plus ground truth. A pivotal review is one whose outcome flips once the lens's own evidence is removed. It is not scored against the board outcome, and each lens reports a pivotal count beside its points. Where the claim has ground truth (a golden-set test, a shadow-run result, a later Nano reversal), the pivotal review is scored against that instead. With no ground truth it is unscored and counted as pivotal. The 20-item calibration report shows, per lens: points, scored count, pivotal count, and pivotal-with-ground-truth count. Required tests: pivotal with no ground truth is unscored and counted; pivotal with ground truth is scored against the ground truth; a non-pivotal review is scored as before; a lens that flips an outcome it bet on earns nothing from the flip. This answers OPEN_QUESTIONS Q17.
+**Why.** Ground truth isn't moved by the lens's vote, so scoring against it can't be gamed. Reporting the counts keeps "unmeasured" visible, so it doesn't read as "bad".
+**Rejected.** Scoring pivotal reviews against the board outcome, which the lens itself moved. Leaving every pivotal review unscored, even where ground truth exists. The other Q17 options: pivotal reviews at w = 1, or dropping the pivotal rule.
+**Tag.** [stated] · remind-me: mem_3f1158fb8fe0485697a8a713fc86469f
+**Key.** lel:599:track-record-pivotal
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Track-record question: option A, plus ground truth". OPEN_QUESTIONS Q17 (card #599 Q2). Numbered D93 (first drafted as D84) under the 2026-11-05 allocation that gives this thread's open PRs D92–D95. Confirmed by Nano's tap of option A, "Keep, report a pivotal count", on decision card cmsg_014AqbZs58L565hMV2pFkCX5FmbGRzqBvub8s2BWcnKhkV (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:17Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5E4QqeAo7EVN379KMrdxNJa). The card was posted before the 11-04 message and doesn't mention ground truth. The ground-truth scoring was confirmed when Nano told dottiusmaximus directly "1518 and 1520 I approve", after the queue had explained D93's pivotal-review ground-truth scoring. dottiusmaximus recorded this on PR #1518 (comment 6669751039, 2026-11-05T21:15:38Z) and PR #1520 (comment 6669752737, 2026-11-05T21:15:43Z). Neither comment claims the 11-04 thread message was retrieved independently.
+
+## D94. Let Em Loose designs live in the repo, in their first draft PR
+
+**Decision.** Every Let Em Loose design goes into `docs/projects/let-em-loose/` as part of its first draft PR, never only in `/mnt/project-files/` or session scratch. The rule is in the let-em-loose-expert pack (sources, step 4) and the let-em-loose row of the scoped `CLAUDE.md` rule.
+**Why.** `/mnt/project-files/` doesn't survive between sessions: the #594 and #599 designs were both lost there.
+**Rejected.** Keeping designs in `/mnt/project-files/let-em-loose/` or in session scratch.
+**Tag.** [stated] · remind-me: mem_aff6060cd75743ef9807b92006c3f1c7
+**Key.** lel:general:designs-live-in-repo
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Design docs live in the repo, never in session scratch." Numbered D94 (first drafted as D85) under the same allocation. Confirmed when Nano told dottiusmaximus directly "1518 and 1520 I approve", after the queue had explained D94's designs-in-repo rule. dottiusmaximus recorded this on PR #1518 (comment 6669751039, 2026-11-05T21:15:38Z), which doesn't claim the 11-04 thread message was retrieved independently.
+
 ## D96. #708 orch runs the alien lens's probes itself, sandboxed
 
 **Decision.** orch runs the alien lens's model-written probe tests itself, in a sandbox. A `SandboxProbes` adapter in `rusty_orch`, behind orch-lens's `Probes` trait, builds a scratch worktree of base plus the candidate's diffs. It runs `cargo test -p <crate> --test probe_<claim>_<n>` with `--no-run` first, then runs the test on the candidate and on base, all with no network. `rusty_orch` adds the in-workspace crates `rusty_sandbox` and `rusty_worktree` as dependencies (they are already workspace members and `[workspace.dependencies]`, so no external crate or version changes). This was on the card as option A's stated consequence, so Nano's choice covers it. D75 §6 assumed an "existing lens sandbox"; orch had none, and both crates were used only by `rusty_bbp_host` (`run_control.rs`, `confine.rs`). This entry replaces that assumption. v1 stays shadow-only, and the trait leaves room for v2 to move execution to the host.
@@ -829,3 +895,158 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_cbd770c24a464ce881d6173e02d28402
 **Key.** lel:708:alien-run-pass
 **Source.** The #708 slice 4c build, 2026-11-05 (builder default, not a Nano decision). `708-alien-lens-design.md` §2–§4, D75, D78, D96, D97, D98. `orch-lens` `src/config.rs`, `src/schedule.rs`. `rusty_orch` `src/lens/hunts.rs`, `src/lens/run.rs`. Last number in this thread's D96–D99 allocation.
+
+## D100. Design mux-hosted agent ptys (D20 and D66's launch path reopened for that design)
+
+**Decision.** Nano chose to design, not build, rusty_mux hosting the ptys of Let Em Loose agents (he asked whether the lens runner could be a mux-hosted agent). For that design only, D20 (no fourth executor) and D66's approved #600 builder launch path (the orch-bbp builder launch profile) are reopened. D25 still applies: the design goes on a card and Nano approves it before any code. This does not by itself decide that the mux becomes an executor or that process lifecycle leaves orch and `bbp mod`; those are the design's questions, along with the collisions in the convergence brief (sandbox has no Unix sockets, `RUSTY_MUX_SOCKET` inheritance against D13, input lease against D8/D13, mux status not being evidence under D3/D22). Until a design is approved, D20 and D66 stand as written.
+**Why.** Nano wants agents visible and hosted in mux panes. Designing first keeps the choice reversible.
+**Rejected.** A watch-only card after #600 (the recommended option A). A watch-only card now (option B).
+**Tag.** [stated] · remind-me: mem_8d721e801bdf4d65a98e6035ad7c6b37
+**Key.** lel:mux:hosted-agents-design
+**Source.** Nano tapped option C "Design mux-hosted agents" ("The mux hosts agent ptys. This reopens D20 (no fourth executor) and the approved #600 design.") on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4MQRCC8E9wvaXezDJg8oqev ("Choose how agents should appear in rusty_mux panes"), 2026-11-04T22:28:51Z; preceded by thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4Nuc7mwNdskgzVg6vK8gWfC (20:07Z), "could the lens runner not be a mux hosted agent?". Context: remind-me mem_d92731e7311c4e90ae9256036eff3cd1 (rusty_mux stays an agent substrate, no orchestration), PR #1470 roadmap arc 4. Numbered D78 on PR #1496's branch; moved to D100 on 2026-11-05 because main assigned D78–D88 first.
+**Superseded 2026-11-04 by D103.** Nano decided that agents get mux-hosted ptys, so D100's "design only; doesn't decide that the mux hosts" framing no longer holds. Design first (D25) still applies.
+
+## D101. Tools go through the gateway, and the agent process is jailed
+
+**Decision.** #726's "every action passes through the sandbox via ACP" is replaced by two parts. First, tools go through the gateway: it extends agentgateway-mcp, not rp-mcp, and enforces per call on everything that leaves the jail (push, PR, merge, board, secrets, network). Second, the agent process is jailed, which limits what it can reach: namespaces and a cgroup, overlayfs mounts plus rusty_sandbox Landlock, egress denied by default except to the gateway, and seccomp. No secrets go inside; the agent gets only a short-lived token scoped to the lens and the claim. An agent_cloud microVM around it is optional, and required for untrusted agents. The agent's built-in tools stay on; edits inside the jail land only in the agent's own throwaway layer. Audit comes from a witness outside the jail, not from the agent: the upper-layer diff, an exec log (audit/eBPF by cgroup) and the gateway's tool-call log, posted on the claim as hashed digests. Denials and out-of-scope writes are posted right away. ACP `session/update` is self-reported and low-trust; a mismatch with the witness counts as evidence against the claim. ACP is the adapter orch uses to drive agent sessions (compared with the existing executors on #594), not a security boundary. Holes to plug: shared `.git` (a read-only object store, with a per-agent clone via `objects/info/alternates`) and shared sccache (read-only for critics, content-keyed writes for builders).
+**Why.** Spike #727 showed ACP can't enforce anything: the Claude Code adapter stopped delegating fs and terminal in v0.18.0, Codex runs commands in its own sandbox, ACP v2 drops client fs and terminal, and `request_permission` is only a prompt. Risky actions all leave the jail through tools or the network, where the gateway and egress rules can govern them.
+**Rejected.** Every action passing through the sandbox via ACP. Building the gateway on rp-mcp.
+**Tag.** [stated] · remind-me: mem_b37d92b6e738462b95873adb4d4250ea
+**Key.** lel:726:gateway-and-jailed-agent
+**Source.** Mill Board card #726, comment by claude-cloud at 1793816610843 ms, "Decisions, Nano, 2026-11-04 (after spike #727)", D-a. Nano asked for it to be in this file in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z). Numbered D79 on PR #1496's branch; moved to D101 on 2026-11-05 because main assigned D78–D88 first.
+
+## D102. orch and the gateway stay separate
+
+**Decision.** orch decides: it composes the lens, picks the model, drives the ACP session and mints the token. The gateway enforces: it checks the token, applies the TOML lens policy, filters tools and passes identity upstream. The gateway runs as its own process, as a security boundary, while orch stays a monolith. Neither imports the other; their shared contract is the lens/policy schema plus the token's claims, kept in Factory config. The gateway also serves callers orch didn't launch. Upstream modes: stateless servers are pooled, with identity sent on each call (remind-me, Mill Board, Tick, web); GitHub is pooled per credential; stateful servers get a session per agent (sandbox fs/shell, browser, REA); unknown servers default to per-session. Gmail, Drive and Calendar aren't exposed. The gateway sets the actor on Mill Board and `written_by` on remind-me from the token, and strips any actor value the agent supplies. Build order (from #727): session tied to token (S), identity passed upstream (M), per-session upstream connections and teardown (L+M), TOML lens policy (M), sandbox fs/shell MCP (M), process jail (L), skill libraries (M).
+**Why.** Separation of duties: a bug or prompt injection in orch can't bypass enforcement. Hard fault isolation around a security boundary is a valid reason to run a separate service.
+**Rejected.** Enforcement inside orch. Either side importing the other.
+**Tag.** [stated] · remind-me: mem_4c1e425c3d2b4903b3cd6f6aae5e37e6
+**Key.** lel:726:orch-gateway-separate
+**Source.** Mill Board card #726, comment by claude-cloud at 1793816610843 ms, "Decisions, Nano, 2026-11-04 (after spike #727)", D-b. Nano asked for it to be in this file in thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z). Numbered D80 on PR #1496's branch; moved to D102 on 2026-11-05 because main assigned D78–D88 first.
+
+## D103. Agents get mux-hosted ptys (supersedes D100; reopens D20 and D66)
+
+**Decision.** Let Em Loose agents run in rusty_mux-hosted ptys. This supersedes D100's narrower "design only, doesn't decide that the mux hosts" framing, and deliberately reopens D20 and D66 (see their Reopened notes). The design follows six constraints:
+1. **orch decides, mux hosts.** orch requests a block. The block's process is the jail launcher (rusty_sandbox plus #726's mounts, seccomp and token, D101), which execs the agent. The design specifies the mux API orch needs (open, kill, quiesce, process-group and slot-hold semantics) and shows that D20's guarantees still hold.
+2. **The mux socket never enters the jail.** The `RUSTY_MUX_SOCKET` scrub stays in orch-bbp's SCRUB. The pty crosses the boundary; the control socket doesn't (D13).
+3. **Human input is off by default.** Takeover is explicit, and every takeover and input batch is recorded on the board against the claim. The design proposes the BBP event shape as an ask-first schema change.
+4. **Record vs. display.** The block shows orch's ACP `session/update` stream and the live pty. Evidence stays the witness diff and exec log plus the gateway log (D101). Mux scrollback is never evidence.
+5. **Topology.** The mux server runs on BaileyAi (D53); rusty_term on Nano's desktop attaches remotely. The design checks whether rusty_mux supports remote attach and, if not, sizes the work.
+6. **Scope.** #600 builders first, then lens sessions under #726. Codex stays a one-shot lens in v0 (D64).
+Design first (D25): the design doc goes in `docs/projects/let-em-loose/` for Nano's approval; no code. Rusty Term owns the mux and term side, LEL owns orch launch, the jail and board events: one cross-project card, one PR per side.
+**Why.** Nano wants agents to live in mux blocks, one environment instead of a watcher over logs. Keeping orch as the decider, the jail as the block's process and the witness as the only evidence keeps D13, D3 and D22 intact.
+**Rejected.** A watch-only card after #600 or now (D100's options A and B). Treating mux scrollback or the ACP stream as evidence.
+**Tag.** [stated] · remind-me: mem_833a5f7ac502415a90e7747bb23fc815 (supersedes mem_8d721e801bdf4d65a98e6035ad7c6b37 and mem_ed61a2115b084bbf8798285bcbeeac86)
+**Key.** lel:mux:agents-get-mux-hosted-ptys
+**Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG (2026-11-04T23:51:22Z), thread cmsg_01WgyiM31RsSnZTgNuPX2VE4KPB5ARgEwMpYqdBDPfmTDb: "Nano decision 2026-11-04: Option C [stated]. Agents get mux-hosted ptys. This deliberately reopens D20 and D66; log both as reopened, with this as the reason." Numbered D81 on PR #1496's branch; moved to D103 on 2026-11-05 because main assigned D78–D88 first.
+**Approved 2026-11-05 (D104).** The design for this decision is approved; see D104.
+
+## D104. The mux-hosted agent ptys design is approved (re-closes D20 and D66)
+
+**Decision.** Nano approved `docs/projects/let-em-loose/mux-hosted-agents-design.md` with all eight §10 recommendations:
+1. The design is approved as a whole. D20 is re-closed as "orch is the only executor; the mux hosts ptys" (§3). D66 is re-closed with the #600 builder launch through the mux `Launch`; its lease, sandbox, wall clock and mirror are unchanged.
+2. The BBP takeover events in §5 are approved as shaped: `takeover_started`, `takeover_input` and `takeover_ended`, the human verb `takeover`, log schema 6 for claims tasks (earlier logs byte-identical), and `human_touched` on the candidate manifest and `claim_card`. This clears that ask-first schema change; scoring is unchanged and takeover doesn't count toward `min authors`.
+3. Takeover input is recorded as-delivered with a hash chain, not write-ahead.
+4. Mux §9 rows 1, 2, 3, 5 and 8 start now; 4 and 6 are deferred, with a viewer program for 6. This is also a Rusty Term decision: this is the LEL view, and the Rusty Term pack records its own.
+5. A granted input lease survives rusty_term's reconnect grace until its `until`, and is refused on re-ask once revoked. This keeps rusty_term D44 and D46.
+6. Remote attach: (a) Windows `--ssh` plus the C26 map entry `nano → orch-runner` first; (b) a mux client inside rusty_term later.
+7. #600 starts `lel-jail` on rusty_sandbox, seccomp and cgroup; the #726 layers (overlay, gateway-only egress, the witness) come later behind the same `jail.json`.
+8. Lens sessions in blocks (the D8 and D54 conflicts) are decided when #726 reaches lens sessions. Nothing changes now; lenses stay orch-side and one-shot.
+Each side may now start its PR under card #732 (§11). Review and merge gates still apply.
+**Build note (D105, D106).** Item 2's "log schema 6" is implemented as new claims-mode events under schema 5, with no bump (D105), and `human_touched` is derived in the fold (D106). The events, the verb, payloads, visibility and the byte-identical guarantee are as approved.
+**Amended by D109.** Item 2's event set gains `takeover_closing`, and `takeover_ended` is host-only.
+**Confirmed (reported) 2026-11-05.** dottiusmaximus reported on PR #1496 (https://github.com/Rusty-Mill/rusty_mill/pull/1496#issuecomment-6670572840, 2026-11-05T21:55Z) that Nano confirmed in the queue conversation: "1496 is approved". The reviewer counts this as fresh owner approval of the PR's mux-hosted agent design. It is a reviewer's relay, not Nano's own record, so the tag stays `[stated]` on the decision card below. The reviewer notes that the earlier decision cards weren't retrieved independently. The approval doesn't authorize a merge, a live launch, a host operation or spending, and review and CI gates still apply.
+**Why.** Design first (D25) on D103. Both experts checked the design against the code. orch stays the only executor and the mux only hosts ptys, so D20's guarantees and D13 hold, and evidence stays the witness (D101). This closes OPEN_QUESTIONS Q13 (design §6: builder session files under `<dir>/builders/<claim>/<n>/`).
+**Rejected.** Approving the design but holding the takeover schema for a separate review (option B). Changes first (option C). Write-ahead recording.
+**Tag.** [stated] · remind-me: mem_fe60aaf6dae240b8b820ef918c6dca4f
+**Key.** lel:mux:hosted-agent-ptys-design-approved
+**Source.** Nano tapped option A "Approve as recommended" ("§10 items 1-8 take the recommended answers, the takeover schema change is approved, and each side can start its PR.") on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra ("Approve the mux-hosted agent ptys design with all eight recommendations?"), 2026-11-05T00:00:23Z, thread cmsg_01WgyiM31RsSnZTgNuPX2VE4KPB5ARgEwMpYqdBDPfmTDb. Numbered D82 on PR #1496's branch; moved to D104 on 2026-11-05 because main assigned D78–D88 first.
+
+## D105. Takeover events go under claims log schema 5, with no schema 6 bump
+
+**Decision.** `takeover_started`, `takeover_input` and `takeover_ended` (D104 item 2) are added as claims-mode events under `LOG_SCHEMA_CLAIMS` = 5 and written only when a takeover happens. There is no log schema 6. The event names, the human verb `takeover`, payloads and visibility are as approved; only D104's "log schema 6" wording changes.
+**Why.** The design's aim was "earlier logs stay byte-identical; nothing is written when there's no takeover", and this meets it with a smaller change. #597 set the precedent under the accepted contract: `HoldoutExtended`, `HoldoutUpdated` and `holdout_digest` were added under schema 5 (addendum § Schema and API changes item 12). `Event` is an externally tagged serde enum with no catch-all, so a build that predates takeover refuses a log containing one rather than misreading it; the variant is the fence. A bump would make every new claims task unreadable to older builds even with no takeover, and `state.rs` takes claims mode from `schema == LOG_SCHEMA_CLAIMS`. Nano can't tell the two apart without reading the code.
+**Rejected.** Log schema 6 for every new claims task. An open-time opt-in flag.
+**Tag.** [default] · remind-me: mem_6385fa126f2349c09e26b166d4e2c5e7
+**Key.** lel:mux:takeover-events-under-schema-5
+**Source.** Caller question from the #732 LEL build, 2026-11-05; `rusty_bbp/src/event.rs` (`LOG_SCHEMA_CLAIMS`, `HoldoutExtended`, `HoldoutUpdated`), `src/state.rs`; bbp-claims-addendum.md § Schema and API changes items 1 and 12; D104. Numbered D83 on PR #1496's branch; moved to D105 on 2026-11-05 because main assigned D78–D88 first.
+
+## D106. `human_touched` is derived in the fold, not stored
+
+**Decision.** `human_touched` (D104 item 2) is computed by the claims fold and shown on `claim_card` and in the inbox; it isn't a stored field on the candidate manifest. A candidate submitted for claim c is `human_touched` when a `takeover_started` on c in the same epoch comes before it, whether or not that takeover is still active when the candidate is submitted. Scoring is unchanged, and a takeover doesn't count toward `min authors`.
+**Why.** Nano sees the same flag either way, and a derived flag writes nothing to the log, so it can change without a schema change. Design §5 marks a candidate "stored from a session that had a takeover", so a takeover that ended before submission still counts; "active at submission" would miss it. Over-marking is the safe direction.
+**Rejected.** A stored `human_touched` manifest field. Marking only candidates submitted while a takeover is active.
+**Tag.** [default] · remind-me: mem_2d7809b2d14348079cb2974291b865d6
+**Key.** lel:mux:human-touched-derived-in-fold
+**Source.** Caller question from the #732 LEL build, 2026-11-05; mux-hosted-agents-design.md §5 "Effect on claims (v0)"; D104. Numbered D84 on PR #1496's branch; moved to D106 on 2026-11-05 because main assigned D78–D88 first.
+
+## D107. `lel-jail` v0 launch contract: `orch-jail` crate, `jail.json` fields, setup order, tests
+
+**Decision.** Implementation defaults for the v0 jail launcher inside the approved design (D104 item 7; mux-hosted-agents-design.md §2 step 5, §4, §8 item 1):
+1. **Crate.** `crates/apps/rusty_orch/crates/orch-jail`: a lib with `JailSpec` (sans-IO parse and validate of `jail.json` through `rusty_serde`) and the bin `lel-jail`. orch-bbp's builder launch (slice 6) writes the spec with the same type. Design §11's "in orch-bbp" is the PR's work split, not a crate layout.
+2. **`jail.json` v0 fields.** `cgroup` (absolute, under `/sys/fs/cgroup/`, no `..`), `status`, `cwd`, `read`, `write` (absolute roots; `cwd` inside a write root), `limits` {`cpu_secs`, `memory_bytes`, `file_bytes`, `open_files`, `processes`}, `env` (exact name/value list; any `RUSTY_MUX_*` name is refused, D13), optional `token` {`file`, `var`} (the file is outside every read and write root; `var` must not repeat an `env` name), `program`, `args`. Unknown fields are refused. There is no `sockets` field: v0 is fixed to `Sockets::InternetOnly`, so the file can't weaken it. Mounts, overlay and the network namespace are added later behind the same file (§8).
+3. **Setup order.** Validate; require fds 3 and 4 open (fail closed); join the cgroup through `<cgroup>/cgroup.procs`; `close_range(5, max)`; read the token; hand off to `rusty_sandbox::run_helper` with `Sockets::InternetOnly` (the same profile the bbp_host harness uses, `rusty_bbp_host/src/confine.rs`). A failure before the handoff writes the status file, prints to stderr (the pty) and exits 125 (`SETUP_FAILED`). v0 unshares no namespaces: §2 step 5's namespace list is the #726 target, and D104 item 7 and §8 put those layers later.
+4. **Tests in this slice.** Spec unit tests (happy path, relative path, unknown field, `cwd` outside the write roots, a `RUSTY_MUX_*` env name, a token file inside a root). A Linux integration test that runs the built `lel-jail` and checks the exec'd program sees only fds 0–4, `RUSTY_MUX_SOCKET` is unset and `socket(AF_UNIX)` fails, plus fail-closed when fd 3 or 4 is missing. It skips with a printed reason when no writable cgroup is available. §4's "the socket path doesn't exist" test waits for the mount namespace; in v0 Landlock keeps the path out of reach. Holder tests are slice 5.
+**Known v0 gap.** `InternetOnly` allows any IPv4/IPv6 egress. 600-builder-session-design §4.3 wants none except the Claude endpoint, and the mirror makes dependencies offline. Enforcing that needs the network namespace, which D104 item 7 (newer and [stated]) defers with gateway-only egress. This is not a reversal.
+**Why.** A separate crate keeps Linux and `rusty_sandbox` dependencies out of orch-bbp, which has none today, and gives the writer and the reader one type. Reusing the existing helper and socket profile is the most reversible choice inside the approved design.
+**Rejected.** A bin inside orch-bbp. A configurable `sockets` field in v0.
+**Tag.** [default] · remind-me: mem_bfc73721060b45989e4f32393bcd3c52
+**Key.** lel:600:lel-jail-v0-launch-contract
+**Source.** Caller question from the D104 slice 4 thread (`lel-jail` v0), 2026-11-05; mux-hosted-agents-design.md §2, §4, §8, §10 item 7; D101, D104; `rusty_sandbox/src/helper.rs`; `rusty_bbp_host/src/confine.rs`. Numbered D85 on PR #1496's branch; moved to D107 on 2026-11-05 because main assigned D78–D88 first.
+
+## D108. #600 cgroup holder, slot hand-off and cgroup `quiesce`
+
+**Decision.** Implementation defaults for slice 5, inside the approved design (D104; mux-hosted-agents-design.md §2 step 3, §3, §11):
+1. **`bbp slot-hold --cgroup PATH`.** After stdin reaches EOF, the holder waits until `<cgroup>/cgroup.events` reads `populated 0`, not until a process group is empty. At `--deadline-ms` it writes `<cgroup>/cgroup.kill`, waits until the cgroup is empty, then exits. In this mode it never calls `killpg`.
+2. **The slot fd.** The holder takes the slot itself through the existing `slots.rs` (one implementation of the slot and `capacity` contract; orch-bbp stays CLI-only and doesn't link `rusty_bbp_host`). orch, the holder's parent, takes a dup of that same open file description with `pidfd_getfd` (`rusty_libc`'s pidfd calls; SCM_RIGHTS over a socketpair would do the same), and orch passes it to the mux as fd 3 (§2 step 4, D107). The holder, orch's copy and the jail's copy then share one lock, as §3 requires.
+3. **The cgroup directory.** A separate command, `bbp cgroup-open --dir D --task T --cgroup PATH`, writes the record `mod/<task>.cgroups/<name>` first, then creates the directory, as `groups.rs` records a group before anyone joins it. So no cgroup exists unrecorded after a crash. This replaces §2 step 2's "orch creates the cgroup", a wording detail: the cgroup still exists, empty, before `Launch`.
+4. **`bbp quiesce`.** For an ended task (as today), it also settles `mod/<task>.cgroups/*`. A populated cgroup gets `cgroup.kill` and a wait. An empty one is removed with `rmdir`, then its record goes. Killing by path is safe without the holder because each path is unique (`lel/<task>/<claim>/<n>`). It answers `true` only once every recorded cgroup is gone (§3).
+**Amended 2026-11-05 (PR #1507).** The record and `mkdir` step moved from the holder into `bbp cgroup-open`, with the same order. Slot-taking and the fd hand-off move to slice 6 with their first caller; until then the slot reaches `slot-hold --cgroup` on stdout. The hand-off uses `pidfd_getfd`, not SCM_RIGHTS. It needs ptrace-attach rights over the holder (Linux 5.6 or later; a Yama `ptrace_scope` of 2 or more refuses it), so a refusal must fail the launch closed, never launch without fd 3.
+**Amended 2026-11-05 (PR #1496 review, Codex comment 4484772928).** Items 1, 3 and 4 above summarise an earlier draft; the merged contract (`rusty_bbp_host/src/cgroups.rs` `open`, `hold`, `settle`; README § Admission, the cgroup paragraph) wins:
+- Item 3: `bbp cgroup-open` runs under the task's cgroup lock (`mod/<task hash>.cgroups.lock`) and refuses an ended task. It records the intent `mod/<task hash>.cgroups/<digest>`, then claims the path for the task with an exclusively created `mod/cgroup-owners/<digest of the path>` (drafted and renamed in whole, under one lock shared by every task; refused if any claim is the same path, an ancestor or a descendant), then creates the cgroup exclusively, and only then marks the record `created <inode>`. A failed open takes its record and claim back. The path must sit below `/sys/fs/cgroup/` and below this control directory's scope: exactly one name in it starts with `lel-store-`, the 16 hex digits `bbp cgroup-scope --dir D` prints. There is no `lel/<task>/<claim>/<n>` layout.
+- Item 1: `slot-hold --cgroup` opens the cgroup once, after `cgroup-open`, and reads and kills through that handle; from the deadline it writes `cgroup.kill` at every look that doesn't find the cgroup empty. A failed read or kill is reported and retried, never taken for emptiness.
+- Item 4: path uniqueness alone does not make a kill safe, and quiesce never kills by path. Under the same lock, it touches a cgroup only when the record is marked `created <inode>`, the task holds the claim, and the cgroup opened at the path has the recorded inode; it reads, kills and empties it through that pinned handle. Populated: `cgroup.kill`, answer stays `false`. Empty: its empty child cgroups (deepest first), then it, then the claim and record are removed. A bare intent, a record whose task doesn't hold the claim, or a cgroup made again at the path is left alone; the record is dropped, with the claim only if its task holds it, so a pre-existing or foreign cgroup is never killed or removed.
+**Why.** The design shows the holder as "an evolution of `bbp slot-hold`" and lists cgroup-based `quiesce` in `bbp` (§11), so these flags are inside what Nano approved. The hand-off keeps §3's "fd 3 inherited into the jail" guarantee without a second slot implementation.
+**Rejected.** orch-bbp linking `rusty_bbp_host` to call `Slots` in-process, which breaks its CLI-only boundary. Alternative B, where no slot fd goes into the jail: if the holder dies while the agent lives, the slot is freed early. That drops §3's kernel-lock guarantee and changes §2 step 4 and D107, so it would need Nano.
+**Tag.** [default] · remind-me: mem_5de884e478294bc8bc17ad735a185d32
+**Key.** lel:600:cgroup-holder-and-quiesce
+**Source.** Coordinator question for D104 slice 5, 2026-11-05; mux-hosted-agents-design.md §2 steps 1–4, §3, §11; D104, D107; `rusty_bbp_host/src/slots.rs`, `groups.rs`, `moderator.rs` (`quiesce`), README § slots; amendment: merged `cgroups.rs` and README § Admission (cgroup paragraph), Codex review comment 4484772928 on PR #1496. Numbered D86 on PR #1496's branch; moved to D108 on 2026-11-05 because main assigned D78–D88 first.
+
+## D109. Takeover end drains delivered input through `takeover_closing` (amends D104 item 2)
+
+**Decision.** A takeover ends in two steps:
+1. **`takeover_closing` {`takeover`, `reason`, `at`}.** New claims-mode event. The human's `TakeoverRelease` writes it with reason `released`; `Close` and `Cancel` write it for every live takeover, before the state change, with reason `turn_ended`. Input permission ends at `at`. There is no second release and no reopening.
+2. **Drain.** The host may still record `takeover_input` until `min(until, closing at)` + `TAKEOVER_DRAIN_MS` (10 s).
+3. **`takeover_ended`.** Host-only, written once, totals taken from the fold, with the reason the takeover closed with. A takeover with no `takeover_closing` ends `expired` (after `until`), `revoked`, `turn_ended` or `mux_lost`, never `released`. `bbp takeover-ended` accepts `--reason released` for a drained released takeover.
+4. **Terminal guard.** On a Closed or Cancelled task, only those two host writes for a closing takeover pass (`claims_engine::closing_audit`); everything else is still refused as terminal.
+Still under claims schema 5 (D105): no bump. D104's events, verb, visibility and hash chain are otherwise unchanged.
+**Why.** Recording is as-delivered (D104 item 3), so input the mux had already delivered could be lost if the end was recorded before orch posted its last batches. Stopping input at `at` and giving the host a bounded drain keeps the audit complete and still fails closed.
+**Rejected.** Release only asks orch to end the takeover (the human writes nothing). Accepting the loss.
+**Tag.** [stated] · remind-me: mem_b63239cb445d4a49a078d1a45590fa4e
+**Key.** lel:mux:takeover-closing-drain
+**Source.** Nano tapped option A, "Add a takeover_closing event", on thread decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE46GHhPehbN6LFb6VXZh2ZpE` at 2026-11-05T03:14:32Z. The card asked: "How should #1502 keep the last typed batch when you release a takeover or close the task?" Earlier, and first recorded: owner approval relayed by dottiusmaximus in a GitHub comment on PR #1502, https://github.com/Rusty-Mill/rusty_mill/pull/1502#issuecomment-6646844427 (2026-11-05T01:13Z), quoting the exchange: "#1502 needs a small audit-schema decision: delivered input can be lost when a takeover ends. I recommend adding a closing state that briefly drains already-delivered input before the host records the end. Are you okay with that?" Owner: "👍". Built in PR #1502 (head b5dd857e) and PR #1504 (head e4050a03). Numbered D87 on PR #1496's branch; moved to D109 on 2026-11-05 because main assigned D78–D88 first.
+
+## D111. #599 `rusty_orch lens record`: read-only calibration report command
+
+**Decision.** Add a read-only subcommand, `rusty_orch lens record`, that prints one JSON line per lens: points, scored, pivotal and pivotal-with-ground-truth (D93's calibration report). It goes in a follow-up PR after #1520. Until then the record shows in each lens's context line (D92). The approval covers this one command only.
+**Why.** D93 asks for a per-lens calibration report Nano can read, and no approved command fits it. A new public CLI command is on the ask-first list.
+**Rejected.** The context line only, with no new command.
+**Tag.** [stated] · remind-me: mem_55db68a49aa14242b83c4150dc738edf
+**Key.** lel:599:lens-record-command
+**Source.** Nano tapped option A, "Add lens record command", on decision card cmsg_014AqbZs58L565hMV2pFkCX524Ybpagn8gHAPAfimMrHys (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:06Z (tap message cmsg_014AqbZs58L565hMV2pFkCX574JBwmkjmMnGTFTzf3n9MZ). Closes OPEN_QUESTIONS Q34.
+
+## D112. #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance
+
+**Decision.** One additive view change to `rusty_bbp::history`, shown by `bbp why`, in one follow-up PR after #1520. It changes neither the log nor the schema (like D77). It adds:
+- `min_authors` on `Rule::AcceptLine` and `Rule::DropLine`;
+- passed golden results;
+- refs on evidence steps;
+- on each reopen step, the items it woke;
+- candidate steps;
+- on each `Failing` step, the candidate its report tested.
+The first three were approved first. The last three were added to Q35 after that card and approved on a second card. When the PR lands, all four of D92's interim limits end: golden truth is then tied to the candidate current at settlement and works on the `bbp why` path.
+**Why.** It is view-only and closes every gap behind D92's interim limits in one change. Without the reopen wakes and candidate provenance, lines after a human reopen stay pivotal and golden truth can't be tied to the code current at settlement. It is a public API change, so it needed Nano's go-ahead.
+**Rejected.** Only `min_authors`. No change, keeping the interim limits. Only the first three fields, keeping the interim limits for reopen wakes and golden provenance.
+**Tag.** [stated] · remind-me: mem_2bc7a496ac8c4d8aa821bfa826891f85
+**Key.** lel:599:history-track-record-fields
+**Source.** Nano tapped option A, "All three fields", on decision card cmsg_014AqbZs58L565hMV2pFkCX5SMdL73WvySEECojiZphZ7g (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:10Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5HzE9svLMYjuftbZk7JHiYM). The card was posted 2026-11-05T18:20:06Z, before Q35's extension. The rest: Nano tapped option A, "Yes, same follow-up PR", on decision card cmsg_014AqbZs58L565hMV2pFkCX553uoAaCJ8FP2tp7oU1ibhQ ("Should the BBP history change also carry reopen wakes and candidate provenance?", same thread), 2026-11-05T21:35:55Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5EJLCSPUm4HnqqKv3SmRqby). Closes OPEN_QUESTIONS Q35.

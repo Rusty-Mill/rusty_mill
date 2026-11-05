@@ -4,6 +4,21 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Lens track records
+**2026-11-05**
+
+- Each lens now has a track record (#599). `lens run` saves every blind
+  review job and shows each lens `record: P points over N blind reviews
+  (S scored, V pivotal)`. A review that decided the outcome itself is
+  scored only against ground truth (a failing golden set), and is
+  otherwise counted as pivotal and left unscored (D93, D92).
+- The record never credits a lens for an outcome it may have moved:
+  until BBP's history says more, golden truth isn't read from it, and a
+  line after a human reopen, or a job with a post whose answer was lost,
+  counts as pivotal. A crash or a failed post never drops a job's posts
+  from its record or counts them twice; a crash between posting and
+  saving leaves the job unscored, never scored on part of its posts.
+
 ## Alien lens hunts in `lens run --alien`
 **2026-11-05**
 

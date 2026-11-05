@@ -29,7 +29,7 @@ use std::time::Duration;
 /// must not select a different billing path or reach spawned workloads.
 /// `RUSTY_MUX_SOCKET` would make a spawned agent a full mux client that can
 /// read and type into other blocks, so it never crosses into a workload (D13,
-/// D81 §4).
+/// D103 §4).
 pub const SCRUB: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
