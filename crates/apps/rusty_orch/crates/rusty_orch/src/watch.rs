@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use orch_cli::CommandRunner;
 use orch_store::{PendingPost, Store, WatchFinding, WatchSlot};
-use rusty_bbp::{MsgId, Response};
+use rusty_bbp::{Code, MsgId, Rejection, Response};
 use rusty_serde::{Deserialize, Serialize, Value};
 
 use crate::args::ArgsError;
@@ -295,8 +295,11 @@ pub fn toolchain(file: &str, watched: &str) -> Option<Finding> {
 fn channel(file: &str) -> Option<String> {
     let mut table = "";
     for line in file.lines().map(str::trim) {
-        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            table = name.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            table = header
+                .split_once(']')
+                .filter(|(_, rest)| ends_line(rest))
+                .map_or("", |(name, _)| name.trim());
             continue;
         }
         let Some((k, v)) = line.split_once('=') else {
@@ -308,11 +311,16 @@ fn channel(file: &str) -> Option<String> {
         let v = v.trim_start();
         let quote = v.chars().next().filter(|c| *c == '"' || *c == '\'')?;
         let (value, rest) = v[1..].split_once(quote)?;
-        let rest = rest.trim_start();
         let clean = !(quote == '"' && value.contains('\\'));
-        return (clean && (rest.is_empty() || rest.starts_with('#'))).then(|| value.to_owned());
+        return (clean && ends_line(rest)).then(|| value.to_owned());
     }
     None
+}
+
+/// Whether `rest` of a TOML line is blank or a comment.
+fn ends_line(rest: &str) -> bool {
+    let rest = rest.trim_start();
+    rest.is_empty() || rest.starts_with('#')
 }
 
 // ---------------------------------------------------------------- posting
@@ -383,6 +391,7 @@ pub fn record(
                 Err(c) => format!("{e}; the pending post stays until a later run: {c}"),
             });
         }
+        Sent::Unsettled(e) => return Err(format!("{e}; the pending post stays until a later run")),
     };
     row.posted = Some(WatchFinding {
         key: finding.key.clone(),
@@ -402,8 +411,10 @@ pub fn record(
 /// The slot, with a post an earlier run wrote down but did not settle
 /// resent first. BBP replays it if it landed (the same op and bytes) or
 /// posts it now, and either way its claim becomes the slot's, so the next
-/// finding supersedes it rather than leaving it orphaned. A refused resend
-/// never posted; it is dropped and reported.
+/// finding supersedes it rather than leaving it orphaned. A resend BBP
+/// checked and refused never posted; it is dropped and reported. One refused
+/// before that check ([`Sent::Unsettled`]) may have posted, so it is kept and
+/// the slot waits for a later run.
 pub fn recover(
     rpc: &mut dyn Rpc,
     seen: &mut dyn Seen,
@@ -425,6 +436,9 @@ pub fn recover(
             None
         }
         Sent::Refused(e) => Some(e),
+        Sent::Unsettled(e) => {
+            return Err(format!("pending post for {} kept: {e}", p.key));
+        }
     };
     seen.put(app, slot, &row)
         .map_err(|e| format!("pending post for {} not settled: {e}", p.key))?;
@@ -487,7 +501,7 @@ pub fn post(
 ) -> Result<MsgId, String> {
     match send(rpc, &post_args(app, finding, supersedes))? {
         Sent::Posted(id) => Ok(id),
-        Sent::Refused(e) => Err(e),
+        Sent::Refused(e) | Sent::Unsettled(e) => Err(e),
     }
 }
 
@@ -495,8 +509,30 @@ pub fn post(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Sent {
     Posted(MsgId),
-    /// BBP answered and refused it: nothing was posted.
+    /// BBP checked the op and refused it: nothing was posted under it.
     Refused(String),
+    /// Refused before BBP looked the op up (authentication, assignment, a
+    /// host error), so an earlier send of the same op may have landed.
+    Unsettled(String),
+}
+
+/// Codes BBP returns before its R15 op lookup. Such a refusal says nothing
+/// about whether the op landed earlier.
+const BEFORE_REPLAY: [Code; 5] = [
+    Code::Forbidden,
+    Code::NotAssigned,
+    Code::WrongMode,
+    Code::BadCredential,
+    Code::OpConflict,
+];
+
+fn refusal(r: &Rejection) -> Sent {
+    let why = format!("{:?}: {}", r.code, r.detail);
+    if BEFORE_REPLAY.contains(&r.code) {
+        Sent::Unsettled(why)
+    } else {
+        Sent::Refused(why)
+    }
 }
 
 /// Send `post` once more if the first answer was lost. `Err` means no answer
@@ -506,16 +542,18 @@ pub fn send(rpc: &mut dyn Rpc, args: &Value) -> Result<Sent, String> {
         Err(CallError::Lost(_)) => rpc.call("post", args.clone()),
         first => first,
     };
-    let text = match reply {
-        Ok(t) => t,
-        Err(CallError::Answered(e)) => return Ok(Sent::Refused(e)),
+    let (text, answered) = match reply {
+        Ok(t) => (t, false),
+        Err(CallError::Answered(t)) => (t, true),
         Err(CallError::Lost(e)) => return Err(format!("no answer: {e}")),
     };
-    match rusty_serde::json::from_str::<Response>(&text) {
-        Ok(Response::Posted(id)) => Ok(Sent::Posted(id)),
-        Ok(Response::Rejected(r)) => Ok(Sent::Refused(format!("{:?}: {}", r.code, r.detail))),
-        Ok(other) => Err(format!("post answered {other:?}")),
-        Err(e) => Err(format!("unreadable answer: {e}")),
+    match (rusty_serde::json::from_str::<Response>(&text), answered) {
+        (Ok(Response::Rejected(r)), _) => Ok(refusal(&r)),
+        // An error that is not a BBP rejection came from the host.
+        (_, true) => Ok(Sent::Unsettled(text)),
+        (Ok(Response::Posted(id)), false) => Ok(Sent::Posted(id)),
+        (Ok(other), false) => Err(format!("post answered {other:?}")),
+        (Err(e), false) => Err(format!("unreadable answer: {e}")),
     }
 }
 
@@ -730,8 +768,10 @@ mod tests {
         posts: Vec<Value>,
         ops: BTreeMap<String, (Value, Response)>,
         next: u64,
-        /// Refuse the next post, as BBP does a `bad_claim`.
-        refuse: bool,
+        /// Refuse the next post with this code.
+        refuse: Option<Code>,
+        /// Fail the next post as the host would, with no BBP rejection.
+        host_error: bool,
     }
 
     impl Board {
@@ -745,9 +785,14 @@ mod tests {
             assert_eq!(tool, "post", "the watcher only posts");
             let op = args["op"].as_str().unwrap().to_owned();
             self.posts.push(args.clone());
-            if std::mem::take(&mut self.refuse) {
-                let no = Rejection::new(Code::BadClaim, "supersedes target closed");
-                return Ok(rusty_serde::json::to_string(&Response::Rejected(no)).unwrap());
+            if std::mem::take(&mut self.host_error) {
+                return Err(CallError::Answered("bbp mcp tools/call: host busy".into()));
+            }
+            if let Some(code) = self.refuse.take() {
+                let no = Rejection::new(code, "refused");
+                return Err(CallError::Answered(
+                    rusty_serde::json::to_string(&Response::Rejected(no)).unwrap(),
+                ));
             }
             let resp = match self.ops.get(&op) {
                 // BBP sees the wire bytes, so compare those.
@@ -842,6 +887,7 @@ mod tests {
             "[toolchain]\nchannel = '1.99.0'\n",
             "[toolchain]\nchannel = \"1.99.0\" # pinned\n",
             "# rust\n[toolchain]\n  channel='1.99.0'  # pinned\nprofile = \"minimal\"\n",
+            "[toolchain] # pinned toolchain\nchannel = \"1.99.0\"\n",
         ];
         for file in current {
             assert_eq!(channel(file).as_deref(), Some("1.99.0"), "{file:?}");
@@ -852,6 +898,9 @@ mod tests {
         let unread = [
             "channel = \"1.98.1\"\n",
             "[other]\nchannel = \"1.98.1\"\n",
+            "[toolchain]\n[other] # next\nchannel = \"1.98.1\"\n",
+            "[toolchain] trailing\nchannel = \"1.98.1\"\n",
+            "[[toolchain]]\nchannel = \"1.98.1\"\n",
             "[toolchain]\nchannel = 1.98\n",
             "[toolchain]\nchannel = \"1.98.1\" trailing\n",
             "[toolchain]\nchannel = \"1.98\\u002e1\"\n",
@@ -973,6 +1022,28 @@ mod tests {
     }
 
     #[test]
+    fn a_resend_refused_before_the_op_check_keeps_the_pending_post() {
+        let (mut board, mut seen) = (Board::default(), MemSeen::default());
+        record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
+        // B posts, but its settling write is lost.
+        seen.fail_after = Some(1);
+        record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap_err();
+        let b = MsgId(10 + board.next);
+        // The resend is refused before BBP looks the op up: B may have landed.
+        for (code, host) in [(Some(Code::BadCredential), false), (None, true)] {
+            (board.refuse, board.host_error) = (code, host);
+            let e = record(&mut board, &mut seen, "demo", set("v1.0.3")).unwrap_err();
+            assert!(e.contains("kept"), "{e}");
+            let row = seen.get("demo", "updates").unwrap();
+            assert!(row.pending.is_some(), "{row:?}");
+        }
+        // Once BBP answers again, B is recovered and C supersedes it, not A.
+        let c = record(&mut board, &mut seen, "demo", set("v1.0.3")).unwrap();
+        assert_eq!(c.supersedes, Some(b));
+        assert_eq!(board.claims(), 3, "B replayed");
+    }
+
+    #[test]
     fn a_post_that_was_never_written_down_is_never_sent() {
         let (mut board, mut seen) = (Board::default(), MemSeen::default());
         seen.fail_after = Some(0);
@@ -985,7 +1056,7 @@ mod tests {
     fn a_refused_post_leaves_the_slot_as_it_was() {
         let (mut board, mut seen) = (Board::default(), MemSeen::default());
         let a = record(&mut board, &mut seen, "demo", set("v1.0.1")).unwrap();
-        board.refuse = true;
+        board.refuse = Some(Code::BadClaim);
         let e = record(&mut board, &mut seen, "demo", set("v1.0.2")).unwrap_err();
         assert!(e.contains("BadClaim"), "{e}");
         let row = seen.get("demo", "updates").unwrap();
@@ -995,7 +1066,7 @@ mod tests {
         // once; the run after that goes on from the slot's claim.
         seen.fail_after = Some(1);
         record(&mut board, &mut seen, "demo", set("v1.0.3")).unwrap_err();
-        board.refuse = true;
+        board.refuse = Some(Code::BadClaim);
         let e = record(&mut board, &mut seen, "demo", set("v1.0.4")).unwrap_err();
         assert!(e.contains("refused and dropped"), "{e}");
         let next = record(&mut board, &mut seen, "demo", set("v1.0.4")).unwrap();

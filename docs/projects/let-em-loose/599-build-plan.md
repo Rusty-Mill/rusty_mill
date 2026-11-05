@@ -182,7 +182,9 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
     BBP replays it if it landed (R15: same op, same bytes) or posts it now.
     Either way its claim becomes the slot's, so the next finding, even a
     different one, supersedes it instead of leaving it orphaned. A resend
-    BBP refuses never posted; it is dropped and reported.
+    BBP checks and refuses never posted; it is dropped and reported. A
+    refusal from before BBP's op lookup (authentication, assignment, mode,
+    op conflict, a host error) can't tell, so the pending post is kept.
   - A post is identified by the app, the key and the slot's previous claim.
     The op id is a digest of all three, and every posted field comes from
     the key and that claim; `refs` cites the opening brief `art:1`.
@@ -190,7 +192,7 @@ daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
     previous claim, so it is a new op: a new claim that supersedes B, not a
     conflict with A's first post.
   - The toolchain channel is read as TOML (`[toolchain] channel`, basic or
-    literal string, optional trailing comment).
+    literal string, optional trailing comment on the header or value).
 - An adapter that fails is reported in the JSON with its reason, the others
   still run, and the exit status is 1.
 
