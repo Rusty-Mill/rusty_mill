@@ -128,7 +128,8 @@ pub struct Dirs {
     /// `<state>/alien/probes/<task>`: one `<claim>-<n>` per probe.
     pub probes: PathBuf,
     /// The candidate's build cache, kept between this hunt's probes only
-    /// (`<state>/alien/target/<task>/<claim>`). Base never uses it.
+    /// (`<state>/alien/target/<task>/<claim>`): [`SandboxProbes::new`]
+    /// empties it. Base never uses it.
     pub target: PathBuf,
 }
 
@@ -145,20 +146,26 @@ impl<'a, E: Executor> SandboxProbes<'a, E>
 where
     E::Error: std::fmt::Display,
 {
+    /// One hunt's probe runner. Empties `dirs.target` first: candidate
+    /// code can write the cache, so nothing in it outlives a hunt.
     pub fn new(
         exec: &'a E,
         repo: &'a Repo,
         toolchain: &'a Toolchain,
         candidate: Candidate,
         dirs: Dirs,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let target = &dirs.target;
+        if target.symlink_metadata().is_ok() {
+            std::fs::remove_dir_all(target).map_err(|e| format!("{}: {e}", target.display()))?;
+        }
+        Ok(Self {
             exec,
             repo,
             toolchain,
             candidate,
             dirs,
-        }
+        })
     }
 
     fn runs(&self, probe: &Probe<'_>, trees: &mut Trees<'_>) -> Result<Runs, String> {
@@ -530,23 +537,61 @@ fn package_name(manifest: &Path) -> Result<Option<String>, String> {
     }
     let text =
         std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
-    let mut in_package = false;
+    Ok(manifest_name(&text))
+}
+
+/// The package name in manifest text: `name` under `[package]`, or a
+/// top-level `package.name`. Covers the TOML a package name can be
+/// written in (basic or literal string, whitespace, trailing comments)
+/// without a TOML crate (D96 keeps rusty_orch's probe path to in-workspace
+/// crates). `None` unless the name is a plain Cargo name, since it goes on
+/// cargo's command line.
+fn manifest_name(text: &str) -> Option<String> {
+    let mut table: Option<String> = None;
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
-            in_package = line == "[package]";
+            let head = line.split('#').next().unwrap_or("").trim();
+            table = head
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .filter(|h| !h.starts_with('['))
+                .map(|h| h.split_whitespace().collect());
             continue;
         }
-        let Some(value) = line.strip_prefix("name").map(str::trim_start) else {
+        let Some((key, value)) = line.split_once('=') else {
             continue;
         };
-        let Some(value) = value.strip_prefix('=').map(str::trim) else {
-            continue;
+        let key: String = key.split_whitespace().collect();
+        let wanted = match table.as_deref() {
+            Some("package") => key == "name",
+            None => key == "package.name",
+            Some(_) => false,
         };
-        if in_package {
-            return Ok(Some(value.trim_matches('"').to_owned()));
+        if wanted {
+            return toml_string(value.trim()).filter(|n| cargo_name(n));
         }
     }
-    Ok(None)
+    None
+}
+
+/// A one-line TOML basic (`"..."`, no escapes) or literal (`'...'`)
+/// string, followed by nothing but an optional comment.
+fn toml_string(value: &str) -> Option<String> {
+    let quote = value.chars().next().filter(|q| *q == '"' || *q == '\'')?;
+    let body = &value[1..];
+    let end = body.find(quote)?;
+    let (name, rest) = (&body[..end], body[end + 1..].trim_start());
+    let clean = rest.is_empty() || rest.starts_with('#');
+    (clean && !(quote == '"' && name.contains('\\'))).then(|| name.to_owned())
+}
+
+/// Whether `name` is a plain Cargo package name: ASCII letters, digits,
+/// `-` and `_`.
+fn cargo_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// A new private cargo home at `home`: the user's registry and git caches
@@ -773,7 +818,7 @@ mod tests {
             base: base(repo),
             diffs: diffs.iter().map(|d| (*d).to_owned()).collect(),
         };
-        let mut probes = SandboxProbes::new(exec, repo, &tc, candidate, dirs.clone());
+        let mut probes = SandboxProbes::new(exec, repo, &tc, candidate, dirs.clone()).expect("new");
         let got = probes.run(&Probe {
             file: "probe_7_1.rs".to_owned(),
             site,
@@ -1023,7 +1068,7 @@ mod tests {
             base: String::new(),
             diffs: vec![],
         };
-        let probes = SandboxProbes::new(&exec, &repo, &tc, candidate, dirs);
+        let probes = SandboxProbes::new(&exec, &repo, &tc, candidate, dirs).expect("new");
         let tmp = root.join("tmp");
         std::fs::create_dir_all(&tmp).expect("mkdir");
         let tree = Tree {
@@ -1149,6 +1194,60 @@ mod tests {
         assert!(!real_dirs(&tree, &tree.join("crates/l/src")));
         assert!(!real_dirs(&tree, &tree.join("crates/a/missing")));
         assert!(!real_dirs(&tree, &root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn manifest_names_follow_toml_string_rules() {
+        let cases = [
+            ("[package]\nname = 'lit-name'\n", Some("lit-name")),
+            ("[package]\nname = \"a\" # the crate\n", Some("a")),
+            ("[package] # main\nname=\"b\"\n", Some("b")),
+            ("[ package ]\n  name   =   \"c_d\"\n", Some("c_d")),
+            (
+                "package.name = \"dotted\"\n[dependencies]\n",
+                Some("dotted"),
+            ),
+            ("[package]\nname = \"x\" extra\n", None),
+            ("[package]\nname = \"has space\"\n", None),
+            ("[package]\nname = \"esc\\u0041\"\n", None),
+            ("[package]\nname = \"\"\n", None),
+            ("[package]\nname = \"open\n", None),
+            ("[[bin]]\nname = \"tool\"\n", None),
+            ("[package.metadata]\nname = \"m\"\n", None),
+            ("name = \"top\"\n", None),
+        ];
+        for (text, want) in cases {
+            assert_eq!(manifest_name(text), want.map(str::to_owned), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn each_hunt_starts_with_an_empty_candidate_cache() {
+        let (root, repo) = repo("cache");
+        let exec = Fake::new(ok);
+        let tc = toolchain(&root);
+        let dirs = Dirs {
+            probes: root.join("p"),
+            target: root.join("target/7/1"),
+        };
+        std::fs::create_dir_all(dirs.target.join("debug")).expect("mkdir");
+        std::fs::write(dirs.target.join("debug/marker"), "x").expect("write");
+        let candidate = Candidate {
+            base: base(&repo),
+            diffs: vec![],
+        };
+        let mut probes =
+            SandboxProbes::new(&exec, &repo, &tc, candidate, dirs.clone()).expect("new");
+        assert!(!dirs.target.exists(), "the last hunt's cache is gone");
+        let got = probes.run(&Probe {
+            file: "probe_7_1.rs".to_owned(),
+            site: "my_crate::f",
+            source: PROBE,
+        });
+        assert!(got.is_ok(), "{got:?}");
+        assert!(dirs.target.is_dir(), "and it is made again for this hunt");
+        assert!(!dirs.target.join("debug/marker").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
