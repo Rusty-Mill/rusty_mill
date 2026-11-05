@@ -7,18 +7,21 @@
 //! `setsid` or `setpgid`. Three pieces replace the process-group ones:
 //!
 //! - [`open`] claims the path for one task (`mod/cgroup-owners/<key>`,
-//!   created exclusively), records it as `mod/<task>.cgroups/<key>` and only
-//!   then creates the cgroup, also exclusively, so no crash leaves a cgroup
-//!   without a record and no two sessions share a path. It runs under the
-//!   task's cgroup lock and refuses an ended task.
+//!   created exclusively), records the intent as `mod/<task>.cgroups/<key>`,
+//!   creates the cgroup, also exclusively, and only then marks the record
+//!   `created`. No crash leaves a cgroup this session made without a record,
+//!   and no two sessions share a path. It runs under the task's cgroup lock
+//!   and refuses an ended task.
 //! - [`hold`] is `bbp slot-hold --cgroup`: it keeps the slot until stdin is
 //!   closed and the cgroup is known to be empty, and from a deadline on
 //!   writes `cgroup.kill`. An error is reported and retried, never taken
 //!   for emptiness. It never signals a process group.
 //! - [`settle`] is what `bbp quiesce` does with each record, under the same
 //!   lock: a populated cgroup is killed, an empty one removed with its claim
-//!   and record. A record whose task doesn't own the path is dropped without
-//!   touching the cgroup, so only its owner's quiesce can kill a session.
+//!   and record. Only a `created` record of the claim's own task touches the
+//!   cgroup. A bare intent, left by a crash before the mark, can't tell a
+//!   cgroup this session made from one that was already there, so it is
+//!   dropped with its claim and the cgroup is left alone: fail closed.
 
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
@@ -134,8 +137,22 @@ pub fn open_with(
     if let Err(e) = create(&cgroup) {
         return Err(undo(e, Some(&record), &owner));
     }
+    // Only now is the cgroup known to be this session's own.
+    let text = format!("{}\n{CREATED}\n", cgroup.display());
+    if let Err(e) = rusty_atomic_file::write(&record, text.as_bytes()) {
+        // Ours and empty: nothing has been told its path yet.
+        let e = format!("{}: {e}", record.display());
+        let e = match std::fs::remove_dir(&cgroup) {
+            Ok(()) => e,
+            Err(rm) => format!("{e} (and removing {}: {rm})", cgroup.display()),
+        };
+        return Err(undo(e, Some(&record), &owner));
+    }
     Ok(cgroup)
 }
+
+/// The record's second line once [`open`] made the cgroup itself.
+const CREATED: &str = "created";
 
 /// The claim file for `cgroup`, created only if no task has claimed it.
 fn claim(dir: &Path, task: &TaskId, cgroup: &Path, key: &str) -> Result<PathBuf, String> {
@@ -198,6 +215,8 @@ pub struct Record {
     /// touch the cgroup.
     owner: PathBuf,
     task: String,
+    /// Whether [`open`] got as far as creating the cgroup itself.
+    created: bool,
 }
 
 impl Record {
@@ -225,14 +244,21 @@ pub fn records(dir: &Path, task: &TaskId) -> Result<Vec<Record>, String> {
             let path = entry.map_err(|e| e.to_string())?.path();
             let text =
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let cgroup = checked(Path::new(text.trim()))
-                .map_err(|e| format!("cgroup record {}: {e}", path.display()))?;
+            let bad = |e: String| format!("cgroup record {}: {e}", path.display());
+            let mut lines = text.lines();
+            let cgroup = checked(Path::new(lines.next().unwrap_or_default())).map_err(bad)?;
+            let created = match (lines.next(), lines.next()) {
+                (None, None) => false,
+                (Some(CREATED), None) => true,
+                _ => return Err(bad("not a path and an optional `created`".into())),
+            };
             let owner = owners(dir).join(key(&cgroup));
             Ok(Record {
                 path,
                 cgroup,
                 owner,
                 task: task.0.clone(),
+                created,
             })
         })
         .collect()
@@ -278,19 +304,25 @@ pub fn kill(cgroup: &Path) -> Result<(), String> {
 
 /// Settle one record, with [`lock`] held: `true` once its cgroup is empty
 /// and removed, then its claim and the record. A populated cgroup is killed
-/// and is not quiet yet. A record whose task doesn't own the path is only
-/// dropped: its cgroup is someone else's or gone.
+/// and is not quiet yet. Only a `created` record whose task holds the claim
+/// touches the cgroup. A bare intent drops its claim and leaves the cgroup
+/// alone, as it can't show the cgroup is its own (an empty one it made just
+/// before a crash is left behind). A record whose task doesn't hold the
+/// claim is only dropped.
 ///
 /// # Errors
 /// When the claim or cgroup can't be read, killed or removed, or the record
 /// removed.
 pub fn settle(record: &Record) -> Result<bool, String> {
-    if owns(record)? {
+    let ours = owns(record)?;
+    if ours && record.created {
         if populated(&record.cgroup)? {
             kill(&record.cgroup)?;
             return Ok(false);
         }
         remove(&record.cgroup, |p| std::fs::remove_dir(p))?;
+    }
+    if ours {
         remove(&record.owner, |p| std::fs::remove_file(p))?;
     }
     remove(&record.path, |p| std::fs::remove_file(p))?;
@@ -517,7 +549,8 @@ mod tests {
         assert!(held(&path), "the slot was freed on an error");
         cg.empty.store(true, Ordering::SeqCst);
         let reports = holder.join().expect("holder");
-        assert!(!held(&path));
+        // A parallel test's fork may hold a copy of the lock until it execs.
+        wait_for("the slot to be freed", || !held(&path));
         assert_eq!(
             reports,
             ["cgroup.events: injected read failure"],
@@ -545,7 +578,8 @@ mod tests {
         assert!(held(&path), "the slot was freed with members left");
         cg.empty.store(true, Ordering::SeqCst);
         let reports = holder.join().expect("holder");
-        assert!(!held(&path));
+        // A parallel test's fork may hold a copy of the lock until it execs.
+        wait_for("the slot to be freed", || !held(&path));
         assert_eq!(reports, ["cgroup.kill: injected denial"]);
         let _ = std::fs::remove_file(&path);
     }
@@ -565,6 +599,7 @@ mod tests {
             cgroup: cgroup.clone(),
             owner: owner.clone(),
             task: "B".into(),
+            created: true,
         };
         assert_eq!(settle(&record), Ok(true));
         assert!(!path.exists(), "the stray record is dropped");
@@ -577,6 +612,62 @@ mod tests {
             "A's cgroup and claim stay"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_intent_never_touches_the_cgroup_even_with_its_own_claim() {
+        let base = std::env::temp_dir().join(format!("bbp-cg-intent-{}", std::process::id()));
+        let cgroup = base.join("cg");
+        std::fs::create_dir_all(&cgroup).expect("cg");
+        std::fs::write(cgroup.join("cgroup.events"), "populated 1\n").expect("events");
+        let owner = base.join("owner");
+        std::fs::write(&owner, "A").expect("owner");
+        let path = base.join("record");
+        std::fs::write(&path, "x").expect("record");
+        let record = Record {
+            path: path.clone(),
+            cgroup: cgroup.clone(),
+            owner: owner.clone(),
+            task: "A".into(),
+            created: false,
+        };
+        assert_eq!(settle(&record), Ok(true));
+        assert!(
+            !path.exists() && !owner.exists(),
+            "intent and claim are dropped"
+        );
+        assert!(
+            !cgroup.join("cgroup.kill").exists(),
+            "the cgroup was not killed"
+        );
+        assert!(cgroup.is_dir(), "nor removed");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_record_is_a_path_and_an_optional_created_mark() {
+        let dir = std::env::temp_dir().join(format!("bbp-cg-rec-{}", std::process::id()));
+        let task = TaskId::from("t");
+        let records_dir = dir_of(&dir, &task);
+        std::fs::create_dir_all(&records_dir).expect("records dir");
+        std::fs::write(records_dir.join("a"), "/sys/fs/cgroup/lel/a\n").expect("a");
+        std::fs::write(records_dir.join("b"), "/sys/fs/cgroup/lel/b\ncreated\n").expect("b");
+        let mut got: Vec<(PathBuf, bool)> = records(&dir, &task)
+            .expect("records")
+            .into_iter()
+            .map(|r| (r.cgroup, r.created))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                (PathBuf::from("/sys/fs/cgroup/lel/a"), false),
+                (PathBuf::from("/sys/fs/cgroup/lel/b"), true)
+            ]
+        );
+        std::fs::write(records_dir.join("c"), "/sys/fs/cgroup/lel/c\nmaybe\n").expect("c");
+        assert!(records(&dir, &task).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

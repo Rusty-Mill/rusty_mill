@@ -1837,6 +1837,94 @@ fn quiesce_waits_for_a_paused_open_and_an_ended_task_opens_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Opens `cgroup` for `t` in `dir` and crashes right after publishing the
+/// claim and the intent record, before the cgroup is created.
+#[cfg(target_os = "linux")]
+fn crash_after_record(dir: &Path, t: &TaskId, cgroup: &Path) {
+    let (dir, t, cgroup) = (dir.to_path_buf(), t.clone(), cgroup.to_path_buf());
+    let crashed = std::thread::spawn(move || {
+        let _ = rusty_bbp_host::cgroups::open_with(&dir, &t, &cgroup, || panic!("crash"));
+    })
+    .join();
+    assert!(crashed.is_err(), "the opener crashed");
+}
+
+/// D86 (#1507 review): a crash between publishing the intent and creating
+/// the cgroup, on a path where a populated cgroup already exists, can't
+/// give quiesce authority over it. The workload is never signalled or
+/// removed, both for a cgroup no board knows and for one another control
+/// directory owns.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_crashed_open_never_cleans_up_a_cgroup_it_did_not_create() {
+    let foreign = match session_cgroup("foreign") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let owned = foreign.with_file_name(format!("bbp-test-{}-owned", std::process::id()));
+    // One made outside any board, one opened by another control directory.
+    std::fs::create_dir(&foreign).expect("foreign cgroup");
+    let other = tempdir("cgroup-other-dir");
+    claims_task(&other);
+    rusty_bbp_host::cgroups::open(&other, &task(), &owned).expect("other dir opens");
+    let mut workloads = [sleeper_in(&foreign), sleeper_in(&owned)];
+    let dir = tempdir("cgroup-crash");
+    claims_task(&dir);
+    let second = TaskId("C2".into());
+    claims_task_as(&dir, &second);
+    for cgroup in [&foreign, &owned] {
+        crash_after_record(&dir, &task(), cgroup);
+        // Without a crash, the same open by another task leaves nothing.
+        let refused = rusty_bbp_host::cgroups::open(&dir, &second, cgroup).expect_err("taken");
+        assert!(refused.contains("owns it"), "{refused}");
+        assert!(rusty_bbp_host::cgroups::records(&dir, &second)
+            .unwrap()
+            .is_empty());
+    }
+    assert_eq!(
+        rusty_bbp_host::cgroups::records(&dir, &task())
+            .unwrap()
+            .len(),
+        2
+    );
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    for (w, cgroup) in workloads.iter_mut().zip([&foreign, &owned]) {
+        assert!(
+            w.try_wait().expect("wait").is_none(),
+            "{} was signalled",
+            cgroup.display()
+        );
+        assert!(cgroup.is_dir(), "{} was removed", cgroup.display());
+    }
+    // The crash released the claim; an uncrashed open now fails to create
+    // the existing cgroup and leaves nothing behind either.
+    let refused = rusty_bbp_host::cgroups::open(&dir, &second, &foreign).expect_err("exists");
+    assert!(refused.contains("exists"), "{refused}");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &second)
+        .unwrap()
+        .is_empty());
+    // The other directory's own quiesce still cleans up what it created.
+    for w in &mut workloads {
+        w.kill().expect("kill");
+        w.wait().expect("reap");
+    }
+    let rev = open_driver(&other, &task()).expect("driver").state.rev;
+    human::perform(&other, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(
+        rusty_bbp_host::moderator::quiesce(&other, &task()),
+        Ok(true)
+    );
+    assert!(!owned.exists());
+    std::fs::remove_dir(&foreign).expect("remove the foreign cgroup");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&other);
+}
+
 // ---------------------------------------------------------------- takeover (D82)
 
 fn bbp(dir: &Path, args: &[&str], stdin: impl AsRef<[u8]>) -> String {
