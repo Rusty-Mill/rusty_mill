@@ -94,16 +94,34 @@ server made owner, are gone at once, and `--wait` gives no way to send further r
     `signal`, `release` and `close`.
   - It writes one JSON line per answer and per owner message on stdout: `InputBatch`,
     `grant-changed`, `program-exited` and `lease-changed` for its blocks.
-  - orch passes its descriptors to the child by inheritance, and `own` forwards them as
-    `SCM_RIGHTS` on `launch`.
+  - Descriptors reach `own` only by inheritance, when orch spawns it. JSON lines can't carry
+    open descriptors, so `launch` names none: `own` forwards exactly the descriptors it was
+    started with, 3…3+n−1, as `SCM_RIGHTS`.
   - This keeps orch at its process boundary with the mux: no crate edge.
   - `orch-bbp` depending on `rusty_mux_ctl` in-process is **not** an option. Both are `apps`
     crates in different families, and `check_workspace_layers.py:98-101` rejects that edge.
     Moving a client library into `libs` would be a new boundary decision, which stays gated and
     isn't proposed here.
-- **Lifetime.** One `own` process for each orch process, owning all of that orch's agent blocks.
-  Its stdin closing is orch's "I'm done": `own` closes its connection, and its blocks orphan after
-  the grace, exactly as if orch had crashed.
+- **Lifetime: one `own` per agent session.** Each session's slot lock and ACP socketpair only
+  exist once orch has prepared that session (LEL §2). So orch spawns a fresh `own` after they
+  exist, with them at fd 3 and fd 4, and that `own` launches exactly one block.
+  - **Inherited copies:** `own` closes its own inherited copies of fd 3…3+n−1 as soon as the
+    launch is answered, whether it succeeded or failed. It never holds a slot lock past the
+    launch.
+  - **Received copies:** the server closes its received and staged copies once the spawn returns
+    (C75). After a successful launch, the only remaining holders of the slot lock are the agent's
+    fd 3 and orch's cgroup holder.
+  - **orch's copies:** orch keeps its own copies under its own rules (LEL §3). If the launch fails,
+    orch's holder releases the slot as it does for any failed start.
+  - **Ending:** after the session ends, orch sends `close`, or keeps the held block on screen and
+    closes it later. It then closes `own`'s stdin. EOF before `close` means orch is done or gone:
+    `own` closes its connection, and the block orphans after the grace, exactly as on an orch
+    crash.
+  - Each session therefore has its own owner connection. A viewer still can't act on any of
+    them, because ownership is per connection (C46).
+  - **Rejected for now:** one `own` for the whole orch process, fed descriptors per launch over a
+    private `SCM_RIGHTS` socketpair. It saves a process per session but adds a second fd-passing
+    channel with its own security review. If it's ever wanted, it is a new gated IPC shape.
 - **Reconnect.** If the connection to the server drops, `own` reconnects with its TAKEOVER token
   inside D44's 30 s grace, so the client and its ownership stay the same, and it tells orch with
   a `reconnected` line. The token stays inside `own` and is never printed. If `own` itself dies,
@@ -111,10 +129,18 @@ server made owner, are gone at once, and `--wait` gives no way to send further r
   ownership to a new process is not proposed.
 
 **Tests.**
+- **Two sessions in a row.** After a first session has finished, orch prepares a second, with a
+  new slot lock and a new ACP socketpair, and spawns a second `own`.
+  - The second agent sees its own ACP endpoint at fd 4: a message through it reaches the second
+    orch end, never the first.
+  - The first session's slot lock is free once its agent has exited, and neither `own` process
+    holds a lock after its launch is answered.
+- **A failed launch** (a missing program) leaves no copy of the slot lock in `own` or the server,
+  so `flock` succeeds from another process.
 - A second client of the same uid can't rename, close, split, signal or disconnect the owner.
 - The owner can.
 - Ownership survives a 5 s reconnect, and the block is orphaned after 30 s.
-- **Acceptance, beyond the grace.** One `own` process launches an owned, `owner-only` block. For
+- **Acceptance, beyond the grace.** One session's `own` launches an owned, `owner-only` block. For
   more than 90 s, through a forced reconnect at about 20 s:
   - it grants a lease to a second client;
   - it receives that client's `InputBatch` at 0 s and again past 60 s;
@@ -328,10 +354,10 @@ a rule with no use.
    - **If it does,** port `ssh.rs` and `remote()` to Windows. The private directory gets the
      owner-only DACL from R10, and the version floor is checked at start with a clear error.
    - **If it doesn't,** use the existing `rusty-mux-ctl bridge` (`ctl/src/bridge.rs`,
-     `ctl/src/lib.rs:21-23,244-253`), run as `ssh HOST rusty-mux-ctl bridge`. It already joins its
+     `ctl/src/lib.rs:21-23,244-253`), run as `ssh HOST rusty-mux-ctl --socket FRONT_DOOR_SOCKET bridge`. It already joins its
      stdin and stdout to the server's socket, byte for byte, for exactly this case. Nothing new is
      needed on the ctl side. The missing work is all in the Windows client:
-     - a Windows route that spawns `ssh … rusty-mux-ctl bridge` and runs `Conn` over the child's
+     - a Windows route that spawns `ssh HOST rusty-mux-ctl --socket PATH bridge` and runs `Conn` over the child's
        pipes (`Conn<S: Read + Write>` already takes any stream);
      - porting the rejoin path (`SshPath`, `Route`, today `cfg(unix)`) to respawn that child;
      - a Windows build of the parts of the `ssh` module it reuses (argument building, hostname
