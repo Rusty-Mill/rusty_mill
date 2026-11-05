@@ -16,6 +16,7 @@
 
 use std::collections::BTreeMap;
 
+use orch_core::AgentId;
 use orch_dispatch::ClassifiedError;
 use rusty_bbp::{Direction, MsgId};
 
@@ -197,8 +198,7 @@ fn review(job: &Job, items: Vec<MsgId>) -> Option<Review> {
 /// Post and record one job's end: a blind review's track-record row, if
 /// any, and a halt that ends the round. The row holds what the job posted,
 /// or nothing for a reply the protocol refused, so refusing is not free. A
-/// post that failed partway halts, and its row keeps the posts that landed;
-/// the abandoned job's retry adds to the same row.
+/// post that failed partway halts (see [`partial`]).
 fn settle(
     job: &Job,
     card: &Card,
@@ -210,15 +210,7 @@ fn settle(
         End::Answered { provider, posts } => {
             let ids = match post(board, &job.key.lens, posts) {
                 Ok(ids) => ids,
-                Err(e) => {
-                    state.abandon(job);
-                    let known = !e.posted.is_empty() || e.unsure;
-                    let row = review(job, e.posted).filter(|_| known).map(|r| Review {
-                        unsure: e.unsure,
-                        ..r
-                    });
-                    return (row, Some(Halt::Board(e.error)));
-                }
+                Err(e) => return partial(job, card, *provider, posts, e, state),
             };
             state.answered(job, *provider, posts.len(), counters(posts));
             if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
@@ -248,6 +240,36 @@ fn settle(
             (None, Some(Halt::Unsaved(e.clone())))
         }
     }
+}
+
+/// A post that failed partway. Nothing on the board: the job is abandoned
+/// and asked again. Something landed, or may have (a lost answer): the job
+/// is answered with what landed and never asked again, since a retry would
+/// post fresh evidence beside it. Its row keeps the landed posts and
+/// whether one is unknown.
+fn partial(
+    job: &Job,
+    card: &Card,
+    provider: AgentId,
+    posts: &[Post],
+    e: PostError,
+    state: &mut State,
+) -> (Option<Review>, Option<Halt>) {
+    let halt = Some(Halt::Board(e.error));
+    if e.posted.is_empty() && !e.unsure {
+        state.abandon(job);
+        return (None, halt);
+    }
+    let landed = &posts[..e.posted.len().min(posts.len())];
+    state.answered(job, provider, landed.len(), counters(landed));
+    if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
+        state.attacked(q, card.id, card.epoch);
+    }
+    let row = review(job, e.posted).map(|r| Review {
+        unsure: e.unsure,
+        ..r
+    });
+    (row, halt)
 }
 
 /// An empty answer posts nothing.
@@ -523,6 +545,22 @@ mod tests {
             "the round stops at the first job"
         );
         assert_eq!(out.report.reviews[0].items, [MsgId(100)]);
+        // The job's first post is on the board: it is answered, not asked
+        // again, so a later round can't post fresh evidence beside it.
+        let lens = out.report.reviews[0].lens.clone();
+        let again = go(
+            &[plain(7)],
+            out.state,
+            400,
+            Echo::new(Ok(vec![counter(7)])),
+            Posted::default(),
+        );
+        assert!(
+            again.report.ran.iter().all(|(k, _)| k.lens != lens),
+            "{:?}",
+            again.report.ran
+        );
+        assert_eq!(again.report.ran.len(), 2, "the other lenses still run");
     }
 
     #[test]

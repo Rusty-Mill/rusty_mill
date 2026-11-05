@@ -1022,8 +1022,8 @@ mod tests {
     }
 
     /// The host appends the second post as id 42 but both its answers are
-    /// lost. The row keeps 41 and is unsure; the job reruns after a
-    /// restart and posts 43. On a line that 42 really decided, the job must
+    /// lost. The row keeps 41 and is unsure; a crash before the state is
+    /// kept reruns the job, which posts 43. On a line that 42 really decided, the job must
     /// not be scored as non-pivotal.
     #[test]
     fn a_landed_but_lost_post_never_lets_a_pivotal_job_score() {
