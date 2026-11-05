@@ -31,7 +31,7 @@ board events (BBP)                  input gate: owner grants lease
 4. **Open.** orch sends the mux `Launch` (§9 item 1):
    - program `lel-jail <jail.json>`;
    - an exact environment (`TERM`, `PATH`, `LANG`, and nothing from the server or `RUSTY_MUX_*`);
-   - fds: fd 3 is the slot lock and fd 4 is orch's end of an ACP socketpair;
+   - fds: fd 3 is the slot lock and fd 4 is the agent's end of an ACP socketpair (orch keeps the other end);
    - `hold: true`;
    - `input: owner-only`;
    - the name `agent:<task>:<claim>:<n>`.
