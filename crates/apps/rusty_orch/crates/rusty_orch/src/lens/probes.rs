@@ -641,6 +641,7 @@ mod tests {
     /// What one exec's environment held: its temp and target dirs, and
     /// whether a marker a candidate run leaves in its temp dir was there.
     #[derive(Debug, Clone)]
+    #[cfg_attr(not(unix), allow(dead_code))]
     struct Seen {
         tree: String,
         tmp: String,
