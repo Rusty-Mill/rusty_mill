@@ -1032,6 +1032,74 @@ fn a_red_base_refuses_the_open_and_writes_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Counts every execution it is asked for and runs none.
+#[derive(Default)]
+struct Counting(std::cell::Cell<u32>);
+
+impl rusty_sandbox::Executor for Counting {
+    type Error = String;
+    fn exec(
+        &self,
+        _: &rusty_sandbox::SandboxSpec,
+        _: &str,
+        _: &[String],
+    ) -> Result<rusty_sandbox::ExecOutcome, String> {
+        self.0.set(self.0.get() + 1);
+        Err("must not run".into())
+    }
+}
+
+/// A baseline whose build could reach the holdout is refused before the
+/// base is checked out or anything runs, whichever way it reaches it.
+#[test]
+fn a_baseline_that_could_read_the_holdout_runs_nothing() {
+    let dir = tempdir("base-holdout");
+    let (repo, base) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    let suite = dir.join("suite");
+    let sentinel = suite.join("api/test.sh");
+    let before = std::fs::read(&sentinel).unwrap();
+    let alias = dir.join("alias");
+    std::os::unix::fs::symlink(&suite, &alias).unwrap();
+    let reading = |root: &Path| {
+        let mut set = profiles();
+        set.read_roots.push(root.display().to_string());
+        set
+    };
+    let work = dir.join("work");
+    let cases: [(&str, ProfileSet, &Path, &Path); 5] = [
+        ("a build read root", reading(&suite), &repo, &work),
+        ("a symlinked read root", reading(&alias), &repo, &work),
+        ("the repository", profiles(), &dir, &work),
+        ("the work root", profiles(), &repo, &suite),
+        ("a symlinked work root", profiles(), &repo, &alias),
+    ];
+    for (case, set, repo_path, work_root) in cases {
+        let exec = Counting::default();
+        let r = runner::isolated_baseline(&exec, &set, Some(&hs), repo_path, work_root, &base);
+        let refused = r.expect_err(case);
+        assert_eq!(refused.code, Code::BadClaimsConfig, "{case}");
+        assert!(
+            refused.detail.contains("holdout"),
+            "{case}: {}",
+            refused.detail
+        );
+        assert_eq!(exec.0.get(), 0, "{case}: nothing ran");
+        assert!(!suite.join("baseline").exists(), "{case}: nothing prepared");
+        assert!(!work.exists(), "{case}: nothing prepared");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), before, "{case}");
+    }
+    // Isolated, the same baseline runs and is green once the flag is.
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let green = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let b = runner::isolated_baseline(&Unconfined, &profiles(), Some(&hs), &repo, &work, &green)
+        .expect("isolated");
+    assert!(b.green(), "{b:?}");
+    assert_eq!(std::fs::read(&sentinel).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_green_base_pins_candidates_and_guards_its_tests() {
     let dir = tempdir("base-green");

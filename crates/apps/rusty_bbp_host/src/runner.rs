@@ -229,6 +229,30 @@ pub fn prepare(repo: &Path, work: &Path, base: &str, diffs: &[Vec<u8>]) -> Resul
     git(work, &["write-tree"])
 }
 
+/// #598: [`baseline`] in `<work_root>/baseline`, refused before anything is
+/// prepared or run when a private holdout or golden path overlaps what the
+/// baseline build reaches: its read roots, the repository or the work root
+/// (#597 2.2, the check `run_once` makes before a candidate run).
+pub fn isolated_baseline<E: Executor>(
+    exec: &E,
+    set: &ProfileSet,
+    holdout: Option<&crate::holdout::HoldoutSet>,
+    repo: &Path,
+    work_root: &Path,
+    base: &str,
+) -> Result<crate::baseline::Baseline, Rejection>
+where
+    E::Error: std::fmt::Display,
+{
+    if let Some(Err(e)) = holdout.map(|hs| hs.isolated_from(set, &[repo, work_root])) {
+        return Err(Rejection::new(
+            Code::BadClaimsConfig,
+            format!("holdout: {e}"),
+        ));
+    }
+    Ok(baseline(exec, set, repo, &work_root.join("baseline"), base))
+}
+
 /// #598: the frozen build suite on a clean checkout of `base`, no diffs,
 /// executed by `exec` exactly as a candidate run is. Nothing is reported to
 /// the task; the caller decides whether it may open.

@@ -246,20 +246,34 @@ fn run() -> Result<String, String> {
                     None | Some("sandbox") => runner::probe_host(),
                     Some(other) => Err(format!("--confine {other}")),
                 };
-                // #598: `--base REF --repo-path PATH --work DIR` runs the
-                // build suite on REF, sandboxed, before anything is written.
-                let baseline = match a.flags.get("base") {
-                    None => None,
-                    Some(r) => {
-                        probe()?;
-                        let repo = PathBuf::from(a.flag("repo-path")?);
-                        let work = PathBuf::from(a.flag("work")?).join("baseline");
-                        let base = baseline::resolve(&repo, r)?;
-                        let exec = runner::sandboxed(&dir.join("sandbox-state"))?;
-                        Some(runner::baseline(&exec, &set, &repo, &work, &base))
-                    }
-                };
                 return with_holdout(&a, |holdout| {
+                    // #598: `--base REF --repo-path PATH --work DIR` runs the
+                    // build suite on REF, sandboxed, before anything is
+                    // written, and only once the holdout is known isolated.
+                    let baseline = match a.flags.get("base") {
+                        None => None,
+                        Some(r) => {
+                            probe()?;
+                            let repo = PathBuf::from(a.flag("repo-path")?);
+                            let work = PathBuf::from(a.flag("work")?);
+                            let base = baseline::resolve(&repo, r)?;
+                            let exec = runner::sandboxed(&dir.join("sandbox-state"))?;
+                            let checked = runner::isolated_baseline(
+                                &exec,
+                                &set,
+                                holdout.as_ref(),
+                                &repo,
+                                &work,
+                                &base,
+                            );
+                            match checked {
+                                Ok(b) => Some(b),
+                                Err(refused) => {
+                                    return Ok(response_json(&Response::Rejected(refused)))
+                                }
+                            }
+                        }
+                    };
                     admin::open_claims_task(
                         &dir,
                         &task,
