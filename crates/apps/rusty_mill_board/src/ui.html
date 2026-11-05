@@ -4,123 +4,261 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mill Board</title>
-<link rel="icon" href="data:,">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='7' height='7' fill='%2312a3dc'/%3E%3Crect x='9' width='7' height='7' fill='%23d4006f'/%3E%3Crect y='9' width='7' height='7' fill='%23f2c200'/%3E%3Crect x='9' y='9' width='7' height='7' fill='%2315171a'/%3E%3C/svg%3E">
 <style>
-:root{--bg:#f6f6f4;--panel:#ececE8;--card:#fff;--ink:#1b1b1a;--mute:#6b6b66;--line:#d8d8d2;--acc:#a8461c;--err:#b3261e}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#161615;--panel:#1f1f1d;--card:#292927;--ink:#ececE8;--mute:#9a9a92;--line:#3a3a36;--acc:#e07a4a;--err:#f2867e}}
+/* A press room's job board: cards are numbered job tickets; process inks carry state.
+   Cyan: in work. Yellow: queued. Magenta: waits on you, and nothing else. Vermilion: blocked. */
+@font-face{font-family:"Hanken Grotesk";src:url(/ui/fonts/hanken-grotesk.woff2) format("woff2");font-weight:400 700;font-display:swap}
+@font-face{font-family:"Barlow Condensed";src:url(/ui/fonts/barlow-condensed-700.woff2) format("woff2");font-weight:700;font-display:swap}
+:root{
+  --bg:#f4f5f7;--card:#fff;--sunk:#eceef1;--ink:#15171a;--mute:#555c66;--line:#dcdfe4;--line2:#c7ccd3;
+  --rail:#1b1f23;--rail-ink:#eef0f2;--rail-mute:#a3abb5;--rail-line:#30363d;
+  --cyan:#0a7fb3;--cyan-fill:#12a3dc;--cyan-wash:#d9f0fa;--yellow:#f2c200;--yellow-wash:#fbf1c4;
+  --mag:#c4006a;--mag-wash:#fbe6f1;--red:#c2361b;--red-fill:#e2492a;--red-wash:#fbe5df;--done:#c9ced5;
+  --ok:#1d7a46;--focus:#12a3dc;--al:40%;
+  --ui:"Hanken Grotesk",system-ui,sans-serif;--num:"Barlow Condensed","Arial Narrow",sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#111316;--card:#1a1d21;--sunk:#15181b;--ink:#e9ebee;--mute:#a0a8b2;--line:#2b3036;--line2:#3a4048;
+  --rail:#0a0c0e;--rail-ink:#eef0f2;--rail-mute:#98a1ab;--rail-line:#262b31;
+  --cyan:#45bdf0;--cyan-fill:#1f9fd6;--cyan-wash:#123445;--yellow:#e8bd12;--yellow-wash:#2c3036;
+  --mag:#ff5aae;--mag-wash:#3a1229;--red:#ff7357;--red-fill:#d8462a;--red-wash:#3b1a12;--done:#4a515a;
+  --ok:#55c98a;--al:66%;color-scheme:dark;
+}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,sans-serif}
-header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
-h1{font-size:16px;margin:0 auto 0 0}
-input,select,textarea,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
-button{cursor:pointer}button:hover{border-color:var(--acc)}
-main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:10px;padding:12px 16px;overflow-x:auto;min-height:calc(100vh - 60px)}
-.col{background:var(--panel);border-radius:8px;padding:8px;min-height:120px}
-.col.over{outline:2px dashed var(--acc)}
-.col h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:2px 4px 8px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:8px;cursor:grab}
-.card b{display:block}
-.num{float:right;margin-left:6px;color:var(--mute);font-size:12px}
-.meta{color:var(--mute);font-size:12px;margin-top:4px}
-.meta.stale{color:var(--err)}
-.tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
-.tag.proj{border-color:var(--acc)}
-.tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
-main.archive{grid-auto-flow:row;grid-template-columns:minmax(0,760px);justify-content:center;align-content:start}
-.archive h3{margin:0;font-size:15px}.archive input{width:100%;margin:6px 0}.archive .card{cursor:pointer}
-.colbar{margin:-4px 4px 8px}.colbar button{font-size:11px;padding:0 6px}
-main.decisions{grid-auto-flow:row;grid-template-columns:minmax(0,760px);justify-content:center;align-content:start}
-.decisions .col p{margin:6px 4px}.decisions .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.decisions a{color:var(--acc)}
-.decisions .cand{border:1px solid var(--line);border-radius:6px;padding:6px;margin:6px 4px}
-#view[aria-pressed=true],#metrics[aria-pressed=true],#decide[aria-pressed=true],#archive[aria-pressed=true]{background:var(--acc);color:#fff}
-main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
-.roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
-@media (max-width:640px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
-.roadmap .card{cursor:pointer}
-main.metrics{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-content:start}
-.metrics h3,.kpis{grid-column:1/-1;margin:0;font-size:15px}
-.kpis{display:flex;flex-wrap:wrap;gap:10px}
-.kpi{background:var(--panel);border-radius:8px;padding:8px 12px;min-width:120px;color:var(--mute);font-size:12px}
-.kpi b{display:block;color:var(--ink);font-size:22px;font-variant-numeric:tabular-nums}
-.bar{display:grid;grid-template-columns:minmax(0,8em) 1fr 2.5em;gap:6px;align-items:center;margin:4px}
-.bar>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bar>span:last-child{text-align:right;font-variant-numeric:tabular-nums}
-.bar i{display:block;height:10px;min-width:1px;border-radius:3px;background:var(--fill,var(--acc))}
-.metrics .card{cursor:pointer}
-:root{--al:40%}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--al:66%}}
-.card.claimed{border-left:4px solid var(--ag);background:color-mix(in srgb,var(--ag) 9%,var(--card))}
-.tag.agent{border-color:var(--ag);color:var(--ag)}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--ui);font-feature-settings:"tnum" 1;
+  display:grid;grid-template-rows:auto auto auto minmax(0,1fr);-webkit-font-smoothing:antialiased}
+::selection{background:var(--cyan-wash);color:var(--ink)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+*{scrollbar-width:thin;scrollbar-color:var(--line2) transparent}
+a{color:var(--cyan);text-underline-offset:3px}
+svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+input,select,textarea,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line2);border-radius:5px;padding:6px 9px}
+input::placeholder,textarea::placeholder{color:var(--mute);opacity:1}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--focus);outline-offset:-1px;border-color:transparent}
+button{cursor:pointer;display:inline-flex;align-items:center;gap:6px;line-height:1.2;transition:background .12s,border-color .12s}
+button:hover:not(:disabled){border-color:var(--ink)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--ink);color:var(--card);border-color:var(--ink);font-weight:600}
+button.primary:hover{background:color-mix(in srgb,var(--ink) 85%,var(--cyan))}
+button.ask{color:var(--mag);border-color:var(--mag);background:var(--card);font-weight:600}
+button.ask:hover:not(:disabled){background:var(--mag);color:#fff;border-color:var(--mag)}
+
+/* The graphite top bar: brand, views, quick add, who you are. */
+header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52px;background:var(--rail);color:var(--rail-ink);flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px;margin-right:18px;white-space:nowrap}
+.brand svg{width:18px;height:18px}
+.views{display:flex;align-self:stretch;gap:2px}
+.views button{background:none;border:0;border-radius:0;color:var(--rail-mute);padding:0 12px;font-weight:500;box-shadow:inset 0 -2px 0 transparent}
+.views button:hover{color:var(--rail-ink)}
+.views button[aria-pressed=true]{color:var(--rail-ink);box-shadow:inset 0 -2px 0 var(--rail-ink)}
+.badge{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:var(--mag);color:#fff;font:700 12px/1 var(--num);letter-spacing:.02em}
+.badge:empty{display:none}
+.quick{display:flex;gap:6px;margin-left:auto;align-items:center}
+.top input,.top select{background:#262b31;border-color:var(--rail-line);color:var(--rail-ink)}
+.top input::placeholder{color:var(--rail-mute)}
+.top #title{width:min(24vw,260px)}
+.top button.primary{background:var(--rail-ink);color:var(--rail);border-color:var(--rail-ink)}
+.top button.primary:hover{background:#fff}
+.top button.icon{background:none;border-color:transparent;color:var(--rail-mute);padding:7px}
+.top button.icon:hover{color:var(--rail-ink);border-color:var(--rail-line)}
+.who{display:flex;gap:6px;align-items:center}
+.me{display:inline-flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;border:1px solid var(--rail-line);border-radius:16px;white-space:nowrap;color:var(--rail-mute)}
+.me b{color:var(--rail-ink);font-weight:600}
+.me .av{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;background:var(--rail-ink);color:var(--rail);font-weight:700;font-size:12px}
+
+/* The scope bar: repository, its projects, and the agents holding claims. Each only narrows the board. */
+#nav1{display:flex;align-items:center;gap:6px;padding:8px 14px;background:var(--card);border-bottom:1px solid var(--line);flex-wrap:wrap;white-space:nowrap}
+#nav1:empty{display:none}
+#nav1 .lbl{font-size:12px;font-weight:600;color:var(--mute);margin:0 2px 0 8px}
+#nav1 .lbl:first-child{margin-left:0}
+#nav1 .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 6px}
+#repo{font-weight:600;padding:5px 8px;max-width:260px}
+#nav1 .item{border-radius:14px;padding:4px 10px;gap:7px;background:var(--card);border-color:var(--line);font-size:13px}
+#nav1 .item .n{font:700 14px/1 var(--num);color:var(--mute)}
+#nav1 .item.on{background:var(--ink);border-color:var(--ink);color:var(--card)}
+#nav1 .item.on .n{color:var(--card);opacity:.75}
+#nav1 .item .name{display:inline-flex;align-items:center}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--ag);margin-right:6px;flex:none}
-@keyframes pulse{50%{opacity:.25}}
-.running .dot{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.3}}
+.running .dot{animation:pulse 1.8s ease-in-out infinite}
 @media (prefers-reduced-motion:reduce){.running .dot{animation:none}}
-.shell{display:grid;grid-template-columns:auto minmax(0,1fr);min-height:100vh}
-.shell.noside{grid-template-columns:minmax(0,1fr)}.shell.noside #side{display:none}
-#side{display:flex;background:var(--panel);border-right:1px solid var(--line)}
-#side nav{width:220px;padding:12px 8px;overflow-y:auto;min-height:100%}
-#side h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute);margin:4px 8px 8px}
-#side h2.sep{margin-top:18px}
-#side .item{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 8px;margin-top:2px;overflow-wrap:anywhere}
-#side .item:hover{background:var(--card)}
-#side .item.on{background:var(--acc);color:#fff}
-#side .item .n{opacity:.75;font-variant-numeric:tabular-nums;white-space:nowrap}
-#side .item .name{display:flex;align-items:center}
-#toggle,#gear{padding:4px 9px}
-#signin form{display:grid;gap:8px}#signin .err{color:var(--err);min-height:1.2em;margin:0}
-#settings{width:min(860px,94vw);max-height:90vh}
-#settings .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:10px}
-#settings .tabs button{border:0;border-radius:6px 6px 0 0;background:none}
-#settings .tabs button.on{background:var(--acc);color:#fff}
-#settings table{width:100%;border-collapse:collapse}
-#settings th,#settings td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
-#settings .err{color:var(--err);min-height:1.2em;margin:6px 0}
-#settings .note{color:var(--mute);margin:6px 0}
-#settings .secret{border:1px solid var(--acc);border-radius:6px;padding:8px;margin:8px 0;overflow-wrap:anywhere}
-#settings code{font-family:ui-monospace,monospace}
-#settings fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 10px}
+
+/* The colour control strip: one patch per column, as wide as its load; a jump bar to it. */
+.strip{display:flex;gap:3px;align-items:stretch;padding:10px 14px 0;background:var(--bg)}
+.strip[hidden]{display:none}
+.strip .patch{flex:var(--w) 1 0;min-width:max-content;border:0;border-radius:3px;padding:6px 10px;justify-content:flex-start;
+  background:var(--ink-fill);color:var(--ink-on);font-weight:600;font-size:13px}
+.strip .patch b{font:700 17px/1 var(--num);margin-left:auto;padding-left:10px}
+.strip .patch.zero{background:none;color:var(--mute);box-shadow:inset 0 0 0 1px var(--line2);border-style:dashed}
+.strip .patch:hover{filter:brightness(.95)}
+.strip .waits{align-self:center;margin-left:10px;color:var(--mag);font-weight:600;white-space:nowrap;display:inline-flex;gap:7px;align-items:center;background:none;border:0;padding:4px 2px;text-decoration:underline;text-underline-offset:3px}
+.strip .waits::before{content:"";width:10px;height:10px;background:var(--mag);border-radius:2px}
+.strip .waits:hover{text-decoration-thickness:2px}
+
+/* Stage inks, by column kind. */
+[data-kind=backlog]{--ink-fill:var(--yellow-wash);--ink-on:var(--ink);--sw:var(--yellow)}
+[data-kind=queue]{--ink-fill:var(--yellow);--ink-on:#15171a;--sw:var(--yellow)}
+[data-kind=work]{--ink-fill:var(--cyan-fill);--ink-on:#fff;--sw:var(--cyan-fill)}
+[data-kind=work][data-late]{--ink-fill:var(--cyan-wash);--ink-on:var(--ink);--sw:#7fcbec}
+[data-kind=done]{--ink-fill:var(--done);--ink-on:var(--ink);--sw:var(--done)}
+[data-kind=blocked]{--ink-fill:var(--red-fill);--ink-on:#fff;--sw:var(--red-fill)}
+
+/* The board. Columns scroll on their own; an empty one folds to a spine. */
+main{overflow:auto;padding:10px 14px 14px;min-height:0}
+main.board{display:flex;align-items:stretch;gap:0}
+.board>.col{flex:1 1 220px;min-width:210px;max-width:360px;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);padding:0 10px}
+.board>.col:first-child{padding-left:0}.board>.col:last-child{border-right:0;padding-right:0}
+.board>.col>.cards{overflow-y:auto;min-height:0;flex:1;padding:2px 2px 12px;margin:0 -2px}
+.board>.col.spine{flex:0 0 46px;min-width:0;padding:0;align-items:center;cursor:default}
+.spine h2{writing-mode:vertical-rl;transform:rotate(180deg);flex-direction:row-reverse;margin:8px 0;gap:10px}
+.spine h2 .sw{margin:0}
+.col.over{background:color-mix(in srgb,var(--cyan) 7%,transparent);box-shadow:inset 0 0 0 2px var(--cyan-fill);border-radius:4px}
+.col h2{display:flex;align-items:baseline;gap:8px;font-size:14px;font-weight:600;margin:6px 0 10px;letter-spacing:0;text-transform:none;color:var(--ink)}
+.col h2 .sw{width:10px;height:10px;border-radius:2px;background:var(--sw);align-self:center;flex:none}
+.col h2 .n{font:700 20px/1 var(--num)}
+.col h2 .hint{margin-left:auto;font-size:12px;font-weight:500;color:var(--mute)}
+.colbar{display:flex;gap:6px;margin:-4px 0 10px;flex-wrap:wrap}.colbar button{font-size:12px;padding:3px 8px}
+.flash{animation:flash 1s ease-out}
+@keyframes flash{from{background:color-mix(in srgb,var(--cyan) 14%,transparent)}}
+@media (prefers-reduced-motion:reduce){.flash{animation:none}}
+
+/* A card is a job ticket: its number set large, then title, then one line of who and where. */
+.card{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:9px 11px 10px;margin-bottom:8px;cursor:grab;
+  box-shadow:0 1px 2px rgb(20 24 30 / .05);transition:border-color .12s,box-shadow .12s}
+.card:hover{border-color:var(--line2);box-shadow:0 3px 10px -4px rgb(20 24 30 / .18)}
+.card .top{display:flex;align-items:center;gap:8px;min-height:22px}
+.num{font:700 21px/1 var(--num);letter-spacing:.01em;color:var(--ink)}
+.card b{display:block;font-size:14.5px;line-height:1.35;font-weight:600;margin:3px 0 0;text-wrap:pretty}
+.meta{color:var(--mute);font-size:13px;margin-top:6px;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
+.meta.stale,.idle{color:var(--red)}
+.idle{font-weight:600}
+.tag{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:3px;padding:0 6px;font-size:12px;line-height:19px;color:var(--mute)}
+.tag.proj{border:0;padding:0;font-size:13px;color:var(--mute)}
+.tag.agent{border:0;padding:0;font-size:13px;color:var(--ink)}
+.tag.agent .dot{margin-right:0}
+.more{font-size:12px;color:var(--mute)}
+/* Priority: a filled, half or open square, with its word. */
+.tag.p5,.tag.p3,.tag.p1{border:0;padding:0;margin-left:auto;font-size:12.5px;color:var(--ink);font-weight:500}
+.tag.p5::before,.tag.p3::before,.tag.p1::before{content:"";width:9px;height:9px;border:1.5px solid currentColor;box-sizing:border-box}
+.tag.p5::before{background:currentColor}
+.tag.p3::before{background:linear-gradient(90deg,currentColor 50%,transparent 50%)}
+.tag.p5{color:var(--red)}
+.ask-row{display:flex;flex-wrap:wrap;white-space:nowrap;align-items:center;gap:8px;margin:9px -11px -10px;padding:7px 11px;border-top:1px solid var(--mag-wash);color:var(--mag);font-size:13px;font-weight:600;background:color-mix(in srgb,var(--mag-wash) 55%,var(--card));border-radius:0 0 4px 4px}
+.ask-row button{margin-left:auto;padding:3px 9px;font-size:12.5px}
+.card.waits{border-color:color-mix(in srgb,var(--mag) 45%,var(--line))}
+.empty-note{color:var(--mute);font-size:13px;padding:6px 2px}
+
+/* Other views share the sheet: panels, not boxes in boxes. */
+main.roadmap,main.metrics{display:grid;gap:14px;align-content:start}
+main.roadmap{grid-template-columns:repeat(5,minmax(200px,1fr))}
+main.metrics{grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
+.roadmap h3,.metrics h3,.archive h3{grid-column:1/-1;margin:4px 0 0;font-size:18px;font-weight:600}
+.roadmap>.col,.metrics>.col{border-top:3px solid var(--ink);padding-top:8px}
+.roadmap .card,.metrics .card,.archive .card{cursor:pointer}
+[data-lane=now]{border-top-color:var(--cyan-fill)!important}[data-lane=next]{border-top-color:var(--yellow)!important}
+[data-lane=blocked]{border-top-color:var(--red-fill)!important}[data-lane=shipped]{border-top-color:var(--done)!important}
+.kpis{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--line);border-radius:4px;background:var(--card)}
+.kpi{padding:12px 18px;min-width:140px;color:var(--mute);font-size:13px;border-right:1px solid var(--line)}
+.kpi:last-child{border-right:0}
+.kpi b{display:block;color:var(--ink);font:700 34px/1.05 var(--num)}
+.bar{display:grid;grid-template-columns:minmax(0,8.5em) 1fr 2.6em;gap:8px;align-items:center;margin:5px 0;font-size:13px}
+.bar>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar>span:last-child{text-align:right;font:700 16px/1 var(--num)}
+.bar>span:nth-child(2){background:var(--sunk);border-radius:2px;height:12px;display:block}
+.bar i{display:block;height:12px;min-width:2px;border-radius:2px;background:var(--fill,var(--cyan-fill))}
+main.archive,main.decisions{display:grid;grid-template-columns:minmax(0,780px);justify-content:center;align-content:start;gap:12px}
+.archive input{width:100%}
+.decisions>.col{background:var(--card);border:1px solid var(--line);border-top:3px solid var(--mag);border-radius:4px;padding:12px 14px}
+.decisions .col p{margin:6px 0}.decisions .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.decisions a{color:var(--mag)}
+.decisions .cand{border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin:8px 0}
+@media (max-width:900px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
+
+/* Dialogs: the card, settings and sign-in. */
+dialog{background:var(--card);color:var(--ink);border:1px solid var(--line2);border-radius:6px;width:min(600px,94vw);padding:18px 20px;box-shadow:0 24px 60px -20px rgb(0 0 0 / .45)}
+dialog::backdrop{background:rgb(14 16 19 / .45)}
+dialog form{display:grid;gap:10px}
+dialog h2{margin:0;font-size:18px}
+#dlg .dhead{display:flex;align-items:baseline;gap:10px}
+#dlg .dhead .num{font-size:30px}
+#dlg .dhead .meta{margin:0}
+#dlg input:first-of-type{font-size:16px;font-weight:600}
+#dlg .row{display:flex;flex-wrap:wrap;gap:6px}
+.cm{border-top:1px solid var(--line)}
+.cm div{border-bottom:1px solid var(--line);padding:8px 0;font-size:13.5px}
+.cm div b{margin-right:6px}
+.banner{border:1px solid var(--mag);background:var(--mag-wash);border-radius:4px;padding:8px 10px}.banner:empty{display:none}
+#signin form{display:grid;gap:10px}#signin .err{color:var(--red);min-height:1.2em;margin:0}
+#settings{width:min(980px,96vw);max-height:90vh;padding:0}
+#settings>div{padding:0 20px 18px}
+#settings .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:0 -20px 14px;padding:0 14px;position:sticky;top:0;background:var(--card);z-index:1}
+#settings .tabs button{border:0;border-radius:0;background:none;padding:12px 10px;color:var(--mute);font-weight:500;box-shadow:inset 0 -2px 0 transparent}
+#settings .tabs button:hover{color:var(--ink)}
+#settings .tabs button.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--ink)}
+#settings table{width:100%;border-collapse:collapse;margin:4px 0 12px}
+#settings th{font-size:12px;font-weight:600;color:var(--mute);text-align:left;padding:6px 8px;border-bottom:1px solid var(--line2)}
+#settings td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
+#settings tr:hover td{background:color-mix(in srgb,var(--sunk) 60%,transparent)}
+#settings .err{color:var(--red);min-height:1.2em;margin:6px 0}
+#settings .note{color:var(--mute);margin:8px 0;font-size:13px}
+#settings .secret{border:1px solid var(--mag);background:var(--mag-wash);border-radius:4px;padding:10px;margin:8px 0;overflow-wrap:anywhere}
+#settings code{font-family:ui-monospace,monospace;font-size:12.5px}
+#settings fieldset{border:0;border-top:1px solid var(--line);margin:0;padding:10px 0;display:flow-root}
+#settings legend{float:left;font-weight:600;padding:5px 0;min-width:200px}
+#settings fieldset>.row,#settings fieldset>textarea{clear:both}
+#settings fieldset>button{font-size:13px;padding:4px 9px;margin-right:6px}
 #settings textarea{width:100%;min-height:3.2em}
-#settings .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+#settings .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0}
 #settings details{display:inline-block}
 #settings details label{display:block}
-@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}#side nav{width:100%;min-height:0}}
-#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
-dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
-dialog form{display:grid;gap:8px}
-.cm div{border-top:1px solid var(--line);padding:6px 0}
-.banner{border:1px solid var(--acc);border-radius:6px;padding:6px 8px}.banner:empty{display:none}
-@media (max-width:640px){main{grid-auto-flow:row;grid-auto-columns:auto}}
+#settings h3,#settings h4{margin:14px 0 6px;font-size:14px}
+#settings input[type=checkbox]{accent-color:var(--ink);width:16px;height:16px}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--card);padding:10px 16px;border-radius:5px;display:none;box-shadow:0 12px 30px -10px rgb(0 0 0 / .4);border-left:0;max-width:min(640px,92vw)}
+#toast::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red-fill);margin-right:9px}
+@media (max-width:760px){
+  header.top{padding:8px 10px}.quick{margin-left:0;width:100%}.top #title{flex:1;width:auto}
+  main.board{flex-direction:column}.board>.col{max-width:none;border-right:0;padding:0;flex:none}
+  .board>.col.spine{flex:none;align-items:stretch}.spine h2{writing-mode:horizontal-tb;transform:none;flex-direction:row}
+  .strip{flex-wrap:wrap}
+}
 </style>
 </head>
 <body>
-<div class="shell" id="shell">
-<aside id="side" aria-label="repositories, projects and agents"><nav id="nav1" aria-label="repositories, projects and agents"></nav></aside>
-<div>
-<header>
-  <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
-  <h1>Mill Board</h1>
-  <button id="view" aria-pressed="false" title="Show the chosen project's roadmap">Roadmap</button>
-  <button id="metrics" aria-pressed="false" title="Show metrics for the chosen repository or project, or the whole board">Metrics</button>
-  <button id="archive" aria-pressed="false" title="Done cards set aside: archived, or done more than 14 days ago">Archive</button>
-  <button id="decide" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions<span id="decide-n"></span></button>
-  <input id="actor" placeholder="your name" size="12" aria-label="actor name">
-  <select id="role" aria-label="role"></select>
-  <input id="title" placeholder="New card title" size="26" aria-label="new card title">
-  <button id="add">Add</button>
-  <button id="gear" title="Settings" aria-label="settings">&#9881;</button>
-  <button id="signout" hidden>Sign out</button>
+<header class="top">
+  <span class="brand"><svg viewBox="0 0 16 16" aria-hidden="true"><rect width="7" height="7" fill="#12a3dc"/><rect x="9" width="7" height="7" fill="#d4006f"/><rect y="9" width="7" height="7" fill="#f2c200"/><rect x="9" y="9" width="7" height="7" fill="#eef0f2"/></svg>Mill Board</span>
+  <nav class="views" aria-label="views">
+    <button id="boardv" type="button" aria-pressed="true">Board</button>
+    <button id="view" type="button" aria-pressed="false" title="The chosen project's roadmap">Roadmap</button>
+    <button id="metrics" type="button" aria-pressed="false" title="Metrics for the chosen repository or project, or the whole board">Metrics</button>
+    <button id="archive" type="button" aria-pressed="false" title="Done cards set aside: archived, or done more than 14 days ago">Archive</button>
+    <button id="decide" type="button" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions <span id="decide-n" class="badge"></span></button>
+  </nav>
+  <div class="quick">
+    <input id="title" placeholder="New card title" aria-label="new card title">
+    <button id="add" type="button" class="primary"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>Add card</button>
+  </div>
+  <div class="who">
+    <span id="me" class="me" hidden></span>
+    <input id="actor" placeholder="your name" size="11" aria-label="actor name">
+    <select id="role" aria-label="role"></select>
+  </div>
+  <button id="gear" type="button" class="icon" title="Settings" aria-label="settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  <button id="signout" type="button" class="icon" hidden title="Sign out" aria-label="sign out"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
 </header>
+<nav id="nav1" aria-label="repositories, projects and agents"></nav>
+<nav id="strip" class="strip" aria-label="columns" hidden></nav>
 <main id="board"></main>
-</div>
-</div>
 <dialog id="dlg"></dialog>
 <dialog id="settings" aria-label="settings"></dialog>
 <dialog id="signin" aria-label="sign in"><form method="dialog">
   <h2>Sign in to Mill Board</h2>
   <p id="signin-why" class="err" role="alert"></p>
   <input id="signin-token" type="password" placeholder="board token" autocomplete="current-password" aria-label="board token" required>
-  <button>Sign in</button>
+  <button class="primary">Sign in</button>
 </form></dialog>
 <div id="toast" role="alert"></div>
 <script>
@@ -206,41 +344,104 @@ async function act(op,args){
 }
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
 // A card's heading: its board number in the corner, if it has one, then its title.
-const heading=k=>[...(k.number?[el("span","#"+k.number,"num")]:[]),el("b",k.title)];
+const heading=k=>{const top=el("div",null,"top");if(k.number)top.append(el("span","#"+k.number,"num"));top.append(...priorityTag(k));return [top,el("b",k.title)]};
 // rusty_tick's priority scale; 0 (none) shows no badge.
 const PRIORITY={5:"High",3:"Medium",1:"Low",0:"None"};
 const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priority)]:[];
 
+// Ages: "40m", "5h", "3d". A card in a work column untouched for a day reads as idle.
+const ago=ms=>{const m=(Date.now()-ms)/6e4;return m<60?Math.max(1,Math.round(m))+"m":m<1440?Math.round(m/60)+"h":Math.round(m/1440)+"d"};
+const kindOf=c=>FLOW.columns.find(x=>x.id===c)?.kind;
+/* A gate ahead: a work column whose move onward is a human approval. Its cards wait on the owner. */
+const gateFrom=c=>kindOf(c)==="work"?FLOW.transitions.find(m=>m.from===c&&m.gate&&kindOf(m.to)!=="blocked"):null;
+const decisionsOn=k=>pending?.filter(p=>p.card?.id===k.id).length??0;
+const waitsOnYou=k=>!!gateFrom(k.column)||decisionsOn(k)>0;
+// Stage ink attributes for a column: its kind, and whether it is a later work column (a lighter cyan).
+function ink(e,c){const kind=kindOf(c)??"backlog";e.dataset.kind=kind;
+  if(kind==="work"&&working().indexOf(c)>0)e.dataset.late="";else delete e.dataset.late}
+const shownIn=c=>cards.filter(k=>k.column===c&&shown(k)&&!shelved(k));
+
+// A card's own tags, the first shown and the rest folded into a count (named on hover).
+function tagChips(k){
+  const tags=k.tags.filter(t=>!t.startsWith("migrated:"));if(!tags.length)return [];
+  const out=[el("span",tags[0],"tag")];
+  if(tags.length>1){const x=el("span","+"+(tags.length-1),"more");x.title=tags.slice(1).join(", ");out.push(x)}
+  return out;
+}
+/* A job ticket: number and priority, title, then project, holder and age; extra tags fold to a count. */
+function ticket(k){
+  const d=el("div",null,"card");
+  d.append(...heading(k));
+  const m=el("div",null,"meta");
+  if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
+  if(k.claim){
+    d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
+    const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
+  }
+  const work=kindOf(k.column)==="work",age=Date.now()-k.updated_ms;
+  if(work&&age>DAY)m.append(el("span","idle "+ago(k.updated_ms),"idle"));
+  else if(work||k.claim)m.append(el("span",ago(k.updated_ms)));
+  m.append(...tagChips(k));
+  if(k.issue)m.append(el("span","issue #"+k.issue));
+  if(k.comments.length)m.append(el("span",k.comments.length+(k.comments.length===1?" comment":" comments")));
+  d.append(m);
+  // What waits on you: a decision on this card, or a gate it stands at.
+  const n=decisionsOn(k),gate=gateFrom(k.column);
+  if(n||gate){
+    d.classList.add("waits");
+    const r=el("div",null,"ask-row");
+    if(n){r.append(n===1?"Decision waiting":n+" decisions waiting");const b=el("button","Answer","ask");b.type="button";b.onclick=e=>{e.stopPropagation();setView("decisions")};r.append(b)}
+    else{r.append("Waits on you");const b=el("button","Approve","ask");b.type="button";b.title="Approve into "+colLabel(gate.to);
+      b.onclick=e=>{e.stopPropagation();if(confirm("Approve #"+(k.number??"")+" "+k.title+" into "+colLabel(gate.to)+"?"))act("card_move",{id:k.id,to:gate.to})};r.append(b)}
+    d.append(r);
+  }
+  d.draggable=true;d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
+  d.onclick=()=>show(k.id);
+  return d;
+}
+
+/* The colour control strip: each column a patch as wide as its open cards, coloured by its stage;
+   a click scrolls to it. At the right, everything that waits on you. */
+function renderStrip(){
+  const s=$("strip");s.hidden=view!=="board";if(s.hidden)return;
+  s.replaceChildren();
+  for(const {id,label:name} of FLOW.columns){
+    const n=shownIn(id).length,b=el("button",null,"patch"+(n?"":" zero"));b.type="button";ink(b,id);
+    b.style.setProperty("--w",String(n?Math.max(1,Math.sqrt(n)):0));b.dataset.jump=id;
+    b.append(name,el("b",String(n)));b.title="Show "+name;
+    b.onclick=()=>{const c=document.querySelector('#board .col[data-col="'+id+'"]');if(!c)return;c.scrollIntoView({inline:"start",block:"nearest",behavior:"smooth"});
+      c.classList.remove("flash");void c.offsetWidth;c.classList.add("flash")};
+    s.append(b);
+  }
+  const gates=cards.filter(k=>shown(k)&&!shelved(k)&&gateFrom(k.column)).length,dec=pending?.length??0;
+  if(gates||dec){
+    const parts=[...(gates?[gates+(gates===1?" approval":" approvals")]:[]),...(dec?[dec+(dec===1?" decision":" decisions")]:[])];
+    const w=el("button","Waits on you: "+parts.join(" · "),"waits");w.type="button";
+    w.onclick=()=>{if(!gates){setView("decisions");return}
+      const first=FLOW.columns.find(c=>gateFrom(c.id)&&shownIn(c.id).length);document.querySelector('[data-jump="'+first?.id+'"]')?.click()};
+    s.append(w);
+  }
+}
+
 function render(){
+  renderStrip();
   if(view==="decisions"){renderDecisions();return}
   if(view==="roadmap"){renderRoadmap();return}
   if(view==="metrics"){renderMetrics();return}
   if(view==="archive"){renderArchive();return}
   mapSeq++;   // drop any roadmap or metrics still loading
-  const b=$("board");b.classList.remove("roadmap","metrics","decisions","archive");b.replaceChildren();
+  const b=$("board");b.classList.remove("board","roadmap","metrics","decisions","archive");b.classList.add("board");b.replaceChildren();
   for(const {id:c,label:name} of FLOW.columns){
-    const col=el("section",null,"col");col.dataset.col=c;col.append(...colHead(c,name));
+    const list=shownIn(c),spine=!list.length&&kindOf(c)!=="done";
+    const col=el("section",null,"col"+(spine?" spine":""));col.dataset.col=c;ink(col,c);col.setAttribute("aria-label",name);
+    col.append(...colHead(c,name,list.length,spine));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
     col.ondragleave=()=>col.classList.remove("over");
     col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
-    for(const k of cards.filter(k=>k.column===c&&shown(k)&&!shelved(k))){
-      const d=el("div",null,"card");d.draggable=true;d.append(...heading(k));
-      const m=el("div",null,"meta");
-      if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
-      m.append(...priorityTag(k));
-      k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
-      if(k.claim){
-        d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
-        const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
-      }
-      const waiting=pending?.filter(p=>p.card?.id===k.id).length;
-      if(waiting){const t=el("span","⚑ "+waiting,"tag p5");t.title="decisions waiting for you";m.append(t)}
-      if(k.issue)m.append(el("span","issue #"+k.issue));
-      if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
-      d.append(m);
-      d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
-      d.onclick=()=>show(k.id);
-      col.append(d);
+    if(!spine){
+      const box=el("div",null,"cards");box.append(...list.map(ticket));
+      if(!list.length)box.append(el("p","Nothing here.","empty-note"));
+      col.append(box);
     }
     b.append(col);
   }
@@ -253,7 +454,7 @@ let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics","archive"
 // Each lane's columns, from the workflow's kinds (the server's Lane::of).
 const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipped:"done"};
 const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
-const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions");$("archive").setAttribute("aria-pressed",view==="archive")};
+const pressed=()=>{$("boardv").setAttribute("aria-pressed",view==="board");$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions");$("archive").setAttribute("aria-pressed",view==="archive")};
 function setView(v){view=v;pref("view",v);pressed();render()}
 // The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
 const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
@@ -264,19 +465,18 @@ async function renderRoadmap(){
   try{
     if(!project)throw new Error("No project to show a roadmap for.");
     map=await api("board_roadmap",{project});
-  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  }catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  b.classList.remove("metrics","decisions","archive");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
+  b.classList.remove("board","metrics","decisions","archive");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
-    const h=el("h2",l.lane+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);
+    const h=el("h2",l.lane[0].toUpperCase()+l.lane.slice(1)+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);
     for(const k of l.cards){
       const d=el("div",null,"card");d.append(...heading(k));
       const m=el("div",null,"meta");
-      if(l.lane==="now")m.append(el("span",colLabel(k.column),"tag"));
-      m.append(...priorityTag(k));
-      k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
-      if(k.claim)m.append(el("span",k.claim,"tag"));
+      if(l.lane==="now")m.append(el("span",colLabel(k.column)));
+      if(k.claim){const t=el("span",null,"tag agent");t.style.setProperty("--ag",agentColor(k.claim));t.append(el("i",null,"dot"),k.claim);m.append(t)}
+      m.append(...tagChips(k));
       if(k.waits_on.length)m.append(el("span","waits on "+k.waits_on.length));
       if(k.done_ms)m.append(el("span","shipped "+new Date(k.done_ms).toLocaleDateString()));
       d.append(m);d.onclick=()=>show(k.id);col.append(d);
@@ -292,7 +492,7 @@ const DAY=864e5,dur=ms=>ms==null?"–":ms<DAY?Math.round(ms/36e5)+"h":(ms/DAY).t
 const day=ms=>new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"});
 // A panel of labelled bars: rows are {label, n, title?, fill?}; `max` lets two panels share a scale.
 function bars(title,rows,hint,max=Math.max(1,...rows.map(r=>r.n))){
-  const s=el("section",null,"col"),h=el("h2",title);if(hint)h.title=hint;s.append(h);
+  const s=el("section",null,"col"),h=el("h2",title[0].toUpperCase()+title.slice(1));if(hint)h.title=hint;s.append(h);
   for(const r of rows){
     const row=el("div",null,"bar"),f=el("i"),t=el("span");f.style.width=(r.n/max*100)+"%";
     if(r.fill)f.style.setProperty("--fill",r.fill);if(r.title)row.title=r.title;
@@ -306,7 +506,7 @@ async function renderMetrics(){
   const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
   let m;
   try{m=await api("board_metrics",args)}
-  catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
   const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
   const kpis=el("div",null,"kpis");
@@ -315,14 +515,14 @@ async function renderMetrics(){
     const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
   }
   const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done]));
-  const idle=el("section",null,"col");idle.append(el("h2","idle longest"));
+  const idle=el("section",null,"col");idle.append(el("h2","Idle longest"));
   for(const k of m.idle){
     const d=el("div",null,"card");d.append(...heading(k));
     d.append(el("div",[colLabel(k.column),"idle "+dur(k.idle_ms),...(k.claim?[k.claim]:[]),...(sel.project?[]:[label(k.project)])].join(" · "),"meta"));
     d.onclick=()=>show(k.id);idle.append(d);
   }
   if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
-  b.classList.remove("roadmap","decisions","archive");b.classList.add("metrics");
+  b.classList.remove("board","roadmap","decisions","archive");b.classList.add("metrics");
   b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
     bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
     bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
@@ -334,54 +534,60 @@ async function renderMetrics(){
   renderSide();syncDialog();
 }
 
-/* The side panel: repositories (and the agents holding claims) on the left; the chosen
-   repository's projects in a second pane. Everything here only narrows what the board shows. */
+/* The scope bar: the repository, its projects as chips, then the agents holding claims.
+   Everything here only narrows what the board shows. */
 function renderSide(){
-  // Every repository is listed, an empty one too (you may be about to add its first card), except the
-  // `default` repository when the Inbox is all it holds: the Inbox row below is it.
+  // Every repository is offered, an empty one too (you may be about to add its first card), except the
+  // `default` repository when the Inbox is all it holds: the Inbox chip is it.
   const names=Object.keys(repos).filter(r=>r!==INBOX||repos[r].length>1);
-  $("shell").classList.toggle("noside",(projects().length<2&&!cards.some(k=>k.claim))||pref("side")==="0");
-  const item=(label,n,on,fn,agent)=>{
-    const b=el("button",null,"item"+(on?" on":""));b.type="button";
+  const item=(text,n,on,fn,agent)=>{
+    const b=el("button",null,"item"+(on?" on":""));b.type="button";b.setAttribute("aria-pressed",String(on));
     const name=el("span",null,"name");
     if(agent){const d=el("i",null,"dot");d.style.setProperty("--ag",agentColor(agent));name.append(d)}
-    name.append(label);b.append(name,el("span",String(n),"n"));b.onclick=fn;return b};
+    name.append(text);b.append(name,el("span",String(n),"n"));b.onclick=fn;return b};
   const n1=$("nav1");n1.replaceChildren();
   if(projects().length>1){
-    n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
+    const r=el("select");r.id="repo";r.setAttribute("aria-label","repository");
+    r.append(new Option("All repositories · "+listed(()=>true),""));
+    for(const x of names)r.append(new Option(x+" · "+listed(k=>repoOf(k.project)===x),x));
+    r.value=sel.repo;r.onchange=()=>pick(r.value,"");
+    n1.append(r);
     // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
     // Listed only when this credential may see it, like every other entry here.
-    if(projects().includes(INBOX))n1.append(item("Inbox",listed(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
-    for(const r of names)n1.append(item(r,listed(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
+    const chips=[];
+    if(projects().includes(INBOX))chips.push(item("Inbox",listed(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
     // The projects of the chosen repository, or of every repository, so one project's cards are a click
-    // away. A repository whose only project is its own is left out: it is the repository, listed above.
+    // away. A repository whose only project is its own is left out: it is the repository, chosen above.
     // (A credential limited to some projects may see a repository with one other project: that one stays.)
-    const named=Object.entries(repos).filter(([r])=>!sel.repo||r===sel.repo)
-      .flatMap(([r,ps])=>ps.length===1&&ps[0]===r?[]:ps).filter(p=>p!==INBOX).sort();
-    if(named.length)n1.append(el("h2","Projects","sep"));
-    for(const p of named)n1.append(item(p,listed(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
+    const named=Object.entries(repos).filter(([x])=>!sel.repo||x===sel.repo)
+      .flatMap(([x,ps])=>ps.length===1&&ps[0]===x?[]:ps).filter(p=>p!==INBOX).sort();
+    for(const p of named)chips.push(item(p,listed(k=>k.project===p),sel.project===p,()=>sel.project===p?pick(sel.repo,""):pick(repoOf(p),p)));
+    if(chips.length)n1.append(el("i",null,"sep"),el("span","Projects","lbl"),...chips);
   }
   // Agents: whoever holds a claim, with how many cards. A second filter, independent of the repository.
   const claims={};cards.forEach(k=>{if(k.claim)claims[k.claim]=(claims[k.claim]||0)+1});
   const agents=Object.keys(claims).sort();
   if(agents.length){
-    n1.append(el("h2","Agents","sep"),item("Everyone",cards.filter(k=>k.claim).length,!sel.agent,()=>pickAgent("")));
+    n1.append(el("i",null,"sep"),el("span","Agents","lbl"),item("Everyone",cards.filter(k=>k.claim).length,!sel.agent,()=>pickAgent("")));
     for(const a of agents)n1.append(item(a,claims[a],sel.agent===a,()=>pickAgent(a),a));
   }
 }
-/* A column's heading. Done's also links to the Archive (with how many of its cards are there) and
-   archives every Done card in view: the chosen project, else every project. */
-function colHead(c,name){
-  const h=el("h2",name);
-  if(FLOW.columns.find(x=>x.id===c)?.kind!=="done")return [h];
+/* A column's heading: its stage swatch, name and count. Done's also links to the Archive (with how
+   many of its cards are there) and archives every Done card in view: the chosen project, else every project. */
+function colHead(c,name,n,spine){
+  const h=el("h2");h.append(el("i",null,"sw"),el("span",name,"label"),el("span",String(n),"n"));
+  if(spine)return [h];
+  if(kindOf(c)==="backlog"&&n>1)h.append(el("span","by priority","hint"));
+  if(kindOf(c)!=="done")return [h];
+  h.append(el("span",SHELF_DAYS+" days","hint"));
   const bar=el("div",null,"colbar");
-  const btn=(t,title,fn)=>{const x=el("button",t);x.type="button";x.title=title;x.onclick=fn;bar.append(x," ")};
-  const n=count(k=>k.column===c&&shown(k)&&shelved(k));
-  btn("Archive all","Archive every Done card in "+(sel.project?label(sel.project):"every project")+" (needs triage)",()=>{
+  const btn=(t,title,fn)=>{const x=el("button",t);x.type="button";x.title=title;x.onclick=fn;bar.append(x)};
+  const shelf=count(k=>k.column===c&&shown(k)&&shelved(k));
+  if(n)btn("Archive all","Archive every Done card in "+(sel.project?label(sel.project):"every project")+" (needs triage)",()=>{
     if(confirm("Archive every Done card in "+(sel.project?label(sel.project):"every project")+"?"))act("card_archive_done",sel.project?{project:sel.project}:{});
   });
-  if(n)btn(n+" archived","Show the Archive",()=>setView("archive"));
-  return [h,bar];
+  if(shelf)btn(shelf+" archived","Show the Archive",()=>setView("archive"));
+  return bar.childElementCount?[h,bar]:[h];
 }
 
 /* The Archive: shelved Done cards in view, newest first, searchable by number, title or tag.
@@ -389,7 +595,7 @@ function colHead(c,name){
 let archQ="";
 function renderArchive(){
   mapSeq++;
-  const b=$("board");b.classList.remove("roadmap","metrics","decisions");b.classList.add("archive");
+  const b=$("board");b.classList.remove("board","roadmap","metrics","decisions");b.classList.add("archive");
   const all=cards.filter(k=>shown(k)&&shelved(k)).sort((a,z)=>(z.done_ms??z.updated_ms)-(a.done_ms??a.updated_ms));
   const q=el("input"),list=el("section",null,"col");
   q.placeholder="Search the archive";q.setAttribute("aria-label","search the archive");q.value=archQ;
@@ -433,14 +639,15 @@ function show(id){
   f.pr.onchange=()=>act("card_plan",{id,priority:+f.pr.value});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   dlg={id,base:snap(k),f};setFields(dlg.base);
-  const row=el("div");
-  const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b," ")};
-  btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
+  const row=el("div",null,"row");
+  const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b);return b};
+  btn("Save",save).classList.add("primary");btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
   // Archive or Restore, for a Done card; syncDialog keeps the label in step with the board.
-  f.ar=el("button");f.ar.type="button";f.ar.onclick=()=>{const c=cards.find(x=>x.id===id);if(c)act(shelved(c)?"card_restore":"card_archive",{id})};row.append(f.ar," ");
+  f.ar=el("button");f.ar.type="button";f.ar.onclick=()=>{const c=cards.find(x=>x.id===id);if(c)act(shelved(c)?"card_restore":"card_archive",{id})};row.append(f.ar);
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
-  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
+  const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
+  form.append(head,f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -454,7 +661,7 @@ function syncDialog(){
   const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
   if(!k){f.banner.textContent="This card no longer exists.";return}
   // Display-only parts follow the board; the inputs are never rebuilt.
-  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+colLabel(k.column)+(k.archived_ms!=null?" · archived":"")+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.meta.textContent=colLabel(k.column)+(k.archived_ms!=null?" · archived":"")+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
   f.ar.hidden=!isDone(k);f.ar.textContent=shelved(k)?"Restore":"Archive";
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
@@ -501,7 +708,8 @@ async function loadPending(){
     else pendingErr=e.message||"no answer";
   }
   $("decide").hidden=pending===null&&pendingErr===null&&view!=="decisions";
-  $("decide-n").textContent=(pending?.length?" · "+pending.length:"")+(pendingErr?" · ⚠":"");
+  $("decide-n").textContent=(pending?.length?String(pending.length):"")+(pendingErr?" !":"");
+  $("decide").title=pendingErr?"Could not read the inbox: "+pendingErr:"Decisions waiting for you: open BBP escalations";
 }
 /* #704 erosion detail (D91): the bin's error, the metrics and the worst functions when erosion fails
    the claim, and unmeasured code always (D45). Shares are basis points, shown as percents. The detail
@@ -539,7 +747,7 @@ async function decide(item,action){
 }
 function renderDecisions(){
   mapSeq++;
-  const b=$("board");b.classList.remove("roadmap","metrics","archive");b.classList.add("decisions");b.replaceChildren();
+  const b=$("board");b.classList.remove("board","roadmap","metrics","archive");b.classList.add("decisions");b.replaceChildren();
   if(pendingErr)b.append(el("p","Could not read the inbox: "+pendingErr+(pending?". Showing what was read at "+new Date(pendingRead).toLocaleTimeString()+", which may be stale.":"."),"meta stale"));
   if(pending===null&&pendingErr){renderSide();return}
   if(pending===null){b.append(el("p","The inbox needs an admin token (sign in with one) and a board started with --bbp-bin and --bbp-root.","meta"));renderSide();return}
@@ -660,13 +868,14 @@ let reposDraft=null;
 function reposTab(){
   const t=el("div"),err=el("div",null,"err");
   if(!cfg.files.projects)t.append(unwritable("--projects FILE"));
+  t.append(el("p","Each repository has a project of its own name, which owns every path no other project of that repository claims.","note"));
   // repo -> [{name, paths}], without each repository's own project (it is implied).
   reposDraft=reposDraft||Object.fromEntries(Object.entries(cfg.repos).map(([r,ps])=>[r,Object.entries(ps).filter(([n])=>n!==r).map(([n,paths])=>({name:n,paths:paths.join("\n")}))]));
   const draft=reposDraft,inputs=[];
   const collect=()=>Object.fromEntries(Object.entries(draft).map(([r,ps])=>[r,Object.fromEntries(ps.map(p=>[p.name,p.paths.split("\n").map(x=>x.trim()).filter(Boolean)]))]));
   const restructure=fn=>()=>{inputs.forEach(f=>f());fn();drawSettings()};   // keep what was typed, change the shape, redraw
   for(const r of Object.keys(draft)){
-    const fs=el("fieldset");fs.append(el("legend",r),el("p","Project "+r+" owns every path no other project of this repository does.","note"));
+    const fs=el("fieldset");fs.append(el("legend",r));
     for(const p of draft[r]){
       const row=el("div",null,"row"),nm=field("input",{value:p.name,size:18,placeholder:"project name"}),
             paths=field("textarea",{value:p.paths,placeholder:"one repository path per line, e.g. crates/apps/rocket_league"});
@@ -842,7 +1051,9 @@ async function loadMeta(){
   FLOW=await meta("board_columns",FLOW);
   // With a per-model token, who you are is fixed by the token: show it, do not ask.
   const me=await meta("board_whoami",{});
-  if(me.authenticated){$("actor").value=me.actor;$("actor").disabled=true;$("role").value=me.role;$("role").disabled=true}
+  if(me.authenticated){$("actor").value=me.actor;$("actor").disabled=true;$("role").value=me.role;$("role").disabled=true;
+    $("actor").hidden=$("role").hidden=true;const c=$("me");c.hidden=false;
+    c.replaceChildren(el("span",(me.actor[0]||"?").toUpperCase(),"av"),el("b",me.actor),"· "+me.role);c.title="Signed in as "+me.actor+" ("+me.role+")"}
   // repo -> its projects. A credential limited to some projects hears only of those.
   const listed=(await meta("board_projects",{repos:{}})).repos;
   repos=Object.fromEntries(Object.entries(listed).map(([r,p])=>[r,Object.keys(p)]));
@@ -861,9 +1072,9 @@ async function loadMeta(){
   $("decide").onclick=()=>setView(view==="decisions"?"board":"decisions");
   $("archive").onclick=()=>setView(view==="archive"?"board":"archive");
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
-  $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
+  $("boardv").onclick=()=>setView("board");
   // New cards go to the chosen project, else to the chosen repository's own project.
-  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(t){$("title").value="";act("card_add",{title:t,...(project&&{project})})}};
+  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
   try{await refresh()}catch(e){toast(e.message)}
   poll();
