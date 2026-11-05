@@ -187,7 +187,9 @@ fn open_mode(
 /// with `bad_claims_config(sandbox)` unless `sandbox` (the host's probe of
 /// its sandbox) succeeds, and with `bad_claims_config(test_paths)` unless
 /// the profile set names its `test_paths`. Both checks come before anything
-/// is written. Claims mode grants no turns: one live turn, turn-based.
+/// is written. A report-only erosion profile is recorded in the report-only
+/// ledger before the open, and refused once report-only has expired (D42,
+/// [`crate::erosion_window`]). Claims mode grants no turns: one live turn, turn-based.
 /// `holdout`, if given, is staged and frozen as the task's holdout suite
 /// (#597); the core then waits for a holdout pass before acceptance.
 /// `baseline`, if given, is the build suite's run on the task's base
@@ -259,6 +261,19 @@ pub fn open_claims_task(
     if let Some(Err(e)) = holdout.map(|hs| hs.isolated_from(set, dirs)) {
         return refuse(format!("holdout: {e}"));
     }
+    // Held until the open below has published its log (D88). Taken before
+    // `open_mode`'s per-task open lock; nothing takes them the other way.
+    let _admission = match set.erosion_report_only() {
+        false => None,
+        true => match crate::erosion_window::admit(dir, task, crate::now())? {
+            Ok(admission) => Some(admission),
+            Err(why) => {
+                return refuse(format!(
+                    "erosion: report-only has expired ({why}); new report-only tasks pause until Nano approves limits from the calibration numbers (D42)"
+                ))
+            }
+        },
+    };
     let stage = || {
         let holdout = holdout
             .map(|hs| crate::holdout::stage(dir, task, hs))
