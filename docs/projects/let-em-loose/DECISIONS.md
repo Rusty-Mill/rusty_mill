@@ -94,6 +94,7 @@ Precise contracts used by this guide:
 | D82 | #704 slice 2: erosion profile recognition, invocation, opt-out, base, measured set and modes | [default] 2026-11-04 (#704) |
 | D86 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
 | D88 | #704 D42 expiry pause: go-live, count, what pauses, opt-out | [default] 2026-11-05 (#704) |
+| D91 | #704 slice 3: erosion escalation detail in the inbox | [default] 2026-11-05 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -711,3 +712,17 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_b55d930642a747baab2f93387bc09ad3
 **Key.** lel:704:expiry-pause-build-defaults
 **Source.** Questions Q1–Q6 from the #704 expiry-pause build thread, 2026-11-05; D41, D42, D82; QA.md § Erosion gate; card #704 Build 5, Time box and Done when; `rusty_bbp_host` `src/admin.rs` `open_claims_task`, `src/profiles.rs` `check_erosion`; `rusty_bbp` `src/event.rs` `TaskOpened`. Counting rule and lock span amended 2026-11-05 after dottiusmaximus's review of PR #1508 (builder default, not a Nano decision). Open-time bullet amended 2026-11-05 after the coordinator's probe of `admin::open_claims_task` on main showed the open writes only `TaskOpened` and `ArtifactStored(Brief)`. Numbered D88 because open PR branches already use D78–D87.
+
+## D91. #704 slice 3: erosion escalation detail in the inbox
+
+**Decision.** Build detail for card #704 Build 3, inside D43 and D45:
+- There is no erosion escalation reason. An erosion escalation is any open `bbp inbox` escalation whose claim has `erosion` in `failing`. Its detail comes from that `FailingView`'s report, then the report's log, then the `{"erosion":1,...}` line in the log's `=== erosion :` section.
+- `unmeasured` code is shown on the claim whether or not the profile fails (D45). For an escalated claim without a failing erosion profile, the host reads the latest report on the claim's current candidate that has an `erosion` profile result.
+- `Escalation` gains an optional `erosion: Option<ErosionDetail>`. It is additive and is not a BBP schema change. The typed fields mirror the bin's line: `base`, `mode`, `within_limits`, `concentration_bp` and `duplication_bp` as `{base, candidate, delta}`, `total_cc`, `loc`, `functions`, `worst_affected` (at most 3 `{key, base_cc, cc}`), `unmeasured` and `parse_errors`. Two more fields come from outside the line: `failing: bool`, taken from the profile result, and `error: Option<String>` for the bin's error line. If the log can't be read, has no erosion section, has no parsable line, or reports a version other than 1, the field is `None` and the inbox still answers.
+- The line is parsed on the host side with serde in `rusty_bbp_host`, so the host doesn't depend on `rusty_erosion` and tree-sitter. Both crates' tests pin one golden line taken from the bin's `render`.
+- Rendering in the Mill Board inbox (#595) is part of Build 3, because "Done when" isn't met by JSON alone. It may land as a second PR after the host JSON. The board shows the deltas and worst functions when erosion is failing, and shows `unmeasured` always. Whether passing or report-only deltas also show on other escalations is OPEN_QUESTIONS Q21. Until it is answered, they are in the JSON but not rendered.
+**Why.** No `ClaimEscalation` variant exists for erosion, because a failing profile blocks through the fail-block (D30, D41). The failing profile on the claim is therefore what makes an escalation an erosion one. D45 puts `unmeasured` on the claim and keeps it from escalating. An optional, typed, fail-soft field is the most reversible shape. A host-side parse keeps a parser dependency out of the host, and the shared golden line catches drift. The board is the inbox Nano reads.
+**Rejected.** A `pub fn parse` in `rusty_erosion` used by the host, which pulls tree-sitter into the host. A JSON-only slice 3 that closes Build 3 without a board view.
+**Tag.** [default] · remind-me: mem_136ada292af5416ebec3ecaf53b3dad9
+**Key.** lel:704:escalation-detail-build-defaults
+**Source.** Questions Q1–Q4 from the #704 slice 3 build thread, 2026-11-05; D30, D41, D43, D45, D82; QA.md § Erosion gate; card #704 Build 3 and Done when; `rusty_bbp_host` `src/inbox.rs` `Escalation`, `Reason`; `rusty_erosion` `src/main.rs` `render`. Numbered D91 because open PR branches already use D89–D90.

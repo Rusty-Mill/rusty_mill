@@ -33,6 +33,7 @@ pub mod broker;
 pub mod cgroups;
 pub mod clean_tree;
 pub mod confine;
+pub mod erosion_detail;
 pub mod erosion_window;
 pub mod golden;
 pub mod grade;
