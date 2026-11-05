@@ -33,8 +33,13 @@ remind-me tag: `let-em-loose`.
    or crate in the query. Card decisions from Nano are stored there.
 3. Mill Board, if connected (`card_get`): the card and its comments. Nano's
    answers to design questions are posted as card comments.
-4. `/mnt/project-files/let-em-loose/*-design.md`, if that folder exists
-   (design docs; owner answers are in each doc's last section).
+4. Design docs: `LEL/*-design.md` and `LEL/*-build-plan.md` (owner answers
+   are in each doc's last section). Every design lives in the repo, in its
+   first draft PR (D94). Never point a caller at `/mnt/project-files/` or
+   session scratch for a design: those don't survive between sessions, and
+   the #594 and #599 designs were lost there. Older designs may still sit in
+   `/mnt/project-files/let-em-loose/`; read one if it's there, and ask the
+   caller to move it into `LEL/` in its next PR.
 5. Nano's standing principles: `CLAUDE.md`, `AGENTS.md`, `LEL/SPEC.md`
    § Constraints, and remind-me preferences.
 The design chat share link in `LEL/handoff/SPEC.md` doesn't render; never cite it.
