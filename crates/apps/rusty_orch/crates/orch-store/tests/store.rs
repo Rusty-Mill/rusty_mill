@@ -766,6 +766,7 @@ mod lens_records {
             epoch: 0,
             look_harder,
             items: items.iter().copied().map(MsgId).collect(),
+            unsure: false,
         }
     }
 
@@ -825,5 +826,28 @@ mod lens_records {
             s.lens_reviews("b1").expect("load"),
             [review("sec", 7, false, &[11, 12, 15])]
         );
+    }
+
+    /// A lost post may have landed: once a save says so, the job stays
+    /// unsure through every later save and reopen.
+    #[test]
+    fn a_lost_post_keeps_the_job_unsure() {
+        let d = dir("lens_records_unsure");
+        {
+            let mut s = Store::open(&d).expect("open");
+            let lost = Review {
+                unsure: true,
+                ..review("sec", 7, false, &[11])
+            };
+            s.save_lens_review("b1", &lost).expect("save");
+            s.save_lens_review("b1", &review("sec", 7, false, &[16]))
+                .expect("retry");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let want = Review {
+            unsure: true,
+            ..review("sec", 7, false, &[11, 16])
+        };
+        assert_eq!(s.lens_reviews("b1").expect("load"), [want]);
     }
 }

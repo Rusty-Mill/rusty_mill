@@ -37,6 +37,7 @@ pub struct LensRecordRecord {
     epoch: u32,
     look_harder: bool,
     items: Vec<u64>,
+    unsure: bool,
 }
 
 impl LensRecordRecord {
@@ -50,6 +51,7 @@ impl LensRecordRecord {
             epoch: row.epoch,
             look_harder: row.look_harder,
             items: row.items.iter().map(|m| m.0).collect(),
+            unsure: row.unsure,
         }
     }
 
@@ -82,6 +84,7 @@ impl LensRecordRecord {
             epoch: self.epoch,
             look_harder: self.look_harder,
             items: self.items.into_iter().map(MsgId).collect(),
+            unsure: self.unsure,
         };
         if key(&self.board, &row) != self.id {
             return Err(StoreError::Corrupt(format!(

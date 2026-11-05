@@ -43,15 +43,19 @@ pub trait Board {
 /// so it stays the job's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostError {
+    /// The ids the board answered with, in order.
     pub posted: Vec<MsgId>,
+    /// The failing post's answer was lost: it may have landed, unknown.
+    pub unsure: bool,
     pub error: String,
 }
 
 impl PostError {
-    /// A failure before anything landed.
-    pub fn none(error: impl Into<String>) -> Self {
+    /// A refused post: nothing more landed than `posted`.
+    pub fn refused(posted: Vec<MsgId>, error: impl Into<String>) -> Self {
         Self {
-            posted: Vec::new(),
+            posted,
+            unsure: false,
             error: error.into(),
         }
     }
@@ -186,6 +190,7 @@ fn review(job: &Job, items: Vec<MsgId>) -> Option<Review> {
         epoch: job.epoch,
         look_harder: job.key.slot == Slot::LookHarder,
         items,
+        unsure: false,
     })
 }
 
@@ -207,8 +212,11 @@ fn settle(
                 Ok(ids) => ids,
                 Err(e) => {
                     state.abandon(job);
-                    let landed = (!e.posted.is_empty()).then_some(e.posted);
-                    let row = landed.and_then(|ids| review(job, ids));
+                    let known = !e.posted.is_empty() || e.unsure;
+                    let row = review(job, e.posted).filter(|_| known).map(|r| Review {
+                        unsure: e.unsure,
+                        ..r
+                    });
                     return (row, Some(Halt::Board(e.error)));
                 }
             };
@@ -352,15 +360,15 @@ mod tests {
     impl Board for Posted {
         fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
             if self.refuse {
-                return Err(PostError::none("board is read-only"));
+                return Err(PostError::refused(Vec::new(), "board is read-only"));
             }
             if let Some(n) = self.refuse_after.filter(|n| *n < posts.len()) {
                 let first = 100 + self.posts.iter().map(|(_, p)| p.len() as u64).sum::<u64>();
                 self.posts.push((lens.to_owned(), posts[..n].to_vec()));
-                return Err(PostError {
-                    posted: (first..first + n as u64).map(MsgId).collect(),
-                    error: "rejected".to_owned(),
-                });
+                return Err(PostError::refused(
+                    (first..first + n as u64).map(MsgId).collect(),
+                    "rejected",
+                ));
             }
             let first = 100 + self.posts.iter().map(|(_, p)| p.len() as u64).sum::<u64>();
             self.posts.push((lens.to_owned(), posts.to_vec()));

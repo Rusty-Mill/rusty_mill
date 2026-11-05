@@ -415,10 +415,10 @@ impl<R: Rpc> Board for Session<R> {
     /// that landed before it.
     fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
         if lens != self.lens {
-            return Err(PostError::none(format!(
-                "{}'s session cannot post for {lens}",
-                self.lens
-            )));
+            return Err(PostError::refused(
+                Vec::new(),
+                format!("{}'s session cannot post for {lens}", self.lens),
+            ));
         }
         let mut ids = Vec::with_capacity(posts.len());
         for p in posts {
@@ -429,6 +429,7 @@ impl<R: Rpc> Board for Session<R> {
                 Err(CallError::Lost(_)) => self.rpc.call("post", args),
                 first => first,
             };
+            let unsure = matches!(reply, Err(CallError::Lost(_)));
             let error = match answer(reply, "post") {
                 Ok(Response::Posted(id)) => {
                     ids.push(id);
@@ -437,7 +438,11 @@ impl<R: Rpc> Board for Session<R> {
                 Ok(other) => format!("post answered {other:?}"),
                 Err(e) => e,
             };
-            return Err(PostError { posted: ids, error });
+            return Err(PostError {
+                posted: ids,
+                unsure,
+                error,
+            });
         }
         Ok(ids)
     }
@@ -994,6 +999,7 @@ mod tests {
             .post("adversary", &[counter("x"), counter("y")])
             .expect_err("second rejected");
         assert_eq!(err.posted, [MsgId(41)]);
+        assert!(!err.unsure, "a rejection is final");
         assert!(err.error.contains("reassigned"), "{err:?}");
     }
 
@@ -1010,6 +1016,7 @@ mod tests {
             .post("adversary", &[counter("x"), counter("y")])
             .expect_err("lost");
         assert_eq!(err.posted, [MsgId(41)]);
+        assert!(err.unsure, "the lost post may have landed");
         assert!(err.error.contains("timed out"), "{err:?}");
         assert_eq!(s.rpc.args("post").len(), 3, "one resend of the lost post");
     }

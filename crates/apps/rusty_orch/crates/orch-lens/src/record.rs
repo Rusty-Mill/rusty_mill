@@ -44,6 +44,10 @@ pub struct Review {
     pub look_harder: bool,
     /// The evidence the job posted; empty for no post or a refused reply.
     pub items: Vec<MsgId>,
+    /// A post's answer was lost, so the job may have posted more than
+    /// `items`: its own contribution isn't known, and it is never scored
+    /// against the board outcome.
+    pub unsure: bool,
 }
 
 /// A claim's history as the record reads it: `bbp why --claim`, trimmed.
@@ -160,9 +164,11 @@ pub fn score(review: &Review, trail: &Trail) -> Scored {
     };
     let own = Own::of(review, trail);
     let Some(direction) = own.direction(trail) else {
-        return Scored::Unscored { pivotal: false };
+        return Scored::Unscored {
+            pivotal: review.unsure,
+        };
     };
-    let pivotal = pivotal(trail, settled, &own);
+    let pivotal = review.unsure || pivotal(trail, settled, &own);
     let truth = if pivotal {
         match golden(trail, settled).filter(|_| !own.executed(trail)) {
             Some(t) => t,
@@ -574,6 +580,7 @@ mod tests {
             epoch: 0,
             look_harder: false,
             items: items.iter().copied().map(MsgId).collect(),
+            unsure: false,
         }
     }
 
@@ -878,6 +885,35 @@ mod tests {
             ..last
         });
         assert_eq!(score(&review(&[3]), &t), Scored::Unscored { pivotal: true });
+    }
+
+    /// A non-pivotal win, but one of the job's posts was lost and may have
+    /// landed: it counts as pivotal, scored only against ground truth.
+    #[test]
+    fn a_job_with_a_lost_post_is_never_scored_against_the_outcome() {
+        let t = trail(
+            vec![
+                ev(2, "a", Support, 3),
+                ev(3, LENS, Support, 3),
+                ev(4, "b", Support, 3),
+                ev(5, "c", Support, 3),
+                line(8, 4),
+            ],
+            ClaimStatus::Accepted,
+        );
+        let unsure = Review {
+            unsure: true,
+            ..review(&[3])
+        };
+        assert_eq!(score(&unsure, &t), Scored::Unscored { pivotal: true });
+        let nothing_known = Review {
+            unsure: true,
+            ..review(&[])
+        };
+        assert_eq!(
+            score(&nothing_known, &t),
+            Scored::Unscored { pivotal: true }
+        );
     }
 
     #[test]

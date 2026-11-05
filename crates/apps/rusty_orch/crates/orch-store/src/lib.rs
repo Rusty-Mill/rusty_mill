@@ -603,6 +603,8 @@ impl Store {
                 merged.items.push(*m);
             }
         }
+        // A lost post stays unknown: the job's contribution stays unsure.
+        merged.unsure |= row.unsure;
         let record = LensRecordRecord::new(board, &merged, revision);
         let written = if existing.is_none() {
             self.lens_records.insert(record).map_err(engine_error)
