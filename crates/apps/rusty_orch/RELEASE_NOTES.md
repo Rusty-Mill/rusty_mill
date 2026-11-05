@@ -12,6 +12,11 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   (S scored, V pivotal)`. A review that decided the outcome itself is
   scored only against ground truth (a failing golden set), and is
   otherwise counted as pivotal and left unscored (D93, D92).
+- The record never credits a lens for an outcome it may have moved:
+  until BBP's history says more, golden truth isn't read from it, and a
+  line after a human reopen, or a job with a post whose answer was lost,
+  counts as pivotal. A crash or a failed post never drops a job's posts
+  from its record or counts them twice.
 
 ## Lens cards show the task's accept line
 **2026-11-04**
