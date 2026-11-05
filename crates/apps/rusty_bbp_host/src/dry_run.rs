@@ -382,6 +382,7 @@ mod tests {
     }
 
     /// `root/data/keep` exists before every refused run and after it.
+    #[cfg(unix)]
     fn sentinel(root: &Path) -> PathBuf {
         let keep = root.join("data/keep");
         std::fs::write(&keep, "real").unwrap();
