@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use orch_lens::card::Card;
 use orch_lens::context::{Line, MAX_LINES};
-use orch_lens::round::Board;
+use orch_lens::round::{Board, PostError};
 use orch_lens::{LensConfig, Post};
 use rusty_bbp::{
     ArtId, Body, ClaimBody, ClaimStatus, ClaimView, Direction, EvidenceKind, MsgId, Ref, Response,
@@ -411,10 +411,14 @@ impl<R: Rpc> Board for Session<R> {
     /// Each post is its own logical post with its own op id. A call whose
     /// answer was lost is sent once more with the same op, so BBP replays
     /// it if the first one landed; an answered error, such as a
-    /// rejection, is not retried.
-    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, String> {
+    /// rejection, is not retried. A failure keeps the ids of the posts
+    /// that landed before it.
+    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
         if lens != self.lens {
-            return Err(format!("{}'s session cannot post for {lens}", self.lens));
+            return Err(PostError::none(format!(
+                "{}'s session cannot post for {lens}",
+                self.lens
+            )));
         }
         let mut ids = Vec::with_capacity(posts.len());
         for p in posts {
@@ -425,10 +429,15 @@ impl<R: Rpc> Board for Session<R> {
                 Err(CallError::Lost(_)) => self.rpc.call("post", args),
                 first => first,
             };
-            match answer(reply, "post")? {
-                Response::Posted(id) => ids.push(id),
-                other => return Err(format!("post answered {other:?}")),
-            }
+            let error = match answer(reply, "post") {
+                Ok(Response::Posted(id)) => {
+                    ids.push(id);
+                    continue;
+                }
+                Ok(other) => format!("post answered {other:?}"),
+                Err(e) => e,
+            };
+            return Err(PostError { posted: ids, error });
         }
         Ok(ids)
     }
@@ -976,11 +985,25 @@ mod tests {
     }
 
     #[test]
+    fn a_post_rejected_partway_keeps_the_ids_that_landed() {
+        let fake = Fake::default()
+            .on("post", Response::Posted(MsgId(41)))
+            .refuse("post", reassigned());
+        let mut s = Session::new("adversary", fake, "r1");
+        let err = s
+            .post("adversary", &[counter("x"), counter("y")])
+            .expect_err("second rejected");
+        assert_eq!(err.posted, [MsgId(41)]);
+        assert!(err.error.contains("reassigned"), "{err:?}");
+    }
+
+    #[test]
     fn a_rejected_post_is_not_retried() {
         let fake = Fake::default().refuse("post", reassigned());
         let mut s = Session::new("adversary", fake, "r1");
         let err = s.post("adversary", &[counter("x")]).expect_err("rejected");
-        assert!(err.contains("reassigned"), "{err}");
+        assert!(err.error.contains("reassigned"), "{err:?}");
+        assert!(err.posted.is_empty());
         assert_eq!(s.rpc.args("post").len(), 1);
     }
 
@@ -1204,7 +1227,8 @@ done
             .with_deadline(Duration::from_millis(300));
         let mut s = Session::new("adversary", child, "r1");
         let err = s.post("adversary", &[counter("x")]).expect_err("rejected");
-        assert!(err.contains("reassigned"), "{err}");
+        assert!(err.error.contains("reassigned"), "{err:?}");
+        assert!(err.posted.is_empty());
         drop(s);
         assert_eq!(logged_posts(&dir).len(), 1, "a rejection is final");
         std::fs::remove_dir_all(&dir).expect("cleanup");

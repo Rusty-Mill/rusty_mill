@@ -32,7 +32,29 @@ use crate::schedule::{schedule, Job, JobKey, Skipped, Slot, State};
 pub trait Board {
     /// Post `posts` as lens `lens`, with its credential, and return their
     /// message ids in order.
-    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, String>;
+    ///
+    /// # Errors
+    ///
+    /// The failure, with the ids of the posts that landed before it.
+    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError>;
+}
+
+/// A post that failed partway: what landed before it stays on the board,
+/// so it stays the job's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostError {
+    pub posted: Vec<MsgId>,
+    pub error: String,
+}
+
+impl PostError {
+    /// A failure before anything landed.
+    pub fn none(error: impl Into<String>) -> Self {
+        Self {
+            posted: Vec::new(),
+            error: error.into(),
+        }
+    }
 }
 
 /// What the shell read for this round.
@@ -120,13 +142,9 @@ pub fn round(
             save: &mut *save,
         };
         let called = call(job, &parts, ctx, models);
-        let settled = settle(job, card, &called.end, state, board);
-        if let Ok(Some(r)) = &settled {
-            reviews.push(r.clone());
-        }
-        let halt = settled
-            .err()
-            .or_else(|| called.unsaved.clone().map(Halt::Unsaved));
+        let (row, halted) = settle(job, card, &called.end, state, board);
+        reviews.extend(row);
+        let halt = halted.or_else(|| called.unsaved.clone().map(Halt::Unsaved));
         ran.push((job.key.clone(), called.end));
         if let Some(h) = halt {
             return report(ran, skipped, reviews, h);
@@ -171,54 +189,61 @@ fn review(job: &Job, items: Vec<MsgId>) -> Option<Review> {
     })
 }
 
-/// Post and record one job's end. `Err` ends the round; `Ok(Some)` is a
-/// blind review's track-record row: what it posted, or nothing for a reply
-/// the protocol refused, so refusing is not free.
+/// Post and record one job's end: a blind review's track-record row, if
+/// any, and a halt that ends the round. The row holds what the job posted,
+/// or nothing for a reply the protocol refused, so refusing is not free. A
+/// post that failed partway halts, and its row keeps the posts that landed;
+/// the abandoned job's retry adds to the same row.
 fn settle(
     job: &Job,
     card: &Card,
     end: &End,
     state: &mut State,
     board: &mut dyn Board,
-) -> Result<Option<Review>, Halt> {
+) -> (Option<Review>, Option<Halt>) {
     match end {
         End::Answered { provider, posts } => {
-            let ids = post(board, &job.key.lens, posts).map_err(|e| {
-                state.abandon(job);
-                Halt::Board(e)
-            })?;
+            let ids = match post(board, &job.key.lens, posts) {
+                Ok(ids) => ids,
+                Err(e) => {
+                    state.abandon(job);
+                    let landed = (!e.posted.is_empty()).then_some(e.posted);
+                    let row = landed.and_then(|ids| review(job, ids));
+                    return (row, Some(Halt::Board(e.error)));
+                }
+            };
             state.answered(job, *provider, posts.len(), counters(posts));
             if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
                 state.attacked(q, card.id, card.epoch);
             }
-            Ok(review(job, ids))
+            (review(job, ids), None)
         }
         End::Failed { error, .. } => {
             state.failed(job);
             let refused = matches!(error, ClassifiedError::Permanent(_));
-            Ok(refused.then(|| review(job, Vec::new())).flatten())
+            (refused.then(|| review(job, Vec::new())).flatten(), None)
         }
         End::Exhausted => {
             state.failed(job);
-            Ok(None)
+            (None, None)
         }
         End::Stopped(Stop::Experiment) => {
             state.abandon(job);
-            Ok(None)
+            (None, None)
         }
         End::Stopped(stop) => {
             state.abandon(job);
-            Err(Halt::Task(*stop))
+            (None, Some(Halt::Task(*stop)))
         }
         End::Unsaved(e) => {
             state.abandon(job);
-            Err(Halt::Unsaved(e.clone()))
+            (None, Some(Halt::Unsaved(e.clone())))
         }
     }
 }
 
 /// An empty answer posts nothing.
-fn post(board: &mut dyn Board, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, String> {
+fn post(board: &mut dyn Board, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
     if posts.is_empty() {
         return Ok(Vec::new());
     }
@@ -320,12 +345,22 @@ mod tests {
     struct Posted {
         posts: Vec<(String, Vec<Post>)>,
         refuse: bool,
+        /// Refuse after this many posts have landed in one call.
+        refuse_after: Option<usize>,
     }
 
     impl Board for Posted {
-        fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, String> {
+        fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
             if self.refuse {
-                return Err("board is read-only".to_owned());
+                return Err(PostError::none("board is read-only"));
+            }
+            if let Some(n) = self.refuse_after.filter(|n| *n < posts.len()) {
+                let first = 100 + self.posts.iter().map(|(_, p)| p.len() as u64).sum::<u64>();
+                self.posts.push((lens.to_owned(), posts[..n].to_vec()));
+                return Err(PostError {
+                    posted: (first..first + n as u64).map(MsgId).collect(),
+                    error: "rejected".to_owned(),
+                });
             }
             let first = 100 + self.posts.iter().map(|(_, p)| p.len() as u64).sum::<u64>();
             self.posts.push((lens.to_owned(), posts.to_vec()));
@@ -454,6 +489,32 @@ mod tests {
             Posted::default(),
         );
         assert!(down.report.reviews.is_empty());
+    }
+
+    #[test]
+    fn a_post_that_fails_partway_keeps_its_landed_items_and_halts() {
+        let board = Posted {
+            refuse_after: Some(1),
+            ..Posted::default()
+        };
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7), counter(7)])),
+            board,
+        );
+        assert!(
+            matches!(&out.report.halt, Some(Halt::Board(e)) if e == "rejected"),
+            "{:?}",
+            out.report.halt
+        );
+        assert_eq!(
+            out.report.reviews.len(),
+            1,
+            "the round stops at the first job"
+        );
+        assert_eq!(out.report.reviews[0].items, [MsgId(100)]);
     }
 
     #[test]

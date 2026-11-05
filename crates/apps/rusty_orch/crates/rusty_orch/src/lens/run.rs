@@ -472,6 +472,7 @@ pub fn run(o: &Options) -> Result<String, String> {
 mod tests {
     use orch_dispatch::{AgentError, ClassifiedError};
     use orch_lens::meter::Stop;
+    use orch_lens::round::PostError;
     use orch_lens::{Answer, Post, Question, Usage};
     use rusty_bbp::{ClaimStatus, Direction, EvidenceBody, EvidenceKind, MsgId, Stakes};
 
@@ -556,7 +557,7 @@ mod tests {
     }
 
     impl Board for FakeSeat {
-        fn post(&mut self, _: &str, posts: &[Post]) -> Result<Vec<MsgId>, String> {
+        fn post(&mut self, _: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
             let first = 100 + self.posts.len() as u64;
             self.posts.extend_from_slice(posts);
             Ok((first..first + posts.len() as u64).map(MsgId).collect())

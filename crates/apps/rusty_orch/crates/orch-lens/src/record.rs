@@ -155,11 +155,7 @@ pub fn score(review: &Review, trail: &Trail) -> Scored {
         ClaimStatus::Void | ClaimStatus::Superseded => return Scored::Excluded,
         ClaimStatus::Open | ClaimStatus::Escalated => return Scored::Pending,
     };
-    let Some(settled) = trail
-        .steps
-        .iter()
-        .rposition(|s| matches!(s.change, Change::Status(_)))
-    else {
+    let Some(settled) = settlement(trail) else {
         return Scored::Pending;
     };
     let own = Own::of(review, trail);
@@ -178,6 +174,17 @@ pub fn score(review: &Review, trail: &Trail) -> Scored {
     let w = 1 + contested(trail, settled, &review.lens) + 2 * upset(trail, &own, truth);
     let points = if direction == truth { w } else { -w };
     Scored::Points { points, pivotal }
+}
+
+/// The latest status step that changed the status. An event that leaves it
+/// as it was, such as an unconfirmed action's escalation of an accepted
+/// claim, settles nothing.
+fn settlement(trail: &Trail) -> Option<usize> {
+    let steps = &trail.steps;
+    (0..steps.len()).rev().find(|&n| {
+        let changed = n == 0 || steps[n - 1].status != steps[n].status;
+        changed && matches!(steps[n].change, Change::Status(_))
+    })
 }
 
 /// The steps holding the job's own items.
@@ -856,6 +863,21 @@ mod tests {
                 pivotal: false
             }
         );
+    }
+
+    #[test]
+    fn a_status_event_that_changes_nothing_is_not_the_settlement() {
+        let mut t = trail(
+            vec![ev(2, "a", Support, 4), ev(3, LENS, Support, 4), line(8, 2)],
+            ClaimStatus::Accepted,
+        );
+        let last = t.steps[2].clone();
+        // An accepted claim's action mark times out: escalated, still accepted.
+        t.steps.push(Step {
+            change: Change::Status(Rule::Other),
+            ..last
+        });
+        assert_eq!(score(&review(&[3]), &t), Scored::Unscored { pivotal: true });
     }
 
     #[test]
