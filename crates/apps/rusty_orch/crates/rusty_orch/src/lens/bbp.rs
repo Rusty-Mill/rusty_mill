@@ -498,7 +498,9 @@ pub enum Diffs {
     /// Each diff's text, in the candidate's order.
     Text(Vec<String>),
     /// The lens's role may not read the candidate or one of its diffs
-    /// (D98): the claim is not eligible. Nothing was charged.
+    /// (D98): the claim is not eligible. The refused read itself is not
+    /// charged; reads that succeeded before it (the candidate, earlier
+    /// diffs) already were.
     Forbidden(String),
 }
 
