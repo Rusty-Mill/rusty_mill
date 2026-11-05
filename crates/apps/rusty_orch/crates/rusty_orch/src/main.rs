@@ -22,6 +22,7 @@ fn main() -> ExitCode {
         Some("inspect") => return inspect(argv),
         Some("maintain") => return maintain(argv),
         Some("lens") => return lens(argv),
+        Some("watch") => return watch(argv),
         _ => {}
     }
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -198,4 +199,33 @@ fn sandbox_helper() -> ! {
     let err = rusty_sandbox::run_helper(&rest);
     eprintln!("rusty_orch __sandbox: {err}");
     std::process::exit(i32::from(rusty_sandbox::SETUP_FAILED));
+}
+
+fn watch(argv: impl IntoIterator<Item = String>) -> ExitCode {
+    use rusty_orch::watch;
+    let options = match watch::options(argv) {
+        Ok(options) => options,
+        Err(ArgsError::Help) => {
+            println!("{}", watch::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        Err(ArgsError::Usage(message)) => {
+            eprintln!("rusty_orch: {message}\n{}", watch::USAGE);
+            return ExitCode::from(2);
+        }
+    };
+    match watch::run(&options, &orch_cli::StdCommand) {
+        Ok((report, clean)) => {
+            println!("{report}");
+            if clean {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        Err(error) => {
+            eprintln!("rusty_orch: {error}");
+            ExitCode::from(1)
+        }
+    }
 }

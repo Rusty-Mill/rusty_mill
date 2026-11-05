@@ -23,10 +23,10 @@ use crate::class::DataClass;
 use crate::config::Tools;
 use crate::meter::Stop;
 
-/// The candidate one hunt is about.
+/// The candidate one hunt is about. Its task is the call context's
+/// ([`Ctx::task`]), so the rows name the task the calls were billed to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target<'a> {
-    pub task: &'a str,
     pub claim: MsgId,
     /// The candidate artifact hunted.
     pub candidate: u64,
@@ -111,7 +111,8 @@ pub fn hunt(
     models: &mut dyn Models,
     probes: &mut dyn Probes,
 ) -> Result<Hunted, Unrecorded> {
-    let spent_before = ctx.meter.task_spent(target.task);
+    let task = ctx.task;
+    let spent_before = ctx.meter.task_spent(task);
     let mut tokens = 0;
     let mut notes = Vec::new();
     let body = enumerate_body(target, list);
@@ -129,7 +130,12 @@ pub fn hunt(
         RawEnd::Stopped(stop) => return Err(Unrecorded::Stopped(stop)),
         RawEnd::Exhausted => return Err(Unrecorded::Exhausted(called.passed)),
         RawEnd::Unsaved(e) => return Err(Unrecorded::Unsaved(e)),
-        RawEnd::Failed { provider, error } => {
+        RawEnd::Failed {
+            provider,
+            error,
+            tokens: t,
+        } => {
+            tokens += t.unwrap_or(0);
             notes.push(format!("enumerate: {provider}: {error:?}"));
             Vec::new()
         }
@@ -150,13 +156,22 @@ pub fn hunt(
                 notes.push(format!("hunt {n}: stopped: {stop}"));
                 break;
             }
+            RawEnd::Failed {
+                provider,
+                error,
+                tokens: t,
+            } => {
+                tokens += t.unwrap_or(0);
+                notes.push(format!("hunt {n}: {provider}: {error:?}"));
+                continue;
+            }
             other => {
                 notes.push(format!("hunt {n}: {other:?}"));
                 continue;
             }
         };
         match parse_probe(&text) {
-            Ok(Some(source)) => match probe(target, n, &s, &source, list, probes) {
+            Ok(Some(source)) => match probe(task, target, n, &s, &source, list, probes) {
                 Ok(row) => rows.push(row),
                 Err(e) => notes.push(format!("probe {n}: not run: {e}")),
             },
@@ -165,16 +180,13 @@ pub fn hunt(
         }
     }
     let hunt = HuntRow {
-        task: target.task.to_owned(),
+        task: task.to_owned(),
         claim: target.claim.0,
         candidate: target.candidate,
         suspects: u32::try_from(named).unwrap_or(u32::MAX),
         probes: u32::try_from(rows.len()).unwrap_or(u32::MAX),
         tokens,
-        cost: ctx
-            .meter
-            .task_spent(target.task)
-            .saturating_sub(spent_before),
+        cost: ctx.meter.task_spent(task).saturating_sub(spent_before),
         started: target.started,
     };
     Ok(Hunted {
@@ -213,6 +225,7 @@ fn ask(
 
 /// Run probe `n` and classify it.
 fn probe(
+    task: &str,
     target: &Target<'_>,
     n: u32,
     s: &Suspect,
@@ -228,7 +241,7 @@ fn probe(
     })?;
     let outcome = outcome(runs.candidate, runs.base)?;
     Ok(ProbeRow {
-        task: target.task.to_owned(),
+        task: task.to_owned(),
         claim: target.claim.0,
         candidate: target.candidate,
         site: s.site.clone(),
@@ -307,21 +320,46 @@ mod tests {
         AgentId::new(s).expect("id")
     }
 
-    /// Answers raw questions from a script, in order.
-    struct Script(VecDeque<Result<String, ClassifiedError>>, Vec<Question>);
+    /// Answers questions from a script, in order.
+    struct Script(VecDeque<Result<Answer, ClassifiedError>>, Vec<Question>);
 
     impl Model for Script {
         fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
             self.1.push(q.clone());
-            let next = self.0.pop_front().expect("scripted reply");
-            next.map(|text| Answer {
-                reply: Reply::Raw(text),
-                usage: Usage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    cached_input_tokens: 0,
-                },
-            })
+            self.0.pop_front().expect("scripted reply")
+        }
+    }
+
+    /// A raw reply using 15 tokens.
+    fn raw(text: &str) -> Answer {
+        Answer {
+            reply: Reply::Raw(text.to_owned()),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+            },
+        }
+    }
+
+    /// Output tokens one over the cap: refused, its usage known.
+    const OVER: u64 = crate::call::MAX_OUTPUT_TOKENS as u64 + 1;
+
+    fn over_cap() -> Answer {
+        Answer {
+            usage: Usage {
+                output_tokens: OVER,
+                ..raw("x").usage
+            },
+            ..raw(SUSPECTS)
+        }
+    }
+
+    /// A posts reply, the wrong shape for a raw question; 15 tokens.
+    fn posts() -> Answer {
+        Answer {
+            reply: Reply::Posts(Vec::new()),
+            ..raw("x")
         }
     }
 
@@ -373,7 +411,6 @@ mod tests {
 
     fn target() -> Target<'static> {
         Target {
-            task: T,
             claim: MsgId(7),
             candidate: 3,
             claim_text: "Write the store atomically",
@@ -396,6 +433,15 @@ mod tests {
         probes: &mut Fake,
         task_calls: u32,
     ) -> (Result<Hunted, Unrecorded>, Vec<Question>) {
+        let script = replies.into_iter().map(|r| r.map(raw)).collect();
+        run_answers(script, probes, task_calls)
+    }
+
+    fn run_answers(
+        script: VecDeque<Result<Answer, ClassifiedError>>,
+        probes: &mut Fake,
+        task_calls: u32,
+    ) -> (Result<Hunted, Unrecorded>, Vec<Question>) {
         let ps = providers();
         let ids = [id("claude")];
         let seat = Seat {
@@ -411,7 +457,6 @@ mod tests {
             meter: &mut m,
             save: &mut save,
         };
-        let script = replies.into_iter().map(|r| r.map(str::to_owned)).collect();
         let mut models = One(Script(script, Vec::new()));
         let out = hunt(&target(), seat, RUST, ctx, &mut models, probes);
         (out, models.0 .1)
@@ -448,9 +493,41 @@ mod tests {
         );
         assert!(h.hunt.cost > 0, "the meter's spend is the hunt's cost");
         let p = &h.probes[0];
+        assert_eq!(
+            (h.hunt.task.as_str(), p.task.as_str()),
+            (T, T),
+            "billed task"
+        );
         assert_eq!((p.outcome, p.novel, p.runs), (Outcome::Regression, true, 2));
         assert_eq!(p.probe_sha256, Sha256::of(b"#[test] fn t() {}").hex());
         assert!(h.notes.is_empty(), "{:?}", h.notes);
+    }
+
+    #[test]
+    fn a_refused_enumerate_reply_still_counts_its_tokens() {
+        let mut probes = fails_then(Run::Passed);
+        let (out, asked) = run_answers([Ok(over_cap())].into(), &mut probes, 10);
+        let h = out.expect("recorded: the call was made");
+        assert_eq!(asked.len(), 1);
+        assert_eq!((h.hunt.suspects, h.hunt.tokens), (0, 10 + OVER));
+        assert!(h.hunt.cost > 0);
+        assert!(h.notes[0].contains("output tokens"), "{:?}", h.notes);
+    }
+
+    #[test]
+    fn refused_and_wrong_shape_hunt_replies_still_count_their_tokens() {
+        let mut probes = fails_then(Run::Passed);
+        let script = [Ok(raw(SUSPECTS)), Ok(over_cap()), Ok(posts())].into();
+        let (out, asked) = run_answers(script, &mut probes, 10);
+        let h = out.expect("recorded");
+        assert_eq!(asked.len(), 3);
+        assert_eq!((h.hunt.probes, h.hunt.tokens), (0, 15 + (10 + OVER) + 15));
+        assert!(probes.1.is_empty(), "no probe came back");
+        assert!(
+            h.notes[0].contains("output tokens") && h.notes[1].contains("posts reply"),
+            "{:?}",
+            h.notes
+        );
     }
 
     #[test]
