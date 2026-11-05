@@ -338,12 +338,13 @@ pub enum Event {
         until: Time,
         reason: String,
     },
-    /// D82: one batch of what the human typed, recorded as delivered.
-    /// `sha256` is [`crate::claims::input_chain`] over the previous batch.
+    /// D82: one batch of what the human typed, the bytes as the mux
+    /// delivered them. `sha256` is [`crate::claims::input_chain`] over the
+    /// previous batch.
     TakeoverInput {
         takeover: u64,
         seq: u64,
-        text: String,
+        bytes: crate::ids::Base64Bytes,
         sha256: Sha256,
     },
     /// D82: the takeover is over; the totals close the chain.

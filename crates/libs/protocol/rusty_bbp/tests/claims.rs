@@ -3724,13 +3724,35 @@ mod takeover {
         }
     }
 
-    fn input(cx: &mut Cx, id: u64, seq: u64, text: &str, prev: Option<Sha256>) -> Response {
+    fn input(
+        cx: &mut Cx,
+        id: u64,
+        seq: u64,
+        batch: impl AsRef<[u8]>,
+        prev: Option<Sha256>,
+    ) -> Response {
+        let batch = batch.as_ref();
         cx.host(HostAction::TakeoverInput {
             takeover: id,
             seq,
-            text: text.into(),
-            sha256: input_chain(prev, text),
+            bytes: Base64Bytes(batch.to_vec()),
+            sha256: input_chain(prev, batch),
         })
+    }
+
+    fn ends(cx: &Cx, id: u64) -> Vec<(TakeoverEnd, u64, Option<Sha256>)> {
+        cx.log
+            .iter()
+            .filter_map(|e| match e {
+                Event::TakeoverEnded {
+                    takeover,
+                    reason,
+                    batches,
+                    last,
+                } if *takeover == id => Some((*reason, *batches, *last)),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -3740,9 +3762,9 @@ mod takeover {
         let id = started(&mut cx, c, "agent:t:c:1");
         assert_eq!(id, 1);
         ok(input(&mut cx, id, 1, "ls\r", None));
-        let one = input_chain(None, "ls\r");
+        let one = input_chain(None, b"ls\r");
         ok(input(&mut cx, id, 2, "cargo test\r", Some(one)));
-        let two = input_chain(Some(one), "cargo test\r");
+        let two = input_chain(Some(one), b"cargo test\r");
         ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
         let ended = cx.log.iter().rev().find_map(|e| match e {
             Event::TakeoverEnded {
@@ -3778,21 +3800,21 @@ mod takeover {
         let forged = cx.host(HostAction::TakeoverInput {
             takeover: id,
             seq: 1,
-            text: "x".into(),
-            sha256: input_chain(None, "y"),
+            bytes: Base64Bytes(b"x".to_vec()),
+            sha256: input_chain(None, b"y"),
         });
         assert_eq!(rejected(forged), Code::PayloadMismatch);
         assert_eq!(
             rejected(input(&mut cx, id, 1, "", None)),
             Code::BadHumanInput
         );
-        let big = "a".repeat(4097);
+        let big = vec![b'a'; 4097];
         assert_eq!(rejected(input(&mut cx, id, 1, &big, None)), Code::TooLarge);
-        ok(input(&mut cx, id, 1, &"a".repeat(4096), None));
+        ok(input(&mut cx, id, 1, vec![b'a'; 4096], None));
     }
 
     #[test]
-    fn expiry_refuses_input_and_only_then_ends_as_expired() {
+    fn expiry_drains_delivered_input_then_refuses_it_and_ends_as_expired() {
         let mut cx = Cx::new();
         let c = cx.low();
         let id = started(&mut cx, c, "s1");
@@ -3804,12 +3826,71 @@ mod takeover {
             rejected(cx.host(end(TakeoverEnd::Expired))),
             Code::WrongState
         );
-        cx.now = cx.now.plus(10 * 60_000 + 1);
+        // A batch delivered just before `until` is posted just after it.
+        let until = cx.now.plus(10 * 60_000);
+        cx.now = until.plus(1);
+        ok(input(&mut cx, id, 1, "last\r", None));
+        let last = input_chain(None, b"last\r");
+        cx.now = until.plus(TAKEOVER_DRAIN_MS + 1);
         assert_eq!(
-            rejected(input(&mut cx, id, 1, "x", None)),
+            rejected(input(&mut cx, id, 2, "x", Some(last))),
             Code::TokenExpired
         );
         ok(cx.host(end(TakeoverEnd::Expired)));
+        assert_eq!(ends(&cx, id), [(TakeoverEnd::Expired, 1, Some(last))]);
+    }
+
+    #[test]
+    fn input_is_recorded_as_raw_bytes_even_when_not_utf8() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        // Invalid UTF-8, then "é" (C3 A9) split across two batches.
+        let batches: [&[u8]; 3] = [b"\xff\xfe", b"caf\xc3", b"\xa9\r"];
+        let mut prev = None;
+        for (seq, batch) in (1..).zip(batches) {
+            ok(input(&mut cx, id, seq, batch, prev));
+            prev = Some(input_chain(prev, batch));
+        }
+        let recorded: Vec<Vec<u8>> = cx
+            .log
+            .iter()
+            .filter_map(|e| match e {
+                Event::TakeoverInput { bytes, .. } => Some(bytes.0.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(recorded, batches.map(<[u8]>::to_vec));
+        let json = rusty_serde::json::to_string(&cx.log).unwrap();
+        assert!(json.contains(r#""bytes":"//4=""#), "base64 on the wire");
+        let back: Vec<Event> = rusty_serde::json::from_str(&json).unwrap();
+        assert_eq!(back, cx.log);
+    }
+
+    #[test]
+    fn closing_or_cancelling_the_task_ends_live_takeovers_once() {
+        for cancel in [false, true] {
+            let mut cx = Cx::new();
+            let c = cx.low();
+            let id = started(&mut cx, c, "s1");
+            let done = started(&mut cx, c, "s2");
+            ok(input(&mut cx, id, 1, "y\r", None));
+            ok(cx.human(HumanAction::TakeoverRelease { takeover: done }));
+            let expected_rev = cx.rev();
+            ok(cx.human(if cancel {
+                HumanAction::Cancel {
+                    expected_rev,
+                    reason: "stop".into(),
+                }
+            } else {
+                HumanAction::Close { expected_rev }
+            }));
+            assert!(cx.st.state.terminal(), "cancel={cancel}");
+            let chain = Some(input_chain(None, b"y\r"));
+            assert_eq!(ends(&cx, id), [(TakeoverEnd::TurnEnded, 1, chain)]);
+            assert_eq!(ends(&cx, done).len(), 1, "an ended one is not ended again");
+            assert!(cx.st.claims.takeovers.values().all(|t| !t.live()));
+        }
     }
 
     #[test]

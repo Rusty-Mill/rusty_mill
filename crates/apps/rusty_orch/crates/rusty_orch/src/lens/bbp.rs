@@ -749,6 +749,7 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            human_touched: false,
         }
     }
 

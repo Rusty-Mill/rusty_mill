@@ -264,10 +264,10 @@ impl Takeover {
 }
 
 /// The takeover input chain: SHA-256 over the previous value (32 zero bytes
-/// before the first batch) followed by the batch text.
-pub fn input_chain(prev: Option<Sha256>, text: &str) -> Sha256 {
+/// before the first batch) followed by the batch's bytes, as delivered.
+pub fn input_chain(prev: Option<Sha256>, batch: &[u8]) -> Sha256 {
     let mut bytes = prev.map_or([0u8; 32], |s| s.0).to_vec();
-    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(batch);
     Sha256::of(&bytes)
 }
 

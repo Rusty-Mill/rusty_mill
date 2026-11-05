@@ -69,7 +69,7 @@ pub enum HostAction {
     TakeoverInput {
         takeover: u64,
         seq: u64,
-        text: String,
+        bytes: crate::ids::Base64Bytes,
         sha256: Sha256,
     },
     /// D82: orch ends a takeover (expired, revoked, turn ended, mux lost).
