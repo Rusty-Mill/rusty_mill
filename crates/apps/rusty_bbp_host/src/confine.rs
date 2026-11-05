@@ -518,8 +518,18 @@ fn git_storage(repo: &Path) -> Result<Vec<PathBuf>, String> {
             continue;
         }
         todo.push(store.clone());
-        let Ok(text) = std::fs::read_to_string(store.join("info/alternates")) else {
-            continue;
+        let file = store.join("info/alternates");
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // Unreadable, not UTF-8, or not a file: the stores it may name
+            // cannot be known, so fail closed.
+            Err(e) => {
+                return Err(format!(
+                    "harness sandbox: {}: {e}, so a hiding sandbox cannot be checked against it",
+                    file.display()
+                ))
+            }
         };
         for line in text
             .lines()
@@ -739,6 +749,20 @@ mod tests {
         assert!(check(&root, hiding(&packs)).unwrap_err().contains("packs"));
         assert!(check(&root, hiding(&loose)).unwrap_err().contains("loose"));
         assert!(check(&root, hiding(&root.join("bin"))).is_ok());
+        // Alternates it cannot read fail closed: not UTF-8, or not a file.
+        let root = dir("bad_alternates");
+        std::fs::create_dir_all(root.join("repo/.git/objects/info")).unwrap();
+        std::fs::write(
+            root.join("repo/.git/objects/info/alternates"),
+            b"\xff\xfe\n",
+        )
+        .unwrap();
+        let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
+        assert!(e.contains("alternates"), "{e}");
+        std::fs::remove_file(root.join("repo/.git/objects/info/alternates")).unwrap();
+        std::fs::create_dir(root.join("repo/.git/objects/info/alternates")).unwrap();
+        let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
+        assert!(e.contains("alternates"), "{e}");
         // Layouts it cannot follow fail closed.
         let root = dir("gitdir_file");
         std::fs::create_dir_all(root.join("repo")).unwrap();
