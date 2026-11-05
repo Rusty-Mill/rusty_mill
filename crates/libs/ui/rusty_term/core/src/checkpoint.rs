@@ -87,8 +87,9 @@ pub(crate) fn encode_spilled(line: &crate::grid::Line, table: &StyleTable) -> Re
 }
 
 /// A grid showing spilled `lines` (each from [`Grid::take_spilled`]),
-/// oldest first: all but the last as its scrollback, each at its own width,
-/// the last as its one screen row, padded to the widest. Refuses a line that
+/// oldest first: all but the last as its scrollback, the last as its one
+/// screen row, every one at its own width: the grid is as wide as the last,
+/// so nothing is padded. Refuses a line that
 /// is not one, or lines that decode to more than [`MAX_DECODED`] in all.
 /// Colours marked default show `like`'s defaults (OSC 10/11), as its own
 /// scrollback does: pass the grid that spilled them.
@@ -113,9 +114,9 @@ fn spilled_grid_within(lines: &[&[u8]], like: &Grid, budget: usize) -> Result<Gr
             return Err(Error("trailing spilled line data"));
         }
     }
-    let cols = decoded.iter().map(|l| l.width()).max().unwrap_or(1).max(1);
     let last = decoded.pop();
-    // The screen row `Grid::new` makes and the last line's padded copy.
+    let cols = last.as_ref().map_or(1, |l| l.width()).max(1);
+    // The screen row `Grid::new` makes and the last line's expanded copy.
     r.charge(cols.saturating_mul(2 * size_of::<Cell>()))?;
     let mut grid = Grid::new(cols, 1);
     let mut table = r.take_styles();

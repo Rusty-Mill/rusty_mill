@@ -3045,4 +3045,31 @@ mod regression {
         let blank = vt.lines().nth(1).unwrap();
         assert!(blank.contains("48;2;18;52;86"), "themed blank kept: {vt:?}");
     }
+
+    #[test]
+    fn a_narrow_last_history_row_is_not_widened_under_a_theme() {
+        // OSC 10/11 theme the defaults. A 400-column row, a themed blank row
+        // 4 wide, then a 4-column row, the last spilled.
+        let theme = "\x1b]10;rgb:aa/bb/cc\x1b\\\x1b]11;rgb:12/34/56\x1b\\";
+        let mut read = spilled(400, &format!("{theme}{}", "w".repeat(400)));
+        read.extend(spilled(4, &format!("{theme}\x1b[2K\r\nab")));
+        let mut like = Grid::new(4, 2);
+        AnsiParser::new().advance(&mut like, theme.as_bytes());
+        for trim in [false, true] {
+            let c = capture(false, trim, true);
+            let vt = format_history(&read, &like, c, REPLY_MAX).unwrap();
+            let rows: Vec<&str> = vt.lines().collect();
+            assert_eq!(rows.len(), 3, "trim {trim}: {vt:?}");
+            // Each row at its own width: themed blanks are cells, not padding.
+            assert_eq!(
+                rows[1].matches(' ').count(),
+                4,
+                "themed blank: {:?}",
+                rows[1]
+            );
+            assert!(rows[2].ends_with("ab  \x1b[0m"), "last row: {:?}", rows[2]);
+        }
+        let plain = format_history(&read, &like, capture(false, true, false), REPLY_MAX).unwrap();
+        assert_eq!(plain.lines().last(), Some("ab"));
+    }
 }
