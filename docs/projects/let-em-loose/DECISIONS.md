@@ -95,6 +95,7 @@ Precise contracts used by this guide:
 | D83 | Takeover events go under claims log schema 5, with no schema 6 bump | [default] 2026-11-05 (mux, #732) |
 | D84 | `human_touched` is derived in the fold, not stored | [default] 2026-11-05 (mux, #732) |
 | D85 | `lel-jail` v0 launch contract: `orch-jail` crate, `jail.json` fields, setup order, tests | [default] 2026-11-05 (#600, #732) |
+| D86 | #600 cgroup holder, slot hand-off and cgroup `quiesce` | [default] 2026-11-05 (#600, #732) |
 
 ## D1. Lenses, not stages
 
@@ -736,3 +737,16 @@ Each side may now start its PR under card #732 (§11). Review and merge gates st
 **Tag.** [default] · remind-me: mem_bfc73721060b45989e4f32393bcd3c52
 **Key.** lel:600:lel-jail-v0-launch-contract
 **Source.** Caller question from the D82 slice 4 thread (`lel-jail` v0), 2026-11-05; mux-hosted-agents-design.md §2, §4, §8, §10 item 7; D79, D82; `rusty_sandbox/src/helper.rs`; `rusty_bbp_host/src/confine.rs`.
+
+## D86. #600 cgroup holder, slot hand-off and cgroup `quiesce`
+
+**Decision.** Implementation defaults for slice 5, inside the approved design (D82; mux-hosted-agents-design.md §2 step 3, §3, §11):
+1. **`bbp slot-hold --cgroup PATH`.** After stdin reaches EOF, the holder waits until `<cgroup>/cgroup.events` reads `populated 0`, not until a process group is empty. At `--deadline-ms` it writes `<cgroup>/cgroup.kill`, waits until the cgroup is empty, then exits. In this mode it never calls `killpg`.
+2. **The slot fd.** The holder takes the slot itself through the existing `slots.rs` (one implementation of the slot and `capacity` contract; orch-bbp stays CLI-only and doesn't link `rusty_bbp_host`). It sends orch a dup of that same open file description over an inherited socketpair (SCM_RIGHTS through `rusty_libc`), and orch passes it to the mux as fd 3 (§2 step 4, D85). The holder, orch's copy and the jail's copy then share one lock, as §3 requires.
+3. **The cgroup directory.** The holder writes the record `mod/<task>.cgroups/<name>` first, then creates the directory, as `groups.rs` records a group before anyone joins it. So no cgroup exists unrecorded after a crash. This replaces §2 step 2's "orch creates the cgroup", a wording detail: the cgroup still exists, empty, before `Launch`.
+4. **`bbp quiesce`.** For an ended task (as today), it also settles `mod/<task>.cgroups/*`. A populated cgroup gets `cgroup.kill` and a wait. An empty one is removed with `rmdir`, then its record goes. Killing by path is safe without the holder because each path is unique (`lel/<task>/<claim>/<n>`). It answers `true` only once every recorded cgroup is gone (§3).
+**Why.** The design shows the holder as "an evolution of `bbp slot-hold`" and lists cgroup-based `quiesce` in `bbp` (§11), so these flags are inside what Nano approved. The hand-off keeps §3's "fd 3 inherited into the jail" guarantee without a second slot implementation.
+**Rejected.** orch-bbp linking `rusty_bbp_host` to call `Slots` in-process, which breaks its CLI-only boundary. Alternative B, where no slot fd goes into the jail: if the holder dies while the agent lives, the slot is freed early. That drops §3's kernel-lock guarantee and changes §2 step 4 and D85, so it would need Nano.
+**Tag.** [default] · remind-me: mem_5de884e478294bc8bc17ad735a185d32
+**Key.** lel:600:cgroup-holder-and-quiesce
+**Source.** Coordinator question for D82 slice 5, 2026-11-05; mux-hosted-agents-design.md §2 steps 1–4, §3, §11; D82, D85; `rusty_bbp_host/src/slots.rs`, `groups.rs`, `moderator.rs` (`quiesce`), README § slots.
