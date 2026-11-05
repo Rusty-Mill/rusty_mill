@@ -399,6 +399,62 @@ fn search_and_tags() {
 }
 
 #[test]
+fn search_by_date_range() {
+    let (_d, mut h) = harness();
+    let list = h.list("L");
+    let old = h.task(&list, r#""title":"Old plan""#);
+    h.clock.store(NOW + 1_000, Ordering::SeqCst);
+    h.task(&list, r#""title":"New plan""#);
+    h.clock.store(NOW + 2_000, Ordering::SeqCst);
+    let id = old["id"].as_str().unwrap().to_string();
+    h.call(
+        Method::Patch,
+        &format!("/api/v1/tasks/{id}"),
+        r#"{"notes":"edited"}"#,
+    );
+    let search = |h: &mut Harness, query: &str| {
+        let (status, v) = h.call(Method::Get, &format!("/api/v1/search?{query}"), "");
+        assert_eq!(status, 200, "{query}");
+        let mut t = titles(&v);
+        t.sort();
+        t
+    };
+
+    let from = NOW + 1_000;
+    assert_eq!(
+        search(&mut h, &format!("q=plan&createdFrom={from}")),
+        ["New plan"]
+    );
+    assert_eq!(
+        search(&mut h, &format!("q=plan&createdTo={from}")),
+        ["Old plan"]
+    );
+    assert_eq!(
+        search(&mut h, &format!("updatedFrom={}", NOW + 2_000)),
+        ["Old plan"],
+        "dates alone list every task in range"
+    );
+    assert_eq!(
+        search(
+            &mut h,
+            &format!("createdFrom={NOW}&updatedTo={}", NOW + 2_000)
+        ),
+        ["New plan"],
+        "ranges combine; `to` is exclusive"
+    );
+    h.call(Method::Delete, &format!("/api/v1/tasks/{id}"), "");
+    assert_eq!(
+        search(&mut h, &format!("updatedFrom={NOW}")),
+        ["New plan"],
+        "the trash is left out"
+    );
+    assert_eq!(
+        h.call(Method::Get, "/api/v1/search?createdFrom=soon", "").0,
+        400
+    );
+}
+
+#[test]
 fn smart_lists_use_the_callers_day_and_skip_done_and_archived() {
     let (_d, mut h) = harness();
     let list = h.list("L");

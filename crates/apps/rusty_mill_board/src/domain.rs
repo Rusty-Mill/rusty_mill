@@ -202,6 +202,38 @@ pub enum MoveRules {
 /// being archived (see [`Card::shelved`]), in days.
 pub const DONE_WINDOW_DAYS: u32 = 14;
 
+/// A half-open range of Unix milliseconds, `[from, to)`; either end may be open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Span {
+    /// At or after, if set.
+    pub from: Option<i64>,
+    /// Before, if set.
+    pub to: Option<i64>,
+}
+
+impl Span {
+    /// Whether `ms` falls in the range.
+    pub fn contains(&self, ms: i64) -> bool {
+        self.from.is_none_or(|f| ms >= f) && self.to.is_none_or(|t| ms < t)
+    }
+
+    /// Whether either end is set.
+    pub fn is_bounded(&self) -> bool {
+        self.from.is_some() || self.to.is_some()
+    }
+}
+
+/// Which cards a listing keeps by date: created, last changed, or moved column in a span.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dates {
+    /// When the card was created.
+    pub created: Span,
+    /// When the card last changed.
+    pub updated: Span,
+    /// When the card changed column (entering the board counts).
+    pub moved: Span,
+}
+
 /// Which cards a listing shows, by whether they are shelved (see [`Card::shelved`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

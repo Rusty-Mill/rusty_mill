@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Event,
+    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Event,
     EventKind, ExecutionLink, MoveRules, Plan, Shelf, import_id, text_hash,
 };
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
@@ -635,6 +635,21 @@ impl<S: Store> Board<S> {
         let mut cards = self.list(column)?;
         cards.retain(|c| shelf.keeps(c.shelved(now, window)));
         Ok(cards)
+    }
+
+    /// Keep the `cards` that `dates` selects. Moves come from the store's history.
+    ///
+    /// # Errors
+    /// If the store fails.
+    pub fn retain_dates(&self, cards: &mut Vec<Card>, dates: &Dates) -> Result<(), BoardError> {
+        cards.retain(|c| {
+            dates.created.contains(c.created_ms) && dates.updated.contains(c.updated_ms)
+        });
+        if dates.moved.is_bounded() {
+            let moved = self.store.moved_in(dates.moved)?;
+            cards.retain(|c| moved.contains(&c.id));
+        }
+        Ok(())
     }
 
     /// The roadmap of `project` as of now (see [`roadmap`](crate::roadmap::roadmap)).

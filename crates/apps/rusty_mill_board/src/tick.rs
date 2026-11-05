@@ -30,7 +30,7 @@
 //! `Created`) by actor `tick` for a task changed or tagged in rusty_tick,
 //! noticed when events are read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::domain::{
-    BoardError, Card, Column, Comment, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
+    BoardError, Card, Column, Comment, DEFAULT_PROJECT, Event, EventKind, ExecutionLink, Span,
     next_event_id, reserved_tag,
 };
 use crate::http::Http;
@@ -66,6 +66,9 @@ const NUMBER_KIND: &str = "board_number";
 /// Numbers tried past the highest reservation seen before giving up; each miss is another
 /// board reserving at the same moment.
 const RESERVE_ATTEMPTS: u64 = 64;
+
+/// Moves asked for per `GET /moves` page: rusty_tick's largest.
+const MOVES_PAGE: usize = 1000;
 
 /// The id of number `n`'s reservation: the same on every board, so `If-None-Match: *` lets
 /// exactly one reserve it.
@@ -217,6 +220,14 @@ impl Task {
             && self.tags.iter().any(|t| t == MILESTONE_TAG)
             && !self.tags.iter().any(|t| t == AGENT_TAG)
     }
+}
+
+/// One entry of rusty_tick's move history: which task changed column, and when.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveRecord {
+    task_id: Uuid,
+    at_ms: i64,
 }
 
 #[derive(Deserialize)]
@@ -856,6 +867,34 @@ impl<T: TickApi> Store for TickStore<T> {
             .log
             .last()
             .map(|e| e.id))
+    }
+
+    /// From rusty_tick's move history (`GET /moves`), which outlives restarts and purges,
+    /// paged from `span.from`.
+    fn moved_in(&self, span: Span) -> Result<BTreeSet<Uuid>, BoardError> {
+        let since = span.from.unwrap_or(0);
+        let mut after = 0u64;
+        let mut moved = BTreeSet::new();
+        loop {
+            let page = self.call(
+                TickRequest::new(
+                    "GET",
+                    format!("/moves?since={since}&after={after}&limit={MOVES_PAGE}"),
+                ),
+                200,
+            )?;
+            let moves: Vec<MoveRecord> = Self::decode(page.clone(), "moves")?;
+            moved.extend(
+                moves
+                    .iter()
+                    .filter(|m| span.contains(m.at_ms))
+                    .map(|m| m.task_id),
+            );
+            match page["next"].as_u64() {
+                Some(next) if next > after => after = next,
+                _ => return Ok(moved),
+            }
+        }
     }
 
     /// Reservations are `board_number` documents, created with `If-None-Match: *` and kept
