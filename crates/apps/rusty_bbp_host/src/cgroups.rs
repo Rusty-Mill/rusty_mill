@@ -53,7 +53,11 @@ fn owners(dir: &Path) -> PathBuf {
 /// # Errors
 /// When the lock file can't be created or locked.
 pub fn lock(dir: &Path, task: &TaskId) -> Result<File, String> {
-    let path = task_dir(dir, "mod", task).with_extension("cgroups.lock");
+    lock_file(&task_dir(dir, "mod", task).with_extension("cgroups.lock"))
+}
+
+/// The exclusive lock on `path`, waiting for it.
+fn lock_file(path: &Path) -> Result<File, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
@@ -62,13 +66,15 @@ pub fn lock(dir: &Path, task: &TaskId) -> Result<File, String> {
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&path)
+        .open(path)
         .map_err(at)?;
     file.lock().map_err(at)?;
     Ok(file)
 }
 
-/// A session cgroup path: absolute, below [`CGROUP_ROOT`], without `..`.
+/// A session cgroup path: absolute, below [`CGROUP_ROOT`], without `..`,
+/// and UTF-8 with no control character and no name that starts or ends in
+/// whitespace, so the path recorded is the path read back, byte for byte.
 ///
 /// # Errors
 /// When `path` is anything else.
@@ -79,6 +85,15 @@ pub fn checked(path: &Path) -> Result<PathBuf, String> {
         return Err(format!(
             "{} is not a cgroup below {CGROUP_ROOT}",
             path.display()
+        ));
+    }
+    let text = path.to_str().ok_or("a cgroup path must be UTF-8")?;
+    let odd_name = text
+        .split('/')
+        .any(|name| name.trim() != name || name.chars().any(char::is_control));
+    if odd_name {
+        return Err(format!(
+            "{text:?}: cgroup names may not have control characters or start or end in whitespace"
         ));
     }
     Ok(path.to_path_buf())
@@ -154,28 +169,60 @@ pub fn open_with(
 /// The record's second line once [`open`] made the cgroup itself.
 const CREATED: &str = "created";
 
-/// The claim file for `cgroup`, created only if no task has claimed it.
+/// The claim file for `cgroup`, created only if no task has claimed it, an
+/// ancestor of it or a cgroup below it: `cgroup.kill` and `populated` reach
+/// the whole subtree, so two sessions may never nest. Every task's claims
+/// are made under one lock, so the check and the claim can't interleave
+/// with another task's.
 fn claim(dir: &Path, task: &TaskId, cgroup: &Path, key: &str) -> Result<PathBuf, String> {
     let owners = owners(dir);
     std::fs::create_dir_all(&owners).map_err(|e| format!("{}: {e}", owners.display()))?;
-    let owner = owners.join(key);
-    let mut file = match File::options().write(true).create_new(true).open(&owner) {
-        Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let by = std::fs::read_to_string(&owner).unwrap_or_default();
+    let _all = lock_file(&owners.with_extension("lock"))?;
+    for (path, by) in claims(&owners)? {
+        if path == cgroup {
             return Err(format!(
                 "{} already exists: task {by} owns it",
                 cgroup.display()
             ));
         }
-        Err(e) => return Err(format!("{}: {e}", owner.display())),
-    };
+        if path.starts_with(cgroup) || cgroup.starts_with(&path) {
+            return Err(format!(
+                "{} overlaps {}, which task {by} owns",
+                cgroup.display(),
+                path.display()
+            ));
+        }
+    }
+    let owner = owners.join(key);
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&owner)
+        .map_err(|e| format!("{}: {e}", owner.display()))?;
+    let text = format!("{}\n{}", cgroup.display(), task.0);
     let wrote =
-        std::io::Write::write_all(&mut file, task.0.as_bytes()).and_then(|()| file.sync_all());
+        std::io::Write::write_all(&mut file, text.as_bytes()).and_then(|()| file.sync_all());
     if let Err(e) = wrote {
         return Err(undo(format!("{}: {e}", owner.display()), None, &owner));
     }
     Ok(owner)
+}
+
+/// Every claim: its path and the task that holds it. A claim file is the
+/// path, a newline, then the task.
+fn claims(owners: &Path) -> Result<Vec<(PathBuf, String)>, String> {
+    let entries = std::fs::read_dir(owners).map_err(|e| format!("{}: {e}", owners.display()))?;
+    entries
+        .map(|entry| {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            let text =
+                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let (cgroup, by) = text
+                .split_once('\n')
+                .ok_or_else(|| format!("cgroup claim {}: no task", path.display()))?;
+            Ok((PathBuf::from(cgroup), by.to_owned()))
+        })
+        .collect()
 }
 
 /// Creates the cgroup itself exclusively: one that exists already, made
@@ -245,7 +292,7 @@ pub fn records(dir: &Path, task: &TaskId) -> Result<Vec<Record>, String> {
             let text =
                 std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let bad = |e: String| format!("cgroup record {}: {e}", path.display());
-            let mut lines = text.lines();
+            let mut lines = text.split_terminator('\n');
             let cgroup = checked(Path::new(lines.next().unwrap_or_default())).map_err(bad)?;
             let created = match (lines.next(), lines.next()) {
                 (None, None) => false,
@@ -320,7 +367,7 @@ pub fn settle(record: &Record) -> Result<bool, String> {
             kill(&record.cgroup)?;
             return Ok(false);
         }
-        remove(&record.cgroup, |p| std::fs::remove_dir(p))?;
+        remove_tree(&record.cgroup)?;
     }
     if ours {
         remove(&record.owner, |p| std::fs::remove_file(p))?;
@@ -332,10 +379,35 @@ pub fn settle(record: &Record) -> Result<bool, String> {
 /// Whether the record's task holds the claim on its cgroup.
 fn owns(record: &Record) -> Result<bool, String> {
     match std::fs::read_to_string(&record.owner) {
-        Ok(by) => Ok(by == record.task),
+        Ok(text) => Ok(text.split_once('\n')
+            == Some((
+                record.cgroup.to_str().unwrap_or_default(),
+                record.task.as_str(),
+            ))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(format!("{}: {e}", record.owner.display())),
     }
+}
+
+/// Removes an empty cgroup and the empty cgroups below it, deepest first:
+/// a session may make its own children, which keep the root from going.
+/// Only for an owned session, which no other session nests in or under.
+fn remove_tree(cgroup: &Path) -> Result<(), String> {
+    let entries = match std::fs::read_dir(cgroup) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", cgroup.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("{}: {e}", cgroup.display()))?;
+        let kind = entry
+            .file_type()
+            .map_err(|e| format!("{}: {e}", entry.path().display()))?;
+        if kind.is_dir() {
+            remove_tree(&entry.path())?;
+        }
+    }
+    remove(cgroup, |p| std::fs::remove_dir(p))
 }
 
 /// `how(path)`, where a path that is already gone is done.
@@ -425,7 +497,17 @@ mod tests {
     #[test]
     fn only_paths_below_the_cgroup_root_are_session_cgroups() {
         assert!(checked(Path::new("/sys/fs/cgroup/lel/t/c/1")).is_ok());
-        for bad in ["/sys/fs/cgroup/", "/sys/fs/cgroup/../x", "/tmp/cg", "lel/t"] {
+        assert!(checked(Path::new("/sys/fs/cgroup/lel/my session")).is_ok());
+        for bad in [
+            "/sys/fs/cgroup/",
+            "/sys/fs/cgroup/../x",
+            "/tmp/cg",
+            "lel/t",
+            "/sys/fs/cgroup/bbp-test/session ",
+            "/sys/fs/cgroup/ lel/s",
+            "/sys/fs/cgroup/lel/s\r",
+            "/sys/fs/cgroup/lel/a\nb",
+        ] {
             assert!(checked(Path::new(bad)).is_err(), "{bad}");
         }
     }
@@ -591,7 +673,7 @@ mod tests {
         std::fs::create_dir_all(&cgroup).expect("cg");
         std::fs::write(cgroup.join("cgroup.events"), "populated 1\n").expect("events");
         let owner = base.join("owner");
-        std::fs::write(&owner, "A").expect("owner");
+        std::fs::write(&owner, format!("{}\nA", cgroup.display())).expect("owner");
         let path = base.join("record");
         std::fs::write(&path, "x").expect("record");
         let record = Record {
@@ -621,7 +703,7 @@ mod tests {
         std::fs::create_dir_all(&cgroup).expect("cg");
         std::fs::write(cgroup.join("cgroup.events"), "populated 1\n").expect("events");
         let owner = base.join("owner");
-        std::fs::write(&owner, "A").expect("owner");
+        std::fs::write(&owner, format!("{}\nA", cgroup.display())).expect("owner");
         let path = base.join("record");
         std::fs::write(&path, "x").expect("record");
         let record = Record {

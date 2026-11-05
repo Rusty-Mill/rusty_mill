@@ -1925,6 +1925,95 @@ fn a_crashed_open_never_cleans_up_a_cgroup_it_did_not_create() {
     let _ = std::fs::remove_dir_all(&other);
 }
 
+/// #1507 review: `cgroup.kill` and `populated` reach a whole subtree, so no
+/// task may own a session nested in or around another task's.
+#[cfg(target_os = "linux")]
+#[test]
+fn sessions_of_different_tasks_never_nest() {
+    let outer = match session_cgroup("nest") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let inner = outer.join("child");
+    let dir = tempdir("cgroup-nest");
+    claims_task(&dir);
+    let b = TaskId("C2".into());
+    claims_task_as(&dir, &b);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &outer).expect("A opens the outer one");
+    let below = rusty_bbp_host::cgroups::open(&dir, &b, &inner).expect_err("nested below");
+    assert!(
+        below.contains("overlaps") && below.contains("task C1"),
+        "{below}"
+    );
+    assert!(
+        !inner.exists()
+            && rusty_bbp_host::cgroups::records(&dir, &b)
+                .unwrap()
+                .is_empty()
+    );
+    // And the other way round: B first, then A around it.
+    let other = outer.with_file_name(format!("bbp-test-{}-nest2", std::process::id()));
+    rusty_bbp_host::cgroups::open(&dir, &b, &other.join("child")).expect("B opens");
+    let around = rusty_bbp_host::cgroups::open(&dir, &task(), &other).expect_err("around");
+    assert!(
+        around.contains("overlaps") && around.contains("task C2"),
+        "{around}"
+    );
+    for t in [task(), b] {
+        let rev = open_driver(&dir, &t).expect("driver").state.rev;
+        human::perform(&dir, &t, "close", &[], Some(rev)).expect("close");
+        assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &t), Ok(true));
+    }
+    assert!(!outer.exists() && !other.join("child").exists());
+    let _ = std::fs::remove_dir(&other);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1507 review: a session that made its own child cgroups is still removed
+/// once empty, deepest first, and quiesce doesn't stall on it.
+#[cfg(target_os = "linux")]
+#[test]
+fn quiesce_removes_a_session_with_empty_children() {
+    let cgroup = match session_cgroup("kids") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-kids");
+    claims_task(&dir);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    std::fs::create_dir_all(cgroup.join("a/b")).expect("children");
+    std::fs::create_dir(cgroup.join("c")).expect("child");
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(!cgroup.exists());
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1507 review: a name the record couldn't hold exactly is refused before
+/// anything is claimed or made, so quiesce can't report a false `true`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_cgroup_name_ending_in_whitespace_is_refused_up_front() {
+    let cgroup = match session_cgroup("space") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let spaced = PathBuf::from(format!("{} ", cgroup.display()));
+    let dir = tempdir("cgroup-space");
+    claims_task(&dir);
+    let out = cgroup_open(&dir, &spaced);
+    assert!(out.contains("whitespace"), "{out}");
+    assert!(!spaced.exists() && !cgroup.exists());
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- takeover (D82)
 
 fn bbp(dir: &Path, args: &[&str], stdin: impl AsRef<[u8]>) -> String {
