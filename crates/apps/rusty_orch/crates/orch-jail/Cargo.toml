@@ -1,0 +1,28 @@
+[package]
+name = "orch-jail"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+description = "The jail spec (jail.json) and `lel-jail`, the launcher a mux block runs: it joins the session's cgroup, keeps only fds 0-4, then confines itself with rusty_sandbox and execs the agent."
+license = "MIT"
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[[bin]]
+name = "lel-jail"
+path = "src/bin/lel-jail.rs"
+
+[dependencies]
+# Landlock, seccomp (`Sockets::InternetOnly`) and rlimits; the helper the
+# bbp_host harness already uses (LEL D85).
+rusty_sandbox = { workspace = true }
+# jail.json, parsed at the boundary.
+rusty_serde = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# fcntl and close_range for the fd rule (design §4).
+rusty_libc = { workspace = true, features = ["std"] }
+
+[lints.rust]
+missing_docs = "warn"

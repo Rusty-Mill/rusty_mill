@@ -87,6 +87,14 @@ struct Harness {
     _jwks: Option<tempfile::TempDir>,
 }
 
+/// Which revision the test client speaks.
+enum Revision {
+    /// The client's default: stateless first.
+    Default,
+    /// Only `2025-11-25`: an `initialize` handshake and a session.
+    Classic,
+}
+
 impl Harness {
     /// Boot a gateway whose one route carries `rules`, and connect a client.
     ///
@@ -94,6 +102,11 @@ impl Harness {
     /// is set the route also carries `jwtAuth`, so `jwt.*` has something to
     /// resolve against.
     async fn start(rules: &[&str], bearer: Option<&str>) -> Harness {
+        Self::start_with(rules, bearer, Revision::Default).await
+    }
+
+    /// [`Harness::start`], with the client speaking `revision`.
+    async fn start_with(rules: &[&str], bearer: Option<&str>, revision: Revision) -> Harness {
         let port = free_port();
         let rules = rules
             .iter()
@@ -172,9 +185,11 @@ binds:
         // Sent as `Authorization: Bearer <token>`.
         config.bearer_token = bearer.map(str::to_owned);
 
-        let client = mcp::connect_with(config)
-            .await
-            .expect("client should complete the MCP handshake");
+        let client = match revision {
+            Revision::Default => mcp::connect_with(config).await,
+            Revision::Classic => mcp::connect_classic(config).await,
+        }
+        .expect("client should complete the MCP handshake");
 
         Harness {
             client,
@@ -322,6 +337,35 @@ async fn a_claim_from_the_verified_token_reaches_a_rule() {
 
     assert_eq!(harness.tool_names().await, vec!["alpha_echo", "beta_echo"]);
     assert_eq!(harness.call("alpha_echo").await, Ok("alpha:echo".into()));
+
+    harness.stop().await;
+}
+
+#[rusty_tokio::test]
+async fn a_classic_session_carries_the_principal_to_every_call() {
+    // The other tests negotiate the stateless revision, where each request
+    // stands alone. Here the client runs a classic `initialize` session, so
+    // the token and the session id ride on every call after the handshake,
+    // and the rule must still see the verified subject on each of them.
+    let bearer = token(json!({"sub": "test-user"}));
+    let harness = Harness::start_with(
+        &[r#"- 'jwt.sub == "test-user" && mcp.tool.name == "echo"'"#],
+        Some(&bearer),
+        Revision::Classic,
+    )
+    .await;
+
+    assert_eq!(
+        harness.client.negotiated().map(|v| v.as_str()),
+        Some(mcp::proto::ProtocolVersion::V_2025_11_25),
+        "the gateway should accept a classic session"
+    );
+    assert_eq!(harness.call("alpha_echo").await, Ok("alpha:echo".into()));
+    assert!(
+        harness.call("alpha_delete").await.is_err(),
+        "a rule refuses within the session as it does without one"
+    );
+    assert_eq!(harness.call("beta_echo").await, Ok("beta:echo".into()));
 
     harness.stop().await;
 }

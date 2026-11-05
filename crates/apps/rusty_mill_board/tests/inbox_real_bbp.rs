@@ -18,7 +18,7 @@ use rusty_mill_board::inbox::{Action, Escalation, Escalations, Outcome, Reason, 
 
 const ROSTER: &str = r#"[{"id":"a","turn_order":0,"post":["Claim","Evidence"],"write":["Diff","Candidate","Source"],"read_artifacts":["Brief","Diff","Candidate","TestReport","Log","Source"],"read_messages":"All","verdict_at":[],"final_decision":false,"consultable":false},{"id":"b","turn_order":1,"post":["Claim","Evidence"],"write":["Diff","Candidate","Source"],"read_artifacts":["Brief","Diff","Candidate","TestReport","Log","Source"],"read_messages":"All","verdict_at":[],"final_decision":false,"consultable":false}]"#;
 
-const PROFILES: &str = r#"{"profiles":[{"name":"test","program":"/bin/sh","args":["-c","sh ./test.sh"]}],"read_roots":["/bin","/usr","/lib","/lib64"],"env":[["PATH","/usr/bin:/bin"]],"limits":{"cpu_secs":60,"wall_secs":120,"memory_bytes":1073741824,"file_bytes":268435456,"open_files":256,"processes":4096},"tree":"sha256(git write-tree id)","test_paths":["tests/**"]}"#;
+const PROFILES: &str = r#"{"profiles":[{"name":"test","program":"/bin/sh","args":["-c","sh ./test.sh"]}],"read_roots":["/bin","/usr","/lib","/lib64"],"env":[["PATH","/usr/bin:/bin"]],"limits":{"cpu_secs":60,"wall_secs":120,"memory_bytes":1073741824,"file_bytes":268435456,"open_files":256,"processes":4096},"tree":"sha256(git write-tree id)","test_paths":["tests/**"],"erosion":"off"}"#;
 
 /// The task opens with 40 messages; this is the one allowance Approve adds.
 const ALLOWANCE: u64 = 40;

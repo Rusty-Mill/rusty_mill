@@ -5,6 +5,7 @@
 //! through the [`Model`] port and posts what comes back; everything it
 //! decides is decided here.
 //!
+//! - [`alien`]: the #708 alien review lens: trigger, suspects, ranking, probes.
 //! - [`round`]: one runner round: schedule, call, post, record.
 //! - [`call`]: one job over its fallback order, metered before each ask.
 //! - [`port`]: the [`Model`] port, one stateless question per call.
@@ -17,12 +18,14 @@
 //! - [`schedule`]: which jobs run now; the blind-first, look-harder,
 //!   proposer, rebel and fairness rules as checks.
 //! - [`record`]: a lens's track record, one informational line.
+//! - [`saved`]: the scheduler's memory as plain data, for the store.
 
 #![cfg_attr(
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
 
+pub mod alien;
 pub mod call;
 pub mod card;
 pub mod class;
@@ -33,6 +36,7 @@ pub mod port;
 pub mod post;
 pub mod record;
 pub mod round;
+pub mod saved;
 pub mod schedule;
 pub mod tier;
 

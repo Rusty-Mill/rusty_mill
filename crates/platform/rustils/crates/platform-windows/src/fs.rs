@@ -58,6 +58,15 @@ pub fn restrict_to_owner(path: &Path) -> Result<()> {
     crate::sys::security::restrict_to_owner(path)
 }
 
+/// [`restrict_to_owner`] for a directory whose new entries inherit the
+/// owner-only entry (`OICI`), as a private state directory needs. Entries
+/// already in it keep their own DACL: restrict each one. Never follows the
+/// path's reparse point, so a junction is restricted, not its target:
+/// refuse one before calling this.
+pub fn restrict_dir_to_owner(path: &Path) -> Result<()> {
+    crate::sys::security::restrict_dir_to_owner(path)
+}
+
 /// A directory capability backed by a directory HANDLE. All operations are
 /// handle-relative (`NtCreateFile` with `RootDirectory`) — the ambient
 /// process namespace is consulted only by [`WindowsDir::open_ambient`]
