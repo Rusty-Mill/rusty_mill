@@ -204,3 +204,25 @@ fn parts_refuse_what_a_body_would_and_smuggled_pairs() {
     };
     assert!(matches!(clear.report(), Some(Report::Clear(_))));
 }
+
+#[test]
+fn a_malformed_id_never_falls_back_to_the_root() {
+    for (state, id) in [
+        ("clear", "bad id"),
+        ("working", "bad id"),
+        ("clear", " sub"),
+    ] {
+        let parts = Parts {
+            id: Some(id),
+            state,
+            ..Parts::default()
+        };
+        assert_eq!(parts.report(), None, "{parts:?}");
+    }
+    let spaced = Parts {
+        state: "working",
+        kind: Some("per mission"),
+        ..Parts::default()
+    };
+    assert_eq!(spaced.report(), None);
+}

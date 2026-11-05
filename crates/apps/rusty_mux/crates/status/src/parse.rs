@@ -73,10 +73,11 @@ pub struct Parts<'a> {
 
 impl Parts<'_> {
     /// The report, or `None` when [`parse`] would ignore or discard it. A
-    /// field holding `:` is refused, since it would split into other pairs.
+    /// plain field outside the value set is refused: `parse` would skip its
+    /// pair, so a bad `id` would fall back to the root record.
     pub fn report(&self) -> Option<Report> {
         let plain = [Some(self.state), self.id, self.kind, self.app];
-        if plain.iter().flatten().any(|f| f.contains(':')) {
+        if !plain.into_iter().flatten().all(is_value) {
             return None;
         }
         let mut pairs = vec![format!("state={}", self.state)];
@@ -134,10 +135,13 @@ fn pair(text: &str) -> Option<(&str, &str)> {
     let (key, value) = text.split_once('=')?;
     let (key, value) = (key.trim(), value.trim());
     let key_ok = !key.is_empty() && key.bytes().all(|b| b.is_ascii_lowercase());
-    let value_ok = value
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b"_.,+/=-".contains(&b));
-    (key_ok && value_ok).then_some((key, value))
+    (key_ok && is_value(value)).then_some((key, value))
+}
+
+/// A value from the protocol's value set (which holds no `:` or space).
+fn is_value(text: &str) -> bool {
+    text.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"_.,+/=-".contains(&b))
 }
 
 /// The id size limits, which discard a report; the rest of the id grammar
