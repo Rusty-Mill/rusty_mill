@@ -675,7 +675,7 @@ mod tests {
             };
             let home = Path::new(&env["CARGO_HOME"]);
             let _ = std::fs::remove_dir_all(home);
-            std::os::unix::fs::symlink(outside, home).expect("symlink");
+            symlink(outside, home).expect("symlink");
         }
     }
 
@@ -782,6 +782,7 @@ mod tests {
     }
 
     /// A diff adding `path` as a symlink to `to`.
+    #[cfg(unix)]
     fn link_diff(path: &str, to: &Path) -> String {
         let to = to.to_string_lossy();
         format!(
@@ -790,6 +791,7 @@ mod tests {
     }
 
     /// Every entry under `dir`, sorted.
+    #[cfg(unix)]
     fn listing(dir: &Path) -> Vec<String> {
         let mut out: Vec<String> = std::fs::read_dir(dir)
             .expect("read_dir")
@@ -1055,6 +1057,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn base_gets_fresh_temp_cargo_home_and_target_whatever_the_candidate_did() {
         let (root, repo) = repo("isolate");
         let outside = root.join("outside");
@@ -1084,6 +1087,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_symlinked_tests_dir_is_refused_before_anything_runs() {
         let (root, repo) = repo("linktests");
         let outside = root.join("outside");
@@ -1105,6 +1109,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_site_under_a_symlinked_dir_names_no_crate() {
         let (root, repo) = repo("linksite");
         let outside = root.join("outside");
@@ -1132,10 +1137,11 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn real_dirs_refuses_symlinks_and_escapes() {
         let (root, _repo) = repo("realdirs");
         let tree = root.join("repo");
-        std::os::unix::fs::symlink(tree.join("crates/a"), tree.join("crates/l")).expect("link");
+        symlink(&tree.join("crates/a"), &tree.join("crates/l")).expect("link");
         assert!(real_dirs(&tree, &tree));
         assert!(real_dirs(&tree, &tree.join("crates/a/src")));
         assert!(!real_dirs(&tree, &tree.join("crates/l")));
