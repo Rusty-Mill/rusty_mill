@@ -85,6 +85,9 @@ pub struct HookReport {
     pub kind: Option<String>,
     pub app: Option<String>,
     pub msg: Option<String>,
+    /// `--tool-from-stdin`: the program running the hook fills `msg` with
+    /// the `tool_name` of the hook event's JSON on stdin.
+    pub tool_from_stdin: bool,
 }
 
 /// Which agents an `agent` verb acts on, and where.
@@ -383,7 +386,7 @@ fn watch(args: &[String]) -> Result<Command, String> {
 
 const AGENT_USAGE: &str = "usage: agent setup|status|remove [--agent claude|codex|opencode|pi|all]... \
      [--project | --dir DIR] [--dry-run] [--name-session] | agent hook [--name-session] | agent hook --event STATE [--id ID] \
-     [--kind KIND] [--app APP] [--msg TEXT] | agent skill";
+     [--kind KIND] [--app APP] [--msg TEXT | --tool-from-stdin] | agent skill";
 
 fn agent(args: &[String]) -> Result<AgentCommand, String> {
     let (verb, rest) = args.split_first().ok_or(AGENT_USAGE)?;
@@ -442,7 +445,11 @@ fn agent(args: &[String]) -> Result<AgentCommand, String> {
 fn hook_report(rest: &[String]) -> Result<HookReport, String> {
     let mut report = HookReport::default();
     let mut state = None;
-    for (key, text) in flags("agent hook", rest, |_| false)? {
+    for (key, text) in flags("agent hook", rest, |f| f == "tool-from-stdin")? {
+        if key == "tool-from-stdin" && text == "true" && !report.tool_from_stdin {
+            report.tool_from_stdin = true;
+            continue;
+        }
         let slot = match key {
             "event" => &mut state,
             "id" => &mut report.id,
@@ -456,6 +463,9 @@ fn hook_report(rest: &[String]) -> Result<HookReport, String> {
         }
     }
     report.state = state.ok_or(AGENT_USAGE)?;
+    if report.tool_from_stdin && report.msg.is_some() {
+        return Err("agent hook: --msg and --tool-from-stdin both set the message".into());
+    }
     Ok(report)
 }
 
@@ -776,7 +786,9 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
          \x20                  that still has a generated name after its task;\n\
          \x20                  agent skill prints the guide the installed skill reads;\n\
          \x20                  agent hook --event STATE [--id ID] [--kind KIND] [--app APP]\n\
-         \x20                  [--msg TEXT] reports an agent's status for its block, silently",
+         \x20                  [--msg TEXT | --tool-from-stdin] reports an agent's status for\n\
+         \x20                  its block, silently; --tool-from-stdin takes the tool name\n\
+         \x20                  from the hook event's JSON on stdin",
     ),
     (
         "bridge",

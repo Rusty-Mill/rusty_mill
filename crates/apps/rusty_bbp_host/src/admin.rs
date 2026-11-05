@@ -94,8 +94,30 @@ pub fn open_task_live(
         roster,
         max_live_turns,
         policy,
-        (Mode::Stages, None, None),
+        (Mode::Stages, None, || Ok((None, None))),
     )
+}
+
+/// Digests of the holdout suite and baseline report an open stages.
+type Staged = (Option<Sha256>, Option<Sha256>);
+
+/// `task`'s open lock, waiting for it. Released when the file drops.
+fn open_lock(dir: &Path, task: &TaskId) -> Result<std::fs::File, String> {
+    let path = dir
+        .join("open")
+        .join(format!("{}.lock", Sha256::of(task.0.as_bytes()).hex()));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let at = |e: std::io::Error| format!("{}: {e}", path.display());
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(at)?;
+    file.lock().map_err(at)?;
+    Ok(file)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -109,8 +131,16 @@ fn open_mode(
     roster: Vec<Role>,
     max_live_turns: u32,
     policy: SchedulingPolicy,
-    (mode, claims, holdout_digest): (Mode, Option<ClaimsConfig>, Option<Sha256>),
+    (mode, claims, stage): (
+        Mode,
+        Option<ClaimsConfig>,
+        impl FnOnce() -> Result<Staged, String>,
+    ),
 ) -> Result<Response, String> {
+    // Held from the opened check through the append: a duplicate or losing
+    // concurrent open writes nothing, so it cannot replace the profile set
+    // or baseline report a committed `task_opened` froze.
+    let _open = open_lock(dir, task)?;
     let master = crate::master::ensure(dir)?;
     let store = FsStore::open(dir).map_err(|e| e.to_string())?;
     let mut d = Driver::new(store, task.clone()).with_master(master);
@@ -121,6 +151,7 @@ fn open_mode(
             "task already opened",
         )));
     }
+    let (holdout_digest, baseline_digest) = stage()?;
     let profile_digest = profiles::freeze(dir, task, set)?;
     let blob = d.store.blob_put(brief);
     let cmd = Command::Open(OpenTask {
@@ -145,6 +176,7 @@ fn open_mode(
         human: human.clone(),
         policy,
         holdout_digest,
+        baseline_digest,
     });
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
@@ -155,9 +187,15 @@ fn open_mode(
 /// with `bad_claims_config(sandbox)` unless `sandbox` (the host's probe of
 /// its sandbox) succeeds, and with `bad_claims_config(test_paths)` unless
 /// the profile set names its `test_paths`. Both checks come before anything
-/// is written. Claims mode grants no turns: one live turn, turn-based.
+/// is written. A report-only erosion profile is recorded in the report-only
+/// ledger before the open, and refused once report-only has expired (D42,
+/// [`crate::erosion_window`]). Claims mode grants no turns: one live turn, turn-based.
 /// `holdout`, if given, is staged and frozen as the task's holdout suite
 /// (#597); the core then waits for a holdout pass before acceptance.
+/// `baseline`, if given, is the build suite's run on the task's base
+/// (#598, `bbp open --base`): anything but green refuses the open
+/// `baseline_red`; a green one is stored, its commit becomes the profile
+/// set's `baseline`, and its digest goes in `task_opened`.
 #[allow(clippy::too_many_arguments)]
 pub fn open_claims_task(
     dir: &Path,
@@ -169,6 +207,7 @@ pub fn open_claims_task(
     holdout: Option<&crate::holdout::HoldoutSet>,
     roster: Vec<Role>,
     cfg: ClaimsConfig,
+    baseline: Option<&crate::baseline::Baseline>,
     sandbox: impl FnOnce() -> Result<(), String>,
 ) -> Result<Response, String> {
     let refuse = |detail: String| {
@@ -185,6 +224,29 @@ pub fn open_claims_task(
     if set.test_paths.is_empty() {
         return refuse("test_paths: the profile set must name its test paths".into());
     }
+    let based;
+    let set = match baseline {
+        None => set,
+        Some(b) if !b.green() => {
+            return Ok(Response::Rejected(Rejection::new(
+                Code::BaselineRed,
+                b.red_detail(),
+            )))
+        }
+        Some(b) if set.baseline.as_ref().is_some_and(|x| *x != b.base) => {
+            return refuse(format!(
+                "baseline: the profile set pins {:?}, but --base resolved to {}",
+                set.baseline, b.base
+            ))
+        }
+        Some(b) => {
+            based = ProfileSet {
+                baseline: Some(b.base.clone()),
+                ..set.clone()
+            };
+            &based
+        }
+    };
     if let Err(e) = set.check_protected() {
         return refuse(format!("protected: {e}"));
     }
@@ -199,9 +261,27 @@ pub fn open_claims_task(
     if let Some(Err(e)) = holdout.map(|hs| hs.isolated_from(set, dirs)) {
         return refuse(format!("holdout: {e}"));
     }
-    let holdout_digest = match holdout {
-        Some(hs) => Some(crate::holdout::stage(dir, task, hs)?),
-        None => None,
+    // Held until the open below has published its log (D88). Taken before
+    // `open_mode`'s per-task open lock; nothing takes them the other way.
+    let _admission = match set.erosion_report_only() {
+        false => None,
+        true => match crate::erosion_window::admit(dir, task, crate::now())? {
+            Ok(admission) => Some(admission),
+            Err(why) => {
+                return refuse(format!(
+                    "erosion: report-only has expired ({why}); new report-only tasks pause until Nano approves limits from the calibration numbers (D42)"
+                ))
+            }
+        },
+    };
+    let stage = || {
+        let holdout = holdout
+            .map(|hs| crate::holdout::stage(dir, task, hs))
+            .transpose()?;
+        let baseline = baseline
+            .map(|b| crate::baseline::store(dir, task, b))
+            .transpose()?;
+        Ok((holdout, baseline))
     };
     open_mode(
         dir,
@@ -213,7 +293,7 @@ pub fn open_claims_task(
         roster,
         1,
         SchedulingPolicy::TurnBased,
-        (Mode::Claims, Some(cfg), holdout_digest),
+        (Mode::Claims, Some(cfg), stage),
     )
 }
 
@@ -254,6 +334,27 @@ pub fn adopt_holdout(
     let cmd = Command::Host {
         op: crate::fresh_op(),
         action: HostAction::HoldoutExtended { digest },
+    };
+    d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
+/// `bbp pause` (#598 C-R12): the host pauses an open claims task on a
+/// ceiling or the cost breaker. `op` makes a retry a replay (R15), so orch
+/// passes the same op for the same pause.
+pub fn pause(
+    dir: &Path,
+    task: &TaskId,
+    reason: PauseReason,
+    detail: &str,
+    op: OpId,
+) -> Result<Response, String> {
+    let mut d = open_driver(dir, task)?;
+    let cmd = Command::Host {
+        op,
+        action: HostAction::TaskPaused {
+            reason,
+            detail: detail.to_owned(),
+        },
     };
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
@@ -315,6 +416,18 @@ fn host(dir: &Path, task: &TaskId, action: HostAction) -> Result<Response, Strin
         action,
     };
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
+}
+
+/// A `--reason` of `bbp pause`.
+pub fn pause_reason(s: &str) -> Result<PauseReason, String> {
+    match s {
+        "spend_ceiling" => Ok(PauseReason::SpendCeiling),
+        "call_ceiling" => Ok(PauseReason::CallCeiling),
+        "breaker" => Ok(PauseReason::Breaker),
+        other => Err(format!(
+            "--reason must be spend_ceiling, call_ceiling or breaker, got {other}"
+        )),
+    }
 }
 
 pub fn assign(

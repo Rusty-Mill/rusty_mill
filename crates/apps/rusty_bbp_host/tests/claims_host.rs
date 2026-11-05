@@ -56,6 +56,7 @@ fn open_as(dir: &Path, t: &TaskId, set: &ProfileSet, probe: Result<(), String>) 
         None,
         vec![lens("a", 0), lens("b", 1)],
         ClaimsConfig::default(),
+        None,
         || probe,
     )
     .expect("open")
@@ -902,6 +903,549 @@ fn a_task_total_row_names_the_field_its_limit_and_one_allowance() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------------------------------------------------------------- intent versions and pauses (#598)
+
+#[test]
+fn a_host_pause_shows_in_the_inbox_and_resume_open_clears_it() {
+    let dir = tempdir("pause");
+    claims_task(&dir);
+    let pause = || {
+        admin::pause(
+            &dir,
+            &task(),
+            admin::pause_reason("call_ceiling").unwrap(),
+            "400 of 400 calls",
+            OpId("pause-1".into()),
+        )
+        .unwrap()
+    };
+    assert_eq!(pause(), Response::Ok);
+    assert_eq!(pause(), Response::Ok, "the same op replays");
+    assert_eq!(state(&dir).state, State::Escalated);
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].reason, inbox::Reason::TaskPaused);
+    assert!(rows[0].totals.is_empty(), "no total is exhausted");
+    assert_eq!(
+        rows[0].pause,
+        Some(inbox::Pause {
+            reason: PauseReason::CallCeiling,
+            detail: "400 of 400 calls".into()
+        })
+    );
+    human_ok(&dir, "resume", &["open"]);
+    assert_eq!(state(&dir).state, State::Open);
+    assert!(inbox::read(&dir, &[task()]).unwrap().is_empty());
+    assert!(admin::pause_reason("bored").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn intent_stores_the_new_brief_and_reopens_or_escalates_what_it_affects() {
+    let dir = tempdir("intent");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "plain", true);
+    let y = claim(&dir, "a", "shipped", true);
+    for c in [x, y] {
+        human_ok(&dir, "claim", &[&format!("msg:{c}"), "accept"]);
+    }
+    let epoch = state(&dir).claims.get(MsgId(y)).unwrap().epoch;
+    let mark = Command::Host {
+        op: OpId("mark-y".into()),
+        action: HostAction::Acting {
+            claim: MsgId(y),
+            epoch,
+            reference: "pr-9".into(),
+        },
+    };
+    open_driver(&dir, &task())
+        .unwrap()
+        .dispatch(&mark, now())
+        .unwrap();
+    let old = brief(&dir);
+    let file = dir.join("brief-v2.md");
+    std::fs::write(&file, "Make the flag say ok, in green.").unwrap();
+    let path = file.to_str().unwrap();
+    // Lists are comma-separated, one argument each; a repeat is refused.
+    let rev = state(&dir).rev;
+    let twice = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path, "claims=msg:1", "claims=msg:2"],
+        Some(rev),
+        "owner",
+        Some(rev),
+        None,
+    );
+    assert!(matches!(twice, Ok(Response::Rejected(r)) if r.code == Code::BadHumanInput));
+    human_ok(&dir, "intent", &[path, &format!("claims=msg:{x},msg:{y}")]);
+    let st = state(&dir);
+    assert_ne!(st.brief.unwrap().0, old, "the new brief is current");
+    assert_eq!(st.claims.intent_version(), 2);
+    assert_eq!(st.claims.get(MsgId(x)).unwrap().status, ClaimStatus::Open);
+    assert_eq!(
+        st.claims.get(MsgId(y)).unwrap().status,
+        ClaimStatus::Escalated
+    );
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert!(
+        rows.iter().any(|r| r.reason == inbox::Reason::IntentChanged
+            && r.claim.as_ref().map(|c| c.id) == Some(MsgId(y))),
+        "{rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- brownfield baseline (#598)
+
+/// Open the claims task on `repo`'s base with the suite already run there.
+fn open_on_base(dir: &Path, b: &rusty_bbp_host::baseline::Baseline) -> Response {
+    admin::open_claims_task(
+        dir,
+        &task(),
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &profiles(),
+        None,
+        vec![lens("a", 0), lens("b", 1)],
+        ClaimsConfig::default(),
+        Some(b),
+        || Ok(()),
+    )
+    .expect("open")
+}
+
+#[test]
+fn a_red_base_refuses_the_open_and_writes_nothing() {
+    let dir = tempdir("base-red");
+    let (repo, base) = repo(&dir);
+    let b = runner::baseline(&Unconfined, &profiles(), &repo, &dir.join("work"), &base);
+    assert_eq!(b.status, RunStatus::Failed, "flag.txt says no at the base");
+    let (code, detail) = rejected(open_on_base(&dir, &b));
+    assert_eq!(code, Code::BaselineRed);
+    assert!(
+        detail.contains("test (exit 1)") && detail.contains("edit profile `test`"),
+        "{detail}"
+    );
+    assert!(!dir.join("master").exists(), "nothing written");
+    assert!(!rusty_bbp_host::profiles::path(&dir, &task()).exists());
+    assert!(!rusty_bbp_host::baseline::path(&dir, &task()).exists());
+    assert!(rusty_bbp_host::baseline::resolve(&repo, "no-such-ref").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Counts every execution it is asked for and runs none.
+#[derive(Default)]
+struct Counting(std::cell::Cell<u32>);
+
+impl rusty_sandbox::Executor for Counting {
+    type Error = String;
+    fn exec(
+        &self,
+        _: &rusty_sandbox::SandboxSpec,
+        _: &str,
+        _: &[String],
+    ) -> Result<rusty_sandbox::ExecOutcome, String> {
+        self.0.set(self.0.get() + 1);
+        Err("must not run".into())
+    }
+}
+
+/// A baseline whose build could reach the holdout is refused before the
+/// base is checked out or anything runs, whichever way it reaches it.
+#[test]
+fn a_baseline_that_could_read_the_holdout_runs_nothing() {
+    let dir = tempdir("base-holdout");
+    let (repo, base) = repo(&dir);
+    let hs = holdout_suite(&dir);
+    let suite = dir.join("suite");
+    let sentinel = suite.join("api/test.sh");
+    let before = std::fs::read(&sentinel).unwrap();
+    let alias = dir.join("alias");
+    std::os::unix::fs::symlink(&suite, &alias).unwrap();
+    let reading = |root: &Path| {
+        let mut set = profiles();
+        set.read_roots.push(root.display().to_string());
+        set
+    };
+    let work = dir.join("work");
+    let cases: [(&str, ProfileSet, &Path, &Path); 5] = [
+        ("a build read root", reading(&suite), &repo, &work),
+        ("a symlinked read root", reading(&alias), &repo, &work),
+        ("the repository", profiles(), &dir, &work),
+        ("the work root", profiles(), &repo, &suite),
+        ("a symlinked work root", profiles(), &repo, &alias),
+    ];
+    for (case, set, repo_path, work_root) in cases {
+        let exec = Counting::default();
+        let r = runner::isolated_baseline(&exec, &set, Some(&hs), repo_path, work_root, &base);
+        let refused = r.expect_err(case);
+        assert_eq!(refused.code, Code::BadClaimsConfig, "{case}");
+        assert!(
+            refused.detail.contains("holdout"),
+            "{case}: {}",
+            refused.detail
+        );
+        assert_eq!(exec.0.get(), 0, "{case}: nothing ran");
+        assert!(!suite.join("baseline").exists(), "{case}: nothing prepared");
+        assert!(!work.exists(), "{case}: nothing prepared");
+        assert_eq!(std::fs::read(&sentinel).unwrap(), before, "{case}");
+    }
+    // Isolated, the same baseline runs and is green once the flag is.
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let green = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let b = runner::isolated_baseline(&Unconfined, &profiles(), Some(&hs), &repo, &work, &green)
+        .expect("isolated");
+    assert!(b.green(), "{b:?}");
+    assert_eq!(std::fs::read(&sentinel).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_green_base_pins_candidates_and_guards_its_tests() {
+    let dir = tempdir("base-green");
+    let (repo, _) = repo(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let base = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let b = runner::baseline(&Unconfined, &profiles(), &repo, &dir.join("work"), &base);
+    assert!(b.green(), "{b:?}");
+    assert_eq!(b.tests, ["tests/core.txt", "tests/old.txt"]);
+    assert!(matches!(open_on_base(&dir, &b), Response::Stored(_)));
+    for who in ["a", "b"] {
+        admin::assign(
+            &dir,
+            &task(),
+            &RoleId::from(who),
+            &PrincipalId(who.into()),
+            "v",
+        )
+        .unwrap();
+    }
+    let st = state(&dir);
+    assert!(st.claims.baseline_digest.is_some());
+    assert_eq!(
+        rusty_bbp_host::profiles::pinned_base(&dir, &task()).unwrap(),
+        Some(base.clone())
+    );
+    let reversible = claim(&dir, "a", "keep", true);
+    let irreversible = claim(&dir, "a", "rewrite", false);
+    let mut s = server(&dir, "a");
+    let body = rusty_serde::json::to_string(&DIFF.to_owned()).unwrap();
+    let diff = id_of(&ok(
+        &mut s,
+        "put_artifact",
+        &format!(r#"{{"op":"d1","kind":"diff","body":{body}}}"#),
+    ));
+    let put = |s: &mut Server, op: &str, base: &str, c: u64| {
+        call(
+            s,
+            "put_artifact",
+            &format!(
+                r#"{{"op":"{op}","kind":"candidate","base":"{base}","diffs":[{diff}],"claim":{c}}}"#
+            ),
+        )
+        .0
+    };
+    let refused = put(&mut s, "k1", &base, reversible);
+    assert!(refused.contains("BaseTestChanged"), "{refused}");
+    assert!(
+        refused.contains("tests/core.txt") && refused.contains("tests/old.txt"),
+        "{refused}"
+    );
+    assert!(
+        !refused.contains("tests/new.txt"),
+        "an added test is no change to the base: {refused}"
+    );
+    let off = put(&mut s, "k2", &"b".repeat(40), irreversible);
+    assert!(
+        off.contains("baseline"),
+        "a pinned base holds without protected paths: {off}"
+    );
+    let stored = put(&mut s, "k3", &base, irreversible);
+    assert!(
+        stored.contains("Stored"),
+        "an irreversible claim goes to Nano: {stored}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A relative `--work` is made absolute before the sandbox sees it, so a
+/// green base reports green.
+#[test]
+fn a_relative_work_root_runs_the_baseline() {
+    let dir = tempdir("base-relative");
+    let (repo, _) = repo(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let base = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let rel = PathBuf::from(format!("bbp_rel_work_{}", std::process::id()));
+    assert!(rel.is_relative());
+    let b = runner::isolated_baseline(&Unconfined, &profiles(), None, &repo, &rel, &base);
+    let _ = std::fs::remove_dir_all(&rel);
+    let b = b.expect("ran");
+    assert!(b.green(), "{b:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two baselines sharing one work root, a red base and a green one, each
+/// report their own checkout: the root's lock spans checkout and execution.
+#[test]
+fn baselines_sharing_a_work_root_report_their_own_checkout() {
+    let dir = tempdir("base-shared");
+    let (repo, red) = repo(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let green = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let work = dir.join("work");
+    for round in 0..6 {
+        let (r, g) = std::thread::scope(|s| {
+            let r = s.spawn(|| {
+                runner::isolated_baseline(&Unconfined, &profiles(), None, &repo, &work, &red)
+            });
+            let g = s.spawn(|| {
+                runner::isolated_baseline(&Unconfined, &profiles(), None, &repo, &work, &green)
+            });
+            (r.join().unwrap().unwrap(), g.join().unwrap().unwrap())
+        });
+        assert_eq!(r.status, RunStatus::Failed, "round {round}: {r:?}");
+        assert!(g.green(), "round {round}: {g:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two green baselines of one repository with different reports: the base,
+/// then a commit that adds a test file.
+fn two_green_baselines(
+    dir: &Path,
+) -> (
+    rusty_bbp_host::baseline::Baseline,
+    rusty_bbp_host::baseline::Baseline,
+) {
+    let (repo, _) = repo(dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let first = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let one = runner::baseline(&Unconfined, &profiles(), &repo, &dir.join("w1"), &first);
+    std::fs::write(repo.join("tests/more.txt"), "more\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "more"]);
+    let second = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let two = runner::baseline(&Unconfined, &profiles(), &repo, &dir.join("w2"), &second);
+    assert!(one.green() && two.green(), "{one:?} {two:?}");
+    assert_ne!(one.tests, two.tests);
+    (one, two)
+}
+
+/// The committed task's frozen report and profile set still load, unchanged,
+/// and a candidate on its base is still admitted (the base-test check reads
+/// that report).
+fn baseline_still_admits(dir: &Path, b: &rusty_bbp_host::baseline::Baseline) {
+    let st = state(dir);
+    let d = st.claims.baseline_digest.expect("frozen");
+    let report = rusty_bbp_host::baseline::load(dir, &task(), d).expect("frozen report");
+    assert_eq!(&report, b, "the committed open's report");
+    assert_eq!(
+        rusty_bbp_host::profiles::pinned_base(dir, &task()).unwrap(),
+        Some(b.base.clone())
+    );
+    for who in ["a", "b"] {
+        reassign(dir, who, who);
+    }
+    let c = claim(dir, "a", "rewrite", false);
+    let mut s = server(dir, "a");
+    let body = rusty_serde::json::to_string(&DIFF.to_owned()).unwrap();
+    let diff = id_of(&ok(
+        &mut s,
+        "put_artifact",
+        &format!(r#"{{"op":"d1","kind":"diff","body":{body}}}"#),
+    ));
+    let put = format!(
+        r#"{{"op":"k1","kind":"candidate","base":"{}","diffs":[{diff}],"claim":{c}}}"#,
+        b.base
+    );
+    let stored = call(&mut s, "put_artifact", &put).0;
+    assert!(stored.contains("Stored"), "{stored}");
+}
+
+#[test]
+fn a_duplicate_open_keeps_the_frozen_baseline() {
+    let dir = tempdir("base-dup");
+    let (one, two) = two_green_baselines(&dir);
+    assert!(matches!(open_on_base(&dir, &one), Response::Stored(_)));
+    let (code, _) = rejected(open_on_base(&dir, &two));
+    assert_eq!(code, Code::AlreadyOpen);
+    baseline_still_admits(&dir, &one);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn concurrent_opens_keep_the_winners_baseline() {
+    for round in 0..8 {
+        let dir = tempdir(&format!("base-race-{round}"));
+        let (one, two) = two_green_baselines(&dir);
+        let opens: Vec<Response> = std::thread::scope(|s| {
+            let a = s.spawn(|| open_on_base(&dir, &one));
+            let b = s.spawn(|| open_on_base(&dir, &two));
+            vec![a.join().unwrap(), b.join().unwrap()]
+        });
+        let won: Vec<usize> = (0..2)
+            .filter(|i| matches!(opens[*i], Response::Stored(_)))
+            .collect();
+        assert_eq!(won.len(), 1, "exactly one open commits: {opens:?}");
+        baseline_still_admits(&dir, [&one, &two][won[0]]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Every file under `dir` with its bytes, except `skip`.
+fn files_under(dir: &Path, skip: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if p != skip {
+                out.insert(p.clone(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
+    let dir = tempdir("intent_dry");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "plain", true);
+    human_ok(&dir, "claim", &[&format!("msg:{x}"), "accept"]);
+    let file = dir.join("brief-v2.md");
+    std::fs::write(&file, "A brief only previewed.").unwrap();
+    let path = file.to_str().unwrap();
+    let sha = Sha256::of(b"A brief only previewed.");
+    let before = files_under(&dir, &file);
+    let rev = state(&dir).rev;
+    let op = || Some(OpId("intent-1".into()));
+    let preview = |args: &[&str], fence: Rev| {
+        human::preview_fenced(
+            &dir,
+            &task(),
+            "intent",
+            args,
+            Some(rev),
+            "owner",
+            Some(fence),
+            op(),
+        )
+        .unwrap()
+    };
+    let fresh = preview(&[path], rev);
+    assert!(matches!(fresh.response, Response::Stored(_)), "{fresh:?}");
+    let unknown = preview(&[path, "claims=msg:999"], rev);
+    assert!(
+        matches!(&unknown.response, Response::Rejected(r) if r.code == Code::BadAffects),
+        "{unknown:?}"
+    );
+    let stale = preview(&[path], Rev(rev.0 - 1));
+    assert!(matches!(stale.response, Response::Rejected(_)), "{stale:?}");
+    assert_eq!(files_under(&dir, &file), before, "no preview wrote a file");
+    assert!(open_driver(&dir, &task())
+        .unwrap()
+        .store
+        .blob_get(&sha)
+        .is_err());
+
+    let applied = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path],
+        Some(rev),
+        "owner",
+        Some(rev),
+        op(),
+    )
+    .unwrap();
+    assert_eq!(
+        applied, fresh.response,
+        "the apply answers as its preview did"
+    );
+    assert_eq!(state(&dir).rev.0, rev.0 + fresh.events.len() as u64);
+    let stored = open_driver(&dir, &task())
+        .unwrap()
+        .store
+        .blob_get(&sha)
+        .unwrap();
+    assert_eq!(stored, b"A brief only previewed.");
+
+    // Refused applies, each with fresh bytes of its own, and a retry of the
+    // applied op with other bytes: none stores its brief or moves the log.
+    let rev = state(&dir).rev;
+    let apply = |name: &str, extra: &[&str], fence: Rev, op: &str| {
+        let file = dir.join(name);
+        std::fs::write(&file, format!("brief {name}")).unwrap();
+        let path = file.to_str().unwrap().to_owned();
+        let args: Vec<&str> = std::iter::once(path.as_str())
+            .chain(extra.iter().copied())
+            .collect();
+        let r = human::perform_fenced(
+            &dir,
+            &task(),
+            "intent",
+            &args,
+            Some(fence),
+            "owner",
+            Some(fence),
+            Some(OpId(op.into())),
+        )
+        .unwrap();
+        (r, Sha256::of(format!("brief {name}").as_bytes()))
+    };
+    let absent = |sha: &Sha256| {
+        open_driver(&dir, &task())
+            .unwrap()
+            .store
+            .blob_get(sha)
+            .is_err()
+    };
+    let (r, sha) = apply("unknown.md", &["claims=msg:999"], rev, "intent-2");
+    assert!(
+        matches!(&r, Response::Rejected(x) if x.code == Code::BadAffects),
+        "{r:?}"
+    );
+    assert!(absent(&sha), "a refused apply stores nothing");
+    let (r, sha) = apply("stale.md", &[], Rev(rev.0 - 1), "intent-3");
+    assert!(matches!(r, Response::Rejected(_)), "{r:?}");
+    assert!(absent(&sha), "a stale fence stores nothing");
+    let (r, sha) = apply("retry.md", &[], rev, "intent-1");
+    assert!(
+        matches!(&r, Response::Rejected(x) if x.code == Code::OpConflict),
+        "{r:?}"
+    );
+    assert!(absent(&sha), "a retry with other bytes stores none of them");
+    assert_eq!(state(&dir).rev, rev, "nothing was written");
+    // The same retry with the same bytes replays the stored answer.
+    let again = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path],
+        Some(Rev(rev.0 - fresh.events.len() as u64)),
+        "owner",
+        Some(Rev(rev.0 - fresh.events.len() as u64)),
+        op(),
+    )
+    .unwrap();
+    assert_eq!(again, applied, "an idempotent retry replays");
+    assert_eq!(state(&dir).rev, rev, "and writes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- protected paths (#597)
 
 /// Store `diff` as `who` and a candidate of it naming claim `c`.
@@ -1073,6 +1617,7 @@ fn open_holdout(
         Some(hs),
         vec![lens("a", 0), lens("b", 1), holdout_lens()],
         ClaimsConfig::default(),
+        None,
         || Ok(()),
     )
     .expect("open")
@@ -2480,4 +3025,211 @@ fn confined_erosion_profile_reports_then_blocks_a_pasted_duplicate() {
         let _ = std::fs::remove_dir_all(&dir);
     }
     println!("BBP_ACCEPTANCE PASS erosion-confined");
+}
+
+/// A claims profile set whose `erosion` profile runs with `mode` flags.
+fn erosion_profiles(mode: &str) -> ProfileSet {
+    let mut set = profiles();
+    set.erosion = None;
+    let args = format!("check --base {} {mode}", "a".repeat(40));
+    set.profiles.push(rusty_bbp_host::profiles::Profile {
+        name: "erosion".into(),
+        program: "/usr/local/bin/erosion".into(),
+        args: args.split(' ').map(String::from).collect(),
+    });
+    set
+}
+
+/// #704 D42 (D88): report-only covers 10 claims tasks, then a new
+/// report-only open pauses. Tasks already open stay, and the opt-out and
+/// enforcing opens are not affected.
+#[test]
+fn report_only_erosion_pauses_after_ten_tasks() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-ten");
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..10 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let ledger = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(ledger.lines().count(), 10, "{ledger}");
+
+    let (code, detail) = rejected(open_as(&dir, &TaskId("R10".into()), &report_only, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.contains("report-only has expired"), "{detail}");
+    assert!(detail.contains("10 report-only tasks"), "{detail}");
+    assert!(!log_path_for(&dir, &TaskId("R10".into())).exists());
+    assert!(log_path_for(&dir, &TaskId("R0".into())).exists());
+
+    let off = TaskId("OFF".into());
+    assert!(matches!(
+        open_as(&dir, &off, &profiles(), Ok(())),
+        Response::Stored(_)
+    ));
+    let enforcing = erosion_profiles("--max-concentration-bp 50 --max-duplication-bp 50");
+    let e = TaskId("ENF".into());
+    assert!(matches!(
+        open_as(&dir, &e, &enforcing, Ok(())),
+        Response::Stored(_)
+    ));
+    let after = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(after, ledger, "only report-only opens are recorded");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): report-only ends 14 days after its first open, and an
+/// open refused before the ledger (here, no sandbox) records nothing.
+#[test]
+fn report_only_erosion_pauses_fourteen_days_after_go_live() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-days");
+    let report_only = erosion_profiles("--report-only");
+    let (code, _) = rejected(open(&dir, &report_only, Err("no Landlock".into())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(!erosion_window::path(&dir).exists());
+
+    let long_ago = now().0 - erosion_window::WINDOW_MS;
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    std::fs::write(erosion_window::path(&dir), format!("{long_ago} OLD\n")).expect("seed");
+    let (code, detail) = rejected(open(&dir, &report_only, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.contains("14 days"), "{detail}");
+    assert!(!log_path_for(&dir, &task()).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): only a log that proves a report-only claims open counts.
+/// Ledger lines for tasks that opened with the opt-out, never opened, or
+/// left an empty log start the clock but do not count, and a refused
+/// re-open of a counted task does not count it twice.
+#[test]
+fn only_proven_report_only_opens_count() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-proof");
+    let mut seeded = String::new();
+    for i in 0..10 {
+        let t = TaskId(format!("OFF{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &profiles(), Ok(())),
+            Response::Stored(_)
+        ));
+        seeded.push_str(&format!("{} OFF{i}\n", now().0));
+    }
+    seeded.push_str(&format!("{} NEVER\n", now().0));
+    seeded.push_str(&format!("{} EMPTY\n", now().0));
+    // A failed write can leave an empty log; it is not an open.
+    std::fs::write(log_path_for(&dir, &TaskId("EMPTY".into())), "").expect("empty log");
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    std::fs::write(erosion_window::path(&dir), seeded).expect("seed");
+
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..9 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let (code, _) = rejected(open_as(&dir, &TaskId("R0".into()), &report_only, Ok(())));
+    assert_eq!(code, Code::AlreadyOpen);
+    assert!(matches!(
+        open_as(&dir, &TaskId("R9".into()), &report_only, Ok(())),
+        Response::Stored(_)
+    ));
+    let (_, detail) = rejected(open_as(&dir, &TaskId("R10".into()), &report_only, Ok(())));
+    assert!(detail.contains("10 report-only tasks"), "{detail}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): racing report-only opens at the boundary admit exactly
+/// one, because the ledger lock spans each open's publication.
+#[test]
+fn racing_report_only_opens_cannot_overshoot() {
+    let dir = tempdir("erosion-race");
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..9 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let stored: usize = std::thread::scope(|s| {
+        let racers: Vec<_> = (0..4)
+            .map(|i| {
+                let (dir, set) = (&dir, &report_only);
+                s.spawn(move || open_as(dir, &TaskId(format!("X{i}")), set, Ok(())))
+            })
+            .collect();
+        racers
+            .into_iter()
+            .map(|h| usize::from(matches!(h.join().expect("join"), Response::Stored(_))))
+            .sum()
+    });
+    assert_eq!(stored, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): a torn ledger append (a valid-looking last line without
+/// its newline) refuses the next report-only open, which publishes nothing
+/// and is not run into the torn record.
+#[test]
+fn a_torn_ledger_refuses_the_next_report_only_open() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-torn");
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    let torn = format!("{} FAILED", now().0);
+    std::fs::write(erosion_window::path(&dir), &torn).expect("seed");
+    let t = TaskId("SUCCESS".into());
+    let opened = admin::open_claims_task(
+        &dir,
+        &t,
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &erosion_profiles("--report-only"),
+        None,
+        vec![lens("a", 0), lens("b", 1)],
+        ClaimsConfig::default(),
+        None,
+        || Ok(()),
+    );
+    assert!(opened.is_err_and(|e| e.contains("torn")));
+    assert!(!log_path_for(&dir, &t).exists());
+    let ledger = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(ledger, torn);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): a report-only open with an empty task id fails without
+/// writing to the ledger, so later report-only opens still work.
+#[test]
+fn an_empty_task_id_does_not_poison_the_ledger() {
+    let dir = tempdir("erosion-empty-id");
+    let report_only = erosion_profiles("--report-only");
+    let empty = admin::open_claims_task(
+        &dir,
+        &TaskId(String::new()),
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &report_only,
+        None,
+        vec![lens("a", 0), lens("b", 1)],
+        ClaimsConfig::default(),
+        None,
+        || Ok(()),
+    );
+    assert!(empty.is_err());
+    assert!(!rusty_bbp_host::erosion_window::path(&dir).exists());
+    let t = TaskId("AFTER".into());
+    assert!(matches!(
+        open_as(&dir, &t, &report_only, Ok(())),
+        Response::Stored(_)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
 }

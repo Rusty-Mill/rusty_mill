@@ -50,7 +50,8 @@ pub struct ProfileSet {
     /// Claims mode with `protected`: the full commit id every candidate
     /// builds on. The diffs are all a candidate changes, so pinning the base
     /// keeps an older revision with weaker tests out (#597 G2). Required
-    /// with `protected`; never written when absent.
+    /// with `protected`, set by `bbp open --base` (#598), and enforced on
+    /// every candidate whenever present; never written when absent.
     #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<String>,
     /// Claims mode (#704, D41, D82): `"off"` records that the task opts out
@@ -144,6 +145,11 @@ impl ProfileSet {
     /// whenever any is set. A pattern it would read literally (`[ab]`, a
     /// leading `/` or `./`) would silently protect nothing, so it fails here.
     pub fn check_protected(&self) -> Result<(), String> {
+        // A baseline is enforced whenever it is set (#598), so it must be
+        // a full commit id even without protected paths.
+        if let Some(b) = self.baseline.as_deref().filter(|b| !is_commit_id(b)) {
+            return Err(format!("baseline {b:?} is not a full commit id"));
+        }
         if self.protected.is_empty() {
             return Ok(());
         }
@@ -174,6 +180,14 @@ impl ProfileSet {
             ([p], None) => self.check_erosion_base(p),
             (_, None) => Err("more than one erosion profile".into()),
         }
+    }
+
+    /// Whether the set's `erosion` profile runs report-only (D42). Meaningful
+    /// once [`ProfileSet::check_erosion`] has passed.
+    pub fn erosion_report_only(&self) -> bool {
+        self.profiles
+            .iter()
+            .any(|p| p.name == EROSION_PROFILE && p.args.iter().any(|a| a == "--report-only"))
     }
 
     /// The profile runs the `erosion` bin directly (D82): no shell, `env` or
@@ -216,6 +230,12 @@ impl ProfileSet {
 pub fn path(dir: &Path, task: &TaskId) -> PathBuf {
     dir.join("profiles")
         .join(format!("{}.json", Sha256::of(task.0.as_bytes()).hex()))
+}
+
+/// The commit the task's frozen profile set pins candidates to, if any.
+pub fn pinned_base(dir: &Path, task: &TaskId) -> Result<Option<String>, String> {
+    let digest = crate::open_driver(dir, task)?.state.profile_digest;
+    Ok(load(dir, task, digest)?.baseline)
 }
 
 /// Read a profile set from a JSON file.

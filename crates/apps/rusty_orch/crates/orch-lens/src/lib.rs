@@ -6,6 +6,7 @@
 //! decides is decided here.
 //!
 //! - [`alien`]: the #708 alien review lens: trigger, suspects, ranking, probes.
+//! - [`hunt`]: one alien hunt over the model port and a probe runner.
 //! - [`round`]: one runner round: schedule, call, post, record.
 //! - [`call`]: one job over its fallback order, metered before each ask.
 //! - [`port`]: the [`Model`] port, one stateless question per call.
@@ -34,6 +35,7 @@ pub mod card;
 pub mod class;
 pub mod config;
 pub mod context;
+pub mod hunt;
 pub mod meter;
 pub mod port;
 pub mod post;
