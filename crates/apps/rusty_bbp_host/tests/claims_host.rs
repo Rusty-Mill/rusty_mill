@@ -1169,6 +1169,90 @@ fn a_green_base_pins_candidates_and_guards_its_tests() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Two green baselines of one repository with different reports: the base,
+/// then a commit that adds a test file.
+fn two_green_baselines(
+    dir: &Path,
+) -> (
+    rusty_bbp_host::baseline::Baseline,
+    rusty_bbp_host::baseline::Baseline,
+) {
+    let (repo, _) = repo(dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let first = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let one = runner::baseline(&Unconfined, &profiles(), &repo, &dir.join("w1"), &first);
+    std::fs::write(repo.join("tests/more.txt"), "more\n").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "--quiet", "-m", "more"]);
+    let second = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let two = runner::baseline(&Unconfined, &profiles(), &repo, &dir.join("w2"), &second);
+    assert!(one.green() && two.green(), "{one:?} {two:?}");
+    assert_ne!(one.tests, two.tests);
+    (one, two)
+}
+
+/// The committed task's frozen report and profile set still load, unchanged,
+/// and a candidate on its base is still admitted (the base-test check reads
+/// that report).
+fn baseline_still_admits(dir: &Path, b: &rusty_bbp_host::baseline::Baseline) {
+    let st = state(dir);
+    let d = st.claims.baseline_digest.expect("frozen");
+    let report = rusty_bbp_host::baseline::load(dir, &task(), d).expect("frozen report");
+    assert_eq!(&report, b, "the committed open's report");
+    assert_eq!(
+        rusty_bbp_host::profiles::pinned_base(dir, &task()).unwrap(),
+        Some(b.base.clone())
+    );
+    for who in ["a", "b"] {
+        reassign(dir, who, who);
+    }
+    let c = claim(dir, "a", "rewrite", false);
+    let mut s = server(dir, "a");
+    let body = rusty_serde::json::to_string(&DIFF.to_owned()).unwrap();
+    let diff = id_of(&ok(
+        &mut s,
+        "put_artifact",
+        &format!(r#"{{"op":"d1","kind":"diff","body":{body}}}"#),
+    ));
+    let put = format!(
+        r#"{{"op":"k1","kind":"candidate","base":"{}","diffs":[{diff}],"claim":{c}}}"#,
+        b.base
+    );
+    let stored = call(&mut s, "put_artifact", &put).0;
+    assert!(stored.contains("Stored"), "{stored}");
+}
+
+#[test]
+fn a_duplicate_open_keeps_the_frozen_baseline() {
+    let dir = tempdir("base-dup");
+    let (one, two) = two_green_baselines(&dir);
+    assert!(matches!(open_on_base(&dir, &one), Response::Stored(_)));
+    let (code, _) = rejected(open_on_base(&dir, &two));
+    assert_eq!(code, Code::AlreadyOpen);
+    baseline_still_admits(&dir, &one);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn concurrent_opens_keep_the_winners_baseline() {
+    for round in 0..8 {
+        let dir = tempdir(&format!("base-race-{round}"));
+        let (one, two) = two_green_baselines(&dir);
+        let opens: Vec<Response> = std::thread::scope(|s| {
+            let a = s.spawn(|| open_on_base(&dir, &one));
+            let b = s.spawn(|| open_on_base(&dir, &two));
+            vec![a.join().unwrap(), b.join().unwrap()]
+        });
+        let won: Vec<usize> = (0..2)
+            .filter(|i| matches!(opens[*i], Response::Stored(_)))
+            .collect();
+        assert_eq!(won.len(), 1, "exactly one open commits: {opens:?}");
+        baseline_still_admits(&dir, [&one, &two][won[0]]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Every file under `dir` with its bytes, except `skip`.
 fn files_under(dir: &Path, skip: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
     let mut out = std::collections::BTreeMap::new();
