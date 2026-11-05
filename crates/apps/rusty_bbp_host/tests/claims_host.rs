@@ -1977,6 +1977,7 @@ fn the_holder_never_kills_a_cgroup_made_again_at_its_path() {
         exits_within(&mut holder, Duration::from_secs(5)),
         "the holder outlived its own cgroup"
     );
+    assert!(!slot_held(&slot), "the replacement kept the old slot held");
     std::thread::sleep(Duration::from_millis(300));
     assert!(
         workload.try_wait().expect("wait").is_none(),
@@ -2010,6 +2011,10 @@ fn a_claim_left_by_a_crashed_open_is_freed_by_quiesce() {
     let rev = state(&dir).rev;
     human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
     assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(!cgroup.exists(), "recovery created nothing");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
     rusty_bbp_host::cgroups::open(&dir, &second, &cgroup).expect("the path is free again");
     let rev = open_driver(&dir, &second).expect("driver").state.rev;
     human::perform(&dir, &second, "close", &[], Some(rev)).expect("close");
