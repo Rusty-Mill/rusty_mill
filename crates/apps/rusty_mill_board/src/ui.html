@@ -200,6 +200,51 @@ main.archive,main.decisions{display:grid;grid-template-columns:minmax(0,780px);j
 .decisions a{color:var(--mag)}
 .decisions .cand{border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin:8px 0}
 @media (max-width:900px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
+/* Roadmap: the timeline, then progress and activity side by side, then the lanes. */
+main.roadmap{max-width:1500px}
+.roadmap>.panel,.roadmap>.rm-top,.roadmap>h4{grid-column:1/-1}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:5px;padding:14px 16px 16px;min-width:0}
+.panel h2{margin:0 0 12px;font-size:14px}
+.roadmap>h4{margin:10px 0 -4px;font-size:14px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em}
+.tl{padding:6px 0 10px}
+.tl-row{display:grid;grid-template-columns:240px minmax(0,1fr);align-items:stretch;border-bottom:1px solid var(--line)}
+.tl-row:last-of-type{border-bottom:0}
+.tl-label{padding:9px 14px 9px 16px;display:flex;flex-direction:column;justify-content:center;min-width:0;border-right:1px solid var(--line)}
+.tl-label b{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-label .meta{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-head .tl-label{justify-content:flex-end;color:var(--mute);font-size:12px;font-weight:600}
+.tl-months,.tl-weeks{display:grid;grid-template-columns:repeat(var(--weeks),1fr)}
+.tl-months span{font-size:12px;font-weight:600;padding:6px 8px 2px;color:var(--ink)}
+.tl-weeks span{font-size:11.5px;color:var(--mute);padding:2px 6px 8px;border-left:1px solid var(--line);white-space:nowrap;overflow:hidden}
+.tl-weeks .now{color:var(--cyan);font-weight:600}
+.tl-lane{position:relative;min-height:42px;background:repeating-linear-gradient(90deg,transparent 0 calc(100% / var(--weeks) - 1px),var(--line) calc(100% / var(--weeks) - 1px) calc(100% / var(--weeks)))}
+.tl-bar{position:absolute;top:9px;bottom:9px;min-width:28px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 10px;border:1.5px solid var(--sw);border-radius:6px;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer;overflow:hidden;
+  background:linear-gradient(90deg,color-mix(in srgb,var(--sw) 30%,var(--card)) var(--pct),color-mix(in srgb,var(--sw) 10%,var(--card)) var(--pct))}
+.tl-bar::after{content:"";position:absolute;left:0;bottom:0;height:3px;width:var(--pct);background:var(--sw)}
+.tl-bar:hover{box-shadow:0 2px 10px -4px var(--sw)}
+.tl-text,.tl-pct{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tl-pct{font:700 15px/1 var(--num);flex:none;margin-left:auto}
+.tl-flag{flex:none;padding:1px 6px;border-radius:3px;background:var(--red-fill);color:#fff;font-size:11px;font-weight:600}
+.tl-text{flex:0 1 auto;min-width:0}
+.tl-mark{position:absolute;top:50%;width:11px;height:11px;margin:-6px 0 0 -6px;padding:0;border:0;border-radius:2px;transform:rotate(45deg);background:var(--cyan-fill);cursor:pointer;box-shadow:0 0 0 2px var(--card)}
+.tl-now{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--cyan);opacity:.7;pointer-events:none}
+.rm-top{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:14px;align-items:start}
+.ins-body{display:flex;gap:20px;align-items:center}
+.ring{--pct:0;flex:none;width:132px;height:132px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  background:radial-gradient(closest-side,var(--card) 78%,transparent 79%),conic-gradient(var(--cyan-fill) calc(var(--pct) * 1%),var(--sunk) 0)}
+.ring b{font:700 34px/1 var(--num)}.ring span{font-size:12px;color:var(--mute)}
+.tiles{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tile{border:1px solid var(--line);border-radius:5px;padding:9px 12px;font-size:12.5px;color:var(--mute)}
+.tile b{display:block;color:var(--ink);font:700 30px/1.1 var(--num)}
+.tile.bad{background:var(--red-wash);border-color:color-mix(in srgb,var(--red) 35%,var(--line))}.tile.bad b{color:var(--red)}
+.tile.you{background:var(--mag-wash);border-color:color-mix(in srgb,var(--mag) 35%,var(--line))}.tile.you b{color:var(--mag)}
+.act{display:flex;flex-direction:column}
+.act-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:10px;align-items:center;text-align:left;width:100%;padding:7px 2px;border:0;border-top:1px solid var(--line);border-radius:0;background:none;font:inherit;color:inherit;cursor:pointer}
+.act-row:hover{background:var(--sunk)}
+.act-row .dot{width:10px;height:10px;border-radius:50%;background:var(--sw)}
+.act-t{display:flex;flex-direction:column;min-width:0}.act-t b{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act-t .meta,.act-row>.meta{font-size:12px}
+@media (max-width:1000px){.rm-top{grid-template-columns:minmax(0,1fr)}.tl-row{grid-template-columns:150px minmax(0,1fr)}}
 
 /* Dialogs: the card, settings and sign-in. */
 dialog{background:var(--card);color:var(--ink);border:1px solid var(--line2);border-radius:6px;width:min(600px,94vw);padding:18px 20px;box-shadow:0 24px 60px -20px rgb(0 0 0 / .45)}
@@ -496,18 +541,126 @@ const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipp
 const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
 const pressed=()=>{$("boardv").setAttribute("aria-pressed",view==="board");$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions");$("archive").setAttribute("aria-pressed",view==="archive")};
 function setView(v){view=v;pref("view",v);pressed();render()}
-// The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
-const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
+/* Roadmap: a timeline of the last ten weeks, the progress and recent activity under it, then the lanes.
+   Cards carry no target dates, so the timeline shows what happened: a bar runs from when its work
+   began to now (or its last ship), and fills with the share shipped. Backlog is "Later", off the chart. */
+const WEEK=7*864e5,MAX_WEEKS=12;
+const dayStart=ms=>{const d=new Date(ms);d.setHours(0,0,0,0);return d.getTime()};
+const weekStart=ms=>dayStart(ms)-((new Date(ms).getDay()+6)%7)*864e5;
+/* The chart's window: back to the oldest work it shows, at most twelve weeks. Three weeks or less is
+   drawn in days, at least fourteen; longer in weeks. */
+function windowOf(scoped){
+  const now=Date.now(),floor=weekStart(now)-(MAX_WEEKS-1)*WEEK;
+  const starts=scoped.flatMap(k=>planned(k)?[k.created_ms]:isDone(k)&&k.done_ms>=floor?[k.created_ms]:[]);
+  const first=Math.max(floor,Math.min(now,...starts));
+  if(now-first<=21*864e5){const n=Math.max(14,Math.ceil((now-dayStart(first))/864e5)+1),t0=dayStart(now)-(n-1)*864e5;return {t0,t1:t0+n*864e5,n,step:864e5,unit:"day"}}
+  const n=Math.ceil((now-weekStart(first))/WEEK)+1,t0=weekStart(now)-(n-1)*WEEK;
+  return {t0,t1:t0+n*WEEK,n,step:WEEK,unit:"week"};
+}
+// The project the lanes are for: the chosen one, else the only one in scope, else none.
+function focusProject(){
+  if(sel.project)return sel.project;
+  const scope=projects().filter(p=>!sel.repo||repoOf(p)===sel.repo);
+  return scope.length===1?scope[0]:"";
+}
+const planned=k=>["work","queue","blocked"].includes(kindOf(k.column));
+// What a set of cards amounts to on the chart: work begun, shipped in the window, and where it stands.
+function track(list,t0){
+  const open=list.filter(planned),shipped=list.filter(k=>isDone(k)&&k.done_ms>=t0);
+  if(!open.length&&!shipped.length)return null;
+  const has=kind=>open.some(k=>kindOf(k.column)===kind);
+  const start=Math.min(...[...open,...shipped].map(k=>k.created_ms));
+  const end=open.length?Date.now():Math.max(...shipped.map(k=>k.done_ms));
+  const kind=has("work")?"work":has("queue")?"queue":has("blocked")?"blocked":"done";   // blocked only when nothing else moves
+  return {open,shipped,start,end,kind,pct:Math.round(100*shipped.length/(shipped.length+open.length))};
+}
+function timeline(scoped,focus,w){
+  const {t0,t1,n,step,unit}=w,x=ms=>Math.min(100,Math.max(0,(ms-t0)/(t1-t0)*100))+"%";
+  const s=el("section",null,"panel tl");s.style.setProperty("--weeks",n);
+  const head=el("div",null,"tl-row tl-head"),months=el("div",null,"tl-months"),weeks=el("div",null,"tl-weeks");
+  let last="";
+  for(let i=0;i<n;i++){
+    const ms=t0+i*step,m=new Date(ms).toLocaleDateString(undefined,{month:"short"}),cur=i===n-1;
+    months.append(el("span",m===last?"":m));last=m;
+    weeks.append(el("span",cur?(unit==="day"?"Today":"This week"):unit==="day"?String(new Date(ms).getDate()):day(ms),cur?"now":null));
+  }
+  const area=el("div",null,"tl-area");area.append(months,weeks);head.append(el("div",focus?"Cards in flight":"Projects","tl-label"),area);s.append(head);
+  const rows=focus?cardRows(scoped,t0):projectRows(scoped,t0);
+  if(!rows.length)s.append(el("p","Nothing planned or shipped in this window.","empty-note"));
+  for(const r of rows.slice(0,14)){
+    const row=el("div",null,"tl-row"),lab=el("div",null,"tl-label"),lane=el("div",null,"tl-area tl-lane");
+    lab.append(el("b",r.label),el("span",r.sub,"meta"));
+    if(r.start!=null){
+      const bar=el("button",null,"tl-bar");bar.dataset.kind=r.kind;bar.style.left=x(r.start);bar.style.width="calc("+x(r.end)+" - "+x(r.start)+")";
+      bar.style.setProperty("--pct",(r.pct??0)+"%");bar.title=r.title??r.label;bar.onclick=r.open;
+      bar.append(el("span",r.text,"tl-text"));if(r.flag)bar.append(el("span",r.flag,"tl-flag"));if(r.right)bar.append(el("span",r.right,"tl-pct"));lane.append(bar);
+    }
+    for(const m of r.marks??[]){const d=el("button",null,"tl-mark");d.style.left=x(m.at);d.title=m.title;d.onclick=m.open;lane.append(d)}
+    const now=el("i",null,"tl-now");now.style.left=x(Date.now());lane.append(now);
+    row.append(lab,lane);s.append(row);
+  }
+  if(rows.length>14)s.append(el("p",(rows.length-14)+" more not shown; choose a project to narrow.","empty-note"));
+  return s;
+}
+function projectRows(scoped,t0){
+  const by=scoped.reduce((m,k)=>m.set(k.project,[...(m.get(k.project)??[]),k]),new Map());
+  const out=[];
+  for(const [p,list] of by){
+    const t=track(list,t0);if(!t)continue;
+    const n=kind=>t.open.filter(k=>kindOf(k.column)===kind).length;
+    const sub=[[n("work"),"in progress"],[n("queue"),"next"],[n("blocked"),"blocked"]].filter(([v])=>v).map(([v,w])=>v+" "+w).join(" · ")||"all shipped";
+    if(n("blocked"))t.flag=n("blocked")+" blocked";
+    out.push({...t,label:label(p),sub,text:t.shipped.length+" shipped",right:t.pct+"%",title:label(p)+": "+t.pct+"% of planned work shipped",open:()=>pick(repoOf(p),p),rank:n("work")*3+n("blocked")*2+n("queue")});
+  }
+  return out.sort((a,z)=>z.rank-a.rank||a.label.localeCompare(z.label));
+}
+const KIND_ORDER={work:0,blocked:1,queue:2};
+function cardRows(scoped,t0){
+  const rows=scoped.filter(planned).sort((a,z)=>KIND_ORDER[kindOf(a.column)]-KIND_ORDER[kindOf(z.column)]||z.priority-a.priority).map(k=>({
+    label:(k.number?"#"+k.number+" ":"")+k.title,sub:colLabel(k.column)+(k.claim?" · "+k.claim:""),start:k.created_ms,end:Date.now(),
+    kind:kindOf(k.column),text:"since "+day(k.created_ms),right:k.claim??"",title:k.title+" · since "+day(k.created_ms),open:()=>show(k.id)}));
+  const shipped=scoped.filter(k=>isDone(k)&&k.done_ms>=t0);
+  if(shipped.length)rows.unshift({label:"Shipped",sub:shipped.length+" in this window",marks:shipped.map(k=>({at:k.done_ms,title:(k.number?"#"+k.number+" ":"")+k.title+" · "+day(k.done_ms),open:()=>show(k.id)}))});
+  return rows;
+}
+// Progress: the share of planned work shipped in the window, and where the rest stands.
+function insights(scoped,t0){
+  const t=track(scoped,t0),s=el("section",null,"panel ins");
+  s.append(el("h2","Progress"));
+  const pct=t?.pct??0,ring=el("div",null,"ring");ring.style.setProperty("--pct",pct);
+  ring.append(el("b",pct+"%"),el("span","shipped"));ring.title="cards shipped since "+day(t0)+", of those shipped or planned (Ready onward)";
+  const tiles=el("div",null,"tiles"),n=kind=>scoped.filter(k=>kindOf(k.column)===kind).length;
+  const waits=scoped.filter(k=>gateFrom(k.column)||decisionsOn(k)).length;
+  for(const [v,l,cls] of [[n("work"),"In progress",""],[n("queue"),"Up next",""],[n("blocked"),"Blocked","bad"],[waits,"Waits on you","you"]]){
+    const d=el("div",null,"tile "+(v?cls:""));d.append(el("span",l),el("b",String(v)));tiles.append(d);
+  }
+  const body=el("div",null,"ins-body");body.append(ring,tiles);s.append(body);return s;
+}
+function activity(scoped){
+  const s=el("section",null,"panel act");s.append(el("h2","Recent activity"));
+  const recent=[...scoped].sort((a,z)=>z.updated_ms-a.updated_ms).slice(0,6);
+  if(!recent.length)s.append(el("p","Nothing yet.","empty-note"));
+  for(const k of recent){
+    const d=el("button",null,"act-row"),dot=el("i",null,"dot");
+    if(k.claim)dot.style.background=agentColor(k.claim);else ink(dot,k.column);
+    const t=el("span",null,"act-t");t.append(el("b",(k.number?"#"+k.number+" ":"")+k.title),el("span",[k.claim,colLabel(k.column),...(focusProject()?[]:[label(k.project)])].filter(Boolean).join(" · "),"meta"));
+    d.append(dot,t,el("span",ago(k.updated_ms),"meta"));d.onclick=()=>show(k.id);s.append(d);
+  }
+  return s;
+}
 async function renderRoadmap(){
-  const project=roadmapProject(),seq=++mapSeq,b=$("board");
+  const focus=focusProject(),seq=++mapSeq,b=$("board");
   const stale=()=>seq!==mapSeq||view!=="roadmap";   // a newer render, or the board, won
-  let map;
-  try{
-    if(!project)throw new Error("No project to show a roadmap for.");
-    map=await api("board_roadmap",{project});
-  }catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  let map=null;
+  try{if(focus)map=await api("board_roadmap",{project:focus})}
+  catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  b.classList.remove("board","metrics","decisions","archive");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
+  b.classList.remove("board","metrics","decisions","archive");b.classList.add("roadmap");
+  const scoped=cards.filter(k=>shown(k)&&(!focus||k.project===focus));
+  const w=windowOf(scoped),top=el("div",null,"rm-top");top.append(insights(scoped,w.t0),activity(scoped));
+  b.replaceChildren(el("h3","Roadmap · "+(focus?label(focus):sel.repo||"all projects")),timeline(scoped,focus,w),top);
+  if(!map){renderSide();syncDialog();return}
+  b.append(el("h4","Lanes","rm-lanes"));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
     const h=el("h2",l.lane[0].toUpperCase()+l.lane.slice(1)+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);

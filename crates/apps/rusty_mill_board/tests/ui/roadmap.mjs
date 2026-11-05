@@ -39,6 +39,10 @@ check(heads.join("|") === "now · 0|next · 1|later · 1|blocked · 0|shipped ·
 check((await lane("next")).join() === "Next up", "ready card is next");
 check((await lane("later")).join() === "Later idea", "backlog card is later");
 check(!(await page.locator(".roadmap").innerText()).includes("Orch card"), "other projects are left out");
+const rowsOf = async () => (await page.locator(".tl .tl-row:not(.tl-head) .tl-label b").allInnerTexts());
+check((await rowsOf()).some((t) => t.endsWith("Next up")) && !(await rowsOf()).some((t) => t.endsWith("Later idea")), `the timeline draws cards from Ready on, not the backlog (${await rowsOf()})`);
+check((await page.locator(".ins .tile", { hasText: "Up next" }).locator("b").innerText()) === "1", "the progress panel counts what is up next");
+check((await page.locator(".act .act-row").count()) === 2, "recent activity lists the project's cards");
 
 await api("card_move", { id: later.id, to: "blocked" });
 await sleep(2500);
@@ -47,6 +51,13 @@ check((await lane("blocked")).join() === "Later idea", "the roadmap follows boar
 await page.reload();
 await page.waitForSelector(".roadmap h3");
 check(true, "the roadmap view is remembered across reloads");
+await page.locator("#nav1 .item.on").filter({ hasText: /^rl\d/ }).click();
+await page.waitForFunction(() => document.querySelector(".roadmap h3")?.textContent !== "Roadmap · rl");
+check((await rowsOf()).join() === "rl", `with no project chosen, the timeline has a row per project with planned work (${await rowsOf()})`);
+check((await page.locator("[data-lane]").count()) === 0, "and no lanes, which belong to one project");
+await page.locator(".tl-bar").first().click();
+await page.waitForFunction(() => document.querySelector(".roadmap h3")?.textContent === "Roadmap · rl");
+check(true, "clicking a project's bar chooses it");
 await page.click("#view");
 await page.waitForSelector("[data-col=backlog]");
 check((await page.locator(".roadmap").count()) === 0, "toggling back shows the board");
