@@ -19,7 +19,7 @@
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
-//! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner or harness group of it runs; kills groups a dead moderator left
+//! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner, harness group or session cgroup of it runs; kills groups a dead moderator left and populated cgroups
 //! bbp profiles rust-lld --sysroot PATH     pre-task, bounded Rust/LLD test profile
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
@@ -31,6 +31,8 @@
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
+//! bbp slot-hold --cgroup PATH [--deadline-ms N]   D82: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
+//! bbp cgroup-open --dir D --task T --cgroup PATH   D82: records a mux-hosted session's cgroup for the task, then creates it (refused if it exists)
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
@@ -101,6 +103,11 @@ fn run() -> Result<String, String> {
             })
             .transpose()?
             .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+        if let Some(cgroup) = a.flags.get("cgroup") {
+            let cgroup = rusty_bbp_host::cgroups::checked(std::path::Path::new(cgroup))?;
+            rusty_bbp_host::cgroups::hold(&cgroup, deadline, std::io::stdin())?;
+            return Ok(String::new());
+        }
         slots::hold_while_alive(deadline);
         return Ok(String::new());
     }
@@ -185,6 +192,11 @@ fn run() -> Result<String, String> {
         let mut tasks: Vec<TaskId> = task.0.split(',').map(|t| TaskId(t.to_owned())).collect();
         tasks.extend(a.positional.iter().map(|t| TaskId(t.clone())));
         return inbox::json(&dir, &tasks);
+    }
+    if sub == "cgroup-open" {
+        let cgroup = PathBuf::from(a.flag("cgroup")?);
+        return rusty_bbp_host::cgroups::open(&dir, &task, &cgroup)
+            .map(|c| c.display().to_string());
     }
     if sub == "quiesce" {
         return moderator::quiesce(&dir, &task).map(|quiet| quiet.to_string());

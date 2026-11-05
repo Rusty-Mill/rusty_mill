@@ -1554,3 +1554,171 @@ fn why_replays_one_claim_and_names_the_rule() {
     assert!(!ok && err.contains("--at needs --claim"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A fresh session cgroup path under the cgroup2 mount, or why there can't
+/// be one (no cgroup2, or not allowed to create one: CI runners as a user).
+#[cfg(target_os = "linux")]
+fn session_cgroup(tag: &str) -> Result<PathBuf, String> {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").map_err(|e| e.to_string())?;
+    let base = mounts
+        .lines()
+        .map(|l| l.split(' ').collect::<Vec<_>>())
+        .find(|f| f.len() > 2 && f[2] == "cgroup2" && f[1].starts_with("/sys/fs/cgroup"))
+        .map(|f| PathBuf::from(f[1]))
+        .ok_or("no cgroup2 mount under /sys/fs/cgroup")?;
+    let probe = base.join(format!("bbp-probe-{}-{tag}", std::process::id()));
+    std::fs::create_dir(&probe).map_err(|e| format!("mkdir {}: {e}", probe.display()))?;
+    std::fs::remove_dir(&probe).map_err(|e| e.to_string())?;
+    Ok(base.join(format!("bbp-test-{}-{tag}", std::process::id())))
+}
+
+/// `bbp cgroup-open` for task C1, with its output.
+#[cfg(target_os = "linux")]
+fn cgroup_open(dir: &Path, cgroup: &Path) -> String {
+    let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["cgroup-open", "--task", "C1", "--dir"])
+        .arg(dir)
+        .arg("--cgroup")
+        .arg(cgroup)
+        .output()
+        .expect("bbp");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// `sleep 30`, moved into `cgroup`.
+#[cfg(target_os = "linux")]
+fn sleeper_in(cgroup: &Path) -> std::process::Child {
+    let child = Proc::new("sleep").arg("30").spawn().expect("sleep");
+    std::fs::write(cgroup.join("cgroup.procs"), child.id().to_string()).expect("join cgroup");
+    child
+}
+
+/// Whether some process holds the slot lock on `path`.
+#[cfg(target_os = "linux")]
+fn slot_held(path: &Path) -> bool {
+    let file = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("slot file");
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
+/// `bbp slot-hold --cgroup C` holding a locked slot file on its stdout.
+#[cfg(target_os = "linux")]
+fn cgroup_holder(cgroup: &Path, slot: &Path, deadline_ms: Option<u128>) -> std::process::Child {
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(slot)
+        .expect("slot");
+    file.lock().expect("lock");
+    let mut cmd = Proc::new(env!("CARGO_BIN_EXE_bbp"));
+    cmd.args(["slot-hold", "--cgroup"]).arg(cgroup);
+    if let Some(ms) = deadline_ms {
+        cmd.args(["--deadline-ms", &ms.to_string()]);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(file)
+        .spawn()
+        .expect("slot-hold")
+}
+
+#[cfg(target_os = "linux")]
+fn exits_within(child: &mut std::process::Child, within: std::time::Duration) -> bool {
+    let end = std::time::Instant::now() + within;
+    while std::time::Instant::now() < end {
+        if child.try_wait().expect("wait").is_some() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// D82/D86: the cgroup holder keeps the slot after its caller is gone until
+/// the session's cgroup is empty, and `quiesce` then removes the cgroup.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_cgroup_holder_frees_the_slot_only_once_the_cgroup_is_empty() {
+    use std::time::Duration;
+    let cgroup = match session_cgroup("hold") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-hold");
+    claims_task(&dir);
+    let out = cgroup_open(&dir, &cgroup);
+    assert!(cgroup.is_dir(), "{out}");
+    let again = cgroup_open(&dir, &cgroup);
+    assert!(again.contains("already exists"), "{again}");
+    let mut agent = sleeper_in(&cgroup);
+    let slot = dir.join("agent-0.lock");
+    let mut holder = cgroup_holder(&cgroup, &slot, None);
+    drop(holder.stdin.take()); // the caller (orch) is gone
+    assert!(!exits_within(&mut holder, Duration::from_millis(500)));
+    assert!(slot_held(&slot), "slot freed while the agent runs");
+    agent.kill().expect("kill");
+    agent.wait().expect("reap");
+    assert!(exits_within(&mut holder, Duration::from_secs(5)));
+    assert!(
+        !slot_held(&slot),
+        "slot still held after the cgroup emptied"
+    );
+    // The task ends; quiesce removes the empty cgroup and its record.
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(!cgroup.exists());
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+}
+
+/// D82/D86: at the deadline the holder kills the cgroup, even while its
+/// caller still holds stdin open, and never touches a process group.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_cgroup_holder_kills_the_cgroup_at_the_deadline() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let cgroup = match session_cgroup("deadline") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-deadline");
+    claims_task(&dir);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    let mut agent = sleeper_in(&cgroup);
+    let slot = dir.join("agent-0.lock");
+    let deadline = SystemTime::now() + Duration::from_millis(400);
+    let ms = deadline.duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let mut holder = cgroup_holder(&cgroup, &slot, Some(ms));
+    assert!(
+        exits_within(&mut holder, Duration::from_secs(5)),
+        "holder outlived the deadline"
+    );
+    let status = agent.wait().expect("reap");
+    assert_eq!(
+        status.signal(),
+        Some(9),
+        "the agent was killed by cgroup.kill"
+    );
+    assert!(!slot_held(&slot));
+    drop(holder.stdin.take());
+    // quiesce on an ended task: a populated cgroup is killed, then removed.
+    let mut late = sleeper_in(&cgroup);
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(false));
+    late.wait().expect("reap");
+    let quiet = (0..50).any(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        rusty_bbp_host::moderator::quiesce(&dir, &task()) == Ok(true)
+    });
+    assert!(quiet && !cgroup.exists());
+}
