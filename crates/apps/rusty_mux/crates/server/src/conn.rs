@@ -236,6 +236,7 @@ mod regression {
                     args: vec![],
                     cwd: "/".into(),
                     console_host: ConsoleHost::default(),
+                    state_dir: None,
                     config_file: None,
                 },
                 None,
@@ -330,6 +331,7 @@ mod tests {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                state_dir: None,
                 config_file: None,
             };
             let state = State::shared(config, None);
@@ -425,6 +427,7 @@ mod tests {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                state_dir: None,
                 config_file: Some("/stalled.json".into()),
             };
             let state = State::shared(config, None);

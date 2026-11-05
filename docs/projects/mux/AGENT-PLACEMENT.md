@@ -51,7 +51,10 @@ agent starts: a `SessionStart` hook for Claude Code and Codex, a plugin for
 OpenCode and an extension for Pi, which add its text to the system prompt.
 Inside a block it prints one paragraph naming the block, window and session
 and pointing at the skill; elsewhere it prints nothing, so the hook costs
-nothing outside rusty_mux. Codex runs a new hook only after it is trusted
+nothing outside rusty_mux. Inside a block, the OpenCode plugin and the Pi
+extension also report the agent's status as it works, with `agent hook
+--event` (C74): the server shows it instead of the program's own OSC 7501
+status while the hooks speak. Codex runs a new hook only after it is trusted
 (`/hooks` in Codex), and a project's hook only in a project whose `.codex`
 layer is trusted.
 

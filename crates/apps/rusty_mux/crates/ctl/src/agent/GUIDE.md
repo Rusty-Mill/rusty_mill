@@ -69,6 +69,7 @@ rusty-mux-ctl terminal.pwd --block dev-server
 rusty-mux-ctl terminal.size --block dev-server      # COLSxROWS, such as 80x24
 rusty-mux-ctl terminal.modes --block dev-server     # NAME<TAB>VALUE: mouse, bracketed-paste, alt-screen, ...
 rusty-mux-ctl terminal.shell --block dev-server     # program, activity idle/busy, OSC 133 phase and exit
+rusty-mux-ctl terminal.history --block dev-server --history 500 --skip 0  # older than the scrollback, from disk
 rusty-mux-ctl acquire-lease --block dev-server + terminal.send-keys --block dev-server --key ctrl+c
 rusty-mux-ctl acquire-lease --block dev-server + terminal.reset --block dev-server
 ```

@@ -33,6 +33,14 @@
 //! program and waits up to 6 s for the consoles it hosts to shut down,
 //! which includes trying to end the other programs still attached.
 //! Closing its console window, or killing it, does not wait.
+//!
+//! Sessions survive a restart (C45): every few seconds, and on a clean
+//! stop, the server saves its sessions, windows, layouts and screens to
+//! `--state DIR`, by default `$XDG_STATE_HOME/rusty_mux/<socket name>`
+//! (or `~/.local/state/...`; `%LOCALAPPDATA%\rusty_mux\<socket name>` on
+//! Windows), owner-only. The next server on that directory restores them,
+//! each block with a fresh shell under its saved screen; the programs that
+//! were running are not restarted. `--no-state` saves and restores nothing.
 
 use std::ffi::OsString;
 use std::net::{IpAddr, SocketAddr};
@@ -44,8 +52,8 @@ use rusty_mux_server::{Config, ConsoleHost, Udp, serve_until};
 use rusty_tokio::io::{UdpSocket, UnixListener};
 use rusty_tokio::{Builder, LocalOptions};
 
-const USAGE: &str =
-    "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE] <socket>
+const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
+                        [--state DIR | --no-state] <socket>
        rusty-mux-server --login MAP [--runtime DIR] <socket>";
 /// Where login mode puts each account's server unless `--runtime` says.
 const RUNTIME: &str = "/run/rusty-mux";
@@ -62,7 +70,19 @@ struct Args {
     idle: Duration,
     /// `--config`, if given.
     config: Option<PathBuf>,
+    state: StateDir,
     mode: Mode,
+}
+
+/// Where sessions are saved across restarts.
+#[derive(Debug, PartialEq, Eq)]
+enum StateDir {
+    /// Under the user's state directory, named after the socket.
+    Default,
+    /// `--state DIR`.
+    At(PathBuf),
+    /// `--no-state`.
+    Off,
 }
 
 /// Which server this is.
@@ -103,6 +123,7 @@ fn main() -> ExitCode {
 fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut socket, mut udp, mut idle, mut config) = (None, None, UDP_IDLE, None);
     let (mut login, mut runtime, mut forwarded_by) = (None, None, None);
+    let mut state = StateDir::Default;
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
             args.next()
@@ -112,6 +133,11 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         match arg.to_str() {
             Some("--udp") => udp = Some(udp_addr(&value("--udp")?)?),
             Some("--config") => config = Some(PathBuf::from(value("--config")?)),
+            Some("--state") | Some("--no-state") if state != StateDir::Default => {
+                return Err("one of --state and --no-state, once".into());
+            }
+            Some("--state") => state = StateDir::At(PathBuf::from(value("--state")?)),
+            Some("--no-state") => state = StateDir::Off,
             Some("--login") => login = Some(PathBuf::from(value("--login")?)),
             Some("--runtime") => runtime = Some(PathBuf::from(value("--runtime")?)),
             Some("--forwarded-by") => {
@@ -144,8 +170,8 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         (None, Some(_), _) => return Err("--runtime needs --login".into()),
         (Some(_), _, Some(_)) => return Err("--login and --forwarded-by are two modes".into()),
         (Some(map), runtime, None) => {
-            if udp.is_some() || config.is_some() {
-                return Err("the front door takes no --udp or --config".into());
+            if udp.is_some() || config.is_some() || state != StateDir::Default {
+                return Err("the front door takes no --udp, --config or --state".into());
             }
             let runtime = runtime.unwrap_or_else(|| PathBuf::from(RUNTIME));
             Mode::Login { map, runtime }
@@ -159,6 +185,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         udp,
         idle,
         config,
+        state,
         mode,
     })
 }
@@ -184,8 +211,13 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
     let config_file = args
         .config
         .or_else(|| rusty_mux_script::default_path(|name| std::env::var_os(name)));
-    let config = default_config(console_host, config_file);
+    let mut config = default_config(console_host, config_file);
     let socket = args.socket;
+    config.state_dir = match args.state {
+        StateDir::Off => None,
+        StateDir::At(dir) => Some(dir),
+        StateDir::Default => default_state_dir(&socket, |name| std::env::var_os(name)),
+    };
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     runtime.block_on(async {
         let listener = UnixListener::bind(&socket)?;
@@ -215,6 +247,23 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
             _ => serve_until(listener, config, udp, stop_requested()?).await,
         }
     })
+}
+
+/// `<state home>/rusty_mux/<socket file name>`, where the state home is
+/// `$XDG_STATE_HOME` or `~/.local/state` (`%LOCALAPPDATA%` on Windows);
+/// `None`, saving nothing, when neither is known.
+fn default_state_dir(
+    socket: &std::path::Path,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
+    let set = |name: &str| env(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let home = if cfg!(windows) {
+        set("LOCALAPPDATA")?
+    } else {
+        set("XDG_STATE_HOME").or_else(|| Some(set("HOME")?.join(".local").join("state")))?
+    };
+    let name = socket.file_name()?;
+    Some(home.join("rusty_mux").join(name))
 }
 
 /// The front door: any local user may connect, so the socket is open to
@@ -285,6 +334,7 @@ fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Co
         cwd: std::env::var_os("HOME").unwrap_or_else(|| OsString::from("/")),
         console_host,
         config_file,
+        state_dir: None,
     }
 }
 
@@ -296,6 +346,7 @@ fn default_config(console_host: ConsoleHost, config_file: Option<PathBuf>) -> Co
         cwd: std::env::var_os("USERPROFILE").unwrap_or_else(|| OsString::from("C:\\")),
         console_host,
         config_file,
+        state_dir: None,
     }
 }
 
@@ -322,6 +373,43 @@ mod tests {
         let file = parse_str(&["--config", "c.json", "s.sock"]).unwrap();
         assert_eq!(file.config, Some(PathBuf::from("c.json")));
         assert_eq!(file.mode, Mode::Personal);
+        assert_eq!(file.state, StateDir::Default);
+        let at = parse_str(&["--state", "/s", "x"]).unwrap();
+        assert_eq!(at.state, StateDir::At("/s".into()));
+        assert_eq!(
+            parse_str(&["--no-state", "x"]).unwrap().state,
+            StateDir::Off
+        );
+    }
+
+    #[test]
+    fn the_state_dir_is_named_after_the_socket() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| OsString::from(v))
+            }
+        };
+        let dir = |pairs| default_state_dir("/run/u/mux.sock".as_ref(), env(pairs));
+        if cfg!(windows) {
+            assert_eq!(
+                dir(&[("LOCALAPPDATA", "C:\\L")]),
+                Some(PathBuf::from("C:\\L\\rusty_mux\\mux.sock"))
+            );
+            assert_eq!(dir(&[]), None);
+            return;
+        }
+        assert_eq!(
+            dir(&[("XDG_STATE_HOME", "/x"), ("HOME", "/h")]),
+            Some("/x/rusty_mux/mux.sock".into())
+        );
+        assert_eq!(
+            dir(&[("XDG_STATE_HOME", ""), ("HOME", "/h")]),
+            Some("/h/.local/state/rusty_mux/mux.sock".into())
+        );
+        assert_eq!(dir(&[]), None);
     }
 
     #[cfg(target_os = "linux")]
@@ -358,6 +446,9 @@ mod tests {
             &["--login", "m", "--forwarded-by", "0", "s"],
             &["--login", "m", "--udp", "0.0.0.0", "s"],
             &["--login", "m", "--config", "c", "s"],
+            &["--login", "m", "--no-state", "s"],
+            &["--state", "a", "--no-state", "s"],
+            &["--state"],
             &["--forwarded-by", "x", "s"],
             &["--forwarded-by", "-1", "s"],
             &["--forwarded-by", "0", "--udp", "0.0.0.0", "s"],

@@ -340,6 +340,43 @@ pub enum Event {
         reason: PauseReason,
         detail: String,
     },
+    /// D82: the human took over agent session `session` on `claim`, written
+    /// before any input is possible. Under schema 5, written only when a
+    /// takeover happens (D83).
+    TakeoverStarted {
+        takeover: u64,
+        claim: MsgId,
+        epoch: u32,
+        session: String,
+        client: String,
+        until: Time,
+        reason: String,
+    },
+    /// D82: one batch of what the human typed, the bytes as the mux
+    /// delivered them. `sha256` is [`crate::claims::input_chain`] over the
+    /// previous batch.
+    TakeoverInput {
+        takeover: u64,
+        seq: u64,
+        bytes: crate::ids::Base64Bytes,
+        sha256: Sha256,
+    },
+    /// D82: input permission ended at `at`, by the human's release or the
+    /// task's end. The host may record batches already delivered for
+    /// [`crate::TAKEOVER_DRAIN_MS`], then writes the one `takeover_ended`.
+    TakeoverClosing {
+        takeover: u64,
+        reason: crate::claims::TakeoverEnd,
+        at: Time,
+    },
+    /// D82: the takeover is over; the totals close the chain. Always the
+    /// host's, after `takeover_closing` or for its own reasons.
+    TakeoverEnded {
+        takeover: u64,
+        reason: crate::claims::TakeoverEnd,
+        batches: u64,
+        last: Option<Sha256>,
+    },
 }
 
 fn is_false(b: &bool) -> bool {

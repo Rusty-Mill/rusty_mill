@@ -328,7 +328,9 @@ pub fn evidence_admission(dir: &Path, task: &TaskId) -> Result<File, String> {
 }
 
 /// Whether nothing `task`'s moderators started still runs: no moderator,
-/// no runner, and no recorded harness group with a live member. While a
+/// no runner, no recorded harness group with a live member, and no recorded
+/// session cgroup (D82) that isn't empty and removed; a populated one is
+/// killed. While a
 /// group's holder lives its members are killed here; once it is gone they
 /// are left alone and the group is not quiet until none remains (see
 /// [`crate::groups`]). Only an ended task is quiesced: a live one is its
@@ -351,6 +353,14 @@ pub fn quiesce(dir: &Path, task: &TaskId) -> Result<bool, String> {
     let mut quiet = try_lock(&crate::runner::lock_path(dir, task))?.is_some();
     for record in crate::groups::records(dir, task)? {
         quiet &= settle(&record)?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Held, so no `cgroup-open` is between its record and its cgroup.
+        let _cgroups = crate::cgroups::lock(dir, task)?;
+        for record in crate::cgroups::records(dir, task)? {
+            quiet &= crate::cgroups::settle(&record)?;
+        }
     }
     Ok(quiet)
 }
