@@ -476,6 +476,11 @@ fn an_irreversible_claim_reaches_the_inbox_and_a_dry_run_commits_nothing() {
     let e = &open[0];
     assert_eq!(e.reason, inbox::Reason::Irreversible);
     assert_eq!(e.reversible, Some(false));
+    // An opted-out task with no erosion run has no erosion detail (D91).
+    assert_eq!(e.erosion, None);
+    assert!(inbox::json(&dir, &[task()])
+        .unwrap()
+        .contains("\"erosion\":null"));
     assert_eq!(e.claim.as_ref().map(|c| c.id), Some(MsgId(x)));
     assert_eq!(e.evidence.len(), 2);
     assert!(e.id.starts_with("C1/msg:"), "{}", e.id);
@@ -3018,6 +3023,20 @@ fn confined_erosion_profile_reports_then_blocks_a_pasted_duplicate() {
         let dup = "\"duplication_bp\":{\"base\":0,\"candidate\":10000,\"delta\":10000}";
         assert!(log.contains(dup), "{log}");
         assert!(log.contains("\"key\":\"src/b.rs::grand\""), "{log}");
+
+        // Slice 3 (D91): the claim's card carries the bin's line, parsed.
+        let d = open_driver(&dir, &task()).unwrap();
+        let rec = d.state.claims.get(MsgId(c)).expect("claim");
+        let view = rusty_bbp::claims::card(&d.state, rec, &rusty_bbp::claims::Sight::all());
+        let blob = |b: &BlobRef| d.store.blob_get(&b.sha).ok();
+        let detail = rusty_bbp_host::erosion_detail::for_claim(&d.state, &view, blob)
+            .expect("erosion detail");
+        assert_eq!(detail.failing, exit == "exit 1", "{detail:?}");
+        assert_eq!(detail.error, None);
+        let line = detail.line.expect("measurement");
+        assert_eq!(line.duplication_bp.delta, 10_000);
+        assert_eq!(line.worst_affected[0].function, "src/b.rs::grand");
+        assert_eq!(line.within_limits, (exit == "exit 1").then_some(false));
         let _ = std::fs::remove_dir_all(&dir);
     }
     println!("BBP_ACCEPTANCE PASS erosion-confined");
