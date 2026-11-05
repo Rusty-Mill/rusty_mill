@@ -29,7 +29,7 @@ use orch_lens::hunt::{Probe, Probes, Runs};
 use rusty_sandbox::{
     ExecOutcome, Executor, Limits, ProcessExecutor, SandboxSpec, Sockets, Termination,
 };
-use rusty_worktree::Repo;
+use rusty_worktree::{git_path, Repo};
 
 /// Wall-clock limit on each cargo invocation, the build and the run (D97).
 pub const PROBE_CARGO_LIMIT: Duration = Duration::from_secs(10 * 60);
@@ -406,7 +406,8 @@ impl Drop for Trees<'_> {
 /// Apply one diff to the worktree at `tree`, through its admin dir (its
 /// `.git` file is not trusted), with inherited `GIT_*` variables removed.
 fn apply(repo: &Repo, tree: &Path, diff: &str) -> Result<(), String> {
-    let admin = repo.admin_dir(tree)?;
+    let admin = git_path(&repo.admin_dir(tree)?)?;
+    let work = git_path(tree)?;
     let mut cmd = Command::new("git");
     for (k, _) in std::env::vars_os() {
         if k.to_string_lossy().starts_with("GIT_") {
@@ -417,7 +418,7 @@ fn apply(repo: &Repo, tree: &Path, diff: &str) -> Result<(), String> {
         .arg("--git-dir")
         .arg(&admin)
         .arg("--work-tree")
-        .arg(tree)
+        .arg(&work)
         .args(["apply", "-"])
         .current_dir(tree)
         .stdin(Stdio::piped())
