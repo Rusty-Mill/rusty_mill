@@ -40,7 +40,7 @@ Owner decisions this rests on (2026-11-02): evidence posts need no turn; the one
 }
 ```
 
-- `mode` absent means `stages`: no field is written, the schema stays 2, 3 or 4, and the log is byte-identical to today.
+- `mode` absent means `stages`: no field is written, the schema stays 2, 3 or 4, and the log's events are byte-identical to today (each line's hash-chain framing, #722, is the store's, not the schema's).
 - `mode: "claims"` writes **schema 5**. A reader older than this addendum refuses schema 5 rather than replaying it as a stage task.
 - `claims` is validated at open: `drop_at < 0 < accept_at ≤ accept_at_strict`, `min_authors ≥ 1`, `settle_window ≥ 2`, `settle_delta ≥ 0`, `evidence_base ≥ 1`, `mark_timeout_secs ≥ 60`. A bad value refuses the open as `bad_claims_config`, naming the field. The values above are the defaults; they are judgment, not data, and are fixed before the first run.
 - `max_live_turns` and `policy` are not used in claims mode, because no agent turn is granted. A claims-mode open that names either is refused as `bad_claims_config`.
@@ -289,6 +289,10 @@ This is the path from a prototype to `executed` evidence, using the normal APIs.
 | `credential_issued` | moderator | role, principal, credential digest (the secret itself is never logged) |
 | `intent_revised` | human | the new brief's artifact id, `affects` (C-R11, #598) |
 | `task_paused` | host | reason, detail (C-R12, #598); followed by the task's move to `escalated` |
+| `takeover_started` | human | takeover id, claim, epoch, session (mux block), client, until, reason. Written before any input is possible; one live takeover per session (D82) |
+| `takeover_input` | host | takeover, seq (from 1, no gaps), bytes (the raw batch as the mux delivered it, standard base64, at most 4096 bytes decoded), sha256 = SHA-256(previous value, or 32 zero bytes, followed by the bytes). Accepted until 10 s (`TAKEOVER_DRAIN_MS`) after input stopped, at `until` or at `takeover_closing`, whichever came first, so a batch delivered before then can be posted; never once ended (D82) |
+| `takeover_closing` | human or host | takeover, reason, at. Input permission ends at `at`: the human's `TakeoverRelease` writes `released`; closing or cancelling the task writes `turn_ended` for every live takeover before the state change. No new input, no second release, no reopening (D82, owner 2026-11-05) |
+| `takeover_ended` | host | takeover, reason, batches and last chain value from the fold, written once. A closing takeover ends with the reason it closed with; a live one ends `expired` (only once `until` has passed), `revoked`, `turn_ended` or `mux_lost`, never `released`. On a Closed or Cancelled task the host may still write `takeover_input` and `takeover_ended` for a closing takeover, and nothing else (D82) |
 
 Task-level state in claims mode:
 - A claim escalation does **not** change the task state. Only that claim waits for the human; turnless posting on other claims continues. The inbox (#595) reads `claim_escalated` events.
@@ -324,8 +328,9 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 12. **Holdout suites (#597, approved 2026-11-02):** `holdout_digest` on `open` and `task_opened`, `suite` on the candidate manifest (default `build`, not written), the role capability `holdout`, the `holdout_mismatch` code, `holdout_due` on `claim_card`, the host action and event `holdout_extended(digest)` and the human action and event `holdout_updated(digest)`. Host: `protected` globs in the profile set and the `protected_path` code; core: the `tests` domain's accept condition. All optional and not written at their defaults, so existing logs are byte-identical.
 13. **Accept line and evidence notes on the card (#594, approved 2026-11-04, D77):** `accept_at` on `claim_card`/`claims_delta` entries, and `strength` and `note` on each evidence item. Derived from the frozen config and the evidence messages; views only, no record, event or log change.
 
-13. **#598 intent versions and pauses (approved 2026-11-04, D59 and D62):** the human action and event `intent_revised { brief, affects }` with the `intent_version` fold and each claim's proven-at version (on `claim_card` as `intent`, written only once the intent was revised); `claim_reopened.by: intent`; the escalation reason `intent_changed`; the `bad_affects` code; the host action and event `task_paused { reason, detail }`. Nothing is written until used, so existing logs are byte-identical.
-14. **#598 brownfield (approved 2026-11-04, D62):** the optional `baseline_digest` on `open` and `task_opened` (claims mode only, written only when present), and the host refusals `baseline_red` (`bbp open --base` ran the frozen build suite on the base and it was not green; nothing is written) and `base_test_changed` (a candidate on a task with a baseline modifies or deletes a `test_paths` file that exists at the base, and its claim is reversible). The base becomes the profile set's `baseline`, which every candidate must build on whether or not the task has protected paths.
+14. **Human takeover (mux-hosted agent ptys, approved 2026-11-05, D82):** the events `takeover_started`, `takeover_input`, `takeover_closing` and `takeover_ended`, the human actions `Takeover` and `TakeoverRelease`, the host actions `TakeoverInput` and `TakeoverEnded`, the response `TakenOver(id)`, and `human_touched` on `claim_card`: true when the current candidate was stored after a `takeover_started` on its claim in the same epoch (D84). Scoring and author counts are unchanged. They are added under schema 5 like item 12, so a log with no takeover is byte-identical and an older build refuses a log that has one (D83). No Agent API view returns takeover events or typed text; agents see only `human_touched` on the card.
+15. **#598 intent versions and pauses (approved 2026-11-04, D59 and D62):** the human action and event `intent_revised { brief, affects }` with the `intent_version` fold and each claim's proven-at version (on `claim_card` as `intent`, written only once the intent was revised); `claim_reopened.by: intent`; the escalation reason `intent_changed`; the `bad_affects` code; the host action and event `task_paused { reason, detail }`. Nothing is written until used, so existing logs are byte-identical.
+16. **#598 brownfield (approved 2026-11-04, D62):** the optional `baseline_digest` on `open` and `task_opened` (claims mode only, written only when present), and the host refusals `baseline_red` (`bbp open --base` ran the frozen build suite on the base and it was not green; nothing is written) and `base_test_changed` (a candidate on a task with a baseline modifies or deletes a `test_paths` file that exists at the base, and its claim is reversible). The base becomes the profile set's `baseline`, which every candidate must build on whether or not the task has protected paths.
 
 No change to `rusty_crdt`, `coedit` or the stage-mode rules.
 
@@ -335,7 +340,7 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 
 | Id | Sequence | Expected |
 | --- | --- | --- |
-| CL-01 | Open a stage task with no `mode` | Log byte-identical to a pre-addendum build's (golden) |
+| CL-01 | Open a stage task with no `mode` | Events byte-identical to a pre-addendum build's (golden); line framing per #722 |
 | CL-02 | Open claims mode with `accept_at = 0` | `bad_claims_config(accept_at)`, nothing written |
 | CL-03 | Claims roster with no role posting `evidence` | `Unservable(claims)` |
 | CL-04 | `a` posts evidence with no turn and a valid credential | Accepted. No `turn_granted` exists in the log |

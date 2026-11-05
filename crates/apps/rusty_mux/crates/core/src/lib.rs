@@ -33,6 +33,7 @@ mod identity;
 mod layout;
 mod mux;
 mod names;
+mod saved;
 
 pub use entity::{Block, Client, Session, Size, Window};
 pub use error::Error;
@@ -42,3 +43,4 @@ pub use identity::{Principal, Transport};
 pub use layout::{Axis, Layout, MAX_DEPTH, ParseError, Rect, Share, Side, Toward};
 pub use mux::{MAX_NAME, Mux};
 pub use names::is_generated;
+pub use saved::{RestoreError, Saved, SavedBlock, SavedSession, SavedWindow};

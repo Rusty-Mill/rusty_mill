@@ -83,10 +83,15 @@ Precise contracts used by this guide:
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 | D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
+| D67 | #722 drops the claim/evidence hash DAG; a linear per-line chain only | [stated] 2026-11-04 (#722) |
+| D68 | #722: a broken chain fails every load | [stated] 2026-11-04 (#722) |
+| D69 | #722: chained line framing, no BBP schema bump | [stated] 2026-11-04 (#722) |
+| D70 | #722 adds `bbp verify` | [stated] 2026-11-04 (#722) |
 | D74 | #708 alien review lens unparked (supersedes D61) | [stated] 2026-11-04 (#708) |
 | D75 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
 | D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
+| D82 | #704 slice 2: erosion profile recognition, invocation, opt-out, base, measured set and modes | [default] 2026-11-04 (#704) |
 | D86 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
 
 ## D1. Lenses, not stages
@@ -588,6 +593,43 @@ Worked examples (concentration, duplication, in basis points):
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
 
+## D67. #722 drops the claim/evidence hash DAG; a linear per-line chain only
+
+**Decision.** #722 v0 makes the BBP log tamper-evident with a linear chain in `rusty_bbp::fs_store`: each log line records `prev`, the SHA-256 of the previous line's exact bytes. The card's per-event hashes of the claims and evidence an event builds on (the DAG) are left out. They wait for the same trigger as signing: outside or untrusted agents joining.
+**Why.** The chain's head already fixes every earlier event, and blob digests already fix evidence bytes. Per-event reference hashes only help prove one claim's trace to an outsider without the rest of the log.
+**Rejected.** Building the DAG now ("Approve, but keep the DAG").
+**Tag.** [stated] · remind-me: mem_5044b01631d14c9a9cba9b5e1dfa69b6
+**Key.** lel:722:no-claim-evidence-dag
+**Source.** Nano tapped option A "Approve all four as recommended" on decision card cmsg_014AqbZs58L565hMV2pFkCX59exuTYA3aBX2BcYCYExYmL ("Approve the #722 hash-chain design v1 as recommended?") in thread cmsg_014AqbZs58L565hMV2pFkCX5BMDsWTnkiWyUoTktyX3YZQ, 2026-11-04T20:23Z, as relayed by the coordinator. The recommendations are in /mnt/project-files/bbp-722/design.md § Questions for Nano, Q1.
+
+## D68. #722: a broken chain fails every load
+
+**Decision.** On every `load_log` (open, refresh, append), a chained line whose `prev` doesn't match the previous line's hash is `FsError::Corrupt`. The task stays unreadable until a human repairs the log. `bbp verify` still works on a broken log.
+**Why.** This is how a corrupt line is handled today, and it follows the v0.5 spec rule that a reader never guesses. It also means `bbp why` / `claim_history` run over verified bytes.
+**Rejected.** Reporting a broken chain only through `bbp verify`.
+**Tag.** [stated] · remind-me: mem_39929b876bf243c082bba1c13068558b
+**Key.** lel:722:broken-chain-fails-load
+**Source.** Nano tapped option A "Approve all four as recommended" on decision card cmsg_014AqbZs58L565hMV2pFkCX59exuTYA3aBX2BcYCYExYmL ("Approve the #722 hash-chain design v1 as recommended?") in thread cmsg_014AqbZs58L565hMV2pFkCX5BMDsWTnkiWyUoTktyX3YZQ, 2026-11-04T20:23Z, as relayed by the coordinator. The recommendations are in /mnt/project-files/bbp-722/design.md § Questions for Nano, Q2.
+
+## D69. #722: chained line framing, no BBP schema bump
+
+**Decision.** New log lines are written as `{"prev":"<sha256 hex>","events":[..]}`. A line starting with `[` is a legacy, unchained line. A chain can start in the middle of an existing log, and a legacy line after a chained one is `Corrupt`. The BBP schema number is not bumped. An older build reports a chained log as `Corrupt`, so rolling back means not opening chained logs with an older build, as with D34 / ADR-0019. The same PR updates the contract text that promises byte-identical stage-task logs (addendum Mode section and CL-01, v0.5 spec §441).
+**Why.** It fails closed, keeps `Rev` and the fold unchanged, and lets existing logs start chaining. A bump would cover only new tasks and add another schema number.
+**Rejected.** A schema bump, and the card's additive serde-default event fields.
+**Tag.** [stated] · remind-me: mem_ac35393946a246a1898c0bad259e057c
+**Key.** lel:722:chained-framing-no-schema-bump
+**Source.** Nano tapped option A "Approve all four as recommended" on decision card cmsg_014AqbZs58L565hMV2pFkCX59exuTYA3aBX2BcYCYExYmL ("Approve the #722 hash-chain design v1 as recommended?") in thread cmsg_014AqbZs58L565hMV2pFkCX5BMDsWTnkiWyUoTktyX3YZQ, 2026-11-04T20:23Z, as relayed by the coordinator. The recommendations are in /mnt/project-files/bbp-722/design.md § Questions for Nano, Q3.
+
+## D70. #722 adds `bbp verify`
+
+**Decision.** `rusty_bbp_host` gets a new public CLI command, `bbp verify --dir D --task T [--expect H]`. It reads the one log at `log_path_for` under the directory lock, without going through `FsStore::open`, and never modifies the file. It prints `{"lines", "unchained", "head", "partial"}`. It exits non-zero if the chain is broken, if a trailing partial line exists (reported and left in place, never truncated), or if `--expect H` is given and H isn't the hash of any line. So a head saved earlier still verifies after legitimate appends, while a truncation or rewrite that drops H fails (design v1 § Checks).
+**Correction.** This entry first said `bbp verify` fails on "a head that differs from `--expect`", which is the design v0 wording. That was a transcription error, not a new decision: Nano approved design v1, whose § Checks has the ancestry rule above. PR #1485 review comment https://github.com/Rusty-Mill/rusty_mill/pull/1485#issuecomment-6643813583 flagged it.
+**Why.** New public commands are ask-first, and this one lets whoever keeps a head check the chain against it.
+**Rejected.** None was offered.
+**Tag.** [stated] · remind-me: mem_ea09aa6ec67b4829bd69b2910c7c2978
+**Key.** lel:722:bbp-verify-cli
+**Source.** Nano tapped option A "Approve all four as recommended" on decision card cmsg_014AqbZs58L565hMV2pFkCX59exuTYA3aBX2BcYCYExYmL ("Approve the #722 hash-chain design v1 as recommended?") in thread cmsg_014AqbZs58L565hMV2pFkCX5BMDsWTnkiWyUoTktyX3YZQ, 2026-11-04T20:23Z, as relayed by the coordinator. The recommendations are in /mnt/project-files/bbp-722/design.md § Questions for Nano, Q4.
+
 ## D74. #708 alien review lens unparked (supersedes D61)
 
 **Decision.** #708 is unparked, replacing D61. Next: finish the design (the value threshold on #596's score, per-language defect lists, scoring, and how reproduced findings enter BBP), run the egm Goldfish review, and bring the design to Nano for approval. Build and open a PR for dottiusmaximus only after he approves it. The design is not approved yet (D25).
@@ -629,6 +671,21 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [stated] · remind-me: mem_506f809db3894df0b29d8992879f373c
 **Key.** lel:594:claim-card-accept-line
 **Source.** Nano's tap on "a) Add accept line to claim view", hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Pksa1peJwFSFnWsRe6jtve (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:55:49Z; dottiusmaximus on #1467; `rusty_bbp/src/claims.rs` `ClaimView`, `EvidenceView`, `ClaimRecord::accept_at`; bbp-claims-addendum.md line on `claim_card`.
+
+## D82. #704 slice 2: erosion profile recognition, invocation, opt-out, base, measured set and modes
+
+**Decision.** Build detail for the `erosion` bin and host profile (card #704 Build 2), inside D41 and D42:
+- `open_claims_task` recognises an erosion profile by its profile name, `erosion`. The recorded opt-out is an optional `ProfileSet` field `erosion` that accepts only `"off"`. It defaults when absent and isn't written then, so existing profile digests don't change, and it is covered by the digest when present. The open refuses with `bad_claims_config(erosion)` when a claims set has neither the profile nor the opt-out, has both, or has another value. The refusal applies from this slice; callers and tests add the profile or the opt-out in the same PR.
+- The compare base is an explicit `--base <full commit id>` in the frozen args. The open checks that it is a full commit id and, when `ProfileSet.baseline` is set, that the two are equal.
+- Invocation contract (amended after review on PR #1494): the `erosion` profile runs the bin directly. `program`'s basename is `erosion` (any path), `args[0]` is `check`, and the remaining args parse exactly as the bin's own parser does: `--base <commit>` once, plus either `--report-only` or both `--max-concentration-bp N` and `--max-duplication-bp N`, each flag at most once, with no positionals and no unknown flags. No wrappers in this slice: a shell (`sh -c`), `env` or `cargo run` form is refused with `bad_claims_config(erosion)` and a message naming the direct form. Recognition stays by profile name, so a profile named `erosion` with any other program is refused, not skipped. A wrapper can be added later with its own parser if a real caller needs one.
+- The measured set is the whole tree at both commits, with exact `Ratio` deltas and the bp value beside them.
+- Modes are frozen args: `--report-only` (always exits 0), or enforcing with both `--max-concentration-bp N` and `--max-duplication-bp N`. The two are mutually exclusive. Changing the mode changes the digest, so it only affects newly opened tasks (D42). The bin always prints one JSON line to stdout (the run log) with the per-metric deltas, the three worst-affected functions and the `unmeasured` list, for the inbox (Build 3, D43) to parse.
+- D42's pause-at-expiry is not in slice 2. It is its own later slice and must merge before the profile goes live, because the time box starts at go-live.
+**Why.** These are the most reversible choices that fit the approved design. Profiles are already identified by name in the run log and the fail-block; recognising by name and then refusing any program but the bin means a misconfigured profile is refused rather than silently skipped. The host can only vouch for `--base` and the mode if it parses the exact argv the bin will run: a reviewer showed that `/bin/sh -c "erosion check --base B …" --base A` passed a standalone-pair scan while sh ran against B. Allowing no wrappers is the narrowest contract and is relaxed later without changing any digest. The opt-out sitting under the digest is part of D41, so it isn't a BBP schema change. Duplication against untouched code needs the whole tree, and calibration (Q9) uses the same measure, so the limits absorb the scale. QA.md § Erosion gate puts the thresholds in profile args. `ProfileSet.baseline` is the pinned base (#597 G2, and the base that #598's `bbp open --base` stores; D62).
+**Rejected.** Recognising the profile by the program's basename alone (a misnamed or wrapped profile would be silently skipped). Accepting wrappers such as `sh -c`, `env` or `cargo run` in this slice (the host would have to parse shell source or the wrapper's argv to trust `--base`; superseded the first version of this entry, which said wrappers still count). Measuring only the files the diff touches (it misses duplicates of untouched code). An unchecked free `--base` arg. Building the expiry pause into slice 2.
+**Tag.** [default] · remind-me: mem_cc7bf0c6331140d8816112c351b44ed6
+**Key.** lel:704:erosion-profile-build-defaults
+**Source.** Questions Q1–Q6 from the #704 slice 2 build thread, 2026-11-04; D41, D42, D43, D62; QA.md § Erosion gate; card #704 Build 2 and Time box; `rusty_bbp_host` `src/profiles.rs` `ProfileSet`, `src/admin.rs` `open_claims_task`. Numbered D82 because open PR branches already use D78–D81. Invocation contract amended 2026-11-04 from the #704 slice 2 build thread, answering dottiusmaximus's review of PR #1494; `rusty_bbp_host` `src/profiles.rs` `check_erosion_base`.
 
 ## D86. #598 build defaults while 598-gaps-design.md is unavailable
 

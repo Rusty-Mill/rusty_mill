@@ -43,6 +43,11 @@ impl Records {
         self.map.clear();
     }
 
+    /// Whether there are no records.
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     /// The records in id order, the root first.
     pub fn iter(&self) -> impl Iterator<Item = (&Id, &Record)> {
         self.map.iter().map(|(id, (record, _))| (id, record))
