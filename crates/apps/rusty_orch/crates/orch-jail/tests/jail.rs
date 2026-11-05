@@ -47,6 +47,24 @@ fn probe() {
     println!("tokens={}", seen("../tokens/c-1"));
     println!("swapped={}", seen("../shared/tools/c-1"));
     println!("pinned={}", seen("../shared/tools.orig/tool.txt"));
+    // The open-file limit the agent runs under, and how many more files it
+    // can actually open.
+    let limits = std::fs::read_to_string("/proc/self/limits").unwrap_or_default();
+    let nofile = limits
+        .lines()
+        .find(|l| l.starts_with("Max open files"))
+        .map_or("none".to_owned(), |l| {
+            l.split_whitespace()
+                .skip(3)
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("/")
+        });
+    println!("nofile={nofile}");
+    let held: Vec<File> = (0..64)
+        .map_while(|_| File::open("/proc/self/stat").ok())
+        .collect();
+    println!("opened={}", held.len());
     std::process::exit(0);
 }
 
@@ -415,18 +433,18 @@ fn a_root_swapped_after_the_check_grants_only_the_checked_directory() {
     );
 }
 
-/// #1506 review: the launcher's pinned handles (one per root, the cwd and
-/// the token) are setup descriptors, gone at the exec, so they don't count
-/// against the agent's open-file limit even when they outnumber it.
-#[test]
-fn pinned_handles_do_not_spend_the_agents_open_file_budget() {
-    let _serial = serial();
-    let mut fx = Fixture::new("nofile");
+/// Launches the probe with `extra` more read roots under an open-file
+/// limit of `limit`; returns its stdout, or `None` where it can't run.
+fn launch_with_budget(name: &str, extra: usize, limit: u64) -> Option<String> {
+    let mut fx = Fixture::new(name);
     let cgroup = match fx.make_cgroup() {
         Ok(cgroup) => cgroup,
-        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+        Err(why) => {
+            eprintln!("no writable cgroup; skipping: {why}");
+            return None;
+        }
     };
-    let more: Vec<PathBuf> = (0..16)
+    let more: Vec<PathBuf> = (0..extra)
         .map(|i| {
             let dir = fx.root.join(format!("ro-{i}"));
             std::fs::create_dir(&dir).unwrap();
@@ -435,23 +453,60 @@ fn pinned_handles_do_not_spend_the_agents_open_file_budget() {
         .collect();
     let spec = fx.write_spec_with(&cgroup, &more, &fx.token());
     let json = std::fs::read_to_string(&spec).unwrap();
-    std::fs::write(
-        &spec,
-        json.replace(r#""open_files": 256"#, r#""open_files": 16"#),
-    )
-    .unwrap();
+    let json = json.replace(r#""open_files": 256"#, &format!(r#""open_files": {limit}"#));
+    std::fs::write(&spec, json).unwrap();
     let slot = File::create(fx.root.join("slot.lock")).unwrap();
     let (acp, _orch) = UnixStream::pair().unwrap();
     let out = run_jail(&spec, &[slot.as_raw_fd(), acp.as_raw_fd()]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let log = format!(
         "{stdout}{}{}",
         String::from_utf8_lossy(&out.stderr),
         fx.status()
     );
     if log.contains("Landlock filesystem confinement is NotEnforced") {
-        return eprintln!("kernel without Landlock; skipping: {log}");
+        eprintln!("kernel without Landlock; skipping: {log}");
+        return None;
     }
     assert!(out.status.success(), "{log}");
     assert!(stdout.contains("fds=0,1,2,3,4\n"), "{log}");
+    assert!(
+        stdout.contains(&format!("nofile={limit}/{limit}\n")),
+        "{log}"
+    );
+    Some(stdout)
+}
+
+/// The number after `opened=` in the probe's output.
+fn opened(stdout: &str) -> usize {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("opened="))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no opened= line: {stdout}"))
+}
+
+/// #1506 review: the launcher's pinned handles (one per root, the cwd and
+/// the token) are setup descriptors, gone at the exec, so a low open-file
+/// limit still confines and execs, and the agent gets exactly that limit:
+/// with fds 0-4 held, it can open no more than the rest.
+#[test]
+fn a_low_open_file_limit_still_launches_and_binds_the_agent() {
+    let _serial = serial();
+    let Some(stdout) = launch_with_budget("nofile-low", 0, 8) else {
+        return;
+    };
+    let n = opened(&stdout);
+    assert!(n > 0 && n <= 8 - 5, "{stdout}");
+}
+
+/// #1506 review: more pinned roots than the agent's whole budget.
+#[test]
+fn pinned_handles_do_not_spend_the_agents_open_file_budget() {
+    let _serial = serial();
+    let Some(stdout) = launch_with_budget("nofile-many", 32, 16) else {
+        return;
+    };
+    let n = opened(&stdout);
+    assert!(n > 0 && n <= 16 - 5, "{stdout}");
 }
