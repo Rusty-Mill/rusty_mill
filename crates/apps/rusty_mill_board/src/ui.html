@@ -618,7 +618,7 @@ function timeline(scoped,focus,w,stones){
       if(r.ahead){const a=el("i",null,"tl-ahead"),from=Math.max(r.start,t0),span=Math.min(r.end,t1)-from;a.style.left=(span>0?(Date.now()-from)/span*100:0)+"%";bar.append(a)}
       bar.append(el("span",r.text,"tl-text"));if(r.flag)bar.append(el("span",r.flag,"tl-flag"));if(r.right)bar.append(el("span",r.right,"tl-pct"));lane.append(bar);
     }
-    for(const m of r.marks??[]){const d=el("button",null,"tl-mark"+(m.cls?" "+m.cls:""));d.style.left=x(m.at);d.title=m.title;if(m.open)d.onclick=m.open;lane.append(d);if(m.label){const t=el("span",m.label,"tl-mlabel");t.style.left=x(m.at);if(parseFloat(x(m.at))>70)t.classList.add("left");lane.append(t)}}
+    for(const m of r.marks??[]){const d=el("button",null,"tl-mark"+(m.cls?" "+m.cls:""));d.style.left=x(m.at);d.title=m.title;if(m.open)d.onclick=m.open;lane.append(d);if(m.label){const t=el("span",m.label,"tl-mlabel");t.style.left=x(m.at);if(parseFloat(x(m.at))>85)t.classList.add("left");lane.append(t)}}
     const now=el("i",null,"tl-now");now.style.left=x(Date.now());lane.append(now);
     row.append(lab,lane);s.append(row);
   }
