@@ -232,7 +232,10 @@ pub fn prepare(repo: &Path, work: &Path, base: &str, diffs: &[Vec<u8>]) -> Resul
 /// #598: [`baseline`] in `<work_root>/baseline`, refused before anything is
 /// prepared or run when a private holdout or golden path overlaps what the
 /// baseline build reaches: its read roots, the repository or the work root
-/// (#597 2.2, the check `run_once` makes before a candidate run).
+/// (#597 2.2, the check `run_once` makes before a candidate run). Relative
+/// paths are made absolute first (the sandbox takes only absolute ones), and
+/// `<work_root>/baseline.lock` is held from checkout through execution, so
+/// two opens sharing a work root never run or report each other's checkout.
 pub fn isolated_baseline<E: Executor>(
     exec: &E,
     set: &ProfileSet,
@@ -244,13 +247,38 @@ pub fn isolated_baseline<E: Executor>(
 where
     E::Error: std::fmt::Display,
 {
-    if let Some(Err(e)) = holdout.map(|hs| hs.isolated_from(set, &[repo, work_root])) {
-        return Err(Rejection::new(
-            Code::BadClaimsConfig,
-            format!("holdout: {e}"),
-        ));
+    let refuse =
+        |what: &str, e: String| Rejection::new(Code::BadClaimsConfig, format!("{what}: {e}"));
+    let absolute = |p: &Path| {
+        std::path::absolute(p).map_err(|e| refuse("path", format!("{}: {e}", p.display())))
+    };
+    let (repo, work_root) = (absolute(repo)?, absolute(work_root)?);
+    if let Some(Err(e)) = holdout.map(|hs| hs.isolated_from(set, &[&repo, &work_root])) {
+        return Err(refuse("holdout", e));
     }
-    Ok(baseline(exec, set, repo, &work_root.join("baseline"), base))
+    let _held = baseline_lock(&work_root).map_err(|e| refuse("work", e))?;
+    Ok(baseline(
+        exec,
+        set,
+        &repo,
+        &work_root.join("baseline"),
+        base,
+    ))
+}
+
+/// The exclusive lock on `<work_root>/baseline.lock`, waiting for it.
+fn baseline_lock(work_root: &Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(work_root).map_err(|e| format!("{}: {e}", work_root.display()))?;
+    let path = work_root.join("baseline.lock");
+    let at = |e: std::io::Error| format!("{}: {e}", path.display());
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(at)?;
+    file.lock().map_err(at)?;
+    Ok(file)
 }
 
 /// #598: the frozen build suite on a clean checkout of `base`, no diffs,
@@ -273,13 +301,16 @@ where
     match checked_out {
         Ok((tree, tests)) => {
             let o = execute(exec, set, work);
+            // No profile ran: the run's own short reason is the explanation.
+            let error = (o.status == RunStatus::Error && o.profiles.is_empty())
+                .then(|| format!("execute: {}", o.log.trim()));
             crate::baseline::Baseline {
                 base: base.to_owned(),
                 tree: Some(Sha256::of(tree.as_bytes())),
                 status: o.status,
                 profiles: o.profiles,
                 tests,
-                error: None,
+                error,
             }
         }
         Err(e) => crate::baseline::Baseline {

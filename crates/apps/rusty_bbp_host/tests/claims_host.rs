@@ -1169,6 +1169,50 @@ fn a_green_base_pins_candidates_and_guards_its_tests() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A relative `--work` is made absolute before the sandbox sees it, so a
+/// green base reports green.
+#[test]
+fn a_relative_work_root_runs_the_baseline() {
+    let dir = tempdir("base-relative");
+    let (repo, _) = repo(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let base = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let rel = PathBuf::from(format!("bbp_rel_work_{}", std::process::id()));
+    assert!(rel.is_relative());
+    let b = runner::isolated_baseline(&Unconfined, &profiles(), None, &repo, &rel, &base);
+    let _ = std::fs::remove_dir_all(&rel);
+    let b = b.expect("ran");
+    assert!(b.green(), "{b:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two baselines sharing one work root, a red base and a green one, each
+/// report their own checkout: the root's lock spans checkout and execution.
+#[test]
+fn baselines_sharing_a_work_root_report_their_own_checkout() {
+    let dir = tempdir("base-shared");
+    let (repo, red) = repo(&dir);
+    std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+    git(&repo, &["commit", "--quiet", "-am", "green"]);
+    let green = rusty_bbp_host::baseline::resolve(&repo, "main").unwrap();
+    let work = dir.join("work");
+    for round in 0..6 {
+        let (r, g) = std::thread::scope(|s| {
+            let r = s.spawn(|| {
+                runner::isolated_baseline(&Unconfined, &profiles(), None, &repo, &work, &red)
+            });
+            let g = s.spawn(|| {
+                runner::isolated_baseline(&Unconfined, &profiles(), None, &repo, &work, &green)
+            });
+            (r.join().unwrap().unwrap(), g.join().unwrap().unwrap())
+        });
+        assert_eq!(r.status, RunStatus::Failed, "round {round}: {r:?}");
+        assert!(g.green(), "round {round}: {g:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Two green baselines of one repository with different reports: the base,
 /// then a commit that adds a test file.
 fn two_green_baselines(
