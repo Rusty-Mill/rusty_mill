@@ -1242,6 +1242,7 @@ pub(crate) fn human(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
         HumanAction::HoldoutUpdated { digest } => {
             new_holdout(w, *digest, Event::HoldoutUpdated { digest: *digest })
         }
+        HumanAction::IntentRevised { brief, affects } => revise_intent(w, *brief, affects),
         HumanAction::Close { expected_rev } => {
             check_rev(&w.st, *expected_rev)?;
             transition(w, State::Closed, now);
@@ -1390,6 +1391,62 @@ fn extend(w: &mut Work, c: MsgId) -> R<Response> {
     Ok(Response::Ok)
 }
 
+/// C-R11 (#598): store the new brief, which becomes the task's current brief,
+/// and bump the intent version. Each affected claim that is `accepted` when
+/// reached, in id order, reopens in a new epoch (then the budget line), or
+/// escalates `intent_changed` if it was acted on. Open and escalated claims
+/// carry on; closed ones stay closed. Dependents follow Dependencies.
+fn revise_intent(w: &mut Work, brief: BlobRef, affects: &Affects) -> R<Response> {
+    if let Affects::Some { claims, domains } = affects {
+        if claims.is_empty() && domains.is_empty() {
+            return Err(rej(
+                Code::BadAffects,
+                "affects names no claim and no domain; omit it to affect every claim",
+            ));
+        }
+        if let Some(c) = claims.iter().find(|c| w.st.claims.get(**c).is_none()) {
+            return Err(rej(
+                Code::BadAffects,
+                format!("{c} is not a claim on this task"),
+            ));
+        }
+    }
+    let id = w.st.next_art_id();
+    w.emit(Event::ArtifactStored(ArtifactRecord {
+        id,
+        author: w.st.human.clone(),
+        kind: ArtifactKind::Brief,
+        blob: brief,
+        payload: ArtifactPayload::Brief,
+        spec: None,
+        candidate: None,
+        run: None,
+    }));
+    w.emit(Event::IntentRevised {
+        brief: id,
+        affects: affects.clone(),
+    });
+    let hit: Vec<MsgId> =
+        w.st.claims
+            .claims
+            .values()
+            .filter(|c| affects.covers(c))
+            .map(|c| c.id)
+            .collect();
+    for c in hit {
+        if status(&w.st, c) != Some(ClaimStatus::Accepted) {
+            continue; // open, escalated, closed, or reopened by an earlier cascade
+        }
+        if acted(&w.st, c) {
+            escalate(w, c, ClaimEscalation::IntentChanged);
+        } else {
+            reopen(w, c, ReopenCause::Intent);
+            budget_line(w, c);
+        }
+    }
+    Ok(Response::Stored(id))
+}
+
 /// A human rerun: debit and start, or hold it at the budget limit.
 fn rerun(w: &mut Work, k: ArtId) -> R<Response> {
     let c = w.st.claims.candidates.get(&k).copied().ok_or_else(|| {
@@ -1455,6 +1512,7 @@ pub(crate) fn host(w: &mut Work, a: &HostAction, now: Time) -> R<Response> {
         HostAction::HoldoutExtended { digest } => {
             new_holdout(w, *digest, Event::HoldoutExtended { digest: *digest })
         }
+        HostAction::TaskPaused { reason, detail } => pause(w, *reason, detail, now),
         HostAction::TakeoverInput {
             takeover,
             seq,
@@ -1463,6 +1521,29 @@ pub(crate) fn host(w: &mut Work, a: &HostAction, now: Time) -> R<Response> {
         } => takeover_input(w, *takeover, *seq, &bytes.0, *sha256, now),
         HostAction::TakeoverEnded { takeover, reason } => takeover_end(w, *takeover, *reason, now),
     }
+}
+
+/// C-R12 (#598): the host pauses an `open` task. It goes `escalated`, so
+/// agent writes are refused (C-R2) until the human records `resumed(open)`.
+fn pause(w: &mut Work, reason: PauseReason, detail: &str, now: Time) -> R<Response> {
+    if w.st.state != State::Open {
+        return Err(rej(
+            Code::WrongState,
+            format!("task is {:?}, not open", w.st.state),
+        ));
+    }
+    if detail.chars().count() > PAUSE_DETAIL_MAX {
+        return Err(rej(
+            Code::BodyTooLong,
+            format!("pause detail is over {PAUSE_DETAIL_MAX} characters"),
+        ));
+    }
+    w.emit(Event::TaskPaused {
+        reason,
+        detail: detail.to_owned(),
+    });
+    transition(w, State::Escalated, now);
+    Ok(Response::Ok)
 }
 
 // ---------------------------------------------------------------- takeover (D82)
