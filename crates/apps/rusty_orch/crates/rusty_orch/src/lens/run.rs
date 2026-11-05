@@ -530,6 +530,20 @@ mod tests {
 
     use super::*;
 
+    /// Open the test store, waiting out a lock that a child process forked
+    /// by another test may briefly inherit before it execs.
+    fn open_store(d: &Path) -> Store {
+        for _ in 0..100 {
+            match Store::open(d) {
+                Err(orch_store::StoreError::Locked(_)) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                r => return r.expect("store"),
+            }
+        }
+        panic!("{} stayed locked", d.display());
+    }
+
     const CONFIG: &str = r#"{
       "providers": {
         "codex": {"kind": "codex-cli", "context_tokens": 32768,
@@ -894,7 +908,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("orch-lens-rerun-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let run = |keep: &mut dyn FnMut(&State) -> Result<(), String>| {
-            let mut store = Store::open(&d).expect("store");
+            let mut store = open_store(&d);
             let mut save_review =
                 |r: &Review| store.save_lens_review("b", r).map_err(|e| e.to_string());
             let mut read_records = || Ok(BTreeMap::new());
@@ -917,10 +931,7 @@ mod tests {
         let crashed = run(&mut |_| Err("killed".to_owned()));
         assert!(crashed.is_err());
         assert!(run(&mut |_| Ok(())).is_ok());
-        let rows = Store::open(&d)
-            .expect("reopen")
-            .lens_reviews("b")
-            .expect("rows");
+        let rows = open_store(&d).lens_reviews("b").expect("rows");
         let lenses: Vec<&str> = rows.iter().map(|r| r.lens.as_str()).collect();
         assert_eq!(lenses, ["adversary", "operator"], "{rows:?}");
         assert!(rows.iter().all(|r| !r.items.is_empty()), "{rows:?}");
@@ -937,7 +948,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("orch-lens-ahead-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let run = |crash: bool| {
-            let mut store = Store::open(&d).expect("store");
+            let mut store = open_store(&d);
             let mut save_review = |r: &Review| {
                 if crash && !r.pending {
                     return Err("killed".to_owned());
@@ -962,17 +973,11 @@ mod tests {
             .0
         };
         assert!(run(true).is_err());
-        let rows = Store::open(&d)
-            .expect("reopen")
-            .lens_reviews("b")
-            .expect("rows");
+        let rows = open_store(&d).lens_reviews("b").expect("rows");
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(rows[0].pending && !rows[0].unsure, "{rows:?}");
         assert!(run(false).is_ok());
-        let rows = Store::open(&d)
-            .expect("reopen")
-            .lens_reviews("b")
-            .expect("rows");
+        let rows = open_store(&d).lens_reviews("b").expect("rows");
         let state: Vec<(&str, bool, bool, usize)> = rows
             .iter()
             .map(|r| (r.lens.as_str(), r.pending, r.unsure, r.items.len()))
@@ -996,7 +1001,7 @@ mod tests {
         let d = std::env::temp_dir().join(format!("orch-lens-settled-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let run = |crash: bool, status: ClaimStatus| {
-            let mut store = Store::open(&d).expect("store");
+            let mut store = open_store(&d);
             let mut save_review = |r: &Review| {
                 if crash && !r.pending {
                     return Err("killed".to_owned());
@@ -1029,10 +1034,7 @@ mod tests {
         let (ended, asked) = run(false, ClaimStatus::Dropped);
         assert!(ended.is_ok(), "{ended:?}");
         assert_eq!(asked, 0, "a settled claim's job isn't asked again");
-        let rows = Store::open(&d)
-            .expect("reopen")
-            .lens_reviews("b")
-            .expect("rows");
+        let rows = open_store(&d).lens_reviews("b").expect("rows");
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert!(rows[0].pending && rows[0].items.is_empty(), "{rows:?}");
         let item = |msg: u64, author: &str, delta: i64| {
@@ -1105,7 +1107,7 @@ mod tests {
                 .join(format!("orch-lens-recover-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             let run = |crash: bool, reply: Result<Vec<Post>, ClassifiedError>| {
-                let mut store = Store::open(&d).expect("store");
+                let mut store = open_store(&d);
                 let mut save_review = |r: &Review| {
                     if crash && !r.pending {
                         return Err("killed".to_owned());
@@ -1132,10 +1134,7 @@ mod tests {
             assert!(run(false, Ok(vec![counter()])).is_ok(), "known prefix");
             assert!(run(true, Ok(vec![counter()])).is_err(), "lost post");
             assert!(run(false, retry).is_ok(), "{name}");
-            let rows = Store::open(&d)
-                .expect("reopen")
-                .lens_reviews("b")
-                .expect("rows");
+            let rows = open_store(&d).lens_reviews("b").expect("rows");
             let state: Vec<(&str, bool, bool, usize)> = rows
                 .iter()
                 .map(|r| (r.lens.as_str(), r.pending, r.unsure, r.items.len()))
