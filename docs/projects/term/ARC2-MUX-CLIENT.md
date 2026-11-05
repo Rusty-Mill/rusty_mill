@@ -3,7 +3,7 @@
 Roadmap arc 2, "One GUI for terminal and mux" ([ROADMAP.md](ROADMAP.md)). Owner GO: Nano,
 2026-11-05 20:55Z, project thread message `cmsg_014f6o52E2iAAAgMm9v8hh1w3582EEHuK6PNVK64YWHa5q`
 ("1 go"), restated on this PR ([comment](https://github.com/Rusty-Mill/rusty_mill/pull/1529#issuecomment-6669837542),
-"go on arc 2, two crates OK"), as D37 requires. Recorded in D95 and D96.
+"go on arc 2, two crates OK"), as D37 requires. Recorded in D95–D98.
 
 Bare D-numbers are rows in [the handoff pack](../rusty_term/handoff/DECISIONS.md); "gui-design Dn" are
 rows in [gui-design/DECISIONS.md](gui-design/DECISIONS.md). Visual design: the design pack,
@@ -35,7 +35,7 @@ can't live in `rusty_term`. Ports and adapters instead:
   without `l13`. This is not a layer exemption: an apps crate linking a libs crate is a downward
   edge the layer check allows, and `rusty_term` itself never links a mux crate.
 
-Nano approved both crates and that edge (D96). Alternatives considered: client code in
+Nano approved both crates and that edge (D96, restated on this PR in D98). Alternatives considered: client code in
 the TUI's lib (the GUI would pull in the server and TUI), or a copy inside the GUI crate (two
 protocol implementations).
 
