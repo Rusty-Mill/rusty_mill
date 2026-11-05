@@ -22,6 +22,9 @@ pub const TOP_K: usize = 3;
 pub const MAX_FIELD: usize = 300;
 /// Longest reproducer test, in bytes.
 pub const MAX_PROBE: usize = 16 * 1024;
+/// Longest candidate diff text a hunt is run on, in bytes (about 32k
+/// tokens). A longer one is skipped, never truncated (D87).
+pub const MAX_DIFF: usize = 128 * 1024;
 
 /// One defect mechanism a suspect can name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +169,29 @@ fn residue(task: &str, claim: MsgId, n: u64) -> u64 {
         .iter()
         .fold(0u128, |r, &b| (r * 256 + u128::from(b)) % n);
     u64::try_from(r).unwrap_or(u64::MAX) // r < n <= u64::MAX
+}
+
+/// Does this diff text touch a `.rs` file? Any `--- a/`, `+++ b/`,
+/// `rename from`, `rename to` or `diff --git` path ending in `.rs` counts;
+/// `/dev/null` does not (D87).
+pub fn touches_rs(diff: &str) -> bool {
+    diff.lines()
+        .flat_map(header_paths)
+        .any(|p| p.ends_with(".rs"))
+}
+
+/// The paths one diff header line names; none for any other line.
+fn header_paths(line: &str) -> Vec<&str> {
+    const ONE: [&str; 4] = ["--- a/", "+++ b/", "rename from ", "rename to "];
+    if let Some(rest) = ONE.iter().find_map(|p| line.strip_prefix(p)) {
+        return vec![rest.trim_end()];
+    }
+    let Some(rest) = line.strip_prefix("diff --git ") else {
+        return Vec::new();
+    };
+    rest.split_whitespace()
+        .filter_map(|p| p.strip_prefix("a/").or(p.strip_prefix("b/")))
+        .collect()
 }
 
 /// One suspect from an enumerate reply.
@@ -563,6 +589,27 @@ fn field(o: &Map, key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diff_touches_rs_by_its_header_paths_only() {
+        let cases = [
+            ("--- a/src/x.rs\n+++ b/src/x.rs\n", true),
+            ("--- /dev/null\n+++ b/new.rs\n", true),
+            ("--- a/gone.rs\n+++ /dev/null\n", true),
+            (
+                "diff --git a/old.rs b/new.rs\nrename from old.rs\nrename to new.rs\n",
+                true,
+            ),
+            ("rename from a.txt\nrename to b.rs\n", true),
+            ("--- a/README.md\n+++ b/README.md\n+see src/x.rs\n", false),
+            ("--- a/x.rsx\n+++ b/x.rsx\n", false),
+            ("--- /dev/null\n+++ /dev/null\n", false),
+            ("", false),
+        ];
+        for (diff, want) in cases {
+            assert_eq!(touches_rs(diff), want, "{diff:?}");
+        }
+    }
 
     fn claim() -> Claim<'static> {
         Claim {

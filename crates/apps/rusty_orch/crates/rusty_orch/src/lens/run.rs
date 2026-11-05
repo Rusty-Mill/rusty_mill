@@ -419,6 +419,7 @@ mod tests {
             budget: 16,
             evidence: vec![],
             candidates: vec![],
+            current: None,
             class: orch_lens::DataClass::Internal,
         }
     }

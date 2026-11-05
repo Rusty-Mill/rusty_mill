@@ -11,6 +11,7 @@ Resolved items are checked and point to the D# or QA entry that answers them. On
 - [x] Q3 (2026-11-03, n): Are the #599 changes in 599-gaps-design.md §6 approved? Nano answered Q1–Q4 but no comment approves §6. — interim choice: treat §6 as needing approval (Ask first: schema/API). → Resolved 2026-11-04: §6 approved as listed; verify the remind-me HTTP `project` route before building. D58; Nano, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t` (2026-11-04 11:58Z).
 - [x] Q12 (2026-11-04, n): Should `claim_card` carry each evidence item's note (and strength), so the #594 lens runner needn't spend charged `read` calls to fill them? Additive `rusty_bbp` public API change. — interim choice: incremental cached `read(after)` per lens session (D54). → resolved by D77.
 - [ ] Q13 (2026-11-04, n): Where does a #600 builder session's CLI output/transcript go? 600-builder-session-design.md doesn't say, so a watch-only pane (Rusty Term roadmap arc 4, PR #1470) would have nothing to tail for builders. — interim choice: nothing; when #600 is built, write it read-only under the task dir on BaileyAi beside the session's `builder_session` row, unless Nano decides otherwise.
+- [ ] Q18 (2026-11-05, n): #708: should a candidate whose diff is too large for the enumerate window be hunted file by file instead of skipped? Skipping leaves the largest diffs out of §8's 20-hunt sample. — interim choice: skip it and print one stderr line per claim (D87 item 3).
 
 ## Waiting on Nano (sourced as open)
 
