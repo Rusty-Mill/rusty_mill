@@ -23,26 +23,26 @@ handoff lands (pack D31).
 
 ## Colour
 
-Chrome colours come from the active theme, never from literals in drawing code. A tint is a
-blend of two theme colours (`mix` in `window.rs`, `blend` in `render.rs`), not a new constant,
-so light and dark themes work alike.
+Chrome colours come from `Chrome::from_theme` (`chrome.rs`), never from literals in drawing
+code (pack D34 to D39):
 
-| Role | Source today |
+| Role | Source |
 | --- | --- |
-| Chrome surface (strip, ribbon) | `mix(bg, fg, 48)` |
-| Muted text | `mix(fg, bg, 110)` |
-| Accent (active tab, selection bar, changed-value dot, running mark) | `theme.cursor` |
-| Success / failure / warning | palette 2 / 1 / 3 |
+| Surfaces: strip `frame`, active tab and pages `base`, hover and search `raised`, ribbon and dock `sunk`, hairlines `line` | Fixed pack tokens, D5 dark or D25 light, picked by the theme background (relative luminance under 0.179 is dark, D39) |
+| Text `text`, `muted`; non-text icons only `dim` (D17) | Fixed pack tokens |
+| Accent (active tab underline, selection bar, changed-value dot, running mark, branch) | `theme.cursor`, or pack verdigris when it is under 3:1 on any chrome surface or no pack text holds 4.5:1 on it (D35) |
+| Success / failure | Pack verdigris / oxide, never the theme palette (D36) |
 | Search match / active match | `SearchColors::from_theme` (`render.rs`): whichever of the theme's yellow and the fixed amber stands out more from the background, and the same between a red-yellow orange from the theme and the fixed orange; the active match always differs from the rest; glyphs keep 4.5:1 |
 
 - A surface and its text are always used as a pair, and chrome text keeps 4.5:1 against its
-  surface.
-- A theme-independent colour is allowed only with a stated reason and a test, as the search
-  fallback has.
-
-Target: surfaces and text use the fixed pack tokens (D5 dark, D25 light). The accent stays
-theme-derived, with pack verdigris as the fallback below 3:1. Search highlights stay as they
-are. Success is verdigris and failure is oxide (D7, D36). (Pack D34, D35.)
+  surface. Failure text never sits on `raised` (D17).
+- Program output is not chrome: the grid and its padding keep the theme's colours.
+- Gutter command marks sit on the theme background (a pane at the left edge) or on the divider
+  (a pane right of a split), so `Marks::on` resolves them against that backing: the pack status
+  token (either mode) that stands out more, the theme cursor for running when it is visible,
+  nudged to 3:1 only where no pack token can reach it (D41, D42).
+- A colour outside these tokens is allowed only with a stated reason and a test, as the search
+  fallback and the native-red caption close hover have.
 
 ## Size and layout
 
@@ -96,10 +96,10 @@ with numbered steps (D32, D33).
 
 1. Tests for theme-derived colours run over every built-in preset (`config::PRESETS`) and a
    sweep of custom palettes, as `search_colours_stay_legible_on_every_preset` and
-   `search_colours_hold_for_a_sweep_of_custom_palettes` do.
+   `chrome_is_legible_on_every_preset` do.
 2. Chrome PRs attach xvfb screenshots in one dark and one light theme, CPU and GPU.
-3. Planned: a ratchet test counting colour literals in `src/gui` outside derivation code, and a
-   contrast test for every chrome surface and text pair.
+3. `chrome.rs` tests every chrome surface and text pair for contrast. Planned: a ratchet test
+   counting colour literals in `src/gui` outside derivation code.
 4. Review a chrome PR for: the top three fixes; clutter, alignment, copy and focus; whether the
    main flow takes one or two actions with Enter and Esc right; empty and error states; light
    and dark; Windows and Linux.

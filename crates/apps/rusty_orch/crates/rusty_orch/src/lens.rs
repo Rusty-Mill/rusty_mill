@@ -13,12 +13,16 @@
 //! - [`alien`]: `rusty_orch lens alien report`, the #708 alien lens's shadow numbers.
 //! - [`record`]: each lens's track record, from its stored blind reviews and
 //!   `bbp why` (#599).
+//! - [`probes`]: the #708 alien lens's sandboxed probe runner (D96).
+//! - [`hunts`]: the #708 alien lens's pass in `lens run --alien` (D99).
 
 pub mod alien;
 pub mod assertions;
 pub mod bbp;
 pub mod check;
 pub mod container;
+pub mod hunts;
+pub mod probes;
 pub mod record;
 pub mod registry;
 pub mod run;

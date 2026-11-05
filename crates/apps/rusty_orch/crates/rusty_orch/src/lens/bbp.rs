@@ -30,6 +30,8 @@ use rusty_bbp::{
 };
 use rusty_serde::Value;
 
+use super::probes::Candidate;
+
 /// How long one tool call may take.
 pub const CALL_DEADLINE: Duration = Duration::from_secs(30);
 /// `read`'s largest page.
@@ -323,14 +325,18 @@ impl<R: Rpc> Session<R> {
         }
     }
 
-    /// The domains the lens follows; `*` is every domain seen so far.
+    /// The domains the lens follows; `*` is every domain seen so far. The
+    /// alien lens follows every domain (D99).
     fn domains(&self, config: &LensConfig) -> BTreeSet<String> {
-        let Some(lens) = config.lens(&self.lens) else {
-            return BTreeSet::new();
+        let every = ["*".to_owned()];
+        let follows: &[String] = match config.lens(&self.lens) {
+            Some(lens) => &lens.domains,
+            None if config.alien.as_ref().is_some_and(|a| a.id == self.lens) => &every,
+            None => return BTreeSet::new(),
         };
         let seen = self.claims.values().flat_map(|b| b.domains.iter());
-        seen.chain(lens.domains.iter())
-            .filter(|d| d.as_str() != "*" && lens.follows(d))
+        seen.chain(follows)
+            .filter(|d| d.as_str() != "*" && follows.iter().any(|f| f == "*" || f == *d))
             .cloned()
             .collect()
     }
@@ -370,8 +376,8 @@ impl<R: Rpc> Session<R> {
             .ok_or_else(|| format!("get_artifact: brief {id} has no text"))
     }
 
-    /// The text of each of code candidate `id`'s diffs, in the candidate's
-    /// order, so each can be applied on its own.
+    /// Code candidate `id`'s base and the text of each of its diffs, in the
+    /// candidate's order, so each can be applied on its own.
     /// Each artifact's first read is charged once to the lens (R11), not
     /// to the claim's budget (D98). A role that may not read the candidate
     /// or a diff gives [`Diffs::Forbidden`]; any other failure is an error.
@@ -396,7 +402,10 @@ impl<R: Rpc> Session<R> {
             }
             texts.push(content);
         }
-        Ok(Diffs::Text(texts))
+        Ok(Diffs::Read(Candidate {
+            base: candidate.base,
+            diffs: texts,
+        }))
     }
 
     /// One artifact's record and text; a `role_forbidden` refusal is
@@ -510,8 +519,8 @@ impl<R: Rpc> Board for Session<R> {
 /// What a lens may read of a claim's code candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Diffs {
-    /// Each diff's text, in the candidate's order.
-    Text(Vec<String>),
+    /// The candidate's base and each diff's text, in the candidate's order.
+    Read(Candidate),
     /// The lens's role may not read the candidate or one of its diffs
     /// (D98): the claim is not eligible. The refused read itself is not
     /// charged; reads that succeeded before it (the candidate, earlier
@@ -868,6 +877,33 @@ mod tests {
 
     fn word(v: &Value, k: &str) -> String {
         v.get(k).map(Value::to_string).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_alien_lens_follows_every_domain_and_an_unknown_role_none() {
+        let at = CONFIG.rfind(']').expect("lenses end");
+        let text = format!(
+            "{}],\n\"alien\": {{\"id\": \"alien\", \"prompt\": \"a\", \"providers\": [\"codex\"]}}}}",
+            &CONFIG[..at]
+        );
+        let cfg = LensConfig::parse(&text).expect("config");
+        for (role, deltas) in [("alien", 1), ("stranger", 0)] {
+            let fake = Fake::default()
+                .on("task_card", task_card(5))
+                .on("read", read(vec![claim(7)], false))
+                .on(
+                    "claims_delta",
+                    Response::Claims(vec![view(7, ClaimStatus::Open, &[])]),
+                );
+            let mut s = Session::new(role, fake, "r1");
+            s.refresh(&cfg).expect("refresh");
+            let asked = s.rpc.args("claims_delta");
+            assert_eq!(asked.len(), deltas, "{role}");
+            if let Some(delta) = asked.first() {
+                assert_eq!(word(delta, "domains"), r#"["dedup"]"#);
+                assert_eq!(s.cards(&cfg).len(), 1);
+            }
+        }
     }
 
     #[test]
@@ -1302,7 +1338,10 @@ mod tests {
         ];
         assert_eq!(
             s.candidate_diffs(ArtId(5)),
-            Ok(Diffs::Text(want.map(str::to_owned).to_vec()))
+            Ok(Diffs::Read(Candidate {
+                base: "0".repeat(40),
+                diffs: want.map(str::to_owned).to_vec(),
+            }))
         );
         let ids: Vec<String> = s
             .rpc
