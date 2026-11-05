@@ -49,8 +49,13 @@ impl Fixture {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("work")).unwrap();
         File::create(root.join("status")).unwrap();
-        std::fs::write(root.join("token"), "tok-123\n").unwrap();
+        std::fs::create_dir(root.join("tokens")).unwrap();
+        std::fs::write(root.join("tokens/c-1"), "tok-123\n").unwrap();
         Self { root, cgroup: None }
+    }
+
+    fn token(&self) -> PathBuf {
+        self.root.join("tokens/c-1")
     }
 
     /// A fresh cgroup under the cgroup2 mount, or why there can't be one.
@@ -69,6 +74,11 @@ impl Fixture {
     }
 
     fn write_spec(&self, cgroup: &Path) -> PathBuf {
+        self.write_spec_with(cgroup, &[], &self.token())
+    }
+
+    /// The spec with `more` read roots and the token at `token`.
+    fn write_spec_with(&self, cgroup: &Path, more: &[PathBuf], token: &Path) -> PathBuf {
         let exe = std::env::current_exe().unwrap();
         let mut read: Vec<String> = ["/usr", "/lib", "/lib64", "/etc", "/proc"]
             .into_iter()
@@ -76,6 +86,7 @@ impl Fixture {
             .map(String::from)
             .collect();
         read.push(exe.parent().unwrap().display().to_string());
+        read.extend(more.iter().map(|p| p.display().to_string()));
         let json = format!(
             r#"{{"cgroup": {cg:?}, "status": {st:?}, "cwd": {wk:?}, "read": {rd:?}, "write": [{wk:?}],
                 "limits": {{"cpu_secs": 30, "memory_bytes": 4294967296, "file_bytes": 1048576,
@@ -87,7 +98,7 @@ impl Fixture {
             st = self.root.join("status").display().to_string(),
             wk = self.root.join("work").display().to_string(),
             rd = read,
-            tk = self.root.join("token").display().to_string(),
+            tk = token.display().to_string(),
             exe = exe.display().to_string(),
         );
         let path = self.root.join("jail.json");
@@ -231,4 +242,68 @@ fn a_bad_spec_is_refused_with_its_field() {
         String::from_utf8_lossy(&out.stderr).contains("jail.json"),
         "{out:?}"
     );
+}
+
+/// Runs `lel-jail` with good fds on `spec`; `None` when there is no
+/// writable cgroup to join, which comes before the path checks.
+fn launch_refused(fx: &mut Fixture, spec: impl Fn(&Fixture, &Path) -> PathBuf) -> Option<String> {
+    let cgroup = match fx.make_cgroup() {
+        Ok(cgroup) => cgroup,
+        Err(why) => {
+            eprintln!("no writable cgroup; skipping: {why}");
+            return None;
+        }
+    };
+    let spec = spec(fx, &cgroup);
+    let slot = File::create(fx.root.join("slot.lock")).unwrap();
+    let (acp, _orch) = UnixStream::pair().unwrap();
+    let out = run_jail(&spec, &[slot.as_raw_fd(), acp.as_raw_fd()]);
+    assert_eq!(out.status.code(), Some(125), "{out:?}");
+    assert!(out.stdout.is_empty(), "the agent ran: {out:?}");
+    Some(fx.status())
+}
+
+/// D85: a root that is a symlink to the token directory, or a token path
+/// that is a symlink into a root, passes the spelled-out check but not the
+/// resolved one, and no agent starts with the dummy token in reach.
+#[test]
+fn a_symlink_alias_of_a_root_or_the_token_refuses_the_launch() {
+    let _serial = serial();
+    let mut fx = Fixture::new("alias-root");
+    let status = launch_refused(&mut fx, |fx, cg| {
+        let alias = fx.root.join("public");
+        std::os::unix::fs::symlink(fx.root.join("tokens"), &alias).unwrap();
+        fx.write_spec_with(cg, &[alias], &fx.token())
+    });
+    if let Some(status) = status {
+        assert!(status.contains("a sandbox root reaches"), "{status}");
+    }
+    drop(fx);
+    let mut fx = Fixture::new("alias-token");
+    let status = launch_refused(&mut fx, |fx, cg| {
+        std::fs::write(fx.root.join("work/c-1"), "tok-123\n").unwrap();
+        let alias = fx.root.join("tok");
+        std::os::unix::fs::symlink(fx.root.join("work"), &alias).unwrap();
+        fx.write_spec_with(cg, &[], &alias.join("c-1"))
+    });
+    if let Some(status) = status {
+        assert!(status.contains("a sandbox root reaches"), "{status}");
+    }
+}
+
+/// `..` never reaches the resolver: the spec refuses it.
+#[test]
+fn a_parent_component_in_a_root_refuses_the_launch() {
+    let _serial = serial();
+    let mut fx = Fixture::new("dotdot");
+    let status = launch_refused(&mut fx, |fx, cg| {
+        let sneaky = fx.root.join("work/../tokens");
+        fx.write_spec_with(cg, &[sneaky], &fx.token())
+    });
+    if let Some(status) = status {
+        assert!(
+            status.is_empty(),
+            "refused at parse, before the status file: {status}"
+        );
+    }
 }

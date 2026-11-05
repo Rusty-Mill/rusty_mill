@@ -5,7 +5,6 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
-- `orch-jail`: the `jail.json` spec and `lel-jail`, the launcher a mux agent block runs. It requires the slot lock on fd 3 and ACP on fd 4, joins the session's cgroup, closes every other descriptor, reads the token by reference and execs the agent under `rusty_sandbox` with `Sockets::InternetOnly` (ADR-0022). Nothing launches it yet.
 - `rusty_orch lens run`: one `bbp mcp` session per lens, prefixes from the task brief, an optional rules file and each lens prompt, and the meter restored and saved in the orch state directory. It runs passes of one round per lens until a pass starts no job, a round halts, or `--max-passes` (default 20) is reached. The scheduler's memory does not survive the process yet.
 - `orch-lens`: `post::protocol()` (the strict reply format and its limits, with an example that parses) closes every lens prefix, and `post::allowance()` tells each job what it may post, ahead of its suffix.
 - `rusty_orch::lens::bbp`: one `bbp mcp` session per lens (D54). `Child` runs the session with credentials scrubbed and a 30-second deadline per request. `Session` reads new messages page by page for claim bodies and evidence notes, merges `claims_delta` cards, gives settled `claim_line`s, and posts as its lens with the brief ref and one op id per logical post (`lens-<run>-<n>`), resending a post lost in transport once under the same op. `orch-lens`: `Card::from_view` builds a card from a `ClaimView`, its body and notes.
