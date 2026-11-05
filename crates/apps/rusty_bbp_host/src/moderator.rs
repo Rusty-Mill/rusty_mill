@@ -354,10 +354,13 @@ pub fn quiesce(dir: &Path, task: &TaskId) -> Result<bool, String> {
     for record in crate::groups::records(dir, task)? {
         quiet &= settle(&record)?;
     }
-    // Held, so no `cgroup-open` is between its record and its cgroup.
-    let _cgroups = crate::cgroups::lock(dir, task)?;
-    for record in crate::cgroups::records(dir, task)? {
-        quiet &= crate::cgroups::settle(&record)?;
+    #[cfg(target_os = "linux")]
+    {
+        // Held, so no `cgroup-open` is between its record and its cgroup.
+        let _cgroups = crate::cgroups::lock(dir, task)?;
+        for record in crate::cgroups::records(dir, task)? {
+            quiet &= crate::cgroups::settle(&record)?;
+        }
     }
     Ok(quiet)
 }

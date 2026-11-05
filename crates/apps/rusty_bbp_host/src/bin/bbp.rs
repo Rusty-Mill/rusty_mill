@@ -107,11 +107,7 @@ fn run() -> Result<String, String> {
             .transpose()?
             .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
         if let Some(cgroup) = a.flags.get("cgroup") {
-            let cgroup = rusty_bbp_host::cgroups::checked(std::path::Path::new(cgroup))?;
-            rusty_bbp_host::cgroups::hold(cgroup.as_path(), deadline, std::io::stdin(), &mut |e| {
-                eprintln!("bbp slot-hold: {e}; still holding")
-            });
-            return Ok(String::new());
+            return cgroup_hold(cgroup, deadline);
         }
         slots::hold_while_alive(deadline);
         return Ok(String::new());
@@ -189,7 +185,7 @@ fn run() -> Result<String, String> {
     }
     let dir = PathBuf::from(a.flag_or_env("dir", "BBP_DIR")?);
     if sub == "cgroup-scope" {
-        return rusty_bbp_host::cgroups::scope(&dir);
+        return cgroup_scope(&dir);
     }
     // `bbp why TASK` names the task positionally too.
     let task = match (sub.as_str(), a.positional.first()) {
@@ -202,9 +198,7 @@ fn run() -> Result<String, String> {
         return inbox::json(&dir, &tasks);
     }
     if sub == "cgroup-open" {
-        let cgroup = PathBuf::from(a.flag("cgroup")?);
-        return rusty_bbp_host::cgroups::open(&dir, &task, &cgroup)
-            .map(|c| c.display().to_string());
+        return cgroup_open(&dir, &task, &PathBuf::from(a.flag("cgroup")?));
     }
     if sub == "quiesce" {
         return moderator::quiesce(&dir, &task).map(|quiet| quiet.to_string());
@@ -587,3 +581,45 @@ fn takeover_batch(input: impl std::io::Read) -> Result<Vec<u8>, String> {
     }
     Ok(bytes)
 }
+
+/// `bbp slot-hold --cgroup PATH`: holds until the cgroup is empty.
+#[cfg(target_os = "linux")]
+fn cgroup_hold(cgroup: &str, deadline: Option<std::time::SystemTime>) -> Result<String, String> {
+    let cgroup = rusty_bbp_host::cgroups::checked(std::path::Path::new(cgroup))?;
+    rusty_bbp_host::cgroups::hold(cgroup.as_path(), deadline, std::io::stdin(), &mut |e| {
+        eprintln!("bbp slot-hold: {e}; still holding")
+    });
+    Ok(String::new())
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_scope(dir: &std::path::Path) -> Result<String, String> {
+    rusty_bbp_host::cgroups::scope(dir)
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_open(
+    dir: &std::path::Path,
+    task: &TaskId,
+    cgroup: &std::path::Path,
+) -> Result<String, String> {
+    rusty_bbp_host::cgroups::open(dir, task, cgroup).map(|c| c.display().to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_hold(_: &str, _: Option<std::time::SystemTime>) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_scope(_: &std::path::Path) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_open(_: &std::path::Path, _: &TaskId, _: &std::path::Path) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+const CGROUPS_LINUX_ONLY: &str = "session cgroups are Linux only";
