@@ -128,7 +128,11 @@ As built (D93, D92):
   expected producer is #598's approved `shadow:` profile kind (D62).
 - **Rows before state.** A job's row is saved before the scheduler state,
   and saving the same job again unions its items, so a job rerun after a
-  crash keeps every item it posted.
+  crash keeps every item it posted. A post that fails partway keeps the
+  ids that were answered; one whose answer was lost marks the job
+  `unsure`, and an unsure job is scored only against ground truth.
+- **Settlement.** The latest status step that changed the status; an
+  escalation that leaves a claim accepted settles nothing.
 - **Interim limits, until OPEN_QUESTIONS Q35 (D92).** Each limit only adds
   unscored pivotal jobs:
   - BBP's history has no `min_authors`, so a job whose removal also removes

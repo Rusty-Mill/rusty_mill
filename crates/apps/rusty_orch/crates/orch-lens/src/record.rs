@@ -165,10 +165,10 @@ pub fn score(review: &Review, trail: &Trail) -> Scored {
     let own = Own::of(review, trail);
     let Some(direction) = own.direction(trail) else {
         return Scored::Unscored {
-            pivotal: review.unsure,
+            pivotal: review.unsure && line_settled(trail, settled),
         };
     };
-    let pivotal = review.unsure || pivotal(trail, settled, &own);
+    let pivotal = pivotal(trail, settled, &own, review.unsure);
     let truth = if pivotal {
         match golden(trail, settled).filter(|_| !own.executed(trail)) {
             Some(t) => t,
@@ -332,10 +332,19 @@ fn could_be_dormant(s: &Step) -> bool {
     })
 }
 
+/// Whether the claim was settled by the accept or drop line.
+fn line_settled(trail: &Trail, settled: usize) -> bool {
+    matches!(
+        trail.steps[settled].change,
+        Change::Status(Rule::Line { .. })
+    )
+}
+
 /// Whether the line that settled the claim would not have held without the
-/// job's own items. A human settlement is never pivotal. A line whose live
-/// items a human reopen may have changed counts as pivotal (D92).
-fn pivotal(trail: &Trail, settled: usize, own: &Own) -> bool {
+/// job's own items. A human settlement is never pivotal. A line counts as
+/// pivotal when the job's own items aren't all known (`unsure`) or a human
+/// reopen may have changed the live items (D92).
+fn pivotal(trail: &Trail, settled: usize, own: &Own, unsure: bool) -> bool {
     let step = &trail.steps[settled];
     let Change::Status(Rule::Line {
         at,
@@ -345,7 +354,7 @@ fn pivotal(trail: &Trail, settled: usize, own: &Own) -> bool {
     else {
         return false;
     };
-    if maybe_woken(trail, settled) {
+    if unsure || maybe_woken(trail, settled) {
         return true;
     }
     let way = match step.status {
@@ -914,6 +923,14 @@ mod tests {
             score(&nothing_known, &t),
             Scored::Unscored { pivotal: true }
         );
+        // A human settlement didn't depend on the score: the known items
+        // are scored against it.
+        let mut human = t.clone();
+        human.steps[4].change = Change::Status(Rule::Human);
+        assert!(matches!(
+            score(&unsure, &human),
+            Scored::Points { pivotal: false, .. }
+        ));
     }
 
     #[test]
