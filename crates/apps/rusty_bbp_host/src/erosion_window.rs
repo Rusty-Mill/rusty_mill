@@ -18,7 +18,7 @@
 //! published its task log ([`Admission`]), so a racing report-only open
 //! always sees the earlier one counted and cannot overshoot.
 
-use rusty_bbp::{log_path_for, Event, Mode, TaskId, Time};
+use rusty_bbp::{Event, FsStore, Mode, Store, StoreError, TaskId, Time};
 use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -69,26 +69,18 @@ pub fn expiry(
     Ok(None)
 }
 
-/// Whether `task`'s log proves a report-only claims open: its first event
-/// is a claims `TaskOpened` whose frozen profile set (checked against the
-/// digest) runs the erosion profile report-only. No log, an empty one or a
-/// partial first line is `false`; an unreadable log or profile set is an
-/// error, so the window fails closed.
-pub fn report_only_open(dir: &Path, task: &TaskId) -> Result<bool, String> {
-    let log = log_path_for(dir, task);
-    let text = match std::fs::read_to_string(&log) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(format!("{}: {e}", log.display())),
+/// Whether `task`'s log in `store` proves a report-only claims open: its
+/// first event is a claims `TaskOpened` whose frozen profile set (checked
+/// against the digest) runs the erosion profile report-only. A task the
+/// store doesn't hold (never opened, or an empty log) is `false`; an
+/// unreadable profile set is an error, so the window fails closed.
+pub fn report_only_open(dir: &Path, store: &FsStore, task: &TaskId) -> Result<bool, String> {
+    let events = match store.events(task, 0) {
+        Ok(events) => events,
+        Err(StoreError::UnknownTask) => return Ok(false),
+        Err(e) => return Err(format!("task {}: {e:?}", task.0)),
     };
-    // An empty log, or a first batch cut short by a crash, is not an open
-    // (`FsStore::open` truncates it the same way).
-    let Some((first, _)) = text.split_once('\n') else {
-        return Ok(false);
-    };
-    let batch: Vec<Event> = rusty_serde::json::from_str(first)
-        .map_err(|e| format!("{}: first line: {e}", log.display()))?;
-    match batch.first() {
+    match events.first() {
         Some(Event::TaskOpened {
             mode: Mode::Claims,
             profile_digest,
@@ -137,7 +129,17 @@ pub fn admit(dir: &Path, task: &TaskId, now: Time) -> Result<Result<Admission, S
     file.read_to_string(&mut text)
         .map_err(|e| format!("{}: {e}", path(dir).display()))?;
     let entries = parse(&text)?;
-    if let Some(why) = expiry(&entries, |t| report_only_open(dir, t), now)? {
+    let mut store = None;
+    let counted = |t: &TaskId| {
+        if store.is_none() {
+            store = Some(FsStore::open(dir).map_err(|e| e.to_string())?);
+        }
+        match &store {
+            Some(st) => report_only_open(dir, st, t),
+            None => Ok(false),
+        }
+    };
+    if let Some(why) = expiry(&entries, counted, now)? {
         return Ok(Err(why));
     }
     file.write_all(format!("{} {}\n", now.0, task.0).as_bytes())
