@@ -11,8 +11,8 @@
 //!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
 //! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
 //! bbp pause   --dir D --task T --reason spend_ceiling|call_ceiling|breaker --op OP [--detail TEXT]   #598: the host pauses an open claims task (task_paused); prints the response JSON, a refusal included; the same OP replays
-//! bbp takeover-input --dir D --task T --takeover N --seq S --sha256 HEX   D82: one batch of takeover input, the raw bytes on stdin, at most 4096; HEX chains it to the last batch
-//! bbp takeover-ended --dir D --task T --takeover N --reason released|expired|revoked|turn-ended|mux-lost   D82: orch ends a takeover (`released` only after `bbp human takeover-release N`)
+//! bbp takeover-input --dir D --task T --takeover N --seq S --sha256 HEX   D104: one batch of takeover input, the raw bytes on stdin, at most 4096; HEX chains it to the last batch
+//! bbp takeover-ended --dir D --task T --takeover N --reason released|expired|revoked|turn-ended|mux-lost   D104: orch ends a takeover (`released` only after `bbp human takeover-release N`)
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
@@ -40,9 +40,9 @@
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
-//! bbp slot-hold --cgroup PATH [--deadline-ms N]   D82: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
-//! bbp cgroup-scope --dir D                 D82: the cgroup name this control directory's sessions must sit below
-//! bbp cgroup-open --dir D --task T --cgroup PATH   D82: records a mux-hosted session's cgroup for the task, then creates it (refused if it exists or isn't below the scope)
+//! bbp slot-hold --cgroup PATH [--deadline-ms N]   D104: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
+//! bbp cgroup-scope --dir D                 D104: the cgroup name this control directory's sessions must sit below
+//! bbp cgroup-open --dir D --task T --cgroup PATH   D104: records a mux-hosted session's cgroup for the task, then creates it (refused if it exists or isn't below the scope)
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
@@ -365,7 +365,7 @@ fn run() -> Result<String, String> {
             a.flags.get("detail").map_or("", String::as_str),
             OpId(a.flag("op")?.to_owned()),
         )?,
-        // D82: orch records takeover input (text on stdin) and ends takeovers.
+        // D104: orch records takeover input (text on stdin) and ends takeovers.
         "takeover-input" => {
             let bytes = takeover_batch(std::io::stdin().lock())?;
             let num = |k: &str| -> Result<u64, String> {
@@ -657,7 +657,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// D82: one takeover batch from `input`, read whole but never past
+/// D104: one takeover batch from `input`, read whole but never past
 /// [`rusty_bbp::MAX_TAKEOVER_BATCH`] + 1 bytes, so an oversized batch is
 /// refused without buffering it. The bytes are kept exactly as delivered.
 fn takeover_batch(input: impl std::io::Read) -> Result<Vec<u8>, String> {
