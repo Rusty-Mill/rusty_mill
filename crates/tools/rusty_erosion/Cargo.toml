@@ -13,3 +13,7 @@ layer = "tools"
 [dependencies]
 tree-sitter = { workspace = true }
 tree-sitter-rust = { workspace = true }
+
+[[bin]]
+name = "erosion"
+path = "src/main.rs"

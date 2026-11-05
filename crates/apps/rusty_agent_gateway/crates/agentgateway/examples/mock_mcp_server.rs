@@ -6,7 +6,8 @@
 //! is how a test sets up a name collision between two targets. `MOCK_DELAY_MS`
 //! makes tool calls slow, so the timeout and concurrency tests have something
 //! real to be slow about. The delay is on `call_tool` only, leaving startup
-//! and `tools/list` prompt.
+//! and `tools/list` prompt, and it ends early when the caller cancels, so a
+//! timed-out call does not keep this process (and the test's stderr) alive.
 //!
 //! `MOCK_PROMPTS` and `MOCK_RESOURCES` add prompts and resources. Both default
 //! to empty, and a server with neither advertises neither capability — which
@@ -14,14 +15,14 @@
 //! actually do.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusty_mcp_server::json::Value;
 use rusty_mcp_server::proto::{
     CallToolResult, ContentBlock, ErrorCode, ErrorData, GetPromptResult, Prompt, PromptMessage,
     ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role, Tool,
 };
-use rusty_mcp_server::{Server, serve_stdio};
+use rusty_mcp_server::{CancelToken, Server, serve_stdio};
 
 /// A comma-separated list from the environment, empty when unset.
 fn list(name: &str, default: &str) -> Vec<String> {
@@ -31,6 +32,19 @@ fn list(name: &str, default: &str) -> Vec<String> {
         .filter(|item| !item.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+/// Sleep for `delay`, waking early once `cancel` is raised.
+fn nap(delay: Duration, cancel: &CancelToken) {
+    const SLICE: Duration = Duration::from_millis(10);
+    let deadline = Instant::now() + delay;
+    while !cancel.is_cancelled() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(SLICE));
+    }
 }
 
 /// The schema every tool advertises: an object with no declared properties.
@@ -61,12 +75,10 @@ fn main() -> std::io::Result<()> {
         tool.description = Some(format!("{name} on {label}"));
         // The label is what lets a test tell which target served the call.
         let text = format!("{label}:{name}");
-        builder = builder.tool(tool, move |_ctx, _call| {
+        builder = builder.tool(tool, move |ctx, _call| {
             // Each call runs on a thread of its own, so a sleep here is slow
             // only for this call; startup and `tools/list` stay prompt.
-            if !delay.is_zero() {
-                std::thread::sleep(delay);
-            }
+            nap(delay, &ctx.cancel_token());
             Ok(CallToolResult {
                 content: vec![ContentBlock::text(text.clone())],
                 ..CallToolResult::default()

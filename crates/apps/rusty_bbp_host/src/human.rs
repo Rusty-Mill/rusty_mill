@@ -179,12 +179,34 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
         "close" => HumanAction::Close {
             expected_rev: rev()?,
         },
+        // D82: take over one agent session for one mux client; the reason is
+        // the rest of the line.
+        "takeover" => HumanAction::Takeover {
+            claim: msg(a(0)?)?,
+            session: a(1)?.to_owned(),
+            client: a(2)?.to_owned(),
+            minutes: a(3)?
+                .parse()
+                .map_err(|_| "minutes must be a number".to_owned())?,
+            reason: rest(4),
+        },
+        "takeover-release" => HumanAction::TakeoverRelease {
+            takeover: takeover_id(a(0)?)?,
+        },
         // #597 G3: adopt a staged holdout suite that changes or removes tests.
         "holdout-updated" => HumanAction::HoldoutUpdated {
             digest: Sha256::from_hex(a(0)?).ok_or("holdout digest must be 64 hex digits")?,
         },
         other => return Err(format!("unknown human action {other}")),
     })
+}
+
+/// A takeover id as `bbp human` and `bbp takeover-*` take it: `N` or
+/// `takeover:N`.
+pub fn takeover_id(s: &str) -> Result<u64, String> {
+    s.trim_start_matches("takeover:")
+        .parse()
+        .map_err(|_| "takeover must be a number".to_owned())
 }
 
 /// Who answered when the op carries no label.
@@ -434,6 +456,32 @@ pub fn perform_fenced(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn takeover_verbs_parse_and_refuse_bad_numbers() {
+        let a = action(
+            "takeover",
+            &["msg:4", "agent:t:4:1", "nano", "15", "fix", "the", "path"],
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            a,
+            HumanAction::Takeover {
+                claim: MsgId(4),
+                session: "agent:t:4:1".into(),
+                client: "nano".into(),
+                minutes: 15,
+                reason: "fix the path".into(),
+            }
+        );
+        assert_eq!(
+            action("takeover-release", &["takeover:2"], None).unwrap(),
+            HumanAction::TakeoverRelease { takeover: 2 }
+        );
+        assert!(action("takeover", &["msg:4", "s", "c", "ten", "r"], None).is_err());
+        assert!(action("takeover-release", &["x"], None).is_err());
+    }
 
     #[test]
     fn the_label_round_trips_through_the_op() {
