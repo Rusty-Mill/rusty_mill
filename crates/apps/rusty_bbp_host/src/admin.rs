@@ -293,7 +293,7 @@ pub fn pause(
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
 }
 
-/// D82: record one batch of takeover input as the mux delivered it. orch
+/// D104: record one batch of takeover input as the mux delivered it. orch
 /// computes `sha256` with [`rusty_bbp::claims::input_chain`]; the core checks
 /// order, size, expiry and the chain.
 pub fn takeover_input(
@@ -316,7 +316,7 @@ pub fn takeover_input(
     )
 }
 
-/// D82: orch writes a takeover's one end: after a release or the task's end
+/// D104: orch writes a takeover's one end: after a release or the task's end
 /// has closed it and the delivered input is drained, or for its own reasons.
 pub fn takeover_ended(
     dir: &Path,

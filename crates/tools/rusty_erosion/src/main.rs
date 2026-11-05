@@ -81,7 +81,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
         // A repeated flag is ambiguous: the host validates one `--base`, so
-        // the binary must not run another (D89).
+        // the binary must not run another (D82).
         if seen.contains(&flag.as_str()) {
             return Err(format!("{flag} given more than once"));
         }

@@ -1,11 +1,11 @@
 # ADR-0022: `lel-jail`, the launcher a mux agent block runs
 
-- **Status:** Accepted (Let Em Loose D82, design approved 2026-11-05; build defaults D85)
+- **Status:** Accepted (Let Em Loose D104, design approved 2026-11-05; build defaults D107)
 - **Date:** 2026-11-05
 
 ## Context
 
-Agents get mux-hosted ptys (D81). The mux forks the block's program on a
+Agents get mux-hosted ptys (D103). The mux forks the block's program on a
 pty it owns, so that program is the first process orch's jail controls.
 It must put the agent in the session's cgroup, keep only the channels the
 design allows (the pty, the slot lock on fd 3, ACP on fd 4) and confine it
@@ -44,7 +44,7 @@ before the agent's code runs (mux-hosted-agents-design.md §2 step 5, §4).
 
 - v0 has no namespaces, overlay or gateway-only egress. `InternetOnly`
   allows any IPv4/IPv6 egress, short of 600-builder-session-design §4.3.
-  Those #726 layers come later behind the same file (D82 item 7).
+  Those #726 layers come later behind the same file (D104 item 7).
 - The mux socket is kept out by the environment, the fd rule, seccomp and
   Landlock, not yet by a mount namespace, so the "socket path doesn't
   exist" test waits for that layer.

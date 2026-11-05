@@ -53,7 +53,7 @@ pub struct ProfileSet {
     /// with `protected`; never written when absent.
     #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<String>,
-    /// Claims mode (#704, D41, D89): `"off"` records that the task opts out
+    /// Claims mode (#704, D41, D82): `"off"` records that the task opts out
     /// of the erosion gate. A claims set needs this or one profile named
     /// [`EROSION_PROFILE`], not both. Covered by the digest; never written
     /// when absent, so existing digests are unchanged.
@@ -61,7 +61,7 @@ pub struct ProfileSet {
     pub erosion: Option<String>,
 }
 
-/// The profile name the claims open looks for (D89). A profile with this
+/// The profile name the claims open looks for (D82). A profile with this
 /// name must run the `erosion` bin directly, or the open refuses it.
 pub const EROSION_PROFILE: &str = "erosion";
 
@@ -159,7 +159,7 @@ impl ProfileSet {
 
     /// A claims set has exactly one of an `erosion` profile or the recorded
     /// `erosion: "off"` opt-out (D41). The profile's `--base` is a full
-    /// commit id, and the pinned `baseline` when one is set (D89).
+    /// commit id, and the pinned `baseline` when one is set (D82).
     pub fn check_erosion(&self) -> Result<(), String> {
         let named: Vec<&Profile> = self
             .profiles
@@ -184,7 +184,7 @@ impl ProfileSet {
             .any(|p| p.name == EROSION_PROFILE && p.args.iter().any(|a| a == "--report-only"))
     }
 
-    /// The profile runs the `erosion` bin directly (D89): no shell, `env` or
+    /// The profile runs the `erosion` bin directly (D82): no shell, `env` or
     /// `cargo run`, so the argv checked here is the argv that runs. The args
     /// parse as the bin's own do: `check`, then `--base COMMIT` and either
     /// `--report-only` or both limits, each once, nothing else. The base is a

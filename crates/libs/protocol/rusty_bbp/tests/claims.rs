@@ -4012,8 +4012,8 @@ mod replay {
     }
 }
 
-/// D82: human takeover of an agent session, recorded on the board (D83: under
-/// schema 5; D84: `human_touched` derived in the fold).
+/// D104: human takeover of an agent session, recorded on the board (D105: under
+/// schema 5; D106: `human_touched` derived in the fold).
 mod takeover {
     use super::*;
     use rusty_bbp::claims::input_chain;

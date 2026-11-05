@@ -179,7 +179,7 @@ pub fn action(verb: &str, args: &[&str], rev: Option<Rev>) -> Result<HumanAction
         "close" => HumanAction::Close {
             expected_rev: rev()?,
         },
-        // D82: take over one agent session for one mux client; the reason is
+        // D104: take over one agent session for one mux client; the reason is
         // the rest of the line.
         "takeover" => HumanAction::Takeover {
             claim: msg(a(0)?)?,

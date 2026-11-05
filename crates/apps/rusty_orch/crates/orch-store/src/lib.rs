@@ -25,6 +25,7 @@ mod lens_states;
 mod meters;
 mod probes;
 mod record;
+mod watch;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -49,6 +50,8 @@ use meters::MeterRecord;
 use orch_lens::alien::{HuntRow, ProbeRow};
 use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
+use watch::WatchRecord;
+pub use watch::{PendingPost, WatchFinding, WatchSlot};
 
 /// The store's files inside its directory.
 const LOCK_FILE: &str = "lock";
@@ -64,6 +67,8 @@ const PROBES_FILE: &str = "probes.mmap";
 const HUNTS_FILE: &str = "hunts.mmap";
 /// Lens scheduler memory, one record per BBP board (#594).
 const LENS_STATES_FILE: &str = "lens-states.mmap";
+/// Watched findings (#599, `watch_finding`).
+const WATCH_FILE: &str = "watch.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -149,6 +154,7 @@ pub struct Store {
     probes: GenericMmapStore<ProbeRecord, ById, Revision>,
     hunts: GenericMmapStore<HuntRecord, ById, Revision>,
     lens_states: GenericMmapStore<LensStateRecord, ById, Revision>,
+    watch: GenericMmapStore<WatchRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -199,6 +205,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(WATCH_FILE);
+        let watch = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -213,6 +225,7 @@ impl Store {
             probes,
             hunts,
             lens_states,
+            watch,
             _lock: lock,
         })
     }
@@ -360,6 +373,45 @@ impl Store {
             self.meters.insert(record).map_err(engine_error)
         } else {
             self.meters.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// The slot `slot` of `app`; empty when nothing was saved for it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record under its key names another
+    /// app or slot.
+    pub fn watch_slot(&self, app: &str, slot: &str) -> Result<WatchSlot, StoreError> {
+        self.watch
+            .get(watch::key(app, slot))
+            .map_or(Ok(WatchSlot::default()), |r| r.into_slot(app, slot))
+    }
+
+    /// Save `row` as the slot `slot` of `app`. A successful return means it
+    /// is durable.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key holds another app or slot;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_watch_slot(
+        &mut self,
+        app: &str,
+        slot: &str,
+        row: &WatchSlot,
+    ) -> Result<(), StoreError> {
+        let existing = self.watch.get(watch::key(app, slot));
+        if let Some(r) = &existing {
+            r.check(app, slot)?;
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = WatchRecord::new(app, slot, row, revision);
+        let written = if existing.is_none() {
+            self.watch.insert(record).map_err(engine_error)
+        } else {
+            self.watch.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
     }

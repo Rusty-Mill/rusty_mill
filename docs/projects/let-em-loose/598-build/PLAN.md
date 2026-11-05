@@ -1,8 +1,8 @@
 # #598 build plan (elephant pass, 2026-11-04)
 
-Kept in the repo per Nano's 2026-11-04 rule that design docs live under `docs/projects/let-em-loose/`. The Goldfish review below names D67 and Q14; those defaults are now D90 and Q16.
+Kept in the repo per Nano's 2026-11-04 rule that design docs live under `docs/projects/let-em-loose/`. The Goldfish review below names D67 and Q14; those defaults are now D86 and Q16.
 
-Card #598 (bbp_factory): close four gaps in BBP/orch. Design approved; all §6 schema/API items approved (DECISIONS D59, D62). The design file `598-gaps-design.md` is not reachable, so shapes not fixed by D59/D62 come from the let-em-loose expert's defaults (D90, `lel:598:build-defaults-without-design-doc`). Nano's answers Q1 to Q6 are on the card.
+Card #598 (bbp_factory): close four gaps in BBP/orch. Design approved; all §6 schema/API items approved (DECISIONS D59, D62). The design file `598-gaps-design.md` is not reachable, so shapes not fixed by D59/D62 come from the let-em-loose expert's defaults (D86, `lel:598:build-defaults-without-design-doc`). Nano's answers Q1 to Q6 are on the card.
 
 Constraints: agents open PRs only (dottiusmaximus reviews and merges); no paid API; all new fields optional and not written at their defaults, so existing logs and profile digests stay byte-identical (no migration, D62). Another thread is building the #594 lens runner shell (`rusty_orch lens run`, PRs #1467, #1479); this plan must not duplicate its wiring.
 

@@ -1,9 +1,9 @@
 # Mux-hosted agent ptys: design
 
-Let Em Loose × rusty_mux, 2026-11-04. Status: **approved 2026-11-05 (D82)**, all eight §10 recommendations (decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra`).
+Let Em Loose × rusty_mux, 2026-11-04. Status: **approved 2026-11-05 (D104)**, all eight §10 recommendations (decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra`).
 
-- **Decision it implements:** D81 [stated]. Agents get mux-hosted ptys. It reopens D20 and D66 and supersedes D78. Nano, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG`, 2026-11-04T23:51Z.
-- **Builds on:** D79 (the gateway enforces and the agent is jailed; #726 D-a) and D80 (orch and the gateway stay separate; #726 D-b).
+- **Decision it implements:** D103 [stated]. Agents get mux-hosted ptys. It reopens D20 and D66 and supersedes D100. Nano, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG`, 2026-11-04T23:51Z.
+- **Builds on:** D101 (the gateway enforces and the agent is jailed; #726 D-a) and D102 (orch and the gateway stay separate; #726 D-b).
 - **Experts:** `let-em-loose-expert` covered orch, BBP and the jail; `rusty-term-expert` covered the mux and rusty_term. Its findings are in the Rusty Term pack QA ("What must the mux add for orch-owned agent blocks"), which is delivered on the Rusty Term side.
 - **Ownership:** Let Em Loose owns the orch launch, the jail and the board events (this document). Rusty Term owns the mux and rusty_term side (§9 is its brief).
 
@@ -21,7 +21,7 @@ board events (BBP)                  input gate: owner grants lease
 
 - **orch decides everything:** whom to run, admission, the token, the deadline, grace, kill, reap, and what reaches the board.
 - **The mux hosts:** it forks the jail launcher on a pty it owns, renders that pty, and forwards input only when orch has granted it.
-- **The agent sees** a tty, its throwaway layer and worktree, and one token scoped to its lens and claim (D79). It never sees the mux socket or the board socket.
+- **The agent sees** a tty, its throwaway layer and worktree, and one token scoped to its lens and claim (D101). It never sees the mux socket or the board socket.
 
 ## 2. One agent session, step by step (#600 builder)
 
@@ -43,7 +43,7 @@ board events (BBP)                  input gate: owner grants lease
    - closes every fd except 0–2, 3 and 4.
 
    The agent is the ACP adapter for the Claude CLI. It speaks ACP on fd 4, and its stderr and any terminal it runs go to the pty.
-6. **Run.** orch drives the session over ACP and renders its `session/update` stream to `<dir>/builders/<claim>/<n>/acp.log`. A second, display-only block runs a viewer of that log (§6). Meanwhile the witness records the upper-layer diff, the exec log and the gateway log (D79).
+6. **Run.** orch drives the session over ACP and renders its `session/update` stream to `<dir>/builders/<claim>/<n>/acp.log`. A second, display-only block runs a viewer of that log (§6). Meanwhile the witness records the upper-layer diff, the exec log and the gateway log (D101).
 7. **End.** The turn can end because a candidate is stored, the wall clock runs out, or the agent gives up. orch then:
    - sends SIGTERM through `SignalBlock` and waits out the end grace (60 s);
    - writes `cgroup.kill` if anything is left;
@@ -74,7 +74,7 @@ So the mux never decides to start or stop an agent. It forks one only when orch 
 - **The pty crosses the boundary; the control socket doesn't.** The jail's channels are the pty (display and takeover input), fd 3 (the slot lock) and fd 4 (ACP to orch).
 - **Environment:** `Launch` sends an exact environment, and the server adds no `RUSTY_MUX_*` variables. orch-bbp's `SCRUB` gains `RUSTY_MUX_SOCKET` (one line plus a test), so it never leaks from whatever started orch.
 - **Filesystem:** the jail's mount namespace doesn't include the runtime directory that holds the mux socket.
-- **Syscalls:** seccomp refuses new `AF_UNIX` sockets and `connect`, so even a leaked path is useless. Internet egress goes only to the gateway (D79).
+- **Syscalls:** seccomp refuses new `AF_UNIX` sockets and `connect`, so even a leaked path is useless. Internet egress goes only to the gateway (D101).
 - **Fds:** `lel-jail` closes everything except 0–4 before it execs.
 - **Tests (at build time):** inside the jail, `RUSTY_MUX_SOCKET` is unset, the socket path doesn't exist, and `socket(AF_UNIX)` fails.
 
@@ -86,7 +86,7 @@ So the mux never decides to start or stop an agent. It forks one only when orch 
 1. Nano asks for it on the human channel: `bbp human takeover CLAIM --session <block> --minutes N --reason "…"`. A rusty_term key binding can run the same command. The board writes `takeover_started` **before** any input is possible.
 2. orch sees the event and sends the mux `GrantLease{block, client, until}`. It targets only the client Nano named, for at most N minutes.
 3. Each keystroke batch the mux delivers is sent to orch as `InputBatch{block, client, seq, bytes}`. orch appends it to a local journal and posts `takeover_input` batches: one every 2 s, or on Enter, at most 4 KiB.
-4. The takeover ends in one of these ways: Nano releases it, it expires, orch revokes it, the turn ends, or the mux is lost. orch then sends `RevokeLease` and posts `takeover_ended`. If orch can't post, it revokes the lease, so the system fails closed. A release, or a `Close`/`Cancel` with a live takeover, first writes `takeover_closing`: input stops at its `at`, and orch has 10 s to post input already delivered before it writes `takeover_ended` (D87).
+4. The takeover ends in one of these ways: Nano releases it, it expires, orch revokes it, the turn ends, or the mux is lost. orch then sends `RevokeLease` and posts `takeover_ended`. If orch can't post, it revokes the lease, so the system fails closed. A release, or a `Close`/`Cancel` with a live takeover, first writes `takeover_closing`: input stops at its `at`, and orch has 10 s to post input already delivered before it writes `takeover_ended` (D109).
 
 **Recording mode.** The recommendation is as-delivered with a hash chain: the mux delivers right away, and orch journals and posts. Write-ahead, where the mux holds each batch until orch acks it, is possible, but it adds a round trip per keystroke and makes the mux side size L (rusty-term-expert). Gaps are detectable because `seq` and the chain are on the board.
 
@@ -96,20 +96,20 @@ So the mux never decides to start or stop an agent. It forks one only when orch 
 |---|---|---|
 | `takeover_started` | human | `claim`, `epoch`, `session` (block name), `client`, `until`, `reason`, expected `rev` |
 | `takeover_input` | host (orch) | `takeover` (msg id), `seq` (from 1), `bytes` (base64, at most 4 KiB), `sha256`, `prev_sha256` (the chain) |
-| `takeover_closing` | written by release, or by `Close`/`Cancel` for a live takeover | `takeover`, `reason` (`released` or `turn_ended`), `at` (D87) |
-| `takeover_ended` | host only (D87) | `takeover`, `reason`: `released` (only after a closing), `expired`, `revoked`, `turn_ended` or `mux_lost`; `batches`; `last_sha256` |
+| `takeover_closing` | written by release, or by `Close`/`Cancel` for a live takeover | `takeover`, `reason` (`released` or `turn_ended`), `at` (D109) |
+| `takeover_ended` | host only (D109) | `takeover`, `reason`: `released` (only after a closing), `expired`, `revoked`, `turn_ended` or `mux_lost`; `batches`; `last_sha256` |
 
 - **Effect on claims (v0):** a candidate stored from a session that had a takeover carries `human_touched: true` on its manifest and on `claim_card`. The inbox shows it. Scoring is unchanged. The takeover doesn't count Nano as a second author toward `min authors`.
 - **Visibility:** the human channel and the host only, never the Agent API (like credentials), so agents can't read Nano's typing back.
 - **Budget:** human writes are uncharged.
-- **Schema:** the events are added under claims schema 5, as #597's holdout events were (D83): there's no schema bump. An older build refuses a log that contains one, and earlier logs stay byte-identical. It also needs one new human verb, `takeover`. Nothing is written when there's no takeover. `human_touched` is derived in the fold: a candidate for claim c is touched when a `takeover_started` on c in the same epoch precedes it (D84).
+- **Schema:** the events are added under claims schema 5, as #597's holdout events were (D105): there's no schema bump. An older build refuses a log that contains one, and earlier logs stay byte-identical. It also needs one new human verb, `takeover`. Nothing is written when there's no takeover. `human_touched` is derived in the fold: a candidate for claim c is touched when a `takeover_started` on c in the same epoch precedes it (D106).
 - **Caution:** typed text is recorded verbatim, so never type a secret into an agent pane.
 
 ## 6. What's displayed and what's recorded
 
 - **Displayed.** Each agent gets one mux window with two blocks: **live pty** (the jail: stderr, the terminals the agent runs, takeover input) and **session** (a viewer of `acp.log`, which is orch's rendered ACP `session/update` stream). Both are held after exit, so the panes outlive the turn.
-- **Recorded as evidence (D79).** The witness: the upper-layer diff, the exec log (audit/eBPF by cgroup) and the gateway's tool-call log, posted as hashed digests on the claim. The runner's `test_report` stays the only route to `executed` evidence.
-- **Low trust.** ACP `session/update` is self-reported. A mismatch with the witness counts as evidence against the claim (D79). The `acp.log` file is a display aid, not a record.
+- **Recorded as evidence (D101).** The witness: the upper-layer diff, the exec log (audit/eBPF by cgroup) and the gateway's tool-call log, posted as hashed digests on the claim. The runner's `test_report` stays the only route to `executed` evidence.
+- **Low trust.** ACP `session/update` is self-reported. A mismatch with the witness counts as evidence against the claim (D101). The `acp.log` file is a display aid, not a record.
 - **Never evidence.** Mux scrollback, grid snapshots and `terminal.format`.
 - **Q13 is answered.** The builder session's files live under `<dir>/builders/<claim>/<n>/` (`jail.json`, `acp.log`, the witness digests), beside its `builder_session` row.
 
@@ -135,7 +135,7 @@ So the mux never decides to start or stop an agent. It forks one only when orch 
    - **later, behind the same `jail.json`:** overlay layers, network namespace with gateway-only egress, the witness.
 
    The launch contract stays the same throughout.
-2. **Lens sessions under #726, after that.** This conflicts with D8 and D54 and needs Nano's call when it starts (§10). D8 makes lenses stateless per question, and D54 has the lens shell reach BBP through its own `bbp mcp` child, while a jailed agent reaches the board only through the gateway (D79). Until then lenses stay as now: orch-side, one-shot, with no blocks.
+2. **Lens sessions under #726, after that.** This conflicts with D8 and D54 and needs Nano's call when it starts (§10). D8 makes lenses stateless per question, and D54 has the lens shell reach BBP through its own `bbp mcp` child, while a jailed agent reaches the board only through the gateway (D101). Until then lenses stay as now: orch-side, one-shot, with no blocks.
 3. **Codex** stays a one-shot lens in v0 and gets no block (D64).
 4. **Stage-lifecycle `bbp mod` harnesses** stay unchanged.
 
@@ -155,11 +155,11 @@ From rusty-term-expert. None of it exists today. Each item is a new capability r
 
 fd passing can't cross the C26 relay or SSH. orch talks to the account server's local socket on BaileyAi, so that isn't a problem.
 
-## 10. Decisions for Nano (approved as recommended, D82)
+## 10. Decisions for Nano (approved as recommended, D104)
 
 Recommendations are in **bold**.
 1. **Approve this design as a whole.** It re-closes D20 as "orch is the only executor; the mux hosts ptys", and D66 with launch through `Launch`.
-2. Approve the BBP takeover events in §5 (an ask-first schema change; built under schema 5, D83): **yes, as shaped**.
+2. Approve the BBP takeover events in §5 (an ask-first schema change; built under schema 5, D105): **yes, as shaped**.
 3. Recording mode: **as-delivered with a hash chain**, or write-ahead.
 4. Start the mux rows 1, 2, 3, 5 and 8 now (rusty-term-expert option a): **yes; defer 4 and 6, and use a viewer program for 6**.
 5. Should a granted lease survive a client reconnect (rusty_term D44's 30 s grace) until its `until`, and be refused on re-ask once revoked (D46)? **Yes**, which keeps D44 and D46.

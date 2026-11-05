@@ -2,7 +2,7 @@
 //!
 //! Sans-IO. [`JailFile`] is the wire shape (unknown fields refused);
 //! [`JailSpec::parse`] validates it once, at the boundary, so the launcher
-//! only ever sees a spec that holds the v0 contract (LEL D85).
+//! only ever sees a spec that holds the v0 contract (LEL D107).
 //! [`JailSpec::resolve`] repeats the token exclusion on what the paths
 //! resolve to, with the resolver passed in. The resolver also hands back a
 //! handle for each path, which the helper then opens instead of the name,
@@ -304,7 +304,7 @@ fn beneath_a_root(sandbox: &SandboxSpec, path: &Path) -> bool {
         .any(|root| path.starts_with(root))
 }
 
-/// D85: neither the token file nor the directory of tokens it sits in may
+/// D107: neither the token file nor the directory of tokens it sits in may
 /// be reachable, judged on resolved paths on both sides. The token is then
 /// read through its handle.
 fn resolved_token(

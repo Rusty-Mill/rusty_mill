@@ -1905,7 +1905,7 @@ fn exits_within(child: &mut std::process::Child, within: std::time::Duration) ->
     false
 }
 
-/// D82/D86: the cgroup holder keeps the slot after its caller is gone until
+/// D104/D108: the cgroup holder keeps the slot after its caller is gone until
 /// the session's cgroup is empty, and `quiesce` then removes the cgroup.
 #[cfg(target_os = "linux")]
 #[test]
@@ -1945,7 +1945,7 @@ fn the_cgroup_holder_frees_the_slot_only_once_the_cgroup_is_empty() {
         .is_empty());
 }
 
-/// D82/D86: at the deadline the holder kills the cgroup, even while its
+/// D104/D108: at the deadline the holder kills the cgroup, even while its
 /// caller still holds stdin open, and never touches a process group.
 #[cfg(target_os = "linux")]
 #[test]
@@ -1990,7 +1990,7 @@ fn the_cgroup_holder_kills_the_cgroup_at_the_deadline() {
     assert!(quiet && !cgroup.exists());
 }
 
-/// D86 (#1507 review): an open paused between its record and its cgroup
+/// D108 (#1507 review): an open paused between its record and its cgroup
 /// is a claim no other task's open can take, so exactly one task owns the
 /// path, the loser leaves no record, and its quiesce can't touch the winner.
 #[cfg(target_os = "linux")]
@@ -2044,7 +2044,7 @@ fn concurrent_opens_of_one_path_have_exactly_one_owner() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// D86 (#1507 review): an open paused after its record while the task
+/// D108 (#1507 review): an open paused after its record while the task
 /// ends: quiesce waits for it rather than settling a half-made session, so
 /// a quiesce that returns `true` leaves no cgroup behind; and once the task
 /// has ended no open succeeds.
@@ -2110,7 +2110,7 @@ fn crash_after_record(dir: &Path, t: &TaskId, cgroup: &Path) {
     assert!(crashed.is_err(), "the opener crashed");
 }
 
-/// D86 (#1507 review): a crash between publishing the intent and creating
+/// D108 (#1507 review): a crash between publishing the intent and creating
 /// the cgroup, on a path where a populated cgroup already exists, can't
 /// give quiesce authority over it: a cgroup made outside any board is
 /// never signalled or removed. One another control directory owns can't
@@ -2421,7 +2421,7 @@ fn a_cgroup_name_ending_in_whitespace_is_refused_up_front() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ---------------------------------------------------------------- takeover (D82)
+// ---------------------------------------------------------------- takeover (D104)
 
 fn bbp(dir: &Path, args: &[&str], stdin: impl AsRef<[u8]>) -> String {
     use std::io::Write;

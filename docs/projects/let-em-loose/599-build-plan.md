@@ -69,7 +69,7 @@ non-claims tasks are errors naming the cause. The turn replay is unchanged.
 Tests: accept line, drop line, human decide, choose, reopen by evidence,
 escalation, supersede, `--at` truncation, non-scoring evidence, unknown claim.
 
-## 2. Track records (PR 2)
+## 2. Track records
 
 Informational only (D29, Q2): never a weight. Replaces #594's unimplemented
 counts with `orch-store` table `lens_record`.
@@ -108,7 +108,7 @@ review (B3, S1–S4):
 `claim_history` supplies "score just before the post" and "contested at
 settlement" for each job.
 
-## 3. Lessons (PR 2)
+## 3. Lessons
 
 A lesson is a fact read from the log, not a model's judgment. Three triggers:
 
@@ -131,28 +131,84 @@ Before building, verify that remind-me's HTTP add route carries `project`
 The research lens finds lessons by remind-me search over the domains and cites
 them as `cited` evidence (weight 2): a lesson informs and never decides.
 
-## 4. Maintenance watcher (PR 3)
+## 4. Maintenance watcher
 
-`rusty_orch watch` runs daily on the BBP host (BaileyAi, D53; deploying is a
-separate step). It reads the Factory registry `apps/*.json` (app, repo, the
-long-lived maintenance task id, released ref, `watch_usd`) and a
-watched-versions file. The `Watch` port has four adapters, all CLI calls with
-no new crates: `cargo-deny` advisories, `cargo update --dry-run`, toolchain
-checks, and a `canary` re-run of the app's profile on its released ref. Each
-finding is posted once (`watch_finding` dedupes) as a claim on the app's
-maintenance task. A human still merges. `watch_usd` caps canary spend.
+`rusty_orch watch --factory DIR --bbp-dir DIR [--bbp PATH] [--app NAME]
+[--dry-run]` (`crates/apps/rusty_orch/crates/rusty_orch/src/watch.rs`) runs
+daily on the BBP host (BaileyAi, D53; deploying is a separate step). It reads
+`factory/apps/<app>.json` (D80) and `factory/watched-versions.json`
+(`{ "rust": "1.99.0" }`; absent means nothing watched).
 
-## 5. `rusty_orch lens why` (PR 2)
+- Adapters (the `Watch` port), all CLI calls with no new crates:
+  - `cargo-deny`: one finding per advisory and package, and one per yanked
+    crate version.
+  - `cargo-update`: one finding for the whole `cargo update --dry-run` set,
+    keyed by its digest. One `cargo update` takes them all, and a finding per
+    crate would post hundreds of claims.
+  - `toolchain`: the app's `rust-toolchain.toml` channel against the watched
+    Rust version.
+  - `canary`: a re-run of `profile` on `released_ref`, capped by `watch_usd`.
+    This is a later step, since it needs the BBP host's canary run.
+- Findings are posted by the task's `watcher` role (D79) as low-stakes,
+  reversible claims citing the brief. A claim needs a second author to
+  accept, and a human still merges.
+- **Posted once, through the approved `watch_finding` table (D83).** Each
+  finding has a stable key and a slot, the thing it is about:
+
+  | Finding | Key | Slot |
+  |---|---|---|
+  | Advisory | `advisory:<id>:<crate>` | the key |
+  | Yanked crate | `yanked:<crate>:<version>` | the key |
+  | Update set | `updates:<digest of the set>` | `updates` |
+  | Toolchain | `toolchain:rust:<watched version>` | `toolchain:rust` |
+
+  `watch_finding` (orch-store, `--state DIR`) keeps the key last posted and
+  its claim for each app and slot.
+  - The same key posts nothing, and the report gives the existing claim.
+  - A new key in a slot that already has a claim posts a claim with
+    `supersedes` naming the old one. Accepting the new claim retires the
+    stale one. Examples: a new update set, or a new watched Rust.
+  - An empty slot posts a new claim.
+
+  Details that change under a key are reported in `detail` and never
+  posted: an advisory's title or severity, or the app's current pin. The
+  claim text comes from the key alone, so it never goes stale.
+
+  A crash between the post and the table write is covered by writing the
+  post down first:
+  - Before a post is sent, its exact arguments are saved in the slot as
+    pending. Once BBP answers, the claim replaces them.
+  - The next run resends a pending post before anything else in that slot.
+    BBP replays it if it landed (R15: same op, same bytes) or posts it now.
+    Either way its claim becomes the slot's, so the next finding, even a
+    different one, supersedes it instead of leaving it orphaned. A resend
+    BBP checks and refuses never posted; it is dropped and reported. A
+    refusal from before BBP's op lookup (authentication, assignment, mode,
+    op conflict, a host error) can't tell, so the pending post is kept.
+  - A post is identified by the app, the key and the slot's previous claim.
+    The op id is a digest of all three, and every posted field comes from
+    the key and that claim; `refs` cites the opening brief `art:1`.
+  - A key that comes back after another (A, then B, then A) has a different
+    previous claim, so it is a new op: a new claim that supersedes B, not a
+    conflict with A's first post.
+  - The toolchain channel is read as TOML (`[toolchain] channel`, basic or
+    literal string, optional trailing comment on the header or value).
+- An adapter that fails is reported in the JSON with its reason, the others
+  still run, and the exit status is 1.
+
+## 5. `rusty_orch lens why`
 
 For one claim: the `bbp why --claim` history joined with orch's job records:
 the job, lens, model and cost behind each evidence post.
 
 ## PR order
 
-1. PR 1, BBP: `history` module + `bbp why --claim/--at`. No dependency on open work.
-2. PR 2, orch: track records, lessons, `lens why`. Waits for the #594 stack
-   (#1467, #1479), which owns the lens run state these read.
-3. PR 3, orch + BBP host: watcher and canary.
+1. BBP: `history` module + `bbp why --claim/--at`. Merged as #1483.
+2. orch: the watcher with three adapters, plus the expert's D79 to D81 and Q17.
+3. orch: track records, lessons and `lens why`. This waits for the #594 stack
+   (#1467, #1479), which owns the lens run state these read. Lessons also wait
+   on the remind-me HTTP `project` check (D58).
+4. BBP host + orch: the canary run.
 
 Out of scope: the Mill Board timeline (Q4: later), using track records as
 weights (Q2), deployment.

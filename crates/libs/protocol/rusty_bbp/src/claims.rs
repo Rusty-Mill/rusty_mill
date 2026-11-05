@@ -267,7 +267,7 @@ pub enum MarkOutcome {
     Aborted,
 }
 
-/// Why a takeover ended (D82).
+/// Why a takeover ended (D104).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TakeoverEnd {
     /// The human handed the session back.
@@ -282,7 +282,7 @@ pub enum TakeoverEnd {
     MuxLost,
 }
 
-/// A human takeover of one agent session (D82): who may type, until when,
+/// A human takeover of one agent session (D104): who may type, until when,
 /// and the hash chain of what was typed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Takeover {
@@ -300,7 +300,7 @@ pub struct Takeover {
     pub phase: TakeoverPhase,
 }
 
-/// Where a takeover is in its life (D82). Closing is the bounded drain
+/// Where a takeover is in its life (D104). Closing is the bounded drain
 /// between the end of input permission and the host's one `takeover_ended`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TakeoverPhase {
@@ -393,7 +393,7 @@ pub struct ClaimRecord {
     pub last_score: i64,
     /// #598: the intent version at the claim's latest acceptance.
     pub proven_at: Option<u32>,
-    /// Epochs in which a human took over one of its sessions (D84).
+    /// Epochs in which a human took over one of its sessions (D106).
     pub takeover_epochs: BTreeSet<u32>,
 }
 
@@ -523,10 +523,10 @@ pub struct ClaimsBook {
     pub holdout_retired: BTreeSet<Sha256>,
     /// #598: `intent_revised` events so far.
     pub revisions: u32,
-    /// Takeovers by id, from 1 (D82).
+    /// Takeovers by id, from 1 (D104).
     pub takeovers: BTreeMap<u64, Takeover>,
     /// Candidates stored after a takeover on their claim in the same epoch
-    /// (D84). Shown on the card; scoring is unchanged.
+    /// (D106). Shown on the card; scoring is unchanged.
     pub human_touched: BTreeSet<ArtId>,
 }
 
@@ -765,7 +765,7 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
         E::ClaimReopened { claim, epoch, by } => touch(claim, &mut |c| {
             // A takeover not yet ended may still be typing into this claim's
             // session: its attribution carries into the new epoch, whatever
-            // reopened it (D84).
+            // reopened it (D106).
             if attended {
                 c.takeover_epochs.insert(*epoch);
             }
@@ -966,7 +966,7 @@ pub struct ClaimView {
     /// holdout run on it yet: the accept line waits for one (#597).
     pub holdout_due: bool,
     /// The current candidate was stored after a human took over one of the
-    /// claim's sessions in this epoch (D84). Scoring is unchanged.
+    /// claim's sessions in this epoch (D106). Scoring is unchanged.
     pub human_touched: bool,
     /// #598: shown once the task's intent has been revised.
     #[rusty_serde(default, skip_serializing_if = "Option::is_none")]

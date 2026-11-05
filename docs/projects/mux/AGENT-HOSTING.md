@@ -1,12 +1,12 @@
 # Agent hosting: the mux side of mux-hosted agent ptys
 
-**Status.** Rows C75–C78 and the scoped C46 are approved to start by Let Em Loose D82: Nano tapped
+**Status.** Rows C75–C78 and the scoped C46 are approved to start by Let Em Loose D104: Nano tapped
 decision card `cmsg_01WgyiM31RsSnZTgNuPX2VE41VyDsxTHxmCrXAPxQnCpra` at 2026-11-05T00:00:23Z,
 choosing §10 items 4 to 6. The shapes below are still *Proposed* in [DECISIONS.md](DECISIONS.md)
 until Nano accepts them on this PR (rusty_term D37), and the Rusty Term pack records its own row
-for D82 item 4. There is no code until then.
+for D104 item 4. There is no code until then.
 
-- **Decision it serves:** Let Em Loose D81 [stated]: agents get mux-hosted ptys. Nano, 2026-11-04
+- **Decision it serves:** Let Em Loose D103 [stated]: agents get mux-hosted ptys. Nano, 2026-11-04
   23:51Z, thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE42EMPL7EXicY3bTWURHCCkG`.
   - orch decides and the mux hosts.
   - The block's program is the jail launcher `lel-jail`, which execs the agent.
@@ -46,7 +46,7 @@ for D82 item 4. There is no code until then.
 independently. Each row gets its own bit, so a peer knows exactly what it has (D27), and each row
 can ship or be reverted on its own.
 
-**Deferred** (LEL §9 and D82 item 4):
+**Deferred** (LEL §9 and D104 item 4):
 - Surviving a mux restart, which needs a handoff of pty masters (size L).
 - A program-less feed block. A viewer program is enough.
 - Write-ahead input recording.
@@ -311,14 +311,14 @@ that need the lease are `Input` (paste included), `Resize`, `terminal.send-keys`
   - It is a message, not an event, so it never enters the shared event `History` and is never
     replayed to a resuming client.
   - Bytes go to the pty first, then the message goes to the owner, which is the "as delivered"
-    mode (D82 item 3). orch batches the messages for the board.
+    mode (D104 item 3). orch batches the messages for the board.
 - **Fail closed.** Input on an `owner-only` block is refused (`input_unrecorded`):
   - while the owner's outbox is above a threshold under its 8 MiB `BUDGET` (`outbox.rs:11-14`);
   - while the owner is inside its D44 grace, since nothing could be reported then.
 
   Input is never delivered without being reported. If the owner is gone for good (C46
   orphaned), every grant ends.
-- **Reconnects** (D82 item 5). A grant survives a reconnect inside D44's 30 s grace, until
+- **Reconnects** (D104 item 5). A grant survives a reconnect inside D44's 30 s grace, until
   `until`. After a revoke or expiry, asking again is refused (D46). D44 and D46 stand.
 
 The owner itself may always take the lease. orch has no reason to type, but refusing it would add
@@ -347,7 +347,7 @@ a rule with no use.
   OpenSSH is often 8.1.
 - rusty_term has no mux client (LEL §7).
 
-**Path (D82 item 6, option a), size M.**
+**Path (D104 item 6, option a), size M.**
 1. **Spike (S, first).** On Lap or Beast, record the in-box OpenSSH version, and check whether it
    does `-L LOCAL_SOCKET:REMOTE_SOCKET` streamlocal forwarding with a Windows AF_UNIX local
    socket.
@@ -368,7 +368,7 @@ a rule with no use.
    the login-mode front door's socket. An account socket (`RUNTIME/ACCOUNT/server.sock`) refuses
    any uid that isn't the account's own or the front door's (`server/src/lib.rs:189-197`).
    rusty_term needs no code. Option (b), a mux client inside rusty_term, stays a later L.
-4. **BaileyAi topology (approved in D82 item 6; host changes still gated).**
+4. **BaileyAi topology (approved in D104 item 6; host changes still gated).**
    - A root front door runs `rusty-mux-server --login MAP` with the map entry
      `user:baileyrd → orch-runner`.
    - orch connects directly to the account socket `…/orch-runner/server.sock`, where it may pass
@@ -386,7 +386,7 @@ a rule with no use.
 
 ## Gates
 
-D82 starts these rows. These still need Nano's or a reviewer's go on the PR that builds them:
+D104 starts these rows. These still need Nano's or a reviewer's go on the PR that builds them:
 - **Wire review for each row:** the `Launch` fields, client types 0x21 onward, server type 0x8e,
   event kind 33, and bits 35–39 (D27).
 - **Public API:** `rusty_libc`, `rusty_tokio`, and rustils `platform`/`platform-linux` (C75), plus
@@ -405,13 +405,13 @@ Answer on this PR.
   - Recommend **orphaned**, as in C46: the block stays, input is closed, and only the owner's
     principal may close it.
   - Closing the block instead would kill the agent from the mux side, against Let Em Loose D20 as
-    re-closed by D82: "the mux never kills one on its own".
+    re-closed by D104: "the mux never kills one on its own".
   - Letting any same-principal client adopt it reopens the viewer-takes-control hole.
 - **B. Descriptor passing adds public API to `rusty_libc`, `rusty_tokio` and rustils `platform`**
   (C75). Recommend **yes**: it is first-party, adds no dependency, and extends those crates where
   the mux needs it (2026-10-22).
 - **C. A stopping mux and owned blocks.** Today, stopping the server SIGKILLs every block's group
   (`Process::drop`).
-  - Recommend **(b): owned blocks are only hung up**, and the cgroup holder cleans up, since D82
+  - Recommend **(b): owned blocks are only hung up**, and the cgroup holder cleans up, since D104
     says the mux never kills an agent on its own.
   - The alternative (a) keeps the kill, and orch sees it as `mux_lost` either way.

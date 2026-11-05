@@ -70,14 +70,14 @@ pub enum HostAction {
         reason: crate::claims::PauseReason,
         detail: String,
     },
-    /// D82: one batch of takeover input, as the mux delivered it.
+    /// D104: one batch of takeover input, as the mux delivered it.
     TakeoverInput {
         takeover: u64,
         seq: u64,
         bytes: crate::ids::Base64Bytes,
         sha256: Sha256,
     },
-    /// D82: orch ends a takeover (expired, revoked, turn ended, mux lost).
+    /// D104: orch ends a takeover (expired, revoked, turn ended, mux lost).
     TakeoverEnded {
         takeover: u64,
         reason: crate::claims::TakeoverEnd,
@@ -219,7 +219,7 @@ pub enum HumanAction {
         mark: u64,
         outcome: crate::claims::MarkOutcome,
     },
-    /// Claims mode (D82): take over agent session `session` on `claim` for
+    /// Claims mode (D104): take over agent session `session` on `claim` for
     /// `client`, for at most `minutes`.
     Takeover {
         claim: MsgId,
@@ -228,7 +228,7 @@ pub enum HumanAction {
         minutes: u32,
         reason: String,
     },
-    /// Claims mode (D82): hand a takeover back.
+    /// Claims mode (D104): hand a takeover back.
     TakeoverRelease {
         takeover: u64,
     },
@@ -269,7 +269,7 @@ pub enum Response {
     Line(Option<String>),
     /// A mark was recorded.
     Marked(u64),
-    /// A takeover started; its id (D82).
+    /// A takeover started; its id (D104).
     TakenOver(u64),
 }
 
