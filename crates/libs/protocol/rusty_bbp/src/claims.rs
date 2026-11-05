@@ -254,12 +254,33 @@ pub struct Takeover {
     pub batches: u64,
     /// The chain value after the last batch.
     pub last: Option<Sha256>,
-    pub ended: Option<TakeoverEnd>,
+    pub phase: TakeoverPhase,
+}
+
+/// Where a takeover is in its life (D82). Closing is the bounded drain
+/// between the end of input permission and the host's one `takeover_ended`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TakeoverPhase {
+    /// The human may type.
+    Live,
+    /// Released or its task ended at `at`: no new input; batches already
+    /// delivered may still be recorded until the drain runs out.
+    Closing {
+        reason: TakeoverEnd,
+        at: Time,
+    },
+    Ended(TakeoverEnd),
 }
 
 impl Takeover {
+    /// Whether the human may still type.
     pub fn live(&self) -> bool {
-        self.ended.is_none()
+        self.phase == TakeoverPhase::Live
+    }
+
+    /// Whether `takeover_ended` has been written.
+    pub fn ended(&self) -> bool {
+        matches!(self.phase, TakeoverPhase::Ended(_))
     }
 }
 
@@ -773,7 +794,7 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
                     until: *until,
                     batches: 0,
                     last: None,
-                    ended: None,
+                    phase: TakeoverPhase::Live,
                 },
             );
         }
@@ -788,11 +809,23 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
                 t.last = Some(*sha256);
             }
         }
+        E::TakeoverClosing {
+            takeover,
+            reason,
+            at,
+        } => {
+            if let Some(t) = book.takeovers.get_mut(takeover) {
+                t.phase = TakeoverPhase::Closing {
+                    reason: *reason,
+                    at: *at,
+                };
+            }
+        }
         E::TakeoverEnded {
             takeover, reason, ..
         } => {
             if let Some(t) = book.takeovers.get_mut(takeover) {
-                t.ended = Some(*reason);
+                t.phase = TakeoverPhase::Ended(*reason);
             }
         }
         E::ClaimActionResult { mark, outcome } => {

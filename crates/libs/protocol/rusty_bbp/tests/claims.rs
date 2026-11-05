@@ -3740,6 +3740,39 @@ mod takeover {
         })
     }
 
+    fn end(id: u64, reason: TakeoverEnd) -> HostAction {
+        HostAction::TakeoverEnded {
+            takeover: id,
+            reason,
+        }
+    }
+
+    fn inputs(cx: &Cx, id: u64) -> Vec<Vec<u8>> {
+        cx.log
+            .iter()
+            .filter_map(|e| match e {
+                Event::TakeoverInput {
+                    takeover, bytes, ..
+                } if *takeover == id => Some(bytes.0.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn closings(cx: &Cx, id: u64) -> Vec<(TakeoverEnd, Time)> {
+        cx.log
+            .iter()
+            .filter_map(|e| match e {
+                Event::TakeoverClosing {
+                    takeover,
+                    reason,
+                    at,
+                } if *takeover == id => Some((*reason, *at)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn ends(cx: &Cx, id: u64) -> Vec<(TakeoverEnd, u64, Option<Sha256>)> {
         cx.log
             .iter()
@@ -3766,16 +3799,8 @@ mod takeover {
         ok(input(&mut cx, id, 2, "cargo test\r", Some(one)));
         let two = input_chain(Some(one), b"cargo test\r");
         ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
-        let ended = cx.log.iter().rev().find_map(|e| match e {
-            Event::TakeoverEnded {
-                reason,
-                batches,
-                last,
-                ..
-            } => Some((*reason, *batches, *last)),
-            _ => None,
-        });
-        assert_eq!(ended, Some((TakeoverEnd::Released, 2, Some(two))));
+        ok(cx.host(end(id, TakeoverEnd::Released)));
+        assert_eq!(ends(&cx, id), [(TakeoverEnd::Released, 2, Some(two))]);
         // Ended: no more input, no second end.
         assert_eq!(
             rejected(input(&mut cx, id, 3, "x", Some(two))),
@@ -3868,15 +3893,82 @@ mod takeover {
     }
 
     #[test]
-    fn closing_or_cancelling_the_task_ends_live_takeovers_once() {
+    fn a_release_drains_a_delivered_batch_then_the_host_ends_it_once() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        ok(input(&mut cx, id, 1, "ls\r", None));
+        let one = input_chain(None, b"ls\r");
+        let at = cx.now;
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        assert_eq!(closings(&cx, id), [(TakeoverEnd::Released, at)]);
+        assert!(ends(&cx, id).is_empty(), "the human does not end it");
+        assert!(!cx.st.claims.takeovers[&id].live());
+        // Released once: no second release, and the session is free again.
+        assert_eq!(
+            rejected(cx.human(HumanAction::TakeoverRelease { takeover: id })),
+            Code::NotOpen
+        );
+        // The batch delivered before the release is posted at the cutoff.
+        cx.now = at.plus(TAKEOVER_DRAIN_MS);
+        ok(input(&mut cx, id, 2, b"q\xff", Some(one)));
+        let two = input_chain(Some(one), b"q\xff");
+        cx.now = at.plus(TAKEOVER_DRAIN_MS + 1);
+        assert_eq!(
+            rejected(input(&mut cx, id, 3, "x", Some(two))),
+            Code::TokenExpired
+        );
+        // It ends for the reason it closed with, with the fold's totals.
+        assert_eq!(
+            rejected(cx.host(end(id, TakeoverEnd::Expired))),
+            Code::WrongState
+        );
+        ok(cx.host(end(id, TakeoverEnd::Released)));
+        assert_eq!(inputs(&cx, id), [b"ls\r".to_vec(), b"q\xff".to_vec()]);
+        assert_eq!(ends(&cx, id), [(TakeoverEnd::Released, 2, Some(two))]);
+        assert_eq!(
+            rejected(cx.host(end(id, TakeoverEnd::Released))),
+            Code::NotOpen
+        );
+        assert_eq!(
+            rejected(input(&mut cx, id, 3, "x", Some(two))),
+            Code::NotOpen
+        );
+        assert_eq!(started(&mut cx, c, "s1"), 2);
+    }
+
+    #[test]
+    fn a_release_after_expiry_does_not_extend_the_drain() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        let until = cx.now.plus(10 * 60_000);
+        cx.now = until.plus(TAKEOVER_DRAIN_MS);
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        cx.now = until.plus(TAKEOVER_DRAIN_MS + 1);
+        assert_eq!(
+            rejected(input(&mut cx, id, 1, "x", None)),
+            Code::TokenExpired
+        );
+        ok(cx.host(end(id, TakeoverEnd::Released)));
+        assert_eq!(ends(&cx, id), [(TakeoverEnd::Released, 0, None)]);
+    }
+
+    #[test]
+    fn closing_or_cancelling_the_task_drains_live_takeovers_then_ends_them_once() {
         for cancel in [false, true] {
             let mut cx = Cx::new();
             let c = cx.low();
             let id = started(&mut cx, c, "s1");
             let done = started(&mut cx, c, "s2");
+            let released = started(&mut cx, c, "s3");
             ok(input(&mut cx, id, 1, "y\r", None));
+            let one = input_chain(None, b"y\r");
             ok(cx.human(HumanAction::TakeoverRelease { takeover: done }));
+            ok(cx.host(end(done, TakeoverEnd::Released)));
+            ok(cx.human(HumanAction::TakeoverRelease { takeover: released }));
             let expected_rev = cx.rev();
+            let at = cx.now;
             ok(cx.human(if cancel {
                 HumanAction::Cancel {
                     expected_rev,
@@ -3886,10 +3978,48 @@ mod takeover {
                 HumanAction::Close { expected_rev }
             }));
             assert!(cx.st.state.terminal(), "cancel={cancel}");
-            let chain = Some(input_chain(None, b"y\r"));
-            assert_eq!(ends(&cx, id), [(TakeoverEnd::TurnEnded, 1, chain)]);
-            assert_eq!(ends(&cx, done).len(), 1, "an ended one is not ended again");
+            assert_eq!(closings(&cx, id), [(TakeoverEnd::TurnEnded, at)]);
+            assert_eq!(closings(&cx, done).len(), 1, "an ended one is left alone");
+            assert_eq!(closings(&cx, released).len(), 1, "a closing one too");
+            assert!(ends(&cx, id).is_empty());
             assert!(cx.st.claims.takeovers.values().all(|t| !t.live()));
+            // The terminal task takes the drain, and nothing else.
+            cx.now = at.plus(TAKEOVER_DRAIN_MS);
+            ok(input(&mut cx, id, 2, "!", Some(one)));
+            let two = input_chain(Some(one), b"!");
+            cx.now = at.plus(TAKEOVER_DRAIN_MS + 1);
+            assert_eq!(
+                rejected(input(&mut cx, id, 3, "x", Some(two))),
+                Code::TokenExpired
+            );
+            assert_eq!(
+                rejected(cx.host(end(done, TakeoverEnd::Released))),
+                Code::Terminal,
+                "an ended one is not ended again"
+            );
+            assert_eq!(
+                rejected(cx.human(HumanAction::TakeoverRelease { takeover: id })),
+                Code::Terminal
+            );
+            assert_eq!(
+                rejected(cx.host(end(id, TakeoverEnd::Released))),
+                Code::WrongState
+            );
+            ok(cx.host(end(id, TakeoverEnd::TurnEnded)));
+            ok(cx.host(end(released, TakeoverEnd::Released)));
+            assert_eq!(inputs(&cx, id), [b"y\r".to_vec(), b"!".to_vec()]);
+            assert_eq!(ends(&cx, id), [(TakeoverEnd::TurnEnded, 2, Some(two))]);
+            assert_eq!(ends(&cx, released), [(TakeoverEnd::Released, 0, None)]);
+            assert_eq!(
+                rejected(cx.host(end(id, TakeoverEnd::TurnEnded))),
+                Code::Terminal
+            );
+            assert_eq!(
+                rejected(input(&mut cx, id, 3, "x", Some(two))),
+                Code::Terminal
+            );
+            assert!(cx.st.claims.takeovers.values().all(|t| t.ended()));
+            assert!(cx.st.state.terminal());
         }
     }
 
@@ -3975,6 +4105,7 @@ mod takeover {
         let id = started(&mut cx, c, "s1");
         ok(input(&mut cx, id, 1, "y\r", None));
         cx.candidate("a", c);
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
         let mut again = TaskState::new(TaskId::from("t"));
         for e in &cx.log {
             again.apply(e);

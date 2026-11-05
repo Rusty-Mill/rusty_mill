@@ -1235,7 +1235,9 @@ pub(crate) fn human(w: &mut Work, a: &HumanAction, now: Time) -> R<Response> {
             reason,
         } => takeover_start(w, *claim, session, client, *minutes, reason, now),
         HumanAction::TakeoverRelease { takeover } => {
-            takeover_end(w, *takeover, TakeoverEnd::Released, now)
+            live_takeover(w, *takeover)?;
+            close_takeover(w, *takeover, TakeoverEnd::Released, now);
+            Ok(Response::Ok)
         }
         HumanAction::HoldoutUpdated { digest } => {
             new_holdout(w, *digest, Event::HoldoutUpdated { digest: *digest })
@@ -1459,12 +1461,7 @@ pub(crate) fn host(w: &mut Work, a: &HostAction, now: Time) -> R<Response> {
             bytes,
             sha256,
         } => takeover_input(w, *takeover, *seq, &bytes.0, *sha256, now),
-        HostAction::TakeoverEnded { takeover, reason } => {
-            if *reason == TakeoverEnd::Released {
-                return Err(rej(Code::Forbidden, "only the human releases a takeover"));
-            }
-            takeover_end(w, *takeover, *reason, now)
-        }
+        HostAction::TakeoverEnded { takeover, reason } => takeover_end(w, *takeover, *reason, now),
     }
 }
 
@@ -1474,8 +1471,9 @@ pub(crate) fn host(w: &mut Work, a: &HostAction, now: Time) -> R<Response> {
 pub const MAX_TAKEOVER_MINUTES: u32 = 60;
 /// The largest input batch, in raw bytes as delivered.
 pub const MAX_TAKEOVER_BATCH: usize = 4096;
-/// How long after `until` delivered input may still be posted: orch posts
-/// every 2 s, so this covers a batch delivered just before expiry.
+/// How long after `until`, a release or the task's end, input already
+/// delivered may still be posted: orch posts every 2 s, so this covers a
+/// batch delivered just before input stopped.
 pub const TAKEOVER_DRAIN_MS: u64 = 10_000;
 /// The longest session or client name.
 const MAX_TAKEOVER_NAME: usize = 128;
@@ -1543,22 +1541,54 @@ fn takeover_start(
     Ok(Response::TakenOver(takeover))
 }
 
-fn live_takeover(w: &Work, id: u64) -> R<&Takeover> {
+fn takeover_of(w: &Work, id: u64) -> R<&Takeover> {
     let t =
         w.st.claims
             .takeovers
             .get(&id)
             .ok_or_else(|| rej(Code::RefUnresolved, format!("no takeover {id}")))?;
-    if !t.live() {
+    if t.ended() {
         return Err(rej(Code::NotOpen, format!("takeover {id} has ended")));
     }
     Ok(t)
 }
 
+fn live_takeover(w: &Work, id: u64) -> R<&Takeover> {
+    let t = takeover_of(w, id)?;
+    if !t.live() {
+        return Err(rej(Code::NotOpen, format!("takeover {id} is closing")));
+    }
+    Ok(t)
+}
+
+/// The last moment a batch may be posted: [`TAKEOVER_DRAIN_MS`] after input
+/// stopped, at `until` or at closing, whichever came first.
+fn input_cutoff(t: &Takeover) -> Time {
+    let stopped = match t.phase {
+        TakeoverPhase::Closing { at, .. } if at < t.until => at,
+        _ => t.until,
+    };
+    stopped.plus(TAKEOVER_DRAIN_MS)
+}
+
+/// D82: the audit writes a closing takeover still takes on a terminal task,
+/// and nothing else: its drained input and its one end.
+pub(crate) fn closing_audit(st: &TaskState, a: &HostAction) -> bool {
+    let id = match a {
+        HostAction::TakeoverInput { takeover, .. } | HostAction::TakeoverEnded { takeover, .. } => {
+            takeover
+        }
+        _ => return false,
+    };
+    st.claims
+        .takeovers
+        .get(id)
+        .is_some_and(|t| matches!(t.phase, TakeoverPhase::Closing { .. }))
+}
+
 /// D82: batches arrive in order and extend the chain. orch posts what the
-/// mux delivered every 2 s, so a batch delivered just before `until` may be
-/// posted after it: input is accepted until `until` plus
-/// [`TAKEOVER_DRAIN_MS`], and never once the takeover has ended.
+/// mux delivered every 2 s, so a batch delivered just before input stopped
+/// may be posted after it: see [`input_cutoff`]. Never once it has ended.
 fn takeover_input(
     w: &mut Work,
     id: u64,
@@ -1567,11 +1597,11 @@ fn takeover_input(
     sha256: Sha256,
     now: Time,
 ) -> R<Response> {
-    let t = live_takeover(w, id)?;
-    if now > t.until.plus(TAKEOVER_DRAIN_MS) {
+    let t = takeover_of(w, id)?;
+    if now > input_cutoff(t) {
         return Err(rej(
             Code::TokenExpired,
-            format!("takeover {id} expired; end it"),
+            format!("takeover {id} stopped taking input; end it"),
         ));
     }
     if seq != t.batches + 1 {
@@ -1604,9 +1634,18 @@ fn takeover_input(
     Ok(Response::Ok)
 }
 
-/// D82: a task that ends ends every live takeover first, so each one closes
-/// with exactly one `takeover_ended` and no takeover outlives its task.
-pub(crate) fn end_live_takeovers(w: &mut Work) {
+/// D82: input stops now; the host drains and writes the end.
+fn close_takeover(w: &mut Work, id: u64, reason: TakeoverEnd, now: Time) {
+    w.emit(Event::TakeoverClosing {
+        takeover: id,
+        reason,
+        at: now,
+    });
+}
+
+/// D82: a task that ends stops input on every live takeover first, so no
+/// one types into a finished task; each still ends once, by the host.
+pub(crate) fn close_live_takeovers(w: &mut Work, now: Time) {
     let live: Vec<u64> =
         w.st.claims
             .takeovers
@@ -1615,26 +1654,32 @@ pub(crate) fn end_live_takeovers(w: &mut Work) {
             .map(|(id, _)| *id)
             .collect();
     for id in live {
-        if let Some(t) = w.st.claims.takeovers.get(&id) {
-            let (batches, last) = (t.batches, t.last);
-            w.emit(Event::TakeoverEnded {
-                takeover: id,
-                reason: TakeoverEnd::TurnEnded,
-                batches,
-                last,
-            });
-        }
+        close_takeover(w, id, TakeoverEnd::TurnEnded, now);
     }
 }
 
-/// D82: the totals come from the fold, not the caller.
+/// D82: only the host ends a takeover, and the totals come from the fold. A
+/// closing one ends for the reason it closed with; a live one for the
+/// host's own reasons, never as the human's release.
 fn takeover_end(w: &mut Work, id: u64, reason: TakeoverEnd, now: Time) -> R<Response> {
-    let t = live_takeover(w, id)?;
-    if reason == TakeoverEnd::Expired && now < t.until {
-        return Err(rej(
-            Code::WrongState,
-            format!("takeover {id} has not expired"),
-        ));
+    let t = takeover_of(w, id)?;
+    match t.phase {
+        TakeoverPhase::Closing { reason: closed, .. } if closed != reason => {
+            return Err(rej(
+                Code::WrongState,
+                format!("takeover {id} is closing as {closed:?}, not {reason:?}"),
+            ));
+        }
+        TakeoverPhase::Live if reason == TakeoverEnd::Released => {
+            return Err(rej(Code::Forbidden, "only the human releases a takeover"));
+        }
+        TakeoverPhase::Live if reason == TakeoverEnd::Expired && now < t.until => {
+            return Err(rej(
+                Code::WrongState,
+                format!("takeover {id} has not expired"),
+            ));
+        }
+        _ => {}
     }
     let (batches, last) = (t.batches, t.last);
     w.emit(Event::TakeoverEnded {
