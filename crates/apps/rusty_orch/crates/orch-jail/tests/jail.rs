@@ -131,7 +131,9 @@ fn run_jail(spec: &Path, fds: &[i32]) -> Output {
     let held: Vec<i32> = [3, 4, 7]
         .into_iter()
         .filter(|&fd| fcntl(fd, F_GETFD, 0).is_err())
-        .inspect(|&fd| drop(dup2(stray.as_raw_fd(), fd).unwrap()))
+        .inspect(|&fd| {
+            dup2(stray.as_raw_fd(), fd).unwrap();
+        })
         .collect();
     // Sources above every target, so placing one never clobbers another.
     let high = |fd: i32| fcntl(fd, F_DUPFD_CLOEXEC, 8).unwrap();
