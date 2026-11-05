@@ -791,7 +791,7 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Rejected.** Scoring pivotal reviews against the board outcome, which the lens itself moved. Leaving every pivotal review unscored, even where ground truth exists. The other Q17 options: pivotal reviews at w = 1, or dropping the pivotal rule.
 **Tag.** [stated] · remind-me: mem_3f1158fb8fe0485697a8a713fc86469f
 **Key.** lel:599:track-record-pivotal
-**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Track-record question: option A, plus ground truth". OPEN_QUESTIONS Q17 (card #599 Q2). Numbered D93 (first drafted as D84) under the 2026-11-05 allocation that gives this thread's open PRs D92–D95.
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Track-record question: option A, plus ground truth". OPEN_QUESTIONS Q17 (card #599 Q2). Numbered D93 (first drafted as D84) under the 2026-11-05 allocation that gives this thread's open PRs D92–D95. Confirmed by Nano's tap of option A, "Keep, report a pivotal count", on decision card cmsg_014AqbZs58L565hMV2pFkCX5FmbGRzqBvub8s2BWcnKhkV (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:17Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5E4QqeAo7EVN379KMrdxNJa). The card was posted before the 11-04 message and doesn't mention ground truth. The ground-truth scoring was confirmed when Nano told dottiusmaximus directly "1518 and 1520 I approve", after the queue had explained D93's pivotal-review ground-truth scoring. dottiusmaximus recorded this on PR #1518 (comment 6669751039, 2026-11-05T21:15:38Z) and PR #1520 (comment 6669752737, 2026-11-05T21:15:43Z). Neither comment claims the 11-04 thread message was retrieved independently.
 
 ## D94. Let Em Loose designs live in the repo, in their first draft PR
 
@@ -800,7 +800,7 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Rejected.** Keeping designs in `/mnt/project-files/let-em-loose/` or in session scratch.
 **Tag.** [stated] · remind-me: mem_aff6060cd75743ef9807b92006c3f1c7
 **Key.** lel:general:designs-live-in-repo
-**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Design docs live in the repo, never in session scratch." Numbered D94 (first drafted as D85) under the same allocation.
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Design docs live in the repo, never in session scratch." Numbered D94 (first drafted as D85) under the same allocation. Confirmed when Nano told dottiusmaximus directly "1518 and 1520 I approve", after the queue had explained D94's designs-in-repo rule. dottiusmaximus recorded this on PR #1518 (comment 6669751039, 2026-11-05T21:15:38Z), which doesn't claim the 11-04 thread message was retrieved independently.
 
 ## D96. #708 orch runs the alien lens's probes itself, sandboxed
 
