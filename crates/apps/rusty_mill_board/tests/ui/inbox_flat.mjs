@@ -28,9 +28,9 @@ await page.goto(BASE);
 await page.waitForSelector(".card");
 await page.fill("#actor", "tester");
 const titles = async () => (await page.locator(".card b").allInnerTexts()).sort();
-const rows = (await page.locator("#nav1 .item").allInnerTexts()).map((t) => t.replace(/\s+/g, " ").trim());
+const rows = [...await page.locator("#repo option").allInnerTexts(), ...await page.locator("#nav1 .item").allInnerTexts()].map((t) => t.replace(/\s+/g, " ").trim());
 
-check(rows.join("|") === "All repositories 2|Inbox 1|default 2|rl 1", `the Inbox counts only its own cards; the repository and its other project stay (${rows.join("|")})`);
+check(rows.join("|") === "All repositories · 2|default · 2|Inbox 1|rl 1", `the Inbox counts only its own cards; the repository and its other project stay (${rows.join("|")})`);
 check((await page.locator(".card", { hasText: "Unsorted card" }).locator(".tag.proj").innerText()) === "Inbox", "an Inbox card's chip says Inbox");
 
 await page.locator("#nav1 .item", { hasText: "Inbox" }).click();
@@ -45,7 +45,7 @@ await page.locator(".card", { hasText: "Added in Inbox" }).click();
 check((await page.locator("#dlg option[value=default]").innerText()) === "Inbox", "the dialog offers project default as the Inbox");
 await page.keyboard.press("Escape");
 
-await page.locator("#nav1 .item", { hasText: /^default/ }).click();
+await page.selectOption("#repo", "default");
 check((await titles()).join() === "Added in Inbox,RL card,Unsorted card", "the default repository still shows every card in it");
 
 check(errors.length === 0, `no page errors ${errors.join("; ")}`);

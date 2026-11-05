@@ -43,6 +43,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{KeyCode, KeyLocation, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, Window, WindowId};
 
+use super::chrome::{Chrome, Marks};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::pace::Pacer;
@@ -1360,12 +1361,18 @@ impl WindowState<'_> {
         }
     }
 
+    /// The chrome colours for the current theme (pack D34-D36, D38).
+    fn chrome_colors(&self) -> Chrome {
+        Chrome::from_theme(&self.theme)
+    }
+
     /// Paint the chrome bar + the active tab's panes through the renderer.
     fn redraw(&mut self) {
         self.pacer.painted(Instant::now());
         let chrome = self.chrome_row();
         let status = self.status_row();
-        let divider = mix(self.theme.bg, self.theme.fg, 60);
+        let tokens = self.chrome_colors();
+        let divider = tokens.line;
         if self.overlay.is_some() {
             let page = self.build_overlay_grid().frame_view();
             let (Some(renderer), Some(window)) = (self.renderer.as_mut(), self.window.as_ref())
@@ -1393,8 +1400,8 @@ impl WindowState<'_> {
                 size.width,
                 size.height,
                 divider,
-                self.theme.bg,
-                mix(self.theme.bg, self.theme.fg, 48),
+                tokens.base, // the page is chrome, padding included
+                tokens.frame,
                 self.pad,
             );
             return;
@@ -1407,7 +1414,7 @@ impl WindowState<'_> {
         let dock_grid = if self.dock_cols() > 0 {
             let built = self.pane().map(|p| {
                 let g = p.grid.lock();
-                build_dock_grid(&g, &self.theme, DOCK_CELLS, self.rows as usize)
+                build_dock_grid(&g, &self.chrome_colors(), DOCK_CELLS, self.rows as usize)
             });
             let (grid, items) =
                 built.unwrap_or_else(|| (Grid::new(DOCK_CELLS, self.rows as usize), Vec::new()));
@@ -1500,13 +1507,19 @@ impl WindowState<'_> {
         } else {
             self.trail = None;
         }
-        // Command gutter marks (per pane): resolve each row's BlockMark to a
-        // theme color — success green, failure red, running in the accent.
+        // Command gutter marks (per pane): resolve each row's BlockMark against
+        // what backs the stripe (D41, D42): the padding band (theme bg) for a pane
+        // at the left edge, the divider for a pane right of a split.
         let marks_on = self.config.command_marks.unwrap_or(true);
-        let mark_color = |m: crate::core::BlockMark| match m {
-            crate::core::BlockMark::Success => self.theme.palette16[2],
-            crate::core::BlockMark::Error => self.theme.palette16[1],
-            crate::core::BlockMark::Running => self.theme.cursor,
+        let edge_marks = Marks::on(self.theme.bg, self.theme.cursor, &tokens);
+        let split_marks = Marks::on(tokens.line, self.theme.cursor, &tokens);
+        let mark_color = |m: crate::core::BlockMark, col: usize| {
+            let marks = if col == 0 { &edge_marks } else { &split_marks };
+            match m {
+                crate::core::BlockMark::Success => marks.success,
+                crate::core::BlockMark::Error => marks.failure,
+                crate::core::BlockMark::Running => marks.running,
+            }
         };
         let search = SearchColors::from_theme(&self.theme);
         let mut frames: Vec<PaneFrame> = snaps
@@ -1527,7 +1540,7 @@ impl WindowState<'_> {
                     g.block_marks()
                         .iter()
                         .enumerate()
-                        .filter_map(|(row, m)| m.map(|m| (row, mark_color(m))))
+                        .filter_map(|(row, m)| m.map(|m| (row, mark_color(m, r.col))))
                         .collect()
                 } else {
                     Vec::new()
@@ -1558,7 +1571,7 @@ impl WindowState<'_> {
             size.height,
             divider,
             self.theme.bg,
-            mix(self.theme.bg, self.theme.fg, 48),
+            tokens.frame,
             self.pad,
         );
         drop(frames);
@@ -1620,8 +1633,9 @@ impl WindowState<'_> {
             return Vec::new();
         }
         let (paint_cols, cols) = self.bar_cells();
-        let bar_bg = mix(self.theme.bg, self.theme.fg, 48);
-        let dim_fg = mix(self.theme.fg, self.theme.bg, 110);
+        let tokens = self.chrome_colors();
+        let bar_bg = tokens.sunk;
+        let dim_fg = tokens.muted;
         let mut row = vec![Cell::blank(); paint_cols];
         for c in &mut row {
             c.fg = dim_fg;
@@ -1645,9 +1659,8 @@ impl WindowState<'_> {
 
         // Right side, innermost first: grid size, scrollback position, exit
         // pill. Each segment carries its own color.
-        let ok = self.theme.palette16[2];
-        let err = self.theme.palette16[1];
-        let warn = self.theme.palette16[3];
+        // Scrolled back is a mode, not a status: full text plus the arrow.
+        let (ok, err, warn) = (tokens.success, tokens.failure, tokens.text);
         let mut right: Vec<(String, u32)> = Vec::new();
         right.push((format!("{gcols}\u{00d7}{grows} "), dim_fg));
         if view_offset > 0 {
@@ -1680,12 +1693,12 @@ impl WindowState<'_> {
                 &mut col,
                 limit,
                 &format!(" {text}"),
-                self.theme.fg,
+                tokens.text,
                 bar_bg,
                 Hit::Drag,
             );
             if let Some(b) = &branch {
-                let accent = self.theme.cursor;
+                let accent = tokens.accent;
                 put_text(
                     &mut row,
                     &mut hits,
@@ -1731,11 +1744,12 @@ impl WindowState<'_> {
 
     fn chrome_row(&mut self) -> Vec<Cell> {
         let (paint_cols, cols) = self.bar_cells();
+        let tokens = self.chrome_colors();
         if let Some(query) = self.searching.clone() {
             let mut row = vec![Cell::blank(); paint_cols];
-            let bar_bg = mix(self.theme.bg, self.theme.fg, 48);
+            let bar_bg = tokens.raised;
             for c in &mut row {
-                c.fg = self.theme.fg;
+                c.fg = tokens.text;
                 c.bg = bar_bg;
             }
             let status = self.pane().and_then(|p| p.grid.lock().search_status());
@@ -1758,7 +1772,7 @@ impl WindowState<'_> {
                 &mut col,
                 limit,
                 &format!("{mode}{query}"),
-                self.theme.fg,
+                tokens.text,
                 bar_bg,
                 Hit::Drag,
             );
@@ -1769,7 +1783,7 @@ impl WindowState<'_> {
                 &mut ccol,
                 cols,
                 &count,
-                self.theme.fg,
+                tokens.text,
                 bar_bg,
                 Hit::Drag,
             );
@@ -1778,9 +1792,9 @@ impl WindowState<'_> {
         }
         if self.copy_mode.is_some() {
             let mut row = vec![Cell::blank(); paint_cols];
-            let bar_bg = mix(self.theme.bg, self.theme.fg, 48);
+            let bar_bg = tokens.raised;
             for c in &mut row {
-                c.fg = self.theme.fg;
+                c.fg = tokens.text;
                 c.bg = bar_bg;
             }
             let mut hits = vec![Hit::Drag; paint_cols];
@@ -1791,29 +1805,26 @@ impl WindowState<'_> {
                 &mut col,
                 cols,
                 " COPY   move: hjkl/arrows   v: select   y: copy   Esc: exit",
-                self.theme.fg,
+                tokens.text,
                 bar_bg,
                 Hit::Drag,
             );
             self.hits = hits;
             return row;
         }
-        // Three contrast tiers give the strip depth: the empty band tints
-        // hardest, inactive tabs sit on it as lighter chips, hover lightens
-        // further, and the active tab adopts the terminal background outright
-        // — so a tab is always distinguishable from the strip it sits on, in
-        // light and dark themes alike. The accent line follows the cursor
-        // color rather than adding config keys.
-        let bar_bg = mix(self.theme.bg, self.theme.fg, 48);
-        let tab_bg = mix(self.theme.bg, self.theme.fg, 20);
-        let dim_fg = mix(self.theme.fg, self.theme.bg, 110);
+        // Pack surfaces (D38): the strip is `frame`; inactive tabs are slate
+        // text with no chip, hover raises them, and the active tab is a
+        // `base` chip with the theme accent underline (D34).
+        let bar_bg = tokens.frame;
+        let tab_bg = tokens.frame;
+        let dim_fg = tokens.muted;
         let hover = self.hover;
-        let hover_bg = mix(self.theme.bg, self.theme.fg, 10);
-        let btn_hover_bg = mix(bar_bg, self.theme.fg, 35);
-        let accent = self.theme.cursor;
+        let hover_bg = tokens.raised;
+        let btn_hover_bg = tokens.raised;
+        let accent = tokens.accent;
         let mut row: Vec<Cell> = vec![Cell::blank(); paint_cols];
         for c in &mut row {
-            c.fg = self.theme.fg;
+            c.fg = tokens.text;
             c.bg = bar_bg;
         }
         let mut hits = vec![Hit::Drag; paint_cols];
@@ -1914,13 +1925,12 @@ impl WindowState<'_> {
             // one; every shell tab renders inactive behind it.
             let is_active = i == self.active && !settings_open;
             let tab_hovered = hover == Some(Hit::Tab(i)) || hover == Some(Hit::CloseTab(i));
-            // The active tab adopts the terminal background, visually merging
-            // with the grid below; inactive ones sit dimmed on the bar and
-            // light up (full fg on a lighter bg) under the pointer.
+            // The active tab is a `base` chip; inactive ones are muted text on
+            // the strip and rise one surface step under the pointer.
             let (fg, bg) = if is_active {
-                (self.theme.fg, self.theme.bg)
+                (tokens.text, tokens.base)
             } else if tab_hovered {
-                (self.theme.fg, hover_bg)
+                (tokens.text, hover_bg)
             } else {
                 (dim_fg, tab_bg)
             };
@@ -1963,7 +1973,8 @@ impl WindowState<'_> {
                 .min(label_end.saturating_sub(col).saturating_sub(content));
             let mut tcol = col + lead;
             if attention {
-                let alert = self.theme.palette16[1]; // ANSI red
+                // Attention is a state, not a failure: the accent dot.
+                let alert = accent;
                 put_text(
                     &mut row,
                     &mut hits,
@@ -1988,7 +1999,7 @@ impl WindowState<'_> {
             if has_close {
                 let mut ccol = tab_end - close_w;
                 let (cfg, cbg) = if hover == Some(Hit::CloseTab(i)) {
-                    (self.theme.fg, mix(bg, self.theme.fg, 55))
+                    (tokens.text, tokens.line)
                 } else {
                     (fg, bg)
                 };
@@ -2019,7 +2030,7 @@ impl WindowState<'_> {
         }
         if hidden > 0 {
             let (ifg, ibg) = if hover == Some(Hit::MoreTabs) {
-                (self.theme.fg, btn_hover_bg)
+                (tokens.text, btn_hover_bg)
             } else {
                 (dim_fg, bar_bg)
             };
@@ -2043,7 +2054,7 @@ impl WindowState<'_> {
             col = indicator_end;
         }
         // The settings page's own chip: rendered exactly like an active tab
-        // (terminal bg, bold, accent underline) with its × closing the page.
+        // (`base` chip, bold, accent underline) with its × closing the page.
         if settings_open {
             let chip_label = match &self.overlay {
                 Some(Overlay::Settings(s)) if s.is_setup() => " Setup",
@@ -2051,10 +2062,10 @@ impl WindowState<'_> {
             };
             let start = col;
             let end = (col + SETTINGS_TAB_W).min(btn0);
-            let bg = self.theme.bg;
+            let bg = tokens.base;
             for c in start..end {
                 row[c] = Cell::blank();
-                row[c].fg = self.theme.fg;
+                row[c].fg = tokens.text;
                 row[c].bg = bg;
                 hits[c] = Hit::SettingsTab;
             }
@@ -2066,14 +2077,14 @@ impl WindowState<'_> {
                 &mut tcol,
                 label_end,
                 chip_label,
-                self.theme.fg,
+                tokens.text,
                 bg,
                 Hit::SettingsTab,
             );
             let (cfg, cbg) = if hover == Some(Hit::CloseSettings) {
-                (self.theme.fg, mix(bg, self.theme.fg, 55))
+                (tokens.text, tokens.line)
             } else {
-                (self.theme.fg, bg)
+                (tokens.text, bg)
             };
             let mut ccol = label_end;
             put_text(
@@ -2095,6 +2106,13 @@ impl WindowState<'_> {
                 col += 1;
             }
         }
+        let btn_fg = |hit: Hit| {
+            if hover == Some(hit) {
+                tokens.text
+            } else {
+                dim_fg
+            }
+        };
         let btn_bg = |hit: Hit| {
             if hover == Some(hit) {
                 btn_hover_bg
@@ -2108,7 +2126,7 @@ impl WindowState<'_> {
             &mut col,
             btn0,
             " + ",
-            self.theme.fg,
+            btn_fg(Hit::NewTab),
             btn_bg(Hit::NewTab),
             Hit::NewTab,
         );
@@ -2118,7 +2136,7 @@ impl WindowState<'_> {
             &mut col,
             btn0,
             " ▾ ",
-            self.theme.fg,
+            btn_fg(Hit::ShellMenu),
             btn_bg(Hit::ShellMenu),
             Hit::ShellMenu,
         );
@@ -2130,7 +2148,7 @@ impl WindowState<'_> {
             &mut bcol,
             btn0 + 4,
             "  ─ ",
-            self.theme.fg,
+            btn_fg(Hit::Minimize),
             btn_bg(Hit::Minimize),
             Hit::Minimize,
         );
@@ -2140,7 +2158,7 @@ impl WindowState<'_> {
             &mut bcol,
             btn0 + 8,
             "  □ ",
-            self.theme.fg,
+            btn_fg(Hit::Maximize),
             btn_bg(Hit::Maximize),
             Hit::Maximize,
         );
@@ -2148,7 +2166,7 @@ impl WindowState<'_> {
         let (close_fg, close_bg) = if hover == Some(Hit::Close) {
             (0xFFFFFF, 0xC42B1C)
         } else {
-            (self.theme.fg, bar_bg)
+            (dim_fg, bar_bg)
         };
         put_text(
             &mut row,
@@ -4267,8 +4285,10 @@ impl WindowState<'_> {
     fn build_overlay_grid(&self) -> Grid {
         let (cols, rows) = (self.cols as usize, self.rows as usize);
         let mut g = Grid::new(cols, rows);
-        let (fg, bg) = (self.theme.fg, self.theme.bg);
-        let dim = mix(self.theme.fg, self.theme.bg, 110);
+        // Overlay pages are chrome: a `base` page with pack text (D38).
+        let tokens = self.chrome_colors();
+        let (fg, bg) = (tokens.text, tokens.base);
+        let dim = tokens.muted;
         for y in 0..rows {
             fill_row(&mut g, y, 0, cols, fg, bg);
         }
@@ -4283,9 +4303,10 @@ impl WindowState<'_> {
                         break;
                     }
                     let on = i == *sel;
-                    let (rfg, rbg) = if on { (bg, self.theme.fg) } else { (fg, bg) };
+                    let (rfg, rbg) = if on { (fg, tokens.raised) } else { (fg, bg) };
                     if on {
                         fill_row(&mut g, r, 0, bar, rfg, rbg);
+                        write_row(&mut g, r, 0, "\u{258C}", tokens.accent, rbg);
                     }
                     write_row(
                         &mut g,
@@ -4310,14 +4331,14 @@ impl WindowState<'_> {
                 // page, so the content starts at the top and the save state
                 // lives in the footer.
                 let footer_top = rows.saturating_sub(SETTINGS_FOOTER_H);
-                // Selection tints hard, hover barely — the two must never
-                // read as the same state when both are on screen.
-                let sel_bg = mix(bg, fg, 56);
-                let hover_bg = mix(bg, fg, 14);
-                // Selected-card description: brighter than dim (it sits on
-                // the tinted band, where dim text loses its contrast).
-                let mid = mix(fg, bg, 60);
-                let accent = self.theme.cursor;
+                // Hover and selection both raise the row (D38); only the
+                // selection carries the accent bar, so the two never read as
+                // the same state when both are on screen.
+                let sel_bg = tokens.raised;
+                let hover_bg = tokens.raised;
+                // Selected-card description: full text on the raised band.
+                let mid = fg;
+                let accent = tokens.accent;
 
                 // Category sidebar: active gets an accent bar + tint (flush
                 // to the `│` rule separating it from the cards), the rest
@@ -4334,7 +4355,7 @@ impl WindowState<'_> {
                     let active = i == s.cat && !filtering;
                     let (cfg, cbg) = if active {
                         fill_row(&mut g, r, 0, SETTINGS_SIDEBAR_W + 1, fg, sel_bg);
-                        write_row(&mut g, r, 0, "\u{258C}", fg, sel_bg);
+                        write_row(&mut g, r, 0, "\u{258C}", accent, sel_bg);
                         (fg, sel_bg)
                     } else {
                         (dim, bg)
@@ -4463,7 +4484,7 @@ impl WindowState<'_> {
                         );
                     }
                     if selected {
-                        write_row(&mut g, top, SETTINGS_SIDEBAR_W + 2, "\u{258C}", fg, rbg);
+                        write_row(&mut g, top, SETTINGS_SIDEBAR_W + 2, "\u{258C}", accent, rbg);
                     }
                     let label_fg = if row.disabled { dim } else { fg };
                     write_row(&mut g, top, SETTINGS_CARD_X, row.label, label_fg, rbg);
@@ -4553,7 +4574,7 @@ impl WindowState<'_> {
                         let (ch, color) = if (thumb_top..thumb_top + thumb_h).contains(&r) {
                             ('\u{2590}', dim) // ▐ thumb
                         } else {
-                            ('\u{2502}', mix(bg, fg, 40)) // │ track
+                            ('\u{2502}', tokens.line) // │ track
                         };
                         let mut cell = Cell::blank();
                         cell.ch = ch;
@@ -4847,13 +4868,14 @@ fn accumulate_scroll_lines(accum: f64, raw_lines: f64) -> (isize, f64) {
 /// the per-row click map (the absolute line a click jumps to).
 fn build_dock_grid(
     g: &Grid,
-    theme: &crate::core::Theme,
+    tokens: &Chrome,
     cols: usize,
     rows: usize,
 ) -> (Grid, Vec<Option<usize>>) {
     let mut d = Grid::new(cols, rows);
-    let (fg, bg) = (theme.fg, theme.bg);
-    let dim = mix(fg, bg, 110);
+    // The dock is chrome on the `sunk` surface, beside the grid (D38).
+    let (fg, bg) = (tokens.text, tokens.sunk);
+    let dim = tokens.muted;
     for r in 0..rows {
         fill_row(&mut d, r, 0, cols, fg, bg);
     }
@@ -4864,12 +4886,12 @@ fn build_dock_grid(
     // blocks in reverse stream order.
     let mut entries: Vec<(char, u32, String, usize)> = Vec::new();
     if let Some(start) = g.running_command() {
-        entries.push(('\u{25b6}', theme.cursor, "\u{2026}".to_string(), start));
+        entries.push(('\u{25b6}', tokens.accent, "\u{2026}".to_string(), start));
     }
     for b in g.fold_blocks().iter().rev() {
         let (glyph, color) = match b.exit {
-            Some(0) => ('\u{2713}', theme.palette16[2]),
-            Some(_) => ('\u{2717}', theme.palette16[1]),
+            Some(0) => ('\u{2713}', tokens.success),
+            Some(_) => ('\u{2717}', tokens.failure),
             None => ('\u{00b7}', dim),
         };
         let dur = b.runtime.map(fmt_runtime).unwrap_or_default();
@@ -4973,15 +4995,6 @@ fn read_git_branch(dir: &std::path::Path) -> Option<String> {
         None if head.len() >= 8 => Some(head[..8].to_string()),
         None => None,
     }
-}
-
-fn mix(a: u32, b: u32, t: u32) -> u32 {
-    let chan = |s: u32| {
-        let av = (a >> s) & 0xff;
-        let bv = (b >> s) & 0xff;
-        ((av * (255 - t) + bv * t) / 255) << s
-    };
-    chan(16) | chan(8) | chan(0)
 }
 
 /// Paint the window border with the theme background so the frame reads as
@@ -6929,10 +6942,10 @@ mod tests {
         SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
         SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
         display_path, drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
-        ime_cursor_area_origin, is_openable_url, mix, osc52_reply, pane_pixel_point,
-        path_from_file_uri, physical_px, put_text, read_git_branch, release_input, route_key_down,
-        settings_hit, settings_value_end, settings_visible, shell_menu_items, tab_drag_target,
-        tab_spans, tab_widths, visible_tab_range, widget_text, zoom_px,
+        ime_cursor_area_origin, is_openable_url, osc52_reply, pane_pixel_point, path_from_file_uri,
+        physical_px, put_text, read_git_branch, release_input, route_key_down, settings_hit,
+        settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
+        tab_widths, visible_tab_range, widget_text, zoom_px,
     };
     use crate::core::Cell;
 
@@ -7645,17 +7658,6 @@ mod tests {
     }
 
     #[test]
-    fn mix_blends_toward_second_color() {
-        assert_eq!(mix(0x000000, 0xFFFFFF, 0), 0x000000);
-        assert_eq!(mix(0x000000, 0xFFFFFF, 255), 0xFFFFFF);
-        let mid = mix(0x000000, 0xFFFFFF, 128);
-        assert!(
-            (0x7F..=0x81).contains(&(mid & 0xff)),
-            "roughly half: {mid:#x}"
-        );
-    }
-
-    #[test]
     fn shell_menu_lists_shells_then_settings_and_config() {
         use crate::shells::DetectedShell;
         use std::path::PathBuf;
@@ -7921,8 +7923,8 @@ mod tests {
             &mut g,
             b"$ make bad\r\n\x1b]133;C\x07boom\r\n\x1b]133;D;3\x07",
         );
-        let theme = crate::core::Theme::default();
-        let (d, items) = super::build_dock_grid(&g, &theme, 30, 8);
+        let tokens = super::Chrome::from_theme(&crate::core::Theme::default());
+        let (d, items) = super::build_dock_grid(&g, &tokens, 30, 8);
         // Header on row 0; entries start on row 2, newest first.
         assert_eq!(
             d.viewport_cell(1, 2).ch,
@@ -7931,8 +7933,8 @@ mod tests {
         );
         assert_eq!(
             d.viewport_cell(1, 2).fg,
-            theme.palette16[1],
-            "failure glyph is red"
+            tokens.failure,
+            "failure glyph is the failure token"
         );
         let label: String = (3..14).map(|c| d.viewport_cell(c, 2).ch).collect();
         assert_eq!(
@@ -7943,8 +7945,8 @@ mod tests {
         assert_eq!(d.viewport_cell(1, 3).ch, '\u{2713}', "older success below");
         assert_eq!(
             d.viewport_cell(1, 3).fg,
-            theme.palette16[2],
-            "success glyph is green"
+            tokens.success,
+            "success glyph is the success token"
         );
         // Click map: row 2 jumps to the failed block's start, row 3 to the
         // successful one's; header/blank rows are inert.
@@ -7957,8 +7959,8 @@ mod tests {
     #[test]
     fn dock_grid_empty_state_has_no_click_targets() {
         let g = crate::core::Grid::new(40, 8);
-        let theme = crate::core::Theme::default();
-        let (d, items) = super::build_dock_grid(&g, &theme, 30, 8);
+        let tokens = super::Chrome::from_theme(&crate::core::Theme::default());
+        let (d, items) = super::build_dock_grid(&g, &tokens, 30, 8);
         assert!(items.iter().all(Option::is_none));
         let msg: String = (1..17).map(|c| d.viewport_cell(c, 2).ch).collect();
         assert_eq!(msg.trim_end(), "No commands yet.");

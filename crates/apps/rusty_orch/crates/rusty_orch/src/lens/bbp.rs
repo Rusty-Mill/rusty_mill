@@ -22,13 +22,15 @@ use std::time::{Duration, Instant};
 
 use orch_lens::card::Card;
 use orch_lens::context::{Line, MAX_LINES};
-use orch_lens::round::Board;
+use orch_lens::round::{Board, PostError};
 use orch_lens::{LensConfig, Post};
 use rusty_bbp::{
     ArtId, ArtifactKind, ArtifactPayload, ArtifactRecord, Body, ClaimBody, ClaimStatus, ClaimView,
     Code, Direction, EvidenceKind, MsgId, Ref, Response, Rev, Stakes,
 };
 use rusty_serde::Value;
+
+use super::probes::Candidate;
 
 /// How long one tool call may take.
 pub const CALL_DEADLINE: Duration = Duration::from_secs(30);
@@ -323,14 +325,18 @@ impl<R: Rpc> Session<R> {
         }
     }
 
-    /// The domains the lens follows; `*` is every domain seen so far.
+    /// The domains the lens follows; `*` is every domain seen so far. The
+    /// alien lens follows every domain (D99).
     fn domains(&self, config: &LensConfig) -> BTreeSet<String> {
-        let Some(lens) = config.lens(&self.lens) else {
-            return BTreeSet::new();
+        let every = ["*".to_owned()];
+        let follows: &[String] = match config.lens(&self.lens) {
+            Some(lens) => &lens.domains,
+            None if config.alien.as_ref().is_some_and(|a| a.id == self.lens) => &every,
+            None => return BTreeSet::new(),
         };
         let seen = self.claims.values().flat_map(|b| b.domains.iter());
-        seen.chain(lens.domains.iter())
-            .filter(|d| d.as_str() != "*" && lens.follows(d))
+        seen.chain(follows)
+            .filter(|d| d.as_str() != "*" && follows.iter().any(|f| f == "*" || f == *d))
             .cloned()
             .collect()
     }
@@ -370,8 +376,8 @@ impl<R: Rpc> Session<R> {
             .ok_or_else(|| format!("get_artifact: brief {id} has no text"))
     }
 
-    /// The text of each of code candidate `id`'s diffs, in the candidate's
-    /// order, so each can be applied on its own.
+    /// Code candidate `id`'s base and the text of each of its diffs, in the
+    /// candidate's order, so each can be applied on its own.
     /// Each artifact's first read is charged once to the lens (R11), not
     /// to the claim's budget (D98). A role that may not read the candidate
     /// or a diff gives [`Diffs::Forbidden`]; any other failure is an error.
@@ -396,7 +402,10 @@ impl<R: Rpc> Session<R> {
             }
             texts.push(content);
         }
-        Ok(Diffs::Text(texts))
+        Ok(Diffs::Read(Candidate {
+            base: candidate.base,
+            diffs: texts,
+        }))
     }
 
     /// One artifact's record and text; a `role_forbidden` refusal is
@@ -470,11 +479,16 @@ impl<R: Rpc> Board for Session<R> {
     /// Each post is its own logical post with its own op id. A call whose
     /// answer was lost is sent once more with the same op, so BBP replays
     /// it if the first one landed; an answered error, such as a
-    /// rejection, is not retried.
-    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<(), String> {
+    /// rejection, is not retried. A failure keeps the ids of the posts
+    /// that landed before it.
+    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
         if lens != self.lens {
-            return Err(format!("{}'s session cannot post for {lens}", self.lens));
+            return Err(PostError::refused(
+                Vec::new(),
+                format!("{}'s session cannot post for {lens}", self.lens),
+            ));
         }
+        let mut ids = Vec::with_capacity(posts.len());
         for p in posts {
             self.posted += 1;
             let op = format!("lens-{}-{}", self.run, self.posted);
@@ -483,20 +497,30 @@ impl<R: Rpc> Board for Session<R> {
                 Err(CallError::Lost(_)) => self.rpc.call("post", args),
                 first => first,
             };
-            match answer(reply, "post")? {
-                Response::Posted(_) => {}
-                other => return Err(format!("post answered {other:?}")),
-            }
+            let unsure = matches!(reply, Err(CallError::Lost(_)));
+            let error = match answer(reply, "post") {
+                Ok(Response::Posted(id)) => {
+                    ids.push(id);
+                    continue;
+                }
+                Ok(other) => format!("post answered {other:?}"),
+                Err(e) => e,
+            };
+            return Err(PostError {
+                posted: ids,
+                unsure,
+                error,
+            });
         }
-        Ok(())
+        Ok(ids)
     }
 }
 
 /// What a lens may read of a claim's code candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Diffs {
-    /// Each diff's text, in the candidate's order.
-    Text(Vec<String>),
+    /// The candidate's base and each diff's text, in the candidate's order.
+    Read(Candidate),
     /// The lens's role may not read the candidate or one of its diffs
     /// (D98): the claim is not eligible. The refused read itself is not
     /// charged; reads that succeeded before it (the candidate, earlier
@@ -856,6 +880,33 @@ mod tests {
     }
 
     #[test]
+    fn the_alien_lens_follows_every_domain_and_an_unknown_role_none() {
+        let at = CONFIG.rfind(']').expect("lenses end");
+        let text = format!(
+            "{}],\n\"alien\": {{\"id\": \"alien\", \"prompt\": \"a\", \"providers\": [\"codex\"]}}}}",
+            &CONFIG[..at]
+        );
+        let cfg = LensConfig::parse(&text).expect("config");
+        for (role, deltas) in [("alien", 1), ("stranger", 0)] {
+            let fake = Fake::default()
+                .on("task_card", task_card(5))
+                .on("read", read(vec![claim(7)], false))
+                .on(
+                    "claims_delta",
+                    Response::Claims(vec![view(7, ClaimStatus::Open, &[])]),
+                );
+            let mut s = Session::new(role, fake, "r1");
+            s.refresh(&cfg).expect("refresh");
+            let asked = s.rpc.args("claims_delta");
+            assert_eq!(asked.len(), deltas, "{role}");
+            if let Some(delta) = asked.first() {
+                assert_eq!(word(delta, "domains"), r#"["dedup"]"#);
+                assert_eq!(s.cards(&cfg).len(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn refresh_reads_new_pages_then_the_delta_and_builds_cards() {
         let fake = Fake::default()
             .on("task_card", task_card(5))
@@ -1067,11 +1118,144 @@ mod tests {
     }
 
     #[test]
+    fn a_post_rejected_partway_keeps_the_ids_that_landed() {
+        let fake = Fake::default()
+            .on("post", Response::Posted(MsgId(41)))
+            .refuse("post", reassigned());
+        let mut s = Session::new("adversary", fake, "r1");
+        let err = s
+            .post("adversary", &[counter("x"), counter("y")])
+            .expect_err("second rejected");
+        assert_eq!(err.posted, [MsgId(41)]);
+        assert!(!err.unsure, "a rejection is final");
+        assert!(err.error.contains("reassigned"), "{err:?}");
+    }
+
+    /// The second post's answer is lost twice: only the id the host
+    /// returned is kept, and the lost one isn't guessed.
+    #[test]
+    fn a_post_lost_partway_keeps_only_the_ids_that_were_answered() {
+        let fake = Fake::default()
+            .on("post", Response::Posted(MsgId(41)))
+            .fail("post", "timed out")
+            .fail("post", "timed out");
+        let mut s = Session::new("adversary", fake, "r1");
+        let err = s
+            .post("adversary", &[counter("x"), counter("y")])
+            .expect_err("lost");
+        assert_eq!(err.posted, [MsgId(41)]);
+        assert!(err.unsure, "the lost post may have landed");
+        assert!(err.error.contains("timed out"), "{err:?}");
+        assert_eq!(s.rpc.args("post").len(), 3, "one resend of the lost post");
+    }
+
+    /// The host appends the second post as id 42 but both its answers are
+    /// lost. The row keeps 41 and is unsure; a crash before the state is
+    /// kept reruns the job, which posts 43. On a line that 42 really decided, the job must
+    /// not be scored as non-pivotal.
+    #[test]
+    fn a_landed_but_lost_post_never_lets_a_pivotal_job_score() {
+        use orch_lens::record::{score, Change, Item, Review, Rule, Scored, Step, Trail};
+        use rusty_bbp::{ClaimStatus, Direction};
+
+        let fake = Fake::default()
+            .on("post", Response::Posted(MsgId(41)))
+            .fail("post", "timed out")
+            .fail("post", "timed out");
+        let mut s = Session::new("adversary", fake, "r1");
+        let lost = s
+            .post("adversary", &[counter("x"), counter("y")])
+            .expect_err("lost");
+        let d =
+            std::env::temp_dir().join(format!("orch-bbp-record-lost-post-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let job = |items: Vec<MsgId>, unsure: bool| Review {
+            lens: "adversary".into(),
+            claim: MsgId(7),
+            epoch: 0,
+            look_harder: false,
+            items,
+            unsure,
+            pending: false,
+        };
+        orch_store::Store::open(&d)
+            .expect("store")
+            .save_lens_review("b", &job(lost.posted.clone(), lost.unsure))
+            .expect("save");
+        // Restart: the abandoned job reruns and its new post is answered.
+        let mut store = orch_store::Store::open(&d).expect("reopen");
+        store
+            .save_lens_review("b", &job(vec![MsgId(43)], false))
+            .expect("rerun");
+        let rows = store.lens_reviews("b").expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].items, [MsgId(41), MsgId(43)]);
+        assert!(rows[0].unsure, "42 may be the job's");
+
+        // 41, 42 and 43 are the lens's; with "a" they reach the line. Only
+        // 42 (unknown to the row) pushes it over: genuinely pivotal.
+        let item = |msg: u64, author: &str, delta: i64| {
+            Change::Item(Item {
+                msg: MsgId(msg),
+                author: author.into(),
+                direction: Direction::Counter,
+                grounded: true,
+                executed: false,
+                delta,
+                scoring: true,
+            })
+        };
+        let changes = [
+            item(2, "a", -6),
+            item(41, "adversary", -1),
+            item(42, "adversary", -3),
+            item(43, "adversary", -1),
+            Change::Status(Rule::Line {
+                at: -8,
+                authors: 2,
+                min_authors: Some(2),
+            }),
+        ];
+        let mut score_so_far = 0;
+        let steps = changes
+            .into_iter()
+            .map(|change| {
+                if let Change::Item(i) = &change {
+                    score_so_far += i.delta;
+                }
+                let status = match change {
+                    Change::Status(_) => ClaimStatus::Dropped,
+                    _ => ClaimStatus::Open,
+                };
+                Step {
+                    change,
+                    status,
+                    score: score_so_far,
+                    epoch: 0,
+                }
+            })
+            .collect();
+        let trail = Trail { steps };
+        assert_eq!(score(&rows[0], &trail), Scored::Unscored { pivotal: true });
+        // Without the marker, the same row would have scored as non-pivotal.
+        let unmarked = Review {
+            unsure: false,
+            ..rows[0].clone()
+        };
+        assert!(matches!(
+            score(&unmarked, &trail),
+            Scored::Points { pivotal: false, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn a_rejected_post_is_not_retried() {
         let fake = Fake::default().refuse("post", reassigned());
         let mut s = Session::new("adversary", fake, "r1");
         let err = s.post("adversary", &[counter("x")]).expect_err("rejected");
-        assert!(err.contains("reassigned"), "{err}");
+        assert!(err.error.contains("reassigned"), "{err:?}");
+        assert!(err.posted.is_empty());
         assert_eq!(s.rpc.args("post").len(), 1);
     }
 
@@ -1154,7 +1338,10 @@ mod tests {
         ];
         assert_eq!(
             s.candidate_diffs(ArtId(5)),
-            Ok(Diffs::Text(want.map(str::to_owned).to_vec()))
+            Ok(Diffs::Read(Candidate {
+                base: "0".repeat(40),
+                diffs: want.map(str::to_owned).to_vec(),
+            }))
         );
         let ids: Vec<String> = s
             .rpc
@@ -1424,7 +1611,8 @@ done
             .with_deadline(Duration::from_millis(300));
         let mut s = Session::new("adversary", child, "r1");
         let err = s.post("adversary", &[counter("x")]).expect_err("rejected");
-        assert!(err.contains("reassigned"), "{err}");
+        assert!(err.error.contains("reassigned"), "{err:?}");
+        assert!(err.posted.is_empty());
         drop(s);
         assert_eq!(logged_posts(&dir).len(), 1, "a rejection is final");
         std::fs::remove_dir_all(&dir).expect("cleanup");

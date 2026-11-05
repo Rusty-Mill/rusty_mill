@@ -13,6 +13,8 @@ fn binding() -> Binding {
         task: TaskId("task\"x".into()),
         principal: PrincipalId("agent".into()),
         turn: Some(TurnId(42)),
+        hidden: vec![],
+        view: None,
     }
 }
 

@@ -1,4 +1,4 @@
-//! `lel-jail` off Linux: the jail is Linux only (D85), so the launcher
+//! `lel-jail` off Linux: the jail is Linux only (D107), so the launcher
 //! refuses before reading anything, with the setup-failure code.
 #![cfg(not(target_os = "linux"))]
 

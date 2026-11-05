@@ -63,7 +63,7 @@ impl Time {
     }
 }
 
-/// Raw bytes, serialized as standard base64 (D82: mux input exactly as
+/// Raw bytes, serialized as standard base64 (D104: mux input exactly as
 /// delivered, which need not be UTF-8).
 #[derive(Clone, PartialEq, Eq, Default)]
 pub struct Base64Bytes(pub Vec<u8>);

@@ -234,7 +234,7 @@ fn os(s: &str) -> &OsStr {
 ///
 /// # Errors
 /// When `path` is verbatim and has no plain form naming the same file.
-fn git_path(path: &Path) -> Result<PathBuf, String> {
+pub fn git_path(path: &Path) -> Result<PathBuf, String> {
     plain_form(path).ok_or_else(|| {
         format!(
             "{}: git cannot take this path, and no plain form names the same file",

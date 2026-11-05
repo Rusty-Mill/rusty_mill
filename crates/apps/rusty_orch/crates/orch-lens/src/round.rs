@@ -1,11 +1,12 @@
 //! One runner round: schedule the board's cards, call each job and post
-//! what comes back. Pure over three ports the shell supplies: [`Models`],
-//! the meter's save, and the [`Board`].
+//! what comes back. Pure over four ports the shell supplies: [`Models`],
+//! the meter's save, the [`Board`] and the track record's write-ahead.
 //!
 //! - Jobs run one at a time, in schedule order; the next round sees what
 //!   this one posted.
 //! - An answer is posted as its lens, then recorded; an attack on a
-//!   candidate also counts a pass for the fairness rule.
+//!   candidate also counts a pass for the fairness rule. A blind review's
+//!   row is saved `pending` before its first post (D92 write-ahead).
 //! - A provider's failure (`Failed`, `Exhausted`) is recorded and the round
 //!   goes on; the rules decide what to ask next.
 //! - The runner's own failures end the round and record nothing, so the
@@ -16,20 +17,50 @@
 
 use std::collections::BTreeMap;
 
+use orch_core::AgentId;
+use orch_dispatch::ClassifiedError;
 use rusty_bbp::{Direction, MsgId};
 
 use crate::call::{call, Ctx, End, Models};
 use crate::card::Card;
 use crate::config::LensConfig;
-use crate::context::{Line, Parts};
+use crate::context::{Line, Parts, Phase};
 use crate::meter::Stop;
 use crate::post::Post;
+use crate::record::Review;
 use crate::schedule::{schedule, Job, JobKey, Skipped, Slot, State};
 
 /// Where answers go: the shared board.
 pub trait Board {
-    /// Post `posts` as lens `lens`, with its credential.
-    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<(), String>;
+    /// Post `posts` as lens `lens`, with its credential, and return their
+    /// message ids in order.
+    ///
+    /// # Errors
+    ///
+    /// The failure, with the ids of the posts that landed before it.
+    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError>;
+}
+
+/// A post that failed partway: what landed before it stays on the board,
+/// so it stays the job's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostError {
+    /// The ids the board answered with, in order.
+    pub posted: Vec<MsgId>,
+    /// The failing post's answer was lost: it may have landed, unknown.
+    pub unsure: bool,
+    pub error: String,
+}
+
+impl PostError {
+    /// A refused post: nothing more landed than `posted`.
+    pub fn refused(posted: Vec<MsgId>, error: impl Into<String>) -> Self {
+        Self {
+            posted,
+            unsure: false,
+            error: error.into(),
+        }
+    }
 }
 
 /// What the shell read for this round.
@@ -50,7 +81,8 @@ pub struct View<'a> {
 pub enum Halt {
     /// A task ceiling: the task pauses.
     Task(Stop),
-    /// The meter could not be saved; the shell should stop.
+    /// The meter or a write-ahead row could not be saved; the shell should
+    /// stop.
     Unsaved(String),
     /// The board refused a post.
     Board(String),
@@ -65,8 +97,13 @@ pub struct Report {
     pub ran: Vec<(JobKey, End)>,
     /// Jobs the rules allow but no provider can take.
     pub skipped: Vec<Skipped>,
+    /// Blind review jobs that ended, for the track record (#599).
+    pub reviews: Vec<Review>,
     pub halt: Option<Halt>,
 }
+
+/// Saves a blind review's row before its first post; see [`Review::pending`].
+pub type Ahead<'a> = &'a mut dyn FnMut(&Review) -> Result<(), String>;
 
 /// Run one round over `view`, updating `state` and the meter in `ctx`.
 pub fn round(
@@ -76,6 +113,7 @@ pub fn round(
     ctx: Ctx<'_>,
     models: &mut dyn Models,
     board: &mut dyn Board,
+    ahead: Ahead<'_>,
 ) -> Report {
     let Ctx {
         task,
@@ -89,12 +127,13 @@ pub fn round(
     }
     let by_id: BTreeMap<MsgId, &Card> = view.cards.iter().map(|c| (c.id, c)).collect();
     let mut ran = Vec::new();
+    let mut reviews = Vec::new();
     for job in &jobs {
         let Some(card) = by_id.get(&job.key.claim) else {
             continue;
         };
         let Some(prefix) = view.prefixes.get(&job.key.lens) else {
-            return report(ran, skipped, Halt::NoPrefix(job.key.lens.clone()));
+            return report(ran, skipped, reviews, Halt::NoPrefix(job.key.lens.clone()));
         };
         let lens = rusty_bbp::PrincipalId(job.key.lens.clone());
         let parts = Parts {
@@ -114,71 +153,165 @@ pub fn round(
             save: &mut *save,
         };
         let called = call(job, &parts, ctx, models);
-        let halt = settle(job, card, &called.end, state, board)
-            .or_else(|| called.unsaved.clone().map(Halt::Unsaved));
+        let (row, halted) = settle(job, card, &called.end, state, board, &mut *ahead);
+        reviews.extend(row);
+        let halt = halted.or_else(|| called.unsaved.clone().map(Halt::Unsaved));
         ran.push((job.key.clone(), called.end));
         if let Some(h) = halt {
-            return report(ran, skipped, h);
+            return report(ran, skipped, reviews, h);
         }
     }
     Report {
         ran,
         skipped,
+        reviews,
         halt: None,
     }
 }
 
-fn report(ran: Vec<(JobKey, End)>, skipped: Vec<Skipped>, halt: Halt) -> Report {
+fn report(
+    ran: Vec<(JobKey, End)>,
+    skipped: Vec<Skipped>,
+    reviews: Vec<Review>,
+    halt: Halt,
+) -> Report {
     Report {
         ran,
         skipped,
+        reviews,
         halt: Some(halt),
     }
 }
 
-/// Post and record one job's end; `Some` ends the round.
+/// The track-record row of a blind review job that ended with `items`
+/// posted; `None` for any other job.
+fn review(job: &Job, items: Vec<MsgId>) -> Option<Review> {
+    let blind = match job.key.slot {
+        Slot::Review => job.phase == Phase::Blind,
+        Slot::LookHarder => true,
+        Slot::Propose(_) | Slot::Rebel => false,
+    };
+    blind.then(|| Review {
+        lens: job.key.lens.clone(),
+        claim: job.key.claim,
+        epoch: job.epoch,
+        look_harder: job.key.slot == Slot::LookHarder,
+        items,
+        unsure: false,
+        pending: false,
+    })
+}
+
+/// Post and record one job's end: a blind review's track-record row, if
+/// any, and a halt that ends the round. The row holds what the job posted,
+/// or nothing for a reply the protocol refused, so refusing is not free. A
+/// post that failed partway halts (see [`partial`]); so does a write-ahead
+/// that could not be saved, before anything is posted.
 fn settle(
     job: &Job,
     card: &Card,
     end: &End,
     state: &mut State,
     board: &mut dyn Board,
-) -> Option<Halt> {
+    ahead: Ahead<'_>,
+) -> (Option<Review>, Option<Halt>) {
     match end {
         End::Answered { provider, posts } => {
-            if let Err(e) = post(board, &job.key.lens, posts) {
+            if let Err(e) = write_ahead(job, ahead) {
                 state.abandon(job);
-                return Some(Halt::Board(e));
+                return (None, Some(Halt::Unsaved(e)));
             }
+            let ids = match post(board, &job.key.lens, posts) {
+                Ok(ids) => ids,
+                Err(e) => return partial(job, card, *provider, posts, e, state),
+            };
             state.answered(job, *provider, posts.len(), counters(posts));
             if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
                 state.attacked(q, card.id, card.epoch);
             }
-            None
+            (review(job, ids), None)
         }
-        End::Failed { .. } | End::Exhausted => {
+        End::Failed { error, .. } => {
             state.failed(job);
-            None
+            if !matches!(error, ClassifiedError::Permanent(_)) {
+                return (None, None);
+            }
+            if let Err(e) = write_ahead(job, ahead) {
+                return (None, Some(Halt::Unsaved(e)));
+            }
+            (review(job, Vec::new()), None)
+        }
+        End::Exhausted => {
+            state.failed(job);
+            (None, None)
         }
         End::Stopped(Stop::Experiment) => {
             state.abandon(job);
-            None
+            (None, None)
         }
         End::Stopped(stop) => {
             state.abandon(job);
-            Some(Halt::Task(*stop))
+            (None, Some(Halt::Task(*stop)))
         }
         End::Unsaved(e) => {
             state.abandon(job);
-            Some(Halt::Unsaved(e.clone()))
+            (None, Some(Halt::Unsaved(e.clone())))
         }
     }
 }
 
-/// An empty answer posts nothing.
-fn post(board: &mut dyn Board, lens: &str, posts: &[Post]) -> Result<(), String> {
-    if posts.is_empty() {
+/// A post that failed partway. Nothing on the board: the job is abandoned
+/// and asked again. Something landed, or may have (a lost answer): the job
+/// is answered with what landed and never asked again, since a retry would
+/// post fresh evidence beside it. Its row keeps the landed posts and
+/// whether one is unknown.
+fn partial(
+    job: &Job,
+    card: &Card,
+    provider: AgentId,
+    posts: &[Post],
+    e: PostError,
+    state: &mut State,
+) -> (Option<Review>, Option<Halt>) {
+    let halt = Some(Halt::Board(e.error));
+    if e.posted.is_empty() && !e.unsure {
+        state.abandon(job);
+        return (None, halt);
+    }
+    let landed = &posts[..e.posted.len().min(posts.len())];
+    state.answered(job, provider, landed.len(), counters(landed));
+    if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
+        state.attacked(q, card.id, card.epoch);
+    }
+    let row = review(job, e.posted).map(|r| Review {
+        unsure: e.unsure,
+        ..r
+    });
+    (row, halt)
+}
+
+/// Save a blind review's row `pending` before anything else of the
+/// attempt: its posts, or the empty row of a reply with none or one the
+/// protocol refused. A crash or a failed save after it leaves the job
+/// unscored, never scored on part of its items. Every row a round saves
+/// follows its own write-ahead, so a save that clears `pending` always
+/// completes the same attempt, and a write-ahead over a row still pending
+/// is always a retry of one interrupted (D92 write-ahead).
+fn write_ahead(job: &Job, ahead: Ahead<'_>) -> Result<(), String> {
+    let Some(row) = review(job, Vec::new()) else {
         return Ok(());
+    };
+    ahead(&Review {
+        pending: true,
+        ..row
+    })
+    .map_err(|e| format!("track record not saved: {e}"))
+}
+
+/// An empty answer posts nothing.
+fn post(board: &mut dyn Board, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
+    if posts.is_empty() {
+        return Ok(Vec::new());
     }
     board.post(lens, posts)
 }
@@ -278,15 +411,28 @@ mod tests {
     struct Posted {
         posts: Vec<(String, Vec<Post>)>,
         refuse: bool,
+        /// Refuse after this many posts have landed in one call.
+        refuse_after: Option<usize>,
+        /// The write-ahead save fails.
+        ahead_fails: bool,
     }
 
     impl Board for Posted {
-        fn post(&mut self, lens: &str, posts: &[Post]) -> Result<(), String> {
+        fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, PostError> {
             if self.refuse {
-                return Err("board is read-only".to_owned());
+                return Err(PostError::refused(Vec::new(), "board is read-only"));
             }
+            if let Some(n) = self.refuse_after.filter(|n| *n < posts.len()) {
+                let first = 100 + self.posts.iter().map(|(_, p)| p.len() as u64).sum::<u64>();
+                self.posts.push((lens.to_owned(), posts[..n].to_vec()));
+                return Err(PostError::refused(
+                    (first..first + n as u64).map(MsgId).collect(),
+                    "rejected",
+                ));
+            }
+            let first = 100 + self.posts.iter().map(|(_, p)| p.len() as u64).sum::<u64>();
             self.posts.push((lens.to_owned(), posts.to_vec()));
-            Ok(())
+            Ok((first..first + posts.len() as u64).map(MsgId).collect())
         }
     }
 
@@ -303,6 +449,8 @@ mod tests {
         meter: Meter,
         echo: Echo,
         board: Posted,
+        /// The write-ahead rows saved, in order.
+        ahead: Vec<Review>,
     }
 
     fn go(cards: &[Card], state: State, task_calls: u32, echo: Echo, board: Posted) -> Out {
@@ -337,13 +485,31 @@ mod tests {
             meter: &mut meter,
             save: &mut |_| Ok(()),
         };
-        let report = round(&cfg, &view, &mut state, ctx, &mut echo, &mut board);
+        let fails = board.ahead_fails;
+        let mut ahead = Vec::new();
+        let mut save_ahead = |r: &Review| {
+            if fails {
+                return Err("disk full".to_owned());
+            }
+            ahead.push(r.clone());
+            Ok(())
+        };
+        let report = round(
+            &cfg,
+            &view,
+            &mut state,
+            ctx,
+            &mut echo,
+            &mut board,
+            &mut save_ahead,
+        );
         Out {
             report,
             state,
             meter,
             echo,
             board,
+            ahead,
         }
     }
 
@@ -373,6 +539,153 @@ mod tests {
         }
         assert!(out.state.in_flight.is_empty());
         assert_eq!(out.meter.snapshot().tasks, [("task-1".to_owned(), 0, 3)]);
+    }
+
+    #[test]
+    fn blind_reviews_are_kept_for_the_track_record() {
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7)])),
+            Posted::default(),
+        );
+        let mut rows = out.report.reviews.clone();
+        rows.sort_by(|a, b| a.lens.cmp(&b.lens));
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.claim == MsgId(7) && !r.look_harder));
+        let mut items: Vec<MsgId> = rows.iter().flat_map(|r| r.items.clone()).collect();
+        items.sort();
+        assert_eq!(items, [MsgId(100), MsgId(101), MsgId(102)], "one post each");
+
+        // A reply the protocol refused is kept with nothing posted; a
+        // provider that couldn't answer is not kept.
+        let refused = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Err(ClassifiedError::Permanent(AgentError("bad".into())))),
+            Posted::default(),
+        );
+        assert_eq!(refused.report.reviews.len(), 3);
+        assert!(refused.report.reviews.iter().all(|r| r.items.is_empty()));
+        let down = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Err(ClassifiedError::Transient(AgentError("busy".into())))),
+            Posted::default(),
+        );
+        assert!(down.report.reviews.is_empty());
+    }
+
+    #[test]
+    fn each_blind_review_is_saved_pending_before_it_posts() {
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7)])),
+            Posted::default(),
+        );
+        assert_eq!(out.ahead.len(), 3, "one write-ahead per blind review");
+        assert!(out.ahead.iter().all(|r| r.pending && r.items.is_empty()));
+        assert!(
+            out.report.reviews.iter().all(|r| !r.pending),
+            "the save after the posts clears it"
+        );
+    }
+
+    /// An empty answer and a refused reply also save a row, so they write
+    /// ahead too: a row that clears `pending` always ends its own attempt.
+    #[test]
+    fn rows_with_nothing_posted_are_written_ahead_too() {
+        for reply in [
+            Ok(vec![]),
+            Err(ClassifiedError::Permanent(AgentError("bad".into()))),
+        ] {
+            let out = go(
+                &[plain(7)],
+                State::default(),
+                400,
+                Echo::new(reply),
+                Posted::default(),
+            );
+            assert_eq!(out.report.reviews.len(), 3);
+            assert_eq!(out.ahead.len(), 3, "one write-ahead per row");
+            assert!(out.ahead.iter().all(|r| r.pending));
+        }
+        let down = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Err(ClassifiedError::Transient(AgentError("busy".into())))),
+            Posted::default(),
+        );
+        assert!(down.ahead.is_empty(), "no row, no write-ahead");
+    }
+
+    #[test]
+    fn a_failed_write_ahead_posts_nothing_and_halts() {
+        let board = Posted {
+            ahead_fails: true,
+            ..Posted::default()
+        };
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7)])),
+            board,
+        );
+        assert!(out.board.posts.is_empty(), "nothing posted without a row");
+        assert!(out.report.reviews.is_empty());
+        assert!(matches!(
+            out.report.halt,
+            Some(Halt::Unsaved(ref e)) if e.contains("track record not saved")
+        ));
+    }
+
+    #[test]
+    fn a_post_that_fails_partway_keeps_its_landed_items_and_halts() {
+        let board = Posted {
+            refuse_after: Some(1),
+            ..Posted::default()
+        };
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7), counter(7)])),
+            board,
+        );
+        assert!(
+            matches!(&out.report.halt, Some(Halt::Board(e)) if e == "rejected"),
+            "{:?}",
+            out.report.halt
+        );
+        assert_eq!(
+            out.report.reviews.len(),
+            1,
+            "the round stops at the first job"
+        );
+        assert_eq!(out.report.reviews[0].items, [MsgId(100)]);
+        // The job's first post is on the board: it is answered, not asked
+        // again, so a later round can't post fresh evidence beside it.
+        let lens = out.report.reviews[0].lens.clone();
+        let again = go(
+            &[plain(7)],
+            out.state,
+            400,
+            Echo::new(Ok(vec![counter(7)])),
+            Posted::default(),
+        );
+        assert!(
+            again.report.ran.iter().all(|(k, _)| k.lens != lens),
+            "{:?}",
+            again.report.ran
+        );
+        assert_eq!(again.report.ran.len(), 2, "the other lenses still run");
     }
 
     #[test]

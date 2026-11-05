@@ -15,7 +15,7 @@ path = "src/bin/lel-jail.rs"
 
 [dependencies]
 # Landlock, seccomp (`Sockets::InternetOnly`) and rlimits; the helper the
-# bbp_host harness already uses (LEL D85).
+# bbp_host harness already uses (LEL D107).
 rusty_sandbox = { workspace = true }
 # jail.json, parsed at the boundary.
 rusty_serde = { workspace = true }

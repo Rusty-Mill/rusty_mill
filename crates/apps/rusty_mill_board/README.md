@@ -53,7 +53,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
   holds nothing up); naming it explicitly says why. It never takes a card with a `superseded_by` link (newer cards
   that replace it): close that card, or re-scope it and clear the link. `related` links are informational.
-  `card_plan` sets priority and all three link lists, and needs Triage. The tags `agent`,
+  `card_plan` sets priority, all three link lists and a target date (`target_ms`, `null` clears it), and needs Triage. The tags `agent`,
   `board:…`, `claim:…`, `number:…`, `archived:…` and `restored:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
   carry them, and the GitHub sync drops such labels when it imports an issue.
 - **Projects:** one board serves several applications of a monorepo, and several repositories.
@@ -61,20 +61,25 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   (`{"rocket_league": ["crates/apps/rocket_league"]}`, or `{"repos": {"rusty_mill": {...}, "other": {...}}}`
   for several repositories; project names are unique across them). Every repository also has a project named
   like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (one that names none, and old cards, to
-  `default`, shown in the web UI as the Inbox, first in the side panel; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed; a Done card stays Done and needs Triage or `close`). A credential in
+  `default`, shown in the web UI as the Inbox, the first project chip; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed; a Done card stays Done and needs Triage or `close`). A credential in
   `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
-  `board_list` and `card_take` take a `project` filter. The UI's side panel lists repositories and then every project
-  (a repository's only project is the repository itself), with card counts; both filter the board, and new cards go to the chosen project (else the repository's own). An
-  Agents list under the repositories (everyone holding a claim, with their count) filters by claimant. Each agent
-  has its own colour (twelve hues; two agents never share one), shown in the list and on every card it holds:
-  a coloured edge, a tint and a chip, whose dot pulses while the card is in building, qa or review. The runner
+  `board_list` and `card_take` take a `project` filter. The UI's scope bar has a repository picker and then every project
+  as a chip (a repository's only project is the repository itself), with card counts; both filter the board, and new cards go to the chosen project (else the repository's own). The
+  Agents chips after them (everyone holding a claim, with their count) filter by claimant. Each agent
+  has its own colour (twelve hues; two agents never share one), shown on its chip and on every card it holds,
+  as a dot that pulses while the card is in a work column. The runner
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
   `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_archive`,
-  `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `inbox_list`, `inbox_act`. The web API
+  `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
+  `milestone_update`, `inbox_list`, `inbox_act`. The web API
   exposes the same table, so the two cannot drift.
+- **Milestones.** A project's dated goals (`src/milestones.rs`): a title and a target date, closed when reached, never
+  deleted. `milestone_add` and `milestone_update` need Triage and the project in scope; `board_milestones` lists what the
+  caller may see. In rusty_tick a milestone is a task tagged `milestone` (never `agent`, so never a card) in the
+  project's list, its `dueMs` the target; without `--tick-url` they live in memory.
 - **Archive.** A Done card leaves the board's default views (`board_list`, the Done column) once it is archived, or
   14 days after it was done or last restored (`board_list`'s `done_days`; 0 keeps every unarchived Done card). It is
   still Done: `card_get`, the roadmap, metrics and dependencies see it as before. `card_restore` puts any such card
@@ -145,6 +150,12 @@ unsaved edit raises a conflict (keep mine / take theirs), and `card_update` take
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
 Cards show their priority (High 5, Medium 3, Low 1; none shows nothing), sort highest first in each column, and
 the dialog sets it through `card_plan` (`tests/ui/priority.mjs`).
+The board reads like a press room's job board ([PRODUCT.md](PRODUCT.md); direction in `.impeccable/surfaces/board.md`):
+a colour strip across the top shows each column's open cards and jumps to it; empty columns fold to a spine; process
+inks carry state (cyan in work, yellow queued, vermilion blocked) and magenta is kept for what waits on you, a card at a
+gate (a work column whose next move is a human approval, with an Approve button) or with a decision open. The
+typefaces (Hanken Grotesk, Barlow Condensed; SIL OFL) are served from the binary at `/ui/fonts/`, so the page fetches
+nothing from elsewhere.
 
 Layout: `domain` (pure) / `store` + `tick` (port and adapters) / `board` (service) /
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +

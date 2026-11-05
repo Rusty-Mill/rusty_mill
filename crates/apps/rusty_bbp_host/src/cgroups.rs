@@ -1,5 +1,5 @@
 //! Agent sessions contained by a cgroup instead of a process group
-//! (Let Em Loose D82, mux-hosted-agents-design.md §3; build defaults D86).
+//! (Let Em Loose D104, mux-hosted-agents-design.md §3; build defaults D108).
 //!
 //! A mux-hosted agent is forked by the mux, not by its holder, so it can't
 //! join the holder's process group. It joins a cgroup that orch names

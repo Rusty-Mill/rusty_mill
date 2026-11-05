@@ -108,6 +108,52 @@ review (B3, S1–S4):
 `claim_history` supplies "score just before the post" and "contested at
 settlement" for each job.
 
+As built (D93, D92):
+
+- `lens run` saves each blind `Review` and `LookHarder` job it answers to
+  orch-store `lens_record` (`lens-records.mmap`): board, lens, claim, epoch,
+  kind and the message ids it posted. A reply the protocol refused is saved
+  with no items, so refusing isn't free; a job no provider answered isn't
+  saved. Points are computed whenever the record is read
+  (`orch-lens::record::tallies`), from these rows and each claim's
+  `bbp why --claim` history, and never stored.
+- **Pivotal jobs (D93).** Leave-one-out applies only to the accept and drop
+  lines. A pivotal job is scored against ground truth where the claim has
+  one, and is otherwise unscored and counted as pivotal. A human `decide`
+  or `choose` settlement is never pivotal, and a later Nano reversal is
+  just the latest settlement.
+- **Ground truth.** Only a `golden:` set counts (Nano signs it off;
+  `holdout:` profiles are model-written). The weight `w` is unchanged, with
+  `upset` judged against the truth. There's no shadow-run source yet: its
+  expected producer is #598's approved `shadow:` profile kind (D62).
+- **Rows before state.** A job's row is saved before the scheduler state,
+  and saving the same job again unions its items, so a job rerun after a
+  crash keeps every item it posted. A post that fails partway keeps the
+  ids that were answered; one whose answer was lost marks the job
+  `unsure`, and an unsure job is never scored (pivotal on a line).
+  Before its first post, or its empty row, a job's row is saved `pending`;
+  the save after clears it. A pending row is scored like an unsure one, and a
+  second write-ahead over it marks the job `unsure`, since the first
+  attempt may have posted under ids nobody knows.
+- **Settlement.** The latest status step that changed the status; an
+  escalation that leaves a claim accepted settles nothing.
+- **Interim limits, until OPEN_QUESTIONS Q35 (D92).** Each limit only adds
+  unscored pivotal jobs:
+  - BBP's history has no `min_authors`, so a job whose removal also removes
+    its lens as an author counts as pivotal.
+  - Reopen steps don't name what a human reopen woke. If one leads into the
+    settlement's epoch and any item could have been dormant (executed,
+    against the closed status), every job on that line counts as pivotal.
+    An evidence reopen's own item counts as live.
+  - The history has no candidate steps, and a failing step doesn't name the
+    candidate it tested, so golden truth is withheld on the `bbp why` path.
+    The rule gives it only for a golden failure on the candidate current at
+    settlement; a passed golden set isn't visible at all.
+  - A job that posted `executed` evidence gets no golden truth, standing in
+    for "cites that report".
+- The lens sees `record: P points over N blind reviews (S scored, V
+  pivotal)`. A per-lens report command waits on Q34.
+
 ## 3. Lessons
 
 A lesson is a fact read from the log, not a model's judgment. Three triggers:

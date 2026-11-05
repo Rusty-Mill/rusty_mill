@@ -96,6 +96,28 @@ The grant then acts as that token's user.
   connector's own disconnect revokes just its grant.
 - Back up `oauth.json` with the rest of the data directory, or every connector signs in again.
 
+## From one shared token to a token per client
+
+A single-user store has one token, `RUSTY_TICK_TOKEN`, which every client shares. Switching the
+directory to users (`users.json`) gives each client its own token, revoked on its own. Adopt the
+store as the user `default`: that is the subject single-user OAuth grants already carry, so
+connectors stay signed in, and `oauth.json` stays where it is.
+
+```sh
+sudo systemctl stop mill-board rusty-tick
+cp -a ~/.rusty_tick/data ~/.rusty_tick/data.pre-users     # and copy it off the host
+rusty_tick user adopt default --data-dir ~/.rusty_tick/data           # token for the first client
+rusty_tick user add default mill-board --data-dir ~/.rusty_tick/data  # one per further client
+sed -i '/^RUSTY_TICK_TOKEN=/d' ~/.rusty_tick/tick.env    # the server refuses to start with it set
+$EDITOR ~/.mill-board/board.env       # RUSTY_TICK_TOKEN=<the mill-board token>
+sudo systemctl start rusty-tick mill-board
+rusty_tick user list --data-dir ~/.rusty_tick/data      # token ids, for `user revoke default <id>`
+```
+
+Each token is printed once. The old shared token stops working at once, so give every client that
+used it a token of its own. Roll back by stopping both services, putting `data.pre-users` back and
+restoring the two env files.
+
 ## Backups, upgrade and rollback
 
 Back up `~/.rusty_tick/data` with the service stopped, and copy it off the host.
