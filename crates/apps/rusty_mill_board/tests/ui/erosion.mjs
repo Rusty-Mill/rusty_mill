@@ -1,6 +1,7 @@
 // Browser check of the #704 erosion detail (D91) against tests/ui/fake_bbp.sh: a claim erosion
 // fails shows its shares, limits and worst function; one it passes report-only shows only its
-// unmeasured code; both show unmeasured code (D45).
+// unmeasured code; both show unmeasured code (D45). A detail of an unexpected shape
+// renders what it can without breaking the view.
 //
 //   export FAKE_BBP_DIR=$(mktemp -d) ID=$(mktemp) && touch $FAKE_BBP_DIR/erosion
 //   echo '[{"token":"decisions-check-owner-token-0001","actor":"nano","role":"human"}]' > $ID && chmod 600 $ID
@@ -28,10 +29,11 @@ const page = await browser.newPage();
 page.on("pageerror", e => failures.push(e.message));
 await page.goto(`${BASE}/inbox#token=${TOKEN}`);
 await page.waitForTimeout(800);
-const [fails, passes] = await page.$$eval("#board section", s => s.map(x => x.textContent));
+const [fails, odd, passes] = await page.$$eval("#board section", s => s.map(x => x.textContent));
 check(fails?.includes("Erosion fails (limits 0.5% and 0.5%): concentration 0% → 0% (0), duplication 0% → 48% (+48)"), "a failing claim shows its shares and limits");
 check(fails?.includes("Complexity 0 → 2 in src/b.rs::grand"), "and its worst function");
 check(fails?.includes("Not measured by erosion: tool.py"), "and its unmeasured code");
+check(odd?.includes("Odd detail") && odd.includes("Erosion fails") && !odd.includes("Not measured"), "a detail of an unexpected shape shows what it can and breaks nothing");
 check(passes?.includes("Not measured by erosion: tool.py"), "a passing claim shows its unmeasured code");
 check(!passes?.includes("Erosion fails") && !passes?.includes("Complexity"), "but not its shares or worst functions (Q23)");
 await browser.close();

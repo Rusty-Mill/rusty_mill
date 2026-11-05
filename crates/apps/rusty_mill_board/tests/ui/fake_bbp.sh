@@ -1,7 +1,8 @@
 #!/bin/sh
 # A stand-in `bbp` for tests/ui/decisions.mjs, task_paused.mjs and erosion.mjs: one stuck question
 # with two candidates (or, while $FAKE_BBP_DIR/paused exists, one #598 task pause; while
-# $FAKE_BBP_DIR/erosion exists, a claim erosion fails and one it passes report-only), until any
+# $FAKE_BBP_DIR/erosion exists, a claim erosion fails, one
+# whose detail has an unexpected shape, and one it passes report-only), until any
 # committed action, after which the inbox is empty. While $FAKE_BBP_DIR/fail exists every call
 # fails, as a host whose log is unreadable does. Logs every call to $FAKE_BBP_DIR/calls.
 D=${FAKE_BBP_DIR:?set FAKE_BBP_DIR}
@@ -14,6 +15,7 @@ case "$1" in inbox)
     S='"stakes":"Low","reversible":false,"evidence":[],"candidates":[],"mark":null,"candidate":null,"brief":2,"acted":[],"totals":[]'
     L='"concentration_bp":{"base":0,"candidate":0,"delta":0},"duplication_bp":{"base":0,"candidate":4800,"delta":4800},"total_cc":2,"loc":11,"functions":1,"worst_affected":[{"key":"src/b.rs::grand","base_cc":0,"cc":2}],"unmeasured":["tool.py"],"parse_errors":[]'
     echo "[{\"id\":\"T1/msg:1/14\",\"task\":\"T1\",\"rev\":16,\"seq\":14,\"reason\":\"Irreversible\",\"claim\":{\"id\":1,\"text\":\"Paste the helper\",$C},$S,\"erosion\":{\"report\":9,\"failing\":true,\"error\":null,\"line\":{\"erosion\":1,\"base\":\"a\",\"mode\":{\"max_concentration_bp\":50,\"max_duplication_bp\":50},\"within_limits\":false,$L}}},\
+{\"id\":\"T1/msg:4/16\",\"task\":\"T1\",\"rev\":16,\"seq\":16,\"reason\":\"Irreversible\",\"claim\":{\"id\":4,\"text\":\"Odd detail\",$C},$S,\"erosion\":{\"report\":11,\"failing\":true,\"line\":{\"mode\":null,\"worst_affected\":[null],\"unmeasured\":\"x\"}}},\
 {\"id\":\"T1/msg:3/15\",\"task\":\"T1\",\"rev\":16,\"seq\":15,\"reason\":\"Irreversible\",\"claim\":{\"id\":3,\"text\":\"Ship the script\",$C},$S,\"erosion\":{\"report\":10,\"failing\":false,\"error\":null,\"line\":{\"erosion\":1,\"base\":\"a\",\"mode\":\"report-only\",\"within_limits\":null,$L}}}]"
     exit 0
   fi
