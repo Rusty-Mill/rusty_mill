@@ -2,7 +2,7 @@
 //! owner's edits in rusty_tick reach the board (ADR-0012).
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind, Plan, Shelf};
+use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind, Plan, Shelf, Span};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::Store;
 use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
@@ -663,5 +663,34 @@ fn restoring_an_aged_out_card_persists_its_restore_time_in_rusty_tick() {
             .as_array()
             .expect("tags")
             .contains(&json!("restored:42"))
+    );
+}
+
+#[test]
+fn moved_in_reads_rusty_tick_move_history_across_pages() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let early = board.add(&human, "early", "", vec![]).expect("add");
+    let late = board.add(&human, "late", "", vec![]).expect("add");
+    tick.record_move(early.id, 100);
+    // More than one page of moves, so the adapter has to follow `next`.
+    for at in 0..1_500 {
+        tick.record_move(late.id, 500 + at);
+    }
+    let store = TickStore::new(tick.clone());
+    let span = |from, to| Span { from, to };
+    assert_eq!(
+        store.moved_in(span(Some(0), Some(200))).expect("moved"),
+        [early.id].into()
+    );
+    assert_eq!(
+        store.moved_in(span(Some(1_900), None)).expect("moved"),
+        [late.id].into()
+    );
+    assert!(
+        store
+            .moved_in(span(Some(5_000), None))
+            .expect("moved")
+            .is_empty()
     );
 }

@@ -20,6 +20,8 @@ struct State {
     tasks: BTreeMap<Uuid, Value>,
     docs: BTreeMap<(String, Uuid), (Value, i64)>,
     clock: i64,
+    /// The move history `GET /moves` pages through, oldest first: `{seq, taskId, atMs}`.
+    moves: Vec<Value>,
     /// Answer the next request whose method and path start like this with a 500, unserved.
     fail_next: Option<(String, String)>,
     /// After each of the next `n` requests whose method and path start like this is
@@ -87,6 +89,43 @@ fn lower_tags(tags: &Value) -> Value {
 }
 
 impl FakeTick {
+    /// Record a column move of `task` at `at_ms` in the move history.
+    pub fn record_move(&self, task: Uuid, at_ms: i64) {
+        let mut state = self.0.lock().expect("lock");
+        let seq = state.moves.len() as u64 + 1;
+        state
+            .moves
+            .push(json!({ "seq": seq, "taskId": task, "atMs": at_ms, "actor": "tick" }));
+    }
+
+    /// `GET /moves?since&after&limit`, as rusty_tick pages it.
+    fn moves_page(state: &State, query: &str) -> (u16, Value) {
+        let param = |key: &str| -> u64 {
+            query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        };
+        let (since, after, limit) = (
+            param("since") as i64,
+            param("after"),
+            param("limit") as usize,
+        );
+        let mut page: Vec<Value> = state
+            .moves
+            .iter()
+            .filter(|m| m["seq"].as_u64() > Some(after) && m["atMs"].as_i64() >= Some(since))
+            .take(limit + 1)
+            .cloned()
+            .collect();
+        let next = (page.len() > limit).then(|| {
+            page.truncate(limit);
+            page.last().map(|m| m["seq"].clone())
+        });
+        (200, json!({ "moves": page, "next": next.flatten() }))
+    }
+
     /// The owner edits a task in rusty_tick: `edit` changes it, and its version moves.
     pub fn owner_edit(&self, id: Uuid, edit: impl FnOnce(&mut Value)) {
         let mut state = self.0.lock().expect("lock");
@@ -156,6 +195,9 @@ impl FakeTick {
         let body = r.body.clone().unwrap_or(Value::Null);
         match (r.method, segments.as_slice()) {
             ("GET", ["health"]) => (200, json!({ "ok": true })),
+            ("GET", [moves]) if moves.starts_with("moves?") => {
+                Self::moves_page(state, &moves["moves?".len()..])
+            }
             ("GET", ["lists"]) => {
                 let lists: Vec<Value> = state
                     .lists

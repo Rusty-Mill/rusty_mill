@@ -83,6 +83,9 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `older_than_days` ago), checks each card again as it commits, and needs `triage`. `board_list` with
   `archived: "only"` lists the archive. The state is an `archived:<ms>` or `restored:<ms>` tag on the rusty_tick
   task, beside `number:<n>`, so there is no migration.
+- **By date (#744).** `board_list` takes `created_from`/`created_to`, `updated_from`/`updated_to` and
+  `moved_from`/`moved_to` (Unix ms, `from` inclusive, `to` exclusive). Moves come from rusty_tick's durable move
+  history (`GET /moves`), so they survive restarts; entering the board counts as a move.
 - **Decision inbox (#595).** `inbox_list` and `inbox_act` (admin only, and only through a token or OAuth credential, never a caller-named actor) show and decide the open BBP escalations
   of the tasks linked from cards. Mill Board stores none of it: run with `--bbp-bin PATH --bbp-root DIR` on the
   orch host and it runs `bbp inbox` and fenced `bbp human` commands, so the host stays the only writer of the log.

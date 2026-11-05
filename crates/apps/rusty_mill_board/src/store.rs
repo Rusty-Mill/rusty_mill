@@ -1,11 +1,11 @@
 //! The storage port and an in-memory adapter.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 
 use uuid::Uuid;
 
-use crate::domain::{BoardError, Card, Event, next_event_id};
+use crate::domain::{BoardError, Card, Column, Event, Span, next_event_id};
 
 /// Persistence for cards and their event log.
 ///
@@ -46,6 +46,24 @@ pub trait Store: Send + Sync {
     /// [`BoardError::Storage`] naming why.
     fn health(&self) -> Result<(), BoardError> {
         Ok(())
+    }
+    /// Cards whose column changed during `span`, entering the board included. This
+    /// default reads the event log, so it knows only what the log still holds;
+    /// [`crate::tick::TickStore`] answers from rusty_tick's durable move history.
+    ///
+    /// # Errors
+    /// If the store fails.
+    fn moved_in(&self, span: Span) -> Result<BTreeSet<Uuid>, BoardError> {
+        let mut last: BTreeMap<Uuid, Column> = BTreeMap::new();
+        let mut moved = BTreeSet::new();
+        for e in self.events_since(None, usize::MAX)? {
+            let changed = last.get(&e.card) != Some(&e.column);
+            if changed && span.contains(e.at_ms) {
+                moved.insert(e.card);
+            }
+            last.insert(e.card, e.column);
+        }
+        Ok(moved)
     }
     /// Whether a committed card survives a restart. A write-ahead record, such as
     /// the inbox's Remediate card, is only worth writing to a store that says so.
