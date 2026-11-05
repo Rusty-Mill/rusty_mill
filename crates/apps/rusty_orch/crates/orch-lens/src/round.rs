@@ -1,11 +1,12 @@
 //! One runner round: schedule the board's cards, call each job and post
-//! what comes back. Pure over three ports the shell supplies: [`Models`],
-//! the meter's save, and the [`Board`].
+//! what comes back. Pure over four ports the shell supplies: [`Models`],
+//! the meter's save, the [`Board`] and the track record's write-ahead.
 //!
 //! - Jobs run one at a time, in schedule order; the next round sees what
 //!   this one posted.
 //! - An answer is posted as its lens, then recorded; an attack on a
-//!   candidate also counts a pass for the fairness rule.
+//!   candidate also counts a pass for the fairness rule. A blind review's
+//!   row is saved `pending` before its first post (D92 write-ahead).
 //! - A provider's failure (`Failed`, `Exhausted`) is recorded and the round
 //!   goes on; the rules decide what to ask next.
 //! - The runner's own failures end the round and record nothing, so the
@@ -80,7 +81,8 @@ pub struct View<'a> {
 pub enum Halt {
     /// A task ceiling: the task pauses.
     Task(Stop),
-    /// The meter could not be saved; the shell should stop.
+    /// The meter or a write-ahead row could not be saved; the shell should
+    /// stop.
     Unsaved(String),
     /// The board refused a post.
     Board(String),
@@ -100,6 +102,9 @@ pub struct Report {
     pub halt: Option<Halt>,
 }
 
+/// Saves a blind review's row before its first post; see [`Review::pending`].
+pub type Ahead<'a> = &'a mut dyn FnMut(&Review) -> Result<(), String>;
+
 /// Run one round over `view`, updating `state` and the meter in `ctx`.
 pub fn round(
     config: &LensConfig,
@@ -108,6 +113,7 @@ pub fn round(
     ctx: Ctx<'_>,
     models: &mut dyn Models,
     board: &mut dyn Board,
+    ahead: Ahead<'_>,
 ) -> Report {
     let Ctx {
         task,
@@ -147,7 +153,7 @@ pub fn round(
             save: &mut *save,
         };
         let called = call(job, &parts, ctx, models);
-        let (row, halted) = settle(job, card, &called.end, state, board);
+        let (row, halted) = settle(job, card, &called.end, state, board, &mut *ahead);
         reviews.extend(row);
         let halt = halted.or_else(|| called.unsaved.clone().map(Halt::Unsaved));
         ran.push((job.key.clone(), called.end));
@@ -192,22 +198,29 @@ fn review(job: &Job, items: Vec<MsgId>) -> Option<Review> {
         look_harder: job.key.slot == Slot::LookHarder,
         items,
         unsure: false,
+        pending: false,
     })
 }
 
 /// Post and record one job's end: a blind review's track-record row, if
 /// any, and a halt that ends the round. The row holds what the job posted,
 /// or nothing for a reply the protocol refused, so refusing is not free. A
-/// post that failed partway halts (see [`partial`]).
+/// post that failed partway halts (see [`partial`]); so does a write-ahead
+/// that could not be saved, before anything is posted.
 fn settle(
     job: &Job,
     card: &Card,
     end: &End,
     state: &mut State,
     board: &mut dyn Board,
+    ahead: Ahead<'_>,
 ) -> (Option<Review>, Option<Halt>) {
     match end {
         End::Answered { provider, posts } => {
+            if let Err(e) = write_ahead(job, posts, ahead) {
+                state.abandon(job);
+                return (None, Some(Halt::Unsaved(e)));
+            }
             let ids = match post(board, &job.key.lens, posts) {
                 Ok(ids) => ids,
                 Err(e) => return partial(job, card, *provider, posts, e, state),
@@ -270,6 +283,20 @@ fn partial(
         ..r
     });
     (row, halt)
+}
+
+/// Save a blind review's row `pending` before its posts, so a crash or a
+/// failed save after them leaves the job unscored, never scored on part of
+/// its items. An empty answer posts nothing and needs none.
+fn write_ahead(job: &Job, posts: &[Post], ahead: Ahead<'_>) -> Result<(), String> {
+    let Some(row) = review(job, Vec::new()).filter(|_| !posts.is_empty()) else {
+        return Ok(());
+    };
+    ahead(&Review {
+        pending: true,
+        ..row
+    })
+    .map_err(|e| format!("track record not saved: {e}"))
 }
 
 /// An empty answer posts nothing.
@@ -377,6 +404,8 @@ mod tests {
         refuse: bool,
         /// Refuse after this many posts have landed in one call.
         refuse_after: Option<usize>,
+        /// The write-ahead save fails.
+        ahead_fails: bool,
     }
 
     impl Board for Posted {
@@ -411,6 +440,8 @@ mod tests {
         meter: Meter,
         echo: Echo,
         board: Posted,
+        /// The write-ahead rows saved, in order.
+        ahead: Vec<Review>,
     }
 
     fn go(cards: &[Card], state: State, task_calls: u32, echo: Echo, board: Posted) -> Out {
@@ -445,13 +476,31 @@ mod tests {
             meter: &mut meter,
             save: &mut |_| Ok(()),
         };
-        let report = round(&cfg, &view, &mut state, ctx, &mut echo, &mut board);
+        let fails = board.ahead_fails;
+        let mut ahead = Vec::new();
+        let mut save_ahead = |r: &Review| {
+            if fails {
+                return Err("disk full".to_owned());
+            }
+            ahead.push(r.clone());
+            Ok(())
+        };
+        let report = round(
+            &cfg,
+            &view,
+            &mut state,
+            ctx,
+            &mut echo,
+            &mut board,
+            &mut save_ahead,
+        );
         Out {
             report,
             state,
             meter,
             echo,
             board,
+            ahead,
         }
     }
 
@@ -519,6 +568,44 @@ mod tests {
             Posted::default(),
         );
         assert!(down.report.reviews.is_empty());
+    }
+
+    #[test]
+    fn each_blind_review_is_saved_pending_before_it_posts() {
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7)])),
+            Posted::default(),
+        );
+        assert_eq!(out.ahead.len(), 3, "one write-ahead per blind review");
+        assert!(out.ahead.iter().all(|r| r.pending && r.items.is_empty()));
+        assert!(
+            out.report.reviews.iter().all(|r| !r.pending),
+            "the save after the posts clears it"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_ahead_posts_nothing_and_halts() {
+        let board = Posted {
+            ahead_fails: true,
+            ..Posted::default()
+        };
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7)])),
+            board,
+        );
+        assert!(out.board.posts.is_empty(), "nothing posted without a row");
+        assert!(out.report.reviews.is_empty());
+        assert!(matches!(
+            out.report.halt,
+            Some(Halt::Unsaved(ref e)) if e.contains("track record not saved")
+        ));
     }
 
     #[test]

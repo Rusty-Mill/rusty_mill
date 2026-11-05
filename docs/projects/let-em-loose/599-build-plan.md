@@ -131,6 +131,10 @@ As built (D93, D92):
   crash keeps every item it posted. A post that fails partway keeps the
   ids that were answered; one whose answer was lost marks the job
   `unsure`, and an unsure job is never scored (pivotal on a line).
+  Before its first post a job's row is saved `pending`; the save after the
+  posts clears it. A pending row is scored like an unsure one, and a
+  second write-ahead over it marks the job `unsure`, since the first
+  attempt may have posted under ids nobody knows.
 - **Settlement.** The latest status step that changed the status; an
   escalation that leaves a claim accepted settles nothing.
 - **Interim limits, until OPEN_QUESTIONS Q35 (D92).** Each limit only adds

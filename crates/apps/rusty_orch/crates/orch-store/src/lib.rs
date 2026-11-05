@@ -593,18 +593,10 @@ impl Store {
             ));
         }
         let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
-        // A job rerun after a crash posts again: keep every item it posted.
-        let mut merged = match existing.clone() {
-            Some(r) => r.into_row()?,
+        let merged = match existing.clone() {
+            Some(r) => merge(r.into_row()?, row),
             None => row.clone(),
         };
-        for m in &row.items {
-            if !merged.items.contains(m) {
-                merged.items.push(*m);
-            }
-        }
-        // A lost post stays unknown: the job's contribution stays unsure.
-        merged.unsure |= row.unsure;
         let record = LensRecordRecord::new(board, &merged, revision);
         let written = if existing.is_none() {
             self.lens_records.insert(record).map_err(engine_error)
@@ -646,4 +638,22 @@ impl Store {
 /// the id-shaped variants cannot happen after `revision` chose the path.
 fn engine_error<E: fmt::Display>(e: E) -> DurabilityError {
     DurabilityError::Engine(e.to_string())
+}
+
+/// `row` saved over the job's stored row `old` (D92 write-ahead):
+///
+/// - A job rerun after a crash posts again: every item it posted is kept.
+/// - A lost post stays unknown: `unsure` never clears.
+/// - A write-ahead over a row still `pending` follows an attempt that
+///   crashed or failed its save after it may have posted: unsure.
+/// - The save after the posts clears `pending`.
+fn merge(mut old: Review, row: &Review) -> Review {
+    for m in &row.items {
+        if !old.items.contains(m) {
+            old.items.push(*m);
+        }
+    }
+    old.unsure |= row.unsure || (row.pending && old.pending);
+    old.pending = row.pending;
+    old
 }

@@ -767,6 +767,14 @@ mod lens_records {
             look_harder,
             items: items.iter().copied().map(MsgId).collect(),
             unsure: false,
+            pending: false,
+        }
+    }
+
+    fn ahead(lens: &str, claim: u64) -> Review {
+        Review {
+            pending: true,
+            ..review(lens, claim, false, &[])
         }
     }
 
@@ -849,5 +857,41 @@ mod lens_records {
             ..review("sec", 7, false, &[11, 16])
         };
         assert_eq!(s.lens_reviews("b1").expect("load"), [want]);
+    }
+
+    /// D92 write-ahead: the save after the posts clears `pending` and keeps
+    /// the items; a second write-ahead over a row still pending follows an
+    /// attempt that may have posted, so the job turns unsure for good.
+    #[test]
+    fn a_write_ahead_over_a_pending_row_makes_the_job_unsure() {
+        let d = dir("lens_records_ahead");
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead");
+            s.save_lens_review("b1", &review("sec", 7, false, &[11]))
+                .expect("posted");
+            s.save_lens_review("b1", &ahead("ops", 7)).expect("ahead");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let still = Review {
+            pending: true,
+            ..review("ops", 7, false, &[])
+        };
+        let clean = review("sec", 7, false, &[11]);
+        assert_eq!(s.lens_reviews("b1").expect("load"), [still, clean]);
+        drop(s);
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &ahead("ops", 7)).expect("rerun");
+            s.save_lens_review("b1", &review("ops", 7, false, &[12]))
+                .expect("posted");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let unsure = Review {
+            unsure: true,
+            ..review("ops", 7, false, &[12])
+        };
+        let clean = review("sec", 7, false, &[11]);
+        assert_eq!(s.lens_reviews("b1").expect("load"), [unsure, clean]);
     }
 }

@@ -1048,6 +1048,7 @@ mod tests {
             look_harder: false,
             items,
             unsure,
+            pending: false,
         };
         orch_store::Store::open(&d)
             .expect("store")

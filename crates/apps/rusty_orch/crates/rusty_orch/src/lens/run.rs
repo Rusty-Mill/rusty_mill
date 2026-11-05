@@ -292,7 +292,15 @@ pub fn passes(
                 meter: &mut *metering.meter,
                 save: &mut *metering.save,
             };
-            let report = round(&one, &view, state, ctx, models, seat.board());
+            let report = round(
+                &one,
+                &view,
+                state,
+                ctx,
+                models,
+                seat.board(),
+                &mut *records.save,
+            );
             // Rows before state: a job kept as done must have its row, and a
             // row saved for a job that then reruns is replaced by its key.
             for r in &report.reviews {
@@ -758,10 +766,14 @@ mod tests {
             1,
             "{bodies:?}"
         );
-        let mut lenses: Vec<&str> = saved.iter().map(|r| r.lens.as_str()).collect();
+        // Each job's write-ahead, then its row once posted.
+        let (ahead, rows): (Vec<Review>, Vec<Review>) = saved.into_iter().partition(|r| r.pending);
+        assert_eq!(ahead.len(), 2, "{ahead:?}");
+        assert!(ahead.iter().all(|r| r.items.is_empty()));
+        let mut lenses: Vec<&str> = rows.iter().map(|r| r.lens.as_str()).collect();
         lenses.sort_unstable();
         assert_eq!(lenses, ["adversary", "operator"]);
-        assert!(saved
+        assert!(rows
             .iter()
             .all(|r| r.claim == MsgId(7) && r.items.len() == 1));
     }
@@ -794,7 +806,13 @@ mod tests {
 
     #[test]
     fn a_failed_row_save_keeps_no_state_so_the_job_reruns() {
-        let mut save_review = |_: &Review| Err("disk full".to_owned());
+        // The write-ahead lands; the row after the posts doesn't.
+        let mut save_review = |r: &Review| {
+            if r.pending {
+                return Ok(());
+            }
+            Err("disk full".to_owned())
+        };
         let mut read_records = || Ok(BTreeMap::new());
         let records = Records {
             save: &mut save_review,
@@ -858,6 +876,64 @@ mod tests {
         let lenses: Vec<&str> = rows.iter().map(|r| r.lens.as_str()).collect();
         assert_eq!(lenses, ["adversary", "operator"], "{rows:?}");
         assert!(rows.iter().all(|r| !r.items.is_empty()), "{rows:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A crash after the first lens posts but before its row is saved: the
+    /// store holds only its write-ahead. The restart asks it again, and the
+    /// first attempt's post is in no row, so that job ends unsure and is
+    /// never scored (D92 write-ahead). The other lens, never reached before
+    /// the crash, is not.
+    #[test]
+    fn a_crash_after_posting_leaves_the_rerun_job_unsure() {
+        let d = std::env::temp_dir().join(format!("orch-lens-ahead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let run = |crash: bool| {
+            let mut store = Store::open(&d).expect("store");
+            let mut save_review = |r: &Review| {
+                if crash && !r.pending {
+                    return Err("killed".to_owned());
+                }
+                store.save_lens_review("b", r).map_err(|e| e.to_string())
+            };
+            let mut read_records = || Ok(BTreeMap::new());
+            let records = Records {
+                save: &mut save_review,
+                read: &mut read_records,
+            };
+            let mut e = echo(Ok(vec![counter()]));
+            go_with(
+                &mut State::default(),
+                &mut |_| Ok(()),
+                records,
+                two_seats(),
+                &mut e,
+                10,
+                1,
+            )
+            .0
+        };
+        assert!(run(true).is_err());
+        let rows = Store::open(&d)
+            .expect("reopen")
+            .lens_reviews("b")
+            .expect("rows");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].pending && !rows[0].unsure, "{rows:?}");
+        assert!(run(false).is_ok());
+        let rows = Store::open(&d)
+            .expect("reopen")
+            .lens_reviews("b")
+            .expect("rows");
+        let state: Vec<(&str, bool, bool, usize)> = rows
+            .iter()
+            .map(|r| (r.lens.as_str(), r.pending, r.unsure, r.items.len()))
+            .collect();
+        assert_eq!(
+            state,
+            [("adversary", false, true, 1), ("operator", false, false, 1)],
+            "the first post is unknown"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

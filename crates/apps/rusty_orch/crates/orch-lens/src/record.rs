@@ -48,6 +48,10 @@ pub struct Review {
     /// `items`: its own contribution isn't known, and it is never scored
     /// against the board outcome.
     pub unsure: bool,
+    /// Saved before the job's first post and cleared by the save after it:
+    /// still set, the job may have posted under ids nobody knows, so it is
+    /// scored like an unsure job (D92 write-ahead).
+    pub pending: bool,
 }
 
 /// A claim's history as the record reads it: `bbp why --claim`, trimmed.
@@ -166,7 +170,7 @@ pub fn score(review: &Review, trail: &Trail) -> Scored {
     // An unsure job's own items aren't all known, so neither are its
     // direction, citation or weight: it is never scored, and on a line
     // settlement it counts as pivotal (D92).
-    if review.unsure {
+    if review.unsure || review.pending {
         return Scored::Unscored {
             pivotal: line_settled(trail, settled),
         };
@@ -607,6 +611,7 @@ mod tests {
             look_harder: false,
             items: items.iter().copied().map(MsgId).collect(),
             unsure: false,
+            pending: false,
         }
     }
 
@@ -954,6 +959,31 @@ mod tests {
             .steps
             .insert(1, failing("golden:cases", Some(9)).into_step());
         assert_eq!(score(&unsure, &golden), Scored::Unscored { pivotal: true });
+    }
+
+    /// A row still pending: the job crashed or failed its save after it may
+    /// have posted. Its items aren't known, so it scores like an unsure job.
+    #[test]
+    fn a_job_still_pending_is_never_scored_against_the_outcome() {
+        let t = trail(
+            vec![
+                ev(2, "a", Support, 3),
+                ev(3, LENS, Support, 3),
+                ev(4, "b", Support, 3),
+                ev(5, "c", Support, 3),
+                line(8, 4),
+            ],
+            ClaimStatus::Accepted,
+        );
+        assert!(matches!(
+            score(&review(&[]), &t),
+            Scored::Unscored { pivotal: false }
+        ));
+        let pending = Review {
+            pending: true,
+            ..review(&[])
+        };
+        assert_eq!(score(&pending, &t), Scored::Unscored { pivotal: true });
     }
 
     #[test]

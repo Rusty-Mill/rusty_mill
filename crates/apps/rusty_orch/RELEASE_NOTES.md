@@ -16,7 +16,8 @@ One entry per merged PR against `main`, newest first. No version tags yet.
   until BBP's history says more, golden truth isn't read from it, and a
   line after a human reopen, or a job with a post whose answer was lost,
   counts as pivotal. A crash or a failed post never drops a job's posts
-  from its record or counts them twice.
+  from its record or counts them twice; a crash between posting and
+  saving leaves the job unscored, never scored on part of its posts.
 
 ## Lens cards show the task's accept line
 **2026-11-04**
