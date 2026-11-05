@@ -40,7 +40,7 @@ Owner decisions this rests on (2026-11-02): evidence posts need no turn; the one
 }
 ```
 
-- `mode` absent means `stages`: no field is written, the schema stays 2, 3 or 4, and the log is byte-identical to today.
+- `mode` absent means `stages`: no field is written, the schema stays 2, 3 or 4, and the log's events are byte-identical to today (each line's hash-chain framing, #722, is the store's, not the schema's).
 - `mode: "claims"` writes **schema 5**. A reader older than this addendum refuses schema 5 rather than replaying it as a stage task.
 - `claims` is validated at open: `drop_at < 0 < accept_at ≤ accept_at_strict`, `min_authors ≥ 1`, `settle_window ≥ 2`, `settle_delta ≥ 0`, `evidence_base ≥ 1`, `mark_timeout_secs ≥ 60`. A bad value refuses the open as `bad_claims_config`, naming the field. The values above are the defaults; they are judgment, not data, and are fixed before the first run.
 - `max_live_turns` and `policy` are not used in claims mode, because no agent turn is granted. A claims-mode open that names either is refused as `bad_claims_config`.
@@ -334,7 +334,7 @@ Named `tests/claims.rs::cl_NN_*`. Each must fail against a core with the corresp
 
 | Id | Sequence | Expected |
 | --- | --- | --- |
-| CL-01 | Open a stage task with no `mode` | Log byte-identical to a pre-addendum build's (golden) |
+| CL-01 | Open a stage task with no `mode` | Events byte-identical to a pre-addendum build's (golden); line framing per #722 |
 | CL-02 | Open claims mode with `accept_at = 0` | `bad_claims_config(accept_at)`, nothing written |
 | CL-03 | Claims roster with no role posting `evidence` | `Unservable(claims)` |
 | CL-04 | `a` posts evidence with no turn and a valid credential | Accepted. No `turn_granted` exists in the log |

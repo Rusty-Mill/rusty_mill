@@ -7,7 +7,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::board::Board;
-use crate::domain::{Actor, BoardError, Card, Column, DEFAULT_PROJECT, ExecutionLink};
+use crate::domain::{
+    Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, ExecutionLink, Shelf,
+};
 use crate::store::Store;
 
 /// The board every surface shares.
@@ -194,6 +196,24 @@ struct ListArgs {
     column: Option<Column>,
     /// Only this project (see `board_projects`).
     project: Option<String>,
+    /// Shelved Done cards (archived, or done longer than `done_days` ago): `exclude`
+    /// (default), `include`, or `only` (the archive).
+    #[serde(default)]
+    archived: Shelf,
+    /// Days a Done card stays on the board before it is shelved without being archived.
+    /// Default 14; 0 shelves only archived cards.
+    done_days: Option<u32>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ArchiveDoneArgs {
+    #[serde(flatten)]
+    who: Who,
+    /// Only this project (see `board_projects`); default every project you may work in.
+    project: Option<String>,
+    /// Only cards done at least this many days ago. Default 0: every Done card.
+    #[serde(default)]
+    older_than_days: u32,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -426,10 +446,11 @@ pub fn ops() -> Vec<Op> {
     vec![
         op(
             "board_list",
-            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those.",
+            "List cards, optionally one column (an id from `board_columns`) and/or one project. A credential limited to some projects only sees those. Done cards that are archived, or done more than `done_days` (default 14) ago, are left out unless `archived` is `include` or `only`.",
             |b, i, a: ListArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
-                let mut cards = b.list(a.column.as_ref())?;
+                let days = a.done_days.unwrap_or(DONE_WINDOW_DAYS);
+                let mut cards = b.list_shelf(a.column.as_ref(), a.archived, days)?;
                 cards.retain(|c| {
                     in_scope(scope(i), &c.project)
                         && a.project.as_deref().is_none_or(|p| c.project == p)
@@ -638,6 +659,32 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "card_archive",
+            "Archive a Done card: it leaves the board's default views but stays Done, counts in roadmap and metrics, and `card_get` still finds it. Needs `close`. Refused for an open card.",
+            |b, i, a: IdArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.archive(card_ref(b, &a.id)?, &who)?)
+            },
+        ),
+        op(
+            "card_restore",
+            "Put an archived card back on the board's default views. Needs `close`.",
+            |b, i, a: IdArgs| {
+                let who = acting(b, i, &a.who)?;
+                card(b.restore(card_ref(b, &a.id)?, &who)?)
+            },
+        ),
+        op(
+            "card_archive_done",
+            "Archive every Done card not yet archived, optionally only one project's and only those done at least `older_than_days` ago. Needs `triage`. {archived: count}.",
+            |b, i, a: ArchiveDoneArgs| {
+                checked_project(b, scope(i), a.project.as_deref())?;
+                let who = acting(b, i, &a.who)?;
+                let archived = b.archive_done(&who, a.project.as_deref(), a.older_than_days)?;
+                to_json(json!({ "archived": archived.len() }))
+            },
+        ),
+        op(
             "card_update",
             "Edit a card's title, body or tags. Pass `rev` (the revision you last read) to refuse the edit if the card has changed since.",
             |b, i, a: UpdateArgs| {
@@ -733,6 +780,101 @@ mod tests {
             .expect("add");
         assert!(add.schema["properties"]["actor"].is_object());
         assert!(add.schema["properties"]["title"].is_object());
+    }
+
+    #[test]
+    fn board_list_leaves_archived_cards_out_unless_asked() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let human = json!({"actor": "nano", "role": "human"});
+        let with = |extra: Value| {
+            let mut args = human.clone();
+            args.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            args
+        };
+        call_as(&board, None, "card_add", with(json!({"title": "open"}))).expect("add");
+        call_as(
+            &board,
+            None,
+            "card_add",
+            with(json!({"title": "shipped", "done": true})),
+        )
+        .expect("add done");
+        let titles = |args: Value| -> Vec<String> {
+            call_as(&board, None, "board_list", args).expect("list")["cards"]
+                .as_array()
+                .expect("cards")
+                .iter()
+                .map(|c| c["title"].as_str().expect("title").to_owned())
+                .collect()
+        };
+        assert_eq!(titles(json!({})).len(), 2);
+
+        let archived = call_as(&board, None, "card_archive_done", with(json!({}))).expect("bulk");
+        assert_eq!(archived["archived"], 1);
+        assert_eq!(titles(json!({})), ["open"]);
+        assert_eq!(titles(json!({"archived": "only"})), ["shipped"]);
+        assert_eq!(titles(json!({"archived": "include"})).len(), 2);
+
+        call_as(&board, None, "card_restore", with(json!({"id": "#2"}))).expect("restore");
+        assert_eq!(titles(json!({})).len(), 2);
+        call_as(&board, None, "card_archive", with(json!({"id": "#2"}))).expect("archive");
+        assert_eq!(titles(json!({"archived": "only"})), ["shipped"]);
+        assert!(matches!(
+            call_as(&board, None, "card_archive", with(json!({"id": "#1"}))),
+            Err(CallError::Board(BoardError::Invalid(_)))
+        ));
+    }
+
+    #[test]
+    fn card_restore_puts_an_aged_out_card_back_in_board_list() {
+        use std::sync::atomic::{AtomicI64, Ordering};
+        static NOW: AtomicI64 = AtomicI64::new(0);
+        let board: Shared =
+            Board::with_clock(Box::new(MemStore::default()), Roles::default(), || {
+                NOW.load(Ordering::SeqCst)
+            });
+        let human = |extra: Value| {
+            let mut args = json!({"actor": "nano", "role": "human"});
+            args.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            args
+        };
+        call_as(
+            &board,
+            None,
+            "card_add",
+            human(json!({"title": "old", "done": true})),
+        )
+        .expect("add done");
+        let count = |args: Value| {
+            call_as(&board, None, "board_list", args).expect("list")["cards"]
+                .as_array()
+                .expect("cards")
+                .len()
+        };
+        NOW.store(20 * 86_400_000, Ordering::SeqCst);
+        assert_eq!(
+            (count(json!({})), count(json!({"archived": "only"}))),
+            (0, 1)
+        );
+        assert_eq!(count(json!({"done_days": 30})), 1);
+
+        call_as(&board, None, "card_restore", human(json!({"id": "#1"}))).expect("restore");
+        assert_eq!(
+            (count(json!({})), count(json!({"archived": "only"}))),
+            (1, 0)
+        );
+        let bulk = call_as(
+            &board,
+            None,
+            "card_archive_done",
+            human(json!({"older_than_days": 5})),
+        )
+        .expect("bulk");
+        assert_eq!(bulk["archived"], 0, "the window counts from the restore");
     }
 
     #[test]
