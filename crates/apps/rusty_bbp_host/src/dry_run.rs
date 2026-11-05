@@ -286,14 +286,13 @@ fn spec(req: &Request, dir: &Path, plan: &Path) -> Result<SandboxSpec, String> {
         .clamp(Duration::from_secs(1), Duration::from_secs(24 * 3600));
     let limits =
         Limits::new(wall, wall, 4 << 30, 1 << 30, 1_024, 512).map_err(|e| e.to_string())?;
-    SandboxSpec::new(
-        read,
-        vec![dir.to_path_buf(), PathBuf::from("/dev/null")],
-        dir.to_path_buf(),
-        env,
-        limits,
-    )
-    .map_err(|e| format!("dry run sandbox: {e}"))
+    // The null device, where there is one at a path; Windows has none.
+    let null: &[&str] = if cfg!(unix) { &["/dev/null"] } else { &[] };
+    let write = std::iter::once(dir.to_path_buf())
+        .chain(null.iter().map(PathBuf::from))
+        .collect();
+    SandboxSpec::new(read, write, dir.to_path_buf(), env, limits)
+        .map_err(|e| format!("dry run sandbox: {e}"))
 }
 
 /// Non-empty lines of a plan.
@@ -304,9 +303,7 @@ fn entries(bytes: &[u8]) -> u64 {
         .count() as u64
 }
 
-// The fixtures run `/bin/sh` and grant `/dev/null`: a dry run is confined
-// with Landlock, so `bbp dry-run` only runs where `probe_host` passes.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
@@ -330,6 +327,8 @@ mod tests {
         }
     }
 
+    // Fixtures that run `/bin/sh` are Unix only; the rest run everywhere.
+    #[cfg(unix)]
     #[test]
     fn a_dry_run_reports_its_plans_digest_and_count_only() {
         let root = root("ok");
@@ -349,9 +348,15 @@ mod tests {
     #[test]
     fn a_failed_or_badly_placed_dry_run_is_refused() {
         let root = root("bad");
+        #[cfg(unix)]
         assert!(run(&Unconfined, &request(&root, "exit 3"))
             .unwrap_err()
             .contains("exit code 3"));
+        assert!(
+            run(&Ends(Termination::Exited(3), ""), &request(&root, "true"))
+                .unwrap_err()
+                .contains("exit code 3")
+        );
         let mut req = request(&root, "true");
         req.work = root.join("data/work");
         assert!(run(&Unconfined, &req).unwrap_err().contains("overlaps"));
@@ -389,20 +394,27 @@ mod tests {
         const SECRET: &str = "ssn=078-05-1120";
         let root = root("quiet");
         std::fs::write(root.join("data/a.csv"), SECRET).unwrap();
-        let script = "cat \"$BBP_DATA_CRM/a.csv\"; cat \"$BBP_DATA_CRM/a.csv\" >&2; exit 4";
-        let err = run(&Unconfined, &request(&root, script)).unwrap_err();
-        assert!(!err.contains(SECRET), "{err}");
-        assert!(err.contains("exit code 4"), "{err}");
-        let kept = root.join("work/dry-run/rename.out/stderr.log");
-        assert_eq!(
-            std::fs::read_to_string(kept).unwrap(),
-            SECRET,
-            "kept locally"
-        );
-        for how in [Termination::TimedOut, Termination::Signaled(9)] {
+        #[cfg(unix)]
+        {
+            let script = "cat \"$BBP_DATA_CRM/a.csv\"; cat \"$BBP_DATA_CRM/a.csv\" >&2; exit 4";
+            let err = run(&Unconfined, &request(&root, script)).unwrap_err();
+            assert!(!err.contains(SECRET), "{err}");
+            assert!(err.contains("exit code 4"), "{err}");
+        }
+        for how in [
+            Termination::Exited(4),
+            Termination::TimedOut,
+            Termination::Signaled(9),
+        ] {
             let err = run(&Ends(how, SECRET), &request(&root, "true")).unwrap_err();
             assert!(!err.contains(SECRET), "{err}");
-            assert!(err.contains(&format!("{how:?}")), "{err}");
+            assert!(err.contains(&ended(&how)), "{err}");
+            let kept = root.join("work/dry-run/rename.out/stderr.log");
+            assert_eq!(
+                std::fs::read_to_string(kept).unwrap(),
+                SECRET,
+                "kept locally"
+            );
         }
         let _ = std::fs::remove_dir_all(&root);
     }
