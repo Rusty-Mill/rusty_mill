@@ -53,7 +53,17 @@ pub struct ProfileSet {
     /// with `protected`; never written when absent.
     #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<String>,
+    /// Claims mode (#704, D41, D82): `"off"` records that the task opts out
+    /// of the erosion gate. A claims set needs this or one profile named
+    /// [`EROSION_PROFILE`], not both. Covered by the digest; never written
+    /// when absent, so existing digests are unchanged.
+    #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
+    pub erosion: Option<String>,
 }
+
+/// The profile name the claims open looks for (D82). A profile with this
+/// name must run the `erosion` bin directly, or the open refuses it.
+pub const EROSION_PROFILE: &str = "erosion";
 
 impl ProfileSet {
     /// A profile set that runs one shell command, for tests and first runs.
@@ -82,6 +92,7 @@ impl ProfileSet {
             test_paths: vec![],
             protected: vec![],
             baseline: None,
+            erosion: None,
         }
     }
 
@@ -143,6 +154,57 @@ impl ProfileSet {
             Some(b) if is_commit_id(b) => Ok(()),
             Some(b) => Err(format!("baseline {b:?} is not a full commit id")),
             None => Err("protected paths need a baseline commit".into()),
+        }
+    }
+
+    /// A claims set has exactly one of an `erosion` profile or the recorded
+    /// `erosion: "off"` opt-out (D41). The profile's `--base` is a full
+    /// commit id, and the pinned `baseline` when one is set (D82).
+    pub fn check_erosion(&self) -> Result<(), String> {
+        let named: Vec<&Profile> = self
+            .profiles
+            .iter()
+            .filter(|p| p.name == EROSION_PROFILE)
+            .collect();
+        match (named.as_slice(), self.erosion.as_deref()) {
+            ([], Some("off")) => Ok(()),
+            (_, Some("off")) => Err("both an erosion profile and erosion \"off\"".into()),
+            (_, Some(v)) => Err(format!("{v:?}: the only opt-out is \"off\"")),
+            ([], None) => Err("a claims task needs an erosion profile or erosion \"off\"".into()),
+            ([p], None) => self.check_erosion_base(p),
+            (_, None) => Err("more than one erosion profile".into()),
+        }
+    }
+
+    /// Whether the set's `erosion` profile runs report-only (D42). Meaningful
+    /// once [`ProfileSet::check_erosion`] has passed.
+    pub fn erosion_report_only(&self) -> bool {
+        self.profiles
+            .iter()
+            .any(|p| p.name == EROSION_PROFILE && p.args.iter().any(|a| a == "--report-only"))
+    }
+
+    /// The profile runs the `erosion` bin directly (D82): no shell, `env` or
+    /// `cargo run`, so the argv checked here is the argv that runs. The args
+    /// parse as the bin's own do: `check`, then `--base COMMIT` and either
+    /// `--report-only` or both limits, each once, nothing else. The base is a
+    /// full commit id, and the pinned `baseline` when one is set.
+    fn check_erosion_base(&self, p: &Profile) -> Result<(), String> {
+        let direct = "run the erosion bin directly: erosion check --base COMMIT (--report-only | --max-concentration-bp N --max-duplication-bp N)";
+        let program = p.program.rsplit('/').next().unwrap_or_default();
+        let Some(("check", rest)) = p.args.split_first().map(|(c, r)| (c.as_str(), r)) else {
+            return Err(format!("the erosion profile must {direct}"));
+        };
+        if program != EROSION_PROFILE {
+            return Err(format!("the erosion profile must {direct}"));
+        }
+        let base = erosion_flags(rest, direct)?;
+        if !is_commit_id(base) {
+            return Err(format!("--base {base:?} is not a full commit id"));
+        }
+        match self.baseline.as_deref() {
+            Some(b) if b != base => Err(format!("--base {base} is not the pinned baseline {b}")),
+            _ => Ok(()),
         }
     }
 
@@ -264,6 +326,45 @@ pub fn is_commit_id(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// The `erosion check` flags after `check`, as the bin parses them: each
+/// flag at most once, `--base` required, and `--report-only` or both limits.
+/// Returns the base.
+fn erosion_flags<'a>(rest: &'a [String], direct: &str) -> Result<&'a str, String> {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut base = None;
+    let mut it = rest.iter();
+    while let Some(flag) = it.next() {
+        let flag = flag.as_str();
+        if seen.contains(&flag) {
+            return Err(format!("the erosion profile names {flag} more than once"));
+        }
+        seen.push(flag);
+        let takes_value = match flag {
+            "--report-only" => false,
+            "--base" | "--max-concentration-bp" | "--max-duplication-bp" => true,
+            other => return Err(format!("erosion argument {other:?}: {direct}")),
+        };
+        if !takes_value {
+            continue;
+        }
+        let value = it.next().ok_or(format!("{flag} needs a value"))?;
+        if flag == "--base" {
+            base = Some(value.as_str());
+        } else if value.parse::<i32>().is_err() {
+            return Err(format!(
+                "{flag} {value:?} is not a whole number of basis points"
+            ));
+        }
+    }
+    let has = |f: &str| seen.contains(&f);
+    let limits = (has("--max-concentration-bp"), has("--max-duplication-bp"));
+    match (has("--report-only"), limits) {
+        (true, (false, false)) | (false, (true, true)) => {}
+        _ => return Err(format!("give --report-only or both limits: {direct}")),
+    }
+    base.ok_or_else(|| "the erosion profile names no --base commit".to_string())
+}
+
 /// Whether `path` matches any of `globs`.
 pub fn is_test_path(globs: &[String], path: &str) -> bool {
     globs.iter().any(|g| path_matches(g, path))
@@ -353,5 +454,122 @@ mod tests {
         claims.test_paths = vec!["tests/**".into()];
         let back = ProfileSet::from_bytes(&claims.to_bytes().unwrap_or_default());
         assert_eq!(back, Ok(claims));
+    }
+
+    fn erosion_set(args: &str) -> ProfileSet {
+        let mut set = ProfileSet::shell("test", "true");
+        set.profiles.push(Profile {
+            name: EROSION_PROFILE.into(),
+            program: "/usr/local/bin/erosion".into(),
+            args: args.split_whitespace().map(String::from).collect(),
+        });
+        set
+    }
+
+    #[test]
+    fn a_claims_set_needs_exactly_one_erosion_profile_or_the_opt_out() {
+        let c = "0123456789abcdef0123456789abcdef01234567";
+        let ok = erosion_set(&format!("check --base {c} --report-only"));
+        assert_eq!(ok.check_erosion(), Ok(()));
+        let mut off = ProfileSet::shell("test", "true");
+        off.erosion = Some("off".into());
+        assert_eq!(off.check_erosion(), Ok(()));
+        let enforcing = erosion_set(&format!(
+            "check --max-concentration-bp 100 --base {c} --max-duplication-bp 0"
+        ));
+        assert_eq!(enforcing.check_erosion(), Ok(()));
+        let mut pinned_ok = ok.clone();
+        pinned_ok.baseline = Some(c.into());
+        assert_eq!(pinned_ok.check_erosion(), Ok(()));
+        // Only the bin run directly: a shell would run its own source, not
+        // the argv checked here (#1494: a dummy positional `--base A`).
+        let quoted = ProfileSet::shell(
+            EROSION_PROFILE,
+            &format!("erosion check --base '{c}' --report-only"),
+        );
+        let mut dummy = ok.clone();
+        dummy.baseline = Some(c.into());
+        dummy.profiles[1].program = "/bin/sh".into();
+        dummy.profiles[1].args = vec![
+            "-c".into(),
+            format!("erosion check --base {} --report-only", "f".repeat(40)),
+            "--base".into(),
+            c.into(),
+        ];
+        let mut env = ok.clone();
+        env.profiles[1].program = "/usr/bin/env".into();
+        env.profiles[1].args.insert(0, "erosion".into());
+        let mut cargo = ok.clone();
+        cargo.profiles[1].program = "cargo".into();
+        let mut renamed = ok.clone();
+        renamed.profiles[1].program = "/usr/local/bin/erosion-old".into();
+
+        let mut both = ok.clone();
+        both.erosion = Some("off".into());
+        let mut other = off.clone();
+        other.erosion = Some("no".into());
+        let mut twice = ok.clone();
+        twice.profiles.push(twice.profiles[1].clone());
+        let mut pinned = ok.clone();
+        pinned.baseline = Some("f".repeat(40));
+        for (bad, why) in [
+            (ProfileSet::shell("test", "true"), "needs"),
+            (both, "both"),
+            (other, "only opt-out"),
+            (twice, "more than one"),
+            (erosion_set("check --report-only"), "no --base"),
+            (
+                erosion_set("check --base HEAD --report-only"),
+                "full commit",
+            ),
+            (pinned, "pinned baseline"),
+            (quoted, "directly"),
+            (dummy, "directly"),
+            (env, "directly"),
+            (cargo, "directly"),
+            (renamed, "directly"),
+            (erosion_set(&format!("{c} --report-only")), "directly"),
+            (
+                erosion_set(&format!("check --base {c} --report-only extra")),
+                "directly",
+            ),
+            (
+                erosion_set(&format!(
+                    "check --base {c} --report-only --max-duplication-bp 5"
+                )),
+                "both limits",
+            ),
+            (
+                erosion_set(&format!("check --base {c} --max-duplication-bp 5")),
+                "both limits",
+            ),
+            (
+                erosion_set(&format!(
+                    "check --base {c} --max-concentration-bp x --max-duplication-bp 5"
+                )),
+                "basis points",
+            ),
+            (erosion_set("check --report-only --base"), "needs a value"),
+            (
+                erosion_set(&format!(
+                    "check --base {c} --base {} --report-only",
+                    "f".repeat(40)
+                )),
+                "more than once",
+            ),
+        ] {
+            assert!(bad.check_erosion().is_err_and(|e| e.contains(why)), "{why}");
+        }
+    }
+
+    #[test]
+    fn an_absent_opt_out_leaves_the_digest_alone() {
+        let set = ProfileSet::shell("test", "true");
+        let text = String::from_utf8(set.to_bytes().unwrap_or_default()).unwrap_or_default();
+        assert!(!text.contains("erosion"), "{text}");
+        let mut off = set.clone();
+        off.erosion = Some("off".into());
+        let back = ProfileSet::from_bytes(&off.to_bytes().unwrap_or_default());
+        assert_eq!(back, Ok(off));
     }
 }

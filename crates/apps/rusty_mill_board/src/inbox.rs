@@ -35,6 +35,18 @@ pub enum Reason {
     RerunHeld,
     /// The whole task crossed a budget total and paused.
     TaskTotal,
+    /// The intent changed under work already shipped (#598).
+    IntentChanged,
+    /// The host paused the whole task on a ceiling or the cost breaker (#598).
+    TaskPaused,
+}
+
+impl Reason {
+    /// A whole-task stop: the task waits, not one claim.
+    #[must_use]
+    pub const fn is_task(self) -> bool {
+        matches!(self, Self::TaskTotal | Self::TaskPaused)
+    }
 }
 
 impl Reason {
@@ -51,6 +63,8 @@ impl Reason {
             Self::ActionUnconfirmed => "Action never reported back",
             Self::RerunHeld => "Rerun waiting on budget",
             Self::TaskTotal => "Whole task paused",
+            Self::IntentChanged => "Intent changed under shipped work",
+            Self::TaskPaused => "Paused on a cost limit",
         }
     }
 }
@@ -139,6 +153,19 @@ pub struct Escalation {
     /// `None` when the host does not report it (older than #1420).
     #[serde(default)]
     pub totals: Option<Vec<Total>>,
+    /// `TaskPaused`: why the host paused it. A ceiling pause recurs on resume
+    /// unless that ceiling was raised.
+    #[serde(default)]
+    pub pause: Option<Pause>,
+}
+
+/// Why the host paused a task (#598).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pause {
+    /// `SpendCeiling`, `CallCeiling` or `Breaker`.
+    pub reason: String,
+    /// The host's account of it.
+    pub detail: String,
 }
 
 /// A claim that was acted on, with the references of its live action marks.
@@ -200,7 +227,10 @@ impl Escalation {
         let drops = |x: &Acted| match (a, self.reason) {
             (
                 Action::Reject { .. },
-                Reason::RerunHeld | Reason::ActionUnconfirmed | Reason::TaskTotal,
+                Reason::RerunHeld
+                | Reason::ActionUnconfirmed
+                | Reason::TaskTotal
+                | Reason::TaskPaused,
             ) => false,
             (Action::Reject { .. }, _) => Some(x.claim) == claim,
             (Action::Choose { chosen }, _) => x.claim != *chosen && Some(x.claim) != claim,
@@ -209,7 +239,10 @@ impl Escalation {
         let could_drop = match (a, self.reason) {
             (Action::Reject { .. }, r) => !matches!(
                 r,
-                Reason::RerunHeld | Reason::ActionUnconfirmed | Reason::TaskTotal
+                Reason::RerunHeld
+                    | Reason::ActionUnconfirmed
+                    | Reason::TaskTotal
+                    | Reason::TaskPaused
             ),
             (Action::Choose { .. }, _) => true,
             _ => false,
@@ -391,7 +424,7 @@ pub trait Escalations: Send + Sync {
 /// [`InboxError::Unsupported`] where the host does not yet report what the
 /// command needs.
 pub fn plan(e: &Escalation, a: &Action) -> Result<Vec<Step>, InboxError> {
-    if e.reason == Reason::TaskTotal {
+    if e.reason.is_task() {
         return plan_task(e, a);
     }
     let claim = e
@@ -535,6 +568,47 @@ mod tests {
         let c = e.claim.unwrap();
         assert_eq!((c.id, c.confidence, c.spent, c.budget), (1, 96, 2, 16));
         assert_eq!(e.evidence.len(), 1);
+    }
+
+    #[test]
+    fn an_intent_change_is_approved_by_accept_and_rejected_by_drop() {
+        let e = esc(Reason::IntentChanged);
+        assert_eq!(verbs(&e, &Action::Approve), ["claim msg:1 accept"]);
+        assert_eq!(
+            verbs(&e, &Action::Reject { reason: None }),
+            ["claim msg:1 drop"]
+        );
+    }
+
+    #[test]
+    fn a_host_pause_reads_and_resumes_open() {
+        // `bbp inbox` JSON for a `task_paused` row (rusty_bbp_host inbox.rs).
+        let json = r#"[{"id":"C1/task/9","task":"C1","brief":0,"rev":12,"seq":9,
+            "reason":"TaskPaused","claim":null,"stakes":null,"reversible":null,
+            "evidence":[],"candidates":[],"mark":null,"candidate":null,"acted":[],
+            "totals":[],"pause":{"reason":"CallCeiling","detail":"400 of 400 calls"}}]"#;
+        let mut rows: Vec<Escalation> = serde_json::from_str(json).unwrap();
+        let e = rows.remove(0);
+        assert_eq!(e.reason, Reason::TaskPaused);
+        assert_eq!(
+            e.pause.as_ref().map(|p| p.reason.as_str()),
+            Some("CallCeiling")
+        );
+        assert_eq!(verbs(&e, &Action::Approve), ["resume open"]);
+        assert_eq!(
+            verbs(
+                &e,
+                &Action::Reject {
+                    reason: Some("too dear".into())
+                }
+            ),
+            ["cancel too dear"]
+        );
+        assert!(
+            e.dropped_acted(&Action::Reject { reason: None })
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

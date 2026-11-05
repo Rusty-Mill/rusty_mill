@@ -33,6 +33,7 @@ fn lens(id: &str, order: u16) -> Role {
 fn profiles() -> ProfileSet {
     let mut set = ProfileSet::shell("test", "sh ./test.sh");
     set.test_paths = vec!["tests/**".into()];
+    set.erosion = Some("off".into());
     set
 }
 
@@ -66,10 +67,11 @@ fn claims_task(dir: &Path) {
 }
 
 fn claims_task_as(dir: &Path, t: &TaskId) {
-    assert!(matches!(
-        open_as(dir, t, &profiles(), Ok(())),
-        Response::Stored(_)
-    ));
+    claims_task_set(dir, t, &profiles());
+}
+
+fn claims_task_set(dir: &Path, t: &TaskId, set: &ProfileSet) {
+    assert!(matches!(open_as(dir, t, set, Ok(())), Response::Stored(_)));
     for who in ["a", "b"] {
         admin::assign(dir, t, &RoleId::from(who), &PrincipalId(who.into()), "v").expect("assign");
     }
@@ -87,7 +89,8 @@ fn rejected(r: Response) -> (Code, String) {
 }
 
 /// CL-44 (a): a host that cannot sandbox refuses a claims open, and so does a
-/// profile set without test_paths; nothing is written either way.
+/// profile set without test_paths or without an erosion profile or opt-out
+/// (#704); nothing is written either way.
 #[test]
 fn claims_open_refuses_a_host_without_a_sandbox() {
     let dir = tempdir("nosandbox");
@@ -97,6 +100,11 @@ fn claims_open_refuses_a_host_without_a_sandbox() {
     let (code, detail) = rejected(open(&dir, &ProfileSet::shell("t", "true"), Ok(())));
     assert_eq!(code, Code::BadClaimsConfig);
     assert!(detail.starts_with("test_paths"), "{detail}");
+    let mut no_erosion = profiles();
+    no_erosion.erosion = None;
+    let (code, detail) = rejected(open(&dir, &no_erosion, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.starts_with("erosion"), "{detail}");
     assert!(!log_path_for(&dir, &task()).exists());
     assert!(!rusty_bbp_host::profiles::path(&dir, &task()).exists());
 
@@ -890,6 +898,245 @@ fn a_task_total_row_names_the_field_its_limit_and_one_allowance() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------------------------------------------------------------- intent versions and pauses (#598)
+
+#[test]
+fn a_host_pause_shows_in_the_inbox_and_resume_open_clears_it() {
+    let dir = tempdir("pause");
+    claims_task(&dir);
+    let pause = || {
+        admin::pause(
+            &dir,
+            &task(),
+            admin::pause_reason("call_ceiling").unwrap(),
+            "400 of 400 calls",
+            OpId("pause-1".into()),
+        )
+        .unwrap()
+    };
+    assert_eq!(pause(), Response::Ok);
+    assert_eq!(pause(), Response::Ok, "the same op replays");
+    assert_eq!(state(&dir).state, State::Escalated);
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].reason, inbox::Reason::TaskPaused);
+    assert!(rows[0].totals.is_empty(), "no total is exhausted");
+    assert_eq!(
+        rows[0].pause,
+        Some(inbox::Pause {
+            reason: PauseReason::CallCeiling,
+            detail: "400 of 400 calls".into()
+        })
+    );
+    human_ok(&dir, "resume", &["open"]);
+    assert_eq!(state(&dir).state, State::Open);
+    assert!(inbox::read(&dir, &[task()]).unwrap().is_empty());
+    assert!(admin::pause_reason("bored").is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn intent_stores_the_new_brief_and_reopens_or_escalates_what_it_affects() {
+    let dir = tempdir("intent");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "plain", true);
+    let y = claim(&dir, "a", "shipped", true);
+    for c in [x, y] {
+        human_ok(&dir, "claim", &[&format!("msg:{c}"), "accept"]);
+    }
+    let epoch = state(&dir).claims.get(MsgId(y)).unwrap().epoch;
+    let mark = Command::Host {
+        op: OpId("mark-y".into()),
+        action: HostAction::Acting {
+            claim: MsgId(y),
+            epoch,
+            reference: "pr-9".into(),
+        },
+    };
+    open_driver(&dir, &task())
+        .unwrap()
+        .dispatch(&mark, now())
+        .unwrap();
+    let old = brief(&dir);
+    let file = dir.join("brief-v2.md");
+    std::fs::write(&file, "Make the flag say ok, in green.").unwrap();
+    let path = file.to_str().unwrap();
+    // Lists are comma-separated, one argument each; a repeat is refused.
+    let rev = state(&dir).rev;
+    let twice = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path, "claims=msg:1", "claims=msg:2"],
+        Some(rev),
+        "owner",
+        Some(rev),
+        None,
+    );
+    assert!(matches!(twice, Ok(Response::Rejected(r)) if r.code == Code::BadHumanInput));
+    human_ok(&dir, "intent", &[path, &format!("claims=msg:{x},msg:{y}")]);
+    let st = state(&dir);
+    assert_ne!(st.brief.unwrap().0, old, "the new brief is current");
+    assert_eq!(st.claims.intent_version(), 2);
+    assert_eq!(st.claims.get(MsgId(x)).unwrap().status, ClaimStatus::Open);
+    assert_eq!(
+        st.claims.get(MsgId(y)).unwrap().status,
+        ClaimStatus::Escalated
+    );
+    let rows = inbox::read(&dir, &[task()]).unwrap();
+    assert!(
+        rows.iter().any(|r| r.reason == inbox::Reason::IntentChanged
+            && r.claim.as_ref().map(|c| c.id) == Some(MsgId(y))),
+        "{rows:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Every file under `dir` with its bytes, except `skip`.
+fn files_under(dir: &Path, skip: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                todo.push(p);
+            } else if p != skip {
+                out.insert(p.clone(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn an_intent_dry_run_stores_nothing_and_matches_the_apply() {
+    let dir = tempdir("intent_dry");
+    claims_task(&dir);
+    let x = claim(&dir, "a", "plain", true);
+    human_ok(&dir, "claim", &[&format!("msg:{x}"), "accept"]);
+    let file = dir.join("brief-v2.md");
+    std::fs::write(&file, "A brief only previewed.").unwrap();
+    let path = file.to_str().unwrap();
+    let sha = Sha256::of(b"A brief only previewed.");
+    let before = files_under(&dir, &file);
+    let rev = state(&dir).rev;
+    let op = || Some(OpId("intent-1".into()));
+    let preview = |args: &[&str], fence: Rev| {
+        human::preview_fenced(
+            &dir,
+            &task(),
+            "intent",
+            args,
+            Some(rev),
+            "owner",
+            Some(fence),
+            op(),
+        )
+        .unwrap()
+    };
+    let fresh = preview(&[path], rev);
+    assert!(matches!(fresh.response, Response::Stored(_)), "{fresh:?}");
+    let unknown = preview(&[path, "claims=msg:999"], rev);
+    assert!(
+        matches!(&unknown.response, Response::Rejected(r) if r.code == Code::BadAffects),
+        "{unknown:?}"
+    );
+    let stale = preview(&[path], Rev(rev.0 - 1));
+    assert!(matches!(stale.response, Response::Rejected(_)), "{stale:?}");
+    assert_eq!(files_under(&dir, &file), before, "no preview wrote a file");
+    assert!(open_driver(&dir, &task())
+        .unwrap()
+        .store
+        .blob_get(&sha)
+        .is_err());
+
+    let applied = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path],
+        Some(rev),
+        "owner",
+        Some(rev),
+        op(),
+    )
+    .unwrap();
+    assert_eq!(
+        applied, fresh.response,
+        "the apply answers as its preview did"
+    );
+    assert_eq!(state(&dir).rev.0, rev.0 + fresh.events.len() as u64);
+    let stored = open_driver(&dir, &task())
+        .unwrap()
+        .store
+        .blob_get(&sha)
+        .unwrap();
+    assert_eq!(stored, b"A brief only previewed.");
+
+    // Refused applies, each with fresh bytes of its own, and a retry of the
+    // applied op with other bytes: none stores its brief or moves the log.
+    let rev = state(&dir).rev;
+    let apply = |name: &str, extra: &[&str], fence: Rev, op: &str| {
+        let file = dir.join(name);
+        std::fs::write(&file, format!("brief {name}")).unwrap();
+        let path = file.to_str().unwrap().to_owned();
+        let args: Vec<&str> = std::iter::once(path.as_str())
+            .chain(extra.iter().copied())
+            .collect();
+        let r = human::perform_fenced(
+            &dir,
+            &task(),
+            "intent",
+            &args,
+            Some(fence),
+            "owner",
+            Some(fence),
+            Some(OpId(op.into())),
+        )
+        .unwrap();
+        (r, Sha256::of(format!("brief {name}").as_bytes()))
+    };
+    let absent = |sha: &Sha256| {
+        open_driver(&dir, &task())
+            .unwrap()
+            .store
+            .blob_get(sha)
+            .is_err()
+    };
+    let (r, sha) = apply("unknown.md", &["claims=msg:999"], rev, "intent-2");
+    assert!(
+        matches!(&r, Response::Rejected(x) if x.code == Code::BadAffects),
+        "{r:?}"
+    );
+    assert!(absent(&sha), "a refused apply stores nothing");
+    let (r, sha) = apply("stale.md", &[], Rev(rev.0 - 1), "intent-3");
+    assert!(matches!(r, Response::Rejected(_)), "{r:?}");
+    assert!(absent(&sha), "a stale fence stores nothing");
+    let (r, sha) = apply("retry.md", &[], rev, "intent-1");
+    assert!(
+        matches!(&r, Response::Rejected(x) if x.code == Code::OpConflict),
+        "{r:?}"
+    );
+    assert!(absent(&sha), "a retry with other bytes stores none of them");
+    assert_eq!(state(&dir).rev, rev, "nothing was written");
+    // The same retry with the same bytes replays the stored answer.
+    let again = human::perform_fenced(
+        &dir,
+        &task(),
+        "intent",
+        &[path],
+        Some(Rev(rev.0 - fresh.events.len() as u64)),
+        "owner",
+        Some(Rev(rev.0 - fresh.events.len() as u64)),
+        op(),
+    )
+    .unwrap();
+    assert_eq!(again, applied, "an idempotent retry replays");
+    assert_eq!(state(&dir).rev, rev, "and writes nothing");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------------------------------------------------------------- protected paths (#597)
 
 /// Store `diff` as `who` and a candidate of it naming claim `c`.
@@ -1552,5 +1799,1125 @@ fn why_replays_one_claim_and_names_the_rule() {
     assert!(!ok && err.contains("exclusive"), "{err}");
     let (ok, _, err) = why(&["--at", "3"]);
     assert!(!ok && err.contains("--at needs --claim"), "{err}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A fresh session cgroup path under the cgroup2 mount, or why there can't
+/// be one (no cgroup2, or not allowed to create one: CI runners as a user).
+#[cfg(target_os = "linux")]
+fn session_cgroup(tag: &str) -> Result<PathBuf, String> {
+    let mounts = std::fs::read_to_string("/proc/self/mounts").map_err(|e| e.to_string())?;
+    let base = mounts
+        .lines()
+        .map(|l| l.split(' ').collect::<Vec<_>>())
+        .find(|f| f.len() > 2 && f[2] == "cgroup2" && f[1].starts_with("/sys/fs/cgroup"))
+        .map(|f| PathBuf::from(f[1]))
+        .ok_or("no cgroup2 mount under /sys/fs/cgroup")?;
+    let probe = base.join(format!("bbp-probe-{}-{tag}", std::process::id()));
+    std::fs::create_dir(&probe).map_err(|e| format!("mkdir {}: {e}", probe.display()))?;
+    std::fs::remove_dir(&probe).map_err(|e| e.to_string())?;
+    Ok(base.join(format!("bbp-test-{}-{tag}", std::process::id())))
+}
+
+/// Removes a control directory's scope cgroup once its test is done.
+#[cfg(target_os = "linux")]
+struct Scope(PathBuf);
+
+#[cfg(target_os = "linux")]
+impl Drop for Scope {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+/// `cgroup`'s name below `dir`'s scope, in `cgroup`'s parent.
+#[cfg(target_os = "linux")]
+fn scoped(dir: &Path, cgroup: &Path) -> (PathBuf, Scope) {
+    let scope = cgroup.with_file_name(rusty_bbp_host::cgroups::scope(dir).expect("scope"));
+    (scope.join(cgroup.file_name().expect("name")), Scope(scope))
+}
+
+/// `bbp cgroup-open` for task C1, with its output.
+#[cfg(target_os = "linux")]
+fn cgroup_open(dir: &Path, cgroup: &Path) -> String {
+    let out = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(["cgroup-open", "--task", "C1", "--dir"])
+        .arg(dir)
+        .arg("--cgroup")
+        .arg(cgroup)
+        .output()
+        .expect("bbp");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// `sleep 30`, moved into `cgroup`.
+#[cfg(target_os = "linux")]
+fn sleeper_in(cgroup: &Path) -> std::process::Child {
+    let child = Proc::new("sleep").arg("30").spawn().expect("sleep");
+    std::fs::write(cgroup.join("cgroup.procs"), child.id().to_string()).expect("join cgroup");
+    child
+}
+
+/// Whether some process holds the slot lock on `path`.
+#[cfg(target_os = "linux")]
+fn slot_held(path: &Path) -> bool {
+    let file = std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("slot file");
+    matches!(file.try_lock(), Err(std::fs::TryLockError::WouldBlock))
+}
+
+/// `bbp slot-hold --cgroup C` holding a locked slot file on its stdout.
+#[cfg(target_os = "linux")]
+fn cgroup_holder(cgroup: &Path, slot: &Path, deadline_ms: Option<u128>) -> std::process::Child {
+    let file = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(slot)
+        .expect("slot");
+    file.lock().expect("lock");
+    let mut cmd = Proc::new(env!("CARGO_BIN_EXE_bbp"));
+    cmd.args(["slot-hold", "--cgroup"]).arg(cgroup);
+    if let Some(ms) = deadline_ms {
+        cmd.args(["--deadline-ms", &ms.to_string()]);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(file)
+        .spawn()
+        .expect("slot-hold")
+}
+
+#[cfg(target_os = "linux")]
+fn exits_within(child: &mut std::process::Child, within: std::time::Duration) -> bool {
+    let end = std::time::Instant::now() + within;
+    while std::time::Instant::now() < end {
+        if child.try_wait().expect("wait").is_some() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// D82/D86: the cgroup holder keeps the slot after its caller is gone until
+/// the session's cgroup is empty, and `quiesce` then removes the cgroup.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_cgroup_holder_frees_the_slot_only_once_the_cgroup_is_empty() {
+    use std::time::Duration;
+    let cgroup = match session_cgroup("hold") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-hold");
+    let (cgroup, _scope) = scoped(&dir, &cgroup);
+    claims_task(&dir);
+    let out = cgroup_open(&dir, &cgroup);
+    assert!(cgroup.is_dir(), "{out}");
+    let again = cgroup_open(&dir, &cgroup);
+    assert!(again.contains("already exists"), "{again}");
+    let mut agent = sleeper_in(&cgroup);
+    let slot = dir.join("agent-0.lock");
+    let mut holder = cgroup_holder(&cgroup, &slot, None);
+    drop(holder.stdin.take()); // the caller (orch) is gone
+    assert!(!exits_within(&mut holder, Duration::from_millis(500)));
+    assert!(slot_held(&slot), "slot freed while the agent runs");
+    agent.kill().expect("kill");
+    agent.wait().expect("reap");
+    assert!(exits_within(&mut holder, Duration::from_secs(5)));
+    assert!(
+        !slot_held(&slot),
+        "slot still held after the cgroup emptied"
+    );
+    // The task ends; quiesce removes the empty cgroup and its record.
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(!cgroup.exists());
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+}
+
+/// D82/D86: at the deadline the holder kills the cgroup, even while its
+/// caller still holds stdin open, and never touches a process group.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_cgroup_holder_kills_the_cgroup_at_the_deadline() {
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let cgroup = match session_cgroup("deadline") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-deadline");
+    let (cgroup, _scope) = scoped(&dir, &cgroup);
+    claims_task(&dir);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    let mut agent = sleeper_in(&cgroup);
+    let slot = dir.join("agent-0.lock");
+    let deadline = SystemTime::now() + Duration::from_millis(400);
+    let ms = deadline.duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let mut holder = cgroup_holder(&cgroup, &slot, Some(ms));
+    assert!(
+        exits_within(&mut holder, Duration::from_secs(5)),
+        "holder outlived the deadline"
+    );
+    let status = agent.wait().expect("reap");
+    assert_eq!(
+        status.signal(),
+        Some(9),
+        "the agent was killed by cgroup.kill"
+    );
+    assert!(!slot_held(&slot));
+    drop(holder.stdin.take());
+    // quiesce on an ended task: a populated cgroup is killed, then removed.
+    let mut late = sleeper_in(&cgroup);
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(false));
+    late.wait().expect("reap");
+    let quiet = (0..50).any(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        rusty_bbp_host::moderator::quiesce(&dir, &task()) == Ok(true)
+    });
+    assert!(quiet && !cgroup.exists());
+}
+
+/// D86 (#1507 review): an open paused between its record and its cgroup
+/// is a claim no other task's open can take, so exactly one task owns the
+/// path, the loser leaves no record, and its quiesce can't touch the winner.
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_opens_of_one_path_have_exactly_one_owner() {
+    let cgroup = match session_cgroup("race") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-race");
+    let (cgroup, _scope) = scoped(&dir, &cgroup);
+    claims_task(&dir);
+    let other = TaskId("C2".into());
+    claims_task_as(&dir, &other);
+    let (paused, resume) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let winner = {
+        let (dir, cgroup) = (dir.clone(), cgroup.clone());
+        let (tell, wait) = (paused.0, resume.1);
+        std::thread::spawn(move || {
+            rusty_bbp_host::cgroups::open_with(&dir, &task(), &cgroup, || {
+                tell.send(()).expect("paused");
+                wait.recv().expect("resume");
+            })
+        })
+    };
+    paused.1.recv().expect("winner paused after its record");
+    let lost = rusty_bbp_host::cgroups::open(&dir, &other, &cgroup).expect_err("second owner");
+    assert!(lost.contains("task C1 owns it"), "{lost}");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &other)
+        .unwrap()
+        .is_empty());
+    resume.0.send(()).expect("resume");
+    winner.join().expect("winner").expect("winner opens");
+    assert!(cgroup.is_dir());
+    // The loser's task ends and quiesces: nothing of the winner's is touched.
+    let mut agent = sleeper_in(&cgroup);
+    let rev = open_driver(&dir, &other).expect("driver").state.rev;
+    human::perform(&dir, &other, "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &other), Ok(true));
+    assert!(
+        agent.try_wait().expect("wait").is_none(),
+        "the winner's agent lives"
+    );
+    assert!(cgroup.is_dir());
+    agent.kill().expect("kill");
+    agent.wait().expect("reap");
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(!cgroup.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// D86 (#1507 review): an open paused after its record while the task
+/// ends: quiesce waits for it rather than settling a half-made session, so
+/// a quiesce that returns `true` leaves no cgroup behind; and once the task
+/// has ended no open succeeds.
+#[cfg(target_os = "linux")]
+#[test]
+fn quiesce_waits_for_a_paused_open_and_an_ended_task_opens_nothing() {
+    use std::time::Duration;
+    let cgroup = match session_cgroup("pause") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-pause");
+    let (cgroup, _scope) = scoped(&dir, &cgroup);
+    claims_task(&dir);
+    let (paused, resume) = (std::sync::mpsc::channel(), std::sync::mpsc::channel::<()>());
+    let opening = {
+        let (dir, cgroup) = (dir.clone(), cgroup.clone());
+        let (tell, wait) = (paused.0, resume.1);
+        std::thread::spawn(move || {
+            rusty_bbp_host::cgroups::open_with(&dir, &task(), &cgroup, || {
+                tell.send(()).expect("paused");
+                wait.recv().expect("resume");
+            })
+        })
+    };
+    paused.1.recv().expect("open paused after its record");
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    let quiescing = {
+        let dir = dir.clone();
+        std::thread::spawn(move || rusty_bbp_host::moderator::quiesce(&dir, &task()))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !quiescing.is_finished(),
+        "quiesce settled a half-made session"
+    );
+    resume.0.send(()).expect("resume");
+    opening
+        .join()
+        .expect("open")
+        .expect("the paused open completes");
+    assert_eq!(quiescing.join().expect("quiesce"), Ok(true));
+    assert!(!cgroup.exists(), "a successful quiesce left a cgroup");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    let late = rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect_err("ended task");
+    assert!(late.contains("has ended"), "{late}");
+    assert!(!cgroup.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Opens `cgroup` for `t` in `dir` and crashes right after publishing the
+/// claim and the intent record, before the cgroup is created.
+#[cfg(target_os = "linux")]
+fn crash_after_record(dir: &Path, t: &TaskId, cgroup: &Path) {
+    let (dir, t, cgroup) = (dir.to_path_buf(), t.clone(), cgroup.to_path_buf());
+    let crashed = std::thread::spawn(move || {
+        let _ = rusty_bbp_host::cgroups::open_with(&dir, &t, &cgroup, || panic!("crash"));
+    })
+    .join();
+    assert!(crashed.is_err(), "the opener crashed");
+}
+
+/// D86 (#1507 review): a crash between publishing the intent and creating
+/// the cgroup, on a path where a populated cgroup already exists, can't
+/// give quiesce authority over it: a cgroup made outside any board is
+/// never signalled or removed. One another control directory owns can't
+/// even be opened, as it sits below that directory's scope.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_crashed_open_never_cleans_up_a_cgroup_it_did_not_create() {
+    let base = match session_cgroup("foreign") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-crash");
+    claims_task(&dir);
+    let second = TaskId("C2".into());
+    claims_task_as(&dir, &second);
+    let other = tempdir("cgroup-other-dir");
+    claims_task(&other);
+    let (foreign, _scope) = scoped(&dir, &base);
+    let (owned, _other_scope) = scoped(&other, &base);
+    // One made outside any board in this directory's scope, one opened by
+    // another control directory.
+    std::fs::create_dir_all(&foreign).expect("foreign cgroup");
+    rusty_bbp_host::cgroups::open(&other, &task(), &owned).expect("other dir opens");
+    let mut workloads = [sleeper_in(&foreign), sleeper_in(&owned)];
+    crash_after_record(&dir, &task(), &foreign);
+    // Without a crash, the same open by another task leaves nothing.
+    let refused = rusty_bbp_host::cgroups::open(&dir, &second, &foreign).expect_err("taken");
+    assert!(refused.contains("owns it"), "{refused}");
+    let refused = rusty_bbp_host::cgroups::open(&dir, &task(), &owned).expect_err("not ours");
+    assert!(refused.contains("scope"), "{refused}");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &second)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        rusty_bbp_host::cgroups::records(&dir, &task())
+            .unwrap()
+            .len(),
+        1
+    );
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    for (w, cgroup) in workloads.iter_mut().zip([&foreign, &owned]) {
+        assert!(
+            w.try_wait().expect("wait").is_none(),
+            "{} was signalled",
+            cgroup.display()
+        );
+        assert!(cgroup.is_dir(), "{} was removed", cgroup.display());
+    }
+    // The crash released the claim; an uncrashed open now fails to create
+    // the existing cgroup and leaves nothing behind either.
+    let refused = rusty_bbp_host::cgroups::open(&dir, &second, &foreign).expect_err("exists");
+    assert!(refused.contains("exists"), "{refused}");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &second)
+        .unwrap()
+        .is_empty());
+    // The other directory's own quiesce still cleans up what it created.
+    for w in &mut workloads {
+        w.kill().expect("kill");
+        w.wait().expect("reap");
+    }
+    let rev = open_driver(&other, &task()).expect("driver").state.rev;
+    human::perform(&other, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(
+        rusty_bbp_host::moderator::quiesce(&other, &task()),
+        Ok(true)
+    );
+    assert!(!owned.exists());
+    std::fs::remove_dir(&foreign).expect("remove the foreign cgroup");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&other);
+}
+
+/// #1507 review: the holder watches the cgroup it opened, not its path. One
+/// removed and made again at the path before the deadline is someone else's:
+/// the holder ends, as its own session is gone, and never kills the new one.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_holder_never_kills_a_cgroup_made_again_at_its_path() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let base = match session_cgroup("rehold") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-rehold");
+    claims_task(&dir);
+    let (cgroup, _scope) = scoped(&dir, &base);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    let slot = dir.join("agent-0.lock");
+    let deadline = SystemTime::now() + Duration::from_millis(800);
+    let ms = deadline.duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let mut holder = cgroup_holder(&cgroup, &slot, Some(ms));
+    std::thread::sleep(Duration::from_millis(200));
+    // The session is removed while its holder runs, and the path reused.
+    std::fs::remove_dir(&cgroup).expect("removed");
+    std::fs::create_dir(&cgroup).expect("made again");
+    let mut workload = sleeper_in(&cgroup);
+    assert!(
+        exits_within(&mut holder, Duration::from_secs(5)),
+        "the holder outlived its own cgroup"
+    );
+    assert!(!slot_held(&slot), "the replacement kept the old slot held");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        workload.try_wait().expect("wait").is_none(),
+        "the new cgroup's workload was killed"
+    );
+    drop(holder.stdin.take());
+    workload.kill().expect("kill");
+    workload.wait().expect("reap");
+    std::fs::remove_dir(&cgroup).expect("remove the new cgroup");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1507 review: an open that crashes once its claim is published leaves
+/// the record that leads quiesce back to it (the intent is recorded first),
+/// so quiescing the crashed task frees the path for the next open.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_claim_left_by_a_crashed_open_is_freed_by_quiesce() {
+    let base = match session_cgroup("freed") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-freed");
+    claims_task(&dir);
+    let second = TaskId("C2".into());
+    claims_task_as(&dir, &second);
+    let (cgroup, _scope) = scoped(&dir, &base);
+    crash_after_record(&dir, &task(), &cgroup);
+    let taken = rusty_bbp_host::cgroups::open(&dir, &second, &cgroup).expect_err("claimed");
+    assert!(taken.contains("task C1 owns it"), "{taken}");
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(!cgroup.exists(), "recovery created nothing");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    rusty_bbp_host::cgroups::open(&dir, &second, &cgroup).expect("the path is free again");
+    let rev = open_driver(&dir, &second).expect("driver").state.rev;
+    human::perform(&dir, &second, "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &second), Ok(true));
+    assert!(!cgroup.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1507 review: a quiesce that removed its cgroup and crashed before
+/// dropping the claim can't hurt a cgroup made again at that path. Another
+/// control directory can't make one there (it is outside that directory's
+/// scope), and one made some other way has another inode, so the restarted
+/// quiesce drops its record and leaves it alone.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_restarted_quiesce_never_touches_a_cgroup_made_again_at_its_path() {
+    let base = match session_cgroup("again") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-again");
+    claims_task(&dir);
+    let (cgroup, _scope) = scoped(&dir, &base);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    // Quiesce removed the empty cgroup, then crashed: claim and record stay.
+    std::fs::remove_dir(&cgroup).expect("removed");
+    let other = tempdir("cgroup-again-other");
+    claims_task(&other);
+    let refused = rusty_bbp_host::cgroups::open(&other, &task(), &cgroup).expect_err("scope");
+    assert!(refused.contains("scope") && !cgroup.exists(), "{refused}");
+    // Made again outside the protocol, with a workload in it.
+    std::fs::create_dir(&cgroup).expect("made again");
+    let mut workload = sleeper_in(&cgroup);
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(
+        workload.try_wait().expect("wait").is_none(),
+        "the new cgroup's workload was signalled"
+    );
+    assert!(cgroup.is_dir(), "the new cgroup was removed");
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    workload.kill().expect("kill");
+    workload.wait().expect("reap");
+    std::fs::remove_dir(&cgroup).expect("remove the new cgroup");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&other);
+}
+
+/// #1507 review: `cgroup.kill` and `populated` reach a whole subtree, so no
+/// task may own a session nested in or around another task's.
+#[cfg(target_os = "linux")]
+#[test]
+fn sessions_of_different_tasks_never_nest() {
+    let outer = match session_cgroup("nest") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-nest");
+    let base = outer;
+    let (outer, _scope) = scoped(&dir, &base);
+    let inner = outer.join("child");
+    claims_task(&dir);
+    let b = TaskId("C2".into());
+    claims_task_as(&dir, &b);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &outer).expect("A opens the outer one");
+    let below = rusty_bbp_host::cgroups::open(&dir, &b, &inner).expect_err("nested below");
+    assert!(
+        below.contains("overlaps") && below.contains("task C1"),
+        "{below}"
+    );
+    assert!(
+        !inner.exists()
+            && rusty_bbp_host::cgroups::records(&dir, &b)
+                .unwrap()
+                .is_empty()
+    );
+    // And the other way round: B first, then A around it.
+    let other = outer.with_file_name(format!("bbp-test-{}-nest2", std::process::id()));
+    rusty_bbp_host::cgroups::open(&dir, &b, &other.join("child")).expect("B opens");
+    let around = rusty_bbp_host::cgroups::open(&dir, &task(), &other).expect_err("around");
+    assert!(
+        around.contains("overlaps") && around.contains("task C2"),
+        "{around}"
+    );
+    // Another control directory keeps its own claims, so it may not nest
+    // either: its paths sit below its own scope, never in or around these.
+    let second = tempdir("cgroup-nest-other");
+    claims_task(&second);
+    for path in [
+        inner.clone(),
+        outer.join("x"),
+        outer.parent().expect("scope").join("y"),
+    ] {
+        let refused = rusty_bbp_host::cgroups::open(&second, &task(), &path).expect_err("scope");
+        assert!(refused.contains("scope"), "{refused}");
+        assert!(!path.exists());
+    }
+    let (theirs, _their_scope) = scoped(&second, &base);
+    rusty_bbp_host::cgroups::open(&second, &task(), &theirs).expect("its own scope");
+    let rev = open_driver(&second, &task()).expect("driver").state.rev;
+    human::perform(&second, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(
+        rusty_bbp_host::moderator::quiesce(&second, &task()),
+        Ok(true)
+    );
+    assert!(!theirs.exists());
+    let _ = std::fs::remove_dir_all(&second);
+    for t in [task(), b] {
+        let rev = open_driver(&dir, &t).expect("driver").state.rev;
+        human::perform(&dir, &t, "close", &[], Some(rev)).expect("close");
+        assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &t), Ok(true));
+    }
+    assert!(!outer.exists() && !other.join("child").exists());
+    let _ = std::fs::remove_dir(&other);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1507 review: a session that made its own child cgroups is still removed
+/// once empty, deepest first, and quiesce doesn't stall on it.
+#[cfg(target_os = "linux")]
+#[test]
+fn quiesce_removes_a_session_with_empty_children() {
+    let cgroup = match session_cgroup("kids") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-kids");
+    let (cgroup, _scope) = scoped(&dir, &cgroup);
+    claims_task(&dir);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    std::fs::create_dir_all(cgroup.join("a/b")).expect("children");
+    std::fs::create_dir(cgroup.join("c")).expect("child");
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    assert!(!cgroup.exists());
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1507 review: a name the record couldn't hold exactly is refused before
+/// anything is claimed or made, so quiesce can't report a false `true`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_cgroup_name_ending_in_whitespace_is_refused_up_front() {
+    let cgroup = match session_cgroup("space") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let spaced = PathBuf::from(format!("{} ", cgroup.display()));
+    let dir = tempdir("cgroup-space");
+    let (cgroup, _scope) = scoped(&dir, &cgroup);
+    claims_task(&dir);
+    let out = cgroup_open(&dir, &spaced);
+    assert!(out.contains("whitespace"), "{out}");
+    assert!(!spaced.exists() && !cgroup.exists());
+    assert!(rusty_bbp_host::cgroups::records(&dir, &task())
+        .unwrap()
+        .is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------- takeover (D82)
+
+fn bbp(dir: &Path, args: &[&str], stdin: impl AsRef<[u8]>) -> String {
+    use std::io::Write;
+    let mut child = Proc::new(env!("CARGO_BIN_EXE_bbp"))
+        .args(args)
+        .arg("--dir")
+        .arg(dir)
+        .args(["--task", "C1"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("bbp");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(stdin.as_ref())
+        .expect("write");
+    let out = child.wait_with_output().expect("wait");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// The human starts a takeover with `bbp human takeover`, orch records the
+/// typed batches with `bbp takeover-input` (text on stdin, chained by
+/// SHA-256) and ends it with `bbp takeover-ended`; the board keeps it all.
+/// After `bbp human takeover-release`, orch drains and ends it as released.
+#[test]
+fn a_takeover_is_recorded_from_start_to_end_through_the_cli() {
+    let dir = tempdir("takeover-cli");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "one", true);
+    let r = human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[
+            &format!("msg:{c}"),
+            "agent:C1:1:1",
+            "nano",
+            "10",
+            "steer",
+            "it",
+        ],
+        None,
+    )
+    .expect("takeover");
+    assert_eq!(r, Response::TakenOver(1));
+    let sha = rusty_bbp::claims::input_chain(None, b"ls\n").hex();
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "ls\n",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    // A replayed or forged batch is refused by the core, not written.
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "ls\n",
+    );
+    assert!(out.contains("OpConflict"), "{out}");
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-ended",
+            "--takeover",
+            "takeover:1",
+            "--reason",
+            "released",
+        ],
+        "",
+    );
+    assert!(out.contains("Forbidden"), "{out}");
+    let out = bbp(
+        &dir,
+        &["takeover-ended", "--takeover", "1", "--reason", "mux-lost"],
+        "",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    let t = state(&dir)
+        .claims
+        .takeovers
+        .get(&1)
+        .cloned()
+        .expect("takeover");
+    assert_eq!(t.batches, 1);
+    assert_eq!(t.phase, TakeoverPhase::Ended(TakeoverEnd::MuxLost));
+
+    let r = human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[&format!("msg:{c}"), "agent:C1:1:1", "nano", "10", "again"],
+        None,
+    )
+    .expect("takeover");
+    assert_eq!(r, Response::TakenOver(2));
+    human::perform(&dir, &task(), "takeover-release", &["takeover:2"], None).expect("release");
+    // Delivered before the release, posted after it.
+    let sha = rusty_bbp::claims::input_chain(None, b"q").hex();
+    let out = bbp(
+        &dir,
+        &[
+            "takeover-input",
+            "--takeover",
+            "2",
+            "--seq",
+            "1",
+            "--sha256",
+            &sha,
+        ],
+        "q",
+    );
+    assert!(out.contains("Ok"), "{out}");
+    let end = ["takeover-ended", "--takeover", "2", "--reason", "released"];
+    assert!(bbp(&dir, &end, "").contains("Ok"));
+    assert!(bbp(&dir, &end, "").contains("NotOpen"), "ends once");
+    let t = state(&dir).claims.takeovers[&2].clone();
+    assert_eq!(t.batches, 1);
+    assert_eq!(t.phase, TakeoverPhase::Ended(TakeoverEnd::Released));
+}
+
+/// `bbp takeover-input` records stdin byte for byte: invalid UTF-8, a
+/// multibyte character split across batches, and exactly 4096 bytes are
+/// kept; 4097 is refused before anything is written.
+#[test]
+fn takeover_input_keeps_raw_bytes_and_refuses_an_oversized_batch() {
+    use rusty_bbp::claims::input_chain;
+    let dir = tempdir("takeover-bytes");
+    claims_task(&dir);
+    let c = claim(&dir, "a", "one", true);
+    let msg = format!("msg:{c}");
+    human::perform(
+        &dir,
+        &task(),
+        "takeover",
+        &[&msg, "s1", "nano", "10", "steer"],
+        None,
+    )
+    .expect("takeover");
+    let full = vec![b'a'; 4096];
+    let batches: [&[u8]; 4] = [b"\xff\xfe", b"caf\xc3", b"\xa9\r", &full];
+    let mut prev = None;
+    for (seq, batch) in (1u64..).zip(batches) {
+        let sha = input_chain(prev, batch);
+        let (seq, hex) = (seq.to_string(), sha.hex());
+        let flags = [
+            "takeover-input",
+            "--takeover",
+            "1",
+            "--seq",
+            &seq,
+            "--sha256",
+            &hex,
+        ];
+        let out = bbp(&dir, &flags, batch);
+        assert!(out.contains("Ok"), "batch {seq}: {out}");
+        prev = Some(sha);
+    }
+    let big = vec![b'b'; 4097];
+    let hex = input_chain(prev, &big).hex();
+    let flags = [
+        "takeover-input",
+        "--takeover",
+        "1",
+        "--seq",
+        "5",
+        "--sha256",
+        &hex,
+    ];
+    let out = bbp(&dir, &flags, &big);
+    assert!(out.contains("over 4096 bytes"), "{out}");
+    let st = state(&dir);
+    let t = st.claims.takeovers.get(&1).expect("takeover");
+    assert_eq!((t.batches, t.last), (4, prev));
+}
+
+// ---------------------------------------------------------------- erosion profile (#704)
+
+const ORIGINAL_RS: &str = "pub fn total(items: &[Item], rate: u32) -> u32 {
+    let mut sum = 0;
+    for item in items.iter() {
+        let price = item.price * item.count;
+        let tax = price * rate / 100;
+        sum += price + tax;
+    }
+    sum
+}
+";
+
+/// A candidate that fixes the flag and pastes a renamed copy of `total`.
+fn paste_diff() -> String {
+    let pasted = ORIGINAL_RS
+        .replace("total", "grand")
+        .replace("items", "goods")
+        .replace("100", "250");
+    let lines: Vec<&str> = pasted.lines().collect();
+    let body: String = lines.iter().map(|l| format!("+{l}\n")).collect();
+    format!(
+        "{FLAG_ONLY}--- /dev/null\n+++ b/src/b.rs\n@@ -0,0 +1,{} @@\n{body}",
+        lines.len()
+    )
+}
+
+/// #704 slice 2, Linux acceptance lane: a claims task's `erosion` profile
+/// runs the real `erosion` binary in the sandbox against the pinned base. A
+/// pasted duplicate is reported while report-only, and fails the profile
+/// once limits are enforced. Refuses to pass where the sandbox does not work.
+#[test]
+#[ignore = "needs a working sandbox and EROSION_TEST_BIN; run by the confined acceptance lane"]
+fn confined_erosion_profile_reports_then_blocks_a_pasted_duplicate() {
+    let bin = PathBuf::from(std::env::var_os("EROSION_TEST_BIN").expect("EROSION_TEST_BIN"));
+    let bin_dir = bin
+        .parent()
+        .expect("bin dir")
+        .to_str()
+        .expect("utf-8")
+        .to_owned();
+    let modes = [
+        ("erosion_report", "--report-only", "exit 0"),
+        (
+            "erosion_enforce",
+            "--max-concentration-bp 100 --max-duplication-bp 100",
+            "exit 1",
+        ),
+    ];
+    for (tag, mode, exit) in modes {
+        let dir = tempdir(tag);
+        runner::probe(&sandbox(&dir), &dir.join("probe")).expect("a working sandbox");
+        let (repo, _) = repo(&dir);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/a.rs"), ORIGINAL_RS).unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "--quiet", "-m", "rust"]);
+        let base = git(&repo, &["rev-parse", "HEAD"]);
+
+        let mut set = profiles();
+        set.erosion = None;
+        set.read_roots.push(bin_dir.clone());
+        let mut args = vec!["check".to_owned(), "--base".to_owned(), base.clone()];
+        args.extend(mode.split_whitespace().map(String::from));
+        set.profiles.push(rusty_bbp_host::profiles::Profile {
+            name: rusty_bbp_host::profiles::EROSION_PROFILE.into(),
+            program: bin.to_str().expect("utf-8").into(),
+            args,
+        });
+        claims_task_set(&dir, &task(), &set);
+        let c = claim(&dir, "a", "flag", true);
+        let (text, err) = put_candidate(&mut server(&dir, "a"), "k", &base, &paste_diff(), c);
+        assert!(!err, "{text}");
+        let k = id_of(&text);
+        let exec = sandbox(&dir);
+        runner::run_once(
+            &dir,
+            &task(),
+            &repo,
+            &dir.join("work"),
+            &exec,
+            Confinement::Sandboxed,
+        )
+        .expect("run");
+
+        let (_, rep, log) = run_of(&dir, k);
+        assert_eq!(rep.sandbox, runner::Sandboxed::LABEL);
+        assert!(log.contains("--- test: exit 0"), "{log}");
+        assert!(log.contains(&format!("--- erosion: {exit}")), "{log}");
+        let dup = "\"duplication_bp\":{\"base\":0,\"candidate\":10000,\"delta\":10000}";
+        assert!(log.contains(dup), "{log}");
+        assert!(log.contains("\"key\":\"src/b.rs::grand\""), "{log}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    println!("BBP_ACCEPTANCE PASS erosion-confined");
+}
+
+/// A claims profile set whose `erosion` profile runs with `mode` flags.
+fn erosion_profiles(mode: &str) -> ProfileSet {
+    let mut set = profiles();
+    set.erosion = None;
+    let args = format!("check --base {} {mode}", "a".repeat(40));
+    set.profiles.push(rusty_bbp_host::profiles::Profile {
+        name: "erosion".into(),
+        program: "/usr/local/bin/erosion".into(),
+        args: args.split(' ').map(String::from).collect(),
+    });
+    set
+}
+
+/// #704 D42 (D88): report-only covers 10 claims tasks, then a new
+/// report-only open pauses. Tasks already open stay, and the opt-out and
+/// enforcing opens are not affected.
+#[test]
+fn report_only_erosion_pauses_after_ten_tasks() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-ten");
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..10 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let ledger = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(ledger.lines().count(), 10, "{ledger}");
+
+    let (code, detail) = rejected(open_as(&dir, &TaskId("R10".into()), &report_only, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.contains("report-only has expired"), "{detail}");
+    assert!(detail.contains("10 report-only tasks"), "{detail}");
+    assert!(!log_path_for(&dir, &TaskId("R10".into())).exists());
+    assert!(log_path_for(&dir, &TaskId("R0".into())).exists());
+
+    let off = TaskId("OFF".into());
+    assert!(matches!(
+        open_as(&dir, &off, &profiles(), Ok(())),
+        Response::Stored(_)
+    ));
+    let enforcing = erosion_profiles("--max-concentration-bp 50 --max-duplication-bp 50");
+    let e = TaskId("ENF".into());
+    assert!(matches!(
+        open_as(&dir, &e, &enforcing, Ok(())),
+        Response::Stored(_)
+    ));
+    let after = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(after, ledger, "only report-only opens are recorded");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): report-only ends 14 days after its first open, and an
+/// open refused before the ledger (here, no sandbox) records nothing.
+#[test]
+fn report_only_erosion_pauses_fourteen_days_after_go_live() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-days");
+    let report_only = erosion_profiles("--report-only");
+    let (code, _) = rejected(open(&dir, &report_only, Err("no Landlock".into())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(!erosion_window::path(&dir).exists());
+
+    let long_ago = now().0 - erosion_window::WINDOW_MS;
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    std::fs::write(erosion_window::path(&dir), format!("{long_ago} OLD\n")).expect("seed");
+    let (code, detail) = rejected(open(&dir, &report_only, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.contains("14 days"), "{detail}");
+    assert!(!log_path_for(&dir, &task()).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): only a log that proves a report-only claims open counts.
+/// Ledger lines for tasks that opened with the opt-out, never opened, or
+/// left an empty log start the clock but do not count, and a refused
+/// re-open of a counted task does not count it twice.
+#[test]
+fn only_proven_report_only_opens_count() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-proof");
+    let mut seeded = String::new();
+    for i in 0..10 {
+        let t = TaskId(format!("OFF{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &profiles(), Ok(())),
+            Response::Stored(_)
+        ));
+        seeded.push_str(&format!("{} OFF{i}\n", now().0));
+    }
+    seeded.push_str(&format!("{} NEVER\n", now().0));
+    seeded.push_str(&format!("{} EMPTY\n", now().0));
+    // A failed write can leave an empty log; it is not an open.
+    std::fs::write(log_path_for(&dir, &TaskId("EMPTY".into())), "").expect("empty log");
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    std::fs::write(erosion_window::path(&dir), seeded).expect("seed");
+
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..9 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let (code, _) = rejected(open_as(&dir, &TaskId("R0".into()), &report_only, Ok(())));
+    assert_eq!(code, Code::AlreadyOpen);
+    assert!(matches!(
+        open_as(&dir, &TaskId("R9".into()), &report_only, Ok(())),
+        Response::Stored(_)
+    ));
+    let (_, detail) = rejected(open_as(&dir, &TaskId("R10".into()), &report_only, Ok(())));
+    assert!(detail.contains("10 report-only tasks"), "{detail}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): racing report-only opens at the boundary admit exactly
+/// one, because the ledger lock spans each open's publication.
+#[test]
+fn racing_report_only_opens_cannot_overshoot() {
+    let dir = tempdir("erosion-race");
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..9 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let stored: usize = std::thread::scope(|s| {
+        let racers: Vec<_> = (0..4)
+            .map(|i| {
+                let (dir, set) = (&dir, &report_only);
+                s.spawn(move || open_as(dir, &TaskId(format!("X{i}")), set, Ok(())))
+            })
+            .collect();
+        racers
+            .into_iter()
+            .map(|h| usize::from(matches!(h.join().expect("join"), Response::Stored(_))))
+            .sum()
+    });
+    assert_eq!(stored, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): a torn ledger append (a valid-looking last line without
+/// its newline) refuses the next report-only open, which publishes nothing
+/// and is not run into the torn record.
+#[test]
+fn a_torn_ledger_refuses_the_next_report_only_open() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-torn");
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    let torn = format!("{} FAILED", now().0);
+    std::fs::write(erosion_window::path(&dir), &torn).expect("seed");
+    let t = TaskId("SUCCESS".into());
+    let opened = admin::open_claims_task(
+        &dir,
+        &t,
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &erosion_profiles("--report-only"),
+        None,
+        vec![lens("a", 0), lens("b", 1)],
+        ClaimsConfig::default(),
+        || Ok(()),
+    );
+    assert!(opened.is_err_and(|e| e.contains("torn")));
+    assert!(!log_path_for(&dir, &t).exists());
+    let ledger = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(ledger, torn);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): a report-only open with an empty task id fails without
+/// writing to the ledger, so later report-only opens still work.
+#[test]
+fn an_empty_task_id_does_not_poison_the_ledger() {
+    let dir = tempdir("erosion-empty-id");
+    let report_only = erosion_profiles("--report-only");
+    let empty = admin::open_claims_task(
+        &dir,
+        &TaskId(String::new()),
+        "local",
+        b"Make the flag say ok.",
+        &PrincipalId("human".into()),
+        &report_only,
+        None,
+        vec![lens("a", 0), lens("b", 1)],
+        ClaimsConfig::default(),
+        || Ok(()),
+    );
+    assert!(empty.is_err());
+    assert!(!rusty_bbp_host::erosion_window::path(&dir).exists());
+    let t = TaskId("AFTER".into());
+    assert!(matches!(
+        open_as(&dir, &t, &report_only, Ok(())),
+        Response::Stored(_)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }

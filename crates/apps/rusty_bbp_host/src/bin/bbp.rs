@@ -5,39 +5,47 @@
 //! bbp mcp-broker --pipes DIR --harness PID  serves a confined harness's relay; env as bbp mcp
 //! bbp open    --dir D --task T --repo R --brief FILE --roster FILE [--human ID] [--profiles FILE] [--live-turns N] [--policy turn-based|event-driven]
 //! bbp open    --mode claims --dir D --task T --repo R --brief FILE --roster FILE --profiles FILE [--claims FILE] [--human ID] [--confine sandbox|none]
-//!                                          claims mode: the profile set names test_paths; a host that cannot sandbox refuses (bad_claims_config)
+//!                                          claims mode: the profile set names test_paths and an erosion profile or "erosion":"off"; a host that cannot sandbox refuses (bad_claims_config)
 //!                                          [--holdout-profiles FILE --holdout-root DIR] freezes a holdout suite (#597): holdout:/golden: profiles over the files under DIR
 //!                                          [--golden DIR] adds a signed golden set (MANIFEST + SIGNOFF, else bad_golden) as a golden: profile; inside the holdout root, or alone as the whole suite
 //! bbp holdout --dir D --task T --holdout-profiles FILE --holdout-root DIR [--golden DIR]   adopt a new holdout suite version: pure additions are written as holdout_extended, anything else needs `bbp human holdout-updated DIGEST`
+//! bbp pause   --dir D --task T --reason spend_ceiling|call_ceiling|breaker --op OP [--detail TEXT]   #598: the host pauses an open claims task (task_paused); prints the response JSON, a refusal included; the same OP replays
+//! bbp takeover-input --dir D --task T --takeover N --seq S --sha256 HEX   D82: one batch of takeover input, the raw bytes on stdin, at most 4096; HEX chains it to the last batch
+//! bbp takeover-ended --dir D --task T --takeover N --reason released|expired|revoked|turn-ended|mux-lost   D82: orch ends a takeover (`released` only after `bbp human takeover-release N`)
 //! bbp golden-run DIR                        the golden: profile's case runner: checks the sign-off, runs each case in the current directory, prints verdicts only
 //! bbp inbox   --dir D --task T[,T2...] [--json yes]   open escalations of claims tasks as JSON: irreversible first, then by task as given, oldest first within a task
 //! bbp assign  --dir D --task T --role ROLE --principal ID --vendor V
 //! bbp card    --dir D --task T
 //! bbp tick    --dir D --task T
 //! bbp human   --dir D --task T [--rev N] [--as WHO] [--fence N] [--dry-run yes] VERB ARGS...  approve-plan | approve-merge | reject | decision | ask | answer | rerun | receipt | resume | extend | cancel
-//!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST
+//!                                          claims mode: claim MSG accept|drop|reopen | choose Q C | extend-claim MSG | withdraw-rerun ART | action-result MARK done|aborted | refine MSG|task BRIEF TEXT | close | holdout-updated DIGEST | takeover MSG SESSION CLIENT MINUTES REASON | takeover-release N
+//!                                          | intent FILE [claims=msg:1,msg:2] [domains=a,b] (#598: new brief; no list = every claim)
 //!                                          reject, rerun, resume, cancel and close need --rev, the card revision you saw; --dry-run prints the events without committing
 //! bbp runner  --dir D --task T --repo-path PATH --work DIR [--confine sandbox|none]
 //! bbp mod-health --dir D --task T [--check yes | --reset yes --rev N]  replayed launch-loop health
-//! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner or harness group of it runs; kills groups a dead moderator left
+//! bbp quiesce --dir D --task T             for an ended task: `true` once no moderator, runner, harness group or session cgroup of it runs; kills groups a dead moderator left and populated cgroups
 //! bbp profiles rust-lld --sysroot PATH     pre-task, bounded Rust/LLD test profile
 //! bbp metrics --dir D --task T                             concurrency metrics of the task's log, as JSON
 //! bbp agents-check --control FILE --treatment FILE --criteria FILE   every role pins a priced model, identically across arms; run before the run
 //! bbp pairs   --manifest FILE                              the 2b gate criteria over a run's pairs, as JSON
 //! bbp why     --dir D (--task T | T) [--turn N]            why each turn was granted (wake reason, or Explicit), replayed from the log, as JSON
 //! bbp why     --dir D (--task T | T) --claim ID [--at REV] how one claim moved: each evidence and status change with the rule that fired, replayed from the log, as JSON
+//! bbp verify  --dir D --task T [--expect H]               check the log's hash chain without changing it; prints lines, unchained, head; H must be the hash of one of its lines
 //! bbp grade   pack --manifest M --rubrics D --seed S --out O | release --key K --held H --scores S --out O | join --key K --scores S --unused-scores U --release R --rubrics D   blind rubric grading
 //! bbp tokens  --dir D --task T [--criteria FILE] [--api-usage FILE]   model tokens per turn, from the harness output, as JSON; weighted by the criteria file; a mismatch with the API usage is an error
 //! bbp shadow  --dir D --task T                             how often an event-driven rule would have picked another role, as JSON
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
+//! bbp slot-hold --cgroup PATH [--deadline-ms N]   D82: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
+//! bbp cgroup-scope --dir D                 D82: the cgroup name this control directory's sessions must sit below
+//! bbp cgroup-open --dir D --task T --cgroup PATH   D82: records a mux-hosted session's cgroup for the task, then creates it (refused if it exists or isn't below the scope)
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
 use rusty_bbp::*;
 use rusty_bbp_host::{
     admin, admission, args::Args, broker, golden, grade, holdout, human, inbox, mcp, moderator,
-    pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens, why,
+    pairs, pins, profiles, report, response_json, runner, shadow, slots, tokens, verify, why,
 };
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -82,7 +90,7 @@ fn with_holdout(
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
-        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|agents-check|grade|why|shadow|mod> ...",
+        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|agents-check|grade|why|verify|shadow|mod> ...",
     )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
@@ -101,6 +109,9 @@ fn run() -> Result<String, String> {
             })
             .transpose()?
             .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms));
+        if let Some(cgroup) = a.flags.get("cgroup") {
+            return cgroup_hold(cgroup, deadline);
+        }
         slots::hold_while_alive(deadline);
         return Ok(String::new());
     }
@@ -176,6 +187,9 @@ fn run() -> Result<String, String> {
         return broker::broker(&pipes, mcp::Binding::from_env()?, harness).map(|()| String::new());
     }
     let dir = PathBuf::from(a.flag_or_env("dir", "BBP_DIR")?);
+    if sub == "cgroup-scope" {
+        return cgroup_scope(&dir);
+    }
     // `bbp why TASK` names the task positionally too.
     let task = match (sub.as_str(), a.positional.first()) {
         ("why", Some(t)) => TaskId(t.clone()),
@@ -185,6 +199,9 @@ fn run() -> Result<String, String> {
         let mut tasks: Vec<TaskId> = task.0.split(',').map(|t| TaskId(t.to_owned())).collect();
         tasks.extend(a.positional.iter().map(|t| TaskId(t.clone())));
         return inbox::json(&dir, &tasks);
+    }
+    if sub == "cgroup-open" {
+        return cgroup_open(&dir, &task, &PathBuf::from(a.flag("cgroup")?));
     }
     if sub == "quiesce" {
         return moderator::quiesce(&dir, &task).map(|quiet| quiet.to_string());
@@ -263,6 +280,36 @@ fn run() -> Result<String, String> {
                 policy,
             )?
         }
+        "pause" => admin::pause(
+            &dir,
+            &task,
+            admin::pause_reason(a.flag("reason")?)?,
+            a.flags.get("detail").map_or("", String::as_str),
+            OpId(a.flag("op")?.to_owned()),
+        )?,
+        // D82: orch records takeover input (text on stdin) and ends takeovers.
+        "takeover-input" => {
+            let bytes = takeover_batch(std::io::stdin().lock())?;
+            let num = |k: &str| -> Result<u64, String> {
+                a.flag(k)?
+                    .parse()
+                    .map_err(|_| format!("--{k} must be a number"))
+            };
+            admin::takeover_input(
+                &dir,
+                &task,
+                human::takeover_id(a.flag("takeover")?)?,
+                num("seq")?,
+                bytes,
+                Sha256::from_hex(a.flag("sha256")?).ok_or("--sha256 must be 64 hex digits")?,
+            )?
+        }
+        "takeover-ended" => admin::takeover_ended(
+            &dir,
+            &task,
+            human::takeover_id(a.flag("takeover")?)?,
+            admin::parse_takeover_end(a.flag("reason")?)?,
+        )?,
         "holdout" => {
             return with_holdout(&a, |next| {
                 let next =
@@ -403,6 +450,7 @@ fn run() -> Result<String, String> {
                 (None, _) => Err("--at needs --claim".into()),
             };
         }
+        "verify" => return verify::json(&dir, &task, a.flags.get("expect").map(String::as_str)),
         "shadow" => return shadow::json(&dir, &task),
         "runner" => {
             let repo = PathBuf::from(a.flag("repo-path")?);
@@ -530,3 +578,68 @@ fn main() -> ExitCode {
         }
     }
 }
+
+/// D82: one takeover batch from `input`, read whole but never past
+/// [`rusty_bbp::MAX_TAKEOVER_BATCH`] + 1 bytes, so an oversized batch is
+/// refused without buffering it. The bytes are kept exactly as delivered.
+fn takeover_batch(input: impl std::io::Read) -> Result<Vec<u8>, String> {
+    let max = rusty_bbp::MAX_TAKEOVER_BATCH;
+    let mut bytes = Vec::with_capacity(max + 1);
+    std::io::Read::read_to_end(&mut input.take(max as u64 + 1), &mut bytes)
+        .map_err(|e| format!("stdin: {e}"))?;
+    if bytes.len() > max {
+        return Err(format!("takeover input batch is over {max} bytes"));
+    }
+    Ok(bytes)
+}
+
+/// `bbp slot-hold --cgroup PATH`: holds until the cgroup is empty.
+#[cfg(target_os = "linux")]
+fn cgroup_hold(cgroup: &str, deadline: Option<std::time::SystemTime>) -> Result<String, String> {
+    use rusty_bbp_host::cgroups::{checked, hold, Session};
+    let cgroup = checked(std::path::Path::new(cgroup))?;
+    // Opened once and held: a cgroup made again at the path is not this one.
+    let session = loop {
+        match Session::open(&cgroup) {
+            Ok(session) => break session,
+            Err(e) => eprintln!("bbp slot-hold: {e}; still holding"),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    hold(&session, deadline, std::io::stdin(), &mut |e| {
+        eprintln!("bbp slot-hold: {e}; still holding")
+    });
+    Ok(String::new())
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_scope(dir: &std::path::Path) -> Result<String, String> {
+    rusty_bbp_host::cgroups::scope(dir)
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_open(
+    dir: &std::path::Path,
+    task: &TaskId,
+    cgroup: &std::path::Path,
+) -> Result<String, String> {
+    rusty_bbp_host::cgroups::open(dir, task, cgroup).map(|c| c.display().to_string())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_hold(_: &str, _: Option<std::time::SystemTime>) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_scope(_: &std::path::Path) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cgroup_open(_: &std::path::Path, _: &TaskId, _: &std::path::Path) -> Result<String, String> {
+    Err(CGROUPS_LINUX_ONLY.into())
+}
+
+#[cfg(not(target_os = "linux"))]
+const CGROUPS_LINUX_ONLY: &str = "session cgroups are Linux only";

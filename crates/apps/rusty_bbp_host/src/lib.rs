@@ -17,6 +17,7 @@
 //! - [`report`]: the concurrency metrics of a task, from its log.
 //! - [`shadow`]: the shadow records of a task, kept deduped on `rev`, and their tally.
 //! - [`why`]: why each turn was granted, replayed from the log (`bbp why`).
+//! - [`verify`]: check a task log's hash chain and print its head (`bbp verify`).
 //! - [`args`]: the small argument parser the `bbp` binary uses.
 
 #![forbid(unsafe_code)]
@@ -28,8 +29,11 @@ pub mod admin;
 pub mod admission;
 pub mod args;
 pub mod broker;
+#[cfg(target_os = "linux")]
+pub mod cgroups;
 pub mod clean_tree;
 pub mod confine;
+pub mod erosion_window;
 pub mod golden;
 pub mod grade;
 pub mod groups;
@@ -50,6 +54,7 @@ pub mod runner;
 pub mod shadow;
 pub mod slots;
 pub mod tokens;
+pub mod verify;
 pub mod waker;
 pub mod why;
 

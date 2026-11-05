@@ -1,7 +1,8 @@
 //! Events: the append-only log. `TaskState` is a fold over these.
 
 use crate::claims::{
-    ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimsConfig, MarkOutcome, Mode, ReopenCause,
+    Affects, ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimsConfig, MarkOutcome, Mode,
+    PauseReason, ReopenCause,
 };
 use crate::command::Response;
 use crate::ids::*;
@@ -325,6 +326,56 @@ pub enum Event {
     /// changes existing tests.
     HoldoutUpdated {
         digest: Sha256,
+    },
+    /// #598: the human revised the intent; `brief` is the new brief artifact,
+    /// stored just before. Bumps the fold's `intent_version`.
+    IntentRevised {
+        brief: ArtId,
+        #[rusty_serde(default)]
+        affects: Affects,
+    },
+    /// #598: the host paused the task (a ceiling or the cost breaker). The
+    /// task goes `escalated`; the human resumes it with `resumed(open)`.
+    TaskPaused {
+        reason: PauseReason,
+        detail: String,
+    },
+    /// D82: the human took over agent session `session` on `claim`, written
+    /// before any input is possible. Under schema 5, written only when a
+    /// takeover happens (D83).
+    TakeoverStarted {
+        takeover: u64,
+        claim: MsgId,
+        epoch: u32,
+        session: String,
+        client: String,
+        until: Time,
+        reason: String,
+    },
+    /// D82: one batch of what the human typed, the bytes as the mux
+    /// delivered them. `sha256` is [`crate::claims::input_chain`] over the
+    /// previous batch.
+    TakeoverInput {
+        takeover: u64,
+        seq: u64,
+        bytes: crate::ids::Base64Bytes,
+        sha256: Sha256,
+    },
+    /// D82: input permission ended at `at`, by the human's release or the
+    /// task's end. The host may record batches already delivered for
+    /// [`crate::TAKEOVER_DRAIN_MS`], then writes the one `takeover_ended`.
+    TakeoverClosing {
+        takeover: u64,
+        reason: crate::claims::TakeoverEnd,
+        at: Time,
+    },
+    /// D82: the takeover is over; the totals close the chain. Always the
+    /// host's, after `takeover_closing` or for its own reasons.
+    TakeoverEnded {
+        takeover: u64,
+        reason: crate::claims::TakeoverEnd,
+        batches: u64,
+        last: Option<Sha256>,
     },
 }
 

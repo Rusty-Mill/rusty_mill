@@ -18,7 +18,7 @@ use rusty_mill_board::inbox::{Action, Escalation, Escalations, Outcome, Reason, 
 
 const ROSTER: &str = r#"[{"id":"a","turn_order":0,"post":["Claim","Evidence"],"write":["Diff","Candidate","Source"],"read_artifacts":["Brief","Diff","Candidate","TestReport","Log","Source"],"read_messages":"All","verdict_at":[],"final_decision":false,"consultable":false},{"id":"b","turn_order":1,"post":["Claim","Evidence"],"write":["Diff","Candidate","Source"],"read_artifacts":["Brief","Diff","Candidate","TestReport","Log","Source"],"read_messages":"All","verdict_at":[],"final_decision":false,"consultable":false}]"#;
 
-const PROFILES: &str = r#"{"profiles":[{"name":"test","program":"/bin/sh","args":["-c","sh ./test.sh"]}],"read_roots":["/bin","/usr","/lib","/lib64"],"env":[["PATH","/usr/bin:/bin"]],"limits":{"cpu_secs":60,"wall_secs":120,"memory_bytes":1073741824,"file_bytes":268435456,"open_files":256,"processes":4096},"tree":"sha256(git write-tree id)","test_paths":["tests/**"]}"#;
+const PROFILES: &str = r#"{"profiles":[{"name":"test","program":"/bin/sh","args":["-c","sh ./test.sh"]}],"read_roots":["/bin","/usr","/lib","/lib64"],"env":[["PATH","/usr/bin:/bin"]],"limits":{"cpu_secs":60,"wall_secs":120,"memory_bytes":1073741824,"file_bytes":268435456,"open_files":256,"processes":4096},"tree":"sha256(git write-tree id)","test_paths":["tests/**"],"erosion":"off"}"#;
 
 /// The task opens with 40 messages; this is the one allowance Approve adds.
 const ALLOWANCE: u64 = 40;
@@ -64,7 +64,8 @@ fn run(bin: &Path, args: &[&str], env: &[(&str, &str)], stdin: Option<&str>) -> 
 
 /// A claims task `task` under `root` whose message total is cut to one and
 /// then crossed by two claims, so it pauses with a task-total escalation.
-fn paused_task(bin: &Path, root: &Path, task: &str) {
+/// A claims task `task` with lenses `a` and `b` assigned.
+fn claims_task(bin: &Path, root: &Path, task: &str) {
     let files = root.join(format!("{task}-files"));
     fs::create_dir_all(&files).unwrap();
     for (name, body) in [
@@ -123,6 +124,12 @@ fn paused_task(bin: &Path, root: &Path, task: &str) {
         );
         assert!(r.contains("Ok"), "assign {who}: {r}");
     }
+}
+
+/// A claims task stopped on its messages total.
+fn paused_task(bin: &Path, root: &Path, task: &str) {
+    claims_task(bin, root, task);
+    let dir = root.to_str().unwrap();
     let r = run(
         bin,
         &[
@@ -300,6 +307,32 @@ fn the_inbox_drives_a_real_bbp_host() {
     assert!(cli.open(&["C2".into()]).unwrap().is_empty());
     let after = card(&bin, &root, "C2");
     assert!(after.contains(r#""state":"Open""#), "{after}");
+
+    // A host pause (#598): the row says why, and Approve resumes it open.
+    claims_task(&bin, &root, "C3");
+    let dir = root.to_str().unwrap();
+    let paused = run(
+        &bin,
+        &[
+            "pause", "--dir", dir, "--task", "C3", "--reason", "breaker", "--op", "p1", "--detail",
+            "flat",
+        ],
+        &[],
+        None,
+    );
+    assert!(paused.contains("Ok"), "pause: {paused}");
+    let row = only_row(&cli, "C3");
+    assert_eq!(row.reason, Reason::TaskPaused);
+    assert_eq!(
+        row.pause.as_ref().map(|p| p.reason.as_str()),
+        Some("Breaker")
+    );
+    assert_eq!(
+        cli.act(&row, &Action::Approve, "owner").unwrap(),
+        Outcome::Done
+    );
+    assert!(cli.open(&["C3".into()]).unwrap().is_empty());
+    assert!(card(&bin, &root, "C3").contains(r#""state":"Open""#));
 
     drop(scratch);
     println!("BBP_ACCEPTANCE PASS millboard-inbox");

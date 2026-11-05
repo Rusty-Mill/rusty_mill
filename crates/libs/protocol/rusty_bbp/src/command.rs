@@ -65,6 +65,23 @@ pub enum HostAction {
     /// #597 G3: a new holdout suite version that only adds files to the
     /// current one. The host checks that before writing it.
     HoldoutExtended { digest: Sha256 },
+    /// #598: pause the task on a spend or call ceiling or the cost breaker.
+    TaskPaused {
+        reason: crate::claims::PauseReason,
+        detail: String,
+    },
+    /// D82: one batch of takeover input, as the mux delivered it.
+    TakeoverInput {
+        takeover: u64,
+        seq: u64,
+        bytes: crate::ids::Base64Bytes,
+        sha256: Sha256,
+    },
+    /// D82: orch ends a takeover (expired, revoked, turn ended, mux lost).
+    TakeoverEnded {
+        takeover: u64,
+        reason: crate::claims::TakeoverEnd,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +219,19 @@ pub enum HumanAction {
         mark: u64,
         outcome: crate::claims::MarkOutcome,
     },
+    /// Claims mode (D82): take over agent session `session` on `claim` for
+    /// `client`, for at most `minutes`.
+    Takeover {
+        claim: MsgId,
+        session: String,
+        client: String,
+        minutes: u32,
+        reason: String,
+    },
+    /// Claims mode (D82): hand a takeover back.
+    TakeoverRelease {
+        takeover: u64,
+    },
     /// Claims mode: end the task.
     Close {
         expected_rev: Rev,
@@ -210,6 +240,13 @@ pub enum HumanAction {
     /// changes existing tests. Only the human may.
     HoldoutUpdated {
         digest: Sha256,
+    },
+    /// Claims mode (#598): a new brief, reopening the accepted claims it
+    /// affects (C-R11). `brief` must be in the store, like `open`'s.
+    IntentRevised {
+        brief: BlobRef,
+        #[rusty_serde(default)]
+        affects: crate::claims::Affects,
     },
 }
 
@@ -232,6 +269,8 @@ pub enum Response {
     Line(Option<String>),
     /// A mark was recorded.
     Marked(u64),
+    /// A takeover started; its id (D82).
+    TakenOver(u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,4 +381,7 @@ pub enum Code {
     /// Host (#597): a golden set's files do not match its MANIFEST, or its
     /// SIGNOFF does not name the set digest.
     BadGolden,
+    /// #598: `intent_revised` names no claim and no domain, or a claim that
+    /// is not a claim on the task.
+    BadAffects,
 }

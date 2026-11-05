@@ -28,11 +28,11 @@ fn check_name(name: &str) -> Result<(), Error> {
 /// changes nothing.
 #[derive(Debug, Default)]
 pub struct Mux {
-    sessions: BTreeMap<SessionId, Session>,
+    pub(crate) sessions: BTreeMap<SessionId, Session>,
     /// Session ids in creation order.
-    session_order: Vec<SessionId>,
-    windows: BTreeMap<WindowId, Window>,
-    blocks: BTreeMap<BlockId, Block>,
+    pub(crate) session_order: Vec<SessionId>,
+    pub(crate) windows: BTreeMap<WindowId, Window>,
+    pub(crate) blocks: BTreeMap<BlockId, Block>,
     clients: BTreeMap<ClientId, Client>,
     events: Vec<Event>,
 }

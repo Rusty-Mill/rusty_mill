@@ -164,6 +164,7 @@ mod tests {
             args: vec!["-l".into()],
             cwd: "/".into(),
             console_host: ConsoleHost::default(),
+            state_dir: None,
             config_file: file,
         }
     }

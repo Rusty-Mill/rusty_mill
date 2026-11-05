@@ -8,7 +8,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Client, block_for, new_block, start_server, window_for};
-use rusty_mux_core::BlockId;
+use rusty_mux_core::{BlockId, Event};
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Code, Entry, Features, Message};
 
@@ -191,6 +191,52 @@ fn terminal_status_reads_the_programs_reports() {
         text(&mut client, block, "terminal.status", &[]),
         "state=blocked:kind=question:app=sh:msg=aGk=\nstate=done:id=job:app=sh"
     );
+}
+
+/// A hook's report is shown over the program's and announced like it;
+/// fields that are not a valid report are refused.
+#[test]
+fn terminal_report_status_shows_the_hooks_report_over_the_programs() {
+    let path = start_server();
+    let features = INSPECT
+        .union(Features::STATUS)
+        .union(Features::AGENT_STATUS);
+    let mut client = Client::connect_with(&path, features, None);
+    let block = block_for(&mut client);
+    client.input(
+        block,
+        b"printf '\\033]7501;state=working\\007'; echo ST$((1+1))\r",
+    );
+    client.wait_for(block, "ST2");
+    assert_eq!(
+        text(&mut client, block, "terminal.status", &[]),
+        "state=working"
+    );
+
+    let text_arg = |s: &str| Value::Text(s.to_owned());
+    let report = [
+        ("state", text_arg("blocked")),
+        ("kind", text_arg("permission")),
+        ("app", text_arg("opencode")),
+        ("msg", text_arg("hi")),
+    ];
+    let done = client.answer(block_call(block, "terminal.report-status", &report));
+    assert!(
+        matches!(done.as_slice(), [Message::Done { .. }]),
+        "{done:?}"
+    );
+    assert_eq!(
+        text(&mut client, block, "terminal.status", &[]),
+        "state=blocked:kind=permission:app=opencode:msg=aGk="
+    );
+    let status = Event::BlockStatus { block };
+    while !client.events.iter().any(|(_, e)| *e == status) {
+        client.recv();
+    }
+
+    let bad = [("state", text_arg("working:app=x"))];
+    let reason = refusal(client.answer(block_call(block, "terminal.report-status", &bad)));
+    assert!(reason.contains("not a valid OSC 7501 report"), "{reason}");
 }
 
 /// The shell is listed alone while idle; a job it runs comes first, above

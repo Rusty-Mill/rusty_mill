@@ -62,6 +62,8 @@ CASES = (
          "a_confined_session_keeps_its_home_and_one_fresh_workspace_across_turns"),
     Case("holdout-confined", "rusty_bbp_host", ("--test", "claims_host"),
          "confined_holdout_run_passes_and_builds_cannot_read_the_suite"),
+    Case("erosion-confined", "rusty_bbp_host", ("--test", "claims_host"),
+         "confined_erosion_profile_reports_then_blocks_a_pasted_duplicate"),
     Case("golden-confined", "rusty_bbp_host", ("--test", "claims_host"),
          "confined_golden_run_passes_and_reads_only_signed_fixtures"),
     Case("millboard-inbox", "rusty_mill_board", ("--test", "inbox_real_bbp"),
@@ -70,6 +72,8 @@ CASES = (
          "confined_rust_lld_profile_passes_under_one_gib"),
     Case("maintenance", "rusty_orch", ("--lib",),
          "maintenance::e2e::sandboxed_maintenance_recovers_and_prepares_reviewed_pr_without_merging"),
+    Case("watch-replay", "rusty_orch", ("--lib",),
+         "watch::e2e::findings_are_posted_once_and_superseded_through_a_real_bbp"),
     *(Case(mode, "rusty_bbp_host", ("--test", "moderator_e2e"),
            f"confined_{mode}_recovery") for mode in ("timeout", "cancel", "kill")),
 )

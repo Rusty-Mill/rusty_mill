@@ -8,12 +8,16 @@
 //! that keeps failing transiently would otherwise be retried forever).
 //!
 //! The meter is restored from, and saved to, the orch state directory
-//! before every call. The scheduler's memory lives only as long as the
-//! process: a second run asks blind passes again.
+//! before every call. The scheduler's memory is restored at start and
+//! saved after every lens's round, under the board's identity: the
+//! canonical BBP store directory and the task id ([`board`]), so a task of
+//! the same name in another BBP directory starts with nothing remembered.
+//! A crash mid-round asks that round's jobs again.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use orch_core::AgentId;
 use orch_lens::call::{Ctx, Models};
@@ -25,6 +29,7 @@ use orch_lens::round::{round, Board, Halt, View};
 use orch_lens::schedule::State;
 use orch_lens::{LensConfig, Model};
 use orch_store::Store;
+use rusty_bbp::ArtId;
 
 use super::assertions::{self, Grants};
 use super::bbp::{run_id, Child, Rpc, Session};
@@ -120,6 +125,11 @@ pub fn options(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<O
 /// One lens's way onto the board.
 pub trait Seat {
     fn refresh(&mut self, config: &LensConfig) -> Result<(), String>;
+    /// The task's current brief, as of the last refresh (#598: a revised
+    /// intent names a new one).
+    fn brief_id(&self) -> Option<ArtId>;
+    /// The current brief's text.
+    fn brief(&mut self) -> Result<String, String>;
     fn cards(&self, config: &LensConfig) -> Vec<Card>;
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String>;
     fn board(&mut self) -> &mut dyn Board;
@@ -128,6 +138,12 @@ pub trait Seat {
 impl<R: Rpc> Seat for Session<R> {
     fn refresh(&mut self, config: &LensConfig) -> Result<(), String> {
         Session::refresh(self, config)
+    }
+    fn brief_id(&self) -> Option<ArtId> {
+        Session::brief_id(self)
+    }
+    fn brief(&mut self) -> Result<String, String> {
+        Session::brief(self)
     }
     fn cards(&self, config: &LensConfig) -> Vec<Card> {
         Session::cards(self, config)
@@ -164,18 +180,54 @@ pub enum Ended {
     Halted(Halt),
 }
 
-/// The lenses to run: the config, and each lens's seat and prefix by id.
+/// The lenses to run: the config, and each lens's seat and prompt by id.
 pub struct Lenses<'a> {
     pub config: &'a LensConfig,
     pub seats: &'a mut BTreeMap<String, Box<dyn Seat>>,
-    pub prefixes: &'a BTreeMap<String, String>,
+    pub prompts: &'a Prompts,
+}
+
+/// What every lens prefix is built from besides the intent.
+pub struct Prompts {
+    /// The board rules, shared by every lens.
+    pub rules: String,
+    /// Each lens's own prompt, by lens id.
+    pub lens: BTreeMap<String, String>,
+}
+
+/// Each lens's prefix, rebuilt whenever its seat sees a new brief (#598):
+/// after an intent revision no call goes out under the old intent.
+#[derive(Default)]
+struct Prefixes {
+    text: BTreeMap<String, String>,
+    built_on: BTreeMap<String, Option<ArtId>>,
+}
+
+impl Prefixes {
+    fn update(&mut self, lens: &str, seat: &mut dyn Seat, prompts: &Prompts) -> Result<(), String> {
+        let Some(prompt) = prompts.lens.get(lens) else {
+            return Ok(()); // the round halts with NoPrefix
+        };
+        let id = seat.brief_id();
+        if self.built_on.get(lens) == Some(&id) {
+            return Ok(());
+        }
+        let intent = seat.brief()?;
+        self.text
+            .insert(lens.to_owned(), prefix(&intent, &prompts.rules, prompt));
+        self.built_on.insert(lens.to_owned(), id);
+        Ok(())
+    }
 }
 
 /// Run up to `max` passes over every lens until one starts no job. A lens
 /// without a seat is an error. Each job's outcome is written to `log`.
+/// `state` goes to `keep` after every lens's round, so a restart resumes
+/// from it; a failed keep is an error.
 pub fn passes(
     lenses: Lenses<'_>,
     state: &mut State,
+    keep: &mut dyn FnMut(&State) -> Result<(), String>,
     metering: Metering<'_>,
     models: &mut dyn Models,
     max: u32,
@@ -184,9 +236,10 @@ pub fn passes(
     let Lenses {
         config,
         seats,
-        prefixes,
+        prompts,
     } = lenses;
     let records = BTreeMap::new();
+    let mut prefixes = Prefixes::default();
     for pass in 1..=max {
         let mut started = 0;
         for lens in &config.lenses {
@@ -194,6 +247,9 @@ pub fn passes(
                 .get_mut(&lens.id)
                 .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             seat.refresh(config)
+                .map_err(|e| format!("{}: {e}", lens.id))?;
+            prefixes
+                .update(&lens.id, seat.as_mut(), prompts)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
             let cards = seat.cards(config);
             let lines = seat
@@ -206,7 +262,7 @@ pub fn passes(
             let view = View {
                 cards: &cards,
                 lines: &lines,
-                prefixes,
+                prefixes: &prefixes.text,
                 records: &records,
             };
             let ctx = Ctx {
@@ -216,6 +272,7 @@ pub fn passes(
                 save: &mut *metering.save,
             };
             let report = round(&one, &view, state, ctx, models, seat.board());
+            keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
             started += report.ran.len();
             for (key, end) in &report.ran {
                 let _ = writeln!(
@@ -254,6 +311,33 @@ pub fn outcome(ended: &Ended, mut log: String) -> Result<String, String> {
     }
 }
 
+/// The identity the scheduler's memory is saved under: the canonical BBP
+/// store directory and the task id, NUL-separated (neither can hold one).
+/// BBP task ids are scoped to their directory, so the id alone is not.
+///
+/// # Errors
+///
+/// A message when `dir` cannot be resolved, or when its canonical path is
+/// not UTF-8: a lossy string could name two directories, so such a
+/// directory is refused before any state is read or any provider asked.
+pub fn board(dir: &Path, task: &str) -> Result<String, String> {
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", dir.display()))?;
+    let text = canonical
+        .to_str()
+        .ok_or_else(|| format!("BBP directory {} is not UTF-8", canonical.display()))?;
+    Ok(format!("{text}\0{task}"))
+}
+
+/// The scheduler's memory saved for `board`, or a fresh one.
+fn load_state(store: &Store, board: &str) -> Result<State, String> {
+    match store.load_lens_state(board).map_err(|e| e.to_string())? {
+        Some(saved) => State::restore(&saved).map_err(|e| format!("lens state: {e}")),
+        None => Ok(State::default()),
+    }
+}
+
 /// Run `o`: open the store and the sessions, build the providers, read
 /// the prompts, then [`passes`]. Returns the log and how it ended.
 pub fn run(o: &Options) -> Result<String, String> {
@@ -276,29 +360,46 @@ pub fn run(o: &Options) -> Result<String, String> {
         }
     };
     let mut registry = Registry::build(&config, &o.repo, &grants)?;
-    let mut store = Store::open(&o.state).map_err(|e| e.to_string())?;
-    let mut meter = match store.load_meter(&o.experiment).map_err(|e| e.to_string())? {
+    let store = RefCell::new(Store::open(&o.state).map_err(|e| e.to_string())?);
+    let board = board(&o.dir, &o.task)?;
+    let mut state = load_state(&store.borrow(), &board)?;
+    let loaded = store
+        .borrow()
+        .load_meter(&o.experiment)
+        .map_err(|e| e.to_string())?;
+    let mut meter = match loaded {
         Some(snap) => Meter::restore(config.ceilings, &snap),
         None => Meter::new(config.ceilings, 0),
     };
     let mut seats: BTreeMap<String, Box<dyn Seat>> = BTreeMap::new();
-    let mut prefixes = BTreeMap::new();
+    let mut prompts = Prompts {
+        rules,
+        lens: BTreeMap::new(),
+    };
     let run = run_id()?;
     let _ = writeln!(log, "run {run}");
     for lens in &config.lenses {
-        let child = Child::spawn(&o.bbp, &o.dir, &o.task, &lens.id)?;
-        let mut session = Session::new(&lens.id, child, &run);
-        let intent = session.brief().map_err(|e| format!("{}: {e}", lens.id))?;
         let path = base.join(&lens.prompt);
         let prompt = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        prefixes.insert(lens.id.clone(), prefix(&intent, &rules, &prompt));
-        seats.insert(lens.id.clone(), Box::new(session));
+        prompts.lens.insert(lens.id.clone(), prompt);
+        let child = Child::spawn(&o.bbp, &o.dir, &o.task, &lens.id)?;
+        seats.insert(
+            lens.id.clone(),
+            Box::new(Session::new(&lens.id, child, &run)),
+        );
     }
     let experiment = o.experiment.clone();
     let mut save = |m: &Meter| {
         store
+            .borrow_mut()
             .save_meter(&experiment, &m.snapshot())
+            .map_err(|e| e.to_string())
+    };
+    let mut keep = |s: &State| {
+        store
+            .borrow_mut()
+            .save_lens_state(&board, &s.saved())
             .map_err(|e| e.to_string())
     };
     let metering = Metering {
@@ -306,15 +407,15 @@ pub fn run(o: &Options) -> Result<String, String> {
         meter: &mut meter,
         save: &mut save,
     };
-    let mut state = State::default();
     let lenses = Lenses {
         config: &config,
         seats: &mut seats,
-        prefixes: &prefixes,
+        prompts: &prompts,
     };
     let ended = passes(
         lenses,
         &mut state,
+        &mut keep,
         metering,
         &mut registry,
         o.max_passes,
@@ -343,10 +444,10 @@ mod tests {
       "lenses": [
         {"id": "adversary", "prompt": "p", "domains": ["*"],
          "may_post": {"evidence": ["counter"]},
-         "models": {"routine": ["codex"], "contested": ["claude"]}},
+         "models": {"routine": ["codex", "claude"], "contested": ["claude"]}},
         {"id": "operator", "prompt": "p", "domains": ["*"],
          "may_post": {"evidence": ["counter"]},
-         "models": {"routine": ["codex"], "contested": ["claude"]}}
+         "models": {"routine": ["codex", "claude"], "contested": ["claude"]}}
       ]
     }"#;
 
@@ -362,6 +463,7 @@ mod tests {
             status: ClaimStatus::Open,
             score: 0,
             accept_at: 8,
+            epoch: 0,
             stakes: Stakes::Medium,
             reversible: true,
             answers: None,
@@ -382,6 +484,10 @@ mod tests {
         refreshes: u32,
         posts: Vec<Post>,
         refresh_error: Option<String>,
+        /// The brief, and from which refresh on it is revised (and the
+        /// cards reopened) to the second one.
+        briefs: [(Option<ArtId>, &'static str); 2],
+        revise_at: Option<u32>,
     }
 
     impl FakeSeat {
@@ -392,7 +498,16 @@ mod tests {
                 refreshes: 0,
                 posts: vec![],
                 refresh_error: None,
+                briefs: [(Some(ArtId(1)), "intent"), (Some(ArtId(9)), "intent v2")],
+                revise_at: None,
             }
+        }
+    }
+
+    impl FakeSeat {
+        fn current(&self) -> (Option<ArtId>, &'static str) {
+            let revised = self.revise_at.is_some_and(|at| self.refreshes >= at);
+            self.briefs[usize::from(revised)]
         }
     }
 
@@ -406,7 +521,18 @@ mod tests {
     impl Seat for FakeSeat {
         fn refresh(&mut self, _: &LensConfig) -> Result<(), String> {
             self.refreshes += 1;
+            if self.revise_at == Some(self.refreshes) {
+                for c in &mut self.cards {
+                    c.epoch += 1;
+                }
+            }
             self.refresh_error.clone().map_or(Ok(()), Err)
+        }
+        fn brief_id(&self) -> Option<ArtId> {
+            self.current().0
+        }
+        fn brief(&mut self) -> Result<String, String> {
+            Ok(self.current().1.to_owned())
         }
         fn cards(&self, config: &LensConfig) -> Vec<Card> {
             let built = self
@@ -429,11 +555,13 @@ mod tests {
         u32,
         Vec<(AgentId, String)>,
         Option<AgentId>,
+        Vec<String>,
     );
 
     impl Model for Echo {
         fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
             self.1 += 1;
+            self.4.push(q.prefix.clone());
             if let Some(id) = self.3 {
                 self.2.push((id, q.body.clone()));
             }
@@ -452,7 +580,7 @@ mod tests {
     }
 
     fn echo(reply: Result<Vec<Post>, ClassifiedError>) -> Echo {
-        Echo(reply, 0, vec![], None)
+        Echo(reply, 0, vec![], None, vec![])
     }
 
     fn counter() -> Post {
@@ -474,16 +602,38 @@ mod tests {
         task_calls: u32,
         max: u32,
     ) -> (Result<Ended, String>, String) {
+        go_from(
+            &mut State::default(),
+            &mut |_| Ok(()),
+            seats,
+            echo,
+            task_calls,
+            max,
+        )
+    }
+
+    /// [`go`] from `state`, keeping it through `keep`.
+    fn go_from(
+        state: &mut State,
+        keep: &mut dyn FnMut(&State) -> Result<(), String>,
+        seats: Vec<(&str, FakeSeat)>,
+        echo: &mut Echo,
+        task_calls: u32,
+        max: u32,
+    ) -> (Result<Ended, String>, String) {
         let cfg = config();
         let mut boxed: BTreeMap<String, Box<dyn Seat>> = seats
             .into_iter()
             .map(|(l, s)| (l.to_owned(), Box::new(s) as Box<dyn Seat>))
             .collect();
-        let prefixes = cfg
-            .lenses
-            .iter()
-            .map(|l| (l.id.clone(), prefix("intent", "", &l.id)))
-            .collect();
+        let prompts = Prompts {
+            rules: String::new(),
+            lens: cfg
+                .lenses
+                .iter()
+                .map(|l| (l.id.clone(), l.id.clone()))
+                .collect(),
+        };
         let mut ceilings = cfg.ceilings;
         ceilings.task_calls = task_calls;
         let mut meter = Meter::new(ceilings, 0);
@@ -496,11 +646,333 @@ mod tests {
         let lenses = Lenses {
             config: &cfg,
             seats: &mut boxed,
-            prefixes: &prefixes,
+            prompts: &prompts,
         };
         let mut log = String::new();
-        let ended = passes(lenses, &mut State::default(), metering, echo, max, &mut log);
+        let ended = passes(lenses, state, keep, metering, echo, max, &mut log);
         (ended, log)
+    }
+
+    fn two_seats() -> Vec<(&'static str, FakeSeat)> {
+        vec![
+            ("adversary", FakeSeat::new(vec![card(7)])),
+            ("operator", FakeSeat::new(vec![card(7)])),
+        ]
+    }
+
+    #[test]
+    fn a_restart_from_the_kept_memory_does_not_ask_again() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut kept = Vec::new();
+        let mut keep = |s: &State| {
+            kept.push(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+        assert_eq!(kept.len(), 4, "kept after every lens's round, two passes");
+        let last = kept.last().expect("kept");
+        assert_eq!(last.progress.len(), 2, "both blind passes remembered");
+        let mut restored = State::restore(last).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2, "no lens asked again: {log}");
+    }
+
+    #[test]
+    fn a_same_named_task_in_another_bbp_directory_starts_fresh() {
+        let root = std::env::temp_dir().join(format!("orch-lens-board-{}", std::process::id()));
+        let (a, b, orch) = (root.join("a"), root.join("b"), root.join("orch"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).expect("dir");
+        }
+        let (board_a, board_b) = (
+            board(&a, "task-1").expect("a"),
+            board(&b, "task-1").expect("b"),
+        );
+        assert_ne!(board_a, board_b);
+        let relative = a.join("..").join("a");
+        assert_eq!(board(&relative, "task-1").expect("same dir"), board_a);
+        let store = RefCell::new(Store::open(&orch).expect("store"));
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut keep = |s: &State| {
+            store
+                .borrow_mut()
+                .save_lens_state(&board_a, &s.saved())
+                .map_err(|e| e.to_string())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+
+        // Board B, same task id and claim ids: nothing of A's carries over.
+        let mut fresh = load_state(&store.borrow(), &board_b).expect("load b");
+        assert_eq!(fresh, State::default());
+        let (_, _) = go_from(&mut fresh, &mut |_| Ok(()), two_seats(), &mut echo, 10, 20);
+        assert_eq!(echo.1, 4, "B makes its own blind passes");
+
+        // Restarting A resumes where it stopped.
+        let mut resumed = load_state(&store.borrow(), &board_a).expect("load a");
+        assert_eq!(resumed.progress.len(), 2);
+        let (_, _) = go_from(
+            &mut resumed,
+            &mut |_| Ok(()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(echo.1, 4, "A asks nothing again");
+        drop(store);
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_whose_path_is_not_utf8_is_refused() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let root = std::env::temp_dir().join(format!("orch-lens-utf8-{}", std::process::id()));
+        let named =
+            |last: u8| root.join(OsString::from_vec(vec![b'b', b'o', b'a', b'r', b'd', last]));
+        let (x80, x81) = (named(0x80), named(0x81));
+        for d in [&x80, &x81] {
+            std::fs::create_dir_all(d).expect("dir");
+        }
+        assert_ne!(
+            x80.canonicalize().expect("x80"),
+            x81.canonicalize().expect("x81")
+        );
+        for d in [&x80, &x81] {
+            let e = board(d, "task-1").expect_err("lossy path refused");
+            assert!(e.contains("not UTF-8"), "{e}");
+        }
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn a_claim_reopened_between_runs_is_reviewed_again() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+        let mut restored = State::restore(&kept.expect("kept")).expect("restore");
+        let mut reopened = card(7);
+        reopened.epoch = 1;
+        let seats = vec![
+            ("adversary", FakeSeat::new(vec![reopened.clone()])),
+            ("operator", FakeSeat::new(vec![reopened])),
+        ];
+        let (ended, log) = go_from(&mut restored, &mut |_| Ok(()), seats, &mut echo, 10, 20);
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 4, "each lens looks at the new epoch blind: {log}");
+    }
+
+    #[test]
+    fn a_revised_intent_rebuilds_the_prefix_before_the_next_call() {
+        let mut echo = echo(Ok(vec![counter()]));
+        // Revised (and the claim reopened) at the second pass's refresh.
+        let seats = ["adversary", "operator"].map(|lens| {
+            let mut seat = FakeSeat::new(vec![card(7)]);
+            seat.revise_at = Some(2);
+            (lens, seat)
+        });
+        let (ended, log) = go(seats.into(), &mut echo, 10, 20);
+        assert_eq!(ended, Ok(Ended::Quiet), "{log}");
+        assert_eq!(
+            echo.4.len(),
+            4,
+            "each lens asked blind on each epoch: {log}"
+        );
+        for (i, p) in echo.4.iter().enumerate() {
+            let want = if i < 2 { "intent" } else { "intent v2" };
+            assert!(
+                p.starts_with(&format!("# Intent\n{want}\n")),
+                "call {i} carries the intent of its pass: {p}"
+            );
+        }
+    }
+
+    fn seats_with(cards: &[Card]) -> Vec<(&'static str, FakeSeat)> {
+        vec![
+            ("adversary", FakeSeat::new(cards.to_vec())),
+            ("operator", FakeSeat::new(cards.to_vec())),
+        ]
+    }
+
+    /// Both passes done on `before` (blind found nothing, the look-harder
+    /// re-ask found nothing) and kept; then a restart onto `after`. Gives
+    /// the asks before and after, and the restart's log.
+    fn restart_after_both_passes(before: &[Card], after: &[Card]) -> (u32, u32, String) {
+        let mut echo = echo(Ok(vec![]));
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            seats_with(before),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        let first = echo.1;
+        let saved = kept.expect("kept");
+        assert!(saved
+            .progress
+            .iter()
+            .all(|p| p.blind.is_some() && p.look_harder.is_some()));
+        let mut restored = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            seats_with(after),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        (first, echo.1 - first, log)
+    }
+
+    #[test]
+    fn a_reopen_after_both_passes_gets_both_passes_again_and_other_claims_keep_theirs() {
+        let both = [card(7), card(8)];
+        let (first, again, log) = restart_after_both_passes(&both, &both);
+        assert_eq!(first, 8, "blind and look-harder, two lenses, two claims");
+        assert_eq!(again, 0, "same epoch resumes with nothing to do: {log}");
+        let mut reopened = card(7);
+        reopened.epoch = 1;
+        let (_, again, log) = restart_after_both_passes(&both, &[reopened, card(8)]);
+        assert_eq!(again, 4, "claim 7's new epoch, both passes per lens: {log}");
+        assert_eq!(log.matches("msg:7").count(), 4, "{log}");
+        assert_eq!(
+            log.matches("msg:8").count(),
+            0,
+            "claim 8 keeps its work: {log}"
+        );
+    }
+
+    /// Question 3 with candidates 10 and 11, proposals settled.
+    fn question_board(epoch_10: u32) -> (Vec<Card>, State) {
+        let mut q = card(3);
+        q.domains = vec![orch_lens::schedule::QUESTION_DOMAIN.to_owned()];
+        q.candidates = vec![MsgId(10), MsgId(11)];
+        let candidate = |n: u64, epoch: u32| {
+            let mut c = card(n);
+            c.answers = Some(MsgId(3));
+            c.epoch = epoch;
+            c
+        };
+        let mut st = State::default();
+        let p = st.questions.entry(MsgId(3)).or_default();
+        p.settled = [0, 1].into();
+        p.rebel_landed = true;
+        (vec![q, candidate(10, epoch_10), candidate(11, 0)], st)
+    }
+
+    #[test]
+    fn a_reopened_candidate_is_not_held_back_by_its_old_attack_count() {
+        let mut echo = echo(Ok(vec![]));
+        let (cards, mut st) = question_board(0);
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(&mut st, &mut keep, seats_with(&cards), &mut echo, 10, 20);
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(
+            echo.1, 8,
+            "blind and look-harder, two lenses, two candidates"
+        );
+        let mut saved = kept.expect("kept");
+        // Make the old counts unequal: 10 is ahead of 11.
+        let attacks = &mut saved.questions[0].attacks;
+        attacks.iter_mut().find(|a| a.0 == 10).expect("10").2 += 1;
+
+        let mut same = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut same,
+            &mut |_| Ok(()),
+            seats_with(&cards),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 8, "same epoch: nothing to do: {log}");
+
+        let (reopened, _) = question_board(1);
+        let mut restored = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            seats_with(&reopened),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(
+            echo.1, 12,
+            "10's new epoch: blind and look-harder per lens: {log}"
+        );
+        assert_eq!(log.matches("msg:10 Review").count(), 2, "{log}");
+        assert_eq!(log.matches("msg:10 LookHarder").count(), 2, "{log}");
+        assert_eq!(log.matches("msg:11").count(), 0, "{log}");
+    }
+
+    #[test]
+    fn memory_that_cannot_be_kept_is_an_error() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut |_| Err("disk full".to_owned()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Err("lens state not saved: disk full".to_owned()));
+        assert_eq!(echo.1, 1, "stops after the first round");
     }
 
     #[test]
@@ -596,6 +1068,8 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            intent: None,
+            human_touched: false,
         };
         let body = rusty_bbp::ClaimBody {
             text: view.text.clone(),

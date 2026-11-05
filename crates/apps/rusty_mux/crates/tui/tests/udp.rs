@@ -53,6 +53,7 @@ fn udp_server() -> (PathBuf, SocketAddr) {
                 args: Vec::new(),
                 cwd: "/".into(),
                 console_host: ConsoleHost::default(),
+                state_dir: None,
                 config_file: None,
             };
             let udp = Udp {

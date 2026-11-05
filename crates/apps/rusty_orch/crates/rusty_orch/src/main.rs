@@ -18,6 +18,7 @@ fn main() -> ExitCode {
         Some("inspect") => return inspect(argv),
         Some("maintain") => return maintain(argv),
         Some("lens") => return lens(argv),
+        Some("watch") => return watch(argv),
         _ => {}
     }
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -141,7 +142,7 @@ fn maintain(argv: impl IntoIterator<Item = String>) -> ExitCode {
 }
 
 fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
-    use rusty_orch::lens::{check, run};
+    use rusty_orch::lens::{alien, check, run};
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
         Err(error) => {
@@ -152,6 +153,7 @@ fn lens(argv: impl IntoIterator<Item = String>) -> ExitCode {
     let argv: Vec<String> = argv.into_iter().collect();
     match argv.first().map(String::as_str) {
         Some("run") => lens_command(run::USAGE, run::options(argv, cwd), run::run),
+        Some("alien") => lens_command(alien::USAGE, alien::options(argv), alien::run),
         _ => lens_command(check::USAGE, check::options(argv, cwd), check::run),
     }
 }
@@ -177,6 +179,35 @@ fn lens_command<O>(
         Ok(report) => {
             print!("{report}");
             ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("rusty_orch: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn watch(argv: impl IntoIterator<Item = String>) -> ExitCode {
+    use rusty_orch::watch;
+    let options = match watch::options(argv) {
+        Ok(options) => options,
+        Err(ArgsError::Help) => {
+            println!("{}", watch::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        Err(ArgsError::Usage(message)) => {
+            eprintln!("rusty_orch: {message}\n{}", watch::USAGE);
+            return ExitCode::from(2);
+        }
+    };
+    match watch::run(&options, &orch_cli::StdCommand) {
+        Ok((report, clean)) => {
+            println!("{report}");
+            if clean {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
         }
         Err(error) => {
             eprintln!("rusty_orch: {error}");

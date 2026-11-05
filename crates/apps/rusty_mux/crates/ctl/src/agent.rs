@@ -103,6 +103,8 @@ pub(crate) fn run(
             return print(out, &text);
         }
         AgentCommand::Skill => return print(out, GUIDE.trim_end()),
+        // Sent by the caller, which holds the connection.
+        AgentCommand::Report(_) => return Ok(Exit::Ok),
         AgentCommand::Setup(args) => (args, setup(&layouts(args, env)?, args.dry_run)?, Exit::Ok),
         AgentCommand::Remove(args) => {
             let others = neighbours(env)?;
