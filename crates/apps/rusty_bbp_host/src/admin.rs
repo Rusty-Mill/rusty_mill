@@ -201,13 +201,18 @@ pub fn open_claims_task(
     if let Some(Err(e)) = holdout.map(|hs| hs.isolated_from(set, dirs)) {
         return refuse(format!("holdout: {e}"));
     }
-    if set.erosion_report_only() {
-        if let Err(why) = crate::erosion_window::admit(dir, task, crate::now())? {
-            return refuse(format!(
-                "erosion: report-only has expired ({why}); new report-only tasks pause until Nano approves limits from the calibration numbers (D42)"
-            ));
-        }
-    }
+    // Held until the open below has published its log (D88).
+    let _admission = match set.erosion_report_only() {
+        false => None,
+        true => match crate::erosion_window::admit(dir, task, crate::now())? {
+            Ok(admission) => Some(admission),
+            Err(why) => {
+                return refuse(format!(
+                    "erosion: report-only has expired ({why}); new report-only tasks pause until Nano approves limits from the calibration numbers (D42)"
+                ))
+            }
+        },
+    };
     let holdout_digest = match holdout {
         Some(hs) => Some(crate::holdout::stage(dir, task, hs)?),
         None => None,

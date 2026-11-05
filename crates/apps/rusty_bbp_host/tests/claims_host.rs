@@ -1734,3 +1734,75 @@ fn report_only_erosion_pauses_fourteen_days_after_go_live() {
     assert!(!log_path_for(&dir, &task()).exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// #704 D42 (D88): only a log that proves a report-only claims open counts.
+/// Ledger lines for tasks that opened with the opt-out, never opened, or
+/// left an empty log start the clock but do not count, and a refused
+/// re-open of a counted task does not count it twice.
+#[test]
+fn only_proven_report_only_opens_count() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-proof");
+    let mut seeded = String::new();
+    for i in 0..10 {
+        let t = TaskId(format!("OFF{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &profiles(), Ok(())),
+            Response::Stored(_)
+        ));
+        seeded.push_str(&format!("{} OFF{i}\n", now().0));
+    }
+    seeded.push_str(&format!("{} NEVER\n", now().0));
+    seeded.push_str(&format!("{} EMPTY\n", now().0));
+    // A failed write can leave an empty log; it is not an open.
+    std::fs::write(log_path_for(&dir, &TaskId("EMPTY".into())), "").expect("empty log");
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    std::fs::write(erosion_window::path(&dir), seeded).expect("seed");
+
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..9 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let (code, _) = rejected(open_as(&dir, &TaskId("R0".into()), &report_only, Ok(())));
+    assert_eq!(code, Code::AlreadyOpen);
+    assert!(matches!(
+        open_as(&dir, &TaskId("R9".into()), &report_only, Ok(())),
+        Response::Stored(_)
+    ));
+    let (_, detail) = rejected(open_as(&dir, &TaskId("R10".into()), &report_only, Ok(())));
+    assert!(detail.contains("10 report-only tasks"), "{detail}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): racing report-only opens at the boundary admit exactly
+/// one, because the ledger lock spans each open's publication.
+#[test]
+fn racing_report_only_opens_cannot_overshoot() {
+    let dir = tempdir("erosion-race");
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..9 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let stored: usize = std::thread::scope(|s| {
+        let racers: Vec<_> = (0..4)
+            .map(|i| {
+                let (dir, set) = (&dir, &report_only);
+                s.spawn(move || open_as(dir, &TaskId(format!("X{i}")), set, Ok(())))
+            })
+            .collect();
+        racers
+            .into_iter()
+            .map(|h| usize::from(matches!(h.join().expect("join"), Response::Stored(_))))
+            .sum()
+    });
+    assert_eq!(stored, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
