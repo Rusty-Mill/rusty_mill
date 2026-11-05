@@ -515,9 +515,17 @@ pub fn perform_fenced(
         Err(rej) => return Err(rej.detail),
     };
     let mut d = open_driver(dir, task)?;
-    // Blobs before references: the brief is stored only now, just before
-    // the command that names it, so a refused command leaves nothing.
     if let Some(bytes) = &brief {
+        // Judge the command before its brief is published: a refusal (bad
+        // affects, a stale fence, the wrong state) and a replay of an op
+        // already answered store nothing. Blobs before references: what
+        // passes stores the brief just before the command that names it.
+        // Only a write racing in between can still refuse it, and then the
+        // stored blob is unreferenced, never a reference without its blob.
+        let judged = handle(&d.state, &cmd, now());
+        if matches!(judged.response, Response::Rejected(_)) || judged.events.is_empty() {
+            return Ok(judged.response);
+        }
         d.store.blob_put(bytes);
     }
     d.dispatch(&cmd, now()).map_err(|e| format!("{e:?}"))
