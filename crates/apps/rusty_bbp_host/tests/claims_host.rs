@@ -1949,6 +1949,75 @@ fn a_crashed_open_never_cleans_up_a_cgroup_it_did_not_create() {
     let _ = std::fs::remove_dir_all(&other);
 }
 
+/// #1507 review: the holder watches the cgroup it opened, not its path. One
+/// removed and made again at the path before the deadline is someone else's:
+/// the holder ends, as its own session is gone, and never kills the new one.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_holder_never_kills_a_cgroup_made_again_at_its_path() {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    let base = match session_cgroup("rehold") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-rehold");
+    claims_task(&dir);
+    let (cgroup, _scope) = scoped(&dir, &base);
+    rusty_bbp_host::cgroups::open(&dir, &task(), &cgroup).expect("open");
+    let slot = dir.join("agent-0.lock");
+    let deadline = SystemTime::now() + Duration::from_millis(800);
+    let ms = deadline.duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let mut holder = cgroup_holder(&cgroup, &slot, Some(ms));
+    std::thread::sleep(Duration::from_millis(200));
+    // The session is removed while its holder runs, and the path reused.
+    std::fs::remove_dir(&cgroup).expect("removed");
+    std::fs::create_dir(&cgroup).expect("made again");
+    let mut workload = sleeper_in(&cgroup);
+    assert!(
+        exits_within(&mut holder, Duration::from_secs(5)),
+        "the holder outlived its own cgroup"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        workload.try_wait().expect("wait").is_none(),
+        "the new cgroup's workload was killed"
+    );
+    drop(holder.stdin.take());
+    workload.kill().expect("kill");
+    workload.wait().expect("reap");
+    std::fs::remove_dir(&cgroup).expect("remove the new cgroup");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1507 review: an open that crashes once its claim is published leaves
+/// the record that leads quiesce back to it (the intent is recorded first),
+/// so quiescing the crashed task frees the path for the next open.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_claim_left_by_a_crashed_open_is_freed_by_quiesce() {
+    let base = match session_cgroup("freed") {
+        Ok(c) => c,
+        Err(why) => return eprintln!("no writable cgroup; skipping: {why}"),
+    };
+    let dir = tempdir("cgroup-freed");
+    claims_task(&dir);
+    let second = TaskId("C2".into());
+    claims_task_as(&dir, &second);
+    let (cgroup, _scope) = scoped(&dir, &base);
+    crash_after_record(&dir, &task(), &cgroup);
+    let taken = rusty_bbp_host::cgroups::open(&dir, &second, &cgroup).expect_err("claimed");
+    assert!(taken.contains("task C1 owns it"), "{taken}");
+    let rev = state(&dir).rev;
+    human::perform(&dir, &task(), "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &task()), Ok(true));
+    rusty_bbp_host::cgroups::open(&dir, &second, &cgroup).expect("the path is free again");
+    let rev = open_driver(&dir, &second).expect("driver").state.rev;
+    human::perform(&dir, &second, "close", &[], Some(rev)).expect("close");
+    assert_eq!(rusty_bbp_host::moderator::quiesce(&dir, &second), Ok(true));
+    assert!(!cgroup.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// #1507 review: a quiesce that removed its cgroup and crashed before
 /// dropping the claim can't hurt a cgroup made again at that path. Another
 /// control directory can't make one there (it is outside that directory's

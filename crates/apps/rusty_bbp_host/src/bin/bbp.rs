@@ -585,8 +585,17 @@ fn takeover_batch(input: impl std::io::Read) -> Result<Vec<u8>, String> {
 /// `bbp slot-hold --cgroup PATH`: holds until the cgroup is empty.
 #[cfg(target_os = "linux")]
 fn cgroup_hold(cgroup: &str, deadline: Option<std::time::SystemTime>) -> Result<String, String> {
-    let cgroup = rusty_bbp_host::cgroups::checked(std::path::Path::new(cgroup))?;
-    rusty_bbp_host::cgroups::hold(cgroup.as_path(), deadline, std::io::stdin(), &mut |e| {
+    use rusty_bbp_host::cgroups::{checked, hold, Session};
+    let cgroup = checked(std::path::Path::new(cgroup))?;
+    // Opened once and held: a cgroup made again at the path is not this one.
+    let session = loop {
+        match Session::open(&cgroup) {
+            Ok(session) => break session,
+            Err(e) => eprintln!("bbp slot-hold: {e}; still holding"),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    hold(&session, deadline, std::io::stdin(), &mut |e| {
         eprintln!("bbp slot-hold: {e}; still holding")
     });
     Ok(String::new())
