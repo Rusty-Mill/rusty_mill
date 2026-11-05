@@ -72,6 +72,8 @@ CASES = (
          "confined_rust_lld_profile_passes_under_one_gib"),
     Case("maintenance", "rusty_orch", ("--lib",),
          "maintenance::e2e::sandboxed_maintenance_recovers_and_prepares_reviewed_pr_without_merging"),
+    Case("watch-replay", "rusty_orch", ("--lib",),
+         "watch::e2e::findings_are_posted_once_and_superseded_through_a_real_bbp"),
     *(Case(mode, "rusty_bbp_host", ("--test", "moderator_e2e"),
            f"confined_{mode}_recovery") for mode in ("timeout", "cancel", "kill")),
 )

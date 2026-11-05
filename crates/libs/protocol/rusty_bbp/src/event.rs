@@ -1,7 +1,8 @@
 //! Events: the append-only log. `TaskState` is a fold over these.
 
 use crate::claims::{
-    ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimsConfig, MarkOutcome, Mode, ReopenCause,
+    Affects, ClaimEscalation, ClaimOutcome, ClaimStatus, ClaimsConfig, MarkOutcome, Mode,
+    PauseReason, ReopenCause,
 };
 use crate::command::Response;
 use crate::ids::*;
@@ -325,6 +326,19 @@ pub enum Event {
     /// changes existing tests.
     HoldoutUpdated {
         digest: Sha256,
+    },
+    /// #598: the human revised the intent; `brief` is the new brief artifact,
+    /// stored just before. Bumps the fold's `intent_version`.
+    IntentRevised {
+        brief: ArtId,
+        #[rusty_serde(default)]
+        affects: Affects,
+    },
+    /// #598: the host paused the task (a ceiling or the cost breaker). The
+    /// task goes `escalated`; the human resumes it with `resumed(open)`.
+    TaskPaused {
+        reason: PauseReason,
+        detail: String,
     },
     /// D82: the human took over agent session `session` on `claim`, written
     /// before any input is possible. Under schema 5, written only when a
