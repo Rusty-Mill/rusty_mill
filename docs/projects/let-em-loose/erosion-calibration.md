@@ -22,7 +22,13 @@ This is the calibration that D42 requires before the erosion gate leaves report-
   python3 -I "$C/summarize.py" report rows.tsv
   ```
 
-  A run takes about 15 seconds per PR on 4 cores. `prs.sh` lists every PR merged when it runs, so a later run includes newer PRs and won't match the tables exactly. To reproduce the recorded run, keep only PRs up to #1521 and build `rusty_erosion` at `f407699455`.
+  A run takes about 15 seconds per PR on 4 cores. `prs.sh` lists the PRs merged when it runs, so this measures today's population, not the recorded one.
+
+  To reproduce the recorded run, build `rusty_erosion` at `f407699455`. Then replace `"$C/prs.sh"` above with the frozen manifest, which is the first three columns of the saved rows:
+
+  ```sh
+  tail -n +2 docs/projects/let-em-loose/erosion-calibration-2026-11-05.tsv | cut -f1-3
+  ```
 
 ## Results
 
