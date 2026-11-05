@@ -761,6 +761,31 @@ printf '{"set":1}\n{"set":2}\n' > "$BBP_PLAN""#;
         assert!(!out.status.success(), "{case}: {shown}");
         assert!(!shown.contains("078-05-1120"), "{case} leaked: {shown}");
     }
+    // Links planted where the host once wrote the output, and into the
+    // host-side output directory, redirect none of the host's writes.
+    std::fs::write(data.join("keep"), "real").expect("write");
+    let plant = r#"for f in stdout.log stderr.log; do ln -s "$BBP_DATA_CRM/keep" "$HOME/$f"; done
+if ln -s "$BBP_DATA_CRM/keep" "$HOME/../plant.out/stdout.log" 2>/dev/null; then echo "out: planted" >&2; fi
+echo overwritten; echo overwritten >&2; exit 3"#;
+    for _ in 0..2 {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_bbp"))
+            .args(["dry-run", "--name", "plant", "--data"])
+            .arg(format!("crm={}", data.display()))
+            .arg("--work")
+            .arg(root.join("work"))
+            .args(["--", "/bin/sh", "-c", plant])
+            .output()
+            .expect("bbp");
+        assert!(!out.status.success());
+        assert_eq!(
+            std::fs::read_to_string(data.join("keep")).expect("read"),
+            "real",
+            "the data is untouched"
+        );
+        let err = std::fs::read_to_string(root.join("work/dry-run/plant.out/stderr.log"))
+            .expect("kept host-side");
+        assert!(!err.contains("out: planted"), "{err}");
+    }
     let _ = std::fs::remove_dir_all(&root);
     println!("BBP_ACCEPTANCE PASS dry-run");
 }
@@ -893,6 +918,32 @@ fn a_hiding_sandbox_is_refused_when_an_implicit_root_reaches_the_repository() {
     cfg.bbp = bbp;
     let error = moderator::run(&cfg).expect_err("the moderator refuses to launch");
     assert!(error.contains("reaches"), "{error}");
+    assert!(planner_log(&cfg.dir, &cfg.task).is_empty(), "nothing ran");
+    assert!(
+        !root.join("work/turns").exists(),
+        "no filtered copy was made"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_hiding_sandbox_is_refused_when_it_reaches_a_linked_git_directory() {
+    let root = root("hidden_linked_git").canonicalize().expect("canonical");
+    let repo = root.join("repo");
+    secret_repo(&repo);
+    // A supported layout: `.git` a link to a backing directory elsewhere.
+    let backing = root.join("backing-git");
+    std::fs::rename(repo.join(".git"), &backing).expect("move .git");
+    std::os::unix::fs::symlink(&backing, repo.join(".git")).expect("link .git");
+    let mut sandbox = HarnessSandbox {
+        checkout: true,
+        hide: vec!["secrets".into()],
+        ..scripts(&root)
+    };
+    sandbox.read.push(backing.to_string_lossy().into_owned());
+    let cfg = setup(&root, "T1", HIDDEN, vec!["x".into()], Some(sandbox));
+    let error = moderator::run(&cfg).expect_err("the moderator refuses to launch");
+    assert!(error.contains("backing-git"), "{error}");
     assert!(planner_log(&cfg.dir, &cfg.task).is_empty(), "nothing ran");
     assert!(
         !root.join("work/turns").exists(),

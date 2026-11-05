@@ -443,20 +443,12 @@ fn refuse_seeing(s: &HarnessSandbox, bbp: &Path, repo: &Path) -> Result<(), Stri
 }
 
 /// Refuse any of `roots` that, resolved, reaches the repository at `repo`
-/// or the object stores it borrows from (`objects/info/alternates`).
+/// or any place its git storage lives: its `.git` and object store wherever
+/// links lead them, the target of every link inside `.git`, and the object
+/// stores it borrows (`objects/info/alternates`, followed transitively).
 fn refuse_exposing(roots: &[&Path], repo: &Path) -> Result<(), String> {
     let repo = resolved(&std::path::absolute(repo).map_err(|e| e.to_string())?)?;
-    let mut held = vec![repo.clone()];
-    let alternates = repo.join(".git/objects/info/alternates");
-    if let Ok(text) = std::fs::read_to_string(&alternates) {
-        for line in text
-            .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        {
-            let path = repo.join(".git/objects").join(line);
-            held.push(resolved(&path)?);
-        }
-    }
+    let held = git_storage(&repo)?;
     for root in roots {
         let root = resolved(root)?;
         if let Some(h) = held
@@ -471,6 +463,72 @@ fn refuse_exposing(roots: &[&Path], repo: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Every resolved place that holds `repo`'s files or objects, `repo`
+/// included. Fails closed on a layout it cannot follow: a `.git` that is
+/// not a directory (a `gitdir:` file) or one that names a `commondir`.
+fn git_storage(repo: &Path) -> Result<Vec<PathBuf>, String> {
+    let dot_git = repo.join(".git");
+    let refuse = |why: &str| {
+        Err(format!(
+            "harness sandbox: {}: {why}, so a hiding sandbox cannot be checked against it",
+            dot_git.display()
+        ))
+    };
+    if !dot_git.is_dir() {
+        return refuse("not a directory");
+    }
+    if dot_git.join("commondir").symlink_metadata().is_ok() {
+        return refuse("its storage is shared through commondir");
+    }
+    let git = canonical(&dot_git)?;
+    let mut held = vec![repo.to_path_buf(), git.clone()];
+    held.extend(link_targets(&git)?);
+    let objects = git.join("objects");
+    let mut stores = match objects.symlink_metadata() {
+        Ok(_) => vec![canonical(&objects)?],
+        Err(_) => Vec::new(),
+    };
+    while let Some(store) = stores.pop() {
+        if !held.contains(&store) {
+            held.extend(link_targets(&store)?);
+            held.push(store.clone());
+        }
+        let Ok(text) = std::fs::read_to_string(store.join("info/alternates")) else {
+            continue;
+        };
+        for line in text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let alt = canonical(&store.join(line))?;
+            if !held.contains(&alt) {
+                stores.push(alt);
+            }
+        }
+    }
+    Ok(held)
+}
+
+/// The resolved target of every symlink under `dir`, which is not followed
+/// while walking.
+fn link_targets(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let entries = std::fs::read_dir(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", d.display()))?;
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_symlink() {
+                out.push(resolved(&entry.path())?);
+            } else if kind.is_dir() {
+                todo.push(entry.path());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `path` with its existing ancestors resolved through symlinks.
@@ -595,6 +653,63 @@ mod tests {
         .unwrap();
         let e = check(&root, hiding(&[&store], "secrets")).unwrap_err();
         assert!(e.contains("store"), "{e}");
+    }
+
+    #[test]
+    fn a_hiding_sandbox_may_not_reach_git_storage_linked_out_of_the_repository() {
+        use std::os::unix::fs::symlink;
+        let hiding = |read: &Path| {
+            let mut l = launcher(&[read], &[]);
+            if let Some(s) = l.sandbox.as_mut() {
+                s.hide = vec!["secrets".into()];
+            }
+            Launchers::default().with("a", l)
+        };
+        // `.git` itself linked to a separate backing directory.
+        let root = dir("linked_git");
+        let backing = root.join("backing");
+        std::fs::create_dir_all(backing.join("objects")).unwrap();
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        symlink(&backing, root.join("repo/.git")).unwrap();
+        let e = check(&root, hiding(&backing)).unwrap_err();
+        assert!(e.contains("backing"), "{e}");
+        // Only the object store linked away.
+        let root = dir("linked_objects");
+        let store = root.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        symlink(&store, root.join("repo/.git/objects")).unwrap();
+        let e = check(&root, hiding(&store)).unwrap_err();
+        assert!(e.contains("store"), "{e}");
+        // A link deeper in `.git`, and an alternate of an alternate.
+        let root = dir("linked_deep");
+        let (pack, second) = (root.join("pack"), root.join("second"));
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::create_dir_all(root.join("first/info")).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git/objects/info")).unwrap();
+        symlink(&pack, root.join("repo/.git/objects/pack")).unwrap();
+        std::fs::write(
+            root.join("repo/.git/objects/info/alternates"),
+            format!("{}\n", root.join("first").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("first/info/alternates"),
+            format!("{}\n", second.display()),
+        )
+        .unwrap();
+        assert!(check(&root, hiding(&pack)).unwrap_err().contains("pack"));
+        assert!(check(&root, hiding(&second))
+            .unwrap_err()
+            .contains("second"));
+        assert!(check(&root, hiding(&root.join("bin"))).is_ok());
+        // Layouts it cannot follow fail closed.
+        let root = dir("gitdir_file");
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        std::fs::write(root.join("repo/.git"), "gitdir: /elsewhere\n").unwrap();
+        let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
+        assert!(e.contains("not a directory"), "{e}");
     }
 
     #[test]

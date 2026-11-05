@@ -10,7 +10,10 @@
 //! The plan is `sensitive` and stays on the host, in the plan directory.
 //! Only its digest and entry count, which are `internal`, are reported, for
 //! the claim to cite. So is what the program prints: a failed run reports
-//! how it ended, and its output stays in the plan directory.
+//! how it ended, and its output is kept beside the plan directory, in
+//! `<name>.out`, where the program cannot write: nothing the host writes
+//! there can follow a link the program planted. The plan itself is read
+//! only when it is a regular file, never through a link or from a FIFO.
 //!
 //! Every path is resolved through symlinks before anything is removed,
 //! made or granted, and the resolved paths are the ones used: a work
@@ -61,42 +64,80 @@ where
 {
     let req = &checked(req)?;
     let dir = req.work.join("dry-run").join(&req.name);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let logs = out_dir(req);
+    for d in [&dir, &logs] {
+        if d.symlink_metadata().is_ok() {
+            std::fs::remove_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let plan = dir.join("plan.jsonl");
     let spec = spec(req, &dir, &plan)?;
     let out = exec
         .exec(&spec, &req.program, &req.args)
         .map_err(|e| format!("dry run {}: {e}", req.name))?;
-    // What it printed may be real data: kept beside the plan, never returned.
+    // What it printed may be real data: kept where the program cannot
+    // write, in files made new, never returned.
     for (name, bytes) in [("stdout.log", &out.stdout), ("stderr.log", &out.stderr)] {
-        let path = dir.join(name);
-        std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+        let path = logs.join(name);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, bytes))
+            .map_err(|e| format!("{}: {e}", path.display()))?;
     }
     if out.termination != Termination::Exited(0) {
         return Err(format!(
             "dry run {} ended {}; its output is in {}",
             req.name,
             ended(&out.termination),
-            dir.display()
+            logs.display()
         ));
     }
-    let meta = std::fs::symlink_metadata(&plan).map_err(|e| format!("{}: {e}", plan.display()))?;
-    if !meta.is_file() {
-        return Err(format!(
-            "{}: the plan is not a regular file",
-            plan.display()
-        ));
-    }
-    let bytes = std::fs::read(&plan).map_err(|e| format!("{}: {e}", plan.display()))?;
+    let bytes = read_plan(&plan)?;
     Ok(Summary {
         name: req.name.clone(),
         plan: plan.to_string_lossy().into_owned(),
         sha256: Sha256::of(&bytes),
         entries: entries(&bytes),
     })
+}
+
+/// Where a run's output is kept: beside its plan directory, which is all
+/// the program may write.
+fn out_dir(req: &Request) -> PathBuf {
+    req.work.join("dry-run").join(format!("{}.out", req.name))
+}
+
+/// The plan's bytes, when it is a regular file the program left: not a
+/// link, a FIFO or a device. Opened without blocking, and checked again
+/// once open, so a swap between the check and the open is refused too.
+fn read_plan(plan: &Path) -> Result<Vec<u8>, String> {
+    let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", plan.display());
+    let before = std::fs::symlink_metadata(plan).map_err(|e| fail(&e))?;
+    if !before.is_file() {
+        return Err(fail(&"the plan is not a regular file"));
+    }
+    let mut open = std::fs::OpenOptions::new();
+    open.read(true);
+    #[cfg(target_os = "linux")]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut open, rusty_libc::fd::O_NONBLOCK);
+    let mut file = open.open(plan).map_err(|e| fail(&e))?;
+    let after = file.metadata().map_err(|e| fail(&e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+            return Err(fail(&"the plan changed while it was opened"));
+        }
+    }
+    if !after.is_file() {
+        return Err(fail(&"the plan is not a regular file"));
+    }
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut file, &mut bytes).map_err(|e| fail(&e))?;
+    Ok(bytes)
 }
 
 /// The sandbox executor's state directory for work directory `work`,
@@ -157,12 +198,18 @@ fn checked(req: &Request) -> Result<Request, String> {
         }
         data.push((name.clone(), real));
     }
-    if dir != work.join("dry-run").join(&req.name) {
-        return Err(format!(
-            "dry run {}: its plan directory {} is reached through a link",
-            req.name,
-            dir.display()
-        ));
+    for lexical in [
+        work.join("dry-run").join(&req.name),
+        work.join("dry-run").join(format!("{}.out", req.name)),
+    ] {
+        let real = resolved(&lexical)?;
+        if real != lexical {
+            return Err(format!(
+                "dry run {}: {} is reached through a link",
+                req.name,
+                real.display()
+            ));
+        }
     }
     Ok(Request {
         data,
@@ -320,7 +367,7 @@ mod tests {
         let err = run(&Unconfined, &request(&root, script)).unwrap_err();
         assert!(!err.contains(SECRET), "{err}");
         assert!(err.contains("exit code 4"), "{err}");
-        let kept = root.join("work/dry-run/rename/stderr.log");
+        let kept = root.join("work/dry-run/rename.out/stderr.log");
         assert_eq!(
             std::fs::read_to_string(kept).unwrap(),
             SECRET,
@@ -384,6 +431,35 @@ mod tests {
         symlink(root.join("elsewhere"), root.join("work/dry-run/rename")).unwrap();
         let err = run(&Unconfined, &request(&root, "true")).unwrap_err();
         assert!(err.contains("through a link"), "{err}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_and_fifos_the_program_plants_redirect_nothing_the_host_writes_or_reads() {
+        let root = root("planted");
+        let keep = sentinel(&root);
+        // Every name the host later writes or reads, planted as a link into
+        // the data or a FIFO, on a run that fails and on one that succeeds.
+        let plant =
+            "for f in stdout.log stderr.log; do ln -s \"$BBP_DATA_CRM/keep\" \"$HOME/$f\"; done; \
+                     echo overwritten; echo overwritten >&2";
+        let err = run(&Unconfined, &request(&root, &format!("{plant}; exit 2"))).unwrap_err();
+        assert!(err.contains("exit code 2"), "{err}");
+        assert_eq!(std::fs::read_to_string(&keep).unwrap(), "real");
+        let logs = root.join("work/dry-run/rename.out");
+        assert_eq!(
+            std::fs::read_to_string(logs.join("stdout.log")).unwrap(),
+            "overwritten\n",
+            "kept host-side"
+        );
+        let linked = format!("{plant}; ln -s \"$BBP_DATA_CRM/keep\" \"$BBP_PLAN\"");
+        let err = run(&Unconfined, &request(&root, &linked)).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+        let fifo = "mkfifo \"$BBP_PLAN\"";
+        let err = run(&Unconfined, &request(&root, fifo)).unwrap_err();
+        assert!(err.contains("not a regular file"), "{err}");
+        assert_eq!(std::fs::read_to_string(&keep).unwrap(), "real");
         let _ = std::fs::remove_dir_all(&root);
     }
 
