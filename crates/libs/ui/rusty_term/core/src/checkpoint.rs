@@ -90,13 +90,15 @@ pub(crate) fn encode_spilled(line: &crate::grid::Line, table: &StyleTable) -> Re
 /// oldest first: all but the last as its scrollback, each at its own width,
 /// the last as its one screen row, padded to the widest. Refuses a line that
 /// is not one, or lines that decode to more than [`MAX_DECODED`] in all.
-pub fn spilled_grid(lines: &[&[u8]]) -> Result<Grid> {
-    spilled_grid_within(lines, MAX_DECODED)
+/// Colours marked default show `like`'s defaults (OSC 10/11), as its own
+/// scrollback does: pass the grid that spilled them.
+pub fn spilled_grid(lines: &[&[u8]], like: &Grid) -> Result<Grid> {
+    spilled_grid_within(lines, like, MAX_DECODED)
 }
 
 /// [`spilled_grid`] within `budget` decoded bytes: every allocation it makes
 /// is charged first: the lines, their cells and the screen row.
-fn spilled_grid_within(lines: &[&[u8]], budget: usize) -> Result<Grid> {
+fn spilled_grid_within(lines: &[&[u8]], like: &Grid, budget: usize) -> Result<Grid> {
     let mut r = Reader::new(&[], budget);
     let mut decoded = Vec::with_capacity(lines.len().min(1 << 16));
     for bytes in lines {
@@ -116,9 +118,8 @@ fn spilled_grid_within(lines: &[&[u8]], budget: usize) -> Result<Grid> {
     // The screen row `Grid::new` makes and the last line's padded copy.
     r.charge(cols.saturating_mul(2 * size_of::<Cell>()))?;
     let mut grid = Grid::new(cols, 1);
-    let defaults = grid.styles().defaults();
     let mut table = r.take_styles();
-    table.set_defaults(defaults);
+    table.set_defaults(like.styles().defaults());
     grid.adopt_spilled(table, decoded, last.map(|l| l.padded_to(cols)));
     Ok(grid)
 }
@@ -1105,7 +1106,7 @@ mod tests {
         // 6 lines and the cursor's blank row: 2 on screen, 2 kept, 3 spilled.
         assert_eq!(spilled.len(), 3);
         let refs: Vec<&[u8]> = spilled.iter().map(Vec::as_slice).collect();
-        let back = spilled_grid(&refs).unwrap();
+        let back = spilled_grid(&refs, &Grid::new(1, 1)).unwrap();
         let text: Vec<_> = (0..).map_while(|n| back.line_text(n)).collect();
         assert_eq!(text, ["red0 plain", "red1 plain", "red2 plain"]);
         let (cells, _) = back.line_cells(1).unwrap();
@@ -1125,7 +1126,7 @@ mod tests {
         g.set_scrollback_max(1);
         let spilled = g.take_spilled();
         let refs: Vec<&[u8]> = spilled.iter().map(Vec::as_slice).collect();
-        let back = spilled_grid(&refs).unwrap();
+        let back = spilled_grid(&refs, &Grid::new(1, 1)).unwrap();
         assert_eq!(back.line_text(0).as_deref(), Some("a"));
         assert_eq!(back.line_text(1).as_deref(), Some("b"));
     }
@@ -1152,7 +1153,7 @@ mod tests {
         spilled.extend(spilled_from(4, 1, "cd"));
         assert_eq!(spilled.len(), 102);
         let refs: Vec<&[u8]> = spilled.iter().map(Vec::as_slice).collect();
-        let back = spilled_grid(&refs).unwrap();
+        let back = spilled_grid(&refs, &Grid::new(1, 1)).unwrap();
         assert_eq!(back.line_cells(0).unwrap().0.len(), 4, "not padded");
         assert_eq!(back.line_text(0).as_deref(), Some("ab"));
         assert_eq!(back.line_text(100).as_deref(), Some(wide.as_str()));
@@ -1163,16 +1164,16 @@ mod tests {
                 .all(|(_, wrapped)| !wrapped)
         );
         // Less than padding the 100 narrow rows to 400 columns would add.
-        let need = least_budget(|b| spilled_grid_within(&refs, b).is_ok());
+        let need = least_budget(|b| spilled_grid_within(&refs, &Grid::new(1, 1), b).is_ok());
         assert!(need < 100 * 396 * size_of::<Cell>(), "{need}");
-        assert!(spilled_grid_within(&refs, need - 1).is_err());
+        assert!(spilled_grid_within(&refs, &Grid::new(1, 1), need - 1).is_err());
     }
 
     #[test]
     fn a_soft_wrapped_spilled_line_keeps_its_wrap() {
         let spilled = spilled_from(4, 2, "abcdef");
         let refs: Vec<&[u8]> = spilled.iter().map(Vec::as_slice).collect();
-        let back = spilled_grid(&refs).unwrap();
+        let back = spilled_grid(&refs, &Grid::new(1, 1)).unwrap();
         let all: Vec<_> = (0..).map_while(|n| back.line_text(n)).collect();
         assert_eq!(all, ["abcd", "ef", "abcd", "ef"]);
         let wraps: Vec<_> = (0..4).map(|n| back.line_cells(n).unwrap().1).collect();
@@ -1180,15 +1181,40 @@ mod tests {
     }
 
     #[test]
+    fn spilled_lines_show_the_default_colours_of_the_grid_they_left() {
+        let (mut g, mut p) = spilling(2, 0);
+        // A themed default background (OSC 11), then plain text.
+        p.advance(&mut g, b"\x1b]11;rgb:12/34/56\x1b\\plain\r\nmore\r\n\r\n");
+        let spilled = g.take_spilled();
+        let refs: Vec<&[u8]> = spilled.iter().map(Vec::as_slice).collect();
+        let back = spilled_grid(&refs, &g).unwrap();
+        let (cells, _) = back.line_cells(0).unwrap();
+        let (live, _) = g.line_cells(g.scrollback_len()).unwrap();
+        assert_eq!(cells[0].bg, 0x123456, "themed, as in the grid");
+        assert_eq!(cells[0].bg, live[0].bg);
+        let fresh = spilled_grid(&refs, &Grid::new(1, 1)).unwrap();
+        assert_ne!(fresh.line_cells(0).unwrap().0[0].bg, 0x123456);
+    }
+
+    #[test]
     fn spilled_lines_that_are_not_are_refused() {
-        assert!(spilled_grid(&[b"RTCP\x06"]).is_err());
-        assert!(spilled_grid(&[b"RTSL\x01"]).is_err());
+        assert!(spilled_grid(&[b"RTCP\x06"], &Grid::new(1, 1)).is_err());
+        assert!(spilled_grid(&[b"RTSL\x01"], &Grid::new(1, 1)).is_err());
         let (mut g, mut p) = spilling(2, 1);
         p.advance(&mut g, b"x\r\ny\r\nz\r\nw\r\n");
         let mut line = g.take_spilled().remove(0);
         line.push(0);
-        assert!(spilled_grid(&[&line]).is_err(), "trailing data");
-        assert_eq!(spilled_grid(&[]).unwrap().line_text(0).as_deref(), Some(""));
+        assert!(
+            spilled_grid(&[&line], &Grid::new(1, 1)).is_err(),
+            "trailing data"
+        );
+        assert_eq!(
+            spilled_grid(&[], &Grid::new(1, 1))
+                .unwrap()
+                .line_text(0)
+                .as_deref(),
+            Some("")
+        );
     }
 
     #[test]

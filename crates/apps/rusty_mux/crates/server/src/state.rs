@@ -1183,7 +1183,7 @@ impl State {
         let text = match found.name {
             "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX)
                 .ok_or_else(|| format!("{method} reply exceeds {REPLY_MAX} bytes"))?,
-            "terminal.history" => history(rt.spool.as_ref(), &named)?,
+            "terminal.history" => history(rt.spool.as_ref(), &rt.grid, &named)?,
             "terminal.send-keys" => {
                 self.mux
                     .authorize_input(client, block)
@@ -2024,8 +2024,8 @@ fn capture(named: &[(&str, Value)]) -> terminal::Capture {
 }
 
 /// `terminal.history`: the spooled lines `named` asks for, as
-/// `terminal.format` would show them.
-fn history(spool: Option<&Spool>, named: &[(&str, Value)]) -> Result<String, Refusal> {
+/// `terminal.format` would show them in `grid`, the block's.
+fn history(spool: Option<&Spool>, grid: &Grid, named: &[(&str, Value)]) -> Result<String, Refusal> {
     let spool = spool.ok_or(
         "no history is kept past this block's scrollback: the server keeps no state, \
          or writing it failed",
@@ -2034,13 +2034,15 @@ fn history(spool: Option<&Spool>, named: &[(&str, Value)]) -> Result<String, Ref
     let read = spool
         .read(lines(named, "skip").into(), capture.history.into())
         .map_err(|e| format!("reading the history: {e}"))?;
-    format_history(&read, capture, REPLY_MAX)
+    format_history(&read, grid, capture, REPLY_MAX)
 }
 
 /// Spilled lines `read`, oldest first, as `terminal.format` shows them
-/// with `capture`, refused past `max` bytes.
+/// in `like`, the grid that spilled them, with `capture`, refused past
+/// `max` bytes.
 fn format_history(
     read: &[Vec<u8>],
+    like: &Grid,
     capture: terminal::Capture,
     max: usize,
 ) -> Result<String, Refusal> {
@@ -2048,7 +2050,7 @@ fn format_history(
         return Ok(String::new());
     };
     let read: Vec<&[u8]> = read.iter().map(Vec::as_slice).collect();
-    let grid = rusty_term_core::checkpoint::spilled_grid(&read)
+    let grid = rusty_term_core::checkpoint::spilled_grid(&read, like)
         .map_err(|e| format!("the history is damaged: {e}"))?;
     let capture = terminal::Capture {
         history: u32::try_from(above).unwrap_or(u32::MAX),
@@ -2950,7 +2952,7 @@ mod regression {
         let mut read = spilled(4, "\x1b[31mabcdef\x1b[0m");
         read.extend(spilled(400, &"w".repeat(400)));
         let wide = "w".repeat(400);
-        let text = |c| format_history(&read, c, REPLY_MAX).unwrap();
+        let text = |c| format_history(&read, &Grid::new(1, 1), c, REPLY_MAX).unwrap();
         let plain = text(capture(true, true, false));
         assert_eq!(plain.lines().collect::<Vec<_>>(), ["abcdef", wide.as_str()]);
         let rows = text(capture(false, true, false));
@@ -2974,11 +2976,73 @@ mod regression {
     fn a_long_wrapped_history_run_is_refused_before_it_is_built() {
         // One logical line of 2,000 cells, wrapped every 20.
         let read = spilled(20, &"x".repeat(2_000));
-        assert!(format_history(&read, capture(true, true, false), 4_000).is_ok());
-        let refused = format_history(&read, capture(true, true, false), 500).unwrap_err();
+        let fresh = Grid::new(1, 1);
+        assert!(format_history(&read, &fresh, capture(true, true, false), 4_000).is_ok());
+        let refused = format_history(&read, &fresh, capture(true, true, false), 500).unwrap_err();
         assert!(refused.reason.contains("exceeds 500"), "{}", refused.reason);
         // Row by row, the reply is the same 2,099 bytes.
-        assert!(format_history(&read, capture(false, true, false), 500).is_err());
-        assert!(format_history(&read, capture(false, true, false), 2_200).is_ok());
+        assert!(format_history(&read, &fresh, capture(false, true, false), 500).is_err());
+        assert!(format_history(&read, &fresh, capture(false, true, false), 2_200).is_ok());
+    }
+
+    #[test]
+    fn a_styled_wrapped_history_run_is_refused_while_it_is_written() {
+        // 200 cells changing colour every cell: few enough cells to pass the
+        // run's bound, far too many SGR bytes for the limit.
+        let styled: String = (0..200).map(|i| format!("\x1b[3{}mx", 1 + i % 2)).collect();
+        let read = spilled(20, &styled);
+        let fresh = Grid::new(1, 1);
+        let vt = capture(true, true, true);
+        assert!(format_history(&read, &fresh, capture(true, true, false), 300).is_ok());
+        let refused = format_history(&read, &fresh, vt, 300).unwrap_err();
+        assert!(refused.reason.contains("exceeds 300"), "{}", refused.reason);
+        assert!(format_history(&read, &fresh, vt, REPLY_MAX).is_ok());
+    }
+
+    #[test]
+    fn history_shows_the_blocks_themed_default_colours() {
+        let mut grid = Grid::new(10, 2);
+        grid.set_scrollback_max(0);
+        grid.spill_evicted(true);
+        let mut parser = AnsiParser::new();
+        // OSC 11 themes the default background; the text keeps the default.
+        parser.advance(&mut grid, b"\x1b]11;rgb:12/34/56\x1b\\plain\r\n\r\n\r\n");
+        let read = grid.take_spilled();
+        let vt = capture(false, true, true);
+        let themed = format_history(&read, &grid, vt, REPLY_MAX).unwrap();
+        assert!(
+            themed.starts_with("\x1b[0;48;2;18;52;86mplain"),
+            "{themed:?}"
+        );
+        let fresh = format_history(&read, &Grid::new(1, 1), vt, REPLY_MAX).unwrap();
+        assert!(fresh.starts_with("\x1b[0mplain"), "{fresh:?}");
+    }
+
+    #[test]
+    fn themed_history_reads_as_the_block_showed_it_blanks_included() {
+        // OSC 10 and 11 theme the defaults; a themed blank row sits between
+        // text rows, and one row has a colour of its own.
+        let input: &[u8] = b"\x1b]10;rgb:aa/bb/cc\x1b\\\x1b]11;rgb:12/34/56\x1b\\\
+            top\r\n\x1b[2K\r\n\x1b[31mred\x1b[0m\r\nend\r\n\r\n\r\n";
+        let mut spilling = Grid::new(10, 2);
+        spilling.set_scrollback_max(0);
+        spilling.spill_evicted(true);
+        let mut twin = Grid::new(10, 2);
+        for grid in [&mut spilling, &mut twin] {
+            AnsiParser::new().advance(grid, input);
+        }
+        let read = spilling.take_spilled();
+        assert_eq!(read.len(), 5);
+        for (trim, vt) in [(false, false), (false, true), (true, false), (true, true)] {
+            let c = capture(false, trim, vt);
+            let history = format_history(&read, &spilling, c, REPLY_MAX).unwrap();
+            // The twin kept the same rows in its scrollback, the screen after.
+            let live = terminal::format(&twin, c, REPLY_MAX).unwrap();
+            let rows = |t: &str| t.lines().take(4).map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(rows(&history), rows(&live), "trim {trim}, vt {vt}");
+        }
+        let vt = format_history(&read, &spilling, capture(false, true, true), REPLY_MAX).unwrap();
+        let blank = vt.lines().nth(1).unwrap();
+        assert!(blank.contains("48;2;18;52;86"), "themed blank kept: {vt:?}");
     }
 }
