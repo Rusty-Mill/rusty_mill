@@ -249,6 +249,14 @@ mod tests {
         ] {
             assert!(matches!(section(&log), Some(Err(_))), "{log}");
         }
+        // An unterminated fake header, before or after the real section,
+        // runs across profile boundaries.
+        for log in [
+            format!("=== test : t\n=== erosion : e\n{ENFORCING}\n--- test: exit 0\n{real}"),
+            format!("{real}=== test : t\n=== erosion : e\n--- test: exit 0\n"),
+        ] {
+            assert!(matches!(section(&log), Some(Err(_))), "{log}");
+        }
         // A stray closer, or a closer before the header.
         let stray = format!("=== test : t\n--- erosion: exit 0\n--- test: exit 0\n{real}");
         assert!(matches!(section(&stray), Some(Err(_))));
