@@ -35,7 +35,7 @@ remind-me tag: `let-em-loose`.
    answers to design questions are posted as card comments.
 4. Design docs: `LEL/*-design.md` and `LEL/*-build-plan.md` (owner answers
    are in each doc's last section). Every design lives in the repo, in its
-   first draft PR (D85). Never point a caller at `/mnt/project-files/` or
+   first draft PR (D94). Never point a caller at `/mnt/project-files/` or
    session scratch for a design: those don't survive between sessions, and
    the #594 and #599 designs were lost there. Older designs may still sit in
    `/mnt/project-files/let-em-loose/`; read one if it's there, and ask the

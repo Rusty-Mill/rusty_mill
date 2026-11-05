@@ -96,10 +96,10 @@ Precise contracts used by this guide:
 | D81 | #599 lesson trigger 2 detects reverts from the action mark and git | [default] 2026-11-04 (#599) |
 | D82 | #704 slice 2: erosion profile recognition, invocation, opt-out, base, measured set and modes | [default] 2026-11-04 (#704) |
 | D83 | #599 watcher dedups by finding key and slot in `watch_finding` | [default] 2026-11-04 (#599) |
-| D84 | #599 track records score pivotal reviews against ground truth only | [stated] 2026-11-04 (#599) |
-| D85 | Let Em Loose designs live in the repo, in their first draft PR | [stated] 2026-11-04 (general) |
 | D86 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
 | D88 | #704 D42 expiry pause: go-live, count, what pauses, opt-out | [default] 2026-11-05 (#704) |
+| D93 | #599 track records score pivotal reviews against ground truth only | [stated] 2026-11-04 (#599) |
+| D94 | Let Em Loose designs live in the repo, in their first draft PR | [stated] 2026-11-04 (general) |
 
 ## D1. Lenses, not stages
 
@@ -730,24 +730,6 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Key.** lel:599:watch-dedup-key
 **Source.** Nano asked for the dedup to be logged with its key and reason in thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), and dottiusmaximus's review comment 6643815580 (P2) on #1491 asked for the payload fix; their review comment 6663660803 (P2) on #1491 found the returning-key `OpConflict`, fixed by adding the prior claim to the op id. The edited 6663660803 and Codex review comment 4483261550 on #1491 found the orphaned post after a lost table write, fixed by the pending post. Codex review comment 4483261567 on #1491 had the toolchain channel read as TOML. let-em-loose-expert, 2026-11-04, answering the #599 build thread, found the rollover gap. Built in `rusty_orch/src/watch.rs` and `orch-store/src/watch.rs`; tests `watch::tests::changed_details_keep_the_first_claim_and_post_nothing`, `a_newer_finding_in_a_slot_supersedes_the_open_claim`, `a_post_whose_record_was_lost_is_settled_before_the_slot_moves_on`, `a_post_that_was_never_written_down_is_never_sent`, `a_refused_post_leaves_the_slot_as_it_was`, `a_key_that_returns_supersedes_the_slots_claim_without_a_conflict`, `the_board_refuses_a_changed_payload_under_one_op`, `the_channel_is_read_as_toml`, `watch::e2e::findings_are_posted_once_and_superseded_through_a_real_bbp` (Orch BBP acceptance job `watch-replay`; it also covers the A→B→A return, and a lost table write followed by a different key across a session restart), and orch-store `watch::a_watched_finding_survives_reopening_and_is_per_app_and_slot`.
 
-## D84. #599 track records score pivotal reviews against ground truth only
-
-**Decision.** Option A plus ground truth. A pivotal review is one whose outcome flips once the lens's own evidence is removed. It is not scored against the board outcome, and each lens reports a pivotal count beside its points. Where the claim has ground truth (a golden-set test, a shadow-run result, a later Nano reversal), the pivotal review is scored against that instead. With no ground truth it is unscored and counted as pivotal. The 20-item calibration report shows, per lens: points, scored count, pivotal count, and pivotal-with-ground-truth count. Required tests: pivotal with no ground truth is unscored and counted; pivotal with ground truth is scored against the ground truth; a non-pivotal review is scored as before; a lens that flips an outcome it bet on earns nothing from the flip. This answers OPEN_QUESTIONS Q17, which is on #1491's branch.
-**Why.** Ground truth isn't moved by the lens's vote, so scoring against it can't be gamed. Reporting the counts keeps "unmeasured" visible, so it doesn't read as "bad".
-**Rejected.** Scoring pivotal reviews against the board outcome, which the lens itself moved. Leaving every pivotal review unscored, even where ground truth exists. The other Q17 options: pivotal reviews at w = 1, or dropping the pivotal rule.
-**Tag.** [stated] · remind-me: mem_3f1158fb8fe0485697a8a713fc86469f
-**Key.** lel:599:track-record-pivotal
-**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Track-record question: option A, plus ground truth". OPEN_QUESTIONS Q17 (card #599 Q2).
-
-## D85. Let Em Loose designs live in the repo, in their first draft PR
-
-**Decision.** Every Let Em Loose design goes into `docs/projects/let-em-loose/` as part of its first draft PR, never only in `/mnt/project-files/` or session scratch. The rule is in the let-em-loose-expert pack (sources, step 4) and the let-em-loose row of the scoped `CLAUDE.md` rule.
-**Why.** `/mnt/project-files/` doesn't survive between sessions: the #594 and #599 designs were both lost there.
-**Rejected.** Keeping designs in `/mnt/project-files/let-em-loose/` or in session scratch.
-**Tag.** [stated] · remind-me: mem_aff6060cd75743ef9807b92006c3f1c7
-**Key.** lel:general:designs-live-in-repo
-**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Design docs live in the repo, never in session scratch."
-
 ## D86. #598 build defaults while 598-gaps-design.md is unavailable
 
 **Decision.** Until the design file can be read, #598 is built with these choices inside the approved §6 (D59, D62). `task_paused.reason` is one of `spend_ceiling`, `call_ceiling` or `breaker`, and `detail` is free text. `intent_revised.affects` is `{all: true}` or `{claims: [..], domains: [..]}` (their union); an unknown claim, or both lists empty, is refused `bad_affects`. `intent_version` is a fold: 1 at `task_opened`, plus one per `intent_revised`. A claim's proven-against version is the `intent_version` at its latest acceptance, also a fold, with no stored field. An intent reopen follows C-R8's epoch and budget rules, with no automatic extension, and an acted-on claim escalates `intent_changed` instead of reopening. `bbp open --base <ref>` resolves the ref to a full commit id stored as the existing `profiles.baseline`. `baseline_digest` is the SHA-256 of the canonical baseline report at `<dir>/baseline/<task>.json`. `baseline_red` lists the red profile and test names plus a suggested profile-set edit as text, with no new skip field. `base_test_changed` refuses a candidate that modifies or deletes a `test_paths` file existing at `base`, unless its claim is `reversible: false`; such a candidate goes to the inbox, one item per candidate. Breaker settings are `window_calls` 40, `window_usd` 5, `min_score_move` 4 (sum of absolute score change in the window) and `mode` `observe`. `rusty_orch lens breaker` is a read-only report. `max_class` keeps the merged default by provider kind (ADR-0021) and `price` stays required. The shadow-run module is `shadow_run.rs`, because `shadow.rs` is #596's policy log.
@@ -771,3 +753,21 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_b55d930642a747baab2f93387bc09ad3
 **Key.** lel:704:expiry-pause-build-defaults
 **Source.** Questions Q1–Q6 from the #704 expiry-pause build thread, 2026-11-05; D41, D42, D82; QA.md § Erosion gate; card #704 Build 5, Time box and Done when; `rusty_bbp_host` `src/admin.rs` `open_claims_task`, `src/profiles.rs` `check_erosion`; `rusty_bbp` `src/event.rs` `TaskOpened`. Counting rule and lock span amended 2026-11-05 after dottiusmaximus's review of PR #1508 (builder default, not a Nano decision). Open-time bullet amended 2026-11-05 after the coordinator's probe of `admin::open_claims_task` on main showed the open writes only `TaskOpened` and `ArtifactStored(Brief)`. Numbered D88 because open PR branches already use D78–D87.
+
+## D93. #599 track records score pivotal reviews against ground truth only
+
+**Decision.** Option A plus ground truth. A pivotal review is one whose outcome flips once the lens's own evidence is removed. It is not scored against the board outcome, and each lens reports a pivotal count beside its points. Where the claim has ground truth (a golden-set test, a shadow-run result, a later Nano reversal), the pivotal review is scored against that instead. With no ground truth it is unscored and counted as pivotal. The 20-item calibration report shows, per lens: points, scored count, pivotal count, and pivotal-with-ground-truth count. Required tests: pivotal with no ground truth is unscored and counted; pivotal with ground truth is scored against the ground truth; a non-pivotal review is scored as before; a lens that flips an outcome it bet on earns nothing from the flip. This answers OPEN_QUESTIONS Q17.
+**Why.** Ground truth isn't moved by the lens's vote, so scoring against it can't be gamed. Reporting the counts keeps "unmeasured" visible, so it doesn't read as "bad".
+**Rejected.** Scoring pivotal reviews against the board outcome, which the lens itself moved. Leaving every pivotal review unscored, even where ground truth exists. The other Q17 options: pivotal reviews at w = 1, or dropping the pivotal rule.
+**Tag.** [stated] · remind-me: mem_3f1158fb8fe0485697a8a713fc86469f
+**Key.** lel:599:track-record-pivotal
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Track-record question: option A, plus ground truth". OPEN_QUESTIONS Q17 (card #599 Q2). Numbered D93 (first drafted as D84) under the 2026-11-05 allocation that gives this thread's open PRs D92–D95.
+
+## D94. Let Em Loose designs live in the repo, in their first draft PR
+
+**Decision.** Every Let Em Loose design goes into `docs/projects/let-em-loose/` as part of its first draft PR, never only in `/mnt/project-files/` or session scratch. The rule is in the let-em-loose-expert pack (sources, step 4) and the let-em-loose row of the scoped `CLAUDE.md` rule.
+**Why.** `/mnt/project-files/` doesn't survive between sessions: the #594 and #599 designs were both lost there.
+**Rejected.** Keeping designs in `/mnt/project-files/let-em-loose/` or in session scratch.
+**Tag.** [stated] · remind-me: mem_aff6060cd75743ef9807b92006c3f1c7
+**Key.** lel:general:designs-live-in-repo
+**Source.** Nano, thread message cmsg_014AqbZs58L565hMV2pFkCX56GR1HMdW1176q2egkeFntF (2026-11-04), "Design docs live in the repo, never in session scratch." Numbered D94 (first drafted as D85) under the same allocation.
