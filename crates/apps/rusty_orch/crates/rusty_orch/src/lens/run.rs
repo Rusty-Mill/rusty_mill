@@ -937,6 +937,108 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A crash after a post that settled the claim, before its row is
+    /// saved: the restart sees the claim settled, so the job is never asked
+    /// again. Its row stays pending, so it stays in the denominator and is
+    /// never scored; here the lost item crossed the line, and the pending
+    /// row counts as pivotal where a row without the marker would not.
+    #[test]
+    fn a_crash_after_a_settling_post_keeps_the_job_pending_and_unscored() {
+        use orch_lens::record::{score, Change, Item, Rule, Scored, Step, Trail};
+        let d = std::env::temp_dir().join(format!("orch-lens-settled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let run = |crash: bool, status: ClaimStatus| {
+            let mut store = Store::open(&d).expect("store");
+            let mut save_review = |r: &Review| {
+                if crash && !r.pending {
+                    return Err("killed".to_owned());
+                }
+                store.save_lens_review("b", r).map_err(|e| e.to_string())
+            };
+            let mut read_records = || Ok(BTreeMap::new());
+            let records = Records {
+                save: &mut save_review,
+                read: &mut read_records,
+            };
+            let settled = Card { status, ..card(7) };
+            let mut e = echo(Ok(vec![counter()]));
+            let ended = go_with(
+                &mut State::default(),
+                &mut |_| Ok(()),
+                records,
+                vec![
+                    ("adversary", FakeSeat::new(vec![settled.clone()])),
+                    ("operator", FakeSeat::new(vec![settled])),
+                ],
+                &mut e,
+                10,
+                1,
+            )
+            .0;
+            (ended, e.1)
+        };
+        assert!(run(true, ClaimStatus::Open).0.is_err());
+        let (ended, asked) = run(false, ClaimStatus::Dropped);
+        assert!(ended.is_ok(), "{ended:?}");
+        assert_eq!(asked, 0, "a settled claim's job isn't asked again");
+        let rows = Store::open(&d)
+            .expect("reopen")
+            .lens_reviews("b")
+            .expect("rows");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].pending && rows[0].items.is_empty(), "{rows:?}");
+        let item = |msg: u64, author: &str, delta: i64| {
+            Change::Item(Item {
+                msg: MsgId(msg),
+                author: author.into(),
+                direction: Direction::Counter,
+                grounded: true,
+                executed: false,
+                delta,
+                scoring: true,
+            })
+        };
+        let changes = [
+            item(2, "a", -6),
+            item(41, "adversary", -3),
+            Change::Status(Rule::Line {
+                at: -8,
+                authors: 2,
+                min_authors: Some(2),
+            }),
+        ];
+        let mut so_far = 0;
+        let steps = changes
+            .into_iter()
+            .map(|change| {
+                if let Change::Item(i) = &change {
+                    so_far += i.delta;
+                }
+                let status = match change {
+                    Change::Status(_) => ClaimStatus::Dropped,
+                    _ => ClaimStatus::Open,
+                };
+                Step {
+                    change,
+                    status,
+                    score: so_far,
+                    epoch: 0,
+                }
+            })
+            .collect();
+        let trail = Trail { steps };
+        assert_eq!(score(&rows[0], &trail), Scored::Unscored { pivotal: true });
+        let unmarked = Review {
+            pending: false,
+            ..rows[0].clone()
+        };
+        assert_eq!(
+            score(&unmarked, &trail),
+            Scored::Unscored { pivotal: false }
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     fn two_seats() -> Vec<(&'static str, FakeSeat)> {
         vec![
             ("adversary", FakeSeat::new(vec![card(7)])),
