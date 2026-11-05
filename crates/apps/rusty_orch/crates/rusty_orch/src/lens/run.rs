@@ -409,7 +409,7 @@ pub fn run(o: &Options) -> Result<String, String> {
         );
     }
     let mut alien = if o.alien {
-        Some(Kit::open(&config, o, &base, &run)?)
+        Some(Kit::open(&config, o, &board, &base, &run)?)
     } else {
         None
     };

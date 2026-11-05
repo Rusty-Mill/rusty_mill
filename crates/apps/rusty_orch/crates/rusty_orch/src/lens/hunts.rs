@@ -5,7 +5,7 @@
 //!
 //! A claim skipped before any model call (the role may not read the
 //! candidate, the diff is too long for one prompt, no provider is cleared
-//! for its class, its probes cannot be set up, or no provider took the
+//! for its class, the candidate tree cannot be built, or no provider took the
 //! first call) records nothing, so a later run tries it again; each skip
 //! is one warning for stderr (D98). A ceiling ends the pass. A hunt that
 //! made its first call is recorded whatever happened next, so its calls
@@ -49,7 +49,9 @@ pub trait Hunter {
     fn hunted(&self, claim: MsgId, candidate: ArtId) -> Result<bool, String>;
     /// Now, in Unix milliseconds.
     fn now(&self) -> u64;
-    /// The probe runner for one hunt of `claim` on `code`.
+    /// The probe runner for one hunt of `claim` on `code`, once the
+    /// candidate is known to build a tree: an `Err` here skips the claim
+    /// before any call, so a fix lets the next run retry it.
     fn probes(&mut self, claim: MsgId, code: Candidate) -> Result<Box<dyn Probes + '_>, String>;
     /// Save a hunt: its probe rows, then its hunt row, which marks the
     /// candidate hunted.
@@ -272,7 +274,13 @@ impl Kit {
     /// # Errors
     ///
     /// A message naming the piece that is missing.
-    pub fn open(config: &LensConfig, o: &Options, base: &Path, run: &str) -> Result<Self, String> {
+    pub fn open(
+        config: &LensConfig,
+        o: &Options,
+        board: &str,
+        base: &Path,
+        run: &str,
+    ) -> Result<Self, String> {
         let alien = config
             .alien
             .clone()
@@ -286,7 +294,8 @@ impl Kit {
         let path = base.join(&alien.prompt);
         let prompt = std::fs::read_to_string(&path)
             .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-        let root = o.state.join("alien");
+        let root = absolute(&o.state.join("alien"))?;
+        bind(&root, &o.task, board)?;
         let leftover = root.join("probes");
         if leftover.symlink_metadata().is_ok() {
             std::fs::remove_dir_all(&leftover)
@@ -358,6 +367,35 @@ impl Kit {
     }
 }
 
+/// `dir`, made if missing, as an absolute path: the sandbox refuses
+/// relative ones.
+fn absolute(dir: &Path) -> Result<PathBuf, String> {
+    let at = |e: std::io::Error| format!("{}: {e}", dir.display());
+    std::fs::create_dir_all(dir).map_err(at)?;
+    dir.canonicalize().map_err(at)
+}
+
+/// Bind `task`'s alien rows in this state dir to one board (D99): they are
+/// keyed by task id, so a same-named task from another BBP directory
+/// (`board` is [`super::run::board`]) is refused, not mixed in.
+fn bind(root: &Path, task: &str, board: &str) -> Result<(), String> {
+    let dir = root.join("boards");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let file = dir.join(task);
+    let at = |e: std::io::Error| format!("{}: {e}", file.display());
+    match std::fs::read_to_string(&file) {
+        Ok(held) if held == board => Ok(()),
+        Ok(_) => Err(format!(
+            "--alien: {} already holds task {task:?} from another BBP directory",
+            root.display()
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(&file, board).map_err(at)
+        }
+        Err(e) => Err(at(e)),
+    }
+}
+
 /// Is `task` one plain path component, so `<state>/alien/probes/<task>`
 /// stays under the state dir?
 fn one_component(task: &str) -> bool {
@@ -409,6 +447,7 @@ where
                 .join(claim.0.to_string()),
         };
         let probes = SandboxProbes::new(self.exec, self.repo, self.toolchain, code, dirs)?;
+        probes.check()?;
         Ok(Box::new(probes))
     }
 
@@ -866,10 +905,24 @@ mod tests {
         };
         let mut without = config();
         without.alien = None;
-        let e = Kit::open(&without, &o("t"), Path::new("/"), "r").err();
+        let e = Kit::open(&without, &o("t"), "b", Path::new("/"), "r").err();
         assert!(e.is_some_and(|e| e.contains("needs an \"alien\" entry")));
-        let e = Kit::open(&config(), &o("../t"), Path::new("/"), "r").err();
+        let e = Kit::open(&config(), &o("../t"), "b", Path::new("/"), "r").err();
         assert!(e.is_some_and(|e| e.contains("cannot name a directory")));
+    }
+
+    #[test]
+    fn a_state_dir_binds_each_task_to_one_board() {
+        let dir = std::env::temp_dir().join(format!("orch_hunts_bind_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = absolute(&dir.join("rel/../alien")).expect("absolute");
+        assert!(root.is_absolute() && root.is_dir());
+        assert_eq!(bind(&root, "t", "/a\0t"), Ok(()));
+        assert_eq!(bind(&root, "t", "/a\0t"), Ok(()), "the same board again");
+        assert_eq!(bind(&root, "u", "/b\0u"), Ok(()), "another task");
+        let e = bind(&root, "t", "/b\0t").expect_err("another board");
+        assert!(e.contains("from another BBP directory"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

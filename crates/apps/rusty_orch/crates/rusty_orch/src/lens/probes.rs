@@ -168,11 +168,25 @@ where
         })
     }
 
-    fn runs(&self, probe: &Probe<'_>, trees: &mut Trees<'_>) -> Result<Runs, String> {
+    /// Build the candidate tree once and remove it, so a base the
+    /// repository lacks or a diff that does not apply is known before the
+    /// hunt spends a call (D99). `Err` names what failed.
+    pub fn check(&self) -> Result<(), String> {
+        let mut trees = Trees::new(self.repo, self.dirs.probes.join("check"))?;
+        self.candidate_tree(&mut trees).map(|_| ())
+    }
+
+    /// The candidate's tree: base with each diff applied in order.
+    fn candidate_tree(&self, trees: &mut Trees<'_>) -> Result<Tree, String> {
         let cand = trees.add("candidate", &self.candidate.base)?;
         for (i, diff) in self.candidate.diffs.iter().enumerate() {
             apply(self.repo, &cand.src, diff).map_err(|e| format!("diff {}: {e}", i + 1))?;
         }
+        Ok(cand)
+    }
+
+    fn runs(&self, probe: &Probe<'_>, trees: &mut Trees<'_>) -> Result<Runs, String> {
+        let cand = self.candidate_tree(trees)?;
         let Some(pkg) = place(&cand.src, probe)? else {
             return Ok(Runs {
                 candidate: Run::BuildError,
@@ -1304,6 +1318,37 @@ mod tests {
         assert!(got.is_ok(), "{got:?}");
         assert!(dirs.target.is_dir(), "and it is made again for this hunt");
         assert!(!dirs.target.join("debug/marker").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_preflight_check_builds_the_candidate_and_leaves_nothing() {
+        let (root, repo) = repo("check");
+        let exec = Fake::new(ok);
+        let tc = toolchain(&root);
+        let dirs = Dirs {
+            probes: root.join("p"),
+            target: root.join("target/7"),
+        };
+        let checked = |base: String, diff: &str| {
+            let candidate = Candidate {
+                base,
+                diffs: vec![diff.to_owned()],
+            };
+            SandboxProbes::new(&exec, &repo, &tc, candidate, dirs.clone())
+                .expect("new")
+                .check()
+        };
+        assert_eq!(checked(base(&repo), DIFF), Ok(()));
+        let bad = DIFF.replace("-    1", "-    9");
+        let e = checked(base(&repo), &bad).expect_err("does not apply");
+        assert!(e.contains("diff 1"), "{e}");
+        assert!(
+            checked("0".repeat(40), DIFF).is_err(),
+            "base not in the repository"
+        );
+        assert!(exec.calls.borrow().is_empty(), "nothing runs");
+        assert!(!dirs.probes.join("check").exists(), "the tree is removed");
         let _ = std::fs::remove_dir_all(&root);
     }
 
