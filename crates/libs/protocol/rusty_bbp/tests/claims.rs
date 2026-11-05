@@ -4444,28 +4444,66 @@ mod takeover {
         assert!(card_of(&cx, c).human_touched);
     }
 
+    fn ui_dep(cx: &mut Cx, tag: &str, dep: MsgId) -> MsgId {
+        cx.claim(
+            tag,
+            ClaimBody {
+                domains: vec!["ui".into()],
+                ..dep_on(tag, vec![dep])
+            },
+        )
+    }
+
+    fn touched(cx: &mut Cx, c: MsgId) -> bool {
+        let k = cx.candidate("a", c);
+        cx.st.claims.human_touched.contains(&k)
+    }
+
+    /// An intent revision reopens `direct` (domain http) and, through the
+    /// dependency cascade, `cascaded`; `other` (domain ui, no deps) is not
+    /// affected. Live takeovers keep steering across the boundary; an ended
+    /// one stays in its own epoch.
     #[test]
     fn a_takeover_not_yet_ended_carries_into_an_intent_reopened_epoch() {
         let mut cx = Cx::new();
-        let live = cx.low();
+        let direct = cx.low();
+        let cascaded = ui_dep(&mut cx, "b", direct);
+        let other = cx.claim(
+            "c",
+            ClaimBody {
+                domains: vec!["ui".into()],
+                ..body("other")
+            },
+        );
         let released = cx.low();
-        let id = started(&mut cx, live, "s1");
-        let gone = started(&mut cx, released, "s2");
+        let on_direct = started(&mut cx, direct, "s1");
+        let on_cascaded = started(&mut cx, cascaded, "s2");
+        let on_other = started(&mut cx, other, "s3");
+        let gone = started(&mut cx, released, "s4");
         ok(cx.human(HumanAction::TakeoverRelease { takeover: gone }));
         ok(cx.host(end(gone, TakeoverEnd::Released)));
-        accept(&mut cx, live);
-        accept(&mut cx, released);
-        ok(super::revise(&mut cx, "brief v2", Affects::All));
-        assert_eq!(cx.rec(live).epoch, 2);
-        assert!(cx.st.claims.takeovers[&id].live());
-        let after = cx.candidate("a", live);
+        for c in [direct, cascaded, other, released] {
+            accept(&mut cx, c);
+        }
+        ok(super::revise(&mut cx, "brief v2", some(vec![], &["http"])));
+        assert!(cx.log.iter().any(|e| matches!(
+            e,
+            Event::ClaimReopened { claim, by: ReopenCause::Dep(d), .. }
+                if *claim == cascaded && *d == direct
+        )));
+        assert_eq!(cx.rec(direct).epoch, 2);
+        assert_eq!(cx.rec(cascaded).epoch, 2);
+        assert_eq!(cx.rec(other).epoch, 1, "unaffected");
+        assert_eq!(cx.status(other), ClaimStatus::Accepted);
+        // Input after the boundary is still accepted on every live takeover.
+        for id in [on_direct, on_cascaded, on_other] {
+            ok(input(&mut cx, id, 1, "y\r", None));
+        }
+        assert!(touched(&mut cx, direct), "a directly reopened claim");
+        assert!(touched(&mut cx, cascaded), "a cascade-reopened claim");
+        assert!(touched(&mut cx, other), "an unaffected claim");
         assert!(
-            cx.st.claims.human_touched.contains(&after),
-            "the live takeover still steers the new epoch"
-        );
-        let fresh = cx.candidate("a", released);
-        assert!(
-            !cx.st.claims.human_touched.contains(&fresh),
+            !touched(&mut cx, released),
             "an ended takeover stays in its own epoch"
         );
     }
