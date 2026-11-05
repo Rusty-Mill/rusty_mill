@@ -883,6 +883,32 @@ mod lens_records {
         assert_eq!(s.lens_reviews("b1").expect("load"), [want]);
     }
 
+    /// The read-only reader makes nothing: it refuses a directory with no
+    /// store or no lens record table, and reads one that has them.
+    #[test]
+    fn lens_reviews_are_read_without_making_a_store() {
+        let d = dir("lens_records_read_only");
+        let missing = |file: &str| format!("{} does not exist", d.join(file).display());
+        let err = Store::read_lens_reviews(&d, "b1").expect_err("no store");
+        assert_eq!(err.to_string(), missing("lock"));
+        assert_eq!(
+            std::fs::read_dir(&d).expect("ls").count(),
+            0,
+            "nothing made"
+        );
+        Store::open(&d)
+            .and_then(|mut s| s.save_lens_review("b1", &review("sec", 7, false, &[11])))
+            .expect("saved");
+        assert_eq!(
+            Store::read_lens_reviews(&d, "b1").expect("read"),
+            [review("sec", 7, false, &[11])]
+        );
+        std::fs::remove_file(d.join("lens-records.mmap")).expect("rm");
+        let err = Store::read_lens_reviews(&d, "b1").expect_err("no table");
+        assert_eq!(err.to_string(), missing("lens-records.mmap"));
+        assert!(!d.join("lens-records.mmap").exists());
+    }
+
     /// D92 write-ahead: the save after the posts clears `pending` and keeps
     /// the items; a second write-ahead over a row still pending follows an
     /// attempt that may have posted, so the job turns unsure for good.

@@ -67,16 +67,10 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
 /// Read the task's saved blind reviews and their claims' histories, then
 /// [`render`] each lens's tally.
 pub fn run(o: &Options) -> Result<String, String> {
-    // Opening a missing store would make one: a report never does.
-    if !o.state.is_dir() {
-        return Err(format!("no orch state at {}", o.state.display()));
-    }
     let board = super::run::board(&o.dir, &o.task)?;
-    // The store is closed before `bbp why` runs, so its lock is held only
-    // for the read and no child inherits it.
-    let rows = Store::open(&o.state)
-        .and_then(|store| store.lens_reviews(&board))
-        .map_err(|e| e.to_string())?;
+    // Read without making anything, and closed before `bbp why` runs, so
+    // the lock is held only for the read and no child inherits it.
+    let rows = Store::read_lens_reviews(&o.state, &board).map_err(|e| e.to_string())?;
     render(&read(&o.bbp, &o.dir, &o.task, &rows)?)
 }
 
@@ -368,12 +362,17 @@ mod tests {
             unsure: false,
             pending: false,
         };
-        assert_eq!(
-            run(&o),
-            Err(format!("no orch state at {}", state.display())),
-            "a missing store is not made"
-        );
+        // A missing or empty state directory is refused and left as it was.
+        let missing = Err(format!("{} does not exist", state.join("lock").display()));
+        assert_eq!(run(&o), missing, "a missing store is not made");
         assert!(!state.exists());
+        std::fs::create_dir_all(&state).expect("state");
+        assert_eq!(run(&o), missing);
+        assert_eq!(
+            std::fs::read_dir(&state).expect("ls").count(),
+            0,
+            "nothing made"
+        );
         retry_locked(|| {
             Store::open(&state)
                 .and_then(|mut s| s.save_lens_review(&board, &review))
