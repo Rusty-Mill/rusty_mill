@@ -157,6 +157,12 @@ pub struct Escalation {
     /// unless that ceiling was raised.
     #[serde(default)]
     pub pause: Option<Pause>,
+    /// The erosion gate's detail on an escalated claim (#704, D91): the bin's
+    /// line from the report that failed it, or else from the latest erosion
+    /// run, so `unmeasured` code shows. Display only and passed through as
+    /// the host wrote it, so a change to its shape can't break the inbox read.
+    #[serde(default)]
+    pub erosion: Option<Value>,
 }
 
 /// Why the host paused a task (#598).
@@ -568,6 +574,24 @@ mod tests {
         let c = e.claim.unwrap();
         assert_eq!((c.id, c.confidence, c.spent, c.budget), (1, 96, 2, 16));
         assert_eq!(e.evidence.len(), 1);
+        assert_eq!(
+            e.erosion, None,
+            "a host older than #1519 has no erosion detail"
+        );
+    }
+
+    #[test]
+    fn the_erosion_detail_passes_through_as_the_host_wrote_it() {
+        let detail = r#"{"report":9,"failing":true,"error":null,"line":{"unmeasured":["tool.py"],"future":1}}"#;
+        let json = SAMPLE.replacen(
+            r#""totals":[]"#,
+            &format!(r#""totals":[],"erosion":{detail}"#),
+            1,
+        );
+        let rows: Vec<Escalation> = serde_json::from_str(&json).unwrap();
+        let want: Value = serde_json::from_str(detail).unwrap();
+        assert_eq!(rows[0].erosion.as_ref(), Some(&want));
+        assert_eq!(serde_json::to_value(&rows[0]).unwrap()["erosion"], want);
     }
 
     #[test]

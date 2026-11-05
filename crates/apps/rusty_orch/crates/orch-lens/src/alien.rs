@@ -22,6 +22,9 @@ pub const TOP_K: usize = 3;
 pub const MAX_FIELD: usize = 300;
 /// Longest reproducer test, in bytes.
 pub const MAX_PROBE: usize = 16 * 1024;
+/// Longest candidate diff text a hunt is run on, in bytes (about 32k
+/// tokens). A longer one is skipped, never truncated (D98).
+pub const MAX_DIFF: usize = 128 * 1024;
 
 /// One defect mechanism a suspect can name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +169,137 @@ fn residue(task: &str, claim: MsgId, n: u64) -> u64 {
         .iter()
         .fold(0u128, |r, &b| (r * 256 + u128::from(b)) % n);
     u64::try_from(r).unwrap_or(u64::MAX) // r < n <= u64::MAX
+}
+
+/// Does this diff text touch a `.rs` file? Any `--- a/`, `+++ b/`,
+/// `rename from`, `rename to` or `diff --git` path ending in `.rs` counts,
+/// including Git's C-quoted paths (spaces, quotes, non-ASCII); `/dev/null`
+/// does not (D98). Header-shaped content lines may also count, which can
+/// only make a claim eligible, never hide a Rust change.
+pub fn touches_rs(diff: &str) -> bool {
+    diff.lines()
+        .flat_map(header_paths)
+        .any(|p| p.ends_with(".rs"))
+}
+
+/// The paths one diff header line names, decoded and without their `a/`
+/// or `b/` prefix; none for any other line, or for `/dev/null`.
+fn header_paths(line: &str) -> Vec<String> {
+    let line = line.trim_end_matches('\r');
+    if let Some(rest) = line.strip_prefix("--- ").or(line.strip_prefix("+++ ")) {
+        return side_path(rest).and_then(unprefixed).into_iter().collect();
+    }
+    if let Some(rest) = line
+        .strip_prefix("rename from ")
+        .or(line.strip_prefix("rename to "))
+    {
+        return path_token(rest).map(|(p, _)| p).into_iter().collect();
+    }
+    let Some(rest) = line.strip_prefix("diff --git ") else {
+        return Vec::new();
+    };
+    git_pair(rest).into_iter().filter_map(unprefixed).collect()
+}
+
+/// A `---`/`+++` path: quoted, or raw up to the tab Git adds after a
+/// path with spaces.
+fn side_path(rest: &str) -> Option<String> {
+    if rest.starts_with('"') {
+        return unquote(rest).map(|(p, _)| p);
+    }
+    Some(
+        rest.split('\t')
+            .next()
+            .unwrap_or(rest)
+            .trim_end()
+            .to_owned(),
+    )
+}
+
+/// A whole-line path, quoted or raw, and what follows it.
+fn path_token(rest: &str) -> Option<(String, &str)> {
+    if rest.starts_with('"') {
+        return unquote(rest);
+    }
+    Some((rest.trim_end().to_owned(), ""))
+}
+
+/// The two paths of `diff --git <a> <b>`. Either may be quoted. Raw
+/// paths may hold spaces, so a raw pair splits at the last ` b/`.
+fn git_pair(rest: &str) -> Vec<String> {
+    if rest.starts_with('"') {
+        let Some((a, tail)) = unquote(rest) else {
+            return Vec::new();
+        };
+        let b = path_token(tail.trim_start()).map(|(b, _)| b);
+        return std::iter::once(a).chain(b).collect();
+    }
+    if let Some(i) = rest.find(" \"") {
+        let b = unquote(&rest[i + 1..]).map(|(b, _)| b);
+        return std::iter::once(rest[..i].to_owned()).chain(b).collect();
+    }
+    match rest.rfind(" b/") {
+        Some(i) => vec![rest[..i].to_owned(), rest[i + 1..].trim_end().to_owned()],
+        None => vec![rest.trim_end().to_owned()],
+    }
+}
+
+/// `path` without Git's `a/` or `b/` prefix; `None` for `/dev/null` or a
+/// path with neither.
+fn unprefixed(path: String) -> Option<String> {
+    path.strip_prefix("a/")
+        .or(path.strip_prefix("b/"))
+        .map(str::to_owned)
+}
+
+/// Git's C-quoted path: `"..."` with `\\`, `\"`, `\a\b\t\n\v\f\r` and
+/// three-digit octal byte escapes. The decoded path and the text after the
+/// closing quote; `None` if it is malformed or unterminated.
+fn unquote(s: &str) -> Option<(String, &str)> {
+    let body = s.strip_prefix('"')?;
+    let mut out = Vec::new();
+    let mut bytes = body.bytes().enumerate();
+    while let Some((i, b)) = bytes.next() {
+        match b {
+            b'"' => {
+                let path = String::from_utf8_lossy(&out).into_owned();
+                return Some((path, &body[i + 1..]));
+            }
+            b'\\' => {
+                let (_, e) = bytes.next()?;
+                out.push(match e {
+                    b'a' => 7,
+                    b'b' => 8,
+                    b't' => b'\t',
+                    b'n' => b'\n',
+                    b'v' => 11,
+                    b'f' => 12,
+                    b'r' => b'\r',
+                    b'\\' | b'"' => e,
+                    b'0'..=b'7' => {
+                        let (_, d2) = bytes.next()?;
+                        let (_, d3) = bytes.next()?;
+                        octal([e, d2, d3])?
+                    }
+                    _ => return None,
+                });
+            }
+            _ => out.push(b),
+        }
+    }
+    None
+}
+
+/// Three octal digits as one byte; `None` if they aren't, or exceed 255.
+fn octal(digits: [u8; 3]) -> Option<u8> {
+    let mut v: u16 = 0;
+    for d in digits {
+        if !(b'0'..=b'7').contains(&d) {
+            return None;
+        }
+        v = v * 8 + u16::from(d - b'0');
+    }
+    u8::try_from(v).ok()
 }
 
 /// One suspect from an enumerate reply.
@@ -563,6 +697,78 @@ fn field(o: &Map, key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diff_touches_rs_by_its_header_paths_only() {
+        let cases = [
+            ("--- a/src/x.rs\n+++ b/src/x.rs\n", true),
+            ("--- /dev/null\n+++ b/new.rs\n", true),
+            ("--- a/gone.rs\n+++ /dev/null\n", true),
+            (
+                "diff --git a/old.rs b/new.rs\nrename from old.rs\nrename to new.rs\n",
+                true,
+            ),
+            ("rename from a.txt\nrename to b.rs\n", true),
+            ("--- a/README.md\n+++ b/README.md\n+see src/x.rs\n", false),
+            ("--- a/x.rsx\n+++ b/x.rsx\n", false),
+            ("--- /dev/null\n+++ /dev/null\n", false),
+            ("", false),
+        ];
+        for (diff, want) in cases {
+            assert_eq!(touches_rs(diff), want, "{diff:?}");
+        }
+    }
+
+    #[test]
+    fn quoted_and_spaced_git_paths_are_decoded() {
+        let cases = [
+            // Modified, quoted with a space (Git itself leaves spaces raw).
+            (
+                "diff --git \"a/src/a b.rs\" \"b/src/a b.rs\"\n--- \"a/src/a b.rs\"\n+++ \"b/src/a b.rs\"\n",
+                true,
+            ),
+            // Non-ASCII under core.quotePath: octal UTF-8 bytes.
+            ("--- \"a/src/caf\\303\\251.rs\"\n+++ \"b/src/caf\\303\\251.rs\"\n", true),
+            // Added and deleted.
+            ("--- /dev/null\n+++ \"b/src/caf\\303\\251.rs\"\n", true),
+            ("--- \"a/x\\ty.rs\"\n+++ /dev/null\n", true),
+            // Renamed, from a non-Rust name with an escaped quote.
+            (
+                "diff --git \"a/q\\\"x.txt\" \"b/q\\\"x.rs\"\nrename from \"q\\\"x.txt\"\nrename to \"q\\\"x.rs\"\n",
+                true,
+            ),
+            // Only the git line, one side quoted.
+            ("diff --git a/plain.md \"b/caf\\303\\251.rs\"\n", true),
+            // Raw paths with spaces: the tab Git adds, and a raw git pair.
+            ("--- a/a b.rs\t\n+++ b/a b.rs\t\n", true),
+            ("diff --git a/x y.rs b/x y.rs\n", true),
+            // Quoted non-Rust paths, one with `.rs` inside the name.
+            ("--- \"a/a b.md\"\n+++ \"b/a b.md\"\n", false),
+            ("diff --git \"a/x.rs y.md\" \"b/x.rs y.md\"\n", false),
+            // A malformed quote names nothing.
+            ("--- \"a/x.rs\n", false),
+        ];
+        for (diff, want) in cases {
+            assert_eq!(touches_rs(diff), want, "{diff:?}");
+        }
+    }
+
+    #[test]
+    fn unquote_decodes_git_escapes_and_refuses_bad_ones() {
+        assert_eq!(
+            unquote("\"a\\tb\\\\c\\\"d\\303\\251\" rest"),
+            Some(("a\tb\\c\"d\u{e9}".to_owned(), " rest"))
+        );
+        for bad in [
+            "\"open",
+            "\"bad\\q\"",
+            "\"oct\\39\"",
+            "\"big\\777\"",
+            "plain",
+        ] {
+            assert_eq!(unquote(bad), None, "{bad:?}");
+        }
+    }
 
     fn claim() -> Claim<'static> {
         Claim {
