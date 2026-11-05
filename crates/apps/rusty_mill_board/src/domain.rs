@@ -523,6 +523,15 @@ pub enum BoardError {
     NotClaimant,
     /// Another writer changed the card first; reload and retry.
     Conflict,
+    /// A change stored in two steps kept only its first: the task's fields (title, body,
+    /// tags, priority) are saved at revision `rev`, the card's prompt and links are not.
+    /// Read the card and apply the rest on `rev`.
+    PartlySaved {
+        /// The card's revision after the step that was saved.
+        rev: u64,
+        /// Why the second step failed.
+        why: String,
+    },
     /// Input rejected at the boundary.
     Invalid(&'static str),
     /// The card belongs to a project this actor may not work in.
@@ -544,6 +553,11 @@ impl fmt::Display for BoardError {
             Self::Claimed(by) => write!(f, "claimed by {by}"),
             Self::NotClaimant => write!(f, "only the claim holder may move this card"),
             Self::Conflict => write!(f, "card changed concurrently; retry"),
+            Self::PartlySaved { rev, why } => write!(
+                f,
+                "only part of this change was saved: title, body, tags and priority are at rev \
+                 {rev}, but the prompt and links are not ({why}); read the card and save again"
+            ),
             Self::Invalid(why) => write!(f, "invalid input: {why}"),
             Self::OutOfScope(p) => write!(f, "project {p:?} is outside your scope"),
             Self::Refused(why) => f.write_str(why),

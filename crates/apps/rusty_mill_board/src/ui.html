@@ -426,16 +426,16 @@ async function api(op,args={}){
     if(sent===tok)await signIn(tok?"That token was refused. Enter a current one.":"This board needs a token.");
   }
   const j=await r.json().catch(()=>({error:r.statusText}));
-  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
+  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;e.savedRev=j.saved_rev;throw e}
   return j;
 }
 /* A per-model token fixes who you are: send nothing, so a role renamed under you never disagrees. */
 const who=()=>$("actor").disabled?{}:{actor:$("actor").value.trim(),role:$("role").value};
 function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
 // Run a write as the current actor, then re-read the board. Resolves to the reply, or null after showing the error.
-async function act(op,args){
-  try{const r=await api(op,{...who(),...args});await refresh();return r}
-  catch(e){toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
+async function act(op,args,failed,done){
+  try{const r=await api(op,{...who(),...args});done?.(r);await refresh();return r}
+  catch(e){failed?.(e);toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
 }
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
 // A card's heading: its board number in the corner, if it has one, then its title.
@@ -940,8 +940,11 @@ function show(id){
 }
 async function save(){
   const d=dlg,t=typed();
-  const r=await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,prompt:t.prompt,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
-  if(r&&dlg===d)d.base=snap(r.card);   // the dialog may have been closed or reopened on another card meanwhile
+  d.partial=d.note=false;
+  // Partly saved (the task's fields, not the prompt): the refresh below must not read that as someone else's edit.
+  await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,prompt:t.prompt,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)},
+    e=>{if(e.savedRev!=null)d.partial=true},
+    r=>{if(dlg===d)d.base=snap(r.card)});   // before the refresh, so our own save is not read as theirs; the dialog may have moved on meanwhile
 }
 function syncDialog(){
   if(!dlg||!$("dlg").open)return;
@@ -955,11 +958,21 @@ function syncDialog(){
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
-  if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
+  if(theirs.rev===dlg.base.rev){if(!dlg.note)f.banner.replaceChildren();return}
+  if(dlg.partial){partlySaved(theirs);return}
   const dirty=!sameText(typed(),dlg.base);
   if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
   else if(sameText(theirs,dlg.base)){dlg.base={...dlg.base,rev:theirs.rev};f.banner.replaceChildren()} // only a comment or claim moved: keep the draft
   else conflict(theirs);                                                       // the text changed under an unsaved edit
+}
+// Our own save stored title, body and tags but not the prompt. If the board holds exactly what was typed
+// there, take it as the base and keep the unsaved prompt, saying so; anything else is a real conflict.
+function partlySaved(theirs){
+  const f=dlg.f,t=typed();
+  dlg.partial=false;
+  if(t.title!==theirs.title||t.body!==theirs.body||t.tags!==theirs.tags){conflict(theirs);return}
+  dlg.base=theirs;dlg.note=true;
+  f.banner.replaceChildren(el("div","Title, body and tags were saved, but the prompt was not. Save again to save it."));
 }
 function conflict(theirs){
   const f=dlg.f,b=el("button","Keep mine"),t=el("button","Take theirs");

@@ -521,12 +521,12 @@ fn a_plan_interrupted_between_its_two_writes_is_finished_by_planning_again() {
     let card = board.add(&human, "card", "", vec![]).expect("add");
     let cursor = board.cursor().expect("cursor");
     tick.fail_next("PUT", "/docs/board/");
-    assert!(
-        board
-            .plan(card.id, &human, &plan(Some(5), Some(vec![dep.id])))
-            .is_err()
-    );
+    let failed = board.plan(card.id, &human, &plan(Some(5), Some(vec![dep.id])));
     let half = board.get(card.id).expect("get");
+    assert!(
+        matches!(failed, Err(BoardError::PartlySaved { rev, .. }) if rev == half.rev),
+        "reported as partly saved, with the revision the task write left: {failed:?}"
+    );
     assert_eq!((half.priority, half.deps.len()), (5, 0));
     let outside = board.events(cursor, 10).expect("events after failed write");
     assert_eq!(outside.len(), 1, "the partial task write is observed once");
@@ -802,6 +802,120 @@ fn moved_in_reads_rusty_tick_move_history_across_pages() {
     assert_eq!(
         boxed.moved_in(span(Some(0), Some(200))).expect("moved"),
         [early.id].into()
+    );
+}
+
+/// A title and prompt edit: two writes to rusty_tick, the task and then its board document.
+fn title_and_prompt<'a>(t: &'a str, p: &'a str) -> Edit<'a> {
+    Edit {
+        title: Some(t),
+        prompt: Some(p),
+        ..Edit::default()
+    }
+}
+
+#[test]
+fn links_that_take_a_document_near_the_limit_past_it_are_refused_before_any_write() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let a = board.add(&human, "a", "", vec![]).expect("add");
+    let b = board.add(&human, "b", "", vec![]).expect("add");
+    let card = board.add(&human, "card", "", vec![]).expect("add");
+    // 32,700 quotes store as 65,400 bytes: the document fits, with no room for two links.
+    let near = "\"".repeat(32_700);
+    let card = board
+        .edit_at(card.id, &human, None, &prompt(&near))
+        .expect("fits");
+    assert!(matches!(
+        board.plan(card.id, &human, &plan(Some(5), Some(vec![a.id, b.id]))),
+        Err(BoardError::Invalid(_))
+    ));
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.rev, read.priority, read.deps.len()),
+        (card.rev, card.priority, 0),
+        "neither the priority nor the links are written"
+    );
+    let doc = tick.doc("board", card.id).expect("doc");
+    assert_eq!(doc["prompt"].as_str().map(str::len), Some(near.len()));
+}
+
+#[test]
+fn a_prompt_edit_whose_document_write_fails_is_partly_saved_and_finished_on_the_new_revision() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    tick.fail_next("PUT", "/docs/board/");
+    let failed = board.edit_at(
+        card.id,
+        &human,
+        Some(card.rev),
+        &title_and_prompt("b", "do it"),
+    );
+    let half = board.get(card.id).expect("get");
+    assert!(
+        matches!(&failed, Err(BoardError::PartlySaved { rev, .. }) if *rev == half.rev),
+        "not reported as a refused edit: {failed:?}"
+    );
+    assert_eq!((half.title.as_str(), half.prompt.as_str()), ("b", ""));
+    assert_eq!(
+        board.edit_at(
+            card.id,
+            &human,
+            Some(card.rev),
+            &title_and_prompt("b", "do it")
+        ),
+        Err(BoardError::Conflict),
+        "the revision the editor started from is gone"
+    );
+    let done = board
+        .edit_at(
+            card.id,
+            &human,
+            Some(half.rev),
+            &title_and_prompt("b", "do it"),
+        )
+        .expect("the same edit on the saved revision");
+    assert_eq!((done.title.as_str(), done.prompt.as_str()), ("b", "do it"));
+}
+
+#[test]
+fn a_writer_between_the_task_and_document_writes_leaves_the_edit_partly_saved() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let raced = json!({ "v": 1, "deps": [], "prompt": "theirs" });
+    tick.race_after("PATCH", "/tasks/", 1, card.id, raced);
+    let failed = board.edit_at(
+        card.id,
+        &human,
+        Some(card.rev),
+        &title_and_prompt("b", "mine"),
+    );
+    let now = board.get(card.id).expect("get");
+    assert!(
+        matches!(&failed, Err(BoardError::PartlySaved { rev, .. }) if *rev + 1 == now.rev),
+        "the revision is the one the task write left, before the other writer: {failed:?}"
+    );
+    assert_eq!(
+        (now.title.as_str(), now.prompt.as_str()),
+        ("b", "theirs"),
+        "the other writer's document is not overwritten"
+    );
+}
+
+#[test]
+fn a_document_only_write_that_fails_is_an_ordinary_error() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    tick.fail_next("PUT", "/docs/board/");
+    let failed = board.edit_at(card.id, &human, Some(card.rev), &prompt("do it"));
+    assert!(matches!(failed, Err(BoardError::Storage(_))), "{failed:?}");
+    assert_eq!(
+        board.get(card.id).expect("get").rev,
+        card.rev,
+        "nothing was saved"
     );
 }
 

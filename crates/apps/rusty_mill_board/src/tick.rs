@@ -868,10 +868,19 @@ impl<T: TickApi> Store for TickStore<T> {
                 // Both change for `card_plan` with priority and links, and for an edit of the
                 // prompt with title, body or tags: two fenced requests. The document is checked
                 // above, so only a lost connection or a writer between them can split the
-                // write; that reports an error with the task fields applied, and the same edit
-                // against the new revision completes it.
+                // write. That is reported as `PartlySaved` with the revision the task write
+                // left, never as a refused change; the same change on that revision finishes it.
                 if let Some(doc) = doc {
-                    version = self.put_doc(card, doc, version)?;
+                    let task_written = version != read;
+                    version = self
+                        .put_doc(card, doc, version)
+                        .map_err(|e| match task_written {
+                            true => BoardError::PartlySaved {
+                                rev: version - 1,
+                                why: e.to_string(),
+                            },
+                            false => e,
+                        })?;
                 }
                 Ok(version)
             }

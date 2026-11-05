@@ -303,7 +303,14 @@ fn answer(result: Result<Value, CallError>) -> Response {
     match result {
         Ok(out) => reply(StatusCode::OK, out),
         Err(CallError::BadArgs(why)) => reply(StatusCode::BAD_REQUEST, json!({"error": why})),
-        Err(CallError::Board(e)) => reply(status_of(&e), json!({"error": e.to_string()})),
+        Err(CallError::Board(e)) => {
+            let mut body = json!({"error": e.to_string()});
+            // What a client needs to tell a partial save from a refused one.
+            if let BoardError::PartlySaved { rev, .. } = &e {
+                body["saved_rev"] = json!(rev);
+            }
+            reply(status_of(&e), body)
+        }
     }
 }
 
@@ -315,7 +322,9 @@ fn principal(identity: &Identity) -> Option<WireValue> {
 fn status_of(e: &BoardError) -> StatusCode {
     match e {
         BoardError::NotFound(_) => StatusCode::NOT_FOUND,
-        BoardError::Conflict | BoardError::Claimed(_) => StatusCode::CONFLICT,
+        BoardError::Conflict | BoardError::Claimed(_) | BoardError::PartlySaved { .. } => {
+            StatusCode::CONFLICT
+        }
         BoardError::Forbidden(_) | BoardError::NotClaimant | BoardError::OutOfScope(_) => {
             StatusCode::FORBIDDEN
         }

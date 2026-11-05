@@ -47,6 +47,40 @@ await dialog.getByRole("button", { name: "Save" }).click();
 await savedResponse;
 const saved = (await api("card_get", { id: card.id })).card;
 check(saved.prompt === "A new prompt." && saved.body === "the description", "Save stores the prompt apart from the body");
+await dialog.getByText(`rev ${saved.rev}`).waitFor();   // the dialog has taken the saved card as its base
+
+// A save that stores title, body and tags but not the prompt (rusty_tick lost the second write):
+// the route stores the request without its prompt and answers as the board does.
+await page.route("**/api/card_update", async (route) => {
+  const sent = JSON.parse(route.request().postData());
+  delete sent.prompt;
+  const fetched = await route.fetch({ postData: JSON.stringify(sent) });
+  const stored = await fetched.json();
+  if (!fetched.ok()) throw new Error(`card_update: ${stored.error}`);
+  await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "only part of this change was saved", saved_rev: stored.card.rev }) });
+});
+await dialog.locator("input").nth(0).fill("Prompt test, renamed");
+await prompt.fill("Partial prompt.");
+const partial = page.waitForResponse("**/api/card_update");
+await dialog.getByRole("button", { name: "Save" }).click();
+await partial;
+const banner = dialog.locator(".banner");
+await banner.filter({ hasText: "the prompt was not" }).waitFor({ timeout: 5000 }).catch(() => {});
+check((await banner.textContent()).includes("the prompt was not"), "a partial save says the prompt was not saved, not that someone else edited");
+check((await prompt.inputValue()) === "Partial prompt.", "the unsaved prompt stays in its box");
+const half = (await api("card_get", { id: card.id })).card;
+check(half.title === "Prompt test, renamed" && half.prompt === "A new prompt.", "only the title reached the board");
+await page.waitForTimeout(2500);   // a poll or two: the note stays until the next Save
+check((await banner.textContent()).includes("the prompt was not"), "the note outlives the next refresh");
+
+await page.unroute("**/api/card_update");
+const finished = page.waitForResponse("**/api/card_update");
+await dialog.getByRole("button", { name: "Save" }).click();
+check((await finished).ok(), "Save again is accepted on the saved revision");
+const whole = (await api("card_get", { id: card.id })).card;
+check(whole.prompt === "Partial prompt." && whole.title === "Prompt test, renamed", "and stores the prompt");
+await page.waitForFunction(() => document.querySelector("#dlg .banner").textContent === "");
+check(true, "the note clears once everything is saved");
 
 check(errors.length === 0, `no page errors (${errors.join("; ")})`);
 await browser.close();
