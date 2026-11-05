@@ -49,7 +49,8 @@ against, with every component owned in-repo.
   program output.
 - The chrome uses its own UI font at a fixed size times DPI; font size and zoom change only the
   terminal grid.
-- Performance is a product feature: throughput floors and IR ceilings gate CI.
+- Performance is a product feature. Instruction-count ceilings gate CI; the throughput floors
+  (`bench/floors.py`) are checked by hand on a fixed host, not in CI.
 - Owner gates: new crates, names or dependencies; lockfile and toolchain changes; public API
   changes; each roadmap item needs its own go.
 - Open: an explicit "create config template" action (handoff Q18).
