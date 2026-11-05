@@ -112,9 +112,10 @@ impl Chrome {
     }
 }
 
-/// Command gutter mark colours. The marks sit in the padding band on the
-/// theme's own background, not on a chrome surface, so they are resolved
-/// against `theme.bg` (pack D41).
+/// Command gutter mark colours. A mark sits on whatever backs the pane's left
+/// edge, not on a chrome surface: the theme background in the padding band,
+/// or the divider between split panes. So they are resolved against that
+/// backing (pack D41, D42).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Marks {
     pub success: u32,
@@ -123,25 +124,25 @@ pub(crate) struct Marks {
 }
 
 impl Marks {
-    /// Success and failure: whichever pack mode's token stands out more from
-    /// `theme.bg`. Running: the theme cursor when it is visible on `theme.bg`,
-    /// else the chrome accent. Any of them still under [`ACCENT_MIN`] (a
-    /// mid-grey background no pack token can clear) is nudged until it holds.
-    pub(crate) fn for_theme(theme: &Theme, chrome: &Chrome) -> Self {
-        let bg = theme.bg;
+    /// Marks on `backing`. Success and failure: whichever pack mode's token
+    /// stands out more from it. Running: the theme `cursor` when it is
+    /// visible on it, else the chrome accent. Any of them still under
+    /// [`ACCENT_MIN`] (a mid-grey backing no pack token can clear) is nudged
+    /// until it holds.
+    pub(crate) fn on(backing: u32, cursor: u32, chrome: &Chrome) -> Self {
         let best = |a: u32, b: u32| {
-            if contrast_ratio(a, bg) >= contrast_ratio(b, bg) {
+            if contrast_ratio(a, backing) >= contrast_ratio(b, backing) {
                 a
             } else {
                 b
             }
         };
-        let running = if contrast_ratio(theme.cursor, bg) >= ACCENT_MIN {
-            theme.cursor
+        let running = if contrast_ratio(cursor, backing) >= ACCENT_MIN {
+            cursor
         } else {
             chrome.accent
         };
-        let hold = |c: u32| ensure_contrast(c, bg, ACCENT_MIN);
+        let hold = |c: u32| ensure_contrast(c, backing, ACCENT_MIN);
         Self {
             success: hold(best(DARK.verdigris, LIGHT.verdigris)),
             failure: hold(best(DARK.oxide, LIGHT.oxide)),
@@ -242,10 +243,11 @@ mod tests {
         }
     }
 
-    /// Gutter marks hold 3:1 on the theme background itself, mid-grey
-    /// included, and stay pack tokens wherever a pack token can.
+    /// Gutter marks hold 3:1 on both backings they can sit on (the theme
+    /// background in the padding band, the divider between split panes),
+    /// mid-grey included, and stay pack tokens on the padding of every preset.
     #[test]
-    fn gutter_marks_are_visible_on_any_background() {
+    fn gutter_marks_are_visible_on_every_backing() {
         for step in 0..=32u32 {
             let v = (step * 255 / 32) & 0xFF;
             let bg = v << 16 | v << 8 | v;
@@ -255,20 +257,26 @@ mod tests {
                     cursor,
                     ..Theme::default()
                 };
-                let m = Marks::for_theme(&theme, &Chrome::from_theme(&theme));
-                for (label, c) in [
-                    ("success", m.success),
-                    ("failure", m.failure),
-                    ("running", m.running),
-                ] {
-                    let r = contrast_ratio(c, bg);
-                    assert!(r >= ACCENT_MIN, "{label} {c:06x} on {bg:06x} = {r:.2}");
+                let chrome = Chrome::from_theme(&theme);
+                for backing in [bg, chrome.line] {
+                    let m = Marks::on(backing, cursor, &chrome);
+                    for (label, c) in [
+                        ("success", m.success),
+                        ("failure", m.failure),
+                        ("running", m.running),
+                    ] {
+                        let r = contrast_ratio(c, backing);
+                        assert!(
+                            r >= ACCENT_MIN,
+                            "{label} {c:06x} on {backing:06x} (bg {bg:06x}) = {r:.2}"
+                        );
+                    }
                 }
             }
         }
         for name in crate::config::PRESETS {
             let theme = crate::config::preset(name).expect("a preset");
-            let m = Marks::for_theme(&theme, &Chrome::from_theme(&theme));
+            let m = Marks::on(theme.bg, theme.cursor, &Chrome::from_theme(&theme));
             let pack = [DARK.verdigris, LIGHT.verdigris, DARK.oxide, LIGHT.oxide];
             assert!(
                 pack.contains(&m.success) && pack.contains(&m.failure),
@@ -284,8 +292,23 @@ mod tests {
             cursor: 0xFFFFFF,
             ..Theme::default()
         };
-        let m = Marks::for_theme(&theme, &Chrome::from_theme(&theme));
+        let m = Marks::on(theme.bg, theme.cursor, &Chrome::from_theme(&theme));
         assert_eq!(m.running, 0xFFFFFF);
+    }
+
+    /// The review case: a black cursor clears 3:1 on a #747474 background but
+    /// not on the dark divider, so a split pane's running mark must differ.
+    #[test]
+    fn split_pane_marks_resolve_against_the_divider() {
+        let theme = Theme {
+            bg: 0x747474,
+            cursor: 0x000000,
+            ..Theme::default()
+        };
+        let chrome = Chrome::from_theme(&theme);
+        let split = Marks::on(chrome.line, theme.cursor, &chrome);
+        assert_ne!(split.running, 0x000000);
+        assert!(contrast_ratio(split.running, chrome.line) >= ACCENT_MIN);
     }
 
     #[test]

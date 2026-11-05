@@ -1507,15 +1507,19 @@ impl WindowState<'_> {
         } else {
             self.trail = None;
         }
-        // Command gutter marks (per pane): resolve each row's BlockMark to a
-        // pack color resolved against the theme background (D41).
+        // Command gutter marks (per pane): resolve each row's BlockMark against
+        // what backs the stripe (D41, D42): the padding band (theme bg) for a pane
+        // at the left edge, the divider for a pane right of a split.
         let marks_on = self.config.command_marks.unwrap_or(true);
-        // The marks sit on the theme background, so they resolve against it.
-        let marks = Marks::for_theme(&self.theme, &tokens);
-        let mark_color = |m: crate::core::BlockMark| match m {
-            crate::core::BlockMark::Success => marks.success,
-            crate::core::BlockMark::Error => marks.failure,
-            crate::core::BlockMark::Running => marks.running,
+        let edge_marks = Marks::on(self.theme.bg, self.theme.cursor, &tokens);
+        let split_marks = Marks::on(tokens.line, self.theme.cursor, &tokens);
+        let mark_color = |m: crate::core::BlockMark, col: usize| {
+            let marks = if col == 0 { &edge_marks } else { &split_marks };
+            match m {
+                crate::core::BlockMark::Success => marks.success,
+                crate::core::BlockMark::Error => marks.failure,
+                crate::core::BlockMark::Running => marks.running,
+            }
         };
         let search = SearchColors::from_theme(&self.theme);
         let mut frames: Vec<PaneFrame> = snaps
@@ -1536,7 +1540,7 @@ impl WindowState<'_> {
                     g.block_marks()
                         .iter()
                         .enumerate()
-                        .filter_map(|(row, m)| m.map(|m| (row, mark_color(m))))
+                        .filter_map(|(row, m)| m.map(|m| (row, mark_color(m, r.col))))
                         .collect()
                 } else {
                     Vec::new()

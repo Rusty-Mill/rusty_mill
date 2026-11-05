@@ -37,9 +37,10 @@ code (pack D34 to D39):
 - A surface and its text are always used as a pair, and chrome text keeps 4.5:1 against its
   surface. Failure text never sits on `raised` (D17).
 - Program output is not chrome: the grid and its padding keep the theme's colours.
-- Gutter command marks sit on the theme background, so `Marks::for_theme` resolves them against
-  it: the pack status token (either mode) that stands out more, the theme cursor for running
-  when it is visible, nudged to 3:1 only where no pack token can reach it (D41).
+- Gutter command marks sit on the theme background (a pane at the left edge) or on the divider
+  (a pane right of a split), so `Marks::on` resolves them against that backing: the pack status
+  token (either mode) that stands out more, the theme cursor for running when it is visible,
+  nudged to 3:1 only where no pack token can reach it (D41, D42).
 - A colour outside these tokens is allowed only with a stated reason and a test, as the search
   fallback and the native-red caption close hover have.
 
