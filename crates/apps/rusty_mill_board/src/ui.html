@@ -696,14 +696,24 @@ function editStone(m,project){
   const when=el("div",null,"plan");when.append(el("span","Target","meta"),d);
   f.append(head,t,when,row);$("dlg").replaceChildren(f);if(!$("dlg").open)$("dlg").showModal();t.focus();
 }
+/* Milestones change without card events (another session may add one), so while the roadmap is open
+   the poll re-reads them every ten seconds and redraws when they differ from what is shown. */
+const stoneArgs=focus=>focus?{project:focus}:sel.repo?{repo:sel.repo}:{};
+let stonesSeen="",stonesAt=0;
+async function stonesChanged(){
+  if(view!=="roadmap"||Date.now()-stonesAt<10000)return false;
+  stonesAt=Date.now();
+  return JSON.stringify((await api("board_milestones",stoneArgs(focusProject()))).milestones)!==stonesSeen;
+}
 async function renderRoadmap(){
   const focus=focusProject(),seq=++mapSeq,b=$("board");
   const stale=()=>seq!==mapSeq||view!=="roadmap";   // a newer render, or the board, won
   let map=null,stones=[];
   try{[map,stones]=await Promise.all([focus?api("board_roadmap",{project:focus}):null,
-    api("board_milestones",focus?{project:focus}:sel.repo?{repo:sel.repo}:{}).then(r=>r.milestones)])}
+    api("board_milestones",stoneArgs(focus)).then(r=>r.milestones)])}
   catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
+  stonesSeen=JSON.stringify(stones);stonesAt=Date.now();
   b.classList.remove("board","metrics","decisions","archive");b.classList.add("roadmap");
   const scoped=cards.filter(k=>shown(k)&&(!focus||k.project===focus));
   const w=windowOf(scoped,stones),top=el("div",null,"rm-top");top.append(insights(scoped,w.t0),activity(scoped));
@@ -1057,6 +1067,7 @@ async function pollColumns(){
 async function poll(){
   try{
     let redraw=await pollColumns();
+    redraw||=await stonesChanged();
     if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){

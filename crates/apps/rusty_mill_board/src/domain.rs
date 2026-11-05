@@ -823,7 +823,6 @@ impl Card {
         Ok(Self {
             archived_ms: Some(now_ms),
             restored_ms: None,
-            target_ms: None,
             ..self.next(now_ms)
         })
     }
