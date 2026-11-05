@@ -34,7 +34,8 @@
 //! bbp mod     --dir D --task T --repo-path PATH --work DIR --agents FILE [--confine sandbox|none] [--poll-ms N] [--max-wall-secs N] [--end-grace-secs N] [--deadline-unix SECS] [--max-usd C --criteria FILE] [--slots DIR --agent-slots N --validator-slots N [--claim FILE]]
 //! bbp slot-hold                           holds the slot lock on stdout until stdin closes and no other process is in the group it leads; started by bbp mod
 //! bbp slot-hold --cgroup PATH [--deadline-ms N]   D82: holds the slot lock on stdout until stdin closes and the cgroup is empty; at the deadline writes cgroup.kill
-//! bbp cgroup-open --dir D --task T --cgroup PATH   D82: records a mux-hosted session's cgroup for the task, then creates it (refused if it exists)
+//! bbp cgroup-scope --dir D                 D82: the cgroup name this control directory's sessions must sit below
+//! bbp cgroup-open --dir D --task T --cgroup PATH   D82: records a mux-hosted session's cgroup for the task, then creates it (refused if it exists or isn't below the scope)
 //! bbp __sandbox ...                         the sandbox helper rusty_sandbox re-invokes; not for hands
 //! ```
 
@@ -187,6 +188,9 @@ fn run() -> Result<String, String> {
         return broker::broker(&pipes, mcp::Binding::from_env()?, harness).map(|()| String::new());
     }
     let dir = PathBuf::from(a.flag_or_env("dir", "BBP_DIR")?);
+    if sub == "cgroup-scope" {
+        return rusty_bbp_host::cgroups::scope(&dir);
+    }
     // `bbp why TASK` names the task positionally too.
     let task = match (sub.as_str(), a.positional.first()) {
         ("why", Some(t)) => TaskId(t.clone()),

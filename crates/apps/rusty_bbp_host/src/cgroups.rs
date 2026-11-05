@@ -7,11 +7,13 @@
 //! `setsid` or `setpgid`. Three pieces replace the process-group ones:
 //!
 //! - [`open`] claims the path for one task (`mod/cgroup-owners/<key>`,
-//!   written whole and renamed in under one lock), records the intent as `mod/<task>.cgroups/<key>`,
-//!   creates the cgroup, also exclusively, and only then marks the record
-//!   `created`. No crash leaves a cgroup this session made without a record,
-//!   and no two sessions share a path. It runs under the task's cgroup lock
-//!   and refuses an ended task.
+//!   written whole and renamed in under one lock), records the intent as
+//!   `mod/<task>.cgroups/<key>`, creates the cgroup, also exclusively, and
+//!   only then marks the record `created` with the cgroup's inode. No crash
+//!   leaves a cgroup this session made without a record, and no two
+//!   sessions share a path: the path must sit below the control directory's
+//!   [`scope`], so two directories' sessions never nest either. It runs
+//!   under the task's cgroup lock and refuses an ended task.
 //! - [`hold`] is `bbp slot-hold --cgroup`: it keeps the slot until stdin is
 //!   closed and the cgroup is known to be empty, and from a deadline on
 //!   writes `cgroup.kill`. An error is reported and retried, never taken
@@ -19,11 +21,13 @@
 //! - [`settle`] is what `bbp quiesce` does with each record, under the same
 //!   lock: a populated cgroup is killed, an empty one removed with its claim
 //!   and record. Only a `created` record of the claim's own task touches the
-//!   cgroup. A bare intent, left by a crash before the mark, can't tell a
+//!   cgroup, and only while the cgroup at the path has the recorded inode.
+//!   A bare intent, left by a crash before the mark, can't tell a
 //!   cgroup this session made from one that was already there, so it is
 //!   dropped with its claim and the cgroup is left alone: fail closed.
 
 use std::fs::File;
+use std::os::fd::AsRawFd;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -33,6 +37,8 @@ use crate::moderator::task_dir;
 
 /// Every session cgroup lives below this.
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup/";
+/// What a control directory's scope name starts with; see [`scope`].
+const SCOPE_PREFIX: &str = "lel-store-";
 /// How often the holder looks at `cgroup.events`.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -99,6 +105,39 @@ pub fn checked(path: &Path) -> Result<PathBuf, String> {
     Ok(path.to_path_buf())
 }
 
+/// The cgroup name a control directory's sessions live below:
+/// `lel-store-` and the first 16 hex digits of the digest of its canonical
+/// path. Claims are kept per control directory but cgroups are global, so
+/// [`open`] takes a path only if exactly one of its names is a scope and
+/// that one is `dir`'s, with the session below it. A path of one directory
+/// then can't be in, around or equal to another's: an ancestor's names are
+/// all in the descendant, which would hold two scopes.
+///
+/// # Errors
+/// When `dir` can't be resolved.
+pub fn scope(dir: &Path) -> Result<String, String> {
+    let real = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let digest = Sha256::of(real.as_os_str().as_encoded_bytes()).hex();
+    Ok(format!("{SCOPE_PREFIX}{}", &digest[..16]))
+}
+
+/// Whether `cgroup` is in `dir`'s scope: see [`scope`].
+fn in_scope(dir: &Path, cgroup: &Path) -> Result<(), String> {
+    let ours = scope(dir)?;
+    let names: Vec<&str> = cgroup.iter().filter_map(|n| n.to_str()).collect();
+    let scopes: Vec<usize> = (0..names.len())
+        .filter(|&i| names[i].starts_with(SCOPE_PREFIX))
+        .collect();
+    let below_ours = matches!(scopes.as_slice(), [i] if names[*i] == ours && *i + 1 < names.len());
+    if below_ours {
+        return Ok(());
+    }
+    Err(format!(
+        "{} is not below this control directory's scope: a session cgroup needs exactly one `{SCOPE_PREFIX}` name, {ours}, with the session below it",
+        cgroup.display()
+    ))
+}
+
 /// The record's file name: a digest of the path, so any path maps to one
 /// file and two sessions never share one.
 fn key(cgroup: &Path) -> String {
@@ -126,6 +165,7 @@ pub fn open_with(
     after_record: impl FnOnce(),
 ) -> Result<PathBuf, String> {
     let cgroup = checked(cgroup)?;
+    in_scope(dir, &cgroup)?;
     let _lock = lock(dir, task)?;
     if crate::open_driver(dir, task)?.state.state.terminal() {
         return Err(format!("task {} has ended", task.0));
@@ -149,11 +189,12 @@ pub fn open_with(
         return Err(undo(e, None, &owner));
     }
     after_record();
-    if let Err(e) = create(&cgroup) {
-        return Err(undo(e, Some(&record), &owner));
-    }
-    // Only now is the cgroup known to be this session's own.
-    let text = format!("{}\n{CREATED}\n", cgroup.display());
+    let id = match create(&cgroup) {
+        Ok(id) => id,
+        Err(e) => return Err(undo(e, Some(&record), &owner)),
+    };
+    // Only now is the cgroup known to be this session's own, and which one.
+    let text = format!("{}\n{CREATED} {id}\n", cgroup.display());
     if let Err(e) = rusty_atomic_file::write(&record, text.as_bytes()) {
         // Ours and empty: nothing has been told its path yet.
         let e = format!("{}: {e}", record.display());
@@ -246,13 +287,17 @@ fn claims(owners: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     Ok(found)
 }
 
-/// Creates the cgroup itself exclusively: one that exists already, made
-/// outside this protocol, is refused rather than shared.
-fn create(cgroup: &Path) -> Result<(), String> {
+/// Creates the cgroup itself exclusively, and returns its inode: one that
+/// exists already, made outside this protocol, is refused rather than
+/// shared.
+fn create(cgroup: &Path) -> Result<u64, String> {
+    use std::os::unix::fs::MetadataExt;
     if let Some(parent) = cgroup.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     }
-    std::fs::create_dir(cgroup).map_err(|e| format!("{}: {e}", cgroup.display()))
+    let at = |e: std::io::Error| format!("{}: {e}", cgroup.display());
+    std::fs::create_dir(cgroup).map_err(at)?;
+    std::fs::metadata(cgroup).map(|m| m.ino()).map_err(at)
 }
 
 /// A failed open takes back its record, then its claim, and says so if it
@@ -283,8 +328,9 @@ pub struct Record {
     /// touch the cgroup.
     owner: PathBuf,
     task: String,
-    /// Whether [`open`] got as far as creating the cgroup itself.
-    created: bool,
+    /// The inode of the cgroup [`open`] created, once it got that far: a
+    /// cgroup at the path with another inode is not this session's.
+    created: Option<u64>,
 }
 
 impl Record {
@@ -316,9 +362,11 @@ pub fn records(dir: &Path, task: &TaskId) -> Result<Vec<Record>, String> {
             let mut lines = text.split_terminator('\n');
             let cgroup = checked(Path::new(lines.next().unwrap_or_default())).map_err(bad)?;
             let created = match (lines.next(), lines.next()) {
-                (None, None) => false,
-                (Some(CREATED), None) => true,
-                _ => return Err(bad("not a path and an optional `created`".into())),
+                (None, None) => None,
+                (Some(mark), None) => {
+                    Some(created_id(mark).ok_or_else(|| bad(format!("bad mark {mark:?}")))?)
+                }
+                _ => return Err(bad("not a path and an optional `created ID`".into())),
             };
             let owner = owners(dir).join(key(&cgroup));
             Ok(Record {
@@ -330,6 +378,11 @@ pub fn records(dir: &Path, task: &TaskId) -> Result<Vec<Record>, String> {
             })
         })
         .collect()
+}
+
+/// The inode in a `created ID` mark.
+fn created_id(mark: &str) -> Option<u64> {
+    mark.strip_prefix(CREATED)?.strip_prefix(' ')?.parse().ok()
 }
 
 /// Whether any process is in `cgroup` or below it. A cgroup that is gone is
@@ -378,23 +431,48 @@ pub fn kill(cgroup: &Path) -> Result<(), String> {
 /// before a crash is left behind). A record whose task doesn't hold the
 /// claim is only dropped.
 ///
+/// The cgroup is opened and its inode checked against the record before it
+/// is touched, and read, killed and emptied through that handle: one
+/// removed and made again at the path (after a crash between removing it
+/// and dropping its claim) is someone else's and is left alone.
+///
 /// # Errors
 /// When the claim or cgroup can't be read, killed or removed, or the record
 /// removed.
 pub fn settle(record: &Record) -> Result<bool, String> {
     let ours = owns(record)?;
-    if ours && record.created {
-        if populated(&record.cgroup)? {
-            kill(&record.cgroup)?;
+    let pinned = match (ours, record.created) {
+        (true, Some(id)) => pin(&record.cgroup, id)?,
+        _ => None,
+    };
+    if let Some(handle) = pinned {
+        let at = PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
+        if populated(&at)? {
+            kill(&at)?;
             return Ok(false);
         }
-        remove_tree(&record.cgroup)?;
+        remove_children(&at)?;
+        remove(&record.cgroup, |p| std::fs::remove_dir(p))?;
     }
     if ours {
         remove(&record.owner, |p| std::fs::remove_file(p))?;
     }
     remove(&record.path, |p| std::fs::remove_file(p))?;
     Ok(true)
+}
+
+/// The cgroup at `cgroup`, open, if it is still the one with inode `id`:
+/// `None` once it is gone or another has taken its path.
+fn pin(cgroup: &Path, id: u64) -> Result<Option<File>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let at = |e: std::io::Error| format!("{}: {e}", cgroup.display());
+    let handle = match File::open(cgroup) {
+        Ok(handle) => handle,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(at(e)),
+    };
+    let ino = handle.metadata().map_err(at)?.ino();
+    Ok((ino == id).then_some(handle))
 }
 
 /// Whether the record's task holds the claim on its cgroup.
@@ -410,10 +488,10 @@ fn owns(record: &Record) -> Result<bool, String> {
     }
 }
 
-/// Removes an empty cgroup and the empty cgroups below it, deepest first:
-/// a session may make its own children, which keep the root from going.
-/// Only for an owned session, which no other session nests in or under.
-fn remove_tree(cgroup: &Path) -> Result<(), String> {
+/// Removes the empty cgroups below `cgroup`, deepest first: a session may
+/// make its own children, which keep it from going. Only for an owned
+/// session, which no other session nests in or under.
+fn remove_children(cgroup: &Path) -> Result<(), String> {
     let entries = match std::fs::read_dir(cgroup) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -425,10 +503,11 @@ fn remove_tree(cgroup: &Path) -> Result<(), String> {
             .file_type()
             .map_err(|e| format!("{}: {e}", entry.path().display()))?;
         if kind.is_dir() {
-            remove_tree(&entry.path())?;
+            remove_children(&entry.path())?;
+            remove(&entry.path(), |p| std::fs::remove_dir(p))?;
         }
     }
-    remove(cgroup, |p| std::fs::remove_dir(p))
+    Ok(())
 }
 
 /// `how(path)`, where a path that is already gone is done.
@@ -702,7 +781,7 @@ mod tests {
             cgroup: cgroup.clone(),
             owner: owner.clone(),
             task: "B".into(),
-            created: true,
+            created: Some(ino(&cgroup)),
         };
         assert_eq!(settle(&record), Ok(true));
         assert!(!path.exists(), "the stray record is dropped");
@@ -732,7 +811,7 @@ mod tests {
             cgroup: cgroup.clone(),
             owner: owner.clone(),
             task: "A".into(),
-            created: false,
+            created: None,
         };
         assert_eq!(settle(&record), Ok(true));
         assert!(
@@ -754,8 +833,8 @@ mod tests {
         let records_dir = dir_of(&dir, &task);
         std::fs::create_dir_all(&records_dir).expect("records dir");
         std::fs::write(records_dir.join("a"), "/sys/fs/cgroup/lel/a\n").expect("a");
-        std::fs::write(records_dir.join("b"), "/sys/fs/cgroup/lel/b\ncreated\n").expect("b");
-        let mut got: Vec<(PathBuf, bool)> = records(&dir, &task)
+        std::fs::write(records_dir.join("b"), "/sys/fs/cgroup/lel/b\ncreated 42\n").expect("b");
+        let mut got: Vec<(PathBuf, Option<u64>)> = records(&dir, &task)
             .expect("records")
             .into_iter()
             .map(|r| (r.cgroup, r.created))
@@ -764,12 +843,15 @@ mod tests {
         assert_eq!(
             got,
             [
-                (PathBuf::from("/sys/fs/cgroup/lel/a"), false),
-                (PathBuf::from("/sys/fs/cgroup/lel/b"), true)
+                (PathBuf::from("/sys/fs/cgroup/lel/a"), None),
+                (PathBuf::from("/sys/fs/cgroup/lel/b"), Some(42))
             ]
         );
-        std::fs::write(records_dir.join("c"), "/sys/fs/cgroup/lel/c\nmaybe\n").expect("c");
-        assert!(records(&dir, &task).is_err());
+        for bad in ["maybe", "created", "created x", "created  42"] {
+            let text = format!("/sys/fs/cgroup/lel/c\n{bad}\n");
+            std::fs::write(records_dir.join("c"), text).expect("c");
+            assert!(records(&dir, &task).is_err(), "{bad:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -828,6 +910,68 @@ mod tests {
                 "A".to_owned()
             )])
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn ino(path: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).expect("stat").ino()
+    }
+
+    #[test]
+    fn a_cgroup_made_again_at_a_settled_path_is_left_alone() {
+        let base = std::env::temp_dir().join(format!("bbp-cg-again-{}", std::process::id()));
+        let cgroup = base.join("cg");
+        std::fs::create_dir_all(&cgroup).expect("cg");
+        // The record names the inode of a cgroup since removed; the one at
+        // the path now, with a member, was made again by someone else.
+        let id = ino(&cgroup) + 1;
+        std::fs::write(cgroup.join("cgroup.events"), "populated 1\n").expect("events");
+        let owner = base.join("owner");
+        std::fs::write(&owner, format!("{}\nA", cgroup.display())).expect("owner");
+        let path = base.join("record");
+        std::fs::write(&path, "x").expect("record");
+        let record = Record {
+            path: path.clone(),
+            cgroup: cgroup.clone(),
+            owner: owner.clone(),
+            task: "A".into(),
+            created: Some(id),
+        };
+        assert_eq!(settle(&record), Ok(true));
+        assert!(!cgroup.join("cgroup.kill").exists(), "not killed");
+        assert!(cgroup.is_dir(), "nor removed");
+        assert!(
+            !path.exists() && !owner.exists(),
+            "record and claim dropped"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_session_must_sit_below_exactly_its_own_scope() {
+        let dir = std::env::temp_dir().join(format!("bbp-cg-scope-{}", std::process::id()));
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).expect("dirs");
+        let (ours, theirs) = (scope(&dir).expect("scope"), scope(&other).expect("scope"));
+        assert!(ours.starts_with(SCOPE_PREFIX) && ours.len() == SCOPE_PREFIX.len() + 16);
+        assert_ne!(ours, theirs);
+        let root = Path::new("/sys/fs/cgroup/lel");
+        assert!(in_scope(&dir, &root.join(&ours).join("s")).is_ok());
+        assert!(in_scope(&dir, &root.join(&ours).join("s/child")).is_ok());
+        for refused in [
+            root.join("s"),
+            root.join(&ours),
+            root.join(&theirs).join("s"),
+            root.join(&theirs).join(&ours).join("s"),
+            root.join(&ours).join("s").join(&theirs).join("t"),
+            root.join(&ours)
+                .join("s")
+                .join(format!("{SCOPE_PREFIX}x"))
+                .join("t"),
+        ] {
+            assert!(in_scope(&dir, &refused).is_err(), "{}", refused.display());
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
