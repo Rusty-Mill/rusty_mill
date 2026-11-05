@@ -47,11 +47,12 @@ pub struct ErosionLine {
     pub parse_errors: Vec<String>,
 }
 
-/// `"report-only"`, or the enforced limits.
+/// A named mode (`"report-only"`, or `"cleanup"` for D44's predicate, D113),
+/// or the enforced limits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[rusty_serde(untagged)]
 pub enum ErosionMode {
-    ReportOnly(String),
+    Named(String),
     Limits {
         max_concentration_bp: i64,
         max_duplication_bp: i64,
@@ -208,7 +209,7 @@ mod tests {
             )
             .replace(r#""within_limits":false"#, r#""within_limits":null"#);
         let line = parse(&report_only).expect("parse").1.expect("line");
-        assert_eq!(line.mode, ErosionMode::ReportOnly("report-only".into()));
+        assert_eq!(line.mode, ErosionMode::Named("report-only".into()));
         assert_eq!(line.within_limits, None);
     }
 

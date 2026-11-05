@@ -120,6 +120,7 @@ Precise contracts used by this guide:
 | D110 | #704 slices 4–5: cleanup trigger and calibration build defaults | [default] 2026-11-05 (#704) |
 | D111 | #599 `rusty_orch lens record`: read-only calibration report command | [stated] 2026-11-05 (#599) |
 | D112 | #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance | [stated] 2026-11-05 (#599) |
+| D113 | #704 slice 4: cleanup mode, consolidate inputs, split | [default] 2026-11-05 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -1065,3 +1066,17 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_2bc7a496ac8c4d8aa821bfa826891f85
 **Key.** lel:599:history-track-record-fields
 **Source.** Nano tapped option A, "All three fields", on decision card cmsg_014AqbZs58L565hMV2pFkCX5SMdL73WvySEECojiZphZ7g (thread cmsg_014AqbZs58L565hMV2pFkCX5Fiyuxpido5spNwMT4HHhuz), 2026-11-05T21:15:10Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5HzE9svLMYjuftbZk7JHiYM). The card was posted 2026-11-05T18:20:06Z, before Q35's extension. The rest: Nano tapped option A, "Yes, same follow-up PR", on decision card cmsg_014AqbZs58L565hMV2pFkCX553uoAaCJ8FP2tp7oU1ibhQ ("Should the BBP history change also carry reopen wakes and candidate provenance?", same thread), 2026-11-05T21:35:55Z (tap message cmsg_014AqbZs58L565hMV2pFkCX5EJLCSPUm4HnqqKv3SmRqby). Closes OPEN_QUESTIONS Q35.
+
+## D113. #704 slice 4: cleanup mode, consolidate inputs, split
+
+**Decision.**
+- **Cleanup mode.** D44's cleanup predicate is enforced by a new mode of the erosion bin: `erosion check --base COMMIT --cleanup`. It prints the same JSON line with mode `"cleanup"`. It exits 0 when `delta_concentration <= 0` and `delta_duplication <= 0` with at least one strictly negative, 1 when that fails, and 2 on a measure error. The host's `check_erosion_base` accepts `--cleanup` as a third exclusive mode, which takes no limits. `erosion_report_only` stays false for it, so the D88 ledger neither counts nor pauses it.
+- **Consolidate inputs.** The consolidate open takes explicit files, as `bbp open` does: `--profiles`, `--roster`, `--claims` and `--holdout-profiles`/`--holdout-root`, plus `--repo`, `--repo-path` and `--work`. orch sets only the erosion profile's `--base`, and the pinned baseline through `bbp open --base`, to the head it measured. It refuses a profile set whose erosion profile is not in `--cleanup` mode. The brief is a fixed consolidate text. orch copies no other task's frozen set or holdout. Which holdouts a cleanup must keep green is Q37.
+- **Split.** Slice 4a is the bin's `--cleanup` mode and host acceptance, with tests. Slice 4b is orch `consolidate`: the count leg and the zero-floor skip, a plan by default, and `--execute` opening through `bbp open --mode claims`.
+- **Current levels.** For the zero-floor skip, orch runs `erosion check --base HEAD --report-only` in a clean checkout of HEAD and reads `concentration_bp.base` and `duplication_bp.base`. The bin gets no `levels` subcommand.
+- **Repo identity.** A task's repo is `TaskOpened.repo`, the opaque string given to `bbp open --repo`. orch matches it exactly against its own `--repo` value, never against `--repo-path`.
+**Why.** An extra mode in an in-repo bin adds to its argv without changing the BBP schema or any existing profile digest. It mirrors the existing modes and exit codes and keeps D82's exact-argv check. Explicit files match `bbp open` and avoid reusing a holdout written for another task's intent. Splitting the slice keeps each PR reviewable. The bin's base measurement already gives current levels.
+**Rejected.** Copying the newest claims task's frozen set, holdout and roster. Enforcing cleanup through ordinary limits of 0 and 0, which would pass an unchanged candidate. A separate `levels` subcommand. Matching repos by path.
+**Tag.** [default] · remind-me: mem_be0176f1b8094208ace97f73cbe425f0
+**Key.** lel:704:cleanup-slice4-build-defaults
+**Source.** Follow-up questions A–E from the #704 slice 4 build thread, 2026-11-05; D37, D44, D55, D82, D88, D110; `rusty_bbp_host` `src/profiles.rs` `check_erosion_base`, `src/bin/bbp.rs` `open`, `src/admin.rs` `open_claims_task`; `rusty_bbp` `src/event.rs` `TaskOpened`; `rusty_erosion` `src/main.rs`. Numbered D113 because main holds D110–D112. Its open question is Q37 because #1530 holds Q36.
