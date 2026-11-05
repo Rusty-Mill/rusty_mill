@@ -7,7 +7,7 @@
 //! `setsid` or `setpgid`. Three pieces replace the process-group ones:
 //!
 //! - [`open`] claims the path for one task (`mod/cgroup-owners/<key>`,
-//!   created exclusively), records the intent as `mod/<task>.cgroups/<key>`,
+//!   written whole and renamed in under one lock), records the intent as `mod/<task>.cgroups/<key>`,
 //!   creates the cgroup, also exclusively, and only then marks the record
 //!   `created`. No crash leaves a cgroup this session made without a record,
 //!   and no two sessions share a path. It runs under the task's cgroup lock
@@ -193,36 +193,57 @@ fn claim(dir: &Path, task: &TaskId, cgroup: &Path, key: &str) -> Result<PathBuf,
             ));
         }
     }
-    let owner = owners.join(key);
-    let mut file = File::options()
-        .write(true)
-        .create_new(true)
-        .open(&owner)
-        .map_err(|e| format!("{}: {e}", owner.display()))?;
+    let draft = drafts(dir).join(key);
     let text = format!("{}\n{}", cgroup.display(), task.0);
-    let wrote =
-        std::io::Write::write_all(&mut file, text.as_bytes()).and_then(|()| file.sync_all());
-    if let Err(e) = wrote {
-        return Err(undo(format!("{}: {e}", owner.display()), None, &owner));
-    }
+    write_synced(&draft, &text).map_err(|e| undo(e, None, &draft))?;
+    // The scan found no claim on this path, and claims are only made under
+    // this lock, so nothing can be at `owner`: the rename publishes a
+    // whole claim or none.
+    let owner = owners.join(key);
+    std::fs::rename(&draft, &owner)
+        .map_err(|e| undo(format!("{}: {e}", owner.display()), None, &draft))?;
     Ok(owner)
 }
 
+/// Where a claim is written before it is published: outside the scanned
+/// directory, so a crash mid-write leaves nothing a scan reads. A draft is
+/// only touched under the owners lock, so one left behind is stale.
+fn drafts(dir: &Path) -> PathBuf {
+    dir.join("mod").join("cgroup-owners.drafts")
+}
+
+/// Writes `text` to `path`, replacing a stale file, and syncs it.
+fn write_synced(path: &Path, text: &str) -> Result<(), String> {
+    let at = |e: std::io::Error| format!("{}: {e}", path.display());
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let mut file = File::create(path).map_err(at)?;
+    std::io::Write::write_all(&mut file, text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(at)
+}
+
 /// Every claim: its path and the task that holds it. A claim file is the
-/// path, a newline, then the task.
+/// path, a newline, then the task. Claims are dropped without the owners
+/// lock (by `settle` and a failed open), so one that goes during the scan
+/// is skipped: it no longer owns anything.
 fn claims(owners: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     let entries = std::fs::read_dir(owners).map_err(|e| format!("{}: {e}", owners.display()))?;
-    entries
-        .map(|entry| {
-            let path = entry.map_err(|e| e.to_string())?.path();
-            let text =
-                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let (cgroup, by) = text
-                .split_once('\n')
-                .ok_or_else(|| format!("cgroup claim {}: no task", path.display()))?;
-            Ok((PathBuf::from(cgroup), by.to_owned()))
-        })
-        .collect()
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let (cgroup, by) = text
+            .split_once('\n')
+            .ok_or_else(|| format!("cgroup claim {}: no task", path.display()))?;
+        found.push((PathBuf::from(cgroup), by.to_owned()));
+    }
+    Ok(found)
 }
 
 /// Creates the cgroup itself exclusively: one that exists already, made
@@ -766,6 +787,46 @@ mod tests {
         assert_ne!(
             key(Path::new("/sys/fs/cgroup/lel/a/1")),
             key(Path::new("/sys/fs/cgroup/lel/b/1"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_claim_is_published_whole_and_a_stale_draft_blocks_nothing() {
+        let dir = std::env::temp_dir().join(format!("bbp-cg-draft-{}", std::process::id()));
+        let cgroup = Path::new("/sys/fs/cgroup/lel/draft/1");
+        let key = key(cgroup);
+        // A crash mid-claim leaves a partial draft, never a partial claim.
+        std::fs::create_dir_all(drafts(&dir)).expect("drafts");
+        std::fs::write(drafts(&dir).join(&key), "/sys/fs/cgroup/lel/dr").expect("draft");
+        std::fs::write(drafts(&dir).join("other"), "").expect("draft");
+        let other = Path::new("/sys/fs/cgroup/lel/draft/2");
+        claim(&dir, &TaskId::from("a"), other, &super::key(other)).expect("unrelated claim");
+        let owner = claim(&dir, &TaskId::from("b"), cgroup, &key).expect("claim over a draft");
+        assert_eq!(
+            std::fs::read_to_string(&owner).expect("claim"),
+            format!("{}\nb", cgroup.display())
+        );
+        assert!(!drafts(&dir).join(&key).exists(), "the draft was renamed");
+        assert_eq!(claims(&owners(&dir)).expect("claims").len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_claim_dropped_during_a_scan_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("bbp-cg-gone-{}", std::process::id()));
+        let owners = owners(&dir);
+        std::fs::create_dir_all(&owners).expect("owners");
+        std::fs::write(owners.join("kept"), "/sys/fs/cgroup/lel/k\nA").expect("kept");
+        // Listed but unreadable as NotFound: what a claim removed by
+        // another task's settle looks like between read_dir and the read.
+        std::os::unix::fs::symlink(owners.join("absent"), owners.join("gone")).expect("link");
+        assert_eq!(
+            claims(&owners),
+            Ok(vec![(
+                PathBuf::from("/sys/fs/cgroup/lel/k"),
+                "A".to_owned()
+            )])
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
