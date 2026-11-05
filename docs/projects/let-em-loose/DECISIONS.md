@@ -77,13 +77,17 @@ Precise contracts used by this guide:
 | D58 | #599 §6 schema and API changes approved | [stated] 2026-11-04 (#599) |
 | D59 | #598 §6: task_paused, intent_revised and data classes approved | [stated] 2026-11-04 (#598) |
 | D60 | Tool-using agents join over MCP after v0 ships | [stated] 2026-11-04 (general) |
-| D61 | #708 alien review lens parked until v0 runs | [stated] 2026-11-04 (#708) |
+| D61 | #708 alien review lens parked until v0 runs (superseded by D74) | [stated] 2026-11-04 (#708) |
 | D62 | The rest of #598 §6 approved | [stated] 2026-11-04 (#598) |
 | D63 | #600's Windows GUI is judged only on Windows | [stated] 2026-11-04 (#600) |
 | D64 | #600 builders are Claude CLI only in v0 | [stated] 2026-11-04 (#600) |
 | D65 | A Windows result that contradicts a Linux pass reaches the claim by Nano's reopen | [stated] 2026-11-04 (#600) |
 | D66 | The #600 builder-session design is approved | [stated] 2026-11-04 (#600) |
+| D74 | #708 alien review lens unparked (supersedes D61) | [stated] 2026-11-04 (#708) |
+| D75 | #708 alien review lens design v1 approved (shadow-only) | [stated] 2026-11-04 (#708) |
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
+| D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
+| D82 | #704 slice 2: erosion profile recognition, invocation, opt-out, base, measured set and modes | [default] 2026-11-04 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -536,6 +540,7 @@ Worked examples (concentration, duplication, in basis points):
 **Rejected.** Designing #708 now.
 **Tag.** [stated] · remind-me: mem_44c8bf81957240d8a0773acb5dc63f7f
 **Key.** lel:708:alien-lens-parked
+**Superseded.** By D74 (2026-11-04T20:16Z): Nano unparked #708.
 **Source.** Nano, thread message cmsg_01WgyiM31RsSnZTgNuPX2VE4UtGWmEuydpHpmL6uyyvn7t (2026-11-04T11:58:44Z), answering the numbered list in cmsg_01WgyiM31RsSnZTgNuPX2VE48CSJZ2CFK5Xom7dXjiyN1X, item 7 "Park it until v0 runs". OPEN_QUESTIONS Q8.
 
 ## D62. The rest of #598 §6 approved
@@ -583,6 +588,30 @@ Worked examples (concentration, duplication, in basis points):
 **Key.** lel:600:builder-session-design-approved
 **Source.** Nano tapped option A "Approve the design" on decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4UkTT9YFWDhx1CsEYPh6YFg ("Approve the #600 builder-session design as a whole, with your three answers?"), 2026-11-04T18:08:52Z.
 
+## D74. #708 alien review lens unparked (supersedes D61)
+
+**Decision.** #708 is unparked, replacing D61. Next: finish the design (the value threshold on #596's score, per-language defect lists, scoring, and how reproduced findings enter BBP), run the egm Goldfish review, and bring the design to Nano for approval. Build and open a PR for dottiusmaximus only after he approves it. The design is not approved yet (D25).
+**Why.** Nano chose this when asked whether his 20:11Z message "Spin off threads for each one with a design or partial design" (cmsg_014AqbZs58L565hMV2pFkCX59ZUnUW7emMuJZYMRh7Zqw9) covered #708.
+**Rejected.** Keeping it parked until v0 runs (D61), and designing and reviewing it without building until v0 runs.
+**Tag.** [stated] · remind-me: mem_80f2a194cf714d4586d27184e3522cc9 (supersedes mem_44c8bf81957240d8a0773acb5dc63f7f)
+**Key.** lel:708:alien-lens-unparked
+**Source.** Nano tapped option B "Unpark: design, review, then build" on decision card cmsg_014AqbZs58L565hMV2pFkCX59b5EzthujQuUWFyYCJrHdB ("Unpark the alien review lens (#708), which you parked this morning?"), 2026-11-04T20:16:21Z, thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Reopens OPEN_QUESTIONS Q8.
+
+## D75. #708 alien review lens design v1 approved (shadow-only)
+
+**Decision.** Nano approved the six points in §10 of `/mnt/project-files/let-em-loose-708/708-alien-lens-design.md`:
+1. v1 is shadow-only and changes nothing in BBP. Posting findings to BBP is a separate v2 design that comes back to Nano, since it is a BBP schema change.
+2. Q1: `min_value` is the Phase A 80th percentile of #596's value score. Until that exists, the lens runs on irreversible claims only; after that, a 1-in-10 random control sample is added.
+3. Q2: the Rust defect-mechanism list in §4.
+4. Q3: the ranking sort in §5.
+5. Q4 (v1): findings stay in orch-store. The v2 BBP route returns as its own design.
+6. The orch-lens port change `Question.shape: Shape { Posts(Allowed), Raw }` (§9.1), a public API change inside orch.
+The build is the four PRs in §9, with `--alien` off by default. v2 gets designed only if §8's bar is met: at least 1 new regression per 20 hunts, at under 15% of the lens's spend on those claims.
+**Why.** The Goldfish review of v0 (`708-goldfish-review.md`) found 3 blockers. Making v1 shadow-only removes them and leaves BBP unchanged until the lens shows its worth.
+**Rejected.** v0's shape, where reproduced findings block claims through BBP right away.
+**Tag.** [stated] · remind-me: mem_8088651b940e45a6a0c7bb6807c1d237
+**Key.** lel:708:design-v1-approved
+**Source.** Nano, "approved", thread message cmsg_014AqbZs58L565hMV2pFkCX5NbYhrp6skRZoUmd7dbZWP2 (2026-11-04T20:27:23Z), replying to cmsg_014AqbZs58L565hMV2pFkCX56Y25HTNtmVLdhS1nDojGpK, which asked him to approve §10. Thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Closes OPEN_QUESTIONS Q8.
 ## D76. `lens run` merges as a disabled slice until the accept-line source lands
 
 **Decision.** PR #1467 (`rusty_orch lens run`) may merge with `lens run` refusing every invocation (`UNKNOWN_CLAIMS`) until BBP exposes the task's frozen accept line. The runner never assumes `ClaimsConfig::default()`. The accept-line source lands as its own small PR stacked on #1467. How BBP exposes it (`accept_at` on `ClaimView`, the whole `ClaimsConfig`, or an operator `--claims` file, bundled with Q12) is not settled here; it is open as Q14.
@@ -591,3 +620,27 @@ Worked examples (concentration, duplication, in basis points):
 **Tag.** [stated] · remind-me: mem_120c56253ad241ce954eb5602baabf53
 **Key.** lel:594:lens-run-disabled-slice
 **Source.** Nano's tap on hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE485HdWybMYAyN7zK64ZJGmR (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:46:52Z, option "Merge as disabled slice". Review and merge gates still apply.
+
+## D77. `claim_card` carries each claim's accept line and each evidence item's note and strength
+
+**Decision.** Nano chose a small additive `rusty_bbp` change: `accept_at` on each claim view and `note` and `strength` on each evidence item, so the #594 runner reads the task's frozen accept lines instead of assuming defaults (closes Q12 and Q14). Build detail, `[default]`: `ClaimView.accept_at: i64` is the claim's effective line, `ClaimRecord::accept_at(&book.config)` with strict already applied (one field, not both lines; the runner needs only the claim's own line, and the tier rule uses `accept_at / 2` of it). `EvidenceView` gains `strength: u8` and `note: String`; the existing `Sight` filter already omits unreadable evidence, so no new visibility rule. No log schema or `PROTOCOL_VERSION` bump: views are derived by the fold, not logged. The addendum's `claim_card` bullet (§ Reads, delta and subscriptions) and its Schema and API changes list gain the fields, citing this approval. With it, D54's `read(after)` note fill and D76's `UNKNOWN_CLAIMS` refusal are retired.
+**Why.** The #1467 reviewer refused `ClaimsConfig::default()` for tasks opened with custom `--claims`, and no host interface exposed the frozen config. A per-claim line is the smallest change and is computed by the host, so the runner can't misapply the strict rule. The addendum card already lists strength, so that part closes a gap with the merged contract.
+**Rejected.** The whole `ClaimsConfig` on the card (option b). An operator `--claims` file the runner can't check (option c). Both lines on every claim (redundant).
+**Tag.** [stated] · remind-me: mem_506f809db3894df0b29d8992879f373c
+**Key.** lel:594:claim-card-accept-line
+**Source.** Nano's tap on "a) Add accept line to claim view", hearthbot decision card cmsg_01WgyiM31RsSnZTgNuPX2VE4Pksa1peJwFSFnWsRe6jtve (thread cmsg_01WgyiM31RsSnZTgNuPX2VE44fHuHfPowdWG17Xr6c2MBA), 2026-11-04T19:55:49Z; dottiusmaximus on #1467; `rusty_bbp/src/claims.rs` `ClaimView`, `EvidenceView`, `ClaimRecord::accept_at`; bbp-claims-addendum.md line on `claim_card`.
+
+## D82. #704 slice 2: erosion profile recognition, invocation, opt-out, base, measured set and modes
+
+**Decision.** Build detail for the `erosion` bin and host profile (card #704 Build 2), inside D41 and D42:
+- `open_claims_task` recognises an erosion profile by its profile name, `erosion`. The recorded opt-out is an optional `ProfileSet` field `erosion` that accepts only `"off"`. It defaults when absent and isn't written then, so existing profile digests don't change, and it is covered by the digest when present. The open refuses with `bad_claims_config(erosion)` when a claims set has neither the profile nor the opt-out, has both, or has another value. The refusal applies from this slice; callers and tests add the profile or the opt-out in the same PR.
+- The compare base is an explicit `--base <full commit id>` in the frozen args. The open checks that it is a full commit id and, when `ProfileSet.baseline` is set, that the two are equal.
+- Invocation contract (amended after review on PR #1494): the `erosion` profile runs the bin directly. `program`'s basename is `erosion` (any path), `args[0]` is `check`, and the remaining args parse exactly as the bin's own parser does: `--base <commit>` once, plus either `--report-only` or both `--max-concentration-bp N` and `--max-duplication-bp N`, each flag at most once, with no positionals and no unknown flags. No wrappers in this slice: a shell (`sh -c`), `env` or `cargo run` form is refused with `bad_claims_config(erosion)` and a message naming the direct form. Recognition stays by profile name, so a profile named `erosion` with any other program is refused, not skipped. A wrapper can be added later with its own parser if a real caller needs one.
+- The measured set is the whole tree at both commits, with exact `Ratio` deltas and the bp value beside them.
+- Modes are frozen args: `--report-only` (always exits 0), or enforcing with both `--max-concentration-bp N` and `--max-duplication-bp N`. The two are mutually exclusive. Changing the mode changes the digest, so it only affects newly opened tasks (D42). The bin always prints one JSON line to stdout (the run log) with the per-metric deltas, the three worst-affected functions and the `unmeasured` list, for the inbox (Build 3, D43) to parse.
+- D42's pause-at-expiry is not in slice 2. It is its own later slice and must merge before the profile goes live, because the time box starts at go-live.
+**Why.** These are the most reversible choices that fit the approved design. Profiles are already identified by name in the run log and the fail-block; recognising by name and then refusing any program but the bin means a misconfigured profile is refused rather than silently skipped. The host can only vouch for `--base` and the mode if it parses the exact argv the bin will run: a reviewer showed that `/bin/sh -c "erosion check --base B …" --base A` passed a standalone-pair scan while sh ran against B. Allowing no wrappers is the narrowest contract and is relaxed later without changing any digest. The opt-out sitting under the digest is part of D41, so it isn't a BBP schema change. Duplication against untouched code needs the whole tree, and calibration (Q9) uses the same measure, so the limits absorb the scale. QA.md § Erosion gate puts the thresholds in profile args. `ProfileSet.baseline` is the pinned base (#597 G2, and the base that #598's `bbp open --base` stores; D62).
+**Rejected.** Recognising the profile by the program's basename alone (a misnamed or wrapped profile would be silently skipped). Accepting wrappers such as `sh -c`, `env` or `cargo run` in this slice (the host would have to parse shell source or the wrapper's argv to trust `--base`; superseded the first version of this entry, which said wrappers still count). Measuring only the files the diff touches (it misses duplicates of untouched code). An unchecked free `--base` arg. Building the expiry pause into slice 2.
+**Tag.** [default] · remind-me: mem_cc7bf0c6331140d8816112c351b44ed6
+**Key.** lel:704:erosion-profile-build-defaults
+**Source.** Questions Q1–Q6 from the #704 slice 2 build thread, 2026-11-04; D41, D42, D43, D62; QA.md § Erosion gate; card #704 Build 2 and Time box; `rusty_bbp_host` `src/profiles.rs` `ProfileSet`, `src/admin.rs` `open_claims_task`. Numbered D82 because open PR branches already use D78–D81. Invocation contract amended 2026-11-04 from the #704 slice 2 build thread, answering dottiusmaximus's review of PR #1494; `rusty_bbp_host` `src/profiles.rs` `check_erosion_base`.

@@ -1,0 +1,19 @@
+[package]
+name = "rusty_erosion"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+description = "Code erosion metric: CC concentration and normalized duplication, in basis points"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "tools"
+
+[dependencies]
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }
+
+[[bin]]
+name = "erosion"
+path = "src/main.rs"

@@ -8,12 +8,16 @@
 //! that keeps failing transiently would otherwise be retried forever).
 //!
 //! The meter is restored from, and saved to, the orch state directory
-//! before every call. The scheduler's memory lives only as long as the
-//! process: a second run asks blind passes again.
+//! before every call. The scheduler's memory is restored at start and
+//! saved after every lens's round, under the board's identity: the
+//! canonical BBP store directory and the task id ([`board`]), so a task of
+//! the same name in another BBP directory starts with nothing remembered.
+//! A crash mid-round asks that round's jobs again.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use orch_core::AgentId;
 use orch_lens::call::{Ctx, Models};
@@ -25,7 +29,6 @@ use orch_lens::round::{round, Board, Halt, View};
 use orch_lens::schedule::State;
 use orch_lens::{LensConfig, Model};
 use orch_store::Store;
-use rusty_bbp::ClaimsConfig;
 
 use super::assertions::{self, Grants};
 use super::bbp::{run_id, Child, Rpc, Session};
@@ -121,7 +124,7 @@ pub fn options(argv: impl IntoIterator<Item = String>, cwd: PathBuf) -> Result<O
 /// One lens's way onto the board.
 pub trait Seat {
     fn refresh(&mut self, config: &LensConfig) -> Result<(), String>;
-    fn cards(&self, config: &LensConfig, claims: &ClaimsConfig) -> Vec<Card>;
+    fn cards(&self, config: &LensConfig) -> Vec<Card>;
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String>;
     fn board(&mut self) -> &mut dyn Board;
 }
@@ -130,8 +133,8 @@ impl<R: Rpc> Seat for Session<R> {
     fn refresh(&mut self, config: &LensConfig) -> Result<(), String> {
         Session::refresh(self, config)
     }
-    fn cards(&self, config: &LensConfig, claims: &ClaimsConfig) -> Vec<Card> {
-        Session::cards(self, config, claims)
+    fn cards(&self, config: &LensConfig) -> Vec<Card> {
+        Session::cards(self, config)
     }
     fn lines(&mut self, config: &LensConfig) -> Result<Vec<Line>, String> {
         Session::lines(self, config)
@@ -165,20 +168,21 @@ pub enum Ended {
     Halted(Halt),
 }
 
-/// The lenses to run: the config, the task's frozen claims settings, and
-/// each lens's seat and prefix by id.
+/// The lenses to run: the config, and each lens's seat and prefix by id.
 pub struct Lenses<'a> {
     pub config: &'a LensConfig,
-    pub claims: &'a ClaimsConfig,
     pub seats: &'a mut BTreeMap<String, Box<dyn Seat>>,
     pub prefixes: &'a BTreeMap<String, String>,
 }
 
 /// Run up to `max` passes over every lens until one starts no job. A lens
 /// without a seat is an error. Each job's outcome is written to `log`.
+/// `state` goes to `keep` after every lens's round, so a restart resumes
+/// from it; a failed keep is an error.
 pub fn passes(
     lenses: Lenses<'_>,
     state: &mut State,
+    keep: &mut dyn FnMut(&State) -> Result<(), String>,
     metering: Metering<'_>,
     models: &mut dyn Models,
     max: u32,
@@ -186,7 +190,6 @@ pub fn passes(
 ) -> Result<Ended, String> {
     let Lenses {
         config,
-        claims,
         seats,
         prefixes,
     } = lenses;
@@ -199,7 +202,7 @@ pub fn passes(
                 .ok_or_else(|| format!("no BBP session for lens {}", lens.id))?;
             seat.refresh(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
-            let cards = seat.cards(config, claims);
+            let cards = seat.cards(config);
             let lines = seat
                 .lines(config)
                 .map_err(|e| format!("{}: {e}", lens.id))?;
@@ -220,6 +223,7 @@ pub fn passes(
                 save: &mut *metering.save,
             };
             let report = round(&one, &view, state, ctx, models, seat.board());
+            keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
             started += report.ran.len();
             for (key, end) in &report.ran {
                 let _ = writeln!(
@@ -246,17 +250,6 @@ pub fn passes(
     Ok(Ended::MaxPasses)
 }
 
-/// Why `lens run` refuses to start for now. Each claim's accept line comes
-/// from the claims settings frozen when its task opened, and no BBP
-/// interface shows them to a lens or to the host. Assuming the defaults
-/// would show models a false accept line and pick the wrong tier.
-pub const UNKNOWN_CLAIMS: &str = "lens run needs the task's frozen claims settings (its accept lines), and no BBP interface exposes them yet; refusing to assume the defaults";
-
-/// The claims settings task `o.task` was opened with: see [`UNKNOWN_CLAIMS`].
-fn task_claims(_: &Options) -> Result<ClaimsConfig, String> {
-    Err(UNKNOWN_CLAIMS.to_owned())
-}
-
 /// The command's result: the log on a clean end (quiet, the pass cap, or a
 /// task ceiling, which pauses the task by design), an error carrying the
 /// log when the runner itself failed (an unsaved meter, a refused post, a
@@ -269,13 +262,39 @@ pub fn outcome(ended: &Ended, mut log: String) -> Result<String, String> {
     }
 }
 
+/// The identity the scheduler's memory is saved under: the canonical BBP
+/// store directory and the task id, NUL-separated (neither can hold one).
+/// BBP task ids are scoped to their directory, so the id alone is not.
+///
+/// # Errors
+///
+/// A message when `dir` cannot be resolved, or when its canonical path is
+/// not UTF-8: a lossy string could name two directories, so such a
+/// directory is refused before any state is read or any provider asked.
+pub fn board(dir: &Path, task: &str) -> Result<String, String> {
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve {}: {e}", dir.display()))?;
+    let text = canonical
+        .to_str()
+        .ok_or_else(|| format!("BBP directory {} is not UTF-8", canonical.display()))?;
+    Ok(format!("{text}\0{task}"))
+}
+
+/// The scheduler's memory saved for `board`, or a fresh one.
+fn load_state(store: &Store, board: &str) -> Result<State, String> {
+    match store.load_lens_state(board).map_err(|e| e.to_string())? {
+        Some(saved) => State::restore(&saved).map_err(|e| format!("lens state: {e}")),
+        None => Ok(State::default()),
+    }
+}
+
 /// Run `o`: open the store and the sessions, build the providers, read
 /// the prompts, then [`passes`]. Returns the log and how it ended.
 pub fn run(o: &Options) -> Result<String, String> {
     let text = std::fs::read_to_string(&o.config)
         .map_err(|e| format!("cannot read {}: {e}", o.config.display()))?;
     let config = LensConfig::parse(&text).map_err(|e| format!("{}: {e}", o.config.display()))?;
-    let claims = task_claims(o)?;
     let base = o.config.parent().map(PathBuf::from).unwrap_or_default();
     let rules = match &o.rules {
         Some(p) => {
@@ -292,8 +311,14 @@ pub fn run(o: &Options) -> Result<String, String> {
         }
     };
     let mut registry = Registry::build(&config, &o.repo, &grants)?;
-    let mut store = Store::open(&o.state).map_err(|e| e.to_string())?;
-    let mut meter = match store.load_meter(&o.experiment).map_err(|e| e.to_string())? {
+    let store = RefCell::new(Store::open(&o.state).map_err(|e| e.to_string())?);
+    let board = board(&o.dir, &o.task)?;
+    let mut state = load_state(&store.borrow(), &board)?;
+    let loaded = store
+        .borrow()
+        .load_meter(&o.experiment)
+        .map_err(|e| e.to_string())?;
+    let mut meter = match loaded {
         Some(snap) => Meter::restore(config.ceilings, &snap),
         None => Meter::new(config.ceilings, 0),
     };
@@ -314,7 +339,14 @@ pub fn run(o: &Options) -> Result<String, String> {
     let experiment = o.experiment.clone();
     let mut save = |m: &Meter| {
         store
+            .borrow_mut()
             .save_meter(&experiment, &m.snapshot())
+            .map_err(|e| e.to_string())
+    };
+    let mut keep = |s: &State| {
+        store
+            .borrow_mut()
+            .save_lens_state(&board, &s.saved())
             .map_err(|e| e.to_string())
     };
     let metering = Metering {
@@ -322,16 +354,15 @@ pub fn run(o: &Options) -> Result<String, String> {
         meter: &mut meter,
         save: &mut save,
     };
-    let mut state = State::default();
     let lenses = Lenses {
         config: &config,
-        claims: &claims,
         seats: &mut seats,
         prefixes: &prefixes,
     };
     let ended = passes(
         lenses,
         &mut state,
+        &mut keep,
         metering,
         &mut registry,
         o.max_passes,
@@ -360,10 +391,10 @@ mod tests {
       "lenses": [
         {"id": "adversary", "prompt": "p", "domains": ["*"],
          "may_post": {"evidence": ["counter"]},
-         "models": {"routine": ["codex"], "contested": ["claude"]}},
+         "models": {"routine": ["codex", "claude"], "contested": ["claude"]}},
         {"id": "operator", "prompt": "p", "domains": ["*"],
          "may_post": {"evidence": ["counter"]},
-         "models": {"routine": ["codex"], "contested": ["claude"]}}
+         "models": {"routine": ["codex", "claude"], "contested": ["claude"]}}
       ]
     }"#;
 
@@ -379,6 +410,7 @@ mod tests {
             status: ClaimStatus::Open,
             score: 0,
             accept_at: 8,
+            epoch: 0,
             stakes: Stakes::Medium,
             reversible: true,
             answers: None,
@@ -425,12 +457,11 @@ mod tests {
             self.refreshes += 1;
             self.refresh_error.clone().map_or(Ok(()), Err)
         }
-        fn cards(&self, config: &LensConfig, claims: &ClaimsConfig) -> Vec<Card> {
-            let none = |_: MsgId| String::new();
+        fn cards(&self, config: &LensConfig) -> Vec<Card> {
             let built = self
                 .views
                 .iter()
-                .map(|(v, b)| Card::from_view(v, b, &none, config, claims));
+                .map(|(v, b)| Card::from_view(v, b, config));
             self.cards.iter().cloned().chain(built).collect()
         }
         fn lines(&mut self, _: &LensConfig) -> Result<Vec<Line>, String> {
@@ -456,7 +487,7 @@ mod tests {
                 self.2.push((id, q.body.clone()));
             }
             self.0.clone().map(|posts| Answer {
-                posts,
+                reply: orch_lens::Reply::Posts(posts),
                 usage: Usage::default(),
             })
         }
@@ -492,15 +523,24 @@ mod tests {
         task_calls: u32,
         max: u32,
     ) -> (Result<Ended, String>, String) {
-        go_with(seats, echo, task_calls, max, &ClaimsConfig::default())
+        go_from(
+            &mut State::default(),
+            &mut |_| Ok(()),
+            seats,
+            echo,
+            task_calls,
+            max,
+        )
     }
 
-    fn go_with(
+    /// [`go`] from `state`, keeping it through `keep`.
+    fn go_from(
+        state: &mut State,
+        keep: &mut dyn FnMut(&State) -> Result<(), String>,
         seats: Vec<(&str, FakeSeat)>,
         echo: &mut Echo,
         task_calls: u32,
         max: u32,
-        claims: &ClaimsConfig,
     ) -> (Result<Ended, String>, String) {
         let cfg = config();
         let mut boxed: BTreeMap<String, Box<dyn Seat>> = seats
@@ -523,13 +563,309 @@ mod tests {
         };
         let lenses = Lenses {
             config: &cfg,
-            claims,
             seats: &mut boxed,
             prefixes: &prefixes,
         };
         let mut log = String::new();
-        let ended = passes(lenses, &mut State::default(), metering, echo, max, &mut log);
+        let ended = passes(lenses, state, keep, metering, echo, max, &mut log);
         (ended, log)
+    }
+
+    fn two_seats() -> Vec<(&'static str, FakeSeat)> {
+        vec![
+            ("adversary", FakeSeat::new(vec![card(7)])),
+            ("operator", FakeSeat::new(vec![card(7)])),
+        ]
+    }
+
+    #[test]
+    fn a_restart_from_the_kept_memory_does_not_ask_again() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut kept = Vec::new();
+        let mut keep = |s: &State| {
+            kept.push(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+        assert_eq!(kept.len(), 4, "kept after every lens's round, two passes");
+        let last = kept.last().expect("kept");
+        assert_eq!(last.progress.len(), 2, "both blind passes remembered");
+        let mut restored = State::restore(last).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2, "no lens asked again: {log}");
+    }
+
+    #[test]
+    fn a_same_named_task_in_another_bbp_directory_starts_fresh() {
+        let root = std::env::temp_dir().join(format!("orch-lens-board-{}", std::process::id()));
+        let (a, b, orch) = (root.join("a"), root.join("b"), root.join("orch"));
+        for d in [&a, &b] {
+            std::fs::create_dir_all(d).expect("dir");
+        }
+        let (board_a, board_b) = (
+            board(&a, "task-1").expect("a"),
+            board(&b, "task-1").expect("b"),
+        );
+        assert_ne!(board_a, board_b);
+        let relative = a.join("..").join("a");
+        assert_eq!(board(&relative, "task-1").expect("same dir"), board_a);
+        let store = RefCell::new(Store::open(&orch).expect("store"));
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut keep = |s: &State| {
+            store
+                .borrow_mut()
+                .save_lens_state(&board_a, &s.saved())
+                .map_err(|e| e.to_string())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+
+        // Board B, same task id and claim ids: nothing of A's carries over.
+        let mut fresh = load_state(&store.borrow(), &board_b).expect("load b");
+        assert_eq!(fresh, State::default());
+        let (_, _) = go_from(&mut fresh, &mut |_| Ok(()), two_seats(), &mut echo, 10, 20);
+        assert_eq!(echo.1, 4, "B makes its own blind passes");
+
+        // Restarting A resumes where it stopped.
+        let mut resumed = load_state(&store.borrow(), &board_a).expect("load a");
+        assert_eq!(resumed.progress.len(), 2);
+        let (_, _) = go_from(
+            &mut resumed,
+            &mut |_| Ok(()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(echo.1, 4, "A asks nothing again");
+        drop(store);
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_whose_path_is_not_utf8_is_refused() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let root = std::env::temp_dir().join(format!("orch-lens-utf8-{}", std::process::id()));
+        let named =
+            |last: u8| root.join(OsString::from_vec(vec![b'b', b'o', b'a', b'r', b'd', last]));
+        let (x80, x81) = (named(0x80), named(0x81));
+        for d in [&x80, &x81] {
+            std::fs::create_dir_all(d).expect("dir");
+        }
+        assert_ne!(
+            x80.canonicalize().expect("x80"),
+            x81.canonicalize().expect("x81")
+        );
+        for d in [&x80, &x81] {
+            let e = board(d, "task-1").expect_err("lossy path refused");
+            assert!(e.contains("not UTF-8"), "{e}");
+        }
+        std::fs::remove_dir_all(&root).expect("clean up");
+    }
+
+    #[test]
+    fn a_claim_reopened_between_runs_is_reviewed_again() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 2);
+        let mut restored = State::restore(&kept.expect("kept")).expect("restore");
+        let mut reopened = card(7);
+        reopened.epoch = 1;
+        let seats = vec![
+            ("adversary", FakeSeat::new(vec![reopened.clone()])),
+            ("operator", FakeSeat::new(vec![reopened])),
+        ];
+        let (ended, log) = go_from(&mut restored, &mut |_| Ok(()), seats, &mut echo, 10, 20);
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 4, "each lens looks at the new epoch blind: {log}");
+    }
+
+    fn seats_with(cards: &[Card]) -> Vec<(&'static str, FakeSeat)> {
+        vec![
+            ("adversary", FakeSeat::new(cards.to_vec())),
+            ("operator", FakeSeat::new(cards.to_vec())),
+        ]
+    }
+
+    /// Both passes done on `before` (blind found nothing, the look-harder
+    /// re-ask found nothing) and kept; then a restart onto `after`. Gives
+    /// the asks before and after, and the restart's log.
+    fn restart_after_both_passes(before: &[Card], after: &[Card]) -> (u32, u32, String) {
+        let mut echo = echo(Ok(vec![]));
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut keep,
+            seats_with(before),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        let first = echo.1;
+        let saved = kept.expect("kept");
+        assert!(saved
+            .progress
+            .iter()
+            .all(|p| p.blind.is_some() && p.look_harder.is_some()));
+        let mut restored = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            seats_with(after),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        (first, echo.1 - first, log)
+    }
+
+    #[test]
+    fn a_reopen_after_both_passes_gets_both_passes_again_and_other_claims_keep_theirs() {
+        let both = [card(7), card(8)];
+        let (first, again, log) = restart_after_both_passes(&both, &both);
+        assert_eq!(first, 8, "blind and look-harder, two lenses, two claims");
+        assert_eq!(again, 0, "same epoch resumes with nothing to do: {log}");
+        let mut reopened = card(7);
+        reopened.epoch = 1;
+        let (_, again, log) = restart_after_both_passes(&both, &[reopened, card(8)]);
+        assert_eq!(again, 4, "claim 7's new epoch, both passes per lens: {log}");
+        assert_eq!(log.matches("msg:7").count(), 4, "{log}");
+        assert_eq!(
+            log.matches("msg:8").count(),
+            0,
+            "claim 8 keeps its work: {log}"
+        );
+    }
+
+    /// Question 3 with candidates 10 and 11, proposals settled.
+    fn question_board(epoch_10: u32) -> (Vec<Card>, State) {
+        let mut q = card(3);
+        q.domains = vec![orch_lens::schedule::QUESTION_DOMAIN.to_owned()];
+        q.candidates = vec![MsgId(10), MsgId(11)];
+        let candidate = |n: u64, epoch: u32| {
+            let mut c = card(n);
+            c.answers = Some(MsgId(3));
+            c.epoch = epoch;
+            c
+        };
+        let mut st = State::default();
+        let p = st.questions.entry(MsgId(3)).or_default();
+        p.settled = [0, 1].into();
+        p.rebel_landed = true;
+        (vec![q, candidate(10, epoch_10), candidate(11, 0)], st)
+    }
+
+    #[test]
+    fn a_reopened_candidate_is_not_held_back_by_its_old_attack_count() {
+        let mut echo = echo(Ok(vec![]));
+        let (cards, mut st) = question_board(0);
+        let mut kept = None;
+        let mut keep = |s: &State| {
+            kept = Some(s.saved());
+            Ok(())
+        };
+        let (ended, _) = go_from(&mut st, &mut keep, seats_with(&cards), &mut echo, 10, 20);
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(
+            echo.1, 8,
+            "blind and look-harder, two lenses, two candidates"
+        );
+        let mut saved = kept.expect("kept");
+        // Make the old counts unequal: 10 is ahead of 11.
+        let attacks = &mut saved.questions[0].attacks;
+        attacks.iter_mut().find(|a| a.0 == 10).expect("10").2 += 1;
+
+        let mut same = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut same,
+            &mut |_| Ok(()),
+            seats_with(&cards),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(echo.1, 8, "same epoch: nothing to do: {log}");
+
+        let (reopened, _) = question_board(1);
+        let mut restored = State::restore(&saved).expect("restore");
+        let (ended, log) = go_from(
+            &mut restored,
+            &mut |_| Ok(()),
+            seats_with(&reopened),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Ok(Ended::Quiet));
+        assert_eq!(
+            echo.1, 12,
+            "10's new epoch: blind and look-harder per lens: {log}"
+        );
+        assert_eq!(log.matches("msg:10 Review").count(), 2, "{log}");
+        assert_eq!(log.matches("msg:10 LookHarder").count(), 2, "{log}");
+        assert_eq!(log.matches("msg:11").count(), 0, "{log}");
+    }
+
+    #[test]
+    fn memory_that_cannot_be_kept_is_an_error() {
+        let mut echo = echo(Ok(vec![counter()]));
+        let (ended, _) = go_from(
+            &mut State::default(),
+            &mut |_| Err("disk full".to_owned()),
+            two_seats(),
+            &mut echo,
+            10,
+            20,
+        );
+        assert_eq!(ended, Err("lens state not saved: disk full".to_owned()));
+        assert_eq!(echo.1, 1, "stops after the first round");
     }
 
     #[test]
@@ -586,14 +922,16 @@ mod tests {
         assert_eq!(ended, Err("adversary: bbp mcp exited".to_owned()));
     }
 
-    /// A split claim at score +5 with four evidence items: under half of
-    /// a 20-point accept line, not under half of the default 8.
-    fn split_view() -> (rusty_bbp::ClaimView, rusty_bbp::ClaimBody) {
+    /// A split claim at score +5 with four evidence items, accepting at
+    /// `accept_at`: under half of a 20-point line, not under half of 8.
+    fn split_view(accept_at: i64) -> (rusty_bbp::ClaimView, rusty_bbp::ClaimBody) {
         let item = |m: u64, author: &str, direction: Direction| rusty_bbp::claims::EvidenceView {
             msg: MsgId(m),
             author: rusty_bbp::PrincipalId(author.to_owned()),
             direction,
             kind: EvidenceKind::Cited,
+            strength: 1,
+            note: String::new(),
             delta: 0,
             epoch: 0,
             scoring: true,
@@ -604,6 +942,7 @@ mod tests {
             domains: vec!["dedup".to_owned()],
             status: ClaimStatus::Open,
             score: 5,
+            accept_at,
             confidence: 50,
             epoch: 0,
             spent: 4,
@@ -622,6 +961,7 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            human_touched: false,
         };
         let body = rusty_bbp::ClaimBody {
             text: view.text.clone(),
@@ -635,29 +975,23 @@ mod tests {
         (view, body)
     }
 
-    fn asked_with(claims: &ClaimsConfig) -> Vec<(AgentId, String)> {
+    fn asked_with(accept_at: i64) -> Vec<(AgentId, String)> {
         let mut seat = FakeSeat::new(vec![]);
-        seat.views.push(split_view());
+        seat.views.push(split_view(accept_at));
         let mut e = echo(Ok(vec![]));
         let seats = vec![("adversary", seat), ("operator", FakeSeat::new(vec![]))];
-        let (ended, log) = go_with(seats, &mut e, 10, 1, claims);
+        let (ended, log) = go(seats, &mut e, 10, 1);
         assert!(ended.is_ok(), "{ended:?} {log}");
         e.2
     }
 
     #[test]
-    fn the_tasks_accept_line_sets_the_tier_and_the_card() {
+    fn the_cards_accept_line_sets_the_tier_and_the_card() {
         let id = |s: &str| AgentId::new(s).expect("id");
-        let default = asked_with(&ClaimsConfig::default());
+        let default = asked_with(8);
         assert_eq!(default[0].0, id("codex"), "routine under the default 8");
         assert!(default[0].1.contains("(accepts at +8)"), "{}", default[0].1);
-        let custom = ClaimsConfig {
-            accept_at: 20,
-            accept_at_strict: 24,
-            ..ClaimsConfig::default()
-        };
-        assert_eq!(custom.invalid_field(), None, "a task BBP would open");
-        let strict = asked_with(&custom);
+        let strict = asked_with(20);
         assert_eq!(strict[0].0, id("claude"), "contested under the task's 20");
         assert!(strict[0].1.contains("(accepts at +20)"), "{}", strict[0].1);
     }
@@ -677,28 +1011,6 @@ mod tests {
             assert!(err.starts_with("log\n"), "the log is kept: {err}");
             assert!(err.contains(&format!("{h:?}")), "{err}");
         }
-    }
-
-    #[test]
-    fn run_refuses_without_the_tasks_claims_settings() {
-        let dir = std::env::temp_dir().join(format!("orch-run-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let cfg = dir.join("lens.json");
-        std::fs::write(&cfg, CONFIG).expect("config");
-        let o = options(
-            argv(&format!(
-                "run {} --bbp /nonexistent/bbp --dir /d --task t --state /s --experiment e",
-                cfg.display()
-            )),
-            dir.clone(),
-        )
-        .expect("options");
-        assert_eq!(
-            run(&o),
-            Err(UNKNOWN_CLAIMS.to_owned()),
-            "before any session or store"
-        );
-        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
     fn argv(s: &str) -> Vec<String> {

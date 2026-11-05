@@ -24,7 +24,7 @@ use orch_dispatch::{AgentError, ClassifiedError};
 use crate::config::{Provider, Tools};
 use crate::context::{assemble, Parts, Refusal, Window};
 use crate::meter::{cost, worst_case, Meter, Stop};
-use crate::port::{Model, Question};
+use crate::port::{Model, Question, Reply, Shape};
 use crate::post::{allowance, Post};
 use crate::schedule::Job;
 
@@ -183,7 +183,7 @@ fn attempt(
     let question = Question {
         prefix,
         body,
-        allowed: job.allowed.clone(),
+        shape: Shape::Posts(job.allowed.clone()),
         max_output_tokens: MAX_OUTPUT_TOKENS,
     };
     match model.ask(&question) {
@@ -199,10 +199,19 @@ fn attempt(
                     error,
                 });
             }
-            Step::End(End::Answered {
-                provider: id,
-                posts: answer.posts,
-            })
+            match answer.reply {
+                Reply::Posts(posts) => Step::End(End::Answered {
+                    provider: id,
+                    posts,
+                }),
+                // An adapter that ignored the question's shape.
+                Reply::Raw(_) => Step::End(End::Failed {
+                    provider: id,
+                    error: ClassifiedError::Permanent(AgentError(
+                        "raw reply to a posts question".to_owned(),
+                    )),
+                }),
+            }
         }
         Err(ClassifiedError::Unavailable(e)) => {
             settle(0);
@@ -330,7 +339,7 @@ mod tests {
 
     fn answer(output_tokens: u64) -> Result<Answer, ClassifiedError> {
         Ok(Answer {
-            posts: Vec::new(),
+            reply: Reply::Posts(Vec::new()),
             usage: Usage {
                 input_tokens: 1_000,
                 output_tokens,
@@ -358,6 +367,7 @@ mod tests {
             },
             suffix: Some("Look harder."),
             foreign_seen: 0,
+            epoch: 0,
             tools: Tools::None,
         }
     }
@@ -515,6 +525,25 @@ mod tests {
         let r = run(&job(&["a", "b"]), &cfg, meter(USD, 0), fakes);
         assert_eq!(r.called.end, End::Stopped(Stop::TaskCalls));
         assert!(r.fakes.asked("a").is_empty() && r.fakes.asked("b").is_empty());
+    }
+
+    #[test]
+    fn a_raw_reply_to_a_posts_question_fails_and_asks_no_one_else() {
+        let cfg = providers(&[("a", provider(32_768, FREE)), ("b", provider(32_768, FREE))]);
+        let raw = Ok(Answer {
+            reply: Reply::Raw("text".to_owned()),
+            usage: Usage::default(),
+        });
+        let fakes = Fakes::new(vec![("a", vec![raw]), ("b", vec![answer(10)])]);
+        let r = run(&job(&["a", "b"]), &cfg, meter(USD, 10), fakes);
+        assert!(
+            matches!(&r.called.end, End::Failed { provider, error: ClassifiedError::Permanent(e) }
+                if *provider == id("a") && e.0.contains("raw reply")),
+            "{:?}",
+            r.called.end
+        );
+        assert!(r.fakes.asked("b").is_empty());
+        assert!(matches!(r.fakes.asked("a")[0].shape, Shape::Posts(_)));
     }
 
     #[test]

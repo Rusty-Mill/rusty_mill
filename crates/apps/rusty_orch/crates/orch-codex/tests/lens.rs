@@ -43,10 +43,10 @@ fn question() -> Question {
     Question {
         prefix: "intent and rules".to_owned(),
         body: "claim C-1".to_owned(),
-        allowed: Allowed {
+        shape: orch_lens::Shape::Posts(Allowed {
             evidence: None,
             claims: None,
-        },
+        }),
         max_output_tokens: 256,
     }
 }
@@ -94,7 +94,7 @@ fn a_question_runs_in_the_repo_and_returns_posts_and_usage() {
 
     let answer = a.ask(&question()).expect("answers");
 
-    assert!(answer.posts.is_empty());
+    assert_eq!(answer.reply, orch_lens::Reply::Posts(Vec::new()));
     assert_eq!(
         answer.usage,
         Usage {
@@ -202,4 +202,25 @@ fn no_last_message_is_transient() {
     let mut a = agent(runner(exit(0, "", CHATGPT), FakeCommand::ok(EVENTS)));
     let err = a.ask(&question()).expect_err("refused");
     assert!(matches!(err, ClassifiedError::Transient(_)), "{err:?}");
+}
+
+#[test]
+fn a_raw_question_returns_the_text_and_refuses_an_empty_one() {
+    let raw = orch_lens::Question {
+        shape: orch_lens::Shape::Raw,
+        ..question()
+    };
+    let mut a = agent(replying("{\"probe\": null}", EVENTS));
+    let answer = a.ask(&raw).expect("answers");
+    assert_eq!(
+        answer.reply,
+        orch_lens::Reply::Raw("{\"probe\": null}".to_owned())
+    );
+
+    let mut a = agent(replying("``` ```", EVENTS));
+    let err = a.ask(&raw).expect_err("refused");
+    assert!(
+        matches!(&err, ClassifiedError::Permanent(m) if m.0.contains("reply is empty")),
+        "{err:?}"
+    );
 }

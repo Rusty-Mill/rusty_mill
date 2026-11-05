@@ -4,10 +4,11 @@
 //! - [`Child`]: the session process, newline-delimited JSON-RPC over its
 //!   stdio, every call bounded by a deadline.
 //! - [`Session`]: the claims tools over any [`Rpc`]. It keeps what the
-//!   lens can see: claim bodies and evidence notes from incremental `read`
-//!   pages (the card view carries neither stakes nor notes), and the cards
-//!   from `claims_delta`. It is the lens's [`Board`]: posts go out under
-//!   its credential, with a stable op id so a retry replays.
+//!   lens can see: claim bodies from incremental `read` pages (the card
+//!   view carries no stakes, reversibility or question), and the cards,
+//!   with their accept lines and evidence notes (D77), from
+//!   `claims_delta`. It is the lens's [`Board`]: posts go out under its
+//!   credential, with a stable op id so a retry replays.
 //!
 //! `read` is charged per call (addendum R11), so a session reads only new
 //! messages, a page at a time; the card, line and delta views are free.
@@ -24,8 +25,8 @@ use orch_lens::context::{Line, MAX_LINES};
 use orch_lens::round::Board;
 use orch_lens::{LensConfig, Post};
 use rusty_bbp::{
-    ArtId, Body, ClaimBody, ClaimStatus, ClaimView, ClaimsConfig, Direction, EvidenceKind, MsgId,
-    Ref, Response, Rev, Stakes,
+    ArtId, Body, ClaimBody, ClaimStatus, ClaimView, Direction, EvidenceKind, MsgId, Ref, Response,
+    Rev, Stakes,
 };
 use rusty_serde::Value;
 
@@ -231,7 +232,6 @@ pub struct Session<R> {
     /// The last message `read` returned.
     cursor: Option<MsgId>,
     claims: BTreeMap<MsgId, ClaimBody>,
-    notes: BTreeMap<MsgId, String>,
     views: BTreeMap<MsgId, ClaimView>,
     /// The task revision the views are current to.
     rev: Rev,
@@ -257,7 +257,6 @@ impl<R: Rpc> Session<R> {
             rpc,
             cursor: None,
             claims: BTreeMap::new(),
-            notes: BTreeMap::new(),
             views: BTreeMap::new(),
             rev: Rev(0),
             brief: None,
@@ -268,8 +267,8 @@ impl<R: Rpc> Session<R> {
         answer(self.rpc.call(tool, args), tool)
     }
 
-    /// Bring the lens's view up to date: new messages (claim bodies and
-    /// evidence notes), then the cards that changed since the last refresh.
+    /// Bring the lens's view up to date: new messages (claim bodies), then
+    /// the cards that changed since the last refresh.
     /// The revision is read first, so a change made meanwhile is seen again
     /// next time rather than missed.
     pub fn refresh(&mut self, config: &LensConfig) -> Result<(), String> {
@@ -313,14 +312,8 @@ impl<R: Rpc> Session<R> {
                 return Err("read answered something else".to_owned());
             };
             for m in messages {
-                match m.draft.body {
-                    Body::Claim(b) => {
-                        self.claims.insert(m.id, b);
-                    }
-                    Body::Evidence(e) => {
-                        self.notes.insert(m.id, e.note);
-                    }
-                    _ => {}
+                if let Body::Claim(b) = m.draft.body {
+                    self.claims.insert(m.id, b);
                 }
             }
             self.cursor = next.or(self.cursor);
@@ -344,13 +337,12 @@ impl<R: Rpc> Session<R> {
 
     /// Every card the lens can see, by claim id. A claim whose body the
     /// lens has not read is left out.
-    pub fn cards(&self, config: &LensConfig, claims: &ClaimsConfig) -> Vec<Card> {
-        let notes = |m: MsgId| self.notes.get(&m).cloned().unwrap_or_default();
+    pub fn cards(&self, config: &LensConfig) -> Vec<Card> {
         self.views
             .values()
             .filter_map(|v| {
                 let body = self.claims.get(&v.id)?;
-                Some(Card::from_view(v, body, &notes, config, claims))
+                Some(Card::from_view(v, body, config))
             })
             .collect()
     }
@@ -730,6 +722,7 @@ mod tests {
             domains: vec!["dedup".to_owned()],
             status,
             score: -2,
+            accept_at: 8,
             confidence: 40,
             epoch: 0,
             spent: 2,
@@ -741,6 +734,8 @@ mod tests {
                     author: PrincipalId("operator".to_owned()),
                     direction: Direction::Counter,
                     kind: EvidenceKind::Cited,
+                    strength: 2,
+                    note: format!("the view's note on {m}"),
                     delta: -2,
                     epoch: 0,
                     scoring: true,
@@ -754,6 +749,7 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            human_touched: false,
         }
     }
 
@@ -780,9 +776,13 @@ mod tests {
         let cfg = config();
         let mut s = Session::new("adversary", fake, "r1");
         s.refresh(&cfg).expect("refresh");
-        let cards = s.cards(&cfg, &ClaimsConfig::default());
+        let cards = s.cards(&cfg);
         assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].evidence[0].note, "fails on empty files");
+        assert_eq!(
+            cards[0].evidence[0].note, "the view's note on 20",
+            "notes come with the card"
+        );
+        assert_eq!(cards[0].accept_at, 8);
         assert_eq!(cards[0].stakes, Stakes::Medium);
         let reads = s.rpc.args("read");
         assert_eq!(word(reads[0], "after"), "");
@@ -820,7 +820,7 @@ mod tests {
         s.refresh(&cfg).expect("second");
         assert_eq!(word(s.rpc.args("claims_delta")[1], "after"), "5");
         assert_eq!(word(s.rpc.args("read")[1], "after"), "8");
-        let cards = s.cards(&cfg, &ClaimsConfig::default());
+        let cards = s.cards(&cfg);
         let status: Vec<ClaimStatus> = cards.iter().map(|c| c.status).collect();
         assert_eq!(status, [ClaimStatus::Open, ClaimStatus::Accepted]);
     }
@@ -840,11 +840,7 @@ mod tests {
         let cfg = config();
         let mut s = Session::new("adversary", fake, "r1");
         s.refresh(&cfg).expect("refresh");
-        let ids: Vec<MsgId> = s
-            .cards(&cfg, &ClaimsConfig::default())
-            .iter()
-            .map(|c| c.id)
-            .collect();
+        let ids: Vec<MsgId> = s.cards(&cfg).iter().map(|c| c.id).collect();
         assert_eq!(ids, [MsgId(7)]);
     }
 
@@ -1061,6 +1057,24 @@ while :; do
 done
 "#;
 
+    /// Spawn the stand-in. Another test thread that forks while
+    /// [`stand_in`] holds the script open for writing keeps that descriptor
+    /// until its own exec, so exec here can briefly fail with ETXTBSY; that
+    /// is retried, nothing else is.
+    #[cfg(unix)]
+    fn spawn(bin: &std::path::Path, dir: &std::path::Path) -> Result<Child, String> {
+        let mut tries = 0;
+        loop {
+            match Child::spawn(bin, dir, "t", "adversary") {
+                Err(e) if e.contains("Text file busy") && tries < 50 => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+    }
+
     /// Write `script` as an executable stand-in `bbp` in a fresh dir.
     #[cfg(unix)]
     fn stand_in(name: &str, script: &str) -> std::path::PathBuf {
@@ -1077,7 +1091,7 @@ done
     #[test]
     fn unrelated_replies_do_not_extend_the_deadline() {
         let dir = stand_in("chatty", CHATTY);
-        let mut child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+        let mut child = spawn(&dir.join("bbp"), &dir)
             .expect("spawn")
             .with_deadline(Duration::from_millis(300));
         let started = Instant::now();
@@ -1098,7 +1112,7 @@ done
     fn a_child_session_answers_by_id_and_reports_its_exit() {
         let dir = stand_in("once", SCRIPT);
         let bin = dir.join("bbp");
-        let mut child = Child::spawn(&bin, &dir, "t", "adversary").expect("spawn");
+        let mut child = spawn(&bin, &dir).expect("spawn");
         assert_eq!(
             child.call("task_card", map(vec![])),
             Ok("adversary yes scrubbed".to_owned())
@@ -1178,7 +1192,7 @@ done
         let posted = rendered(&Response::Posted(MsgId(30)));
         let script = logging_script(Some(rendered(&Response::Rejected(reassigned()))), posted);
         let dir = stand_in("refused", &script);
-        let child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+        let child = spawn(&dir.join("bbp"), &dir)
             .expect("spawn")
             .with_deadline(Duration::from_millis(300));
         let mut s = Session::new("adversary", child, "r1");
@@ -1194,7 +1208,7 @@ done
     fn a_lost_answer_through_the_child_is_resent_with_the_same_op() {
         let script = logging_script(None, rendered(&Response::Posted(MsgId(30))));
         let dir = stand_in("lost", &script);
-        let child = Child::spawn(&dir.join("bbp"), &dir, "t", "adversary")
+        let child = spawn(&dir.join("bbp"), &dir)
             .expect("spawn")
             .with_deadline(Duration::from_millis(300));
         let mut s = Session::new("adversary", child, "r1");

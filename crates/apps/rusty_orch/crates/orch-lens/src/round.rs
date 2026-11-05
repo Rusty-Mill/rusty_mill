@@ -152,7 +152,7 @@ fn settle(
             }
             state.answered(job, *provider, posts.len(), counters(posts));
             if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
-                state.attacked(q, card.id);
+                state.attacked(q, card.id, card.epoch);
             }
             None
         }
@@ -205,7 +205,7 @@ mod tests {
     use crate::config::tests::STARTER;
     use crate::config::Tools;
     use crate::meter::{Ceilings, Meter};
-    use crate::port::{Answer, Model, Question, Usage};
+    use crate::port::{Answer, Model, Question, Reply, Usage};
 
     const USD: u64 = 1_000_000;
     const LENSES: [&str; 4] = ["adversary", "architect", "operator", "research"];
@@ -257,7 +257,7 @@ mod tests {
                 self.asked.push((id, tools, q.clone()));
             }
             self.reply.clone().map(|posts| Answer {
-                posts,
+                reply: Reply::Posts(posts),
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 10,
@@ -496,7 +496,7 @@ mod tests {
         );
         assert_eq!(out.report.halt, None);
         let attacks = &out.state.questions[&MsgId(3)].attacks;
-        assert!(attacks[&MsgId(10)] > 0);
+        assert!(attacks[&MsgId(10)].passes > 0);
         assert_eq!(attacks[&MsgId(10)], attacks[&MsgId(11)]);
     }
 }

@@ -259,6 +259,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. |
 | apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. |
+| apps | rusty_orch | orch-jail | The jail spec (jail.json) and \`lel-jail\`, the launcher a mux block runs: it joins the session's cgroup, keeps only fds 0-4, then confines itself with rusty_sandbox and execs the agent. |
 | apps | rusty_orch | orch-lens | Orchestrator lens runner core: critic lenses over a BBP claims board. Reply protocol, context assembly, tiering, data classes and the money meter. Pure, no I/O. |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-openai | Orchestrator adapter: one OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only (llama-swap in v0). |
@@ -308,3 +309,4 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_yirp | sessionmgr-tui | The sessionmgr TUI: a grid of session panes over the daemon's public socket. Depends on sessionmgr-protocol only -- never sessionmgr-proc or sessionmgr-agents -- so a UI that cannot name a process type cannot accidentally spawn one. |
 | tools | rusty_baseline | rusty_baseline | Per-product baseline: binary size, dependency closure, clean and incremental build, startup, idle and peak RSS |
 | tools | rusty_boot | rusty_boot | A #![no_std] + alloc sovereign bootstrapper demonstrating kernel-to-application execution without Rust std |
+| tools | rusty_erosion | rusty_erosion | Code erosion metric: CC concentration and normalized duplication, in basis points |
