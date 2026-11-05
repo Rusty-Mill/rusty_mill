@@ -4445,6 +4445,32 @@ mod takeover {
     }
 
     #[test]
+    fn a_takeover_not_yet_ended_carries_into_an_intent_reopened_epoch() {
+        let mut cx = Cx::new();
+        let live = cx.low();
+        let released = cx.low();
+        let id = started(&mut cx, live, "s1");
+        let gone = started(&mut cx, released, "s2");
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: gone }));
+        ok(cx.host(end(gone, TakeoverEnd::Released)));
+        accept(&mut cx, live);
+        accept(&mut cx, released);
+        ok(super::revise(&mut cx, "brief v2", Affects::All));
+        assert_eq!(cx.rec(live).epoch, 2);
+        assert!(cx.st.claims.takeovers[&id].live());
+        let after = cx.candidate("a", live);
+        assert!(
+            cx.st.claims.human_touched.contains(&after),
+            "the live takeover still steers the new epoch"
+        );
+        let fresh = cx.candidate("a", released);
+        assert!(
+            !cx.st.claims.human_touched.contains(&fresh),
+            "an ended takeover stays in its own epoch"
+        );
+    }
+
+    #[test]
     fn takeovers_replay_to_the_same_state() {
         let mut cx = Cx::new();
         let c = cx.low();

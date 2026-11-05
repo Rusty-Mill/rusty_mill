@@ -727,6 +727,13 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
         _ => None,
     };
     let version = book.intent_version();
+    let attended = match e {
+        E::ClaimReopened { claim, .. } => book
+            .takeovers
+            .values()
+            .any(|t| t.claim == *claim && !t.ended()),
+        _ => false,
+    };
     let mut touch = |id: &MsgId, f: &mut dyn FnMut(&mut ClaimRecord)| {
         if let Some(c) = book.claims.get_mut(id) {
             f(c);
@@ -759,6 +766,12 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
             _ => touch(claim, &mut |c| c.status = ClaimStatus::Escalated),
         },
         E::ClaimReopened { claim, epoch, by } => touch(claim, &mut |c| {
+            // A takeover not yet ended may still be typing into this claim's
+            // session: its attribution carries into the new epoch, whatever
+            // reopened it (D84).
+            if attended {
+                c.takeover_epochs.insert(*epoch);
+            }
             c.status = ClaimStatus::Open;
             c.epoch = *epoch;
             c.sole_candidate = false;
