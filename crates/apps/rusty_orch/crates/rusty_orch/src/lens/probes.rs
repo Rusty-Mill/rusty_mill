@@ -482,13 +482,14 @@ fn real_dirs(tree: &Path, dir: &Path) -> bool {
 
 /// The crate `site` names in `tree`: for a file path, the nearest package
 /// above it; for `crate::module::fn`, the package whose library name
-/// (hyphens as underscores) is the first segment. Its directory and
-/// package name.
+/// (`[lib] name`, else the package name with hyphens as underscores) is
+/// the first segment. Its directory and package name.
 fn crate_of(tree: &Path, site: &str) -> Result<Option<(PathBuf, String)>, String> {
     if let Some((krate, _)) = site.split_once("::") {
         return Ok(packages(tree)?
             .into_iter()
-            .find(|(_, name)| name.replace('-', "_") == krate));
+            .find(|(_, names)| names.lib == krate)
+            .map(|(dir, names)| (dir, names.package)));
     }
     let rel = Path::new(site);
     if rel.components().any(|c| !matches!(c, Component::Normal(_))) {
@@ -499,8 +500,8 @@ fn crate_of(tree: &Path, site: &str) -> Result<Option<(PathBuf, String)>, String
         if !real_dirs(tree, &dir) {
             continue;
         }
-        if let Some(name) = package_name(&dir.join("Cargo.toml"))? {
-            return Ok(Some((dir, name)));
+        if let Some(names) = read_names(&dir.join("Cargo.toml"))? {
+            return Ok(Some((dir, names.package)));
         }
     }
     Ok(None)
@@ -508,12 +509,12 @@ fn crate_of(tree: &Path, site: &str) -> Result<Option<(PathBuf, String)>, String
 
 /// Every package in `tree`, by directory and name. Symlinks, `target` and
 /// hidden directories are not followed.
-fn packages(tree: &Path) -> Result<Vec<(PathBuf, String)>, String> {
+fn packages(tree: &Path) -> Result<Vec<(PathBuf, Names)>, String> {
     let mut out = Vec::new();
     let mut dirs = vec![tree.to_path_buf()];
     while let Some(dir) = dirs.pop() {
-        if let Some(name) = package_name(&dir.join("Cargo.toml"))? {
-            out.push((dir.clone(), name));
+        if let Some(names) = read_names(&dir.join("Cargo.toml"))? {
+            out.push((dir.clone(), names));
         }
         let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         for entry in entries {
@@ -529,24 +530,34 @@ fn packages(tree: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     Ok(out)
 }
 
-/// The `[package]` name in a manifest, if it is a regular file with one.
-fn package_name(manifest: &Path) -> Result<Option<String>, String> {
+/// A package's name, for `cargo -p`, and its library's, which
+/// `crate::module::fn` sites use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Names {
+    package: String,
+    lib: String,
+}
+
+/// The names in a manifest, if it is a regular file with a package.
+fn read_names(manifest: &Path) -> Result<Option<Names>, String> {
     match manifest.symlink_metadata() {
         Ok(m) if m.is_file() => {}
         _ => return Ok(None),
     }
     let text =
         std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
-    Ok(manifest_name(&text))
+    Ok(manifest_names(&text))
 }
 
-/// The package name in manifest text: `name` under `[package]`, or a
-/// top-level `package.name`. Covers the TOML a package name can be
-/// written in (basic or literal string, whitespace, trailing comments)
-/// without a TOML crate (D96 keeps rusty_orch's probe path to in-workspace
-/// crates). `None` unless the name is a plain Cargo name, since it goes on
-/// cargo's command line.
-fn manifest_name(text: &str) -> Option<String> {
+/// The names in manifest text: `name` under `[package]` (or a top-level
+/// `package.name`), and `name` under `[lib]` (or `lib.name`), which
+/// defaults to the package name with hyphens as underscores. Covers the
+/// TOML a name can be written in (basic or literal string, whitespace,
+/// trailing comments) without a TOML crate (D96 keeps rusty_orch's probe
+/// path to in-workspace crates). `None` unless both are plain Cargo names,
+/// since they go on cargo's command line.
+fn manifest_names(text: &str) -> Option<Names> {
+    let (mut package, mut lib) = (None, None);
     let mut table: Option<String> = None;
     for line in text.lines().map(str::trim) {
         if line.starts_with('[') {
@@ -562,16 +573,23 @@ fn manifest_name(text: &str) -> Option<String> {
             continue;
         };
         let key: String = key.split_whitespace().collect();
-        let wanted = match table.as_deref() {
-            Some("package") => key == "name",
-            None => key == "package.name",
-            Some(_) => false,
+        let key = match &table {
+            Some(t) => format!("{t}.{key}"),
+            None => key,
         };
-        if wanted {
-            return toml_string(value.trim()).filter(|n| cargo_name(n));
-        }
+        let slot = match key.as_str() {
+            "package.name" => &mut package,
+            "lib.name" => &mut lib,
+            _ => continue,
+        };
+        *slot = Some(toml_string(value.trim()).filter(|n| cargo_name(n)));
     }
-    None
+    let package = package??;
+    let lib = match lib {
+        Some(lib) => lib?,
+        None => package.replace('-', "_"),
+    };
+    Some(Names { package, lib })
 }
 
 /// A one-line TOML basic (`"..."`, no escapes) or literal (`'...'`)
@@ -1218,8 +1236,46 @@ mod tests {
             ("name = \"top\"\n", None),
         ];
         for (text, want) in cases {
-            assert_eq!(manifest_name(text), want.map(str::to_owned), "{text:?}");
+            let got = manifest_names(text).map(|n| n.package);
+            assert_eq!(got, want.map(str::to_owned), "{text:?}");
         }
+    }
+
+    #[test]
+    fn library_names_come_from_lib_or_the_package() {
+        let names = |text: &str| manifest_names(text).map(|n| (n.package, n.lib));
+        let pair = |p: &str, l: &str| Some((p.to_owned(), l.to_owned()));
+        assert_eq!(names("[package]\nname = \"a-b\"\n"), pair("a-b", "a_b"));
+        assert_eq!(
+            names("[lib]\nname = 'x_lib' # tauri\n[package]\nname = \"x\"\n"),
+            pair("x", "x_lib")
+        );
+        assert_eq!(
+            names("lib.name = \"y_lib\"\npackage.name = \"y\"\n"),
+            pair("y", "y_lib")
+        );
+        assert_eq!(
+            names("[package]\nname = \"z\"\n[lib]\nname = \"no space\"\n"),
+            None
+        );
+        assert_eq!(names("[lib]\nname = \"only_lib\"\n"), None);
+    }
+
+    #[test]
+    fn a_module_site_resolves_through_an_explicit_library_name() {
+        let tree = std::env::temp_dir().join(format!("orch_probes_{}_libname", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tree);
+        let dir = tree.join("app/src-tauri");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"sessionmgr-desktop\"\n\n[lib]\nname = \"sessionmgr_desktop_lib\"\n",
+        )
+        .expect("write");
+        let want = Some((dir.clone(), "sessionmgr-desktop".to_owned()));
+        assert_eq!(crate_of(&tree, "sessionmgr_desktop_lib::run"), Ok(want));
+        assert_eq!(crate_of(&tree, "sessionmgr_desktop::run"), Ok(None));
+        let _ = std::fs::remove_dir_all(&tree);
     }
 
     #[test]
@@ -1268,7 +1324,8 @@ mod tests {
         ];
         for (text, want) in cases {
             std::fs::write(&file, text).expect("write");
-            assert_eq!(package_name(&file), Ok(want.map(str::to_owned)), "{text:?}");
+            let got = read_names(&file).map(|n| n.map(|n| n.package));
+            assert_eq!(got, Ok(want.map(str::to_owned)), "{text:?}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
