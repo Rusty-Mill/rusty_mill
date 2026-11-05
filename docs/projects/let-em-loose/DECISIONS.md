@@ -102,6 +102,7 @@ Precise contracts used by this guide:
 | D91 | #704 slice 3: erosion escalation detail in the inbox | [default] 2026-11-05 (#704) |
 | D96 | #708 orch runs the alien lens's probes itself, sandboxed | [stated] 2026-11-05 (#708) |
 | D97 | #708 slice 4d: probe scratch trees and cargo time limit | [default] 2026-11-05 (#708) |
+| D98 | #708 alien hunt reads the candidate and its diffs through `get_artifact` | [default] 2026-11-05 (#708) |
 
 ## D1. Lenses, not stages
 
@@ -800,3 +801,15 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_f7977776fd4044d081d68c7525aa514b
 **Key.** lel:708:sandbox-probes-limits
 **Source.** The #708 slice 4d build questions, 2026-11-05. D75 and design §6. D96. `orch-lens` `src/alien.rs` `outcome`. PR #1500 `src/hunt.rs` `Probes::run` (where `Err` means the probe did not run). Slice 4c rule: unrun probes are never written as `error`. Item 1's cache scope, the signaled-base rule in item 2 and item 3 were amended 2026-11-05 after review of PR #1511 by dottiusmaximus and Codex (builder default, not a Nano decision). The shared cache was narrowed because candidate code can write to it. Drafted as D90 and renumbered D97 on 2026-11-05 with D96, for the same collision; meaning, key and tags unchanged.
+
+## D98. #708 alien hunt reads the candidate and its diffs through `get_artifact`
+
+**Decision.** In slice 4b the lens runner reads the claim's `current` candidate, then each of its diffs, with `get_artifact`. Each artifact's first read is charged once to the lens principal under R11, against the task's `reads` total and not the claim's evidence budget. That fits §3, whose "nothing is debited" is about the claim's budget (addendum § Budgets keeps the two apart). Build detail:
+1. If the role lacks `Read(Candidate)` or `Read(Diff)` (`role_forbidden`, which is rejected before any charge), the claim is not eligible. The runner prints the refusal once per run on stderr, writes no hunt marker (D78) and does not fail the run. Every other `get_artifact` error goes through the runner's usual error path.
+2. Whether the candidate touches a `.rs` file comes from the diff text of all its diffs: any `--- a/`, `+++ b/`, `rename from`, `rename to` or `diff --git` path that ends in `.rs`, with `/dev/null` ignored.
+3. If the combined diff text is longer than the enumerate prompt's window (a named const in `orch_lens::alien`), the hunt is skipped, not truncated. Nothing is spent on a model call, and no probe row and no hunt marker are written. The runner prints one stderr line per claim per run. Whether to hunt oversized diffs file by file is open as OPEN_QUESTIONS Q18.
+**Why.** These are implementation choices inside the approved D75 design. Each one is the most reversible option. A refusal or a skip never escalates the task or fails a run, and it records no hunt, so a later fix makes it retry. A truncated diff would make the suspects unreliable. Diff artifacts carry text, not a file list.
+**Rejected.** Failing the run when a role is refused. Truncating oversized diffs. Recording a skip as a hunt.
+**Tag.** [default] · remind-me: mem_17ea768d43f24f95944d46d7abb9836d
+**Key.** lel:708:alien-candidate-reads
+**Source.** let-em-loose-expert, 2026-11-05, answering the #708 build thread's slice 4b questions. `708-alien-lens-design.md` §2–§3, D75, D78; `claims_engine.rs` `get_artifact` (R11 per principal and artifact); `engine.rs` `get_artifact_record`; `bbp-claims-addendum.md` § Budgets and § Reads, delta and subscriptions. Drafted as D87 and renumbered D98 on 2026-11-05 to avoid colliding with #1496; meaning, key and tags unchanged.
