@@ -51,7 +51,9 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Order:** `card_take` looks in the queue and work columns nearest Done first (by default Review, QA, Building,
   then Ready); within one, the highest `priority` (0, 1, 3, 5)
   first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
-  holds nothing up); naming it explicitly says why. `card_plan` sets both and needs Triage. The tags `agent`,
+  holds nothing up); naming it explicitly says why. It never takes a card with a `superseded_by` link (newer cards
+  that replace it): close that card, or re-scope it and clear the link. `related` links are informational.
+  `card_plan` sets priority and all three link lists, and needs Triage. The tags `agent`,
   `board:…`, `claim:…`, `number:…`, `archived:…` and `restored:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
   carry them, and the GitHub sync drops such labels when it imports an issue.
 - **Projects:** one board serves several applications of a monorepo, and several repositories.
@@ -108,11 +110,11 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Storage: rusty_tick** (`--tick-url`, token only from the `RUSTY_TICK_TOKEN` environment variable; [ADR-0012](../../../docs/adr/0012-one-task-store.md)):
   the board is the rusty_tick tasks tagged `agent`, so the owner reads and edits the same tasks on the phone or web.
   Column and claim are `board:`/`claim:` tags, the project is the task's list (the Inbox is `default`), comments are
-  rusty_tick comments with their author, and dependencies, the forge link and the execution link are one `board`
+  rusty_tick comments with their author, and dependencies and other links, the forge link and the execution link are one `board`
   document per task. Every write is one request fenced on the task version the board read, and every write moves
   it (rusty_tick moves it for a board document or comment written with `If-Task-Match`), so the version names the
   whole card. A comment is an explicit append, so one the owner adds meanwhile is kept. Only `card_plan` with both a
-  priority and dependencies takes two requests; if the second fails it reports an error, and the same plan again
+  priority and links takes two requests; if the second fails it reports an error, and the same plan again
   completes it.
   Tags come back lowercase, so actor names must be lowercase. Events are kept in memory only: the board's own
   writes plus an `edited` event (actor `tick`) when a task changes in rusty_tick. `/health` is 503 while rusty_tick

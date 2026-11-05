@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::board::Board;
 use crate::domain::{
-    Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, ExecutionLink, Shelf,
+    Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, ExecutionLink, Plan, Shelf,
 };
 use crate::store::Store;
 
@@ -271,6 +271,11 @@ struct PlanArgs {
     priority: Option<u8>,
     /// Ids or numbers of the cards that must be Done before this one is taken; replaces the list.
     deps: Option<Vec<String>>,
+    /// Ids or numbers of newer cards that replace this one; replaces the list, `[]` clears it.
+    /// `card_take` never hands out a superseded card.
+    superseded_by: Option<Vec<String>>,
+    /// Ids or numbers of cards worth reading alongside this one; replaces the list.
+    related: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -701,18 +706,24 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_plan",
-            "Set a card's priority and the cards it waits on (needs Triage). `card_take` takes higher priority first and skips a card until its dependencies are Done.",
+            "Set a card's priority and links (needs Triage): `deps` (waits on), `superseded_by` (newer cards that replace it) and `related`. Each list replaces the current one; `[]` clears it. `card_take` takes higher priority first, skips a card until its dependencies are Done, and never hands out a superseded card. After marking a card superseded, close it (move it to done) or re-scope it and clear `superseded_by`.",
             |b, i, a: PlanArgs| {
                 let who = acting(b, i, &a.who)?;
-                let deps = a
-                    .deps
-                    .map(|d| {
-                        d.iter()
+                let refs = |l: Option<Vec<String>>| {
+                    l.map(|l| {
+                        l.iter()
                             .map(|r| card_ref(b, r))
                             .collect::<Result<Vec<_>, _>>()
                     })
-                    .transpose()?;
-                card(b.plan(card_ref(b, &a.id)?, &who, a.priority, deps)?)
+                    .transpose()
+                };
+                let plan = Plan {
+                    priority: a.priority,
+                    deps: refs(a.deps)?,
+                    superseded_by: refs(a.superseded_by)?,
+                    related: refs(a.related)?,
+                };
+                card(b.plan(card_ref(b, &a.id)?, &who, &plan)?)
             },
         ),
         op(
