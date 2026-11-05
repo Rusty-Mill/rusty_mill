@@ -217,7 +217,7 @@ fn settle(
 ) -> (Option<Review>, Option<Halt>) {
     match end {
         End::Answered { provider, posts } => {
-            if let Err(e) = write_ahead(job, posts, ahead) {
+            if let Err(e) = write_ahead(job, ahead) {
                 state.abandon(job);
                 return (None, Some(Halt::Unsaved(e)));
             }
@@ -233,8 +233,13 @@ fn settle(
         }
         End::Failed { error, .. } => {
             state.failed(job);
-            let refused = matches!(error, ClassifiedError::Permanent(_));
-            (refused.then(|| review(job, Vec::new())).flatten(), None)
+            if !matches!(error, ClassifiedError::Permanent(_)) {
+                return (None, None);
+            }
+            if let Err(e) = write_ahead(job, ahead) {
+                return (None, Some(Halt::Unsaved(e)));
+            }
+            (review(job, Vec::new()), None)
         }
         End::Exhausted => {
             state.failed(job);
@@ -285,11 +290,15 @@ fn partial(
     (row, halt)
 }
 
-/// Save a blind review's row `pending` before its posts, so a crash or a
-/// failed save after them leaves the job unscored, never scored on part of
-/// its items. An empty answer posts nothing and needs none.
-fn write_ahead(job: &Job, posts: &[Post], ahead: Ahead<'_>) -> Result<(), String> {
-    let Some(row) = review(job, Vec::new()).filter(|_| !posts.is_empty()) else {
+/// Save a blind review's row `pending` before anything else of the
+/// attempt: its posts, or the empty row of a reply with none or one the
+/// protocol refused. A crash or a failed save after it leaves the job
+/// unscored, never scored on part of its items. Every row a round saves
+/// follows its own write-ahead, so a save that clears `pending` always
+/// completes the same attempt, and a write-ahead over a row still pending
+/// is always a retry of one interrupted (D92 write-ahead).
+fn write_ahead(job: &Job, ahead: Ahead<'_>) -> Result<(), String> {
+    let Some(row) = review(job, Vec::new()) else {
         return Ok(());
     };
     ahead(&Review {
@@ -585,6 +594,35 @@ mod tests {
             out.report.reviews.iter().all(|r| !r.pending),
             "the save after the posts clears it"
         );
+    }
+
+    /// An empty answer and a refused reply also save a row, so they write
+    /// ahead too: a row that clears `pending` always ends its own attempt.
+    #[test]
+    fn rows_with_nothing_posted_are_written_ahead_too() {
+        for reply in [
+            Ok(vec![]),
+            Err(ClassifiedError::Permanent(AgentError("bad".into()))),
+        ] {
+            let out = go(
+                &[plain(7)],
+                State::default(),
+                400,
+                Echo::new(reply),
+                Posted::default(),
+            );
+            assert_eq!(out.report.reviews.len(), 3);
+            assert_eq!(out.ahead.len(), 3, "one write-ahead per row");
+            assert!(out.ahead.iter().all(|r| r.pending));
+        }
+        let down = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Err(ClassifiedError::Transient(AgentError("busy".into())))),
+            Posted::default(),
+        );
+        assert!(down.ahead.is_empty(), "no row, no write-ahead");
     }
 
     #[test]

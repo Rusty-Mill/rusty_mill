@@ -1039,6 +1039,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A known prefix plus an unknown landed post, then a retry that posts
+    /// nothing: an empty answer or a refusal. The retry writes ahead over
+    /// the interrupted attempt's pending row, so the job stays unsure with
+    /// the ids it had, whatever the retry ends with.
+    #[test]
+    fn a_retry_that_posts_nothing_keeps_an_interrupted_job_unsure() {
+        let retries = [
+            ("empty", Ok(vec![])),
+            (
+                "refused",
+                Err(ClassifiedError::Permanent(AgentError("bad".into()))),
+            ),
+        ];
+        for (name, retry) in retries {
+            let d = std::env::temp_dir()
+                .join(format!("orch-lens-recover-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            let run = |crash: bool, reply: Result<Vec<Post>, ClassifiedError>| {
+                let mut store = Store::open(&d).expect("store");
+                let mut save_review = |r: &Review| {
+                    if crash && !r.pending {
+                        return Err("killed".to_owned());
+                    }
+                    store.save_lens_review("b", r).map_err(|e| e.to_string())
+                };
+                let mut read_records = || Ok(BTreeMap::new());
+                let records = Records {
+                    save: &mut save_review,
+                    read: &mut read_records,
+                };
+                let mut e = echo(reply);
+                go_with(
+                    &mut State::default(),
+                    &mut |_| Ok(()),
+                    records,
+                    two_seats(),
+                    &mut e,
+                    10,
+                    1,
+                )
+                .0
+            };
+            assert!(run(false, Ok(vec![counter()])).is_ok(), "known prefix");
+            assert!(run(true, Ok(vec![counter()])).is_err(), "lost post");
+            assert!(run(false, retry).is_ok(), "{name}");
+            let rows = Store::open(&d)
+                .expect("reopen")
+                .lens_reviews("b")
+                .expect("rows");
+            let state: Vec<(&str, bool, bool, usize)> = rows
+                .iter()
+                .map(|r| (r.lens.as_str(), r.pending, r.unsure, r.items.len()))
+                .collect();
+            assert_eq!(
+                state,
+                [("adversary", false, true, 1), ("operator", false, false, 1)],
+                "{name}: the lost post keeps the job unsure"
+            );
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
     fn two_seats() -> Vec<(&'static str, FakeSeat)> {
         vec![
             ("adversary", FakeSeat::new(vec![card(7)])),

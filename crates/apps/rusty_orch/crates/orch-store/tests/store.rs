@@ -894,4 +894,34 @@ mod lens_records {
         let clean = review("sec", 7, false, &[11]);
         assert_eq!(s.lens_reviews("b1").expect("load"), [unsure, clean]);
     }
+
+    /// An interrupted attempt is recovered as unsure even when the retry
+    /// posts nothing, and the ids an earlier attempt saved are kept. Here:
+    /// attempt 1 saved 11; attempt 2 wrote ahead and posted, then crashed
+    /// before its row; attempt 3 writes ahead and ends with an empty row.
+    #[test]
+    fn a_retry_with_nothing_posted_keeps_an_interrupted_job_unsure() {
+        {
+            let d = dir("lens_records_recover");
+            {
+                let mut s = Store::open(&d).expect("open");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 1");
+                s.save_lens_review("b1", &review("sec", 7, false, &[11]))
+                    .expect("row 1");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 2");
+            }
+            {
+                let mut s = Store::open(&d).expect("restart");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 3");
+                s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                    .expect("row 3");
+            }
+            let s = Store::open(&d).expect("reopen");
+            let want = Review {
+                unsure: true,
+                ..review("sec", 7, false, &[11])
+            };
+            assert_eq!(s.lens_reviews("b1").expect("load"), [want]);
+        }
+    }
 }
