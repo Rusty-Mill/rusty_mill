@@ -754,3 +754,51 @@ mod watch {
         assert_eq!(got, row("updates:bb", 7, None), "a later save replaces it");
     }
 }
+
+mod lens_records {
+    use super::*;
+    use orch_lens::record::{MsgId, Review};
+
+    fn review(lens: &str, claim: u64, look_harder: bool, items: &[u64]) -> Review {
+        Review {
+            lens: lens.to_owned(),
+            claim: MsgId(claim),
+            epoch: 0,
+            look_harder,
+            items: items.iter().copied().map(MsgId).collect(),
+        }
+    }
+
+    #[test]
+    fn lens_reviews_survive_reopening_per_board_and_replace_the_same_job() {
+        let d = dir("lens_records_reopen");
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert!(s.lens_reviews("b1").expect("load").is_empty());
+            s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                .expect("save");
+            s.save_lens_review("b1", &review("ops", 7, false, &[11]))
+                .expect("save");
+            s.save_lens_review("b1", &review("sec", 7, true, &[12]))
+                .expect("save");
+            s.save_lens_review("b2", &review("sec", 7, false, &[13]))
+                .expect("save");
+        }
+        let mut s = Store::open(&d).expect("reopen");
+        // Asked again after a refused reply: the job's row is replaced.
+        s.save_lens_review("b1", &review("sec", 7, false, &[14]))
+            .expect("replace");
+        assert_eq!(
+            s.lens_reviews("b1").expect("load"),
+            [
+                review("ops", 7, false, &[11]),
+                review("sec", 7, false, &[14]),
+                review("sec", 7, true, &[12]),
+            ]
+        );
+        assert_eq!(
+            s.lens_reviews("b2").expect("load"),
+            [review("sec", 7, false, &[13])]
+        );
+    }
+}

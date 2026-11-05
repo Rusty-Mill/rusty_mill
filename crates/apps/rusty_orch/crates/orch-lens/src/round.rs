@@ -16,20 +16,23 @@
 
 use std::collections::BTreeMap;
 
+use orch_dispatch::ClassifiedError;
 use rusty_bbp::{Direction, MsgId};
 
 use crate::call::{call, Ctx, End, Models};
 use crate::card::Card;
 use crate::config::LensConfig;
-use crate::context::{Line, Parts};
+use crate::context::{Line, Parts, Phase};
 use crate::meter::Stop;
 use crate::post::Post;
+use crate::record::Review;
 use crate::schedule::{schedule, Job, JobKey, Skipped, Slot, State};
 
 /// Where answers go: the shared board.
 pub trait Board {
-    /// Post `posts` as lens `lens`, with its credential.
-    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<(), String>;
+    /// Post `posts` as lens `lens`, with its credential, and return their
+    /// message ids in order.
+    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, String>;
 }
 
 /// What the shell read for this round.
@@ -65,6 +68,8 @@ pub struct Report {
     pub ran: Vec<(JobKey, End)>,
     /// Jobs the rules allow but no provider can take.
     pub skipped: Vec<Skipped>,
+    /// Blind review jobs that ended, for the track record (#599).
+    pub reviews: Vec<Review>,
     pub halt: Option<Halt>,
 }
 
@@ -89,12 +94,13 @@ pub fn round(
     }
     let by_id: BTreeMap<MsgId, &Card> = view.cards.iter().map(|c| (c.id, c)).collect();
     let mut ran = Vec::new();
+    let mut reviews = Vec::new();
     for job in &jobs {
         let Some(card) = by_id.get(&job.key.claim) else {
             continue;
         };
         let Some(prefix) = view.prefixes.get(&job.key.lens) else {
-            return report(ran, skipped, Halt::NoPrefix(job.key.lens.clone()));
+            return report(ran, skipped, reviews, Halt::NoPrefix(job.key.lens.clone()));
         };
         let lens = rusty_bbp::PrincipalId(job.key.lens.clone());
         let parts = Parts {
@@ -114,71 +120,107 @@ pub fn round(
             save: &mut *save,
         };
         let called = call(job, &parts, ctx, models);
-        let halt = settle(job, card, &called.end, state, board)
+        let settled = settle(job, card, &called.end, state, board);
+        if let Ok(Some(r)) = &settled {
+            reviews.push(r.clone());
+        }
+        let halt = settled
+            .err()
             .or_else(|| called.unsaved.clone().map(Halt::Unsaved));
         ran.push((job.key.clone(), called.end));
         if let Some(h) = halt {
-            return report(ran, skipped, h);
+            return report(ran, skipped, reviews, h);
         }
     }
     Report {
         ran,
         skipped,
+        reviews,
         halt: None,
     }
 }
 
-fn report(ran: Vec<(JobKey, End)>, skipped: Vec<Skipped>, halt: Halt) -> Report {
+fn report(
+    ran: Vec<(JobKey, End)>,
+    skipped: Vec<Skipped>,
+    reviews: Vec<Review>,
+    halt: Halt,
+) -> Report {
     Report {
         ran,
         skipped,
+        reviews,
         halt: Some(halt),
     }
 }
 
-/// Post and record one job's end; `Some` ends the round.
+/// The track-record row of a blind review job that ended with `items`
+/// posted; `None` for any other job.
+fn review(job: &Job, items: Vec<MsgId>) -> Option<Review> {
+    let blind = match job.key.slot {
+        Slot::Review => job.phase == Phase::Blind,
+        Slot::LookHarder => true,
+        Slot::Propose(_) | Slot::Rebel => false,
+    };
+    blind.then(|| Review {
+        lens: job.key.lens.clone(),
+        claim: job.key.claim,
+        epoch: job.epoch,
+        look_harder: job.key.slot == Slot::LookHarder,
+        items,
+    })
+}
+
+/// Post and record one job's end. `Err` ends the round; `Ok(Some)` is a
+/// blind review's track-record row: what it posted, or nothing for a reply
+/// the protocol refused, so refusing is not free.
 fn settle(
     job: &Job,
     card: &Card,
     end: &End,
     state: &mut State,
     board: &mut dyn Board,
-) -> Option<Halt> {
+) -> Result<Option<Review>, Halt> {
     match end {
         End::Answered { provider, posts } => {
-            if let Err(e) = post(board, &job.key.lens, posts) {
+            let ids = post(board, &job.key.lens, posts).map_err(|e| {
                 state.abandon(job);
-                return Some(Halt::Board(e));
-            }
+                Halt::Board(e)
+            })?;
             state.answered(job, *provider, posts.len(), counters(posts));
             if let (Slot::Review | Slot::LookHarder, Some(q)) = (job.key.slot, card.answers) {
                 state.attacked(q, card.id, card.epoch);
             }
-            None
+            Ok(review(job, ids))
         }
-        End::Failed { .. } | End::Exhausted => {
+        End::Failed { error, .. } => {
             state.failed(job);
-            None
+            let refused = matches!(error, ClassifiedError::Permanent(_));
+            Ok(refused.then(|| review(job, Vec::new())).flatten())
+        }
+        End::Exhausted => {
+            state.failed(job);
+            Ok(None)
         }
         End::Stopped(Stop::Experiment) => {
             state.abandon(job);
-            None
+            Ok(None)
         }
         End::Stopped(stop) => {
             state.abandon(job);
-            Some(Halt::Task(*stop))
+            Err(Halt::Task(*stop))
         }
         End::Unsaved(e) => {
             state.abandon(job);
-            Some(Halt::Unsaved(e.clone()))
+            Err(Halt::Unsaved(e.clone()))
         }
     }
 }
 
 /// An empty answer posts nothing.
-fn post(board: &mut dyn Board, lens: &str, posts: &[Post]) -> Result<(), String> {
+fn post(board: &mut dyn Board, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, String> {
     if posts.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     board.post(lens, posts)
 }
@@ -281,12 +323,13 @@ mod tests {
     }
 
     impl Board for Posted {
-        fn post(&mut self, lens: &str, posts: &[Post]) -> Result<(), String> {
+        fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, String> {
             if self.refuse {
                 return Err("board is read-only".to_owned());
             }
+            let first = 100 + self.posts.iter().map(|(_, p)| p.len() as u64).sum::<u64>();
             self.posts.push((lens.to_owned(), posts.to_vec()));
-            Ok(())
+            Ok((first..first + posts.len() as u64).map(MsgId).collect())
         }
     }
 
@@ -373,6 +416,44 @@ mod tests {
         }
         assert!(out.state.in_flight.is_empty());
         assert_eq!(out.meter.snapshot().tasks, [("task-1".to_owned(), 0, 3)]);
+    }
+
+    #[test]
+    fn blind_reviews_are_kept_for_the_track_record() {
+        let out = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Ok(vec![counter(7)])),
+            Posted::default(),
+        );
+        let mut rows = out.report.reviews.clone();
+        rows.sort_by(|a, b| a.lens.cmp(&b.lens));
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.claim == MsgId(7) && !r.look_harder));
+        let mut items: Vec<MsgId> = rows.iter().flat_map(|r| r.items.clone()).collect();
+        items.sort();
+        assert_eq!(items, [MsgId(100), MsgId(101), MsgId(102)], "one post each");
+
+        // A reply the protocol refused is kept with nothing posted; a
+        // provider that couldn't answer is not kept.
+        let refused = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Err(ClassifiedError::Permanent(AgentError("bad".into())))),
+            Posted::default(),
+        );
+        assert_eq!(refused.report.reviews.len(), 3);
+        assert!(refused.report.reviews.iter().all(|r| r.items.is_empty()));
+        let down = go(
+            &[plain(7)],
+            State::default(),
+            400,
+            Echo::new(Err(ClassifiedError::Transient(AgentError("busy".into())))),
+            Posted::default(),
+        );
+        assert!(down.report.reviews.is_empty());
     }
 
     #[test]

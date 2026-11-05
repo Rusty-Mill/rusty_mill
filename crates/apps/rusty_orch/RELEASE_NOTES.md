@@ -4,6 +4,15 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Lens track records
+**2026-11-05**
+
+- Each lens now has a track record (#599). `lens run` saves every blind
+  review job and shows each lens `record: P points over N blind reviews
+  (S scored, V pivotal)`. A review that decided the outcome itself is
+  scored only against ground truth (a failing golden set), and is
+  otherwise counted as pivotal and left unscored (D84, D89).
+
 ## Lens cards show the task's accept line
 **2026-11-04**
 

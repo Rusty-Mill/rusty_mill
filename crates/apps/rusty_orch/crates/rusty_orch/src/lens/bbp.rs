@@ -412,10 +412,11 @@ impl<R: Rpc> Board for Session<R> {
     /// answer was lost is sent once more with the same op, so BBP replays
     /// it if the first one landed; an answered error, such as a
     /// rejection, is not retried.
-    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<(), String> {
+    fn post(&mut self, lens: &str, posts: &[Post]) -> Result<Vec<MsgId>, String> {
         if lens != self.lens {
             return Err(format!("{}'s session cannot post for {lens}", self.lens));
         }
+        let mut ids = Vec::with_capacity(posts.len());
         for p in posts {
             self.posted += 1;
             let op = format!("lens-{}-{}", self.run, self.posted);
@@ -425,11 +426,11 @@ impl<R: Rpc> Board for Session<R> {
                 first => first,
             };
             match answer(reply, "post")? {
-                Response::Posted(_) => {}
+                Response::Posted(id) => ids.push(id),
                 other => return Err(format!("post answered {other:?}")),
             }
         }
-        Ok(())
+        Ok(ids)
     }
 }
 

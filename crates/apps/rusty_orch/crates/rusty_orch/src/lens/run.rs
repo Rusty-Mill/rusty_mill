@@ -13,6 +13,11 @@
 //! canonical BBP store directory and the task id ([`board`]), so a task of
 //! the same name in another BBP directory starts with nothing remembered.
 //! A crash mid-round asks that round's jobs again.
+//!
+//! Each blind review job is saved for its lens's track record (#599) after
+//! its round, and each pass starts by reading every lens's record into the
+//! line its context shows. A record that can't be read is logged and shown
+//! to nobody: it is informational and never holds a run up.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -25,6 +30,7 @@ use orch_lens::card::Card;
 use orch_lens::config::Tools;
 use orch_lens::context::{prefix, Line};
 use orch_lens::meter::Meter;
+use orch_lens::record::{Review, Tally};
 use orch_lens::round::{round, Board, Halt, View};
 use orch_lens::schedule::State;
 use orch_lens::{LensConfig, Model};
@@ -180,6 +186,12 @@ pub enum Ended {
     Halted(Halt),
 }
 
+/// Where blind review jobs go and each lens's track record comes from.
+pub struct Records<'a> {
+    pub save: &'a mut dyn FnMut(&Review) -> Result<(), String>,
+    pub read: &'a mut dyn FnMut() -> Result<BTreeMap<String, Tally>, String>,
+}
+
 /// The lenses to run: the config, and each lens's seat and prompt by id.
 pub struct Lenses<'a> {
     pub config: &'a LensConfig,
@@ -224,10 +236,12 @@ impl Prefixes {
 /// without a seat is an error. Each job's outcome is written to `log`.
 /// `state` goes to `keep` after every lens's round, so a restart resumes
 /// from it; a failed keep is an error.
+#[allow(clippy::too_many_arguments)]
 pub fn passes(
     lenses: Lenses<'_>,
     state: &mut State,
     keep: &mut dyn FnMut(&State) -> Result<(), String>,
+    records: Records<'_>,
     metering: Metering<'_>,
     models: &mut dyn Models,
     max: u32,
@@ -238,9 +252,15 @@ pub fn passes(
         seats,
         prompts,
     } = lenses;
-    let records = BTreeMap::new();
     let mut prefixes = Prefixes::default();
     for pass in 1..=max {
+        let tracks: BTreeMap<String, String> = match (records.read)() {
+            Ok(t) => t.iter().map(|(l, t)| (l.clone(), t.line())).collect(),
+            Err(e) => {
+                let _ = writeln!(log, "pass {pass} track record not read: {e}");
+                BTreeMap::new()
+            }
+        };
         let mut started = 0;
         for lens in &config.lenses {
             let seat = seats
@@ -263,7 +283,7 @@ pub fn passes(
                 cards: &cards,
                 lines: &lines,
                 prefixes: &prefixes.text,
-                records: &records,
+                records: &tracks,
             };
             let ctx = Ctx {
                 task: metering.task,
@@ -273,6 +293,9 @@ pub fn passes(
             };
             let report = round(&one, &view, state, ctx, models, seat.board());
             keep(state).map_err(|e| format!("lens state not saved: {e}"))?;
+            for r in &report.reviews {
+                (records.save)(r).map_err(|e| format!("track record not saved: {e}"))?;
+            }
             started += report.ran.len();
             for (key, end) in &report.ran {
                 let _ = writeln!(
@@ -402,6 +425,23 @@ pub fn run(o: &Options) -> Result<String, String> {
             .save_lens_state(&board, &s.saved())
             .map_err(|e| e.to_string())
     };
+    let mut save_review = |r: &Review| {
+        store
+            .borrow_mut()
+            .save_lens_review(&board, r)
+            .map_err(|e| e.to_string())
+    };
+    let mut read_records = || {
+        let rows = store
+            .borrow()
+            .lens_reviews(&board)
+            .map_err(|e| e.to_string())?;
+        super::record::read(&o.bbp, &o.dir, &o.task, &rows)
+    };
+    let records = Records {
+        save: &mut save_review,
+        read: &mut read_records,
+    };
     let metering = Metering {
         task: &o.task,
         meter: &mut meter,
@@ -416,6 +456,7 @@ pub fn run(o: &Options) -> Result<String, String> {
         lenses,
         &mut state,
         &mut keep,
+        records,
         metering,
         &mut registry,
         o.max_passes,
@@ -512,9 +553,10 @@ mod tests {
     }
 
     impl Board for FakeSeat {
-        fn post(&mut self, _: &str, posts: &[Post]) -> Result<(), String> {
+        fn post(&mut self, _: &str, posts: &[Post]) -> Result<Vec<MsgId>, String> {
+            let first = 100 + self.posts.len() as u64;
             self.posts.extend_from_slice(posts);
-            Ok(())
+            Ok((first..first + posts.len() as u64).map(MsgId).collect())
         }
     }
 
@@ -621,6 +663,25 @@ mod tests {
         task_calls: u32,
         max: u32,
     ) -> (Result<Ended, String>, String) {
+        let mut save_review = |_: &Review| Ok(());
+        let mut read_records = || Ok(BTreeMap::new());
+        let records = Records {
+            save: &mut save_review,
+            read: &mut read_records,
+        };
+        go_with(state, keep, records, seats, echo, task_calls, max)
+    }
+
+    /// [`go_from`] with the track record's store.
+    fn go_with(
+        state: &mut State,
+        keep: &mut dyn FnMut(&State) -> Result<(), String>,
+        records: Records<'_>,
+        seats: Vec<(&str, FakeSeat)>,
+        echo: &mut Echo,
+        task_calls: u32,
+        max: u32,
+    ) -> (Result<Ended, String>, String) {
         let cfg = config();
         let mut boxed: BTreeMap<String, Box<dyn Seat>> = seats
             .into_iter()
@@ -649,8 +710,82 @@ mod tests {
             prompts: &prompts,
         };
         let mut log = String::new();
-        let ended = passes(lenses, state, keep, metering, echo, max, &mut log);
+        let ended = passes(lenses, state, keep, records, metering, echo, max, &mut log);
         (ended, log)
+    }
+
+    #[test]
+    fn blind_reviews_are_saved_and_each_lens_sees_its_record() {
+        let mut saved: Vec<Review> = Vec::new();
+        let mut save_review = |r: &Review| {
+            saved.push(r.clone());
+            Ok(())
+        };
+        let mut reads = 0;
+        let mut read_records = || {
+            reads += 1;
+            let mut t = Tally::default();
+            t.add(orch_lens::record::Scored::Points {
+                points: 3,
+                pivotal: false,
+            });
+            Ok(BTreeMap::from([("adversary".to_owned(), t)]))
+        };
+        let records = Records {
+            save: &mut save_review,
+            read: &mut read_records,
+        };
+        let mut e = echo(Ok(vec![counter()]));
+        let (ended, log) = go_with(
+            &mut State::default(),
+            &mut |_| Ok(()),
+            records,
+            two_seats(),
+            &mut e,
+            10,
+            1,
+        );
+        assert!(ended.is_ok(), "{log}");
+        assert_eq!(reads, 1, "read once per pass");
+        let line = "record: 3 points over 1 blind reviews (1 scored, 0 pivotal)";
+        let bodies: Vec<&String> = e.2.iter().map(|(_, b)| b).collect();
+        assert_eq!(
+            bodies.iter().filter(|b| b.contains(line)).count(),
+            1,
+            "{bodies:?}"
+        );
+        let mut lenses: Vec<&str> = saved.iter().map(|r| r.lens.as_str()).collect();
+        lenses.sort_unstable();
+        assert_eq!(lenses, ["adversary", "operator"]);
+        assert!(saved
+            .iter()
+            .all(|r| r.claim == MsgId(7) && r.items.len() == 1));
+    }
+
+    #[test]
+    fn an_unreadable_record_is_logged_and_the_run_goes_on() {
+        let mut save_review = |_: &Review| Ok(());
+        let mut read_records = || Err("bbp why: no such task".to_owned());
+        let records = Records {
+            save: &mut save_review,
+            read: &mut read_records,
+        };
+        let mut e = echo(Ok(vec![counter()]));
+        let (ended, log) = go_with(
+            &mut State::default(),
+            &mut |_| Ok(()),
+            records,
+            two_seats(),
+            &mut e,
+            10,
+            1,
+        );
+        assert!(ended.is_ok(), "{log}");
+        assert!(
+            log.contains("track record not read: bbp why: no such task"),
+            "{log}"
+        );
+        assert_eq!(e.1, 2, "both lenses still asked");
     }
 
     fn two_seats() -> Vec<(&'static str, FakeSeat)> {

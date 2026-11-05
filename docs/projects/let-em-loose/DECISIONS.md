@@ -98,6 +98,7 @@ Precise contracts used by this guide:
 | D83 | #599 watcher dedups by finding key and slot in `watch_finding` | [default] 2026-11-04 (#599) |
 | D86 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
 | D88 | #704 D42 expiry pause: go-live, count, what pauses, opt-out | [default] 2026-11-05 (#704) |
+| D89 | #599 track records: job rows, pivotal scope, ground truth, weight, PR split | [default] 2026-11-05 (#599) |
 
 ## D1. Lenses, not stages
 
@@ -751,3 +752,18 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_b55d930642a747baab2f93387bc09ad3
 **Key.** lel:704:expiry-pause-build-defaults
 **Source.** Questions Q1–Q6 from the #704 expiry-pause build thread, 2026-11-05; D41, D42, D82; QA.md § Erosion gate; card #704 Build 5, Time box and Done when; `rusty_bbp_host` `src/admin.rs` `open_claims_task`, `src/profiles.rs` `check_erosion`; `rusty_bbp` `src/event.rs` `TaskOpened`. Counting rule and lock span amended 2026-11-05 after dottiusmaximus's review of PR #1508 (builder default, not a Nano decision). Open-time bullet amended 2026-11-05 after the coordinator's probe of `admin::open_claims_task` on main showed the open writes only `TaskOpened` and `ArtifactStored(Brief)`. Numbered D88 because open PR branches already use D78–D87.
+
+## D89. #599 track records: job rows, pivotal scope, ground truth, weight, PR split
+
+**Decision.** Build detail for #599 track records (599-build-plan.md §2), inside D58 and D84:
+- **Job rows.** The D58 orch-store table `lens_record` holds one row per answered blind `Review` or `LookHarder` job: task, lens, claim, epoch, slot and the MsgIds the job posted. A job answered with nothing, or whose reply the protocol refused, is a row with no items and counts 0 in the denominator, so refusing isn't free. `Skipped` jobs and jobs no provider could answer are not written. Points are folded from the rows and `claim_history` when read, never stored. `Record`'s `found_problems`, `found_nothing_twice` and `refused` fields are left as they are, not wired and not deleted, in this PR.
+- **Pivotal scope.** Leave-one-out applies only when the claim's latest settlement is `AcceptLine` or `DropLine`. A latest `Human` or `Choose` settlement didn't depend on the score, so the job is never pivotal and is scored against that outcome. That is how a later Nano reversal acts as ground truth: no separate reversal source is needed, and golden and reversal can't conflict.
+- **Ground truth for a pivotal job.** The final `golden:` report (not `holdout:`, which a model wrote) on `current(c)`'s code at settlement: passed means accept was right, failed means drop was right. It doesn't count for a job whose own items cite that report. There is no shadow-run source yet; #598's approved `shadow:` profile kind (D62) is the expected producer. Ground truth is an internal function in `orch-lens::record`, with no new port.
+- **Weight.** A pivotal job scored against ground truth uses the same `w = 1 + contested + 2·upset`, with its own items removed and `upset` judged against the ground truth.
+- **PR split.** Track records are a PR of their own; lessons (§3) and `lens why` (§5) follow in later PRs.
+- **Interim limits (2026-11-05, until Q22).** `claim_history` doesn't carry what the rules above need, so the first build is conservative. A line rule doesn't carry `min_authors`, so if removing the job's items would remove the lens as a distinct author, the job counts as pivotal. Only a `Failing` step shows a `golden:` result, so the only golden ground truth is a failing golden profile (drop was right), and a pivotal job on a claim whose golden set passed stays unscored. Evidence steps carry no refs, so a job whose own items include `executed` evidence gets no golden ground truth, which stands in for "its items cite that report". Each limit only makes more jobs unscored-pivotal, never scores one against the board outcome, and shows in the `pivotal` count. The code and 599-build-plan.md §2 note them.
+**Why.** These are implementation details inside the approved design. Each is the most reversible option: scores are computed when read, so a later rule change recomputes them from the stored rows. Only `golden:` sets are signed off by Nano, and a holdout lens can't be judged by its own report. A port would add to D58's approved list, which the build plan says nothing does.
+**Rejected.** Storing points. Leave-one-out on human settlements. Treating a reversal as a separate source, ranked against golden. `holdout:` reports as ground truth. A `GroundTruth` port now. One PR for track records, lessons and `lens why`.
+**Tag.** [default] · remind-me: mem_6f0738d7778847d0b13fac1f7d458b68
+**Key.** lel:599:track-record-build-defaults
+**Source.** let-em-loose-expert, 2026-11-05, answering questions 1–4 and 6 from the #599 track-record build thread; D58, D84 (on PR #1518's branch), 599-build-plan.md §2, `bbp-claims-addendum.md` § Holdout suites (G1), `rusty_bbp::history::Rule`. Question 5 (a `lens record` subcommand) is OPEN_QUESTIONS Q21. Interim limits: coordinator follow-ups A and B, 2026-11-05; `claims_engine.rs` `accept_line`/`drop_line`; `rusty_bbp::history` `Change`, `Rule`; OPEN_QUESTIONS Q22.

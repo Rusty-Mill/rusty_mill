@@ -21,6 +21,7 @@
 
 mod assignments;
 mod hunts;
+mod lens_records;
 mod lens_states;
 mod meters;
 mod probes;
@@ -45,9 +46,11 @@ use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
 use hunts::HuntRecord;
+use lens_records::LensRecordRecord;
 use lens_states::LensStateRecord;
 use meters::MeterRecord;
 use orch_lens::alien::{HuntRow, ProbeRow};
+use orch_lens::record::Review;
 use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
 use watch::WatchRecord;
@@ -69,6 +72,8 @@ const HUNTS_FILE: &str = "hunts.mmap";
 const LENS_STATES_FILE: &str = "lens-states.mmap";
 /// Watched findings (#599, `watch_finding`).
 const WATCH_FILE: &str = "watch.mmap";
+/// Blind review jobs for lens track records (#599, `lens_record`).
+const LENS_RECORDS_FILE: &str = "lens-records.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -155,6 +160,7 @@ pub struct Store {
     hunts: GenericMmapStore<HuntRecord, ById, Revision>,
     lens_states: GenericMmapStore<LensStateRecord, ById, Revision>,
     watch: GenericMmapStore<WatchRecord, ById, Revision>,
+    lens_records: GenericMmapStore<LensRecordRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -211,6 +217,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(LENS_RECORDS_FILE);
+        let lens_records = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -226,6 +238,7 @@ impl Store {
             hunts,
             lens_states,
             watch,
+            lens_records,
             _lock: lock,
         })
     }
@@ -560,6 +573,59 @@ impl Store {
             self.lens_states.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
+    }
+}
+
+impl Store {
+    /// Save one blind review job of `board` for its lens's track record,
+    /// replacing an earlier save of the same job.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another job;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_lens_review(&mut self, board: &str, row: &Review) -> Result<(), StoreError> {
+        let existing = self.lens_records.get(lens_records::key(board, row));
+        if existing.as_ref().is_some_and(|r| !r.is(board, row)) {
+            return Err(StoreError::Corrupt(
+                "lens record key holds another job".to_owned(),
+            ));
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = LensRecordRecord::new(board, row, revision);
+        let written = if existing.is_none() {
+            self.lens_records.insert(record).map_err(engine_error)
+        } else {
+            self.lens_records.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// Every blind review job saved for `board`, sorted by lens, claim,
+    /// epoch and kind.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when a record does not check out.
+    pub fn lens_reviews(&self, board: &str) -> Result<Vec<Review>, StoreError> {
+        let mut rows = Vec::new();
+        for id in self.lens_records.all_ids() {
+            let Some(record) = self.lens_records.get(id) else {
+                continue;
+            };
+            if record.board() == board {
+                rows.push(record.into_row()?);
+            }
+        }
+        rows.sort_by(|a, b| {
+            (&a.lens, a.claim, a.epoch, a.look_harder).cmp(&(
+                &b.lens,
+                b.claim,
+                b.epoch,
+                b.look_harder,
+            ))
+        });
+        Ok(rows)
     }
 }
 
