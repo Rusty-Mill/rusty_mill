@@ -88,6 +88,7 @@ Precise contracts used by this guide:
 | D76 | `lens run` merges as a disabled slice until the accept-line source lands | [stated] 2026-11-04 (#594) |
 | D77 | `claim_card` carries each claim's accept line and each evidence item's note and strength | [stated] 2026-11-04 (#594) |
 | D82 | #704 slice 2: erosion profile recognition, invocation, opt-out, base, measured set and modes | [default] 2026-11-04 (#704) |
+| D88 | #704 D42 expiry pause: go-live, count, what pauses, opt-out | [default] 2026-11-05 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -644,3 +645,18 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_cc7bf0c6331140d8816112c351b44ed6
 **Key.** lel:704:erosion-profile-build-defaults
 **Source.** Questions Q1–Q6 from the #704 slice 2 build thread, 2026-11-04; D41, D42, D43, D62; QA.md § Erosion gate; card #704 Build 2 and Time box; `rusty_bbp_host` `src/profiles.rs` `ProfileSet`, `src/admin.rs` `open_claims_task`. Numbered D82 because open PR branches already use D78–D81. Invocation contract amended 2026-11-04 from the #704 slice 2 build thread, answering dottiusmaximus's review of PR #1494; `rusty_bbp_host` `src/profiles.rs` `check_erosion_base`.
+
+## D88. #704 D42 expiry pause: go-live, count, what pauses, opt-out
+
+**Decision.** Build detail for the D42 pause-at-expiry slice (card #704), inside D41, D42 and D82:
+- Go-live and the count come from a host-side, append-only ledger, `<dir>/erosion/report-only.log`, one line `<unix_ms> <task id>` per report-only claims open. A claims open writes no time to the BBP log (`task_opened` has no time field and claims mode grants no turn at open), so the log alone can't date it. In `open_claims_task`, after every refusal check and before the open dispatches, the host appends the line; if the append fails, the open is refused and nothing is opened, so no report-only task can open uncounted. Go-live is the first line's time. The count is the number of distinct task ids in the ledger that have a task in the store, so a line whose open then failed isn't counted; that line can only start the clock earlier, which is the safe direction under D42. A missing ledger means not live yet. This is host state, not a BBP change, and no human command writes it. Someone with write access to the data dir can reset it, but they can already rewrite the task logs.
+- Only claims tasks with a report-only erosion profile count. Report-only expires 14 days after go-live or once 10 such tasks have opened, whichever comes first. After that, `open_claims_task` refuses a new claims open with a report-only profile with `bad_claims_config(erosion)`: report-only has expired, and limits wait for Nano's approval from the calibration numbers (card #704 Build 5). Tasks already open are untouched.
+- An `erosion = "off"` opt-out is not an affected task: it doesn't count and isn't paused.
+- Count by tasks opened, not tasks finished.
+- Sending the calibration numbers to Nano is Build 5 (card #704 Build 5 and Done when), not this slice. The refusal only points at it.
+- Enforcing opens are unchanged for now. Whether an enforcing profile's limits need a human-only host record of the approved limits is OPEN_QUESTIONS Q19.
+**Why.** These are the most reversible choices that fit D42. The ledger dates every report-only open with no BBP schema change. Appending before the open fails closed, so the time box can't be undercounted. The pause acts on opens, so counting opens keeps the time box from stretching while tasks run. The opt-out is D41's recorded path, covered by the digest, and pausing it would pause every claims task, which D42 doesn't say.
+**Rejected.** A go-live file written by a human command (the clock could be started late). Deriving go-live statelessly from the first `TurnGranted` (an unassigned task would never start the clock, extending report-only against D42). Appending after the open (an open whose append failed would stand uncounted). The first version of this entry, which read the open time from an opening `TurnGranted` that claims mode never writes. Counting finished tasks. Pausing opt-out tasks. Delivering the calibration report from this slice.
+**Tag.** [default] · remind-me: mem_b55d930642a747baab2f93387bc09ad3
+**Key.** lel:704:expiry-pause-build-defaults
+**Source.** Questions Q1–Q6 from the #704 expiry-pause build thread, 2026-11-05; D41, D42, D82; QA.md § Erosion gate; card #704 Build 5, Time box and Done when; `rusty_bbp_host` `src/admin.rs` `open_claims_task`, `src/profiles.rs` `check_erosion`; `rusty_bbp` `src/event.rs` `TaskOpened`. Open-time bullet amended 2026-11-05 after the coordinator's probe of `admin::open_claims_task` on main showed the open writes only `TaskOpened` and `ArtifactStored(Brief)`. Numbered D88 because open PR branches already use D78–D87.

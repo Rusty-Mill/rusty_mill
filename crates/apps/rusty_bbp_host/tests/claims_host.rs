@@ -1659,3 +1659,78 @@ fn confined_erosion_profile_reports_then_blocks_a_pasted_duplicate() {
     }
     println!("BBP_ACCEPTANCE PASS erosion-confined");
 }
+
+/// A claims profile set whose `erosion` profile runs with `mode` flags.
+fn erosion_profiles(mode: &str) -> ProfileSet {
+    let mut set = profiles();
+    set.erosion = None;
+    let args = format!("check --base {} {mode}", "a".repeat(40));
+    set.profiles.push(rusty_bbp_host::profiles::Profile {
+        name: "erosion".into(),
+        program: "/usr/local/bin/erosion".into(),
+        args: args.split(' ').map(String::from).collect(),
+    });
+    set
+}
+
+/// #704 D42 (D88): report-only covers 10 claims tasks, then a new
+/// report-only open pauses. Tasks already open stay, and the opt-out and
+/// enforcing opens are not affected.
+#[test]
+fn report_only_erosion_pauses_after_ten_tasks() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-ten");
+    let report_only = erosion_profiles("--report-only");
+    for i in 0..10 {
+        let t = TaskId(format!("R{i}"));
+        assert!(matches!(
+            open_as(&dir, &t, &report_only, Ok(())),
+            Response::Stored(_)
+        ));
+    }
+    let ledger = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(ledger.lines().count(), 10, "{ledger}");
+
+    let (code, detail) = rejected(open_as(&dir, &TaskId("R10".into()), &report_only, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.contains("report-only has expired"), "{detail}");
+    assert!(detail.contains("10 report-only tasks"), "{detail}");
+    assert!(!log_path_for(&dir, &TaskId("R10".into())).exists());
+    assert!(log_path_for(&dir, &TaskId("R0".into())).exists());
+
+    let off = TaskId("OFF".into());
+    assert!(matches!(
+        open_as(&dir, &off, &profiles(), Ok(())),
+        Response::Stored(_)
+    ));
+    let enforcing = erosion_profiles("--max-concentration-bp 50 --max-duplication-bp 50");
+    let e = TaskId("ENF".into());
+    assert!(matches!(
+        open_as(&dir, &e, &enforcing, Ok(())),
+        Response::Stored(_)
+    ));
+    let after = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
+    assert_eq!(after, ledger, "only report-only opens are recorded");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #704 D42 (D88): report-only ends 14 days after its first open, and an
+/// open refused before the ledger (here, no sandbox) records nothing.
+#[test]
+fn report_only_erosion_pauses_fourteen_days_after_go_live() {
+    use rusty_bbp_host::erosion_window;
+    let dir = tempdir("erosion-days");
+    let report_only = erosion_profiles("--report-only");
+    let (code, _) = rejected(open(&dir, &report_only, Err("no Landlock".into())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(!erosion_window::path(&dir).exists());
+
+    let long_ago = now().0 - erosion_window::WINDOW_MS;
+    std::fs::create_dir_all(dir.join("erosion")).expect("mkdir");
+    std::fs::write(erosion_window::path(&dir), format!("{long_ago} OLD\n")).expect("seed");
+    let (code, detail) = rejected(open(&dir, &report_only, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.contains("14 days"), "{detail}");
+    assert!(!log_path_for(&dir, &task()).exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
