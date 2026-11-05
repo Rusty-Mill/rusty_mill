@@ -289,13 +289,11 @@ fn claude_gets_a_status_hook_per_event_as_one_item() {
     let written = json(&fs::read_to_string(dir.join("settings.json")).expect("settings"));
     let quoted = format!("'{CTL}' agent hook");
     let want = [
-        ("PermissionDenied", " --event working --app claude"),
         (
             "PermissionRequest",
             " --event blocked --kind permission --app claude --tool-from-stdin",
         ),
-        ("PostToolUse", " --event working --app claude"),
-        ("PostToolUseFailure", " --event working --app claude"),
+        ("PostToolBatch", " --event working --app claude"),
         (
             "PreToolUse",
             " --event working --app claude --tool-from-stdin",
@@ -336,6 +334,31 @@ fn claude_gets_a_status_hook_per_event_as_one_item() {
     assert!(files_in(&dir).is_empty(), "{:?}", files_in(&dir));
 }
 
+/// An install with the per-tool events an earlier ctl wrote is outdated,
+/// and setup and remove take those hooks out.
+#[test]
+fn per_tool_completion_hooks_from_an_earlier_ctl_are_retired() {
+    let entries = settings::entries(AgentKind::Claude, plain(CTL), false).expect("entries");
+    let mut earlier = entries.clone();
+    for event in ["PostToolUse", "PostToolUseFailure", "PermissionDenied"] {
+        let mut entry = entries[1].clone();
+        entry.event = event;
+        earlier.push(entry);
+    }
+    let old = settings::with_hook(json("{}"), &earlier).expect("adds");
+    assert_eq!(settings::state(&old, &entries), Ok(State::Outdated));
+    let updated = settings::with_hook(old.clone(), &entries).expect("updates");
+    assert_eq!(settings::state(&updated, &entries), Ok(State::Installed));
+    let events: Vec<String> = commands(&updated).into_iter().map(|(e, _)| e).collect();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.starts_with("PostToolUse") || e == "PermissionDenied"),
+        "{events:?}"
+    );
+    assert_eq!(settings::without_hook(old, None), Ok(json("{}")));
+}
+
 /// Codex reports as Claude Code does, from its own events (D89, Q21).
 #[test]
 fn codex_gets_its_status_hooks() {
@@ -348,7 +371,6 @@ fn codex_gets_its_status_hooks() {
             "UserPromptSubmit",
             "PreToolUse",
             "PermissionRequest",
-            "PostToolUse",
             "Stop",
             "Interrupt"
         ]
@@ -362,7 +384,7 @@ fn codex_gets_its_status_hooks() {
     let windows = settings::entries(AgentKind::Codex, plain(r"C:\bin\rusty-mux-ctl.exe"), true)
         .expect("entries");
     assert_eq!(
-        windows[5].windows.as_deref(),
+        windows[4].windows.as_deref(),
         Some("C:/bin/rusty-mux-ctl.exe agent hook --event idle --app codex")
     );
     // Claude Code runs hooks in a POSIX shell everywhere: no Windows command.

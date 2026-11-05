@@ -34,8 +34,11 @@ pub(crate) struct Entry {
 type Event = (&'static str, &'static [&'static str]);
 
 /// Claude Code's status hooks (D89). A permission prompt shows `blocked`
-/// until the tool runs, fails or is denied; `PreToolUse` and
-/// `PermissionRequest` name the tool from the event's stdin.
+/// until the batch of tools it is in ends (`PostToolBatch`), the next tool
+/// starts or the turn ends. Not `PostToolUse`: it fires for each of a
+/// parallel batch's tools, and one finishing would hide another's pending
+/// prompt. `PreToolUse` and `PermissionRequest` name the tool from the
+/// event's stdin.
 const CLAUDE: &[Event] = &[
     (
         "UserPromptSubmit",
@@ -57,22 +60,16 @@ const CLAUDE: &[Event] = &[
             "--tool-from-stdin",
         ],
     ),
-    (
-        "PermissionDenied",
-        &["--event", "working", "--app", "claude"],
-    ),
-    ("PostToolUse", &["--event", "working", "--app", "claude"]),
-    (
-        "PostToolUseFailure",
-        &["--event", "working", "--app", "claude"],
-    ),
+    ("PostToolBatch", &["--event", "working", "--app", "claude"]),
     ("Stop", &["--event", "idle", "--app", "claude"]),
     ("StopFailure", &["--event", "error", "--app", "claude"]),
 ];
 
 /// Codex's status hooks (events from `openai/codex` `codex-rs/hooks`): as
-/// Claude Code's, less the failure events, plus `Interrupt`, which ends a
-/// turn without `Stop`.
+/// Claude Code's, less the batch and failure events, plus `Interrupt`,
+/// which ends a turn without `Stop`. Not `PostToolUse`, for the reason
+/// Claude Code's has none; an approved tool shows `blocked` until the next
+/// tool starts or the turn ends.
 const CODEX: &[Event] = &[
     (
         "UserPromptSubmit",
@@ -94,7 +91,6 @@ const CODEX: &[Event] = &[
             "--tool-from-stdin",
         ],
     ),
-    ("PostToolUse", &["--event", "working", "--app", "codex"]),
     ("Stop", &["--event", "idle", "--app", "codex"]),
     ("Interrupt", &["--event", "idle", "--app", "codex"]),
 ];
@@ -108,10 +104,16 @@ fn events(agent: AgentKind) -> &'static [Event] {
     }
 }
 
-/// Every event setup may write under, once each; they must hold arrays to
-/// be edited.
+/// Events an earlier ctl wrote status hooks under and this one does not,
+/// so setup and remove still take those hooks out.
+const RETIRED: &[&str] = &["PostToolUse", "PostToolUseFailure", "PermissionDenied"];
+
+/// Every event setup may write under or take hooks out of, once each; they
+/// must hold arrays to be edited.
 fn known_events() -> Vec<&'static str> {
-    let all = std::iter::once(SESSION_START).chain(CLAUDE.iter().chain(CODEX).map(|(e, _)| *e));
+    let all = std::iter::once(SESSION_START)
+        .chain(CLAUDE.iter().chain(CODEX).map(|(e, _)| *e))
+        .chain(RETIRED.iter().copied());
     let mut events = Vec::new();
     for event in all {
         if !events.contains(&event) {
