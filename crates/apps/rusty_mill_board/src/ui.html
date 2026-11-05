@@ -227,6 +227,14 @@ main.roadmap{max-width:1500px}
 .tl-flag{flex:none;padding:1px 6px;border-radius:3px;background:var(--red-fill);color:#fff;font-size:11px;font-weight:600}
 .tl-text{flex:0 1 auto;min-width:0}
 .tl-mark{position:absolute;top:50%;width:11px;height:11px;margin:-6px 0 0 -6px;padding:0;border:0;border-radius:2px;transform:rotate(45deg);background:var(--cyan-fill);cursor:pointer;box-shadow:0 0 0 2px var(--card)}
+.tl-mark.stone{width:13px;height:13px;margin:-7px 0 0 -7px;background:var(--card);border:2px solid var(--ink);box-shadow:none}
+.tl-mark.stone.done{background:var(--ok);border-color:var(--ok)}.tl-mark.stone.late{border-color:var(--red);background:var(--red-wash)}
+.tl-mlabel{position:absolute;top:50%;transform:translate(10px,-50%);font-size:12px;font-weight:600;white-space:nowrap;pointer-events:none;padding:0 4px;background:color-mix(in srgb,var(--card) 85%,transparent);border-radius:3px}
+.tl-mlabel.left{transform:translate(calc(-100% - 10px),-50%)}
+.tl-bar.late{border-style:dashed;border-color:var(--red)}.tl-bar.late .tl-flag{background:var(--red)}
+.tl-ahead{position:absolute;top:0;bottom:0;right:0;background:repeating-linear-gradient(135deg,transparent 0 5px,color-mix(in srgb,var(--sw) 14%,transparent) 5px 7px);pointer-events:none}
+.rm-head{grid-column:1/-1;display:flex;align-items:center;gap:12px}.rm-head button{margin-left:auto;font-size:13px;font-weight:600}
+#dlg .stone{display:grid;gap:10px}
 .tl-now{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--cyan);opacity:.7;pointer-events:none}
 .rm-top{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:14px;align-items:start}
 .ins-body{display:flex;gap:20px;align-items:center}
@@ -255,6 +263,7 @@ dialog h2{margin:0;font-size:18px}
 #dlg .dhead .num{font-size:30px}
 #dlg .dhead .meta{margin:0}
 #dlg input:first-of-type{font-size:16px;font-weight:600}
+#dlg .plan{display:flex;align-items:center;gap:8px}#dlg .plan input{width:auto;font-size:14px;font-weight:400}
 #dlg .row{display:flex;flex-wrap:wrap;gap:6px}
 .cm{border-top:1px solid var(--line)}
 .cm div{border-bottom:1px solid var(--line);padding:8px 0;font-size:13.5px}
@@ -547,14 +556,18 @@ function setView(v){view=v;pref("view",v);pressed();render()}
 const WEEK=7*864e5,MAX_WEEKS=12;
 const dayStart=ms=>{const d=new Date(ms);d.setHours(0,0,0,0);return d.getTime()};
 const weekStart=ms=>dayStart(ms)-((new Date(ms).getDay()+6)%7)*864e5;
-/* The chart's window: back to the oldest work it shows, at most twelve weeks. Three weeks or less is
-   drawn in days, at least fourteen; longer in weeks. */
-function windowOf(scoped){
-  const now=Date.now(),floor=weekStart(now)-(MAX_WEEKS-1)*WEEK;
+/* The chart's window: back to the oldest work it shows and on to the furthest target or milestone,
+   at most twelve weeks each way. Three weeks or less is drawn in days, at least fourteen; longer in weeks. */
+function windowOf(scoped,stones){
+  const now=Date.now(),floor=weekStart(now)-(MAX_WEEKS-1)*WEEK,ceil=now+MAX_WEEKS*WEEK;
   const starts=scoped.flatMap(k=>planned(k)?[k.created_ms]:isDone(k)&&k.done_ms>=floor?[k.created_ms]:[]);
-  const first=Math.max(floor,Math.min(now,...starts));
-  if(now-first<=21*864e5){const n=Math.max(14,Math.ceil((now-dayStart(first))/864e5)+1),t0=dayStart(now)-(n-1)*864e5;return {t0,t1:t0+n*864e5,n,step:864e5,unit:"day"}}
-  const n=Math.ceil((now-weekStart(first))/WEEK)+1,t0=weekStart(now)-(n-1)*WEEK;
+  const ends=[...scoped.filter(planned).map(k=>k.target_ms),...stones.filter(m=>!m.done_ms).map(m=>m.target_ms)].filter(t=>t>now);
+  const first=Math.max(floor,Math.min(now,...starts)),last=Math.min(ceil,Math.max(now,...ends));
+  if(last-first<=21*864e5){
+    const n=Math.max(14,Math.round((dayStart(last)-dayStart(first))/864e5)+1),ahead=Math.round((dayStart(last)-dayStart(now))/864e5);
+    const t0=dayStart(now)-(n-1-ahead)*864e5;return {t0,t1:t0+n*864e5,n,step:864e5,unit:"day"};
+  }
+  const t0=weekStart(first),n=Math.round((weekStart(last)-t0)/WEEK)+1;
   return {t0,t1:t0+n*WEEK,n,step:WEEK,unit:"week"};
 }
 // The project the lanes are for: the chosen one, else the only one in scope, else none.
@@ -564,52 +577,66 @@ function focusProject(){
   return scope.length===1?scope[0]:"";
 }
 const planned=k=>["work","queue","blocked"].includes(kindOf(k.column));
+const overdue=k=>!isDone(k)&&k.target_ms!=null&&k.target_ms<dayStart(Date.now());
+// Milestones as one row: each a diamond at its target, filled once done, late ones in red.
+const stoneMarks=stones=>stones.map(m=>({at:m.done_ms??m.target_ms,label:m.title,cls:"stone"+(m.done_ms?" done":m.target_ms<dayStart(Date.now())?" late":""),
+  title:m.title+(m.done_ms?" · reached "+day(m.done_ms):" · due "+day(m.target_ms)),open:()=>editStone(m)}));
+function stoneRows(stones){
+  if(!stones.length)return [];
+  return [{label:"Milestones",sub:stones.filter(m=>!m.done_ms).length+" ahead · "+stones.filter(m=>m.done_ms).length+" reached",marks:stoneMarks(stones)}];
+}
 // What a set of cards amounts to on the chart: work begun, shipped in the window, and where it stands.
 function track(list,t0){
   const open=list.filter(planned),shipped=list.filter(k=>isDone(k)&&k.done_ms>=t0);
   if(!open.length&&!shipped.length)return null;
   const has=kind=>open.some(k=>kindOf(k.column)===kind);
   const start=Math.min(...[...open,...shipped].map(k=>k.created_ms));
-  const end=open.length?Date.now():Math.max(...shipped.map(k=>k.done_ms));
+  const end=open.length?Math.max(Date.now(),...open.map(k=>k.target_ms??0)):Math.max(...shipped.map(k=>k.done_ms));
   const kind=has("work")?"work":has("queue")?"queue":has("blocked")?"blocked":"done";   // blocked only when nothing else moves
-  return {open,shipped,start,end,kind,pct:Math.round(100*shipped.length/(shipped.length+open.length))};
+  return {open,shipped,start,end,kind,ahead:end>Date.now(),pct:Math.round(100*shipped.length/(shipped.length+open.length))};
 }
-function timeline(scoped,focus,w){
+function timeline(scoped,focus,w,stones){
   const {t0,t1,n,step,unit}=w,x=ms=>Math.min(100,Math.max(0,(ms-t0)/(t1-t0)*100))+"%";
   const s=el("section",null,"panel tl");s.style.setProperty("--weeks",n);
   const head=el("div",null,"tl-row tl-head"),months=el("div",null,"tl-months"),weeks=el("div",null,"tl-weeks");
   let last="";
   for(let i=0;i<n;i++){
-    const ms=t0+i*step,m=new Date(ms).toLocaleDateString(undefined,{month:"short"}),cur=i===n-1;
+    const ms=t0+i*step,m=new Date(ms).toLocaleDateString(undefined,{month:"short"}),cur=Date.now()>=ms&&Date.now()<ms+step;
     months.append(el("span",m===last?"":m));last=m;
     weeks.append(el("span",cur?(unit==="day"?"Today":"This week"):unit==="day"?String(new Date(ms).getDate()):day(ms),cur?"now":null));
   }
   const area=el("div",null,"tl-area");area.append(months,weeks);head.append(el("div",focus?"Cards in flight":"Projects","tl-label"),area);s.append(head);
-  const rows=focus?cardRows(scoped,t0):projectRows(scoped,t0);
+  // One project: its milestones on a row of their own. Several: each project's on its own row.
+  const rows=focus?[...stoneRows(stones,focus),...cardRows(scoped,t0)]:projectRows(scoped,t0,stones);
   if(!rows.length)s.append(el("p","Nothing planned or shipped in this window.","empty-note"));
   for(const r of rows.slice(0,14)){
     const row=el("div",null,"tl-row"),lab=el("div",null,"tl-label"),lane=el("div",null,"tl-area tl-lane");
     lab.append(el("b",r.label),el("span",r.sub,"meta"));
     if(r.start!=null){
       const bar=el("button",null,"tl-bar");bar.dataset.kind=r.kind;bar.style.left=x(r.start);bar.style.width="calc("+x(r.end)+" - "+x(r.start)+")";
-      bar.style.setProperty("--pct",(r.pct??0)+"%");bar.title=r.title??r.label;bar.onclick=r.open;
+      bar.style.setProperty("--pct",(r.pct??0)+"%");bar.title=r.title??r.label;bar.onclick=r.open;if(r.late)bar.classList.add("late");
+      if(r.ahead){const a=el("i",null,"tl-ahead"),from=Math.max(r.start,t0),span=Math.min(r.end,t1)-from;a.style.left=(span>0?(Date.now()-from)/span*100:0)+"%";bar.append(a)}
       bar.append(el("span",r.text,"tl-text"));if(r.flag)bar.append(el("span",r.flag,"tl-flag"));if(r.right)bar.append(el("span",r.right,"tl-pct"));lane.append(bar);
     }
-    for(const m of r.marks??[]){const d=el("button",null,"tl-mark");d.style.left=x(m.at);d.title=m.title;d.onclick=m.open;lane.append(d)}
+    for(const m of r.marks??[]){const d=el("button",null,"tl-mark"+(m.cls?" "+m.cls:""));d.style.left=x(m.at);d.title=m.title;if(m.open)d.onclick=m.open;lane.append(d);if(m.label){const t=el("span",m.label,"tl-mlabel");t.style.left=x(m.at);if(parseFloat(x(m.at))>70)t.classList.add("left");lane.append(t)}}
     const now=el("i",null,"tl-now");now.style.left=x(Date.now());lane.append(now);
     row.append(lab,lane);s.append(row);
   }
   if(rows.length>14)s.append(el("p",(rows.length-14)+" more not shown; choose a project to narrow.","empty-note"));
   return s;
 }
-function projectRows(scoped,t0){
+function projectRows(scoped,t0,stones){
   const by=scoped.reduce((m,k)=>m.set(k.project,[...(m.get(k.project)??[]),k]),new Map());
+  for(const m of stones)if(!by.has(m.project))by.set(m.project,[]);
   const out=[];
   for(const [p,list] of by){
-    const t=track(list,t0);if(!t)continue;
+    const marks=stoneMarks(stones.filter(m=>m.project===p)),t=track(list,t0);
+    if(!t){if(marks.length)out.push({label:label(p),sub:"milestones only",marks,rank:-1});continue}
+    t.marks=marks.map(m=>m.at>=t.start&&m.at<=t.end?{...m,label:""}:m);   // a name over the bar would cover it; hover tells
     const n=kind=>t.open.filter(k=>kindOf(k.column)===kind).length;
     const sub=[[n("work"),"in progress"],[n("queue"),"next"],[n("blocked"),"blocked"]].filter(([v])=>v).map(([v,w])=>v+" "+w).join(" · ")||"all shipped";
-    if(n("blocked"))t.flag=n("blocked")+" blocked";
+    const late=t.open.filter(overdue).length;
+    t.flag=[n("blocked")&&n("blocked")+" blocked",late&&late+" overdue"].filter(Boolean).join(" · ");
     out.push({...t,label:label(p),sub,text:t.shipped.length+" shipped",right:t.pct+"%",title:label(p)+": "+t.pct+"% of planned work shipped",open:()=>pick(repoOf(p),p),rank:n("work")*3+n("blocked")*2+n("queue")});
   }
   return out.sort((a,z)=>z.rank-a.rank||a.label.localeCompare(z.label));
@@ -617,8 +644,9 @@ function projectRows(scoped,t0){
 const KIND_ORDER={work:0,blocked:1,queue:2};
 function cardRows(scoped,t0){
   const rows=scoped.filter(planned).sort((a,z)=>KIND_ORDER[kindOf(a.column)]-KIND_ORDER[kindOf(z.column)]||z.priority-a.priority).map(k=>({
-    label:(k.number?"#"+k.number+" ":"")+k.title,sub:colLabel(k.column)+(k.claim?" · "+k.claim:""),start:k.created_ms,end:Date.now(),
-    kind:kindOf(k.column),text:"since "+day(k.created_ms),right:k.claim??"",title:k.title+" · since "+day(k.created_ms),open:()=>show(k.id)}));
+    label:(k.number?"#"+k.number+" ":"")+k.title,sub:colLabel(k.column)+(k.claim?" · "+k.claim:""),start:k.created_ms,end:Math.max(Date.now(),k.target_ms??0),
+    kind:kindOf(k.column),text:k.target_ms?"due "+day(k.target_ms):"since "+day(k.created_ms),right:k.claim??"",ahead:k.target_ms>Date.now(),
+    late:overdue(k),flag:overdue(k)?"overdue "+ago(k.target_ms):"",title:k.title+" · since "+day(k.created_ms)+(k.target_ms?" · due "+day(k.target_ms):""),open:()=>show(k.id)}));
   const shipped=scoped.filter(k=>isDone(k)&&k.done_ms>=t0);
   if(shipped.length)rows.unshift({label:"Shipped",sub:shipped.length+" in this window",marks:shipped.map(k=>({at:k.done_ms,title:(k.number?"#"+k.number+" ":"")+k.title+" · "+day(k.done_ms),open:()=>show(k.id)}))});
   return rows;
@@ -648,17 +676,40 @@ function activity(scoped){
   }
   return s;
 }
+/* A milestone's dialog: add one to `project`, or change, close or reopen `m`. Milestones are never
+   deleted. It borrows the card dialog, so the card in it (if any) is let go first. */
+function editStone(m,project){
+  dlg=null;
+  const f=el("form",null,"stone"),t=el("input"),d=el("input"),row=el("div",null,"row");f.method="dialog";
+  t.placeholder="Milestone, e.g. Beta release";t.setAttribute("aria-label","milestone title");t.value=m?.title??"";
+  d.type="date";d.setAttribute("aria-label","milestone date");d.value=m?isoDay(m.target_ms):"";d.required=true;
+  const at=()=>new Date(d.value+"T12:00").getTime();
+  const done=async r=>{if(r){$("dlg").close();render()}};
+  const btn=(text,fn,cls)=>{const b=el("button",text,cls);b.type="button";b.onclick=fn;row.append(b);return b};
+  btn(m?"Save":"Add milestone",async()=>{
+    if(!t.value.trim()||!d.value){toast("A milestone needs a title and a date.");return}
+    done(m?await act("milestone_update",{id:m.id,title:t.value,target_ms:at()}):await act("milestone_add",{project,title:t.value,target_ms:at()}));
+  },"primary");
+  if(m)btn(m.done_ms?"Reopen":"Mark reached",async()=>done(await act("milestone_update",{id:m.id,done:!m.done_ms})));
+  btn("Cancel",()=>$("dlg").close());
+  const head=el("div",null,"dhead");head.append(el("span",m?(m.done_ms?"Reached "+day(m.done_ms):"Milestone"):"New milestone","meta"),el("span",label(m?.project??project),"tag proj"));
+  const when=el("div",null,"plan");when.append(el("span","Target","meta"),d);
+  f.append(head,t,when,row);$("dlg").replaceChildren(f);if(!$("dlg").open)$("dlg").showModal();t.focus();
+}
 async function renderRoadmap(){
   const focus=focusProject(),seq=++mapSeq,b=$("board");
   const stale=()=>seq!==mapSeq||view!=="roadmap";   // a newer render, or the board, won
-  let map=null;
-  try{if(focus)map=await api("board_roadmap",{project:focus})}
+  let map=null,stones=[];
+  try{[map,stones]=await Promise.all([focus?api("board_roadmap",{project:focus}):null,
+    api("board_milestones",focus?{project:focus}:sel.repo?{repo:sel.repo}:{}).then(r=>r.milestones)])}
   catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
   b.classList.remove("board","metrics","decisions","archive");b.classList.add("roadmap");
   const scoped=cards.filter(k=>shown(k)&&(!focus||k.project===focus));
-  const w=windowOf(scoped),top=el("div",null,"rm-top");top.append(insights(scoped,w.t0),activity(scoped));
-  b.replaceChildren(el("h3","Roadmap · "+(focus?label(focus):sel.repo||"all projects")),timeline(scoped,focus,w),top);
+  const w=windowOf(scoped,stones),top=el("div",null,"rm-top");top.append(insights(scoped,w.t0),activity(scoped));
+  const h=el("div",null,"rm-head");h.append(el("h3","Roadmap · "+(focus?label(focus):sel.repo||"all projects")));
+  if(focus){const add=el("button","Add milestone");add.type="button";add.onclick=()=>editStone(null,focus);h.append(add)}
+  b.replaceChildren(h,timeline(scoped,focus,w,stones),top);
   if(!map){renderSide();syncDialog();return}
   b.append(el("h4","Lanes","rm-lanes"));
   for(const l of map.lanes){
@@ -841,17 +892,21 @@ function pickAgent(agent){sel={...sel,agent};render()}
 const snap=k=>({rev:k.rev,title:k.title,body:k.body,tags:k.tags.join(", ")});
 const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,tags:dlg.f.g.value});
 const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.tags===b.tags;
+const isoDay=ms=>{const d=new Date(ms);return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
 function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s.tags}
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select")};
+  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input")};
   for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
   [5,3,1,0].forEach(v=>f.pr.append(new Option("Priority: "+PRIORITY[v],v)));
   f.pr.setAttribute("aria-label","priority");f.pr.value=k.priority;
   f.pr.onchange=()=>act("card_plan",{id,priority:+f.pr.value});
+  // The target date, a local day; stored at its noon so a time zone shift keeps the day.
+  f.due.type="date";f.due.setAttribute("aria-label","target date");f.due.title="Target date: when this should be done";
+  f.due.onchange=()=>act("card_plan",{id,target_ms:f.due.value?new Date(f.due.value+"T12:00").getTime():null});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   dlg={id,base:snap(k),f};setFields(dlg.base);
   const row=el("div",null,"row");
@@ -862,7 +917,8 @@ function show(id){
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
   const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
-  form.append(head,f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
+  const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
+  form.append(head,f.banner,f.t,f.b,f.g,plan,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
@@ -882,6 +938,7 @@ function syncDialog(){
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
+  if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
   if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
   const dirty=!sameText(typed(),dlg.base);
   if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board

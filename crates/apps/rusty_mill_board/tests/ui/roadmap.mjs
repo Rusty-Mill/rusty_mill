@@ -58,6 +58,24 @@ check((await page.locator("[data-lane]").count()) === 0, "and no lanes, which be
 await page.locator(".tl-bar").first().click();
 await page.waitForFunction(() => document.querySelector(".roadmap h3")?.textContent === "Roadmap · rl");
 check(true, "clicking a project's bar chooses it");
+
+// Plans ahead: a card's target date carries its bar past today, and a milestone sits on its own row.
+await api("card_plan", { id: next.id, target_ms: Date.now() + 9 * 864e5 });
+await page.waitForFunction(() => [...document.querySelectorAll(".tl-bar .tl-text")].some((t) => t.textContent.startsWith("due ")));
+check((await page.locator(".tl-bar .tl-ahead").count()) === 1, "a card due later is drawn on past today");
+await page.fill("#actor", "tester"); // an open board has no credential, so the UI needs a name
+await page.click(".rm-head button");
+await page.fill('#dlg input[aria-label="milestone title"]', "Beta");
+const ahead = new Date(Date.now() + 14 * 864e5);
+await page.fill('#dlg input[aria-label="milestone date"]', `${ahead.getFullYear()}-${String(ahead.getMonth() + 1).padStart(2, "0")}-${String(ahead.getDate()).padStart(2, "0")}`);
+await page.locator("#dlg button", { hasText: "Add milestone" }).click();
+await page.waitForSelector(".tl-mark.stone");
+const stones = (await api("board_milestones", { project: "rl" })).milestones;
+check(stones.length === 1 && stones[0].title === "Beta", "a milestone added from the roadmap is stored in its project");
+await page.click(".tl-mark.stone");
+await page.locator("#dlg button", { hasText: "Mark reached" }).click();
+await page.waitForSelector(".tl-mark.stone.done");
+check((await api("board_milestones", { project: "rl" })).milestones[0].done_ms != null, "and can be marked reached");
 await page.click("#view");
 await page.waitForSelector("[data-col=backlog]");
 check((await page.locator(".roadmap").count()) === 0, "toggling back shows the board");

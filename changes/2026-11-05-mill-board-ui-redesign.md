@@ -1,6 +1,6 @@
 ---
 category: Changed
-changelog: Mill Board web UI redesigned: scope bar, colour strip, job-ticket cards, approvals that wait on you.
+changelog: Mill Board web UI redesigned (scope bar, colour strip, job-ticket cards, approvals that wait on you); roadmap timeline with target dates and milestones.
 ---
 ## 2026-11-05 - Mill Board web UI redesign
 
@@ -15,7 +15,9 @@ changelog: Mill Board web UI redesigned: scope bar, colour strip, job-ticket car
   shipped cards as diamonds), each bar running from when its work began and filled with the share shipped; under it a
   progress ring with In progress, Up next, Blocked and Waits on you, recent activity, then the lanes. Archive,
   Decisions and the card dialog share the look; dark mode follows the OS.
+- **Added:** target dates on cards (`card_plan` `target_ms`, set from the card dialog) and project milestones
+  (`board_milestones`, `milestone_add`, `milestone_update`; rusty_tick tasks tagged `milestone`). The roadmap timeline
+  runs each card's bar to its target, marks overdue work, and draws milestones as diamonds ahead of today.
 - **Added:** the UI's two typefaces (SIL OFL 1.1) are served from the binary at `/ui/fonts/`.
 - **Known limitations:** browser checks (`tests/ui/*.mjs`) stay manual, as before; card ages use the last update, since
-  cards carry no claim time. Cards have no target dates, so the roadmap timeline shows history up to today, not a
-  plan ahead.
+  cards carry no claim time.

@@ -53,7 +53,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
   holds nothing up); naming it explicitly says why. It never takes a card with a `superseded_by` link (newer cards
   that replace it): close that card, or re-scope it and clear the link. `related` links are informational.
-  `card_plan` sets priority and all three link lists, and needs Triage. The tags `agent`,
+  `card_plan` sets priority, all three link lists and a target date (`target_ms`, `null` clears it), and needs Triage. The tags `agent`,
   `board:…`, `claim:…`, `number:…`, `archived:…` and `restored:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
   carry them, and the GitHub sync drops such labels when it imports an issue.
 - **Projects:** one board serves several applications of a monorepo, and several repositories.
@@ -73,8 +73,13 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
   `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_archive`,
-  `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `inbox_list`, `inbox_act`. The web API
+  `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
+  `milestone_update`, `inbox_list`, `inbox_act`. The web API
   exposes the same table, so the two cannot drift.
+- **Milestones.** A project's dated goals (`src/milestones.rs`): a title and a target date, closed when reached, never
+  deleted. `milestone_add` and `milestone_update` need Triage and the project in scope; `board_milestones` lists what the
+  caller may see. In rusty_tick a milestone is a task tagged `milestone` (never `agent`, so never a card) in the
+  project's list, its `dueMs` the target; without `--tick-url` they live in memory.
 - **Archive.** A Done card leaves the board's default views (`board_list`, the Done column) once it is archived, or
   14 days after it was done or last restored (`board_list`'s `done_days`; 0 keeps every unarchived Done card). It is
   still Done: `card_get`, the roadmap, metrics and dependencies see it as before. `card_restore` puts any such card

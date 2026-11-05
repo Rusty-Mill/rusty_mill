@@ -73,6 +73,8 @@ pub struct RoadmapCard {
     pub waits_on: Vec<Uuid>,
     /// When it shipped, Unix ms.
     pub done_ms: Option<i64>,
+    /// When it should be done, Unix ms, if planned.
+    pub target_ms: Option<i64>,
 }
 
 /// One lane and its cards, in order.
@@ -148,6 +150,7 @@ fn view(card: &Card, open: &BTreeSet<Uuid>) -> RoadmapCard {
             .filter(|d| open.contains(d))
             .collect(),
         done_ms: card.done_ms,
+        target_ms: card.target_ms,
     }
 }
 
