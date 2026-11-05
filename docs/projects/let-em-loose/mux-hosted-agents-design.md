@@ -86,7 +86,7 @@ So the mux never decides to start or stop an agent. It forks one only when orch 
 1. Nano asks for it on the human channel: `bbp human takeover CLAIM --session <block> --minutes N --reason "…"`. A rusty_term key binding can run the same command. The board writes `takeover_started` **before** any input is possible.
 2. orch sees the event and sends the mux `GrantLease{block, client, until}`. It targets only the client Nano named, for at most N minutes.
 3. Each keystroke batch the mux delivers is sent to orch as `InputBatch{block, client, seq, bytes}`. orch appends it to a local journal and posts `takeover_input` batches: one every 2 s, or on Enter, at most 4 KiB.
-4. The takeover ends in one of these ways: Nano releases it, it expires, orch revokes it, the turn ends, or the mux is lost. orch then sends `RevokeLease` and posts `takeover_ended`. If orch can't post, it revokes the lease, so the system fails closed.
+4. The takeover ends in one of these ways: Nano releases it, it expires, orch revokes it, the turn ends, or the mux is lost. orch then sends `RevokeLease` and posts `takeover_ended`. If orch can't post, it revokes the lease, so the system fails closed. A release, or a `Close`/`Cancel` with a live takeover, first writes `takeover_closing`: input stops at its `at`, and orch has 10 s to post input already delivered before it writes `takeover_ended` (D87).
 
 **Recording mode.** The recommendation is as-delivered with a hash chain: the mux delivers right away, and orch journals and posts. Write-ahead, where the mux holds each batch until orch acks it, is possible, but it adds a round trip per keystroke and makes the mux side size L (rusty-term-expert). Gaps are detectable because `seq` and the chain are on the board.
 
@@ -96,7 +96,8 @@ So the mux never decides to start or stop an agent. It forks one only when orch 
 |---|---|---|
 | `takeover_started` | human | `claim`, `epoch`, `session` (block name), `client`, `until`, `reason`, expected `rev` |
 | `takeover_input` | host (orch) | `takeover` (msg id), `seq` (from 1), `bytes` (base64, at most 4 KiB), `sha256`, `prev_sha256` (the chain) |
-| `takeover_ended` | host or human | `takeover`, `reason`: `released`, `expired`, `revoked`, `turn_ended` or `mux_lost`; `batches`; `last_sha256` |
+| `takeover_closing` | written by release, or by `Close`/`Cancel` for a live takeover | `takeover`, `reason` (`released` or `turn_ended`), `at` (D87) |
+| `takeover_ended` | host only (D87) | `takeover`, `reason`: `released` (only after a closing), `expired`, `revoked`, `turn_ended` or `mux_lost`; `batches`; `last_sha256` |
 
 - **Effect on claims (v0):** a candidate stored from a session that had a takeover carries `human_touched: true` on its manifest and on `claim_card`. The inbox shows it. Scoring is unchanged. The takeover doesn't count Nano as a second author toward `min authors`.
 - **Visibility:** the human channel and the host only, never the Agent API (like credentials), so agents can't read Nano's typing back.

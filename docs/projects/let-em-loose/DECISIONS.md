@@ -96,6 +96,7 @@ Precise contracts used by this guide:
 | D84 | `human_touched` is derived in the fold, not stored | [default] 2026-11-05 (mux, #732) |
 | D85 | `lel-jail` v0 launch contract: `orch-jail` crate, `jail.json` fields, setup order, tests | [default] 2026-11-05 (#600, #732) |
 | D86 | #600 cgroup holder, slot hand-off and cgroup `quiesce` | [default] 2026-11-05 (#600, #732) |
+| D87 | Takeover end drains delivered input through `takeover_closing` (amends D82 item 2) | [stated] 2026-11-05 (mux, #732, PR #1502) |
 
 ## D1. Lenses, not stages
 
@@ -700,6 +701,7 @@ Design first (D25): the design doc goes in `docs/projects/let-em-loose/` for Nan
 8. Lens sessions in blocks (the D8 and D54 conflicts) are decided when #726 reaches lens sessions. Nothing changes now; lenses stay orch-side and one-shot.
 Each side may now start its PR under card #732 (§11). Review and merge gates still apply.
 **Build note (D83, D84).** Item 2's "log schema 6" is implemented as new claims-mode events under schema 5, with no bump (D83), and `human_touched` is derived in the fold (D84). The events, the verb, payloads, visibility and the byte-identical guarantee are as approved.
+**Amended by D87.** Item 2's event set gains `takeover_closing`, and `takeover_ended` is host-only.
 **Why.** Design first (D25) on D81. Both experts checked the design against the code. orch stays the only executor and the mux only hosts ptys, so D20's guarantees and D13 hold, and evidence stays the witness (D79). This closes OPEN_QUESTIONS Q13 (design §6: builder session files under `<dir>/builders/<claim>/<n>/`).
 **Rejected.** Approving the design but holding the takeover schema for a separate review (option B). Changes first (option C). Write-ahead recording.
 **Tag.** [stated] · remind-me: mem_fe60aaf6dae240b8b820ef918c6dca4f
@@ -751,3 +753,17 @@ Each side may now start its PR under card #732 (§11). Review and merge gates st
 **Tag.** [default] · remind-me: mem_5de884e478294bc8bc17ad735a185d32
 **Key.** lel:600:cgroup-holder-and-quiesce
 **Source.** Coordinator question for D82 slice 5, 2026-11-05; mux-hosted-agents-design.md §2 steps 1–4, §3, §11; D82, D85; `rusty_bbp_host/src/slots.rs`, `groups.rs`, `moderator.rs` (`quiesce`), README § slots.
+
+## D87. Takeover end drains delivered input through `takeover_closing` (amends D82 item 2)
+
+**Decision.** A takeover ends in two steps:
+1. **`takeover_closing` {`takeover`, `reason`, `at`}.** New claims-mode event. The human's `TakeoverRelease` writes it with reason `released`; `Close` and `Cancel` write it for every live takeover, before the state change, with reason `turn_ended`. Input permission ends at `at`. There is no second release and no reopening.
+2. **Drain.** The host may still record `takeover_input` until `min(until, closing at)` + `TAKEOVER_DRAIN_MS` (10 s).
+3. **`takeover_ended`.** Host-only, written once, totals taken from the fold, with the reason the takeover closed with. A takeover with no `takeover_closing` ends `expired` (after `until`), `revoked`, `turn_ended` or `mux_lost`, never `released`. `bbp takeover-ended` accepts `--reason released` for a drained released takeover.
+4. **Terminal guard.** On a Closed or Cancelled task, only those two host writes for a closing takeover pass (`claims_engine::closing_audit`); everything else is still refused as terminal.
+Still under claims schema 5 (D83): no bump. D82's events, verb, visibility and hash chain are otherwise unchanged.
+**Why.** Recording is as-delivered (D82 item 3), so input the mux had already delivered could be lost if the end was recorded before orch posted its last batches. Stopping input at `at` and giving the host a bounded drain keeps the audit complete and still fails closed.
+**Rejected.** Release only asks orch to end the takeover (the human writes nothing). Accepting the loss.
+**Tag.** [stated] · remind-me: mem_b63239cb445d4a49a078d1a45590fa4e
+**Key.** lel:mux:takeover-closing-drain
+**Source.** Owner approval relayed by dottiusmaximus in a GitHub comment on PR #1502, https://github.com/Rusty-Mill/rusty_mill/pull/1502#issuecomment-6646844427 (2026-11-05T01:13Z), quoting the exchange: "#1502 needs a small audit-schema decision: delivered input can be lost when a takeover ends. I recommend adding a closing state that briefly drains already-delivered input before the host records the end. Are you okay with that?" Owner: "👍". This is a relay, not a tap: the thread's decision card asking the same question (options: add a `takeover_closing` event (recommended), release only asks orch, accept the loss) was still unanswered in-thread when this was recorded. Built in PR #1502 (head b5dd857e) and PR #1504 (head e4050a03).
