@@ -19,6 +19,10 @@
 //! made or granted, and the resolved paths are the ones used: a work
 //! directory that is, holds or lies in a data root is refused, whatever
 //! names lead there.
+//!
+//! Runs of one name are serialised by `<name>.lock`, held from removing the
+//! last run's directories until the plan is summarised, so a concurrent run
+//! never deletes or reports another's plan.
 
 use rusty_bbp::Sha256;
 use rusty_sandbox::{Executor, Limits, SandboxSpec, Termination};
@@ -63,6 +67,9 @@ where
     E::Error: std::fmt::Display,
 {
     let req = &checked(req)?;
+    // Held from cleanup through reading the plan: a second run of the same
+    // name waits rather than removing this one's plan or output.
+    let _held = name_lock(req)?;
     let dir = req.work.join("dry-run").join(&req.name);
     let logs = out_dir(req);
     for d in [&dir, &logs] {
@@ -102,6 +109,23 @@ where
         sha256: Sha256::of(&bytes),
         entries: entries(&bytes),
     })
+}
+
+/// The exclusive lock on one dry run name, `<work>/dry-run/<name>.lock`,
+/// beside the plan directory, where the program cannot write. Never opened
+/// through a link.
+fn name_lock(req: &Request) -> Result<std::fs::File, String> {
+    let parent = req.work.join("dry-run");
+    std::fs::create_dir_all(&parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let path = parent.join(format!("{}.lock", req.name));
+    let at = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut options = std::fs::File::options();
+    options.create(true).truncate(false).write(true);
+    #[cfg(target_os = "linux")]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, rusty_libc::fd::O_NOFOLLOW);
+    let file = options.open(&path).map_err(at)?;
+    file.lock().map_err(at)?;
+    Ok(file)
 }
 
 /// Where a run's output is kept: beside its plan directory, which is all
@@ -377,6 +401,75 @@ mod tests {
             let err = run(&Ends(how, SECRET), &request(&root, "true")).unwrap_err();
             assert!(!err.contains(SECRET), "{err}");
             assert!(err.contains(&format!("{how:?}")), "{err}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Writes its first argument as the plan, then waits, recording how
+    /// many runs were inside at once and whether its plan survived.
+    #[derive(Default)]
+    struct Overlap {
+        inside: std::sync::atomic::AtomicUsize,
+        most: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Executor for Overlap {
+        type Error = String;
+        fn exec(
+            &self,
+            spec: &SandboxSpec,
+            _: &str,
+            args: &[String],
+        ) -> Result<rusty_sandbox::ExecOutcome, String> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let now = self.inside.fetch_add(1, SeqCst) + 1;
+            self.most.fetch_max(now, SeqCst);
+            let plan = spec
+                .env()
+                .iter()
+                .find(|(k, _)| k == PLAN_ENV)
+                .map(|(_, v)| PathBuf::from(v))
+                .ok_or("no plan")?;
+            std::fs::write(&plan, &args[0]).map_err(|e| e.to_string())?;
+            std::thread::sleep(Duration::from_millis(200));
+            let kept = std::fs::read_to_string(&plan).unwrap_or_default() == args[0];
+            self.inside.fetch_sub(1, SeqCst);
+            Ok(rusty_sandbox::ExecOutcome {
+                termination: if kept {
+                    Termination::Exited(0)
+                } else {
+                    Termination::Exited(9)
+                },
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                wall: Duration::ZERO,
+            })
+        }
+    }
+
+    #[test]
+    fn concurrent_dry_runs_of_one_name_each_report_their_own_plan() {
+        let root = root("overlap");
+        let exec = Overlap::default();
+        let plans = ["{\"op\":\"a\"}\n", "{\"op\":\"b\"}\n{\"op\":\"b\"}\n"];
+        let summaries: Vec<Summary> = std::thread::scope(|s| {
+            let runs: Vec<_> = plans
+                .iter()
+                .map(|plan| {
+                    let mut req = request(&root, "unused");
+                    req.args = vec![(*plan).to_owned()];
+                    let exec = &exec;
+                    s.spawn(move || run(exec, &req))
+                })
+                .collect();
+            runs.into_iter()
+                .map(|r| r.join().unwrap().unwrap())
+                .collect()
+        });
+        assert_eq!(exec.most.load(std::sync::atomic::Ordering::SeqCst), 1);
+        for (summary, plan) in summaries.iter().zip(plans) {
+            assert_eq!(summary.sha256, Sha256::of(plan.as_bytes()));
+            assert_eq!(summary.entries, plan.lines().count() as u64);
         }
         let _ = std::fs::remove_dir_all(&root);
     }
