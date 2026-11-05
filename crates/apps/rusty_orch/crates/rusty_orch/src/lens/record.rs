@@ -393,6 +393,7 @@ mod tests {
 
     /// Retries `f` while the store is locked: another test's child process
     /// can briefly inherit a store lock.
+    #[cfg(unix)]
     fn retry_locked<T>(mut f: impl FnMut() -> Result<T, String>) -> Result<T, String> {
         for _ in 0..100 {
             match f() {
