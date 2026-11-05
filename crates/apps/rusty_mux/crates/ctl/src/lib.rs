@@ -62,7 +62,9 @@ use rusty_mux_proto::{Code, Cursor, Entry, Features, Message};
 use rusty_uuid::Uuid;
 
 pub use crate::api::input_schema;
-use crate::cli::{Api, Arg, Call, Command, ConfigCommand, Defaults, Invocation};
+use crate::cli::{
+    AgentCommand, Api, Arg, Call, Command, ConfigCommand, Defaults, HookReport, Invocation,
+};
 use crate::conn::Conn;
 pub use crate::stop::Stop;
 use crate::target::Miss;
@@ -290,6 +292,16 @@ pub fn run_until(
             return write_line(out, completion::script(shell).trim_end());
         }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
+        Command::Agent(AgentCommand::Report(hook)) => {
+            // An agent's event hook must never fail, print or hold the agent
+            // up (Claude Code adds hook output to the model's context), so
+            // a report that cannot be sent is dropped: the program's own
+            // OSC 7501 status still shows.
+            if let (Some(socket), Some(block)) = (hook_socket.as_deref(), env.here.block) {
+                let _dropped = hook_report(socket, block, &hook, stop);
+            }
+            return Exit::Ok;
+        }
         Command::Agent(command) => {
             let generated_name = || {
                 let (socket, session) = (hook_socket.as_deref()?, env.here.session?);
@@ -564,6 +576,54 @@ fn follow(
 /// A hard bound only where [`conn::connect`] bounds connecting and writes
 /// (Linux); elsewhere the host's hook timeout is the bound.
 const HOOK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Sends an agent hook's report on `block` to the server at `socket` with
+/// `terminal.report-status`, within [`HOOK_PATIENCE`]. Nothing is sent to
+/// a server that does not know the method.
+#[cfg(any(unix, windows))]
+fn hook_report(socket: &Path, block: Uuid, hook: &HookReport, stop: &Stop) -> Result<(), Failure> {
+    let method = rusty_mux_proto::schema::block_method("terminal.report-status")
+        .ok_or_else(|| Failure::Failed("terminal.report-status is not in the catalog".into()))?;
+    let stop = stop.sooner(Instant::now() + HOOK_PATIENCE);
+    let mut conn = Conn::new(conn::connect(socket, &stop)?, stop);
+    let mut sink = io::sink();
+    let mut client = Session {
+        conn: &mut conn,
+        out: &mut sink,
+        json: false,
+        here: None,
+    };
+    let (features, _) = client.hello(method.needs, None)?;
+    if !features.contains(method.needs) {
+        return Ok(());
+    }
+    let mut args = vec![
+        ("block", Value::Id(block)),
+        ("state", Value::Text(hook.state.clone())),
+    ];
+    let optional = [
+        ("id", &hook.id),
+        ("kind", &hook.kind),
+        ("app", &hook.app),
+        ("msg", &hook.msg),
+    ];
+    for (name, value) in optional {
+        if let Some(value) = value {
+            args.push((name, Value::Text(value.clone())));
+        }
+    }
+    let message = method
+        .request(1, &args)
+        .map_err(|e| Failure::Failed(e.to_string()))?;
+    client.conn.send(&message)?;
+    client.reply(1, 1, method.name)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn hook_report(_: &Path, _: Uuid, _: &HookReport, _: &Stop) -> Result<(), Failure> {
+    Err(unsupported())
+}
 
 /// The name of `session` on the server at `socket` while it is one the
 /// server made up and nobody has renamed it since, for the agent hook.

@@ -562,6 +562,36 @@ const TERMINAL_MORE: Features = Features::BLOCK_CALL.union(Features::TERMINAL_MO
 /// What `terminal.shell` needs.
 const TERMINAL_SHELL: Features = Features::BLOCK_CALL.union(Features::TERMINAL_SHELL);
 
+/// What `terminal.report-status` needs.
+const AGENT_STATUS: Features = Features::BLOCK_CALL.union(Features::AGENT_STATUS);
+
+/// An optional parameter of `terminal.report-status`.
+const fn status_part(name: &'static str, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty: Ty::Text,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::AGENT_STATUS,
+        },
+    }
+}
+
+/// What `terminal.history` needs.
+const TERMINAL_HISTORY: Features = Features::BLOCK_CALL.union(Features::TERMINAL_HISTORY);
+
+/// An optional parameter of `terminal.history`.
+const fn history(name: &'static str, ty: Ty, doc: &'static str) -> Param {
+    Param {
+        name,
+        ty,
+        doc,
+        presence: Presence::Optional {
+            needs: Features::TERMINAL_HISTORY,
+        },
+    }
+}
+
 /// An optional parameter of `terminal.set-theme`.
 const fn theme(name: &'static str, ty: Ty, doc: &'static str) -> Param {
     Param {
@@ -1283,6 +1313,78 @@ pub static CATALOG: &[Method] = &[
         needs: TERMINAL_SHELL,
         returns: Returns::Text,
         build: |req, a| block_call(req, a, "terminal.shell"),
+    },
+    Method {
+        name: "terminal.report-status",
+        doc: "Report the block's status for an agent's hooks, as one OSC 7501 report given \
+              field by field. Hook reports are shown instead of the program's own, and \
+              announced by `BlockStatus` like them, until the hooks have been silent for 120 \
+              seconds and the program reports something else; the next hook report takes \
+              the block back. A new prompt and a reset end them as they do the program's. \
+              Refused when the fields are not a valid report.",
+        params: &[
+            BLOCK,
+            Param {
+                name: "state",
+                ty: Ty::Text,
+                doc: "`idle`, `working`, `blocked`, `done`, `error`, or `clear` to remove \
+                      the record and those beneath it.",
+                presence: Presence::Required,
+            },
+            status_part(
+                "id",
+                "The record's path, such as `subagent/2`; the root record when absent.",
+            ),
+            status_part(
+                "kind",
+                "Why a blocked agent waits: `permission`, `question` or `auth`.",
+            ),
+            status_part("app", "The agent's stable identifier, such as `opencode`."),
+            status_part("msg", "One line for people, such as the tool in use."),
+        ],
+        needs: AGENT_STATUS,
+        returns: Returns::Nothing,
+        build: |req, a| block_call(req, a, "terminal.report-status"),
+    },
+    Method {
+        name: "terminal.history",
+        doc: "Read the terminal's history older than its scrollback, kept on disk while the \
+              server keeps state (the newest 64 MiB a block spilled), as text: one line per \
+              row, oldest first, without trailing blanks. Refused when the server keeps no \
+              state. A line keeps its colors and wrapping, not a hyperlink or a character \
+              combined from several.",
+        params: &[
+            BLOCK,
+            required(
+                "history",
+                Ty::Lines,
+                "How many lines to read, at most 100000; fewer near the oldest kept.",
+            ),
+            history(
+                "skip",
+                Ty::Lines,
+                "How many of the newest spooled lines to pass over first, to page back.",
+            ),
+            history(
+                "trim",
+                Ty::Flag,
+                "Leave out the blank lines before the first and after the last line with text.",
+            ),
+            history(
+                "unwrap",
+                Ty::Flag,
+                "Join rows the program's text wrapped onto into one line, keeping their blanks.",
+            ),
+            history(
+                "vt",
+                Ty::Flag,
+                "Keep colors and attributes as SGR escape sequences, each line starting from \
+                 the default style and returning to it.",
+            ),
+        ],
+        needs: TERMINAL_HISTORY,
+        returns: Returns::Text,
+        build: |req, a| block_call(req, a, "terminal.history"),
     },
     Method {
         name: "close-block",

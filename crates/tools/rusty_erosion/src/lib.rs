@@ -23,4 +23,4 @@ pub mod adapter;
 pub mod core;
 
 pub use adapter::{Error, FileClass, classify, measure};
-pub use core::{Delta, FileMeasure, FunctionMetric, Lang, Ratio, Report};
+pub use core::{Affected, Delta, FileMeasure, FunctionMetric, Lang, Ratio, Report};
