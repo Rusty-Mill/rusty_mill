@@ -138,17 +138,21 @@ impl Turn {
                     .map_err(|e| format!("{}: {e}", workspace.display()))?;
             }
         }
+        // A pinned baseline (#597, #598) is what every candidate must build
+        // on, so a builder starts there, not at HEAD, filtered or not.
+        let at = match sandbox.checkout {
+            true => crate::profiles::pinned_base(&cfg.dir, &cfg.task)?,
+            false => None,
+        };
+        let at = at.as_deref().unwrap_or("HEAD");
         let mut view = None;
         let repo = if let Some(repo) = repo {
-            // A pinned baseline (#597, #598) is what every candidate must
-            // build on, so the builder starts there, not at HEAD.
-            let at = crate::profiles::pinned_base(&cfg.dir, &cfg.task)?;
-            repo.add_detached(&workspace, at.as_deref().unwrap_or("HEAD"))?;
+            repo.add_detached(&workspace, at)?;
             Some(repo)
         } else if filtered {
             view = Some(crate::filtered::copy(
                 &cfg.repo,
-                "HEAD",
+                at,
                 &workspace,
                 &sandbox.hide,
             )?);
@@ -772,6 +776,89 @@ mod tests {
         std::fs::write(root.join("repo/.git"), "gitdir: /elsewhere\n").unwrap();
         let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
         assert!(e.contains("not a directory"), "{e}");
+    }
+
+    /// #598: a filtered workspace starts at the task's pinned baseline, not
+    /// HEAD, as an unfiltered checkout does.
+    #[test]
+    fn a_filtered_checkout_starts_at_the_pinned_baseline() {
+        let root = dir("filtered_pinned");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("secrets")).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "--quiet", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("flag.txt"), "no\n").unwrap();
+        std::fs::write(repo.join("secrets/token.txt"), "hunter2\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let pinned = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+        git(&["commit", "--quiet", "-am", "later"]);
+        let dir = root.join("task");
+        let task = rusty_bbp::TaskId("T1".into());
+        let roster = crate::admin::read_roster(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/proving/roster.json"),
+        )
+        .unwrap();
+        let set = crate::profiles::ProfileSet {
+            baseline: Some(pinned.clone()),
+            ..crate::profiles::ProfileSet::shell("test", "true")
+        };
+        crate::admin::open_task(
+            &dir,
+            &task,
+            "local",
+            b"Brief.",
+            &PrincipalId("human".into()),
+            &set,
+            roster,
+        )
+        .unwrap();
+        let cfg = crate::moderator::Config {
+            dir,
+            task,
+            bbp: root.join("bbp"),
+            repo: repo.clone(),
+            work: root.join("work"),
+            launchers: Launchers::default(),
+            confinement: crate::runner::Confinement::Unconfined,
+            poll: std::time::Duration::from_millis(50),
+            max_wall: std::time::Duration::from_secs(5),
+            end_grace: std::time::Duration::from_secs(1),
+            deadline: None,
+            cost_cap: None,
+            admission: None,
+        };
+        let sandbox = HarnessSandbox {
+            checkout: true,
+            hide: vec!["secrets".into()],
+            ..HarnessSandbox::default()
+        };
+        let facts = crate::launchers::Facts {
+            repo: repo.to_string_lossy().into_owned(),
+            review: false,
+            live: true,
+            role: None,
+            vendor: None,
+            candidate_vendors: vec![],
+        };
+        let turn = Turn::prepare(&cfg, &sandbox, TurnId(1), None, &facts).unwrap();
+        let view = turn.view.as_ref().unwrap();
+        assert_eq!(view.base, pinned, "pinned, not HEAD");
+        let flag = std::fs::read_to_string(turn.workspace.join("flag.txt")).unwrap();
+        assert_eq!(flag, "no\n", "the baseline's tree");
+        assert!(!turn.workspace.join("secrets").exists());
     }
 
     #[test]
