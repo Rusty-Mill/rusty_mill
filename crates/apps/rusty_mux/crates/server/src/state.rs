@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsString;
+use std::io;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
@@ -30,6 +31,7 @@ use crate::keys;
 use crate::outbox::Outbox;
 use crate::process;
 use crate::pty::{self, Process, Pty};
+use crate::spool::Spool;
 use crate::store::{Started, Store};
 use crate::terminal;
 
@@ -88,7 +90,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::NAME_SESSION)
     .union(Features::TERMINAL_MORE)
     .union(Features::TERMINAL_SHELL)
-    .union(Features::AGENT_STATUS);
+    .union(Features::AGENT_STATUS)
+    .union(Features::TERMINAL_HISTORY);
 
 /// Fresh randomness to pick a generated session name with.
 fn name_seed() -> u64 {
@@ -140,6 +143,9 @@ struct BlockRt {
     started: Started,
     /// The grid changed since the store last saved it.
     unsaved: bool,
+    /// Where lines evicted from the grid's scrollback go, while the
+    /// server keeps state (C70).
+    spool: Option<Spool>,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -211,6 +217,7 @@ impl BlockRt {
             waiting: Waiting::default(),
             started,
             unsaved: true,
+            spool: None,
         }
     }
 
@@ -227,6 +234,49 @@ impl BlockRt {
             "the block is read-only: it was restored after a server restart and its command was not run again"
                 .into()
         })
+    }
+
+    /// Keeps the history this grid evicts in `spool`, starting with the
+    /// lines already waiting (a restore's marker pushes some out). Without a
+    /// spool, or once writing fails, the grid stops collecting them: spilling
+    /// is on exactly while `self.spool` is some.
+    fn keep_history(&mut self, block: BlockId, spool: io::Result<Spool>) {
+        let pending = self.grid.take_spilled();
+        let kept = spool.and_then(|mut spool| spool.append(pending).map(|()| spool));
+        match kept {
+            Ok(spool) => {
+                self.grid.spill_evicted(true);
+                self.spool = Some(spool);
+            }
+            Err(e) => {
+                eprintln!(
+                    "rusty-mux-server: block {block}'s history past scrollback will not be kept: {e}"
+                );
+                self.stop_history();
+            }
+        }
+    }
+
+    /// Appends the lines the grid evicted to the spool. A spool that
+    /// fails is dropped with a warning, and its history stops there.
+    fn spill(&mut self, block: BlockId) {
+        let Some(spool) = self.spool.as_mut() else {
+            return self.stop_history();
+        };
+        let lines = self.grid.take_spilled();
+        if lines.is_empty() {
+            return;
+        }
+        if let Err(e) = spool.append(lines) {
+            eprintln!("rusty-mux-server: block {block}'s history past scrollback stops here: {e}");
+            self.stop_history();
+        }
+    }
+
+    /// Drops the spool and stops the grid collecting lines for it.
+    fn stop_history(&mut self) {
+        self.spool = None;
+        self.grid.spill_evicted(false);
     }
 
     fn pid(&self) -> Option<u32> {
@@ -1135,6 +1185,7 @@ impl State {
         let text = match found.name {
             "terminal.format" => terminal::format(&rt.grid, capture(&named), REPLY_MAX)
                 .ok_or_else(|| format!("{method} reply exceeds {REPLY_MAX} bytes"))?,
+            "terminal.history" => history(rt.spool.as_ref(), &rt.grid, &named)?,
             "terminal.send-keys" => {
                 self.mux
                     .authorize_input(client, block)
@@ -1362,8 +1413,18 @@ impl State {
             Some((target, side)) => self.mux.split_block(block, target, side, size)?,
         }
         let rt = rt.screened(shared, crate::checkpoint::grid(size), AnsiParser::new());
-        self.blocks.insert(block, rt);
+        self.adopt(block, rt);
         Ok(Outcome::Done(Some(block.uuid())))
+    }
+
+    /// Holds `rt` as `block`'s, spooling the history its grid evicts
+    /// while the server keeps state (C70).
+    fn adopt(&mut self, block: BlockId, mut rt: BlockRt) {
+        match &self.store {
+            Some(store) => rt.keep_history(block, store.spool(block)),
+            None => rt.stop_history(),
+        }
+        self.blocks.insert(block, rt);
     }
 
     /// Starts `start.block`'s program, for the caller to give a screen
@@ -1610,6 +1671,7 @@ impl State {
             return Vec::new();
         };
         rt.parser.advance(&mut rt.grid, data);
+        rt.spill(block);
         rt.unsaved = true;
         let replies = rt.parser.take_responses();
         let status = terminal::absorb_status(&mut rt.grid, &mut rt.status, Instant::now());
@@ -1764,6 +1826,14 @@ impl State {
         }
     }
 
+    /// Deletes closed `block`'s spool by its path, whether or not a handle
+    /// to it is left. A stopping server closes no block, so keeps them all.
+    fn forget_history(&self, block: BlockId) {
+        if let Some(Err(e)) = self.store.as_ref().map(|s| s.remove_spool(block)) {
+            eprintln!("rusty-mux-server: removing block {block}'s history: {e}");
+        }
+    }
+
     /// Broadcasts queued model events and releases closed blocks' PTYs,
     /// until a pass queues nothing new.
     fn flush(&mut self) {
@@ -1773,11 +1843,12 @@ impl State {
                 return;
             }
             for event in events {
-                if let Event::BlockClosed { block } = event
-                    && let Some(process) =
-                        self.blocks.remove(&block).and_then(|rt| rt.release(true))
-                {
-                    rusty_tokio::task::spawn_local(process.reap());
+                if let Event::BlockClosed { block } = event {
+                    // Its program may have hung up, or its spool failed, first.
+                    if let Some(rt) = self.blocks.remove(&block) {
+                        close(rt);
+                    }
+                    self.forget_history(block);
                 }
                 let seq = self.history.push(event.clone());
                 let (Some(plain), Some(numbered)) =
@@ -1797,6 +1868,14 @@ impl State {
                 }
             }
         }
+    }
+}
+
+/// Lets a closed block's program go, to be reaped, and its spool's files.
+fn close(mut rt: BlockRt) {
+    drop(rt.spool.take());
+    if let Some(process) = rt.release(true) {
+        rusty_tokio::task::spawn_local(process.reap());
     }
 }
 
@@ -1958,6 +2037,17 @@ enum Outcome {
     Later(oneshot::Receiver<()>),
 }
 
+/// The line count `param` holds, 0 when left out.
+fn lines(named: &[(&str, Value)], param: &str) -> u32 {
+    named
+        .iter()
+        .find_map(|(name, value)| match value {
+            Value::Lines(n) if *name == param => Some(*n),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// `terminal.format`'s options from its arguments, which the catalog
 /// checked: a flag left out is off.
 fn capture(named: &[(&str, Value)]) -> terminal::Capture {
@@ -1968,17 +2058,48 @@ fn capture(named: &[(&str, Value)]) -> terminal::Capture {
     };
     terminal::Capture {
         // Required, so always there.
-        history: named
-            .iter()
-            .find_map(|(name, value)| match (*name, value) {
-                ("history", Value::Lines(n)) => Some(*n),
-                _ => None,
-            })
-            .unwrap_or_default(),
+        history: lines(named, "history"),
         trim: flag("trim"),
         unwrap: flag("unwrap"),
         vt: flag("vt"),
     }
+}
+
+/// `terminal.history`: the spooled lines `named` asks for, as
+/// `terminal.format` would show them in `grid`, the block's.
+fn history(spool: Option<&Spool>, grid: &Grid, named: &[(&str, Value)]) -> Result<String, Refusal> {
+    let spool = spool.ok_or(
+        "no history is kept past this block's scrollback: the server keeps no state, \
+         or writing it failed",
+    )?;
+    let capture = capture(named);
+    let read = spool
+        .read(lines(named, "skip").into(), capture.history.into())
+        .map_err(|e| format!("reading the history: {e}"))?;
+    format_history(&read, grid, capture, REPLY_MAX)
+}
+
+/// Spilled lines `read`, oldest first, as `terminal.format` shows them
+/// in `like`, the grid that spilled them, with `capture`, refused past
+/// `max` bytes.
+fn format_history(
+    read: &[Vec<u8>],
+    like: &Grid,
+    capture: terminal::Capture,
+    max: usize,
+) -> Result<String, Refusal> {
+    let Some(above) = read.len().checked_sub(1) else {
+        return Ok(String::new());
+    };
+    let read: Vec<&[u8]> = read.iter().map(Vec::as_slice).collect();
+    let grid = rusty_term_core::checkpoint::spilled_grid(&read, like)
+        .map_err(|e| format!("the history is damaged: {e}"))?;
+    let capture = terminal::Capture {
+        history: u32::try_from(above).unwrap_or(u32::MAX),
+        ..capture
+    };
+    terminal::format(&grid, capture, max)
+        .ok_or_else(|| format!("terminal.history reply exceeds {max} bytes").into())
 }
 
 /// Encodes the messages answering a `what` request, all or nothing: a reply
@@ -2785,5 +2906,218 @@ mod regression {
         ));
         let refused = reply("t", &[text(1, half), text(2, half)]);
         assert!(matches!(refused, Err(why) if why.reason.contains("exceeds")));
+    }
+
+    /// A read-only block whose 2-row grid keeps no scrollback, so every
+    /// line that scrolls off spills, as a revived one's does.
+    fn spilling_block() -> BlockRt {
+        let mut grid = Grid::new(10, 2);
+        grid.set_scrollback_max(0);
+        grid.spill_evicted(true);
+        let started = Started {
+            shell: true,
+            read_only: true,
+            program: "sh".into(),
+            args: vec![],
+            cwd: "/".into(),
+        };
+        BlockRt::read_only(grid, AnsiParser::new(), started)
+    }
+
+    /// Prints `n` lines into `rt`'s grid, as `output` does.
+    fn print(rt: &mut BlockRt, block: BlockId, n: usize) {
+        for i in 0..n {
+            rt.parser
+                .advance(&mut rt.grid, format!("line {i}\r\n").as_bytes());
+            rt.spill(block);
+        }
+    }
+
+    /// A spool directory, gone before anything is written to it.
+    fn vanished_spool(name: &str) -> Spool {
+        let dir = std::env::temp_dir().join(format!("rusty-mux-{name}-{}", std::process::id()));
+        let spool = Spool::open(dir.clone()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        spool
+    }
+
+    #[test]
+    fn a_spool_that_cannot_open_stops_the_grid_collecting_lines() {
+        let block = BlockId::from_uuid(Uuid::nil());
+        let mut rt = spilling_block();
+        rt.parser.advance(&mut rt.grid, b"a\r\nb\r\nc\r\n");
+        rt.keep_history(block, Err(io::Error::other("no room")));
+        print(&mut rt, block, 50);
+        assert!(rt.spool.is_none());
+        assert!(rt.grid.take_spilled().is_empty(), "nothing queued");
+        assert_eq!(rt.grid.line_text(0).as_deref(), Some("line 49"));
+    }
+
+    #[test]
+    fn a_spool_that_fails_to_write_is_dropped_and_collects_nothing_more() {
+        let block = BlockId::from_uuid(Uuid::nil());
+        // The lines a restore's marker pushed out fail to write.
+        let mut rt = spilling_block();
+        rt.parser.advance(&mut rt.grid, b"a\r\nb\r\nc\r\n");
+        rt.keep_history(block, Ok(vanished_spool("pending")));
+        assert!(rt.spool.is_none());
+        print(&mut rt, block, 50);
+        assert!(rt.grid.take_spilled().is_empty(), "nothing queued");
+        // Or later output does.
+        let mut rt = spilling_block();
+        rt.keep_history(block, Ok(vanished_spool("later")));
+        assert!(rt.spool.is_some(), "nothing to write yet");
+        print(&mut rt, block, 50);
+        assert!(rt.spool.is_none());
+        assert!(rt.grid.take_spilled().is_empty(), "nothing queued");
+        assert_eq!(rt.grid.line_text(0).as_deref(), Some("line 49"));
+    }
+
+    /// Every line `text` leaves a grid `cols` wide, spilled: a 2-row grid
+    /// keeping no scrollback, the cursor's row pushed off at the end.
+    fn spilled(cols: usize, text: &str) -> Vec<Vec<u8>> {
+        let mut grid = Grid::new(cols, 2);
+        grid.set_scrollback_max(0);
+        grid.spill_evicted(true);
+        let mut parser = AnsiParser::new();
+        parser.advance(&mut grid, text.as_bytes());
+        parser.advance(&mut grid, b"\r\n\r\n");
+        grid.take_spilled()
+    }
+
+    fn capture(unwrap: bool, trim: bool, vt: bool) -> terminal::Capture {
+        terminal::Capture {
+            history: u32::MAX,
+            trim,
+            unwrap,
+            vt,
+        }
+    }
+
+    #[test]
+    fn history_unwraps_narrow_rows_beside_a_wide_one_without_padding() {
+        // `abcd` wraps into `ef` at 4 columns; an unrelated row is 400 wide.
+        let mut read = spilled(4, "\x1b[31mabcdef\x1b[0m");
+        read.extend(spilled(400, &"w".repeat(400)));
+        let wide = "w".repeat(400);
+        let text = |c| format_history(&read, &Grid::new(1, 1), c, REPLY_MAX).unwrap();
+        let plain = text(capture(true, true, false));
+        assert_eq!(plain.lines().collect::<Vec<_>>(), ["abcdef", wide.as_str()]);
+        let rows = text(capture(false, true, false));
+        assert_eq!(
+            rows.lines().collect::<Vec<_>>(),
+            ["abcd", "ef", wide.as_str()]
+        );
+        let vt = text(capture(true, true, true));
+        let first = vt.lines().next().unwrap();
+        assert!(
+            first.contains("abcdef") && first.contains("\x1b[0m"),
+            "{first:?}"
+        );
+        assert!(!first.contains("  "), "no padding: {first:?}");
+        // Without trim the blank rows the cursor left stay.
+        let untrimmed = text(capture(true, false, false));
+        assert!(untrimmed.starts_with("abcdef\n"), "{untrimmed:?}");
+    }
+
+    #[test]
+    fn a_long_wrapped_history_run_is_refused_before_it_is_built() {
+        // One logical line of 2,000 cells, wrapped every 20.
+        let read = spilled(20, &"x".repeat(2_000));
+        let fresh = Grid::new(1, 1);
+        assert!(format_history(&read, &fresh, capture(true, true, false), 4_000).is_ok());
+        let refused = format_history(&read, &fresh, capture(true, true, false), 500).unwrap_err();
+        assert!(refused.reason.contains("exceeds 500"), "{}", refused.reason);
+        // Row by row, the reply is the same 2,099 bytes.
+        assert!(format_history(&read, &fresh, capture(false, true, false), 500).is_err());
+        assert!(format_history(&read, &fresh, capture(false, true, false), 2_200).is_ok());
+    }
+
+    #[test]
+    fn a_styled_wrapped_history_run_is_refused_while_it_is_written() {
+        // 200 cells changing colour every cell: few enough cells to pass the
+        // run's bound, far too many SGR bytes for the limit.
+        let styled: String = (0..200).map(|i| format!("\x1b[3{}mx", 1 + i % 2)).collect();
+        let read = spilled(20, &styled);
+        let fresh = Grid::new(1, 1);
+        let vt = capture(true, true, true);
+        assert!(format_history(&read, &fresh, capture(true, true, false), 300).is_ok());
+        let refused = format_history(&read, &fresh, vt, 300).unwrap_err();
+        assert!(refused.reason.contains("exceeds 300"), "{}", refused.reason);
+        assert!(format_history(&read, &fresh, vt, REPLY_MAX).is_ok());
+    }
+
+    #[test]
+    fn history_shows_the_blocks_themed_default_colours() {
+        let mut grid = Grid::new(10, 2);
+        grid.set_scrollback_max(0);
+        grid.spill_evicted(true);
+        let mut parser = AnsiParser::new();
+        // OSC 11 themes the default background; the text keeps the default.
+        parser.advance(&mut grid, b"\x1b]11;rgb:12/34/56\x1b\\plain\r\n\r\n\r\n");
+        let read = grid.take_spilled();
+        let vt = capture(false, true, true);
+        let themed = format_history(&read, &grid, vt, REPLY_MAX).unwrap();
+        assert!(
+            themed.starts_with("\x1b[0;48;2;18;52;86mplain"),
+            "{themed:?}"
+        );
+        let fresh = format_history(&read, &Grid::new(1, 1), vt, REPLY_MAX).unwrap();
+        assert!(fresh.starts_with("\x1b[0mplain"), "{fresh:?}");
+    }
+
+    #[test]
+    fn themed_history_reads_as_the_block_showed_it_blanks_included() {
+        // OSC 10 and 11 theme the defaults; a themed blank row sits between
+        // text rows, and one row has a colour of its own.
+        let input: &[u8] = b"\x1b]10;rgb:aa/bb/cc\x1b\\\x1b]11;rgb:12/34/56\x1b\\\
+            top\r\n\x1b[2K\r\n\x1b[31mred\x1b[0m\r\nend\r\n\r\n\r\n";
+        let mut spilling = Grid::new(10, 2);
+        spilling.set_scrollback_max(0);
+        spilling.spill_evicted(true);
+        let mut twin = Grid::new(10, 2);
+        for grid in [&mut spilling, &mut twin] {
+            AnsiParser::new().advance(grid, input);
+        }
+        let read = spilling.take_spilled();
+        assert_eq!(read.len(), 5);
+        for (trim, vt) in [(false, false), (false, true), (true, false), (true, true)] {
+            let c = capture(false, trim, vt);
+            let history = format_history(&read, &spilling, c, REPLY_MAX).unwrap();
+            // The twin kept the same rows in its scrollback, the screen after.
+            let live = terminal::format(&twin, c, REPLY_MAX).unwrap();
+            let rows = |t: &str| t.lines().take(4).map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(rows(&history), rows(&live), "trim {trim}, vt {vt}");
+        }
+        let vt = format_history(&read, &spilling, capture(false, true, true), REPLY_MAX).unwrap();
+        let blank = vt.lines().nth(1).unwrap();
+        assert!(blank.contains("48;2;18;52;86"), "themed blank kept: {vt:?}");
+    }
+
+    #[test]
+    fn a_narrow_last_history_row_is_not_widened_under_a_theme() {
+        // OSC 10/11 theme the defaults. A 400-column row, a themed blank row
+        // 4 wide, then a 4-column row, the last spilled.
+        let theme = "\x1b]10;rgb:aa/bb/cc\x1b\\\x1b]11;rgb:12/34/56\x1b\\";
+        let mut read = spilled(400, &format!("{theme}{}", "w".repeat(400)));
+        read.extend(spilled(4, &format!("{theme}\x1b[2K\r\nab")));
+        let mut like = Grid::new(4, 2);
+        AnsiParser::new().advance(&mut like, theme.as_bytes());
+        for trim in [false, true] {
+            let c = capture(false, trim, true);
+            let vt = format_history(&read, &like, c, REPLY_MAX).unwrap();
+            let rows: Vec<&str> = vt.lines().collect();
+            assert_eq!(rows.len(), 3, "trim {trim}: {vt:?}");
+            // Each row at its own width: themed blanks are cells, not padding.
+            assert_eq!(
+                rows[1].matches(' ').count(),
+                4,
+                "themed blank: {:?}",
+                rows[1]
+            );
+            assert!(rows[2].ends_with("ab  \x1b[0m"), "last row: {:?}", rows[2]);
+        }
+        let plain = format_history(&read, &like, capture(false, true, false), REPLY_MAX).unwrap();
+        assert_eq!(plain.lines().last(), Some("ab"));
     }
 }
