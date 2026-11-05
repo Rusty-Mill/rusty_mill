@@ -11066,8 +11066,10 @@ dependencies = [
  "rusty_http",
  "rusty_json",
  "rusty_rand",
+ "rusty_sandbox",
  "rusty_serde",
  "rusty_time",
+ "rusty_worktree",
 ]
 
 [[package]]

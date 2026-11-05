@@ -14,6 +14,10 @@ const OLLAMA_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn main() -> ExitCode {
     let mut argv = std::env::args().skip(1);
+    if argv.next().as_deref() == Some("__sandbox") {
+        sandbox_helper();
+    }
+    let mut argv = std::env::args().skip(1);
     match argv.next().as_deref() {
         Some("inspect") => return inspect(argv),
         Some("maintain") => return maintain(argv),
@@ -185,6 +189,16 @@ fn lens_command<O>(
             ExitCode::from(1)
         }
     }
+}
+
+/// `rusty_orch __sandbox ...`: the helper `rusty_sandbox` re-invokes to
+/// confine an alien-lens probe (D96). It confines itself and `exec`s the
+/// probe, so it returns only when that failed. Not for hands.
+fn sandbox_helper() -> ! {
+    let rest: Vec<std::ffi::OsString> = std::env::args_os().skip(2).collect();
+    let err = rusty_sandbox::run_helper(&rest);
+    eprintln!("rusty_orch __sandbox: {err}");
+    std::process::exit(i32::from(rusty_sandbox::SETUP_FAILED));
 }
 
 fn watch(argv: impl IntoIterator<Item = String>) -> ExitCode {

@@ -100,6 +100,8 @@ Precise contracts used by this guide:
 | D86 | #598 build defaults while 598-gaps-design.md is unavailable | [default] 2026-11-04 (#598) |
 | D88 | #704 D42 expiry pause: go-live, count, what pauses, opt-out | [default] 2026-11-05 (#704) |
 | D91 | #704 slice 3: erosion escalation detail in the inbox | [default] 2026-11-05 (#704) |
+| D96 | #708 orch runs the alien lens's probes itself, sandboxed | [stated] 2026-11-05 (#708) |
+| D97 | #708 slice 4d: probe scratch trees and cargo time limit | [default] 2026-11-05 (#708) |
 | D98 | #708 alien hunt reads the candidate and its diffs through `get_artifact` | [default] 2026-11-05 (#708) |
 
 ## D1. Lenses, not stages
@@ -778,6 +780,27 @@ The build is the four PRs in §9, with `--alien` off by default. v2 gets designe
 **Tag.** [default] · remind-me: mem_136ada292af5416ebec3ecaf53b3dad9
 **Key.** lel:704:escalation-detail-build-defaults
 **Source.** Questions Q1–Q4 from the #704 slice 3 build thread, 2026-11-05; D30, D41, D43, D45, D82; QA.md § Erosion gate; card #704 Build 3 and Done when; `rusty_bbp_host` `src/inbox.rs` `Escalation`, `Reason`; `rusty_erosion` `src/main.rs` `render`. Numbered D91 because open PR branches already use D89–D90. Its open question is Q23 because open #1520 uses Q21–Q22.
+
+## D96. #708 orch runs the alien lens's probes itself, sandboxed
+
+**Decision.** orch runs the alien lens's model-written probe tests itself, in a sandbox. A `SandboxProbes` adapter in `rusty_orch`, behind orch-lens's `Probes` trait, builds a scratch worktree of base plus the candidate's diffs. It runs `cargo test -p <crate> --test probe_<claim>_<n>` with `--no-run` first, then runs the test on the candidate and on base, all with no network. `rusty_orch` adds the in-workspace crates `rusty_sandbox` and `rusty_worktree` as dependencies (they are already workspace members and `[workspace.dependencies]`, so no external crate or version changes). This was on the card as option A's stated consequence, so Nano's choice covers it. D75 §6 assumed an "existing lens sandbox"; orch had none, and both crates were used only by `rusty_bbp_host` (`run_control.rs`, `confine.rs`). This entry replaces that assumption. v1 stays shadow-only, and the trait leaves room for v2 to move execution to the host.
+**Why.** It keeps v1 shadow-only with no BBP change, and it reuses the host's crates and no-network confinement. Without probe runs, the §8 success bar can't be measured. The cost is a code-running path in orch. D20 still holds: the lens runner already extends orch, so this adds no fourth executor.
+**Rejected.** (b) Running probes through the BBP host's run machinery: that is the deferred v2 BBP route and needs its own design. (c) Holding probe execution, which would ship hunts and probe generation with no runs and leave §8 unmeasurable.
+**Tag.** [stated] · remind-me: mem_936fff49c7ec468fb8da5434da55ed73
+**Key.** lel:708:probe-execution-in-orch
+**Source.** Nano tapped option A, "Yes, orch runs them sandboxed", on hearthbot decision card cmsg_014AqbZs58L565hMV2pFkCX53jwAvbS5K1FLg3DH1ESfus (asked 2026-11-04T23:52:18Z, answered 2026-11-05T02:31:46Z), thread cmsg_014AqbZs58L565hMV2pFkCX5PRArQZK27dSqRZa2ZYPeC1. Option A's consequence read: "orch adds rusty_sandbox and rusty_worktree and runs probes with no network on a scratch base+diff tree, behind a trait so v2 can move it to the host." `/mnt/project-files/let-em-loose-708/708-slice4-plan.md` § Findings, 4d. Drafted as D89 and renumbered D96 on 2026-11-05 under the coordinator's allocation (D96–D99 for this thread), because main and open PR branches use D78–D95; meaning, key and tags unchanged.
+
+## D97. #708 slice 4d: probe scratch trees and cargo time limit
+
+**Decision.** Build detail inside D75 and D96.
+1. **Scratch trees.** Trees go under the lens state dir (`--state`) at `<state>/alien/probes/<task>/<claim>-<n>/`. There is one tree for the candidate (base, the candidate's diffs and the probe file) and one for base (base and the probe file). A guard removes both after that probe's runs, whatever the result, and the runner removes any leftover `<state>/alien/probes/` when it starts. The candidate's cargo target dir, `<state>/alien/target/<task>/<claim>`, persists between that hunt's probes as a build cache, is emptied when a hunt starts, and can be deleted at any time.
+2. **Time limit.** Each cargo invocation, the `--no-run` build and then the test run, has its own wall-clock limit: the named const `PROBE_CARGO_LIMIT`, 10 minutes. Cargo runs `--offline` inside the no-network sandbox. A timeout on the candidate, in the build or the run, is reported as `Run::BuildError`, so its probe row is `error` with a "timed out" note and never counts as a finding. A timeout on base is returned as a `Probes::run` `Err`: no probe row and a "not run" note, never `new-code-fail`. Failures of the worktree or sandbox setup are `Err` too. The orch-lens `Run` and `Outcome` types do not change. A base build killed by a signal is handled like a base timeout.
+3. **Isolation.** Each tree gets its own new temp dir (`<name>-tmp`, also its `HOME`) holding a new private cargo home. Base builds into a target dir inside its own temp dir, never the candidate's cache, so nothing a candidate run wrote reaches base. Host-side writes into a tree never go through a symlink, because the candidate's diffs can add them. Every directory from the tree root down to the crate's `tests` must be a real directory, and the probe file is created new (`O_EXCL`). A site path under a symlinked directory names no crate. A refused placement is an `Err`, so the probe is not run.
+**Why.** D75 §6 states no time limit and no location, so this is implementation detail. One const, the existing types and state that can be removed are the most reversible choices. Only a probe that passes on base and fails on the candidate is a regression. A hang therefore can't be counted as one, and a base timeout can't separate pre-existing from regression from new-code-fail.
+**Rejected.** A system temp dir, which leaves trees outside the state the operator manages. Mapping a candidate run timeout to `Failed`, which could turn a hang into a false regression. Mapping a base timeout to `BuildError`, which would record `new-code-fail` wrongly. A new `Run::TimedOut` variant, an orch-lens public API change that isn't needed yet.
+**Tag.** [default] · remind-me: mem_f7977776fd4044d081d68c7525aa514b
+**Key.** lel:708:sandbox-probes-limits
+**Source.** The #708 slice 4d build questions, 2026-11-05. D75 and design §6. D96. `orch-lens` `src/alien.rs` `outcome`. PR #1500 `src/hunt.rs` `Probes::run` (where `Err` means the probe did not run). Slice 4c rule: unrun probes are never written as `error`. Item 1's cache scope, the signaled-base rule in item 2 and item 3 were amended 2026-11-05 after review of PR #1511 by dottiusmaximus and Codex (builder default, not a Nano decision). The shared cache was narrowed because candidate code can write to it. Drafted as D90 and renumbered D97 on 2026-11-05 with D96, for the same collision; meaning, key and tags unchanged.
 
 ## D98. #708 alien hunt reads the candidate and its diffs through `get_artifact`
 
