@@ -1021,6 +1021,105 @@ mod tests {
         assert_eq!(s.rpc.args("post").len(), 3, "one resend of the lost post");
     }
 
+    /// The host appends the second post as id 42 but both its answers are
+    /// lost. The row keeps 41 and is unsure; the job reruns after a
+    /// restart and posts 43. On a line that 42 really decided, the job must
+    /// not be scored as non-pivotal.
+    #[test]
+    fn a_landed_but_lost_post_never_lets_a_pivotal_job_score() {
+        use orch_lens::record::{score, Change, Item, Review, Rule, Scored, Step, Trail};
+        use rusty_bbp::{ClaimStatus, Direction};
+
+        let fake = Fake::default()
+            .on("post", Response::Posted(MsgId(41)))
+            .fail("post", "timed out")
+            .fail("post", "timed out");
+        let mut s = Session::new("adversary", fake, "r1");
+        let lost = s
+            .post("adversary", &[counter("x"), counter("y")])
+            .expect_err("lost");
+        let d =
+            std::env::temp_dir().join(format!("orch-bbp-record-lost-post-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let job = |items: Vec<MsgId>, unsure: bool| Review {
+            lens: "adversary".into(),
+            claim: MsgId(7),
+            epoch: 0,
+            look_harder: false,
+            items,
+            unsure,
+        };
+        orch_store::Store::open(&d)
+            .expect("store")
+            .save_lens_review("b", &job(lost.posted.clone(), lost.unsure))
+            .expect("save");
+        // Restart: the abandoned job reruns and its new post is answered.
+        let mut store = orch_store::Store::open(&d).expect("reopen");
+        store
+            .save_lens_review("b", &job(vec![MsgId(43)], false))
+            .expect("rerun");
+        let rows = store.lens_reviews("b").expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].items, [MsgId(41), MsgId(43)]);
+        assert!(rows[0].unsure, "42 may be the job's");
+
+        // 41, 42 and 43 are the lens's; with "a" they reach the line. Only
+        // 42 (unknown to the row) pushes it over: genuinely pivotal.
+        let item = |msg: u64, author: &str, delta: i64| {
+            Change::Item(Item {
+                msg: MsgId(msg),
+                author: author.into(),
+                direction: Direction::Counter,
+                grounded: true,
+                executed: false,
+                delta,
+                scoring: true,
+            })
+        };
+        let changes = [
+            item(2, "a", -6),
+            item(41, "adversary", -1),
+            item(42, "adversary", -3),
+            item(43, "adversary", -1),
+            Change::Status(Rule::Line {
+                at: -8,
+                authors: 2,
+                min_authors: Some(2),
+            }),
+        ];
+        let mut score_so_far = 0;
+        let steps = changes
+            .into_iter()
+            .map(|change| {
+                if let Change::Item(i) = &change {
+                    score_so_far += i.delta;
+                }
+                let status = match change {
+                    Change::Status(_) => ClaimStatus::Dropped,
+                    _ => ClaimStatus::Open,
+                };
+                Step {
+                    change,
+                    status,
+                    score: score_so_far,
+                    epoch: 0,
+                }
+            })
+            .collect();
+        let trail = Trail { steps };
+        assert_eq!(score(&rows[0], &trail), Scored::Unscored { pivotal: true });
+        // Without the marker, the same row would have scored as non-pivotal.
+        let unmarked = Review {
+            unsure: false,
+            ..rows[0].clone()
+        };
+        assert!(matches!(
+            score(&unmarked, &trail),
+            Scored::Points { pivotal: false, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_rejected_post_is_not_retried() {
         let fake = Fake::default().refuse("post", reassigned());
