@@ -25,6 +25,7 @@ mod lens_states;
 mod meters;
 mod probes;
 mod record;
+mod taints;
 mod watch;
 
 use std::fmt;
@@ -37,6 +38,7 @@ use orch_core::GoalId;
 use orch_dispatch::Ledger;
 use orch_lens::meter::Snapshot;
 use orch_lens::saved::Saved;
+use orch_lens::taint::Taints;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
@@ -50,6 +52,7 @@ use meters::MeterRecord;
 use orch_lens::alien::{HuntRow, ProbeRow};
 use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
+use taints::TaintRecord;
 use watch::WatchRecord;
 pub use watch::{PendingPost, WatchFinding, WatchSlot};
 
@@ -61,6 +64,8 @@ const LEGACY_ASSIGNMENTS_FILE: &str = "assignments.mmap";
 const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 /// Lens experiment meters (#594).
 const METERS_FILE: &str = "meters.mmap";
+/// BBP tasks' taint tables (#598).
+const TAINTS_FILE: &str = "taints.mmap";
 /// Alien-lens probe rows (#708).
 const PROBES_FILE: &str = "probes.mmap";
 /// Completed alien-lens hunts, with or without probes (#708).
@@ -151,6 +156,7 @@ pub struct Store {
     assignments: GenericMmapStore<AssignmentRecord, ById, Revision>,
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     meters: GenericMmapStore<MeterRecord, ById, Revision>,
+    taints: GenericMmapStore<TaintRecord, ById, Revision>,
     probes: GenericMmapStore<ProbeRecord, ById, Revision>,
     hunts: GenericMmapStore<HuntRecord, ById, Revision>,
     lens_states: GenericMmapStore<LensStateRecord, ById, Revision>,
@@ -183,6 +189,12 @@ impl Store {
         };
         let path = dir.join(METERS_FILE);
         let meters = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
+        let path = dir.join(TAINTS_FILE);
+        let taints = if path.exists() {
             GenericMmapStore::open_portable(&path)?
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
@@ -222,6 +234,7 @@ impl Store {
             assignments,
             legacy,
             meters,
+            taints,
             probes,
             hunts,
             lens_states,
@@ -558,6 +571,47 @@ impl Store {
             self.lens_states.insert(record).map_err(engine_error)
         } else {
             self.lens_states.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+}
+
+impl Store {
+    /// BBP task `task`'s taint table; empty when none was saved.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record under its key names another
+    /// task or an unknown class.
+    pub fn load_taints(&self, task: &str) -> Result<Taints, StoreError> {
+        self.taints
+            .get(taints::key(task))
+            .map_or(Ok(Taints::default()), |r| r.into_taints(task))
+    }
+
+    /// Save `taints` as task `task`'s table. Only ever grows: the caller
+    /// loads, raises and saves under the store's lock.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another task's
+    /// table; [`StoreError::Engine`] when the write fails.
+    pub fn save_taints(&mut self, task: &str, taints: &Taints) -> Result<(), StoreError> {
+        let existing = self.taints.get(taints::key(task));
+        if let Some(r) = &existing {
+            if r.task != task {
+                return Err(StoreError::Corrupt(format!(
+                    "taint key for {task:?} holds {:?}",
+                    r.task
+                )));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = TaintRecord::new(task, taints, revision);
+        let written = if existing.is_none() {
+            self.taints.insert(record).map_err(engine_error)
+        } else {
+            self.taints.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
     }

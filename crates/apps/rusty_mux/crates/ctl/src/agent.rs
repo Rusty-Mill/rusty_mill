@@ -261,16 +261,9 @@ fn status(layouts: &[Layout]) -> Vec<Line> {
 /// The state of the hook `hook` describes.
 fn hook_state(hook: &Hook) -> Result<State, String> {
     match hook {
-        Hook::Settings {
-            file,
-            command,
-            windows,
-            ..
-        } => match read(file)? {
+        Hook::Settings { file, entries, .. } => match read(file)? {
             None => Ok(State::Missing),
-            Some((_, value)) => {
-                settings::state(&value, command, windows.as_deref()).map_err(|e| at(file, e))
-            }
+            Some((_, value)) => settings::state(&value, entries).map_err(|e| at(file, e)),
         },
         Hook::Script { file, text } => marked_state(file, text, |t| t.starts_with(scripts::MARK)),
     }
@@ -340,8 +333,7 @@ fn install_hook(hook: &Hook, state: State) -> Result<(), String> {
         Hook::Settings {
             file,
             backup,
-            command,
-            windows,
+            entries,
         } => {
             let value = match read(file)? {
                 Some((text, value)) => {
@@ -353,8 +345,7 @@ fn install_hook(hook: &Hook, state: State) -> Result<(), String> {
                 }
                 None => Value::Object(Map::new()),
             };
-            let value =
-                settings::with_hook(value, command, windows.as_deref()).map_err(|e| at(file, e))?;
+            let value = settings::with_hook(value, entries).map_err(|e| at(file, e))?;
             write_new(file, &pretty(&value))
         }
     }

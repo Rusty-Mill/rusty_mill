@@ -7,8 +7,17 @@
 //! ```
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{BoardError, Column, ExecutionLink};
+use rusty_mill_board::domain::{BoardError, Column, ExecutionLink, Plan};
 use rusty_mill_board::tick::{TickHttp, TickStore};
+
+/// A plan of a priority and dependencies only.
+fn plan(priority: Option<u8>, deps: Option<Vec<uuid::Uuid>>) -> Plan {
+    Plan {
+        priority,
+        deps,
+        ..Plan::default()
+    }
+}
 
 #[test]
 #[ignore = "writes to a real rusty_tick"]
@@ -28,7 +37,7 @@ fn a_card_round_trips_through_a_real_rusty_tick() {
         .add(&human, "live card", "body", vec!["Live".into()])
         .expect("add");
     board
-        .plan(card.id, &human, Some(3), Some(vec![dep.id]))
+        .plan(card.id, &human, &plan(Some(3), Some(vec![dep.id])))
         .expect("plan");
     board
         .move_card(card.id, &Column::READY, &human)

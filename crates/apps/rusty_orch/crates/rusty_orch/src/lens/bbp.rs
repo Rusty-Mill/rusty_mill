@@ -25,10 +25,12 @@ use orch_lens::context::{Line, MAX_LINES};
 use orch_lens::round::Board;
 use orch_lens::{LensConfig, Post};
 use rusty_bbp::{
-    ArtId, Body, ClaimBody, ClaimStatus, ClaimView, Direction, EvidenceKind, MsgId, Ref, Response,
-    Rev, Stakes,
+    ArtId, ArtifactKind, ArtifactPayload, ArtifactRecord, Body, ClaimBody, ClaimStatus, ClaimView,
+    Code, Direction, EvidenceKind, MsgId, Ref, Response, Rev, Stakes,
 };
 use rusty_serde::Value;
+
+use super::probes::Candidate;
 
 /// How long one tool call may take.
 pub const CALL_DEADLINE: Duration = Duration::from_secs(30);
@@ -323,14 +325,18 @@ impl<R: Rpc> Session<R> {
         }
     }
 
-    /// The domains the lens follows; `*` is every domain seen so far.
+    /// The domains the lens follows; `*` is every domain seen so far. The
+    /// alien lens follows every domain (D99).
     fn domains(&self, config: &LensConfig) -> BTreeSet<String> {
-        let Some(lens) = config.lens(&self.lens) else {
-            return BTreeSet::new();
+        let every = ["*".to_owned()];
+        let follows: &[String] = match config.lens(&self.lens) {
+            Some(lens) => &lens.domains,
+            None if config.alien.as_ref().is_some_and(|a| a.id == self.lens) => &every,
+            None => return BTreeSet::new(),
         };
         let seen = self.claims.values().flat_map(|b| b.domains.iter());
-        seen.chain(lens.domains.iter())
-            .filter(|d| d.as_str() != "*" && lens.follows(d))
+        seen.chain(follows)
+            .filter(|d| d.as_str() != "*" && follows.iter().any(|f| f == "*" || f == *d))
             .cloned()
             .collect()
     }
@@ -368,6 +374,68 @@ impl<R: Rpc> Session<R> {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .ok_or_else(|| format!("get_artifact: brief {id} has no text"))
+    }
+
+    /// Code candidate `id`'s base and the text of each of its diffs, in the
+    /// candidate's order, so each can be applied on its own.
+    /// Each artifact's first read is charged once to the lens (R11), not
+    /// to the claim's budget (D98). A role that may not read the candidate
+    /// or a diff gives [`Diffs::Forbidden`]; any other failure is an error.
+    pub fn candidate_diffs(&mut self, id: ArtId) -> Result<Diffs, String> {
+        let (rec, _) = match self.artifact(id)? {
+            Got::Read(rec, content) => (rec, content),
+            Got::Forbidden(why) => return Ok(Diffs::Forbidden(why)),
+        };
+        let ArtifactPayload::Candidate(candidate) = rec.payload else {
+            return Err(format!("get_artifact: {id} is not a candidate"));
+        };
+        let mut texts = Vec::with_capacity(candidate.diffs.len());
+        for diff in candidate.diffs {
+            let (rec, content) = match self.artifact(diff)? {
+                Got::Read(rec, content) => (rec, content),
+                Got::Forbidden(why) => return Ok(Diffs::Forbidden(why)),
+            };
+            if rec.kind != ArtifactKind::Diff {
+                return Err(format!(
+                    "get_artifact: {diff} of candidate {id} is not a diff"
+                ));
+            }
+            texts.push(content);
+        }
+        Ok(Diffs::Read(Candidate {
+            base: candidate.base,
+            diffs: texts,
+        }))
+    }
+
+    /// One artifact's record and text; a `role_forbidden` refusal is
+    /// [`Got::Forbidden`].
+    fn artifact(&mut self, id: ArtId) -> Result<Got, String> {
+        const TOOL: &str = "get_artifact";
+        let reply = self.rpc.call(TOOL, map(vec![("id", id.0.into())]));
+        if let Err(CallError::Answered(text)) = &reply {
+            if let Some(r) = forbidden(text) {
+                return Ok(Got::Forbidden(rejected(&format!("{TOOL} {id}"), &r)));
+            }
+        }
+        let text = reply.map_err(|e| failed(e, TOOL))?;
+        let v: Value = rusty_serde::json::from_str(&text)
+            .map_err(|e| format!("{TOOL}: unreadable answer: {e}"))?;
+        // The host puts the text (and version fields) beside the response,
+        // so the response is read back on its own.
+        let rec = v
+            .get("Artifact")
+            .cloned()
+            .ok_or_else(|| format!("{TOOL}: {id} answered no artifact"))?;
+        let only = Value::Map(vec![("Artifact".to_owned(), rec)]).to_string();
+        let Response::Artifact(rec) = parse(&only, TOOL)? else {
+            return Err(format!("{TOOL}: {id} answered no artifact"));
+        };
+        let content = v
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{TOOL}: {id} has no text"))?;
+        Ok(Got::Read(Box::new(rec), content.to_owned()))
     }
 
     fn refresh_card(&mut self) -> Result<Rev, String> {
@@ -433,17 +501,50 @@ impl<R: Rpc> Board for Session<R> {
     }
 }
 
+/// What a lens may read of a claim's code candidate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Diffs {
+    /// The candidate's base and each diff's text, in the candidate's order.
+    Read(Candidate),
+    /// The lens's role may not read the candidate or one of its diffs
+    /// (D98): the claim is not eligible. The refused read itself is not
+    /// charged; reads that succeeded before it (the candidate, earlier
+    /// diffs) already were.
+    Forbidden(String),
+}
+
+/// One `get_artifact` answer.
+enum Got {
+    Read(Box<ArtifactRecord>, String),
+    Forbidden(String),
+}
+
 /// A call's outcome as a response; a rejection or any other error is an
-/// error naming `tool`. An answered error's text is shown as a rejection
-/// when it is one (the host's `isError` shape), else as sent.
+/// error naming `tool`.
 fn answer(reply: Result<String, CallError>, tool: &str) -> Result<Response, String> {
-    match reply {
-        Ok(text) => parse(&text, tool),
-        Err(CallError::Answered(text)) => Err(match rusty_serde::json::from_str(&text) {
+    reply
+        .map_err(|e| failed(e, tool))
+        .and_then(|text| parse(&text, tool))
+}
+
+/// A failed call as an error naming `tool`. An answered error's text is
+/// shown as a rejection when it is one (the host's `isError` shape), else
+/// as sent.
+fn failed(e: CallError, tool: &str) -> String {
+    match e {
+        CallError::Answered(text) => match rusty_serde::json::from_str(&text) {
             Ok(Response::Rejected(r)) => rejected(tool, &r),
             _ => format!("{tool}: {text}"),
-        }),
-        Err(CallError::Lost(e)) => Err(format!("{tool}: {e}")),
+        },
+        CallError::Lost(e) => format!("{tool}: {e}"),
+    }
+}
+
+/// BBP's `role_forbidden` refusal, if this answered error is one.
+fn forbidden(text: &str) -> Option<rusty_bbp::Rejection> {
+    match rusty_serde::json::from_str(text) {
+        Ok(Response::Rejected(r)) if r.code == Code::RoleForbidden => Some(r),
+        _ => None,
     }
 }
 
@@ -764,6 +865,33 @@ mod tests {
     }
 
     #[test]
+    fn the_alien_lens_follows_every_domain_and_an_unknown_role_none() {
+        let at = CONFIG.rfind(']').expect("lenses end");
+        let text = format!(
+            "{}],\n\"alien\": {{\"id\": \"alien\", \"prompt\": \"a\", \"providers\": [\"codex\"]}}}}",
+            &CONFIG[..at]
+        );
+        let cfg = LensConfig::parse(&text).expect("config");
+        for (role, deltas) in [("alien", 1), ("stranger", 0)] {
+            let fake = Fake::default()
+                .on("task_card", task_card(5))
+                .on("read", read(vec![claim(7)], false))
+                .on(
+                    "claims_delta",
+                    Response::Claims(vec![view(7, ClaimStatus::Open, &[])]),
+                );
+            let mut s = Session::new(role, fake, "r1");
+            s.refresh(&cfg).expect("refresh");
+            let asked = s.rpc.args("claims_delta");
+            assert_eq!(asked.len(), deltas, "{role}");
+            if let Some(delta) = asked.first() {
+                assert_eq!(word(delta, "domains"), r#"["dedup"]"#);
+                assert_eq!(s.cards(&cfg).len(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn refresh_reads_new_pages_then_the_delta_and_builds_cards() {
         let fake = Fake::default()
             .on("task_card", task_card(5))
@@ -995,6 +1123,138 @@ mod tests {
         let mut s = Session::new("adversary", fake, "r1");
         assert_eq!(s.brief(), Ok("Dedup 20 TB of photos.".to_owned()));
         assert_eq!(word(s.rpc.args("get_artifact")[0], "id"), "1");
+    }
+
+    /// A `get_artifact` answer as the host renders it: the response with
+    /// the artifact's text beside it.
+    fn artifact(id: u64, payload: ArtifactPayload, content: &str) -> Result<String, CallError> {
+        let rec = ArtifactRecord {
+            id: ArtId(id),
+            author: PrincipalId("builder".to_owned()),
+            kind: payload.kind(),
+            blob: rusty_bbp::BlobRef {
+                sha: rusty_bbp::Sha256::of(content.as_bytes()),
+                len: content.len() as u64,
+            },
+            payload,
+            spec: None,
+            candidate: None,
+            run: None,
+        };
+        let text = rusty_serde::json::to_string(&Response::Artifact(rec)).expect("encode");
+        let Ok(Value::Map(mut m)) = rusty_serde::json::from_str::<Value>(&text) else {
+            panic!("not a map: {text}");
+        };
+        m.push(("content".to_owned(), content.into()));
+        Ok(Value::Map(m).to_string())
+    }
+
+    fn candidate(diffs: &[u64]) -> ArtifactPayload {
+        ArtifactPayload::Candidate(rusty_bbp::Candidate {
+            base: "0".repeat(40),
+            diffs: diffs.iter().copied().map(ArtId).collect(),
+            claim: Some(MsgId(10)),
+            suite: rusty_bbp::Suite::Build,
+        })
+    }
+
+    fn reading(answers: Vec<Result<String, CallError>>) -> Session<Fake> {
+        let mut fake = Fake::default();
+        fake.replies
+            .entry("get_artifact".to_owned())
+            .or_default()
+            .extend(answers);
+        Session::new("adversary", fake, "r1")
+    }
+
+    fn forbid() -> Result<String, CallError> {
+        let r = rusty_bbp::Rejection::new(Code::RoleForbidden, "role lacks read(diff)");
+        let text = rusty_serde::json::to_string(&Response::Rejected(r)).expect("encode");
+        Err(CallError::Answered(text))
+    }
+
+    #[test]
+    fn a_candidates_diffs_are_read_in_order() {
+        let mut s = reading(vec![
+            artifact(5, candidate(&[3, 4]), "{}"),
+            artifact(3, ArtifactPayload::Diff, "--- a/src/x.rs\n+++ b/src/x.rs"),
+            artifact(
+                4,
+                ArtifactPayload::Diff,
+                "--- a/README.md\n+++ b/README.md\n",
+            ),
+        ]);
+        let want = [
+            "--- a/src/x.rs\n+++ b/src/x.rs",
+            "--- a/README.md\n+++ b/README.md\n",
+        ];
+        assert_eq!(
+            s.candidate_diffs(ArtId(5)),
+            Ok(Diffs::Read(Candidate {
+                base: "0".repeat(40),
+                diffs: want.map(str::to_owned).to_vec(),
+            }))
+        );
+        let ids: Vec<String> = s
+            .rpc
+            .args("get_artifact")
+            .iter()
+            .map(|a| word(a, "id"))
+            .collect();
+        assert_eq!(ids, ["5", "3", "4"]);
+    }
+
+    #[test]
+    fn a_refused_read_is_forbidden_and_stops() {
+        let mut s = reading(vec![forbid()]);
+        let Ok(Diffs::Forbidden(why)) = s.candidate_diffs(ArtId(5)) else {
+            panic!("not forbidden");
+        };
+        assert!(why.contains("read(diff)"), "{why}");
+        assert_eq!(s.rpc.args("get_artifact").len(), 1);
+
+        let mut s = reading(vec![artifact(5, candidate(&[3, 4]), "{}"), forbid()]);
+        assert!(matches!(
+            s.candidate_diffs(ArtId(5)),
+            Ok(Diffs::Forbidden(_))
+        ));
+        assert_eq!(
+            s.rpc.args("get_artifact").len(),
+            2,
+            "the second diff is not read"
+        );
+    }
+
+    #[test]
+    fn other_failures_reading_a_candidate_are_errors() {
+        let refused = rusty_bbp::Rejection::new(Code::RefUnresolved, "art:5");
+        let text = rusty_serde::json::to_string(&Response::Rejected(refused)).expect("encode");
+        let cases: Vec<(Vec<Result<String, CallError>>, &str)> = vec![
+            (vec![Err(CallError::Answered(text))], "RefUnresolved"),
+            (
+                vec![Err(CallError::Lost("timed out".to_owned()))],
+                "timed out",
+            ),
+            (
+                vec![artifact(5, ArtifactPayload::Diff, "x")],
+                "not a candidate",
+            ),
+            (
+                vec![
+                    artifact(5, candidate(&[3]), "{}"),
+                    artifact(3, ArtifactPayload::Log, "x"),
+                ],
+                "not a diff",
+            ),
+            (
+                vec![Ok(r#"{"id":5,"content":"x"}"#.to_owned())],
+                "no artifact",
+            ),
+        ];
+        for (answers, want) in cases {
+            let err = reading(answers).candidate_diffs(ArtId(5)).expect_err(want);
+            assert!(err.contains(want), "{err} lacks {want}");
+        }
     }
 
     #[test]

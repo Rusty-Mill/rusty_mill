@@ -503,6 +503,23 @@ async function loadPending(){
   $("decide").hidden=pending===null&&pendingErr===null&&view!=="decisions";
   $("decide-n").textContent=(pending?.length?" · "+pending.length:"")+(pendingErr?" · ⚠":"");
 }
+/* #704 erosion detail (D91): the bin's error, the metrics and the worst functions when erosion fails
+   the claim, and unmeasured code always (D45). Shares are basis points, shown as percents. The detail
+   is passed through untyped, so a missing or changed field skips its line instead of breaking the view. */
+function erosion(er){
+  const m=er?.line,out=[],list=x=>Array.isArray(x)?x:[];
+  if(er?.error)return[el("p","Erosion could not measure: "+er.error,"meta")];
+  if(!m||typeof m!=="object")return out;
+  const share=(name,s)=>s&&name+" "+s.base/100+"% → "+s.candidate/100+"% ("+(s.delta>0?"+":"")+s.delta/100+")";
+  if(er.failing){
+    const lim=m.mode&&typeof m.mode==="object"?" (limits "+m.mode.max_concentration_bp/100+"% and "+m.mode.max_duplication_bp/100+"%)":"";
+    const shares=[share("concentration",m.concentration_bp),share("duplication",m.duplication_bp)].filter(Boolean);
+    out.push(el("p","Erosion fails"+lim+(shares.length?": "+shares.join(", "):""),"meta"));
+    for(const w of list(m.worst_affected))if(w)out.push(el("p","Complexity "+w.base_cc+" → "+w.cc+" in "+w.key,"meta"));
+  }
+  if(list(m.unmeasured).length)out.push(el("p","Not measured by erosion: "+list(m.unmeasured).join(", "),"meta"));
+  return out;
+}
 const pct=c=>c.confidence+"% · score "+c.score+" · budget "+c.spent+"/"+c.budget+(c.epoch?" · epoch "+c.epoch:"");
 const changes=d=>d.events.map(e=>Object.keys(e)[0]).join(", ")||"nothing";
 async function decide(item,action){
@@ -535,6 +552,7 @@ function renderDecisions(){
     for(const t of it.totals||[])s.append(el("p",t.field+": spent "+t.spent+" of "+t.limit+"; Approve adds "+t.allowance,"meta"));
     for(const a of it.acted||[])s.append(el("p","Already acted on: msg:"+a.claim+(a.marks.length?" ("+a.marks.join(", ")+")":"")+". Dropping it files a Remediate card.","meta"));
     for(const e of it.evidence)s.append(el("p",(e.delta>0?"+":"")+e.delta+" "+e.kind.toLowerCase()+" "+e.direction.toLowerCase()+" by "+e.author+" (msg:"+e.msg+")","meta"));
+    s.append(...erosion(it.erosion));
     for(const k of it.candidates){
       const d=el("div",null,"cand");d.append(el("b",k.text),el("p",pct(k),"meta"));
       const pick=el("button","Choose this");pick.onclick=()=>decide(it,{action:"choose",chosen:k.id});d.append(pick);s.append(d);

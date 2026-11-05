@@ -60,6 +60,16 @@ pub struct HarnessSandbox {
     /// may write only its own worktree.
     #[rusty_serde(default)]
     pub checkout: bool,
+    /// #598: globs of paths this harness must not see or touch (the
+    /// factory's `sensitive_paths`, for a cloud harness). With `checkout`
+    /// the workspace is then a [filtered copy](crate::filtered) of `HEAD`
+    /// in a fresh repository instead of a worktree, which the launcher
+    /// clones from; a diff it posts that touches a hidden path is refused,
+    /// and a candidate on the copy's commit is pinned to the source commit.
+    /// No root it is granted, the system roots and `bbp`'s directory
+    /// included, may reach the repository.
+    #[rusty_serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hide: Vec<String>,
 }
 
 /// One confined turn's places: the workspace it may write, the pipes of its
@@ -71,6 +81,11 @@ pub(crate) struct Turn {
     scratch: PathBuf,
     /// The repository the workspace is a worktree of, with `checkout`.
     repo: Option<Repo>,
+    /// The sandbox's `hide` globs: the workspace is a filtered copy, removed
+    /// at [`Turn::finish`], and the broker refuses diffs touching them.
+    hide: Vec<String>,
+    /// With `hide`, the copy's commit and the source commit it pins to.
+    view: Option<crate::filtered::View>,
     pub pipes: PathBuf,
     pub mcp_config: PathBuf,
     /// The turn's launch [`Facts`], readable but not writable by the harness.
@@ -109,8 +124,8 @@ impl Turn {
         for dir in [&base, &scratch] {
             std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         }
-        let repo = sandbox
-            .checkout
+        let filtered = sandbox.checkout && !sandbox.hide.is_empty();
+        let repo = (sandbox.checkout && !filtered)
             .then(|| Repo::open(&cfg.repo))
             .transpose()?;
         // What a session's earlier turn left, if its cleanup never ran.
@@ -123,16 +138,38 @@ impl Turn {
                     .map_err(|e| format!("{}: {e}", workspace.display()))?;
             }
         }
+        // A pinned baseline (#597, #598) is what every candidate must build
+        // on, so a builder starts there, not at HEAD, filtered or not.
+        let at = match sandbox.checkout {
+            true => crate::profiles::pinned_base(&cfg.dir, &cfg.task)?,
+            false => None,
+        };
+        let at = at.as_deref().unwrap_or("HEAD");
+        let mut view = None;
         let repo = if let Some(repo) = repo {
-            // A pinned baseline (#597, #598) is what every candidate must
-            // build on, so the builder starts there, not at HEAD.
-            let at = crate::profiles::pinned_base(&cfg.dir, &cfg.task)?;
-            repo.add_detached(&workspace, at.as_deref().unwrap_or("HEAD"))?;
+            repo.add_detached(&workspace, at)?;
             Some(repo)
+        } else if filtered {
+            view = Some(crate::filtered::copy(
+                &cfg.repo,
+                at,
+                &workspace,
+                &sandbox.hide,
+            )?);
+            None
         } else {
             std::fs::create_dir_all(&workspace)
                 .map_err(|e| format!("{}: {e}", workspace.display()))?;
             None
+        };
+        // A filtered harness never reaches the source repository: its
+        // launcher clones the copy instead.
+        let facts = match &view {
+            Some(_) => &Facts {
+                repo: workspace.to_string_lossy().into_owned(),
+                ..facts.clone()
+            },
+            None => facts,
         };
         broker::make_pipes(&pipes)?;
         let mcp_config = scratch.join("mcp.json");
@@ -154,6 +191,8 @@ impl Turn {
             workspace,
             scratch,
             repo,
+            hide: sandbox.hide.clone(),
+            view,
             pipes,
             mcp_config,
             facts: facts_path,
@@ -214,6 +253,15 @@ impl Turn {
         let spec = SandboxSpec::new(read, write, self.workspace.clone(), env, limits)
             .map_err(|e| format!("harness sandbox: {e}"))?;
         refuse_reaching(&spec, &cfg.dir)?;
+        if !self.hide.is_empty() {
+            let roots: Vec<&Path> = spec
+                .read_roots()
+                .iter()
+                .chain(spec.write_roots())
+                .map(PathBuf::as_path)
+                .collect();
+            refuse_exposing(&roots, &cfg.repo)?;
+        }
         let request = HelperRequest {
             status: self.status.clone(),
             cwd: spec.cwd().clone(),
@@ -255,6 +303,13 @@ impl Turn {
             .env("BBP_TASK", &cfg.task.0)
             .env("BBP_PRINCIPAL", &principal.0)
             .env("BBP_TURN", turn.0.to_string())
+            .env(crate::mcp::HIDDEN_ENV, self.hide.join("\n"))
+            .env(
+                crate::mcp::VIEW_ENV,
+                self.view
+                    .as_ref()
+                    .map_or_else(String::new, |v| format!("{} {}", v.head, v.base)),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(log);
@@ -271,9 +326,14 @@ impl Turn {
     /// Remove the turn's worktree, if it has one: its edits reached the task
     /// through MCP, and the object store keeps nothing of them.
     pub fn finish(&self) -> Result<(), String> {
-        self.repo
-            .as_ref()
-            .map_or(Ok(()), |repo| repo.remove(&self.workspace))
+        if let Some(repo) = &self.repo {
+            return repo.remove(&self.workspace);
+        }
+        if self.hide.is_empty() || !self.workspace.exists() {
+            return Ok(());
+        }
+        std::fs::remove_dir_all(&self.workspace)
+            .map_err(|e| format!("{}: {e}", self.workspace.display()))
     }
 
     /// Why the helper refused to run the harness, if it did.
@@ -343,6 +403,9 @@ pub fn refuse_swappable(
     if sandboxes.iter().any(|s| s.checkout) {
         roots.push(resolved(&Repo::open(repo)?.git_dir())?);
     }
+    for s in sandboxes.iter().filter(|s| !s.hide.is_empty()) {
+        refuse_seeing(s, bbp, repo)?;
+    }
     let work = resolved(&std::path::absolute(work).map_err(|e| e.to_string())?)?;
     for write in &writes {
         if write.starts_with(&work) {
@@ -360,6 +423,158 @@ pub fn refuse_swappable(
         }
     }
     Ok(())
+}
+
+/// A sandbox with `hide` must name valid globs and grant no root that
+/// reaches the repository, whose files and object store hold what it hides:
+/// neither its own roots nor those every harness gets, the system roots and
+/// `bbp`'s directory. [`Turn::command`] checks the complete roots again.
+fn refuse_seeing(s: &HarnessSandbox, bbp: &Path, repo: &Path) -> Result<(), String> {
+    for g in &s.hide {
+        crate::profiles::check_glob(g).map_err(|e| format!("harness sandbox: hide {g:?}: {e}"))?;
+    }
+    let bbp_dir = resolved(bbp)?
+        .parent()
+        .ok_or("bbp binary has no directory")?
+        .to_path_buf();
+    let mut roots: Vec<PathBuf> = s.read.iter().chain(&s.write).map(PathBuf::from).collect();
+    roots.extend(
+        SYSTEM_ROOTS
+            .iter()
+            .map(PathBuf::from)
+            .filter(|p| p.exists()),
+    );
+    roots.push(bbp_dir);
+    let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+    refuse_exposing(&roots, repo)
+}
+
+/// Refuse any of `roots` that, resolved, reaches the repository at `repo`
+/// or any place its git storage lives: its `.git` and object store wherever
+/// links lead them, the target of every link inside `.git`, and the object
+/// stores it borrows (`objects/info/alternates`, followed transitively).
+fn refuse_exposing(roots: &[&Path], repo: &Path) -> Result<(), String> {
+    let repo = resolved(&std::path::absolute(repo).map_err(|e| e.to_string())?)?;
+    let held = git_storage(&repo)?;
+    for root in roots {
+        let root = resolved(root)?;
+        if let Some(h) = held
+            .iter()
+            .find(|h| h.starts_with(&root) || root.starts_with(h))
+        {
+            return Err(format!(
+                "harness sandbox: {} reaches {}, which holds the paths it hides",
+                root.display(),
+                h.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every resolved place that holds `repo`'s files or objects, `repo`
+/// included: `.git`, the target of every link reached from it, followed
+/// transitively through linked directories (a linked `objects` whose `pack`
+/// is linked again), and the object stores it borrows
+/// (`objects/info/alternates`, also transitively). What has been scanned is
+/// kept apart from what is held, so holding a place never skips scanning it,
+/// and each place is scanned once, so link cycles end. Fails closed on a
+/// layout it cannot follow: a `.git` that is not a directory (a `gitdir:`
+/// file), one that names a `commondir`, or a directory it cannot read.
+fn git_storage(repo: &Path) -> Result<Vec<PathBuf>, String> {
+    let dot_git = repo.join(".git");
+    let refuse = |why: &str| {
+        Err(format!(
+            "harness sandbox: {}: {why}, so a hiding sandbox cannot be checked against it",
+            dot_git.display()
+        ))
+    };
+    if !dot_git.is_dir() {
+        return refuse("not a directory");
+    }
+    if dot_git.join("commondir").symlink_metadata().is_ok() {
+        return refuse("its storage is shared through commondir");
+    }
+    let git = canonical(&dot_git)?;
+    let mut held = vec![repo.to_path_buf()];
+    let mut scanned = std::collections::BTreeSet::new();
+    let mut stores = std::collections::BTreeSet::new();
+    let mut todo = vec![git.clone()];
+    let objects = git.join("objects");
+    let mut alternates = match objects.symlink_metadata() {
+        Ok(_) => vec![canonical(&objects)?],
+        Err(_) => Vec::new(),
+    };
+    loop {
+        if let Some(d) = todo.pop() {
+            if scanned.insert(d.clone()) {
+                for target in link_targets(&d)? {
+                    if target.is_dir() {
+                        todo.push(target.clone());
+                    }
+                    held.push(target);
+                }
+                held.push(d);
+            }
+            continue;
+        }
+        let Some(store) = alternates.pop() else {
+            break;
+        };
+        if !stores.insert(store.clone()) {
+            continue;
+        }
+        todo.push(store.clone());
+        let file = store.join("info/alternates");
+        let text = match std::fs::read_to_string(&file) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            // Unreadable, not UTF-8, or not a file: the stores it may name
+            // cannot be known, so fail closed.
+            Err(e) => {
+                return Err(format!(
+                    "harness sandbox: {}: {e}, so a hiding sandbox cannot be checked against it",
+                    file.display()
+                ))
+            }
+        };
+        // As git reads it: entries split at LF only, so a CR stays part of
+        // the path; empty and `#` lines skipped. A quoted entry is
+        // C-unquoted by git, which this does not do, so it fails closed.
+        for line in text
+            .split('\n')
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            if line.starts_with('"') {
+                return Err(format!(
+                    "harness sandbox: {}: a quoted entry, so a hiding sandbox cannot be checked against it",
+                    file.display()
+                ));
+            }
+            alternates.push(canonical(&store.join(line))?);
+        }
+    }
+    Ok(held)
+}
+
+/// The resolved target of every symlink under `dir`, which is not followed
+/// while walking.
+fn link_targets(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        let entries = std::fs::read_dir(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", d.display()))?;
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            if kind.is_symlink() {
+                out.push(resolved(&entry.path())?);
+            } else if kind.is_dir() {
+                todo.push(entry.path());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `path` with its existing ancestors resolved through symlinks.
@@ -445,6 +660,236 @@ mod tests {
             .with("a", launcher(&[], &[&src]))
             .with("b", launcher(&[&src, &root.join("tools")], &[]));
         assert_eq!(check(&root, shared), Ok(()));
+    }
+
+    #[test]
+    fn a_hiding_sandbox_may_not_reach_the_repository_or_name_a_bad_glob() {
+        let root = dir("hide");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let hiding = |read: &[&Path], hide: &str| {
+            let mut l = launcher(read, &[]);
+            if let Some(s) = l.sandbox.as_mut() {
+                s.hide = vec![hide.into()];
+            }
+            Launchers::default().with("a", l)
+        };
+        let e = check(&root, hiding(&[&root], "secrets")).unwrap_err();
+        assert!(e.contains("reaches"), "{e}");
+        let e = check(&root, hiding(&[], "a/[b]")).unwrap_err();
+        assert!(e.contains("hide"), "{e}");
+        assert!(check(&root, hiding(&[], "secrets/**")).is_ok());
+        // Roots every harness gets count too: `bbp` installed in the repo.
+        let e = refuse_swappable(
+            &hiding(&[], "secrets"),
+            &repo.join("bbp"),
+            &root.join("work"),
+            &repo,
+        )
+        .unwrap_err();
+        assert!(e.contains("reaches"), "{e}");
+        // And so does an object store the repository borrows from.
+        let store = root.join("store");
+        std::fs::create_dir_all(repo.join(".git/objects/info")).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(
+            repo.join(".git/objects/info/alternates"),
+            format!("{}\n", store.display()),
+        )
+        .unwrap();
+        let e = check(&root, hiding(&[&store], "secrets")).unwrap_err();
+        assert!(e.contains("store"), "{e}");
+    }
+
+    #[test]
+    fn a_hiding_sandbox_may_not_reach_git_storage_linked_out_of_the_repository() {
+        use std::os::unix::fs::symlink;
+        let hiding = |read: &Path| {
+            let mut l = launcher(&[read], &[]);
+            if let Some(s) = l.sandbox.as_mut() {
+                s.hide = vec!["secrets".into()];
+            }
+            Launchers::default().with("a", l)
+        };
+        // `.git` itself linked to a separate backing directory.
+        let root = dir("linked_git");
+        let backing = root.join("backing");
+        std::fs::create_dir_all(backing.join("objects")).unwrap();
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        symlink(&backing, root.join("repo/.git")).unwrap();
+        let e = check(&root, hiding(&backing)).unwrap_err();
+        assert!(e.contains("backing"), "{e}");
+        // Only the object store linked away.
+        let root = dir("linked_objects");
+        let store = root.join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        symlink(&store, root.join("repo/.git/objects")).unwrap();
+        let e = check(&root, hiding(&store)).unwrap_err();
+        assert!(e.contains("store"), "{e}");
+        // A link deeper in `.git`, and an alternate of an alternate.
+        let root = dir("linked_deep");
+        let (pack, second) = (root.join("pack"), root.join("second"));
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::create_dir_all(root.join("first/info")).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git/objects/info")).unwrap();
+        symlink(&pack, root.join("repo/.git/objects/pack")).unwrap();
+        std::fs::write(
+            root.join("repo/.git/objects/info/alternates"),
+            format!("{}\n", root.join("first").display()),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("first/info/alternates"),
+            format!("{}\n", second.display()),
+        )
+        .unwrap();
+        assert!(check(&root, hiding(&pack)).unwrap_err().contains("pack"));
+        assert!(check(&root, hiding(&second))
+            .unwrap_err()
+            .contains("second"));
+        assert!(check(&root, hiding(&root.join("bin"))).is_ok());
+        // Linked twice: `objects` to a store whose `pack` and a loose-object
+        // directory are linked again, with a link cycle back into the store.
+        let root = dir("linked_twice");
+        let (store, packs, loose) = (root.join("store"), root.join("packs"), root.join("loose"));
+        for d in [&store, &packs, &loose] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::create_dir_all(root.join("repo/.git")).unwrap();
+        symlink(&store, root.join("repo/.git/objects")).unwrap();
+        symlink(&packs, store.join("pack")).unwrap();
+        symlink(&loose, store.join("ab")).unwrap();
+        symlink(&store, packs.join("back")).unwrap();
+        assert!(check(&root, hiding(&packs)).unwrap_err().contains("packs"));
+        assert!(check(&root, hiding(&loose)).unwrap_err().contains("loose"));
+        assert!(check(&root, hiding(&root.join("bin"))).is_ok());
+        // Alternates it cannot read fail closed: not UTF-8, or not a file.
+        let root = dir("bad_alternates");
+        std::fs::create_dir_all(root.join("repo/.git/objects/info")).unwrap();
+        std::fs::write(
+            root.join("repo/.git/objects/info/alternates"),
+            b"\xff\xfe\n",
+        )
+        .unwrap();
+        let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
+        assert!(e.contains("alternates"), "{e}");
+        std::fs::remove_file(root.join("repo/.git/objects/info/alternates")).unwrap();
+        std::fs::create_dir(root.join("repo/.git/objects/info/alternates")).unwrap();
+        let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
+        assert!(e.contains("alternates"), "{e}");
+        // Git splits alternates at LF only: a CRLF entry names the store
+        // whose name ends in CR, which is what is held, not its CR-less twin.
+        let root = dir("crlf_alternate");
+        let (plain, cr) = (root.join("store"), root.join("store\r"));
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::create_dir_all(&cr).unwrap();
+        std::fs::create_dir_all(root.join("repo/.git/objects/info")).unwrap();
+        std::fs::write(
+            root.join("repo/.git/objects/info/alternates"),
+            format!("{}\r\n", plain.display()),
+        )
+        .unwrap();
+        let e = check(&root, hiding(&cr)).unwrap_err();
+        assert!(e.contains("reaches"), "{e}");
+        // A quoted entry, which git unquotes, fails closed.
+        std::fs::write(
+            root.join("repo/.git/objects/info/alternates"),
+            "\"/elsewhere\"\n",
+        )
+        .unwrap();
+        let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
+        assert!(e.contains("quoted"), "{e}");
+        // Layouts it cannot follow fail closed.
+        let root = dir("gitdir_file");
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        std::fs::write(root.join("repo/.git"), "gitdir: /elsewhere\n").unwrap();
+        let e = check(&root, hiding(&root.join("bin"))).unwrap_err();
+        assert!(e.contains("not a directory"), "{e}");
+    }
+
+    /// #598: a filtered workspace starts at the task's pinned baseline, not
+    /// HEAD, as an unfiltered checkout does.
+    #[test]
+    fn a_filtered_checkout_starts_at_the_pinned_baseline() {
+        let root = dir("filtered_pinned");
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("secrets")).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "--quiet", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("flag.txt"), "no\n").unwrap();
+        std::fs::write(repo.join("secrets/token.txt"), "hunter2\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "base"]);
+        let pinned = git(&["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("flag.txt"), "ok\n").unwrap();
+        git(&["commit", "--quiet", "-am", "later"]);
+        let dir = root.join("task");
+        let task = rusty_bbp::TaskId("T1".into());
+        let roster = crate::admin::read_roster(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/proving/roster.json"),
+        )
+        .unwrap();
+        let set = crate::profiles::ProfileSet {
+            baseline: Some(pinned.clone()),
+            ..crate::profiles::ProfileSet::shell("test", "true")
+        };
+        crate::admin::open_task(
+            &dir,
+            &task,
+            "local",
+            b"Brief.",
+            &PrincipalId("human".into()),
+            &set,
+            roster,
+        )
+        .unwrap();
+        let cfg = crate::moderator::Config {
+            dir,
+            task,
+            bbp: root.join("bbp"),
+            repo: repo.clone(),
+            work: root.join("work"),
+            launchers: Launchers::default(),
+            confinement: crate::runner::Confinement::Unconfined,
+            poll: std::time::Duration::from_millis(50),
+            max_wall: std::time::Duration::from_secs(5),
+            end_grace: std::time::Duration::from_secs(1),
+            deadline: None,
+            cost_cap: None,
+            admission: None,
+        };
+        let sandbox = HarnessSandbox {
+            checkout: true,
+            hide: vec!["secrets".into()],
+            ..HarnessSandbox::default()
+        };
+        let facts = crate::launchers::Facts {
+            repo: repo.to_string_lossy().into_owned(),
+            review: false,
+            live: true,
+            role: None,
+            vendor: None,
+            candidate_vendors: vec![],
+        };
+        let turn = Turn::prepare(&cfg, &sandbox, TurnId(1), None, &facts).unwrap();
+        let view = turn.view.as_ref().unwrap();
+        assert_eq!(view.base, pinned, "pinned, not HEAD");
+        let flag = std::fs::read_to_string(turn.workspace.join("flag.txt")).unwrap();
+        assert_eq!(flag, "no\n", "the baseline's tree");
+        assert!(!turn.workspace.join("secrets").exists());
     }
 
     #[test]
