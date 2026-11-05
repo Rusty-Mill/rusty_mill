@@ -20,8 +20,10 @@
 )]
 
 mod assignments;
+mod hunts;
 mod lens_states;
 mod meters;
+mod probes;
 mod record;
 mod taints;
 
@@ -39,12 +41,15 @@ use orch_lens::taint::Taints;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
-use rusty_multimodal_db_engine::generic::query::GetById;
+use rusty_multimodal_db_engine::generic::query::{AllIds, GetById};
 use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
+use hunts::HuntRecord;
 use lens_states::LensStateRecord;
 use meters::MeterRecord;
+use orch_lens::alien::{HuntRow, ProbeRow};
+use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
 use taints::TaintRecord;
 
@@ -58,6 +63,10 @@ const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 const METERS_FILE: &str = "meters.mmap";
 /// BBP tasks' taint tables (#598).
 const TAINTS_FILE: &str = "taints.mmap";
+/// Alien-lens probe rows (#708).
+const PROBES_FILE: &str = "probes.mmap";
+/// Completed alien-lens hunts, with or without probes (#708).
+const HUNTS_FILE: &str = "hunts.mmap";
 /// Lens scheduler memory, one record per BBP board (#594).
 const LENS_STATES_FILE: &str = "lens-states.mmap";
 
@@ -143,6 +152,8 @@ pub struct Store {
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     meters: GenericMmapStore<MeterRecord, ById, Revision>,
     taints: GenericMmapStore<TaintRecord, ById, Revision>,
+    probes: GenericMmapStore<ProbeRecord, ById, Revision>,
+    hunts: GenericMmapStore<HuntRecord, ById, Revision>,
     lens_states: GenericMmapStore<LensStateRecord, ById, Revision>,
     _lock: DirLock,
 }
@@ -182,6 +193,18 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(PROBES_FILE);
+        let probes = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
+        let path = dir.join(HUNTS_FILE);
+        let hunts = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LENS_STATES_FILE);
         let lens_states = if path.exists() {
             GenericMmapStore::open_portable(&path)?
@@ -200,6 +223,8 @@ impl Store {
             legacy,
             meters,
             taints,
+            probes,
+            hunts,
             lens_states,
             _lock: lock,
         })
@@ -354,6 +379,108 @@ impl Store {
 }
 
 impl Store {
+    /// Save one alien-lens probe row, replacing an earlier save of the
+    /// same probe (task, claim, candidate, site, mechanism).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another probe;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_probe(&mut self, row: &ProbeRow) -> Result<(), StoreError> {
+        let existing = self.probes.get(probes::key(row));
+        if let Some(r) = &existing {
+            if !r.is(row) {
+                return Err(StoreError::Corrupt(
+                    "probe key holds another probe".to_owned(),
+                ));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = ProbeRecord::new(row, revision);
+        let written = if existing.is_none() {
+            self.probes.insert(record).map_err(engine_error)
+        } else {
+            self.probes.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// Save one completed hunt, replacing an earlier save of the same
+    /// (task, claim, candidate). Save it even when it wrote no probe, so
+    /// the §8 bar counts it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another hunt;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_hunt(&mut self, row: &HuntRow) -> Result<(), StoreError> {
+        let existing = self.hunts.get(hunts::key(row));
+        if let Some(r) = &existing {
+            if !r.is(row) {
+                return Err(StoreError::Corrupt(
+                    "hunt key holds another hunt".to_owned(),
+                ));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = HuntRecord::new(row, revision);
+        let written = if existing.is_none() {
+            self.hunts.insert(record).map_err(engine_error)
+        } else {
+            self.hunts.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// Every saved hunt, of `task` when given, sorted by task, claim and
+    /// candidate.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when a record does not check out.
+    pub fn hunts(&self, task: Option<&str>) -> Result<Vec<HuntRow>, StoreError> {
+        let mut rows = Vec::new();
+        for id in self.hunts.all_ids() {
+            let Some(record) = self.hunts.get(id) else {
+                continue;
+            };
+            let row = record.into_row()?;
+            if task.is_none_or(|t| t == row.task) {
+                rows.push(row);
+            }
+        }
+        rows.sort_by(|a, b| (&a.task, a.claim, a.candidate).cmp(&(&b.task, b.claim, b.candidate)));
+        Ok(rows)
+    }
+
+    /// Every saved probe row, of `task` when given, sorted by task, claim,
+    /// candidate, site and mechanism.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when a record does not check out.
+    pub fn probes(&self, task: Option<&str>) -> Result<Vec<ProbeRow>, StoreError> {
+        let mut rows = Vec::new();
+        for id in self.probes.all_ids() {
+            let Some(record) = self.probes.get(id) else {
+                continue;
+            };
+            let row = record.into_row()?;
+            if task.is_none_or(|t| t == row.task) {
+                rows.push(row);
+            }
+        }
+        rows.sort_by(|a, b| {
+            (&a.task, a.claim, a.candidate, &a.site, &a.mechanism).cmp(&(
+                &b.task,
+                b.claim,
+                b.candidate,
+                &b.site,
+                &b.mechanism,
+            ))
+        });
+        Ok(rows)
+    }
     /// The saved lens scheduler memory of BBP board `board`, or `None` when
     /// none was saved. A board names one task in one BBP store directory;
     /// the caller builds it (`rusty_orch` uses the canonical directory and
