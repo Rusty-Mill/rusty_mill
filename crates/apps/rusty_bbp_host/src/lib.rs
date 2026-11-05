@@ -28,11 +28,13 @@ pub const BUILD_SHA: &str = env!("BBP_BUILD_SHA");
 pub mod admin;
 pub mod admission;
 pub mod args;
+pub mod baseline;
 pub mod broker;
 #[cfg(target_os = "linux")]
 pub mod cgroups;
 pub mod clean_tree;
 pub mod confine;
+pub mod erosion_detail;
 pub mod erosion_window;
 pub mod golden;
 pub mod grade;

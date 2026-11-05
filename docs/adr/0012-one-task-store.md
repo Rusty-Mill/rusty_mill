@@ -63,6 +63,7 @@ one `board` document per task, with its own compare-and-swap (below).
 | `created_ms`, `updated_ms` | same | |
 | *(new)* order | `priority`, then `sortOrder` | see 4 |
 | *(new)* `deps` | `board` doc | see 4 |
+| *(new)* `superseded_by`, `related` | `board` doc | left out while empty; a superseded card is never taken |
 
 A task is on the board when it carries the tag `agent`. That tag is the
 owner's switch: tag a task `agent` in rusty_tick (phone, web, MCP) and it

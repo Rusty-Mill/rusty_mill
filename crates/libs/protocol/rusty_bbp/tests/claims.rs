@@ -54,6 +54,7 @@ fn open_task(mode: Mode, claims: Option<ClaimsConfig>, roster: Vec<Role>) -> Ope
         mode,
         claims,
         holdout_digest: None,
+        baseline_digest: None,
     }
 }
 
@@ -4010,6 +4011,40 @@ mod replay {
         assert!(claim_history(&TaskId::from("t"), &cx.log, c, Some(before)).is_none());
         assert!(claim_history(&TaskId::from("t"), &cx.log, MsgId(999), None).is_none());
     }
+}
+
+// ---------------------------------------------------------------- #598 brownfield baseline
+
+#[test]
+fn cl_114_baseline_digest_is_claims_mode_only_and_folds() {
+    let digest = Sha256::of(b"baseline report");
+    let mut o = open_task(Mode::Stages, None, stage_roster());
+    o.baseline_digest = Some(digest);
+    let h = handle(
+        &TaskState::new(TaskId::from("t")),
+        &Command::Open(o),
+        Time(1),
+    );
+    assert_eq!(rejected(h.response), Code::BadClaimsConfig);
+    let mut o = open_task(Mode::Claims, Some(ClaimsConfig::default()), roster());
+    o.baseline_digest = Some(digest);
+    let h = handle(
+        &TaskState::new(TaskId::from("t")),
+        &Command::Open(o),
+        Time(1),
+    );
+    let mut st = TaskState::new(TaskId::from("t"));
+    for e in &h.events {
+        st.apply(e);
+    }
+    assert_eq!(st.claims.baseline_digest, Some(digest));
+    let json = rusty_serde::json::to_string(&h.events[0]).unwrap();
+    assert!(json.contains("baseline_digest"), "{json}");
+    // Greenfield: not written, so the log is byte-identical to before.
+    let cx = Cx::new();
+    let json = rusty_serde::json::to_string(&cx.log[0]).unwrap();
+    assert!(!json.contains("baseline_digest"), "{json}");
+    assert_eq!(cx.st.claims.baseline_digest, None);
 }
 
 /// D82: human takeover of an agent session, recorded on the board (D83: under

@@ -243,8 +243,38 @@ pub fn import_id(issue: u64) -> Uuid {
 /// The priorities a card may have, on rusty_tick's scale: none, low, medium, high.
 pub const PRIORITIES: [u8; 4] = [0, 1, 3, 5];
 
-/// Most cards one card may wait on.
+/// Most cards one card may wait on; also the most in each of its other link lists.
 pub const MAX_DEPS: usize = 32;
+
+/// A planning change (`card_plan`): each `None` field is left as it is, and a list replaces
+/// the card's current one (an empty list clears it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// One of [`PRIORITIES`].
+    pub priority: Option<u8>,
+    /// Cards that must be Done before this one is taken.
+    pub deps: Option<Vec<Uuid>>,
+    /// Newer cards that replace this one.
+    pub superseded_by: Option<Vec<Uuid>>,
+    /// Cards worth reading alongside this one.
+    pub related: Option<Vec<Uuid>>,
+}
+
+impl Plan {
+    /// Whether the plan changes nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Every card the plan links to.
+    pub fn linked(&self) -> impl Iterator<Item = &Uuid> {
+        [&self.deps, &self.superseded_by, &self.related]
+            .into_iter()
+            .flatten()
+            .flatten()
+    }
+}
 
 /// Whether `tag` is one the board keeps for itself in rusty_tick (ADR-0012):
 /// `agent` puts a task on the board, `board:<column>`, `claim:<actor>` and
@@ -329,6 +359,13 @@ pub struct Card {
     /// Cards that must be Done before this one is taken.
     #[serde(default)]
     pub deps: Vec<Uuid>,
+    /// Newer cards that replace this one. While any is set, `take` never hands the card out:
+    /// close it, or re-scope it and clear the link.
+    #[serde(default)]
+    pub superseded_by: Vec<Uuid>,
+    /// Cards worth reading alongside this one. Informational: nothing waits on them.
+    #[serde(default)]
+    pub related: Vec<Uuid>,
     /// Manual order within a queue, lower first, after priority. Set by the store
     /// (rusty_tick's drag order); `0` elsewhere.
     #[serde(default)]
@@ -595,6 +632,8 @@ impl Card {
             comments: Vec::new(),
             priority: 0,
             deps: Vec::new(),
+            superseded_by: Vec::new(),
+            related: Vec::new(),
             sort_order: 0,
             issue: None,
             synced_text: None,
@@ -844,37 +883,44 @@ impl Card {
         Ok(next)
     }
 
-    /// Set the priority and the cards this one waits on (each optional).
-    /// Repeated dependencies are dropped.
+    /// Apply a [`Plan`]: priority and links, each left as it is when `None`. Repeated ids
+    /// in a list are dropped.
     ///
     /// # Errors
-    /// A priority outside [`PRIORITIES`], a card depending on itself, or more
-    /// than [`MAX_DEPS`] dependencies.
-    pub fn plan(
-        &self,
-        priority: Option<u8>,
-        deps: Option<Vec<Uuid>>,
-        now_ms: i64,
-    ) -> Result<Self, BoardError> {
+    /// A priority outside [`PRIORITIES`], a card linking to itself, or more than
+    /// [`MAX_DEPS`] ids in one list.
+    pub fn plan(&self, plan: &Plan, now_ms: i64) -> Result<Self, BoardError> {
         let mut next = self.next(now_ms);
-        if let Some(p) = priority {
+        if let Some(p) = plan.priority {
             if !PRIORITIES.contains(&p) {
                 return Err(BoardError::Invalid("priority must be 0, 1, 3 or 5"));
             }
             next.priority = p;
         }
-        if let Some(mut d) = deps {
-            if d.contains(&self.id) {
-                return Err(BoardError::Invalid("a card cannot depend on itself"));
-            }
-            d.sort_unstable();
-            d.dedup();
-            if d.len() > MAX_DEPS {
-                return Err(BoardError::Invalid("too many dependencies"));
-            }
-            next.deps = d;
+        if let Some(d) = &plan.deps {
+            next.deps = self.links(d)?;
+        }
+        if let Some(s) = &plan.superseded_by {
+            next.superseded_by = self.links(s)?;
+        }
+        if let Some(r) = &plan.related {
+            next.related = self.links(r)?;
         }
         Ok(next)
+    }
+
+    /// `ids` sorted and deduplicated, as one of this card's link lists.
+    fn links(&self, ids: &[Uuid]) -> Result<Vec<Uuid>, BoardError> {
+        if ids.contains(&self.id) {
+            return Err(BoardError::Invalid("a card cannot link to itself"));
+        }
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.len() > MAX_DEPS {
+            return Err(BoardError::Invalid("too many linked cards"));
+        }
+        Ok(ids)
     }
 
     /// Record the forge issue this card is synced with, and the text both

@@ -225,6 +225,11 @@ struct Doc {
 struct BoardDoc {
     #[serde(default)]
     deps: Vec<Uuid>,
+    // Left out while empty, so documents written before these links existed are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded_by: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    related: Vec<Uuid>,
     #[serde(default)]
     issue: Option<u64>,
     #[serde(default)]
@@ -237,6 +242,8 @@ impl BoardDoc {
     fn of(card: &Card) -> Self {
         Self {
             deps: card.deps.clone(),
+            superseded_by: card.superseded_by.clone(),
+            related: card.related.clone(),
             issue: card.issue,
             synced_text: card.synced_text,
             execution: card.execution.clone(),
@@ -352,6 +359,8 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         comments,
         priority: task.priority,
         deps: doc.deps,
+        superseded_by: doc.superseded_by,
+        related: doc.related,
         sort_order: task.sort_order,
         issue: doc.issue,
         synced_text: doc.synced_text,
