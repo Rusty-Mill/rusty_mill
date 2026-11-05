@@ -126,14 +126,14 @@ As built (D93, D92):
   `holdout:` profiles are model-written). The weight `w` is unchanged, with
   `upset` judged against the truth. There's no shadow-run source yet: its
   expected producer is #598's approved `shadow:` profile kind (D62).
-- **Interim limits, until OPEN_QUESTIONS Q25.** BBP's history has no
+- **Interim limits, until OPEN_QUESTIONS Q35.** BBP's history has no
   `min_authors`, so a job whose removal also removes its lens as an author
   counts as pivotal. Only a failing golden set is visible, which means drop
   was right. A job that posted `executed` evidence gets no golden truth,
   standing in for "cites that report". Each limit only adds unscored
   pivotal jobs.
 - The lens sees `record: P points over N blind reviews (S scored, V
-  pivotal)`. A per-lens report command waits on Q24.
+  pivotal)`. A per-lens report command waits on Q34.
 
 ## 3. Lessons
 

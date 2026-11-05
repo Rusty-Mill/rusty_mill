@@ -180,7 +180,7 @@ impl Own {
 
     /// Whether the job posted executed evidence. The history carries no
     /// refs, so this stands in for "the job cites the golden report": a
-    /// lens can't be judged by its own report (D92, until Q25).
+    /// lens can't be judged by its own report (D92, until Q35).
     fn executed(&self, trail: &Trail) -> bool {
         self.steps
             .iter()
