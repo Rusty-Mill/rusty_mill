@@ -155,9 +155,9 @@ main.board{display:flex;align-items:stretch;gap:0}
 /* Other views share the sheet: panels, not boxes in boxes. */
 main.roadmap,main.metrics{display:grid;gap:14px;align-content:start}
 main.roadmap{grid-template-columns:repeat(5,minmax(200px,1fr))}
-main.metrics{grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
+main.metrics{grid-template-columns:repeat(12,minmax(0,1fr));max-width:1400px;align-items:start}
 .roadmap h3,.metrics h3,.archive h3{grid-column:1/-1;margin:4px 0 0;font-size:18px;font-weight:600}
-.roadmap>.col,.metrics>.col{border-top:3px solid var(--ink);padding-top:8px}
+.roadmap>.col{border-top:3px solid var(--ink);padding-top:8px}
 .roadmap .card,.metrics .card,.archive .card{cursor:pointer}
 [data-lane=now]{border-top-color:var(--cyan-fill)!important}[data-lane=next]{border-top-color:var(--yellow)!important}
 [data-lane=blocked]{border-top-color:var(--red-fill)!important}[data-lane=shipped]{border-top-color:var(--done)!important}
@@ -170,6 +170,29 @@ main.metrics{grid-template-columns:repeat(auto-fill,minmax(270px,1fr))}
 .bar>span:last-child{text-align:right;font:700 16px/1 var(--num)}
 .bar>span:nth-child(2){background:var(--sunk);border-radius:2px;height:12px;display:block}
 .bar i{display:block;height:12px;min-width:2px;border-radius:2px;background:var(--fill,var(--cyan-fill))}
+/* Metrics: one sheet of panels on a twelve-column grid. */
+.metrics>.col{background:var(--card);border:1px solid var(--line);border-radius:5px;padding:14px 16px 16px;grid-column:span 4;min-width:0}
+.metrics>.w12{grid-column:1/-1}.metrics>.w8{grid-column:span 8}.metrics>.w4{grid-column:span 4}
+.metrics>.col h2{margin:0 0 12px;font-size:14px}
+.metrics .split{columns:3 240px;column-gap:32px}.metrics .split h2{column-span:all}
+.metrics .split .bar{break-inside:avoid}
+.metrics h3,.metrics .kpis{grid-column:1/-1}
+.bar i[data-kind]{background:var(--sw)}
+.stack{display:flex;height:14px;border-radius:3px;overflow:hidden;gap:2px;margin:0 0 12px}
+.stack i{background:var(--sw);min-width:3px}
+.weeks{display:grid;grid-template-columns:repeat(8,1fr);gap:10px;height:190px;align-items:end;border-bottom:1px solid var(--line2);padding-top:18px}
+.wk{display:flex;flex-direction:column;height:100%;justify-content:flex-end}
+.pair{display:flex;gap:3px;align-items:flex-end;height:100%}
+.colm{flex:1;height:var(--h);min-height:2px;position:relative;border-radius:2px 2px 0 0}
+.colm span{position:absolute;bottom:100%;left:0;right:0;text-align:center;font:700 14px/1.3 var(--num);color:var(--ink)}
+.colm.add{background:var(--line2)}.colm.ship{background:var(--cyan-fill)}
+.wl{position:relative;top:22px;height:0;text-align:center;font-size:12px;color:var(--mute);white-space:nowrap}
+.key{display:flex;gap:16px;margin-top:40px;font-size:12.5px;color:var(--mute)}
+.key .k::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.key .add::before{background:var(--line2)}.key .ship::before{background:var(--cyan-fill)}
+.metrics .idlelist .card{border:0;border-top:1px solid var(--line);border-radius:0;box-shadow:none;margin:0;padding:9px 0}
+.metrics .idlelist .card .num{font-size:17px}.metrics .idlelist .card b{font-size:13.5px}
+@media (max-width:1000px){.metrics>.col,.metrics>.w8,.metrics>.w4{grid-column:1/-1}}
 main.archive,main.decisions{display:grid;grid-template-columns:minmax(0,780px);justify-content:center;align-content:start;gap:12px}
 .archive input{width:100%}
 .decisions>.col{background:var(--card);border:1px solid var(--line);border-top:3px solid var(--mag);border-radius:4px;padding:12px 14px}
@@ -193,30 +216,47 @@ dialog h2{margin:0;font-size:18px}
 .cm div b{margin-right:6px}
 .banner{border:1px solid var(--mag);background:var(--mag-wash);border-radius:4px;padding:8px 10px}.banner:empty{display:none}
 #signin form{display:grid;gap:10px}#signin .err{color:var(--red);min-height:1.2em;margin:0}
-#settings{width:min(980px,96vw);max-height:90vh;padding:0}
-#settings>div{padding:0 20px 18px}
-#settings .tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);margin:0 -20px 14px;padding:0 14px;position:sticky;top:0;background:var(--card);z-index:1}
-#settings .tabs button{border:0;border-radius:0;background:none;padding:12px 10px;color:var(--mute);font-weight:500;box-shadow:inset 0 -2px 0 transparent}
-#settings .tabs button:hover{color:var(--ink)}
-#settings .tabs button.on{color:var(--ink);box-shadow:inset 0 -2px 0 var(--ink)}
-#settings table{width:100%;border-collapse:collapse;margin:4px 0 12px}
-#settings th{font-size:12px;font-weight:600;color:var(--mute);text-align:left;padding:6px 8px;border-bottom:1px solid var(--line2)}
-#settings td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
-#settings tr:hover td{background:color-mix(in srgb,var(--sunk) 60%,transparent)}
+#settings{width:100vw;height:100vh;max-width:none;max-height:none;margin:0;padding:0;border:0;border-radius:0;box-shadow:none}
+#settings .sheet{display:grid;grid-template-columns:230px minmax(0,1fr);height:100%}
+#settings .tabs{display:flex;flex-direction:column;gap:2px;padding:18px 12px;background:var(--rail);color:var(--rail-ink);overflow-y:auto}
+#settings .stitle{font-weight:700;font-size:15px;padding:4px 10px 14px}
+#settings .tabs button{border:0;background:none;color:var(--rail-mute);text-align:left;padding:9px 10px;border-radius:5px;font-weight:500}
+#settings .tabs button:hover{color:var(--rail-ink);background:#262b31}
+#settings .tabs button.on{color:var(--rail);background:var(--rail-ink)}
+#settings .tabs .close{margin-top:auto;border:1px solid var(--rail-line);justify-content:center;color:var(--rail-ink)}
+#settings .pane{overflow-y:auto;padding:30px 44px 48px;background:var(--bg)}
+#settings .pane>*{max-width:1080px}
+#settings .pane>h2{font-size:24px;margin:0 0 4px}
+#settings .lead{color:var(--mute);margin:0 0 22px;max-width:70ch}
+#settings table{width:100%;border-collapse:collapse;margin:0 0 14px;background:var(--card);border:1px solid var(--line);border-radius:5px;overflow:hidden}
+#settings th{font-size:12px;font-weight:600;color:var(--mute);text-align:left;padding:9px 10px;border-bottom:1px solid var(--line2);background:var(--sunk)}
+#settings td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+#settings tr:last-child td{border-bottom:0}
+#settings tr:hover td{background:color-mix(in srgb,var(--sunk) 50%,var(--card))}
+#settings td select{border-color:transparent;background:transparent;padding:5px 7px}
+#settings td select:hover{border-color:var(--line2);background:var(--card)}
+#settings td input:not([type=checkbox]){border-color:var(--line);padding:5px 8px}
+#settings td button{font-size:13px;padding:4px 9px;background:transparent;border-color:transparent;color:var(--mute)}
+#settings td button:hover:not(:disabled){border-color:var(--line2);color:var(--ink);background:var(--card)}
+#settings button.danger{color:var(--red)}
 #settings .err{color:var(--red);min-height:1.2em;margin:6px 0}
-#settings .note{color:var(--mute);margin:8px 0;font-size:13px}
-#settings .secret{border:1px solid var(--mag);background:var(--mag-wash);border-radius:4px;padding:10px;margin:8px 0;overflow-wrap:anywhere}
+#settings .note{color:var(--mute);margin:10px 0;font-size:13px;max-width:75ch}
+#settings .secret{border:1px solid var(--mag);background:var(--mag-wash);border-radius:5px;padding:12px;margin:0 0 14px;overflow-wrap:anywhere}
 #settings code{font-family:ui-monospace,monospace;font-size:12.5px}
-#settings fieldset{border:0;border-top:1px solid var(--line);margin:0;padding:10px 0;display:flow-root}
-#settings legend{float:left;font-weight:600;padding:5px 0;min-width:200px}
+#settings fieldset{border:1px solid var(--line);border-radius:5px;background:var(--card);margin:0 0 10px;padding:12px 14px;display:flow-root}
+#settings legend{float:left;font-weight:600;padding:5px 0;min-width:220px}
 #settings fieldset>.row,#settings fieldset>textarea{clear:both}
 #settings fieldset>button{font-size:13px;padding:4px 9px;margin-right:6px}
 #settings textarea{width:100%;min-height:3.2em}
-#settings .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0}
+#settings .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:10px 0}
 #settings details{display:inline-block}
-#settings details label{display:block}
-#settings h3,#settings h4{margin:14px 0 6px;font-size:14px}
+#settings details label{display:block;padding:2px 0}
+#settings summary{cursor:pointer;color:var(--ink)}
+#settings h3,#settings h4{margin:22px 0 8px;font-size:15px}
 #settings input[type=checkbox]{accent-color:var(--ink);width:16px;height:16px}
+#settings label{display:inline-flex;align-items:center;gap:8px}
+#settings>.sheet>.pane>div>button,#settings .row>button:last-child{font-weight:600}
+@media (max-width:760px){#settings .sheet{grid-template-columns:minmax(0,1fr);grid-template-rows:auto 1fr}#settings .tabs{flex-direction:row;flex-wrap:wrap}#settings .pane{padding:20px}}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--card);padding:10px 16px;border-radius:5px;display:none;box-shadow:0 12px 30px -10px rgb(0 0 0 / .4);border-left:0;max-width:min(640px,92vw)}
 #toast::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red-fill);margin-right:9px}
 @media (max-width:760px){
@@ -490,16 +530,16 @@ async function renderRoadmap(){
    this credential may see, computed by the server's board_metrics. Re-read whenever the board is. */
 const DAY=864e5,dur=ms=>ms==null?"–":ms<DAY?Math.round(ms/36e5)+"h":(ms/DAY).toFixed(ms<10*DAY?1:0)+"d";
 const day=ms=>new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"});
-// A panel of labelled bars: rows are {label, n, title?, fill?}; `max` lets two panels share a scale.
-function bars(title,rows,hint,max=Math.max(1,...rows.map(r=>r.n))){
-  const s=el("section",null,"col"),h=el("h2",title[0].toUpperCase()+title.slice(1));if(hint)h.title=hint;s.append(h);
-  for(const r of rows){
+// A metrics panel: a heading (its hint on hover) and a width class on the twelve-column grid.
+function panel(title,cls,hint){const s=el("section",null,"col "+cls),h=el("h2",title);if(hint)h.title=hint;s.append(h);return s}
+// Labelled bars: rows are {label, n, title?, fill?, col?}; `max` sets the scale (default: the largest row).
+function rows(list,max=Math.max(1,...list.map(r=>r.n))){
+  if(!list.length)return [el("p","None.","meta")];
+  return list.map(r=>{
     const row=el("div",null,"bar"),f=el("i"),t=el("span");f.style.width=(r.n/max*100)+"%";
-    if(r.fill)f.style.setProperty("--fill",r.fill);if(r.title)row.title=r.title;
-    t.append(f);row.append(el("span",r.label),t,el("span",String(r.n)));s.append(row);
-  }
-  if(!rows.length)s.append(el("p","None.","meta"));
-  return s;
+    if(r.fill)f.style.setProperty("--fill",r.fill);if(r.col)ink(f,r.col);if(r.title)row.title=r.title;
+    t.append(f);row.append(el("span",r.label),t,el("span",String(r.n)));return row;
+  });
 }
 async function renderMetrics(){
   const seq=++mapSeq,b=$("board"),stale=()=>seq!==mapSeq||view!=="metrics";
@@ -514,23 +554,45 @@ async function renderMetrics(){
     [lt.shipped,"shipped, 30 days"],[dur(lt.median_ms),"median lead time","created to shipped, last 30 days"],[dur(lt.p85_ms),"85% within","created to shipped, last 30 days"]]){
     const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
   }
+  b.classList.remove("board","roadmap","decisions","archive");b.classList.add("metrics");
+  const scope=sel.project?label(sel.project):sel.repo||"all projects";
+  // Flow: cards added and shipped each week, side by side, the current week last.
   const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done]));
-  const idle=el("section",null,"col");idle.append(el("h2","Idle longest"));
-  for(const k of m.idle){
+  const flow=panel("Flow","w8","cards created and shipped per week, the current week last");
+  const chart=el("div",null,"weeks");
+  m.weeks.forEach((w,i)=>{
+    const g=el("div",null,"wk");g.title=day(w.start_ms)+": "+w.added+" added, "+w.done+" shipped";
+    const pair=el("div",null,"pair");
+    for(const [n,cls] of [[w.added,"add"],[w.done,"ship"]]){const c=el("div",null,"colm "+cls);c.style.setProperty("--h",(n/wmax*100)+"%");c.append(el("span",String(n)));pair.append(c)}
+    g.append(pair,el("div",i===m.weeks.length-1?"This week":day(w.start_ms),"wl"));chart.append(g);
+  });
+  const key=el("div",null,"key");key.append(el("span","Added","k add"),el("span","Shipped","k ship"));
+  flow.append(chart,key);
+  // Where open work sits: one stacked bar in stage inks, then the rows.
+  const cols=panel("Open by column","w4");
+  const stack=el("div",null,"stack"),total=Math.max(1,m.by_column.reduce((a,t)=>a+t.count,0));
+  for(const t of m.by_column){if(!t.count)continue;const x=el("i");ink(x,t.key);x.style.flexGrow=t.count;x.title=colLabel(t.key)+": "+t.count;stack.append(x)}
+  cols.append(stack,...rows(m.by_column.map(t=>({label:colLabel(t.key),n:t.count,col:t.key})),total));
+  const pri=panel("Open by priority","w4");
+  const PFILL={5:"var(--red-fill)",3:"var(--ink)",1:"var(--mute)",0:"var(--line2)"};
+  pri.append(...rows(m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count,fill:PFILL[t.key]}))));
+  const agents=panel("In progress by agent","w4","claimed cards in work columns");
+  agents.append(...rows(m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)}))));
+  const parts=[flow,cols,pri,agents];
+  const idle=panel("Idle longest","w4 idlelist","open cards past backlog, longest untouched first");
+  for(const k of m.idle.slice(0,6)){
     const d=el("div",null,"card");d.append(...heading(k));
     d.append(el("div",[colLabel(k.column),"idle "+dur(k.idle_ms),...(k.claim?[k.claim]:[]),...(sel.project?[]:[label(k.project)])].join(" · "),"meta"));
     d.onclick=()=>show(k.id);idle.append(d);
   }
   if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
-  b.classList.remove("board","roadmap","decisions","archive");b.classList.add("metrics");
-  b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
-    bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
-    bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
-    bars("open by column",m.by_column.map(t=>({label:colLabel(t.key),n:t.count}))),
-    bars("open by priority",m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count}))),
-    ...(sel.project?[]:[bars("open by project",m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"})))]),
-    bars("in progress by agent",m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)})),"claimed cards in work columns"),
-    idle);
+  parts.push(idle);
+  if(!sel.project){
+    const proj=panel("Open by project","w12 split");
+    proj.append(...rows(m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"}))));
+    parts.push(proj);
+  }
+  b.replaceChildren(el("h3","Metrics · "+scope),kpis,...parts);
   renderSide();syncDialog();
 }
 
@@ -804,13 +866,30 @@ async function openSettings(){
   catch(e){toast(e.status===403?"Settings need the admin capability.":e.message);return}
   secret=null;reposDraft=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
 }
+/* Settings fill the page: sections down the left, the chosen one on the right with what it is for. */
+const SECTIONS=[
+  ["agents","Agents","Who may use the board. Each agent signs in with its own token and acts with one role, in all projects or a chosen few."],
+  ["repos","Repositories","The repositories this board serves and their projects. A project owns the repository paths listed under it; each repository's own project owns the rest."],
+  ["roles","Roles","A role is a set of capabilities. Tick what each role may do; hover a capability for what it allows."],
+  ["columns","Columns","The board's columns, their order and kind, and the moves between them with the capability each needs."],
+  ["rules","Rules","Whether card moves follow the Columns moves and each role's capabilities."],
+  ["github","GitHub","Mirror a repository's issues onto the board."],
+  ["apps","Apps","Apps signed in through OAuth, such as a claude.ai connector."],
+  ["server","Server","How this board was started. Read-only; it changes with the server's flags and a restart."]];
 function drawSettings(){
-  const d=$("settings"),box=el("div");
-  const tabs=el("div",null,"tabs");
-  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["columns","Columns"],["rules","Rules"],["github","GitHub"],["apps","Apps"],["server","Server"]]){
-    const b=el("button",label,tab===id?"on":"");b.type="button";b.onclick=()=>{tab=id;secret=null;reposDraft=null;flowDraft=null;drawSettings()};tabs.append(b)}
-  const close=el("button","Close");close.type="button";close.onclick=()=>d.close();close.style.marginLeft="auto";tabs.append(close);
-  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  const d=$("settings"),box=el("div",null,"sheet");
+  const tabs=el("nav",null,"tabs");tabs.setAttribute("aria-label","settings sections");
+  tabs.append(el("div","Settings","stitle"));
+  for(const [id,label] of SECTIONS){
+    const b=el("button",label,tab===id?"on":"");b.type="button";b.setAttribute("aria-current",tab===id?"page":"false");
+    b.onclick=()=>{tab=id;secret=null;reposDraft=null;flowDraft=null;drawSettings()};tabs.append(b)}
+  const close=el("button","Close","close");close.type="button";close.onclick=()=>d.close();tabs.append(close);
+  const [,title,about]=SECTIONS.find(([id])=>id===tab),pane=el("div",null,"pane");
+  pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  // Destructive actions read as such wherever a section puts them.
+  pane.querySelectorAll("button").forEach(b=>{if(/^(Remove|Revoke|Turn sync off)/.test(b.textContent))b.classList.add("danger");
+    else if(/^(Save (roles|columns|repositories|and)|Add (agent|role|column)$)/.test(b.textContent))b.classList.add("primary")});
+  box.append(tabs,pane);
   d.replaceChildren(box);
 }
 /* After a change: re-read the board's roles and projects (who you are may have changed), then the settings, and redraw. */
@@ -868,7 +947,6 @@ let reposDraft=null;
 function reposTab(){
   const t=el("div"),err=el("div",null,"err");
   if(!cfg.files.projects)t.append(unwritable("--projects FILE"));
-  t.append(el("p","Each repository has a project of its own name, which owns every path no other project of that repository claims.","note"));
   // repo -> [{name, paths}], without each repository's own project (it is implied).
   reposDraft=reposDraft||Object.fromEntries(Object.entries(cfg.repos).map(([r,ps])=>[r,Object.entries(ps).filter(([n])=>n!==r).map(([n,paths])=>({name:n,paths:paths.join("\n")}))]));
   const draft=reposDraft,inputs=[];
@@ -917,7 +995,7 @@ function rolesTab(){
   const save=el("button","Save roles");save.type="button";save.onclick=guard(err,()=>setting("settings_roles_set",{roles:draft}));
   const row=el("div",null,"row");row.append(nm,add);
   const help=el("table");for(const c of CAPS){const tr=el("tr");tr.append(el("td",c),el("td",about[c]||""));help.append(tr)}
-  t.append(tbl,row,save,err,help,el("p","Roles are yours to define; capabilities are built in. A role held by an agent cannot be removed, and at least one agent must keep a role with admin.","note"));
+  t.append(tbl,row,save,err,el("h3","What each capability allows"),help,el("p","Roles are yours to define; capabilities are built in. A role held by an agent cannot be removed, and at least one agent must keep a role with admin.","note"));
   return t;
 }
 
