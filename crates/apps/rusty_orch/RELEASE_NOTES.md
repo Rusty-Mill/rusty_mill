@@ -4,6 +4,17 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Cost breaker and taint for lenses
+**2026-11-05**
+
+- New pure pieces for card #598, not wired into `lens run` yet. The cost
+  breaker spots a task whose spend keeps rising while its claims stop
+  moving; by default it only reports, and in `enforce` mode it asks for a
+  `bbp pause`. The lens config takes an optional `breaker` key.
+- Taint marks what a lens posts with the most sensitive class it was
+  shown, so a cleared local lens can't pass sensitive input on to a
+  cloud lens. Each task's taint table is stored in `taints.mmap`.
+
 ## Lens cards show the task's accept line
 **2026-11-04**
 
