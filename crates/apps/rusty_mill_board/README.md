@@ -52,7 +52,7 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   then Ready); within one, the highest `priority` (0, 1, 3, 5)
   first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
   holds nothing up); naming it explicitly says why. `card_plan` sets both and needs Triage. The tags `agent`,
-  `board:…` and `claim:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
+  `board:…`, `claim:…`, `number:…` and `archived:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
   carry them, and the GitHub sync drops such labels when it imports an issue.
 - **Projects:** one board serves several applications of a monorepo, and several repositories.
   `--projects FILE` names the projects and the repository paths each may change
@@ -70,8 +70,15 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
-  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`, `inbox_list`, `inbox_act`. The web API
+  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_archive`,
+  `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `inbox_list`, `inbox_act`. The web API
   exposes the same table, so the two cannot drift.
+- **Archive.** A Done card leaves the board's default views (`board_list`, the Done column) once it is archived, or
+  14 days after it was done (`board_list`'s `done_days`; 0 keeps every unarchived Done card). It is still Done:
+  `card_get`, the roadmap, metrics and dependencies see it as before. `card_archive` and `card_restore` need
+  `close`; `card_archive_done` archives every Done card at once (optionally one project's, done at least
+  `older_than_days` ago) and needs `triage`. `board_list` with `archived: "only"` lists the archive. The state is
+  one `archived:<ms>` tag on the rusty_tick task, beside `number:<n>`, so there is no migration.
 - **Decision inbox (#595).** `inbox_list` and `inbox_act` (admin only, and only through a token or OAuth credential, never a caller-named actor) show and decide the open BBP escalations
   of the tasks linked from cards. Mill Board stores none of it: run with `--bbp-bin PATH --bbp-root DIR` on the
   orch host and it runs `bbp inbox` and fenced `bbp human` commands, so the host stays the only writer of the log.

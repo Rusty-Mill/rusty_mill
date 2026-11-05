@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
-    MoveRules, import_id, text_hash,
+    MoveRules, Shelf, import_id, text_hash,
 };
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
@@ -607,6 +607,24 @@ impl<S: Store> Board<S> {
         Ok(cards)
     }
 
+    /// As [`Board::list`], keeping only the cards `shelf` shows when Done cards leave the
+    /// default views after `window_days` (`0`: only when archived).
+    ///
+    /// # Errors
+    /// On storage failure.
+    pub fn list_shelf(
+        &self,
+        column: Option<&Column>,
+        shelf: Shelf,
+        window_days: u32,
+    ) -> Result<Vec<Card>, BoardError> {
+        let now = (self.clock)();
+        let window = window_ms(window_days);
+        let mut cards = self.list(column)?;
+        cards.retain(|c| shelf.keeps(c.shelved(now, window)));
+        Ok(cards)
+    }
+
     /// The roadmap of `project` as of now (see [`roadmap`](crate::roadmap::roadmap)).
     ///
     /// # Errors
@@ -1141,6 +1159,54 @@ impl<S: Store> Board<S> {
         card
     }
 
+    /// Archive a Done card. Needs `Close`, as closing work does.
+    ///
+    /// # Errors
+    /// A missing capability, or see [`Card::archive`].
+    pub fn archive(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Close) {
+            return Err(BoardError::Forbidden(Capability::Close));
+        }
+        self.apply(id, by, EventKind::Archived, |c, now| c.archive(now))
+    }
+
+    /// Put an archived card back on the default views. Needs `Close`.
+    ///
+    /// # Errors
+    /// A missing capability, or a missing card.
+    pub fn restore(&self, id: Uuid, by: &Actor) -> Result<Card, BoardError> {
+        if !by.caps.contains(&Capability::Close) {
+            return Err(BoardError::Forbidden(Capability::Close));
+        }
+        self.apply(id, by, EventKind::Restored, |c, now| Ok(c.restore(now)))
+    }
+
+    /// Archive every Done card not yet archived that was done at least `older_than_days`
+    /// ago, in `project` or in every project `by` may work in. Needs `Triage`: it is a
+    /// board-wide tidy-up. Returns the cards archived.
+    ///
+    /// # Errors
+    /// A missing capability, or a storage failure; the cards archived before it stay archived.
+    pub fn archive_done(
+        &self,
+        by: &Actor,
+        project: Option<&str>,
+        older_than_days: u32,
+    ) -> Result<Vec<Card>, BoardError> {
+        if !by.caps.contains(&Capability::Triage) {
+            return Err(BoardError::Forbidden(Capability::Triage));
+        }
+        let now = (self.clock)();
+        let window = window_ms(older_than_days).unwrap_or(0);
+        self.list(Some(&Column::DONE))?
+            .into_iter()
+            .filter(|c| c.archived_ms.is_none() && by.may_work_in(&c.project))
+            .filter(|c| project.is_none_or(|p| c.project == p))
+            .filter(|c| now.saturating_sub(c.done_ms.unwrap_or(c.updated_ms)) >= window)
+            .map(|c| self.apply(c.id, by, EventKind::Archived, |c, now| c.archive(now)))
+            .collect()
+    }
+
     /// Claim a card.
     ///
     /// # Errors
@@ -1233,6 +1299,11 @@ impl<S: Store> Board<S> {
             c.comment(by, text, now)
         })
     }
+}
+
+/// `days` as milliseconds, or `None` for `0`: no window.
+fn window_ms(days: u32) -> Option<i64> {
+    (days > 0).then(|| i64::from(days) * 24 * 60 * 60 * 1000)
 }
 
 /// `card` as `flow` sees it: in Backlog if its column is not one of the workflow's (removed

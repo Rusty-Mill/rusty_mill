@@ -26,11 +26,14 @@ main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:
 .tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
 .tag.proj{border-color:var(--acc)}
 .tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
+main.archive{grid-auto-flow:row;grid-template-columns:minmax(0,760px);justify-content:center;align-content:start}
+.archive h3{margin:0;font-size:15px}.archive input{width:100%;margin:6px 0}.archive .card{cursor:pointer}
+.colbar{margin:-4px 4px 8px}.colbar button{font-size:11px;padding:0 6px}
 main.decisions{grid-auto-flow:row;grid-template-columns:minmax(0,760px);justify-content:center;align-content:start}
 .decisions .col p{margin:6px 4px}.decisions .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .decisions a{color:var(--acc)}
 .decisions .cand{border:1px solid var(--line);border-radius:6px;padding:6px;margin:6px 4px}
-#view[aria-pressed=true],#metrics[aria-pressed=true],#decide[aria-pressed=true]{background:var(--acc);color:#fff}
+#view[aria-pressed=true],#metrics[aria-pressed=true],#decide[aria-pressed=true],#archive[aria-pressed=true]{background:var(--acc);color:#fff}
 main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
 .roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
 @media (max-width:640px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
@@ -99,6 +102,7 @@ dialog form{display:grid;gap:8px}
   <h1>Mill Board</h1>
   <button id="view" aria-pressed="false" title="Show the chosen project's roadmap">Roadmap</button>
   <button id="metrics" aria-pressed="false" title="Show metrics for the chosen repository or project, or the whole board">Metrics</button>
+  <button id="archive" aria-pressed="false" title="Done cards set aside: archived, or done more than 14 days ago">Archive</button>
   <button id="decide" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions<span id="decide-n"></span></button>
   <input id="actor" placeholder="your name" size="12" aria-label="actor name">
   <select id="role" aria-label="role"></select>
@@ -135,6 +139,12 @@ const INBOX="default",label=p=>p===INBOX?"Inbox":p;
 const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
+/* A Done card is shelved, off the board and in the Archive view, once archived or 14 days after it
+   was done (closed without shipping: after its last change). The server's Card::shelved, with
+   board_list's default window; kept here so the board reads every card once. */
+const SHELF_DAYS=14,isDone=k=>FLOW.columns.find(c=>c.id===k.column)?.kind==="done";
+const shelved=k=>isDone(k)&&(k.archived_ms!=null||Date.now()-(k.done_ms??k.updated_ms)>SHELF_DAYS*864e5);
+const listed=f=>count(k=>!shelved(k)&&f(k));
 /* One colour per agent, the same on every card and in the panel. Twelve hues 30 degrees apart; a name
    prefers the slot its hash picks and takes the next free one if another agent has it, so two agents
    never look alike. The set of agents seen is kept in this browser so colours do not shuffle. */
@@ -204,14 +214,15 @@ function render(){
   if(view==="decisions"){renderDecisions();return}
   if(view==="roadmap"){renderRoadmap();return}
   if(view==="metrics"){renderMetrics();return}
+  if(view==="archive"){renderArchive();return}
   mapSeq++;   // drop any roadmap or metrics still loading
-  const b=$("board");b.classList.remove("roadmap","metrics","decisions");b.replaceChildren();
+  const b=$("board");b.classList.remove("roadmap","metrics","decisions","archive");b.replaceChildren();
   for(const {id:c,label:name} of FLOW.columns){
-    const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",name));
+    const col=el("section",null,"col");col.dataset.col=c;col.append(...colHead(c,name));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
     col.ondragleave=()=>col.classList.remove("over");
     col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
-    for(const k of cards.filter(k=>k.column===c&&shown(k))){
+    for(const k of cards.filter(k=>k.column===c&&shown(k)&&!shelved(k))){
       const d=el("div",null,"card");d.draggable=true;d.append(...heading(k));
       const m=el("div",null,"meta");
       if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
@@ -237,11 +248,11 @@ function render(){
 
 /* The roadmap: the chosen project's cards in lanes (now, next, later, blocked, shipped), laid out
    by the server's board_roadmap so the rules live in one place. Re-read whenever the board is. */
-let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
+let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics","archive"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
 // Each lane's columns, from the workflow's kinds (the server's Lane::of).
 const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipped:"done"};
 const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
-const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions")};
+const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions");$("archive").setAttribute("aria-pressed",view==="archive")};
 function setView(v){view=v;pref("view",v);pressed();render()}
 // The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
 const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
@@ -252,9 +263,9 @@ async function renderRoadmap(){
   try{
     if(!project)throw new Error("No project to show a roadmap for.");
     map=await api("board_roadmap",{project});
-  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  b.classList.remove("metrics","decisions");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
+  b.classList.remove("metrics","decisions","archive");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
     const h=el("h2",l.lane+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);
@@ -294,7 +305,7 @@ async function renderMetrics(){
   const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
   let m;
   try{m=await api("board_metrics",args)}
-  catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
   const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
   const kpis=el("div",null,"kpis");
@@ -310,7 +321,7 @@ async function renderMetrics(){
     d.onclick=()=>show(k.id);idle.append(d);
   }
   if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
-  b.classList.remove("roadmap","decisions");b.classList.add("metrics");
+  b.classList.remove("roadmap","decisions","archive");b.classList.add("metrics");
   b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
     bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
     bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
@@ -339,15 +350,15 @@ function renderSide(){
     n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
     // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
     // Listed only when this credential may see it, like every other entry here.
-    if(projects().includes(INBOX))n1.append(item("Inbox",count(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
-    for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
+    if(projects().includes(INBOX))n1.append(item("Inbox",listed(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
+    for(const r of names)n1.append(item(r,listed(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
     // The projects of the chosen repository, or of every repository, so one project's cards are a click
     // away. A repository whose only project is its own is left out: it is the repository, listed above.
     // (A credential limited to some projects may see a repository with one other project: that one stays.)
     const named=Object.entries(repos).filter(([r])=>!sel.repo||r===sel.repo)
       .flatMap(([r,ps])=>ps.length===1&&ps[0]===r?[]:ps).filter(p=>p!==INBOX).sort();
     if(named.length)n1.append(el("h2","Projects","sep"));
-    for(const p of named)n1.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
+    for(const p of named)n1.append(item(p,listed(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
   }
   // Agents: whoever holds a claim, with how many cards. A second filter, independent of the repository.
   const claims={};cards.forEach(k=>{if(k.claim)claims[k.claim]=(claims[k.claim]||0)+1});
@@ -357,6 +368,51 @@ function renderSide(){
     for(const a of agents)n1.append(item(a,claims[a],sel.agent===a,()=>pickAgent(a),a));
   }
 }
+/* A column's heading. Done's also links to the Archive (with how many of its cards are there) and
+   archives every Done card in view: the chosen project, else every project. */
+function colHead(c,name){
+  const h=el("h2",name);
+  if(FLOW.columns.find(x=>x.id===c)?.kind!=="done")return [h];
+  const bar=el("div",null,"colbar");
+  const btn=(t,title,fn)=>{const x=el("button",t);x.type="button";x.title=title;x.onclick=fn;bar.append(x," ")};
+  const n=count(k=>k.column===c&&shown(k)&&shelved(k));
+  btn("Archive all","Archive every Done card in "+(sel.project?label(sel.project):"every project")+" (needs triage)",()=>{
+    if(confirm("Archive every Done card in "+(sel.project?label(sel.project):"every project")+"?"))act("card_archive_done",sel.project?{project:sel.project}:{});
+  });
+  if(n)btn(n+" archived","Show the Archive",()=>setView("archive"));
+  return [h,bar];
+}
+
+/* The Archive: shelved Done cards in view, newest first, searchable by number, title or tag.
+   Restore puts an archived card back; one that only aged out stays here until it is archived and restored. */
+let archQ="";
+function renderArchive(){
+  mapSeq++;
+  const b=$("board");b.classList.remove("roadmap","metrics","decisions");b.classList.add("archive");
+  const all=cards.filter(k=>shown(k)&&shelved(k)).sort((a,z)=>(z.done_ms??z.updated_ms)-(a.done_ms??a.updated_ms));
+  const q=el("input"),list=el("section",null,"col");
+  q.placeholder="Search the archive";q.setAttribute("aria-label","search the archive");q.value=archQ;
+  const fill=()=>{
+    const t=archQ.trim().toLowerCase().replace(/^#/,"");
+    const hits=all.filter(k=>!t||String(k.number??"")===t||k.title.toLowerCase().includes(t)||k.tags.some(g=>g.includes(t)));
+    list.replaceChildren(...hits.map(k=>{
+      const d=el("div",null,"card");d.append(...heading(k));
+      const m=el("div",null,"meta");
+      if(projects().length>1)m.append(el("span",label(k.project),"tag proj"));
+      m.append(el("span",(k.done_ms?"shipped ":"closed ")+new Date(k.done_ms??k.updated_ms).toLocaleDateString()));
+      if(k.archived_ms!=null){
+        m.append(el("span"," · archived "+new Date(k.archived_ms).toLocaleDateString()+" "));
+        const r=el("button","Restore");r.type="button";r.onclick=e=>{e.stopPropagation();act("card_restore",{id:k.id})};m.append(r);
+      }
+      d.append(m);d.onclick=()=>show(k.id);return d;
+    }));
+    if(!hits.length)list.append(el("p",all.length?"No match.":"Nothing archived.","meta"));
+  };
+  q.oninput=()=>{archQ=q.value;fill()};fill();
+  b.replaceChildren(el("h3","Archive · "+all.length),q,list);
+  renderSide();syncDialog();
+}
+
 function pick(repo,project){sel={...sel,repo,project};pref("repo",repo);pref("project",project);render()}
 function pickAgent(agent){sel={...sel,agent};render()}
 
@@ -381,6 +437,8 @@ function show(id){
   const row=el("div");
   const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b," ")};
   btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
+  // Archive or Restore, for a Done card; syncDialog keeps the label in step with the board.
+  f.ar=el("button");f.ar.type="button";f.ar.onclick=()=>{const c=cards.find(x=>x.id===id);if(c)act(c.archived_ms!=null?"card_restore":"card_archive",{id})};row.append(f.ar," ");
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
   const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
@@ -397,7 +455,8 @@ function syncDialog(){
   const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
   if(!k){f.banner.textContent="This card no longer exists.";return}
   // Display-only parts follow the board; the inputs are never rebuilt.
-  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+colLabel(k.column)+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+colLabel(k.column)+(k.archived_ms!=null?" · archived":"")+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.ar.hidden=!isDone(k);f.ar.textContent=k.archived_ms!=null?"Restore":"Archive";
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);
@@ -424,7 +483,7 @@ $("dlg").onclose=()=>{dlg=null};
 const byPriority=list=>list.sort((a,b)=>b.priority-a.priority);
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
-  const list=(await api("board_list")).cards;
+  const list=(await api("board_list",{archived:"include"})).cards;
   cursor=at;cards=byPriority(list);
 }
 async function refresh(){await snapshot();await loadPending();render()}
@@ -464,7 +523,7 @@ async function decide(item,action){
 }
 function renderDecisions(){
   mapSeq++;
-  const b=$("board");b.classList.remove("roadmap","metrics");b.classList.add("decisions");b.replaceChildren();
+  const b=$("board");b.classList.remove("roadmap","metrics","archive");b.classList.add("decisions");b.replaceChildren();
   if(pendingErr)b.append(el("p","Could not read the inbox: "+pendingErr+(pending?". Showing what was read at "+new Date(pendingRead).toLocaleTimeString()+", which may be stale.":"."),"meta stale"));
   if(pending===null&&pendingErr){renderSide();return}
   if(pending===null){b.append(el("p","The inbox needs an admin token (sign in with one) and a board started with --bbp-bin and --bbp-root.","meta"));renderSide();return}
@@ -502,7 +561,7 @@ async function poll(){
     if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
-      const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
+      const list=(await api("board_list",{archived:"include"})).cards;   // if this throws, the cursor stays put and the events are retried
       cursor=r.cursor;cards=byPriority(list);redraw=true;
     }
     if(redraw)render();
@@ -781,6 +840,7 @@ async function loadMeta(){
   $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
   $("metrics").onclick=()=>setView(view==="metrics"?"board":"metrics");pressed();
   $("decide").onclick=()=>setView(view==="decisions"?"board":"decisions");
+  $("archive").onclick=()=>setView(view==="archive"?"board":"archive");
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
   $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
   // New cards go to the chosen project, else to the chosen repository's own project.

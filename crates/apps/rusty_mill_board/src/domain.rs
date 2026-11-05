@@ -115,6 +115,7 @@ pub enum Capability {
     Merge,
     /// Record as Done a card from Building or QA whose work already merged
     /// outside the board's flow (the PR was reviewed and merged on the forge).
+    /// Also archives and restores Done cards.
     Close,
     /// Add a project (never change or remove one).
     Project,
@@ -150,7 +151,7 @@ impl Capability {
             Capability::Review => "Send reviewed work back to Building.",
             Capability::Merge => "Move reviewed cards to Done.",
             Capability::Close => {
-                "Move Building or QA cards whose PR already merged straight to Done."
+                "Move Building or QA cards whose PR already merged straight to Done, and archive or restore Done cards."
             }
             Capability::Project => "Add a project (never change or remove one).",
             Capability::Admin => "Change these settings: agents, projects, roles, GitHub, apps.",
@@ -197,6 +198,35 @@ pub enum MoveRules {
     Open,
 }
 
+/// How long a Done card stays on the board's default views before it is shelved without
+/// being archived (see [`Card::shelved`]), in days.
+pub const DONE_WINDOW_DAYS: u32 = 14;
+
+/// Which cards a listing shows, by whether they are shelved (see [`Card::shelved`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Shelf {
+    /// Only cards on the default views: open cards, and Done cards neither archived nor
+    /// past the window.
+    #[default]
+    Exclude,
+    /// Every card.
+    Include,
+    /// Only shelved cards: the archive.
+    Only,
+}
+
+impl Shelf {
+    /// Whether a card shelved (`shelved`) or not belongs in this view.
+    pub fn keeps(self, shelved: bool) -> bool {
+        match self {
+            Shelf::Exclude => !shelved,
+            Shelf::Include => true,
+            Shelf::Only => shelved,
+        }
+    }
+}
+
 /// The id of the card imported from forge issue `issue`: derived from the number,
 /// so an import interrupted between two writes (a store that cannot commit a card
 /// and its link together) is finished, not repeated, by the next run.
@@ -225,12 +255,13 @@ pub fn reserved_tag(tag: &str) -> bool {
         || tag.starts_with("board:")
         || tag.starts_with("claim:")
         || tag.starts_with("number:")
+        || tag.starts_with("archived:")
 }
 
 fn check_tags(tags: &[String]) -> Result<(), BoardError> {
     if tags.iter().any(|t| reserved_tag(t)) {
         return Err(BoardError::Invalid(
-            "tags `agent`, `board:…`, `claim:…` and `number:…` are the board's own",
+            "tags `agent`, `board:…`, `claim:…`, `number:…` and `archived:…` are the board's own",
         ));
     }
     Ok(())
@@ -320,6 +351,10 @@ pub struct Card {
     /// and for work closed without shipping (rusty_tick's won't-do).
     #[serde(default)]
     pub done_ms: Option<i64>,
+    /// When the card was archived, Unix ms: a Done card set aside from the board's default
+    /// views. It is still Done, so roadmap, metrics and dependencies count it as before.
+    #[serde(default)]
+    pub archived_ms: Option<i64>,
 }
 
 /// Stable cross-component ids for the one logical execution a card may own.
@@ -436,6 +471,10 @@ pub enum EventKind {
     Commented,
     /// Linked to a forge issue.
     Linked,
+    /// A Done card set aside from the default views.
+    Archived,
+    /// An archived card put back.
+    Restored,
     /// Title/body brought in line with the linked issue.
     Synced,
     /// A factory execution was initiated or adopted.
@@ -557,6 +596,7 @@ impl Card {
             created_ms: now_ms,
             updated_ms: now_ms,
             done_ms: None,
+            archived_ms: None,
         })
     }
 
@@ -714,6 +754,50 @@ impl Card {
             done_ms: (*to == Column::DONE).then_some(now_ms),
             ..self.next(now_ms)
         }
+    }
+
+    /// Archive the card: set it aside from the default views. Unchanged if already archived.
+    ///
+    /// # Errors
+    /// [`BoardError::Invalid`] if the card is not Done: archiving tidies finished work and
+    /// never closes open work.
+    pub fn archive(&self, now_ms: i64) -> Result<Self, BoardError> {
+        if self.column != Column::DONE {
+            return Err(BoardError::Invalid("only done cards can be archived"));
+        }
+        if self.archived_ms.is_some() {
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            archived_ms: Some(now_ms),
+            ..self.next(now_ms)
+        })
+    }
+
+    /// Put an archived card back. Unchanged if it is not archived.
+    #[must_use]
+    pub fn restore(&self, now_ms: i64) -> Self {
+        if self.archived_ms.is_none() {
+            return self.clone();
+        }
+        Self {
+            archived_ms: None,
+            ..self.next(now_ms)
+        }
+    }
+
+    /// Whether the card is off the board's default views at `now_ms`: archived, or Done for
+    /// longer than `window_ms`, when there is a window. A card closed without shipping has no
+    /// ship time, so its last change stands in.
+    pub fn shelved(&self, now_ms: i64, window_ms: Option<i64>) -> bool {
+        if self.column != Column::DONE {
+            return false;
+        }
+        if self.archived_ms.is_some() {
+            return true;
+        }
+        let closed_ms = self.done_ms.unwrap_or(self.updated_ms);
+        window_ms.is_some_and(|w| now_ms.saturating_sub(closed_ms) > w)
     }
 
     /// Replace title/body/tags (each optional).
