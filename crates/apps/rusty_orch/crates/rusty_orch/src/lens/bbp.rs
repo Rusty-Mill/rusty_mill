@@ -365,7 +365,8 @@ impl<R: Rpc> Session<R> {
             .ok_or_else(|| format!("get_artifact: brief {id} has no text"))
     }
 
-    /// The text of code candidate `id`'s diffs, in the candidate's order.
+    /// The text of each of code candidate `id`'s diffs, in the candidate's
+    /// order, so each can be applied on its own.
     /// Each artifact's first read is charged once to the lens (R11), not
     /// to the claim's budget (D87). A role that may not read the candidate
     /// or a diff gives [`Diffs::Forbidden`]; any other failure is an error.
@@ -377,7 +378,7 @@ impl<R: Rpc> Session<R> {
         let ArtifactPayload::Candidate(candidate) = rec.payload else {
             return Err(format!("get_artifact: {id} is not a candidate"));
         };
-        let mut text = String::new();
+        let mut texts = Vec::with_capacity(candidate.diffs.len());
         for diff in candidate.diffs {
             let (rec, content) = match self.artifact(diff)? {
                 Got::Read(rec, content) => (rec, content),
@@ -388,12 +389,9 @@ impl<R: Rpc> Session<R> {
                     "get_artifact: {diff} of candidate {id} is not a diff"
                 ));
             }
-            text.push_str(&content);
-            if !text.ends_with('\n') {
-                text.push('\n');
-            }
+            texts.push(content);
         }
-        Ok(Diffs::Text(text))
+        Ok(Diffs::Text(texts))
     }
 
     /// One artifact's record and text; a `role_forbidden` refusal is
@@ -492,8 +490,8 @@ impl<R: Rpc> Board for Session<R> {
 /// What a lens may read of a claim's code candidate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Diffs {
-    /// Its diffs' text, each ending in a newline.
-    Text(String),
+    /// Each diff's text, in the candidate's order.
+    Text(Vec<String>),
     /// The lens's role may not read the candidate or one of its diffs
     /// (D87): the claim is not eligible. Nothing was charged.
     Forbidden(String),
@@ -1141,10 +1139,13 @@ mod tests {
                 "--- a/README.md\n+++ b/README.md\n",
             ),
         ]);
-        let want = "--- a/src/x.rs\n+++ b/src/x.rs\n--- a/README.md\n+++ b/README.md\n";
+        let want = [
+            "--- a/src/x.rs\n+++ b/src/x.rs",
+            "--- a/README.md\n+++ b/README.md\n",
+        ];
         assert_eq!(
             s.candidate_diffs(ArtId(5)),
-            Ok(Diffs::Text(want.to_owned()))
+            Ok(Diffs::Text(want.map(str::to_owned).to_vec()))
         );
         let ids: Vec<String> = s
             .rpc
