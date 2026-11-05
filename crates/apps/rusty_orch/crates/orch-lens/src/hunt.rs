@@ -320,21 +320,46 @@ mod tests {
         AgentId::new(s).expect("id")
     }
 
-    /// Answers raw questions from a script, in order.
-    struct Script(VecDeque<Result<String, ClassifiedError>>, Vec<Question>);
+    /// Answers questions from a script, in order.
+    struct Script(VecDeque<Result<Answer, ClassifiedError>>, Vec<Question>);
 
     impl Model for Script {
         fn ask(&mut self, q: &Question) -> Result<Answer, ClassifiedError> {
             self.1.push(q.clone());
-            let next = self.0.pop_front().expect("scripted reply");
-            next.map(|text| Answer {
-                reply: Reply::Raw(text),
-                usage: Usage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    cached_input_tokens: 0,
-                },
-            })
+            self.0.pop_front().expect("scripted reply")
+        }
+    }
+
+    /// A raw reply using 15 tokens.
+    fn raw(text: &str) -> Answer {
+        Answer {
+            reply: Reply::Raw(text.to_owned()),
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+            },
+        }
+    }
+
+    /// Output tokens one over the cap: refused, its usage known.
+    const OVER: u64 = crate::call::MAX_OUTPUT_TOKENS as u64 + 1;
+
+    fn over_cap() -> Answer {
+        Answer {
+            usage: Usage {
+                output_tokens: OVER,
+                ..raw("x").usage
+            },
+            ..raw(SUSPECTS)
+        }
+    }
+
+    /// A posts reply, the wrong shape for a raw question; 15 tokens.
+    fn posts() -> Answer {
+        Answer {
+            reply: Reply::Posts(Vec::new()),
+            ..raw("x")
         }
     }
 
@@ -408,6 +433,15 @@ mod tests {
         probes: &mut Fake,
         task_calls: u32,
     ) -> (Result<Hunted, Unrecorded>, Vec<Question>) {
+        let script = replies.into_iter().map(|r| r.map(raw)).collect();
+        run_answers(script, probes, task_calls)
+    }
+
+    fn run_answers(
+        script: VecDeque<Result<Answer, ClassifiedError>>,
+        probes: &mut Fake,
+        task_calls: u32,
+    ) -> (Result<Hunted, Unrecorded>, Vec<Question>) {
         let ps = providers();
         let ids = [id("claude")];
         let seat = Seat {
@@ -423,7 +457,6 @@ mod tests {
             meter: &mut m,
             save: &mut save,
         };
-        let script = replies.into_iter().map(|r| r.map(str::to_owned)).collect();
         let mut models = One(Script(script, Vec::new()));
         let out = hunt(&target(), seat, RUST, ctx, &mut models, probes);
         (out, models.0 .1)
@@ -468,6 +501,33 @@ mod tests {
         assert_eq!((p.outcome, p.novel, p.runs), (Outcome::Regression, true, 2));
         assert_eq!(p.probe_sha256, Sha256::of(b"#[test] fn t() {}").hex());
         assert!(h.notes.is_empty(), "{:?}", h.notes);
+    }
+
+    #[test]
+    fn a_refused_enumerate_reply_still_counts_its_tokens() {
+        let mut probes = fails_then(Run::Passed);
+        let (out, asked) = run_answers([Ok(over_cap())].into(), &mut probes, 10);
+        let h = out.expect("recorded: the call was made");
+        assert_eq!(asked.len(), 1);
+        assert_eq!((h.hunt.suspects, h.hunt.tokens), (0, 10 + OVER));
+        assert!(h.hunt.cost > 0);
+        assert!(h.notes[0].contains("output tokens"), "{:?}", h.notes);
+    }
+
+    #[test]
+    fn refused_and_wrong_shape_hunt_replies_still_count_their_tokens() {
+        let mut probes = fails_then(Run::Passed);
+        let script = [Ok(raw(SUSPECTS)), Ok(over_cap()), Ok(posts())].into();
+        let (out, asked) = run_answers(script, &mut probes, 10);
+        let h = out.expect("recorded");
+        assert_eq!(asked.len(), 3);
+        assert_eq!((h.hunt.probes, h.hunt.tokens), (0, 15 + (10 + OVER) + 15));
+        assert!(probes.1.is_empty(), "no probe came back");
+        assert!(
+            h.notes[0].contains("output tokens") && h.notes[1].contains("posts reply"),
+            "{:?}",
+            h.notes
+        );
     }
 
     #[test]
