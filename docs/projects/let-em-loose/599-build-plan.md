@@ -108,7 +108,7 @@ review (B3, S1–S4):
 `claim_history` supplies "score just before the post" and "contested at
 settlement" for each job.
 
-As built (D84, D92):
+As built (D93, D92):
 
 - `lens run` saves each blind `Review` and `LookHarder` job it answers to
   orch-store `lens_record` (`lens-records.mmap`): board, lens, claim, epoch,
@@ -117,7 +117,7 @@ As built (D84, D92):
   saved. Points are computed whenever the record is read
   (`orch-lens::record::tallies`), from these rows and each claim's
   `bbp why --claim` history, and never stored.
-- **Pivotal jobs (D84).** Leave-one-out applies only to the accept and drop
+- **Pivotal jobs (D93).** Leave-one-out applies only to the accept and drop
   lines. A pivotal job is scored against ground truth where the claim has
   one, and is otherwise unscored and counted as pivotal. A human `decide`
   or `choose` settlement is never pivotal, and a later Nano reversal is
@@ -126,14 +126,14 @@ As built (D84, D92):
   `holdout:` profiles are model-written). The weight `w` is unchanged, with
   `upset` judged against the truth. There's no shadow-run source yet: its
   expected producer is #598's approved `shadow:` profile kind (D62).
-- **Interim limits, until OPEN_QUESTIONS Q23.** BBP's history has no
+- **Interim limits, until OPEN_QUESTIONS Q25.** BBP's history has no
   `min_authors`, so a job whose removal also removes its lens as an author
   counts as pivotal. Only a failing golden set is visible, which means drop
   was right. A job that posted `executed` evidence gets no golden truth,
   standing in for "cites that report". Each limit only adds unscored
   pivotal jobs.
 - The lens sees `record: P points over N blind reviews (S scored, V
-  pivotal)`. A per-lens report command waits on Q22.
+  pivotal)`. A per-lens report command waits on Q24.
 
 ## 3. Lessons
 
