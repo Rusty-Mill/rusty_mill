@@ -4,6 +4,14 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## `lens record` calibration report
+**2026-11-05**
+
+- `rusty_orch lens record` prints each lens's track record on one task
+  as one JSON line: points, blind reviews assigned, scored and pending,
+  pivotal jobs, and pivotal jobs scored against ground truth (#599,
+  D111). It is D93's calibration report, and it changes nothing.
+
 ## Lens track records
 **2026-11-05**
 
