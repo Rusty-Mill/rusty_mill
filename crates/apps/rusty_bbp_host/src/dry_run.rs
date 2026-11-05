@@ -304,7 +304,9 @@ fn entries(bytes: &[u8]) -> u64 {
         .count() as u64
 }
 
-#[cfg(test)]
+// The fixtures run `/bin/sh` and grant `/dev/null`: a dry run is confined
+// with Landlock, so `bbp dry-run` only runs where `probe_host` passes.
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
