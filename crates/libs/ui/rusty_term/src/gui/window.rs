@@ -5352,6 +5352,11 @@ impl WindowState<'_> {
                 // cursor renders only while focused, and regaining focus
                 // clears the active tab's attention badge (in `chrome_row`).
                 self.focused = focused;
+                // A release that lands after focus moves away never reaches
+                // us, so drop the pressed look here rather than leave it stuck.
+                if !focused {
+                    self.pressed = None;
+                }
                 if let Some(p) = self.pane_mut()
                     && p.grid.lock().focus_reporting
                 {
@@ -5655,6 +5660,7 @@ impl WindowState<'_> {
                     }
                     if to != from {
                         self.reorder_tab(from, to);
+                        self.pressed = pressed_after_reorder(self.pressed, from, to);
                     }
                 }
                 // Chrome-bar hover feedback: track the element under the
@@ -6627,6 +6633,15 @@ fn tab_spans(hits: &[Hit]) -> Vec<(usize, usize, usize)> {
 /// position. Midpoint-based so unequal adaptive widths can't oscillate — a
 /// swap only fires once the pointer is past the point where swapping back
 /// would immediately retrigger. `from` when nothing was crossed.
+/// The pressed look follows the dragged tab when it moves from `from` to `to`
+/// (D43); any other pressed control is untouched.
+fn pressed_after_reorder(pressed: Option<Hit>, from: usize, to: usize) -> Option<Hit> {
+    match pressed {
+        Some(Hit::Tab(i)) if i == from => Some(Hit::Tab(to)),
+        other => other,
+    }
+}
+
 fn tab_drag_target(col: usize, spans: &[(usize, usize, usize)], from: usize) -> usize {
     let Some(pos) = spans.iter().position(|&(i, _, _)| i == from) else {
         return from;
@@ -6978,9 +6993,9 @@ mod tests {
         SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
         display_path, drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
         ime_cursor_area_origin, is_openable_url, osc52_reply, pane_pixel_point, path_from_file_uri,
-        physical_px, put_text, read_git_branch, release_input, route_key_down, settings_hit,
-        settings_value_end, settings_visible, shell_menu_items, tab_drag_target, tab_spans,
-        tab_widths, visible_tab_range, widget_text, zoom_px,
+        physical_px, pressed_after_reorder, put_text, read_git_branch, release_input,
+        route_key_down, settings_hit, settings_value_end, settings_visible, shell_menu_items,
+        tab_drag_target, tab_spans, tab_widths, visible_tab_range, widget_text, zoom_px,
     };
     use crate::core::Cell;
 
@@ -7839,6 +7854,15 @@ mod tests {
             Hit::NewTab,
         ];
         assert_eq!(tab_spans(&hits), vec![(0, 0, 4), (1, 5, 7)]);
+    }
+
+    #[test]
+    fn pressed_tab_follows_a_reorder() {
+        let after = |p: Option<Hit>| pressed_after_reorder(p, 1, 3);
+        assert!(after(Some(Hit::Tab(1))) == Some(Hit::Tab(3)));
+        assert!(after(Some(Hit::Tab(2))) == Some(Hit::Tab(2)));
+        assert!(after(Some(Hit::MoreTabs)) == Some(Hit::MoreTabs));
+        assert!(after(None).is_none());
     }
 
     #[test]
