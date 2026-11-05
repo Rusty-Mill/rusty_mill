@@ -285,6 +285,9 @@ This is the path from a prototype to `executed` evidence, using the normal APIs.
 | `claim_action_result` | host or human | mark, `done` or `aborted` (C-R9) |
 | `run_started` | moderator | candidate id, run id (existing event, also emitted in claims mode on candidate storage) |
 | `credential_issued` | moderator | role, principal, credential digest (the secret itself is never logged) |
+| `takeover_started` | human | takeover id, claim, epoch, session (mux block), client, until, reason. Written before any input is possible; one live takeover per session (D82) |
+| `takeover_input` | host | takeover, seq (from 1, no gaps), text (at most 4096 bytes), sha256 = SHA-256(previous value, or 32 zero bytes, followed by the text) (D82) |
+| `takeover_ended` | host or human | takeover, reason (`released` by the human only; `expired` only once `until` has passed; `revoked`, `turn_ended`, `mux_lost`), batches and last chain value from the fold (D82) |
 
 Task-level state in claims mode:
 - A claim escalation does **not** change the task state. Only that claim waits for the human; turnless posting on other claims continues. The inbox (#595) reads `claim_escalated` events.
@@ -319,6 +322,8 @@ All writes still go through the single transactional writer: `FsStore` takes an 
 11. **Interim test-change rule:** `test_paths` in the host profile set (claims mode), `tests_changed: [{path, change}]` on `Report`, and the `tests_unendorsed` code. Removed or relaxed when #597 holdouts land.
 12. **Holdout suites (#597, approved 2026-11-02):** `holdout_digest` on `open` and `task_opened`, `suite` on the candidate manifest (default `build`, not written), the role capability `holdout`, the `holdout_mismatch` code, `holdout_due` on `claim_card`, the host action and event `holdout_extended(digest)` and the human action and event `holdout_updated(digest)`. Host: `protected` globs in the profile set and the `protected_path` code; core: the `tests` domain's accept condition. All optional and not written at their defaults, so existing logs are byte-identical.
 13. **Accept line and evidence notes on the card (#594, approved 2026-11-04, D77):** `accept_at` on `claim_card`/`claims_delta` entries, and `strength` and `note` on each evidence item. Derived from the frozen config and the evidence messages; views only, no record, event or log change.
+
+14. **Human takeover (mux-hosted agent ptys, approved 2026-11-05, D82):** the events `takeover_started`, `takeover_input` and `takeover_ended`, the human actions `Takeover` and `TakeoverRelease`, the host actions `TakeoverInput` and `TakeoverEnded`, the response `TakenOver(id)`, and `human_touched` on `claim_card`: true when the current candidate was stored after a `takeover_started` on its claim in the same epoch (D84). Scoring and author counts are unchanged. They are added under schema 5 like item 12, so a log with no takeover is byte-identical and an older build refuses a log that has one (D83). No Agent API view returns takeover events or typed text; agents see only `human_touched` on the card.
 
 No change to `rusty_crdt`, `coedit` or the stage-mode rules.
 

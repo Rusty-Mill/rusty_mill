@@ -224,6 +224,53 @@ pub enum MarkOutcome {
     Aborted,
 }
 
+/// Why a takeover ended (D82).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TakeoverEnd {
+    /// The human handed the session back.
+    Released,
+    /// `until` passed.
+    Expired,
+    /// orch withdrew the lease.
+    Revoked,
+    /// The agent's turn or session ended first.
+    TurnEnded,
+    /// The mux connection or block went away.
+    MuxLost,
+}
+
+/// A human takeover of one agent session (D82): who may type, until when,
+/// and the hash chain of what was typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Takeover {
+    pub claim: MsgId,
+    pub epoch: u32,
+    /// The mux block the agent runs in.
+    pub session: String,
+    /// The mux client the lease is granted to.
+    pub client: String,
+    pub until: Time,
+    /// Input batches recorded so far; the next one is `batches + 1`.
+    pub batches: u64,
+    /// The chain value after the last batch.
+    pub last: Option<Sha256>,
+    pub ended: Option<TakeoverEnd>,
+}
+
+impl Takeover {
+    pub fn live(&self) -> bool {
+        self.ended.is_none()
+    }
+}
+
+/// The takeover input chain: SHA-256 over the previous value (32 zero bytes
+/// before the first batch) followed by the batch text.
+pub fn input_chain(prev: Option<Sha256>, text: &str) -> Sha256 {
+    let mut bytes = prev.map_or([0u8; 32], |s| s.0).to_vec();
+    bytes.extend_from_slice(text.as_bytes());
+    Sha256::of(&bytes)
+}
+
 /// One evidence item as the fold keeps it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
@@ -280,6 +327,8 @@ pub struct ClaimRecord {
     pub changed: Rev,
     /// Score at the last settlement, for the card.
     pub last_score: i64,
+    /// Epochs in which a human took over one of its sessions (D84).
+    pub takeover_epochs: BTreeSet<u32>,
 }
 
 impl ClaimRecord {
@@ -300,6 +349,7 @@ impl ClaimRecord {
             sole_candidate: false,
             changed: rev,
             last_score: 0,
+            takeover_epochs: BTreeSet::new(),
         }
     }
 
@@ -404,6 +454,11 @@ pub struct ClaimsBook {
     /// Every holdout digest the task has left behind (#597). A retired suite
     /// is never adopted again: its old passes would count once more.
     pub holdout_retired: BTreeSet<Sha256>,
+    /// Takeovers by id, from 1 (D82).
+    pub takeovers: BTreeMap<u64, Takeover>,
+    /// Candidates stored after a takeover on their claim in the same epoch
+    /// (D84). Shown on the card; scoring is unchanged.
+    pub human_touched: BTreeSet<ArtId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -569,6 +624,11 @@ pub(crate) fn on_artifact(st: &mut crate::state::TaskState, a: &crate::record::A
         return;
     };
     st.claims.candidates.insert(a.id, claim);
+    if let Some(c) = st.claims.claims.get(&claim) {
+        if c.takeover_epochs.contains(&c.epoch) {
+            st.claims.human_touched.insert(a.id);
+        }
+    }
     if !k.suite.is_build() {
         return; // a holdout candidate never becomes current
     }
@@ -691,6 +751,50 @@ pub(crate) fn apply(st: &mut crate::state::TaskState, e: &crate::event::Event) {
                 c.changed = rev;
             }
         }
+        E::TakeoverStarted {
+            takeover,
+            claim,
+            epoch,
+            session,
+            client,
+            until,
+            ..
+        } => {
+            touch(claim, &mut |c| {
+                c.takeover_epochs.insert(*epoch);
+            });
+            book.takeovers.insert(
+                *takeover,
+                Takeover {
+                    claim: *claim,
+                    epoch: *epoch,
+                    session: session.clone(),
+                    client: client.clone(),
+                    until: *until,
+                    batches: 0,
+                    last: None,
+                    ended: None,
+                },
+            );
+        }
+        E::TakeoverInput {
+            takeover,
+            seq,
+            sha256,
+            ..
+        } => {
+            if let Some(t) = book.takeovers.get_mut(takeover) {
+                t.batches = *seq;
+                t.last = Some(*sha256);
+            }
+        }
+        E::TakeoverEnded {
+            takeover, reason, ..
+        } => {
+            if let Some(t) = book.takeovers.get_mut(takeover) {
+                t.ended = Some(*reason);
+            }
+        }
         E::ClaimActionResult { mark, outcome } => {
             for c in book.claims.values_mut() {
                 if let Some(m) = c.marks.iter_mut().find(|m| m.id == *mark) {
@@ -759,6 +863,9 @@ pub struct ClaimView {
     /// The task has a holdout suite and the current candidate has no passed
     /// holdout run on it yet: the accept line waits for one (#597).
     pub holdout_due: bool,
+    /// The current candidate was stored after a human took over one of the
+    /// claim's sessions in this epoch (D84). Scoring is unchanged.
+    pub human_touched: bool,
 }
 
 /// A failing profile and the report that set it (hidden if unreadable).
@@ -860,6 +967,7 @@ pub fn card(st: &crate::state::TaskState, c: &ClaimRecord, sight: &Sight) -> Cla
         tests_changed,
         endorsement,
         holdout_due: !crate::claims_engine::holdout_passed(st, c),
+        human_touched: c.current.is_some_and(|k| book.human_touched.contains(&k)),
     }
 }
 

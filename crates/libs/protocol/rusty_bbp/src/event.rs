@@ -326,6 +326,33 @@ pub enum Event {
     HoldoutUpdated {
         digest: Sha256,
     },
+    /// D82: the human took over agent session `session` on `claim`, written
+    /// before any input is possible. Under schema 5, written only when a
+    /// takeover happens (D83).
+    TakeoverStarted {
+        takeover: u64,
+        claim: MsgId,
+        epoch: u32,
+        session: String,
+        client: String,
+        until: Time,
+        reason: String,
+    },
+    /// D82: one batch of what the human typed, recorded as delivered.
+    /// `sha256` is [`crate::claims::input_chain`] over the previous batch.
+    TakeoverInput {
+        takeover: u64,
+        seq: u64,
+        text: String,
+        sha256: Sha256,
+    },
+    /// D82: the takeover is over; the totals close the chain.
+    TakeoverEnded {
+        takeover: u64,
+        reason: crate::claims::TakeoverEnd,
+        batches: u64,
+        last: Option<Sha256>,
+    },
 }
 
 fn is_false(b: &bool) -> bool {

@@ -3700,3 +3700,205 @@ mod replay {
         assert!(claim_history(&TaskId::from("t"), &cx.log, MsgId(999), None).is_none());
     }
 }
+
+/// D82: human takeover of an agent session, recorded on the board (D83: under
+/// schema 5; D84: `human_touched` derived in the fold).
+mod takeover {
+    use super::*;
+    use rusty_bbp::claims::input_chain;
+
+    fn start(cx: &mut Cx, c: MsgId, session: &str) -> Response {
+        cx.human(HumanAction::Takeover {
+            claim: c,
+            session: session.into(),
+            client: "nano-desktop".into(),
+            minutes: 10,
+            reason: "steer the build".into(),
+        })
+    }
+
+    fn started(cx: &mut Cx, c: MsgId, session: &str) -> u64 {
+        match start(cx, c, session) {
+            Response::TakenOver(id) => id,
+            r => panic!("takeover: {r:?}"),
+        }
+    }
+
+    fn input(cx: &mut Cx, id: u64, seq: u64, text: &str, prev: Option<Sha256>) -> Response {
+        cx.host(HostAction::TakeoverInput {
+            takeover: id,
+            seq,
+            text: text.into(),
+            sha256: input_chain(prev, text),
+        })
+    }
+
+    #[test]
+    fn started_before_input_and_chained_to_the_end() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "agent:t:c:1");
+        assert_eq!(id, 1);
+        ok(input(&mut cx, id, 1, "ls\r", None));
+        let one = input_chain(None, "ls\r");
+        ok(input(&mut cx, id, 2, "cargo test\r", Some(one)));
+        let two = input_chain(Some(one), "cargo test\r");
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        let ended = cx.log.iter().rev().find_map(|e| match e {
+            Event::TakeoverEnded {
+                reason,
+                batches,
+                last,
+                ..
+            } => Some((*reason, *batches, *last)),
+            _ => None,
+        });
+        assert_eq!(ended, Some((TakeoverEnd::Released, 2, Some(two))));
+        // Ended: no more input, no second end.
+        assert_eq!(
+            rejected(input(&mut cx, id, 3, "x", Some(two))),
+            Code::NotOpen
+        );
+        assert_eq!(
+            rejected(cx.human(HumanAction::TakeoverRelease { takeover: id })),
+            Code::NotOpen
+        );
+    }
+
+    #[test]
+    fn input_needs_a_live_takeover_in_order_and_on_the_chain() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        assert_eq!(
+            rejected(input(&mut cx, 1, 1, "x", None)),
+            Code::RefUnresolved
+        );
+        let id = started(&mut cx, c, "s1");
+        assert_eq!(rejected(input(&mut cx, id, 2, "x", None)), Code::OpConflict);
+        let forged = cx.host(HostAction::TakeoverInput {
+            takeover: id,
+            seq: 1,
+            text: "x".into(),
+            sha256: input_chain(None, "y"),
+        });
+        assert_eq!(rejected(forged), Code::PayloadMismatch);
+        assert_eq!(
+            rejected(input(&mut cx, id, 1, "", None)),
+            Code::BadHumanInput
+        );
+        let big = "a".repeat(4097);
+        assert_eq!(rejected(input(&mut cx, id, 1, &big, None)), Code::TooLarge);
+        ok(input(&mut cx, id, 1, &"a".repeat(4096), None));
+    }
+
+    #[test]
+    fn expiry_refuses_input_and_only_then_ends_as_expired() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        let end = |reason| HostAction::TakeoverEnded {
+            takeover: id,
+            reason,
+        };
+        assert_eq!(
+            rejected(cx.host(end(TakeoverEnd::Expired))),
+            Code::WrongState
+        );
+        cx.now = cx.now.plus(10 * 60_000 + 1);
+        assert_eq!(
+            rejected(input(&mut cx, id, 1, "x", None)),
+            Code::TokenExpired
+        );
+        ok(cx.host(end(TakeoverEnd::Expired)));
+    }
+
+    #[test]
+    fn the_host_cannot_release_for_the_human() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        let r = cx.host(HostAction::TakeoverEnded {
+            takeover: id,
+            reason: TakeoverEnd::Released,
+        });
+        assert_eq!(rejected(r), Code::Forbidden);
+        ok(cx.host(HostAction::TakeoverEnded {
+            takeover: id,
+            reason: TakeoverEnd::MuxLost,
+        }));
+    }
+
+    #[test]
+    fn one_live_takeover_per_session_and_bounded_fields() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        assert_eq!(rejected(start(&mut cx, c, "s1")), Code::AlreadyOpen);
+        assert_eq!(started(&mut cx, c, "s2"), 2);
+        ok(cx.host(HostAction::TakeoverEnded {
+            takeover: id,
+            reason: TakeoverEnd::TurnEnded,
+        }));
+        assert_eq!(started(&mut cx, c, "s1"), 3);
+        let bad = |minutes, session: &str, reason: &str| HumanAction::Takeover {
+            claim: c,
+            session: session.into(),
+            client: "nano".into(),
+            minutes,
+            reason: reason.into(),
+        };
+        assert_eq!(rejected(cx.human(bad(0, "s9", "r"))), Code::BadHumanInput);
+        assert_eq!(rejected(cx.human(bad(61, "s9", "r"))), Code::BadHumanInput);
+        assert_eq!(rejected(cx.human(bad(5, " ", "r"))), Code::BadHumanInput);
+        assert_eq!(rejected(cx.human(bad(5, "s9", ""))), Code::BadHumanInput);
+        assert_eq!(
+            rejected(cx.human(bad(5, &"s".repeat(129), "r"))),
+            Code::TooLarge
+        );
+    }
+
+    #[test]
+    fn a_closed_claim_cannot_be_taken_over() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        ok(cx.human(HumanAction::ClaimDecision {
+            claim: c,
+            outcome: ClaimOutcome::Drop,
+        }));
+        assert_eq!(rejected(start(&mut cx, c, "s1")), Code::WrongState);
+        assert_eq!(
+            rejected(start(&mut cx, MsgId(999), "s1")),
+            Code::RefUnresolved
+        );
+    }
+
+    #[test]
+    fn a_candidate_after_a_takeover_in_its_epoch_is_human_touched() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let before = cx.candidate("a", c);
+        assert!(!card_of(&cx, c).human_touched);
+        let id = started(&mut cx, c, "s1");
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        // Ended before submission still counts: a human touched the work.
+        let after = cx.candidate("a", c);
+        assert!(cx.st.claims.human_touched.contains(&after));
+        assert!(!cx.st.claims.human_touched.contains(&before));
+        assert!(card_of(&cx, c).human_touched);
+    }
+
+    #[test]
+    fn takeovers_replay_to_the_same_state() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        ok(input(&mut cx, id, 1, "y\r", None));
+        cx.candidate("a", c);
+        let mut again = TaskState::new(TaskId::from("t"));
+        for e in &cx.log {
+            again.apply(e);
+        }
+        assert_eq!(again.claims.takeovers, cx.st.claims.takeovers);
+        assert_eq!(again.claims.human_touched, cx.st.claims.human_touched);
+    }
+}
