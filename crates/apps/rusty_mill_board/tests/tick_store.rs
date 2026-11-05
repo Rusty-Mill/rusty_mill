@@ -2,12 +2,21 @@
 //! owner's edits in rusty_tick reach the board (ADR-0012).
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind, Shelf};
+use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind, Plan, Shelf};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::Store;
 use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
 use serde_json::json;
 use std::sync::{Arc, Barrier};
+
+/// A plan of a priority and dependencies only.
+fn plan(priority: Option<u8>, deps: Option<Vec<uuid::Uuid>>) -> Plan {
+    Plan {
+        priority,
+        deps,
+        ..Plan::default()
+    }
+}
 
 mod fake_tick;
 use fake_tick::FakeTick;
@@ -266,13 +275,47 @@ fn a_done_card_moves_to_another_list_and_its_task_stays_closed() {
 }
 
 #[test]
+fn links_live_in_the_board_document_and_are_left_out_while_empty() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let old = board.add(&human, "old", "", vec![]).expect("add");
+    let newer = board.add(&human, "newer", "", vec![]).expect("add");
+    board
+        .plan(old.id, &human, &plan(None, Some(vec![newer.id])))
+        .expect("plan");
+    let doc = tick.doc("board", old.id).expect("board doc");
+    assert!(
+        doc.get("supersededBy").is_none() && doc.get("related").is_none(),
+        "documents without links stay as before: {doc}"
+    );
+
+    let links = Plan {
+        deps: Some(vec![]),
+        superseded_by: Some(vec![newer.id]),
+        related: Some(vec![newer.id]),
+        ..Plan::default()
+    };
+    board.plan(old.id, &human, &links).expect("link");
+    let doc = tick.doc("board", old.id).expect("board doc");
+    assert_eq!(
+        (&doc["supersededBy"], &doc["related"]),
+        (&json!([newer.id]), &json!([newer.id]))
+    );
+    let read = board.get(old.id).expect("get");
+    assert_eq!(
+        (read.superseded_by, read.related),
+        (vec![newer.id], vec![newer.id])
+    );
+}
+
+#[test]
 fn deps_and_comments_are_rusty_tick_documents() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");
     let first = board.add(&human, "first", "", vec![]).expect("add");
     let second = board.add(&human, "second", "", vec![]).expect("add");
     let planned = board
-        .plan(second.id, &human, Some(5), Some(vec![first.id]))
+        .plan(second.id, &human, &plan(Some(5), Some(vec![first.id])))
         .expect("plan");
     assert_eq!(
         (planned.priority, planned.deps.clone()),
@@ -362,7 +405,7 @@ fn of_two_bindings_from_the_same_read_only_the_first_lands() {
 fn a_dependency_write_and_a_binding_from_the_same_read_do_not_both_land() {
     let (a, b, tick, read) = two_readers();
     let planned = read
-        .plan(None, Some(vec![uuid::Uuid::now_v7()]), 1)
+        .plan(&plan(None, Some(vec![uuid::Uuid::now_v7()])), 1)
         .expect("plan");
     let bound = read.bind_execution(link("e1"), 1).expect("bind");
     a.replace(&planned, Event::of(&planned, EventKind::Edited, "a"))
@@ -432,7 +475,7 @@ fn a_plan_interrupted_between_its_two_writes_is_finished_by_planning_again() {
     tick.fail_next("PUT", "/docs/board/");
     assert!(
         board
-            .plan(card.id, &human, Some(5), Some(vec![dep.id]))
+            .plan(card.id, &human, &plan(Some(5), Some(vec![dep.id])))
             .is_err()
     );
     let half = board.get(card.id).expect("get");
@@ -446,7 +489,7 @@ fn a_plan_interrupted_between_its_two_writes_is_finished_by_planning_again() {
     );
 
     let done = board
-        .plan(card.id, &human, Some(5), Some(vec![dep.id]))
+        .plan(card.id, &human, &plan(Some(5), Some(vec![dep.id])))
         .expect("plan again");
     assert_eq!((done.priority, done.deps.clone()), (5, vec![dep.id]));
 }
@@ -494,7 +537,7 @@ fn a_write_in_two_steps_returns_the_revision_a_read_sees_and_the_next_edit_names
     let dep = board.add(&human, "dep", "", vec![]).expect("add");
     let card = board.add(&human, "card", "", vec![]).expect("add");
     let planned = board
-        .plan(card.id, &human, Some(5), Some(vec![dep.id]))
+        .plan(card.id, &human, &plan(Some(5), Some(vec![dep.id])))
         .expect("plan");
     assert_eq!(planned.rev, board.get(card.id).expect("get").rev);
     let edited = board

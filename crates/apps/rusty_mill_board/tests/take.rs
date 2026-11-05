@@ -4,10 +4,19 @@ use std::sync::Arc;
 
 use rusty_mill_board::board::{Board, Roles};
 use rusty_mill_board::domain::{
-    Actor, BoardError, Capability, Card, Column, Event, EventKind, MoveRules,
+    Actor, BoardError, Capability, Card, Column, Event, EventKind, MoveRules, Plan,
 };
 use rusty_mill_board::store::{MemStore, Store};
 use rusty_mill_board::workflow::{ColumnDef, Kind, Transition, Workflow};
+
+/// A plan of a priority and dependencies only.
+fn plan(priority: Option<u8>, deps: Option<Vec<uuid::Uuid>>) -> Plan {
+    Plan {
+        priority,
+        deps,
+        ..Plan::default()
+    }
+}
 
 fn board() -> Board<MemStore> {
     Board::new(MemStore::default(), Roles::default())
@@ -316,7 +325,7 @@ fn take_prefers_higher_priority_within_a_queue() {
     let old = ready(&b, "old, no priority");
     let urgent = ready(&b, "new, high priority");
     let h = who(&b, "nano", "human");
-    b.plan(urgent, &h, Some(5), None).expect("plan");
+    b.plan(urgent, &h, &plan(Some(5), None)).expect("plan");
     let dev = who(&b, "claude", "builder");
     assert_eq!(
         b.take(&dev, None).expect("take").map(|c| c.id),
@@ -332,7 +341,8 @@ fn take_skips_a_card_until_its_dependencies_are_done() {
     let first = ready(&b, "first");
     let then = ready(&b, "then");
     let h = who(&b, "nano", "human");
-    b.plan(then, &h, Some(5), Some(vec![first])).expect("plan");
+    b.plan(then, &h, &plan(Some(5), Some(vec![first])))
+        .expect("plan");
     let dev = who(&b, "claude", "builder");
     assert!(
         matches!(b.take(&dev, Some(then)), Err(BoardError::Refused(_))),
@@ -356,25 +366,99 @@ fn take_skips_a_card_until_its_dependencies_are_done() {
 }
 
 #[test]
+fn take_never_hands_out_a_superseded_card_until_the_link_is_cleared() {
+    let b = board();
+    let old = ready(&b, "old");
+    let newer = b
+        .add(&who(&b, "nano", "human"), "newer", "", vec![])
+        .expect("add")
+        .id;
+    let h = who(&b, "nano", "human");
+    let superseded = Plan {
+        superseded_by: Some(vec![newer]),
+        ..Plan::default()
+    };
+    b.plan(old, &h, &superseded).expect("supersede");
+    let dev = who(&b, "claude", "builder");
+    assert!(
+        matches!(b.take(&dev, Some(old)), Err(BoardError::Refused(_))),
+        "named explicitly, it says why"
+    );
+    assert!(b.take(&dev, None).expect("take").is_none());
+
+    let cleared = Plan {
+        superseded_by: Some(vec![]),
+        ..Plan::default()
+    };
+    b.plan(old, &h, &cleared).expect("clear");
+    assert_eq!(b.take(&dev, None).expect("take").map(|c| c.id), Some(old));
+}
+
+#[test]
+fn related_cards_are_recorded_and_hold_nothing_up() {
+    let b = board();
+    let a = ready(&b, "a");
+    let other = ready(&b, "other");
+    let h = who(&b, "nano", "human");
+    let related = Plan {
+        related: Some(vec![other, other]),
+        ..Plan::default()
+    };
+    let card = b.plan(a, &h, &related).expect("relate");
+    assert_eq!(card.related, vec![other], "repeats are dropped");
+    let dev = who(&b, "claude", "builder");
+    assert_eq!(b.take(&dev, Some(a)).expect("take").map(|c| c.id), Some(a));
+}
+
+#[test]
+fn links_must_name_other_real_cards() {
+    let b = board();
+    let a = ready(&b, "a");
+    let h = who(&b, "nano", "human");
+    let to = |ids: Vec<uuid::Uuid>| Plan {
+        superseded_by: Some(ids.clone()),
+        related: Some(ids),
+        ..Plan::default()
+    };
+    assert!(matches!(
+        b.plan(a, &h, &to(vec![uuid::Uuid::new_v4()])),
+        Err(BoardError::NotFound(_))
+    ));
+    assert!(matches!(
+        b.plan(a, &h, &to(vec![a])),
+        Err(BoardError::Invalid(_))
+    ));
+    assert!(matches!(
+        b.plan(a, &h, &Plan::default()),
+        Err(BoardError::Invalid(_))
+    ));
+    let many: Vec<uuid::Uuid> = (0..33).map(|i| ready(&b, &format!("c{i}"))).collect();
+    assert!(matches!(
+        b.plan(a, &h, &to(many)),
+        Err(BoardError::Invalid(_))
+    ));
+}
+
+#[test]
 fn planning_needs_triage_and_real_cards() {
     let b = board();
     let a = ready(&b, "a");
     let dev = who(&b, "claude", "builder");
     assert!(matches!(
-        b.plan(a, &dev, Some(5), None),
+        b.plan(a, &dev, &plan(Some(5), None)),
         Err(BoardError::Forbidden(_))
     ));
     let h = who(&b, "nano", "human");
     assert!(matches!(
-        b.plan(a, &h, None, Some(vec![uuid::Uuid::new_v4()])),
+        b.plan(a, &h, &plan(None, Some(vec![uuid::Uuid::new_v4()]))),
         Err(BoardError::NotFound(_))
     ));
     assert!(matches!(
-        b.plan(a, &h, None, Some(vec![a])),
+        b.plan(a, &h, &plan(None, Some(vec![a]))),
         Err(BoardError::Invalid(_))
     ));
     assert!(matches!(
-        b.plan(a, &h, Some(2), None),
+        b.plan(a, &h, &plan(Some(2), None)),
         Err(BoardError::Invalid(_))
     ));
 }
@@ -467,7 +551,9 @@ fn planned_mid_take() -> (Board<HookAfterGet>, uuid::Uuid, uuid::Uuid) {
     let card = b.add(&h, "card", "", vec![]).expect("add").id;
     b.move_card(card, &Column::READY, &h).expect("ready");
     let hook: Hook = Box::new(move |store, seen| {
-        let planned = seen.plan(None, Some(vec![blocker]), 2).expect("plan");
+        let planned = seen
+            .plan(&plan(None, Some(vec![blocker])), 2)
+            .expect("plan");
         let event = rusty_mill_board::domain::Event::of(
             &planned,
             rusty_mill_board::domain::EventKind::Edited,
@@ -508,7 +594,7 @@ fn an_invalid_plan_changes_nothing() {
     let before = b.get(id).expect("card");
     let events = b.events(None, 100).expect("events").len();
     for deps in [vec![id], (0..33).map(|_| uuid::Uuid::now_v7()).collect()] {
-        assert!(b.plan(id, &h, Some(5), Some(deps)).is_err());
+        assert!(b.plan(id, &h, &plan(Some(5), Some(deps))).is_err());
     }
     let after = b.get(id).expect("card");
     assert_eq!(
