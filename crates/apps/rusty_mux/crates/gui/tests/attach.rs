@@ -1,5 +1,6 @@
 //! The GUI client's source against a real server: a block's screen and
-//! output reach its pane, typing needs the lease the focus brings, the
+//! output reach its pane, typing needs the lease the focus brings (asked
+//! for again once another client gives it back), the
 //! window's layout changes are followed, the window's own split and zoom
 //! requests come back as layout and zoom, a session picked in the
 //! switcher is shown, a detached block is listed and put back, and a
@@ -159,6 +160,47 @@ fn a_block_shows_its_screen_takes_typing_and_follows_the_layout() {
     let (mut beside, beside_feed) = feed_of(attached.source.open(new, 40, 24).expect("opened"));
     attached.source.focus(new);
     type_until_echoed(beside.as_mut(), &beside_feed, 3);
+}
+
+#[test]
+fn a_lease_another_client_holds_is_asked_for_again_once_it_is_free() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let block = attached.block;
+    let mut other = control(&socket);
+    let mut req = Requests {
+        conn: &mut other,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    req.call(|req| Message::Attach { req, block })
+        .expect("attach");
+    req.call(|req| Message::AcquireLease { req, block })
+        .expect("the other client holds the lease");
+
+    // The focused pane is refused the lease: its typing is dropped.
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    next_screen(&feed);
+    writer.write(b"echo MARK$((7*2))\r").expect("write");
+    let refused = Instant::now() + Duration::from_secs(1);
+    while let Some(left) = refused.checked_duration_since(Instant::now()) {
+        if let Ok(Feed::Bytes(b)) = feed.recv_timeout(left) {
+            assert!(
+                !String::from_utf8_lossy(&b).contains("MARK14"),
+                "typed without the lease"
+            );
+        }
+    }
+
+    // Once it is given back, the pane asks again and types (handoff D115).
+    req.call(|req| Message::ReleaseLease { req, block })
+        .expect("release");
+    type_until_echoed(writer.as_mut(), &feed, 8);
 }
 
 /// The next session the run told, skipping layouts and focus moves.

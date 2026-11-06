@@ -1057,6 +1057,24 @@ impl Block {
         }
     }
 
+    /// Follows the block's lease to `holder` (handoff D115): lost when
+    /// another client holds it, and asked for again once it is free while
+    /// still wanted. Never taken from a holder.
+    fn lease_changed(&self, holder: Option<ClientId>) {
+        let wanted = {
+            if holder == Some(self.client) {
+                return;
+            }
+            let mut lease = self.lease();
+            lease.held = false;
+            if holder.is_some() {
+                return;
+            }
+            lease.wanted
+        };
+        self.want_lease(wanted);
+    }
+
     /// Resizes the block to its place when the lease allows and it is not
     /// that size already asked for.
     fn fit(&self, lease: &mut Lease) {
@@ -1158,6 +1176,13 @@ impl Block {
                     event: Event::BlockClosed { block: b },
                     ..
                 } if b == block => return Read::Ended,
+                Message::Event {
+                    event: Event::LeaseChanged { block: b, holder },
+                    ..
+                } if b == block => {
+                    self.lease_changed(holder);
+                    continue;
+                }
                 Message::Done { req, .. } => {
                     self.answered(req, true);
                     continue;
