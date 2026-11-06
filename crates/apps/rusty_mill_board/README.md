@@ -88,6 +88,12 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
   `older_than_days` ago), checks each card again as it commits, and needs `triage`. `board_list` with
   `archived: "only"` lists the archive. The state is an `archived:<ms>` or `restored:<ms>` tag on the rusty_tick
   task, beside `number:<n>`, so there is no migration.
+- **Prompt (#745).** A card's `prompt` holds instructions for whoever takes it, apart from the body: `card_update`
+  sets it (`""` clears it, at most 32 KiB), `card_get`/`board_list` return it, and the card dialog shows it in its own
+  box with a Copy prompt button. It lives in the card's rusty_tick `board` document, not on the task, so rusty_tick's
+  own UI doesn't show it and nothing migrates. A prompt edited with the title, body or tags is two writes to rusty_tick;
+  if only the first lands, the answer is `409` with `saved_rev` (what was saved, and the revision to finish on), and
+  the dialog keeps the unsaved prompt and says so.
 - **By date (#744).** `board_list` takes `created_from`/`created_to`, `updated_from`/`updated_to` and
   `moved_from`/`moved_to` (Unix ms, `from` inclusive, `to` exclusive). Moves come from rusty_tick's durable move
   history (`GET /moves`), so they survive restarts; entering the board counts as a move.

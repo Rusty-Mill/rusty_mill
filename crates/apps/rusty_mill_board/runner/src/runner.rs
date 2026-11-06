@@ -413,7 +413,7 @@ mod tests {
         use rusty_mill_board::domain::BoardError::*;
         let status = match e {
             NotFound(_) => 404,
-            Conflict | Claimed(_) => 409,
+            Conflict | Claimed(_) | PartlySaved { .. } => 409,
             Forbidden(_) | NotClaimant | OutOfScope(_) => 403,
             Terminal | NoSuchMove { .. } | Invalid(_) | Refused(_) => 422,
             Storage(_) => 500,

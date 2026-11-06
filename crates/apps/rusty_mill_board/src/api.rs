@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use crate::board::Board;
 use crate::domain::{
-    Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, ExecutionLink, Plan,
-    Shelf, Span,
+    Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit, ExecutionLink,
+    Plan, Shelf, Span,
 };
 use crate::milestones::MilestoneEdit;
 use crate::store::Store;
@@ -392,6 +392,9 @@ struct UpdateArgs {
     body: Option<String>,
     /// New labels (replaces all).
     tags: Option<Vec<String>>,
+    /// New prompt: instructions for whoever takes the card, kept apart from the body
+    /// (`""` clears it; at most 32 KiB).
+    prompt: Option<String>,
     /// The card revision you last saw. If the card has moved on, the update is refused (409)
     /// so you can look at what changed instead of overwriting it.
     rev: Option<u64>,
@@ -801,17 +804,16 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_update",
-            "Edit a card's title, body or tags. Pass `rev` (the revision you last read) to refuse the edit if the card has changed since.",
+            "Edit a card's title, body, tags or prompt (instructions for whoever takes it, shown apart from the body). Pass `rev` (the revision you last read) to refuse the edit if the card has changed since.",
             |b, i, a: UpdateArgs| {
                 let who = acting(b, i, &a.who)?;
-                card(b.edit_at(
-                    card_ref(b, &a.id)?,
-                    &who,
-                    a.rev,
-                    a.title.as_deref(),
-                    a.body.as_deref(),
-                    a.tags,
-                )?)
+                let edit = Edit {
+                    title: a.title.as_deref(),
+                    body: a.body.as_deref(),
+                    tags: a.tags,
+                    prompt: a.prompt.as_deref(),
+                };
+                card(b.edit_at(card_ref(b, &a.id)?, &who, a.rev, &edit)?)
             },
         ),
         op(

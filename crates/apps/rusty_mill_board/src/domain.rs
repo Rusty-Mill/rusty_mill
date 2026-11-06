@@ -278,6 +278,23 @@ pub const PRIORITIES: [u8; 4] = [0, 1, 3, 5];
 /// Most cards one card may wait on; also the most in each of its other link lists.
 pub const MAX_DEPS: usize = 32;
 
+/// What an edit changes; each field left as it is when `None`.
+#[derive(Debug, Clone, Default)]
+pub struct Edit<'a> {
+    /// New title.
+    pub title: Option<&'a str>,
+    /// New description.
+    pub body: Option<&'a str>,
+    /// New labels (replaces all).
+    pub tags: Option<Vec<String>>,
+    /// New prompt; `""` clears it.
+    pub prompt: Option<&'a str>,
+}
+
+/// The longest prompt, in bytes. It is stored in the card's rusty_tick board document,
+/// which rusty_tick caps at 64 KiB, beside the links.
+pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+
 /// A planning change (`card_plan`): each `None` field is left as it is, and a list replaces
 /// the card's current one (an empty list clears it).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -376,6 +393,10 @@ pub struct Card {
     pub title: String,
     /// Longer description (markdown).
     pub body: String,
+    /// Instructions for whoever takes the card, kept apart from the description so they can be
+    /// read or copied whole. Empty when there are none.
+    #[serde(default)]
+    pub prompt: String,
     /// Current column.
     pub column: Column,
     /// Who holds the work, if anyone.
@@ -502,6 +523,15 @@ pub enum BoardError {
     NotClaimant,
     /// Another writer changed the card first; reload and retry.
     Conflict,
+    /// A change stored in two steps kept only its first: the task's fields (title, body,
+    /// tags, priority) are saved at revision `rev`, the card's prompt and links are not.
+    /// Read the card and apply the rest on `rev`.
+    PartlySaved {
+        /// The card's revision after the step that was saved.
+        rev: u64,
+        /// Why the second step failed.
+        why: String,
+    },
     /// Input rejected at the boundary.
     Invalid(&'static str),
     /// The card belongs to a project this actor may not work in.
@@ -523,6 +553,11 @@ impl fmt::Display for BoardError {
             Self::Claimed(by) => write!(f, "claimed by {by}"),
             Self::NotClaimant => write!(f, "only the claim holder may move this card"),
             Self::Conflict => write!(f, "card changed concurrently; retry"),
+            Self::PartlySaved { rev, why } => write!(
+                f,
+                "only part of this change was saved: title, body, tags and priority are at rev \
+                 {rev}, but the prompt and links are not ({why}); read the card and save again"
+            ),
             Self::Invalid(why) => write!(f, "invalid input: {why}"),
             Self::OutOfScope(p) => write!(f, "project {p:?} is outside your scope"),
             Self::Refused(why) => f.write_str(why),
@@ -662,6 +697,7 @@ impl Card {
             rev: 0,
             title: title.to_owned(),
             body: body.to_owned(),
+            prompt: String::new(),
             column: Column::BACKLOG,
             claim: None,
             tags,
@@ -919,6 +955,18 @@ impl Card {
             next.tags = t;
         }
         Ok(next)
+    }
+
+    /// Replace the prompt; an empty one clears it.
+    ///
+    /// # Errors
+    /// A prompt over [`MAX_PROMPT_BYTES`].
+    pub fn with_prompt(mut self, prompt: &str) -> Result<Self, BoardError> {
+        if prompt.len() > MAX_PROMPT_BYTES {
+            return Err(BoardError::Invalid("prompt is longer than 32 KiB"));
+        }
+        self.prompt = prompt.to_owned();
+        Ok(self)
     }
 
     /// Apply a [`Plan`]: priority, links and target date, each left as it is when `None`. Repeated ids

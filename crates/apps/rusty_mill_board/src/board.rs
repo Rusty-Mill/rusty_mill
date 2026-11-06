@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{
-    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Event,
-    EventKind, ExecutionLink, MoveRules, Plan, Shelf, import_id, text_hash,
+    Actor, BoardError, Capability, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit,
+    Event, EventKind, ExecutionLink, MoveRules, Plan, Shelf, import_id, text_hash,
 };
 use crate::inbox::{Acted, Action, DryRun, Escalation, Escalations, InboxError, Outcome};
 use crate::metrics::{Metrics, metrics};
@@ -1369,7 +1369,13 @@ impl<S: Store> Board<S> {
         body: Option<&str>,
         tags: Option<Vec<String>>,
     ) -> Result<Card, BoardError> {
-        self.edit_at(id, by, None, title, body, tags)
+        let edit = Edit {
+            title,
+            body,
+            tags,
+            prompt: None,
+        };
+        self.edit_at(id, by, None, &edit)
     }
 
     /// As [`Board::edit`], but only if the card is still at revision `expect_rev`
@@ -1383,15 +1389,17 @@ impl<S: Store> Board<S> {
         id: Uuid,
         by: &Actor,
         expect_rev: Option<u64>,
-        title: Option<&str>,
-        body: Option<&str>,
-        tags: Option<Vec<String>>,
+        edit: &Edit<'_>,
     ) -> Result<Card, BoardError> {
         self.apply(id, by, EventKind::Edited, |c, now| {
             if expect_rev.is_some_and(|rev| c.rev != rev) {
                 return Err(BoardError::Conflict);
             }
-            c.edit(title, body, tags.clone(), now)
+            let next = c.edit(edit.title, edit.body, edit.tags.clone(), now)?;
+            match edit.prompt {
+                Some(p) => next.with_prompt(p),
+                None => Ok(next),
+            }
         })
     }
 

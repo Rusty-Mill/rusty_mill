@@ -319,6 +319,7 @@ dialog h2{margin:0;font-size:18px}
   .board>.col.spine{flex:none;align-items:stretch}.spine h2{writing-mode:horizontal-tb;transform:none;flex-direction:row}
   .strip{flex-wrap:wrap}
 }
+.prompt{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center}.prompt textarea{grid-column:1/-1;font-family:ui-monospace,monospace}
 </style>
 </head>
 <body>
@@ -425,16 +426,16 @@ async function api(op,args={}){
     if(sent===tok)await signIn(tok?"That token was refused. Enter a current one.":"This board needs a token.");
   }
   const j=await r.json().catch(()=>({error:r.statusText}));
-  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
+  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;e.savedRev=j.saved_rev;throw e}
   return j;
 }
 /* A per-model token fixes who you are: send nothing, so a role renamed under you never disagrees. */
 const who=()=>$("actor").disabled?{}:{actor:$("actor").value.trim(),role:$("role").value};
 function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
 // Run a write as the current actor, then re-read the board. Resolves to the reply, or null after showing the error.
-async function act(op,args){
-  try{const r=await api(op,{...who(),...args});await refresh();return r}
-  catch(e){toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
+async function act(op,args,failed,done){
+  try{const r=await api(op,{...who(),...args});done?.(r);await refresh();return r}
+  catch(e){failed?.(e);toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
 }
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
 // A card's heading: its board number in the corner, if it has one, then its title.
@@ -899,15 +900,15 @@ function pickAgent(agent){sel={...sel,agent};render()}
 
 /* The card dialog is built once and then kept in step with the board without ever
    touching what the person is typing. `dlg.base` is the card as they last saw it. */
-const snap=k=>({rev:k.rev,title:k.title,body:k.body,tags:k.tags.join(", ")});
-const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,tags:dlg.f.g.value});
-const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.tags===b.tags;
+const snap=k=>({rev:k.rev,title:k.title,body:k.body,prompt:k.prompt??"",tags:k.tags.join(", ")});
+const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,prompt:dlg.f.q.value,tags:dlg.f.g.value});
+const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.prompt===b.prompt&&a.tags===b.tags;
 const isoDay=ms=>{const d=new Date(ms);return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
-function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s.tags}
+function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s.prompt;dlg.f.g.value=s.tags}
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input")};
   for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
@@ -918,6 +919,11 @@ function show(id){
   f.due.type="date";f.due.setAttribute("aria-label","target date");f.due.title="Target date: when this should be done";
   f.due.onchange=()=>act("card_plan",{id,target_ms:f.due.value?new Date(f.due.value+"T12:00").getTime():null});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
+  // The prompt: instructions for whoever takes the card, kept apart from the description.
+  f.q.rows=4;f.q.placeholder="Prompt for whoever takes this card";f.q.setAttribute("aria-label","prompt");
+  const copy=el("button","Copy prompt");copy.type="button";
+  copy.onclick=async()=>{try{await navigator.clipboard.writeText(f.q.value);toast("Prompt copied")}catch{toast("Copy failed")}};
+  const promptRow=el("div","","prompt");promptRow.append(el("label","Prompt "),copy,f.q);
   dlg={id,base:snap(k),f};setFields(dlg.base);
   const row=el("div",null,"row");
   const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b);return b};
@@ -928,14 +934,17 @@ function show(id){
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
   const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
-  form.append(head,f.banner,f.t,f.b,f.g,plan,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
+  form.append(head,f.banner,f.t,f.b,promptRow,f.g,plan,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
 async function save(){
   const d=dlg,t=typed();
-  const r=await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
-  if(r&&dlg===d)d.base=snap(r.card);   // the dialog may have been closed or reopened on another card meanwhile
+  d.partial=null;d.note=false;
+  // Partly saved (the task's fields, not the prompt): the refresh below must not read that as someone else's edit.
+  await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,prompt:t.prompt,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)},
+    e=>{if(e.savedRev!=null)d.partial=e.savedRev},
+    r=>{if(dlg===d)d.base=snap(r.card)});   // before the refresh, so our own save is not read as theirs; the dialog may have moved on meanwhile
 }
 function syncDialog(){
   if(!dlg||!$("dlg").open)return;
@@ -949,11 +958,23 @@ function syncDialog(){
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
-  if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
+  if(theirs.rev===dlg.base.rev){if(!dlg.note)f.banner.replaceChildren();return}
+  if(dlg.partial!=null){partlySaved(theirs);return}
   const dirty=!sameText(typed(),dlg.base);
   if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
   else if(sameText(theirs,dlg.base)){dlg.base={...dlg.base,rev:theirs.rev};f.banner.replaceChildren()} // only a comment or claim moved: keep the draft
   else conflict(theirs);                                                       // the text changed under an unsaved edit
+}
+// Our own save stored title, body and tags but not the prompt, at revision `saved`. If the card is still at
+// that revision, holding what was typed and the prompt we started from, take it as the base and keep the
+// unsaved prompt, saying so. Anything else means another writer came in between: a real conflict.
+function partlySaved(theirs){
+  const f=dlg.f,t=typed(),saved=dlg.partial;
+  dlg.partial=null;
+  const ours=theirs.rev===saved&&theirs.prompt===dlg.base.prompt;
+  if(!ours||t.title!==theirs.title||t.body!==theirs.body||t.tags!==theirs.tags){conflict(theirs);return}
+  dlg.base=theirs;dlg.note=true;
+  f.banner.replaceChildren(el("div","Title, body and tags were saved, but the prompt was not. Save again to save it."));
 }
 function conflict(theirs){
   const f=dlg.f,b=el("button","Keep mine"),t=el("button","Take theirs");
