@@ -123,6 +123,7 @@ Precise contracts used by this guide:
 | D113 | #704 slice 4: cleanup mode, consolidate inputs, split | [default] 2026-11-05 (#704) |
 | D114 | #704 D44 cleanup half-limit leg: repo head vs last cleanup | [stated] 2026-11-06 (#704) |
 | D115 | #704 approved erosion limits: a human-only host record | [stated] 2026-11-06 (#704) |
+| D116 | A GUI shows the LEL stage strip as a derived read-only display and the product intent as a read-only brief | [stated] 2026-11-04 (general) |
 
 ## D1. Lenses, not stages
 
@@ -1109,3 +1110,11 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_69f9310316bf4c9693a3ab8dc1235db9
 **Key.** lel:704:approved-erosion-limits-record
 **Source.** Nano tapped option A "Recorded approved limits" ("Only a human command records your approved limits. A task that enforces limits must use exactly those numbers, or it is refused.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX5UNTzdY4w4xdKPk1naZzrRp` ("Decide what counts as approved erosion limits once report-only ends") in the #704 build thread, 2026-11-06T00:58:58Z. OPEN_QUESTIONS Q20; D42, D88. Numbered D115 after D114.
+## D116. A GUI shows the LEL stage strip as a derived read-only display and the product intent as a read-only brief
+
+**Decision.** (1) A GUI's 5-stage strip (Intent, Skeletons, Under attack, Shadow run, Living app) is a derived, read-only display the GUI computes from claim and evidence facts. BBP and orch gain no stage field. (2) The shared product-intent layer is out of scope: the GUI shows the task brief read-only, and intent versioning stays on #598.
+**Why.** D1, D9 and D27 say there is no stage state machine, so a derived view keeps them intact and needs no ask-first change. #598 already holds intent versioning and nothing is designed.
+**Rejected.** A real product-level stage field in orch/BBP (reopens D1/D9). A structured, versioned, GUI-editable product-intent object now.
+**Tag.** [stated] · remind-me: mem_28731854176542ec9a596164bb9ef8a9 (written by the rusty_term design expert; records Nano's AskUserQuestion answers, 2026-11-04; it is not LEL-tagged)
+**Key.** lel:general:gui-stage-strip-derived-intent-readonly
+**Source.** Nano via AskUserQuestion, 2026-11-04, relayed by the coordinator and verified in mem_28731854176542ec9a596164bb9ef8a9. Asked in the LEL full-app SVG review (README § Full-application interface, D1, D9, D27, D35, #598). Numbered D116 (first written as D83 on PR #1510) because main assigned D83 to #599 and holds D84–D115; its questions are Q38–Q43 for the same reason.

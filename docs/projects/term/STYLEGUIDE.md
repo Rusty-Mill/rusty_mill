@@ -53,7 +53,7 @@ code (pack D34 to D39):
   configured `font-size` changes it.
 - **Face.** The chrome uses the terminal's monospace face.
   Target: interface text in Instrument Sans, terminal text in JetBrains Mono (pack D6).
-  The interface font lands with arc 2's chrome, which adds proportional text (pack D53).
+  The interface font lands with arc 2's chrome, which adds proportional text (pack D59).
 - **Spacing.** Chrome sits on a 4 px grid inside the padding band (`[window] padding`,
   default 8 px); gutter marks stay in that band.
 - **Elevation, three levels:** flat (surface plus a hairline) for the strip, ribbon and dock;
