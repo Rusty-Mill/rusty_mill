@@ -23,7 +23,7 @@ fn running(client: &mut Client, script: &str) -> BlockId {
             args: vec!["-c".into(), script.into()],
         }),
         cwd: None,
-        own: false,
+        ..Launch::default()
     };
     let size = Size::new(80, 24).expect("size");
     let block = BlockId::from_uuid(

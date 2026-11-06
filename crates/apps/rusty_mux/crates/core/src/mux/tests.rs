@@ -1336,7 +1336,7 @@ fn only_the_owner_may_change_an_owned_block() {
     let owner = connect(&mut mux);
     let peer = connect(&mut mux);
     assert_eq!(mux.authorize_owner(peer, block), Ok(()), "unowned is open");
-    mux.own(owner, block).expect("own");
+    mux.own(owner, block, InputMode::Open).expect("own");
     assert_eq!(mux.authorize_owner(owner, block), Ok(()));
     assert_eq!(
         mux.authorize_owner(peer, block),
@@ -1353,7 +1353,10 @@ fn only_the_owner_may_change_an_owned_block() {
             block
         })
     );
-    assert_eq!(mux.own(peer, block), Err(Error::Owned(block)));
+    assert_eq!(
+        mux.own(peer, block, InputMode::Open),
+        Err(Error::Owned(block))
+    );
     assert!(mux.owns_any(owner));
     assert!(!mux.owns_any(peer));
 }
@@ -1362,7 +1365,7 @@ fn only_the_owner_may_change_an_owned_block() {
 fn a_gone_owner_orphans_its_block_and_ends_its_lease() {
     let (mut mux, _, _, block) = fixture();
     let owner = connect(&mut mux);
-    mux.own(owner, block).expect("own");
+    mux.own(owner, block, InputMode::Open).expect("own");
     let typist = leased_client(&mut mux, block);
     mux.disconnect(owner).expect("disconnect");
     let owned = mux
@@ -1389,7 +1392,7 @@ fn a_gone_owner_orphans_its_block_and_ends_its_lease() {
 fn only_the_owners_principal_may_close_an_orphaned_block() {
     let (mut mux, _, _, block) = fixture();
     let owner = connect(&mut mux);
-    mux.own(owner, block).expect("own");
+    mux.own(owner, block, InputMode::Open).expect("own");
     mux.disconnect(owner).expect("disconnect");
     let same = connect(&mut mux);
     let other = connect_other(&mut mux);
@@ -1402,4 +1405,117 @@ fn only_the_owners_principal_may_close_an_orphaned_block() {
         Err(Error::Orphaned(block))
     );
     assert_eq!(mux.authorize_close(same, block), Ok(()));
+}
+
+/// An owner-only block owned by a new client, and a second attached client.
+fn gated() -> (Mux, BlockId, ClientId, ClientId) {
+    let (mut mux, _, _, block) = fixture();
+    let owner = connect(&mut mux);
+    mux.own(owner, block, InputMode::OwnerOnly).expect("own");
+    let guest = connect(&mut mux);
+    mux.attach(guest, block).expect("attach");
+    mux.take_events();
+    (mux, block, owner, guest)
+}
+
+const NOW: u64 = 1_000_000;
+
+#[test]
+fn an_owner_only_block_leases_only_to_its_owner_and_grantees() {
+    let (mut mux, block, owner, guest) = gated();
+    assert_eq!(
+        mux.acquire_lease(guest, block),
+        Err(Error::InputGated(block))
+    );
+    mux.attach(owner, block).expect("attach");
+    assert_eq!(
+        mux.acquire_lease(owner, block),
+        Ok(()),
+        "the owner may type"
+    );
+    mux.release_lease(owner, block).expect("release");
+
+    mux.grant(owner, block, guest, NOW + 60_000, NOW)
+        .expect("grant");
+    assert!(mux.take_events().contains(&Event::GrantChanged {
+        block,
+        client: guest,
+        until: Some(NOW + 60_000)
+    }));
+    assert_eq!(mux.acquire_lease(guest, block), Ok(()));
+
+    mux.revoke(owner, block, guest).expect("revoke");
+    let events = mux.take_events();
+    assert!(events.contains(&Event::GrantChanged {
+        block,
+        client: guest,
+        until: None
+    }));
+    assert!(events.contains(&Event::LeaseChanged {
+        block,
+        holder: None
+    }));
+    assert_eq!(
+        mux.acquire_lease(guest, block),
+        Err(Error::InputGated(block))
+    );
+}
+
+#[test]
+fn only_the_owner_grants_and_only_for_up_to_a_day() {
+    let (mut mux, block, owner, guest) = gated();
+    assert_eq!(
+        mux.grant(guest, block, guest, NOW + 1, NOW),
+        Err(Error::NotOwner {
+            client: guest,
+            block
+        })
+    );
+    for until in [NOW, NOW - 1, NOW + MAX_GRANT_MS + 1] {
+        assert_eq!(
+            mux.grant(owner, block, guest, until, NOW),
+            Err(Error::BadGrant { block, until })
+        );
+    }
+    assert_eq!(
+        mux.grant(owner, block, guest, NOW + MAX_GRANT_MS, NOW),
+        Ok(())
+    );
+    let (mut open, _, _, unowned) = fixture();
+    let someone = connect(&mut open);
+    assert_eq!(
+        open.grant(someone, unowned, someone, NOW + 1, NOW),
+        Err(Error::Unowned(unowned))
+    );
+}
+
+#[test]
+fn a_grant_ends_at_its_time_taking_the_lease_back() {
+    let (mut mux, block, owner, guest) = gated();
+    mux.grant(owner, block, guest, NOW + 10, NOW)
+        .expect("grant");
+    mux.acquire_lease(guest, block).expect("lease");
+    mux.expire_grants(NOW + 9);
+    assert_eq!(mux.block(block).and_then(|b| b.lease()), Some(guest));
+    mux.expire_grants(NOW + 10);
+    assert_eq!(mux.block(block).and_then(|b| b.lease()), None);
+    assert!(mux.block(block).is_some_and(|b| b.grants().is_empty()));
+}
+
+#[test]
+fn grants_end_with_the_owner_or_the_grantee() {
+    let (mut mux, block, owner, guest) = gated();
+    mux.grant(owner, block, guest, NOW + 10, NOW)
+        .expect("grant");
+    mux.disconnect(guest).expect("gone");
+    assert!(mux.block(block).is_some_and(|b| b.grants().is_empty()));
+
+    let (mut mux, block, owner, guest) = gated();
+    mux.grant(owner, block, guest, NOW + 10, NOW)
+        .expect("grant");
+    mux.acquire_lease(guest, block).expect("lease");
+    mux.disconnect(owner).expect("gone");
+    assert!(mux.block(block).is_some_and(|b| b.grants().is_empty()));
+    assert_eq!(mux.block(block).and_then(|b| b.lease()), None);
+    assert_eq!(mux.acquire_lease(guest, block), Err(Error::Orphaned(block)));
 }

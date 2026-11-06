@@ -9,7 +9,8 @@ use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, Mux, Principal, Side, Size, Transport, WindowId,
+    BlockId, ClientId, EntityId, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
+    Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
@@ -92,7 +93,20 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_SHELL)
     .union(Features::AGENT_STATUS)
     .union(Features::TERMINAL_HISTORY)
-    .union(Features::OWNERSHIP);
+    .union(Features::OWNERSHIP)
+    .union(Features::INPUT_GATE);
+
+/// An owner whose outbox holds more than this can't be told of more
+/// input, so an owner-only block refuses it (C77): half the budget, so a
+/// refusal comes well before the owner is dropped.
+const INPUT_REPORT_LIMIT: usize = crate::outbox::BUDGET / 2;
+
+/// The server's clock in unix ms, which grants are given in (C77).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
 
 /// Fresh randomness to pick a generated session name with.
 fn name_seed() -> u64 {
@@ -109,6 +123,9 @@ pub(crate) struct PtyWrite {
     /// With [`Features::ECHO_ACK`]: the block and `Input` request to
     /// [`State::written`] once the write returns.
     pub(crate) key: Option<(BlockId, u64)>,
+    /// On an owner-only block: the block and writer to report the bytes
+    /// for, with [`State::report_input`], once the write returns (C77).
+    pub(crate) report: Option<(BlockId, ClientId)>,
 }
 
 /// What a connection must finish before it reads its next request, so
@@ -147,6 +164,8 @@ struct BlockRt {
     /// Where lines evicted from the grid's scrollback go, while the
     /// server keeps state (C70).
     spool: Option<Spool>,
+    /// The last [`Message::InputBatch`] number sent to the owner (C77).
+    input_seq: u64,
 }
 
 /// A block's running program: its PTY and the task reading it.
@@ -219,6 +238,7 @@ impl BlockRt {
             started,
             unsaved: true,
             spool: None,
+            input_seq: 0,
         }
     }
 
@@ -868,6 +888,8 @@ impl State {
         if let Some(tokens) = this.tokens.get_mut(&client) {
             tokens.confirmed = Some(tokens.current);
         }
+        // Grants end on time before anything relies on them (C77).
+        this.mux.expire_grants(now_ms());
         let (req, outcome) = this.apply(shared, client, message);
         let write = match outcome {
             Ok(Outcome::Done(created)) => {
@@ -1110,6 +1132,25 @@ impl State {
                 self.require(client, Features::LABELS, "disconnect")
                     .and_then(|()| self.disconnect_other(client, target)),
             ),
+            M::GrantLease {
+                req,
+                block,
+                client: grantee,
+                until,
+            } => (
+                req,
+                self.require(client, Features::INPUT_GATE, "grant-lease")
+                    .and_then(|()| done(self.mux.grant(client, block, grantee, until, now_ms()))),
+            ),
+            M::RevokeLease {
+                req,
+                block,
+                client: grantee,
+            } => (
+                req,
+                self.require(client, Features::INPUT_GATE, "revoke-lease")
+                    .and_then(|()| done(self.mux.revoke(client, block, grantee))),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
@@ -1184,6 +1225,12 @@ impl State {
         if launch.own {
             self.require(client, Features::OWNERSHIP, "an owned launch")?;
         }
+        if launch.input == InputMode::OwnerOnly {
+            self.require(client, Features::INPUT_GATE, "an owner-only launch")?;
+            if !launch.own {
+                return Err("bad_launch(input): an owner-only block must be owned".into());
+            }
+        }
         Ok(())
     }
 
@@ -1253,10 +1300,13 @@ impl State {
                 };
                 let data = keys::encode(keys, rt.grid.app_cursor_keys)
                     .map_err(|e| format!("{method}: {e}"))?;
+                let pty = rt.live()?.pty.clone();
+                let report = self.reporting(client, block)?;
                 return Ok(Outcome::Write(PtyWrite {
-                    pty: rt.live()?.pty.clone(),
+                    pty,
                     data,
                     key: None,
+                    report,
                 }));
             }
             "terminal.pwd" => terminal::pwd(&rt.grid, rt.pid())
@@ -1382,6 +1432,7 @@ impl State {
                             Some(client) => Ownership::Client(client),
                             None => Ownership::Orphaned,
                         }),
+                        input: block.input(),
                     });
                 }
             }
@@ -1482,7 +1533,7 @@ impl State {
             Some((target, side)) => self.mux.split_block(block, target, side, size)?,
         }
         if launch.own {
-            in_step("own", self.mux.own(client, block));
+            in_step("own", self.mux.own(client, block, launch.input));
         }
         let rt = rt.screened(shared, crate::checkpoint::grid(size), AnsiParser::new());
         self.adopt(block, rt);
@@ -1572,9 +1623,63 @@ impl State {
             .live()?
             .pty
             .clone();
+        let report = self.reporting(client, block)?;
         self.check_echo(block);
         let key = self.echoes(client).then_some((block, req));
-        Ok(Outcome::Write(PtyWrite { pty, data, key }))
+        Ok(Outcome::Write(PtyWrite {
+            pty,
+            data,
+            key,
+            report,
+        }))
+    }
+
+    /// For input `client` may write to `block`: what to report it as, on an
+    /// owner-only block, or a refusal when the owner can't be told now,
+    /// being in its reconnect grace or behind on its output (C77). Input is
+    /// never delivered without being reported.
+    fn reporting(
+        &self,
+        client: ClientId,
+        block: BlockId,
+    ) -> Result<Option<(BlockId, ClientId)>, Refusal> {
+        let Some(target) = self.mux.block(block) else {
+            return Ok(None);
+        };
+        if target.input() != InputMode::OwnerOnly {
+            return Ok(None);
+        }
+        let owner = target.owner().and_then(|o| o.client());
+        let reachable = owner
+            .and_then(|o| self.clients.get(&o))
+            .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
+        if !reachable {
+            return Err(format!(
+                "input_unrecorded: block {block}'s owner can't be told of input now"
+            )
+            .into());
+        }
+        Ok(Some((block, client)))
+    }
+
+    /// Tells `block`'s owner of `data`, which `from` just wrote to its
+    /// program (C77): one [`Message::InputBatch`], numbered per block.
+    pub(crate) fn report_input(&mut self, block: BlockId, from: ClientId, data: Vec<u8>) {
+        let Some(owner) = self.mux.block(block).and_then(|b| b.owner()?.client()) else {
+            return;
+        };
+        let Some(rt) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        rt.input_seq += 1;
+        let batch = Message::InputBatch {
+            block,
+            client: from,
+            seq: rt.input_seq,
+            data,
+        };
+        self.send(owner, &batch);
+        self.flush();
     }
 
     /// Whether `client` negotiated [`Features::ECHO_ACK`].
@@ -1999,6 +2104,7 @@ fn receives(features: Features, event: &Event) -> bool {
         Event::ConfigReloaded => Features::CONFIG_RELOAD,
         Event::WindowMoved { .. } => Features::LAYOUT_EDIT,
         Event::FocusChanged { .. } => Features::FOCUS,
+        Event::GrantChanged { .. } => Features::INPUT_GATE,
         _ => Features::NONE,
     };
     features.contains(needs)

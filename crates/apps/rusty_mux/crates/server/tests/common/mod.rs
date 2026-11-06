@@ -356,6 +356,15 @@ impl Client {
         req
     }
 
+    /// Sends a Sync, needing [`Features::SYNC`]; its request number. Its
+    /// Done follows every answer to the requests before it.
+    pub fn input_sync(&mut self) -> u64 {
+        let req = self.next_req;
+        self.next_req += 1;
+        self.send(&Message::Sync { req });
+        req
+    }
+
     /// `block`'s raw output since attach.
     pub fn output(&self, block: BlockId) -> &[u8] {
         self.output

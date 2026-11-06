@@ -8,6 +8,7 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{Client, block_for, new_block, start_server, window_for};
+use rusty_mux_core::InputMode;
 use rusty_mux_core::{BlockId, Event};
 use rusty_mux_proto::schema::Value;
 use rusty_mux_proto::{Code, Entry, Features, Message};
@@ -90,6 +91,7 @@ fn list_gives_each_parent_before_its_children() {
             title,
             name: bname,
             owner: None,
+            input: InputMode::Open,
         },
         Entry::Block {
             block: b2,

@@ -1,8 +1,8 @@
 //! The messages and their field layouts.
 
 use rusty_mux_core::{
-    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, Layout, Principal, Progress, Selection,
-    SessionId, Share, Side, Size, Toward, Transport, WindowId,
+    Axis, BlockId, ClientId, EntityId, Event, ExitStatus, InputMode, Layout, Principal, Progress,
+    Selection, SessionId, Share, Side, Size, Toward, Transport, WindowId,
 };
 use rusty_uuid::Uuid;
 use rusty_wire::{Reader, Writer};
@@ -183,6 +183,14 @@ impl Features {
     /// one all the same.
     pub const OWNERSHIP: Self = Self(1 << 35);
 
+    /// The input gate (C77): [`Launch::input`] makes an owned block's
+    /// input the owner's; its owner grants and revokes the lease with
+    /// [`Message::GrantLease`] and [`Message::RevokeLease`], announced by
+    /// [`Event::GrantChanged`] (skipped for a client without it), and gets
+    /// every byte typed into it as [`Message::InputBatch`]. A block entry
+    /// carries its input mode regardless, since older decoders skip it.
+    pub const INPUT_GATE: Self = Self(1 << 36);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -268,6 +276,9 @@ pub struct Launch {
     /// The launching client owns the block (C46). Negotiated with
     /// [`Features::OWNERSHIP`].
     pub own: bool,
+    /// Who may type into an owned block (C77); [`InputMode::OwnerOnly`]
+    /// needs `own`. Negotiated with [`Features::INPUT_GATE`].
+    pub input: InputMode,
 }
 
 /// Who controls an owned block, in its [`Entry::Block`] (C46).
@@ -328,6 +339,9 @@ pub enum Entry {
         /// `None` for a block nobody owns, or from a server without
         /// [`Features::OWNERSHIP`].
         owner: Option<Ownership>,
+        /// Who may take its lease; [`InputMode::Open`] from a server
+        /// without [`Features::INPUT_GATE`].
+        input: InputMode,
     },
     /// Sent only with [`Features::LABELS`].
     Client {
@@ -546,6 +560,24 @@ pub enum Message {
         session: SessionId,
         name: String,
     },
+    /// Lets `client` take `block`'s input lease until `until`, unix ms on
+    /// the server's clock and at most a day ahead; replaces its earlier
+    /// grant. Only the block's owner may send it. Negotiated with
+    /// [`Features::INPUT_GATE`].
+    GrantLease {
+        req: u64,
+        block: BlockId,
+        client: ClientId,
+        until: u64,
+    },
+    /// Ends `client`'s grant on `block` and takes the lease back if it
+    /// holds it. Only the block's owner may send it. Negotiated with
+    /// [`Features::INPUT_GATE`].
+    RevokeLease {
+        req: u64,
+        block: BlockId,
+        client: ClientId,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -624,6 +656,16 @@ pub enum Message {
     EchoAck {
         block: BlockId,
         req: u64,
+    },
+    /// Bytes `client` wrote to an owner-only block's program, sent to its
+    /// owner only, after they reached the program. `seq` counts each
+    /// block's batches from 1. Never an event, so never replayed to anyone.
+    /// Negotiated with [`Features::INPUT_GATE`].
+    InputBatch {
+        block: BlockId,
+        client: ClientId,
+        seq: u64,
+        data: Vec<u8>,
     },
     /// The block's [`Echo`] changed, or the client just attached; it
     /// precedes the Output read after the change. Negotiated with
@@ -719,8 +761,12 @@ const OWN: u32 = 52;
 const OWNER: u32 = 53;
 /// An owned block's mark that its owner is gone: 1, or absent.
 const ORPHANED: u32 = 54;
-// IDs 1..=ORPHANED are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = ORPHANED as usize;
+/// An [`InputMode`]: 1 owner-only; absent or anything else open.
+const INPUT: u32 = 55;
+/// When a grant ends, unix ms on the server's clock.
+const UNTIL: u32 = 56;
+// IDs 1..=UNTIL are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = UNTIL as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -755,6 +801,8 @@ mod ty {
     pub const FOCUS_BLOCK: u8 = 0x1e;
     pub const MOVE_FOCUS: u8 = 0x1f;
     pub const NAME_SESSION: u8 = 0x20;
+    pub const GRANT_LEASE: u8 = 0x21;
+    pub const REVOKE_LEASE: u8 = 0x22;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -768,6 +816,7 @@ mod ty {
     pub const ECHO_ACK: u8 = 0x8b;
     pub const ECHO_MODE: u8 = 0x8c;
     pub const DATAGRAM: u8 = 0x8d;
+    pub const INPUT_BATCH: u8 = 0x8e;
 }
 
 impl Message {
@@ -948,6 +997,36 @@ impl Message {
                     .uuid(SESSION, session.uuid())
                     .bytes(NAME, name.as_bytes());
                 ty::NAME_SESSION
+            }
+            M::GrantLease {
+                req,
+                block,
+                client,
+                until,
+            } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .uuid(CLIENT, client.uuid())
+                    .varint(UNTIL, *until);
+                ty::GRANT_LEASE
+            }
+            M::RevokeLease { req, block, client } => {
+                out.varint(REQ, *req)
+                    .uuid(BLOCK, block.uuid())
+                    .uuid(CLIENT, client.uuid());
+                ty::REVOKE_LEASE
+            }
+            M::InputBatch {
+                block,
+                client,
+                seq,
+                data,
+            } => {
+                out.uuid(BLOCK, block.uuid())
+                    .uuid(CLIENT, client.uuid())
+                    .varint(SEQ, *seq)
+                    .bytes(DATA, data);
+                ty::INPUT_BATCH
             }
             M::Welcome {
                 features,
@@ -1181,6 +1260,23 @@ impl Message {
                 session: session(&f, SESSION)?,
                 name: f.string(NAME)?,
             },
+            ty::GRANT_LEASE => M::GrantLease {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                client: client(&f, CLIENT)?,
+                until: f.varint(UNTIL)?,
+            },
+            ty::REVOKE_LEASE => M::RevokeLease {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+                client: client(&f, CLIENT)?,
+            },
+            ty::INPUT_BATCH => M::InputBatch {
+                block: block(&f, BLOCK)?,
+                client: client(&f, CLIENT)?,
+                seq: f.varint(SEQ)?,
+                data: f.bytes(DATA)?.to_vec(),
+            },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
                 client: client(&f, CLIENT)?,
@@ -1268,6 +1364,21 @@ fn put_launch(out: &mut Out, launch: &Launch) {
     if launch.own {
         out.varint(OWN, 1);
     }
+    put_input(out, launch.input);
+}
+
+/// Only owner-only travels: absent is open.
+fn put_input(out: &mut Out, input: InputMode) {
+    if input == InputMode::OwnerOnly {
+        out.varint(INPUT, 1);
+    }
+}
+
+fn get_input(f: &In<'_>) -> Result<InputMode, Error> {
+    Ok(match f.opt(INPUT, In::varint)? {
+        Some(1) => InputMode::OwnerOnly,
+        _ => InputMode::Open,
+    })
 }
 
 /// Arguments only with a command.
@@ -1286,6 +1397,7 @@ fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
         program,
         cwd: f.opt(CWD, In::string)?,
         own: f.opt(OWN, In::varint)? == Some(1),
+        input: get_input(f)?,
     })
 }
 
@@ -1480,6 +1592,7 @@ mod kind {
     pub const CONFIG_RELOADED: u64 = 30;
     pub const WINDOW_MOVED: u64 = 31;
     pub const FOCUS_CHANGED: u64 = 32;
+    pub const GRANT_CHANGED: u64 = 33;
 }
 
 fn put_event(out: &mut Out, event: &Event) {
@@ -1507,6 +1620,18 @@ fn put_event(out: &mut Out, event: &Event) {
                 .uuid(WINDOW, window.uuid());
             if let Some(block) = block {
                 out.uuid(BLOCK, block.uuid());
+            }
+        }
+        E::GrantChanged {
+            block,
+            client,
+            until,
+        } => {
+            out.varint(KIND, kind::GRANT_CHANGED)
+                .uuid(BLOCK, block.uuid())
+                .uuid(CLIENT, client.uuid());
+            if let Some(until) = until {
+                out.varint(UNTIL, until);
             }
         }
         E::WindowMoved { window, index } => {
@@ -1744,6 +1869,11 @@ fn get_event(f: &In<'_>) -> Result<Event, Error> {
             window: window(f, WINDOW)?,
             block: f.opt(BLOCK, block)?,
         },
+        kind::GRANT_CHANGED => E::GrantChanged {
+            block: block(f, BLOCK)?,
+            client: client(f, CLIENT)?,
+            until: f.opt(UNTIL, In::varint)?,
+        },
         kind::WINDOW_MOVED => E::WindowMoved {
             window: window(f, WINDOW)?,
             index: get_index(f)?,
@@ -1904,6 +2034,7 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             title,
             name,
             owner,
+            input,
         } => {
             let o = out
                 .varint(KIND, entry::BLOCK)
@@ -1923,6 +2054,7 @@ fn put_entry(out: &mut Out, entry: &Entry) {
                     o.varint(ORPHANED, 1);
                 }
             }
+            put_input(o, *input);
             put_size(o, *size);
         }
         Entry::Client {
@@ -1975,6 +2107,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             // An older server sends no name.
             name: f.opt(NAME, In::string)?.unwrap_or_default(),
             owner: get_ownership(f)?,
+            input: get_input(f)?,
         },
         entry::CLIENT => Entry::Client {
             client: client(f, CLIENT)?,

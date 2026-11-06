@@ -83,6 +83,14 @@ pub enum Event {
         block: BlockId,
         holder: Option<ClientId>,
     },
+    /// The owner of an owner-only block granted `client` its input lease
+    /// until `until` (unix ms, the server's clock), or, with `None`, the
+    /// grant ended: revoked, expired, or the owner or grantee is gone (C77).
+    GrantChanged {
+        block: BlockId,
+        client: ClientId,
+        until: Option<u64>,
+    },
     /// What the block's program says it is doing changed state; the
     /// `terminal.status` block method reads it.
     BlockStatus {

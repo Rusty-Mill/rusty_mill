@@ -9,6 +9,7 @@ use super::*;
 use crate::field::Out;
 use crate::schema::Value;
 use crate::{Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Program, Takeover};
+use rusty_mux_core::InputMode;
 
 const REQ_ID: u32 = 1;
 
@@ -87,7 +88,7 @@ fn every_message_round_trips() {
                     args: vec!["-c".into(), String::new(), "exit 3".into()],
                 }),
                 cwd: Some("/tmp/wörk".into()),
-                own: false,
+                ..Launch::default()
             },
         },
         Message::CreateBlock {
@@ -100,7 +101,7 @@ fn every_message_round_trips() {
                     args: Vec::new(),
                 }),
                 cwd: None,
-                own: false,
+                ..Launch::default()
             },
         },
         Message::Attach { req: 4, block },
@@ -199,6 +200,7 @@ fn every_message_round_trips() {
                 title: "vim".into(),
                 name: "editor".into(),
                 owner: None,
+                input: InputMode::Open,
             },
         },
         Message::Entry {
@@ -211,6 +213,7 @@ fn every_message_round_trips() {
                 title: String::new(),
                 name: String::new(),
                 owner: None,
+                input: InputMode::Open,
             },
         },
         Message::Entry {
@@ -278,7 +281,7 @@ fn every_message_round_trips() {
             launch: Launch {
                 program: None,
                 cwd: Some("/tmp".into()),
-                own: false,
+                ..Launch::default()
             },
         },
         Message::Zoom { req: 22, block },

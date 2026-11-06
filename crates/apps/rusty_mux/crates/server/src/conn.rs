@@ -130,6 +130,10 @@ async fn serve(
             let now = std::time::Instant::now();
             state.borrow_mut().written(client, cancel, key, now);
         }
+        // Reported after the program has the bytes (C77).
+        if let Some((block, from)) = write.report {
+            state.borrow_mut().report_input(block, from, write.data);
+        }
     }
     Ok(())
 }
