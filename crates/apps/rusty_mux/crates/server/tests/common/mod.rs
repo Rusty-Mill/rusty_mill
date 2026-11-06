@@ -392,6 +392,27 @@ impl Client {
         }
     }
 
+    /// Reads until `needle` shows in `block`'s output since attach as
+    /// text, not inside an OSC string: `cmd.exe` puts the command it runs,
+    /// carets already dropped, in the window title before its output.
+    pub fn wait_for_text(&mut self, block: BlockId, needle: &str) {
+        let deadline = Instant::now() + PATIENCE;
+        let mut text = Text::default();
+        let mut checked = 0usize;
+        loop {
+            let out = self.output(block);
+            if text.feed(&out[checked.min(out.len())..], needle.as_bytes()) {
+                return;
+            }
+            checked = out.len();
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {needle:?} as text"
+            );
+            self.recv();
+        }
+    }
+
     pub fn saw(&self, block: BlockId, needle: &str) -> bool {
         let out = self
             .output
@@ -493,12 +514,48 @@ pub fn block_for(client: &mut Client) -> BlockId {
     block
 }
 
-/// Runs a command whose output differs from its echo, and waits for it.
+/// Runs a command whose output differs from its echo, and waits for that
+/// output as text, so the block's screen shows it.
 pub fn run_and_wait(writer: &mut Client, block: BlockId, n: u32) -> String {
     let (input, expected) = marker(n);
     writer.input(block, input.as_bytes());
-    writer.wait_for(block, &expected);
+    writer.wait_for_text(block, &expected);
     expected
+}
+
+/// A terminal stream fed in pieces, watched for a needle outside OSC
+/// strings (`ESC ]` to `BEL` or `ESC \`).
+#[derive(Default)]
+pub struct Text {
+    osc: bool,
+    esc: bool,
+    tail: Vec<u8>,
+}
+
+impl Text {
+    /// Feeds `bytes`; whether `needle` has appeared as text so far.
+    pub fn feed(&mut self, bytes: &[u8], needle: &[u8]) -> bool {
+        for &b in bytes {
+            let after_esc = std::mem::replace(&mut self.esc, b == 0x1b);
+            if self.osc {
+                self.osc = !(b == 0x07 || (after_esc && b == b'\\'));
+                continue;
+            }
+            if after_esc && b == b']' {
+                self.osc = true;
+                self.tail.pop();
+                continue;
+            }
+            self.tail.push(b);
+            if self.tail.len() > needle.len() {
+                self.tail.remove(0);
+            }
+            if self.tail.ends_with(needle) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// The first `key` in `out` followed by digits and then something else, so

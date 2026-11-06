@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Client, block_for, run_and_wait, start_server};
+use common::{Client, Text, block_for, run_and_wait, start_server};
 use rusty_mux_core::EntityId;
 use rusty_mux_proto::{Entry, Features, Message, Takeover};
 use rusty_uuid::Uuid;
@@ -41,7 +41,16 @@ fn a_reconnect_keeps_the_client_its_screen_and_its_lease() {
     assert_eq!(new.id(), old.id(), "the same client");
     assert_ne!(new.token, old.token, "a fresh token");
     new.wait_ready(block);
-    assert!(new.text(block).contains(&seen), "the screen came along");
+    let screen = new.text(block);
+    // On failure, old's own screen and raw output tell a checkpoint that
+    // lost the text from a terminal that no longer shows it.
+    assert!(
+        screen.contains(&seen),
+        "the screen came along: {seen:?} missing from the checkpoint's screen:\n{screen}\n\
+         -- the old client's screen:\n{}\n-- its raw output: {:?}",
+        old.text(block),
+        String::from_utf8_lossy(old.output(block)),
+    );
 
     old.wait_closed();
     let names: Vec<_> = new
@@ -236,4 +245,31 @@ fn a_lost_welcome_after_an_idle_takeover_can_be_retried_with_its_token() {
         assert_ne!(replay.id(), oldest.client, "{used:?} still works");
     }
     run_and_wait(&mut retry, block, 2);
+}
+
+#[test]
+fn a_marker_in_the_window_title_is_not_its_output() {
+    // What a Windows runner's `cmd.exe` sent for `echo MARK^2` before
+    // printing MARK2: the command, caret dropped, in the title.
+    let title = b"Temp>echo MARK^2\r\n\x1b]0;Administrator: cmd.exe - echo  MARK2\x07";
+    let mut text = Text::default();
+    assert!(!text.feed(title, b"MARK2"), "the title is not output");
+    assert!(text.feed(b"MARK2\r\n", b"MARK2"));
+
+    let mut split = Text::default();
+    assert!(!split.feed(b"\x1b]0;MAR", b"MARK2"));
+    assert!(!split.feed(b"K2\x1b\\MA", b"MARK2"), "ST ends the title");
+    assert!(split.feed(b"RK2", b"MARK2"), "text across reads");
+
+    // An observer's reads can cut anywhere, even between ESC and `]`.
+    let mut observer = Text::default();
+    for piece in [
+        &b"echo MARK^2\r\n\x1b"[..],
+        b"]0;cmd.exe - echo  MA",
+        b"RK2",
+        b"\x07\r\nMA",
+    ] {
+        assert!(!observer.feed(piece, b"MARK2"), "done on {piece:?}");
+    }
+    assert!(observer.feed(b"RK2\r\n", b"MARK2"));
 }
