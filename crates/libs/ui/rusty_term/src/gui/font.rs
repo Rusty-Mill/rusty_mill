@@ -445,7 +445,7 @@ fn rasterize(font: &Font, ratio: f32, ch: char) -> Glyph {
 /// the tight, top-down pixel-space box this module's callers expect
 /// (matching the previous `ab_glyph` backend's convention): pixel row 0 is
 /// the glyph's topmost row, column 0 its leftmost column.
-fn rasterize_id(font: &Font, ratio: f32, id: u16) -> Glyph {
+pub(super) fn rasterize_id(font: &Font, ratio: f32, id: u16) -> Glyph {
     let Some(outline) = font.glyph_outline(id) else {
         return Glyph::blank();
     };

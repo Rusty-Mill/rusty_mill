@@ -1,16 +1,21 @@
-//! `rusty-mux-gui <socket> [block]`: show a rusty_mux block's window in
+//! `rusty-mux-gui [--gpu] <socket> [block]`: show a rusty_mux block's window in
 //! rusty_term's native window, starting with that block focused. Without a
 //! block id it creates a session, window and block first. The window
 //! follows the server's layout and shared focus; typing goes to the
 //! focused block, whose input lease this client holds. rusty_term's config
-//! file sets fonts and colours.
+//! file sets fonts and colours; `--gpu` draws with the GPU renderer, as
+//! it does for rusty_term.
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    // rusty_term reads `--gpu` itself.
+    let args: Vec<_> = std::env::args_os()
+        .skip(1)
+        .filter(|a| a != "--gpu")
+        .collect();
     if args.is_empty() || args.len() > 2 {
-        eprintln!("usage: rusty-mux-gui <socket> [block]");
+        eprintln!("usage: rusty-mux-gui [--gpu] <socket> [block]");
         return ExitCode::from(2);
     }
     match run(&args) {

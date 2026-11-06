@@ -78,6 +78,7 @@ impl FrameBench {
         let frame = Frame::capture(
             &panes,
             &[],
+            None,
             &[],
             [self.font.id(), self.ui.id()],
             size,
@@ -93,6 +94,7 @@ impl FrameBench {
             &mut self.buf,
             &panes,
             &[],
+            None,
             &[],
             &mut self.font,
             &mut self.ui,

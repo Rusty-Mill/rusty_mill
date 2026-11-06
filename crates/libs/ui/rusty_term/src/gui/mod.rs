@@ -36,11 +36,14 @@ mod layout;
 mod motion;
 mod mouse;
 mod pace;
+mod paint;
 mod render;
 mod settings;
 mod shape;
 pub mod source;
+mod strip;
 mod taskbar;
+mod text;
 mod window;
 
 pub use window::{run, run_attached};

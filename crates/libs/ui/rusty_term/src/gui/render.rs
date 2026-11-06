@@ -17,6 +17,7 @@ use crate::core::{
 use super::cpu;
 use super::damage::{Damage, Frame};
 use super::font::{FontCache, GlyphSource};
+use super::paint::Pixmap;
 
 /// Pixels of strip-colored band above the chrome bar's tabs, so a tab's top
 /// edge is visibly distinct from the window's (the tabs otherwise run flush
@@ -28,13 +29,14 @@ pub(super) fn bar_inset(pad: usize, bar_h: usize) -> usize {
 }
 
 /// Pixel row where the pane grid starts: below the padding and, when there
-/// is one, the chrome bar (`bar_h` tall, the UI font's cell height) and its
+/// is one, the top strip (an attached window's, flush with the top) or the
+/// chrome bar (`bar_h` tall, the UI font's cell height) and its
 /// [`bar_inset`]. Pane rows count from 0 at this edge.
-pub(super) fn grid_top(chrome: &[Cell], pad: usize, bar_h: usize) -> usize {
-    if chrome.is_empty() {
-        pad
-    } else {
-        pad + bar_inset(pad, bar_h) + bar_h
+pub(super) fn grid_top(chrome: &[Cell], strip: Option<&Pixmap>, pad: usize, bar_h: usize) -> usize {
+    match strip {
+        Some(strip) => pad + strip.height,
+        None if chrome.is_empty() => pad,
+        None => pad + bar_inset(pad, bar_h) + bar_h,
     }
 }
 
@@ -230,6 +232,7 @@ pub(crate) trait Renderer {
         &mut self,
         panes: &[PaneFrame],
         chrome: &[Cell],
+        strip: Option<&Pixmap>,
         status: &[Cell],
         font: &mut FontCache,
         ui: &mut FontCache,
@@ -287,6 +290,7 @@ impl Renderer for CpuRenderer {
         &mut self,
         panes: &[PaneFrame],
         chrome: &[Cell],
+        strip: Option<&Pixmap>,
         status: &[Cell],
         font: &mut FontCache,
         ui: &mut FontCache,
@@ -310,6 +314,7 @@ impl Renderer for CpuRenderer {
         let frame = Frame::capture(
             panes,
             chrome,
+            strip,
             status,
             [font.id(), ui.id()],
             (w, h),
@@ -321,6 +326,7 @@ impl Renderer for CpuRenderer {
             &mut buffer,
             panes,
             chrome,
+            strip,
             status,
             font,
             ui,
@@ -358,6 +364,7 @@ pub(super) fn composite(
     buffer: &mut [u32],
     panes: &[PaneFrame],
     chrome: &[Cell],
+    strip: Option<&Pixmap>,
     status: &[Cell],
     font: &mut dyn GlyphSource,
     ui: &mut dyn GlyphSource,
@@ -374,7 +381,7 @@ pub(super) fn composite(
     // The chrome bar sits `inset` px below the window's top edge (the
     // strip band shows above it); the grid starts below the bar plus the
     // pad-sized gap — the bottom pad absorbs the difference.
-    let oy = grid_top(chrome, pad, bh);
+    let oy = grid_top(chrome, strip, pad, bh);
     if let Some(rows) = repaint {
         for (p, rows) in panes.iter().zip(rows) {
             cpu::draw_grid(
@@ -416,7 +423,9 @@ pub(super) fn composite(
             }
         }
     }
-    if !chrome.is_empty() {
+    if let Some(strip) = strip {
+        cpu::draw_pixmap(buffer, w, h, strip, 0, 0);
+    } else if !chrome.is_empty() {
         cpu::draw_chrome(buffer, w, h, chrome, ui, bw, bh, inset, bar_bg);
     }
     // The status ribbon sits flush with the window's bottom edge; the
@@ -514,6 +523,7 @@ mod tests {
             &mut buf,
             &[pane],
             &chrome,
+            None,
             &status,
             &mut font,
             &mut ui,
@@ -532,7 +542,7 @@ mod tests {
         assert_eq!(at(0, inset), chrome_bg, "chrome starts below the band");
         assert_eq!(at(0, inset + 11), chrome_bg, "chrome is one UI cell tall");
         assert_eq!(at(PAD, inset + 12), page_bg, "padding gap below the bar");
-        let top = grid_top(&chrome, PAD, 12);
+        let top = grid_top(&chrome, None, PAD, 12);
         assert_eq!(top, PAD + inset + 12);
         assert_eq!(at(PAD, top), 0x0000FF, "the grid starts below the bar");
         assert_eq!(at(PAD, top - 1), page_bg);

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use rusty_mux_client::Conn;
 use rusty_mux_client::attach::{CONTROL, Requests};
 use rusty_mux_core::Side;
-use rusty_mux_gui::source::attach;
+use rusty_mux_gui::source::{Out, attach};
 use rusty_mux_proto::{Launch, Message};
 use rusty_mux_server::{Config, ConsoleHost, serve};
 use rusty_term::gui::source::{Feed, PaneIo, Source, Tree};
@@ -110,7 +110,12 @@ fn a_block_shows_its_screen_takes_typing_and_follows_the_layout() {
     let (layouts_tx, layouts) = channel();
     let events = attached.events;
     let block = attached.block;
-    std::thread::spawn(move || events.run(|t| layouts_tx.send(t).is_ok(), |_| true));
+    std::thread::spawn(move || {
+        events.run(|out| match out {
+            Out::Layout(t) => layouts_tx.send(t).is_ok(),
+            _ => true,
+        })
+    });
     let other = UnixStream::connect(&socket).expect("connect");
     let mut conn = Conn::new(other);
     conn.send(&Message::Hello {
@@ -150,4 +155,58 @@ fn a_block_shows_its_screen_takes_typing_and_follows_the_layout() {
     let (mut beside, beside_feed) = feed_of(attached.source.open(new, 40, 24).expect("opened"));
     attached.source.focus(new);
     type_until_echoed(beside.as_mut(), &beside_feed, 3);
+}
+
+/// The next session the run told, skipping layouts and focus moves.
+fn next_session(outs: &Receiver<Out>) -> rusty_term::gui::source::Session {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if let Out::Session(s) = outs.recv_timeout(left).expect("a session") {
+            return s;
+        }
+    }
+}
+
+#[test]
+fn the_strip_shows_the_session_and_a_new_window_is_shown_when_made() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+    let first = next_session(&outs);
+    assert_eq!(first.windows.len(), 1);
+    assert!(first.windows[0].shown);
+    assert!(!first.host.is_empty());
+    assert!(first.clients >= 1);
+
+    // "+" makes a window with a block and selects it: the window follows.
+    attached.source.new_window();
+    let deadline = Instant::now() + PATIENCE;
+    let shown = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if let Out::Layout(Some(t)) = outs.recv_timeout(left).expect("the new window") {
+            break t;
+        }
+    };
+    assert!(
+        matches!(shown, Tree::Pane(_)),
+        "one block in the new window: {shown:?}"
+    );
+    let now = loop {
+        let s = next_session(&outs);
+        if s.windows.len() == 2 && s.windows[1].shown {
+            break s;
+        }
+    };
+
+    // Picking the first tab goes back to it.
+    attached.source.select(now.windows[0].key);
+    loop {
+        let s = next_session(&outs);
+        if s.windows[0].shown {
+            break;
+        }
+    }
 }

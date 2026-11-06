@@ -2,12 +2,14 @@
 //! window, through its session-source port (`rusty_term::gui::source`,
 //! pack D101).
 //!
-//! [`keys`] names blocks by the window's pane keys, [`tree`] turns a
-//! server layout into the window's. [`source`] attaches to one server
-//! window: a block connection per shown block, its input lease following
-//! the shared focus (pack D102).
+//! [`keys`] names blocks and windows by the window's keys, [`tree`] turns
+//! a server layout into the window's, and [`session`] keeps the session the
+//! top strip shows. [`source`] attaches to a server session and shows its
+//! active window: a block connection per shown block, its input lease
+//! following the shared focus (pack D102).
 
 pub mod keys;
+pub mod session;
 #[cfg(any(target_os = "linux", windows))]
 pub mod source;
 pub mod tree;
