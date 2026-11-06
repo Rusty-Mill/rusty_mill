@@ -108,6 +108,9 @@ pub struct Model {
     /// The server tells the session's active window, so the shown window
     /// follows it; without, the GUI ends with its first window.
     follows_active: bool,
+    /// The shown session's name once a reconnect found it gone (handoff
+    /// D114): nothing is shown until another session is picked.
+    ended: Option<String>,
 }
 
 impl Model {
@@ -145,6 +148,7 @@ impl Model {
             shown,
             clients: HashMap::new(),
             follows_active,
+            ended: None,
         };
         for m in entries {
             if let Some(e) = entry(m) {
@@ -157,8 +161,9 @@ impl Model {
     /// The same session from a fresh List's `entries`, after a reconnect
     /// (handoff D111): its active window when the server tells it, else
     /// the window shown before, else its first with blocks. Blocks keep
-    /// when they were detached. `None` when the session is gone (D112).
-    pub fn relisted(&self, entries: &[Message]) -> Option<Self> {
+    /// when they were detached. When the session is gone it shows
+    /// nothing and is [`Self::ended`] (handoff D114).
+    pub fn relisted(&self, entries: &[Message]) -> Self {
         let mut model = Self {
             session: self.session,
             host: self.host.clone(),
@@ -168,6 +173,7 @@ impl Model {
             shown: self.shown,
             clients: HashMap::new(),
             follows_active: self.follows_active,
+            ended: self.ended.clone(),
         };
         for e in entries.iter().filter_map(entry) {
             model.take(e);
@@ -175,14 +181,31 @@ impl Model {
         for (id, b) in &mut model.blocks {
             b.detached = self.blocks.get(id).and_then(|old| old.detached);
         }
-        model.sess(model.session)?;
         let kept = model.window(self.shown).map(|w| w.id);
         let first = model.window_to_show(model.session);
-        model.shown = match self.follows_active {
+        let shown = match self.follows_active {
             true => first.or(kept),
             false => kept.or(first),
-        }?;
-        Some(model)
+        };
+        match (model.sess(model.session), shown) {
+            (Some(_), Some(shown)) => model.shown = shown,
+            _ => model.ended = Some(self.session_name()),
+        }
+        model
+    }
+
+    /// The shown session's name once a reconnect found it gone.
+    pub fn ended(&self) -> Option<&str> {
+        self.ended.as_deref()
+    }
+
+    /// The shown session's name, kept after it ended.
+    fn session_name(&self) -> String {
+        match (&self.ended, self.sess(self.session)) {
+            (Some(name), _) => name.clone(),
+            (None, Some(s)) => s.name.clone(),
+            (None, None) => String::new(),
+        }
     }
 
     /// What a block header calls `client` (gui-design D48): its name, else
@@ -285,18 +308,15 @@ impl Model {
         };
         self.session = session;
         self.shown = window;
+        self.ended = None;
         true
     }
 
     /// The session as the strip and the switcher show it; sessions keyed
     /// by `sessions`, windows by `windows`, blocks by `blocks`.
     pub fn session(&self, keys: &mut StripKeys<'_>) -> Session {
-        let name = self
-            .sess(self.session)
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
         Session {
-            name,
+            name: self.session_name(),
             host: self.host.clone(),
             windows: self
                 .own_windows()
@@ -799,26 +819,34 @@ mod tests {
     }
 
     #[test]
-    fn a_list_after_a_reconnect_shows_the_active_window_or_the_session_is_gone() {
+    fn a_list_after_a_reconnect_shows_the_active_window_or_says_the_session_ended() {
         let (s, w, b) = (
             SessionId::from_uuid(Uuid::new_v4()),
             ids(WindowId::from_uuid),
             ids(BlockId::from_uuid),
         );
         let m = model(s, &w, &b);
-        let same = m.relisted(&list(s, &w, &b, w[0])).expect("the session");
+        let same = m.relisted(&list(s, &w, &b, w[0]));
+        assert_eq!(same.ended(), None);
         assert_eq!((same.shown(), same.view().1), (w[0], Some(b[0])));
         // The active window moved while away; the shown one closed.
-        let moved = m
-            .relisted(&list(s, &w[1..], &b[1..], w[2]))
-            .expect("the session");
+        let moved = m.relisted(&list(s, &w[1..], &b[1..], w[2]));
         assert_eq!(moved.shown(), w[2]);
         let mut old = model(s, &w, &b);
         old.follows_active = false;
-        let kept = old.relisted(&list(s, &w, &b, w[2])).expect("the session");
+        let kept = old.relisted(&list(s, &w, &b, w[2]));
         assert_eq!(kept.shown(), w[0], "without active windows it stays");
         let other = SessionId::from_uuid(Uuid::new_v4());
-        assert!(m.relisted(&list(other, &w, &b, w[0])).is_none());
+        // Gone: the strip keeps its name, nothing is shown, and picking
+        // another session shows it.
+        let (w2, b2) = (ids(WindowId::from_uuid), ids(BlockId::from_uuid));
+        let mut gone = m.relisted(&list(other, &w2, &b2, w2[0]));
+        assert_eq!(gone.ended(), Some("work"));
+        assert_eq!(strip(&gone).name, "work");
+        assert_eq!(gone.view(), (None, None));
+        assert!(strip(&gone).sessions.iter().all(|c| !c.current));
+        assert!(gone.switch(other));
+        assert_eq!((gone.ended(), gone.shown()), (None, w2[0]));
     }
 
     fn strip(m: &Model) -> rusty_term::gui::source::Session {

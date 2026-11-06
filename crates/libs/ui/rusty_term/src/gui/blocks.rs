@@ -75,6 +75,20 @@ const DIM_VEIL: u8 = 77;
 const EMPTY_TITLE_PX: f32 = 14.0;
 const EMPTY_LINE_PX: f32 = 12.0;
 const EMPTY_GAP: f32 = 8.0;
+/// The ended session panel (D28, D62; gui_lib `.panel`): its widest, the
+/// space between its parts and before its button, its title and text
+/// sizes and line heights, the alert's stroke and the title's gap.
+const PANEL_MAX: f32 = 420.0;
+const PANEL_GAP: f32 = 10.0;
+const PANEL_ACTS: f32 = 4.0;
+const PANEL_TITLE: (f32, f32) = (15.0, 20.0);
+const PANEL_TEXT: (f32, f32) = (12.0, 18.0);
+const PANEL_ICON_STROKE: f32 = 1.6;
+/// A primary button: height, side padding, radius, text size.
+const PRIMARY: (f32, f32, f32, f32) = (28.0, 12.0, 6.0, 12.0);
+/// What the panel says of the other sessions.
+const ENDED_TEXT: &str =
+    "The server closed it, or the last block exited. Your other sessions are still running.";
 
 /// The pixel area the blocks tile: the window under its top bars, inset
 /// [`GAP`] but at the top, above `bottom` px of other bars.
@@ -330,6 +344,8 @@ pub(crate) enum Spot {
     Chip(u64),
     /// A connection banner's button (gui-design D62).
     Banner(Action),
+    /// The ended session panel's "Open switcher" (D62, D60).
+    OpenSwitcher,
 }
 
 /// A block to draw: its box in the body's px, whether it has the focus or
@@ -365,6 +381,9 @@ pub(crate) struct Scene {
     pub banner: Option<Banner>,
     /// The blocks show at 70% and take no clicks: the link is down (D62).
     pub dim: bool,
+    /// The shown session, by name, ended while the link was down: its
+    /// panel fills the body (D28, D62).
+    pub ended: Option<String>,
 }
 
 /// A painted body: its pixels, what is drawn over the grids (F2 badges),
@@ -407,6 +426,10 @@ pub(crate) fn paint(
     let y = height.saturating_sub(ribbon::height(look.scale)) as f32;
     if let Some(n) = scene.empty {
         paint_empty(&mut out, n, y, look, font);
+    }
+    if let Some(name) = &scene.ended {
+        let r = paint_ended(&mut out, name, y, look, font);
+        spots.push((r, Spot::OpenSwitcher));
     }
     ribbon::paint(&mut out, y, &scene.ribbon, (&look.chrome, look.scale), font);
     let mut over: Vec<(Pixmap, (usize, usize))> = scene
@@ -481,6 +504,98 @@ fn paint_empty(out: &mut Pixmap, detached: usize, bottom: f32, look: &Look, font
         line_base,
         c.muted,
     );
+}
+
+/// The D28 "Session {name} ended" panel in a block filling the body above
+/// `bottom`, centred: the alert and title, what happened wrapped at
+/// [`PANEL_MAX`], and "Open switcher", whose box it returns (D62).
+fn paint_ended(out: &mut Pixmap, name: &str, bottom: f32, look: &Look, font: &mut UiText) -> Rect {
+    let (s, c) = (look.scale, &look.chrome);
+    let gap = GAP * s;
+    let frame = Rect {
+        x: gap,
+        y: 0.0,
+        w: (out.width as f32 - 2.0 * gap).max(0.0),
+        h: (bottom - gap).max(0.0),
+    };
+    out.fill(frame, RADIUS * s, c.base);
+    out.border(frame, RADIUS * s, BORDER * s, c.line);
+    let title = format!("Session {name} ended");
+    let (title_px, title_h) = (PANEL_TITLE.0 * s, PANEL_TITLE.1 * s);
+    let (text_px, text_h) = (PANEL_TEXT.0 * s, PANEL_TEXT.1 * s);
+    let room = (PANEL_MAX * s).min(frame.w - 2.0 * gap);
+    let lines = wrap(font, ENDED_TEXT, text_px, room);
+    let label = "Open switcher";
+    let (btn_h, btn_pad, btn_r, btn_px) = PRIMARY;
+    let label_w = font.width(label, Weight::Medium, btn_px * s);
+    let title_w = (ICON + ITEM_GAP) * s + font.width(&title, Weight::Medium, title_px);
+    let widest = lines
+        .iter()
+        .map(|l| font.width(l, Weight::Regular, text_px))
+        .fold(title_w, f32::max)
+        .min(room);
+    let height = title_h
+        + PANEL_GAP * s
+        + text_h * lines.len() as f32
+        + (PANEL_GAP + PANEL_ACTS + btn_h) * s;
+    let x = frame.x + (frame.w - widest) / 2.0;
+    let mut y = frame.y + (frame.h - height) / 2.0;
+    let mid = y + title_h / 2.0;
+    out.icon(
+        icons::ALERT,
+        x,
+        mid - ICON * s / 2.0,
+        ICON * s,
+        PANEL_ICON_STROKE * s,
+        c.failure,
+    );
+    let tx = x + (ICON + ITEM_GAP) * s;
+    let base = mid + font.centre_drop(title_px);
+    out.text(font, &title, Weight::Medium, title_px, tx, base, c.text);
+    y += title_h + PANEL_GAP * s;
+    for line in &lines {
+        let base = y + text_h / 2.0 + font.centre_drop(text_px);
+        out.text(font, line, Weight::Regular, text_px, x, base, c.muted);
+        y += text_h;
+    }
+    y += (PANEL_GAP + PANEL_ACTS) * s;
+    let button = Rect {
+        x,
+        y,
+        w: label_w + 2.0 * btn_pad * s,
+        h: btn_h * s,
+    };
+    out.fill(button, btn_r * s, c.accent);
+    let base = y + button.h / 2.0 + font.centre_drop(btn_px * s);
+    let lx = x + btn_pad * s;
+    out.text(
+        font,
+        label,
+        Weight::Medium,
+        btn_px * s,
+        lx,
+        base,
+        c.on_accent,
+    );
+    button
+}
+
+/// `text` broken at spaces into lines at most `room` px wide at `px`; a
+/// word wider than that keeps a line of its own.
+fn wrap(font: &UiText, text: &str, px: f32, room: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        let joined = lines.last().map(|l| format!("{l} {word}"));
+        match joined {
+            Some(j) if font.width(&j, Weight::Regular, px) <= room => {
+                if let Some(last) = lines.last_mut() {
+                    *last = j;
+                }
+            }
+            _ => lines.push(word.to_owned()),
+        }
+    }
+    lines
 }
 
 fn rect(c: Cells) -> Rect {
@@ -842,6 +957,8 @@ pub(crate) struct BodyState {
     target: String,
     /// How it reaches its server (D62).
     link: Link,
+    /// The shown session's name, once it ended while the link was down.
+    ended: Option<String>,
     home: Option<String>,
     branches: HashMap<String, (Option<String>, Instant)>,
     text: UiText,
@@ -857,6 +974,7 @@ impl BodyState {
             local: false,
             target: String::new(),
             link: Link::Up,
+            ended: None,
             home,
             branches: HashMap::new(),
             text: UiText::embedded()?,
@@ -900,6 +1018,16 @@ impl BodyState {
     /// How the window reaches its server now, for the ribbon.
     pub(crate) fn set_link(&mut self, link: Link) {
         self.link = link;
+    }
+
+    /// Show that the shown session, `name`, ended, or stop with `None`.
+    pub(crate) fn set_ended(&mut self, name: Option<String>) {
+        self.ended = name;
+    }
+
+    /// The shown session's name, once it ended while the link was down.
+    pub(crate) fn ended(&self) -> Option<&str> {
+        self.ended.as_deref()
     }
 
     /// The banner the link shows, if any (D62).
@@ -1380,5 +1508,44 @@ mod tests {
         assert_eq!((veil.opacity, veil.width), (DIM_VEIL, 1100));
         assert!(veil.height < 350, "the ribbon stays bright");
         assert_eq!(banner.height, banner::height(1.0));
+    }
+
+    #[test]
+    fn an_ended_session_fills_the_body_with_its_panel_and_open_switcher() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let ended = Scene {
+            ended: Some("rusty_mill".into()),
+            ..Scene::default()
+        };
+        let body = paint(900, 500, &ended, &look, &mut font);
+        let spots: Vec<Spot> = body.spots.iter().map(|&(_, s)| s).collect();
+        assert_eq!(spots, [Spot::OpenSwitcher]);
+        let (button, _) = body.spots[0];
+        assert_eq!(button.h, 28.0);
+        let p = &body.pixmap;
+        let at = |x: f32, y: f32| p.pixels()[y as usize * p.width + x as usize];
+        assert_eq!(at(button.x + 3.0, button.y + 14.0), look.chrome.accent);
+        assert_eq!(at(100.0, 100.0), look.chrome.base, "inside the block");
+        assert_eq!(at(2.0, 100.0), look.chrome.frame, "the gap");
+        let failure = p
+            .pixels()
+            .iter()
+            .filter(|&&px| px == look.chrome.failure)
+            .count();
+        assert!(failure > 0, "the alert");
+    }
+
+    #[test]
+    fn the_panel_text_wraps_at_its_width() {
+        let font = UiText::embedded().expect("the embedded faces parse");
+        let lines = wrap(&font, ENDED_TEXT, 12.0, 420.0);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines.join(" "), ENDED_TEXT);
+        assert!(
+            lines
+                .iter()
+                .all(|l| font.width(l, Weight::Regular, 12.0) <= 420.0)
+        );
     }
 }

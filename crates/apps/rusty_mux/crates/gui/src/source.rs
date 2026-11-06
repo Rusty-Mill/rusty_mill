@@ -458,6 +458,9 @@ pub enum Out {
     Blocks(Vec<(u64, BlockInfo)>),
     /// How the connection to the server stands (gui-design D62).
     Link(Link),
+    /// The shown session, named, ended while the connection was away:
+    /// show no block until another is picked (handoff D114).
+    Ended(String),
 }
 
 /// Why the events reader stopped following the session.
@@ -496,6 +499,7 @@ impl Events {
                 Out::Session(s) => remote.session(s),
                 Out::Blocks(b) => remote.blocks(b),
                 Out::Link(l) => remote.link(l),
+                Out::Ended(name) => remote.ended(name),
             })
         });
     }
@@ -618,7 +622,7 @@ impl Events {
                 return Some(Stop::Closed);
             }
             match self.take_over() {
-                Ok(stop) => return self.back(stop, true, out),
+                Ok(()) => return self.back(true, out),
                 Err(Missed::Dropped) => self.me = None,
                 Err(Missed::Retry(_)) => {}
                 Err(Missed::Broken(_, me)) => self.me = Some(me),
@@ -646,7 +650,7 @@ impl Events {
             }
             if self.me.is_some() {
                 match self.take_over() {
-                    Ok(stop) => return self.back(stop, true, out),
+                    Ok(()) => return self.back(true, out),
                     Err(Missed::Dropped) => self.me = None,
                     Err(Missed::Retry(_)) => continue,
                     Err(Missed::Broken(_, me)) => {
@@ -656,7 +660,7 @@ impl Events {
                 }
             }
             match self.attach_anew() {
-                Ok(stop) => return self.back(stop, false, out),
+                Ok(()) => return self.back(false, out),
                 Err(why) => eprintln!("rusty-mux-gui: reconnecting: {why}"),
             }
         }
@@ -666,7 +670,7 @@ impl Events {
     /// connection (handoff D111), hands each block its connection back
     /// and reads the session again. `Some(Gone)` when the session ended
     /// meanwhile.
-    fn take_over(&mut self) -> Result<Option<Stop>, Missed> {
+    fn take_over(&mut self) -> Result<(), Missed> {
         let me = self.me.ok_or(Missed::Dropped)?;
         let blocks: Vec<(Arc<Block>, Takeover)> = self
             .state
@@ -697,12 +701,13 @@ impl Events {
         for ((block, _), opened) in blocks.iter().zip(back.panes) {
             block.revive(opened);
         }
-        Ok(self.install((back.conn, back.writer), Some(back.me), next, &entries))
+        self.install((back.conn, back.writer), Some(back.me), next, &entries);
+        Ok(())
     }
 
     /// Attaches anew, as a new client: the window opens its blocks again,
     /// their leases from before released (D113).
-    fn attach_anew(&mut self) -> Result<Option<Stop>, String> {
+    fn attach_anew(&mut self) -> Result<(), String> {
         let (stream, mut conn) = hello(&self.state.socket)?;
         let mut req = Requests {
             conn: &mut conn,
@@ -714,23 +719,21 @@ impl Events {
         let entries = req.call(|req| Message::List { req })?;
         let next = req.next;
         let writer = Conn::new(clone(&stream)?);
-        Ok(self.install((conn, writer), takeover, next, &entries))
+        self.install((conn, writer), takeover, next, &entries);
+        Ok(())
     }
 
     /// Follows the session on the connection `(conn, writer)` from now,
-    /// as its List `entries` say. `Some(Gone)` when the session is not in
-    /// them (D112).
+    /// as its List `entries` say, the shown session ended if they lack it
+    /// (handoff D114).
     fn install(
         &mut self,
         (conn, writer): (Conn<UnixStream>, Conn<UnixStream>),
         me: Option<Takeover>,
         next: u64,
         entries: &[Message],
-    ) -> Option<Stop> {
-        let Some(model) = self.model.relisted(entries) else {
-            return Some(Stop::Gone);
-        };
-        self.model = model;
+    ) {
+        self.model = self.model.relisted(entries);
         self.conn = conn;
         self.me = me;
         *lock(&self.state.control) = writer;
@@ -740,20 +743,17 @@ impl Events {
         self.headers = Headers::default();
         self.follow_blocks();
         self.take_headers(entries);
-        None
     }
 
     /// Says the connection is back, `kept` when its clients were taken
-    /// over, then shows the session as it is now; `stop` if the session
-    /// ended meanwhile.
-    fn back(
-        &mut self,
-        stop: Option<Stop>,
-        kept: bool,
-        out: &mut impl FnMut(Out) -> bool,
-    ) -> Option<Stop> {
-        if stop.is_some() {
-            return stop;
+    /// over, then shows the session as it is now, or that it ended while
+    /// the connection was away (gui-design D62, handoff D114).
+    fn back(&mut self, kept: bool, out: &mut impl FnMut(Out) -> bool) -> Option<Stop> {
+        if let Some(name) = self.model.ended() {
+            let told = out(Out::Link(Link::Up))
+                && out(Out::Ended(name.to_owned()))
+                && out(Out::Session(self.session()));
+            return (!told).then_some(Stop::Closed);
         }
         let shown = out(Out::Link(Link::Back { kept }))
             && self.layout(out)
