@@ -45,6 +45,7 @@ mod settings;
 mod shape;
 pub mod source;
 mod strip;
+mod switcher;
 mod taskbar;
 mod text;
 mod window;

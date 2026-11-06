@@ -11,12 +11,19 @@ use std::cell::Cell;
 
 use super::text::{UiText, Weight};
 
-/// An opaque `0xRRGGBB` image, row-major.
+/// A pixel [`Pixmap::clear`] leaves see-through: no `0xRRGGBB` colour has
+/// its top byte set.
+pub(crate) const CLEAR: u32 = 0xFF00_0000;
+
+/// A `0xRRGGBB` image, row-major; opaque unless made [`Pixmap::clear`].
 #[derive(Clone, Debug)]
 pub(crate) struct Pixmap {
     pub width: usize,
     pub height: usize,
     pixels: Vec<u32>,
+    /// Some pixels may be [`CLEAR`], drawn as nothing (a popover's
+    /// rounded corners over whatever is under them).
+    pub see_through: bool,
     /// The fingerprint's hash once taken; any change clears it, so a
     /// window-sized pixmap is hashed once per paint, not once per frame.
     print: Cell<Option<u64>>,
@@ -66,14 +73,16 @@ impl Rect {
     }
 }
 
-/// `src` over `dst` at coverage `a` (0..=1).
-fn mix(dst: u32, src: u32, a: f32) -> u32 {
+/// `src` over `dst` at coverage `a` (0..=1). Over a [`CLEAR`] pixel the
+/// result is opaque.
+pub(crate) fn mix(dst: u32, src: u32, a: f32) -> u32 {
     if a <= 0.0 {
         return dst;
     }
     if a >= 1.0 {
         return src;
     }
+    let dst = dst & 0x00FF_FFFF;
     let ch = |shift: u32| {
         let (d, s) = (
             ((dst >> shift) & 0xff) as f32,
@@ -113,7 +122,18 @@ impl Pixmap {
             width,
             height,
             pixels: vec![color; width * height],
+            see_through: false,
             print: Cell::new(None),
+        }
+    }
+
+    /// A `width × height` image of [`CLEAR`] pixels: what is painted on it
+    /// shows, the rest lets what is under it through. A shape's soft edge
+    /// blends towards black, under a 1 px border in practice.
+    pub(crate) fn clear(width: usize, height: usize) -> Self {
+        Self {
+            see_through: true,
+            ..Self::new(width, height, CLEAR)
         }
     }
 

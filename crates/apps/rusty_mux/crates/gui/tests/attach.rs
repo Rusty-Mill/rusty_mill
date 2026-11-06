@@ -1,7 +1,8 @@
 //! The GUI client's source against a real server: a block's screen and
 //! output reach its pane, typing needs the lease the focus brings, the
-//! window's layout changes are followed, and the window's own split and
-//! zoom requests come back as layout and zoom.
+//! window's layout changes are followed, the window's own split and zoom
+//! requests come back as layout and zoom, and a session picked in the
+//! switcher is shown.
 
 #![cfg(target_os = "linux")]
 
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use rusty_mux_client::Conn;
 use rusty_mux_client::attach::{CONTROL, Requests};
-use rusty_mux_core::Side;
+use rusty_mux_core::{Side, Size};
 use rusty_mux_gui::source::{Out, attach};
 use rusty_mux_proto::{Launch, Message};
 use rusty_mux_server::{Config, ConsoleHost, serve};
@@ -304,4 +305,63 @@ fn a_split_and_a_zoom_asked_by_the_window_come_back() {
     );
     attached.source.act(Act::Unzoom);
     assert_eq!(next(&|o| matches!(o, Out::Zoom(_))), Out::Zoom(None));
+}
+
+#[test]
+fn a_session_picked_in_the_switcher_is_shown_on_the_same_connection() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(first) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+
+    // Another client makes a second session.
+    let other = UnixStream::connect(&socket).expect("connect");
+    let mut conn = Conn::new(other);
+    conn.send(&Message::Hello {
+        features: CONTROL,
+        resume: None,
+        takeover: None,
+    })
+    .expect("hello");
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let size = Size::new(80, 24).expect("a size");
+    req.create(size, "other").expect("a second session");
+    let listed = loop {
+        let s = next_session(&outs);
+        if let Some(c) = s.sessions.iter().find(|c| c.name == "other" && c.can_show) {
+            break c.clone();
+        }
+    };
+    assert!(!listed.current);
+
+    attached.source.switch(listed.key);
+    let deadline = Instant::now() + PATIENCE;
+    let shown = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if let Out::Layout(Some(t)) = outs.recv_timeout(left).expect("its layout") {
+            break t;
+        }
+    };
+    assert!(
+        matches!(shown, Tree::Pane(k) if k != first),
+        "the other session's block: {shown:?}"
+    );
+    let now = next_session(&outs);
+    assert_eq!(now.name, "other");
+    assert!(
+        now.sessions
+            .iter()
+            .any(|c| c.key == listed.key && c.current)
+    );
+    assert_eq!(now.windows.len(), 1, "only the other session's window");
 }

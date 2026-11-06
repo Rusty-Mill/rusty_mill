@@ -97,6 +97,25 @@ pub struct Session {
     /// The session runs on this machine, so its paths can be read here
     /// (a block header's git branch, gui-design D48).
     pub local: bool,
+    /// Every session on the server, this one included, in order, for the
+    /// switcher (gui-design F4, D60).
+    pub sessions: Vec<SessionChoice>,
+}
+
+/// One of the server's sessions, as the switcher lists it (gui-design D60).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionChoice {
+    /// The source's key for the session.
+    pub key: u64,
+    pub name: String,
+    /// Its windows.
+    pub windows: usize,
+    /// Distinct people attached to its blocks.
+    pub clients: usize,
+    /// Whether this is the session shown.
+    pub current: bool,
+    /// Whether it has blocks to show; a session without can't be picked.
+    pub can_show: bool,
 }
 
 /// One of a session's windows, as its strip tab shows it.
@@ -165,6 +184,9 @@ pub trait Source {
     fn focus(&self, key: u64);
     /// The user picked window `key` on the strip: show it instead.
     fn select(&self, key: u64);
+    /// The user picked session `key` in the switcher: show it instead
+    /// (gui-design D60). The source answers with its layout and session.
+    fn switch(&self, key: u64);
     /// The user asked for a new window in the session.
     fn new_window(&self);
     /// The user asked to change the layout (gui-design F2, F7; handoff
@@ -214,8 +236,9 @@ impl Remote {
         self.0.send_event(UserEvent::Session(session)).is_ok()
     }
 
-    /// Show `blocks` in the shown panes' headers, by pane key; a pane left
-    /// out shows an empty header.
+    /// What the session's blocks say, by pane key, for the shown panes'
+    /// headers and the strip's thumbnails; a pane left out shows an empty
+    /// header.
     pub fn blocks(&self, blocks: Vec<(u64, BlockInfo)>) -> bool {
         self.0.send_event(UserEvent::Blocks(blocks)).is_ok()
     }

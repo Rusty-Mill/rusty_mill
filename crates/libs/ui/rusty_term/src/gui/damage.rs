@@ -32,8 +32,10 @@ struct Layout {
     chrome: Vec<Cell>,
     /// An attached window's top strip and body, by
     /// [`Pixmap::fingerprint`].
-    strip: Option<(usize, usize, u64)>,
-    body: Option<(usize, usize, u64)>,
+    strip: Option<Print>,
+    body: Option<Print>,
+    /// The popover, by fingerprint and place.
+    pop: Option<(Print, (usize, usize))>,
     status: Vec<Cell>,
     panes: Vec<PaneLayout>,
 }
@@ -79,6 +81,9 @@ impl RowState {
     }
 }
 
+/// A [`Pixmap::fingerprint`].
+type Print = (usize, usize, u64);
+
 /// What one presented frame painted.
 pub(super) struct Frame {
     layout: Layout,
@@ -109,6 +114,7 @@ impl Frame {
             chrome: chrome.to_vec(),
             strip: scene.strip.map(Pixmap::fingerprint),
             body: scene.body.map(Pixmap::fingerprint),
+            pop: scene.pop.map(|(p, at)| (p.fingerprint(), at)),
             status: status.to_vec(),
             panes: panes.iter().map(pane_layout).collect(),
         };
