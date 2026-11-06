@@ -43,13 +43,15 @@ pub(super) fn grid_top(chrome: &[Cell], strip: Option<&Pixmap>, pad: usize, bar_
 /// What an attached window paints in pixels rather than cells: its top
 /// strip, flush with the window's top in place of the chrome bar, the body
 /// of framed blocks (gui-design D47), from the bars' bottom edge down,
-/// behind the panes, and small pixmaps over the panes (F2 badges, D49), at
-/// px from the body's corner. All empty for local shells.
+/// behind the panes, small pixmaps over the panes (F2 badges, D49), at
+/// px from the body's corner, and a popover over everything (the session
+/// switcher, D60), at window px. All empty for local shells.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Scene<'a> {
     pub strip: Option<&'a Pixmap>,
     pub body: Option<&'a Pixmap>,
     pub over: &'a [(Pixmap, (usize, usize))],
+    pub pop: Option<(&'a Pixmap, (usize, usize))>,
 }
 
 /// The theme-independent search highlight: amber for a match, orange for the
@@ -480,10 +482,14 @@ pub(super) fn composite(
     draw_over(buffer, w, h, &scene, oy - pad);
 }
 
-/// Draw `scene`'s pixmaps over the panes, the body's corner at `top`.
+/// Draw `scene`'s pixmaps over the panes, the body's corner at `top`,
+/// then its popover.
 fn draw_over(buffer: &mut [u32], w: usize, h: usize, scene: &Scene, top: usize) {
     for (pixmap, (x, y)) in scene.over {
         cpu::draw_pixmap(buffer, w, h, pixmap, *x, top + y);
+    }
+    if let Some((pixmap, (x, y))) = scene.pop {
+        cpu::draw_pixmap(buffer, w, h, pixmap, x, y);
     }
 }
 

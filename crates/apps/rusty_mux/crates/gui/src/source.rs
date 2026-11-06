@@ -36,7 +36,7 @@ use rusty_term::gui::source::{Act, BlockInfo, Dir, Feed, PaneIo, Remote, Session
 
 use crate::headers::{Call, Effect, Headers};
 use crate::keys::Keys;
-use crate::session::{Change, Model, local_host};
+use crate::session::{Change, Model, StripKeys, local_host};
 use crate::tree::tree;
 
 /// What the GUI's control connection asks for: the TUI's set, plus names
@@ -117,7 +117,8 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         tells_focus: welcomed.features.contains(Features::FOCUS),
         selects: follows_active,
         calls_blocks,
-        session: model.session_id(),
+        session: Mutex::new(model.session_id()),
+        switch: Mutex::new(None),
         shown: Mutex::new(Shown::default()),
     });
     let (first, focus) = {
@@ -161,7 +162,10 @@ struct State {
     selects: bool,
     /// The server answers `BlockCall`, which the headers read with.
     calls_blocks: bool,
-    session: SessionId,
+    /// The session shown, where a new window goes.
+    session: Mutex<SessionId>,
+    /// The session the user picked, for the events reader to show.
+    switch: Mutex<Option<SessionId>>,
     shown: Mutex<Shown>,
 }
 
@@ -171,6 +175,8 @@ struct Shown {
     keys: Keys,
     /// The strip's tab keys for the session's windows.
     windows: Keys<WindowId>,
+    /// The switcher's keys for the server's sessions.
+    sessions: Keys<SessionId>,
     /// Each open pane's block connection, kept weakly: the window owns it.
     blocks: HashMap<u64, std::sync::Weak<Block>>,
     focus: Option<u64>,
@@ -180,7 +186,7 @@ struct Shown {
 
 impl State {
     fn shown(&self) -> MutexGuard<'_, Shown> {
-        self.shown.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.shown)
     }
 
     /// Tells the server the window's focus moved to `block`.
@@ -232,6 +238,12 @@ impl State {
             }
         }
     }
+}
+
+/// `m`'s guard, whether or not a holder panicked: every value here stays
+/// whole between statements.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// The server window's blocks, opened on demand by the GUI window.
@@ -303,10 +315,21 @@ impl Source for MuxSource {
         });
     }
 
+    /// Shows session `key` (handoff D109): the events reader re-points the
+    /// window at it, woken by the answer to a List sent here. No
+    /// `SelectWindow`: the pick changes only what this client shows.
+    fn switch(&self, key: u64) {
+        let Some(session) = self.0.shown().sessions.id(key) else {
+            return;
+        };
+        *lock(&self.0.switch) = Some(session);
+        self.0.send(|req| Message::List { req });
+    }
+
     /// Creates a window with one block and selects it, on a connection of
     /// its own so the UI never waits for the server.
     fn new_window(&self) {
-        let (socket, session) = (self.0.socket.clone(), self.0.session);
+        let (socket, session) = (self.0.socket.clone(), *lock(&self.0.session));
         let spawned = std::thread::Builder::new()
             .name("mux-new-window".into())
             .spawn(move || {
@@ -409,16 +432,21 @@ impl Events {
                 Message::Entry { entry, .. } => self.model.take(entry),
                 _ => Change::None,
             };
+            if !self.switched(&mut out) {
+                return;
+            }
             if let Message::Event {
-                event: Event::WindowCreated { .. },
+                event: Event::WindowCreated { .. } | Event::SessionCreated { .. },
                 ..
             } = message
             {
-                // Its name comes with the window's entry.
+                // Its name comes with its entry.
                 self.state.send(|req| Message::List { req });
             }
             if matches!(change, Change::Layout | Change::Shown) {
                 self.state.shown().window = Some(self.model.shown());
+            }
+            if matches!(change, Change::Layout | Change::Shown | Change::Strip) {
                 self.follow_blocks();
             }
             let go_on = match change {
@@ -449,13 +477,30 @@ impl Events {
         out(Out::Layout(None));
     }
 
-    /// Follows the shown window's blocks for their headers: reads what is
-    /// not known of new ones, and their lease holders from a List.
+    /// Shows the session the user picked, if any: its window's layout,
+    /// focus and strip, as when another window is shown. `false` once the
+    /// window is gone.
+    fn switched(&mut self, out: &mut impl FnMut(Out) -> bool) -> bool {
+        let Some(session) = lock(&self.state.switch).take() else {
+            return true;
+        };
+        if !self.model.switch(session) {
+            return true;
+        }
+        *lock(&self.state.session) = session;
+        self.state.shown().window = Some(self.model.shown());
+        self.follow_blocks();
+        self.layout(out) && self.focus_shown(out) && out(Out::Session(self.session()))
+    }
+
+    /// Follows the session's blocks for their headers and thumbnails:
+    /// reads what is not known of new ones, and their lease holders from a
+    /// List.
     fn follow_blocks(&mut self) {
         if !self.state.calls_blocks {
             return;
         }
-        let calls = self.headers.track(&self.model.shown_blocks());
+        let calls = self.headers.track(&self.model.session_blocks());
         if calls.is_empty() {
             return;
         }
@@ -510,7 +555,11 @@ impl Events {
     /// The session as the strip shows it.
     fn session(&self) -> Session {
         let shown = &mut *self.state.shown();
-        self.model.session(&mut shown.windows, &mut shown.keys)
+        self.model.session(&mut StripKeys {
+            sessions: &mut shown.sessions,
+            windows: &mut shown.windows,
+            blocks: &mut shown.keys,
+        })
     }
 
     /// Sends the shown window's layout and zoom; a window with no blocks

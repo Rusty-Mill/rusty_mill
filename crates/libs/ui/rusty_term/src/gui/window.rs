@@ -54,6 +54,7 @@ use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{Act, Feed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
+use super::switcher::{self, Pick, Switcher};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -698,6 +699,9 @@ struct WindowState<'a> {
     /// An attached window's framed blocks under the strip (gui-design
     /// D47); `None` for local shells.
     body: Option<BodyState>,
+    /// An attached window's session switcher (gui-design F4, D60); `None`
+    /// for local shells.
+    switcher: Option<Switcher>,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -1671,6 +1675,11 @@ impl WindowState<'_> {
         let area = self.pane_area();
         let places = self.places(self.active);
         self.repaint_body(&places);
+        let scale = self.scale_factor as f32;
+        if let Some(switcher) = &mut self.switcher {
+            switcher.repaint(tokens, scale);
+        }
+        let pop_at = self.switcher_at();
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
         // right of the pane area. Built before the renderer is borrowed and
@@ -1870,6 +1879,11 @@ impl WindowState<'_> {
                 .as_ref()
                 .and_then(BodyState::painted)
                 .map_or(&[], |b| &b.over),
+            pop: self
+                .switcher
+                .as_ref()
+                .and_then(Switcher::painted)
+                .map(|p| (&p.pixmap, pop_at)),
         };
         renderer.render(
             &frames,
@@ -3055,6 +3069,10 @@ impl WindowState<'_> {
                 if let Some(source) = self.source {
                     source.new_window();
                 }
+            }
+            Hit::Session if self.switcher.is_some() => {
+                self.close_overlay();
+                self.toggle_switcher();
             }
             Hit::ShellMenu | Hit::Session => {
                 let was_menu = matches!(self.overlay, Some(Overlay::Menu { .. }));
@@ -5884,6 +5902,9 @@ impl WindowState<'_> {
         if let Some(body) = &mut self.body {
             body.set_session(session.local, &session.host);
         }
+        if let Some(switcher) = &mut self.switcher {
+            switcher.update(session.sessions.clone());
+        }
         if let Some(strip) = &mut self.strip {
             strip.show(session);
             if let Some(window) = &self.window {
@@ -5896,6 +5917,9 @@ impl WindowState<'_> {
     fn show_blocks(&mut self, blocks: Vec<(u64, super::source::BlockInfo)>) {
         if let Some(body) = &mut self.body {
             body.show(blocks);
+            if let Some(strip) = &mut self.strip {
+                strip.set_running(body.running());
+            }
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
@@ -6031,6 +6055,152 @@ impl WindowState<'_> {
 
     /// An attached window's prefix keys (gui-design F2): Ctrl-] arms, and
     /// the next key runs. Returns whether the key was taken.
+    /// Whether the session switcher is open.
+    fn switcher_open(&self) -> bool {
+        self.switcher.as_ref().is_some_and(Switcher::is_open)
+    }
+
+    /// Open the session switcher under the session chip, or close it
+    /// (gui-design D60): the server's sessions, then the menu's items.
+    fn toggle_switcher(&mut self) {
+        let menu = switcher::Menu {
+            host: self
+                .strip
+                .as_ref()
+                .map(|s| s.session().host.clone())
+                .unwrap_or_default(),
+            sessions: self
+                .strip
+                .as_ref()
+                .map(|s| s.session().sessions.clone())
+                .unwrap_or_default(),
+            items: self.switcher_items().into_iter().map(|i| i.label).collect(),
+        };
+        self.set_armed(false);
+        let Some(switcher) = &mut self.switcher else {
+            return;
+        };
+        if switcher.is_open() {
+            switcher.close();
+        } else {
+            switcher.open(menu);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The menu's items an attached window lists under its sessions: the
+    /// `▾` menu's, less the launchers, as the server spawns blocks (D45 b).
+    fn switcher_items(&self) -> Vec<MenuItem> {
+        let mut items = shell_menu_items(&self.config.profiles, &self.shells);
+        items.retain(|i| {
+            !matches!(
+                i.kind,
+                MenuKind::LaunchProfile(_) | MenuKind::LaunchShell(_)
+            )
+        });
+        items
+    }
+
+    /// A key while the switcher is open: Up/Down move, Enter picks, Esc
+    /// closes; the rest are dropped.
+    fn switcher_key(&mut self, key: &Key) {
+        use winit::keyboard::NamedKey;
+        let Some(switcher) = &mut self.switcher else {
+            return;
+        };
+        match key {
+            Key::Named(NamedKey::ArrowUp) => switcher.step(false),
+            Key::Named(NamedKey::ArrowDown) => switcher.step(true),
+            Key::Named(NamedKey::Escape) => switcher.close(),
+            Key::Named(NamedKey::Enter) => {
+                let picked = switcher.selected();
+                self.switcher_pick(picked);
+            }
+            _ => return,
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Carry out `picked` and close the switcher: show another session,
+    /// or run a menu item; the current session only closes.
+    fn switcher_pick(&mut self, picked: Option<Pick>) {
+        let Some(switcher) = &mut self.switcher else {
+            return;
+        };
+        let Some(picked) = picked else {
+            return; // a disabled row stays open
+        };
+        let current = matches!(picked, Pick::Session(key) if switcher.is_current(key));
+        switcher.close();
+        match picked {
+            Pick::Session(_) if current => {}
+            Pick::Session(key) => {
+                if let Some(source) = self.source {
+                    source.switch(key);
+                }
+            }
+            Pick::Item(i) => {
+                if let Some(item) = self.switcher_items().into_iter().nth(i) {
+                    self.menu_pick(item.kind);
+                }
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Where the switcher sits, in window px.
+    fn switcher_at(&self) -> (usize, usize) {
+        let s = self.scale_factor as f32;
+        let (x, y) = switcher::AT;
+        ((x * s).round() as usize, (y * s).round() as usize)
+    }
+
+    /// The switcher row under window pixel `(x, y)`, and whether the point
+    /// is on the switcher at all.
+    fn switcher_row(&self, x: f64, y: f64) -> (Option<usize>, bool) {
+        let Some(pop) = self.switcher.as_ref().and_then(Switcher::painted) else {
+            return (None, false);
+        };
+        let (ox, oy) = self.switcher_at();
+        let (px, py) = ((x - ox as f64) as f32, (y - oy as f64) as f32);
+        (pop.row(px, py), pop.contains(px, py))
+    }
+
+    /// The pointer moved to `(x, y)`: light the row under it.
+    fn switcher_hover(&mut self, x: f64, y: f64) {
+        let (row, _) = self.switcher_row(x, y);
+        let changed = self.switcher.as_mut().is_some_and(|s| s.hover(row));
+        if let (true, Some(window)) = (changed, &self.window) {
+            window.request_redraw();
+        }
+    }
+
+    /// A click while the switcher is open: a row picks, a click elsewhere
+    /// on the panel does nothing, and one off it closes it.
+    fn switcher_click(&mut self, x: f64, y: f64) {
+        match self.switcher_row(x, y) {
+            (Some(row), _) => {
+                let picked = self.switcher.as_ref().and_then(|s| s.pick(row));
+                self.switcher_pick(picked);
+            }
+            (None, true) => {}
+            (None, false) => {
+                if let Some(switcher) = &mut self.switcher {
+                    switcher.close();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        }
+    }
+
     fn prefix_key(&mut self, key: &Key, physical: PhysicalKey) -> bool {
         if self.source.is_none() {
             return false;
@@ -6130,6 +6300,7 @@ impl WindowState<'_> {
                         })
                         .unwrap_or_default();
                     let ui_owns_keys = self.overlay.is_some()
+                        || self.switcher_open()
                         || self.searching.is_some()
                         || self.copy_mode.is_some();
                     let release = KeyRelease {
@@ -6145,6 +6316,12 @@ impl WindowState<'_> {
                     {
                         self.write_child(&bytes);
                     }
+                    return;
+                }
+                // An open switcher owns every key (gui-design D60).
+                if self.switcher_open() {
+                    self.switcher_key(&event.logical_key);
+                    self.consumed_keys.consume(event.physical_key);
                     return;
                 }
                 // A settings page / shell menu, if open, owns all key input,
@@ -6406,6 +6583,7 @@ impl WindowState<'_> {
                         window.request_redraw();
                     }
                 }
+                self.switcher_hover(position.x, position.y);
                 // Settings-page hover: highlight the card under the pointer.
                 if let Some((col, grid_row)) = self.overlay_cell(position.x, position.y) {
                     let grid_rows = self.rows as usize;
@@ -6508,6 +6686,11 @@ impl WindowState<'_> {
                     return;
                 };
                 match state {
+                    // An open switcher takes the click: a row picks, any
+                    // other place closes it (gui-design D60).
+                    ElementState::Pressed if self.switcher_open() => {
+                        self.switcher_click(self.mouse_pos.0, self.mouse_pos.1);
+                    }
                     ElementState::Pressed => {
                         // Ctrl+click follows an OSC 8 hyperlink under the
                         // pointer, suppressing selection and mouse reporting
@@ -6736,6 +6919,10 @@ impl<'a> App<'a> {
             },
             body: match self.source {
                 Some(_) => Some(BodyState::new().ok_or("the interface font failed to parse")?),
+                None => None,
+            },
+            switcher: match self.source {
+                Some(_) => Some(Switcher::new().ok_or("the interface font failed to parse")?),
                 None => None,
             },
             config: self.config.clone(),

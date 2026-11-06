@@ -1552,6 +1552,9 @@ impl GpuCore {
         for (pixmap, (x, y)) in scene.over {
             self.append_pixmap(&mut frame, pixmap, (*x, top + y));
         }
+        if let Some((pixmap, at)) = scene.pop {
+            self.append_pixmap(&mut frame, pixmap, at);
+        }
         self.draw_frame(view, &frame, bg);
         self.spare = frame;
     }
@@ -1570,7 +1573,11 @@ impl GpuCore {
         let bind = match self.img_cache.get(&key) {
             Some(bind) => Some(Rc::clone(bind)),
             None => {
-                let pixels: Vec<Option<u32>> = strip.pixels().iter().map(|&p| Some(p)).collect();
+                let pixels: Vec<Option<u32>> = strip
+                    .pixels()
+                    .iter()
+                    .map(|&p| (p != super::paint::CLEAR).then_some(p))
+                    .collect();
                 self.image_texture(key, w, h, &pixels)
             }
         };

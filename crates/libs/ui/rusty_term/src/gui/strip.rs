@@ -90,6 +90,8 @@ impl Strip {
 /// painting, kept until the session, the look or the width changes.
 pub(crate) struct StripState {
     session: Session,
+    /// Blocks whose program runs, lit in their thumbnails (D46, D60).
+    running: Vec<u64>,
     text: UiText,
     painted: Option<(Look, Strip)>,
 }
@@ -99,6 +101,7 @@ impl StripState {
     pub(crate) fn new() -> Option<Self> {
         Some(Self {
             session: Session::default(),
+            running: Vec::new(),
             text: UiText::embedded()?,
             painted: None,
         })
@@ -112,12 +115,26 @@ impl StripState {
         }
     }
 
+    /// The session shown.
+    pub(crate) fn session(&self) -> &Session {
+        &self.session
+    }
+
+    /// Light `running` blocks' thumbnail cells from the next painting on.
+    pub(crate) fn set_running(&mut self, mut running: Vec<u64>) {
+        running.sort_unstable();
+        if running != self.running {
+            self.running = running;
+            self.painted = None;
+        }
+    }
+
     /// Paint the strip for `look` across `width` px, unless the last
     /// painting already is that.
     pub(crate) fn repaint(&mut self, look: Look, width: usize) {
         let fresh = matches!(&self.painted, Some((l, s)) if *l == look && s.pixmap.width == width);
         if !fresh {
-            let strip = paint(&self.session, &look, width, &mut self.text);
+            let strip = paint(&self.session, &self.running, &look, width, &mut self.text);
             self.painted = Some((look, strip));
         }
     }
@@ -141,8 +158,15 @@ struct TabPlan<'a> {
     w: f32,
 }
 
-/// Paint `session` across a strip `width` px wide.
-pub(crate) fn paint(session: &Session, look: &Look, width: usize, font: &mut UiText) -> Strip {
+/// Paint `session` across a strip `width` px wide, the `running` blocks
+/// lit in their thumbnails.
+pub(crate) fn paint(
+    session: &Session,
+    running: &[u64],
+    look: &Look,
+    width: usize,
+    font: &mut UiText,
+) -> Strip {
     let s = look.scale;
     let c = &look.chrome;
     let mut p = Pixmap::new(width, height(s), c.frame);
@@ -247,14 +271,14 @@ pub(crate) fn paint(session: &Session, look: &Look, width: usize, font: &mut UiT
         // On a lit tab the thumbnail takes the selected fill, which holds
         // against `raised` and `line` as the unselected one can't.
         let lit = selected || look.hover == Some(spot) || look.pressed == Some(spot);
-        thumbnail(
-            &mut p,
-            plan.tab,
-            c.thumb[usize::from(lit)],
-            tx,
-            mid - THUMB.1 * s / 2.0,
-            s,
-        );
+        let fill = |key: u64| {
+            if running.contains(&key) {
+                c.accent
+            } else {
+                c.thumb[usize::from(lit)]
+            }
+        };
+        thumbnail(&mut p, plan.tab, fill, tx, mid - THUMB.1 * s / 2.0, s);
         let fg = if selected || look.pressed == Some(spot) {
             c.text
         } else {
@@ -399,34 +423,37 @@ fn caption(p: &mut Pixmap, spots: &mut Vec<(Rect, Spot)>, look: &Look, x: f32) {
 }
 
 /// A tab's 26×16 thumbnail of its window's blocks (D10, D46): a rounded
-/// cell per block with 1.5 px gaps.
-fn thumbnail(p: &mut Pixmap, tab: &WindowTab, fill: u32, x: f32, y: f32, s: f32) {
+/// cell per block with 1.5 px gaps, each `fill(key)`.
+fn thumbnail(p: &mut Pixmap, tab: &WindowTab, fill: impl Fn(u64) -> u32, x: f32, y: f32, s: f32) {
     // A window with no blocks shows an empty slot.
     let Some(tree) = &tab.tree else {
         return;
     };
-    for (fx, fy, fw, fh) in cells(tree) {
+    for (key, (fx, fy, fw, fh)) in cells(tree) {
         let r = Rect {
             x: x + (fx * THUMB.0 + 0.5) * s,
             y: y + (fy * THUMB.1 + 0.5) * s,
             w: (fw * THUMB.0 - 1.5) * s,
             h: (fh * THUMB.1 - 1.5) * s,
         };
-        p.fill(r, 1.5 * s, fill);
+        p.fill(r, 1.5 * s, fill(key));
     }
 }
 
-/// Each block's place in the unit square, as fractions `(x, y, w, h)`.
-fn cells(tree: &Tree) -> Vec<(f32, f32, f32, f32)> {
+/// A place in the unit square, as fractions `(x, y, w, h)`.
+type Unit = (f32, f32, f32, f32);
+
+/// Each block's key and place in the unit square.
+fn cells(tree: &Tree) -> Vec<(u64, Unit)> {
     let mut out = Vec::new();
     place(tree, (0.0, 0.0, 1.0, 1.0), &mut out);
     out
 }
 
-fn place(tree: &Tree, at: (f32, f32, f32, f32), out: &mut Vec<(f32, f32, f32, f32)>) {
+fn place(tree: &Tree, at: Unit, out: &mut Vec<(u64, Unit)>) {
     let (x, y, w, h) = at;
     match tree {
-        Tree::Pane(_) => out.push(at),
+        Tree::Pane(key) => out.push((*key, at)),
         Tree::Split { dir, ratio, a, b } => {
             let r = ratio.clamp(0.0, 1.0);
             let (first, second) = match dir {
@@ -466,6 +493,7 @@ mod tests {
                 .collect(),
             clients: 2,
             local: true,
+            sessions: Vec::new(),
         }
     }
 
@@ -486,13 +514,13 @@ mod tests {
     fn the_strip_is_52_logical_px_scaled_by_dpi() {
         assert_eq!(height(1.0), 52);
         assert_eq!(height(1.5), 78);
-        let strip = paint(&session(1), &look(2.0), 1200, &mut font());
+        let strip = paint(&session(1), &[], &look(2.0), 1200, &mut font());
         assert_eq!((strip.pixmap.width, strip.pixmap.height), (1200, 104));
     }
 
     #[test]
     fn every_window_gets_a_tab_in_order_after_the_session_chip() {
-        let strip = paint(&session(3), &look(1.0), 1400, &mut font());
+        let strip = paint(&session(3), &[], &look(1.0), 1400, &mut font());
         let xs: Vec<(f32, Spot)> = strip.spots.iter().map(|(r, s)| (r.x, *s)).collect();
         let order: Vec<Spot> = {
             let mut v = xs.clone();
@@ -516,21 +544,21 @@ mod tests {
 
     #[test]
     fn the_top_right_corner_closes() {
-        let strip = paint(&session(1), &look(1.0), 900, &mut font());
+        let strip = paint(&session(1), &[], &look(1.0), 900, &mut font());
         assert_eq!(strip.spot(899.0, 0.0), Some(Spot::Close));
         assert_eq!(strip.spot(899.0, 51.0), Some(Spot::Close));
     }
 
     #[test]
     fn empty_strip_is_no_spot_so_it_drags() {
-        let strip = paint(&session(1), &look(1.0), 1400, &mut font());
+        let strip = paint(&session(1), &[], &look(1.0), 1400, &mut font());
         assert_eq!(strip.spot(700.0, 26.0), None);
         assert_eq!(strip.spot(2.0, 26.0), None, "the left padding");
     }
 
     #[test]
     fn crowded_tabs_drop_unselected_names_then_stop_before_the_right_group() {
-        let roomy = paint(&session(3), &look(1.0), 1400, &mut font());
+        let roomy = paint(&session(3), &[], &look(1.0), 1400, &mut font());
         let tab_w = |strip: &super::Strip, key| {
             strip
                 .spots
@@ -538,7 +566,7 @@ mod tests {
                 .find(|(_, s)| *s == Spot::Tab(key))
                 .map(|(r, _)| r.w)
         };
-        let tight = paint(&session(3), &look(1.0), 760, &mut font());
+        let tight = paint(&session(3), &[], &look(1.0), 760, &mut font());
         let (a, b) = (
             tab_w(&roomy, 11).expect("tab"),
             tab_w(&tight, 11).expect("tab"),
@@ -549,7 +577,7 @@ mod tests {
             tab_w(&roomy, 10),
             "the selected one keeps its name"
         );
-        let crowded = paint(&session(30), &look(1.0), 760, &mut font());
+        let crowded = paint(&session(30), &[], &look(1.0), 760, &mut font());
         let clients_x = crowded
             .spots
             .iter()
@@ -569,17 +597,17 @@ mod tests {
     #[test]
     fn hover_and_press_change_only_the_pixels() {
         let mut f = font();
-        let rest = paint(&session(2), &look(1.0), 1200, &mut f);
+        let rest = paint(&session(2), &[], &look(1.0), 1200, &mut f);
         let mut hovered = look(1.0);
         hovered.hover = Some(Spot::Tab(11));
-        let hover = paint(&session(2), &hovered, 1200, &mut f);
+        let hover = paint(&session(2), &[], &hovered, 1200, &mut f);
         assert_eq!(rest.spots, hover.spots);
         assert_ne!(rest.pixmap, hover.pixmap);
     }
 
     #[test]
     fn the_selected_tab_has_the_base_surface() {
-        let strip = paint(&session(2), &look(1.0), 1200, &mut font());
+        let strip = paint(&session(2), &[], &look(1.0), 1200, &mut font());
         let (r, _) = strip
             .spots
             .iter()
@@ -605,7 +633,9 @@ mod tests {
             }),
         };
         let got = cells(&tree);
-        assert_eq!(got.len(), 3);
+        let keys: Vec<u64> = got.iter().map(|c| c.0).collect();
+        assert_eq!(keys, [1, 2, 3]);
+        let got: Vec<_> = got.into_iter().map(|c| c.1).collect();
         assert_eq!(got[0], (0.0, 0.0, 0.6, 1.0));
         assert!((got[1].0 - 0.6).abs() < 1e-6 && got[1].3 == 0.5);
         assert!((got[2].1 - 0.5).abs() < 1e-6);
@@ -615,5 +645,23 @@ mod tests {
     fn one_client_is_singular() {
         assert_eq!(clients_label(1), "1 client attached");
         assert_eq!(clients_label(3), "3 clients attached");
+    }
+
+    #[test]
+    fn a_running_block_lights_its_thumbnail_cell() {
+        let mut f = font();
+        let c = look(1.0).chrome;
+        let accent = |strip: &super::Strip| {
+            strip
+                .pixmap
+                .pixels()
+                .iter()
+                .filter(|&&px| px == c.accent)
+                .count()
+        };
+        let idle = paint(&session(1), &[], &look(1.0), 1200, &mut f);
+        let running = paint(&session(1), &[2], &look(1.0), 1200, &mut f);
+        assert_eq!(accent(&idle), 0);
+        assert!(accent(&running) > 0, "block 2's cell is the accent");
     }
 }

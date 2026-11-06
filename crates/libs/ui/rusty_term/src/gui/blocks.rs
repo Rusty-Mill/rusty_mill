@@ -782,6 +782,16 @@ impl BodyState {
         }
     }
 
+    /// The blocks whose program runs (D48's running rule), lit in the
+    /// strip's thumbnails (D46, D60).
+    pub(crate) fn running(&self) -> Vec<u64> {
+        self.infos
+            .iter()
+            .filter(|(_, i)| matches!(lead(i), Some((Glyph::Spinner, _))))
+            .map(|(&k, _)| k)
+            .collect()
+    }
+
     /// Block `key`'s lead glyph, for its rail chip.
     pub(crate) fn lead(&self, key: u64) -> Option<(Glyph, Ink)> {
         self.infos.get(&key).and_then(lead)
