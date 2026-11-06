@@ -37,6 +37,8 @@ pub(crate) struct Ribbon {
     pub target: String,
     /// Blocks in the window's layout, zoomed or not.
     pub blocks: usize,
+    /// The window's detached blocks (gui-design D61).
+    pub detached: usize,
     /// The focused block's shell.
     pub shell: Option<String>,
     /// The prefix is armed (F2).
@@ -137,10 +139,13 @@ pub(crate) fn keycap(
 /// The left group's texts, dropped from the end as room runs out: the
 /// encoding, then the shell (D49).
 fn left_texts(ribbon: &Ribbon) -> Vec<String> {
-    let count = match ribbon.blocks {
+    let mut count = match ribbon.blocks {
         1 => "1 block".to_owned(),
         n => format!("{n} blocks"),
     };
+    if ribbon.detached > 0 {
+        count = format!("{count}, {} detached", ribbon.detached);
+    }
     let mut texts = vec![format!("Connected to {}", ribbon.target), count];
     texts.extend(ribbon.shell.clone());
     texts.push("UTF-8".to_owned());
@@ -251,6 +256,7 @@ mod tests {
         Ribbon {
             target: "baileyai".into(),
             blocks: 3,
+            detached: 0,
             shell: Some("zsh".into()),
             armed: false,
         }
@@ -271,6 +277,16 @@ mod tests {
             left_texts(&one),
             ["Connected to baileyai", "1 block", "UTF-8"]
         );
+    }
+
+    #[test]
+    fn detached_blocks_join_the_count() {
+        let some = Ribbon {
+            blocks: 2,
+            detached: 1,
+            ..ribbon()
+        };
+        assert_eq!(left_texts(&some)[1], "2 blocks, 1 detached");
     }
 
     #[test]

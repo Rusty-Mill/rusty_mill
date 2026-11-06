@@ -48,13 +48,13 @@ use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::motion;
 use super::pace::Pacer;
+use super::popover::{self, DetachedRow, Kind, Menu, Pick, Popover, Row};
 use super::prefix::{self, Command};
 use super::render::{CpuRenderer, PaneFrame, Renderer, Scene, SearchColors, blend};
 use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{Act, Feed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
-use super::switcher::{self, Pick, Switcher};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -155,11 +155,30 @@ pub(crate) enum UserEvent {
     Focus(u64),
     /// The source zoomed a pane, or unzoomed with `None` ([`Remote::zoom`]).
     Zoom(Option<u64>),
+    /// The source's window shows no block: all are detached
+    /// ([`Remote::empty`]).
+    Empty,
     /// The source's session changed ([`Remote::session`]).
     Session(super::source::Session),
     /// What the source says of the shown blocks, for their headers
     /// ([`Remote::blocks`]).
     Blocks(Vec<(u64, super::source::BlockInfo)>),
+}
+
+/// What an attached window draws besides its panes: the strip, the
+/// body and its overlays, and an open popover.
+fn attached_scene<'a>(
+    strip: Option<&'a StripState>,
+    body: Option<&'a BodyState>,
+    popover: Option<&'a Popover>,
+) -> Scene<'a> {
+    let body = body.and_then(BodyState::painted);
+    Scene {
+        strip: strip.and_then(StripState::painted).map(|s| &s.pixmap),
+        body: body.map(|b| &b.pixmap),
+        over: body.map_or(&[], |b| &b.over),
+        pop: popover.and_then(Popover::painted),
+    }
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -210,6 +229,8 @@ enum Hit {
     Window(u64),
     /// Ask the source for a new window (the strip's "+").
     NewWindow,
+    /// The detached-blocks chip: its popover (gui-design D61).
+    Detached,
     /// A control on an attached window's blocks: a zoom button, "Exit
     /// zoom" or a rail chip (gui-design D49).
     Block(blocks::Spot),
@@ -222,6 +243,7 @@ impl Hit {
             Hit::Session => Spot::Session,
             Hit::Window(key) => Spot::Tab(key),
             Hit::NewWindow => Spot::NewWindow,
+            Hit::Detached => Spot::Detached,
             Hit::Minimize => Spot::Minimize,
             Hit::Maximize => Spot::Maximize,
             Hit::Close => Spot::Close,
@@ -244,6 +266,7 @@ impl From<Spot> for Hit {
             Spot::Session => Hit::Session,
             Spot::Tab(key) => Hit::Window(key),
             Spot::NewWindow => Hit::NewWindow,
+            Spot::Detached => Hit::Detached,
             Spot::Minimize => Hit::Minimize,
             Spot::Maximize => Hit::Maximize,
             Spot::Close => Hit::Close,
@@ -699,9 +722,9 @@ struct WindowState<'a> {
     /// An attached window's framed blocks under the strip (gui-design
     /// D47); `None` for local shells.
     body: Option<BodyState>,
-    /// An attached window's session switcher (gui-design F4, D60); `None`
-    /// for local shells.
-    switcher: Option<Switcher>,
+    /// An attached window's popover: the session switcher (gui-design F4,
+    /// D60) or the detached blocks (D61); `None` for local shells.
+    popover: Option<Popover>,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -1676,10 +1699,9 @@ impl WindowState<'_> {
         let places = self.places(self.active);
         self.repaint_body(&places);
         let scale = self.scale_factor as f32;
-        if let Some(switcher) = &mut self.switcher {
-            switcher.repaint(tokens, scale);
+        if let Some(popover) = &mut self.popover {
+            popover.repaint(tokens, scale);
         }
-        let pop_at = self.switcher_at();
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
         // right of the pane area. Built before the renderer is borrowed and
@@ -1701,10 +1723,33 @@ impl WindowState<'_> {
         let (Some(renderer), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) else {
             return;
         };
+        let size = window.inner_size();
         let Some(tab) = self.tabs.get(self.active) else {
+            // An attached window showing no block (gui-design D61): its
+            // strip, body and popover alone.
+            if self.source.is_some() {
+                let scene = attached_scene(
+                    self.strip.as_ref(),
+                    self.body.as_ref(),
+                    self.popover.as_ref(),
+                );
+                renderer.render(
+                    &[],
+                    &chrome,
+                    scene,
+                    &status,
+                    &mut self.font,
+                    &mut self.ui_font,
+                    size.width,
+                    size.height,
+                    divider,
+                    self.theme.bg,
+                    tokens.frame,
+                    self.pad,
+                );
+            }
             return;
         };
-        let size = window.inner_size();
         // Taskbar progress (G01 stretch, Windows only): resolved once per
         // frame like the title below, from the same winit `Window`.
         #[cfg(windows)]
@@ -1863,28 +1908,11 @@ impl WindowState<'_> {
                 search: SearchColors::default(),
             });
         }
-        let scene = Scene {
-            strip: self
-                .strip
-                .as_ref()
-                .and_then(StripState::painted)
-                .map(|s| &s.pixmap),
-            body: self
-                .body
-                .as_ref()
-                .and_then(BodyState::painted)
-                .map(|b| &b.pixmap),
-            over: self
-                .body
-                .as_ref()
-                .and_then(BodyState::painted)
-                .map_or(&[], |b| &b.over),
-            pop: self
-                .switcher
-                .as_ref()
-                .and_then(Switcher::painted)
-                .map(|p| (&p.pixmap, pop_at)),
-        };
+        let scene = attached_scene(
+            self.strip.as_ref(),
+            self.body.as_ref(),
+            self.popover.as_ref(),
+        );
         renderer.render(
             &frames,
             &chrome,
@@ -2612,6 +2640,7 @@ impl WindowState<'_> {
             scale: self.scale_factor as f32,
             hover: self.hover.and_then(Hit::spot),
             pressed: self.pressed.and_then(Hit::spot),
+            detached_open: self.popover_kind() == Some(Kind::Detached),
         };
         if let Some(strip) = &mut self.strip {
             strip.repaint(look, width);
@@ -2625,7 +2654,12 @@ impl WindowState<'_> {
         let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else {
             return;
         };
+        let detached = self
+            .strip
+            .as_ref()
+            .map_or(0, |s| s.session().detached.len());
         let Some(tab) = self.tabs.get(self.active) else {
+            self.repaint_empty(detached);
             return;
         };
         let (focus, zoomed, ids) = (tab.focus, tab.zoomed, tab.layout.ids());
@@ -2686,7 +2720,38 @@ impl WindowState<'_> {
         let scene = blocks::Scene {
             blocks: shown,
             rail,
-            ribbon: body.ribbon(ids.len(), Some(focus), armed),
+            ribbon: body.ribbon(ids.len(), detached, Some(focus), armed),
+            empty: None,
+        };
+        let height = (size.height as usize).saturating_sub(top);
+        body.repaint(size.width as usize, height, scene, look);
+    }
+
+    /// Paint a body showing no block: with `detached` blocks out of the
+    /// layout it says so (gui-design D61); with none yet, nothing.
+    fn repaint_empty(&mut self, detached: usize) {
+        let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else {
+            return;
+        };
+        if detached == 0 {
+            return;
+        }
+        let top = self.chrome_h();
+        let look = blocks::Look {
+            chrome: self.chrome_colors(),
+            bg: self.theme.bg,
+            scale: self.scale_factor as f32,
+            hover: None,
+            pressed: None,
+        };
+        let armed = self.armed;
+        let Some(body) = &mut self.body else {
+            return;
+        };
+        let scene = blocks::Scene {
+            ribbon: body.ribbon(0, detached, None, armed),
+            empty: Some(detached),
+            ..blocks::Scene::default()
         };
         let height = (size.height as usize).saturating_sub(top);
         body.repaint(size.width as usize, height, scene, look);
@@ -3070,9 +3135,13 @@ impl WindowState<'_> {
                     source.new_window();
                 }
             }
-            Hit::Session if self.switcher.is_some() => {
+            Hit::Session if self.popover.is_some() => {
                 self.close_overlay();
-                self.toggle_switcher();
+                self.toggle_popover(Kind::Switcher);
+            }
+            Hit::Detached => {
+                self.close_overlay();
+                self.toggle_popover(Kind::Detached);
             }
             Hit::ShellMenu | Hit::Session => {
                 let was_menu = matches!(self.overlay, Some(Overlay::Menu { .. }));
@@ -5897,14 +5966,25 @@ impl WindowState<'_> {
         }
     }
 
+    /// Show no block: every block of the source's window is detached
+    /// (gui-design D61). The body says so until a layout comes again.
+    fn show_empty(&mut self) {
+        if self.source.is_none() {
+            return;
+        }
+        self.tabs.clear();
+        self.active = 0;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Show the source's `session` on the top strip.
     fn show_session(&mut self, session: super::source::Session) {
         if let Some(body) = &mut self.body {
             body.set_session(session.local, &session.host);
         }
-        if let Some(switcher) = &mut self.switcher {
-            switcher.update(session.sessions.clone());
-        }
+        self.refresh_popover(&session);
         if let Some(strip) = &mut self.strip {
             strip.show(session);
             if let Some(window) = &self.window {
@@ -5923,6 +6003,25 @@ impl WindowState<'_> {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
+        }
+        // Detached rows say their blocks' states.
+        if self.popover_kind() == Some(Kind::Detached)
+            && let Some(session) = self.strip.as_ref().map(|s| s.session().clone())
+        {
+            self.refresh_popover(&session);
+        }
+    }
+
+    /// The open popover's rows for `session` now (D60, D61: rows update
+    /// live).
+    fn refresh_popover(&mut self, session: &super::source::Session) {
+        let rows = match self.popover_kind() {
+            Some(Kind::Switcher) => self.switcher_rows(session),
+            Some(Kind::Detached) => self.detached_rows(session),
+            None => return,
+        };
+        if let Some(popover) = &mut self.popover {
+            popover.update(rows);
         }
     }
 
@@ -6053,41 +6152,98 @@ impl WindowState<'_> {
         }
     }
 
-    /// An attached window's prefix keys (gui-design F2): Ctrl-] arms, and
-    /// the next key runs. Returns whether the key was taken.
-    /// Whether the session switcher is open.
-    fn switcher_open(&self) -> bool {
-        self.switcher.as_ref().is_some_and(Switcher::is_open)
+    /// Which popover is open, if any.
+    fn popover_kind(&self) -> Option<Kind> {
+        self.popover.as_ref().and_then(Popover::kind)
     }
 
-    /// Open the session switcher under the session chip, or close it
-    /// (gui-design D60): the server's sessions, then the menu's items.
-    fn toggle_switcher(&mut self) {
-        let menu = switcher::Menu {
-            host: self
-                .strip
-                .as_ref()
-                .map(|s| s.session().host.clone())
-                .unwrap_or_default(),
-            sessions: self
-                .strip
-                .as_ref()
-                .map(|s| s.session().sessions.clone())
-                .unwrap_or_default(),
-            items: self.switcher_items().into_iter().map(|i| i.label).collect(),
-        };
+    /// Open the `kind` popover, or close it if it is the one open: the
+    /// session switcher under the session chip (gui-design D60), or the
+    /// detached blocks under their chip (D61).
+    fn toggle_popover(&mut self, kind: Kind) {
         self.set_armed(false);
-        let Some(switcher) = &mut self.switcher else {
-            return;
-        };
-        if switcher.is_open() {
-            switcher.close();
-        } else {
-            switcher.open(menu);
+        let open = self.popover_kind();
+        if let Some(popover) = &mut self.popover {
+            popover.close();
+        }
+        if open != Some(kind) {
+            self.open_popover(kind);
         }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// Open the `kind` popover on the session shown now.
+    fn open_popover(&mut self, kind: Kind) {
+        let Some(strip) = &self.strip else {
+            return;
+        };
+        let session = strip.session();
+        let s = self.scale_factor as f32;
+        let top = (popover::TOP * s).round() as usize;
+        let (header, rows, x) = match kind {
+            Kind::Switcher => (
+                session.host.clone(),
+                self.switcher_rows(session),
+                (popover::SWITCHER_X * s).round() as usize,
+            ),
+            Kind::Detached => {
+                // Right edge on the chip's right edge (D61).
+                let Some(chip) = strip.painted().and_then(|p| {
+                    p.spots
+                        .iter()
+                        .find(|(_, spot)| *spot == Spot::Detached)
+                        .map(|(r, _)| *r)
+                }) else {
+                    return;
+                };
+                let x = (chip.x + chip.w - popover::DETACHED_W * s).max(0.0);
+                (
+                    "Detached blocks".to_owned(),
+                    self.detached_rows(session),
+                    x.round() as usize,
+                )
+            }
+        };
+        if rows.is_empty() {
+            return;
+        }
+        let menu = Menu { kind, header, rows };
+        if let Some(popover) = &mut self.popover {
+            popover.open(menu, (x, top));
+        }
+    }
+
+    /// The switcher's rows: the server's sessions, then the menu's items.
+    fn switcher_rows(&self, session: &super::source::Session) -> Vec<Row> {
+        let sessions = session.sessions.iter().cloned().map(Row::Session);
+        let items = self
+            .switcher_items()
+            .into_iter()
+            .map(|i| Row::Item(i.label));
+        sessions.chain(items).collect()
+    }
+
+    /// The detached popover's rows: each detached block's name, lead
+    /// glyph, state and age (D61).
+    fn detached_rows(&self, session: &super::source::Session) -> Vec<Row> {
+        let now = Instant::now();
+        session
+            .detached
+            .iter()
+            .map(|d| {
+                let body = self.body.as_ref();
+                let state = body.map_or("Idle", |b| b.state(d.key));
+                let age = d.since.map(|t| now.saturating_duration_since(t));
+                Row::Detached(DetachedRow {
+                    key: d.key,
+                    name: d.name.clone(),
+                    detail: popover::detached_detail(state, age),
+                    lead: body.and_then(|b| b.lead(d.key)),
+                })
+            })
+            .collect()
     }
 
     /// The menu's items an attached window lists under its sessions: the
@@ -6103,20 +6259,20 @@ impl WindowState<'_> {
         items
     }
 
-    /// A key while the switcher is open: Up/Down move, Enter picks, Esc
+    /// A key while a popover is open: Up/Down move, Enter picks, Esc
     /// closes; the rest are dropped.
-    fn switcher_key(&mut self, key: &Key) {
+    fn popover_key(&mut self, key: &Key) {
         use winit::keyboard::NamedKey;
-        let Some(switcher) = &mut self.switcher else {
+        let Some(popover) = &mut self.popover else {
             return;
         };
         match key {
-            Key::Named(NamedKey::ArrowUp) => switcher.step(false),
-            Key::Named(NamedKey::ArrowDown) => switcher.step(true),
-            Key::Named(NamedKey::Escape) => switcher.close(),
+            Key::Named(NamedKey::ArrowUp) => popover.step(false),
+            Key::Named(NamedKey::ArrowDown) => popover.step(true),
+            Key::Named(NamedKey::Escape) => popover.close(),
             Key::Named(NamedKey::Enter) => {
-                let picked = switcher.selected();
-                self.switcher_pick(picked);
+                let picked = popover.selected();
+                self.popover_pick(picked);
             }
             _ => return,
         }
@@ -6125,17 +6281,18 @@ impl WindowState<'_> {
         }
     }
 
-    /// Carry out `picked` and close the switcher: show another session,
-    /// or run a menu item; the current session only closes.
-    fn switcher_pick(&mut self, picked: Option<Pick>) {
-        let Some(switcher) = &mut self.switcher else {
+    /// Carry out `picked` and close the popover: show another session,
+    /// run a menu item or reattach a block; the current session only
+    /// closes.
+    fn popover_pick(&mut self, picked: Option<Pick>) {
+        let Some(popover) = &mut self.popover else {
             return;
         };
         let Some(picked) = picked else {
             return; // a disabled row stays open
         };
-        let current = matches!(picked, Pick::Session(key) if switcher.is_current(key));
-        switcher.close();
+        let current = matches!(picked, Pick::Session(key) if popover.is_current(key));
+        popover.close();
         match picked {
             Pick::Session(_) if current => {}
             Pick::Session(key) => {
@@ -6148,51 +6305,42 @@ impl WindowState<'_> {
                     self.menu_pick(item.kind);
                 }
             }
+            // Needs no shown block: it may fill an empty window (D61).
+            Pick::Reattach(key) => {
+                if let Some(source) = self.source {
+                    source.act(Act::Reattach(key));
+                }
+            }
         }
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
 
-    /// Where the switcher sits, in window px.
-    fn switcher_at(&self) -> (usize, usize) {
-        let s = self.scale_factor as f32;
-        let (x, y) = switcher::AT;
-        ((x * s).round() as usize, (y * s).round() as usize)
-    }
-
-    /// The switcher row under window pixel `(x, y)`, and whether the point
-    /// is on the switcher at all.
-    fn switcher_row(&self, x: f64, y: f64) -> (Option<usize>, bool) {
-        let Some(pop) = self.switcher.as_ref().and_then(Switcher::painted) else {
-            return (None, false);
-        };
-        let (ox, oy) = self.switcher_at();
-        let (px, py) = ((x - ox as f64) as f32, (y - oy as f64) as f32);
-        (pop.row(px, py), pop.contains(px, py))
+    /// Whether a popover is open.
+    fn popover_open(&self) -> bool {
+        self.popover_kind().is_some()
     }
 
     /// The pointer moved to `(x, y)`: light the row under it.
-    fn switcher_hover(&mut self, x: f64, y: f64) {
-        let (row, _) = self.switcher_row(x, y);
-        let changed = self.switcher.as_mut().is_some_and(|s| s.hover(row));
+    fn popover_hover(&mut self, x: f64, y: f64) {
+        let changed = self.popover.as_mut().is_some_and(|p| p.hover(x, y));
         if let (true, Some(window)) = (changed, &self.window) {
             window.request_redraw();
         }
     }
 
-    /// A click while the switcher is open: a row picks, a click elsewhere
-    /// on the panel does nothing, and one off it closes it.
-    fn switcher_click(&mut self, x: f64, y: f64) {
-        match self.switcher_row(x, y) {
-            (Some(row), _) => {
-                let picked = self.switcher.as_ref().and_then(|s| s.pick(row));
-                self.switcher_pick(picked);
-            }
-            (None, true) => {}
-            (None, false) => {
-                if let Some(switcher) = &mut self.switcher {
-                    switcher.close();
+    /// A click while a popover is open: a row picks, a click elsewhere on
+    /// the panel does nothing, and one off it closes it. A click on the
+    /// open popover's own chip closes it too, through the chip.
+    fn popover_click(&mut self, x: f64, y: f64) {
+        let hit = self.popover.as_ref().map(|p| p.hit(x, y));
+        match hit {
+            None | Some((None, true)) => {}
+            Some((Some(picked), _)) => self.popover_pick(Some(picked)),
+            Some((None, false)) => {
+                if let Some(popover) = &mut self.popover {
+                    popover.close();
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
@@ -6201,6 +6349,8 @@ impl WindowState<'_> {
         }
     }
 
+    /// An attached window's prefix keys (gui-design F2): Ctrl-] arms, and
+    /// the next key runs. Returns whether the key was taken.
     fn prefix_key(&mut self, key: &Key, physical: PhysicalKey) -> bool {
         if self.source.is_none() {
             return false;
@@ -6300,7 +6450,7 @@ impl WindowState<'_> {
                         })
                         .unwrap_or_default();
                     let ui_owns_keys = self.overlay.is_some()
-                        || self.switcher_open()
+                        || self.popover_open()
                         || self.searching.is_some()
                         || self.copy_mode.is_some();
                     let release = KeyRelease {
@@ -6318,9 +6468,9 @@ impl WindowState<'_> {
                     }
                     return;
                 }
-                // An open switcher owns every key (gui-design D60).
-                if self.switcher_open() {
-                    self.switcher_key(&event.logical_key);
+                // An open popover owns every key (gui-design D60, D61).
+                if self.popover_open() {
+                    self.popover_key(&event.logical_key);
                     self.consumed_keys.consume(event.physical_key);
                     return;
                 }
@@ -6583,7 +6733,7 @@ impl WindowState<'_> {
                         window.request_redraw();
                     }
                 }
-                self.switcher_hover(position.x, position.y);
+                self.popover_hover(position.x, position.y);
                 // Settings-page hover: highlight the card under the pointer.
                 if let Some((col, grid_row)) = self.overlay_cell(position.x, position.y) {
                     let grid_rows = self.rows as usize;
@@ -6686,10 +6836,10 @@ impl WindowState<'_> {
                     return;
                 };
                 match state {
-                    // An open switcher takes the click: a row picks, any
+                    // An open popover takes the click: a row picks, any
                     // other place closes it (gui-design D60).
-                    ElementState::Pressed if self.switcher_open() => {
-                        self.switcher_click(self.mouse_pos.0, self.mouse_pos.1);
+                    ElementState::Pressed if self.popover_open() => {
+                        self.popover_click(self.mouse_pos.0, self.mouse_pos.1);
                     }
                     ElementState::Pressed => {
                         // Ctrl+click follows an OSC 8 hyperlink under the
@@ -6921,8 +7071,8 @@ impl<'a> App<'a> {
                 Some(_) => Some(BodyState::new().ok_or("the interface font failed to parse")?),
                 None => None,
             },
-            switcher: match self.source {
-                Some(_) => Some(Switcher::new().ok_or("the interface font failed to parse")?),
+            popover: match self.source {
+                Some(_) => Some(Popover::new().ok_or("the interface font failed to parse")?),
                 None => None,
             },
             config: self.config.clone(),
@@ -7135,6 +7285,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Zoom(key) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
                     w.zoom_from_source(key);
+                }
+            }
+            UserEvent::Empty => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.show_empty();
                 }
             }
             UserEvent::Session(session) => {

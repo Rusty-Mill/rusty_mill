@@ -1,6 +1,7 @@
 //! An attached window's top strip (gui-design F1; geometry D46, scope D45):
 //! the session chip, a tab per server window with its layout thumbnail, a
-//! "+" for a new window, the attached-clients count and the caption buttons.
+//! "+" for a new window, the detached-blocks chip (D61), the
+//! attached-clients count and the caption buttons.
 //!
 //! Pure: [`paint`] turns a [`Session`] and a [`Look`] into a [`Strip`], the
 //! pixels both renderers present plus the spots a click can hit. Sizes are
@@ -44,6 +45,9 @@ const TEXT_PX: f32 = 13.0;
 const SMALL_PX: f32 = 12.0;
 /// The caption close button's hover, native red as on Windows 11.
 const CLOSE_HOVER: (u32, u32) = (0xFFFFFF, 0xC42B1C);
+/// The detached chip's height and side padding (D61).
+const DETACHED_H: f32 = 28.0;
+const DETACHED_PAD: f32 = 12.0;
 
 /// What a spot on the strip does when clicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +58,8 @@ pub(crate) enum Spot {
     Tab(u64),
     /// A new window.
     NewWindow,
+    /// The detached chip: its popover (D61).
+    Detached,
     Minimize,
     Maximize,
     Close,
@@ -66,6 +72,8 @@ pub(crate) struct Look {
     pub scale: f32,
     pub hover: Option<Spot>,
     pub pressed: Option<Spot>,
+    /// Whether the detached popover is open (D61: raised, accent border).
+    pub detached_open: bool,
 }
 
 /// A painted strip: its pixels and the spots on them. A click anywhere
@@ -205,7 +213,12 @@ pub(crate) fn paint(
         ICON_STROKE * s,
         c.muted,
     );
-    let right = icon_x - CAPTION_SPACE * s;
+    let mut right = icon_x - CAPTION_SPACE * s;
+    if !session.detached.is_empty() {
+        let r = detached_chip(&mut p, look, font, session.detached.len(), right);
+        spots.push((r, Spot::Detached));
+        right = r.x - CAPTION_SPACE * s;
+    }
 
     // The session chip.
     let mut x = LEFT * s;
@@ -313,6 +326,45 @@ pub(crate) fn paint(
         spots.push((r, Spot::NewWindow));
     }
     Strip { pixmap: p, spots }
+}
+
+/// The "{n} detached" chip ending at `right` (D61): a zoom icon, the
+/// count and a chevron; raised with an accent border while its popover
+/// is open.
+fn detached_chip(p: &mut Pixmap, look: &Look, font: &mut UiText, n: usize, right: f32) -> Rect {
+    let s = look.scale;
+    let c = &look.chrome;
+    let mid = HEIGHT * s / 2.0;
+    let label = format!("{n} detached");
+    let text_w = font.width(&label, Weight::Medium, SMALL_PX * s);
+    let w = (DETACHED_PAD + ICON + GAP) * s + text_w + (GAP + ICON + DETACHED_PAD) * s;
+    let r = Rect {
+        x: right - w,
+        y: mid - DETACHED_H * s / 2.0,
+        w,
+        h: DETACHED_H * s,
+    };
+    let lit = look.detached_open || look.hover == Some(Spot::Detached);
+    let rest = if lit { c.raised } else { c.base };
+    surface(p, look, Spot::Detached, r, Some(rest));
+    let edge = if look.detached_open { c.accent } else { c.line };
+    p.border(r, CHIP_R * s, s.max(1.0).round(), edge);
+    let icon_y = mid - ICON * s / 2.0;
+    let mut x = r.x + DETACHED_PAD * s;
+    p.icon(icons::ZOOM, x, icon_y, ICON * s, ICON_STROKE * s, c.muted);
+    x += (ICON + GAP) * s;
+    let base = mid + font.centre_drop(SMALL_PX * s);
+    x += p.text(font, &label, Weight::Medium, SMALL_PX * s, x, base, c.text);
+    x += GAP * s;
+    p.icon(
+        icons::CHEVRON_DOWN,
+        x,
+        icon_y,
+        ICON * s,
+        ICON_STROKE * s,
+        c.muted,
+    );
+    r
 }
 
 /// "{n} clients attached", singular for one.
@@ -472,6 +524,7 @@ mod tests {
     use crate::core::Theme;
     use crate::gui::chrome::Chrome;
     use crate::gui::layout::Dir;
+    use crate::gui::source::Detached;
     use crate::gui::text::UiText;
 
     fn session(windows: usize) -> Session {
@@ -494,6 +547,7 @@ mod tests {
             clients: 2,
             local: true,
             sessions: Vec::new(),
+            detached: Vec::new(),
         }
     }
 
@@ -503,6 +557,7 @@ mod tests {
             scale,
             hover: None,
             pressed: None,
+            detached_open: false,
         }
     }
 
@@ -663,5 +718,60 @@ mod tests {
         let running = paint(&session(1), &[2], &look(1.0), 1200, &mut f);
         assert_eq!(accent(&idle), 0);
         assert!(accent(&running) > 0, "block 2's cell is the accent");
+    }
+
+    fn with_detached(n: usize) -> Session {
+        let mut s = session(2);
+        s.detached = (0..n)
+            .map(|i| Detached {
+                key: 30 + i as u64,
+                name: format!("block {i}"),
+                since: None,
+            })
+            .collect();
+        s
+    }
+
+    #[test]
+    fn the_detached_chip_shows_only_with_detached_blocks() {
+        let mut f = font();
+        let none = paint(&session(2), &[], &look(1.0), 1200, &mut f);
+        assert!(!none.spots.iter().any(|(_, s)| *s == Spot::Detached));
+        let some = paint(&with_detached(2), &[], &look(1.0), 1200, &mut f);
+        let (chip, _) = some
+            .spots
+            .iter()
+            .find(|(_, s)| *s == Spot::Detached)
+            .expect("a detached chip");
+        assert_eq!(chip.h, 28.0);
+        let add = some
+            .spots
+            .iter()
+            .find(|(_, s)| *s == Spot::NewWindow)
+            .map(|(r, _)| r.x + r.w)
+            .expect("+");
+        assert!(add < chip.x, "the chip sits right of the tabs");
+    }
+
+    #[test]
+    fn an_open_detached_chip_has_an_accent_border() {
+        let mut f = font();
+        let c = look(1.0).chrome;
+        let accent = |strip: &super::Strip| {
+            strip
+                .pixmap
+                .pixels()
+                .iter()
+                .filter(|&&px| px == c.accent)
+                .count()
+        };
+        let shut = paint(&with_detached(1), &[], &look(1.0), 1200, &mut f);
+        let open = Look {
+            detached_open: true,
+            ..look(1.0)
+        };
+        let open = paint(&with_detached(1), &[], &open, 1200, &mut f);
+        assert_eq!(accent(&shut), 0);
+        assert!(accent(&open) > 0);
     }
 }

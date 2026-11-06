@@ -1,8 +1,8 @@
 //! The GUI client's source against a real server: a block's screen and
 //! output reach its pane, typing needs the lease the focus brings, the
 //! window's layout changes are followed, the window's own split and zoom
-//! requests come back as layout and zoom, and a session picked in the
-//! switcher is shown.
+//! requests come back as layout and zoom, a session picked in the
+//! switcher is shown, and a detached block is listed and put back.
 
 #![cfg(target_os = "linux")]
 
@@ -364,4 +364,145 @@ fn a_session_picked_in_the_switcher_is_shown_on_the_same_connection() {
             .any(|c| c.key == listed.key && c.current)
     );
     assert_eq!(now.windows.len(), 1, "only the other session's window");
+}
+
+/// A control client of its own on `socket`, welcomed.
+fn control(socket: &std::path::Path) -> Conn<UnixStream> {
+    let mut conn = Conn::new(UnixStream::connect(socket).expect("connect"));
+    conn.send(&Message::Hello {
+        features: CONTROL,
+        resume: None,
+        takeover: None,
+    })
+    .expect("hello");
+    conn
+}
+
+#[test]
+fn a_detached_block_is_listed_and_reattach_puts_it_back() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+    let next = |want: &dyn Fn(&Out) -> bool| loop {
+        let out = outs.recv_timeout(PATIENCE).expect("an event");
+        if want(&out) {
+            return out;
+        }
+    };
+
+    attached.source.act(Act::Split {
+        key,
+        dir: Dir::Vertical,
+    });
+    let Out::Layout(Some(Tree::Split { b, .. })) =
+        next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. }))))
+    else {
+        unreachable!("matched above");
+    };
+    let Tree::Pane(new) = *b else {
+        panic!("a block on the right: {b:?}");
+    };
+
+    // Another client detaches the new block (the GUI has no key for it).
+    let mut conn = control(&socket);
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let listed = req.call(|req| Message::List { req }).expect("a list");
+    let blocks: Vec<_> = listed
+        .iter()
+        .filter_map(|m| match m {
+            Message::Entry {
+                entry: rusty_mux_proto::Entry::Block { block, .. },
+                ..
+            } => Some(*block),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(blocks.len(), 2);
+    let session = loop {
+        let s = next_session(&outs);
+        if s.windows
+            .first()
+            .is_some_and(|w| matches!(w.tree, Some(Tree::Split { .. })))
+        {
+            break s;
+        }
+    };
+    assert!(session.detached.is_empty());
+    // Detach each in turn until the GUI's `new` is the one out.
+    let mut out = None;
+    for block in blocks {
+        req.call(|req| Message::DetachBlock { req, block })
+            .expect("detached");
+        let s = loop {
+            let s = next_session(&outs);
+            if !s.detached.is_empty() {
+                break s;
+            }
+        };
+        if s.detached[0].key == new {
+            out = Some(s);
+            break;
+        }
+        // The other one went: put it back and try the next.
+        attached.source.act(Act::Reattach(s.detached[0].key));
+        loop {
+            if next_session(&outs).detached.is_empty() {
+                break;
+            }
+        }
+    }
+    let s = out.expect("the new block detached");
+    assert_eq!(s.detached.len(), 1);
+    assert!(s.detached[0].since.is_some(), "timed from the change seen");
+    assert!(!s.detached[0].name.is_empty());
+
+    attached.source.act(Act::Reattach(new));
+    assert!(
+        matches!(
+            next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. })))),
+            Out::Layout(Some(_))
+        ),
+        "two blocks again"
+    );
+    loop {
+        if next_session(&outs).detached.is_empty() {
+            break;
+        }
+    }
+
+    // With every block detached the window shows none, and lists both.
+    let listed = req.call(|req| Message::List { req }).expect("a list");
+    for m in listed {
+        if let Message::Entry {
+            entry: rusty_mux_proto::Entry::Block { block, .. },
+            ..
+        } = m
+        {
+            req.call(|req| Message::DetachBlock { req, block })
+                .expect("detached");
+        }
+    }
+    assert_eq!(next(&|o| matches!(o, Out::Empty)), Out::Empty);
+    loop {
+        if next_session(&outs).detached.len() == 2 {
+            break;
+        }
+    }
+    attached.source.act(Act::Reattach(new));
+    assert_eq!(
+        next(&|o| matches!(o, Out::Layout(_))),
+        Out::Layout(Some(Tree::Pane(new))),
+        "it fills the empty window"
+    );
 }

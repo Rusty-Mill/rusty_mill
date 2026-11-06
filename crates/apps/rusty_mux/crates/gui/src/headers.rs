@@ -145,6 +145,16 @@ impl Headers {
         })
     }
 
+    /// `block`'s program: the one in the foreground, else its shell.
+    pub fn program(&self, block: BlockId) -> Option<String> {
+        let k = self.known.get(&block)?;
+        k.foreground
+            .as_ref()
+            .or(k.shell.as_ref())
+            .map(|p| p.1.clone())
+            .filter(|n| !n.is_empty())
+    }
+
     /// Whether `req` is a call asked here.
     pub fn owns(&self, req: u64) -> bool {
         self.pending.contains_key(&req)

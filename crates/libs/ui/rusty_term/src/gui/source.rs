@@ -10,6 +10,7 @@
 
 use std::io;
 use std::sync::mpsc::{Receiver, SyncSender};
+use std::time::Instant;
 
 use winit::event_loop::EventLoopProxy;
 
@@ -100,6 +101,20 @@ pub struct Session {
     /// Every session on the server, this one included, in order, for the
     /// switcher (gui-design F4, D60).
     pub sessions: Vec<SessionChoice>,
+    /// The shown window's detached blocks (gui-design F6, D61), newest
+    /// first; empty when the source can't put one back.
+    pub detached: Vec<Detached>,
+}
+
+/// A block taken out of the shown window's layout, still running.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Detached {
+    /// Its pane key.
+    pub key: u64,
+    /// Its name, else its title, else its program.
+    pub name: String,
+    /// When this client saw it go; `None` when it went before.
+    pub since: Option<Instant>,
 }
 
 /// One of the server's sessions, as the switcher lists it (gui-design D60).
@@ -207,6 +222,9 @@ pub enum Act {
     Unzoom,
     /// Close pane `key`'s block.
     Close(u64),
+    /// Put detached block `key` back, beside the focused pane (gui-design
+    /// D61); the source places it.
+    Reattach(u64),
 }
 
 /// The source's way into a running window, from any thread. Each call is
@@ -223,6 +241,12 @@ impl Remote {
     /// Move the focus to pane `key`, as another client did.
     pub fn focus(&self, key: u64) -> bool {
         self.0.send_event(UserEvent::Focus(key)).is_ok()
+    }
+
+    /// Show no pane: the window's blocks are all detached (gui-design
+    /// D61). A later [`Remote::layout`] shows panes again.
+    pub fn empty(&self) -> bool {
+        self.0.send_event(UserEvent::Empty).is_ok()
     }
 
     /// Show pane `key` alone, or every pane with `None` (gui-design F7).
