@@ -127,6 +127,7 @@ Precise contracts used by this guide:
 | D117 | #704 `rusty_orch consolidate`: public subcommand approved as built in PR #1539 | [stated] 2026-11-06 (#704) |
 | D118 | #704 D115/D114 build: the limits record, its command, the open check and orch's half-limit leg | [default] 2026-11-06 (#704) |
 | D119 | #704 `bbp erosion approve` and `bbp erosion limits`: both commands and their trust model approved as built in PR #1543 | [stated] 2026-11-06 (#704) |
+| D120 | #704 slice 4d: half-limit leg firing rule, measuring, `--bbp-bin` and pending base | [default] 2026-11-06 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -1153,3 +1154,17 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_3af56d3beda444f0b68cecbad92b12f4
 **Key.** lel:704:erosion-limits-commands-trust
 **Source.** Nano, "1, approve as built", in the rusty-mill project chat, message `cmsg_01Y8j3ihrYW8jedySti37M9cH5a9PiPyhKBCrdwb9eatkm`, 2026-11-06T14:20:02Z, replying to `cmsg_01Y8j3ihrYW8jedySti37M9cEocaiXtqjs3qXh2GXqe2c2` (14:15:18Z), which asked for his call on #1543's second new command (`bbp erosion limits`) and its unchecked source. That is option a of the expert's escalation (approve both as built). D37, D111, D115, D117, D118.
+
+
+## D120. #704 slice 4d: half-limit leg firing rule, measuring, `--bbp-bin` and pending base
+
+**Decision.** Refines D118's orch half-limit leg (D114):
+- **Firing rule.** Per metric, `change = head - last_base`. The leg fires when, for either metric, `change > 0 && 2 * change >= limit` (integer arithmetic). A zero or negative change never fires it. For limits of 1 bp or more this is the same as D118's literal rule.
+- **Measuring.** When limits are recorded, every run measures HEAD (one `erosion check --report-only`) to evaluate the leg, even when the count leg isn't due. With no record, nothing is measured and the run keeps today's count-only wait.
+- **`--bbp-bin`.** A top-level option in both plan and `--execute` modes, default `bbp`. Plan mode runs only the read-only `bbp erosion limits --dir D`.
+- **Pending base.** The journal's `pending.base` becomes `{commit, concentration_bp, duplication_bp}`, so settling an open sets `last_base` from the levels measured for it. No compatibility shim: slice 4b's journal format isn't on main.
+**Why.** D44 and D114 fire on cumulative *erosion*: a change that is zero or an improvement isn't erosion. Read literally, D118 with a 0 bp limit would reopen a cleanup on every run once the last one closed. Measuring is a local git computation with no provider calls. orch still reads limits only through the host CLI (D118). The journal format hasn't shipped.
+**Rejected.** D118's literal `2 * change >= limit` with no sign check. Measuring HEAD on every run when no limits are recorded. Keeping `--bbp-bin` `--execute`-only, which leaves plan mode unable to report the leg.
+**Tag.** [default] · remind-me: mem_23a36220effe41ffbc6f50f5fe6f6cdc
+**Key.** lel:704:half-limit-leg-build-details
+**Source.** Builder questions 1–4 from the #704 slice 4d build, 2026-11-06; D44, D110, D114, D118; `rusty_orch` `src/consolidate.rs` (branch `slice4d`). Numbered D120 after D119.

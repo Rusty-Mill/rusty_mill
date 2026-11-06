@@ -44,6 +44,12 @@ fn plan_is_the_default_and_execute_needs_its_inputs() {
     let plan = options(argv("--dir /b --repo r --repo-path /p")).unwrap();
     assert_eq!(plan.execute, None);
     assert_eq!(plan.erosion_bin, "erosion");
+    assert_eq!(plan.bbp_bin, "bbp");
+    let read_only = options(argv("--dir /b --repo r --repo-path /p --bbp-bin /x/bbp")).unwrap();
+    assert_eq!(
+        (read_only.bbp_bin.as_str(), read_only.execute),
+        ("/x/bbp", None)
+    );
     for bad in [
         "--dir /b --repo r",
         "--dir /b --repo r --repo-path /p --roster x",
@@ -60,7 +66,6 @@ fn plan_is_the_default_and_execute_needs_its_inputs() {
     .unwrap()
     .execute
     .unwrap();
-    assert_eq!(e.bbp_bin, "bbp");
     assert_eq!(
         e.passthrough,
         [
@@ -117,7 +122,7 @@ fn a_pending_open_settles_by_whether_the_store_has_the_task() {
     let snapshot = BTreeMap::from([("a".to_string(), 6)]);
     j.pending = Some(Pending {
         task: "c".into(),
-        base: "b".into(),
+        base: base("b", 10, 20),
         snapshot: snapshot.clone(),
     });
     let missing = j.clone().settle(&[log("a", "r", &[], 6)]);
@@ -126,6 +131,63 @@ fn a_pending_open_settles_by_whether_the_store_has_the_task() {
     assert_eq!(landed.marker, snapshot);
     assert_eq!(landed.cleanups, ["c"]);
     assert_eq!(landed.pending, None);
+    assert_eq!(landed.last_base, Some(base("b", 10, 20)));
+}
+
+fn base(commit: &str, c: i64, d: i64) -> Base {
+    Base {
+        commit: commit.into(),
+        concentration_bp: c,
+        duplication_bp: d,
+    }
+}
+
+fn levels(c: i64, d: i64) -> Levels {
+    Levels {
+        concentration_bp: c,
+        duplication_bp: d,
+    }
+}
+
+#[test]
+fn the_half_leg_fires_on_a_rise_of_half_either_limit() {
+    let lim = |c, d| {
+        Some(Limits {
+            concentration_bp: c,
+            duplication_bp: d,
+        })
+    };
+    let last = base("b", 100, 50);
+    assert_eq!(half(None, Some(&last), levels(999, 999)), Half::Inactive);
+    assert_eq!(half(lim(10, 10), None, levels(999, 999)), Half::Start);
+    assert_eq!(half(lim(10, 10), Some(&last), levels(104, 54)), Half::Below);
+    assert_eq!(
+        half(lim(10, 10), Some(&last), levels(105, 50)),
+        Half::Reached
+    );
+    assert_eq!(
+        half(lim(10, 10), Some(&last), levels(90, 55)),
+        Half::Reached
+    );
+    assert_eq!(half(lim(1, 1), Some(&last), levels(101, 50)), Half::Reached);
+    // D120: no rise never fires, even against a 0 bp limit.
+    assert_eq!(half(lim(0, 0), Some(&last), levels(100, 49)), Half::Below);
+    assert_eq!(half(lim(0, 0), Some(&last), levels(100, 51)), Half::Reached);
+}
+
+#[test]
+fn limits_parse_the_newest_record_or_null() {
+    assert_eq!(Limits::parse("null\n").unwrap(), None);
+    let r = r#"{"at_ms":1,"concentration_bp":1,"duplication_bp":2,"by":"nano","source":"cmsg"}"#;
+    assert_eq!(
+        Limits::parse(r).unwrap(),
+        Some(Limits {
+            concentration_bp: 1,
+            duplication_bp: 2
+        })
+    );
+    assert!(Limits::parse("{}").is_err());
+    assert!(Limits::parse("nope").is_err());
 }
 
 #[test]
@@ -237,7 +299,8 @@ fn a_store_log_reads_as_its_repo_mode_and_acceptances() {
 /// Answers git and erosion; `bbp open` writes the task it was asked for.
 struct Fake {
     common: PathBuf,
-    levels: (i64, i64),
+    levels: RefCell<(i64, i64)>,
+    limits: Option<(i64, i64)>,
     calls: RefCell<Vec<Vec<String>>>,
 }
 
@@ -263,8 +326,13 @@ impl CommandRunner for Fake {
             ("git", "rev-parse") => BASE.into(),
             ("erosion", "check") => format!(
                 r#"{{"erosion":1,"concentration_bp":{{"base":{}}},"duplication_bp":{{"base":{}}}}}"#,
-                self.levels.0, self.levels.1
+                self.levels.borrow().0,
+                self.levels.borrow().1
             ),
+            ("bbp", "erosion") => match self.limits {
+                None => "null".into(),
+                Some((c, d)) => format!(r#"{{"concentration_bp":{c},"duplication_bp":{d}}}"#),
+            },
             ("bbp", "open") => {
                 let dir = PathBuf::from(flag("--dir").unwrap());
                 persist(&dir, &flag("--task").unwrap(), &flag("--repo").unwrap(), 0);
@@ -281,6 +349,10 @@ impl CommandRunner for Fake {
 }
 
 fn setup(levels: (i64, i64)) -> (PathBuf, Options, Fake) {
+    setup_with(levels, None)
+}
+
+fn setup_with(levels: (i64, i64), limits: Option<(i64, i64)>) -> (PathBuf, Options, Fake) {
     let root = temp();
     let profiles = root.join("profiles.json");
     fs::write(&profiles, set("check --base HEAD --cleanup")).unwrap();
@@ -289,15 +361,16 @@ fn setup(levels: (i64, i64)) -> (PathBuf, Options, Fake) {
         repo: "r".into(),
         repo_path: root.join("repo"),
         erosion_bin: "erosion".into(),
+        bbp_bin: "bbp".into(),
         execute: Some(Execute {
-            bbp_bin: "bbp".into(),
             profiles,
             passthrough: vec![("--roster", "x".into()), ("--work", "w".into())],
         }),
     };
     let fake = Fake {
         common: root.join("git"),
-        levels,
+        levels: RefCell::new(levels),
+        limits,
         calls: RefCell::default(),
     };
     (root, options, fake)
@@ -329,7 +402,7 @@ fn execute_opens_a_cleanup_then_waits_for_it_and_for_five_new_claims() {
         .calls
         .borrow()
         .iter()
-        .find(|c| c[0] == "bbp")
+        .find(|c| c[..2] == ["bbp", "open"])
         .cloned()
         .unwrap();
     for pair in [
@@ -360,7 +433,7 @@ fn a_zero_floor_skips_and_moves_the_marker() {
     persist(&options.dir, "a", "r", 5);
     let out = run_with(&options, &fake, 7).unwrap();
     assert!(out.contains(r#""action":"skipped""#), "{out}");
-    assert!(!fake.calls.borrow().iter().any(|c| c[0] == "bbp"));
+    assert!(!fake.calls.borrow().iter().any(|c| c[1] == "open"));
     let out = run_with(&options, &fake, 8).unwrap();
     assert!(
         out.contains(r#""action":"wait""#) && out.contains(r#""accepted":0"#),
@@ -391,4 +464,56 @@ fn a_terminal_cleanup_no_longer_blocks() {
     let mut done = log("c", "r", &[], 3);
     done.open = false;
     assert_eq!(due(&[done], &j), Due::Wait(0));
+}
+
+#[test]
+fn without_limits_a_waiting_run_measures_nothing() {
+    let (root, options, fake) = setup((10, 10));
+    persist(&options.dir, "a", "r", 1);
+    let out = run_with(&options, &fake, 7).unwrap();
+    assert!(out.contains(r#""half":"inactive""#), "{out}");
+    assert!(!fake.calls.borrow().iter().any(|c| c[0] == "erosion"));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn the_half_leg_starts_at_head_then_opens_on_half_a_limit() {
+    let (root, options, fake) = setup_with((100, 50), Some((10, 10)));
+    persist(&options.dir, "a", "r", 1);
+    let plan = Options {
+        execute: None,
+        ..options.clone()
+    };
+    let out = run_with(&plan, &fake, 6).unwrap();
+    assert!(out.contains(r#""half":"start""#), "{out}");
+    assert!(
+        !root.join("git").join(STATE).exists(),
+        "a plan writes nothing"
+    );
+
+    let out = run_with(&options, &fake, 7).unwrap();
+    assert!(
+        out.contains(r#""half":"start""#) && out.contains(r#""action":"wait""#),
+        "{out}"
+    );
+    *fake.levels.borrow_mut() = (104, 50);
+    let out = run_with(&options, &fake, 8).unwrap();
+    assert!(
+        out.contains(r#""half":"below""#) && out.contains(r#""last_base""#),
+        "{out}"
+    );
+    *fake.levels.borrow_mut() = (105, 50);
+    let out = run_with(&options, &fake, 9).unwrap();
+    assert!(
+        out.contains(r#""action":"opened""#) && out.contains(r#""trigger":"half""#),
+        "{out}"
+    );
+    // The open moved the base to the levels it measured, and the marker.
+    let journal: Journal = json::from_str(
+        &fs::read_to_string(root.join("git").join(STATE).join("journal.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(journal.last_base, Some(base(BASE, 105, 50)));
+    assert_eq!(journal.marker, BTreeMap::from([("a".into(), 2)]));
+    fs::remove_dir_all(root).unwrap();
 }

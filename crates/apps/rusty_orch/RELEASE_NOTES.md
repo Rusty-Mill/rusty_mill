@@ -4,6 +4,13 @@ One entry per merged PR against `main`, newest first. No version tags yet.
 
 ---
 
+## Half-limit erosion cleanups
+**2026-11-06**
+
+- `rusty_orch consolidate` now also opens a cleanup when erosion since the
+  last cleanup reaches half of Nano's approved limits. It stays off until
+  limits are recorded with `bbp erosion approve`.
+
 ## Scheduled erosion cleanups
 **2026-11-06**
 

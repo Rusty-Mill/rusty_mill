@@ -1,8 +1,9 @@
-//! `rusty_orch consolidate`: D44's scheduled cleanup, count leg only
-//! (D110, D113). After [`EVERY`] accepted claims on one repo's claims tasks
-//! since the last cleanup, it opens a claims task whose erosion profile runs
-//! `erosion check --cleanup`, through `bbp open --mode claims`. A read-only
-//! plan by default. The half-limit leg (D114) is not built yet.
+//! `rusty_orch consolidate`: D44's scheduled cleanup (D110, D113, D114,
+//! D118). It opens a claims task whose erosion profile runs `erosion check
+//! --cleanup`, through `bbp open --mode claims`, when either leg is due:
+//! [`EVERY`] accepted claims on one repo's claims tasks since the last
+//! cleanup, or HEAD's erosion rising by half of Nano's approved limits since
+//! the last cleanup's base. A read-only plan by default.
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
@@ -24,7 +25,7 @@ pub const EVERY: usize = 5;
 /// The fixed consolidate intent (D113).
 pub const BRIEF: &str = "Consolidate: pay erosion down (D44). Lower the repo-wide concentration or duplication share without raising the other: split complex functions, merge duplicated code. Change no behaviour; the frozen suite and the holdouts must stay green.\n";
 
-pub const USAGE: &str = "usage: rusty_orch consolidate --dir BBP_DIR --repo NAME --repo-path DIR\n       [--erosion-bin BIN] [--execute --bbp-bin BIN --profiles FILE --roster FILE --work DIR\n        [--claims FILE] [--holdout-profiles FILE --holdout-root DIR]]\n\nDefault: read-only JSON plan. Counts accepted claims on NAME's claims tasks in\nBBP_DIR since the last cleanup; after 5 it opens a consolidate claims task, or\nskips when both erosion shares are already zero (D44). --execute writes the\njournal and runs bbp open. The profile set's erosion profile must use --cleanup;\norch sets its --base to the measured HEAD.";
+pub const USAGE: &str = "usage: rusty_orch consolidate --dir BBP_DIR --repo NAME --repo-path DIR\n       [--erosion-bin BIN] [--bbp-bin BIN] [--execute --profiles FILE --roster FILE --work DIR\n        [--claims FILE] [--holdout-profiles FILE --holdout-root DIR]]\n\nDefault: read-only JSON plan. A cleanup is due after 5 accepted claims on NAME's\nclaims tasks in BBP_DIR since the last cleanup, or, when Nano's limits are\nrecorded (bbp erosion limits), once HEAD's erosion has risen by half a limit\nsince the last cleanup's base. It opens a consolidate claims task, or skips when\nboth erosion shares are already zero (D44). --execute writes the journal and\nruns bbp open. The profile set's erosion profile must use --cleanup; orch sets\nits --base to the measured HEAD.";
 
 const TIMEOUT: Duration = Duration::from_secs(600);
 const STATE: &str = "rusty-orch-consolidate";
@@ -36,13 +37,14 @@ pub struct Options {
     pub repo: String,
     pub repo_path: PathBuf,
     pub erosion_bin: String,
+    /// Reads Nano's limits in both modes; opens tasks with `--execute`.
+    pub bbp_bin: String,
     pub execute: Option<Execute>,
 }
 
 /// What `--execute` hands to `bbp open`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Execute {
-    pub bbp_bin: String,
     pub profiles: PathBuf,
     /// `bbp open` flags passed through unchanged: `--roster`, `--work`, and
     /// optionally `--claims` and the holdout pair.
@@ -74,7 +76,7 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
     let repo = required(take("--repo"), "--repo")?;
     let repo_path = required(take("--repo-path"), "--repo-path")?.into();
     let erosion_bin = take("--erosion-bin").unwrap_or_else(|| "erosion".into());
-    let bbp_bin = take("--bbp-bin");
+    let bbp_bin = take("--bbp-bin").unwrap_or_else(|| "bbp".into());
     let profiles = take("--profiles");
     let mut passthrough = Vec::new();
     for f in [
@@ -89,7 +91,7 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
         }
     }
     if !execute {
-        let given = bbp_bin.is_some() || profiles.is_some() || !passthrough.is_empty();
+        let given = profiles.is_some() || !passthrough.is_empty();
         return match given {
             true => Err(usage("bbp open inputs need --execute".into())),
             false => Ok(Options {
@@ -97,6 +99,7 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
                 repo,
                 repo_path,
                 erosion_bin,
+                bbp_bin,
                 execute: None,
             }),
         };
@@ -113,7 +116,6 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
         ));
     }
     let execute = Execute {
-        bbp_bin: bbp_bin.unwrap_or_else(|| "bbp".into()),
         profiles: required(profiles, "--profiles")?.into(),
         passthrough,
     };
@@ -122,6 +124,7 @@ pub fn options(argv: impl IntoIterator<Item = String>) -> Result<Options, ArgsEr
         repo,
         repo_path,
         erosion_bin,
+        bbp_bin,
         execute: Some(execute),
     })
 }
@@ -193,13 +196,34 @@ pub struct Journal {
     /// An open written ahead, not yet seen in the store.
     #[rusty_serde(default)]
     pub pending: Option<Pending>,
+    /// The half-limit leg's start: the last cleanup's base (D118).
+    #[rusty_serde(default)]
+    pub last_base: Option<Base>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pending {
     pub task: String,
-    pub base: String,
+    pub base: Base,
     pub snapshot: BTreeMap<String, usize>,
+}
+
+/// A commit and its repo-wide shares.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Base {
+    pub commit: String,
+    pub concentration_bp: i64,
+    pub duplication_bp: i64,
+}
+
+impl Base {
+    fn new(commit: &str, levels: Levels) -> Base {
+        Base {
+            commit: commit.into(),
+            concentration_bp: levels.concentration_bp,
+            duplication_bp: levels.duplication_bp,
+        }
+    }
 }
 
 impl Journal {
@@ -212,6 +236,7 @@ impl Journal {
         if tasks.iter().any(|t| t.id == p.task) {
             self.marker = p.snapshot;
             self.cleanups.push(p.task);
+            self.last_base = Some(p.base);
         }
         self
     }
@@ -252,11 +277,97 @@ pub fn due(tasks: &[TaskLog], journal: &Journal) -> Due {
             t.accepted.iter().filter(|&&i| i >= from).count()
         })
         .sum();
-    if accepted < EVERY {
-        return Due::Wait(accepted);
+    match accepted < EVERY {
+        true => Due::Wait(accepted),
+        false => Due::Now {
+            accepted,
+            snapshot: snapshot(tasks, journal),
+        },
     }
-    let snapshot = counted.iter().map(|t| (t.id.clone(), t.len)).collect();
-    Due::Now { accepted, snapshot }
+}
+
+/// The next marker: each counted task's log length now.
+pub fn snapshot(tasks: &[TaskLog], journal: &Journal) -> BTreeMap<String, usize> {
+    tasks
+        .iter()
+        .filter(|t| journal.counts(t))
+        .map(|t| (t.id.clone(), t.len))
+        .collect()
+}
+
+/// Nano's approved limits, from `bbp erosion limits` (D115).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Limits {
+    pub concentration_bp: i64,
+    pub duplication_bp: i64,
+}
+
+impl Limits {
+    /// Parse `bbp erosion limits` output: the newest record, or `null`.
+    pub fn parse(line: &str) -> Result<Option<Limits>> {
+        let v: Value =
+            json::from_str(line.trim()).map_err(|e| format!("bbp erosion limits: {e}"))?;
+        if v == Value::Null {
+            return Ok(None);
+        }
+        let bp = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_i64)
+                .ok_or_else(|| format!("bbp erosion limits has no {k}"))
+        };
+        Ok(Some(Limits {
+            concentration_bp: bp("concentration_bp")?,
+            duplication_bp: bp("duplication_bp")?,
+        }))
+    }
+}
+
+/// The half-limit leg (D114, D118).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Half {
+    /// No limits are recorded; only the count leg runs.
+    Inactive,
+    /// Limits are recorded but there is no base yet: HEAD becomes it.
+    Start,
+    /// Neither share has risen by half its limit.
+    Below,
+    /// A share rose by at least half its limit: a cleanup is due.
+    Reached,
+}
+
+impl Half {
+    fn name(self) -> &'static str {
+        match self {
+            Half::Inactive => "inactive",
+            Half::Start => "start",
+            Half::Below => "below",
+            Half::Reached => "reached",
+        }
+    }
+}
+
+/// Has either share risen by half its limit since `last`? A share that
+/// didn't rise never fires, even against a 0 bp limit.
+pub fn half(limits: Option<Limits>, last: Option<&Base>, head: Levels) -> Half {
+    let Some(limits) = limits else {
+        return Half::Inactive;
+    };
+    let Some(last) = last else {
+        return Half::Start;
+    };
+    let reached = |rise: i64, limit: i64| rise > 0 && rise.saturating_mul(2) >= limit;
+    let c = reached(
+        head.concentration_bp - last.concentration_bp,
+        limits.concentration_bp,
+    );
+    let d = reached(
+        head.duplication_bp - last.duplication_bp,
+        limits.duplication_bp,
+    );
+    match c || d {
+        true => Half::Reached,
+        false => Half::Below,
+    }
 }
 
 /// Repo-wide shares at a commit, in basis points.
@@ -340,6 +451,11 @@ struct Report {
     task: Option<String>,
     base: Option<String>,
     levels: Option<Levels>,
+    /// Which leg made the cleanup due: `count` or `half`.
+    trigger: Option<&'static str>,
+    half: &'static str,
+    limits: Option<Limits>,
+    last_base: Option<Base>,
 }
 
 /// Run the command with real processes and the clock.
@@ -379,49 +495,74 @@ pub fn run_with(options: &Options, runner: &impl CommandRunner, now: u64) -> Res
         task: None,
         base: None,
         levels: None,
+        trigger: None,
+        half: Half::Inactive.name(),
+        limits: None,
+        last_base: journal.last_base.clone(),
     };
-    let snapshot = match due(&tasks, &journal) {
+    let (accepted, count_due) = match due(&tasks, &journal) {
         Due::Busy(task) => {
             report.action = "busy";
             report.task = Some(task);
             return finish(report);
         }
-        Due::Wait(n) => {
-            report.accepted = n;
-            return finish(report);
-        }
-        Due::Now { accepted, snapshot } => {
-            report.accepted = accepted;
-            snapshot
-        }
+        Due::Wait(n) => (n, false),
+        Due::Now { accepted, .. } => (accepted, true),
     };
-    let base = git(
+    report.accepted = accepted;
+    let limits = read_limits(runner, options)?;
+    report.limits = limits;
+    if !count_due && limits.is_none() {
+        return finish(report);
+    }
+    let commit = git(
         runner,
         &options.repo_path,
         &["rev-parse", "--verify", "HEAD^{commit}"],
     )?;
-    let levels = measure(runner, options, &base)?;
-    report.base = Some(base.clone());
+    let levels = measure(runner, options, &commit)?;
+    let leg = half(limits, journal.last_base.as_ref(), levels);
+    let base = Base::new(&commit, levels);
+    report.half = leg.name();
+    report.base = Some(commit.clone());
     report.levels = Some(levels);
+    report.trigger = match (count_due, leg) {
+        (true, _) => Some("count"),
+        (false, Half::Reached) => Some("half"),
+        _ => None,
+    };
     let Some(execute) = &options.execute else {
-        report.action = if levels.zero() { "skip" } else { "open" };
+        report.action = match (report.trigger, levels.zero()) {
+            (None, _) => "wait",
+            (Some(_), true) => "skip",
+            (Some(_), false) => "open",
+        };
         return finish(report);
     };
+    if report.trigger.is_none() {
+        if leg == Half::Start {
+            journal.last_base = Some(base);
+            save(&path, &journal)?;
+        }
+        return finish(report);
+    }
+    let snapshot = snapshot(&tasks, &journal);
     if levels.zero() {
         journal.marker = snapshot;
+        journal.last_base = Some(base);
         save(&path, &journal)?;
         report.action = "skipped";
         return finish(report);
     }
-    let task = format!("consolidate-{}-{now}", &base[..12.min(base.len())]);
-    let profiles = cleanup_profiles(&read(&execute.profiles)?, &base)?;
+    let task = format!("consolidate-{}-{now}", &commit[..12.min(commit.len())]);
+    let profiles = cleanup_profiles(&read(&execute.profiles)?, &commit)?;
     journal.pending = Some(Pending {
         task: task.clone(),
-        base: base.clone(),
+        base,
         snapshot,
     });
     save(&path, &journal)?;
-    open(runner, options, execute, &state, &task, &base, &profiles)?;
+    open(runner, options, execute, &state, &task, &commit, &profiles)?;
     let journal = journal.settle(&read_tasks(&options.dir)?);
     save(&path, &journal)?;
     if !journal.cleanups.contains(&task) {
@@ -430,6 +571,16 @@ pub fn run_with(options: &Options, runner: &impl CommandRunner, now: u64) -> Res
     report.action = "opened";
     report.task = Some(task);
     finish(report)
+}
+
+/// D118: Nano's limits through the host, which owns the record's format.
+fn read_limits(runner: &impl CommandRunner, options: &Options) -> Result<Option<Limits>> {
+    let argv = [&options.bbp_bin, "erosion", "limits", "--dir"]
+        .map(String::from)
+        .into_iter()
+        .chain([options.dir.display().to_string()])
+        .collect::<Vec<_>>();
+    Limits::parse(&command(runner, &options.repo_path, &argv)?)
 }
 
 fn finish(report: Report) -> Result<String> {
@@ -466,7 +617,7 @@ fn open(
     let (profiles_file, brief_file) = (files.join("profiles.json"), files.join("brief.md"));
     write(&profiles_file, profiles)?;
     write(&brief_file, BRIEF)?;
-    let mut argv: Vec<String> = [&execute.bbp_bin, "open", "--mode", "claims", "--task", task]
+    let mut argv: Vec<String> = [&options.bbp_bin, "open", "--mode", "claims", "--task", task]
         .map(String::from)
         .into();
     let path = |p: &Path| p.display().to_string();
