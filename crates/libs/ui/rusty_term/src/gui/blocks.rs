@@ -67,6 +67,10 @@ const BADGE_PX: f32 = 16.0;
 const RAIL: f32 = 36.0;
 const CHIP_H: f32 = 56.0;
 const CHIP_GAP: f32 = 3.0;
+/// The empty state's title and line sizes and the gap between (D28).
+const EMPTY_TITLE_PX: f32 = 14.0;
+const EMPTY_LINE_PX: f32 = 12.0;
+const EMPTY_GAP: f32 = 8.0;
 
 /// The pixel area the blocks tile: the window under its top bars, inset
 /// [`GAP`] but at the top, above `bottom` px of other bars.
@@ -236,6 +240,20 @@ pub(crate) fn lead(info: &BlockInfo) -> Option<(Glyph, Ink)> {
     }
 }
 
+/// A block's state in a word or two, as the detached popover says it
+/// (D61): its status, else "Running" while a program other than the
+/// shell runs, else "Idle".
+pub(crate) fn state_word(info: &BlockInfo) -> &'static str {
+    match info.status.as_ref().map(|s| s.state) {
+        None if info.foreground.is_some() => "Running",
+        None | Some(State::Idle) => "Idle",
+        Some(State::Working) => "Working",
+        Some(State::Blocked(wait)) => waiting(wait),
+        Some(State::Done) => "Done",
+        Some(State::Error) => "Stopped: error",
+    }
+}
+
 /// The program's status glyph, its name and its status text.
 fn program_parts(info: &BlockInfo) -> Vec<Part> {
     let name = info
@@ -335,6 +353,8 @@ pub(crate) struct Scene {
     pub blocks: Vec<Shown>,
     pub rail: Vec<Chip>,
     pub ribbon: Ribbon,
+    /// Every block is detached: this many, said in the middle (D61).
+    pub empty: Option<usize>,
 }
 
 /// A painted body: its pixels, what is drawn over the grids (F2 badges),
@@ -375,6 +395,9 @@ pub(crate) fn paint(
         spots.push((rect(chip.rect), Spot::Chip(chip.key)));
     }
     let y = height.saturating_sub(ribbon::height(look.scale)) as f32;
+    if let Some(n) = scene.empty {
+        paint_empty(&mut out, n, y, look, font);
+    }
     ribbon::paint(&mut out, y, &scene.ribbon, (&look.chrome, look.scale), font);
     let over = scene
         .blocks
@@ -386,6 +409,44 @@ pub(crate) fn paint(
         over,
         spots,
     }
+}
+
+/// The D28 empty state over the body above `bottom`: "No blocks shown"
+/// over what keeps running, centred (D61).
+fn paint_empty(out: &mut Pixmap, detached: usize, bottom: f32, look: &Look, font: &mut UiText) {
+    let (s, c) = (look.scale, &look.chrome);
+    let title = "No blocks shown";
+    let line = match detached {
+        1 => "1 detached block keeps running. Reattach it from the strip.".to_owned(),
+        n => format!("{n} detached blocks keep running. Reattach one from the strip."),
+    };
+    let (title_px, line_px) = (EMPTY_TITLE_PX * s, EMPTY_LINE_PX * s);
+    let total = title_px + EMPTY_GAP * s + line_px;
+    let top = (bottom - total) / 2.0;
+    let centre = out.width as f32 / 2.0;
+    let title_w = font.width(title, Weight::Medium, title_px);
+    let title_base = top + title_px / 2.0 + font.centre_drop(title_px);
+    out.text(
+        font,
+        title,
+        Weight::Medium,
+        title_px,
+        centre - title_w / 2.0,
+        title_base,
+        c.text,
+    );
+    let line_w = font.width(&line, Weight::Regular, line_px);
+    let line_mid = top + title_px + EMPTY_GAP * s + line_px / 2.0;
+    let line_base = line_mid + font.centre_drop(line_px);
+    out.text(
+        font,
+        &line,
+        Weight::Regular,
+        line_px,
+        centre - line_w / 2.0,
+        line_base,
+        c.muted,
+    );
 }
 
 fn rect(c: Cells) -> Rect {
@@ -443,7 +504,7 @@ fn focus_border(c: &Chrome) -> u32 {
     }
 }
 
-fn ink(c: &Chrome, ink: Ink) -> u32 {
+pub(crate) fn ink(c: &Chrome, ink: Ink) -> u32 {
     match ink {
         Ink::Text => c.text,
         Ink::Muted => c.muted,
@@ -709,7 +770,15 @@ fn fit(parts: &[Part], room: f32, s: f32, font: &UiText) -> Vec<String> {
         .collect()
 }
 
-fn paint_glyph(out: &mut Pixmap, glyph: Glyph, x: f32, y: f32, s: f32, color: u32, ring: u32) {
+pub(crate) fn paint_glyph(
+    out: &mut Pixmap,
+    glyph: Glyph,
+    x: f32,
+    y: f32,
+    s: f32,
+    color: u32,
+    ring: u32,
+) {
     let (size, stroke) = (ICON * s, ICON_STROKE * s);
     let path = match glyph {
         Glyph::Folder => icons::FOLDER,
@@ -770,11 +839,19 @@ impl BodyState {
         target.clone_into(&mut self.target);
     }
 
-    /// The ribbon for a window of `blocks` blocks focused on `focus`.
-    pub(crate) fn ribbon(&self, blocks: usize, focus: Option<u64>, armed: bool) -> Ribbon {
+    /// The ribbon for a window of `blocks` blocks, `detached` more out
+    /// of its layout, focused on `focus`.
+    pub(crate) fn ribbon(
+        &self,
+        blocks: usize,
+        detached: usize,
+        focus: Option<u64>,
+        armed: bool,
+    ) -> Ribbon {
         Ribbon {
             target: self.target.clone(),
             blocks,
+            detached,
             shell: focus
                 .and_then(|k| self.infos.get(&k))
                 .and_then(|i| i.shell.clone()),
@@ -795,6 +872,11 @@ impl BodyState {
     /// Block `key`'s lead glyph, for its rail chip.
     pub(crate) fn lead(&self, key: u64) -> Option<(Glyph, Ink)> {
         self.infos.get(&key).and_then(lead)
+    }
+
+    /// Block `key`'s [`state_word`]; "Idle" when it is not known.
+    pub(crate) fn state(&self, key: u64) -> &'static str {
+        self.infos.get(&key).map_or("Idle", state_word)
     }
 
     /// Block `key`'s header, its branch read by `read` while it is fresh.
@@ -1190,5 +1272,33 @@ mod tests {
             .sum::<f32>()
             + 3.0 * ITEM_GAP;
         assert!(used <= 260.0, "{used}");
+    }
+
+    #[test]
+    fn with_every_block_detached_the_body_says_so_in_the_middle() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let bare = paint(600, 300, &Scene::default(), &look, &mut font);
+        let empty = Scene {
+            empty: Some(2),
+            ..Scene::default()
+        };
+        let said = paint(600, 300, &empty, &look, &mut font);
+        let text = look.chrome.text;
+        let lit = |b: &Body| b.pixmap.pixels().iter().filter(|&&p| p == text).count();
+        assert!(lit(&said) > lit(&bare), "the title is drawn in bone");
+        // Centred: as much ink left of the middle as right of it.
+        let p = &said.pixmap;
+        let (mut left, mut right) = (0usize, 0usize);
+        for (i, &px) in p.pixels().iter().enumerate() {
+            if px == text && (i / p.width) < 200 {
+                if i % p.width < p.width / 2 {
+                    left += 1;
+                } else {
+                    right += 1;
+                }
+            }
+        }
+        assert!(left.abs_diff(right) * 4 < left + right, "{left} vs {right}");
     }
 }

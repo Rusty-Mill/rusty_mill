@@ -32,7 +32,9 @@ use rusty_mux_client::checkpoint::Receiver;
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
 use rusty_mux_proto::{Features, Launch, Message};
 use rusty_term::backend::BackendHandle;
-use rusty_term::gui::source::{Act, BlockInfo, Dir, Feed, PaneIo, Remote, Session, Source, Tree};
+use rusty_term::gui::source::{
+    Act, BlockInfo, Detached, Dir, Feed, PaneIo, Remote, Session, Source, Tree,
+};
 
 use crate::headers::{Call, Effect, Headers};
 use crate::keys::Keys;
@@ -115,6 +117,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         control: Mutex::new(Conn::new(clone(&stream)?)),
         next: AtomicU64::new(next),
         tells_focus: welcomed.features.contains(Features::FOCUS),
+        edits_layout: welcomed.features.contains(Features::LAYOUT_EDIT),
         selects: follows_active,
         calls_blocks,
         session: Mutex::new(model.session_id()),
@@ -158,6 +161,9 @@ struct State {
     next: AtomicU64,
     /// The server takes `FocusBlock` (C41).
     tells_focus: bool,
+    /// The server takes `MoveBlock`, so a detached block can be put back
+    /// (D61); without, none is listed.
+    edits_layout: bool,
     /// The server takes `SelectWindow` and tells the active window.
     selects: bool,
     /// The server answers `BlockCall`, which the headers read with.
@@ -291,13 +297,16 @@ impl Source for MuxSource {
     /// Sends a layout change (handoff D104); the window follows the
     /// `LayoutChanged` it causes. A pane not shown is left alone.
     fn act(&self, act: Act) {
-        let (block, window) = {
+        let (block, window, focused) = {
             let shown = self.0.shown();
             let key = match act {
-                Act::Split { key, .. } | Act::Zoom(key) | Act::Close(key) => Some(key),
+                Act::Split { key, .. } | Act::Zoom(key) | Act::Close(key) | Act::Reattach(key) => {
+                    Some(key)
+                }
                 Act::Unzoom => None,
             };
-            (key.and_then(|k| shown.keys.id(k)), shown.window)
+            let focused = shown.focus.and_then(|k| shown.keys.id(k));
+            (key.and_then(|k| shown.keys.id(k)), shown.window, focused)
         };
         self.0.try_send(|req| match act {
             Act::Split { dir, .. } => block.map(|block| Message::Split {
@@ -312,6 +321,13 @@ impl Source for MuxSource {
             Act::Zoom(_) => block.map(|block| Message::Zoom { req, block }),
             Act::Close(_) => block.map(|block| Message::CloseBlock { req, block }),
             Act::Unzoom => window.map(|window| Message::Unzoom { req, window }),
+            // Beside the focused block; the server fills an empty window.
+            Act::Reattach(_) => block.map(|block| Message::MoveBlock {
+                req,
+                block,
+                beside: focused,
+                side: Side::Right,
+            }),
         });
     }
 
@@ -388,6 +404,8 @@ pub enum Out {
     /// Show this pane alone, or every pane with `None`; follows the
     /// layout it applies to.
     Zoom(Option<u64>),
+    /// Show no pane: every block of the window is detached.
+    Empty,
     /// The session changed, for the top strip.
     Session(Session),
     /// What the shown blocks' headers say, by pane key.
@@ -411,6 +429,7 @@ impl Events {
                 Out::Layout(t) => remote.layout(t),
                 Out::Focus(k) => remote.focus(k),
                 Out::Zoom(k) => remote.zoom(k),
+                Out::Empty => remote.empty(),
                 Out::Session(s) => remote.session(s),
                 Out::Blocks(b) => remote.blocks(b),
             })
@@ -453,7 +472,8 @@ impl Events {
                 Change::None => true,
                 Change::Strip => out(Out::Session(self.session())),
                 Change::Holders => out(Out::Blocks(self.blocks())),
-                Change::Layout => self.layout(&mut out),
+                // The strip follows: the thumbnail and detached blocks.
+                Change::Layout => self.layout(&mut out) && out(Out::Session(self.session())),
                 Change::Focus(block) => {
                     let key = self.state.shown().keys.key(block);
                     self.state.focus(key);
@@ -555,23 +575,58 @@ impl Events {
     /// The session as the strip shows it.
     fn session(&self) -> Session {
         let shown = &mut *self.state.shown();
-        self.model.session(&mut StripKeys {
+        let mut session = self.model.session(&mut StripKeys {
             sessions: &mut shown.sessions,
             windows: &mut shown.windows,
             blocks: &mut shown.keys,
-        })
+        });
+        if self.state.edits_layout {
+            session.detached = self
+                .model
+                .detached()
+                .into_iter()
+                .map(|d| Detached {
+                    key: shown.keys.key(d.block),
+                    name: Some(d.name)
+                        .filter(|n| !n.is_empty())
+                        .or_else(|| self.headers.program(d.block))
+                        .unwrap_or_else(|| "Block".into()),
+                    since: d.since,
+                })
+                .collect();
+        }
+        session
     }
 
     /// Sends the shown window's layout and zoom; a window with no blocks
-    /// ends the GUI window.
+    /// ends the GUI window, unless its blocks are detached (D61).
     fn layout(&self, out: &mut impl FnMut(Out) -> bool) -> bool {
-        let shown = self
-            .model
-            .view()
-            .0
-            .map(|l| tree(l, &mut self.state.shown().keys));
+        let (layout, focused) = self.model.view();
+        let shown = layout.map(|l| tree(l, &mut self.state.shown().keys));
+        self.keep_focus_in(layout.map(Layout::blocks).unwrap_or_default(), focused);
+        if shown.is_none() && !self.model.detached().is_empty() {
+            return out(Out::Empty);
+        }
         let ended = shown.is_none();
         out(Out::Layout(shown)) && !ended && out(Out::Zoom(self.zoomed()))
+    }
+
+    /// Keeps the focus Reattach places beside on a block `laid_out`:
+    /// the server's `focused` one, else the first (D61). A block just
+    /// detached can't be.
+    fn keep_focus_in(&self, laid_out: Vec<BlockId>, focused: Option<BlockId>) {
+        let shown = &mut *self.state.shown();
+        let kept = shown
+            .focus
+            .and_then(|k| shown.keys.id(k))
+            .is_some_and(|b| laid_out.contains(&b));
+        if kept {
+            return;
+        }
+        let block = focused
+            .filter(|b| laid_out.contains(b))
+            .or_else(|| laid_out.first().copied());
+        shown.focus = block.map(|b| shown.keys.key(b));
     }
 
     /// The pane the shown window shows alone, if any.

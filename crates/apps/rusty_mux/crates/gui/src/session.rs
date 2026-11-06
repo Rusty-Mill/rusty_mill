@@ -5,6 +5,7 @@
 //! and switching windows or sessions follows it.
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, Principal, SessionId, WindowId};
 use rusty_mux_proto::{Entry, Message};
@@ -32,6 +33,26 @@ struct Win {
     focused: Option<BlockId>,
     /// The block shown alone, if any.
     zoomed: Option<BlockId>,
+}
+
+/// A block, as the List and events tell it.
+#[derive(Debug, Clone, PartialEq)]
+struct Blk {
+    window: WindowId,
+    /// Empty until it is named.
+    name: String,
+    title: String,
+    /// When this client saw it leave its window's layout, if it did.
+    detached: Option<Instant>,
+}
+
+/// A detached block of the shown window (gui-design D61).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DetachedBlock {
+    pub block: BlockId,
+    /// Its name, else its title; empty for neither.
+    pub name: String,
+    pub since: Option<Instant>,
 }
 
 /// A connected client.
@@ -78,8 +99,9 @@ pub struct Model {
     sessions: Vec<Sess>,
     /// Every session's windows, each session's in order.
     windows: Vec<Win>,
-    /// Each block's window, to tell which session a client is attached to.
-    blocks: HashMap<BlockId, WindowId>,
+    /// Every block: its window, to tell which session a client is
+    /// attached to and which blocks are detached, and its name.
+    blocks: HashMap<BlockId, Blk>,
     shown: WindowId,
     /// Every connected client and who the server verified it to be.
     clients: HashMap<ClientId, Client>,
@@ -148,13 +170,52 @@ impl Model {
         }
     }
 
-    /// The blocks laid out in the shown session's windows, for their
-    /// headers and the strip's thumbnails.
+    /// The shown session's blocks, for their headers, the strip's
+    /// thumbnails and the detached list: those laid out, window by
+    /// window, then the detached ones.
     pub fn session_blocks(&self) -> Vec<BlockId> {
-        self.own_windows()
+        let mut blocks: Vec<BlockId> = self
+            .own_windows()
             .filter_map(|w| w.layout.as_ref())
             .flat_map(Layout::blocks)
-            .collect()
+            .collect();
+        let mut detached: Vec<BlockId> = self
+            .blocks
+            .iter()
+            .filter(|(id, b)| {
+                !blocks.contains(id)
+                    && self
+                        .window(b.window)
+                        .is_some_and(|w| w.session == self.session)
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        detached.sort_unstable();
+        blocks.extend(detached);
+        blocks
+    }
+
+    /// The shown window's detached blocks (gui-design D61): listed in it
+    /// but out of its layout. Newest first; those detached before this
+    /// client saw it last, by id.
+    pub fn detached(&self) -> Vec<DetachedBlock> {
+        let laid_out = self.view().0.map(Layout::blocks).unwrap_or_default();
+        let mut out: Vec<DetachedBlock> = self
+            .blocks
+            .iter()
+            .filter(|(id, b)| b.window == self.shown && !laid_out.contains(id))
+            .map(|(&block, b)| DetachedBlock {
+                block,
+                name: if b.name.is_empty() {
+                    b.title.clone()
+                } else {
+                    b.name.clone()
+                },
+                since: b.detached,
+            })
+            .collect();
+        out.sort_by(|a, b| b.since.cmp(&a.since).then(a.block.cmp(&b.block)));
+        out
     }
 
     /// The session shown.
@@ -231,6 +292,8 @@ impl Model {
                     can_show: self.window_to_show(s.id).is_some(),
                 })
                 .collect(),
+            // The source fills these in when it can put one back.
+            detached: Vec::new(),
         }
     }
 
@@ -277,10 +340,25 @@ impl Model {
                 }
                 Change::Strip
             }
-            Entry::Block { block, window, .. } => match self.blocks.insert(*block, *window) {
-                Some(was) if was == *window => Change::None,
-                _ => Change::Strip,
-            },
+            Entry::Block {
+                block,
+                window,
+                name,
+                title,
+                ..
+            } => {
+                let detached = self.blocks.get(block).and_then(|b| b.detached);
+                let blk = Blk {
+                    window: *window,
+                    name: name.clone(),
+                    title: title.clone(),
+                    detached,
+                };
+                match self.blocks.insert(*block, blk.clone()) {
+                    Some(was) if was == blk => Change::None,
+                    _ => Change::Strip,
+                }
+            }
             Entry::Client {
                 client,
                 principal,
@@ -362,6 +440,7 @@ impl Model {
                 layout,
                 zoomed,
             } => {
+                self.mark_detached(*window, layout.as_ref());
                 let shown = *window == self.shown;
                 let change = self.with_window(*window, |w| {
                     w.layout.clone_from(layout);
@@ -370,6 +449,10 @@ impl Model {
                 });
                 if change != Change::Layout || layout.is_some() || !self.follows_active {
                     return change;
+                }
+                // Its blocks are all detached: it shows that (D61).
+                if !self.detached().is_empty() {
+                    return Change::Layout;
                 }
                 // The last block of the shown window ended; the server keeps
                 // the window. Move to a neighbour that shows blocks, the one
@@ -390,9 +473,22 @@ impl Model {
                 })
             }
             Event::BlockCreated { block, window, .. } => {
-                self.blocks.insert(*block, *window);
+                let blk = Blk {
+                    window: *window,
+                    name: String::new(),
+                    title: String::new(),
+                    detached: None,
+                };
+                self.blocks.insert(*block, blk);
                 Change::None
             }
+            Event::BlockRenamed { block, name } => match self.blocks.get_mut(block) {
+                Some(b) => {
+                    b.name.clone_from(name);
+                    Change::Strip
+                }
+                None => Change::None,
+            },
             Event::BlockClosed { block } => {
                 self.blocks.remove(block);
                 Change::None
@@ -419,6 +515,29 @@ impl Model {
                 None => Change::None,
             },
             _ => Change::None,
+        }
+    }
+
+    /// Note when `window`'s blocks leave its layout for `layout`, and
+    /// forget it for those back in it. A closed block is gone by now: the
+    /// server tells `BlockClosed` before the layout change it causes.
+    fn mark_detached(&mut self, window: WindowId, layout: Option<&Layout>) {
+        let was = self
+            .window(window)
+            .and_then(|w| w.layout.as_ref())
+            .map(Layout::blocks)
+            .unwrap_or_default();
+        let now = layout.map(Layout::blocks).unwrap_or_default();
+        let at = Instant::now();
+        for (id, b) in &mut self.blocks {
+            if b.window != window {
+                continue;
+            }
+            if now.contains(id) {
+                b.detached = None;
+            } else if was.contains(id) {
+                b.detached = Some(at);
+            }
         }
     }
 
@@ -491,7 +610,7 @@ impl Model {
             let in_session = c
                 .attached
                 .and_then(|b| self.blocks.get(&b))
-                .and_then(|w| self.window(*w))
+                .and_then(|b| self.window(b.window))
                 .is_some_and(|w| w.session == session);
             if !in_session {
                 continue;
@@ -766,17 +885,21 @@ mod tests {
             ids(BlockId::from_uuid),
         );
         let mut m = model(s, &w, &b);
-        let emptied = |window| Event::LayoutChanged {
-            window,
-            layout: None,
-            zoomed: None,
+        // The server says the last block closed, then the layout it left.
+        let emptied = |m: &mut Model, i: usize| {
+            m.apply(&Event::BlockClosed { block: b[i] });
+            m.apply(&Event::LayoutChanged {
+                window: w[i],
+                layout: None,
+                zoomed: None,
+            })
         };
         m.apply(&Event::ActiveWindowChanged {
             session: s,
             window: Some(w[1]),
         });
         assert_eq!(
-            m.apply(&emptied(w[1])),
+            emptied(&mut m, 1),
             Change::Emptied(w[0]),
             "the one before first"
         );
@@ -785,7 +908,7 @@ mod tests {
             window: Some(w[0]),
         });
         assert_eq!(
-            m.apply(&emptied(w[0])),
+            emptied(&mut m, 0),
             Change::Emptied(w[2]),
             "then the one after"
         );
@@ -794,7 +917,7 @@ mod tests {
             window: Some(w[2]),
         });
         assert_eq!(
-            m.apply(&emptied(w[2])),
+            emptied(&mut m, 2),
             Change::Layout,
             "none left: the window ends"
         );
@@ -1013,5 +1136,109 @@ mod tests {
         );
         assert_eq!(strip(&m).sessions.len(), 1);
         assert_eq!(m.shown(), w[0]);
+    }
+
+    #[test]
+    fn a_block_out_of_the_layout_is_detached_until_it_is_back() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut m = model(s, &w, &b);
+        let extra = BlockId::from_uuid(Uuid::new_v4());
+        let split = Layout::Split {
+            axis: rusty_mux_core::Axis::Columns,
+            share: rusty_mux_core::Share::HALF,
+            first: Box::new(Layout::Block(b[0])),
+            second: Box::new(Layout::Block(extra)),
+        };
+        let changed = |layout| Event::LayoutChanged {
+            window: w[0],
+            layout,
+            zoomed: None,
+        };
+        m.apply(&Event::BlockCreated {
+            block: extra,
+            window: w[0],
+            size: rusty_mux_core::Size::new(80, 24).expect("a size"),
+        });
+        m.apply(&changed(Some(split.clone())));
+        assert!(m.detached().is_empty(), "both laid out");
+
+        m.apply(&changed(Some(Layout::Block(b[0]))));
+        let out = m.detached();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].block, extra);
+        assert!(out[0].since.is_some(), "timed from the change seen");
+        assert!(
+            m.session_blocks().contains(&extra),
+            "its header stays known"
+        );
+
+        m.apply(&Event::BlockRenamed {
+            block: extra,
+            name: "build".into(),
+        });
+        assert_eq!(m.detached()[0].name, "build");
+
+        m.apply(&changed(Some(split)));
+        assert!(m.detached().is_empty(), "reattached");
+    }
+
+    #[test]
+    fn a_window_with_every_block_detached_stays_shown() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut m = model(s, &w, &b);
+        let change = m.apply(&Event::LayoutChanged {
+            window: w[0],
+            layout: None,
+            zoomed: None,
+        });
+        assert_eq!(change, Change::Layout, "not handed to a neighbour");
+        assert_eq!(m.view().0, None);
+        assert_eq!(m.detached().len(), 1);
+        assert_eq!(m.detached()[0].block, b[0]);
+    }
+
+    #[test]
+    fn a_block_listed_out_of_its_layout_is_detached_with_no_age() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut list = vec![Message::Entry {
+            req: 1,
+            entry: Entry::Session {
+                session: s,
+                name: "work".into(),
+                active: Some(w[0]),
+                generated: false,
+            },
+        }];
+        list.push(window(w[0], s, "w0", b[0]));
+        for (block, title) in [(b[0], ""), (b[1], "htop")] {
+            list.push(Message::Entry {
+                req: 1,
+                entry: Entry::Block {
+                    block,
+                    window: w[0],
+                    size: rusty_mux_core::Size::new(80, 24).expect("a size"),
+                    holder: None,
+                    title: title.into(),
+                    name: String::new(),
+                },
+            });
+        }
+        let m = Model::from_list(&list, b[0], "box".into(), true).expect("a model");
+        let out = m.detached();
+        assert_eq!(out.len(), 1);
+        assert_eq!((out[0].block, out[0].name.as_str()), (b[1], "htop"));
+        assert_eq!(out[0].since, None, "detached before this client saw");
     }
 }
