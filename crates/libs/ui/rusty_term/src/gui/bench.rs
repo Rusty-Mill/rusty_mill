@@ -12,7 +12,7 @@ use crate::core::FrameView;
 
 use super::damage::{Damage, Frame, Plan};
 use super::font::{self, FontCache, GlyphSource};
-use super::render::{self, PaneFrame, SearchColors};
+use super::render::{self, PaneFrame, Scene, SearchColors};
 
 /// An offscreen frame target with a loaded font.
 pub struct FrameBench {
@@ -65,6 +65,7 @@ impl FrameBench {
             grid,
             col0: 0,
             row0: 0,
+            px: (0, 0),
             focused: true,
             cursor_on: true,
             trail: Vec::new(),
@@ -78,7 +79,7 @@ impl FrameBench {
         let frame = Frame::capture(
             &panes,
             &[],
-            None,
+            Scene::default(),
             &[],
             [self.font.id(), self.ui.id()],
             size,
@@ -94,7 +95,7 @@ impl FrameBench {
             &mut self.buf,
             &panes,
             &[],
-            None,
+            Scene::default(),
             &[],
             &mut self.font,
             &mut self.ui,

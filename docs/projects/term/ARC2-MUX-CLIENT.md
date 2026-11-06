@@ -51,7 +51,7 @@ gui-design D45–D49.
 | S2a | Session-source port in `rusty_term` (`gui::source`), local adapter. No behaviour change | approved (D96; split D103, shape D101) |
 | S2b | `rusty_mux_gui` attaches to one server window and draws its split tree (focus, lease, resize per D102); `rusty_term::gui::run_attached` | approved (D96) |
 | S3a | Instrument Sans text path (gui-design D59) and the F1 top strip: session chip, a tab per window with its thumbnail, "+", clients (gui-design D45, D46; data D105) | arc GO |
-| S3b | F1 block headers with C21 status and lease | arc GO covers C21 |
+| S3b | F1 block frames and headers: blocks laid out in pixels with 8 px gaps, each framed, headed by its folder and branch or its program and C21 status, and who else has input (gui-design D47, D48; data D105) | arc GO covers C21 |
 | S3c | F1 ribbon; F2 prefix keys and hints (D104); F7 zoom | arc GO covers C16 |
 | S4 | F4 session switcher and thumbnails, F6 detached block, F5 reconnecting (30 s grace, D44; leases survive a reconnect, D83) | arc GO |
 | S5 | F3 take over: confirm first (gui-design D44); the client re-asks for the lease after (D46) | arc GO |

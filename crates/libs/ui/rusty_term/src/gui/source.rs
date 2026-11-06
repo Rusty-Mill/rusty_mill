@@ -94,6 +94,9 @@ pub struct Session {
     pub windows: Vec<WindowTab>,
     /// Clients attached to the session, this one included.
     pub clients: usize,
+    /// The session runs on this machine, so its paths can be read here
+    /// (a block header's git branch, gui-design D48).
+    pub local: bool,
 }
 
 /// One of a session's windows, as its strip tab shows it.
@@ -106,6 +109,50 @@ pub struct WindowTab {
     pub tree: Option<Tree>,
     /// Whether this is the window shown.
     pub shown: bool,
+}
+
+/// What a block's header shows of it (gui-design D47, D48), as its source
+/// tells it. The window decides how; a field it lacks is left out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BlockInfo {
+    /// The program's working directory.
+    pub cwd: Option<String>,
+    /// The program the block started, its shell.
+    pub shell: Option<String>,
+    /// The program in the foreground, when it isn't the shell.
+    pub foreground: Option<String>,
+    /// What the program reports doing (OSC 7501's top record).
+    pub status: Option<Status>,
+    /// Who else has input: the client holding the block's input lease,
+    /// when that isn't this window.
+    pub holder: Option<String>,
+}
+
+/// A program's status report (OSC 7501).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    pub state: State,
+    /// What it says it does, such as "Editing zoom.rs".
+    pub msg: Option<String>,
+}
+
+/// What a program says it is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Idle,
+    Working,
+    /// Waiting on the user, and why, when it says.
+    Blocked(Option<Wait>),
+    Done,
+    Error,
+}
+
+/// Why a blocked program waits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wait {
+    Permission,
+    Question,
+    SignIn,
 }
 
 /// Where an attached window's panes come from, such as a rusty_mux window.
@@ -141,6 +188,12 @@ impl Remote {
     /// Show `session` on the top strip.
     pub fn session(&self, session: Session) -> bool {
         self.0.send_event(UserEvent::Session(session)).is_ok()
+    }
+
+    /// Show `blocks` in the shown panes' headers, by pane key; a pane left
+    /// out shows an empty header.
+    pub fn blocks(&self, blocks: Vec<(u64, BlockInfo)>) -> bool {
+        self.0.send_event(UserEvent::Blocks(blocks)).is_ok()
     }
 }
 

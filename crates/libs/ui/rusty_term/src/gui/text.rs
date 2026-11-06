@@ -112,6 +112,26 @@ impl UiText {
         out
     }
 
+    /// `s` cut to fit `max` px from its start, beginning with "…" when it
+    /// was cut, so a path keeps its last folders.
+    pub(crate) fn fit_tail(&self, s: &str, weight: Weight, px: f32, max: f32) -> String {
+        if self.width(s, weight, px) <= max {
+            return s.to_owned();
+        }
+        let room = max - self.width("…", weight, px);
+        let advances: Vec<f32> = self.run(s, weight, px).map(|(_, a)| a).collect();
+        let mut used = 0.0;
+        let mut start = s.len();
+        for ((at, _), advance) in s.char_indices().rev().zip(advances.iter().rev()) {
+            if used + advance > room {
+                break;
+            }
+            used += advance;
+            start = at;
+        }
+        format!("…{}", &s[start..])
+    }
+
     /// `s`'s glyphs, each placed at its pen position from 0.
     pub(crate) fn layout(&mut self, s: &str, weight: Weight, px: f32) -> Vec<Placed> {
         let ratio = self.ratio(weight, px);
@@ -181,6 +201,15 @@ mod tests {
         let cut = t.fit("a rather long window name", Weight::Regular, 13.0, 60.0);
         assert!(cut.ends_with('…'), "{cut}");
         assert!(t.width(&cut, Weight::Regular, 13.0) <= 60.0);
+    }
+
+    #[test]
+    fn fit_tail_keeps_the_end() {
+        let t = text();
+        assert_eq!(t.fit_tail("~/src", Weight::Medium, 13.0, 500.0), "~/src");
+        let cut = t.fit_tail("~/src/github/rusty_mill", Weight::Medium, 13.0, 90.0);
+        assert!(cut.starts_with('…') && cut.ends_with("rusty_mill"), "{cut}");
+        assert!(t.width(&cut, Weight::Medium, 13.0) <= 90.0);
     }
 
     #[test]

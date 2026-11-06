@@ -7,14 +7,38 @@
 //! 16 px stroke paths (`gui-design/assets/build_mux.py`), stroked with round
 //! caps and joins.
 
+use std::cell::Cell;
+
 use super::text::{UiText, Weight};
 
 /// An opaque `0xRRGGBB` image, row-major.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct Pixmap {
     pub width: usize,
     pub height: usize,
-    pub pixels: Vec<u32>,
+    pixels: Vec<u32>,
+    /// The fingerprint's hash once taken; any change clears it, so a
+    /// window-sized pixmap is hashed once per paint, not once per frame.
+    print: Cell<Option<u64>>,
+}
+
+impl PartialEq for Pixmap {
+    fn eq(&self, other: &Self) -> bool {
+        (self.width, self.height) == (other.width, other.height) && self.pixels == other.pixels
+    }
+}
+
+impl Eq for Pixmap {}
+
+/// Where a shape is known to cover nothing or everything, so painting it
+/// skips the per-pixel distance there.
+#[derive(Clone, Copy)]
+enum Inner {
+    None,
+    /// Fully covered: set to the colour.
+    Fill(Rect),
+    /// Not covered: left alone.
+    Skip(Rect),
 }
 
 /// A rectangle in pixels.
@@ -29,6 +53,16 @@ pub(crate) struct Rect {
 impl Rect {
     pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
+    /// This box shrunk by `by` on every side, never below nothing.
+    pub(crate) fn inset(&self, by: f32) -> Rect {
+        Rect {
+            x: self.x + by,
+            y: self.y + by,
+            w: (self.w - 2.0 * by).max(0.0),
+            h: (self.h - 2.0 * by).max(0.0),
+        }
     }
 }
 
@@ -79,45 +113,103 @@ impl Pixmap {
             width,
             height,
             pixels: vec![color; width * height],
+            print: Cell::new(None),
         }
     }
 
+    /// Its pixels, row-major.
+    pub(crate) fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    /// Its pixels to change; the fingerprint is taken again after.
+    fn pixels_mut(&mut self) -> &mut [u32] {
+        *self.print.get_mut() = None;
+        &mut self.pixels
+    }
+
     /// Its size and a hash of its pixels: equal pixmaps match, and a change
-    /// to any pixel almost surely changes it. Fast enough for every frame.
+    /// to any pixel almost surely changes it. Hashed once after a change.
     pub(crate) fn fingerprint(&self) -> (usize, usize, u64) {
-        // FNV-1a over whole pixels.
-        let hash = self.pixels.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &px| {
-            (h ^ u64::from(px)).wrapping_mul(0x0100_0000_01b3)
+        let hash = self.print.get().unwrap_or_else(|| {
+            // FNV-1a over whole pixels.
+            let hash = self.pixels.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &px| {
+                (h ^ u64::from(px)).wrapping_mul(0x0100_0000_01b3)
+            });
+            self.print.set(Some(hash));
+            hash
         });
         (self.width, self.height, hash)
     }
 
-    /// Calls `cover` for every pixel centre in `r` (clipped to the image)
-    /// and blends `color` at the coverage it returns.
-    fn shade(&mut self, r: &Rect, color: u32, cover: impl Fn(f32, f32) -> f32) {
-        let x0 = r.x.floor().max(0.0) as usize;
-        let y0 = r.y.floor().max(0.0) as usize;
-        let x1 = ((r.x + r.w).ceil().max(0.0) as usize).min(self.width);
-        let y1 = ((r.y + r.h).ceil().max(0.0) as usize).min(self.height);
+    /// Calls `cover` for every pixel centre in `r` (clipped to `clip` and
+    /// the image) and blends `color` at the coverage it returns; `inner`
+    /// spares it where the answer is known.
+    fn shade(
+        &mut self,
+        r: &Rect,
+        clip: &Rect,
+        color: u32,
+        inner: Inner,
+        cover: impl Fn(f32, f32) -> f32,
+    ) {
+        let (w, h) = (self.width, self.height);
+        let span = |a: f32, b: f32, max: usize| {
+            (
+                (a.floor().max(0.0) as usize).min(max),
+                (b.ceil().max(0.0) as usize).min(max),
+            )
+        };
+        let (x0, x1) = span(r.x.max(clip.x), (r.x + r.w).min(clip.x + clip.w), w);
+        let (y0, y1) = span(r.y.max(clip.y), (r.y + r.h).min(clip.y + clip.h), h);
+        // Pixels whose centres lie in `inner`, per axis.
+        let centred = |a: f32, len: f32| {
+            let first = (a - 0.5).ceil().max(0.0) as usize;
+            let end = (a + len - 0.5).ceil().max(0.0) as usize;
+            (first, end.max(first))
+        };
+        let pixels = self.pixels_mut();
         for y in y0..y1 {
-            for x in x0..x1 {
+            let row = &mut pixels[y * w..(y + 1) * w];
+            let (known, fill) = match inner {
+                Inner::Fill(i) => (Some(i), true),
+                Inner::Skip(i) => (Some(i), false),
+                Inner::None => (None, false),
+            };
+            let (ix0, ix1) = match known {
+                Some(i) if (i.y..i.y + i.h).contains(&(y as f32 + 0.5)) => {
+                    let (a, b) = centred(i.x, i.w);
+                    (a.clamp(x0, x1), b.clamp(x0, x1))
+                }
+                _ => (x1, x1),
+            };
+            for x in (x0..ix0).chain(ix1..x1) {
                 let a = cover(x as f32 + 0.5, y as f32 + 0.5);
-                let i = y * self.width + x;
-                self.pixels[i] = mix(self.pixels[i], color, a);
+                row[x] = mix(row[x], color, a);
+            }
+            if fill {
+                row[ix0..ix1].fill(color);
             }
         }
     }
 
     /// Fill a box with corners of `radius`.
     pub(crate) fn fill(&mut self, r: Rect, radius: f32, color: u32) {
-        self.shade(&r, color, |x, y| {
+        self.fill_part(r, radius, r, color);
+    }
+
+    /// Fill the part of a box with corners of `radius` that lies in `part`.
+    pub(crate) fn fill_part(&mut self, r: Rect, radius: f32, part: Rect, color: u32) {
+        let inner = Inner::Fill(r.inset(radius.max(0.0) + 1.0));
+        self.shade(&r, &part, color, inner, |x, y| {
             (0.5 - box_distance(&r, radius, x, y)).clamp(0.0, 1.0)
         });
     }
 
     /// Draw a `width`-px border just inside a box with corners of `radius`.
     pub(crate) fn border(&mut self, r: Rect, radius: f32, width: f32, color: u32) {
-        self.shade(&r, color, |x, y| {
+        let inner = Inner::Skip(r.inset(radius.max(0.0) + width + 1.0));
+        self.shade(&r, &r, color, inner, |x, y| {
             let d = box_distance(&r, radius, x, y);
             ((0.5 - d).clamp(0.0, 1.0) - (0.5 - d - width).clamp(0.0, 1.0)).max(0.0)
         });
@@ -142,7 +234,7 @@ impl Pixmap {
             w: size + 2.0 * width,
             h: size + 2.0 * width,
         };
-        self.shade(&bounds, color, |px, py| {
+        self.shade(&bounds, &bounds, color, Inner::None, |px, py| {
             let d = lines
                 .iter()
                 .flat_map(|l| {
@@ -168,21 +260,23 @@ impl Pixmap {
         color: u32,
     ) -> f32 {
         let (ox, oy) = (x.round() as i32, y.round() as i32);
+        let (width, height) = (self.width, self.height);
+        let pixels = self.pixels_mut();
         for placed in font.layout(s, weight, px) {
             let g = &placed.glyph;
             for gy in 0..g.height {
                 let ty = oy + g.top + gy as i32;
-                if ty < 0 || ty as usize >= self.height {
+                if ty < 0 || ty as usize >= height {
                     continue;
                 }
                 for gx in 0..g.width {
                     let tx = ox + placed.x + g.left + gx as i32;
-                    if tx < 0 || tx as usize >= self.width {
+                    if tx < 0 || tx as usize >= width {
                         continue;
                     }
                     let a = f32::from(g.coverage[gy * g.width + gx]) / 255.0;
-                    let i = ty as usize * self.width + tx as usize;
-                    self.pixels[i] = mix(self.pixels[i], color, a);
+                    let i = ty as usize * width + tx as usize;
+                    pixels[i] = mix(pixels[i], color, a);
                 }
             }
         }
@@ -200,6 +294,18 @@ pub(crate) mod icons {
     pub(crate) const MINIMIZE: &str = "M3.5 8h9";
     pub(crate) const MAXIMIZE: &str = "M3.5 3.5h9v9h-9z";
     pub(crate) const CLOSE: &str = "M4 4l8 8M12 4l-8 8";
+    /// Block headers (gui-design D47, D48).
+    pub(crate) const FOLDER: &str = "M2.5 4.5h4l1.5 1.5h5.5v6.5h-11z";
+    pub(crate) const BRANCH: &str =
+        "M5 3v10M5 13a1.8 1.8 0 1 0 0 .1M11 3a1.8 1.8 0 1 0 0 .1M11 4.8c0 4-6 3-6 6.2";
+    pub(crate) const EYE: &str = "M1.8 8s2.3-4.2 6.2-4.2S14.2 8 14.2 8s-2.3 4.2-6.2 4.2S1.8 8 1.8 8zM8 6.3a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4z";
+    pub(crate) const CHECK: &str = "M3.5 8.5l3 3 6-7";
+    pub(crate) const CROSS: &str = "M4.5 4.5l7 7M11.5 4.5l-7 7";
+    pub(crate) const PAUSE: &str = "M6 4v8M10 4v8";
+    /// The spinner (`gui_lib.py` `spinner`): a ring in `line`, and the
+    /// quarter arc on it in the accent.
+    pub(crate) const SPINNER_RING: &str = "M3 8a5 5 0 1 0 10 0a5 5 0 1 0-10 0";
+    pub(crate) const SPINNER_ARC: &str = "M8 3a5 5 0 0 1 5 5";
 }
 
 /// Segments per curve or arc when flattening.
@@ -435,13 +541,13 @@ impl<'a> Tokens<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pixmap, Rect, flatten, icons};
+    use super::{Inner, Pixmap, Rect, box_distance, flatten, icons};
 
     const BG: u32 = 0x000000;
     const FG: u32 = 0xFFFFFF;
 
     fn at(p: &Pixmap, x: usize, y: usize) -> u32 {
-        p.pixels[y * p.width + x]
+        p.pixels()[y * p.width + x]
     }
 
     #[test]
@@ -501,6 +607,14 @@ mod tests {
             icons::MINIMIZE,
             icons::MAXIMIZE,
             icons::CLOSE,
+            icons::FOLDER,
+            icons::BRANCH,
+            icons::EYE,
+            icons::CHECK,
+            icons::CROSS,
+            icons::PAUSE,
+            icons::SPINNER_RING,
+            icons::SPINNER_ARC,
         ] {
             let lines = flatten(path);
             assert!(!lines.is_empty(), "{path}");
@@ -562,6 +676,77 @@ mod tests {
             "a line one px wide and a half covers both sides"
         );
         assert_eq!(at(&p, 1, 1), BG);
+    }
+
+    #[test]
+    fn a_large_fill_matches_the_per_pixel_shape() {
+        let r = Rect {
+            x: 3.3,
+            y: 2.6,
+            w: 40.0,
+            h: 30.0,
+        };
+        let mut fast = Pixmap::new(48, 40, BG);
+        fast.fill(r, 9.0, FG);
+        fast.border(r, 9.0, 1.5, 0x808080);
+        let mut slow = Pixmap::new(48, 40, BG);
+        let all = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 48.0,
+            h: 40.0,
+        };
+        slow.shade(&r, &all, FG, Inner::None, |x, y| {
+            (0.5 - box_distance(&r, 9.0, x, y)).clamp(0.0, 1.0)
+        });
+        slow.shade(&r, &all, 0x808080, Inner::None, |x, y| {
+            let d = box_distance(&r, 9.0, x, y);
+            ((0.5 - d).clamp(0.0, 1.0) - (0.5 - d - 1.5).clamp(0.0, 1.0)).max(0.0)
+        });
+        assert_eq!(fast, slow);
+    }
+
+    #[test]
+    fn fill_part_paints_only_its_part() {
+        let r = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 20.0,
+            h: 20.0,
+        };
+        let mut p = Pixmap::new(20, 20, BG);
+        p.fill_part(
+            r,
+            6.0,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 20.0,
+                h: 8.0,
+            },
+            FG,
+        );
+        assert_eq!(at(&p, 10, 4), FG);
+        assert_eq!(at(&p, 10, 12), BG);
+        assert_eq!(at(&p, 0, 0), BG, "its corner is still round");
+    }
+
+    #[test]
+    fn the_fingerprint_follows_changes() {
+        let mut p = Pixmap::new(4, 4, BG);
+        let before = p.fingerprint();
+        assert_eq!(p.fingerprint(), before, "taken again, unchanged");
+        p.fill(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 2.0,
+                h: 2.0,
+            },
+            0.0,
+            FG,
+        );
+        assert_ne!(p.fingerprint(), before);
     }
 
     #[test]

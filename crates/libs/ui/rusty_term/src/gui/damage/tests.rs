@@ -10,7 +10,7 @@ use std::rc::Rc;
 use crate::core::{AnsiParser, Cell, Grid};
 
 use super::super::font::{Glyph, GlyphSource, Style};
-use super::super::render::{PaneFrame, SearchColors, composite};
+use super::super::render::{PaneFrame, Scene, SearchColors, composite};
 use super::{Damage, Frame, Plan};
 
 const CELL: (usize, usize) = (6, 10);
@@ -166,6 +166,7 @@ pub(in crate::gui) fn panes<'a>(
                 grid: v,
                 col0,
                 row0: 0,
+                px: (0, 0),
                 focused: x.focused == (i == 0),
                 cursor_on: x.cursor_on,
                 trail: x
@@ -230,20 +231,41 @@ fn assert_partial_matches_full(
         let panes = panes(&views, x);
         let mut full = vec![0xDEAD_BEEF; w * h];
         composite(
-            &mut full, &panes, &chrome, None, &status, &mut font, &mut ui, w, h, COLORS[0],
-            COLORS[1], COLORS[2], PAD, None,
+            &mut full,
+            &panes,
+            &chrome,
+            Scene::default(),
+            &status,
+            &mut font,
+            &mut ui,
+            w,
+            h,
+            COLORS[0],
+            COLORS[1],
+            COLORS[2],
+            PAD,
+            None,
         );
 
         let slot = n % chain;
         let age = painted_at[slot].map_or(0, |f| (n - f) as u8);
-        let frame = Frame::capture(&panes, &chrome, None, &status, [7, 7], (w, h), COLORS, PAD);
+        let frame = Frame::capture(
+            &panes,
+            &chrome,
+            Scene::default(),
+            &status,
+            [7, 7],
+            (w, h),
+            COLORS,
+            PAD,
+        );
         let plan = damage.plan(&frame, age);
         let buf = &mut bufs[slot];
         composite(
             buf,
             &panes,
             &chrome,
-            None,
+            Scene::default(),
             &status,
             &mut font,
             &mut ui,
@@ -313,6 +335,7 @@ fn repaint_after(bytes: &[u8]) -> Vec<bool> {
             grid: &v,
             col0: 0,
             row0: 0,
+            px: (0, 0),
             focused: true,
             cursor_on: true,
             trail: Vec::new(),
@@ -320,7 +343,16 @@ fn repaint_after(bytes: &[u8]) -> Vec<bool> {
             marks: Vec::new(),
             search: SearchColors::default(),
         };
-        Frame::capture(&[pane], &[], None, &[], [1, 1], (120, 80), COLORS, 0)
+        Frame::capture(
+            &[pane],
+            &[],
+            Scene::default(),
+            &[],
+            [1, 1],
+            (120, 80),
+            COLORS,
+            0,
+        )
     };
     let mut damage = Damage::default();
     damage.presented(capture(&g));
@@ -349,6 +381,7 @@ fn unknown_or_stale_buffers_repaint_fully() {
         grid: v,
         col0: 0,
         row0: 0,
+        px: (0, 0),
         focused: true,
         cursor_on: true,
         trail: Vec::new(),
@@ -360,7 +393,7 @@ fn unknown_or_stale_buffers_repaint_fully() {
         Frame::capture(
             &[pane(v)],
             &[],
-            None,
+            Scene::default(),
             &[],
             [font, font],
             (24, 20),
@@ -414,6 +447,7 @@ fn ime_overhang_survives_a_neighbor_repaint() {
                 grid: &v,
                 col0: 0,
                 row0: 0,
+                px: (0, 0),
                 focused: true,
                 cursor_on: true,
                 trail: Vec::new(),
@@ -421,13 +455,14 @@ fn ime_overhang_survives_a_neighbor_repaint() {
                 marks: Vec::new(),
                 search: SearchColors::default(),
             }];
-            let frame = Frame::capture(&pane, &[], None, &[], [7, 7], (w, h), COLORS, 0);
+            let frame =
+                Frame::capture(&pane, &[], Scene::default(), &[], [7, 7], (w, h), COLORS, 0);
             let plan = damage.as_ref().map_or(Plan::Full, |d| d.plan(&frame, 1));
             composite(
                 buf,
                 &pane,
                 &[],
-                None,
+                Scene::default(),
                 &[],
                 font,
                 &mut OverhangFont,

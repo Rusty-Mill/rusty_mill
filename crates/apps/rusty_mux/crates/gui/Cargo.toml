@@ -21,6 +21,8 @@ rusty_term = { workspace = true, features = ["gui"] }
 rusty_mux_client = { workspace = true }
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
+# Reads the blocks' OSC 7501 reports for their headers (gui-design D48).
+rusty_mux_status = { workspace = true }
 rusty_uuid = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]

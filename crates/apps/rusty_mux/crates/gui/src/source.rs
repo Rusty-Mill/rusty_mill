@@ -9,7 +9,8 @@
 //! the window's on the server (C41): a move here is told with
 //! `FocusBlock`, a move by another client comes back as `FocusChanged`.
 //! Only the focused block's lease is held, so other clients can type into
-//! the rest, and only a leased block is resized (pack D102).
+//! the rest, and only a leased block is resized (pack D102). The control
+//! connection also reads what the blocks' headers say ([`Headers`]).
 
 use std::collections::HashMap;
 use std::net::Shutdown;
@@ -28,19 +29,29 @@ use rusty_mux_client::attach::{
     CONTROL, HANDSHAKE, Missed, Requests, clone, connect, first_session_name, reach,
 };
 use rusty_mux_client::checkpoint::Receiver;
-use rusty_mux_core::{BlockId, Event, Layout, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Size, WindowId};
 use rusty_mux_proto::{Features, Launch, Message};
 use rusty_term::backend::BackendHandle;
-use rusty_term::gui::source::{Feed, PaneIo, Remote, Session, Source, Tree};
+use rusty_term::gui::source::{BlockInfo, Feed, PaneIo, Remote, Session, Source, Tree};
 
+use crate::headers::{Call, Effect, Headers};
 use crate::keys::Keys;
 use crate::session::{Change, Model, local_host};
 use crate::tree::tree;
 
 /// What the GUI's control connection asks for: the TUI's set, plus names
-/// for the strip and who each client is, to count them (handoff D105).
-/// A server without some grants the rest, and the strip shows less.
-pub const GUI: Features = CONTROL.union(Features::LABELS).union(Features::IDENTITY);
+/// for the strip and who each client is, to count them, and block calls
+/// and the events that say a block's folder, status or foreground program
+/// changed, for its header (handoff D105). A server without some grants
+/// the rest, and the chrome shows less.
+pub const GUI: Features = CONTROL
+    .union(Features::LABELS)
+    .union(Features::IDENTITY)
+    .union(Features::BLOCK_CALL)
+    .union(Features::STATUS)
+    .union(Features::TERMINAL_EVENTS)
+    .union(Features::PROCESS)
+    .union(Features::MORE_PROGRAM_EVENTS);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -96,6 +107,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
     let entries = req.call(|req| Message::List { req })?;
     let follows_active = welcomed.features.contains(Features::ACTIVE_WINDOW);
     let model = Model::from_list(&entries, block, local_host(), follows_active)?;
+    let calls_blocks = welcomed.features.contains(Features::BLOCK_CALL);
     let next = req.next;
     let layout = model.view().0.cloned().unwrap_or(Layout::Block(block));
     let state = Arc::new(State {
@@ -104,6 +116,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         next: AtomicU64::new(next),
         tells_focus: welcomed.features.contains(Features::FOCUS),
         selects: follows_active,
+        calls_blocks,
         session: model.session_id(),
         shown: Mutex::new(Shown::default()),
     });
@@ -115,12 +128,24 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         (first, focus)
     };
     state.tell_focus(block);
+    let mut events = Events {
+        state: Arc::clone(&state),
+        conn,
+        model,
+        headers: Headers::default(),
+    };
+    events.follow_blocks();
+    for m in &entries {
+        if let Message::Entry { entry, .. } = m {
+            events.headers.take(entry);
+        }
+    }
     Ok(Attached {
         block,
         focus,
-        source: MuxSource(Arc::clone(&state)),
+        source: MuxSource(state),
         first,
-        events: Events { state, conn, model },
+        events,
     })
 }
 
@@ -133,6 +158,8 @@ struct State {
     tells_focus: bool,
     /// The server takes `SelectWindow` and tells the active window.
     selects: bool,
+    /// The server answers `BlockCall`, which the headers read with.
+    calls_blocks: bool,
     session: SessionId,
     shown: Mutex<Shown>,
 }
@@ -160,13 +187,26 @@ impl State {
         }
     }
 
-    /// Sends a request on the control connection; its answer is skipped.
-    fn send(&self, make: impl FnOnce(u64) -> Message) {
+    /// The clients this window's block connections are.
+    fn mine(&self) -> Vec<ClientId> {
+        let shown = self.shown();
+        shown
+            .blocks
+            .values()
+            .filter_map(std::sync::Weak::upgrade)
+            .map(|b| b.client)
+            .collect()
+    }
+
+    /// Sends a request on the control connection, returning its number;
+    /// the events reader skips its answer unless it asked for it.
+    fn send(&self, make: impl FnOnce(u64) -> Message) -> u64 {
         let req = self.next.fetch_add(1, Ordering::Relaxed);
         let control = &mut self.control.lock().unwrap_or_else(PoisonError::into_inner);
         // A dead control connection ends the events reader, which closes
         // the window.
         let _ = control.send(&make(req));
+        req
     }
 
     /// Moves the focus to `key`, its block's lease with it.
@@ -284,6 +324,8 @@ pub enum Out {
     Focus(u64),
     /// The session changed, for the top strip.
     Session(Session),
+    /// What the shown blocks' headers say, by pane key.
+    Blocks(Vec<(u64, BlockInfo)>),
 }
 
 /// The control connection's events for the window.
@@ -291,6 +333,7 @@ pub struct Events {
     state: Arc<State>,
     conn: Conn<UnixStream>,
     model: Model,
+    headers: Headers,
 }
 
 impl Events {
@@ -302,6 +345,7 @@ impl Events {
                 Out::Layout(t) => remote.layout(t),
                 Out::Focus(k) => remote.focus(k),
                 Out::Session(s) => remote.session(s),
+                Out::Blocks(b) => remote.blocks(b),
             })
         });
     }
@@ -313,6 +357,9 @@ impl Events {
             return;
         }
         while let Ok(message) = self.conn.recv() {
+            if !self.headed(&message, &mut out) {
+                return;
+            }
             let change = match &message {
                 Message::Event { event, .. } => self.model.apply(event),
                 Message::Entry { entry, .. } => self.model.take(entry),
@@ -326,9 +373,13 @@ impl Events {
                 // Its name comes with the window's entry.
                 self.state.send(|req| Message::List { req });
             }
+            if matches!(change, Change::Layout | Change::Shown) {
+                self.follow_blocks();
+            }
             let go_on = match change {
                 Change::None => true,
                 Change::Strip => out(Out::Session(self.session())),
+                Change::Holders => out(Out::Blocks(self.blocks())),
                 Change::Layout => self.layout(&mut out),
                 Change::Focus(block) => {
                     let key = self.state.shown().keys.key(block);
@@ -351,6 +402,64 @@ impl Events {
             }
         }
         out(Out::Layout(None));
+    }
+
+    /// Follows the shown window's blocks for their headers: reads what is
+    /// not known of new ones, and their lease holders from a List.
+    fn follow_blocks(&mut self) {
+        if !self.state.calls_blocks {
+            return;
+        }
+        let calls = self.headers.track(&self.model.shown_blocks());
+        if calls.is_empty() {
+            return;
+        }
+        for (block, call) in calls {
+            self.ask(block, call);
+        }
+        self.state.send(|req| Message::List { req });
+    }
+
+    fn ask(&mut self, block: BlockId, call: Call) {
+        let req = self.state.send(|req| Message::BlockCall {
+            req,
+            block,
+            method: call.method().into(),
+            args: Vec::new(),
+        });
+        self.headers.asked(req, block, call);
+    }
+
+    /// Takes what `message` says of the headers, and sends them when they
+    /// changed; `false` once the window is gone.
+    fn headed(&mut self, message: &Message, out: &mut impl FnMut(Out) -> bool) -> bool {
+        let changed = match message {
+            Message::Text { req, text } if self.headers.owns(*req) => {
+                self.headers.answer(*req, Some(text))
+            }
+            Message::Failed { req, .. } if self.headers.owns(*req) => {
+                self.headers.answer(*req, None)
+            }
+            Message::Entry { entry, .. } => self.headers.take(entry),
+            Message::Event { event, .. } => match self.headers.apply(event) {
+                Effect::None => false,
+                Effect::Changed => true,
+                Effect::Ask(block, call) => {
+                    self.ask(block, call);
+                    false
+                }
+            },
+            _ => false,
+        };
+        !changed || out(Out::Blocks(self.blocks()))
+    }
+
+    /// What the shown blocks' headers say.
+    fn blocks(&self) -> Vec<(u64, BlockInfo)> {
+        let mine = self.state.mine();
+        let keys = &mut self.state.shown().keys;
+        self.headers
+            .infos(keys, &mine, |c| self.model.client_name(c))
     }
 
     /// The session as the strip shows it.
@@ -385,6 +494,8 @@ impl Events {
 /// One block's connection, shared by the pane's writer and its reader.
 struct Block {
     block: BlockId,
+    /// The client the server made of this connection.
+    client: ClientId,
     stream: UnixStream,
     conn: Mutex<Conn<UnixStream>>,
     next: AtomicU64,
@@ -419,6 +530,7 @@ impl Block {
         })?;
         let shared = Arc::new(Block {
             block,
+            client: opened.client,
             stream: opened.stream,
             conn: Mutex::new(opened.writer),
             next: AtomicU64::new(1),

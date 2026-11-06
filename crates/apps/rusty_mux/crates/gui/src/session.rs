@@ -21,6 +21,15 @@ struct Win {
     focused: Option<BlockId>,
 }
 
+/// A connected client.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Client {
+    /// Who the server verified it to be.
+    principal: Option<Principal>,
+    /// Empty until it is named.
+    name: String,
+}
+
 /// What an event changed for the GUI window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change {
@@ -37,6 +46,8 @@ pub enum Change {
     /// The shown window has no blocks left; the GUI asks for this window
     /// instead, and shows it when the server makes it active.
     Emptied(WindowId),
+    /// A client's name, which a block header may show.
+    Holders,
     /// Nothing is left to show: the session or its last window closed.
     Gone,
 }
@@ -51,7 +62,7 @@ pub struct Model {
     windows: Vec<Win>,
     shown: WindowId,
     /// Every connected client and who the server verified it to be.
-    clients: HashMap<ClientId, Option<Principal>>,
+    clients: HashMap<ClientId, Client>,
     /// The server tells the session's active window, so the shown window
     /// follows it; without, the GUI ends with its first window.
     follows_active: bool,
@@ -100,6 +111,27 @@ impl Model {
         Ok(model)
     }
 
+    /// What a block header calls `client` (gui-design D48): its name, else
+    /// who it is, else "Another client".
+    pub fn client_name(&self, client: ClientId) -> String {
+        let Some(c) = self.clients.get(&client) else {
+            return "Another client".into();
+        };
+        if !c.name.is_empty() {
+            return c.name.clone();
+        }
+        match &c.principal {
+            Some(p) if !p.user().is_empty() => p.user().to_owned(),
+            Some(p) => p.id().to_owned(),
+            None => "Another client".into(),
+        }
+    }
+
+    /// The shown window's blocks.
+    pub fn shown_blocks(&self) -> Vec<BlockId> {
+        self.view().0.map(Layout::blocks).unwrap_or_default()
+    }
+
     /// The session's id.
     pub fn session_id(&self) -> SessionId {
         self.session
@@ -122,8 +154,11 @@ impl Model {
     /// `windows`, blocks by `blocks`.
     pub fn session(&self, windows: &mut Keys<WindowId>, blocks: &mut Keys) -> Session {
         // Clients without a verified principal are told apart by id.
-        let mut people: Vec<Option<&Principal>> =
-            self.clients.values().map(Option::as_ref).collect();
+        let mut people: Vec<Option<&Principal>> = self
+            .clients
+            .values()
+            .map(|c| c.principal.as_ref())
+            .collect();
         let unverified = people.iter().filter(|p| p.is_none()).count();
         people.retain(Option::is_some);
         people.sort_by(|a, b| a.map(Principal::id).cmp(&b.map(Principal::id)));
@@ -142,6 +177,8 @@ impl Model {
                 })
                 .collect(),
             clients: (people.len() + unverified).max(1),
+            // Reached over a local socket: the server runs here.
+            local: true,
         }
     }
 
@@ -173,9 +210,16 @@ impl Model {
                 Change::Strip
             }
             Entry::Client {
-                client, principal, ..
+                client,
+                principal,
+                name,
+                ..
             } => {
-                self.clients.insert(*client, principal.clone());
+                let c = Client {
+                    principal: principal.clone(),
+                    name: name.clone(),
+                };
+                self.clients.insert(*client, c);
                 Change::Strip
             }
             _ => Change::None,
@@ -267,9 +311,20 @@ impl Model {
                 })
             }
             Event::ClientConnected { client, principal } => {
-                self.clients.insert(*client, principal.clone());
+                let c = Client {
+                    principal: principal.clone(),
+                    name: String::new(),
+                };
+                self.clients.insert(*client, c);
                 Change::Strip
             }
+            Event::ClientRenamed { client, name } => match self.clients.get_mut(client) {
+                Some(c) => {
+                    c.name.clone_from(name);
+                    Change::Holders
+                }
+                None => Change::None,
+            },
             Event::ClientDisconnected { client } => match self.clients.remove(client) {
                 Some(_) => Change::Strip,
                 None => Change::None,

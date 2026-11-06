@@ -167,48 +167,50 @@ impl Node {
         false
     }
 
-    fn rects(&self, area: Rect, out: &mut Vec<(u64, Rect)>) {
+    fn rects(&self, area: Rect, gap: usize, out: &mut Vec<(u64, Rect)>) {
         match self {
             Node::Leaf(id) => out.push((*id, area)),
             Node::Split { dir, ratio, a, b } => {
-                let (ra, rb) = split_area(area, *dir, *ratio);
-                a.rects(ra, out);
-                b.rects(rb, out);
+                let (ra, rb) = split_area(area, *dir, *ratio, gap);
+                a.rects(ra, gap, out);
+                b.rects(rb, gap, out);
             }
         }
     }
 }
 
-/// Split `area` into two sub-areas for a [`Dir`] at `ratio`, reserving one cell
-/// between them for the divider. Degenerates gracefully when the area is too
-/// small to divide (the first child takes it all).
-fn split_area(area: Rect, dir: Dir, ratio: f32) -> (Rect, Rect) {
+/// Split `area` into two sub-areas for a [`Dir`] at `ratio`, reserving `gap`
+/// units between them for the divider. Degenerates gracefully when the area
+/// is too small to divide (the first child takes it all).
+fn split_area(area: Rect, dir: Dir, ratio: f32, gap: usize) -> (Rect, Rect) {
     match dir {
         Dir::Vertical => {
-            if area.cols < 2 {
+            let Some((a, b)) = divide(area.cols, ratio, gap) else {
                 return (area, Rect::new(area.col, area.row, 0, area.rows));
-            }
-            let usable = area.cols - 1; // one column for the divider
-            let a_cols = ((usable as f32 * ratio).round() as usize).clamp(1, usable - 1);
-            let b_cols = usable - a_cols;
+            };
             (
-                Rect::new(area.col, area.row, a_cols, area.rows),
-                Rect::new(area.col + a_cols + 1, area.row, b_cols, area.rows),
+                Rect::new(area.col, area.row, a, area.rows),
+                Rect::new(area.col + a + gap, area.row, b, area.rows),
             )
         }
         Dir::Horizontal => {
-            if area.rows < 2 {
+            let Some((a, b)) = divide(area.rows, ratio, gap) else {
                 return (area, Rect::new(area.col, area.row, area.cols, 0));
-            }
-            let usable = area.rows - 1; // one row for the divider
-            let a_rows = ((usable as f32 * ratio).round() as usize).clamp(1, usable - 1);
-            let b_rows = usable - a_rows;
+            };
             (
-                Rect::new(area.col, area.row, area.cols, a_rows),
-                Rect::new(area.col, area.row + a_rows + 1, area.cols, b_rows),
+                Rect::new(area.col, area.row, area.cols, a),
+                Rect::new(area.col, area.row + a + gap, area.cols, b),
             )
         }
     }
+}
+
+/// `len` less `gap`, split at `ratio` with at least one unit each side;
+/// `None` when that doesn't fit.
+fn divide(len: usize, ratio: f32, gap: usize) -> Option<(usize, usize)> {
+    let usable = len.checked_sub(gap).filter(|&u| u >= 2)?;
+    let a = ((usable as f32 * ratio).round() as usize).clamp(1, usable - 1);
+    Some((a, usable - a))
 }
 
 /// A tab's pane layout.
@@ -250,8 +252,14 @@ impl Layout {
     /// Every pane and its rectangle within `area`, in tree (left-to-right,
     /// top-to-bottom) order.
     pub fn rects(&self, area: Rect) -> Vec<(u64, Rect)> {
+        self.boxes(area, 1)
+    }
+
+    /// The same tiling in any unit, such as pixels, with `gap` units
+    /// between neighbours.
+    pub(crate) fn boxes(&self, area: Rect, gap: usize) -> Vec<(u64, Rect)> {
         let mut out = Vec::new();
-        self.root.rects(area, &mut out);
+        self.root.rects(area, gap, &mut out);
         out
     }
 
@@ -410,6 +418,24 @@ mod tests {
         let rs = l.rects(area);
         // Both panes keep at least one row even after saturating growth.
         assert!(rs.iter().all(|(_, r)| r.rows >= 1));
+    }
+
+    #[test]
+    fn boxes_leave_the_gap_between_neighbours() {
+        let mut l = Layout::single(1);
+        l.split(1, 2, Dir::Vertical);
+        l.split(2, 3, Dir::Horizontal);
+        let boxes = l.boxes(Rect::new(8, 52, 808, 408), 8);
+        assert_eq!(
+            boxes,
+            vec![
+                (1, Rect::new(8, 52, 400, 408)),
+                (2, Rect::new(416, 52, 400, 200)),
+                (3, Rect::new(416, 260, 400, 200)),
+            ]
+        );
+        let tiny = l.boxes(Rect::new(0, 0, 9, 9), 8);
+        assert_eq!(tiny[0], (1, Rect::new(0, 0, 9, 9)), "too small to split");
     }
 
     #[test]
