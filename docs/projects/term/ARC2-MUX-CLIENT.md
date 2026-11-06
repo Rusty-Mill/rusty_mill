@@ -42,13 +42,14 @@ protocol implementations).
 
 ## Slices
 
-Each slice is one PR. Every F-item's look goes through `rusty-term-design-expert`; visual rows use
+Each slice is one PR (S2 is two, D103). Every F-item's look goes through `rusty-term-design-expert`; visual rows use
 gui-design D45–D49.
 
 | # | Slice | Gate |
 |---|---|---|
 | S1 | Extract `rusty_mux_client`; the TUI uses it. No behaviour change | approved (D96) |
-| S2 | Session-source port in `rusty_term`, local adapter; `rusty_mux_gui` attaches to one server window and draws its split tree | approved (D96) |
+| S2a | Session-source port in `rusty_term` (`gui::source`), local adapter. No behaviour change | approved (D96; split D103, shape D101) |
+| S2b | `rusty_mux_gui` attaches to one server window and draws its split tree (focus, lease, resize per D102) | approved (D96) |
 | S3 | F1 chrome: top strip, block headers with C21 status, ribbon; F2 prefix hints; F7 zoom | arc GO covers C16, C21 |
 | S4 | F4 session switcher and thumbnails, F6 detached block, F5 reconnecting (30 s grace, D44; leases survive a reconnect, D83) | arc GO |
 | S5 | F3 take over: confirm first (gui-design D44); the client re-asks for the lease after (D46) | arc GO |
