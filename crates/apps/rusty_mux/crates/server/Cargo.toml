@@ -17,7 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 rusty_mux_core = { workspace = true }
-rusty_mux_proto = { workspace = true }
+rusty_mux_proto = { workspace = true, features = ["screen"] }
 # The config file's `server` section, parsed as ctl parses the rest.
 rusty_mux_script = { workspace = true }
 rusty_mux_status = { workspace = true }

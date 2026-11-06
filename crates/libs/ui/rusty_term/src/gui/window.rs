@@ -32,7 +32,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
 use crate::sync::Mutex;
@@ -43,11 +42,14 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{KeyCode, KeyLocation, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, Window, WindowId};
 
+use super::chrome::{Chrome, Marks};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
+use super::motion;
 use super::pace::Pacer;
-use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors};
+use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors, blend};
 use super::settings::{Field, Settings, SetupBaseline, Widget};
+use super::source::{Feed, PaneIo};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -156,6 +158,10 @@ struct Trail {
     to: (usize, usize),
     since: Instant,
 }
+
+/// Text coverage of a disabled settings row: 45% (pack D26), standing in for
+/// opacity since a cell has no alpha.
+const DISABLED_ALPHA: u8 = 115;
 
 /// What a click on a given chrome-bar cell does.
 #[derive(Clone, Copy, PartialEq)]
@@ -421,15 +427,6 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Most PTY output parsed under one grid lock: about 1 ms of parsing, so
-/// a flood still leaves the UI thread the lock between batches.
-const READ_BATCH: usize = 64 * 1024;
-
-/// Batches read ahead of the parser: at most 1 MiB queued. The kernel's PTY
-/// buffer holds only a few KiB, so without a separate read thread the child
-/// stalls on every batch the parser works through.
-const READ_AHEAD: usize = 16;
-
 /// A pane's one outstanding wakeup: the reader raises it when it sends a
 /// `Redraw`, the window lowers it when it handles one. Output parsed while
 /// it is raised needs no wakeup of its own, since the pending one repaints
@@ -476,51 +473,33 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("the windowing library panicked")
 }
 
-/// PTY reader loop (own thread, one per tab): parse output into the tab's
-/// grid, send replies (DA/DSR/structured-channel) back to the child, and wake
-/// the window with the tab's id through `send` (`false` once the event loop
-/// is gone). A second thread ([`read_ahead`]) reads the PTY in batches, so
-/// the child keeps writing while this one parses. A wakeup is sent only when
-/// the window has handled the last one (`wake`), so a flood costs the UI
-/// thread one event per frame, not one per read. The loop ends on read EOF
-/// or error, or when a send fails, and then sends `Exit`.
+/// Pane reader loop (own thread, one per pane): apply the pane's feed to
+/// its grid, send the parser's replies (DA/DSR/structured-channel) back
+/// through `replies` when the window answers the program's queries, and
+/// wake the window with the pane's id through `send` (`false` once the
+/// event loop is gone). A wakeup is sent only when the window has handled
+/// the last one (`wake`), so a flood costs the UI thread one event per
+/// frame, not one per read. The loop ends when the feed does or a send
+/// fails, and then sends `Exit`.
 fn reader_loop(
     id: u64,
-    mut reader: Box<dyn BackendHandle>,
-    mut replies: Box<dyn BackendHandle>,
+    feed: impl Iterator<Item = Feed>,
+    mut replies: Option<Box<dyn BackendHandle>>,
     grid: Arc<Mutex<Grid>>,
     parser: Arc<Mutex<AnsiParser>>,
     wake: WakeFlag,
     mut send: impl FnMut(UserEvent) -> bool,
 ) {
-    let (batches, ready) = std::sync::mpsc::sync_channel(READ_AHEAD);
-    let spawned = std::thread::Builder::new()
-        .name(format!("pty-read-{id}"))
-        .spawn(move || read_ahead(reader.as_mut(), &batches));
-    if let Err(e) = spawned {
-        eprintln!("rusty_term: pane {id}: cannot start the PTY read thread: {e}");
-        send(UserEvent::Exit(id));
-        return;
-    }
-    // Ends when the read thread hangs up: PTY EOF or a read error.
-    for data in ready {
-        let response = {
-            // Bulk: step aside for the UI thread between chunks.
-            let mut g = grid.lock_bulk();
-            let mut parser = parser.lock();
-            parser.advance(&mut g, &data);
-            // host_out (clipboard/title relay) has no host here; dropped.
-            let _ = g.take_host_out();
-            parser.take_responses()
-        };
-        if !response.is_empty() {
+    for step in feed {
+        let response = apply(step, &grid, &parser);
+        if let Some(replies) = replies.as_mut().filter(|_| !response.is_empty()) {
             let _ = replies.write(&response);
         }
         // Signal even mid synchronized-output window: the `Redraw` handler
         // checks `sync_output_active` and skips painting. A wakeup still
         // unhandled already covers this output. Closing the pane leaves its
-        // flag raised, so the loop then only parses until read EOF or error,
-        // as it did when every send succeeded: dropping the pane hangs up the
+        // flag raised, so the loop then only parses until the feed ends, as
+        // it did when every send succeeded: dropping the pane hangs up the
         // direct child, but a descendant holding the PTY open keeps it
         // reading.
         if wake.raise() && !send(UserEvent::Redraw(id)) {
@@ -530,20 +509,27 @@ fn reader_loop(
     send(UserEvent::Exit(id));
 }
 
-/// Read the PTY in batches (see [`read_batch`](crate::backend::read_batch))
-/// and queue each for the parser, until EOF, a read error, or the parser
-/// hanging up. The queue is bounded, so a parser that falls behind still
-/// pushes back on the child.
-fn read_ahead(reader: &mut dyn BackendHandle, batches: &SyncSender<Vec<u8>>) {
-    let mut buf = vec![0u8; READ_BATCH];
-    loop {
-        match crate::backend::read_batch(reader, &mut buf) {
-            Ok(0) | Err(_) => return, // EOF (child exited) or a dead PTY
-            Ok(n) => {
-                if batches.send(buf[..n].to_vec()).is_err() {
-                    return; // parser gone
-                }
-            }
+/// Apply one feed step to a pane's terminal, returning the parser's
+/// replies to the program.
+fn apply(step: Feed, grid: &Mutex<Grid>, parser: &Mutex<AnsiParser>) -> Vec<u8> {
+    match step {
+        Feed::Bytes(data) => {
+            // Bulk: step aside for the UI thread between chunks.
+            let mut g = grid.lock_bulk();
+            let mut parser = parser.lock();
+            parser.advance(&mut g, &data);
+            // host_out (clipboard/title relay) has no host here; dropped.
+            let _ = g.take_host_out();
+            parser.take_responses()
+        }
+        Feed::Screen(new_grid, new_parser) => {
+            *grid.lock() = *new_grid;
+            *parser.lock() = *new_parser;
+            Vec::new()
+        }
+        Feed::Resized { cols, rows } => {
+            grid.lock().resize(cols.into(), rows.into());
+            Vec::new()
         }
     }
 }
@@ -627,6 +613,9 @@ struct WindowState<'a> {
     hits: Vec<Hit>,
     /// An in-progress tab drag (press on a tab arms it; releasing clears).
     tab_drag: Option<TabDrag>,
+    /// The chrome control the left button went down on, drawn pressed until
+    /// the button is released (D26, D43).
+    pressed: Option<Hit>,
     /// Chrome-bar element under the pointer, for hover feedback. `None` when
     /// the pointer is below the bar or over an inert (drag-strip) cell.
     hover: Option<Hit>,
@@ -759,10 +748,19 @@ impl WindowState<'_> {
         let grid = Arc::new(Mutex::new(g));
         let parser = Arc::new(Mutex::new(AnsiParser::with_theme(theme)));
 
-        // Reader thread: PTY -> parser -> grid, writing replies back and waking
-        // the loop. Independent handle clones so it shares no lock with us.
-        let read_handle = handle.try_clone()?;
-        let reply_handle = handle.try_clone()?;
+        // Child-exit watcher (Windows ConPTY: the output pipe only EOFs at
+        // teardown, so block on the child handle; `None` on Unix where read-EOF
+        // already signals exit).
+        let exit = handle.exit_token();
+        let io = PaneIo::local(handle, format!("pty-read-{id}"))?;
+
+        // Reader thread: feed -> parser -> grid, writing replies back and
+        // waking the loop. Its own reply handle, so it shares no lock with us.
+        let replies = match io.answers_queries {
+            true => Some(io.writer.try_clone()?),
+            false => None,
+        };
+        let feed = io.feed;
         let reader_grid = Arc::clone(&grid);
         let reader_parser = Arc::clone(&parser);
         let reader_proxy = self.proxy.clone();
@@ -771,8 +769,8 @@ impl WindowState<'_> {
         std::thread::spawn(move || {
             reader_loop(
                 id,
-                read_handle,
-                reply_handle,
+                feed,
+                replies,
                 reader_grid,
                 reader_parser,
                 reader_wake,
@@ -780,10 +778,7 @@ impl WindowState<'_> {
             )
         });
 
-        // Child-exit watcher (Windows ConPTY: the output pipe only EOFs at
-        // teardown, so block on the child handle; `None` on Unix where read-EOF
-        // already signals exit).
-        if let Some(wait) = handle.exit_token() {
+        if let Some(wait) = exit {
             let exit_proxy = self.proxy.clone();
             std::thread::spawn(move || {
                 wait();
@@ -794,7 +789,7 @@ impl WindowState<'_> {
             id,
             grid,
             parser,
-            writer: handle,
+            writer: io.writer,
             wake,
             shown: std::cell::RefCell::new(None),
             compactor: Compactor::default(),
@@ -1360,12 +1355,24 @@ impl WindowState<'_> {
         }
     }
 
+    /// Whether the chrome holds still (pack D27, D50): the config override,
+    /// else the OS accessibility setting.
+    fn reduce_motion(&self) -> bool {
+        motion::resolve(self.config.reduce_motion, motion::os_reduces_motion)
+    }
+
+    /// The chrome colours for the current theme (pack D34-D36, D38).
+    fn chrome_colors(&self) -> Chrome {
+        Chrome::from_theme(&self.theme)
+    }
+
     /// Paint the chrome bar + the active tab's panes through the renderer.
     fn redraw(&mut self) {
         self.pacer.painted(Instant::now());
         let chrome = self.chrome_row();
         let status = self.status_row();
-        let divider = mix(self.theme.bg, self.theme.fg, 60);
+        let tokens = self.chrome_colors();
+        let divider = tokens.line;
         if self.overlay.is_some() {
             let page = self.build_overlay_grid().frame_view();
             let (Some(renderer), Some(window)) = (self.renderer.as_mut(), self.window.as_ref())
@@ -1393,8 +1400,8 @@ impl WindowState<'_> {
                 size.width,
                 size.height,
                 divider,
-                self.theme.bg,
-                mix(self.theme.bg, self.theme.fg, 48),
+                tokens.base, // the page is chrome, padding included
+                tokens.frame,
                 self.pad,
             );
             return;
@@ -1407,7 +1414,7 @@ impl WindowState<'_> {
         let dock_grid = if self.dock_cols() > 0 {
             let built = self.pane().map(|p| {
                 let g = p.grid.lock();
-                build_dock_grid(&g, &self.theme, DOCK_CELLS, self.rows as usize)
+                build_dock_grid(&g, &self.chrome_colors(), DOCK_CELLS, self.rows as usize)
             });
             let (grid, items) =
                 built.unwrap_or_else(|| (Grid::new(DOCK_CELLS, self.rows as usize), Vec::new()));
@@ -1474,7 +1481,9 @@ impl WindowState<'_> {
         // TRAIL_MS (the tick loop keeps frames coming while one is live).
         const TRAIL_MS: u64 = 150;
         let mut ghosts: Vec<(usize, usize, f32)> = Vec::new();
-        if self.config.cursor_trail.unwrap_or(false) {
+        if self.config.cursor_trail.unwrap_or(false)
+            && !motion::resolve(self.config.reduce_motion, motion::os_reduces_motion)
+        {
             let now = Instant::now();
             if let Some((g, _, _)) = snaps.iter().find(|(_, _, foc)| *foc) {
                 let cur = (g.cursor_visible && g.view_offset == 0).then_some(g.cursor);
@@ -1500,13 +1509,19 @@ impl WindowState<'_> {
         } else {
             self.trail = None;
         }
-        // Command gutter marks (per pane): resolve each row's BlockMark to a
-        // theme color — success green, failure red, running in the accent.
+        // Command gutter marks (per pane): resolve each row's BlockMark against
+        // what backs the stripe (D41, D42): the padding band (theme bg) for a pane
+        // at the left edge, the divider for a pane right of a split.
         let marks_on = self.config.command_marks.unwrap_or(true);
-        let mark_color = |m: crate::core::BlockMark| match m {
-            crate::core::BlockMark::Success => self.theme.palette16[2],
-            crate::core::BlockMark::Error => self.theme.palette16[1],
-            crate::core::BlockMark::Running => self.theme.cursor,
+        let edge_marks = Marks::on(self.theme.bg, self.theme.cursor, &tokens);
+        let split_marks = Marks::on(tokens.line, self.theme.cursor, &tokens);
+        let mark_color = |m: crate::core::BlockMark, col: usize| {
+            let marks = if col == 0 { &edge_marks } else { &split_marks };
+            match m {
+                crate::core::BlockMark::Success => marks.success,
+                crate::core::BlockMark::Error => marks.failure,
+                crate::core::BlockMark::Running => marks.running,
+            }
         };
         let search = SearchColors::from_theme(&self.theme);
         let mut frames: Vec<PaneFrame> = snaps
@@ -1527,7 +1542,7 @@ impl WindowState<'_> {
                     g.block_marks()
                         .iter()
                         .enumerate()
-                        .filter_map(|(row, m)| m.map(|m| (row, mark_color(m))))
+                        .filter_map(|(row, m)| m.map(|m| (row, mark_color(m, r.col))))
                         .collect()
                 } else {
                     Vec::new()
@@ -1558,7 +1573,7 @@ impl WindowState<'_> {
             size.height,
             divider,
             self.theme.bg,
-            mix(self.theme.bg, self.theme.fg, 48),
+            tokens.frame,
             self.pad,
         );
         drop(frames);
@@ -1620,8 +1635,9 @@ impl WindowState<'_> {
             return Vec::new();
         }
         let (paint_cols, cols) = self.bar_cells();
-        let bar_bg = mix(self.theme.bg, self.theme.fg, 48);
-        let dim_fg = mix(self.theme.fg, self.theme.bg, 110);
+        let tokens = self.chrome_colors();
+        let bar_bg = tokens.sunk;
+        let dim_fg = tokens.muted;
         let mut row = vec![Cell::blank(); paint_cols];
         for c in &mut row {
             c.fg = dim_fg;
@@ -1645,9 +1661,8 @@ impl WindowState<'_> {
 
         // Right side, innermost first: grid size, scrollback position, exit
         // pill. Each segment carries its own color.
-        let ok = self.theme.palette16[2];
-        let err = self.theme.palette16[1];
-        let warn = self.theme.palette16[3];
+        // Scrolled back is a mode, not a status: full text plus the arrow.
+        let (ok, err, warn) = (tokens.success, tokens.failure, tokens.text);
         let mut right: Vec<(String, u32)> = Vec::new();
         right.push((format!("{gcols}\u{00d7}{grows} "), dim_fg));
         if view_offset > 0 {
@@ -1680,12 +1695,12 @@ impl WindowState<'_> {
                 &mut col,
                 limit,
                 &format!(" {text}"),
-                self.theme.fg,
+                tokens.text,
                 bar_bg,
                 Hit::Drag,
             );
             if let Some(b) = &branch {
-                let accent = self.theme.cursor;
+                let accent = tokens.accent;
                 put_text(
                     &mut row,
                     &mut hits,
@@ -1731,11 +1746,12 @@ impl WindowState<'_> {
 
     fn chrome_row(&mut self) -> Vec<Cell> {
         let (paint_cols, cols) = self.bar_cells();
+        let tokens = self.chrome_colors();
         if let Some(query) = self.searching.clone() {
             let mut row = vec![Cell::blank(); paint_cols];
-            let bar_bg = mix(self.theme.bg, self.theme.fg, 48);
+            let bar_bg = tokens.raised;
             for c in &mut row {
-                c.fg = self.theme.fg;
+                c.fg = tokens.text;
                 c.bg = bar_bg;
             }
             let status = self.pane().and_then(|p| p.grid.lock().search_status());
@@ -1758,7 +1774,7 @@ impl WindowState<'_> {
                 &mut col,
                 limit,
                 &format!("{mode}{query}"),
-                self.theme.fg,
+                tokens.text,
                 bar_bg,
                 Hit::Drag,
             );
@@ -1769,7 +1785,7 @@ impl WindowState<'_> {
                 &mut ccol,
                 cols,
                 &count,
-                self.theme.fg,
+                tokens.text,
                 bar_bg,
                 Hit::Drag,
             );
@@ -1778,9 +1794,9 @@ impl WindowState<'_> {
         }
         if self.copy_mode.is_some() {
             let mut row = vec![Cell::blank(); paint_cols];
-            let bar_bg = mix(self.theme.bg, self.theme.fg, 48);
+            let bar_bg = tokens.raised;
             for c in &mut row {
-                c.fg = self.theme.fg;
+                c.fg = tokens.text;
                 c.bg = bar_bg;
             }
             let mut hits = vec![Hit::Drag; paint_cols];
@@ -1791,29 +1807,32 @@ impl WindowState<'_> {
                 &mut col,
                 cols,
                 " COPY   move: hjkl/arrows   v: select   y: copy   Esc: exit",
-                self.theme.fg,
+                tokens.text,
                 bar_bg,
                 Hit::Drag,
             );
             self.hits = hits;
             return row;
         }
-        // Three contrast tiers give the strip depth: the empty band tints
-        // hardest, inactive tabs sit on it as lighter chips, hover lightens
-        // further, and the active tab adopts the terminal background outright
-        // — so a tab is always distinguishable from the strip it sits on, in
-        // light and dark themes alike. The accent line follows the cursor
-        // color rather than adding config keys.
-        let bar_bg = mix(self.theme.bg, self.theme.fg, 48);
-        let tab_bg = mix(self.theme.bg, self.theme.fg, 20);
-        let dim_fg = mix(self.theme.fg, self.theme.bg, 110);
+        // Pack surfaces (D38): the strip is `frame`; inactive tabs are slate
+        // text with no chip, hover raises them, and the active tab is a
+        // `base` chip with the theme accent underline (D34).
+        let bar_bg = tokens.frame;
+        let tab_bg = tokens.frame;
+        let dim_fg = tokens.muted;
         let hover = self.hover;
-        let hover_bg = mix(self.theme.bg, self.theme.fg, 10);
-        let btn_hover_bg = mix(bar_bg, self.theme.fg, 35);
-        let accent = self.theme.cursor;
+        let hover_bg = tokens.raised;
+        let btn_hover_bg = tokens.raised;
+        let accent = tokens.accent;
+        // Pressed is one more surface step, `line`, with full text on it
+        // (slate fails there): D26, D43.
+        let pressed = self.pressed;
+        // A chip's × already hovers at `line` (one step above the chip), so
+        // its pressed look is the same step.
+        let is_pressed = |hit: Hit| pressed == Some(hit);
         let mut row: Vec<Cell> = vec![Cell::blank(); paint_cols];
         for c in &mut row {
-            c.fg = self.theme.fg;
+            c.fg = tokens.text;
             c.bg = bar_bg;
         }
         let mut hits = vec![Hit::Drag; paint_cols];
@@ -1914,13 +1933,14 @@ impl WindowState<'_> {
             // one; every shell tab renders inactive behind it.
             let is_active = i == self.active && !settings_open;
             let tab_hovered = hover == Some(Hit::Tab(i)) || hover == Some(Hit::CloseTab(i));
-            // The active tab adopts the terminal background, visually merging
-            // with the grid below; inactive ones sit dimmed on the bar and
-            // light up (full fg on a lighter bg) under the pointer.
-            let (fg, bg) = if is_active {
-                (self.theme.fg, self.theme.bg)
+            // The active tab is a `base` chip; inactive ones are muted text on
+            // the strip and rise one surface step under the pointer.
+            let (fg, bg) = if is_pressed(Hit::Tab(i)) {
+                (tokens.text, tokens.line)
+            } else if is_active {
+                (tokens.text, tokens.base)
             } else if tab_hovered {
-                (self.theme.fg, hover_bg)
+                (tokens.text, hover_bg)
             } else {
                 (dim_fg, tab_bg)
             };
@@ -1963,7 +1983,8 @@ impl WindowState<'_> {
                 .min(label_end.saturating_sub(col).saturating_sub(content));
             let mut tcol = col + lead;
             if attention {
-                let alert = self.theme.palette16[1]; // ANSI red
+                // Attention is a state, not a failure: the accent dot.
+                let alert = accent;
                 put_text(
                     &mut row,
                     &mut hits,
@@ -1987,8 +2008,9 @@ impl WindowState<'_> {
             );
             if has_close {
                 let mut ccol = tab_end - close_w;
-                let (cfg, cbg) = if hover == Some(Hit::CloseTab(i)) {
-                    (self.theme.fg, mix(bg, self.theme.fg, 55))
+                let (cfg, cbg) = if is_pressed(Hit::CloseTab(i)) || hover == Some(Hit::CloseTab(i))
+                {
+                    (tokens.text, tokens.line)
                 } else {
                     (fg, bg)
                 };
@@ -2018,8 +2040,10 @@ impl WindowState<'_> {
             }
         }
         if hidden > 0 {
-            let (ifg, ibg) = if hover == Some(Hit::MoreTabs) {
-                (self.theme.fg, btn_hover_bg)
+            let (ifg, ibg) = if is_pressed(Hit::MoreTabs) {
+                (tokens.text, tokens.line)
+            } else if hover == Some(Hit::MoreTabs) {
+                (tokens.text, btn_hover_bg)
             } else {
                 (dim_fg, bar_bg)
             };
@@ -2043,7 +2067,7 @@ impl WindowState<'_> {
             col = indicator_end;
         }
         // The settings page's own chip: rendered exactly like an active tab
-        // (terminal bg, bold, accent underline) with its × closing the page.
+        // (`base` chip, bold, accent underline) with its × closing the page.
         if settings_open {
             let chip_label = match &self.overlay {
                 Some(Overlay::Settings(s)) if s.is_setup() => " Setup",
@@ -2051,10 +2075,10 @@ impl WindowState<'_> {
             };
             let start = col;
             let end = (col + SETTINGS_TAB_W).min(btn0);
-            let bg = self.theme.bg;
+            let bg = tokens.base;
             for c in start..end {
                 row[c] = Cell::blank();
-                row[c].fg = self.theme.fg;
+                row[c].fg = tokens.text;
                 row[c].bg = bg;
                 hits[c] = Hit::SettingsTab;
             }
@@ -2066,14 +2090,15 @@ impl WindowState<'_> {
                 &mut tcol,
                 label_end,
                 chip_label,
-                self.theme.fg,
+                tokens.text,
                 bg,
                 Hit::SettingsTab,
             );
-            let (cfg, cbg) = if hover == Some(Hit::CloseSettings) {
-                (self.theme.fg, mix(bg, self.theme.fg, 55))
+            let (cfg, cbg) = if is_pressed(Hit::CloseSettings) || hover == Some(Hit::CloseSettings)
+            {
+                (tokens.text, tokens.line)
             } else {
-                (self.theme.fg, bg)
+                (tokens.text, bg)
             };
             let mut ccol = label_end;
             put_text(
@@ -2095,8 +2120,17 @@ impl WindowState<'_> {
                 col += 1;
             }
         }
+        let btn_fg = |hit: Hit| {
+            if hover == Some(hit) || is_pressed(hit) {
+                tokens.text
+            } else {
+                dim_fg
+            }
+        };
         let btn_bg = |hit: Hit| {
-            if hover == Some(hit) {
+            if is_pressed(hit) {
+                tokens.line
+            } else if hover == Some(hit) {
                 btn_hover_bg
             } else {
                 bar_bg
@@ -2108,7 +2142,7 @@ impl WindowState<'_> {
             &mut col,
             btn0,
             " + ",
-            self.theme.fg,
+            btn_fg(Hit::NewTab),
             btn_bg(Hit::NewTab),
             Hit::NewTab,
         );
@@ -2118,7 +2152,7 @@ impl WindowState<'_> {
             &mut col,
             btn0,
             " ▾ ",
-            self.theme.fg,
+            btn_fg(Hit::ShellMenu),
             btn_bg(Hit::ShellMenu),
             Hit::ShellMenu,
         );
@@ -2130,7 +2164,7 @@ impl WindowState<'_> {
             &mut bcol,
             btn0 + 4,
             "  ─ ",
-            self.theme.fg,
+            btn_fg(Hit::Minimize),
             btn_bg(Hit::Minimize),
             Hit::Minimize,
         );
@@ -2140,7 +2174,7 @@ impl WindowState<'_> {
             &mut bcol,
             btn0 + 8,
             "  □ ",
-            self.theme.fg,
+            btn_fg(Hit::Maximize),
             btn_bg(Hit::Maximize),
             Hit::Maximize,
         );
@@ -2148,7 +2182,7 @@ impl WindowState<'_> {
         let (close_fg, close_bg) = if hover == Some(Hit::Close) {
             (0xFFFFFF, 0xC42B1C)
         } else {
-            (self.theme.fg, bar_bg)
+            (dim_fg, bar_bg)
         };
         put_text(
             &mut row,
@@ -2518,6 +2552,10 @@ impl WindowState<'_> {
         let Some(window) = self.window.clone() else {
             return;
         };
+        if self.hits[col] != Hit::Drag {
+            self.pressed = Some(self.hits[col]);
+            window.request_redraw();
+        }
         match self.hits[col] {
             Hit::Tab(i) => {
                 self.close_overlay();
@@ -3980,6 +4018,7 @@ impl WindowState<'_> {
         let blink = s.blink();
         let ligatures = s.ligatures();
         let cursor_trail = s.cursor_trail();
+        let reduce_motion = s.reduce_motion();
         let min_contrast = s.min_contrast();
         let scrollback = s.scrollback();
         let shell = s.shell_path();
@@ -4025,6 +4064,8 @@ impl WindowState<'_> {
             }
             // Read live at draw time; updating the config is the whole apply.
             Field::CursorTrail => self.config.cursor_trail = Some(cursor_trail),
+            // Read live by the draw and tick paths, like the trail.
+            Field::ReduceMotion => self.config.reduce_motion = reduce_motion,
             Field::MinContrast => {
                 self.config.minimum_contrast = min_contrast;
                 for tab in &self.tabs {
@@ -4267,8 +4308,10 @@ impl WindowState<'_> {
     fn build_overlay_grid(&self) -> Grid {
         let (cols, rows) = (self.cols as usize, self.rows as usize);
         let mut g = Grid::new(cols, rows);
-        let (fg, bg) = (self.theme.fg, self.theme.bg);
-        let dim = mix(self.theme.fg, self.theme.bg, 110);
+        // Overlay pages are chrome: a `base` page with pack text (D38).
+        let tokens = self.chrome_colors();
+        let (fg, bg) = (tokens.text, tokens.base);
+        let dim = tokens.muted;
         for y in 0..rows {
             fill_row(&mut g, y, 0, cols, fg, bg);
         }
@@ -4283,9 +4326,10 @@ impl WindowState<'_> {
                         break;
                     }
                     let on = i == *sel;
-                    let (rfg, rbg) = if on { (bg, self.theme.fg) } else { (fg, bg) };
+                    let (rfg, rbg) = if on { (fg, tokens.raised) } else { (fg, bg) };
                     if on {
                         fill_row(&mut g, r, 0, bar, rfg, rbg);
+                        write_row(&mut g, r, 0, "\u{258C}", tokens.accent, rbg);
                     }
                     write_row(
                         &mut g,
@@ -4310,14 +4354,14 @@ impl WindowState<'_> {
                 // page, so the content starts at the top and the save state
                 // lives in the footer.
                 let footer_top = rows.saturating_sub(SETTINGS_FOOTER_H);
-                // Selection tints hard, hover barely — the two must never
-                // read as the same state when both are on screen.
-                let sel_bg = mix(bg, fg, 56);
-                let hover_bg = mix(bg, fg, 14);
-                // Selected-card description: brighter than dim (it sits on
-                // the tinted band, where dim text loses its contrast).
-                let mid = mix(fg, bg, 60);
-                let accent = self.theme.cursor;
+                // Hover and selection both raise the row (D38); only the
+                // selection carries the accent bar, so the two never read as
+                // the same state when both are on screen.
+                let sel_bg = tokens.raised;
+                let hover_bg = tokens.raised;
+                // Selected-card description: full text on the raised band.
+                let mid = fg;
+                let accent = tokens.accent;
 
                 // Category sidebar: active gets an accent bar + tint (flush
                 // to the `│` rule separating it from the cards), the rest
@@ -4334,7 +4378,7 @@ impl WindowState<'_> {
                     let active = i == s.cat && !filtering;
                     let (cfg, cbg) = if active {
                         fill_row(&mut g, r, 0, SETTINGS_SIDEBAR_W + 1, fg, sel_bg);
-                        write_row(&mut g, r, 0, "\u{258C}", fg, sel_bg);
+                        write_row(&mut g, r, 0, "\u{258C}", accent, sel_bg);
                         (fg, sel_bg)
                     } else {
                         (dim, bg)
@@ -4443,7 +4487,8 @@ impl WindowState<'_> {
                 for (vi, row) in list.iter().enumerate().skip(scroll).take(visible) {
                     let top = SETTINGS_CARDS_TOP + (vi - scroll) * SETTINGS_ROW_H;
                     let selected = vi == s.sel;
-                    let hovered = s.hover == Some(vi);
+                    // A disabled row takes no hover (D26).
+                    let hovered = s.hover == Some(vi) && !row.disabled;
                     let rbg = if selected {
                         sel_bg
                     } else if hovered {
@@ -4463,9 +4508,12 @@ impl WindowState<'_> {
                         );
                     }
                     if selected {
-                        write_row(&mut g, top, SETTINGS_SIDEBAR_W + 2, "\u{258C}", fg, rbg);
+                        write_row(&mut g, top, SETTINGS_SIDEBAR_W + 2, "\u{258C}", accent, rbg);
                     }
-                    let label_fg = if row.disabled { dim } else { fg };
+                    // Disabled = 45% opacity (D26, D43), blended since a cell
+                    // has no alpha; exempt from the contrast floor.
+                    let disabled_fg = blend(rbg, fg, DISABLED_ALPHA);
+                    let label_fg = if row.disabled { disabled_fg } else { fg };
                     write_row(&mut g, top, SETTINGS_CARD_X, row.label, label_fg, rbg);
                     // An accent dot marks a value changed from its default —
                     // the same gate that decides what lands in the config
@@ -4521,7 +4569,7 @@ impl WindowState<'_> {
                     let wlen = wtext.chars().count();
                     let wcol = value_end.saturating_sub(wlen);
                     let wfg = if row.disabled {
-                        dim
+                        disabled_fg
                     } else {
                         match row.widget {
                             Widget::Toggle(false) if !editing_this => dim,
@@ -4553,7 +4601,7 @@ impl WindowState<'_> {
                         let (ch, color) = if (thumb_top..thumb_top + thumb_h).contains(&r) {
                             ('\u{2590}', dim) // ▐ thumb
                         } else {
-                            ('\u{2502}', mix(bg, fg, 40)) // │ track
+                            ('\u{2502}', tokens.line) // │ track
                         };
                         let mut cell = Cell::blank();
                         cell.ch = ch;
@@ -4847,13 +4895,14 @@ fn accumulate_scroll_lines(accum: f64, raw_lines: f64) -> (isize, f64) {
 /// the per-row click map (the absolute line a click jumps to).
 fn build_dock_grid(
     g: &Grid,
-    theme: &crate::core::Theme,
+    tokens: &Chrome,
     cols: usize,
     rows: usize,
 ) -> (Grid, Vec<Option<usize>>) {
     let mut d = Grid::new(cols, rows);
-    let (fg, bg) = (theme.fg, theme.bg);
-    let dim = mix(fg, bg, 110);
+    // The dock is chrome on the `sunk` surface, beside the grid (D38).
+    let (fg, bg) = (tokens.text, tokens.sunk);
+    let dim = tokens.muted;
     for r in 0..rows {
         fill_row(&mut d, r, 0, cols, fg, bg);
     }
@@ -4864,12 +4913,12 @@ fn build_dock_grid(
     // blocks in reverse stream order.
     let mut entries: Vec<(char, u32, String, usize)> = Vec::new();
     if let Some(start) = g.running_command() {
-        entries.push(('\u{25b6}', theme.cursor, "\u{2026}".to_string(), start));
+        entries.push(('\u{25b6}', tokens.accent, "\u{2026}".to_string(), start));
     }
     for b in g.fold_blocks().iter().rev() {
         let (glyph, color) = match b.exit {
-            Some(0) => ('\u{2713}', theme.palette16[2]),
-            Some(_) => ('\u{2717}', theme.palette16[1]),
+            Some(0) => ('\u{2713}', tokens.success),
+            Some(_) => ('\u{2717}', tokens.failure),
             None => ('\u{00b7}', dim),
         };
         let dur = b.runtime.map(fmt_runtime).unwrap_or_default();
@@ -4973,15 +5022,6 @@ fn read_git_branch(dir: &std::path::Path) -> Option<String> {
         None if head.len() >= 8 => Some(head[..8].to_string()),
         None => None,
     }
-}
-
-fn mix(a: u32, b: u32, t: u32) -> u32 {
-    let chan = |s: u32| {
-        let av = (a >> s) & 0xff;
-        let bv = (b >> s) & 0xff;
-        ((av * (255 - t) + bv * t) / 255) << s
-    };
-    chan(16) | chan(8) | chan(0)
 }
 
 /// Paint the window border with the theme background so the frame reads as
@@ -5105,10 +5145,16 @@ impl WindowState<'_> {
                 animating |= g.kitty_images.iter().any(|i| i.playing);
             }
         }
-        let blinking = self.pane().is_some_and(|p| {
-            let g = p.grid.lock();
-            g.cursor_blink && g.cursor_visible && g.view_offset == 0
-        });
+        // Reduced motion (D50): the cursor draws solid, whoever asked it to
+        // blink (config or a program's DECSCUSR).
+        let blinking = !self.reduce_motion()
+            && self.pane().is_some_and(|p| {
+                let g = p.grid.lock();
+                g.cursor_blink && g.cursor_visible && g.view_offset == 0
+            });
+        if !blinking {
+            self.cursor_blink_on = true;
+        }
         // A live cursor trail needs frames until it fades (~150ms).
         if self.trail.is_some() {
             if let Some(window) = &self.window {
@@ -5310,6 +5356,9 @@ impl WindowState<'_> {
                 // cursor renders only while focused, and regaining focus
                 // clears the active tab's attention badge (in `chrome_row`).
                 self.focused = focused;
+                // A release that lands after focus moves away never reaches
+                // us, so drop the pressed look here rather than leave it stuck.
+                self.pressed = pressed_after_focus(self.pressed, focused);
                 if let Some(p) = self.pane_mut()
                     && p.grid.lock().focus_reporting
                 {
@@ -5613,6 +5662,7 @@ impl WindowState<'_> {
                     }
                     if to != from {
                         self.reorder_tab(from, to);
+                        self.pressed = pressed_after_reorder(self.pressed, from, to);
                     }
                 }
                 // Chrome-bar hover feedback: track the element under the
@@ -5789,6 +5839,11 @@ impl WindowState<'_> {
                                 self.copy_selection_primary(); // copy-on-select
                             }
                             self.tab_drag = None; // a reorder drag ends with the button
+                            if self.pressed.take().is_some()
+                                && let Some(window) = &self.window
+                            {
+                                window.request_redraw();
+                            }
                         }
                         if self.mouse_button_down == Some(kind) {
                             self.mouse_button_down = None;
@@ -5985,6 +6040,7 @@ impl<'a> App<'a> {
             consumed_keys: ConsumedKeys::default(),
             hits: Vec::new(),
             tab_drag: None,
+            pressed: None,
             last_strip_click: None,
             cursor_blink_on: true,
             last_blink: Instant::now(),
@@ -6579,6 +6635,21 @@ fn tab_spans(hits: &[Hit]) -> Vec<(usize, usize, usize)> {
 /// position. Midpoint-based so unequal adaptive widths can't oscillate — a
 /// swap only fires once the pointer is past the point where swapping back
 /// would immediately retrigger. `from` when nothing was crossed.
+/// Losing focus cancels the pressed look: the release that would end it may
+/// land in another window and never reach this one.
+fn pressed_after_focus(pressed: Option<Hit>, focused: bool) -> Option<Hit> {
+    if focused { pressed } else { None }
+}
+
+/// The pressed look follows the dragged tab when it moves from `from` to `to`
+/// (D43); any other pressed control is untouched.
+fn pressed_after_reorder(pressed: Option<Hit>, from: usize, to: usize) -> Option<Hit> {
+    match pressed {
+        Some(Hit::Tab(i)) if i == from => Some(Hit::Tab(to)),
+        other => other,
+    }
+}
+
 fn tab_drag_target(col: usize, spans: &[(usize, usize, usize)], from: usize) -> usize {
     let Some(pos) = spans.iter().position(|&(i, _, _)| i == from) else {
         return from;
@@ -6929,10 +7000,11 @@ mod tests {
         SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
         SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
         display_path, drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
-        ime_cursor_area_origin, is_openable_url, mix, osc52_reply, pane_pixel_point,
-        path_from_file_uri, physical_px, put_text, read_git_branch, release_input, route_key_down,
-        settings_hit, settings_value_end, settings_visible, shell_menu_items, tab_drag_target,
-        tab_spans, tab_widths, visible_tab_range, widget_text, zoom_px,
+        ime_cursor_area_origin, is_openable_url, osc52_reply, pane_pixel_point, path_from_file_uri,
+        physical_px, pressed_after_focus, pressed_after_reorder, put_text, read_git_branch,
+        release_input, route_key_down, settings_hit, settings_value_end, settings_visible,
+        shell_menu_items, tab_drag_target, tab_spans, tab_widths, visible_tab_range, widget_text,
+        zoom_px,
     };
     use crate::core::Cell;
 
@@ -7645,17 +7717,6 @@ mod tests {
     }
 
     #[test]
-    fn mix_blends_toward_second_color() {
-        assert_eq!(mix(0x000000, 0xFFFFFF, 0), 0x000000);
-        assert_eq!(mix(0x000000, 0xFFFFFF, 255), 0xFFFFFF);
-        let mid = mix(0x000000, 0xFFFFFF, 128);
-        assert!(
-            (0x7F..=0x81).contains(&(mid & 0xff)),
-            "roughly half: {mid:#x}"
-        );
-    }
-
-    #[test]
     fn shell_menu_lists_shells_then_settings_and_config() {
         use crate::shells::DetectedShell;
         use std::path::PathBuf;
@@ -7805,6 +7866,26 @@ mod tests {
     }
 
     #[test]
+    fn focus_loss_without_release_clears_pressed() {
+        // press -> focus lost -> focus back, with no release in between
+        let pressed = Some(Hit::Tab(0));
+        let lost = pressed_after_focus(pressed, false);
+        assert!(lost.is_none());
+        assert!(pressed_after_focus(lost, true).is_none());
+        // gaining focus alone never cancels a live press
+        assert!(pressed_after_focus(pressed, true) == pressed);
+    }
+
+    #[test]
+    fn pressed_tab_follows_a_reorder() {
+        let after = |p: Option<Hit>| pressed_after_reorder(p, 1, 3);
+        assert!(after(Some(Hit::Tab(1))) == Some(Hit::Tab(3)));
+        assert!(after(Some(Hit::Tab(2))) == Some(Hit::Tab(2)));
+        assert!(after(Some(Hit::MoreTabs)) == Some(Hit::MoreTabs));
+        assert!(after(None).is_none());
+    }
+
+    #[test]
     fn tab_drag_target_fires_on_midpoint_crossings_only() {
         // Three 10-cell tabs with 1-cell gaps: spans at 0..10, 11..21, 22..32
         // (midpoints 5, 16, 27).
@@ -7921,8 +8002,8 @@ mod tests {
             &mut g,
             b"$ make bad\r\n\x1b]133;C\x07boom\r\n\x1b]133;D;3\x07",
         );
-        let theme = crate::core::Theme::default();
-        let (d, items) = super::build_dock_grid(&g, &theme, 30, 8);
+        let tokens = super::Chrome::from_theme(&crate::core::Theme::default());
+        let (d, items) = super::build_dock_grid(&g, &tokens, 30, 8);
         // Header on row 0; entries start on row 2, newest first.
         assert_eq!(
             d.viewport_cell(1, 2).ch,
@@ -7931,8 +8012,8 @@ mod tests {
         );
         assert_eq!(
             d.viewport_cell(1, 2).fg,
-            theme.palette16[1],
-            "failure glyph is red"
+            tokens.failure,
+            "failure glyph is the failure token"
         );
         let label: String = (3..14).map(|c| d.viewport_cell(c, 2).ch).collect();
         assert_eq!(
@@ -7943,8 +8024,8 @@ mod tests {
         assert_eq!(d.viewport_cell(1, 3).ch, '\u{2713}', "older success below");
         assert_eq!(
             d.viewport_cell(1, 3).fg,
-            theme.palette16[2],
-            "success glyph is green"
+            tokens.success,
+            "success glyph is the success token"
         );
         // Click map: row 2 jumps to the failed block's start, row 3 to the
         // successful one's; header/blank rows are inert.
@@ -7957,8 +8038,8 @@ mod tests {
     #[test]
     fn dock_grid_empty_state_has_no_click_targets() {
         let g = crate::core::Grid::new(40, 8);
-        let theme = crate::core::Theme::default();
-        let (d, items) = super::build_dock_grid(&g, &theme, 30, 8);
+        let tokens = super::Chrome::from_theme(&crate::core::Theme::default());
+        let (d, items) = super::build_dock_grid(&g, &tokens, 30, 8);
         assert!(items.iter().all(Option::is_none));
         let msg: String = (1..17).map(|c| d.viewport_cell(c, 2).ch).collect();
         assert_eq!(msg.trim_end(), "No commands yet.");
@@ -8020,31 +8101,50 @@ mod tests {
     }
 
     mod reader {
-        use super::super::{AnsiParser, Grid, Mutex, UserEvent, WakeFlag, read_ahead, reader_loop};
+        use super::super::{AnsiParser, Feed, Grid, Mutex, UserEvent, WakeFlag, reader_loop};
         use crate::backend::BackendHandle;
-        use crate::backend::mock::apart;
         use std::io::Error;
         use std::sync::Arc;
 
-        /// What `reader_loop` sent for `parts` (each its own batch), with
-        /// `lower` standing in for the window handling each `Redraw` and
-        /// `deliver` for whether a send reaches the loop. Ends with the
-        /// grid's first line.
+        /// Each part as its own feed step.
+        fn bytes(parts: &[&[u8]]) -> Vec<Feed> {
+            parts.iter().map(|p| Feed::Bytes(p.to_vec())).collect()
+        }
+
+        /// What `reader_loop` sent for `steps`, with `lower` standing in
+        /// for the window handling each `Redraw` and `deliver` for whether
+        /// a send reaches the loop. Ends with the grid's first line.
         fn run(
-            parts: Vec<Result<&[u8], Error>>,
+            steps: Vec<Feed>,
             wake: &WakeFlag,
             lower: bool,
             deliver: bool,
         ) -> (Vec<String>, String) {
             let grid = Arc::new(Mutex::new(Grid::new(20, 2)));
+            let parser = Arc::new(Mutex::new(AnsiParser::new()));
+            let sent = feed(steps, None, &grid, &parser, wake, lower, deliver);
+            let line = grid.lock().line_text(0).unwrap_or_default();
+            (sent, line)
+        }
+
+        /// Runs `reader_loop` over `steps` into `grid` and `parser`.
+        fn feed(
+            steps: Vec<Feed>,
+            replies: Option<Box<dyn BackendHandle>>,
+            grid: &Arc<Mutex<Grid>>,
+            parser: &Arc<Mutex<AnsiParser>>,
+            wake: &WakeFlag,
+            lower: bool,
+            deliver: bool,
+        ) -> Vec<String> {
             let mut sent = Vec::new();
             let handled = wake.clone();
             reader_loop(
                 7,
-                Box::new(apart(parts)),
-                Box::new(apart(vec![])) as Box<dyn BackendHandle>,
-                Arc::clone(&grid),
-                Arc::new(Mutex::new(AnsiParser::new())),
+                steps.into_iter(),
+                replies,
+                Arc::clone(grid),
+                Arc::clone(parser),
                 wake.clone(),
                 |event| {
                     let name = match event {
@@ -8059,14 +8159,13 @@ mod tests {
                     deliver
                 },
             );
-            let line = grid.lock().line_text(0).unwrap_or_default();
-            (sent, line)
+            sent
         }
 
         #[test]
         fn output_while_a_wakeup_is_pending_sends_no_more() {
             let wake = WakeFlag::default();
-            let (sent, line) = run(vec![Ok(b"a"), Ok(b"b"), Ok(b"c")], &wake, false, true);
+            let (sent, line) = run(bytes(&[b"a", b"b", b"c"]), &wake, false, true);
             assert_eq!(sent, ["redraw", "exit"]);
             assert_eq!(line, "abc", "every batch is still parsed");
         }
@@ -8074,7 +8173,7 @@ mod tests {
         #[test]
         fn output_after_the_window_handles_a_wakeup_sends_another() {
             let wake = WakeFlag::default();
-            let (sent, _) = run(vec![Ok(b"a"), Ok(b"b")], &wake, true, true);
+            let (sent, _) = run(bytes(&[b"a", b"b"]), &wake, true, true);
             assert_eq!(sent, ["redraw", "redraw", "exit"]);
         }
 
@@ -8082,7 +8181,7 @@ mod tests {
         fn output_before_the_flag_is_lowered_rides_the_pending_wakeup() {
             let wake = WakeFlag::default();
             assert!(wake.raise(), "a wakeup is in flight");
-            let (sent, _) = run(vec![Ok(b"a")], &wake, false, true);
+            let (sent, _) = run(bytes(&[b"a"]), &wake, false, true);
             assert_eq!(sent, ["exit"]);
             wake.lower();
             assert!(wake.raise(), "once lowered, the next output wakes again");
@@ -8091,118 +8190,108 @@ mod tests {
         #[test]
         fn a_failed_delivery_stops_reading() {
             let wake = WakeFlag::default();
-            let (sent, line) = run(vec![Ok(b"a"), Ok(b"b")], &wake, false, false);
+            let (sent, line) = run(bytes(&[b"a", b"b"]), &wake, false, false);
             assert_eq!(sent, ["redraw", "exit"]);
             assert_eq!(line, "a", "nothing is parsed after the failed send");
         }
 
-        /// The batches `read_ahead` queues for `parts` with nobody parsing.
-        fn read_all(parts: Vec<Result<&[u8], Error>>) -> Vec<Vec<u8>> {
-            let (tx, rx) = std::sync::mpsc::sync_channel(super::super::READ_AHEAD);
-            read_ahead(&mut apart(parts), &tx);
-            drop(tx);
-            rx.into_iter().collect()
+        #[test]
+        fn a_closed_pane_with_a_pending_wakeup_reads_until_its_feed_ends() {
+            // A closed pane never lowers its flag: the loop sends nothing
+            // more and stops only when the feed ends (PTY EOF or error).
+            let wake = WakeFlag::default();
+            assert!(wake.raise());
+            let (sent, line) = run(bytes(&[b"a", b"b"]), &wake, false, true);
+            assert_eq!(sent, ["exit"]);
+            assert_eq!(line, "ab");
         }
 
         #[test]
-        fn reading_runs_ahead_of_the_parser() {
-            let got = read_all(vec![Ok(b"a"), Ok(b"b"), Ok(b"c")]);
-            assert_eq!(got, [b"a", b"b", b"c"], "all queued before any parse");
+        fn a_screen_replaces_the_terminal_and_output_continues_on_it() {
+            let mut shown = Grid::new(30, 3);
+            let mut its_parser = AnsiParser::new();
+            its_parser.advance(&mut shown, b"from the server ");
+            let steps = vec![
+                Feed::Bytes(b"local".to_vec()),
+                Feed::Screen(Box::new(shown), Box::new(its_parser)),
+                Feed::Bytes(b"live".to_vec()),
+            ];
+            let (sent, line) = run(steps, &WakeFlag::default(), true, true);
+            assert_eq!(sent, ["redraw", "redraw", "redraw", "exit"]);
+            assert_eq!(line.trim_end(), "from the server live");
         }
 
         #[test]
-        fn a_read_error_ends_reading() {
-            let got = read_all(vec![Ok(b"a"), Err(Error::other("gone")), Ok(b"b")]);
-            assert_eq!(got, [b"a"]);
+        fn a_resize_from_the_source_resizes_the_grid() {
+            let grid = Arc::new(Mutex::new(Grid::new(20, 2)));
+            let parser = Arc::new(Mutex::new(AnsiParser::new()));
+            let steps = vec![Feed::Resized { cols: 33, rows: 5 }];
+            feed(
+                steps,
+                None,
+                &grid,
+                &parser,
+                &WakeFlag::default(),
+                true,
+                true,
+            );
+            let g = grid.lock();
+            assert_eq!((g.cols, g.rows), (33, 5));
         }
 
-        /// A PTY handle that counts its reads.
-        struct Counted {
-            inner: crate::backend::mock::Chunks,
-            reads: Arc<std::sync::atomic::AtomicUsize>,
-        }
+        /// A writer that keeps what it is sent.
+        struct Recorded(Arc<std::sync::Mutex<Vec<u8>>>);
 
-        impl BackendHandle for Counted {
-            fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-                self.reads
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.inner.read_into(buf)
-            }
-            fn output_ready(&self) -> bool {
-                self.inner.output_ready()
+        impl BackendHandle for Recorded {
+            fn read_into(&mut self, _buf: &mut [u8]) -> Result<usize, Error> {
+                Ok(0)
             }
             fn write(&mut self, data: &[u8]) -> Result<(), Error> {
-                self.inner.write(data)
+                self.0.lock().expect("unpoisoned").extend_from_slice(data);
+                Ok(())
             }
             fn try_clone(&self) -> Result<Box<dyn BackendHandle>, Error> {
-                self.inner.try_clone()
+                Ok(Box::new(Recorded(Arc::clone(&self.0))))
             }
-            fn set_winsize(&mut self, cols: u16, rows: u16) -> Result<(), Error> {
-                self.inner.set_winsize(cols, rows)
+            fn set_winsize(&mut self, _cols: u16, _rows: u16) -> Result<(), Error> {
+                Ok(())
             }
             #[cfg(unix)]
             fn pty_fd(&self) -> std::os::unix::io::RawFd {
-                self.inner.pty_fd()
+                -1
             }
         }
 
-        /// Ten one-byte batches, and the counter of how many were read.
-        fn ten_parts() -> (Counted, Arc<std::sync::atomic::AtomicUsize>) {
-            let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let parts = (0..10).map(|_| Ok(&b"x"[..])).collect();
-            let handle = Counted {
-                inner: apart(parts),
-                reads: Arc::clone(&reads),
-            };
-            (handle, reads)
-        }
-
         #[test]
-        fn a_gone_parser_ends_reading() {
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            drop(rx);
-            let (mut pty, reads) = ten_parts();
-            read_ahead(&mut pty, &tx);
-            assert_eq!(
-                reads.load(std::sync::atomic::Ordering::Relaxed),
-                1,
-                "the first failed send stops reading"
+        fn queries_are_answered_only_with_a_reply_writer() {
+            // DA1: the parser answers it, so a pane that answers writes back.
+            let query = || bytes(&[b"\x1b[c"]);
+            let grid = Arc::new(Mutex::new(Grid::new(20, 2)));
+            let parser = Arc::new(Mutex::new(AnsiParser::new()));
+            let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = Box::new(Recorded(Arc::clone(&kept)));
+            feed(
+                query(),
+                Some(writer),
+                &grid,
+                &parser,
+                &WakeFlag::default(),
+                true,
+                true,
             );
-        }
-
-        #[test]
-        fn a_parser_gone_while_the_queue_is_full_ends_reading() {
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let (mut pty, reads) = ten_parts();
-            let counter = Arc::clone(&reads);
-            let (done_tx, done) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                read_ahead(&mut pty, &tx);
-                let _ = done_tx.send(());
-            });
-            // Wait until the reader is blocked on the full queue, then hang up.
-            while counter.load(std::sync::atomic::Ordering::Relaxed) < 2 {
-                std::thread::yield_now();
-            }
-            drop(rx);
-            done.recv_timeout(std::time::Duration::from_secs(5))
-                .expect("the blocked send is released and reading stops");
-            assert!(reads.load(std::sync::atomic::Ordering::Relaxed) < 10);
-        }
-
-        #[test]
-        fn a_closed_pane_with_a_pending_wakeup_reads_until_eof_or_error() {
-            // A closed pane never lowers its flag: the loop sends nothing
-            // more and stops only when the PTY reports EOF or an error.
-            for end in [None, Some(Error::other("gone"))] {
-                let wake = WakeFlag::default();
-                assert!(wake.raise());
-                let mut parts: Vec<Result<&[u8], Error>> = vec![Ok(b"a"), Ok(b"b")];
-                parts.extend(end.map(Err));
-                let (sent, line) = run(parts, &wake, false, true);
-                assert_eq!(sent, ["exit"]);
-                assert_eq!(line, "ab");
-            }
+            assert!(!kept.lock().expect("unpoisoned").is_empty(), "answered");
+            // Without one (a mux block: its server answers), nothing is sent
+            // and the parser's reply is still drained.
+            feed(
+                query(),
+                None,
+                &grid,
+                &parser,
+                &WakeFlag::default(),
+                true,
+                true,
+            );
+            assert!(parser.lock().take_responses().is_empty());
         }
     }
 }

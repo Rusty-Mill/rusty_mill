@@ -50,7 +50,8 @@ pub struct ProfileSet {
     /// Claims mode with `protected`: the full commit id every candidate
     /// builds on. The diffs are all a candidate changes, so pinning the base
     /// keeps an older revision with weaker tests out (#597 G2). Required
-    /// with `protected`; never written when absent.
+    /// with `protected`, set by `bbp open --base` (#598), and enforced on
+    /// every candidate whenever present; never written when absent.
     #[rusty_serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<String>,
     /// Claims mode (#704, D41, D82): `"off"` records that the task opts out
@@ -144,6 +145,11 @@ impl ProfileSet {
     /// whenever any is set. A pattern it would read literally (`[ab]`, a
     /// leading `/` or `./`) would silently protect nothing, so it fails here.
     pub fn check_protected(&self) -> Result<(), String> {
+        // A baseline is enforced whenever it is set (#598), so it must be
+        // a full commit id even without protected paths.
+        if let Some(b) = self.baseline.as_deref().filter(|b| !is_commit_id(b)) {
+            return Err(format!("baseline {b:?} is not a full commit id"));
+        }
         if self.protected.is_empty() {
             return Ok(());
         }
@@ -176,13 +182,22 @@ impl ProfileSet {
         }
     }
 
+    /// Whether the set's `erosion` profile runs report-only (D42). Meaningful
+    /// once [`ProfileSet::check_erosion`] has passed.
+    pub fn erosion_report_only(&self) -> bool {
+        self.profiles
+            .iter()
+            .any(|p| p.name == EROSION_PROFILE && p.args.iter().any(|a| a == "--report-only"))
+    }
+
     /// The profile runs the `erosion` bin directly (D82): no shell, `env` or
     /// `cargo run`, so the argv checked here is the argv that runs. The args
     /// parse as the bin's own do: `check`, then `--base COMMIT` and either
-    /// `--report-only` or both limits, each once, nothing else. The base is a
+    /// one mode (`--report-only`, `--cleanup` or both limits), each once,
+    /// nothing else. The base is a
     /// full commit id, and the pinned `baseline` when one is set.
     fn check_erosion_base(&self, p: &Profile) -> Result<(), String> {
-        let direct = "run the erosion bin directly: erosion check --base COMMIT (--report-only | --max-concentration-bp N --max-duplication-bp N)";
+        let direct = "run the erosion bin directly: erosion check --base COMMIT (--report-only | --cleanup | --max-concentration-bp N --max-duplication-bp N)";
         let program = p.program.rsplit('/').next().unwrap_or_default();
         let Some(("check", rest)) = p.args.split_first().map(|(c, r)| (c.as_str(), r)) else {
             return Err(format!("the erosion profile must {direct}"));
@@ -216,6 +231,12 @@ impl ProfileSet {
 pub fn path(dir: &Path, task: &TaskId) -> PathBuf {
     dir.join("profiles")
         .join(format!("{}.json", Sha256::of(task.0.as_bytes()).hex()))
+}
+
+/// The commit the task's frozen profile set pins candidates to, if any.
+pub fn pinned_base(dir: &Path, task: &TaskId) -> Result<Option<String>, String> {
+    let digest = crate::open_driver(dir, task)?.state.profile_digest;
+    Ok(load(dir, task, digest)?.baseline)
 }
 
 /// Read a profile set from a JSON file.
@@ -319,7 +340,8 @@ pub fn is_commit_id(s: &str) -> bool {
 }
 
 /// The `erosion check` flags after `check`, as the bin parses them: each
-/// flag at most once, `--base` required, and `--report-only` or both limits.
+/// flag at most once, `--base` required, and one mode: `--report-only`,
+/// `--cleanup` (D44's cleanup predicate, D113) or both limits.
 /// Returns the base.
 fn erosion_flags<'a>(rest: &'a [String], direct: &str) -> Result<&'a str, String> {
     let mut seen: Vec<&str> = Vec::new();
@@ -332,7 +354,7 @@ fn erosion_flags<'a>(rest: &'a [String], direct: &str) -> Result<&'a str, String
         }
         seen.push(flag);
         let takes_value = match flag {
-            "--report-only" => false,
+            "--report-only" | "--cleanup" => false,
             "--base" | "--max-concentration-bp" | "--max-duplication-bp" => true,
             other => return Err(format!("erosion argument {other:?}: {direct}")),
         };
@@ -350,9 +372,15 @@ fn erosion_flags<'a>(rest: &'a [String], direct: &str) -> Result<&'a str, String
     }
     let has = |f: &str| seen.contains(&f);
     let limits = (has("--max-concentration-bp"), has("--max-duplication-bp"));
-    match (has("--report-only"), limits) {
-        (true, (false, false)) | (false, (true, true)) => {}
-        _ => return Err(format!("give --report-only or both limits: {direct}")),
+    match (has("--report-only"), has("--cleanup"), limits) {
+        (true, false, (false, false))
+        | (false, true, (false, false))
+        | (false, false, (true, true)) => {}
+        _ => {
+            return Err(format!(
+                "give one mode, --report-only, --cleanup or both limits: {direct}"
+            ))
+        }
     }
     base.ok_or_else(|| "the erosion profile names no --base commit".to_string())
 }
@@ -470,6 +498,12 @@ mod tests {
             "check --max-concentration-bp 100 --base {c} --max-duplication-bp 0"
         ));
         assert_eq!(enforcing.check_erosion(), Ok(()));
+        let cleanup = erosion_set(&format!("check --base {c} --cleanup"));
+        assert_eq!(cleanup.check_erosion(), Ok(()));
+        assert!(
+            !cleanup.erosion_report_only(),
+            "a cleanup is not counted as report-only"
+        );
         let mut pinned_ok = ok.clone();
         pinned_ok.baseline = Some(c.into());
         assert_eq!(pinned_ok.check_erosion(), Ok(()));
@@ -542,6 +576,16 @@ mod tests {
                 "basis points",
             ),
             (erosion_set("check --report-only --base"), "needs a value"),
+            (
+                erosion_set(&format!("check --base {c} --cleanup --report-only")),
+                "one mode",
+            ),
+            (
+                erosion_set(&format!(
+                    "check --base {c} --cleanup --max-concentration-bp 1 --max-duplication-bp 1"
+                )),
+                "one mode",
+            ),
             (
                 erosion_set(&format!(
                     "check --base {c} --base {} --report-only",

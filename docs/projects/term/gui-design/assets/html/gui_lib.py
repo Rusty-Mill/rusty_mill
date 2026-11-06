@@ -283,7 +283,7 @@ def tab(n: int, name: str, cells, sel: bool = False, state: str = "", bell: bool
 
 def strip(sel: int = 1, detached: int = 0, cells: dict | None = None, lel: bool = False,
           inbox: int | None = None, inbox_open: bool = False) -> str:
-    """Top strip. `lel` adds the Let Em Loose tab (D37); `inbox` is the decision count chip, shown in every window."""
+    """Top strip. `lel` adds the Let Em Loose tab (D53); `inbox` is the decision count chip, shown in every window."""
     cells = dict(cells or {1: T_BUILD, 2: T_AGENTS, 3: T_ONE})
     names = {1: "build", 2: "agents", 3: "baileyai"}
     if lel:

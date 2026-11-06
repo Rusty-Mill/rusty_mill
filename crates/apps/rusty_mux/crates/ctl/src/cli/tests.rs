@@ -413,6 +413,33 @@ fn agent_verbs_take_agents_a_scope_and_dry_run() {
         Ok(Command::Agent(AgentCommand::Skill))
     );
     assert_eq!(
+        agent("agent hook --event blocked --kind permission --app pi --msg hi --id sub/1"),
+        Ok(Command::Agent(AgentCommand::Report(HookReport {
+            state: "blocked".into(),
+            id: Some("sub/1".into()),
+            kind: Some("permission".into()),
+            app: Some("pi".into()),
+            msg: Some("hi".into()),
+            tool_from_stdin: false,
+        })))
+    );
+    assert_eq!(
+        agent("agent hook --event working --app claude --tool-from-stdin"),
+        Ok(Command::Agent(AgentCommand::Report(HookReport {
+            state: "working".into(),
+            app: Some("claude".into()),
+            tool_from_stdin: true,
+            ..HookReport::default()
+        })))
+    );
+    assert_eq!(
+        agent("agent hook --event=idle"),
+        Ok(Command::Agent(AgentCommand::Report(HookReport {
+            state: "idle".into(),
+            ..HookReport::default()
+        })))
+    );
+    assert_eq!(
         agent("agent setup --name-session --agent codex"),
         Ok(Command::Agent(AgentCommand::Setup(AgentArgs {
             name_session: true,
@@ -428,6 +455,13 @@ fn agent_verbs_take_agents_a_scope_and_dry_run() {
         "agent hook --dir x",
         "agent hook --agent codex",
         "agent skill --project",
+        "agent hook --event idle --event done",
+        "agent hook --event idle --tool-from-stdin --tool-from-stdin",
+        "agent hook --event idle --tool-from-stdin=no",
+        "agent hook --event idle --tool-from-stdin --msg hi",
+        "agent hook --event idle --name-session",
+        "agent hook --event",
+        "agent hook --app pi",
         "agent skill show",
         "agent setup --to x",
         "agent setup x",

@@ -244,6 +244,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_mill_board | rusty_mill_board | Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI. |
 | apps | rusty_mill_board | rusty_mill_runner | Optional runner for Mill Board: works cards through stages by running a configured agent command per column, sandboxed in a git worktree. |
 | apps | rusty_multimodal_db | rusty_multimodal_db | The multimodal_db server, clients and domain adapters over rusty_multimodal_db_engine |
+| apps | rusty_mux | rusty_mux_client | rusty_mux's attach protocol for clients: connecting, the handshake, takeover and reading a window's layout. Shared by the terminal and GUI clients; links no server. |
 | apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. |
 | apps | rusty_mux | rusty_mux_ctl | rusty-mux-ctl: scriptable rusty_mux client generated from the request catalog, with --json output and stable exit codes. |
 | apps | rusty_mux | rusty_mux_mcp | rusty-mux-mcp: the rusty_mux request catalog as MCP tools over stdio, each call run as rusty-mux-ctl would run it. |
@@ -259,6 +260,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_orch | orch-codex | Orchestrator adapter: Agent::Codex over the Codex CLI, read-only sandbox, prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-core | Orchestrator domain: goals, task cards, blackboard. Pure, no I/O. |
 | apps | rusty_orch | orch-dispatch | Orchestrator dispatcher: routes task cards to agents and drives a Plan to completion. In-memory, synchronous. |
+| apps | rusty_orch | orch-jail | The jail spec (jail.json) and \`lel-jail\`, the launcher a mux block runs: it joins the session's cgroup, keeps only fds 0-4, then confines itself with rusty_sandbox and execs the agent. |
 | apps | rusty_orch | orch-lens | Orchestrator lens runner core: critic lenses over a BBP claims board. Reply protocol, context assembly, tiering, data classes and the money meter. Pure, no I/O. |
 | apps | rusty_orch | orch-ollama | Orchestrator adapter: Agent::Local over the Ollama CLI. Prompt on stdin, one JSON object out. |
 | apps | rusty_orch | orch-openai | Orchestrator adapter: one OpenAI-compatible chat completion over plain HTTP/1.1, to loopback and private addresses only (llama-swap in v0). |

@@ -4,119 +4,356 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mill Board</title>
-<link rel="icon" href="data:,">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='7' height='7' fill='%2312a3dc'/%3E%3Crect x='9' width='7' height='7' fill='%23d4006f'/%3E%3Crect y='9' width='7' height='7' fill='%23f2c200'/%3E%3Crect x='9' y='9' width='7' height='7' fill='%2315171a'/%3E%3C/svg%3E">
 <style>
-:root{--bg:#f6f6f4;--panel:#ececE8;--card:#fff;--ink:#1b1b1a;--mute:#6b6b66;--line:#d8d8d2;--acc:#a8461c;--err:#b3261e}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#161615;--panel:#1f1f1d;--card:#292927;--ink:#ececE8;--mute:#9a9a92;--line:#3a3a36;--acc:#e07a4a;--err:#f2867e}}
+/* A press room's job board: cards are numbered job tickets; process inks carry state.
+   Cyan: in work. Yellow: queued. Magenta: waits on you, and nothing else. Vermilion: blocked. */
+@font-face{font-family:"Hanken Grotesk";src:url(/ui/fonts/hanken-grotesk.woff2) format("woff2");font-weight:400 700;font-display:swap}
+@font-face{font-family:"Barlow Condensed";src:url(/ui/fonts/barlow-condensed-700.woff2) format("woff2");font-weight:700;font-display:swap}
+:root{
+  --bg:#f4f5f7;--card:#fff;--sunk:#eceef1;--ink:#15171a;--mute:#555c66;--line:#dcdfe4;--line2:#c7ccd3;
+  --rail:#1b1f23;--rail-ink:#eef0f2;--rail-mute:#a3abb5;--rail-line:#30363d;
+  --cyan:#0a7fb3;--cyan-fill:#12a3dc;--cyan-wash:#d9f0fa;--yellow:#f2c200;--yellow-wash:#fbf1c4;
+  --mag:#c4006a;--mag-wash:#fbe6f1;--red:#c2361b;--red-fill:#e2492a;--red-wash:#fbe5df;--done:#c9ced5;
+  --ok:#1d7a46;--focus:#12a3dc;--al:40%;
+  --ui:"Hanken Grotesk",system-ui,sans-serif;--num:"Barlow Condensed","Arial Narrow",sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#111316;--card:#1a1d21;--sunk:#15181b;--ink:#e9ebee;--mute:#a0a8b2;--line:#2b3036;--line2:#3a4048;
+  --rail:#0a0c0e;--rail-ink:#eef0f2;--rail-mute:#98a1ab;--rail-line:#262b31;
+  --cyan:#45bdf0;--cyan-fill:#1f9fd6;--cyan-wash:#123445;--yellow:#e8bd12;--yellow-wash:#2c3036;
+  --mag:#ff5aae;--mag-wash:#3a1229;--red:#ff7357;--red-fill:#d8462a;--red-wash:#3b1a12;--done:#4a515a;
+  --ok:#55c98a;--al:66%;color-scheme:dark;
+}}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.4 system-ui,sans-serif}
-header{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line)}
-h1{font-size:16px;margin:0 auto 0 0}
-input,select,textarea,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:6px;padding:5px 8px}
-button{cursor:pointer}button:hover{border-color:var(--acc)}
-main{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(210px,1fr);gap:10px;padding:12px 16px;overflow-x:auto;min-height:calc(100vh - 60px)}
-.col{background:var(--panel);border-radius:8px;padding:8px;min-height:120px}
-.col.over{outline:2px dashed var(--acc)}
-.col h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:2px 4px 8px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px;margin-bottom:8px;cursor:grab}
-.card b{display:block}
-.num{float:right;margin-left:6px;color:var(--mute);font-size:12px}
-.meta{color:var(--mute);font-size:12px;margin-top:4px}
-.meta.stale{color:var(--err)}
-.tag{display:inline-block;border:1px solid var(--line);border-radius:10px;padding:0 6px;margin-right:4px}
-.tag.proj{border-color:var(--acc)}
-.tag.p5{border-color:var(--err);color:var(--err)}.tag.p3{border-color:var(--acc);color:var(--acc)}
-main.decisions{grid-auto-flow:row;grid-template-columns:minmax(0,760px);justify-content:center;align-content:start}
-.decisions .col p{margin:6px 4px}.decisions .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
-.decisions a{color:var(--acc)}
-.decisions .cand{border:1px solid var(--line);border-radius:6px;padding:6px;margin:6px 4px}
-#view[aria-pressed=true],#metrics[aria-pressed=true],#decide[aria-pressed=true]{background:var(--acc);color:#fff}
-main.roadmap{grid-auto-flow:row;grid-template-columns:repeat(5,minmax(190px,1fr));align-content:start}
-.roadmap h3{grid-column:1/-1;margin:0;font-size:15px}
-@media (max-width:640px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
-.roadmap .card{cursor:pointer}
-main.metrics{grid-auto-flow:row;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));align-content:start}
-.metrics h3,.kpis{grid-column:1/-1;margin:0;font-size:15px}
-.kpis{display:flex;flex-wrap:wrap;gap:10px}
-.kpi{background:var(--panel);border-radius:8px;padding:8px 12px;min-width:120px;color:var(--mute);font-size:12px}
-.kpi b{display:block;color:var(--ink);font-size:22px;font-variant-numeric:tabular-nums}
-.bar{display:grid;grid-template-columns:minmax(0,8em) 1fr 2.5em;gap:6px;align-items:center;margin:4px}
-.bar>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bar>span:last-child{text-align:right;font-variant-numeric:tabular-nums}
-.bar i{display:block;height:10px;min-width:1px;border-radius:3px;background:var(--fill,var(--acc))}
-.metrics .card{cursor:pointer}
-:root{--al:40%}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--al:66%}}
-.card.claimed{border-left:4px solid var(--ag);background:color-mix(in srgb,var(--ag) 9%,var(--card))}
-.tag.agent{border-color:var(--ag);color:var(--ag)}
+[hidden]{display:none!important}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--ui);font-feature-settings:"tnum" 1;
+  display:grid;grid-template-rows:auto auto auto minmax(0,1fr);-webkit-font-smoothing:antialiased}
+::selection{background:var(--cyan-wash);color:var(--ink)}
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+*{scrollbar-width:thin;scrollbar-color:var(--line2) transparent}
+a{color:var(--cyan);text-underline-offset:3px}
+svg.i{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+input,select,textarea,button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line2);border-radius:5px;padding:6px 9px}
+input::placeholder,textarea::placeholder{color:var(--mute);opacity:1}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--focus);outline-offset:-1px;border-color:transparent}
+button{cursor:pointer;display:inline-flex;align-items:center;gap:6px;line-height:1.2;transition:background .12s,border-color .12s}
+button:hover:not(:disabled){border-color:var(--ink)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.primary{background:var(--ink);color:var(--card);border-color:var(--ink);font-weight:600}
+button.primary:hover{background:color-mix(in srgb,var(--ink) 85%,var(--cyan))}
+button.ask{color:var(--mag);border-color:var(--mag);background:var(--card);font-weight:600}
+button.ask:hover:not(:disabled){background:var(--mag);color:#fff;border-color:var(--mag)}
+
+/* The graphite top bar: brand, views, quick add, who you are. */
+header.top{display:flex;align-items:center;gap:6px;padding:0 14px;min-height:52px;background:var(--rail);color:var(--rail-ink);flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px;margin-right:18px;white-space:nowrap}
+.brand svg{width:18px;height:18px}
+.views{display:flex;align-self:stretch;gap:2px}
+.views button{background:none;border:0;border-radius:0;color:var(--rail-mute);padding:0 12px;font-weight:500;box-shadow:inset 0 -2px 0 transparent}
+.views button:hover{color:var(--rail-ink)}
+.views button[aria-pressed=true]{color:var(--rail-ink);box-shadow:inset 0 -2px 0 var(--rail-ink)}
+.badge{display:inline-grid;place-items:center;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:var(--mag);color:#fff;font:700 12px/1 var(--num);letter-spacing:.02em}
+.badge:empty{display:none}
+.quick{display:flex;gap:6px;margin-left:auto;align-items:center}
+.top input,.top select{background:#262b31;border-color:var(--rail-line);color:var(--rail-ink)}
+.top input::placeholder{color:var(--rail-mute)}
+.top #title{width:min(24vw,260px)}
+.top button.primary{background:var(--rail-ink);color:var(--rail);border-color:var(--rail-ink)}
+.top button.primary:hover{background:#fff}
+.top button.icon{background:none;border-color:transparent;color:var(--rail-mute);padding:7px}
+.top button.icon:hover{color:var(--rail-ink);border-color:var(--rail-line)}
+.who{display:flex;gap:6px;align-items:center}
+.me{display:inline-flex;align-items:center;gap:8px;padding:4px 10px 4px 4px;border:1px solid var(--rail-line);border-radius:16px;white-space:nowrap;color:var(--rail-mute)}
+.me b{color:var(--rail-ink);font-weight:600}
+.me .av{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;background:var(--rail-ink);color:var(--rail);font-weight:700;font-size:12px}
+
+/* The scope bar: repository, its projects, and the agents holding claims. Each only narrows the board. */
+#nav1{display:flex;align-items:center;gap:6px;padding:8px 14px;background:var(--card);border-bottom:1px solid var(--line);flex-wrap:wrap;white-space:nowrap}
+#nav1:empty{display:none}
+#nav1 .lbl{font-size:12px;font-weight:600;color:var(--mute);margin:0 2px 0 8px}
+#nav1 .lbl:first-child{margin-left:0}
+#nav1 .sep{width:1px;align-self:stretch;background:var(--line);margin:2px 6px}
+#repo{font-weight:600;padding:5px 8px;max-width:260px}
+#nav1 .item{border-radius:14px;padding:4px 10px;gap:7px;background:var(--card);border-color:var(--line);font-size:13px}
+#nav1 .item .n{font:700 14px/1 var(--num);color:var(--mute)}
+#nav1 .item.on{background:var(--ink);border-color:var(--ink);color:var(--card)}
+#nav1 .item.on .n{color:var(--card);opacity:.75}
+#nav1 .item .name{display:inline-flex;align-items:center}
 .dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--ag);margin-right:6px;flex:none}
-@keyframes pulse{50%{opacity:.25}}
-.running .dot{animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.3}}
+.running .dot{animation:pulse 1.8s ease-in-out infinite}
 @media (prefers-reduced-motion:reduce){.running .dot{animation:none}}
-.shell{display:grid;grid-template-columns:auto minmax(0,1fr);min-height:100vh}
-.shell.noside{grid-template-columns:minmax(0,1fr)}.shell.noside #side{display:none}
-#side{display:flex;background:var(--panel);border-right:1px solid var(--line)}
-#side nav{width:220px;padding:12px 8px;overflow-y:auto;min-height:100%}
-#side h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute);margin:4px 8px 8px}
-#side h2.sep{margin-top:18px}
-#side .item{display:flex;justify-content:space-between;gap:8px;width:100%;text-align:left;background:none;border:0;border-radius:6px;padding:7px 8px;margin-top:2px;overflow-wrap:anywhere}
-#side .item:hover{background:var(--card)}
-#side .item.on{background:var(--acc);color:#fff}
-#side .item .n{opacity:.75;font-variant-numeric:tabular-nums;white-space:nowrap}
-#side .item .name{display:flex;align-items:center}
-#toggle,#gear{padding:4px 9px}
-#signin form{display:grid;gap:8px}#signin .err{color:var(--err);min-height:1.2em;margin:0}
-#settings{width:min(860px,94vw);max-height:90vh}
-#settings .tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:10px}
-#settings .tabs button{border:0;border-radius:6px 6px 0 0;background:none}
-#settings .tabs button.on{background:var(--acc);color:#fff}
-#settings table{width:100%;border-collapse:collapse}
-#settings th,#settings td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
-#settings .err{color:var(--err);min-height:1.2em;margin:6px 0}
-#settings .note{color:var(--mute);margin:6px 0}
-#settings .secret{border:1px solid var(--acc);border-radius:6px;padding:8px;margin:8px 0;overflow-wrap:anywhere}
-#settings code{font-family:ui-monospace,monospace}
-#settings fieldset{border:1px solid var(--line);border-radius:8px;margin:0 0 10px}
+
+/* The colour control strip: one patch per column, as wide as its load; a jump bar to it. */
+.strip{display:flex;gap:3px;align-items:stretch;padding:10px 14px 0;background:var(--bg)}
+.strip[hidden]{display:none}
+.strip .patch{flex:var(--w) 1 0;min-width:max-content;border:0;border-radius:3px;padding:6px 10px;justify-content:flex-start;
+  background:var(--ink-fill);color:var(--ink-on);font-weight:600;font-size:13px}
+.strip .patch b{font:700 17px/1 var(--num);margin-left:auto;padding-left:10px}
+.strip .patch.zero{background:none;color:var(--mute);box-shadow:inset 0 0 0 1px var(--line2);border-style:dashed}
+.strip .patch:hover{filter:brightness(.95)}
+.strip .waits{align-self:center;margin-left:10px;color:var(--mag);font-weight:600;white-space:nowrap;display:inline-flex;gap:7px;align-items:center;background:none;border:0;padding:4px 2px;text-decoration:underline;text-underline-offset:3px}
+.strip .waits::before{content:"";width:10px;height:10px;background:var(--mag);border-radius:2px}
+.strip .waits:hover{text-decoration-thickness:2px}
+
+/* Stage inks, by column kind. */
+[data-kind=backlog]{--ink-fill:var(--yellow-wash);--ink-on:var(--ink);--sw:var(--yellow)}
+[data-kind=queue]{--ink-fill:var(--yellow);--ink-on:#15171a;--sw:var(--yellow)}
+[data-kind=work]{--ink-fill:var(--cyan-fill);--ink-on:#fff;--sw:var(--cyan-fill)}
+[data-kind=work][data-late]{--ink-fill:var(--cyan-wash);--ink-on:var(--ink);--sw:#7fcbec}
+[data-kind=done]{--ink-fill:var(--done);--ink-on:var(--ink);--sw:var(--done)}
+[data-kind=blocked]{--ink-fill:var(--red-fill);--ink-on:#fff;--sw:var(--red-fill)}
+
+/* The board. Columns scroll on their own; an empty one folds to a spine. */
+main{overflow:auto;padding:10px 14px 14px;min-height:0}
+main.board{display:flex;align-items:stretch;gap:0}
+.board>.col{flex:1 1 220px;min-width:210px;max-width:360px;display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line);padding:0 10px}
+.board>.col:first-child{padding-left:0}.board>.col:last-child{border-right:0;padding-right:0}
+.board>.col>.cards{overflow-y:auto;min-height:0;flex:1;padding:2px 2px 12px;margin:0 -2px}
+.board>.col.spine{flex:0 0 46px;min-width:0;padding:0;align-items:center;cursor:default}
+.spine h2{writing-mode:vertical-rl;transform:rotate(180deg);flex-direction:row-reverse;margin:8px 0;gap:10px}
+.spine h2 .sw{margin:0}
+.col.over{background:color-mix(in srgb,var(--cyan) 7%,transparent);box-shadow:inset 0 0 0 2px var(--cyan-fill);border-radius:4px}
+.col h2{display:flex;align-items:baseline;gap:8px;font-size:14px;font-weight:600;margin:6px 0 10px;letter-spacing:0;text-transform:none;color:var(--ink)}
+.col h2 .sw{width:10px;height:10px;border-radius:2px;background:var(--sw);align-self:center;flex:none}
+.col h2 .n{font:700 20px/1 var(--num)}
+.col h2 .hint{margin-left:auto;font-size:12px;font-weight:500;color:var(--mute)}
+.colbar{display:flex;gap:6px;margin:-4px 0 10px;flex-wrap:wrap}.colbar button{font-size:12px;padding:3px 8px}
+.flash{animation:flash 1s ease-out}
+@keyframes flash{from{background:color-mix(in srgb,var(--cyan) 14%,transparent)}}
+@media (prefers-reduced-motion:reduce){.flash{animation:none}}
+
+/* A card is a job ticket: its number set large, then title, then one line of who and where. */
+.card{background:var(--card);border:1px solid var(--line);border-radius:4px;padding:9px 11px 10px;margin-bottom:8px;cursor:grab;
+  box-shadow:0 1px 2px rgb(20 24 30 / .05);transition:border-color .12s,box-shadow .12s}
+.card:hover{border-color:var(--line2);box-shadow:0 3px 10px -4px rgb(20 24 30 / .18)}
+.card .top{display:flex;align-items:center;gap:8px;min-height:22px}
+.num{font:700 21px/1 var(--num);letter-spacing:.01em;color:var(--ink)}
+.card b{display:block;font-size:14.5px;line-height:1.35;font-weight:600;margin:3px 0 0;text-wrap:pretty}
+.meta{color:var(--mute);font-size:13px;margin-top:6px;display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center}
+.meta.stale,.idle{color:var(--red)}
+.idle{font-weight:600}
+.tag{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:3px;padding:0 6px;font-size:12px;line-height:19px;color:var(--mute)}
+.tag.proj{border:0;padding:0;font-size:13px;color:var(--mute)}
+.tag.agent{border:0;padding:0;font-size:13px;color:var(--ink)}
+.tag.agent .dot{margin-right:0}
+.more{font-size:12px;color:var(--mute)}
+/* Priority: a filled, half or open square, with its word. */
+.tag.p5,.tag.p3,.tag.p1{border:0;padding:0;margin-left:auto;font-size:12.5px;color:var(--ink);font-weight:500}
+.tag.p5::before,.tag.p3::before,.tag.p1::before{content:"";width:9px;height:9px;border:1.5px solid currentColor;box-sizing:border-box}
+.tag.p5::before{background:currentColor}
+.tag.p3::before{background:linear-gradient(90deg,currentColor 50%,transparent 50%)}
+.tag.p5{color:var(--red)}
+.ask-row{display:flex;flex-wrap:wrap;white-space:nowrap;align-items:center;gap:8px;margin:9px -11px -10px;padding:7px 11px;border-top:1px solid var(--mag-wash);color:var(--mag);font-size:13px;font-weight:600;background:color-mix(in srgb,var(--mag-wash) 55%,var(--card));border-radius:0 0 4px 4px}
+.ask-row button{margin-left:auto;padding:3px 9px;font-size:12.5px}
+.card.waits{border-color:color-mix(in srgb,var(--mag) 45%,var(--line))}
+.empty-note{color:var(--mute);font-size:13px;padding:6px 2px}
+
+/* Other views share the sheet: panels, not boxes in boxes. */
+main.roadmap,main.metrics{display:grid;gap:14px;align-content:start}
+main.roadmap{grid-template-columns:repeat(5,minmax(200px,1fr))}
+main.metrics{grid-template-columns:repeat(12,minmax(0,1fr));max-width:1400px;align-items:start}
+.roadmap h3,.metrics h3,.archive h3{grid-column:1/-1;margin:4px 0 0;font-size:18px;font-weight:600}
+.roadmap>.col{border-top:3px solid var(--ink);padding-top:8px}
+.roadmap .card,.metrics .card,.archive .card{cursor:pointer}
+[data-lane=now]{border-top-color:var(--cyan-fill)!important}[data-lane=next]{border-top-color:var(--yellow)!important}
+[data-lane=blocked]{border-top-color:var(--red-fill)!important}[data-lane=shipped]{border-top-color:var(--done)!important}
+.kpis{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--line);border-radius:4px;background:var(--card)}
+.kpi{padding:12px 18px;min-width:140px;color:var(--mute);font-size:13px;border-right:1px solid var(--line)}
+.kpi:last-child{border-right:0}
+.kpi b{display:block;color:var(--ink);font:700 34px/1.05 var(--num)}
+.bar{display:grid;grid-template-columns:minmax(0,8.5em) 1fr 2.6em;gap:8px;align-items:center;margin:5px 0;font-size:13px}
+.bar>span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar>span:last-child{text-align:right;font:700 16px/1 var(--num)}
+.bar>span:nth-child(2){background:var(--sunk);border-radius:2px;height:12px;display:block}
+.bar i{display:block;height:12px;min-width:2px;border-radius:2px;background:var(--fill,var(--cyan-fill))}
+/* Metrics: one sheet of panels on a twelve-column grid. */
+.metrics>.col{background:var(--card);border:1px solid var(--line);border-radius:5px;padding:14px 16px 16px;grid-column:span 4;min-width:0}
+.metrics>.w12{grid-column:1/-1}.metrics>.w8{grid-column:span 8}.metrics>.w4{grid-column:span 4}
+.metrics>.col h2{margin:0 0 12px;font-size:14px}
+.metrics .split{columns:3 240px;column-gap:32px}.metrics .split h2{column-span:all}
+.metrics .split .bar{break-inside:avoid}
+.metrics h3,.metrics .kpis{grid-column:1/-1}
+.bar i[data-kind]{background:var(--sw)}
+.stack{display:flex;height:14px;border-radius:3px;overflow:hidden;gap:2px;margin:0 0 12px}
+.stack i{background:var(--sw);min-width:3px}
+.weeks{display:grid;grid-template-columns:repeat(8,1fr);gap:10px;height:190px;align-items:end;border-bottom:1px solid var(--line2);padding-top:18px}
+.wk{display:flex;flex-direction:column;height:100%;justify-content:flex-end}
+.pair{display:flex;gap:3px;align-items:flex-end;height:100%}
+.colm{flex:1;height:var(--h);min-height:2px;position:relative;border-radius:2px 2px 0 0}
+.colm span{position:absolute;bottom:100%;left:0;right:0;text-align:center;font:700 14px/1.3 var(--num);color:var(--ink)}
+.colm.add{background:var(--line2)}.colm.ship{background:var(--cyan-fill)}
+.wl{position:relative;top:22px;height:0;text-align:center;font-size:12px;color:var(--mute);white-space:nowrap}
+.key{display:flex;gap:16px;margin-top:40px;font-size:12.5px;color:var(--mute)}
+.key .k::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.key .add::before{background:var(--line2)}.key .ship::before{background:var(--cyan-fill)}
+.metrics .idlelist .card{border:0;border-top:1px solid var(--line);border-radius:0;box-shadow:none;margin:0;padding:9px 0}
+.metrics .idlelist .card .num{font-size:17px}.metrics .idlelist .card b{font-size:13.5px}
+@media (max-width:1000px){.metrics>.col,.metrics>.w8,.metrics>.w4{grid-column:1/-1}}
+main.archive,main.decisions{display:grid;grid-template-columns:minmax(0,780px);justify-content:center;align-content:start;gap:12px}
+.archive input{width:100%}
+.decisions>.col{background:var(--card);border:1px solid var(--line);border-top:3px solid var(--mag);border-radius:4px;padding:12px 14px}
+.decisions .col p{margin:6px 0}.decisions .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.decisions a{color:var(--mag)}
+.decisions .cand{border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin:8px 0}
+@media (max-width:900px){main.roadmap{grid-template-columns:minmax(0,1fr)}}
+/* Roadmap: the timeline, then progress and activity side by side, then the lanes. */
+main.roadmap{max-width:1500px}
+.roadmap>.panel,.roadmap>.rm-top,.roadmap>h4{grid-column:1/-1}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:5px;padding:14px 16px 16px;min-width:0}
+.panel h2{margin:0 0 12px;font-size:14px}
+.roadmap>h4{margin:10px 0 -4px;font-size:14px;color:var(--mute);text-transform:uppercase;letter-spacing:.06em}
+.tl{padding:6px 0 10px}
+.tl-row{display:grid;grid-template-columns:240px minmax(0,1fr);align-items:stretch;border-bottom:1px solid var(--line)}
+.tl-row:last-of-type{border-bottom:0}
+.tl-label{padding:9px 14px 9px 16px;display:flex;flex-direction:column;justify-content:center;min-width:0;border-right:1px solid var(--line)}
+.tl-label b{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-label .meta{font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tl-head .tl-label{justify-content:flex-end;color:var(--mute);font-size:12px;font-weight:600}
+.tl-months,.tl-weeks{display:grid;grid-template-columns:repeat(var(--weeks),1fr)}
+.tl-months span{font-size:12px;font-weight:600;padding:6px 8px 2px;color:var(--ink)}
+.tl-weeks span{font-size:11.5px;color:var(--mute);padding:2px 6px 8px;border-left:1px solid var(--line);white-space:nowrap;overflow:hidden}
+.tl-weeks .now{color:var(--cyan);font-weight:600}
+.tl-lane{position:relative;min-height:42px;background:repeating-linear-gradient(90deg,transparent 0 calc(100% / var(--weeks) - 1px),var(--line) calc(100% / var(--weeks) - 1px) calc(100% / var(--weeks)))}
+.tl-bar{position:absolute;top:9px;bottom:9px;min-width:28px;display:flex;align-items:center;justify-content:space-between;gap:8px;padding:0 10px;border:1.5px solid var(--sw);border-radius:6px;font:inherit;font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer;overflow:hidden;
+  background:linear-gradient(90deg,color-mix(in srgb,var(--sw) 30%,var(--card)) var(--pct),color-mix(in srgb,var(--sw) 10%,var(--card)) var(--pct))}
+.tl-bar::after{content:"";position:absolute;left:0;bottom:0;height:3px;width:var(--pct);background:var(--sw)}
+.tl-bar:hover{box-shadow:0 2px 10px -4px var(--sw)}
+.tl-text,.tl-pct{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tl-pct{font:700 15px/1 var(--num);flex:none;margin-left:auto}
+.tl-flag{flex:none;padding:1px 6px;border-radius:3px;background:var(--red-fill);color:#fff;font-size:11px;font-weight:600}
+.tl-text{flex:0 1 auto;min-width:0}
+.tl-mark{position:absolute;top:50%;width:11px;height:11px;margin:-6px 0 0 -6px;padding:0;border:0;border-radius:2px;transform:rotate(45deg);background:var(--cyan-fill);cursor:pointer;box-shadow:0 0 0 2px var(--card)}
+.tl-mark.stone{width:13px;height:13px;margin:-7px 0 0 -7px;background:var(--card);border:2px solid var(--ink);box-shadow:none}
+.tl-mark.stone.done{background:var(--ok);border-color:var(--ok)}.tl-mark.stone.late{border-color:var(--red);background:var(--red-wash)}
+.tl-mlabel{position:absolute;top:50%;transform:translate(10px,-50%);font-size:12px;font-weight:600;white-space:nowrap;pointer-events:none;padding:0 4px;background:color-mix(in srgb,var(--card) 85%,transparent);border-radius:3px}
+.tl-mlabel.left{transform:translate(calc(-100% - 10px),-50%)}
+.tl-bar.late{border-style:dashed;border-color:var(--red)}.tl-bar.late .tl-flag{background:var(--red)}
+.tl-ahead{position:absolute;top:0;bottom:0;right:0;background:repeating-linear-gradient(135deg,transparent 0 5px,color-mix(in srgb,var(--sw) 14%,transparent) 5px 7px);pointer-events:none}
+.rm-head{grid-column:1/-1;display:flex;align-items:center;gap:12px}.rm-head button{margin-left:auto;font-size:13px;font-weight:600}
+#dlg .stone{display:grid;gap:10px}
+.tl-now{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--cyan);opacity:.7;pointer-events:none}
+.rm-top{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,7fr);gap:14px;align-items:start}
+.ins-body{display:flex;gap:20px;align-items:center}
+.ring{--pct:0;flex:none;width:132px;height:132px;border-radius:50%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  background:radial-gradient(closest-side,var(--card) 78%,transparent 79%),conic-gradient(var(--cyan-fill) calc(var(--pct) * 1%),var(--sunk) 0)}
+.ring b{font:700 34px/1 var(--num)}.ring span{font-size:12px;color:var(--mute)}
+.tiles{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tile{border:1px solid var(--line);border-radius:5px;padding:9px 12px;font-size:12.5px;color:var(--mute)}
+.tile b{display:block;color:var(--ink);font:700 30px/1.1 var(--num)}
+.tile.bad{background:var(--red-wash);border-color:color-mix(in srgb,var(--red) 35%,var(--line))}.tile.bad b{color:var(--red)}
+.tile.you{background:var(--mag-wash);border-color:color-mix(in srgb,var(--mag) 35%,var(--line))}.tile.you b{color:var(--mag)}
+.act{display:flex;flex-direction:column}
+.act-row{display:grid;grid-template-columns:10px minmax(0,1fr) auto;gap:10px;align-items:center;text-align:left;width:100%;padding:7px 2px;border:0;border-top:1px solid var(--line);border-radius:0;background:none;font:inherit;color:inherit;cursor:pointer}
+.act-row:hover{background:var(--sunk)}
+.act-row .dot{width:10px;height:10px;border-radius:50%;background:var(--sw)}
+.act-t{display:flex;flex-direction:column;min-width:0}.act-t b{font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act-t .meta,.act-row>.meta{font-size:12px}
+@media (max-width:1000px){.rm-top{grid-template-columns:minmax(0,1fr)}.tl-row{grid-template-columns:150px minmax(0,1fr)}}
+
+/* Dialogs: the card, settings and sign-in. */
+dialog{background:var(--card);color:var(--ink);border:1px solid var(--line2);border-radius:6px;width:min(600px,94vw);padding:18px 20px;box-shadow:0 24px 60px -20px rgb(0 0 0 / .45)}
+dialog::backdrop{background:rgb(14 16 19 / .45)}
+dialog form{display:grid;gap:10px}
+dialog h2{margin:0;font-size:18px}
+#dlg .dhead{display:flex;align-items:baseline;gap:10px}
+#dlg .dhead .num{font-size:30px}
+#dlg .dhead .meta{margin:0}
+#dlg input:first-of-type{font-size:16px;font-weight:600}
+#dlg .plan{display:flex;align-items:center;gap:8px}#dlg .plan input{width:auto;font-size:14px;font-weight:400}
+#dlg .row{display:flex;flex-wrap:wrap;gap:6px}
+.cm{border-top:1px solid var(--line)}
+.cm div{border-bottom:1px solid var(--line);padding:8px 0;font-size:13.5px}
+.cm div b{margin-right:6px}
+.banner{border:1px solid var(--mag);background:var(--mag-wash);border-radius:4px;padding:8px 10px}.banner:empty{display:none}
+#signin form{display:grid;gap:10px}#signin .err{color:var(--red);min-height:1.2em;margin:0}
+#settings{width:100vw;height:100vh;max-width:none;max-height:none;margin:0;padding:0;border:0;border-radius:0;box-shadow:none}
+#settings .sheet{display:grid;grid-template-columns:230px minmax(0,1fr);height:100%}
+#settings .tabs{display:flex;flex-direction:column;gap:2px;padding:18px 12px;background:var(--rail);color:var(--rail-ink);overflow-y:auto}
+#settings .stitle{font-weight:700;font-size:15px;padding:4px 10px 14px}
+#settings .tabs button{border:0;background:none;color:var(--rail-mute);text-align:left;padding:9px 10px;border-radius:5px;font-weight:500}
+#settings .tabs button:hover{color:var(--rail-ink);background:#262b31}
+#settings .tabs button.on{color:var(--rail);background:var(--rail-ink)}
+#settings .tabs .close{margin-top:auto;border:1px solid var(--rail-line);justify-content:center;color:var(--rail-ink)}
+#settings .pane{overflow-y:auto;padding:30px 44px 48px;background:var(--bg)}
+#settings .pane>*{max-width:1080px}
+#settings .pane>h2{font-size:24px;margin:0 0 4px}
+#settings .lead{color:var(--mute);margin:0 0 22px;max-width:70ch}
+#settings table{width:100%;border-collapse:collapse;margin:0 0 14px;background:var(--card);border:1px solid var(--line);border-radius:5px;overflow:hidden}
+#settings th{font-size:12px;font-weight:600;color:var(--mute);text-align:left;padding:9px 10px;border-bottom:1px solid var(--line2);background:var(--sunk)}
+#settings td{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+#settings tr:last-child td{border-bottom:0}
+#settings tr:hover td{background:color-mix(in srgb,var(--sunk) 50%,var(--card))}
+#settings td select{border-color:transparent;background:transparent;padding:5px 7px}
+#settings td select:hover{border-color:var(--line2);background:var(--card)}
+#settings td input:not([type=checkbox]){border-color:var(--line);padding:5px 8px}
+#settings td button{font-size:13px;padding:4px 9px;background:transparent;border-color:transparent;color:var(--mute)}
+#settings td button:hover:not(:disabled){border-color:var(--line2);color:var(--ink);background:var(--card)}
+#settings button.danger{color:var(--red)}
+#settings .err{color:var(--red);min-height:1.2em;margin:6px 0}
+#settings .note{color:var(--mute);margin:10px 0;font-size:13px;max-width:75ch}
+#settings .secret{border:1px solid var(--mag);background:var(--mag-wash);border-radius:5px;padding:12px;margin:0 0 14px;overflow-wrap:anywhere}
+#settings code{font-family:ui-monospace,monospace;font-size:12.5px}
+#settings fieldset{border:1px solid var(--line);border-radius:5px;background:var(--card);margin:0 0 10px;padding:12px 14px;display:flow-root}
+#settings legend{float:left;font-weight:600;padding:5px 0;min-width:220px}
+#settings fieldset>.row,#settings fieldset>textarea{clear:both}
+#settings fieldset>button{font-size:13px;padding:4px 9px;margin-right:6px}
 #settings textarea{width:100%;min-height:3.2em}
-#settings .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+#settings .row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:10px 0}
 #settings details{display:inline-block}
-#settings details label{display:block}
-@media (max-width:760px){.shell{grid-template-columns:minmax(0,1fr)}#side{flex-wrap:wrap;border-right:0;border-bottom:1px solid var(--line)}#side nav{width:100%;min-height:0}}
-#toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:var(--err);color:#fff;padding:8px 14px;border-radius:6px;display:none}
-dialog{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;width:min(560px,92vw)}
-dialog form{display:grid;gap:8px}
-.cm div{border-top:1px solid var(--line);padding:6px 0}
-.banner{border:1px solid var(--acc);border-radius:6px;padding:6px 8px}.banner:empty{display:none}
-@media (max-width:640px){main{grid-auto-flow:row;grid-auto-columns:auto}}
+#settings details label{display:block;padding:2px 0}
+#settings summary{cursor:pointer;color:var(--ink)}
+#settings h3,#settings h4{margin:22px 0 8px;font-size:15px}
+#settings input[type=checkbox]{accent-color:var(--ink);width:16px;height:16px}
+#settings label{display:inline-flex;align-items:center;gap:8px}
+#settings>.sheet>.pane>div>button,#settings .row>button:last-child{font-weight:600}
+@media (max-width:760px){#settings .sheet{grid-template-columns:minmax(0,1fr);grid-template-rows:auto 1fr}#settings .tabs{flex-direction:row;flex-wrap:wrap}#settings .pane{padding:20px}}
+#toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--card);padding:10px 16px;border-radius:5px;display:none;box-shadow:0 12px 30px -10px rgb(0 0 0 / .4);border-left:0;max-width:min(640px,92vw)}
+#toast::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red-fill);margin-right:9px}
+@media (max-width:760px){
+  header.top{padding:8px 10px}.quick{margin-left:0;width:100%}.top #title{flex:1;width:auto}
+  main.board{flex-direction:column}.board>.col{max-width:none;border-right:0;padding:0;flex:none}
+  .board>.col.spine{flex:none;align-items:stretch}.spine h2{writing-mode:horizontal-tb;transform:none;flex-direction:row}
+  .strip{flex-wrap:wrap}
+}
+.prompt{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center}.prompt textarea{grid-column:1/-1;font-family:ui-monospace,monospace}
 </style>
 </head>
 <body>
-<div class="shell" id="shell">
-<aside id="side" aria-label="repositories, projects and agents"><nav id="nav1" aria-label="repositories, projects and agents"></nav></aside>
-<div>
-<header>
-  <button id="toggle" aria-label="toggle repositories panel" title="Repositories">&#9776;</button>
-  <h1>Mill Board</h1>
-  <button id="view" aria-pressed="false" title="Show the chosen project's roadmap">Roadmap</button>
-  <button id="metrics" aria-pressed="false" title="Show metrics for the chosen repository or project, or the whole board">Metrics</button>
-  <button id="decide" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions<span id="decide-n"></span></button>
-  <input id="actor" placeholder="your name" size="12" aria-label="actor name">
-  <select id="role" aria-label="role"></select>
-  <input id="title" placeholder="New card title" size="26" aria-label="new card title">
-  <button id="add">Add</button>
-  <button id="gear" title="Settings" aria-label="settings">&#9881;</button>
-  <button id="signout" hidden>Sign out</button>
+<header class="top">
+  <span class="brand"><svg viewBox="0 0 16 16" aria-hidden="true"><rect width="7" height="7" fill="#12a3dc"/><rect x="9" width="7" height="7" fill="#d4006f"/><rect y="9" width="7" height="7" fill="#f2c200"/><rect x="9" y="9" width="7" height="7" fill="#eef0f2"/></svg>Mill Board</span>
+  <nav class="views" aria-label="views">
+    <button id="boardv" type="button" aria-pressed="true">Board</button>
+    <button id="view" type="button" aria-pressed="false" title="The chosen project's roadmap">Roadmap</button>
+    <button id="metrics" type="button" aria-pressed="false" title="Metrics for the chosen repository or project, or the whole board">Metrics</button>
+    <button id="archive" type="button" aria-pressed="false" title="Done cards set aside: archived, or done more than 14 days ago">Archive</button>
+    <button id="decide" type="button" aria-pressed="false" hidden title="Decisions waiting for you: open BBP escalations">Decisions <span id="decide-n" class="badge"></span></button>
+  </nav>
+  <div class="quick">
+    <input id="title" placeholder="New card title" aria-label="new card title">
+    <button id="add" type="button" class="primary"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg>Add card</button>
+  </div>
+  <div class="who">
+    <span id="me" class="me" hidden></span>
+    <input id="actor" placeholder="your name" size="11" aria-label="actor name">
+    <select id="role" aria-label="role"></select>
+  </div>
+  <button id="gear" type="button" class="icon" title="Settings" aria-label="settings"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  <button id="signout" type="button" class="icon" hidden title="Sign out" aria-label="sign out"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
 </header>
+<nav id="nav1" aria-label="repositories, projects and agents"></nav>
+<nav id="strip" class="strip" aria-label="columns" hidden></nav>
 <main id="board"></main>
-</div>
-</div>
 <dialog id="dlg"></dialog>
 <dialog id="settings" aria-label="settings"></dialog>
 <dialog id="signin" aria-label="sign in"><form method="dialog">
   <h2>Sign in to Mill Board</h2>
   <p id="signin-why" class="err" role="alert"></p>
   <input id="signin-token" type="password" placeholder="board token" autocomplete="current-password" aria-label="board token" required>
-  <button>Sign in</button>
+  <button class="primary">Sign in</button>
 </form></dialog>
 <div id="toast" role="alert"></div>
 <script>
@@ -135,6 +372,13 @@ const INBOX="default",label=p=>p===INBOX?"Inbox":p;
 const repoOf=p=>Object.keys(repos).find(r=>repos[r].includes(p))||"";
 const shown=k=>(!sel.repo||repoOf(k.project)===sel.repo)&&(!sel.project||k.project===sel.project)&&(!sel.agent||k.claim===sel.agent);
 const count=f=>cards.filter(f).length;
+/* A Done card is shelved, off the board and in the Archive view, once archived or 14 days after it
+   was done (closed without shipping: after its last change) or last restored. The server's
+   Card::shelved, with board_list's default window; kept here so the board reads every card once. */
+const SHELF_DAYS=14,isDone=k=>FLOW.columns.find(c=>c.id===k.column)?.kind==="done";
+const since=k=>Math.max(k.done_ms??k.updated_ms,k.restored_ms??-Infinity);
+const shelved=k=>isDone(k)&&(k.archived_ms!=null||Date.now()-since(k)>SHELF_DAYS*864e5);
+const listed=f=>count(k=>!shelved(k)&&f(k));
 /* One colour per agent, the same on every card and in the panel. Twelve hues 30 degrees apart; a name
    prefers the slot its hash picks and takes the next free one if another agent has it, so two agents
    never look alike. The set of agents seen is kept in this browser so colours do not shuffle. */
@@ -182,53 +426,117 @@ async function api(op,args={}){
     if(sent===tok)await signIn(tok?"That token was refused. Enter a current one.":"This board needs a token.");
   }
   const j=await r.json().catch(()=>({error:r.statusText}));
-  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;throw e}
+  if(!r.ok){const e=new Error(j.error||r.statusText);e.status=r.status;e.savedRev=j.saved_rev;throw e}
   return j;
 }
 /* A per-model token fixes who you are: send nothing, so a role renamed under you never disagrees. */
 const who=()=>$("actor").disabled?{}:{actor:$("actor").value.trim(),role:$("role").value};
 function toast(m){const t=$("toast");t.textContent=m;t.style.display="block";clearTimeout(toast.h);toast.h=setTimeout(()=>t.style.display="none",3500)}
 // Run a write as the current actor, then re-read the board. Resolves to the reply, or null after showing the error.
-async function act(op,args){
-  try{const r=await api(op,{...who(),...args});await refresh();return r}
-  catch(e){toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
+async function act(op,args,failed,done){
+  try{const r=await api(op,{...who(),...args});done?.(r);await refresh();return r}
+  catch(e){failed?.(e);toast(e.message);if(e.status===409)await refresh().catch(()=>{});return null}
 }
 function el(tag,text,cls){const e=document.createElement(tag);if(text!=null)e.textContent=text;if(cls)e.className=cls;return e}
 // A card's heading: its board number in the corner, if it has one, then its title.
-const heading=k=>[...(k.number?[el("span","#"+k.number,"num")]:[]),el("b",k.title)];
+const heading=k=>{const top=el("div",null,"top");if(k.number)top.append(el("span","#"+k.number,"num"));top.append(...priorityTag(k));return [top,el("b",k.title)]};
 // rusty_tick's priority scale; 0 (none) shows no badge.
 const PRIORITY={5:"High",3:"Medium",1:"Low",0:"None"};
 const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priority)]:[];
 
+// Ages: "40m", "5h", "3d". A card in a work column untouched for a day reads as idle.
+const ago=ms=>{const m=(Date.now()-ms)/6e4;return m<60?Math.max(1,Math.round(m))+"m":m<1440?Math.round(m/60)+"h":Math.round(m/1440)+"d"};
+const kindOf=c=>FLOW.columns.find(x=>x.id===c)?.kind;
+/* A gate ahead: a work column whose move onward is a human approval. Its cards wait on the owner. */
+const gateFrom=c=>kindOf(c)==="work"?FLOW.transitions.find(m=>m.from===c&&m.gate&&kindOf(m.to)!=="blocked"):null;
+const decisionsOn=k=>pending?.filter(p=>p.card?.id===k.id).length??0;
+const waitsOnYou=k=>!!gateFrom(k.column)||decisionsOn(k)>0;
+// Stage ink attributes for a column: its kind, and whether it is a later work column (a lighter cyan).
+function ink(e,c){const kind=kindOf(c)??"backlog";e.dataset.kind=kind;
+  if(kind==="work"&&working().indexOf(c)>0)e.dataset.late="";else delete e.dataset.late}
+const shownIn=c=>cards.filter(k=>k.column===c&&shown(k)&&!shelved(k));
+
+// A card's own tags, the first shown and the rest folded into a count (named on hover).
+function tagChips(k){
+  const tags=k.tags.filter(t=>!t.startsWith("migrated:"));if(!tags.length)return [];
+  const out=[el("span",tags[0],"tag")];
+  if(tags.length>1){const x=el("span","+"+(tags.length-1),"more");x.title=tags.slice(1).join(", ");out.push(x)}
+  return out;
+}
+/* A job ticket: number and priority, title, then project, holder and age; extra tags fold to a count. */
+function ticket(k){
+  const d=el("div",null,"card");
+  d.append(...heading(k));
+  const m=el("div",null,"meta");
+  if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
+  if(k.claim){
+    d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
+    const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
+  }
+  const work=kindOf(k.column)==="work",age=Date.now()-k.updated_ms;
+  if(work&&age>DAY)m.append(el("span","idle "+ago(k.updated_ms),"idle"));
+  else if(work||k.claim)m.append(el("span",ago(k.updated_ms)));
+  m.append(...tagChips(k));
+  if(k.issue)m.append(el("span","issue #"+k.issue));
+  if(k.comments.length)m.append(el("span",k.comments.length+(k.comments.length===1?" comment":" comments")));
+  d.append(m);
+  // What waits on you: a decision on this card, or a gate it stands at.
+  const n=decisionsOn(k),gate=gateFrom(k.column);
+  if(n||gate){
+    d.classList.add("waits");
+    const r=el("div",null,"ask-row");
+    if(n){r.append(n===1?"Decision waiting":n+" decisions waiting");const b=el("button","Answer","ask");b.type="button";b.onclick=e=>{e.stopPropagation();setView("decisions")};r.append(b)}
+    else{r.append("Waits on you");const b=el("button","Approve","ask");b.type="button";b.title="Approve into "+colLabel(gate.to);
+      b.onclick=e=>{e.stopPropagation();if(confirm("Approve #"+(k.number??"")+" "+k.title+" into "+colLabel(gate.to)+"?"))act("card_move",{id:k.id,to:gate.to})};r.append(b)}
+    d.append(r);
+  }
+  d.draggable=true;d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
+  d.onclick=()=>show(k.id);
+  return d;
+}
+
+/* The colour control strip: each column a patch as wide as its open cards, coloured by its stage;
+   a click scrolls to it. At the right, everything that waits on you. */
+function renderStrip(){
+  const s=$("strip");s.hidden=view!=="board";if(s.hidden)return;
+  s.replaceChildren();
+  for(const {id,label:name} of FLOW.columns){
+    const n=shownIn(id).length,b=el("button",null,"patch"+(n?"":" zero"));b.type="button";ink(b,id);
+    b.style.setProperty("--w",String(n?Math.max(1,Math.sqrt(n)):0));b.dataset.jump=id;
+    b.append(name,el("b",String(n)));b.title="Show "+name;
+    b.onclick=()=>{const c=document.querySelector('#board .col[data-col="'+id+'"]');if(!c)return;c.scrollIntoView({inline:"start",block:"nearest",behavior:"smooth"});
+      c.classList.remove("flash");void c.offsetWidth;c.classList.add("flash")};
+    s.append(b);
+  }
+  const gates=cards.filter(k=>shown(k)&&!shelved(k)&&gateFrom(k.column)).length,dec=pending?.length??0;
+  if(gates||dec){
+    const parts=[...(gates?[gates+(gates===1?" approval":" approvals")]:[]),...(dec?[dec+(dec===1?" decision":" decisions")]:[])];
+    const w=el("button","Waits on you: "+parts.join(" · "),"waits");w.type="button";
+    w.onclick=()=>{if(!gates){setView("decisions");return}
+      const first=FLOW.columns.find(c=>gateFrom(c.id)&&shownIn(c.id).length);document.querySelector('[data-jump="'+first?.id+'"]')?.click()};
+    s.append(w);
+  }
+}
+
 function render(){
+  renderStrip();
   if(view==="decisions"){renderDecisions();return}
   if(view==="roadmap"){renderRoadmap();return}
   if(view==="metrics"){renderMetrics();return}
+  if(view==="archive"){renderArchive();return}
   mapSeq++;   // drop any roadmap or metrics still loading
-  const b=$("board");b.classList.remove("roadmap","metrics","decisions");b.replaceChildren();
+  const b=$("board");b.classList.remove("board","roadmap","metrics","decisions","archive");b.classList.add("board");b.replaceChildren();
   for(const {id:c,label:name} of FLOW.columns){
-    const col=el("section",null,"col");col.dataset.col=c;col.append(el("h2",name));
+    const list=shownIn(c),spine=!list.length&&kindOf(c)!=="done";
+    const col=el("section",null,"col"+(spine?" spine":""));col.dataset.col=c;ink(col,c);col.setAttribute("aria-label",name);
+    col.append(...colHead(c,name,list.length,spine));
     col.ondragover=e=>{e.preventDefault();col.classList.add("over")};
     col.ondragleave=()=>col.classList.remove("over");
     col.ondrop=e=>{e.preventDefault();col.classList.remove("over");act("card_move",{id:e.dataTransfer.getData("text"),to:c})};
-    for(const k of cards.filter(k=>k.column===c&&shown(k))){
-      const d=el("div",null,"card");d.draggable=true;d.append(...heading(k));
-      const m=el("div",null,"meta");
-      if(projects().length>1&&!sel.project){const t=el("span",label(k.project),"tag proj");t.title=repoOf(k.project);m.append(t)}
-      m.append(...priorityTag(k));
-      k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
-      if(k.claim){
-        d.classList.add("claimed");d.style.setProperty("--ag",agentColor(k.claim));
-        const t=el("span",null,"tag agent"+(working().includes(k.column)?" running":""));t.append(el("i",null,"dot"),k.claim);m.append(t);
-      }
-      const waiting=pending?.filter(p=>p.card?.id===k.id).length;
-      if(waiting){const t=el("span","⚑ "+waiting,"tag p5");t.title="decisions waiting for you";m.append(t)}
-      if(k.issue)m.append(el("span","issue #"+k.issue));
-      if(k.comments.length)m.append(el("span"," · "+k.comments.length+" 💬"));
-      d.append(m);
-      d.ondragstart=e=>e.dataTransfer.setData("text",k.id);
-      d.onclick=()=>show(k.id);
-      col.append(d);
+    if(!spine){
+      const box=el("div",null,"cards");box.append(...list.map(ticket));
+      if(!list.length)box.append(el("p","Nothing here.","empty-note"));
+      col.append(box);
     }
     b.append(col);
   }
@@ -237,34 +545,193 @@ function render(){
 
 /* The roadmap: the chosen project's cards in lanes (now, next, later, blocked, shipped), laid out
    by the server's board_roadmap so the rules live in one place. Re-read whenever the board is. */
-let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
+let view=location.pathname==="/inbox"?"decisions":["roadmap","metrics","archive"].includes(pref("view"))?pref("view"):"board",mapSeq=0;
 // Each lane's columns, from the workflow's kinds (the server's Lane::of).
 const LANE_KIND={now:"work",next:"queue",later:"backlog",blocked:"blocked",shipped:"done"};
 const laneHint=l=>FLOW.columns.filter(c=>c.kind===LANE_KIND[l]).map(c=>c.label).join(", ")+(l==="shipped"?", last 30 days":"");
-const pressed=()=>{$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions")};
+const pressed=()=>{$("boardv").setAttribute("aria-pressed",view==="board");$("view").setAttribute("aria-pressed",view==="roadmap");$("metrics").setAttribute("aria-pressed",view==="metrics");$("decide").setAttribute("aria-pressed",view==="decisions");$("archive").setAttribute("aria-pressed",view==="archive")};
 function setView(v){view=v;pref("view",v);pressed();render()}
-// The chosen project, else the chosen repository's own, else `default`, else the first this credential may see.
-const roadmapProject=()=>[sel.project,sel.repo,"default",...projects()].find(p=>p&&projects().includes(p));
+/* Roadmap: a timeline of the last ten weeks, the progress and recent activity under it, then the lanes.
+   Cards carry no target dates, so the timeline shows what happened: a bar runs from when its work
+   began to now (or its last ship), and fills with the share shipped. Backlog is "Later", off the chart. */
+const WEEK=7*864e5,MAX_WEEKS=12;
+const dayStart=ms=>{const d=new Date(ms);d.setHours(0,0,0,0);return d.getTime()};
+const weekStart=ms=>dayStart(ms)-((new Date(ms).getDay()+6)%7)*864e5;
+/* The chart's window: back to the oldest work it shows and on to the furthest target or milestone,
+   at most twelve weeks each way. Three weeks or less is drawn in days, at least fourteen; longer in weeks. */
+function windowOf(scoped,stones){
+  const now=Date.now(),floor=weekStart(now)-(MAX_WEEKS-1)*WEEK,ceil=now+MAX_WEEKS*WEEK;
+  const starts=scoped.flatMap(k=>planned(k)?[k.created_ms]:isDone(k)&&k.done_ms>=floor?[k.created_ms]:[]);
+  const ends=[...scoped.filter(planned).map(k=>k.target_ms),...stones.filter(m=>!m.done_ms).map(m=>m.target_ms)].filter(t=>t>now);
+  const first=Math.max(floor,Math.min(now,...starts)),last=Math.min(ceil,Math.max(now,...ends));
+  if(last-first<=21*864e5){
+    const n=Math.max(14,Math.round((dayStart(last)-dayStart(first))/864e5)+1),ahead=Math.round((dayStart(last)-dayStart(now))/864e5);
+    const t0=dayStart(now)-(n-1-ahead)*864e5;return {t0,t1:t0+n*864e5,n,step:864e5,unit:"day"};
+  }
+  const t0=weekStart(first),n=Math.round((weekStart(last)-t0)/WEEK)+1;
+  return {t0,t1:t0+n*WEEK,n,step:WEEK,unit:"week"};
+}
+// The project the lanes are for: the chosen one, else the only one in scope, else none.
+function focusProject(){
+  if(sel.project)return sel.project;
+  const scope=projects().filter(p=>!sel.repo||repoOf(p)===sel.repo);
+  return scope.length===1?scope[0]:"";
+}
+const planned=k=>["work","queue","blocked"].includes(kindOf(k.column));
+const overdue=k=>!isDone(k)&&k.target_ms!=null&&k.target_ms<dayStart(Date.now());
+// Milestones as one row: each a diamond at its target, filled once done, late ones in red.
+const stoneMarks=stones=>stones.map(m=>({at:m.done_ms??m.target_ms,label:m.title,cls:"stone"+(m.done_ms?" done":m.target_ms<dayStart(Date.now())?" late":""),
+  title:m.title+(m.done_ms?" · reached "+day(m.done_ms):" · due "+day(m.target_ms)),open:()=>editStone(m)}));
+function stoneRows(stones){
+  if(!stones.length)return [];
+  return [{label:"Milestones",sub:stones.filter(m=>!m.done_ms).length+" ahead · "+stones.filter(m=>m.done_ms).length+" reached",marks:stoneMarks(stones)}];
+}
+// What a set of cards amounts to on the chart: work begun, shipped in the window, and where it stands.
+function track(list,t0){
+  const open=list.filter(planned),shipped=list.filter(k=>isDone(k)&&k.done_ms>=t0);
+  if(!open.length&&!shipped.length)return null;
+  const has=kind=>open.some(k=>kindOf(k.column)===kind);
+  const start=Math.min(...[...open,...shipped].map(k=>k.created_ms));
+  const end=open.length?Math.max(Date.now(),...open.map(k=>k.target_ms??0)):Math.max(...shipped.map(k=>k.done_ms));
+  const kind=has("work")?"work":has("queue")?"queue":has("blocked")?"blocked":"done";   // blocked only when nothing else moves
+  return {open,shipped,start,end,kind,ahead:end>Date.now(),pct:Math.round(100*shipped.length/(shipped.length+open.length))};
+}
+function timeline(scoped,focus,w,stones){
+  const {t0,t1,n,step,unit}=w,x=ms=>Math.min(100,Math.max(0,(ms-t0)/(t1-t0)*100))+"%";
+  const s=el("section",null,"panel tl");s.style.setProperty("--weeks",n);
+  const head=el("div",null,"tl-row tl-head"),months=el("div",null,"tl-months"),weeks=el("div",null,"tl-weeks");
+  let last="";
+  for(let i=0;i<n;i++){
+    const ms=t0+i*step,m=new Date(ms).toLocaleDateString(undefined,{month:"short"}),cur=Date.now()>=ms&&Date.now()<ms+step;
+    months.append(el("span",m===last?"":m));last=m;
+    weeks.append(el("span",cur?(unit==="day"?"Today":"This week"):unit==="day"?String(new Date(ms).getDate()):day(ms),cur?"now":null));
+  }
+  const area=el("div",null,"tl-area");area.append(months,weeks);head.append(el("div",focus?"Cards in flight":"Projects","tl-label"),area);s.append(head);
+  // One project: its milestones on a row of their own. Several: each project's on its own row.
+  const rows=focus?[...stoneRows(stones,focus),...cardRows(scoped,t0)]:projectRows(scoped,t0,stones);
+  if(!rows.length)s.append(el("p","Nothing planned or shipped in this window.","empty-note"));
+  for(const r of rows.slice(0,14)){
+    const row=el("div",null,"tl-row"),lab=el("div",null,"tl-label"),lane=el("div",null,"tl-area tl-lane");
+    lab.append(el("b",r.label),el("span",r.sub,"meta"));
+    if(r.start!=null){
+      const bar=el("button",null,"tl-bar");bar.dataset.kind=r.kind;bar.style.left=x(r.start);bar.style.width="calc("+x(r.end)+" - "+x(r.start)+")";
+      bar.style.setProperty("--pct",(r.pct??0)+"%");bar.title=r.title??r.label;bar.onclick=r.open;if(r.late)bar.classList.add("late");
+      if(r.ahead){const a=el("i",null,"tl-ahead"),from=Math.max(r.start,t0),span=Math.min(r.end,t1)-from;a.style.left=(span>0?(Date.now()-from)/span*100:0)+"%";bar.append(a)}
+      bar.append(el("span",r.text,"tl-text"));if(r.flag)bar.append(el("span",r.flag,"tl-flag"));if(r.right)bar.append(el("span",r.right,"tl-pct"));lane.append(bar);
+    }
+    for(const m of r.marks??[]){const d=el("button",null,"tl-mark"+(m.cls?" "+m.cls:""));d.style.left=x(m.at);d.title=m.title;if(m.open)d.onclick=m.open;lane.append(d);if(m.label){const t=el("span",m.label,"tl-mlabel");t.style.left=x(m.at);if(parseFloat(x(m.at))>85)t.classList.add("left");lane.append(t)}}
+    const now=el("i",null,"tl-now");now.style.left=x(Date.now());lane.append(now);
+    row.append(lab,lane);s.append(row);
+  }
+  if(rows.length>14)s.append(el("p",(rows.length-14)+" more not shown; choose a project to narrow.","empty-note"));
+  return s;
+}
+function projectRows(scoped,t0,stones){
+  const by=scoped.reduce((m,k)=>m.set(k.project,[...(m.get(k.project)??[]),k]),new Map());
+  for(const m of stones)if(!by.has(m.project))by.set(m.project,[]);
+  const out=[];
+  for(const [p,list] of by){
+    const marks=stoneMarks(stones.filter(m=>m.project===p)),t=track(list,t0);
+    if(!t){if(marks.length)out.push({label:label(p),sub:"milestones only",marks,rank:-1});continue}
+    t.marks=marks.map(m=>m.at>=t.start&&m.at<=t.end?{...m,label:""}:m);   // a name over the bar would cover it; hover tells
+    const n=kind=>t.open.filter(k=>kindOf(k.column)===kind).length;
+    const sub=[[n("work"),"in progress"],[n("queue"),"next"],[n("blocked"),"blocked"]].filter(([v])=>v).map(([v,w])=>v+" "+w).join(" · ")||"all shipped";
+    const late=t.open.filter(overdue).length;
+    t.flag=[n("blocked")&&n("blocked")+" blocked",late&&late+" overdue"].filter(Boolean).join(" · ");
+    out.push({...t,label:label(p),sub,text:t.shipped.length+" shipped",right:t.pct+"%",title:label(p)+": "+t.pct+"% of planned work shipped",open:()=>pick(repoOf(p),p),rank:n("work")*3+n("blocked")*2+n("queue")});
+  }
+  return out.sort((a,z)=>z.rank-a.rank||a.label.localeCompare(z.label));
+}
+const KIND_ORDER={work:0,blocked:1,queue:2};
+function cardRows(scoped,t0){
+  const rows=scoped.filter(planned).sort((a,z)=>KIND_ORDER[kindOf(a.column)]-KIND_ORDER[kindOf(z.column)]||z.priority-a.priority).map(k=>({
+    label:(k.number?"#"+k.number+" ":"")+k.title,sub:colLabel(k.column)+(k.claim?" · "+k.claim:""),start:k.created_ms,end:Math.max(Date.now(),k.target_ms??0),
+    kind:kindOf(k.column),text:k.target_ms?"due "+day(k.target_ms):"since "+day(k.created_ms),right:k.claim??"",ahead:k.target_ms>Date.now(),
+    late:overdue(k),flag:overdue(k)?"overdue "+ago(k.target_ms):"",title:k.title+" · since "+day(k.created_ms)+(k.target_ms?" · due "+day(k.target_ms):""),open:()=>show(k.id)}));
+  const shipped=scoped.filter(k=>isDone(k)&&k.done_ms>=t0);
+  if(shipped.length)rows.unshift({label:"Shipped",sub:shipped.length+" in this window",marks:shipped.map(k=>({at:k.done_ms,title:(k.number?"#"+k.number+" ":"")+k.title+" · "+day(k.done_ms),open:()=>show(k.id)}))});
+  return rows;
+}
+// Progress: the share of planned work shipped in the window, and where the rest stands.
+function insights(scoped,t0){
+  const t=track(scoped,t0),s=el("section",null,"panel ins");
+  s.append(el("h2","Progress"));
+  const pct=t?.pct??0,ring=el("div",null,"ring");ring.style.setProperty("--pct",pct);
+  ring.append(el("b",pct+"%"),el("span","shipped"));ring.title="cards shipped since "+day(t0)+", of those shipped or planned (Ready onward)";
+  const tiles=el("div",null,"tiles"),n=kind=>scoped.filter(k=>kindOf(k.column)===kind).length;
+  const waits=scoped.filter(k=>gateFrom(k.column)||decisionsOn(k)).length;
+  for(const [v,l,cls] of [[n("work"),"In progress",""],[n("queue"),"Up next",""],[n("blocked"),"Blocked","bad"],[waits,"Waits on you","you"]]){
+    const d=el("div",null,"tile "+(v?cls:""));d.append(el("span",l),el("b",String(v)));tiles.append(d);
+  }
+  const body=el("div",null,"ins-body");body.append(ring,tiles);s.append(body);return s;
+}
+function activity(scoped){
+  const s=el("section",null,"panel act");s.append(el("h2","Recent activity"));
+  const recent=[...scoped].sort((a,z)=>z.updated_ms-a.updated_ms).slice(0,6);
+  if(!recent.length)s.append(el("p","Nothing yet.","empty-note"));
+  for(const k of recent){
+    const d=el("button",null,"act-row"),dot=el("i",null,"dot");
+    if(k.claim)dot.style.background=agentColor(k.claim);else ink(dot,k.column);
+    const t=el("span",null,"act-t");t.append(el("b",(k.number?"#"+k.number+" ":"")+k.title),el("span",[k.claim,colLabel(k.column),...(focusProject()?[]:[label(k.project)])].filter(Boolean).join(" · "),"meta"));
+    d.append(dot,t,el("span",ago(k.updated_ms),"meta"));d.onclick=()=>show(k.id);s.append(d);
+  }
+  return s;
+}
+/* A milestone's dialog: add one to `project`, or change, close or reopen `m`. Milestones are never
+   deleted. It borrows the card dialog, so the card in it (if any) is let go first. */
+function editStone(m,project){
+  dlg=null;
+  const f=el("form",null,"stone"),t=el("input"),d=el("input"),row=el("div",null,"row");f.method="dialog";
+  t.placeholder="Milestone, e.g. Beta release";t.setAttribute("aria-label","milestone title");t.value=m?.title??"";
+  d.type="date";d.setAttribute("aria-label","milestone date");d.value=m?isoDay(m.target_ms):"";d.required=true;
+  const at=()=>new Date(d.value+"T12:00").getTime();
+  const done=async r=>{if(r){$("dlg").close();render()}};
+  const btn=(text,fn,cls)=>{const b=el("button",text,cls);b.type="button";b.onclick=fn;row.append(b);return b};
+  btn(m?"Save":"Add milestone",async()=>{
+    if(!t.value.trim()||!d.value){toast("A milestone needs a title and a date.");return}
+    done(m?await act("milestone_update",{id:m.id,title:t.value,target_ms:at()}):await act("milestone_add",{project,title:t.value,target_ms:at()}));
+  },"primary");
+  if(m)btn(m.done_ms?"Reopen":"Mark reached",async()=>done(await act("milestone_update",{id:m.id,done:!m.done_ms})));
+  btn("Cancel",()=>$("dlg").close());
+  const head=el("div",null,"dhead");head.append(el("span",m?(m.done_ms?"Reached "+day(m.done_ms):"Milestone"):"New milestone","meta"),el("span",label(m?.project??project),"tag proj"));
+  const when=el("div",null,"plan");when.append(el("span","Target","meta"),d);
+  f.append(head,t,when,row);$("dlg").replaceChildren(f);if(!$("dlg").open)$("dlg").showModal();t.focus();
+}
+/* Milestones change without card events (another session may add one), so while the roadmap is open
+   the poll re-reads them every ten seconds and redraws when they differ from what is shown. */
+const stoneArgs=focus=>focus?{project:focus}:sel.repo?{repo:sel.repo}:{};
+let stonesSeen="",stonesAt=0;
+async function stonesChanged(){
+  if(view!=="roadmap"||Date.now()-stonesAt<10000)return false;
+  stonesAt=Date.now();
+  return JSON.stringify((await api("board_milestones",stoneArgs(focusProject()))).milestones)!==stonesSeen;
+}
 async function renderRoadmap(){
-  const project=roadmapProject(),seq=++mapSeq,b=$("board");
+  const focus=focusProject(),seq=++mapSeq,b=$("board");
   const stale=()=>seq!==mapSeq||view!=="roadmap";   // a newer render, or the board, won
-  let map;
-  try{
-    if(!project)throw new Error("No project to show a roadmap for.");
-    map=await api("board_roadmap",{project});
-  }catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  let map=null,stones=[];
+  try{[map,stones]=await Promise.all([focus?api("board_roadmap",{project:focus}):null,
+    api("board_milestones",stoneArgs(focus)).then(r=>r.milestones)])}
+  catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
-  b.classList.remove("metrics","decisions");b.classList.add("roadmap");b.replaceChildren(el("h3","Roadmap · "+label(map.project)));
+  stonesSeen=JSON.stringify(stones);stonesAt=Date.now();
+  b.classList.remove("board","metrics","decisions","archive");b.classList.add("roadmap");
+  const scoped=cards.filter(k=>shown(k)&&(!focus||k.project===focus));
+  const w=windowOf(scoped,stones),top=el("div",null,"rm-top");top.append(insights(scoped,w.t0),activity(scoped));
+  const h=el("div",null,"rm-head");h.append(el("h3","Roadmap · "+(focus?label(focus):sel.repo||"all projects")));
+  if(focus){const add=el("button","Add milestone");add.type="button";add.onclick=()=>editStone(null,focus);h.append(add)}
+  b.replaceChildren(h,timeline(scoped,focus,w,stones),top);
+  if(!map){renderSide();syncDialog();return}
+  b.append(el("h4","Lanes","rm-lanes"));
   for(const l of map.lanes){
     const col=el("section",null,"col");col.dataset.lane=l.lane;
-    const h=el("h2",l.lane+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);
+    const h=el("h2",l.lane[0].toUpperCase()+l.lane.slice(1)+" · "+l.cards.length);h.title=laneHint(l.lane);col.append(h);
     for(const k of l.cards){
       const d=el("div",null,"card");d.append(...heading(k));
       const m=el("div",null,"meta");
-      if(l.lane==="now")m.append(el("span",colLabel(k.column),"tag"));
-      m.append(...priorityTag(k));
-      k.tags.filter(t=>!t.startsWith("migrated:")).forEach(t=>m.append(el("span",t,"tag")));
-      if(k.claim)m.append(el("span",k.claim,"tag"));
+      if(l.lane==="now")m.append(el("span",colLabel(k.column)));
+      if(k.claim){const t=el("span",null,"tag agent");t.style.setProperty("--ag",agentColor(k.claim));t.append(el("i",null,"dot"),k.claim);m.append(t)}
+      m.append(...tagChips(k));
       if(k.waits_on.length)m.append(el("span","waits on "+k.waits_on.length));
       if(k.done_ms)m.append(el("span","shipped "+new Date(k.done_ms).toLocaleDateString()));
       d.append(m);d.onclick=()=>show(k.id);col.append(d);
@@ -278,23 +745,23 @@ async function renderRoadmap(){
    this credential may see, computed by the server's board_metrics. Re-read whenever the board is. */
 const DAY=864e5,dur=ms=>ms==null?"–":ms<DAY?Math.round(ms/36e5)+"h":(ms/DAY).toFixed(ms<10*DAY?1:0)+"d";
 const day=ms=>new Date(ms).toLocaleDateString(undefined,{month:"short",day:"numeric"});
-// A panel of labelled bars: rows are {label, n, title?, fill?}; `max` lets two panels share a scale.
-function bars(title,rows,hint,max=Math.max(1,...rows.map(r=>r.n))){
-  const s=el("section",null,"col"),h=el("h2",title);if(hint)h.title=hint;s.append(h);
-  for(const r of rows){
+// A metrics panel: a heading (its hint on hover) and a width class on the twelve-column grid.
+function panel(title,cls,hint){const s=el("section",null,"col "+cls),h=el("h2",title);if(hint)h.title=hint;s.append(h);return s}
+// Labelled bars: rows are {label, n, title?, fill?, col?}; `max` sets the scale (default: the largest row).
+function rows(list,max=Math.max(1,...list.map(r=>r.n))){
+  if(!list.length)return [el("p","None.","meta")];
+  return list.map(r=>{
     const row=el("div",null,"bar"),f=el("i"),t=el("span");f.style.width=(r.n/max*100)+"%";
-    if(r.fill)f.style.setProperty("--fill",r.fill);if(r.title)row.title=r.title;
-    t.append(f);row.append(el("span",r.label),t,el("span",String(r.n)));s.append(row);
-  }
-  if(!rows.length)s.append(el("p","None.","meta"));
-  return s;
+    if(r.fill)f.style.setProperty("--fill",r.fill);if(r.col)ink(f,r.col);if(r.title)row.title=r.title;
+    t.append(f);row.append(el("span",r.label),t,el("span",String(r.n)));return row;
+  });
 }
 async function renderMetrics(){
   const seq=++mapSeq,b=$("board"),stale=()=>seq!==mapSeq||view!=="metrics";
   const args=sel.project?{project:sel.project}:sel.repo?{repo:sel.repo}:{};
   let m;
   try{m=await api("board_metrics",args)}
-  catch(e){if(!stale()){b.classList.remove("roadmap","metrics","decisions");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
+  catch(e){if(!stale()){b.classList.remove("board","roadmap","metrics","decisions","archive");b.replaceChildren(el("p",e.message,"meta"));renderSide()}return}
   if(stale())return;
   const n=c=>m.by_column.find(t=>t.key===c)?.count??0,lt=m.lead_time;
   const kpis=el("div",null,"kpis");
@@ -302,111 +769,212 @@ async function renderMetrics(){
     [lt.shipped,"shipped, 30 days"],[dur(lt.median_ms),"median lead time","created to shipped, last 30 days"],[dur(lt.p85_ms),"85% within","created to shipped, last 30 days"]]){
     const k=el("div",null,"kpi");k.append(el("b",String(v)),l);if(t)k.title=t;kpis.append(k);
   }
+  b.classList.remove("board","roadmap","decisions","archive");b.classList.add("metrics");
+  const scope=sel.project?label(sel.project):sel.repo||"all projects";
+  // Flow: cards added and shipped each week, side by side, the current week last.
   const wmax=Math.max(1,...m.weeks.flatMap(w=>[w.added,w.done]));
-  const idle=el("section",null,"col");idle.append(el("h2","idle longest"));
-  for(const k of m.idle){
+  const flow=panel("Flow","w8","cards created and shipped per week, the current week last");
+  const chart=el("div",null,"weeks");
+  m.weeks.forEach((w,i)=>{
+    const g=el("div",null,"wk");g.title=day(w.start_ms)+": "+w.added+" added, "+w.done+" shipped";
+    const pair=el("div",null,"pair");
+    for(const [n,cls] of [[w.added,"add"],[w.done,"ship"]]){const c=el("div",null,"colm "+cls);c.style.setProperty("--h",(n/wmax*100)+"%");c.append(el("span",String(n)));pair.append(c)}
+    g.append(pair,el("div",i===m.weeks.length-1?"This week":day(w.start_ms),"wl"));chart.append(g);
+  });
+  const key=el("div",null,"key");key.append(el("span","Added","k add"),el("span","Shipped","k ship"));
+  flow.append(chart,key);
+  // Where open work sits: one stacked bar in stage inks, then the rows.
+  const cols=panel("Open by column","w4");
+  const stack=el("div",null,"stack"),total=Math.max(1,m.by_column.reduce((a,t)=>a+t.count,0));
+  for(const t of m.by_column){if(!t.count)continue;const x=el("i");ink(x,t.key);x.style.flexGrow=t.count;x.title=colLabel(t.key)+": "+t.count;stack.append(x)}
+  cols.append(stack,...rows(m.by_column.map(t=>({label:colLabel(t.key),n:t.count,col:t.key})),total));
+  const pri=panel("Open by priority","w4");
+  const PFILL={5:"var(--red-fill)",3:"var(--ink)",1:"var(--mute)",0:"var(--line2)"};
+  pri.append(...rows(m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count,fill:PFILL[t.key]}))));
+  const agents=panel("In progress by agent","w4","claimed cards in work columns");
+  agents.append(...rows(m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)}))));
+  const parts=[flow,cols,pri,agents];
+  const idle=panel("Idle longest","w4 idlelist","open cards past backlog, longest untouched first");
+  for(const k of m.idle.slice(0,6)){
     const d=el("div",null,"card");d.append(...heading(k));
     d.append(el("div",[colLabel(k.column),"idle "+dur(k.idle_ms),...(k.claim?[k.claim]:[]),...(sel.project?[]:[label(k.project)])].join(" · "),"meta"));
     d.onclick=()=>show(k.id);idle.append(d);
   }
   if(!m.idle.length)idle.append(el("p","Nothing past backlog is open.","meta"));
-  b.classList.remove("roadmap","decisions");b.classList.add("metrics");
-  b.replaceChildren(el("h3","Metrics · "+(sel.project?label(sel.project):sel.repo||"all projects")),kpis,
-    bars("added per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.added})),"cards created, the current week last",wmax),
-    bars("shipped per week",m.weeks.map(w=>({label:day(w.start_ms),n:w.done})),"cards done, the current week last",wmax),
-    bars("open by column",m.by_column.map(t=>({label:colLabel(t.key),n:t.count}))),
-    bars("open by priority",m.by_priority.map(t=>({label:PRIORITY[t.key],n:t.count}))),
-    ...(sel.project?[]:[bars("open by project",m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"})))]),
-    bars("in progress by agent",m.by_claim.map(t=>({label:t.key,n:t.count,fill:agentColor(t.key)})),"claimed cards in work columns"),
-    idle);
+  parts.push(idle);
+  if(!sel.project){
+    const proj=panel("Open by project","w12 split");
+    proj.append(...rows(m.by_project.map(p=>({label:label(p.project),n:p.open,title:p.shipped+" shipped in 30 days"}))));
+    parts.push(proj);
+  }
+  b.replaceChildren(el("h3","Metrics · "+scope),kpis,...parts);
   renderSide();syncDialog();
 }
 
-/* The side panel: repositories (and the agents holding claims) on the left; the chosen
-   repository's projects in a second pane. Everything here only narrows what the board shows. */
+/* The scope bar: the repository, its projects as chips, then the agents holding claims.
+   Everything here only narrows what the board shows. */
 function renderSide(){
-  // Every repository is listed, an empty one too (you may be about to add its first card), except the
-  // `default` repository when the Inbox is all it holds: the Inbox row below is it.
+  // Every repository is offered, an empty one too (you may be about to add its first card), except the
+  // `default` repository when the Inbox is all it holds: the Inbox chip is it.
   const names=Object.keys(repos).filter(r=>r!==INBOX||repos[r].length>1);
-  $("shell").classList.toggle("noside",(projects().length<2&&!cards.some(k=>k.claim))||pref("side")==="0");
-  const item=(label,n,on,fn,agent)=>{
-    const b=el("button",null,"item"+(on?" on":""));b.type="button";
+  const item=(text,n,on,fn,agent)=>{
+    const b=el("button",null,"item"+(on?" on":""));b.type="button";b.setAttribute("aria-pressed",String(on));
     const name=el("span",null,"name");
     if(agent){const d=el("i",null,"dot");d.style.setProperty("--ag",agentColor(agent));name.append(d)}
-    name.append(label);b.append(name,el("span",String(n),"n"));b.onclick=fn;return b};
+    name.append(text);b.append(name,el("span",String(n),"n"));b.onclick=fn;return b};
   const n1=$("nav1");n1.replaceChildren();
   if(projects().length>1){
-    n1.append(el("h2","Repositories"),item("All repositories",cards.length,!sel.repo,()=>pick("","")));
+    const r=el("select");r.id="repo";r.setAttribute("aria-label","repository");
+    r.append(new Option("All repositories · "+listed(()=>true),""));
+    for(const x of names)r.append(new Option(x+" · "+listed(k=>repoOf(k.project)===x),x));
+    r.value=sel.repo;r.onchange=()=>pick(r.value,"");
+    n1.append(r);
     // The Inbox is a project, not a repository: it shows and counts only cards with no other project.
     // Listed only when this credential may see it, like every other entry here.
-    if(projects().includes(INBOX))n1.append(item("Inbox",count(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
-    for(const r of names)n1.append(item(r,count(k=>repoOf(k.project)===r),sel.repo===r,()=>pick(r,"")));
+    const chips=[];
+    if(projects().includes(INBOX))chips.push(item("Inbox",listed(k=>k.project===INBOX),sel.project===INBOX,()=>pick(repoOf(INBOX),INBOX)));
     // The projects of the chosen repository, or of every repository, so one project's cards are a click
-    // away. A repository whose only project is its own is left out: it is the repository, listed above.
+    // away. A repository whose only project is its own is left out: it is the repository, chosen above.
     // (A credential limited to some projects may see a repository with one other project: that one stays.)
-    const named=Object.entries(repos).filter(([r])=>!sel.repo||r===sel.repo)
-      .flatMap(([r,ps])=>ps.length===1&&ps[0]===r?[]:ps).filter(p=>p!==INBOX).sort();
-    if(named.length)n1.append(el("h2","Projects","sep"));
-    for(const p of named)n1.append(item(p,count(k=>k.project===p),sel.project===p,()=>pick(repoOf(p),p)));
+    const named=Object.entries(repos).filter(([x])=>!sel.repo||x===sel.repo)
+      .flatMap(([x,ps])=>ps.length===1&&ps[0]===x?[]:ps).filter(p=>p!==INBOX).sort();
+    for(const p of named)chips.push(item(p,listed(k=>k.project===p),sel.project===p,()=>sel.project===p?pick(sel.repo,""):pick(repoOf(p),p)));
+    if(chips.length)n1.append(el("i",null,"sep"),el("span","Projects","lbl"),...chips);
   }
   // Agents: whoever holds a claim, with how many cards. A second filter, independent of the repository.
   const claims={};cards.forEach(k=>{if(k.claim)claims[k.claim]=(claims[k.claim]||0)+1});
   const agents=Object.keys(claims).sort();
   if(agents.length){
-    n1.append(el("h2","Agents","sep"),item("Everyone",cards.filter(k=>k.claim).length,!sel.agent,()=>pickAgent("")));
+    n1.append(el("i",null,"sep"),el("span","Agents","lbl"),item("Everyone",cards.filter(k=>k.claim).length,!sel.agent,()=>pickAgent("")));
     for(const a of agents)n1.append(item(a,claims[a],sel.agent===a,()=>pickAgent(a),a));
   }
 }
+/* A column's heading: its stage swatch, name and count. Done's also links to the Archive (with how
+   many of its cards are there) and archives every Done card in view: the chosen project, else every project. */
+function colHead(c,name,n,spine){
+  const h=el("h2");h.append(el("i",null,"sw"),el("span",name,"label"),el("span",String(n),"n"));
+  if(spine)return [h];
+  if(kindOf(c)==="backlog"&&n>1)h.append(el("span","by priority","hint"));
+  if(kindOf(c)!=="done")return [h];
+  h.append(el("span",SHELF_DAYS+" days","hint"));
+  const bar=el("div",null,"colbar");
+  const btn=(t,title,fn)=>{const x=el("button",t);x.type="button";x.title=title;x.onclick=fn;bar.append(x)};
+  const shelf=count(k=>k.column===c&&shown(k)&&shelved(k));
+  if(n)btn("Archive all","Archive every Done card in "+(sel.project?label(sel.project):"every project")+" (needs triage)",()=>{
+    if(confirm("Archive every Done card in "+(sel.project?label(sel.project):"every project")+"?"))act("card_archive_done",sel.project?{project:sel.project}:{});
+  });
+  if(shelf)btn(shelf+" archived","Show the Archive",()=>setView("archive"));
+  return bar.childElementCount?[h,bar]:[h];
+}
+
+/* The Archive: shelved Done cards in view, newest first, searchable by number, title or tag.
+   Restore puts any of them back on the board for another 14 days, whether archived or aged out. */
+let archQ="";
+function renderArchive(){
+  mapSeq++;
+  const b=$("board");b.classList.remove("board","roadmap","metrics","decisions");b.classList.add("archive");
+  const all=cards.filter(k=>shown(k)&&shelved(k)).sort((a,z)=>(z.done_ms??z.updated_ms)-(a.done_ms??a.updated_ms));
+  const q=el("input"),list=el("section",null,"col");
+  q.placeholder="Search the archive";q.setAttribute("aria-label","search the archive");q.value=archQ;
+  const fill=()=>{
+    const t=archQ.trim().toLowerCase().replace(/^#/,"");
+    const hits=all.filter(k=>!t||String(k.number??"")===t||k.title.toLowerCase().includes(t)||k.tags.some(g=>g.includes(t)));
+    list.replaceChildren(...hits.map(k=>{
+      const d=el("div",null,"card");d.append(...heading(k));
+      const m=el("div",null,"meta");
+      if(projects().length>1)m.append(el("span",label(k.project),"tag proj"));
+      m.append(el("span",(k.done_ms?"shipped ":"closed ")+new Date(k.done_ms??k.updated_ms).toLocaleDateString()));
+      if(k.archived_ms!=null)m.append(el("span"," · archived "+new Date(k.archived_ms).toLocaleDateString()));
+      const r=el("button","Restore");r.type="button";r.onclick=e=>{e.stopPropagation();act("card_restore",{id:k.id})};m.append(" ",r);
+      d.append(m);d.onclick=()=>show(k.id);return d;
+    }));
+    if(!hits.length)list.append(el("p",all.length?"No match.":"Nothing archived.","meta"));
+  };
+  q.oninput=()=>{archQ=q.value;fill()};fill();
+  b.replaceChildren(el("h3","Archive · "+all.length),q,list);
+  renderSide();syncDialog();
+}
+
 function pick(repo,project){sel={...sel,repo,project};pref("repo",repo);pref("project",project);render()}
 function pickAgent(agent){sel={...sel,agent};render()}
 
 /* The card dialog is built once and then kept in step with the board without ever
    touching what the person is typing. `dlg.base` is the card as they last saw it. */
-const snap=k=>({rev:k.rev,title:k.title,body:k.body,tags:k.tags.join(", ")});
-const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,tags:dlg.f.g.value});
-const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.tags===b.tags;
-function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.g.value=s.tags}
+const snap=k=>({rev:k.rev,title:k.title,body:k.body,prompt:k.prompt??"",tags:k.tags.join(", ")});
+const typed=()=>({title:dlg.f.t.value,body:dlg.f.b.value,prompt:dlg.f.q.value,tags:dlg.f.g.value});
+const sameText=(a,b)=>a.title===b.title&&a.body===b.body&&a.prompt===b.prompt&&a.tags===b.tags;
+const isoDay=ms=>{const d=new Date(ms);return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
+function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s.prompt;dlg.f.g.value=s.tags}
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input")};
   for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
   [5,3,1,0].forEach(v=>f.pr.append(new Option("Priority: "+PRIORITY[v],v)));
   f.pr.setAttribute("aria-label","priority");f.pr.value=k.priority;
   f.pr.onchange=()=>act("card_plan",{id,priority:+f.pr.value});
+  // The target date, a local day; stored at its noon so a time zone shift keeps the day.
+  f.due.type="date";f.due.setAttribute("aria-label","target date");f.due.title="Target date: when this should be done";
+  f.due.onchange=()=>act("card_plan",{id,target_ms:f.due.value?new Date(f.due.value+"T12:00").getTime():null});
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
+  // The prompt: instructions for whoever takes the card, kept apart from the description.
+  f.q.rows=4;f.q.placeholder="Prompt for whoever takes this card";f.q.setAttribute("aria-label","prompt");
+  const copy=el("button","Copy prompt");copy.type="button";
+  copy.onclick=async()=>{try{await navigator.clipboard.writeText(f.q.value);toast("Prompt copied")}catch{toast("Copy failed")}};
+  const promptRow=el("div","","prompt");promptRow.append(el("label","Prompt "),copy,f.q);
   dlg={id,base:snap(k),f};setFields(dlg.base);
-  const row=el("div");
-  const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b," ")};
-  btn("Save",save);btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
+  const row=el("div",null,"row");
+  const btn=(label,fn)=>{const b=el("button",label);b.type="button";b.onclick=fn;row.append(b);return b};
+  btn("Save",save).classList.add("primary");btn("Claim",()=>act("card_claim",{id}));btn("Release",()=>act("card_release",{id}));
+  // Archive or Restore, for a Done card; syncDialog keeps the label in step with the board.
+  f.ar=el("button");f.ar.type="button";f.ar.onclick=()=>{const c=cards.find(x=>x.id===id);if(c)act(shelved(c)?"card_restore":"card_archive",{id})};row.append(f.ar);
   btn("Close",()=>$("dlg").close());
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
-  const form=el("form");form.method="dialog";form.append(f.banner,f.t,f.b,f.g,f.pr,...(projects().length>1?[f.p]:[]),row,f.meta,f.cm,f.ci);
+  const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
+  const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
+  form.append(head,f.banner,f.t,f.b,promptRow,f.g,plan,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
 }
 async function save(){
   const d=dlg,t=typed();
-  const r=await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)});
-  if(r&&dlg===d)d.base=snap(r.card);   // the dialog may have been closed or reopened on another card meanwhile
+  d.partial=null;d.note=false;
+  // Partly saved (the task's fields, not the prompt): the refresh below must not read that as someone else's edit.
+  await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,prompt:t.prompt,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)},
+    e=>{if(e.savedRev!=null)d.partial=e.savedRev},
+    r=>{if(dlg===d)d.base=snap(r.card)});   // before the refresh, so our own save is not read as theirs; the dialog may have moved on meanwhile
 }
 function syncDialog(){
   if(!dlg||!$("dlg").open)return;
   const k=cards.find(c=>c.id===dlg.id),f=dlg.f;
   if(!k){f.banner.textContent="This card no longer exists.";return}
   // Display-only parts follow the board; the inputs are never rebuilt.
-  f.meta.textContent=(k.number?"#"+k.number+" · ":"")+colLabel(k.column)+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.meta.textContent=colLabel(k.column)+(k.archived_ms!=null?" · archived":"")+(k.claim?" · claimed by "+k.claim:"")+" · rev "+k.rev;
+  f.ar.hidden=!isDone(k);f.ar.textContent=shelved(k)?"Restore":"Archive";
   if(f.p.value!==k.project&&document.activeElement!==f.p)f.p.value=k.project;
   f.cm.replaceChildren(...k.comments.map(c=>{const d=el("div");d.append(el("b",c.by+": "),el("span",c.text));return d}));
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
-  if(theirs.rev===dlg.base.rev){f.banner.replaceChildren();return}
+  if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
+  if(theirs.rev===dlg.base.rev){if(!dlg.note)f.banner.replaceChildren();return}
+  if(dlg.partial!=null){partlySaved(theirs);return}
   const dirty=!sameText(typed(),dlg.base);
   if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
   else if(sameText(theirs,dlg.base)){dlg.base={...dlg.base,rev:theirs.rev};f.banner.replaceChildren()} // only a comment or claim moved: keep the draft
   else conflict(theirs);                                                       // the text changed under an unsaved edit
+}
+// Our own save stored title, body and tags but not the prompt, at revision `saved`. If the card is still at
+// that revision, holding what was typed and the prompt we started from, take it as the base and keep the
+// unsaved prompt, saying so. Anything else means another writer came in between: a real conflict.
+function partlySaved(theirs){
+  const f=dlg.f,t=typed(),saved=dlg.partial;
+  dlg.partial=null;
+  const ours=theirs.rev===saved&&theirs.prompt===dlg.base.prompt;
+  if(!ours||t.title!==theirs.title||t.body!==theirs.body||t.tags!==theirs.tags){conflict(theirs);return}
+  dlg.base=theirs;dlg.note=true;
+  f.banner.replaceChildren(el("div","Title, body and tags were saved, but the prompt was not. Save again to save it."));
 }
 function conflict(theirs){
   const f=dlg.f,b=el("button","Keep mine"),t=el("button","Take theirs");
@@ -424,7 +992,7 @@ $("dlg").onclose=()=>{dlg=null};
 const byPriority=list=>list.sort((a,b)=>b.priority-a.priority);
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
-  const list=(await api("board_list")).cards;
+  const list=(await api("board_list",{archived:"include"})).cards;
   cursor=at;cards=byPriority(list);
 }
 async function refresh(){await snapshot();await loadPending();render()}
@@ -443,7 +1011,25 @@ async function loadPending(){
     else pendingErr=e.message||"no answer";
   }
   $("decide").hidden=pending===null&&pendingErr===null&&view!=="decisions";
-  $("decide-n").textContent=(pending?.length?" · "+pending.length:"")+(pendingErr?" · ⚠":"");
+  $("decide-n").textContent=(pending?.length?String(pending.length):"")+(pendingErr?" !":"");
+  $("decide").title=pendingErr?"Could not read the inbox: "+pendingErr:"Decisions waiting for you: open BBP escalations";
+}
+/* #704 erosion detail (D91): the bin's error, the metrics and the worst functions when erosion fails
+   the claim, and unmeasured code always (D45). Shares are basis points, shown as percents. The detail
+   is passed through untyped, so a missing or changed field skips its line instead of breaking the view. */
+function erosion(er){
+  const m=er?.line,out=[],list=x=>Array.isArray(x)?x:[];
+  if(er?.error)return[el("p","Erosion could not measure: "+er.error,"meta")];
+  if(!m||typeof m!=="object")return out;
+  const share=(name,s)=>s&&name+" "+s.base/100+"% → "+s.candidate/100+"% ("+(s.delta>0?"+":"")+s.delta/100+")";
+  if(er.failing){
+    const lim=m.mode&&typeof m.mode==="object"?" (limits "+m.mode.max_concentration_bp/100+"% and "+m.mode.max_duplication_bp/100+"%)":"";
+    const shares=[share("concentration",m.concentration_bp),share("duplication",m.duplication_bp)].filter(Boolean);
+    out.push(el("p","Erosion fails"+lim+(shares.length?": "+shares.join(", "):""),"meta"));
+    for(const w of list(m.worst_affected))if(w)out.push(el("p","Complexity "+w.base_cc+" → "+w.cc+" in "+w.key,"meta"));
+  }
+  if(list(m.unmeasured).length)out.push(el("p","Not measured by erosion: "+list(m.unmeasured).join(", "),"meta"));
+  return out;
 }
 const pct=c=>c.confidence+"% · score "+c.score+" · budget "+c.spent+"/"+c.budget+(c.epoch?" · epoch "+c.epoch:"");
 const changes=d=>d.events.map(e=>Object.keys(e)[0]).join(", ")||"nothing";
@@ -464,7 +1050,7 @@ async function decide(item,action){
 }
 function renderDecisions(){
   mapSeq++;
-  const b=$("board");b.classList.remove("roadmap","metrics");b.classList.add("decisions");b.replaceChildren();
+  const b=$("board");b.classList.remove("board","roadmap","metrics","archive");b.classList.add("decisions");b.replaceChildren();
   if(pendingErr)b.append(el("p","Could not read the inbox: "+pendingErr+(pending?". Showing what was read at "+new Date(pendingRead).toLocaleTimeString()+", which may be stale.":"."),"meta stale"));
   if(pending===null&&pendingErr){renderSide();return}
   if(pending===null){b.append(el("p","The inbox needs an admin token (sign in with one) and a board started with --bbp-bin and --bbp-root.","meta"));renderSide();return}
@@ -477,13 +1063,16 @@ function renderDecisions(){
     for(const t of it.totals||[])s.append(el("p",t.field+": spent "+t.spent+" of "+t.limit+"; Approve adds "+t.allowance,"meta"));
     for(const a of it.acted||[])s.append(el("p","Already acted on: msg:"+a.claim+(a.marks.length?" ("+a.marks.join(", ")+")":"")+". Dropping it files a Remediate card.","meta"));
     for(const e of it.evidence)s.append(el("p",(e.delta>0?"+":"")+e.delta+" "+e.kind.toLowerCase()+" "+e.direction.toLowerCase()+" by "+e.author+" (msg:"+e.msg+")","meta"));
+    s.append(...erosion(it.erosion));
     for(const k of it.candidates){
       const d=el("div",null,"cand");d.append(el("b",k.text),el("p",pct(k),"meta"));
       const pick=el("button","Choose this");pick.onclick=()=>decide(it,{action:"choose",chosen:k.id});d.append(pick);s.append(d);
     }
     const acts=el("div",null,"acts"),btn=(t,f)=>{const x=el("button",t);x.onclick=f;acts.append(x)};
     btn("Approve",()=>decide(it,{action:"approve"}));
-    btn("Reject",()=>{const reason=it.reason==="TaskTotal"?prompt("Why cancel this task?"):null;if(it.reason!=="TaskTotal"||reason)decide(it,{action:"reject",...(reason&&{reason})})});
+    // A whole-task stop (a spent total or a #598 pause) is cancelled with a reason; cancelling the prompt sends nothing.
+    const task=it.reason==="TaskTotal"||it.reason==="TaskPaused";
+    btn("Reject",()=>{const reason=task?prompt("Why cancel this task?"):null;if(!task||reason)decide(it,{action:"reject",...(reason&&{reason})})});
     btn("Refine intent",()=>{const note=prompt("What should the lenses know? (1 to 1200 characters)");if(note)decide(it,{action:"refine",note})});
     s.append(acts);b.append(s);
   }
@@ -499,10 +1088,11 @@ async function pollColumns(){
 async function poll(){
   try{
     let redraw=await pollColumns();
+    redraw||=await stonesChanged();
     if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
     const r=await api("board_events",{after:cursor,limit:1000});
     if(r.events.length){
-      const list=(await api("board_list")).cards;   // if this throws, the cursor stays put and the events are retried
+      const list=(await api("board_list",{archived:"include"})).cards;   // if this throws, the cursor stays put and the events are retried
       cursor=r.cursor;cards=byPriority(list);redraw=true;
     }
     if(redraw)render();
@@ -518,13 +1108,30 @@ async function openSettings(){
   catch(e){toast(e.status===403?"Settings need the admin capability.":e.message);return}
   secret=null;reposDraft=null;flowDraft=null;tab="agents";drawSettings();if(!$("settings").open)$("settings").showModal();
 }
+/* Settings fill the page: sections down the left, the chosen one on the right with what it is for. */
+const SECTIONS=[
+  ["agents","Agents","Who may use the board. Each agent signs in with its own token and acts with one role, in all projects or a chosen few."],
+  ["repos","Repositories","The repositories this board serves and their projects. A project owns the repository paths listed under it; each repository's own project owns the rest."],
+  ["roles","Roles","A role is a set of capabilities. Tick what each role may do; hover a capability for what it allows."],
+  ["columns","Columns","The board's columns, their order and kind, and the moves between them with the capability each needs."],
+  ["rules","Rules","Whether card moves follow the Columns moves and each role's capabilities."],
+  ["github","GitHub","Mirror a repository's issues onto the board."],
+  ["apps","Apps","Apps signed in through OAuth, such as a claude.ai connector."],
+  ["server","Server","How this board was started. Read-only; it changes with the server's flags and a restart."]];
 function drawSettings(){
-  const d=$("settings"),box=el("div");
-  const tabs=el("div",null,"tabs");
-  for(const [id,label] of [["agents","Agents"],["repos","Repositories"],["roles","Roles"],["columns","Columns"],["rules","Rules"],["github","GitHub"],["apps","Apps"],["server","Server"]]){
-    const b=el("button",label,tab===id?"on":"");b.type="button";b.onclick=()=>{tab=id;secret=null;reposDraft=null;flowDraft=null;drawSettings()};tabs.append(b)}
-  const close=el("button","Close");close.type="button";close.onclick=()=>d.close();close.style.marginLeft="auto";tabs.append(close);
-  box.append(tabs,{agents:agentsTab,repos:reposTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  const d=$("settings"),box=el("div",null,"sheet");
+  const tabs=el("nav",null,"tabs");tabs.setAttribute("aria-label","settings sections");
+  tabs.append(el("div","Settings","stitle"));
+  for(const [id,label] of SECTIONS){
+    const b=el("button",label,tab===id?"on":"");b.type="button";b.setAttribute("aria-current",tab===id?"page":"false");
+    b.onclick=()=>{tab=id;secret=null;reposDraft=null;flowDraft=null;drawSettings()};tabs.append(b)}
+  const close=el("button","Close","close");close.type="button";close.onclick=()=>d.close();tabs.append(close);
+  const [,title,about]=SECTIONS.find(([id])=>id===tab),pane=el("div",null,"pane");
+  pane.append(el("h2",title),el("p",about,"lead"),{agents:agentsTab,repos:reposTab,roles:rolesTab,columns:columnsTab,rules:rulesTab,github:githubTab,apps:appsTab,server:serverTab}[tab]());
+  // Destructive actions read as such wherever a section puts them.
+  pane.querySelectorAll("button").forEach(b=>{if(/^(Remove|Revoke|Turn sync off)/.test(b.textContent))b.classList.add("danger");
+    else if(/^(Save (roles|columns|repositories|and)|Add (agent|role|column)$)/.test(b.textContent))b.classList.add("primary")});
+  box.append(tabs,pane);
   d.replaceChildren(box);
 }
 /* After a change: re-read the board's roles and projects (who you are may have changed), then the settings, and redraw. */
@@ -588,7 +1195,7 @@ function reposTab(){
   const collect=()=>Object.fromEntries(Object.entries(draft).map(([r,ps])=>[r,Object.fromEntries(ps.map(p=>[p.name,p.paths.split("\n").map(x=>x.trim()).filter(Boolean)]))]));
   const restructure=fn=>()=>{inputs.forEach(f=>f());fn();drawSettings()};   // keep what was typed, change the shape, redraw
   for(const r of Object.keys(draft)){
-    const fs=el("fieldset");fs.append(el("legend",r),el("p","Project "+r+" owns every path no other project of this repository does.","note"));
+    const fs=el("fieldset");fs.append(el("legend",r));
     for(const p of draft[r]){
       const row=el("div",null,"row"),nm=field("input",{value:p.name,size:18,placeholder:"project name"}),
             paths=field("textarea",{value:p.paths,placeholder:"one repository path per line, e.g. crates/apps/rocket_league"});
@@ -630,7 +1237,7 @@ function rolesTab(){
   const save=el("button","Save roles");save.type="button";save.onclick=guard(err,()=>setting("settings_roles_set",{roles:draft}));
   const row=el("div",null,"row");row.append(nm,add);
   const help=el("table");for(const c of CAPS){const tr=el("tr");tr.append(el("td",c),el("td",about[c]||""));help.append(tr)}
-  t.append(tbl,row,save,err,help,el("p","Roles are yours to define; capabilities are built in. A role held by an agent cannot be removed, and at least one agent must keep a role with admin.","note"));
+  t.append(tbl,row,save,err,el("h3","What each capability allows"),help,el("p","Roles are yours to define; capabilities are built in. A role held by an agent cannot be removed, and at least one agent must keep a role with admin.","note"));
   return t;
 }
 
@@ -764,7 +1371,9 @@ async function loadMeta(){
   FLOW=await meta("board_columns",FLOW);
   // With a per-model token, who you are is fixed by the token: show it, do not ask.
   const me=await meta("board_whoami",{});
-  if(me.authenticated){$("actor").value=me.actor;$("actor").disabled=true;$("role").value=me.role;$("role").disabled=true}
+  if(me.authenticated){$("actor").value=me.actor;$("actor").disabled=true;$("role").value=me.role;$("role").disabled=true;
+    $("actor").hidden=$("role").hidden=true;const c=$("me");c.hidden=false;
+    c.replaceChildren(el("span",(me.actor[0]||"?").toUpperCase(),"av"),el("b",me.actor),"· "+me.role);c.title="Signed in as "+me.actor+" ("+me.role+")"}
   // repo -> its projects. A credential limited to some projects hears only of those.
   const listed=(await meta("board_projects",{repos:{}})).repos;
   repos=Object.fromEntries(Object.entries(listed).map(([r,p])=>[r,Object.keys(p)]));
@@ -781,10 +1390,11 @@ async function loadMeta(){
   $("view").onclick=()=>setView(view==="roadmap"?"board":"roadmap");
   $("metrics").onclick=()=>setView(view==="metrics"?"board":"metrics");pressed();
   $("decide").onclick=()=>setView(view==="decisions"?"board":"decisions");
+  $("archive").onclick=()=>setView(view==="archive"?"board":"archive");
   $("signout").onclick=()=>{try{localStorage.removeItem("token")}catch{}location.reload()};
-  $("toggle").onclick=()=>{pref("side",pref("side")==="0"?"1":"0");renderSide()};
+  $("boardv").onclick=()=>setView("board");
   // New cards go to the chosen project, else to the chosen repository's own project.
-  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(t){$("title").value="";act("card_add",{title:t,...(project&&{project})})}};
+  $("add").onclick=()=>{const t=$("title").value.trim();const project=sel.project||sel.repo;if(!t){$("title").focus();return}$("title").value="";act("card_add",{title:t,...(project&&{project})})};
   $("title").onkeydown=e=>{if(e.key==="Enter")$("add").click()};
   try{await refresh()}catch(e){toast(e.message)}
   poll();

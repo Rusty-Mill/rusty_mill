@@ -30,6 +30,19 @@ use rusty_oauth_server::{
 
 const UI: &str = include_str!("ui.html");
 
+/// The UI's typefaces (SIL OFL 1.1; licences beside them in `fonts/`), served from the binary so
+/// the page fetches nothing from elsewhere.
+const FONTS: [(&str, &[u8]); 2] = [
+    (
+        "/ui/fonts/hanken-grotesk.woff2",
+        include_bytes!("fonts/hanken-grotesk.woff2"),
+    ),
+    (
+        "/ui/fonts/barlow-condensed-700.woff2",
+        include_bytes!("fonts/barlow-condensed-700.woff2"),
+    ),
+];
+
 /// The subject of a grant approved with the shared `--auth-token`.
 const SHARED_SUBJECT: &str = "shared";
 
@@ -290,7 +303,14 @@ fn answer(result: Result<Value, CallError>) -> Response {
     match result {
         Ok(out) => reply(StatusCode::OK, out),
         Err(CallError::BadArgs(why)) => reply(StatusCode::BAD_REQUEST, json!({"error": why})),
-        Err(CallError::Board(e)) => reply(status_of(&e), json!({"error": e.to_string()})),
+        Err(CallError::Board(e)) => {
+            let mut body = json!({"error": e.to_string()});
+            // What a client needs to tell a partial save from a refused one.
+            if let BoardError::PartlySaved { rev, .. } = &e {
+                body["saved_rev"] = json!(rev);
+            }
+            reply(status_of(&e), body)
+        }
     }
 }
 
@@ -302,7 +322,9 @@ fn principal(identity: &Identity) -> Option<WireValue> {
 fn status_of(e: &BoardError) -> StatusCode {
     match e {
         BoardError::NotFound(_) => StatusCode::NOT_FOUND,
-        BoardError::Conflict | BoardError::Claimed(_) => StatusCode::CONFLICT,
+        BoardError::Conflict | BoardError::Claimed(_) | BoardError::PartlySaved { .. } => {
+            StatusCode::CONFLICT
+        }
         BoardError::Forbidden(_) | BoardError::NotClaimant | BoardError::OutOfScope(_) => {
             StatusCode::FORBIDDEN
         }
@@ -360,6 +382,11 @@ impl SharedHandler for Web {
                 std::iter::once(UI.as_bytes().to_vec()),
             );
         }
+        if request.method == &Method::Get
+            && let Some((_, font)) = FONTS.iter().find(|(p, _)| *p == path)
+        {
+            return Response::stream("font/woff2", std::iter::once(font.to_vec()));
+        }
         let Some(name) = path.strip_prefix("/api/") else {
             return reply(StatusCode::NOT_FOUND, json!({"error": "not found"}));
         };
@@ -376,6 +403,18 @@ mod tests {
 
     fn addr(s: &str) -> std::net::SocketAddr {
         s.parse().expect("addr")
+    }
+
+    #[test]
+    fn the_page_asks_only_for_fonts_the_binary_serves() {
+        for (path, bytes) in FONTS {
+            assert!(bytes.starts_with(b"wOF2"), "{path} is not woff2");
+            assert!(
+                UI.contains(&format!("url({path})")),
+                "ui.html does not use {path}"
+            );
+        }
+        assert_eq!(UI.matches("url(/ui/fonts/").count(), FONTS.len());
     }
 
     #[test]

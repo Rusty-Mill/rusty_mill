@@ -2,12 +2,40 @@
 //! owner's edits in rusty_tick reach the board (ADR-0012).
 
 use rusty_mill_board::board::{Board, Roles};
-use rusty_mill_board::domain::{BoardError, Card, Column, Event, EventKind};
+use rusty_mill_board::domain::{
+    BoardError, Card, Column, Dates, Edit, Event, EventKind, Plan, Shelf, Span,
+};
+use rusty_mill_board::milestones::{MilestoneEdit, MilestoneStore};
 use rusty_mill_board::projects::Projects;
 use rusty_mill_board::store::Store;
 use rusty_mill_board::tick::{TickApi, TickRequest, TickStore};
 use serde_json::json;
 use std::sync::{Arc, Barrier};
+
+/// An edit of the title only.
+fn title(t: &str) -> Edit<'_> {
+    Edit {
+        title: Some(t),
+        ..Edit::default()
+    }
+}
+
+/// An edit of the prompt only.
+fn prompt(p: &str) -> Edit<'_> {
+    Edit {
+        prompt: Some(p),
+        ..Edit::default()
+    }
+}
+
+/// A plan of a priority and dependencies only.
+fn plan(priority: Option<u8>, deps: Option<Vec<uuid::Uuid>>) -> Plan {
+    Plan {
+        priority,
+        deps,
+        ..Plan::default()
+    }
+}
 
 mod fake_tick;
 use fake_tick::FakeTick;
@@ -266,13 +294,76 @@ fn a_done_card_moves_to_another_list_and_its_task_stays_closed() {
 }
 
 #[test]
+fn links_live_in_the_board_document_and_are_left_out_while_empty() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let old = board.add(&human, "old", "", vec![]).expect("add");
+    let newer = board.add(&human, "newer", "", vec![]).expect("add");
+    board
+        .plan(old.id, &human, &plan(None, Some(vec![newer.id])))
+        .expect("plan");
+    let doc = tick.doc("board", old.id).expect("board doc");
+    assert!(
+        doc.get("supersededBy").is_none() && doc.get("related").is_none(),
+        "documents without links stay as before: {doc}"
+    );
+
+    let links = Plan {
+        deps: Some(vec![]),
+        superseded_by: Some(vec![newer.id]),
+        related: Some(vec![newer.id]),
+        ..Plan::default()
+    };
+    board.plan(old.id, &human, &links).expect("link");
+    let doc = tick.doc("board", old.id).expect("board doc");
+    assert_eq!(
+        (&doc["supersededBy"], &doc["related"]),
+        (&json!([newer.id]), &json!([newer.id]))
+    );
+    let read = board.get(old.id).expect("get");
+    assert_eq!(
+        (read.superseded_by, read.related),
+        (vec![newer.id], vec![newer.id])
+    );
+}
+
+#[test]
+fn a_target_date_lives_in_the_board_document_and_is_left_out_while_unset() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "dated", "", vec![]).expect("add");
+    let target = |t: Option<i64>| Plan {
+        target_ms: Some(t),
+        ..Plan::default()
+    };
+    board
+        .plan(card.id, &human, &target(Some(1_800_000_000_000)))
+        .expect("set");
+    assert_eq!(
+        tick.doc("board", card.id).expect("doc")["targetMs"],
+        json!(1_800_000_000_000_i64)
+    );
+    assert_eq!(
+        board.get(card.id).expect("get").target_ms,
+        Some(1_800_000_000_000)
+    );
+    board.plan(card.id, &human, &target(None)).expect("clear");
+    let doc = tick.doc("board", card.id).expect("doc");
+    assert!(
+        doc.get("targetMs").is_none(),
+        "an unset target is left out: {doc}"
+    );
+    assert_eq!(board.get(card.id).expect("get").target_ms, None);
+}
+
+#[test]
 fn deps_and_comments_are_rusty_tick_documents() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");
     let first = board.add(&human, "first", "", vec![]).expect("add");
     let second = board.add(&human, "second", "", vec![]).expect("add");
     let planned = board
-        .plan(second.id, &human, Some(5), Some(vec![first.id]))
+        .plan(second.id, &human, &plan(Some(5), Some(vec![first.id])))
         .expect("plan");
     assert_eq!(
         (planned.priority, planned.deps.clone()),
@@ -362,7 +453,7 @@ fn of_two_bindings_from_the_same_read_only_the_first_lands() {
 fn a_dependency_write_and_a_binding_from_the_same_read_do_not_both_land() {
     let (a, b, tick, read) = two_readers();
     let planned = read
-        .plan(None, Some(vec![uuid::Uuid::now_v7()]), 1)
+        .plan(&plan(None, Some(vec![uuid::Uuid::now_v7()])), 1)
         .expect("plan");
     let bound = read.bind_execution(link("e1"), 1).expect("bind");
     a.replace(&planned, Event::of(&planned, EventKind::Edited, "a"))
@@ -430,12 +521,12 @@ fn a_plan_interrupted_between_its_two_writes_is_finished_by_planning_again() {
     let card = board.add(&human, "card", "", vec![]).expect("add");
     let cursor = board.cursor().expect("cursor");
     tick.fail_next("PUT", "/docs/board/");
-    assert!(
-        board
-            .plan(card.id, &human, Some(5), Some(vec![dep.id]))
-            .is_err()
-    );
+    let failed = board.plan(card.id, &human, &plan(Some(5), Some(vec![dep.id])));
     let half = board.get(card.id).expect("get");
+    assert!(
+        matches!(failed, Err(BoardError::PartlySaved { rev, .. }) if rev == half.rev),
+        "reported as partly saved, with the revision the task write left: {failed:?}"
+    );
     assert_eq!((half.priority, half.deps.len()), (5, 0));
     let outside = board.events(cursor, 10).expect("events after failed write");
     assert_eq!(outside.len(), 1, "the partial task write is observed once");
@@ -446,7 +537,7 @@ fn a_plan_interrupted_between_its_two_writes_is_finished_by_planning_again() {
     );
 
     let done = board
-        .plan(card.id, &human, Some(5), Some(vec![dep.id]))
+        .plan(card.id, &human, &plan(Some(5), Some(vec![dep.id])))
         .expect("plan again");
     assert_eq!((done.priority, done.deps.clone()), (5, vec![dep.id]));
 }
@@ -480,25 +571,18 @@ fn a_write_in_two_steps_returns_the_revision_a_read_sees_and_the_next_edit_names
         .expect("import");
     assert_eq!(imported.rev, board.get(imported.id).expect("get").rev);
     board
-        .edit_at(
-            imported.id,
-            &human,
-            Some(imported.rev),
-            Some("t"),
-            None,
-            None,
-        )
+        .edit_at(imported.id, &human, Some(imported.rev), &title("t"))
         .expect("edit at the returned revision");
 
     // So is a plan with a priority and dependencies.
     let dep = board.add(&human, "dep", "", vec![]).expect("add");
     let card = board.add(&human, "card", "", vec![]).expect("add");
     let planned = board
-        .plan(card.id, &human, Some(5), Some(vec![dep.id]))
+        .plan(card.id, &human, &plan(Some(5), Some(vec![dep.id])))
         .expect("plan");
     assert_eq!(planned.rev, board.get(card.id).expect("get").rev);
     let edited = board
-        .edit_at(card.id, &human, Some(planned.rev), Some("t"), None, None)
+        .edit_at(card.id, &human, Some(planned.rev), &title("t"))
         .expect("edit at the returned revision");
     assert_eq!(edited.rev, board.get(card.id).expect("get").rev);
 }
@@ -527,4 +611,434 @@ fn a_card_that_keeps_moving_under_its_reads_is_a_conflict() {
     tick.race_after("GET", "/docs/board", 1_000, read.id, raced);
 
     assert_eq!(a.get(read.id), Err(BoardError::Conflict));
+}
+
+#[test]
+fn an_archived_card_is_one_tag_on_its_closed_task() {
+    let (board, tick) = board();
+    let builder = board.roles().actor("claude", "builder").expect("role");
+    let card = board
+        .add_done_in(&builder, "default", "shipped", "", vec![])
+        .expect("add done");
+    board.archive(card.id, &builder).expect("archive");
+    assert!(
+        tick.task(card.id)["tags"]
+            .as_array()
+            .expect("tags")
+            .contains(&json!("archived:42"))
+    );
+    assert_eq!(tick.task(card.id)["status"], "done");
+    let read = board.get(card.id).expect("get");
+    assert_eq!((read.archived_ms, read.tags.len()), (Some(42), 0));
+
+    board.restore(card.id, &builder).expect("restore");
+    assert_eq!(board.get(card.id).expect("get").archived_ms, None);
+    assert!(
+        !tick.task(card.id)["tags"]
+            .as_array()
+            .expect("tags")
+            .iter()
+            .any(|t| t.as_str().is_some_and(|t| t.starts_with("archived:")))
+    );
+
+    // Only a Done card is archived: the tag added by hand to an open task means nothing.
+    let open = board.add(&builder, "open", "", vec![]).expect("add");
+    tick.owner_edit(open.id, |t| {
+        t["tags"] = json!(["agent", "board:backlog", "archived:7"]);
+    });
+    assert_eq!(board.get(open.id).expect("get").archived_ms, None);
+}
+
+#[test]
+fn the_archived_tag_is_the_boards_own() {
+    let (board, _tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    assert!(matches!(
+        board.add(&human, "a", "", vec!["archived:1".into()]),
+        Err(BoardError::Invalid(_))
+    ));
+}
+
+#[test]
+fn restoring_an_aged_out_card_persists_its_restore_time_in_rusty_tick() {
+    let (board, tick) = board();
+    let builder = board.roles().actor("claude", "builder").expect("role");
+    let card = board
+        .add_done_in(&builder, "default", "old", "", vec![])
+        .expect("add done");
+    // Shipped 30 days before the board's clock.
+    tick.owner_edit(card.id, |t| {
+        t["completedMs"] = json!(42 - 30 * 86_400_000_i64)
+    });
+    let listed = |shelf| board.list_shelf(None, shelf, 14).expect("list").len();
+    assert_eq!(listed(Shelf::Exclude), 0);
+
+    board.restore(card.id, &builder).expect("restore");
+    assert!(
+        tick.task(card.id)["tags"]
+            .as_array()
+            .expect("tags")
+            .contains(&json!("restored:42"))
+    );
+    let read = board.get(card.id).expect("reload");
+    assert_eq!(
+        (read.restored_ms, read.done_ms),
+        (Some(42), Some(42 - 30 * 86_400_000))
+    );
+    assert_eq!(
+        listed(Shelf::Exclude),
+        1,
+        "back on the board after a reload"
+    );
+
+    // Archiving again drops the restore time.
+    board.archive(card.id, &builder).expect("archive");
+    let tags = tick.task(card.id)["tags"].clone();
+    assert!(
+        tags.as_array()
+            .expect("tags")
+            .contains(&json!("archived:42"))
+    );
+    assert!(
+        !tags
+            .as_array()
+            .expect("tags")
+            .contains(&json!("restored:42"))
+    );
+}
+
+#[test]
+fn a_prompt_is_kept_in_the_board_document_and_read_back() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board
+        .add(&human, "a", "the description", vec![])
+        .expect("add");
+    assert!(
+        tick.docs("board").is_empty(),
+        "no prompt and no links: no document"
+    );
+    let edited = board
+        .edit_at(card.id, &human, None, &prompt("Do the thing."))
+        .expect("set prompt");
+    assert_eq!(edited.prompt, "Do the thing.");
+    assert_eq!(tick.docs("board")[0]["prompt"], "Do the thing.");
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.prompt.as_str(), read.body.as_str()),
+        ("Do the thing.", "the description"),
+        "the prompt is apart from the body"
+    );
+    let cleared = board
+        .edit_at(card.id, &human, None, &prompt(""))
+        .expect("clear");
+    assert!(cleared.prompt.is_empty());
+    assert!(
+        tick.docs("board")[0].get("prompt").is_none(),
+        "an empty prompt is left out of the document"
+    );
+    let too_long = "x".repeat(32 * 1024 + 1);
+    assert!(matches!(
+        board.edit_at(card.id, &human, None, &prompt(&too_long)),
+        Err(BoardError::Invalid(_))
+    ));
+}
+
+#[test]
+fn a_prompt_that_escapes_past_the_document_limit_is_refused_before_any_write() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    // Within 32 KiB as typed, but every quote doubles once stored as JSON.
+    let quotes = "\"".repeat(32 * 1024);
+    let edit = Edit {
+        title: Some("b"),
+        prompt: Some(&quotes),
+        ..Edit::default()
+    };
+    assert!(matches!(
+        board.edit_at(card.id, &human, None, &edit),
+        Err(BoardError::Invalid(_))
+    ));
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.title.as_str(), read.rev),
+        ("a", card.rev),
+        "the title is not applied without the prompt"
+    );
+    assert!(tick.docs("board").is_empty());
+}
+
+#[test]
+fn moved_in_reads_rusty_tick_move_history_across_pages() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let early = board.add(&human, "early", "", vec![]).expect("add");
+    let late = board.add(&human, "late", "", vec![]).expect("add");
+    tick.record_move(early.id, 100);
+    // More than one page of moves, so the adapter has to follow `next`.
+    for at in 0..1_500 {
+        tick.record_move(late.id, 500 + at);
+    }
+    let store = TickStore::new(tick.clone());
+    let span = |from, to| Span { from, to };
+    assert_eq!(
+        store.moved_in(span(Some(0), Some(200))).expect("moved"),
+        [early.id].into()
+    );
+    assert_eq!(
+        store.moved_in(span(Some(1_900), None)).expect("moved"),
+        [late.id].into()
+    );
+    assert!(
+        store
+            .moved_in(span(Some(5_000), None))
+            .expect("moved")
+            .is_empty()
+    );
+    // The server runs over a boxed store: it must reach rusty_tick's history too, not the
+    // default that reads the (here empty) event log.
+    let boxed: Box<dyn Store> = Box::new(TickStore::new(tick.clone()));
+    assert_eq!(
+        boxed.moved_in(span(Some(0), Some(200))).expect("moved"),
+        [early.id].into()
+    );
+}
+
+/// A title and prompt edit: two writes to rusty_tick, the task and then its board document.
+fn title_and_prompt<'a>(t: &'a str, p: &'a str) -> Edit<'a> {
+    Edit {
+        title: Some(t),
+        prompt: Some(p),
+        ..Edit::default()
+    }
+}
+
+#[test]
+fn links_that_take_a_document_near_the_limit_past_it_are_refused_before_any_write() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let a = board.add(&human, "a", "", vec![]).expect("add");
+    let b = board.add(&human, "b", "", vec![]).expect("add");
+    let card = board.add(&human, "card", "", vec![]).expect("add");
+    // 32,700 quotes store as 65,400 bytes: the document fits, with no room for two links.
+    let near = "\"".repeat(32_700);
+    let card = board
+        .edit_at(card.id, &human, None, &prompt(&near))
+        .expect("fits");
+    assert!(matches!(
+        board.plan(card.id, &human, &plan(Some(5), Some(vec![a.id, b.id]))),
+        Err(BoardError::Invalid(_))
+    ));
+    let read = board.get(card.id).expect("get");
+    assert_eq!(
+        (read.rev, read.priority, read.deps.len()),
+        (card.rev, card.priority, 0),
+        "neither the priority nor the links are written"
+    );
+    let doc = tick.doc("board", card.id).expect("doc");
+    assert_eq!(doc["prompt"].as_str().map(str::len), Some(near.len()));
+}
+
+#[test]
+fn a_prompt_edit_whose_document_write_fails_is_partly_saved_and_finished_on_the_new_revision() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    tick.fail_next("PUT", "/docs/board/");
+    let failed = board.edit_at(
+        card.id,
+        &human,
+        Some(card.rev),
+        &title_and_prompt("b", "do it"),
+    );
+    let half = board.get(card.id).expect("get");
+    assert!(
+        matches!(&failed, Err(BoardError::PartlySaved { rev, .. }) if *rev == half.rev),
+        "not reported as a refused edit: {failed:?}"
+    );
+    assert_eq!((half.title.as_str(), half.prompt.as_str()), ("b", ""));
+    assert_eq!(
+        board.edit_at(
+            card.id,
+            &human,
+            Some(card.rev),
+            &title_and_prompt("b", "do it")
+        ),
+        Err(BoardError::Conflict),
+        "the revision the editor started from is gone"
+    );
+    let done = board
+        .edit_at(
+            card.id,
+            &human,
+            Some(half.rev),
+            &title_and_prompt("b", "do it"),
+        )
+        .expect("the same edit on the saved revision");
+    assert_eq!((done.title.as_str(), done.prompt.as_str()), ("b", "do it"));
+}
+
+#[test]
+fn a_writer_between_the_task_and_document_writes_leaves_the_edit_partly_saved() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let raced = json!({ "v": 1, "deps": [], "prompt": "theirs" });
+    tick.race_after("PATCH", "/tasks/", 1, card.id, raced);
+    let failed = board.edit_at(
+        card.id,
+        &human,
+        Some(card.rev),
+        &title_and_prompt("b", "mine"),
+    );
+    let now = board.get(card.id).expect("get");
+    assert!(
+        matches!(&failed, Err(BoardError::PartlySaved { rev, .. }) if *rev + 1 == now.rev),
+        "the revision is the one the task write left, before the other writer: {failed:?}"
+    );
+    assert_eq!(
+        (now.title.as_str(), now.prompt.as_str()),
+        ("b", "theirs"),
+        "the other writer's document is not overwritten"
+    );
+}
+
+#[test]
+fn a_document_only_write_that_fails_is_an_ordinary_error() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    tick.fail_next("PUT", "/docs/board/");
+    let failed = board.edit_at(card.id, &human, Some(card.rev), &prompt("do it"));
+    assert!(matches!(failed, Err(BoardError::Storage(_))), "{failed:?}");
+    assert_eq!(
+        board.get(card.id).expect("get").rev,
+        card.rev,
+        "nothing was saved"
+    );
+}
+
+#[test]
+fn a_milestone_is_a_dated_task_tagged_milestone_and_never_a_card() {
+    let (board, tick) = board();
+    let board = board.with_milestones(Box::new(TickStore::new(tick.clone())));
+    let human = board.roles().actor("nano", "human").expect("role");
+    let beta = board
+        .add_milestone(&human, "orch", "Beta", 1_800_000_000_000)
+        .expect("add");
+    let task = tick.task(beta.id);
+    assert_eq!(
+        (&task["tags"], &task["dueMs"], &task["status"]),
+        (
+            &json!(["milestone"]),
+            &json!(1_800_000_000_000_i64),
+            &json!("open")
+        )
+    );
+    assert!(board.list(None).expect("list").is_empty(), "not a card");
+    let listed = board.milestones(|_| true).expect("milestones");
+    assert_eq!(listed, vec![beta.clone()]);
+
+    let close = MilestoneEdit {
+        done: Some(true),
+        target_ms: Some(1_900_000_000_000),
+        ..MilestoneEdit::default()
+    };
+    board
+        .edit_milestone(&human, beta.id, &close, |_| true)
+        .expect("close");
+    let read = TickStore::new(tick.clone())
+        .milestone(beta.id)
+        .expect("read")
+        .expect("there");
+    assert_eq!(read.target_ms, 1_900_000_000_000);
+    assert!(read.done_ms.is_some(), "closed in rusty_tick");
+
+    // A card that happens to carry the tag is still a card, not a milestone.
+    let card = board
+        .add(&human, "tagged", "", vec!["milestone".into()])
+        .expect("add");
+    let ids: Vec<_> = board
+        .milestones(|_| true)
+        .expect("milestones")
+        .iter()
+        .map(|m| m.id)
+        .collect();
+    assert!(!ids.contains(&card.id));
+}
+
+#[test]
+fn a_milestone_save_is_fenced_on_the_version_its_scope_was_checked_at() {
+    let (board, tick) = board();
+    let store = TickStore::new(tick.clone());
+    let board = board.with_milestones(Box::new(TickStore::new(tick.clone())));
+    let human = board.roles().actor("nano", "human").expect("role");
+    let beta = board
+        .add_milestone(&human, "orch", "Beta", 1_800_000_000_000)
+        .expect("add");
+    let read = store.milestone(beta.id).expect("read").expect("there");
+    // The owner moves it to another list in rusty_tick after the read.
+    tick.owner_edit(beta.id, |t| t["listId"] = json!(uuid::Uuid::now_v7()));
+    let everything = MilestoneEdit {
+        title: Some("Renamed".into()),
+        target_ms: Some(1_900_000_000_000),
+        done: Some(true),
+    };
+    let next = read.edited(&everything, 1).expect("edit");
+    assert!(matches!(
+        store.save_milestone(&read, &next),
+        Err(BoardError::Conflict)
+    ));
+    let task = tick.task(beta.id);
+    assert_eq!(
+        (&task["title"], &task["dueMs"], &task["status"]),
+        (
+            &json!("Beta"),
+            &json!(1_800_000_000_000_i64),
+            &json!("open")
+        ),
+        "title, date and completion are all unchanged"
+    );
+    // A fresh read sees the move, so the scope check runs on where it is now.
+    let again = store.milestone(beta.id).expect("read").expect("there");
+    assert_eq!(
+        again.project, "default",
+        "an unknown list reads as the Inbox"
+    );
+    assert!(again.rev > read.rev);
+}
+
+#[test]
+fn a_restarted_boxed_board_lists_moves_from_tick_history_not_its_fresh_event_log() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let moved = board.add(&human, "moved", "", vec![]).expect("add");
+    let quiet = board.add(&human, "quiet", "", vec![]).expect("add");
+    tick.record_move(moved.id, 10);
+    // A restart: a new board over a boxed store, as the server runs, with an empty event log.
+    let fresh = Board::with_clock(
+        Box::new(TickStore::new(tick.clone())) as Box<dyn Store>,
+        Roles::default(),
+        clock,
+    );
+    let human = fresh.roles().actor("nano", "human").expect("role");
+    fresh
+        .comment(quiet.id, &human, "just a note")
+        .expect("comment");
+    let mut cards = fresh.list(None).expect("list");
+    let dates = Dates {
+        moved: Span {
+            from: Some(0),
+            to: None,
+        },
+        ..Dates::default()
+    };
+    fresh.retain_dates(&mut cards, &dates).expect("dates");
+    let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(
+        titles,
+        ["moved"],
+        "the recorded move counts; a comment after the restart is not a move"
+    );
 }

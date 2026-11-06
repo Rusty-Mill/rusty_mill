@@ -3,7 +3,7 @@
 //! Pure data and its text rendering.
 
 use rusty_bbp::{
-    ClaimBody, ClaimStatus, ClaimView, Direction, EvidenceKind, MsgId, PrincipalId, Stakes,
+    ArtId, ClaimBody, ClaimStatus, ClaimView, Direction, EvidenceKind, MsgId, PrincipalId, Stakes,
 };
 
 use crate::class::{admit, DataClass};
@@ -34,6 +34,9 @@ pub struct Card {
     pub evidence: Vec<Item>,
     /// For a question: its candidate claims.
     pub candidates: Vec<MsgId>,
+    /// The code candidate stored last for this claim, when the lens may
+    /// read it.
+    pub current: Option<ArtId>,
     pub class: DataClass,
 }
 
@@ -109,6 +112,7 @@ impl Card {
             budget: view.budget,
             evidence,
             candidates: view.candidates.clone(),
+            current: view.current,
             class,
         }
     }
@@ -241,6 +245,7 @@ pub(crate) mod fixtures {
             budget: 16,
             evidence,
             candidates: vec![],
+            current: None,
             class: DataClass::Internal,
         }
     }
@@ -343,6 +348,8 @@ mod tests {
             tests_changed: vec![],
             endorsement: None,
             holdout_due: false,
+            intent: None,
+            human_touched: false,
         }
     }
 

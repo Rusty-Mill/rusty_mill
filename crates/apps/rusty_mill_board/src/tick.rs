@@ -2,7 +2,8 @@
 //! rusty_tick tasks tagged `agent`, so there is one task store.
 //!
 //! **Mapping.** A card is a task: title, notes (body), priority, sort order, and
-//! tags carrying the board's state (`board:<column>`, `claim:<actor>`, `number:<n>`) beside
+//! tags carrying the board's state (`board:<column>`, `claim:<actor>`, `number:<n>`,
+//! `archived:<ms>`, `restored:<ms>`) beside
 //! the card's own tags, which rusty_tick keeps lowercase. Its project is the
 //! task's list, named like the project; the Inbox is the `default` project. A
 //! closed task (done or won't do) is Done. The
@@ -29,7 +30,7 @@
 //! `Created`) by actor `tick` for a task changed or tagged in rusty_tick,
 //! noticed when events are read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -38,14 +39,17 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::domain::{
-    BoardError, Card, Column, Comment, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
+    BoardError, Card, Column, Comment, DEFAULT_PROJECT, Event, EventKind, ExecutionLink, Span,
     next_event_id, reserved_tag,
 };
 use crate::http::Http;
+use crate::milestones::{Milestone, MilestoneStore};
 use crate::store::Store;
 
 /// The tag that puts a task on the board.
 pub const AGENT_TAG: &str = "agent";
+/// The tag that makes a rusty_tick task a milestone (see [`crate::milestones`]).
+pub const MILESTONE_TAG: &str = "milestone";
 /// rusty_tick's Inbox, which every store has: the `default` project.
 const INBOX: Uuid = Uuid::from_u128(0x0000_0000_0000_7000_8000_0000_0000_0001);
 /// Who a comment written in rusty_tick itself is shown as.
@@ -62,6 +66,11 @@ const NUMBER_KIND: &str = "board_number";
 /// Numbers tried past the highest reservation seen before giving up; each miss is another
 /// board reserving at the same moment.
 const RESERVE_ATTEMPTS: u64 = 64;
+/// rusty_tick's limit on one document's serialized body.
+const MAX_DOC_BYTES: usize = 64 * 1024;
+
+/// Moves asked for per `GET /moves` page: rusty_tick's largest.
+const MOVES_PAGE: usize = 1000;
 
 /// The id of number `n`'s reservation: the same on every board, so `If-None-Match: *` lets
 /// exactly one reserve it.
@@ -189,6 +198,8 @@ struct Task {
     updated_ms: i64,
     #[serde(default)]
     completed_ms: Option<i64>,
+    #[serde(default)]
+    due_ms: Option<i64>,
     deleted_ms: Option<i64>,
     etag: String,
 }
@@ -203,6 +214,22 @@ impl Task {
     fn on_board(&self) -> bool {
         self.deleted_ms.is_none() && self.tags.iter().any(|t| t == AGENT_TAG)
     }
+
+    /// A milestone: tagged `milestone`, never `agent` (that would make it a card), with a date.
+    fn is_milestone(&self) -> bool {
+        self.deleted_ms.is_none()
+            && self.due_ms.is_some()
+            && self.tags.iter().any(|t| t == MILESTONE_TAG)
+            && !self.tags.iter().any(|t| t == AGENT_TAG)
+    }
+}
+
+/// One entry of rusty_tick's move history: which task changed column, and when.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveRecord {
+    task_id: Uuid,
+    at_ms: i64,
 }
 
 #[derive(Deserialize)]
@@ -224,21 +251,34 @@ struct Doc {
 struct BoardDoc {
     #[serde(default)]
     deps: Vec<Uuid>,
+    // Left out while empty, so documents written before these links existed are unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    superseded_by: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    related: Vec<Uuid>,
     #[serde(default)]
     issue: Option<u64>,
     #[serde(default)]
     synced_text: Option<u64>,
     #[serde(default)]
     execution: Option<ExecutionLink>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_ms: Option<i64>,
 }
 
 impl BoardDoc {
     fn of(card: &Card) -> Self {
         Self {
             deps: card.deps.clone(),
+            superseded_by: card.superseded_by.clone(),
+            related: card.related.clone(),
             issue: card.issue,
             synced_text: card.synced_text,
             execution: card.execution.clone(),
+            prompt: card.prompt.clone(),
+            target_ms: card.target_ms,
         }
     }
 
@@ -248,6 +288,20 @@ impl BoardDoc {
             map.insert("v".into(), json!(1));
         }
         body
+    }
+
+    /// The body to write for `card`, refused before any request when rusty_tick would
+    /// refuse it, so an edit never half-lands on a document that cannot be stored.
+    fn checked(card: &Card) -> Result<Value, BoardError> {
+        let body = Self::of(card).body();
+        let bytes = serde_json::to_vec(&body)
+            .map_err(|e| BoardError::Storage(format!("board document: {e}")))?;
+        if bytes.len() > MAX_DOC_BYTES {
+            return Err(BoardError::Invalid(
+                "the card's prompt and links are larger than 64 KiB once stored",
+            ));
+        }
+        Ok(body)
     }
 }
 
@@ -287,6 +341,8 @@ fn task_tags(card: &Card) -> Vec<String> {
     let mut tags = vec![AGENT_TAG.to_owned(), format!("board:{}", card.column)];
     tags.extend(card.claim.iter().map(|c| format!("claim:{c}")));
     tags.extend(card.number.iter().map(|n| format!("number:{n}")));
+    tags.extend(card.archived_ms.iter().map(|ms| format!("archived:{ms}")));
+    tags.extend(card.restored_ms.iter().map(|ms| format!("restored:{ms}")));
     tags.extend(card.tags.iter().cloned());
     tags
 }
@@ -318,6 +374,17 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         .iter()
         .find_map(|t| t.strip_prefix("number:"))
         .and_then(|n| n.parse().ok());
+    // Only a Done card is archived or restored; such a tag added by hand to an open task
+    // means nothing.
+    let shelf_tag = |prefix: &str| -> Option<i64> {
+        task.tags
+            .iter()
+            .find_map(|t| t.strip_prefix(prefix))
+            .and_then(|ms| ms.parse().ok())
+            .filter(|_| column == Column::DONE)
+    };
+    let archived_ms = shelf_tag("archived:");
+    let restored_ms = shelf_tag("restored:");
     let tags = task
         .tags
         .iter()
@@ -331,6 +398,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         rev,
         title: task.title,
         body: task.notes,
+        prompt: doc.prompt,
         column,
         claim,
         tags,
@@ -338,6 +406,8 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         comments,
         priority: task.priority,
         deps: doc.deps,
+        superseded_by: doc.superseded_by,
+        related: doc.related,
         sort_order: task.sort_order,
         issue: doc.issue,
         synced_text: doc.synced_text,
@@ -346,6 +416,9 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         updated_ms: task.updated_ms,
         // Only shipped work has a ship date; won't-do is closed but never shipped.
         done_ms: task.completed_ms.filter(|_| task.status == "done"),
+        archived_ms,
+        restored_ms,
+        target_ms: doc.target_ms,
     })
 }
 
@@ -568,9 +641,8 @@ impl<T: TickApi> TickStore<T> {
 
     /// Write the card's board document if its task is still at `version`.
     /// rusty_tick moves the task's version in the same locked step; returns it.
-    fn put_doc(&self, card: &Card, version: u64) -> Result<u64, BoardError> {
-        let mut request = TickRequest::new("PUT", format!("/docs/board/{}", card.id))
-            .body(BoardDoc::of(card).body());
+    fn put_doc(&self, card: &Card, body: Value, version: u64) -> Result<u64, BoardError> {
+        let mut request = TickRequest::new("PUT", format!("/docs/board/{}", card.id)).body(body);
         request.if_task_match = Some(version.to_string());
         self.call(request, 200)?;
         Ok(version + 1)
@@ -729,6 +801,10 @@ impl<T: TickApi> Store for TickStore<T> {
         if card.column == Column::DONE {
             body["status"] = json!("done");
         }
+        let doc = match BoardDoc::of(card) == BoardDoc::default() {
+            true => None,
+            false => Some(BoardDoc::checked(card)?),
+        };
         self.start_write(card.id)?;
         let result = (|| {
             let (status, _) = self
@@ -745,9 +821,9 @@ impl<T: TickApi> Store for TickStore<T> {
             }
             // A second request: a crash before it leaves the task without its document. Only
             // an import has one at insert, and its id names its issue, so the sync relinks it.
-            match BoardDoc::of(card) == BoardDoc::default() {
-                true => Ok(1),
-                false => self.put_doc(card, 1),
+            match doc {
+                None => Ok(1),
+                Some(doc) => self.put_doc(card, doc, 1),
             }
         })();
         self.finish_write(event, result)
@@ -768,6 +844,10 @@ impl<T: TickApi> Store for TickStore<T> {
         if current.rev + 1 != read {
             return Err(BoardError::Conflict);
         }
+        let doc = match BoardDoc::of(card) != BoardDoc::of(&current) {
+            true => Some(BoardDoc::checked(card)?),
+            false => None,
+        };
         self.start_write(card.id)?;
         let result = (|| {
             if event.kind == EventKind::Commented {
@@ -780,17 +860,27 @@ impl<T: TickApi> Store for TickStore<T> {
             } else {
                 let patch = self.task_patch(&current, card)?;
                 let task_changed = patch.as_object().is_some_and(|p| !p.is_empty());
-                let doc_changed = BoardDoc::of(card) != BoardDoc::of(&current);
                 let mut version = read;
                 // An empty patch still moves the version, so every write is a compare-and-swap.
-                if task_changed || !doc_changed {
+                if task_changed || doc.is_none() {
                     version = self.patch_task(card.id, patch, version)?;
                 }
-                // Both change only for `card_plan` with priority and dependencies: two fenced
-                // requests. A failure between them reports an error with the priority applied;
-                // the same plan again completes it.
-                if doc_changed {
-                    version = self.put_doc(card, version)?;
+                // Both change for `card_plan` with priority and links, and for an edit of the
+                // prompt with title, body or tags: two fenced requests. The document is checked
+                // above, so only a lost connection or a writer between them can split the
+                // write. That is reported as `PartlySaved` with the revision the task write
+                // left, never as a refused change; the same change on that revision finishes it.
+                if let Some(doc) = doc {
+                    let task_written = version != read;
+                    version = self
+                        .put_doc(card, doc, version)
+                        .map_err(|e| match task_written {
+                            true => BoardError::PartlySaved {
+                                rev: version - 1,
+                                why: e.to_string(),
+                            },
+                            false => e,
+                        })?;
                 }
                 Ok(version)
             }
@@ -814,6 +904,34 @@ impl<T: TickApi> Store for TickStore<T> {
             .log
             .last()
             .map(|e| e.id))
+    }
+
+    /// From rusty_tick's move history (`GET /moves`), which outlives restarts and purges,
+    /// paged from `span.from`.
+    fn moved_in(&self, span: Span) -> Result<BTreeSet<Uuid>, BoardError> {
+        let since = span.from.unwrap_or(0);
+        let mut after = 0u64;
+        let mut moved = BTreeSet::new();
+        loop {
+            let page = self.call(
+                TickRequest::new(
+                    "GET",
+                    format!("/moves?since={since}&after={after}&limit={MOVES_PAGE}"),
+                ),
+                200,
+            )?;
+            let moves: Vec<MoveRecord> = Self::decode(page.clone(), "moves")?;
+            moved.extend(
+                moves
+                    .iter()
+                    .filter(|m| span.contains(m.at_ms))
+                    .map(|m| m.task_id),
+            );
+            match page["next"].as_u64() {
+                Some(next) if next > after => after = next,
+                _ => return Ok(moved),
+            }
+        }
     }
 
     /// Reservations are `board_number` documents, created with `If-None-Match: *` and kept
@@ -856,5 +974,93 @@ impl<T: TickApi> Store for TickStore<T> {
                 "rusty_tick health is {status}"
             )))
         }
+    }
+}
+
+/// Milestones in rusty_tick: tasks tagged `milestone` in the project's list, `dueMs` the target,
+/// closed when done.
+impl<T: TickApi> TickStore<T> {
+    fn milestone_of(projects: &Projects, task: Task) -> Option<Milestone> {
+        let target_ms = task.due_ms?;
+        let rev = task.version().ok()?;
+        Some(Milestone {
+            rev,
+            id: task.id,
+            project: projects.of(&task),
+            done_ms: task.completed_ms.filter(|_| task.status == "done"),
+            title: task.title,
+            target_ms,
+        })
+    }
+}
+
+impl<T: TickApi> MilestoneStore for TickStore<T> {
+    fn milestones(&self) -> Result<Vec<Milestone>, BoardError> {
+        let tasks: Vec<Task> = Self::decode(
+            self.call(
+                TickRequest::new("GET", format!("/tags/{MILESTONE_TAG}/tasks")),
+                200,
+            )?,
+            "tasks",
+        )?;
+        let projects = self.projects()?;
+        Ok(tasks
+            .into_iter()
+            .filter(Task::is_milestone)
+            .filter_map(|t| Self::milestone_of(&projects, t))
+            .collect())
+    }
+
+    fn milestone(&self, id: Uuid) -> Result<Option<Milestone>, BoardError> {
+        let Some(task) = self.task(id)?.filter(Task::is_milestone) else {
+            return Ok(None);
+        };
+        Ok(Self::milestone_of(&self.projects()?, task))
+    }
+
+    fn add_milestone(&self, milestone: &Milestone) -> Result<u64, BoardError> {
+        let body = json!({
+            "id": milestone.id,
+            "listId": self.list_for(&milestone.project)?,
+            "title": milestone.title,
+            "tags": [MILESTONE_TAG],
+            "dueMs": milestone.target_ms,
+        });
+        let (status, created) = self
+            .tick
+            .send(&TickRequest::new("POST", "/tasks").body(body))?;
+        match status {
+            201 => serde_json::from_value::<Task>(created)
+                .map_err(|e| BoardError::Storage(format!("rusty_tick sent a bad task: {e}")))?
+                .version(),
+            409 => Err(BoardError::Conflict),
+            _ => Err(BoardError::Storage(format!(
+                "rusty_tick answered {status} creating a milestone"
+            ))),
+        }
+    }
+
+    fn save_milestone(&self, current: &Milestone, next: &Milestone) -> Result<u64, BoardError> {
+        let mut patch = serde_json::Map::new();
+        if next.title != current.title {
+            patch.insert("title".into(), json!(next.title));
+        }
+        if next.target_ms != current.target_ms {
+            patch.insert("dueMs".into(), json!(next.target_ms));
+        }
+        if next.done_ms.is_some() != current.done_ms.is_some() {
+            let status = if next.done_ms.is_some() {
+                "done"
+            } else {
+                "open"
+            };
+            patch.insert("status".into(), json!(status));
+        }
+        if patch.is_empty() {
+            return Ok(current.rev);
+        }
+        // Fenced on the version the caller's scope check read: if the task moved meanwhile (to
+        // another project's list, say), rusty_tick refuses with 412 and the edit must start over.
+        self.patch_task(current.id, Value::Object(patch), current.rev)
     }
 }

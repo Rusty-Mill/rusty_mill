@@ -16,10 +16,9 @@ name = "rusty-mux"
 path = "src/main.rs"
 
 [dependencies]
+rusty_mux_client = { workspace = true }
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
-# Only for `checkpoint::Receiver`, the documented client-side assembler.
-rusty_mux_server = { workspace = true }
 rusty_mux_transport = { workspace = true }
 rusty_term_core = { workspace = true }
 rusty_uuid = { workspace = true }
@@ -33,5 +32,6 @@ platform-windows = { workspace = true }
 
 [dev-dependencies]
 # Runs a real server in-process for the reconnect tests, as rusty_mux_ctl's
-# tests do.
+# tests do. The client itself never links the server.
+rusty_mux_server = { workspace = true }
 rusty_tokio = { workspace = true }

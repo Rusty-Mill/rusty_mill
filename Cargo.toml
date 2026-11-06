@@ -105,6 +105,7 @@ members = [
     "crates/apps/rusty_fair_play",
     "crates/libs/storage/rusty_fair_play_domain",
     "crates/libs/storage/rusty_multimodal_db_engine",
+    "crates/apps/rusty_mux/crates/client",
     "crates/apps/rusty_mux/crates/core",
     "crates/apps/rusty_mux/crates/ctl",
     "crates/apps/rusty_mux/crates/mcp",
@@ -227,6 +228,7 @@ members = [
     "crates/apps/rusty_orch/crates/orch-lens",
     "crates/apps/rusty_orch/crates/orch-openai",
     "crates/apps/rusty_orch/crates/orch-store",
+    "crates/apps/rusty_orch/crates/orch-jail",
     "crates/apps/rusty_orch/crates/rusty_orch",
     "crates/apps/rusty_key/crates/config",
     "crates/apps/rusty_key/crates/observe",
@@ -935,6 +937,7 @@ nexus-plugin-api = { path = "crates/apps/nexus/crates/nexus-plugin-api" }
 nexus-hashline = { path = "crates/apps/nexus/crates/nexus-hashline" }
 
 # rusty_mux family (docs/projects/mux/).
+rusty_mux_client = { path = "crates/apps/rusty_mux/crates/client" }
 rusty_mux_core = { path = "crates/apps/rusty_mux/crates/core" }
 rusty_mux_ctl = { path = "crates/apps/rusty_mux/crates/ctl" }
 rusty_mux_proto = { path = "crates/apps/rusty_mux/crates/proto" }

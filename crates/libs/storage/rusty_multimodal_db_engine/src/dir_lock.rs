@@ -61,6 +61,27 @@ impl DirLock {
             .write(true)
             .open(&path)
             .map_err(|e| DirLockError::Io(path.clone(), e))?;
+        Self::lock(dir, path, file)
+    }
+
+    /// Lock `dir` through its existing file `name`, making nothing: for a
+    /// reader that must leave a missing or partial directory as it found it.
+    ///
+    /// # Errors
+    ///
+    /// [`DirLockError::Held`] when another process holds the lock, or
+    /// [`DirLockError::Io`] if the file cannot be opened, with
+    /// [`io::ErrorKind::NotFound`] when it does not exist.
+    pub fn acquire_existing(dir: &Path, name: &str) -> Result<Self, DirLockError> {
+        let path = dir.join(name);
+        let file = File::options()
+            .write(true)
+            .open(&path)
+            .map_err(|e| DirLockError::Io(path.clone(), e))?;
+        Self::lock(dir, path, file)
+    }
+
+    fn lock(dir: &Path, path: PathBuf, file: File) -> Result<Self, DirLockError> {
         match file.try_lock() {
             Ok(()) => Ok(Self { _file: file }),
             Err(TryLockError::WouldBlock) => Err(DirLockError::Held(dir.to_path_buf())),
@@ -90,5 +111,21 @@ mod tests {
         let dir = fresh_temp_dir("dir_lock_new").unwrap().join("nested");
         DirLock::acquire(&dir, "store.lock").unwrap();
         assert!(dir.join("store.lock").exists());
+    }
+
+    #[test]
+    fn acquire_existing_makes_nothing_and_honours_a_holder() {
+        let dir = fresh_temp_dir("dir_lock_existing").unwrap().join("nested");
+        let err = DirLock::acquire_existing(&dir, "store.lock").unwrap_err();
+        assert!(
+            matches!(&err, DirLockError::Io(_, e) if e.kind() == io::ErrorKind::NotFound),
+            "{err}"
+        );
+        assert!(!dir.exists(), "nothing made");
+        let first = DirLock::acquire(&dir, "store.lock").unwrap();
+        let err = DirLock::acquire_existing(&dir, "store.lock").unwrap_err();
+        assert!(matches!(err, DirLockError::Held(_)), "{err}");
+        drop(first);
+        DirLock::acquire_existing(&dir, "store.lock").unwrap();
     }
 }

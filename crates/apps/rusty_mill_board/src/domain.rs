@@ -115,6 +115,7 @@ pub enum Capability {
     Merge,
     /// Record as Done a card from Building or QA whose work already merged
     /// outside the board's flow (the PR was reviewed and merged on the forge).
+    /// Also archives and restores Done cards.
     Close,
     /// Add a project (never change or remove one).
     Project,
@@ -150,7 +151,7 @@ impl Capability {
             Capability::Review => "Send reviewed work back to Building.",
             Capability::Merge => "Move reviewed cards to Done.",
             Capability::Close => {
-                "Move Building or QA cards whose PR already merged straight to Done."
+                "Move Building or QA cards whose PR already merged straight to Done, and archive or restore Done cards."
             }
             Capability::Project => "Add a project (never change or remove one).",
             Capability::Admin => "Change these settings: agents, projects, roles, GitHub, apps.",
@@ -197,6 +198,67 @@ pub enum MoveRules {
     Open,
 }
 
+/// How long a Done card stays on the board's default views before it is shelved without
+/// being archived (see [`Card::shelved`]), in days.
+pub const DONE_WINDOW_DAYS: u32 = 14;
+
+/// A half-open range of Unix milliseconds, `[from, to)`; either end may be open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Span {
+    /// At or after, if set.
+    pub from: Option<i64>,
+    /// Before, if set.
+    pub to: Option<i64>,
+}
+
+impl Span {
+    /// Whether `ms` falls in the range.
+    pub fn contains(&self, ms: i64) -> bool {
+        self.from.is_none_or(|f| ms >= f) && self.to.is_none_or(|t| ms < t)
+    }
+
+    /// Whether either end is set.
+    pub fn is_bounded(&self) -> bool {
+        self.from.is_some() || self.to.is_some()
+    }
+}
+
+/// Which cards a listing keeps by date: created, last changed, or moved column in a span.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dates {
+    /// When the card was created.
+    pub created: Span,
+    /// When the card last changed.
+    pub updated: Span,
+    /// When the card changed column (entering the board counts).
+    pub moved: Span,
+}
+
+/// Which cards a listing shows, by whether they are shelved (see [`Card::shelved`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Shelf {
+    /// Only cards on the default views: open cards, and Done cards neither archived nor
+    /// past the window.
+    #[default]
+    Exclude,
+    /// Every card.
+    Include,
+    /// Only shelved cards: the archive.
+    Only,
+}
+
+impl Shelf {
+    /// Whether a card shelved (`shelved`) or not belongs in this view.
+    pub fn keeps(self, shelved: bool) -> bool {
+        match self {
+            Shelf::Exclude => !shelved,
+            Shelf::Include => true,
+            Shelf::Only => shelved,
+        }
+    }
+}
+
 /// The id of the card imported from forge issue `issue`: derived from the number,
 /// so an import interrupted between two writes (a store that cannot commit a card
 /// and its link together) is finished, not repeated, by the next run.
@@ -213,8 +275,57 @@ pub fn import_id(issue: u64) -> Uuid {
 /// The priorities a card may have, on rusty_tick's scale: none, low, medium, high.
 pub const PRIORITIES: [u8; 4] = [0, 1, 3, 5];
 
-/// Most cards one card may wait on.
+/// Most cards one card may wait on; also the most in each of its other link lists.
 pub const MAX_DEPS: usize = 32;
+
+/// What an edit changes; each field left as it is when `None`.
+#[derive(Debug, Clone, Default)]
+pub struct Edit<'a> {
+    /// New title.
+    pub title: Option<&'a str>,
+    /// New description.
+    pub body: Option<&'a str>,
+    /// New labels (replaces all).
+    pub tags: Option<Vec<String>>,
+    /// New prompt; `""` clears it.
+    pub prompt: Option<&'a str>,
+}
+
+/// The longest prompt, in bytes. It is stored in the card's rusty_tick board document,
+/// which rusty_tick caps at 64 KiB, beside the links.
+pub const MAX_PROMPT_BYTES: usize = 32 * 1024;
+
+/// A planning change (`card_plan`): each `None` field is left as it is, and a list replaces
+/// the card's current one (an empty list clears it).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// One of [`PRIORITIES`].
+    pub priority: Option<u8>,
+    /// Cards that must be Done before this one is taken.
+    pub deps: Option<Vec<Uuid>>,
+    /// Newer cards that replace this one.
+    pub superseded_by: Option<Vec<Uuid>>,
+    /// Cards worth reading alongside this one.
+    pub related: Option<Vec<Uuid>>,
+    /// When the card should be done, Unix ms: `Some(None)` clears it.
+    pub target_ms: Option<Option<i64>>,
+}
+
+impl Plan {
+    /// Whether the plan changes nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// Every card the plan links to.
+    pub fn linked(&self) -> impl Iterator<Item = &Uuid> {
+        [&self.deps, &self.superseded_by, &self.related]
+            .into_iter()
+            .flatten()
+            .flatten()
+    }
+}
 
 /// Whether `tag` is one the board keeps for itself in rusty_tick (ADR-0012):
 /// `agent` puts a task on the board, `board:<column>`, `claim:<actor>` and
@@ -225,12 +336,14 @@ pub fn reserved_tag(tag: &str) -> bool {
         || tag.starts_with("board:")
         || tag.starts_with("claim:")
         || tag.starts_with("number:")
+        || tag.starts_with("archived:")
+        || tag.starts_with("restored:")
 }
 
 fn check_tags(tags: &[String]) -> Result<(), BoardError> {
     if tags.iter().any(|t| reserved_tag(t)) {
         return Err(BoardError::Invalid(
-            "tags `agent`, `board:…`, `claim:…` and `number:…` are the board's own",
+            "tags `agent`, `board:…`, `claim:…`, `number:…`, `archived:…` and `restored:…` are the board's own",
         ));
     }
     Ok(())
@@ -280,6 +393,10 @@ pub struct Card {
     pub title: String,
     /// Longer description (markdown).
     pub body: String,
+    /// Instructions for whoever takes the card, kept apart from the description so they can be
+    /// read or copied whole. Empty when there are none.
+    #[serde(default)]
+    pub prompt: String,
     /// Current column.
     pub column: Column,
     /// Who holds the work, if anyone.
@@ -297,6 +414,13 @@ pub struct Card {
     /// Cards that must be Done before this one is taken.
     #[serde(default)]
     pub deps: Vec<Uuid>,
+    /// Newer cards that replace this one. While any is set, `take` never hands the card out:
+    /// close it, or re-scope it and clear the link.
+    #[serde(default)]
+    pub superseded_by: Vec<Uuid>,
+    /// Cards worth reading alongside this one. Informational: nothing waits on them.
+    #[serde(default)]
+    pub related: Vec<Uuid>,
     /// Manual order within a queue, lower first, after priority. Set by the store
     /// (rusty_tick's drag order); `0` elsewhere.
     #[serde(default)]
@@ -320,6 +444,18 @@ pub struct Card {
     /// and for work closed without shipping (rusty_tick's won't-do).
     #[serde(default)]
     pub done_ms: Option<i64>,
+    /// When the card was archived, Unix ms: a Done card set aside from the board's default
+    /// views. It is still Done, so roadmap, metrics and dependencies count it as before.
+    #[serde(default)]
+    pub archived_ms: Option<i64>,
+    /// When the card was last put back from the archive, Unix ms. The Done window counts from
+    /// it rather than from `done_ms`, so a restored card stays on the board while its ship time,
+    /// and with it the roadmap and metrics, is left as it was.
+    #[serde(default)]
+    pub restored_ms: Option<i64>,
+    /// When the card should be done, Unix ms, if planned: what the roadmap draws ahead of today.
+    #[serde(default)]
+    pub target_ms: Option<i64>,
 }
 
 /// Stable cross-component ids for the one logical execution a card may own.
@@ -387,6 +523,15 @@ pub enum BoardError {
     NotClaimant,
     /// Another writer changed the card first; reload and retry.
     Conflict,
+    /// A change stored in two steps kept only its first: the task's fields (title, body,
+    /// tags, priority) are saved at revision `rev`, the card's prompt and links are not.
+    /// Read the card and apply the rest on `rev`.
+    PartlySaved {
+        /// The card's revision after the step that was saved.
+        rev: u64,
+        /// Why the second step failed.
+        why: String,
+    },
     /// Input rejected at the boundary.
     Invalid(&'static str),
     /// The card belongs to a project this actor may not work in.
@@ -408,6 +553,11 @@ impl fmt::Display for BoardError {
             Self::Claimed(by) => write!(f, "claimed by {by}"),
             Self::NotClaimant => write!(f, "only the claim holder may move this card"),
             Self::Conflict => write!(f, "card changed concurrently; retry"),
+            Self::PartlySaved { rev, why } => write!(
+                f,
+                "only part of this change was saved: title, body, tags and priority are at rev \
+                 {rev}, but the prompt and links are not ({why}); read the card and save again"
+            ),
             Self::Invalid(why) => write!(f, "invalid input: {why}"),
             Self::OutOfScope(p) => write!(f, "project {p:?} is outside your scope"),
             Self::Refused(why) => f.write_str(why),
@@ -436,6 +586,10 @@ pub enum EventKind {
     Commented,
     /// Linked to a forge issue.
     Linked,
+    /// A Done card set aside from the default views.
+    Archived,
+    /// An archived card put back.
+    Restored,
     /// Title/body brought in line with the linked issue.
     Synced,
     /// A factory execution was initiated or adopted.
@@ -543,6 +697,7 @@ impl Card {
             rev: 0,
             title: title.to_owned(),
             body: body.to_owned(),
+            prompt: String::new(),
             column: Column::BACKLOG,
             claim: None,
             tags,
@@ -550,6 +705,8 @@ impl Card {
             comments: Vec::new(),
             priority: 0,
             deps: Vec::new(),
+            superseded_by: Vec::new(),
+            related: Vec::new(),
             sort_order: 0,
             issue: None,
             synced_text: None,
@@ -557,6 +714,9 @@ impl Card {
             created_ms: now_ms,
             updated_ms: now_ms,
             done_ms: None,
+            archived_ms: None,
+            restored_ms: None,
+            target_ms: None,
         })
     }
 
@@ -716,6 +876,59 @@ impl Card {
         }
     }
 
+    /// Archive the card: set it aside from the default views. Unchanged if already archived.
+    ///
+    /// # Errors
+    /// [`BoardError::Invalid`] if the card is not Done: archiving tidies finished work and
+    /// never closes open work.
+    pub fn archive(&self, now_ms: i64) -> Result<Self, BoardError> {
+        if self.column != Column::DONE {
+            return Err(BoardError::Invalid("only done cards can be archived"));
+        }
+        if self.archived_ms.is_some() {
+            return Ok(self.clone());
+        }
+        Ok(Self {
+            archived_ms: Some(now_ms),
+            restored_ms: None,
+            ..self.next(now_ms)
+        })
+    }
+
+    /// Put a shelved card (see [`Card::shelved`]) back on the default views: no longer archived,
+    /// and its Done window starts again at `now_ms`. Unchanged if it is not shelved.
+    #[must_use]
+    pub fn restore(&self, now_ms: i64, window_ms: Option<i64>) -> Self {
+        if !self.shelved(now_ms, window_ms) {
+            return self.clone();
+        }
+        Self {
+            archived_ms: None,
+            restored_ms: Some(now_ms),
+            ..self.next(now_ms)
+        }
+    }
+
+    /// Where a Done card's window starts: its ship time (or, closed without shipping, its last
+    /// change), or its last restore if later.
+    pub fn shelf_since_ms(&self) -> i64 {
+        let closed_ms = self.done_ms.unwrap_or(self.updated_ms);
+        self.restored_ms.map_or(closed_ms, |r| r.max(closed_ms))
+    }
+
+    /// Whether the card is off the board's default views at `now_ms`: a Done card that is
+    /// archived, or whose window ([`Card::shelf_since_ms`]) is older than `window_ms`, when
+    /// there is a window.
+    pub fn shelved(&self, now_ms: i64, window_ms: Option<i64>) -> bool {
+        if self.column != Column::DONE {
+            return false;
+        }
+        if self.archived_ms.is_some() {
+            return true;
+        }
+        window_ms.is_some_and(|w| now_ms.saturating_sub(self.shelf_since_ms()) > w)
+    }
+
     /// Replace title/body/tags (each optional).
     ///
     /// # Errors
@@ -744,37 +957,64 @@ impl Card {
         Ok(next)
     }
 
-    /// Set the priority and the cards this one waits on (each optional).
-    /// Repeated dependencies are dropped.
+    /// Replace the prompt; an empty one clears it.
     ///
     /// # Errors
-    /// A priority outside [`PRIORITIES`], a card depending on itself, or more
-    /// than [`MAX_DEPS`] dependencies.
-    pub fn plan(
-        &self,
-        priority: Option<u8>,
-        deps: Option<Vec<Uuid>>,
-        now_ms: i64,
-    ) -> Result<Self, BoardError> {
+    /// A prompt over [`MAX_PROMPT_BYTES`].
+    pub fn with_prompt(mut self, prompt: &str) -> Result<Self, BoardError> {
+        if prompt.len() > MAX_PROMPT_BYTES {
+            return Err(BoardError::Invalid("prompt is longer than 32 KiB"));
+        }
+        self.prompt = prompt.to_owned();
+        Ok(self)
+    }
+
+    /// Apply a [`Plan`]: priority, links and target date, each left as it is when `None`. Repeated ids
+    /// in a list are dropped.
+    ///
+    /// # Errors
+    /// A priority outside [`PRIORITIES`], a card linking to itself, more than
+    /// [`MAX_DEPS`] ids in one list, or a target that is not a positive time.
+    pub fn plan(&self, plan: &Plan, now_ms: i64) -> Result<Self, BoardError> {
         let mut next = self.next(now_ms);
-        if let Some(p) = priority {
+        if let Some(p) = plan.priority {
             if !PRIORITIES.contains(&p) {
                 return Err(BoardError::Invalid("priority must be 0, 1, 3 or 5"));
             }
             next.priority = p;
         }
-        if let Some(mut d) = deps {
-            if d.contains(&self.id) {
-                return Err(BoardError::Invalid("a card cannot depend on itself"));
+        if let Some(d) = &plan.deps {
+            next.deps = self.links(d)?;
+        }
+        if let Some(s) = &plan.superseded_by {
+            next.superseded_by = self.links(s)?;
+        }
+        if let Some(r) = &plan.related {
+            next.related = self.links(r)?;
+        }
+        if let Some(t) = plan.target_ms {
+            if t.is_some_and(|ms| ms <= 0) {
+                return Err(BoardError::Invalid(
+                    "target_ms must be a positive Unix time in ms",
+                ));
             }
-            d.sort_unstable();
-            d.dedup();
-            if d.len() > MAX_DEPS {
-                return Err(BoardError::Invalid("too many dependencies"));
-            }
-            next.deps = d;
+            next.target_ms = t;
         }
         Ok(next)
+    }
+
+    /// `ids` sorted and deduplicated, as one of this card's link lists.
+    fn links(&self, ids: &[Uuid]) -> Result<Vec<Uuid>, BoardError> {
+        if ids.contains(&self.id) {
+            return Err(BoardError::Invalid("a card cannot link to itself"));
+        }
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        if ids.len() > MAX_DEPS {
+            return Err(BoardError::Invalid("too many linked cards"));
+        }
+        Ok(ids)
     }
 
     /// Record the forge issue this card is synced with, and the text both

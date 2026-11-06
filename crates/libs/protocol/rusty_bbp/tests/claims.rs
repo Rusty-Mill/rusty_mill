@@ -54,6 +54,7 @@ fn open_task(mode: Mode, claims: Option<ClaimsConfig>, roster: Vec<Role>) -> Ope
         mode,
         claims,
         holdout_digest: None,
+        baseline_digest: None,
     }
 }
 
@@ -65,6 +66,8 @@ struct Cx {
     brief: ArtId,
     /// The tree the runner reports.
     tree: Option<Sha256>,
+    /// The runner's next reports are runner errors (a timeout, exit 124).
+    erring: bool,
 }
 
 fn pid(s: &str) -> PrincipalId {
@@ -80,6 +83,7 @@ impl Cx {
             ops: 0,
             brief: ArtId(0),
             tree: Some(Sha256::of(b"tree")),
+            erring: false,
         };
         let r = cx.run(Command::Open(open_task(Mode::Claims, Some(cfg), roster())));
         let Response::Stored(brief) = r else {
@@ -329,7 +333,9 @@ impl Cx {
             candidate: k,
             run,
             profile_digest: digest,
-            status: if failed {
+            status: if self.erring {
+                RunStatus::Error
+            } else if failed {
                 RunStatus::Failed
             } else {
                 RunStatus::Passed
@@ -3462,6 +3468,317 @@ fn cl_101_another_claims_holdout_of_equal_code_does_not_count() {
     );
 }
 
+// ---------------------------------------------------------------- #598 intent versions and pauses
+
+fn revise(cx: &mut Cx, tag: &str, affects: Affects) -> Response {
+    cx.human(HumanAction::IntentRevised {
+        brief: blob(tag),
+        affects,
+    })
+}
+
+fn some(claims: Vec<MsgId>, domains: &[&str]) -> Affects {
+    Affects::Some {
+        claims,
+        domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+    }
+}
+
+fn reopened_by_intent(cx: &Cx, c: MsgId) -> bool {
+    cx.log.iter().any(
+        |e| matches!(e, Event::ClaimReopened { claim, by: ReopenCause::Intent, .. } if *claim == c),
+    )
+}
+
+#[test]
+fn cl_104_intent_revised_reopens_accepted_claims_in_a_new_epoch() {
+    let mut cx = Cx::new();
+    let x = cx.low();
+    accept(&mut cx, x);
+    assert_eq!(cx.st.claims.intent_version(), 1);
+    assert_eq!(
+        card_all(&cx.st, x).intent,
+        None,
+        "no intent view before a revision"
+    );
+    let brief = stored(revise(&mut cx, "brief v2", Affects::All));
+    assert_eq!(cx.st.claims.intent_version(), 2);
+    assert_eq!(cx.st.brief, Some(brief), "the new brief is the current one");
+    assert_eq!(cx.status(x), ClaimStatus::Open);
+    assert_eq!(cx.rec(x).epoch, 2);
+    assert_eq!(cx.score(x), 0, "old-epoch evidence does not score");
+    assert!(reopened_by_intent(&cx, x));
+    assert_eq!(
+        card_all(&cx.st, x).intent,
+        Some(rusty_bbp::claims::IntentView {
+            current: 2,
+            proven_at: Some(1)
+        })
+    );
+    accept(&mut cx, x);
+    assert_eq!(
+        cx.rec(x).proven_at,
+        Some(2),
+        "proven against the new intent"
+    );
+}
+
+#[test]
+fn cl_105_an_acted_on_claim_escalates_intent_changed_in_any_epoch() {
+    let mut cx = Cx::new();
+    let x = cx.low();
+    accept(&mut cx, x);
+    let m = cx.mark(x, "pr-1");
+    ok(cx.host(HostAction::ActionResult {
+        mark: m,
+        outcome: MarkOutcome::Done,
+    }));
+    // Acted on in epoch 1, reopened and accepted again in epoch 2.
+    ok(cx.decide(x, ClaimOutcome::Reopen));
+    accept(&mut cx, x);
+    assert_eq!(cx.rec(x).epoch, 2);
+    ok(revise(&mut cx, "brief v2", Affects::All));
+    assert_eq!(cx.status(x), ClaimStatus::Escalated);
+    assert!(!reopened_by_intent(&cx, x));
+    assert!(cx.log.iter().any(|e| matches!(
+        e,
+        Event::ClaimEscalated { claim, reason: ClaimEscalation::IntentChanged } if *claim == x
+    )));
+}
+
+#[test]
+fn cl_106_affects_is_the_union_of_claims_and_domains() {
+    let mut cx = Cx::new();
+    let by_id = cx.low();
+    let by_domain = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec!["db".into()],
+            ..body("db")
+        },
+    );
+    let other = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec!["ui".into()],
+            ..body("ui")
+        },
+    );
+    let open = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec!["db".into()],
+            ..body("open")
+        },
+    );
+    let dropped = cx.claim(
+        "a",
+        ClaimBody {
+            domains: vec!["db".into()],
+            ..body("dropped")
+        },
+    );
+    for c in [by_id, by_domain, other] {
+        accept(&mut cx, c);
+    }
+    drop_claim(&mut cx, dropped);
+    ok(revise(
+        &mut cx,
+        "brief v2",
+        some(vec![by_id], &["db", "nobody-has-this"]),
+    ));
+    assert_eq!(cx.status(by_id), ClaimStatus::Open);
+    assert_eq!(cx.status(by_domain), ClaimStatus::Open);
+    assert_eq!(cx.status(other), ClaimStatus::Accepted, "not affected");
+    assert_eq!(cx.status(open), ClaimStatus::Open);
+    assert_eq!(cx.rec(open).epoch, 1, "an open claim carries on");
+    assert_eq!(
+        cx.status(dropped),
+        ClaimStatus::Dropped,
+        "dropped stays dropped"
+    );
+}
+
+#[test]
+fn cl_107_bad_affects_is_refused_and_writes_nothing() {
+    let mut cx = Cx::new();
+    let x = cx.low();
+    accept(&mut cx, x);
+    let before = cx.log.len();
+    assert_eq!(
+        rejected(revise(&mut cx, "v2", some(vec![], &[]))),
+        Code::BadAffects
+    );
+    assert_eq!(
+        rejected(revise(&mut cx, "v2", some(vec![MsgId(9_999)], &[]))),
+        Code::BadAffects
+    );
+    assert_eq!(
+        cx.log.len(),
+        before + 2,
+        "only the two rejections are logged"
+    );
+    assert_eq!(cx.st.claims.intent_version(), 1);
+    assert_eq!(cx.status(x), ClaimStatus::Accepted);
+}
+
+#[test]
+fn cl_108_an_intent_reopen_carries_to_dependents() {
+    let mut cx = Cx::new();
+    let a = cx.low();
+    let b = cx.claim(
+        "b",
+        ClaimBody {
+            domains: vec!["ui".into()],
+            ..dep_on("b", vec![a])
+        },
+    );
+    let c = cx.claim(
+        "c",
+        ClaimBody {
+            domains: vec!["ui".into()],
+            ..dep_on("c", vec![a])
+        },
+    );
+    accept(&mut cx, a);
+    accept(&mut cx, b);
+    accept(&mut cx, c);
+    let m = cx.mark(c, "pr-c");
+    ok(cx.host(HostAction::ActionResult {
+        mark: m,
+        outcome: MarkOutcome::Done,
+    }));
+    // Only `a` (domain http) is affected; its dependents follow Dependencies.
+    ok(revise(&mut cx, "v2", some(vec![], &["http"])));
+    assert_eq!(cx.status(a), ClaimStatus::Open);
+    assert_eq!(
+        cx.status(b),
+        ClaimStatus::Open,
+        "an unacted dependent reopens"
+    );
+    assert!(cx.log.iter().any(|e| matches!(
+        e,
+        Event::ClaimReopened { claim, by: ReopenCause::Dep(d), .. } if *claim == b && *d == a
+    )));
+    assert_eq!(
+        cx.status(c),
+        ClaimStatus::Escalated,
+        "an acted-on dependent escalates"
+    );
+}
+
+#[test]
+fn cl_109_a_refine_answer_refs_the_current_brief() {
+    let mut cx = Cx::new();
+    let old = cx.brief;
+    let new = stored(revise(&mut cx, "v2", Affects::All));
+    let answer =
+        |b: ArtId| HumanAction::Post(Draft::new(MessageKind::Answer, "x").refs(vec![Ref::art(b)]));
+    assert_eq!(rejected(cx.human(answer(old))), Code::RefsRequired);
+    posted(cx.human(answer(new)));
+}
+
+#[test]
+fn cl_110_task_paused_escalates_the_task_until_resumed_open() {
+    let mut cx = Cx::new();
+    let x = cx.low();
+    let pause = HostAction::TaskPaused {
+        reason: PauseReason::CallCeiling,
+        detail: "400 of 400 calls".into(),
+    };
+    let op = cx.op();
+    let cmd = Command::Host {
+        op,
+        action: pause.clone(),
+    };
+    ok(cx.run(cmd.clone()));
+    assert_eq!(cx.st.state, State::Escalated);
+    assert_eq!(cx.count(|e| matches!(e, Event::TaskPaused { .. })), 1);
+    let replay = cx.run(cmd);
+    ok(replay);
+    assert_eq!(
+        cx.count(|e| matches!(e, Event::TaskPaused { .. })),
+        1,
+        "R15 replay"
+    );
+    assert_eq!(
+        rejected(cx.opinion("a", x, Support)),
+        Code::WrongState,
+        "agent writes wait while paused"
+    );
+    assert_eq!(
+        rejected(cx.host(pause)),
+        Code::WrongState,
+        "a paused task cannot pause again"
+    );
+    let rev = cx.rev();
+    ok(cx.human(HumanAction::Resume {
+        target: State::Open,
+        expected_rev: rev,
+    }));
+    assert_eq!(cx.st.state, State::Open);
+    ok(cx.opinion("a", x, Support));
+}
+
+#[test]
+fn cl_111_pause_detail_is_bounded() {
+    let mut cx = Cx::new();
+    let long = "x".repeat(rusty_bbp::claims::PAUSE_DETAIL_MAX + 1);
+    assert_eq!(
+        rejected(cx.host(HostAction::TaskPaused {
+            reason: PauseReason::Breaker,
+            detail: long,
+        })),
+        Code::BodyTooLong
+    );
+    assert_eq!(cx.st.state, State::Open);
+}
+
+#[test]
+fn cl_112_intent_and_pause_are_claims_mode_only() {
+    let mut st = TaskState::new(TaskId::from("t"));
+    let run = |st: &mut TaskState, cmd: Command| {
+        let h = handle(st, &cmd, Time(1_000));
+        for e in &h.events {
+            st.apply(e);
+        }
+        h.response
+    };
+    ok(run(
+        &mut st,
+        Command::Open(open_task(Mode::Stages, None, stage_roster())),
+    ));
+    let human = Command::Human {
+        op: OpId("op1".into()),
+        action: HumanAction::IntentRevised {
+            brief: blob("v2"),
+            affects: Affects::All,
+        },
+    };
+    assert!(matches!(run(&mut st, human), Response::Rejected(_)));
+    let host = Command::Host {
+        op: OpId("op2".into()),
+        action: HostAction::TaskPaused {
+            reason: PauseReason::Breaker,
+            detail: String::new(),
+        },
+    };
+    assert_eq!(rejected(run(&mut st, host)), Code::WrongMode);
+}
+
+#[test]
+fn cl_113_affects_absent_on_the_wire_reads_as_all() {
+    let e: Event =
+        rusty_serde::json::from_str(r#"{"IntentRevised":{"brief":3}}"#).expect("decodes");
+    assert_eq!(
+        e,
+        Event::IntentRevised {
+            brief: ArtId(3),
+            affects: Affects::All
+        }
+    );
+}
+
 #[test]
 fn cl_102_the_card_carries_the_claims_own_accept_line() {
     let mut cx = Cx::with(ClaimsConfig {
@@ -3565,7 +3882,8 @@ mod replay {
             rules(&h),
             vec![Rule::AcceptLine {
                 accept_at: 8,
-                support_authors: 2
+                support_authors: 2,
+                min_authors: 2
             }]
         );
         let last = h.steps.last().expect("step");
@@ -3594,7 +3912,8 @@ mod replay {
             rules(&h),
             vec![Rule::DropLine {
                 drop_at: -8,
-                counter_authors: 2
+                counter_authors: 2,
+                min_authors: 2
             }]
         );
         let last = h.steps.last().expect("step");
@@ -3656,7 +3975,8 @@ mod replay {
                 Rule::Reopen(ReopenCause::Human),
                 Rule::AcceptLine {
                     accept_at: 8,
-                    support_authors: 2
+                    support_authors: 2,
+                    min_authors: 2
                 }
             ],
             "{got:?}"
@@ -3686,6 +4006,209 @@ mod replay {
         assert_eq!(rules(&history(&cx, a)), vec![chose]);
     }
 
+    /// The status step of each reopen, with what it woke.
+    fn reopens(h: &History) -> Vec<(ReopenCause, Vec<MsgId>)> {
+        h.steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Status {
+                    rule: Rule::Reopen(by),
+                    woke,
+                    ..
+                } => Some((*by, woke.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_evidence_reopen_names_the_item_it_woke() {
+        let mut cx = Cx::new();
+        let x = cx.low();
+        drop_claim(&mut cx, x);
+        let pass = cx.tested("c", x, true);
+        let m = posted(cx.executed("c", x, Support, pass));
+        let h = history(&cx, x);
+        assert_eq!(reopens(&h), vec![(ReopenCause::Evidence(m), vec![m])]);
+        let refs = h.steps.iter().find_map(|s| match &s.change {
+            Change::Evidence { msg, refs, .. } if *msg == m => Some(refs.clone()),
+            _ => None,
+        });
+        assert_eq!(refs, Some(vec![Ref::art(pass)]), "an item names its report");
+        let status_steps = h
+            .steps
+            .iter()
+            .filter(|s| matches!(&s.change, Change::Status { woke, .. } if woke.is_empty()));
+        assert_eq!(status_steps.count(), 1, "only the reopen wakes anything");
+    }
+
+    /// A human reopen wakes the dormant items: executed evidence posted
+    /// against the closed status while a dep was closed.
+    #[test]
+    fn a_human_reopen_names_the_dormant_items_it_woke() {
+        let mut cx = Cx::new();
+        let a = cx.low();
+        let b = cx.claim("b", dep_on("b", vec![a]));
+        let pass = cx.tested("c", b, true);
+        drop_claim(&mut cx, b);
+        drop_claim(&mut cx, a);
+        let m1 = posted(cx.executed("c", b, Support, pass));
+        let m2 = posted(cx.executed("a", b, Support, pass));
+        ok(cx.decide(a, ClaimOutcome::Reopen));
+        accept(&mut cx, a);
+        ok(cx.decide(b, ClaimOutcome::Reopen));
+        assert_eq!(
+            reopens(&history(&cx, b)),
+            vec![(ReopenCause::Human, vec![m1, m2])]
+        );
+    }
+
+    /// Candidate steps, the candidate a failing set is on, and each final
+    /// holdout report on the current code with its passed and failed profiles.
+    #[test]
+    fn candidates_and_holdout_reports_are_steps() {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        let fail = stored(cx.holdout_run(k, &[("golden:cases", 1), ("holdout:api", 0)]));
+        let k2 = cx.candidate("b", x);
+        stored(cx.report_profiles(k2, &[("unit", 0)], vec![]));
+        let pass = stored(cx.holdout_run(k2, &[("golden:cases", 0)]));
+        let names = |v: &[&str]| v.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        let got: Vec<Change> = history(&cx, x)
+            .steps
+            .into_iter()
+            .map(|s| s.change)
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Candidate { .. } | Change::Report { .. } | Change::Failing { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                Change::Candidate { candidate: k },
+                Change::Report {
+                    report: fail,
+                    candidate: k,
+                    passed: names(&["holdout:api"]),
+                    failed: names(&["golden:cases"]),
+                },
+                Change::Failing {
+                    profiles: names(&["golden:cases"]),
+                    candidate: Some(k),
+                },
+                Change::Candidate { candidate: k2 },
+                Change::Report {
+                    report: pass,
+                    candidate: k2,
+                    passed: names(&["golden:cases"]),
+                    failed: vec![],
+                },
+                Change::Failing {
+                    profiles: vec![],
+                    candidate: Some(k2),
+                },
+            ]
+        );
+    }
+
+    /// The holdout report a status step names: the one still speaking for
+    /// the current code when the status changed, not one from a retired
+    /// suite.
+    fn holdouts(h: &History) -> Vec<Option<ArtId>> {
+        h.steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Status { holdout, .. } => Some(*holdout),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_settlement_names_the_holdout_report_still_valid_then() {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let kx = cx.candidate("a", x);
+        let px = stored(cx.report_profiles(kx, &[("unit", 0)], vec![]));
+        let hx = stored(cx.holdout_run(kx, &[("golden:cases", 0)]));
+        ok(cx.executed("a", x, Support, px));
+        ok(cx.executed("b", x, Support, px));
+        assert_eq!(holdouts(&history(&cx, x)), vec![Some(hx)]);
+        // A report under a suite since replaced speaks for nothing.
+        let y = cx.low();
+        let ky = cx.candidate("a", y);
+        stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(ky, &[("golden:cases", 1)]));
+        ok(cx.host(HostAction::HoldoutExtended {
+            digest: Sha256::of(b"holdout suite v2"),
+        }));
+        drop_claim(&mut cx, y);
+        assert_eq!(holdouts(&history(&cx, y)), vec![None]);
+    }
+
+    /// The current candidate rerun on a moved base: a holdout report on the
+    /// old tree no longer speaks for it, and a fresh one on the new tree does.
+    #[test]
+    fn a_moved_tested_tree_needs_a_fresh_holdout_report() {
+        let mut cx = holdout_cx();
+        let rerun = |cx: &mut Cx, k: ArtId| {
+            cx.tree = Some(Sha256::of(b"moved tree"));
+            let rev = cx.rev();
+            ok(cx.human(HumanAction::Rerun {
+                candidate: k,
+                expected_rev: rev,
+            }));
+            stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        };
+        let y = cx.low();
+        let ky = cx.candidate("a", y);
+        stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(ky, &[("golden:cases", 1)]));
+        rerun(&mut cx, ky);
+        drop_claim(&mut cx, y);
+        assert_eq!(holdouts(&history(&cx, y)), vec![None], "stale tree");
+        cx.tree = Some(Sha256::of(b"tree"));
+        let z = cx.low();
+        let kz = cx.candidate("a", z);
+        stored(cx.report_profiles(kz, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(kz, &[("golden:cases", 1)]));
+        rerun(&mut cx, kz);
+        let fresh = stored(cx.holdout_run(kz, &[("golden:cases", 1)]));
+        drop_claim(&mut cx, z);
+        assert_eq!(holdouts(&history(&cx, z)), vec![Some(fresh)]);
+    }
+
+    /// A runner error (a timeout or an executor failure) is no report on
+    /// the code: no `Report` step, and it doesn't displace a genuine one.
+    #[test]
+    fn a_runner_error_is_never_a_holdout_report() {
+        let mut cx = holdout_cx();
+        let y = cx.low();
+        let k = cx.candidate("a", y);
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        let genuine = stored(cx.holdout_run(k, &[("golden:cases", 1)]));
+        cx.erring = true;
+        let error = stored(cx.holdout_run(k, &[("golden:cases", 1)]));
+        cx.erring = false;
+        drop_claim(&mut cx, y);
+        let h = history(&cx, y);
+        let reports: Vec<ArtId> = h
+            .steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Report { report, .. } => Some(*report),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reports, vec![genuine], "not {error:?}");
+        assert_eq!(holdouts(&h), vec![Some(genuine)]);
+    }
+
     #[test]
     fn at_stops_the_replay_and_an_unposted_claim_has_none() {
         let mut cx = Cx::new();
@@ -3698,5 +4221,517 @@ mod replay {
         let before = Rev(posted_at.0 - 1);
         assert!(claim_history(&TaskId::from("t"), &cx.log, c, Some(before)).is_none());
         assert!(claim_history(&TaskId::from("t"), &cx.log, MsgId(999), None).is_none());
+    }
+}
+
+// ---------------------------------------------------------------- #598 brownfield baseline
+
+#[test]
+fn cl_114_baseline_digest_is_claims_mode_only_and_folds() {
+    let digest = Sha256::of(b"baseline report");
+    let mut o = open_task(Mode::Stages, None, stage_roster());
+    o.baseline_digest = Some(digest);
+    let h = handle(
+        &TaskState::new(TaskId::from("t")),
+        &Command::Open(o),
+        Time(1),
+    );
+    assert_eq!(rejected(h.response), Code::BadClaimsConfig);
+    let mut o = open_task(Mode::Claims, Some(ClaimsConfig::default()), roster());
+    o.baseline_digest = Some(digest);
+    let h = handle(
+        &TaskState::new(TaskId::from("t")),
+        &Command::Open(o),
+        Time(1),
+    );
+    let mut st = TaskState::new(TaskId::from("t"));
+    for e in &h.events {
+        st.apply(e);
+    }
+    assert_eq!(st.claims.baseline_digest, Some(digest));
+    let json = rusty_serde::json::to_string(&h.events[0]).unwrap();
+    assert!(json.contains("baseline_digest"), "{json}");
+    // Greenfield: not written, so the log is byte-identical to before.
+    let cx = Cx::new();
+    let json = rusty_serde::json::to_string(&cx.log[0]).unwrap();
+    assert!(!json.contains("baseline_digest"), "{json}");
+    assert_eq!(cx.st.claims.baseline_digest, None);
+}
+
+/// D104: human takeover of an agent session, recorded on the board (D105: under
+/// schema 5; D106: `human_touched` derived in the fold).
+mod takeover {
+    use super::*;
+    use rusty_bbp::claims::input_chain;
+
+    fn start(cx: &mut Cx, c: MsgId, session: &str) -> Response {
+        cx.human(HumanAction::Takeover {
+            claim: c,
+            session: session.into(),
+            client: "nano-desktop".into(),
+            minutes: 10,
+            reason: "steer the build".into(),
+        })
+    }
+
+    fn started(cx: &mut Cx, c: MsgId, session: &str) -> u64 {
+        match start(cx, c, session) {
+            Response::TakenOver(id) => id,
+            r => panic!("takeover: {r:?}"),
+        }
+    }
+
+    fn input(
+        cx: &mut Cx,
+        id: u64,
+        seq: u64,
+        batch: impl AsRef<[u8]>,
+        prev: Option<Sha256>,
+    ) -> Response {
+        let batch = batch.as_ref();
+        cx.host(HostAction::TakeoverInput {
+            takeover: id,
+            seq,
+            bytes: Base64Bytes(batch.to_vec()),
+            sha256: input_chain(prev, batch),
+        })
+    }
+
+    fn end(id: u64, reason: TakeoverEnd) -> HostAction {
+        HostAction::TakeoverEnded {
+            takeover: id,
+            reason,
+        }
+    }
+
+    fn inputs(cx: &Cx, id: u64) -> Vec<Vec<u8>> {
+        cx.log
+            .iter()
+            .filter_map(|e| match e {
+                Event::TakeoverInput {
+                    takeover, bytes, ..
+                } if *takeover == id => Some(bytes.0.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn closings(cx: &Cx, id: u64) -> Vec<(TakeoverEnd, Time)> {
+        cx.log
+            .iter()
+            .filter_map(|e| match e {
+                Event::TakeoverClosing {
+                    takeover,
+                    reason,
+                    at,
+                } if *takeover == id => Some((*reason, *at)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ends(cx: &Cx, id: u64) -> Vec<(TakeoverEnd, u64, Option<Sha256>)> {
+        cx.log
+            .iter()
+            .filter_map(|e| match e {
+                Event::TakeoverEnded {
+                    takeover,
+                    reason,
+                    batches,
+                    last,
+                } if *takeover == id => Some((*reason, *batches, *last)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn started_before_input_and_chained_to_the_end() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "agent:t:c:1");
+        assert_eq!(id, 1);
+        ok(input(&mut cx, id, 1, "ls\r", None));
+        let one = input_chain(None, b"ls\r");
+        ok(input(&mut cx, id, 2, "cargo test\r", Some(one)));
+        let two = input_chain(Some(one), b"cargo test\r");
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        ok(cx.host(end(id, TakeoverEnd::Released)));
+        assert_eq!(ends(&cx, id), [(TakeoverEnd::Released, 2, Some(two))]);
+        // Ended: no more input, no second end.
+        assert_eq!(
+            rejected(input(&mut cx, id, 3, "x", Some(two))),
+            Code::NotOpen
+        );
+        assert_eq!(
+            rejected(cx.human(HumanAction::TakeoverRelease { takeover: id })),
+            Code::NotOpen
+        );
+    }
+
+    #[test]
+    fn input_needs_a_live_takeover_in_order_and_on_the_chain() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        assert_eq!(
+            rejected(input(&mut cx, 1, 1, "x", None)),
+            Code::RefUnresolved
+        );
+        let id = started(&mut cx, c, "s1");
+        assert_eq!(rejected(input(&mut cx, id, 2, "x", None)), Code::OpConflict);
+        let forged = cx.host(HostAction::TakeoverInput {
+            takeover: id,
+            seq: 1,
+            bytes: Base64Bytes(b"x".to_vec()),
+            sha256: input_chain(None, b"y"),
+        });
+        assert_eq!(rejected(forged), Code::PayloadMismatch);
+        assert_eq!(
+            rejected(input(&mut cx, id, 1, "", None)),
+            Code::BadHumanInput
+        );
+        let big = vec![b'a'; 4097];
+        assert_eq!(rejected(input(&mut cx, id, 1, &big, None)), Code::TooLarge);
+        ok(input(&mut cx, id, 1, vec![b'a'; 4096], None));
+    }
+
+    #[test]
+    fn expiry_drains_delivered_input_then_refuses_it_and_ends_as_expired() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        let end = |reason| HostAction::TakeoverEnded {
+            takeover: id,
+            reason,
+        };
+        assert_eq!(
+            rejected(cx.host(end(TakeoverEnd::Expired))),
+            Code::WrongState
+        );
+        // A batch delivered just before `until` is posted just after it.
+        let until = cx.now.plus(10 * 60_000);
+        cx.now = until.plus(1);
+        ok(input(&mut cx, id, 1, "last\r", None));
+        let last = input_chain(None, b"last\r");
+        cx.now = until.plus(TAKEOVER_DRAIN_MS + 1);
+        assert_eq!(
+            rejected(input(&mut cx, id, 2, "x", Some(last))),
+            Code::TokenExpired
+        );
+        ok(cx.host(end(TakeoverEnd::Expired)));
+        assert_eq!(ends(&cx, id), [(TakeoverEnd::Expired, 1, Some(last))]);
+    }
+
+    #[test]
+    fn input_is_recorded_as_raw_bytes_even_when_not_utf8() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        // Invalid UTF-8, then "é" (C3 A9) split across two batches.
+        let batches: [&[u8]; 3] = [b"\xff\xfe", b"caf\xc3", b"\xa9\r"];
+        let mut prev = None;
+        for (seq, batch) in (1..).zip(batches) {
+            ok(input(&mut cx, id, seq, batch, prev));
+            prev = Some(input_chain(prev, batch));
+        }
+        let recorded: Vec<Vec<u8>> = cx
+            .log
+            .iter()
+            .filter_map(|e| match e {
+                Event::TakeoverInput { bytes, .. } => Some(bytes.0.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(recorded, batches.map(<[u8]>::to_vec));
+        let json = rusty_serde::json::to_string(&cx.log).unwrap();
+        assert!(json.contains(r#""bytes":"//4=""#), "base64 on the wire");
+        let back: Vec<Event> = rusty_serde::json::from_str(&json).unwrap();
+        assert_eq!(back, cx.log);
+    }
+
+    #[test]
+    fn a_release_drains_a_delivered_batch_then_the_host_ends_it_once() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        ok(input(&mut cx, id, 1, "ls\r", None));
+        let one = input_chain(None, b"ls\r");
+        let at = cx.now;
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        assert_eq!(closings(&cx, id), [(TakeoverEnd::Released, at)]);
+        assert!(ends(&cx, id).is_empty(), "the human does not end it");
+        assert!(!cx.st.claims.takeovers[&id].live());
+        // Released once: no second release, and the session is free again.
+        assert_eq!(
+            rejected(cx.human(HumanAction::TakeoverRelease { takeover: id })),
+            Code::NotOpen
+        );
+        // The batch delivered before the release is posted at the cutoff.
+        cx.now = at.plus(TAKEOVER_DRAIN_MS);
+        ok(input(&mut cx, id, 2, b"q\xff", Some(one)));
+        let two = input_chain(Some(one), b"q\xff");
+        cx.now = at.plus(TAKEOVER_DRAIN_MS + 1);
+        assert_eq!(
+            rejected(input(&mut cx, id, 3, "x", Some(two))),
+            Code::TokenExpired
+        );
+        // It ends for the reason it closed with, with the fold's totals.
+        assert_eq!(
+            rejected(cx.host(end(id, TakeoverEnd::Expired))),
+            Code::WrongState
+        );
+        ok(cx.host(end(id, TakeoverEnd::Released)));
+        assert_eq!(inputs(&cx, id), [b"ls\r".to_vec(), b"q\xff".to_vec()]);
+        assert_eq!(ends(&cx, id), [(TakeoverEnd::Released, 2, Some(two))]);
+        assert_eq!(
+            rejected(cx.host(end(id, TakeoverEnd::Released))),
+            Code::NotOpen
+        );
+        assert_eq!(
+            rejected(input(&mut cx, id, 3, "x", Some(two))),
+            Code::NotOpen
+        );
+        assert_eq!(started(&mut cx, c, "s1"), 2);
+    }
+
+    #[test]
+    fn a_release_after_expiry_does_not_extend_the_drain() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        let until = cx.now.plus(10 * 60_000);
+        cx.now = until.plus(TAKEOVER_DRAIN_MS);
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        cx.now = until.plus(TAKEOVER_DRAIN_MS + 1);
+        assert_eq!(
+            rejected(input(&mut cx, id, 1, "x", None)),
+            Code::TokenExpired
+        );
+        ok(cx.host(end(id, TakeoverEnd::Released)));
+        assert_eq!(ends(&cx, id), [(TakeoverEnd::Released, 0, None)]);
+    }
+
+    #[test]
+    fn closing_or_cancelling_the_task_drains_live_takeovers_then_ends_them_once() {
+        for cancel in [false, true] {
+            let mut cx = Cx::new();
+            let c = cx.low();
+            let id = started(&mut cx, c, "s1");
+            let done = started(&mut cx, c, "s2");
+            let released = started(&mut cx, c, "s3");
+            ok(input(&mut cx, id, 1, "y\r", None));
+            let one = input_chain(None, b"y\r");
+            ok(cx.human(HumanAction::TakeoverRelease { takeover: done }));
+            ok(cx.host(end(done, TakeoverEnd::Released)));
+            ok(cx.human(HumanAction::TakeoverRelease { takeover: released }));
+            let expected_rev = cx.rev();
+            let at = cx.now;
+            ok(cx.human(if cancel {
+                HumanAction::Cancel {
+                    expected_rev,
+                    reason: "stop".into(),
+                }
+            } else {
+                HumanAction::Close { expected_rev }
+            }));
+            assert!(cx.st.state.terminal(), "cancel={cancel}");
+            assert_eq!(closings(&cx, id), [(TakeoverEnd::TurnEnded, at)]);
+            assert_eq!(closings(&cx, done).len(), 1, "an ended one is left alone");
+            assert_eq!(closings(&cx, released).len(), 1, "a closing one too");
+            assert!(ends(&cx, id).is_empty());
+            assert!(cx.st.claims.takeovers.values().all(|t| !t.live()));
+            // The terminal task takes the drain, and nothing else.
+            cx.now = at.plus(TAKEOVER_DRAIN_MS);
+            ok(input(&mut cx, id, 2, "!", Some(one)));
+            let two = input_chain(Some(one), b"!");
+            cx.now = at.plus(TAKEOVER_DRAIN_MS + 1);
+            assert_eq!(
+                rejected(input(&mut cx, id, 3, "x", Some(two))),
+                Code::TokenExpired
+            );
+            assert_eq!(
+                rejected(cx.host(end(done, TakeoverEnd::Released))),
+                Code::Terminal,
+                "an ended one is not ended again"
+            );
+            assert_eq!(
+                rejected(cx.human(HumanAction::TakeoverRelease { takeover: id })),
+                Code::Terminal
+            );
+            assert_eq!(
+                rejected(cx.host(end(id, TakeoverEnd::Released))),
+                Code::WrongState
+            );
+            ok(cx.host(end(id, TakeoverEnd::TurnEnded)));
+            ok(cx.host(end(released, TakeoverEnd::Released)));
+            assert_eq!(inputs(&cx, id), [b"y\r".to_vec(), b"!".to_vec()]);
+            assert_eq!(ends(&cx, id), [(TakeoverEnd::TurnEnded, 2, Some(two))]);
+            assert_eq!(ends(&cx, released), [(TakeoverEnd::Released, 0, None)]);
+            assert_eq!(
+                rejected(cx.host(end(id, TakeoverEnd::TurnEnded))),
+                Code::Terminal
+            );
+            assert_eq!(
+                rejected(input(&mut cx, id, 3, "x", Some(two))),
+                Code::Terminal
+            );
+            assert!(cx.st.claims.takeovers.values().all(|t| t.ended()));
+            assert!(cx.st.state.terminal());
+        }
+    }
+
+    #[test]
+    fn the_host_cannot_release_for_the_human() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        let r = cx.host(HostAction::TakeoverEnded {
+            takeover: id,
+            reason: TakeoverEnd::Released,
+        });
+        assert_eq!(rejected(r), Code::Forbidden);
+        ok(cx.host(HostAction::TakeoverEnded {
+            takeover: id,
+            reason: TakeoverEnd::MuxLost,
+        }));
+    }
+
+    #[test]
+    fn one_live_takeover_per_session_and_bounded_fields() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        assert_eq!(rejected(start(&mut cx, c, "s1")), Code::AlreadyOpen);
+        assert_eq!(started(&mut cx, c, "s2"), 2);
+        ok(cx.host(HostAction::TakeoverEnded {
+            takeover: id,
+            reason: TakeoverEnd::TurnEnded,
+        }));
+        assert_eq!(started(&mut cx, c, "s1"), 3);
+        let bad = |minutes, session: &str, reason: &str| HumanAction::Takeover {
+            claim: c,
+            session: session.into(),
+            client: "nano".into(),
+            minutes,
+            reason: reason.into(),
+        };
+        assert_eq!(rejected(cx.human(bad(0, "s9", "r"))), Code::BadHumanInput);
+        assert_eq!(rejected(cx.human(bad(61, "s9", "r"))), Code::BadHumanInput);
+        assert_eq!(rejected(cx.human(bad(5, " ", "r"))), Code::BadHumanInput);
+        assert_eq!(rejected(cx.human(bad(5, "s9", ""))), Code::BadHumanInput);
+        assert_eq!(
+            rejected(cx.human(bad(5, &"s".repeat(129), "r"))),
+            Code::TooLarge
+        );
+    }
+
+    #[test]
+    fn a_closed_claim_cannot_be_taken_over() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        ok(cx.human(HumanAction::ClaimDecision {
+            claim: c,
+            outcome: ClaimOutcome::Drop,
+        }));
+        assert_eq!(rejected(start(&mut cx, c, "s1")), Code::WrongState);
+        assert_eq!(
+            rejected(start(&mut cx, MsgId(999), "s1")),
+            Code::RefUnresolved
+        );
+    }
+
+    #[test]
+    fn a_candidate_after_a_takeover_in_its_epoch_is_human_touched() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let before = cx.candidate("a", c);
+        assert!(!card_of(&cx, c).human_touched);
+        let id = started(&mut cx, c, "s1");
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        // Ended before submission still counts: a human touched the work.
+        let after = cx.candidate("a", c);
+        assert!(cx.st.claims.human_touched.contains(&after));
+        assert!(!cx.st.claims.human_touched.contains(&before));
+        assert!(card_of(&cx, c).human_touched);
+    }
+
+    fn ui_dep(cx: &mut Cx, tag: &str, dep: MsgId) -> MsgId {
+        cx.claim(
+            tag,
+            ClaimBody {
+                domains: vec!["ui".into()],
+                ..dep_on(tag, vec![dep])
+            },
+        )
+    }
+
+    fn touched(cx: &mut Cx, c: MsgId) -> bool {
+        let k = cx.candidate("a", c);
+        cx.st.claims.human_touched.contains(&k)
+    }
+
+    /// An intent revision reopens `direct` (domain http) and, through the
+    /// dependency cascade, `cascaded`; `other` (domain ui, no deps) is not
+    /// affected. Live takeovers keep steering across the boundary; an ended
+    /// one stays in its own epoch.
+    #[test]
+    fn a_takeover_not_yet_ended_carries_into_an_intent_reopened_epoch() {
+        let mut cx = Cx::new();
+        let direct = cx.low();
+        let cascaded = ui_dep(&mut cx, "b", direct);
+        let other = cx.claim(
+            "c",
+            ClaimBody {
+                domains: vec!["ui".into()],
+                ..body("other")
+            },
+        );
+        let released = cx.low();
+        let on_direct = started(&mut cx, direct, "s1");
+        let on_cascaded = started(&mut cx, cascaded, "s2");
+        let on_other = started(&mut cx, other, "s3");
+        let gone = started(&mut cx, released, "s4");
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: gone }));
+        ok(cx.host(end(gone, TakeoverEnd::Released)));
+        for c in [direct, cascaded, other, released] {
+            accept(&mut cx, c);
+        }
+        ok(super::revise(&mut cx, "brief v2", some(vec![], &["http"])));
+        assert!(cx.log.iter().any(|e| matches!(
+            e,
+            Event::ClaimReopened { claim, by: ReopenCause::Dep(d), .. }
+                if *claim == cascaded && *d == direct
+        )));
+        assert_eq!(cx.rec(direct).epoch, 2);
+        assert_eq!(cx.rec(cascaded).epoch, 2);
+        assert_eq!(cx.rec(other).epoch, 1, "unaffected");
+        assert_eq!(cx.status(other), ClaimStatus::Accepted);
+        // Input after the boundary is still accepted on every live takeover.
+        for id in [on_direct, on_cascaded, on_other] {
+            ok(input(&mut cx, id, 1, "y\r", None));
+        }
+        assert!(touched(&mut cx, direct), "a directly reopened claim");
+        assert!(touched(&mut cx, cascaded), "a cascade-reopened claim");
+        assert!(touched(&mut cx, other), "an unaffected claim");
+        assert!(
+            !touched(&mut cx, released),
+            "an ended takeover stays in its own epoch"
+        );
+    }
+
+    #[test]
+    fn takeovers_replay_to_the_same_state() {
+        let mut cx = Cx::new();
+        let c = cx.low();
+        let id = started(&mut cx, c, "s1");
+        ok(input(&mut cx, id, 1, "y\r", None));
+        cx.candidate("a", c);
+        ok(cx.human(HumanAction::TakeoverRelease { takeover: id }));
+        let mut again = TaskState::new(TaskId::from("t"));
+        for e in &cx.log {
+            again.apply(e);
+        }
+        assert_eq!(again.claims.takeovers, cx.st.claims.takeovers);
+        assert_eq!(again.claims.human_touched, cx.st.claims.human_touched);
     }
 }

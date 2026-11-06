@@ -292,14 +292,7 @@ fn review(
     let Some(blind) = p.blind else {
         return Some((Slot::Review, Phase::Blind, cleared.to_vec(), None));
     };
-    let others: Vec<AgentId> = cleared
-        .iter()
-        .copied()
-        .filter(|m| *m != blind.provider)
-        .collect();
-    // With no other cleared provider the re-ask is skipped, not repeated
-    // on the same model.
-    if !blind.found_counter && p.look_harder.is_none() && !others.is_empty() {
+    if let Some(others) = look_harder_owed(&p, blind, cleared) {
         return Some((Slot::LookHarder, Phase::Blind, others, Some(LOOK_HARDER)));
     }
     let posted = blind.posted + p.look_harder.map_or(0, |l| l.posted);
@@ -308,6 +301,48 @@ fn review(
     }
     (foreign(card, &lens.id) > p.foreign_seen)
         .then(|| (Slot::Review, Phase::Informed, cleared.to_vec(), None))
+}
+
+/// The providers a look-harder re-ask may use, when one is owed: the blind
+/// pass found no counter and nothing re-asked yet. With no other cleared
+/// provider the re-ask is skipped, not repeated on the same model.
+fn look_harder_owed(p: &Progress, blind: Pass, cleared: &[AgentId]) -> Option<Vec<AgentId>> {
+    if blind.found_counter || p.look_harder.is_some() {
+        return None;
+    }
+    let others: Vec<AgentId> = cleared
+        .iter()
+        .copied()
+        .filter(|m| *m != blind.provider)
+        .collect();
+    (!others.is_empty()).then_some(others)
+}
+
+/// Has every review lens that follows `card` recorded its blind outcome in
+/// the card's epoch, and its look-harder when one is owed? The alien
+/// lens's trigger reads this (#708 §2). A review lens is one that may post
+/// evidence; a card no review lens follows is not settled, since nobody
+/// reviewed it.
+pub fn reviews_settled(config: &LensConfig, card: &Card, state: &State) -> bool {
+    let mut reviewers = config
+        .lenses
+        .iter()
+        .filter(|l| !l.evidence.is_empty() && card.domains.iter().any(|d| l.follows(d)))
+        .peekable();
+    if reviewers.peek().is_none() {
+        return false;
+    }
+    reviewers.all(|lens| {
+        let Some(p) = state
+            .progress
+            .get(&(lens.id.clone(), card.id))
+            .filter(|p| p.epoch == card.epoch)
+        else {
+            return false;
+        };
+        p.blind
+            .is_some_and(|blind| look_harder_owed(p, blind, &route(config, lens, card)).is_none())
+    })
 }
 
 /// May candidate `card` of question `q` be attacked now?
@@ -572,6 +607,51 @@ mod tests {
         assert!(
             jobs_for(&jobs, "adversary").is_empty(),
             "done this epoch too"
+        );
+    }
+
+    /// Answer every blind and look-harder job once, with nothing found.
+    fn answer_blind_jobs(st: &mut State, card: &Card) -> usize {
+        let (jobs, _) = schedule(&config(), std::slice::from_ref(card), st);
+        let blind: Vec<Job> = jobs
+            .into_iter()
+            .filter(|j| j.phase == Phase::Blind)
+            .collect();
+        for j in &blind {
+            st.start(j);
+            st.answered(j, j.providers[0], 0, 0);
+        }
+        blind.len()
+    }
+
+    #[test]
+    fn reviews_settle_after_every_blind_pass_and_owed_look_harder() {
+        let c = config();
+        let mut st = State::default();
+        let card = plain(7);
+        assert!(!reviews_settled(&c, &card, &st), "nobody looked yet");
+        assert_eq!(answer_blind_jobs(&mut st, &card), 3);
+        assert!(!reviews_settled(&c, &card, &st), "look-harder owed");
+        assert!(answer_blind_jobs(&mut st, &card) > 0);
+        assert!(reviews_settled(&c, &card, &st));
+        let mut reopened = card.clone();
+        reopened.epoch = 1;
+        assert!(
+            !reviews_settled(&c, &reopened, &st),
+            "a new epoch starts over"
+        );
+        let proposer_only = LensConfig {
+            lenses: c
+                .lenses
+                .iter()
+                .filter(|l| l.id == "architect")
+                .cloned()
+                .collect(),
+            ..c.clone()
+        };
+        assert!(
+            !reviews_settled(&proposer_only, &card, &st),
+            "no review lens follows the claim"
         );
     }
 

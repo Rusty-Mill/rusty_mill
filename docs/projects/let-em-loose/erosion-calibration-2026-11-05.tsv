@@ -1,0 +1,1183 @@
+number	branch	sha	concentration_bp	duplication_bp	functions	total_cc	unmeasured	error
+10	claude/duplication-review-9zqjt2	63a83a509bc45a0afc9dd70bff97f0a62652d75b	-19	-30	-3	-11		0
+11	claude/duplication-review-9zqjt2	a70eb1a7ee07dcee75f866a288fb7761082f5ae6	0	0	0	-4		0
+13	claude/duplication-review-9zqjt2	b3ecdd7b48bd1f07caee16586ea8f5e9992e1e4f	0	0	0	0		0
+15	claude/duplication-review-9zqjt2	9e06629e997a5275f14ad0769f78cc17c0b8d853	0	3	0	0		0
+16	claude/consolidate-rusty-repos-mmsw83	be11cbe52a38be3793a0a03f9f35cf5311301d7c	-698	420	1517	2326		0
+17	claude/consolidate-rusty-repos-mmsw83	b25b1f843633576aac696f52829db08325fc0598	-87	-52	480	1286		0
+18	claude/consolidate-rusty-repos-mmsw83	bb0bce5dfebef8ef6970ff52afe101221c7036bf	-73	141	293	452	sh:1	0
+19	claude/consolidate-rusty-repos-mmsw83	cd3eb59a06128b7c6e2d7100b8fa4aa3a52128d0	-197	-60	590	955		0
+20	claude/consolidate-rusty-repos-mmsw83	71af7273cfcffe2b4861ee25c57695a668b88fc1	-64	18	437	1228	ps1:2	0
+21	import/rusty_serde	78b3471a702bb97931addd8fe0c7a47eac0b4c9e	-42	171	620	1392		0
+22	import/rusty_lsp	2b9e1b41bb590f690bb5164ae7d0e95831c5c238	-60	150	393	680		0
+23	import/rusty_a2a	996868928f0780f6f2abd5d4d2d367aa9a6e5342	-71	46	438	914		0
+24	import/rusty_mcp	1124ad63a7d5831b95a306b5c46bd8f31935500a	-73	-48	291	471	sh:3	0
+25	import/rusty_stream	449a07c1eee7d78e1ee33267b0a31164370dd49f	-22	-15	68	145		0
+26	import/rusty_url	ed19e9a5a0fe0074e7d8a127e117460b8650514d	-2	-55	206	740		0
+27	import/rusty_http	fd8609f8ea6f2629f8798a16190a90688a5c6182	-16	38	147	446		0
+28	import/rusty_json	b74a70a33d1ee332001ffa15bbc7d7a5cb8bdc19	-62	35	394	616		0
+29	import/rusty_oauth	d20e401e0d2760adc7f4b08d3de9bf6ee2986009	-43	8	220	622		0
+30	import/rustils_async	a7acdefdf9db6303b8ddb1107df80f1694a09996	-18	-5	89	137		0
+31	import/rusty_wire	f785393dca75b87d73e7f86ff3b06bb4fa4a3009	-4	4	33	37		0
+32	cleanup/rusty-wire-target	69a63e853ac49b726f479dfe2ced76f728efbb96	0	0	0	0		0
+33	import/rusty_std	76759819aa1ab6f4cf9121359eddf1fae31d2b50	-7	-4	44	58		0
+34	import/rusty_wiremock	586d93b67417753d9bb907671170885df15a6374	-1	0	10	11		0
+35	import/rusty_err	e0281bc9993a62f5dae7e646df7ca636d603b962	-1	-5	19	47		0
+36	import/rusty_time	d9f22899d689efc757ab86f92f8fe0f253f0a8fd	0	-2	22	54		0
+37	import/rusty_uuid	7d4c76b5ab261b1664edaf10ad58fc6949d0fa8e	-2	-1	11	19		0
+38	import/rusty_request	944a8edcecb5e9cf03b82965c16ad8b49eec55fb	-35	5	199	390		0
+39	import/rusty_sqlite	278950d0975995b66ba9c5b67acac521687dfdad	-8	-4	36	63		0
+40	import/rusty_search	7ce0e22cab657c5664b27fb0ac6f4e23d408fb0a	-63	65	286	852		0
+41	import/rusty_vulkan	c527f2ecad2e6ae03dbaf68d0b1fbf4bebcbd13f	-4	-8	24	42		0
+42	import/rusty_sync	ccb379a2e7a2c4d16182c2f46eabb9c4a70d1905	-2	3	18	23		0
+43	import/rusty_simd	01e5539e30a98799af5388a7481d9b9c8de710a3	-1	0	5	17		0
+44	import/rusty_h2	670b09480b150302bdc76e02dfa32e46ea72787c	-19	5	233	515		0
+45	import/rusty_crypto_key	d0e184a6c48fcd17ae3591aecd8874bd0e27e7d8	-1	0	9	12		0
+46	import/rusty_config	f79726c8f75c6dc06fa159ceb887feeea3f48f65	2	0	5	20		0
+47	import/rusty_codec	a229d08b08692d731e6dfa941806ed0be2e237ea	-1	-1	30	103		0
+48	import/rusty_audio	76fc9b99ae509a61ba9dc088511c671ba260285c	0	-4	22	58		0
+49	import/rusty_ansi	7d5c4f36d2f02d5a5a20d1b5b6f785f4bfec7d78	3	-2	4	30		0
+50	fix/mill-term-cross-platform-path-test	8c6b1b4e4de64a6d0a31ede318707c5559892599	0	0	0	0		0
+51	import/rusty_db	86fca40e5b5141bb0044cfe54429a7001451a449	-5	67	563	1274		0
+52	fix/rusty_libc-wait-test-race	9d4d2b45243c99da1a1e8a11ecadaf2b01916e17	0	0	0	0		0
+53	cleanup/rusty_config-build-artifacts	2f6654338e0261dd255ce3f6303cfab4a60dd35f	0	0	0	0		0
+54	import/rusty_jinja	a3cbd07037db80ae0685ac66606b58a1d07430b5	22	-6	48	270		0
+55	import/rustils	275acc8d96654cfb69f1fbe94e8128a2af2fb841	-129	39	1041	2339		0
+56	cleanup/rusty_ansi-build-artifacts	e0347e54ed3a7cc971ae52534376496a1c4b5bbf	0	0	0	0		0
+57	cleanup/rusty_simd-build-artifacts	839658245d008a90d6ed8f247d34baced2c0f47c	0	0	0	0		0
+58	import/rusty_ansder	9d6da6d496302adcbeb4f8b00ba7708121ee87fc	-4	-1	18	42		0
+59	import/rusty_boot	2d214aab27bf27b3e1d5c7b4caea00d33d51a67e	0	0	1	1		0
+60	import/rusty_whisper	e88c16bee34190c5796dc5ce39a42536617a3b4e	51	-43	324	1505	js:1	0
+61	cleanup/rusty_crypto_key-build-artifacts	b68fa883a1afe1cfbd07939d06d2c87c9a5ec5c7	0	0	0	0		0
+62	cleanup/rusty_ansder-build-artifacts	2ddde5ea51063fec39b792d600fc76a626842d1e	0	0	0	0		0
+63	import/rusty_rdp	22f12c420a8005083621d87eee21c3cf4fe7fca0	-126	105	963	2040		0
+64	import/rusty_voice	ec13bd43f1344288f7b7dfeed5126e6974e6f8c3	10	0	9	83		0
+65	claude/monorepo-duplication-audit-fpqi2x	a4d5679d713f8232849c777b58c36f45301384c3	2	-7	-30	-31		0
+66	claude/rusty-homelab-mcp-g5l1qb	b0f712d54d22e89c3c8216a67dca277574e6f2a9	-6	8	49	82		0
+67	claude/monorepo-ci-efficiency-bypq0z	8c3c7fe104a4299e33724e782f8fdafea537d2d7	0	0	0	0	py:1	0
+68	verify/affected-crate-filtering-rusty-url	9fd2e27c9cfd5d1b21a5e58b55e368258a0a2779	0	0	0	0		0
+69	claude/repo-inspector-skill-4wye4a	908138f68b813b544b9f356f805fb094f7e91268	0	0	0	0		0
+112	claude/repo-inspector-8bx1g2	8f5514bfee2bf0f0f2a299801328e0669c9358cd	0	0	0	0		0
+113	claude/dedupe-f16-to-f32-rusty-whisper-v2	9d9d8fd8f9d4e48a524a7e1edcdbcdad625ad0c2	0	0	-1	-5		0
+114	claude/sovereignty-uuid-rusty-a2a	c4858303dda849e76f4125e6bd636abe86a0fd47	0	0	0	0		0
+115	claude/sovereignty-url-rusty-mcp	be68aa727d7f64ebf30aac03c7a6ac30a27fc886	0	0	0	0		0
+116	claude/dedupe-retry-policy-extraction	86dea771834436c91fd90e2355a4539e32a4cabd	0	0	4	4		0
+117	claude/dedupe-rsa-crypto-extraction	b0ebb1716be74a1df17c38ec07e50c88e659314d	3	-6	-15	-41		0
+122	claude/rusty-repos-migration-iwvuld	e8cae617b76bdde728f32bc865aa0ec0a46256f2	-262	-299	3859	10222	go:1,js:6,py:3,sh:10,ts:6,tsx:20	0
+123	claude/homelab-mcp-output-schema-fix	ce6990d40eeaeb12ca094aea266323731d6165c8	0	0	1	1		0
+124	claude/rusty-homelab-mcp-g5l1qb	da16d92d89c79e770ba6cff89d0f554a2aa24622	0	1	4	4		0
+125	fix/rush-unnecessary-rlimit-cast	b5fb56cc95cfa2618ad0f442778683ee37c2826a	0	0	0	0		0
+126	claude/rusty-homelab-mcp-g5l1qb	2bc3acf2ef1de3591bd95cd15d86cdb9d25ad2c0	-1	2	15	17		0
+127	claude/rusty-homelab-mcp-g5l1qb	5859f48103cb4425b0001c7eda37ac67dfe014cf	-1	7	22	22		0
+128	claude/rusty-homelab-mcp-g5l1qb	dd87a4b5c6a93e7999fbad91a2c297b60f798ea0	-1	3	14	14		0
+129	claude/rusty-homelab-mcp-g5l1qb	5105b1504a8ad039bed5c1e361afbe4a55b711f2	0	0	0	5		0
+130	claude/rusty-homelab-mcp-g5l1qb	a5df87fc345842ebdf58e7c4cbb12f8acf8764e3	-1	2	13	16		0
+131	claude/rusty-meshed-crate-migration-zy7k1n	cfea436007f8d55e2ac8b1c3b4f4e584c8321595	-54	65	643	1251		0
+132	docs/rusty-tokio-real-tokio-bridge-decision-request	06ca8669f38f80291a63308de7563bfea43caab5	0	0	0	0		0
+133	fix/ci-doctests-honour-windows-exclude	ee98a0ab043be15b3a9dad9c0642804d68e0d8ed	0	0	0	0		0
+134	fix/rusty-request-additive-tokio-feature	9c33680c13b1f9ac0d729057f53c86a3abc35746	-1	0	9	19		0
+135	claude/rusty-homelab-mcp-g5l1qb	dddb9ccbeea96ad7ac2577b6337d08702f0048cd	-1	2	13	18		0
+136	fix/rusty-request-https-tests-explicit-provider	53ffd0893c11f87b419c99251d004fd9ff0a708d	0	0	0	0		0
+138	fix/rusty-tokio-connect-waits-for-completion	ff27236d94f8cde3a88d492c49009b333b9fbd57	0	0	5	6		0
+139	claude/assessment-review-corrections-nac84f	0d6e88200cc4de142108c500422e045552849936	0	0	0	0		0
+140	fix/rusty-tokio-readiness-lost-edge	5379b954e25e31842cf1274cd34b9061e9892ac9	0	0	3	4		0
+141	claude/assessment-review-corrections-nac84f	0fa23b68796465756df4ab338525abb45f5e597a	0	0	0	0		0
+142	claude/assessment-review-corrections-nac84f	9e774907378288d8eb8d17d13ca7ab4b131b15a6	0	0	0	0	py:2	0
+143	claude/assessment-review-corrections-nac84f	2356dc70345c48ccb9d872b406208a345bc6864d	0	0	0	0		0
+144	claude/assessment-review-corrections-nac84f	d10d858456a12c4b694469db3afa61063eb740db	0	0	0	0		0
+145	claude/assessment-review-corrections-nac84f	77df1d62e0d328a86f54dedb226e5204a0e42fad	0	0	0	0		0
+146	feat/rusty-meshed-data-mesh-monitor	c8fa4f179f5e09d3b8a000e90b8658661d47e631	0	0	1	7	js:2,jsx:5,mjs:1	0
+147	claude/review-recommended-changes-8kepe6	82e068c9a115ea699c351b3ae006a891baca41e0	0	0	0	0	py:2	0
+148	feat/tls-server-peer-certificate	cf284712988f09ee444dddfa5086e7019f4f786c	0	0	1	1		0
+149	claude/rusty-meshed-crate-migration-zy7k1n	c2f0ef20f6c7639d5df59e739d818f94835ece76	-3	2	51	160		0
+151	claude/rusty-meshed-crate-migration-zy7k1n	f8f98d2f0cad944c553012f57fbfddaad5b5260e	0	0	0	0		0
+152	docs/repo-inspector-regeneration-183-members	0d61a7a511dfa5a6b817f8eb179eea1066536fb6	0	0	0	0		0
+154	claude/rusty-meshed-crate-migration-zy7k1n	bcddf6383e29428d0b49a5b2b919b2c115d634c7	2	0	1	3		0
+155	claude/sovereignty-base64-extraction	4a6487eae4a4a19644f14541cffef4d7707bf92e	0	0	0	0		0
+156	claude/fedora-systemd-module-hb7vxv	c2c3ea05bef40532b27857a2931baf5131637e5a	-9	1	93	217		0
+157	claude/repo-inspector-report-wgoocq	32c541a13d3b4041df9fd56ab031f71235deeeaa	0	-2	6	-9		0
+158	claude/fedora-multi-host-support	9629ec0dc4100ec49881bda087139baf2f659b45	0	0	4	9		0
+159	claude/nexus-rusty-mill-migration-ic3fqa	5a86cc2ea16980a6e6870fdc254e69b87cb7fb8f	-111	343	5275	15880	js:3,jsx:8,ps1:1,py:16,sh:15,ts:1003,tsx:151	0
+160	claude/loving-bell-kntf9l	8a32cc2e925cc5072145eb966f297a0fc7f47099	-35	82	1272	2994	py:5	0
+161	claude/nexus-ci-keyring-fix	8d640ad530a76d8b00ebabe487e3e2cdda3352cc	0	0	0	0		0
+162	claude/codex-review-fixes-sovereignty	9208835126b9f739d8a588e8e1c35d5cc0b3996c	0	-4	19	84	py:2	0
+165	claude/clever-wright-y6qkyq	07cb2114949f0f746882b6d9abb558da19f8dea6	0	0	11	48		0
+166	claude/clever-wright-y6qkyq	b98fa1887dd9a74234219f28c3fccd1f9fe673f9	-1	-3	-58	-206		0
+167	claude/clever-wright-y6qkyq	aceb16300dac6142440f2485920535d8c0516940	0	0	0	0		0
+168	claude/clever-wright-y6qkyq	56574a51ea097933c8e97ec75ffe88b8522e07cc	0	0	-1	-1		0
+169	claude/clever-wright-y6qkyq	ee98452c9a57891e89c384542d272af422bca4f9	0	0	0	0		0
+170	claude/hister-rust-port-quq3ho	c51581b61ec0ef85467943041fc803f17f70b2c6	0	0	0	0		0
+171	claude/codex-build-fix-63-findings-9c1a2f	e4e72bdaa961a8fa8e33737ef531747af70dc30c	0	2	50	182		0
+172	claude/ci-scope-cargo-toml-additions	695cb1c373f9b4657e4c87bd256e8ade914d5dd9	0	0	0	0	py:2	0
+173	claude/decide-hister-adr-0002-0003	d699539de77a024db968dd073f32ca8d4fd03611	0	0	0	0		0
+174	claude/confirm-hister-licensing	17e45b1e332f8df3b8c33900b40b9be2ce8dc07c	0	0	0	0		0
+175	claude/hister-phase1-core	c293172f9239bcd3124c54677600f4f48e185a0f	0	0	2	2		0
+176	claude/hister-phase1-extractor-registry	bf5c23241ff249237e0c006bb88f5a237df65cb4	0	-1	14	41		0
+177	codex-review-round3-2026-09-12	c62562ed16076f3f2879bfb3a840e8452c3b5e13	-2	-3	23	89		0
+178	claude/hister-phase1-model	8aa7e8d1173d738f34294eb266527b6050ebbb44	0	0	0	0		0
+179	claude/hister-phase1-model-embedding-queue	7c81a34387bd171f43d7c8c8065e1d3df2f7a87d	0	0	10	13		0
+180	claude/hister-phase1-model-websession	d9af7249063ce2a2ff420b854e3e1380c149c2b8	0	0	4	5		0
+181	claude/hister-phase1-model-document-version	5724ec8427a96b0265595908e38e28233e9a7cde	0	1	5	7		0
+182	claude/hister-phase1-model-crawl-job	d0c0ff933c1d08fc1028c3747d2ceb774234a96d	0	0	7	11		0
+183	codex-review-round4-2026-09-12	912d8da7bbb71914179e295670259c50cd36cc19	-3	-5	16	68		0
+184	claude/hister-phase1-model-crawl-url	502a0fc155f9bfeba6f54f4f5d93dba2abe26fb0	0	0	14	23		0
+185	claude/hister-phase1-model-history	dfd4e2c9ac9384855e68f787193376b76995691f	-1	3	13	39		0
+186	claude/hister-phase1-model-user	897213e6151714acd481194c65b94439fc819986	0	1	19	25		0
+187	claude/hister-phase1-extractor-jsonld	f84903d78c47efc16e2af010d446938fe50d363b	-2	-1	22	76		0
+188	codex-review-round5-2026-09-12	9a6c660f7f024274d4553660c6923adfff2c99fd	-1	-2	32	100		0
+189	claude/hister-phase1-extractor-embeddedvideo	3d91edb72ad0c76095c4954b505b4c618fae2564	0	1	14	26		0
+190	claude/hister-phase1-extractor-stackexchange	02b07b9b99080f63fa87b1b103716cc00b2ac83e	0	-2	50	179		0
+191	claude/hister-phase1-extractor-godoc	3618236f3181ba3688423e0604d9b86078b3fad9	0	0	8	9		0
+192	claude/hister-phase1-extractor-lobsters	58ad46f383a5eb4e4690b0985384ccbd3496b545	0	0	13	50		0
+193	claude/hister-phase1-extractor-hackernews	fce9f8b7e08255e372fbe1eff714b0ecf1eef3ea	3	0	15	72		0
+194	claude/hister-phase1-extractor-github	d1bb7ac917eac736479bde7d31e46cd9d815bd0a	-2	2	29	128		0
+195	codex-review-round6-2026-09-13	29a1c7817e8144acdcd310b8df6754fd561f1653	1	-1	27	123		0
+196	claude/hister-phase1-extractor-chatgpt	6ac8896d5f87b4d2efa65e802493c7d18be7f112	0	0	27	103		0
+197	claude/hister-phase1-extractor-basic	1a0ef494c78d6c47000819e2c8209a6ffb29af4c	0	0	10	19		0
+198	claude/hister-phase1-extractor-wikipedia	71df5051a54ad7c158ca03165e31e0358e582256	-2	-2	47	133		0
+199	claude/hister-phase1-extractor-reddit	4175d3d6645ec5f3dd72d826f5d3a50e75576532	0	-3	48	229		0
+200	claude/hister-phase1-extractor-discourse	bc797c2f9f65663f49f28178278e03a9939cec42	-2	0	53	238		0
+201	claude/hister-phase1-extractor-ytdlp	3b89fe569b576a0a3a15eca97e821c8764079aa1	2	-1	29	111		0
+202	claude/hister-phase1-extractor-notion	c59c02b5cf6059dc2fc24ec5fe18bafe7d04ec6f	2	0	16	56		0
+203	claude/hister-phase1-extractor-markdown-org	556c066fffbff59b65f44a54db2dbb6c021fa9dd	0	1	16	19		0
+204	claude/hister-phase1-extractor-readability	e49491da0aab0b05cf86a0ec6a71ca7b17cd2f25	0	0	9	15		0
+205	claude/hister-phase1-extractor-mastodon	941870dca0f921a358023851d2cc64df7ce6128c	0	0	13	33		0
+206	claude/hister-phase1-extractor-bluesky	a9a94ce895ea2638c5e867dd05b18fd3cb92de50	-1	-5	47	225		0
+207	claude/hister-phase1-extractor-twitter	6aaa5c335ccf791a9877ceff67da523abe1cf4a4	4	0	39	190		0
+208	claude/hister-fix-extractor-test-count	f01a9c7c1cedfcb13ee42e4fc741f6b0e8ef71bc	0	0	0	0		0
+209	codex-review-round7-2026-09-13	33325c93008f31b503a993c5f6be161f0d2f6c4a	-3	-3	33	123		0
+210	claude/round7-monorepo-fixes	67e8d93bf697db16d20d55ac2a2575f2d1151d85	-1	0	28	118	ts:1	0
+211	claude/multimodal-db-full-dbms-2026-09-14	35d6a3e891fdeded80f3ebe7541f3848846a3500	0	1	11	51		0
+212	claude/server-metrics-backup-2026-09-14	cc0989aec320a86de3e0f423818e7bf9be7f720e	1	0	23	56	py:3	0
+213	claude/round7-gap-closing-wave3-fixes	2b8dbc551aea1bd0a3455db3fe8276af15e49ba1	0	0	3	9		0
+214	claude/future-growth-doc-sync-2026-09-14	76ce46ab10a36a4f7193d14c59319901c610c5fb	0	0	0	0		0
+215	claude/schema-migration-design-2026-09-14	e4832883fd8f5b90c60f3303f46e4a87447a4de3	0	0	10	15		0
+216	claude/server-replication-design-2026-09-14	fe06d987a2087db63e5b92a4d199a0069e466917	0	0	9	34	py:3	0
+217	claude/server-filtered-page-design-2026-09-14	be59504262e98ce2f62b33a992ec2ba361ef7323	0	0	4	12	py:3	0
+218	claude/server-metrics-http-design-2026-09-15	b832b61e66a3287685d94ef7ff4aa98a6fec3bac	0	0	3	16		0
+219	claude/server-restore-design-2026-09-15	cd789d57314d352bbed6f3eb259a2c0728994510	0	-1	10	32		0
+220	claude/adr-0003-workspace-layout-2026-09-15	5e9c7b55a2f10296befed8f09113f23c0fef0b7f	0	0	0	0		0
+221	claude/adr-0003-codex-review-2026-09-15	97896e1ad95294c9d988f3970c3e036d6709b9fc	0	0	0	0		0
+222	claude/adr-0003-phase0a-2026-09-15	aa9e32b6a99ccb696503ccd5b10909989030e80a	0	0	0	0	py:4	0
+223	claude/adr-0003-phase0b-2026-09-15	0783ef859d48dd26358649c0e895b5e9d10921fe	0	0	0	0		0
+224	claude/adr-0003-phase1-2026-09-15	e35eeea94dcde6df462525db8a0565345383ec48	0	0	0	0	py:2	0
+225	claude/adr-0003-phase2-2026-09-15	8057961153e9b34119f9f0fb68c43935990d8d1d	0	0	0	0	sh:2	0
+226	claude/adr-0003-phase3-2026-09-15	0cead027ba8789d9101bc9449428e96bc944698c	0	0	0	0	js:4,mjs:4,ps1:6,py:22,sh:12,ts:28,tsx:26	0
+227	claude/adr-0003-phase4-2026-09-15	b5cf3a6ff0e9cd387f8e2facefd24c2ec1bc86c6	0	0	0	0	go:2,js:22,jsx:26,mjs:2,ps1:2,py:46,rb:2,sh:48,ts:2018,tsx:342	0
+228	adr-0003-mark-implemented	3df36daf10cf8d7b304c3860f6c30d4949a8d193	0	0	0	0		0
+229	baileyrd-patch-1	ccc84bca66a846fbd93e33b111258cdd34eed3d8	0	0	0	0		0
+230	docs/move-monorepo-reviews	7576902868ff5a734b99567506c6cfa5165b889c	0	0	0	0		0
+231	claude/lucid-brown-u235di	4382d566f0ecbf0f7512e493a499378973aa8944	0	0	0	0		0
+232	claude/atlas-dependents-list	bf9b68171bb3af200656a5176984578201ddc149	0	0	0	0		0
+233	codex/mvcc-design-spike	a5a49eb0b0db39add422c04cd4e00238bf4e1b10	0	0	6	16		0
+234	codex/mvcc-production	8997d2d78be0dac41d03377e7f72f521d3556d7e	-2	10	61	203		0
+235	claude/mvcc-entity-relation-tests	ac6732f0786b7141aaf61a5a0ae90f62ff9fdf89	0	0	0	0		0
+236	claude/mvcc-client-support	451bdd4a4893fb6caf1d4d6fc60e32f0c360ed49	0	0	2	4	py:1	0
+237	claude/mvcc-open-hook-design	1b01742bd8e488fcf6c366549bce6066573288ac	0	0	0	0		0
+238	claude/mvcc-open-hook-impl	fccffd62e44ffa077f2f9d524a2ceaa332a539a5	0	0	6	6		0
+239	claude/mvcc-dog-order-employee	e65237b395a58187412eee29bd5be6a625745b7b	-3	8	27	88		0
+240	claude/mvcc-nonjournaled-flush-fix	9e2abf4618c7a97683efba24418973bb43199dc2	0	1	0	30		0
+241	claude/mvcc-deployment-wiring	6c6f8dfc98064722f34a9c2211f1c13f1b235ab4	1	0	0	12		0
+242	claude/sql-planner-design	bcd3a4ec5d04cd62126fede189ae78958b6de01a	0	0	0	0		0
+243	claude/sql-planner-impl	6b84b1831d9e168ccbc0323f5b7077cf1ac7fa07	0	0	5	10		0
+244	claude/dependabot-npm	0692d961fa8283967261e4729f8b74853de14418	0	0	0	0		0
+245	claude/mvcc-docs-reconcile	3a8677e68c28a2503050fa3f976ffe782a204262	0	0	0	0		0
+247	claude/planner-consumers-design	9303544087c7e086fff7d6df77cd3ab9beee5405	0	0	0	0		0
+248	claude/dependabot-minor-only	23a5010ba8bb1f2f443716c0bc9ff53ef5562bf1	0	0	0	0		0
+249	claude/planner-consumers-impl	666febd75b204d9b5705a99c565660e1937e1563	0	0	3	6		0
+260	claude/ci-rusty-term-web	d53f34490fbacba3b330a0321010bb1636944c07	0	0	0	0		0
+261	claude/dependabot-vite-toolchain	903f056b13889b5fb3b086cccc68a34a73bc3a1a	0	0	0	0		0
+263	claude/fix-job-object-test	9bcf06e186eff3b0b8eebb4655cec134f9bbc154	0	0	0	0		0
+265	claude/term-web-manualchunks	8e28f853972c19ce31a768311793dc1e1da82fa4	0	0	0	0	ts:1	0
+273	claude/planner-range-design	5465cbeb73978e3db9e6263d3037b55fea0a0dd7	0	0	0	0		0
+274	claude/planner-range-impl	b134241c5653779a58d870e45715abd8b663ba9f	-1	0	12	31		0
+276	claude/planner-filtered-page-walk	3ce8888403e5875428dad1f754e8a08cbb98c6f9	0	0	8	20		0
+277	claude/pr-276-multimodal-db-growth-4lkjx8	908809d8436606707539d17b5333d362f0519b61	0	0	2	10		0
+278	claude/pr-276-multimodal-db-growth-4lkjx8	b771e6e433fa99db7adf0a9bcead26cf1932f5ed	0	0	2	7		0
+279	claude/pr-276-multimodal-db-growth-4lkjx8	ad17482ef7b0991973ce8ea98dc9482300726239	0	0	6	10		0
+280	claude/pr-276-multimodal-db-growth-4lkjx8	2e6d8efce9e35328610bdcff13d705d68898fb95	0	1	9	17		0
+281	claude/pr-276-multimodal-db-growth-4lkjx8	45309affeee39b4f34833ad068f291bc16a64e41	0	0	8	24		0
+282	claude/pr-276-multimodal-db-growth-4lkjx8	1e2149284d84cfa8562827a8f2a1ee84e74fc2bd	0	0	9	26		0
+283	claude/pr-276-multimodal-db-growth-4lkjx8	b32e73d059e501bb0904146d1d890995b03608d6	-1	0	2	2		0
+284	claude/pr-276-multimodal-db-growth-4lkjx8	4b89e923a4722a1a4f04043608863471eea41a33	0	0	0	5		0
+285	claude/pr-276-multimodal-db-growth-4lkjx8	954088d4ed14cb9d0ed35900b1a270300f0ee765	0	0	1	7		0
+286	claude/pr-276-multimodal-db-growth-4lkjx8	dd5879339f52943d9fc1e5c26839dfea71ecdcfd	1	0	4	31		0
+287	claude/pr-276-multimodal-db-growth-4lkjx8	3bd1ab093d513046b4419d00adbc23cddd949f93	0	0	7	10		0
+288	claude/pr-276-multimodal-db-growth-4lkjx8	9828ed688b0874a22044e738982f247852b861d6	0	0	2	3		0
+289	claude/pr-276-multimodal-db-growth-4lkjx8	5c72defa619834d7e441d914fae9b05941785cb0	3	5	13	60	py:3	0
+290	claude/pr-276-multimodal-db-growth-4lkjx8	e2efa15f73470cb1e07f93498cc79a69d770bbe6	2	0	2	27	py:1	0
+292	claude/pr-276-multimodal-db-growth-4lkjx8	46bb121e8e703d7f3ba805635e80776a81486d0b	0	0	4	9		0
+293	claude/pr-276-multimodal-db-growth-4lkjx8	3758e638e0e540b3a1a9b8f8f20286f0abb263c7	0	0	11	24		0
+294	claude/pr-276-multimodal-db-growth-4lkjx8	8130400cf6cc6d0671abcd2420967a5aec7e4f3d	4	0	4	16		0
+295	claude/pr-276-multimodal-db-growth-4lkjx8	70b73e4f1a10e6db41082a7fde1b4e83bc889ff1	0	0	0	0		0
+296	claude/pr-276-multimodal-db-growth-4lkjx8	0ca64fd669ed9a593fc3a39f0a4c056b5dd12ae6	0	0	2	6		0
+297	claude/pr-276-multimodal-db-growth-4lkjx8	6fa402a8fbdd63ca7a1e94b2cb5d926fa4002c74	0	0	6	21		0
+298	claude/pr-276-multimodal-db-growth-4lkjx8	b4db8b9d0c7d9d36c7ead808218a70704aea63b8	0	0	0	0		0
+299	claude/pr-276-multimodal-db-growth-4lkjx8	178b1758a1e5ab8813df91529c67be032fa3a308	0	0	1	3		0
+300	claude/pr-276-multimodal-db-growth-4lkjx8	b3d1d5b807cf34c0a72d02e9124afca59c9a0b57	0	0	0	0		0
+301	claude/pr-276-multimodal-db-growth-4lkjx8	ff8b43ba815141fd35a0f8b42f3a36e60395141d	0	0	0	0		0
+302	claude/pr-276-multimodal-db-growth-4lkjx8	b4447cf114a9b6caa90d4f5c46d7f884c2badc6a	0	0	2	5		0
+303	claude/pr-276-multimodal-db-growth-4lkjx8	95e71c215f40a714c619cb9ac035ba9ea6552b6f	0	0	0	0		0
+304	claude/pr-276-multimodal-db-growth-4lkjx8	3a3f2cc8ef5eac2092770341fd6d474e9fd3b8bf	0	0	3	11	py:2	0
+305	claude/pr-276-multimodal-db-growth-4lkjx8	6921a8fb7c893fa5eeb61a8b6d9ce7b03b54d891	0	0	1	6		0
+306	claude/pr-276-multimodal-db-growth-4lkjx8	258eb4b5729bb28c6edfdf95f7042b923025e5cf	0	0	0	0		0
+307	claude/pr-276-multimodal-db-growth-4lkjx8	bfe0f14cdf8a65ccf35ab7eff33e6c39174d358e	0	0	7	14		0
+308	claude/pr-276-multimodal-db-growth-4lkjx8	ab5d50ee500e9809982ee0366e5f5d9d78bb654f	0	0	0	0		0
+309	claude/pr-276-multimodal-db-growth-4lkjx8	bb49c030b3a29e7151e58a59abe2b76c54ec9b50	0	0	0	0		0
+310	claude/pr-276-multimodal-db-growth-4lkjx8	9c401e3001e62132953f4bd38fedbae7fb65b763	0	0	9	23		0
+311	claude/pr-276-multimodal-db-growth-4lkjx8	61cd6f7323c8d74b6bfe2c31ab30714c2e1bb6cc	0	0	5	10		0
+312	claude/pr-276-multimodal-db-growth-4lkjx8	1f5af03a0f8d3a2731dd8c3a6191d0db4adfaf62	0	0	3	6		0
+313	claude/pr-276-multimodal-db-growth-4lkjx8	1c4939a9ec74fdac3f03dd0ea3a01094ba0a80f5	0	0	1	7	py:1	0
+314	claude/pr-276-multimodal-db-growth-4lkjx8	95e0c69f0aec42dce91a1fac2615e261921cefdb	0	0	5	17	py:1	0
+315	claude/pr-276-multimodal-db-growth-4lkjx8	4b2807f21f6e03a3ec6cdc46391bf321d477e479	0	1	0	18		0
+316	claude/pr-276-multimodal-db-growth-4lkjx8	ea78c593c7909f5b532949bcd1ab7423c923c91f	-2	2	21	40		0
+317	claude/pr-276-multimodal-db-growth-4lkjx8	f5ed098da1b4427ebf650f4fab8bd39de53ae81f	0	-2	23	63	py:2,sh:1	0
+318	claude/pr-276-multimodal-db-growth-4lkjx8	de8f7b44abde7506c30b3dc197cfa612832d0ad8	0	0	0	0	sh:1	0
+319	claude/pr-276-multimodal-db-growth-4lkjx8	e7b7664342dcddaa6b3d43f55811ef298c048be2	2	0	13	70	py:1,sh:2	0
+320	claude/pr-276-multimodal-db-growth-4lkjx8	3878c642dc43778f5a54305def136dfbdf64eef9	0	0	2	6		0
+321	claude/keen-tesla-c8qhx6	ac865a2f18157a56e10e3e860c7339482eb12e2d	-12	-31	1264	3832	jsx:7,ps1:1,py:2,sh:7,sql:3	0
+322	claude/musing-ramanujan-8e236a	3ee8f70629e10f8e9dbaa57c844e38cb2c16881e	0	0	0	0		0
+324	claude/keen-tesla-c8qhx6	7669191fc6b922d61a229dd8fa7ba5ec533ad2a1	0	0	0	0	sh:1	0
+325	claude/keen-tesla-c8qhx6	14246c25a172dbf2f8e689461fb2cd43c4d1ce10	0	0	3	3		0
+326	claude/keen-tesla-c8qhx6	b282e4b0801883364336500e0a1faf05a3f10b0a	0	0	0	0		0
+327	claude/keen-tesla-c8qhx6	7b4e7514db0bb105891217430f9f6b74d192ed10	0	0	0	0		0
+328	claude/keen-tesla-c8qhx6	626fa65f9edc796182eecce5ba805ca84be6cc5a	0	0	3	4		0
+329	claude/keen-tesla-c8qhx6	6f8e1c2b293aeb1390f51279133fd28bea9b2617	-3	-2	66	118		0
+330	claude/sqlite-hub-seq-high-water	da727135d2e71d43271fe3d122027041fc3da425	0	0	2	3		0
+331	claude/keen-tesla-c8qhx6	d097336fe2a832dd67e6c2ff9ed8729f0e8596fa	-2	-5	52	126		0
+332	claude/keen-tesla-c8qhx6	72299199db775c31907c44d465beb04e98a9f686	-2	-3	71	82	sh:1	0
+333	claude/keen-tesla-c8qhx6	20dd550920f2a2835d370259b6217e32438a2698	4	-1	-56	-136	sh:1	0
+334	claude/keen-tesla-c8qhx6	8ea672584f751f22b7b46f775e4ff715e018e67f	-7	6	175	194	ps1:1,py:2,sh:3,sql:3	0
+335	claude/keen-tesla-c8qhx6	6df2a542272a9235570c7502abba623ffcaa1f3d	-5	-6	78	164		0
+336	claude/keen-tesla-c8qhx6	c7ab2868be5459a93b3728061d7f0599abe634be	0	-2	24	52		0
+337	claude/keen-tesla-c8qhx6	a84e2fc9290db1c289f552ab00c71740b984971f	0	11	27	121	py:1	0
+338	claude/keen-tesla-c8qhx6	36b905ea9dfd4a2f4bc7358833c47e9a29b98c50	0	3	9	16		0
+339	claude/keen-tesla-c8qhx6	2b6a2c58e56ea25371a404266f82297aad9f7a2a	-2	-1	40	62		0
+340	claude/keen-tesla-c8qhx6	28176631aea9a343ed5be5d334336ded2c1a11c2	-1	2	21	35		0
+341	claude/keen-tesla-c8qhx6	c51e7c3dd58776f13e1cb5e513818b4dfebcc841	0	0	5	5		0
+342	claude/keen-tesla-c8qhx6	9963425251ee93dd160dd7886347d686721cc1c5	0	3	14	26		0
+343	claude/keen-tesla-c8qhx6	0888beeb340d3085a5b7ce8068afa5886c7c26b3	0	0	14	21		0
+344	claude/keen-tesla-c8qhx6	d635779a5b047d1b37f65aa83c05b5c04cdb21de	0	1	11	14		0
+345	claude/keen-tesla-c8qhx6	0e30f5f7e2d5724567eda365ec814ffd4e99c3a4	-1	1	25	46		0
+346	claude/keen-tesla-c8qhx6	8000f3fca98cd1ade7897eeb6ee0127ef85052b1	-5	-5	89	170		0
+347	claude/keen-tesla-c8qhx6	e31aa4eb49bd1ea1d6d8d79ef834977d76f70ea1	-1	-1	12	14		0
+348	claude/keen-tesla-c8qhx6	5943342f60ee892f2136e980eb5829195f874154	0	0	5	12		0
+349	claude/fix-theme-hot-reload-race	ae588a4f43bb7ae5f10570f56a41b94d816c7f07	0	0	0	0		0
+350	claude/keen-tesla-c8qhx6	c8e68d45b32f9294aedbf4711c6bfcf07eada6b1	-1	3	25	54		0
+351	claude/keen-tesla-c8qhx6	d6be4db177e1d148cb53e2f8c1ad4ebb44292b77	0	0	14	28		0
+352	claude/keen-tesla-c8qhx6	14db481d83234270e2a89fa2d970e79c464b8ca7	-1	6	45	98		0
+353	claude/keen-tesla-c8qhx6	6d5fb984a56148016fc5433c26a1f4e462316113	1	2	20	49		0
+354	claude/keen-tesla-c8qhx6	3c9bd75e588d838d87fabddc30bcfefb23187e99	-3	2	51	121		0
+355	claude/keen-tesla-c8qhx6	ba5014447393d3b6a041d49f2453079ff113d86e	-2	7	52	125		0
+356	claude/keen-tesla-c8qhx6	8b2e1299fdc24e2f74d56e036fe36d6f8a4c1906	0	0	13	48		0
+357	claude/keen-tesla-c8qhx6	8906d126f51a07bd15f21bcb1b1ecf8556a7d409	0	0	29	85		0
+358	claude/keen-tesla-c8qhx6	2d02a63a1bd97b36ab513eb5b358c975017f25a7	0	0	-2	-6		0
+359	claude/keen-tesla-c8qhx6	6868d5aa50b13cd729b4c80d986d79c55e36dc2c	0	1	16	51		0
+360	claude/keen-tesla-c8qhx6	21ff54aa0c8d68e101d74c00fb75b473ee893bf5	-1	0	14	41		0
+361	claude/keen-tesla-c8qhx6	3c019365443dacdc55fba12750ad6708ccceac9e	0	-2	18	30		0
+362	claude/keen-tesla-c8qhx6	9df5d9f657652516951cfdac83c022439ad0feb0	0	0	7	18		0
+363	claude/keen-tesla-c8qhx6	f76811a19246fb0c8f97712028a7de42b7697c5b	0	0	0	0		0
+364	claude/keen-tesla-c8qhx6	f45edfb2135bb5659d696d5b1d9e9465063ab823	0	0	2	3		0
+365	claude/keen-tesla-c8qhx6	ab8db2681cced3cc614d40e44dc7b7771f1a800b	0	0	0	0		0
+366	claude/keen-tesla-c8qhx6	f0ef7e49aaa17fc88099a96c6cb96f0b0438bf61	-1	-1	17	39		0
+367	claude/keen-tesla-c8qhx6	6b4f4d9537b2356a3c8893663ca80da20d3b6d58	0	0	6	10		0
+368	claude/keen-tesla-c8qhx6	de0d305df58bd2cdb758ce4b2537b33669eb708f	0	0	3	7		0
+371	claude/keen-tesla-c8qhx6	8998d9b59c00d2aca882086919a10c0dfef85f32	0	0	0	1		0
+372	claude/keen-tesla-c8qhx6	9e6f4a1ad051af280e989dc43a76211c29d65dd7	0	0	2	6		0
+373	claude/keen-tesla-c8qhx6	9a1f48209729a74ea951b6f1ddffcaed902473c7	0	0	0	0		0
+374	claude/keen-tesla-c8qhx6	6fe4127c5666a4506c987a8119fd7a6cd399e7b8	0	0	0	0		0
+375	claude/keen-tesla-c8qhx6	bacd25e65b592fa19aff1cbdfb9db3e0aa7ec59d	0	0	2	7		0
+376	claude/keen-tesla-c8qhx6	7fb25e171696e9dd030849f28e51a60628b5caf5	0	0	11	28		0
+377	claude/keen-tesla-c8qhx6	bdc95e28053c01ace6526976695b428ab25348f9	0	0	0	1		0
+378	claude/keen-tesla-c8qhx6	07902b3a5776d5923a2929e00caaea549ac5b63d	0	0	0	0		0
+379	claude/keen-tesla-c8qhx6	fd9bc31a70f2ce063ffe000a25b360161908c50d	0	0	6	15		0
+380	claude/keen-tesla-c8qhx6	199438fb1f8d45411f0f02b5ac3010af523175f0	0	0	0	1		0
+381	fix/daemon-bounded-hello-read	d7ecb4390249431044324fbaf8331e04658de714	0	0	3	5		0
+383	claude/vibrant-hamilton-awpf6o	1e58e35a99639ad40ac2cf97427cbdf3d183a382	-3	-4	98	218		0
+384	claude/stoic-johnson-a2kv1t	6a49131d2ff10776be6e1b87ef3595093b37f045	0	0	8	18		0
+385	claude/stoic-johnson-a2kv1t	8764e215068a5087ee0c8317f25669e6374f092c	0	0	3	7		0
+386	claude/stoic-johnson-a2kv1t	6a910d70a42edd9007e861cce8e5e6a27abbff22	0	0	8	14		0
+387	claude/stoic-johnson-a2kv1t	fbb333fc7e00c957ec3313538f99320f8dd4ba02	-1	-2	22	43		0
+388	claude/vibrant-hamilton-awpf6o	3e8051f40c13b91a6fffad1f83259f77221b6887	0	1	80	205	js:2,ts:90,tsx:74	0
+389	claude/stoic-johnson-a2kv1t	c1e7314f7860e78d0fff27d51c4644f9af061b52	0	0	12	25		0
+393	claude/vibrant-hamilton-awpf6o	0c2b294ab27c9d563a06659a905796685bc0a7b5	0	0	0	0	ts:6,tsx:2	0
+394	claude/stoic-johnson-a2kv1t	2229add05e56ca2e78aa5d0c8e7b758d10808f8f	0	0	1	16		0
+395	claude/vibrant-hamilton-awpf6o	fe4c25916c55beea0d7c6bc5edaac450545b88ff	0	0	0	0	ts:3,tsx:2	0
+396	claude/stoic-johnson-a2kv1t	76f8f32d2a49b566acf462f9932f3dcbb8eba494	0	0	2	9		0
+397	claude/vibrant-hamilton-awpf6o	b8706004f02446013b990f1771b45637b93f8e65	0	0	0	0	ts:5,tsx:6	0
+398	claude/stoic-johnson-a2kv1t	988369afe223e6ab99d909a33e4a499b03cdaa90	8	-5	153	403	py:2	0
+399	claude/vibrant-hamilton-awpf6o	bb2aaae102e8eba03dc72a65e4dd18769d46f510	0	0	0	0	mjs:1,ts:3,tsx:1	0
+400	claude/vibrant-hamilton-awpf6o	3281acb4a08523b873e17fade732520cf2e74a89	0	0	0	0	ts:8,tsx:9	0
+401	claude/vibrant-hamilton-awpf6o	59ce1cd941152e909e5427138935f20c978541c2	0	0	0	0	ts:1,tsx:11	0
+402	claude/vibrant-hamilton-awpf6o	eded76a157b0a7848226c923e30a2d8c3b02e37a	0	0	0	0	tsx:3	0
+403	claude/vibrant-hamilton-awpf6o	44b8c32027f7ebd9a6864ce7162a4b1df15da0a4	0	0	0	0	ts:2,tsx:15	0
+404	claude/vibrant-hamilton-awpf6o	91a05b59588a63bd7b106ff905344fb9a24fc024	0	0	0	0	tsx:7	0
+405	claude/stoic-johnson-a2kv1t	40891065c17f863e723ff775c3b4b28e8b5367ee	0	0	0	0		0
+406	claude/vibrant-hamilton-awpf6o	0d4a7ddf661524c1ad75e93771f91b062c83bac3	0	0	0	0	tsx:9	0
+407	claude/vibrant-hamilton-awpf6o	06a810bf8f7af5dddc15553d9fb143c1f27a2e4d	0	0	0	0	tsx:1	0
+409	claude/peaceful-brown-r44bh2	0e4cd2bf51554f8655514ba70dbaea23d4e68e50	0	0	1	6		0
+410	claude/vibrant-hamilton-awpf6o	3a08dbc56576cfbe6b4cba9b5af078a8f1050f8b	0	0	0	0	ts:4,tsx:7	0
+412	claude/peaceful-brown-r44bh2-t2	eedff5a9c2fb25dc347441a1b9d5e30695705471	0	-2	37	82		0
+413	claude/stoic-johnson-a2kv1t	f0d95b17e25fa6c9fc1b2b32fef42898f905ddeb	0	-1	8	23		0
+414	claude/vibrant-hamilton-awpf6o	e8ec6cab665e19e0243013a6d06e90729af64dd4	0	0	1	2	ts:2	0
+416	claude/vibrant-hamilton-awpf6o	71f00250a083ba6057c359e2598f52c747ee44a7	0	0	2	2	ts:2	0
+417	claude/vibrant-hamilton-awpf6o	43676c6df89a6ab5b1c503cdf6f9cc0018f2a5d6	0	0	0	0	ts:5,tsx:4	0
+419	claude/peaceful-brown-r44bh2-t3	d043271365d7dfbd3e037a0e0bca4f10415ef973	0	-5	29	107		0
+420	fix/tick-web-quickadd-case-clash	3da295e2813362a9bbacc7f36f2d8305ba18afc3	0	0	0	0	ts:4,tsx:2	0
+421	claude/stoic-johnson-a2kv1t	d89200dfd65a1b2d0a892fb092374ef1e75984e7	0	0	0	0		0
+423	claude/peaceful-brown-r44bh2-t4	625b3db1c9aaea5122a87bdcc8c571207b3a696f	-4	-4	34	11		0
+424	claude/stoic-johnson-a2kv1t	4614ba937152fd02c27e7a5121d51b9c20e458b7	-2	-2	37	101	py:2	0
+425	claude/peaceful-brown-r44bh2-fetch-update	4017ff824461f48213f873c4d905d306f0123b04	0	0	0	6		0
+426	claude/peaceful-brown-r44bh2-rush-merge	e8c121a2a75ddbf2baada8d127d23e48db7f378f	-5	-41	-218	-845		0
+429	import/rusty_orch	ab2ef435d9e51b8a32a93b66c67007baef6a12e7	-3	0	58	113		0
+430	claude/gallant-brown-4mgjel	35529081f6a963c514d41141ebf6d032ad7feae8	-1	-1	29	57		0
+431	claude/peaceful-brown-r44bh2-t5	bd3ee9fee901bb1ff0b41be946f24bb5014f4395	-7	-6	87	142		0
+432	claude/gallant-brown-4mgjel	9feca0514fb54d47d3e4ba81180ad646c91ee0c7	-2	-3	28	73		0
+433	claude/peaceful-brown-r44bh2-engine-insert	fda50445a8e73a261ebc954dc565af0d4bb8d740	0	0	8	14		0
+434	claude/gallant-brown-4mgjel	7e6e852ae3eb595ce3d7fbef1dcedd0ee9842155	1	0	1	6		0
+435	claude/peaceful-brown-r44bh2-drop-rusqlite	454aee8b90aaaed5d6c8415ac76658e0bff0ef49	-10	13	-482	-1297		0
+436	claude/gallant-brown-4mgjel	3a2dce2051d1c6b678b716b9853b0cc1ef8bc3fd	0	0	6	15		0
+443	claude/gallant-brown-4mgjel	8e71ca6b4a5e562bdb5524fd48f83fdfe13977cf	-1	0	29	54		0
+444	claude/peaceful-brown-r44bh2-nexus-push	aa9d1e9759ef9e077d6f3aaf16a6121ac9934e70	0	0	9	22		0
+449	claude/gallant-brown-4mgjel	f7b349bd383a2173c226c4aaeaeb771be026364d	0	0	1	6		0
+450	fix/issue-446-atomic-collision	ec1b028faeaf00a862389b50c8378395fd13e109	0	0	3	9		0
+451	fix/447-line-cap	eb04ffdf614a4868459fbde336620f0de856b33e	0	0	0	1		0
+452	claude/gallant-brown-4mgjel	10979181d896e8dcb27d69a2abbac891ac2410c1	0	0	0	0		0
+453	fix/439-live-successor-refs	66352349fcf5c52f066c62868c56161ede2be762	0	0	1	2		0
+454	fix/440-unsupported-role	c39dd710964348a9f29d08e00f549cce9433fcca	0	0	5	13		0
+455	fix/411-atomic-trash	590610ffc1e039cb97d039406e88c507e14d9a2e	-1	-2	7	44		0
+456	claude/peaceful-brown-r44bh2-tick-trash	4f0c96034296ac5b07ba83837e2e474471d430ba	0	0	0	5		0
+457	fix/418-jinja-quoted-delimiters	34aa3f0bbee250e771af4021f173c89d6e17563f	1	0	0	3		0
+458	claude/gallant-brown-4mgjel	45e3d327f2446b33125e826e306421206ead8455	0	0	8	15		0
+459	fix/428-baseline-platforms	d24664b426a90ecc2932730e656ba5adc414c87b	1	0	3	21		0
+460	docs/445-sync-contract	8d56a28eb6f14d857b2b4aa40361b31bd87a8a23	0	0	0	0	py:1	0
+461	docs/418-rusty-rdp-rustdoc-link	a513ce9b1fce2ca8fdd6c0fc20ec54f5cf1be1e1	0	0	0	0		0
+462	fix/418-rusty-rdp-rustdoc-link	39262db4067ecfdc162bc19885148523642b50c8	0	0	0	0		0
+463	fix/411-async-pidfd-signaling	7138b6b2013a0727e43fa678a0efb01bbb2ddcee	0	0	6	19		0
+464	cleanup/418-rusty-h2-dormant-source	5fcfbe33100b48a0fea0f43048cb474151dbb4c5	0	0	-12	-28		0
+465	fix/418-kafka-connect-timeout	31f32948671004380acde1409f199f60c971b9cd	0	0	1	1		0
+466	refactor/411-spinlock-authority	d297831230519e59ebf26c41896269239576d71b	0	-1	0	-1		0
+467	claude/gallant-brown-4mgjel	d1fd3b689ee16e132fbdc4058509a34021529653	-3	-3	45	178		0
+468	chore/dependabot-cargo-security-root	a05ab037dbf9d24ab89b5c6ac12889dcb7361132	0	0	0	0		0
+470	security/nexus-rmcp-upgrade	5967e71af1da9baa55bfaa256b78c0e007d60577	0	0	0	0		0
+471	claude/gallant-brown-4mgjel	347393945796b7f85b5bd1e78f744f9093fbe7fa	0	0	36	106		0
+472	claude/epic-davinci-bv4mrk	06fdde310d96d0d737c6e5ae12ac5b006e02dc0b	-4	-4	78	148	tsx:1	0
+474	claude/rusty-tick-week-test	1ab192e292002b887e41713150ee2890d0959d4e	0	0	0	0		0
+475	claude/gallant-brown-4mgjel	5b86564132bbfea5c901d211d31963e74c311929	0	0	4	9		0
+476	claude/epic-davinci-bv4mrk	beecb5e7b310b803b4f2c6b2dd05091c6951bf30	-5	-9	94	234	py:5	0
+477	claude/gallant-brown-4mgjel	588bdb0196e606dde93091cc7b7bf1735b0a7189	0	1	21	49		0
+478	claude/epic-davinci-bv4mrk	469c4bb60694ce5537f1bd222c81dcb75368227a	-6	-9	99	255	py:1	0
+481	claude/new-session-k1frjo	9c69dc44a223dcf5b576346c539d6c02f754eaca	-9	3	177	374	py:1	0
+482	claude/fair-play-frontend	c36d1b54740a2f8280e655580e9b50a6aca1dc2c	0	5	87	203	js:2,ts:27,tsx:30	0
+483	claude/epic-davinci-bv4mrk	1e2da106cc32505eb257ae25cabb8551a2c02bde	-4	-11	101	214		0
+484	claude/new-session-k1frjo	69fc7bdd4fbe4c6fdb8e79f24d2bff070c0ca4cf	0	0	6	9	ts:17,tsx:8	0
+485	claude/epic-davinci-bv4mrk	6f0361dd86be8cc6c405b83b1005eac77c9e80ec	-1	-2	32	72		0
+491	claude/intelligent-cori-u4ceia	5c849353e5e9bf96bedaecf68e57caa34d88d165	0	-26	190	281	sh:5,sql:2	0
+492	fix/418-jinja-render-budgets	3ccdbae9e97c24d1dd901af051e3cb0ab2087dd3	0	-1	14	36		0
+493	codex/fair-play-conflict-drafts	cfab1ebc118d687eb2e9c88a1177cd7bc32df1e6	0	0	0	0	tsx:2	0
+494	codex/fair-play-correctness-fixes	256a29ba839832d2e295696908b3d39c7eea2b5a	0	0	2	12		0
+495	claude/new-session-k1frjo	27c454b26c0129cd11ad081eaf4fdecdacab43da	0	0	7	24	ts:11,tsx:6	0
+496	codex/445-memory-contract-evidence	a432a56258d14967146088286fa5ed5b0d64bf51	0	0	0	0	py:1	0
+497	fix/418-shared-admission	99d41507737523d1e5412a2545c4825f1fb45701	0	0	-2	-4		0
+498	codex/rusty-mcp-protocol-client	54930b7de96952842a617a26f6a4938b71af7a29	0	0	0	0		0
+499	codex/windows-session-survival-regression	9e8ceb445ef8cbbe24f005700ca27efe7a1c70a1	0	0	0	0		0
+500	codex/nexus-mcp-rusty-mcp-step1	1d4d6d2b8a8197b29b6b2e934d85be60fe4874e7	0	0	2	6		0
+501	codex/ci-sweep-scheduling	ac7f88f261f517f3cf7d33091d8d490104b5ba0b	0	0	0	0	py:5	0
+502	codex/memory-sync-evidence-refresh	af166904be0bf8cf1903879196276b45ec0d5e71	0	0	0	0	py:1	0
+503	codex/remind-legacy-import-cleanup-beast	a9d80b7e3f7e7d90fb2092d74b379336292b58bc	0	0	0	0	py:2	0
+504	claude/epic-davinci-bv4mrk	4c260e65ee760e3bd5e1cd98d1fb682c92c69a4c	-1	-1	23	42		0
+505	claude/gallant-brown-4mgjel	3bedb7e049be6cf5bc5ccc9b99a9c4b803cd97f4	0	0	0	0		0
+506	claude/new-session-k1frjo	e76d69707b5b5ea793fe5d1b646590986465f902	0	0	0	0	js:1,tsx:1	0
+507	claude/epic-davinci-bv4mrk	e327fa1df32957adfceb082d3729390d07aea4b1	0	0	1	5		0
+508	claude/gallant-brown-4mgjel	894d0aa6635183c894de395e7db4d8138cb86a20	0	0	0	0		0
+509	claude/epic-davinci-bv4mrk	fdecf86294909d49239e114074cbf61cf6d2c8ed	0	0	0	0		0
+510	codex/264-windows-reliability-main-beast	dab8499d034c5ccc61182f3c9c40ef23f4157bb1	0	0	0	0	py:6	0
+511	claude/epic-davinci-bv4mrk	6ce90a939d94ac40a6bc9144b7b893b4a0777f5d	0	0	0	0		0
+512	claude/focused-dijkstra-2nl8uo	f7b0afbb0098ffe24bb211318fd9673fe5febbec	6	-3	132	452		0
+513	claude/focused-dijkstra-2nl8uo	28665c48e4d5f30f9702451d2324f170d5b634c8	0	0	0	0		0
+514	codex/418-ssrf-conformance-beast	c7e26ecb842c9bd1bc104f8370076b08b3b6d6e3	-3	0	1	-20		0
+515	claude/focused-dijkstra-2nl8uo	9a4953e8230cbe5f7fdd2fbc7f616c2111c04a53	-2	-6	83	215	py:2,ts:20,tsx:6	0
+516	claude/affectionate-fermi-farqxb	aab093c9f16e87b36315e7211f01a1a701417588	0	0	0	0	ts:14,tsx:9	0
+517	codex/428-baseline-exit-status-beast	6e4f74a04f4eb4b74fecc0b4752f4fb8a5459a67	0	0	6	20	py:1	0
+520	claude/affectionate-fermi-farqxb	16fdcb7bf103b02ccea3923752f5d723bac0c07c	0	0	0	2	ts:23,tsx:17	0
+521	claude/focused-dijkstra-2nl8uo	8c8dd645e51114c92dd4654b251d65565eae04b0	0	0	13	20		0
+524	claude/focused-dijkstra-2nl8uo	66eb5138bb648d5ae8a74b9bc9a982aa1bf697cd	-4	-3	106	254	ts:13,tsx:2	0
+525	claude/affectionate-fermi-farqxb	b8a4a93175a53d322c0dabd18beee6b79cdf172d	1	-2	14	69	ts:26,tsx:14	0
+526	claude/new-session-cihrd9	4409d5a396cd13605e2a72c2287dc19e6bfb54fd	0	0	5	0		0
+527	claude/new-session-cihrd9	40354d34f0d75b63d40105b14ec7928af7f4aaef	2	-3	-1	-79		0
+530	claude/affectionate-fermi-farqxb	28d8eb736ba95ac65a37dc439c3951a953708dec	0	0	0	0	ts:8,tsx:3	0
+531	claude/focused-dijkstra-2nl8uo	4f286eb761f9f281c6171ee2de7793167f4effae	0	1	-19	-52		0
+534	claude/focused-dijkstra-2nl8uo	3cd56635350602a0bd74191c45cf5e3d2f1ecd7a	0	0	0	0	mjs:1,ts:1,tsx:2	0
+535	claude/new-session-cihrd9	baf76b9648a40561f3d98b6b1f6ecd8552bc944f	-2	-5	42	91		0
+536	claude/focused-dijkstra-2nl8uo	03ac209db8bf02e4a67858ead038362a75ca9922	0	0	0	0	mjs:1,ts:1,tsx:1	0
+537	codex/tailwind-v4-ci-local	4506e96bedd504cc0749b3ff33745058dfdb1038	0	0	0	0	js:2,mjs:2,ts:3,tsx:42	0
+538	codex/479-nexus-stdio-cli	79628ed36ad3d8118ea39ec61c77efbcc2342085	0	0	-1	-4		0
+539	claude/peaceful-dirac-200syz	a402fff051ce78ed6a56c731f2b9a6811d28730d	3	-9	-11	-99		0
+540	claude/bold-hypatia-i6nvo6	f490b3a0ef1be38dd12a2a293c5a01f343b485b1	-8	-4	159	345	py:13,sh:8	0
+541	claude/adoring-lovelace-ovifyu	9895fed1907b7be3404e7cb219d2020796190476	-4	-27	525	1396	cpp:1,h:1,ps1:1,py:32,sh:1	0
+542	claude/rusty-bbp-core	97944bc28ff117f844a85a0da189acf06f91821d	11	-9	89	412		0
+543	claude/wizardly-fermat-hc57tf	c030b472aac00436e43373253bc64069be325d8a	0	0	0	0	py:2	0
+544	claude/adoring-lovelace-ovifyu-rleval	b0151aa35a617e5809509f33f8043a40366fca79	14	-34	815	2920	js:2,ps1:2,py:21,sh:2	0
+545	claude/rusty-bbp-stage2	adac03446ec284d393268470e63ad2221acf1a91	-1	0	18	35		0
+546	claude/adoring-lovelace-ovifyu-rleval-ci	59441db558c73d41b799427c6ea98e83db0d02e3	0	0	0	0	py:2	0
+547	claude/rusty-bbp-boundary	59ef0bcc19a3e927c1b69693760a46b2e7589e8b	0	0	5	22		0
+548	claude/rusty-bbp-stage3a	3722af975003982c2b063c09f34611b54a1f39c3	-1	-3	50	144		0
+549	claude/rusty-bbp-stage3b	c9ac17f478b24b219552b55d5dd1f84b5969f5a3	0	-2	18	49		0
+550	claude/rp-core-rate-limit-clock	0ea7cc1732c44f674da80f4f9f8bd7cff08ec4f7	0	0	1	1		0
+551	claude/rusty-ttf-parser	a4bf7ccdda1d3e54d1ea32448f4d41ee55d5a951	-2	-1	77	151		0
+552	claude/adoring-lovelace-ovifyu	cfd37bac198ac12c20345043979a142cf6e32649	3	-2	16	76		0
+553	claude/ci-windows-protoc	68f1fa756c1df1e727616cb534d285cb50630770	0	0	0	0		0
+554	claude/rusty-bbp-stage3c	f42e7ea4eaf359230e6f90be6e473594e67efa5c	1	-1	21	67		0
+555	claude/rb-env-match-flow-review-fixes	b371461eb17ff60748d75cef079d7323f4b42811	0	0	3	12		0
+556	claude/rusty-bullet-funny-clarke-import	617eaaba8370c0be31df3c43ce863359a3b42fe9	0	0	0	0		0
+557	claude/rusty-bbp-candidate-turn	93dd461460cb4b8df7ac4317216e8accaf6e4431	0	0	0	0		0
+558	claude/rl-source-frozen	2b46d112b2b064cd13df4a7efe29fe3d0f373a18	0	0	0	0		0
+559	claude/rlbot-native-port-plan	5e044be4fcc4d4c82c95a5d7a01433e539040344	0	0	0	0		0
+560	claude/rusty-bbp-task-filenames	eb1b317972d2c04ebce021a89a56b117b2029baa	0	0	1	1		0
+561	claude/rustls-pki-types-migration	c1d5d6b83ba489beb77950f7f5c47520002e803e	0	0	1	3		0
+562	claude/rusty-flatbuffers	6bfcc7cf6256d3a02d5ddcdfb3acda6b4fc0b601	-2	-1	43	74		0
+566	claude/rusty-bbp-design-record	3423aea0ec16ee27299fbf041a40beb2a54721c7	0	0	0	0		0
+567	claude/rp-server-usage-history-flake	942d4c5b7d59423bf6b1bcc50c8a5c624c224799	0	0	0	0		0
+568	claude/workspace-dep-inheritance	9db18a0e5dd8a46868e6e45fa659e6666385f525	0	0	0	0		0
+569	claude/ci-fmt-gate-sccache-trial	b0d66ba3dfae2d23db5cd01dcc4d6b392d71a8cc	0	0	0	0	py:1	0
+570	claude/cargo-shear-unused-deps	37bfd368f208136768898203fa77e41fd36c5be1	0	0	0	0	py:2	0
+571	claude/merge-queue	ebb6bf4445569e0cf4b9c61079cf03e757f5595f	0	0	0	0	py:2	0
+572	claude/adoring-cori-x573kc	8d1f31104ada833e7cfb154d71d0a58189820035	13	3	230	855	py:4,sh:2	0
+574	claude/revert-sccache-trial	66518297a733dba3a517e57159f003f49fdf819b	0	0	0	0	py:1	0
+575	claude/deny-bincode	9f731e7a2dbd69b4d0644cd6aaab31f77a118b60	0	0	0	0	py:1	0
+576	claude/bold-hypatia-i6nvo6	99f16e4aa8b321085ba854c0c610d94062c71815	0	-1	37	74	py:2,sh:2	0
+577	claude/relaxed-galileo-bs7xas	5351e528eaeec3fe11a76d5e7819d92f2fbe0d9b	-18	-10	664	1382		0
+578	claude/rb-rlbot-wire	226ff2c19be4e1720989cdd5160cd90d71c134e1	-3	3	106	140		0
+579	claude/rusty-bbp-host-status	7dc076f0aa60857df218e93da8ca06ba3082666f	0	0	0	0		0
+580	claude/bump-wnaf	9aeaf50464aa1d81bef511cb3f6375188831df1d	0	0	0	0		0
+581	claude/beautiful-cori-2go4co	ba3f17710e63aad00a9a9775041af561f39e7c44	0	0	0	0		0
+582	claude/shear-rk-observe	5680f82002e107fbc29050417ba526f8ab552192	0	0	0	0		0
+583	claude/rusty-bbp-proving-run-fixes	5b32bd3b5b3385050591ad46395e6aeae2447a7c	0	0	0	0		0
+584	claude/rusty-bbp-proving-run-fixes-2	cce2e59cdc3d0ba1def3d8332b7f215ba0055695	0	0	0	0		0
+585	claude/rb-rlbot-client	90b95635174ea93249fa5da79b3eb7d299e9cc8f	0	0	24	64		0
+586	claude/peaceful-dirac-200syz	b07a8359c281cd59d210833518613f99fc99e15b	0	0	0	0		0
+587	claude/adoring-cori-x573kc	c324623264f4bb8bc0ab6f6f156e4ca0870569a4	-2	0	24	77		0
+588	claude/change-fragments	554852f37305073814ce5d47b1a0ef422a90f64b	0	0	0	0	py:2	0
+589	claude/peaceful-dirac-200syz	410b6ea2f8928e629ebc97532fa383a294a25c8a	0	0	4	13		0
+590	claude/bbp-proving-run-record-2026-10-09	2a5d7fb7f528b18e5e6e71e319d4df0bf9bdaa9a	0	0	0	0		0
+591	claude/rb-tape-bot-port	76d2453d5e148507a853b272d38d36e90bcfc9a2	0	0	-1	-4		0
+592	claude/rb-rlbot-bridge	b605aa340ac77b1259f663a34452a6c396aa9868	0	0	9	14		0
+593	claude/bold-hypatia-i6nvo6	8f51959046676c008230c34a73372476bc6f3e29	0	0	0	0	py:2	0
+594	claude/peaceful-dirac-200syz	9ba7a815f7c696e825e44fa5c14d4ec33b2dab0e	6	1	-138	-221	sh:1	0
+595	claude/bbp-sandbox-cargo	ee4d0a95fdeb55a8aa0c8375fa60b1986d056fe6	1	0	6	26		0
+596	claude/bbp-proving-prompts	a5262d4e0d8974aa1fda2d31089b1b12fdf6e18a	0	0	0	0		0
+597	claude/bbp-proving-recovery	0c01ad777044dd6c1be90ae94caff06626afbcf1	0	0	0	0		0
+598	claude/peaceful-dirac-200syz	dcaf76e34b2dd9b5b3dc09becc06ade052d4bc80	0	0	0	0		0
+599	claude/bbp-proving-recovery-2	5f4593eadf9eb360c4528ffa7ec22ce532d8efb9	0	0	0	0		0
+600	claude/bold-hypatia-i6nvo6	8a559b9d710518b224f2b8ba919ea04882b10dab	-2	0	31	79		0
+601	claude/bbp-proving-recovery-3	3b941642eb7396925439aa777d360275a2e5a364	0	0	0	0		0
+602	claude/relaxed-galileo-bs7xas	5e72789822cde0d502463686e2dbe0eb3d4313ee	0	0	13	23		0
+604	claude/orch-bbp-adr	86c643b412ac4027a6b80e701bb1e3c0df2ee6c2	0	0	0	0		0
+605	claude/orch-bbp-adr-2	7db01e7eb7816184ffec5adc052cb5e36ef8c57a	0	0	0	0		0
+607	claude/adoring-cori-x573kc	515a508f55103300281f2194b914bf6129cbe345	0	0	0	0	py:3,sh:1	0
+608	claude/rb-client-io-context	2b7a66590b1e765ccdf6ad61e04cd6f862d6e2fd	0	0	4	10		0
+609	claude/rb-chaser-bot	96f0815f59bb2b52d489b0b7101aa1c7db0bcea5	0	0	2	2		0
+610	claude/adoring-cori-x573kc	614de82d0a20db73384ee254d9bbb270d0405273	0	0	1	8	py:3,sh:1	0
+611	claude/rb-chaser-bot-checked	7617acfacf10bc5538a7f44ade4e3625e69ebe98	0	0	0	0		0
+612	claude/rb-chaser-bot-orange	ab5585ab11f0afc101f0a1aebd1e705048ce7251	0	0	0	0		0
+613	claude/rleval-evaluator-design	3ee7e717a1fe7bcc07d3401117d219bb123bcd85	0	0	0	0		0
+614	claude/rl-server-research	906de9c9439df2c214e10143603d42bbe5380759	0	0	0	0		0
+615	claude/parity-verify	31d0f2a8b71cf31e356b1e7a160802aaaf40f8de	0	0	0	0		0
+616	claude/rusty-mcp-item3-jwks-on-rusty-request	12a14d95f2dcfd15e263e40e1c2c749d6e8a73a0	0	0	0	1		0
+617	claude/parity-pass2	a9a60733c7eacb98b2c2f66485cc11acfc34dcf2	0	0	0	0		0
+618	claude/parity-scripts	1fe1f5f5dea49df82865f4894a0aad58f18bc9a9	0	0	0	0	py:1	0
+619	claude/parity-scripts	0ee3e7fc232b7791cd3e098788f29d80a6b2bb62	0	0	0	0	py:2	0
+620	claude/rlbot-port-scope	963925aeb52e1dfa20c111cea3491b452c698ca9	0	0	0	0		0
+621	claude/rlbot-wire-server-msgs	12a14d95f2dcfd15e263e40e1c2c749d6e8a73a0	0	0	0	1		0
+622	claude/rusty-mcp-item4-jwt-on-rusty-oauth	57ec7632ef3fae5e67c4bd7f265aca48201e10f1	0	-2	10	29		0
+623	claude/rusty-bullet-rlbot-core-and-game-bridge	1f56def2da430407848c832b076c55cf73facff8	4	-12	178	601		0
+624	claude/rlbot-core-hardening	eb9052fb93d2bed30a30448afafd134bcd62ddc1	0	0	3	22		0
+625	local/ammonia-4.1.7	2663cbc2ca471475c87eb28397e1d27d2dfdca5e	0	0	0	0		0
+626	claude/game-link-state-faults	f109d29de034798cd6fcfef597c5b07b19a2fa05	0	0	1	8		0
+627	claude/game-tag-census	e0d17defa04aeea849537374580a14531be0f449	0	0	9	24		0
+628	claude/adoring-cori-x573kc	e67fd6c141e8046f62b22b0032fdb16b4cd09ef2	0	0	0	-1		0
+629	claude/distribute-live-cars	e1eb69965aaa0466eec39aced404e9053b35b9ea	0	0	0	3		0
+630	claude/rusty-oauth-rsa-key-bounds	5fefe3398d999a2d5a9079d8e652a85da7bf359c	0	0	1	9		0
+631	claude/held-without-packets	6693163332d540cc8035e60dcab9f86ac505470c	0	0	0	2		0
+632	claude/held-test-hardening	2719a8fe404a8226ba6a6f3c16e24fdad67257ea	0	0	0	0		0
+633	claude/rusty-oauth-numericdate	7cdae127b8d2b5445279e0cc16162d4686c13162	0	0	3	6		0
+634	claude/rl-live-test-tooling	28b4aa09cf6d919f02f227f1f9965eb412b7026a	0	0	5	26	ps1:2	0
+635	claude/rusty-mcp-use-oauth-rsa-bounds	4be0744fc609831c85763fa94aa09e26e9f0dcc1	0	0	1	-5		0
+636	claude/adoring-lovelace-ovifyu	c23c3c41d4ceb48134b519a95a23049418adc26c	0	0	0	-1		0
+637	fix/pr634-live-test-safety	d63d35a0a10e8b8ca0e1e3741a5a5e80caa973c9	0	0	1	1	ps1:4	0
+638	claude/bbp-event-driven-note	4ca6dcac98b56d9cc91950435f4308b48c0c501a	0	0	0	0		0
+639	claude/bbp-concurrency-note	36d04cd7835df3d09c00228bd00dbfe3a98ff260	0	0	0	0		0
+640	claude/adoring-lovelace-ovifyu	bcd4825135919dddd12a456dba45b9023b35357f	0	0	0	0		0
+641	claude/quirky-maxwell-7byzad	f2920acd7dc03739bc8754e0dc80421795ff78d5	0	0	0	0	py:2,ts:1,tsx:1	0
+642	claude/bots-port-first	8d970a2fa552e222a5f3c843220060490ecc0294	0	0	2	2		0
+643	claude/bbp-role-audit	004af3890b9663c1fa509c8f78ff94c687412b40	0	0	0	0		0
+644	claude/bbp-spec-v0-5	479775240d536afcdce2d4004b5c8b72730abc74	0	0	0	0		0
+645	claude/bbp-roles-as-data	c03318c76328d74bf404ac3eea7205d6e7aa61f2	0	-2	29	81		0
+647	claude/core-agent-hardening	0040280cf42b6b3fe848e4cb5e30a763312bac8c	0	0	3	7		0
+648	claude/quirky-maxwell-7byzad	e501b19f51999576d2e00ce96fd78901712f1677	0	0	0	0	py:2,ts:1,tsx:1	0
+649	claude/long-run-counters	228ca046dfa74e86db11a6bf2b28537882f8cf42	0	0	0	2		0
+650	claude/long-run-counters-followup	e2605657156abd3fc5273b23bab0a2cba11d33c4	0	0	0	0		0
+651	claude/bold-hypatia-i6nvo6	6d0645352a202adbb1457a622ab6c7c7c9cb2685	1	0	-2	-1	py:2,sh:2	0
+652	claude/adoring-cori-x573kc	85d95a615462a522f44f0255c49e6aca343448cd	0	0	0	1		0
+653	claude/runner-scrub	6d0645352a202adbb1457a622ab6c7c7c9cb2685	1	0	-2	-1	py:2,sh:2	0
+654	claude/bbp-phase1-note-update	061b603fdb692d2186ddc69412ee9d46552777ba	0	0	0	0		0
+655	claude/bbp-wake-set	08763a0aaf03460c93a82933540910154f8375aa	0	0	7	28		0
+656	claude/ecstatic-archimedes-64bnhp	362b56b5046fc63191ceee94e9dbd1de48c85071	-7	-9	171	389		0
+657	claude/exciting-davinci-gmy0ay	a5cd9d52559ba735b7d3690906107a1034ef0097	2	-2	22	91		0
+658	claude/bbp-host-abort-turn	28cfe87c464f559f6e6d9b085b535f100689d7f4	0	0	0	2		0
+659	claude/quirky-maxwell-7byzad	851b93fa4d7da28edd1a4ce342507fb6ed0b1989	0	0	0	0	py:1	0
+660	claude/bbp-host-harness-per-turn	c0689a4d3bb2766ccb33e1a7d4c178d425506bcf	0	0	2	4		0
+661	claude/bbp-2b-gate-criteria	bc8e586231055b3132accb8cdbe47666c7077e36	0	0	0	0		0
+662	claude/bbp-metrics	0497629d863c90d12a0191cb35e29d99eb64fa0b	1	-1	6	38		0
+663	claude/bbp-note-shadow-fix	f3d03a936e7d9497b5ef315a5be8b30755aef689	0	0	0	0		0
+664	claude/bbp-2b-criteria-revision	6904d5acdf67702df18bde16f214596577b9e76e	0	0	0	0		0
+665	claude/rusty-mcp-jwks-body-cap	45824a55e3f4a3ff0e11d599ce753bcb4d0ece52	0	0	2	2		0
+666	claude/game-peer-check	41bc65bce22b19efce6350ffd4485da0c673acfc	0	0	5	32	ps1:1	0
+667	claude/bbp-scheduling-seam	4c2d8459b97a76036b4681d0660b0be48aadc309	0	0	2	2		0
+668	claude/quirky-maxwell-7byzad	967ef9d0e179ff3671aa975ca4c06ff78e5cc180	0	0	0	0	ts:1,tsx:1	0
+669	claude/bold-hypatia-i6nvo6	ba4f728f7578ab8bdcaa573a4d8d4d1ffd6ed441	0	0	0	0		0
+670	claude/adoring-cori-x573kc	5dbb2d025d2a07a7f7fed2daa4d086d757eeb39d	0	0	0	0		0
+671	claude/bbp-shadow-mode	d90a22c98477fbe38758bf32294c27703317ebd6	0	0	4	12		0
+672	claude/bbp-shadow-host-log	7adecc773a96a94e2f94f074dd097fe014bb39e7	0	0	9	28		0
+673	claude/game-socket-reset-and-docs	d0d149effbee843e697b37e58285030e2dba18dc	2	0	1	7		0
+674	claude/bbp-wake-rules	05cad6d7f5df1b46e2741bd1a3f160af72ca03b8	0	0	2	6		0
+675	claude/bbp-e2e-launch-count-race	833538dcd0b7b45143243b5652cffe384d576b84	0	0	0	0		0
+676	claude/bbp-spec-conflicts	b352a49d4b075b0acbfdc106579cfa628e1b9cf9	0	-1	12	37		0
+677	claude/bbp-spec-attribution	453a24929147853d4c08a0abab655caec2c9d23a	0	0	10	22		0
+678	claude/bbp-state-timing	5ca2819e4345b52f678060c742902145e8e60b19	0	0	3	4		0
+681	claude/bridge-line-timestamps	5da10f53254a0b1d03b7609bd1f2ffcd9c43300b	0	0	2	2	ps1:1	0
+682	claude/quirky-maxwell-7byzad	d8ec0dfea6251e98797ebce4439d8773b918dc0e	0	0	0	0	py:7	0
+683	fix/rustls-0.23.46-security	8df4bd23ac94c17a6af4abb1dd0beaab53ac6006	0	0	0	0		0
+684	claude/adoring-cori-x573kc	33f642f311e116fa26a9fc42695d941c46cc0854	0	0	0	0	py:1,sh:1	0
+708	claude/super-board-onboard	abefbf748ebd3794c09b24ef496c08f3d0320aa0	0	0	0	0		0
+709	claude/rusty-mcp-limits-core	3f78d113ac9e42d6242da77faacf17fca527f5b0	0	0	4	5		0
+710	claude/epic-relaunch	e965d0a6b8b6b271b9f2675673e53f597e7b3e40	0	0	1	2		0
+711	claude/rusty-mcp-auth-core	3846ac534e71f87ad59592adf18418321c33b8e0	0	0	3	7		0
+712	claude/super-board-tooling	9bc957c5abd119e192fd72df92ac6875c67294a1	0	0	0	0	js:2,mjs:1,py:20,sh:24	0
+713	claude/charming-shannon-r19xol	78eb03e953f18d40dc759e81dec700a2bc401a9e	0	0	0	0		0
+714	claude/rusty-mcp-metrics-core	5065d09b9c83a4abce3f0f15e83980a9966cce27	0	0	8	8		0
+715	claude/bbp-event-driven-live	b1a7e8a02495c6e45bf0a43d16c3e9761b34963a	0	0	1	11		0
+716	claude/rusty-tls-tls13-only-stream	9bf2d45186c0c344b035515079e5c52383533beb	0	0	10	14		0
+717	fix/remind-me-shutdown-completion	9597b46908f58f45b95b7a6b5e723f78a6cba93a	1	0	3	23		0
+718	claude/bbp-2b-criteria-run-plan	5c575cc9f160bd617e2349018233671b95cd833e	0	0	0	0		0
+719	claude/super-board-autonomy-policy	68fa4f277a0db5fcc8be8dc8d223bb8f223a16ef	0	0	0	0		0
+720	claude/bbp-verdict-binding	317da9d65963e24269a12900ed82a6ec12b38650	0	0	2	9		0
+721	claude/bbp-gate-answers	317da9d65963e24269a12900ed82a6ec12b38650	0	0	2	9		0
+722	claude/bbp-why	3e905772e2927fb32cc212408091c4f6f75eac38	0	0	7	28		0
+723	claude/bbp-token-capture	316df938adc7c0922532035f6ca183dabd5449a3	0	0	5	13		0
+724	claude/bbp-pair-report	d2468b22edab86cb7ff793a23118fb2651af67cb	-1	-3	37	116		0
+725	claude/bbp-grader	8a98e6dddeb836e342f07f992f7940740feb40be	-1	-2	18	55		0
+726	claude/bbp-2b-criteria-status	3e905772e2927fb32cc212408091c4f6f75eac38	0	0	7	28		0
+727	claude/bbp-verdict-seed	962f57eb5482ef70600d7f107ecdc40818564289	0	0	1	8		0
+730	claude/bbp-weights	632429ffc330716d2fc43b1a912d30b224f0ef92	0	-1	8	27		0
+731	claude/bbp-pick-from	522f6304c28bc807b714a4638bf902f972760c86	0	0	1	1		0
+752	issue-685-serde-stack-inventory	37beac11dc11a6f176921105a5928191736d886e	0	0	0	0	py:1	0
+753	claude/ecstatic-archimedes-64bnhp	ce92ab24eca3cf47aef4e74d4fd907ad846e3690	1	-5	89	200		0
+754	claude/bbp-why-multilive-trace	522f6304c28bc807b714a4638bf902f972760c86	0	0	1	1		0
+755	claude/rusty-mcp-serve-adapter	1b4d6a8813835e8aabd8bb907f1d8893abe33a54	0	0	12	19		0
+756	claude/bbp-budget-order-tests	94c977dab4079661f3ea92d960df907d9a69f2b9	0	0	0	0		0
+757	issue-707-keep-dev-proc-macro-crates	38b5a42c953ca6cef49f832cac4c5005bf9e9f2a	0	0	3	7	ps1:1,py:2	0
+758	claude/merge-gate-queue-delete-branch	c695244bf4ba9e047b744b0b567e508b6532dfbd	0	0	0	0	sh:1	0
+759	feat/rl-physics-brake-boost-quantize	38b5a42c953ca6cef49f832cac4c5005bf9e9f2a	0	0	3	7	ps1:1,py:2	0
+760	claude/super-review-thread-reads	2bc213e26ab659eaedee9f933eaa430e42068695	0	0	0	0		0
+761	claude/rusty-mcp-otlp-core	98828888c0bea9b9059ff0710182ca033c6fbc9b	-1	0	41	71		0
+762	issue-704-keep-tauri-stack	1104021dfa27ce9c9919a3f55edf58e163d8282e	0	0	0	0		0
+763	claude/bbp-run-guards	735f1b25e8479424181733756307e0bba8eef200	6	-7	62	329		0
+764	claude/super-review-merge-queue-confirm	ee629e95ed154cfc0cfd56990c75a1d1b5dc5260	0	0	0	0		0
+765	claude/beautiful-wozniak-3z3uzx	f1c13411b41634e28b0db79384bead40b2a061f5	0	0	0	0		0
+766	fix/rb-tape-bot-verify-path	66e0f1dec223439280fc7d6421e3265797430f09	0	0	0	0	ps1:2,py:13	0
+768	codex/767-orch-bbp-task-host	5a1137e538416590d6a7045be0afd6cc101d3061	0	-8	73	234		0
+769	claude/adoring-cori-x573kc-scope	481a0285877f7131d53209a2854a0d6e97b4a85c	0	0	0	0		0
+770	fix/zip-security-2026-0367-0369	7596fcdd15cc4d271d86bf96e7868edcb9021768	0	0	0	0		0
+771	claude/fair-play-points-frequency	5a1137e538416590d6a7045be0afd6cc101d3061	0	-8	73	234		0
+772	codex/orch-bbp-confined-acceptance	024a4c5252d9ad42bcd42dbe80553fa106785b72	0	0	4	6	py:3	0
+775	claude/rusty-tls-review-terms	928af56e65ae0091b8c6b2666b9208612e09cb73	0	0	0	0		0
+776	codex/bbp-provider-launchers	07d1cca56bea04a5befb4bda304f6e3a7df109c7	1	-2	22	90	py:2	0
+778	claude/ammonia-security-fix	7b51fab55f142bc3b0b553a21baeda15725cf777	0	0	0	0		0
+779	claude/rusty-mcp-otlp-spans	9b97e67ed955627ede06b03760e81a52cfeb70c5	-3	-1	55	128		0
+780	claude/rusty-mcp-sovereignty-policy	739896cb95dc2b35788dea7cf22db3d93792454f	0	0	0	0	py:2	0
+781	claude/bbp-run-guards	4fc0c5df0501e47b0359631ed05674050c9f217a	0	0	0	7		0
+782	claude/rusty-mcp-drop-axum	747f52fa01aab229d2a8110f614b1133441346db	0	0	0	0	py:1	0
+783	codex/repository-intelligence	25dd95173a1fee869411565092e63c2eacf01f40	0	0	4	16	py:2	0
+786	codex/autonomous-maintenance	4dc15c25875b596e0af51e3fd571b7bb3455cd1e	4	-4	36	177	py:5	0
+787	claude/tracing-facade-plan	8287edb2a763d1e8da09df91cae0061d5c341521	0	0	0	0		0
+788	claude/rusty-log-crate	eab907368fe10fb671752c563d35f323a1643c35	0	0	0	0	py:2	0
+789	claude/rusty-mcp-on-rusty-log	9ff32f23bc2e58566126166e2e8357dff60ceb10	0	0	0	0	py:1	0
+790	claude/bbp-run-guards	2db20367f4fb7b854aad2fa2d4943169360dc1c9	0	0	0	0		0
+793	claude/gateway-on-rusty-log	6ce0fd20799560bda09da04c68151a7a6b200017	0	0	0	0	py:1	0
+794	claude/exciting-goldberg-u5jvuq	6ce0fd20799560bda09da04c68151a7a6b200017	0	0	0	0	py:1	0
+795	claude/libs-on-rusty-log	8b5567b16ccfd64c20a008ed787de3978177209e	0	0	0	0	py:1	0
+796	claude/apps-on-rusty-log	1f00ab190966d80269e381c26eabe6a6b6eef2cc	0	0	0	0	py:1	0
+797	claude/tailscale-on-rusty-log	632d476c2d54caa2873879b0bd8cd1ac47463398	0	0	0	0	py:1	0
+798	claude/tracing-strict-rule	55c5f4caa0612ed7e8efa60d21d120bf2de17b00	0	0	0	0	py:2	0
+799	claude/admiring-goldberg-rqkbv6	0472f3bea99730e04a4003d5fd23b996ae647bbd	-1	-3	49	80		0
+801	claude/exciting-goldberg-u5jvuq	71b3399ee0637a5e9d11b4a895f4db856f088a23	0	0	26	70		0
+802	claude/bbp-run-guards	ebfa3dc0c458dc28bb2d7ee76c4277018924bf0e	0	0	0	0		0
+803	claude/exciting-goldberg-u5jvuq	c3af4eb578226cdfacec773ccd19480c94ab6723	0	-2	72	206		0
+805	claude/bbp-run-guards	b7795705809dfdfc1d6e473430690a3881ab9c30	0	0	0	0		0
+806	claude/admiring-goldberg-rqkbv6	37eadf9c9c81e812f3a391d6ee165c5845859d88	0	0	0	0		0
+807	claude/exciting-goldberg-u5jvuq	c1cd36f9638a254683b1cf9c67fc7c381bab2744	0	-1	11	37		0
+808	codex/stage1-change-impact	ff91cb9730ec3532c6fe7f7c97cf479ba02b42bf	0	0	-1	-2	py:2	0
+809	claude/msrv-declared-floors	ff91cb9730ec3532c6fe7f7c97cf479ba02b42bf	0	0	-1	-2	py:2	0
+810	claude/rusty-h2-driver	fc3b042c801b7cfab74268a5d0c8afc044838262	-2	-5	64	230		0
+811	claude/lockfile-webpki-advisories	37eadf9c9c81e812f3a391d6ee165c5845859d88	0	0	0	0		0
+813	claude/rusty-tls-alpn-identity	d5ab711319fe27314405d94d307d860726f6c99f	0	0	4	9		0
+816	codex/orch-windows-metadata-determinism	9a78012b0f1dd4820f1dc784d305136e0fe30fd2	0	0	1	3	py:2	0
+820	claude/bbp-run-guards	9ba7ef4dd3bfb0065a7e50997e07b0cedc5a2287	0	0	0	0		0
+821	claude/dazzling-johnson-nhph9y	42a328109a0d42cd9c7f8e0fef1809ba61f24caa	0	0	0	0	js:1,ts:9,tsx:2	0
+822	claude/exciting-goldberg-u5jvuq	76df3b341ec2d05e7a303f7b46cf0bf7223f2ffa	0	0	2	2		0
+823	codex/stage2-factory-execution	6a177320ac993c34b92d72848333bef4ba148bb0	0	0	20	82		0
+824	claude/dazzling-johnson-nhph9y	f695160b9f1df0d8317945da338d921e637f6f85	0	0	0	0	ts:6,tsx:1	0
+825	claude/msrv-compile-at-floor	dacc1b17d2a4cdce320ebd2e87d162ce251db9a4	0	0	0	0	py:3	0
+826	claude/rusty-hyper	c56558475653f3fe18b92990a63146e21cd3fc96	-1	-1	24	47		0
+827	claude/rusty-h2-windows-abort	926efbcaf8fed2a4fe421f79a25863cc2646345e	0	0	3	11		0
+828	claude/rusty-h2-ready	27593d63c30830a9d52a346e6333117960b8a2f9	0	0	3	6		0
+829	claude/dazzling-johnson-nhph9y	2c46b57d082b0b729514d87bbf19161de3a458f7	0	0	0	0	ts:2,tsx:2	0
+830	claude/project-thread-71j9sc	902885a65201167b11a4dc67786b0c3d9b0f7404	0	0	1	7		0
+831	claude/project-thread-8mkuru	0071f4f9642f88849d693b0a17cad92fd26dcdef	0	0	0	0		0
+832	claude/project-thread-71j9sc	93ec4de75bc0f5c6be76956d6ab9250caa4127c0	0	0	2	2		0
+833	claude/project-thread-71j9sc	d1d5e0c1de5785006ff55847221db255bb77e0ce	0	0	0	0		0
+834	claude/dazzling-johnson-nhph9y	44384a17fb940894abcc7568a447f7fec411f4e3	0	0	0	0	ts:12,tsx:1	0
+835	claude/project-thread-09wt9n	6895b60a1f87915f12432d292fc262d3cb54cd03	0	0	22	68	py:1	0
+836	claude/project-thread-8b4tq4	3b4128bc95e52cfa602cfabb38e1a1b941fa1164	0	0	0	0	py:3	0
+837	claude/remind-me-0-4-0	9df305ca213a672b0a415951acd234e80d589c87	0	0	0	0		0
+838	claude/project-thread-09wt9n	434ed13b6ba1cdec16a7b1563f3c28b704c9957e	0	-1	15	40	py:2	0
+839	claude/project-thread-8b4tq4	dfd3085a8d53986396eecba7dcec2923dc61d2d7	0	0	0	0	py:1	0
+841	claude/project-thread-09wt9n	0b72f97abdb53677ea71c99664864cd244349f12	0	0	1	1		0
+842	claude/rusty-tonic-client	3fb98d8598527c8570a2f6b86d1bdef14507190b	-2	-2	35	79		0
+843	docs/adr-0002-stage-table	6ba272c82efb308066cae5cfb9cf4c664b6e57ce	0	0	0	0		0
+847	claude/dazzling-johnson-nhph9y	12207949ea474601afdbc389043a8a839e78d545	0	0	0	0	ts:9	0
+848	claude/rusty-tonic-server	43bd0cce35ae986a91347e45ca34b1f891328132	-1	0	37	62		0
+849	claude/project-thread-09wt9n	004991ed6306199cb463c5fe0797369fa20143b2	0	-1	16	41	py:1	0
+851	claude/new-session-s68lms	161dbf8a02b2ab853ff410fae001e06acb00b1cb	0	0	8	27	py:3	0
+852	claude/dazzling-johnson-nhph9y	161dbf8a02b2ab853ff410fae001e06acb00b1cb	0	0	8	27	py:3	0
+853	docs/tls-native-crypto-seam	98351916105c7c033735fc512679c362db17ef68	0	0	0	0		0
+857	claude/new-session-s68lms	744d458969ce2ca652d8b4b257ab9eac5be7a35e	1	-1	3	24	sh:1	0
+858	claude/rusty-a2a-prost	2e6e99916eabe4c9ac349c395af119ff8e4e5491	0	1	18	30		0
+859	docs/reopen-gap-4-client	8c549e88940472765c91382491710c9a2036b6ab	0	0	0	0		0
+860	claude/dazzling-johnson-nhph9y	20126746ce2ab61270bda3cba6f7d7c1a09f6c10	0	0	0	0	ts:2	0
+861	claude/project-thread-09wt9n	6c0e94816a8a4990889e68ef5890925b9f05493b	0	-1	20	43	py:1	0
+862	claude/new-session-s68lms	61693cbf6a7de4ae011593a17949697adb6f404e	0	0	3	4		0
+863	claude/rl-plugin-preflight	e32460107eff7f04c13409143c5d3b1c41e999c5	0	0	0	0	ps1:3	0
+864	claude/batch-score-skip-pad-sidecars	9303430677a1f8c473b9bf4d8ca72ddc1cd2dddf	0	0	0	0	ps1:1	0
+865	feat/tls-crypto-backend-seam	f43c6236dd6e27cb5b77c0ac6a08727b28b7ead8	0	0	18	30		0
+866	claude/project-thread-09wt9n	ccc81707e4d419a5d0a310754ceb8a24aafccb6e	0	-1	16	34	py:1	0
+867	claude/dazzling-johnson-nhph9y	52fadc0f3985128599d1f660bedf7a5406760053	0	0	0	0	ts:8,tsx:4	0
+868	docs/adr-0005-native-crypto	bcf092e1c91968511ee2b4909bb2f2f1e0e672c5	0	0	0	0		0
+869	claude/project-thread-09wt9n	fe6a32fc61f9b7c48d7921afa5d483ee3a54cf5c	0	0	2	3		0
+870	claude/project-thread-bvie55	4fbc328b4f66f0c29cda38fd5f35204d100282d6	0	0	0	0		0
+871	feat/tls-native-crypto-backend	f5f220dfd770bb4db92d96df90ce24df4eff211f	0	-2	23	50		0
+872	claude/new-session-s68lms	809b051106567e45aa294c754bed0a7b53887e92	0	0	0	3	py:4	0
+873	claude/batch-sidecar-followup	2f7af4a8479d4c2c92c75725161f33ff33da65b2	0	0	0	0	ps1:1	0
+874	claude/docs-use-pwsh	7eee9a7b882307b2c2f468eabf884dff1933ecec	0	0	0	0	ps1:1	0
+877	claude/rusty-prost-declare	ac0f847c89f4785f278abf0a2caad1877eb5d261	0	0	0	0		0
+878	docs/rusty-mcp-axum-tier-a	fe6a32fc61f9b7c48d7921afa5d483ee3a54cf5c	0	0	2	3		0
+880	claude/project-thread-bvie55	9cb7173869ee663eae29a61b3a76d4e0bce0ea6e	0	-1	11	25		0
+881	claude/agentgateway-mcp-prost	370faa54476b3305fa6e72a6508303a8fc0f0402	0	0	0	0	py:1	0
+882	claude/relaxed-galileo-bs7xas	146ee373928d9d5a75ebb911ab3d74036b96d5be	0	0	0	0	py:2	0
+883	claude/rusty-axum-stage1-inventory	53e472fd46b966692747da6c7c87a037cfd41453	0	0	0	0		0
+887	claude/dazzling-johnson-nhph9y	d629da3c3319eafd583d67ef3de5c00ada8ae7ef	0	-2	30	118	ts:2,tsx:2	0
+888	claude/project-thread-9jnjew	238886c53e10130210b9871b6d0f9b1c3a746d8f	0	0	0	0		0
+891	claude/project-thread-09wt9n	60be195e28fc760d8834ac11e1053fbbb7280021	-2	0	8	14	py:1	0
+892	claude/rusty-axum-owner-decisions	60be195e28fc760d8834ac11e1053fbbb7280021	-2	0	8	14	py:1	0
+893	claude/new-session-v85pyp	238886c53e10130210b9871b6d0f9b1c3a746d8f	0	0	0	0		0
+894	claude/new-session-s68lms	0f9646a02dcb0d68b35185fc1104a111dd923012	0	0	0	7		0
+915	claude/async-pilot-rk-constrain	d48bb7c73dd7c1c0e5c81d0fa21edfe80c24aa6e	0	0	11	11		0
+916	claude/rusty-journal-rename	0cb2aabc6bafd706e0a6306cd22c8dcdab6eca02	0	0	0	0		0
+917	claude/rusty-stream-crate	fe0a139d9f6e1a858eaf986ca109f067dcaa5acc	-1	0	85	169		0
+918	fix/ci-setup-timeout-15m	0f9646a02dcb0d68b35185fc1104a111dd923012	0	0	0	7		0
+919	claude/project-thread-bvie55	6502de0f2ce009bdf6c63820461baebe03130ad8	0	0	1	2		0
+921	baileyrd-patch-1	1f9b2411b9da9600cae5aff22c6df228a2784e84	0	0	0	0	py:1	0
+922	baileyrd-patch-2	e164f1c180eb2802ea2dcc5db67eac5b86adfbfa	0	0	0	0	py:1	0
+923	baileyrd-patch-3	af82e9c01110615ecf3072fdc3d92ce06f20ec4a	0	0	0	0	py:1	0
+924	fix/ci-tls-adr-impact	f22b980545c5d66c7fe6b9762d081aa4d40b4673	0	0	0	0	py:2	0
+925	claude/new-session-s68lms	1703450af78b2c70ecd0c4b18f8fa5c3ec117235	0	0	1	6		0
+926	fix/ci-ubuntu-mirror-priority	4dd922163a50347c0e46ae296cbb5df3cf919db8	0	0	0	0	py:2	0
+927	fix/confined-worktree-probe-barrier	cc12bf96dd71bdbaf882775c7fe63f7cc4a3e2ac	0	0	0	0		0
+928	fix/ci-apt-download-cache	93860ffe75a6647f6d3004625122f46a96254793	0	0	0	0	py:3	0
+929	claude/dazzling-johnson-nhph9y	41d2c3760dc892e1d4458b16e384f42a89639518	2	-1	10	88	ts:5,tsx:2	0
+930	claude/new-session-s68lms	6509b7ed72f4af1da86a046cb998de9949f2b4a7	0	-12	6	-6		0
+931	fix/crypto-taint-example-names	3b8d5dc22a818148415a49620eca86c6633296f0	0	0	0	0	py:1,sh:3	0
+932	claude/project-thread-bvie55	4deda99281a7eed997ece9db20743ebe0c706e1d	0	0	6	22		0
+933	claude/rusty-axum-core	9e016fa330c031e04f39c59df90b7e91ed78f961	-3	-2	104	140		0
+934	claude/rusty-axum-serve	40d35b7ba3b5411a3e92a86d27ff5971f083386d	0	-1	29	75		0
+935	claude/rusty-axum-middleware	094b2af639aeed3f678735aa56be668d0fb8ebe4	0	-1	22	36		0
+936	claude/new-session-s68lms	ab1ed59df051acf2320444a47993e0495eaa320d	0	0	3	17		0
+937	fix/fair-play-split-coordination	b14686b9609ca3b1112d7d784ca9b771e56956c2	0	0	0	0	ts:4	0
+938	claude/project-thread-bvie55	c38ca5fd54d980a7c132245d97433217100c73db	1	0	3	15		0
+939	claude/new-session-s68lms	7ce453a5fa4fe4e275f4ec264257871518bda4fd	-1	-1	32	117		0
+940	claude/new-session-s68lms	5c24bf8c2f4b06761eae870bd7655631446a4e97	-1	-1	16	41		0
+941	fix/tls12-negative-openssl-readiness	fec00b98e6e1432f0d05d67bfdd436a072054411	0	0	0	0		0
+942	docs/tls-review-attestation	3b3ea344ad6b73b1fa7636d4e8aa9ab6b44e9396	0	0	0	0		0
+943	fix/ctutils-0.4.4-security	7e4715df71997ed19aa618a0c38e7a7ceb350682	0	0	0	0		0
+945	claude/project-thread-9jnjew	a45f943c8d1aaefbe2433941dcbcfafeaa617305	0	0	0	0		0
+946	claude/rusty-axum-tokio-bridge	4cc04265db2ff11977db27022398e9c034c89886	0	0	7	10		0
+947	feat/tls-native-bogo	918ad13acec6e8c022197aa972bd9d1935a19b7b	0	0	0	2	sh:1	0
+948	claude/rusty-axum-rk-app-pilot	b8db831861ee1903be793810caaca15805d2b4e7	0	0	3	4		0
+949	claude/project-thread-p7hc7s	b443f153e32fc8fcaeb2b5a4916cc93f036dcabc	0	0	0	0		0
+950	claude/rusty-term-handoff-docs	9dab5e52fcbcce3f6f98ff7b5a898b7f79e5e298	0	0	0	0		0
+951	claude/serene-johnson-1a9bzi	4c12777ab0a065e418958ce3a6efa2458de1612f	0	0	1	2		0
+952	claude/project-thread-cleydg	60b6f210eeebc7440d83936fc634e8d311492d9b	0	0	15	24		0
+953	claude/project-thread-9jnjew	90ee60b9e7bdaccedd8c22c04e67e47b9d2900ab	-1	0	43	69		0
+954	claude/project-thread-p7hc7s-rusty-tokio-mpsc	0cb2aabc6bafd706e0a6306cd22c8dcdab6eca02	0	0	0	0		0
+955	claude/project-thread-p7hc7s-rusty-term-rt	b123ab749ad89b9f0073bc8e22dba527133ea10f	2	0	0	28		0
+956	claude/project-thread-p7hc7s-std-mutex	dcf7037638f38be84d201f00616a8ba5b0978053	0	0	2	2		0
+957	claude/project-thread-ut6pts	02cf092b0d29cb680f35f887a449e3031a044471	-2	-3	46	123	py:1	0
+958	claude/project-thread-8bvkdy	7e4f9dd4abb88a366cf68766249a9ffdae98674c	0	0	0	0		0
+959	claude/project-thread-8bvkdy-determinism	98418a9b637cc58ec5965e52b57fcae3c53b7bf0	0	0	0	0		0
+960	claude/project-thread-8bvkdy-private-refs	98418a9b637cc58ec5965e52b57fcae3c53b7bf0	0	0	0	0		0
+961	claude/project-thread-8bvkdy-rleval-ci	91393b007e681e640ff1c248658d26b92c517f1f	0	0	0	0	py:2	0
+962	claude/project-thread-p7hc7s-mpsc-cancel	792f569009aa9ce4eda9be25c80bd04b057c8433	0	0	5	10		0
+968	feat/aead-aes-gcm-opt-in	8e24fedc9476c915efaf33c1025b938bad01061f	0	0	0	0	py:3,sh:2	0
+969	fix/uring-poll-teardown	4505b8329eb039fb4367ead8545106247ecd6708	0	-2	3	11		0
+970	claude/rusty-term-docs-850	14b772a2096fa0bd03c3fc61db695259435be124	0	0	0	0		0
+971	claude/project-thread-8bvkdy-gdc-hypotheses	29a9310a8e7644c548222a3892094518d23decbe	0	0	0	0		0
+972	claude/project-thread-8bvkdy-late-dodge-ball	e4aacd6460cf637c61574d4e11d46c523eaff5cb	0	0	0	0		0
+973	claude/project-thread-8bvkdy-b19-scenarios	b0a7bc93aaa26ac3f95b44ed5aa95a3aa5e3a3d3	0	0	0	0	py:1	0
+974	claude/project-thread-cleydg	4bc840c7583540f65d3d5cabb5b8b7aae922166e	-1	0	20	28		0
+975	fix/crypto-bigint-rustsec-2026-0387	6375f2f2b5bce27ce0613a6e2f8b68a22f24cfb2	1	1	300	706	py:1,sh:1	0
+976	fix/rleval-startup-race	fe2aff8669cbd31cdd3fd3afb03da7b67ec8055e	0	0	1	1		0
+977	claude/rusty-term-docs-955-974	fde54fe13aedca5f8cc4a6c8a12a1ca558fbfa28	0	0	0	0		0
+981	docs/tls-native-signing-scope	f27da5d878db147fc0de4bd56e99d66d6a8bd1ea	0	0	0	0		0
+982	claude/project-thread-9jnjew	f9258a3d23c73ad7996af880525dbef4652b947e	3	0	34	115		0
+983	claude/rusty-mcp-changelog-876	2ee38406d4e1e28a526d1ba7282decf3dfe6c531	0	0	0	0		0
+984	claude/rusty-tokio-compat-paths	ce7160dae8face8d8a37d8a47d4724b9ded91d17	0	0	0	0		0
+985	feat/rusty-pk-ed25519-sign	b89ab43c72f35bad19f4177e39136b8e51daf032	0	0	10	16	sh:2	0
+986	claude/project-thread-8bvkdy-human-captures	ce7160dae8face8d8a37d8a47d4724b9ded91d17	0	0	0	0		0
+987	claude/project-thread-8bvkdy-sim-viewer-note	80413ad19e650aa77a59f4809278c9a15ebff67a	0	0	0	0		0
+988	claude/project-thread-snt98j	ed9c3702255009b6d719ae492d909f050ee0dcce	-1	-1	35	77	py:1	0
+989	docs/tls-hedged-nonce-correction	462328c868a9c26a232a5f78eb75e9c411bfc5db	0	0	0	0		0
+990	claude/project-thread-8bvkdy-server-clone-findings	712c1c2275f6898009357365175a2498f291dadb	0	0	0	0		0
+991	claude/project-thread-8bvkdy-replay-parser-scope	00b2c29ae929bc1616257880296e37bd4135672e	0	0	0	0		0
+992	feat/rusty-pk-ecdsa-sign	698844212a77722ea15d47cc37160caf1371f153	0	-1	22	45	py:4,sh:2	0
+993	claude/project-thread-cleydg	79391ba60cc6be0d9fd8ac73bd961011119295a6	-1	-6	34	77		0
+994	claude/project-thread-9jnjew	c53da74e76b67372a586cd2c29ac948b452207bf	0	0	87	262		0
+995	fix/watchdog-source-locations	c39eda2c01ea8859731fd47c84eea7f44200f231	0	0	2	4		0
+996	claude/rusty-tokio-net-parity	7dd139cddf0baa058eefa669229c9f5fc97950c5	0	0	16	12		0
+997	claude/rusty-tokio-gaps-898-899-901	78edd75b899a14b6413f774c899cf529016ae6e9	-2	-1	53	83		0
+998	claude/project-thread-8bvkdy-sim-viewer	7611e29391d5214fea6489dce82af1c1e9bf9b37	-1	-2	22	57		0
+999	claude/project-thread-8bvkdy-rl-replay	1fae2f6c0cc7f5ec0ea9d3551476923e4f83cd4e	0	0	25	60	py:1	0
+1000	claude/rusty-tokio-select-900	148c63fe50f871c62f6757852f5c3874f490d0a5	0	-3	9	38		0
+1001	docs/s5-owner-review	7a74673de0c7e9edb4f21d749cc7deeb529c432d	0	0	0	0		0
+1002	claude/rusty-term-docs-956	7a74673de0c7e9edb4f21d749cc7deeb529c432d	0	0	0	0		0
+1003	fix/tokio-abort-poll-race	36c448bcab523187c66be4216b454412e427f2bb	0	0	1	2		0
+1004	claude/rusty-axum-any-fallback-peer	c8de36a8ff6446c0b2608077d190396f7aeb8eb1	0	0	12	17		0
+1005	claude/project-thread-mcdtcl	c5706abdf82ac9e48998ab998c8c3f8ab8bc8908	0	0	6	31	py:1	0
+1006	claude/mcp-server-rusty-axum-mount	1dc498fdd957f157a45679eb01868657e2e792b6	0	0	9	19		0
+1007	claude/rp-server-rusty-axum	b05c422797767a1da592e63aba0cb27d7351d4a5	0	0	4	2		0
+1008	claude/project-thread-seqr2d	c9afd33731379333dd689561e67471279baac241	0	0	1	1		0
+1009	claude/h2-closed	501cba6669c7273094150c9b80085239711f2a7b	0	0	3	7		0
+1011	claude/rusty-term-docs-mux-crates	a4362fcb3f50a7e0aecb548cc2f4cb593d513b3b	0	0	0	0		0
+1012	feat/rusty-pk-pkcs8	1f29a9755122b71272f2366f3efa6a8135f9eaf6	0	0	13	43	sh:1	0
+1013	claude/project-thread-y42ug5	5059b83d360ea880e5da7efbae9ef8f14b575805	0	0	4	15		0
+1014	claude/a2a-grpc-client	f793abc3a1b23601260374e45c6f5b1f60df701d	0	-1	10	16		0
+1015	claude/project-thread-58vh3a	1d57b7e67111815c12b0ca4ef59bcfcdc72b22e1	0	0	4	23		0
+1016	claude/project-thread-733zw1	9aa29b9f54b6415950f7f847b4813b0a4f721267	0	0	1	5		0
+1017	claude/project-thread-ld2mpo	55813a897927573bb1f3cc965e11e872b479e582	0	-1	8	14		0
+1018	claude/ts-control-rusty-h2	fe4334f4795277f86ebb7815fdf69e9bebef74c1	0	0	4	5		0
+1019	claude/project-thread-cleydg	011af7d1b0b513e3faae2a6fa2cd6269384a8961	0	0	0	0	py:2	0
+1020	feat/rusty-tls-native-signing	5817dc4540656859d277d9affbe0b5b2111b553b	0	2	5	11	sh:1	0
+1021	claude/rp-mcp-lease-race	833734034b6933c7b2b3a5e3b21ab5efeb03b95d	0	0	1	2		0
+1022	claude/a2a-grpc-server	a6c8002e30b6d6bf5e845fc6a4419f46c11c733a	0	0	-5	-11		0
+1023	docs/first-native-consumer	216ca3749dda2bd47cb8898dc2fbfc5e00ed9e0f	0	0	5	9		0
+1024	claude/rusty-search-904	feb5a320d03cb909e241fba8ae03b8eb9de0a1a7	0	0	10	22		0
+1025	ci/native-live-step	c54d6e1356355b1ad8f3a5f6855758561c6922ae	0	0	0	0	py:2,sh:1	0
+1026	claude/homelab-905	3e75cfb8ab5347d7e3ef7bd96e0668a875ba99a2	0	0	1	2		0
+1027	claude/rusty-net-tokio-903	1e143523bb8c2fb4e392404f021d61e32561976c	0	0	0	2		0
+1028	claude/zen-franklin-0a9ybw	272a7b060654a0b724af0e0e7ebfd93c69c4da43	0	0	0	0	py:3	0
+1029	claude/project-thread-fruoii	eca816a22bbb5b343b801242ab55fa8174a73844	0	0	1	2		0
+1030	claude/project-thread-9jnjew	5b990fa2f7c6bccf6f0e8c6269cf52f351446559	0	-1	16	64		0
+1031	claude/remind-me-remote-rusty-axum	216ca3749dda2bd47cb8898dc2fbfc5e00ed9e0f	0	0	5	9		0
+1032	claude/zen-franklin-0a9ybw	fce7e327df223184e4b28941f40bcce00e4ddc57	0	0	0	0		0
+1033	claude/fix-tokio-bind-callers	cc185e762184ae660541417aa72b6f5861294b94	0	0	0	0		0
+1035	claude/zen-franklin-0a9ybw	d77456a72f788f23923c5492de4803fff7547b3c	0	0	0	0	py:2	0
+1037	claude/fix-a2a-async-bind	962aa84678f784a081c0a1757c74f16d4580f454	0	0	0	0		0
+1039	claude/fix-tonic-cancel-race	feb5a320d03cb909e241fba8ae03b8eb9de0a1a7	0	0	10	22		0
+1040	claude/adk-mcp-rusty-axum	000ffedee0b38019c7b08c89b8bdf6b6344a9cf4	0	0	2	3		0
+1043	claude/rusty-tailscale-907	e21ab4fe44dd08417a7c44a5e196cf9e03a6c2bb	0	0	17	25	go:1	0
+1044	claude/zen-franklin-0a9ybw	84b7b0652195316dcd1ee205deb26eb7e59b6be5	0	0	1	1		0
+1045	claude/agentgateway-mcp-service	d7b5ef3df5e8aaff9b9c0406a63298ab600a3361	0	1	15	27		0
+1046	claude/project-thread-bsz0x4	e55ead1cd18d694574a8b668c6a754162ac06511	0	0	0	0	ps1:3	0
+1047	claude/evidence-bar-daily	a8912fb28c650c59dc6b206c9979543cbfda284e	0	0	0	0		0
+1048	claude/project-thread-qljkrn	1b007393e48aa5d531bbf299d28447094a2d530a	0	0	0	0	py:3	0
+1049	claude/project-thread-8hmhj7	04921ccf3e8cb2b7360344ee78dc73afa4e0e840	-1	-1	28	74		0
+1050	ci/cache-save-scope	beaf3acc842fc7d6483c9e9148084efcb4025bff	0	0	0	0	py:1	0
+1051	claude/project-thread-9jnjew	35e78dd63de5ed94681b1fa6b085aa7eeff0c43c	0	0	15	39		0
+1052	claude/project-thread-uqe885	c3214d033cfe50bc42cdec6decc2c03f317109db	0	-1	15	40		0
+1053	fix/rl-bootstrap-ownership	fc6e76ab2e4bc678b924f72bf45666d1903f91dd	0	0	0	0	ps1:3	0
+1054	claude/rusty-mcp-906	000ffedee0b38019c7b08c89b8bdf6b6344a9cf4	0	0	2	3		0
+1055	claude/project-thread-cleydg	5e14011c061c119712ea7cf259cbd57ebe2d93d4	-1	-1	18	57		0
+1056	claude/rusty-mcp-tests-off-mcp-axum	3e10ff850e1c4006bb31ab7cba67d94234c840bf	0	0	0	0		0
+1057	claude/project-thread-9jnjew	6288fc8097043da26e091b587b2e5bcba036a3f5	0	0	9	19		0
+1058	claude/project-thread-cleydg	6288fc8097043da26e091b587b2e5bcba036a3f5	0	0	9	19		0
+1059	claude/project-thread-58vh3a	9248ea8d51bb91cfe134ab3638b939fb2780141f	0	0	3	5		0
+1060	claude/project-thread-9jnjew	479e403644cf1baa0bd20d3eaabe7a95d518658e	-1	-1	37	111		0
+1061	claude/project-thread-efvb1g	df7c44ecd382d32f78c39a7d410d41ccbfb15a63	0	0	0	0		0
+1062	claude/project-thread-yvk09u	0beaf37853b445cb8e2a09485029f0d982d53d77	0	0	0	0		0
+1063	claude/project-thread-e6wdwk	3cd24c2d866f7393bc406913e6a6c73ce55d7541	0	0	1	1		0
+1065	claude/project-thread-tgcco3	b24632ab2703a1c68aad5f7d30fba3c830843c67	0	0	1	1		0
+1066	claude/project-thread-efvb1g-mutex	f2fd834dfe8017ca937cf290576c0666cd1dd120	0	0	15	28		0
+1067	claude/project-thread-uqe885	0da98ffedd89b9973e6fa12304fc8a0f76579837	0	0	-2	-6		0
+1068	claude/project-thread-tvjwpp	fc6f66880d92630fafab2de9f5f0f64fa39d3994	0	0	0	0	py:3	0
+1069	claude/project-thread-rkjqvk	782666a34a72b55b34534075de67bee1867b33ee	0	0	0	-1		0
+1070	claude/agentgateway-mcp-g2	84b7b0652195316dcd1ee205deb26eb7e59b6be5	0	0	1	1		0
+1071	claude/project-thread-efvb1g-tracing-flake	53664175fea4b4e00a5e6c6c2bc011cc13753cf6	0	0	0	0		0
+1072	claude/project-thread-9jnjew	3cb78b15160a949f7fef4da1e876128c551c6716	0	0	16	55		0
+1073	ci/member-dependency-edits-full	17b4e6a3cf814305413b762443c4e8924096e9b5	0	0	0	0	py:3	0
+1074	feat/tls-fuzz-long	98b25a102e176ed2b780c4d91172773a79b17f1a	0	0	0	0	py:3,sh:1	0
+1075	claude/io-uring-cancel-ealready	2202ee674a014b4c2f163e13c52f7c8aa62c6e14	0	0	0	3		0
+1076	claude/project-thread-xwg9fs	37f9b8467fa707fd88ac6087065b31319bf89b3f	0	0	-10	-21		0
+1078	claude/project-thread-ely5mt	c5e10e8d28a39ac0a12c87c312be9d0380bffd60	0	0	5	9		0
+1079	claude/project-thread-cleydg	496765b75a9a5298706da6dfd9cf9eadbf8c0063	0	0	1	-1		0
+1080	claude/rusty-axum-http2	13ecc1fe855f322070142c1846ecc60d047818be	2	-1	23	73	py:3	0
+1081	claude/project-thread-tvjwpp	f8b476b839dd73824458aae9e356b15056149ceb	0	0	4	9	py:3	0
+1082	claude/zen-franklin-0a9ybw	620968dc9428f20c964ec72a28849a82786a6709	0	0	0	0		0
+1083	claude/rusty-request-proxy	35e3e642dbcb3aeb078bfc0b5a7a49160794d6c3	0	0	10	26		0
+1084	claude/gateway-proxy-off-hyper	a03c7591957dcda1ae4278a21c8710a41b79e99c	0	-1	6	12		0
+1085	claude/project-thread-yvk09u	aaad39fb55051ffd09f8ed9ab172d036c5d0e8d8	0	0	9	16		0
+1086	fix/remind-me-search-fixture-decay	620968dc9428f20c964ec72a28849a82786a6709	0	0	0	0		0
+1087	claude/gateway-off-reqwest	a03c7591957dcda1ae4278a21c8710a41b79e99c	0	-1	6	12		0
+1088	claude/zen-franklin-0a9ybw	8a9e5995173c21aacaaf51d229d44232d1ec3755	0	0	0	0		0
+1089	claude/project-thread-9jnjew	0ca7ec3be6db21f1b5a955cc16c9fc97d7f2d795	-1	-2	20	53		0
+1090	claude/project-thread-cleydg	4c57b059fa8b3a0648a477dcbf8f8d0e15f62c69	-1	-4	58	113	py:1	0
+1091	claude/project-thread-9jnjew	ffc4199d6de355f3e7884571775657ab8423a768	-1	-1	17	53		0
+1092	claude/project-thread-9jnjew	ac44ccd7f6f87ec22a912995e3610954445417aa	0	-1	31	105		0
+1093	claude/merge-main-rule	732a90c60ca35a2a9f3d2522888e96594a8c55b0	0	0	0	0		0
+1094	claude/project-thread-pz5loj	97d5b8032d2300556051b4206a599895a706cf40	-1	-5	94	249	jsx:2	0
+1095	claude/project-thread-qatnbk	727e5057d9b3134e889b97852e8a71745d8279f5	0	0	0	0		0
+1096	claude/project-thread-k4q0jl	b91d3c4edb4c4a807dbaed83d3babbf0a83516a6	0	0	0	0		0
+1097	claude/prune-stale-caches	71db0773b92ab5809ea0210417d369f5893b625b	0	0	0	0	py:2	0
+1098	claude/project-thread-6sj8yy	e53051b900c7096f0424a137adc1aed0d3cc6a98	0	0	0	0		0
+1099	claude/project-thread-pewlft	844d40c74dbe871971356a96c1ce12163c561041	0	0	4	7		0
+1100	claude/project-thread-9jnjew	debf3321a026fde751fe13d942cd91c866510b11	-1	-1	25	63		0
+1101	claude/project-thread-k4q0jl	7a8948551eb4aa870573af67ae417d9c5f276ce5	0	0	0	0		0
+1102	claude/project-thread-v25556	e0ce007617898add35856b69450dcc354e58ac67	0	0	9	30		0
+1103	claude/project-thread-1a53dh	29e5929926416f4dccd4ce0fe8cb6a35c8f4a37b	1	-1	23	88		0
+1104	claude/project-thread-6sj8yy-zstd	f3c5df05e7f76ed5d00a22267bb43fd4baa3f276	0	0	0	0		0
+1105	claude/project-thread-cdn5e5	169a973cff2d71147fd8705ef07a64aa70fe4e57	0	-1	6	28		0
+1106	baileyrd-patch-1	2e1524eb4ee431a942b4cf413128c474065b7932	0	0	0	0		0
+1107	claude/project-thread-cleydg	d30f3681eb31e3b72d99b169d65a52a93a51bcf0	0	0	6	12		0
+1108	claude/project-thread-6sj8yy-reaper	409472cf7b3510748feed94908d0322e240ecb8b	0	0	0	0	py:1	0
+1109	claude/project-thread-1q4rpw	52e20232465c7ed8846f655b6dcb0335f3a5aae7	-1	-1	27	48		0
+1111	claude/project-thread-j12i0c	486cc3ec25c0f6b667c3470f8bb5b2193ac126e9	0	0	0	0	py:2	0
+1112	claude/project-thread-cleydg	93871550c8b467eb4e05ef70f7dc20ce9b354e1e	0	0	8	17		0
+1113	claude/project-thread-1h5989	afaa0b55013154d77ff2e884e2c07fb3f1bfe151	0	0	0	0		0
+1114	claude/project-thread-itxwja	409472cf7b3510748feed94908d0322e240ecb8b	0	0	0	0	py:1	0
+1115	claude/project-thread-kker8b	2c83f59f42e99f7a207c3fd325fd4485192c1099	0	0	7	19		0
+1116	claude/project-thread-ustwl1	82262bc883a3ecbd50dab23412d763450a4606cb	0	0	16	34		0
+1117	claude/project-thread-lgdlmu	08833ce50db882c487a5003e2ec14ec9dfa57aca	0	0	16	35		0
+1118	claude/project-thread-jqq7lv	e4642adf731b82bdfe970146f19af9a405c40059	-1	0	28	90		0
+1119	claude/project-thread-7s45hb	c5735b63696ad2046f93b9afc08fe2857f7eb603	0	-2	29	93	sh:3	0
+1120	claude/project-thread-p9wdvx	ff2ea387b1f47d6e307632b1ae1ace11c4200730	0	0	2	5		0
+1121	claude/project-thread-ey7b73	7fc602dc550c2403e4c52bbfbc5412d19fc2c3dd	-1	0	16	46		0
+1122	claude/project-thread-1h5989-rusty-crdt	82262bc883a3ecbd50dab23412d763450a4606cb	0	0	16	34		0
+1123	claude/project-thread-v25556	74d3dd8a97bb30f9be59f88920b18105ee6fc596	0	0	3	17		0
+1124	claude/project-thread-p9wdvx	cfba818d1bc7fe3a8fd452bcbf06a297a40653c4	0	0	2	6		0
+1125	claude/project-thread-qatnbk	4a518ab868ddf0bab6b4d3912ca697a794d670fc	0	0	13	39	ts:2,tsx:2	0
+1126	claude/project-thread-itxwja	156c5f1b259614ddcfcb9a3f335592fb4a2dc571	0	0	4	6		0
+1127	claude/project-thread-cleydg	8b94dfbc72342a4a63f7c8174123adb0654459d9	0	0	2	3		0
+1128	claude/project-thread-9jnjew	1170c41386306518cd58629800855e8eea92a16e	-1	-1	37	115		0
+1129	claude/project-thread-qatnbk	72d049f515966fbff59f23a2b3c83fac0ddddfb4	-2	-2	42	94		0
+1130	claude/project-thread-p9wdvx	42a882c55b567b60184fb981db3cbb0029626d6a	0	0	5	13		0
+1133	claude/gateway-server-rusty-axum	ec68244b4fa2778959d73e56bb466626a6dbe2a1	0	-1	10	37		0
+1134	claude/project-thread-oaqen2	12cf16dce004eefab0fe86295419c2032a1265b4	0	0	1	4		0
+1135	claude/project-thread-cleydg	0aed25fa74fc5ce2c71801f5da87e7c531903ef4	0	0	4	7		0
+1136	claude/project-thread-1q4rpw	f43e93f2e6255ce00f70a5a72bc08abed7386c90	-1	0	22	44		0
+1137	claude/project-thread-qatnbk	be2d5324b7d2f777ca06f5ee66f7d56c2dc21f8c	0	0	1	8	py:2	0
+1138	claude/project-thread-9jnjew	408de7150368daca0faa4e645c7a11180eb4d192	-2	-1	23	65		0
+1139	claude/project-thread-cleydg	43a3a74f6f0ac74cae0d1a56edc57769d6d622a1	0	-1	1	-3		0
+1140	claude/project-thread-v25556	c1d47fc70446f667656034785c9cadb0fc403b5f	0	0	0	0	py:2	0
+1141	claude/project-thread-oaqen2	ec68244b4fa2778959d73e56bb466626a6dbe2a1	0	-1	10	37		0
+1142	claude/project-thread-1q4rpw	1d37cdac4d393e8cd6c4a0bb780a2956914f7967	0	0	2	2		0
+1143	claude/project-thread-cleydg	ec0d248c7ac59bb1f1edcfb84d9833c13f2e3661	0	0	4	10		0
+1144	claude/project-thread-qatnbk	c9ff83ddaee35029ed4fec571e7c350730cdffb1	0	0	1	3		0
+1145	claude/project-thread-v25556	8fc3ba1b66dd7b2b5718279d7fe78acf4938898a	0	-1	8	15		0
+1146	claude/project-thread-cleydg	0811f8e8192db9289ba83812ec1a08a56257bc19	0	0	2	5		0
+1147	claude/rusty-mcp-drop-tower	88197ac885f73a58cf3a5fc8eb220a5f42b65b5b	0	0	-24	-35	py:1	0
+1148	claude/project-thread-1q4rpw	40042915e13a26d6efa576ac2f334c57eaf1a744	-1	0	17	45		0
+1149	claude/project-thread-1q4rpw	2b67bfa4cd0edee472b4be80f967049e105fb2d4	0	0	0	0		0
+1150	claude/project-thread-cleydg	c4a0d031b437e9140d192f172838f4261da5b889	0	0	20	45		0
+1151	claude/project-thread-j12i0c	f3e3033c2bb994225cfb31fe7ef119f0b3f8813d	0	0	0	0	py:5	0
+1152	claude/project-thread-oaqen2	f3e3033c2bb994225cfb31fe7ef119f0b3f8813d	0	0	0	0	py:5	0
+1153	claude/project-thread-dauq56	2d1918e905aa86ea51fa56b05a4f4bbb4b7c3530	0	0	5	11		0
+1154	claude/project-thread-zsq63d	e15fa85e4ea1d0d3a7287bdb363704d5b5d0d589	0	0	1	3		0
+1164	claude/project-thread-ojypyz	b7ce9cefc38b3fbcc00b5702f22015c9ef7a334f	0	0	0	0		0
+1165	claude/project-thread-qatnbk	e0a614d21896a44fafe231e3b3a59b1bdaa9553d	1	0	-43	-63		0
+1166	claude/project-thread-rm3s64	e15fa85e4ea1d0d3a7287bdb363704d5b5d0d589	0	0	1	3		0
+1167	claude/project-thread-kl3ixg	afc3e44cf769ac6643333ea2cd126f70e92fbd6c	0	0	11	59		0
+1168	codex/windows-check-without-mingw	2c0d9fe6952e3991f73e73f55fe539c6ddfd20fe	0	0	0	0	py:1,sh:1	0
+1169	claude/project-thread-v25556	b405977810fff251ca66e73b77638641ae4c7f75	0	0	0	0	py:1	0
+1170	claude/project-thread-fe3arz	2a3a2089bf76149a4f184efbae4c9a4181f02245	0	0	0	0		0
+1171	claude/project-thread-dzdkfc	b405977810fff251ca66e73b77638641ae4c7f75	0	0	0	0	py:1	0
+1172	claude/project-thread-oaqen2	08ccaf223fafa4d725a899529b48cb3d042595fb	0	0	0	1		0
+1173	claude/project-thread-fe3arz	d56b4f5124fe0e4b7a339aa8b58529609218df9a	0	0	0	0		0
+1174	claude/project-thread-s8nwpu	afc3e44cf769ac6643333ea2cd126f70e92fbd6c	0	0	11	59		0
+1175	claude/rename-rusty-mcp-middleware	ffc70edd9cee8acfeaa9e272caa06982e531b70e	0	0	0	0	py:2	0
+1176	claude/project-thread-s8nwpu	c8502e5051af140b1a311ae33a65f3f981d6d586	0	0	0	0		0
+1177	claude/project-thread-oaqen2	e99e85d31dec2e4b83bc3d0bc9e31e0acedc7824	0	0	2	-2		0
+1178	claude/project-thread-wxte57	2152e7ff2b79bc39af8725b1d2d70710dee807db	-1	-3	32	129		0
+1179	claude/project-thread-v1dygg	1cde61985d5ac771335db32d70e80d38b5c474a4	0	-1	18	16		0
+1180	claude/agentgateway-mcp-tests-off-axum	7c8cc718264b80457ce8f8e017fea976b326e838	0	0	0	0		0
+1181	claude/agentgateway-tests-off-axum	5938d05953e0ef9fe328587f8af8ded20f0b90c3	0	0	0	0		0
+1182	claude/rusty-mcp-middleware-tests-off-axum	5938d05953e0ef9fe328587f8af8ded20f0b90c3	0	0	0	0		0
+1183	claude/project-thread-dc8dpu	ded742a984ccd9f96eef9c79295b4817c67ef659	0	0	14	34		0
+1184	claude/project-thread-v1dygg	55e5f3c65762cfd71c8f10883bcee20ea972ce7b	0	-1	16	32		0
+1185	claude/project-thread-oaqen2	2d13f75abbd5ee2caa951776d1727ca8190035b3	0	0	2	2		0
+1186	claude/project-thread-tascb1	c96b78ed942e0baa17b3358c38b7b904b3c748c0	4	-1	18	128		0
+1187	claude/project-thread-v1dygg	32a42b6947ed89ce8dc0b457c57e7dd6e1c0f990	0	0	17	33		0
+1188	claude/project-thread-oaqen2	840506e890cfb66e1369f008fcb6325f2dea44de	0	0	0	4		0
+1189	claude/project-thread-c6jkld	7ce2b8ee091c270539b382e887e985a324027836	0	1	12	59		0
+1190	claude/project-thread-q40kh3	fa1667be28edf1c758e5ce522a10f2b056e0f213	-3	-2	39	126		0
+1193	claude/project-thread-0ps4x5	d5eb07f93983f0abeba89c42f8b8495d22b4523f	0	0	0	0	js:1,sh:2	0
+1194	claude/project-thread-dauq56	8154659383881af490eb275adad4470c344e4a29	0	0	0	0		0
+1195	claude/project-thread-2vxvl6	2dd0f8535b7628abf01dc1370de33208ca928b59	0	0	3	7	sh:1	0
+1196	claude/project-thread-dhz8o3	b574697983c935df6fd9c3faa81d03cfa97719f5	0	0	39	98		0
+1197	claude/project-thread-jh4khu	78609a99b85bd7c2a00505ff02099af195d46f6b	0	0	7	23		0
+1198	claude/project-thread-olvnxe	911dd0fbf98692fcd7d037d73e16d4f96fe3c92e	0	0	5	19		0
+1199	claude/project-thread-v25556	fa47ab822241aefb9d96832a01168e8566498985	0	0	0	0	py:1	0
+1200	claude/project-thread-dhz8o3	28cd66527d16eec60d965d096a8ba8cbf80ddb6d	6	-4	46	239		0
+1201	claude/project-thread-2vxvl6	eff5a5dd6da2dea52d5e78964d4ea53a80498508	0	-2	14	27		0
+1203	claude/project-thread-ec28f7	28a654f3211afde9079f39d43fb48ea6a164a61d	0	0	0	0		0
+1204	claude/project-thread-hx1a7l	4e04d59196cc016d7d34d246207c1d05d36e39f4	0	0	0	0	py:2,sh:1	0
+1205	claude/project-thread-9e315o	a950b6ddf65e79cb9c542c13acdee6c888e136ac	0	0	0	0		0
+1206	claude/project-thread-2vxvl6	7bbef42371979e7b879f4ba3cb9000895ad59bd0	0	-2	23	54		0
+1207	codex/1202-rleval-test-isolation	3f9efb0b81afb8189ffc0faba353edfe0afc88a4	0	0	0	0		0
+1208	claude/project-thread-ec28f7	0bc18dd70a4266ca0b8dfafff8f53fa6eaddafa8	0	0	0	0		0
+1209	claude/project-thread-5ymdk6	e59adbefb24dfca494c7b8fcabeb87b4d1655e4e	0	0	3	11		0
+1210	claude/project-thread-2lbnu7	74a2ded26e2068b544f8a5a0a1c0478b2f4b62bc	0	0	6	12		0
+1211	claude/project-thread-ec28f7	c8c67bcfdefcddc7884e453eb41c52565c6371ad	0	0	0	0		0
+1212	docs/rusty-mux-windows-manual-check	0dcc9650ad012aaf3422c160cae02efa18a88c9f	0	0	0	0		0
+1213	claude/project-thread-hx1a7l	42429420b39c827ff4b84491e10160b5d29425af	38	14	-2620	-6517	jsx:7,ps1:1,py:4,sh:9	0
+1214	claude/project-thread-9e315o	7197c3475aad8d7d78a82fbe5e49b79c58b97afa	0	0	6	20		0
+1215	claude/project-thread-9kwevk	6b0442771bc7d1ae242dfe253229fc0966776438	0	-2	11	66	py:1	0
+1218	claude/project-thread-9e315o	fa3b3881cc306f4909e0a52257c849cef53f324d	0	0	0	0		0
+1219	claude/project-thread-fxf5m8	31c15429f115c0d6a8943ef797a1f750f4786176	0	0	0	0		0
+1221	claude/project-thread-fxf5m8	88f6993a929b77c56496ba7b12168fb4076fb781	0	0	4	6		0
+1223	claude/project-thread-36yux1	0363c2b63ebad3bea4ce3b8643f996e9d0fe0276	0	0	0	0		0
+1224	claude/project-thread-vvjka6	124c77391eb1ccab4bf0db6a353ccb4034bdc52a	0	0	1	1		0
+1225	claude/project-thread-qg9c37	60ef263304cb773724ea5ceaf0c81f96044df4ea	0	0	4	10		0
+1226	claude/project-thread-36yux1-fallback	0d96cb7b993ee8be471b5a34750089ae107d5cf0	0	0	3	6		0
+1227	claude/project-thread-9kwevk	254455dcf5942851160d85213d630d67f37a9413	0	0	0	0		0
+1228	claude/project-thread-fxf5m8	7d46e00764dbd697b6acfe4cfcba782cb66d91da	0	0	3	12		0
+1229	claude/project-thread-9kwevk	52a12e46beb05a91a4a2976a8bb444bd874c2d89	0	0	0	0		0
+1230	claude/project-thread-fxf5m8	d50375a25ced7622f88810e6d3bcad8f1986bb50	0	0	0	0		0
+1231	claude/project-thread-36yux1	46ae47cb24da4fc184ce89992bf4bdd7968dee0e	0	0	-15	-27		0
+1233	claude/project-thread-ez6z7c	d3d4a2927efec4a38c2c9e2fbe265b149e5cb700	0	0	8	15		0
+1234	claude/project-thread-9kwevk	b58edaf672f3004dcece478cfcff38e1c3fdca33	-3	-3	71	142		0
+1235	claude/project-thread-54br0s	a488eaf3c64488d1c40c92ff2ece1d931d93039a	5	2	-146	-261	py:1	0
+1236	claude/project-thread-fxf5m8	0e6852df2926a53a80f62dc7f4453b8c6ae566cb	0	0	10	25		0
+1237	claude/project-thread-ds4vuz	c18a28bdedb9388d38b723b6ba4b31860b299812	0	0	0	0		0
+1238	claude/project-thread-shiii8	a488eaf3c64488d1c40c92ff2ece1d931d93039a	5	2	-146	-261	py:1	0
+1239	claude/project-thread-fxf5m8	5f912a52c7493176926efe64bfe518d8550ac497	2	0	6	18		0
+1240	claude/project-thread-ez6z7c	db552759de81e7f64d4ab81d301383f6be46c064	0	0	0	1		0
+1241	claude/project-thread-bxhq00	5991f222b78d6579e1bac512b0a2846f4fdab0ae	0	0	0	0		0
+1243	claude/project-thread-fxf5m8	0b4f1cc42378f3d96246f1538e29ae38b32241c3	0	-2	24	80		0
+1244	claude/project-thread-9kwevk	66f4bc38c8181fd669c58f8e34df385a6afa895e	-2	-7	121	326		0
+1245	claude/project-thread-fxf5m8	d05170b8cc082cffaf6c348411e82bea84b9632d	0	0	0	0		0
+1246	claude/project-thread-9kwevk	1a0a328b42dd6f9fce7cacd50dd23158e084302f	2	-7	101	406		0
+1247	claude/project-thread-fxf5m8	65c04a00b8caf650565f7fa413b70241b3052d0d	0	0	21	58		0
+1250	claude/rusty-tokio-notify-drop	10dd224e3db104a54d919a6b2d82cbcd8354e994	0	0	5	11		0
+1251	claude/mux-trickle-test-flake	87569bec9f94986b4133dba59a2d82a3a188c6b4	0	0	1	10		0
+1252	claude/project-thread-9kwevk	ebb92e2819b0bc445aaf6f5baeca8fb1343a5332	2	-2	55	194		0
+1253	claude/project-thread-w9ptf4	9cab0d09576b4c3d572283cf1fe3ba04d5ab987e	1	0	15	46		0
+1255	claude/project-thread-4g5ek3	3189a06c7c23b9c15aaf4d4e49f578f9da1f92ec	0	0	10	13		0
+1258	claude/project-thread-fxf5m8	ad1c3e3716d756db511322210bfbf927706be803	0	-1	22	73		0
+1266	claude/project-thread-fxf5m8	d13a88a763c27731ad5d50359caf5bf539c42587	-1	0	0	-1		0
+1267	claude/project-thread-fxf5m8	2fc312c8dccef7cfb070b3900a5ff97c455d0569	0	0	9	24		0
+1268	claude/project-thread-fxf5m8	c650ae413a57d90ef19c1ede828a05321646b720	0	0	0	0		0
+1269	claude/project-thread-9kwevk	83c9b3a99d1676bef6b94ac6ec9c02354321b544	-1	-1	24	59		0
+1270	claude/project-thread-fxf5m8	6c56d5749329a98a01d8c27199caf9fe782c1297	-4	-5	88	236		0
+1276	claude/project-thread-9kwevk	1a5edfe4cb9a58a402572ff8fec2511667f780ff	0	-1	6	-3		0
+1277	fix/conhost-input-resumption	e95ef662ceebb80ab90d1af19e8ca4fdb4587399	2	0	3	40		0
+1278	claude/project-thread-hw4nfr	2c93ca78a7bdf47ae2fd91c99ec027a7187355f3	0	-1	27	59		0
+1280	claude/project-thread-fxf5m8	aafe0860d29ec9ad06cefec1fa008091a91df0ac	0	-1	31	79		0
+1282	claude/project-thread-f1na7x	2478d63c4b2a52b8a2d4fcd58eb338f40b8feee7	-1	-1	15	59		0
+1283	claude/project-thread-fxf5m8	1cbef6736228fc6df8ad49edcc499ceef1f52fd0	-2	-2	30	96		0
+1284	claude/project-thread-fxf5m8	10f52a466bc9fc241dae08279da12b0fa789b6ef	0	0	0	0		0
+1285	claude/project-thread-fxf5m8	ff92f087334ee8fe6b8b20e4f48a93301a4cfe8e	0	0	6	17		0
+1286	claude/project-thread-g0pt25	d4f0c46f0d4ce3525c04db5dfc2485f3f60f3a16	-1	-1	31	67		0
+1287	claude/project-thread-fxf5m8	2444b37cf947c42a17510decfa16d6dc50b5c5d5	0	0	10	27		0
+1288	claude/project-thread-fxf5m8	ce9bf7b05320313dd77d30ecaa29443067d3b8ba	0	0	7	8		0
+1289	claude/project-thread-fxf5m8	1285a12b3e10145144cfc2eb12f887f651dd3fb0	-2	-2	27	108		0
+1290	claude/project-thread-pclxlb	32dd54463bf177a1b3c5a72a8401a41fac783e1a	0	0	8	21		0
+1291	claude/project-thread-hh2d8h	808d6ebd92a4215b0a913e6d45172c2be8973bd2	0	-1	20	50		0
+1292	claude/project-thread-cvngxk	1e83f6b208486d92eb491c650614f7f1c84619a5	1	-2	31	120	py:1	0
+1293	claude/project-thread-fxf5m8	5517f86e25c71786dd415a46f53730fd8e34f6d9	0	0	0	1		0
+1294	claude/project-thread-wgmskq	b70979c69840b6a10f22cd09e269b22732a039d2	0	0	0	0		0
+1295	claude/project-thread-nd2bh2	069eedbcd10e4352152f5ee7df78db301e9b8fc8	0	-1	18	47		0
+1307	claude/project-thread-x49l3h	e1a4795363c0e760855bea93108c56d745db3d81	0	0	0	0		0
+1308	claude/project-thread-hcqtp5	1a429c66d98b0f60c29323f302119fadfa86677a	0	0	0	0		0
+1319	claude/rusty-tokio-1302-child-reap	57c0ab2d1ce08521e0f692b0f661cde24eb43748	0	0	1	1		0
+1320	claude/rusty-tokio-1303-notify-parity	f79417b8d85377e9f217f94c656e6a8c444c5aa7	0	0	3	6		0
+1321	claude/rusty-tokio-1305-add-permits	0b8d865a53705d23703643556a58e702ae7b5b7d	0	0	2	9		0
+1322	claude/project-thread-9y20j9	b3c1a366ba93099050fdd0f20cb3421a4c878b18	0	0	2	5		0
+1323	claude/project-thread-9y20j9-broadcast	0eb5d14574329ae7933c22da128cfd08e091f9d4	0	0	4	9		0
+1338	claude/project-thread-rx33bv	43ec25dbd03dc59e1e3669bf359b5e92ce028184	1	-1	75	141		0
+1339	claude/project-thread-r7cf8j	0dedf46e45c7f75731faa68d037b27899b224a20	0	-2	34	96		0
+1340	claude/project-thread-39pgzb	a73e14154de8b6d6d57f1103a56fa938a7932c6a	0	0	7	45		0
+1341	claude/project-thread-3p22u8	4c520ea188e37635a18be6639fa54634c46a66f2	0	-2	46	202		0
+1342	fix/crypto-apt-time-bounds	a6083f171158ed50b75f38ed67ae6c38f3f07622	0	0	0	0	py:1	0
+1343	claude/project-thread-9y20j9-oneshot	83a653e918670cc5ce19a0c3f6c3acbf17e749f9	0	0	0	2		0
+1344	claude/project-thread-9y20j9-rwlock	c5207da9f47cd986ce660f68de6a17349bcdc0cb	0	0	4	-2		0
+1345	claude/project-thread-1koznh	be9603820ef979c5dea6f7ad63e59b62ae80ac2f	0	0	1	3		0
+1346	claude/project-thread-1koznh-1328	2b16c1e94efdffb93e37e5ab06163a23778b4775	0	0	0	1		0
+1347	claude/project-thread-9y20j9-waiters	4a526d0d68f256a5d159651a846959b601849f5d	0	0	10	12		0
+1348	claude/project-thread-pcyidq	a34f28ca02d48a964b0af3485194bfb4f6498ddc	1	0	7	48		0
+1349	claude/project-thread-zlu43p	29d19e8b8a374bdf5818b67a017126dc74aa5c24	0	0	4	12		0
+1350	feat/mux-c25-principals	a34f28ca02d48a964b0af3485194bfb4f6498ddc	1	0	7	48		0
+1351	claude/project-thread-rjhc1e	77d5385127106669f91959edbe5561f99587f5b4	0	0	0	0		0
+1352	fix/rl-197-ball-spin-up	0b6dace1f8fd8ed7de4939affd292e323bff685a	0	0	0	0		0
+1353	claude/project-thread-xbz5w7	d0d4bd07d5ef38de64b1e2d0c9849afa39f705d2	11	-28	-298	-452		0
+1354	claude/project-thread-o032it	ce6ddae5a9337a91e8dff3410f2f1e2e4a4f5738	1	0	6	36		0
+1355	claude/project-thread-xbz5w7	7fb4bfc927abc55201f1eb491bf3fdb07fc751a8	0	0	11	23		0
+1356	claude/project-thread-pcyidq	29d19e8b8a374bdf5818b67a017126dc74aa5c24	0	0	4	12		0
+1357	claude/project-thread-9y20j9-mutex	087a928d01b3e6003be8b633e24bb121e75261c6	0	0	0	0		0
+1358	claude/project-thread-9y20j9-timer-shutdown	087a928d01b3e6003be8b633e24bb121e75261c6	0	0	0	0		0
+1359	claude/project-thread-xbz5w7	eb0eda0fff8dcbd8f1236363fcd0fc8c4c3e16a5	0	0	0	0		0
+1360	claude/project-thread-9y20j9-shutdown-notified	7baabdd85d171647caec32c0bd1fe1c10eba014f	0	0	1	2		0
+1362	claude/project-thread-uqe885	e320e810c6aa92843530629edd1e5b5d41381a47	0	0	0	0		0
+1363	claude/project-thread-uu71pn	8202cde5e30bcaed9fda3c014776226a89bff9b1	0	0	2	6		0
+1364	claude/project-thread-dw49bz	a10b272f1135c14de082a853aaee9702c84b0314	0	0	6	20		0
+1365	claude/project-thread-1koznh-pin-stderr	9cc6dd2da72e772cc5f5e04cdf2ec778114db7c9	0	0	0	1		0
+1366	claude/project-thread-1koznh	aa020b34b431bf8c63802b75d5471f3c5d867eca	0	0	4	22		0
+1367	claude/project-thread-pr1p5t	5d085db0cb6c1d432c15bb235ac816d4fe597f1a	0	0	6	15		0
+1368	claude/project-thread-dw49bz	8f27bb99274992f3ab69a7566d7aca7d2ddf81ec	2	0	15	64		0
+1369	claude/project-thread-i6y509	a9a4ddfe60a0648e7d2d998fc5e3434193934553	0	0	0	2		0
+1370	claude/project-thread-9kk2kc	3e0023be603e454ced35aa93f60a88deb2936b08	0	0	16	58		0
+1372	claude/project-thread-f8dtjr	38ed8671f51154f93a027a0fef374458290f81a8	1	-1	27	98		0
+1373	claude/project-thread-fgipv4	258e155852c72a50f9a6bd2da37dca1ed0c0ee4f	0	-3	46	157		0
+1374	claude/project-thread-55m319	a9a4ddfe60a0648e7d2d998fc5e3434193934553	0	0	0	2		0
+1376	claude/project-thread-3a6n3r	627f9f3a079fa05528c540917b1326ae028f5d1c	0	0	0	0		0
+1377	claude/project-thread-ofrot3	1d7fc8587028fb1cb576ca977665e6740988c2e0	2	0	5	30		0
+1378	claude/project-thread-4ct6dj	ce280099580f28d6b4fcac2bf8dd1e716d423a50	0	-1	15	40		0
+1379	claude/project-thread-9y20j9-timer-pause	973ab1d1b4f20501b5152e78114d86578c1a503b	0	0	1	3		0
+1380	claude/project-thread-9y20j9-timer-wakers	adfa35f5637db01072c2a6674d8c967aebde9d5a	0	0	0	0		0
+1381	claude/project-thread-9y20j9-connect-refused	e516484eb0bcbba8399eddb2c48d982fd563f287	0	0	0	0		0
+1382	claude/project-thread-3a6n3r-c40	b8467139bfcea198162d2da78471f6db0a773a0b	1	0	14	58		0
+1383	claude/project-thread-9y20j9-owned-tasks	bf83da461e41608184aed4720183ed9c9c77493a	0	0	12	31		0
+1384	docs/let-em-loose-concept	a3e46b3bd1acd243b4bce439b738aa39d03ddce0	0	0	0	0		0
+1385	claude/project-thread-rrbjgm	5cf5f2cb924c492b86e248819e5d65f122a8c9a2	0	0	0	0	py:2	0
+1386	claude/project-thread-cuy60u	0e8f67e17b618bb9ffd69f0fe8844b2f84840eb0	0	0	0	0		0
+1388	claude/project-thread-tvrgmw	165e9141093fee75593f80cb1d34fd18c5bb7919	0	-1	11	13		0
+1389	claude/project-thread-1tioxa	2539b77429c19c44895d8510f7f50865083c25ce	-2	-4	110	423		0
+1391	claude/project-thread-1tioxa-host	3d91d95239d8199ea19c90769b275fc533f8c3a6	0	-1	34	128		0
+1392	claude/project-thread-x49l3h	3d91d95239d8199ea19c90769b275fc533f8c3a6	0	-1	34	128		0
+1393	claude/project-thread-u0xkgg	b2b9f85303e9e3090ad852f34bf2f159d88608ab	0	1	26	92		0
+1394	claude/project-thread-r14ss9	59b2c0dd02f1c2fbda84ed444d76ac584a2f74fd	0	0	-2	-10		0
+1397	claude/project-thread-fl0yra	6043ac08b5f40c59c3fc0b3ba2b0f5c40f46ffd7	0	0	4	19		0
+1398	claude/project-thread-q9a5dl	cb0cb701a91d45611e2258251ae05295dfa72bea	0	0	6	13		0
+1399	claude/project-thread-gpo26g	6e11eb597da3754325891cc2185a2f272dcb4f2d	0	0	0	0		0
+1400	claude/project-thread-wlkt3l	474832d46e6b108f0feb9f80ed524ec853429b2b	0	0	6	12		0
+1401	claude/project-thread-7j8i5b	7eb1757e0016207e8c7ca29746cf5bd8583d7d10	0	0	1	3		0
+1402	claude/project-thread-7xbh85	59b2c0dd02f1c2fbda84ed444d76ac584a2f74fd	0	0	-2	-10		0
+1403	claude/project-thread-3m7rtg	1afa05b880318d5b592316496f2975d62cf039ad	0	0	0	0		0
+1404	claude/project-thread-hbez20	6043ac08b5f40c59c3fc0b3ba2b0f5c40f46ffd7	0	0	4	19		0
+1405	claude/project-thread-1tioxa	9c112e65892a51021da7980cd100aa104913eed5	0	0	0	0		0
+1406	claude/project-thread-u0xkgg	14be653aacad0da671ee64b4b847af0a746723da	0	0	23	70		0
+1407	claude/project-thread-u0xkgg	b65f0b6287128a158b47fa3c0309f050c140fa5b	4	-1	25	112		0
+1408	claude/project-thread-9r15d6	79bcdfbb832a6bd7dd51caec0db3bf1ddce8d88b	0	0	6	3		0
+1409	claude/project-thread-9r15d6-openai	e9b7cdd8f8a8ad1b85d87205efc28149169cb242	-2	-2	46	91		0
+1410	claude/project-thread-9r15d6-lens	af291da58b49583349eb73b1511352244a9e8977	-3	-2	93	263		0
+1411	claude/project-thread-7xbh85	baf38a826392ee3cc555454aca3493405a021f4a	-1	0	15	30		0
+1412	claude/project-thread-8sfwxd	cd5c2a6c3de043a14455aa1f52673714d2da160c	0	0	9	24		0
+1413	claude/project-thread-covndq	19131f736f547308a530dc21190c0988e1603aea	0	0	18	55		0
+1414	claude/project-thread-iiey28	e03641b985c0e077d793b48f241b7e57b47c7a42	-1	0	15	49		0
+1415	claude/project-thread-covndq-mcp	d1ac188095b91d562c88fa00c550869dd64780de	0	0	8	17		0
+1416	claude/project-thread-iiey28-versions	55f71ceae639468760c4f31a2188f36cf70eed74	0	0	1	12		0
+1417	claude/project-thread-covndq-ui	ee6976ebce033d450d6df580caba2fed115cbf1e	0	0	0	0		0
+1418	claude/project-thread-iiey28-protected	df021868135236d9779cb6dc2c5ce0b44f9f0b81	0	-1	20	86		0
+1419	claude/project-thread-iiey28-holdout-host	02685e4996dff3d4700884b065262ceaa25b3503	0	-1	18	64	py:1	0
+1420	claude/project-thread-covndq-host	074886455d2f8c28f71244080a5ba2a9bd80f13c	0	0	3	16		0
+1421	claude/project-thread-iiey28-golden	2754746bde46572a9801781ba2178c9395d6dbec	0	0	19	72	py:1	0
+1422	claude/project-thread-covndq-remediate	d38d916fd2a998770004fb87c0002f5587eb2f72	0	-1	13	36		0
+1423	claude/project-thread-68uexw	a85b68cc73c9760a2eb271b98782a1c31bc276b8	0	0	11	20		0
+1424	claude/project-thread-8sfwxd	84d4309e4d6f9d3d96faa57364ddcf77c154a7bb	1	0	8	27		0
+1425	claude/project-thread-9r15d6-lens-models	99d61f33fd98da58735a1ee15d59af1ba366d4b5	0	0	5	7		0
+1426	claude/project-thread-9r15d6-lens-claude	3f1b20b8379deafc8493320d881fc576ebbd0500	0	-1	14	21		0
+1427	claude/project-thread-9r15d6-lens-codex	c61b784b284ff33ee0b74d4158fe814bc3e9f787	0	0	17	28		0
+1428	claude/project-thread-8sfwxd	5b4d45e54a2244dc78cf957f558f8f67cb12bcd2	0	0	0	0		0
+1429	claude/project-thread-9r15d6-lens-shell	33ffcb08677722e8467aaeb7d84680636028336e	0	0	10	25		0
+1430	claude/project-thread-9r15d6-lens-assert	16e32f07b96125c262abfb7343a41e839aa83000	0	0	15	39		0
+1431	claude/project-thread-covndq-realhost	168c2f92a568452bc88fc0f1e01204f67e61bfca	0	0	0	0	py:2	0
+1432	claude/project-thread-qjkwrx	c428da0421c156ca48f73921d9d9554bad5a2c28	0	0	3	12		0
+1433	claude/project-thread-68uexw	1b4d20a9087fdf4b7a0e21f37b0715e9e8ee53eb	0	0	2	25		0
+1434	claude/project-thread-qjkwrx	c27934d5483e312c7e3d60486e26c7bf6bd7f1fc	0	0	10	31		0
+1435	claude/project-thread-qjkwrx	b3988533c766311b580eb09b7a41275f5a9a0f07	0	0	0	0		0
+1436	claude/project-thread-9r15d6-codex-events	3038a3d592539f9807984c673eae5566a6642935	0	0	-3	-2		0
+1437	claude/project-thread-9r15d6-container-assert	61309bbeb2ed895412eac5c8f8ad6dd73bbf52e3	0	0	5	21		0
+1438	claude/project-thread-9r15d6-container-check	54f97a143928a5af1a4daaf76f28108306a2f3a2	-1	-1	18	46		0
+1439	claude/project-thread-9r15d6-lens-check	ccc02fc5cf4582636777157e5a6af96d9dd5ecb7	0	0	7	37		0
+1440	claude/project-thread-qjkwrx	2eb0ee269532ffc7422f8b294376555763aaf2ba	0	0	3	10		0
+1441	claude/project-thread-u1yc6d	0a2b958138a7eb48e6290178cd7c8881bfa06b91	0	0	4	12		0
+1442	claude/project-thread-9r15d6-lens-run	04fc7bfbe6ad1fec9691a86aa3edcf4ad1dcf6e8	0	0	3	14		0
+1443	claude/project-thread-u1yc6d	1417c404315f1bae8e9e33268cc74258141ac788	0	0	0	0		0
+1444	claude/project-thread-9r15d6-meter-save	5beabe734bc54eb5fb08ae0bd8993a496447b9a3	0	0	3	8		0
+1445	claude/project-thread-x8v9vw	376f733f3abb19eaa37867cf665c1d860048b114	0	0	0	0		0
+1446	handoff/let-em-loose-resolved	bb23f6c6e7b066c82c94c7e4d0f078850a44642c	0	0	0	0		0
+1447	claude/project-thread-dpw8cw	a3e46b3bd1acd243b4bce439b738aa39d03ddce0	0	0	0	0		0
+1448	claude/project-thread-dpw8cw	1f34f67df01e36d62d5af5584f9d2c572b3e9bc9	0	0	0	0		0
+1449	docs/let-em-loose-1384-corrections	515bfb3ffab18468c9d0292ea618927db2ccb04f	0	0	0	0		0
+1450	claude/project-thread-f6cl79-643	10c891a6fc379c8464911c28c86805a25968c759	0	0	0	0	py:2	0
+1451	claude/project-thread-f6cl79-591	68da8aa488edd9f22227f91e5d34639d960e77d2	0	0	4	11		0
+1452	claude/project-thread-f6cl79-402	992dcfee23241a9292c85b202412bdfa2ca6b159	0	0	0	0		0
+1453	claude/project-thread-f6cl79-525	141d7f36ee86174323dd5fa6e10faeb8ba49b50e	0	0	1	1		0
+1454	claude/project-thread-f6cl79-404	8d5401338bdeb19ed7b8118e67d988f6750494e8	0	0	0	1		0
+1455	claude/project-thread-f6cl79-440	0309d1047351d2a88dd673a5ae9a53ac36273152	0	0	0	0		0
+1456	claude/project-thread-f6cl79-409	52b5e13ae779dd93560a178f2544f258dc5b047c	0	0	1	1		0
+1457	claude/project-thread-f6cl79-406	83e70a1ce23444de5c814c3c4e11c48e576ca3a2	0	0	10	20		0
+1458	claude/project-thread-f6cl79-408	213c86f0d318c455f9e98f4999d5e30eb72f90cf	0	0	0	0	py:4	0
+1459	claude/project-thread-f6cl79-718	aec9e460ffbaf2af60f43757678fe2cfe9267788	0	0	-1	-2		0
+1460	claude/project-thread-hcpo4a	5083e4e7e8e3ec380b057ec28d97a38507253a6d	0	0	5	6		0
+1461	claude/project-thread-f6cl79-719	3f6f27bbe0f259616773e8033b99ee8a00e3f7d7	0	0	1	1		0
+1462	claude/project-thread-9r15d6-meter-store	b730e3bcd9fc94209d6c42617468e3851201ae85	0	0	9	15		0
+1463	claude/project-thread-1koznh	487b818b9f6f1b8c25197882d1cd9ed857b7e586	0	0	0	0		0
+1464	claude/project-thread-9r15d6-lens-run	aacc370ab645fffff213b5fafc47b3c371c174cc	0	0	6	17		0
+1465	claude/project-thread-9r15d6-lens-bbp	efd10acfe13e4b76c6aa69f2750d2c2c89df7a8c	-1	-1	31	72		0
+1466	claude/project-thread-9r15d6-lens-protocol	23542e2107f1e5edc0a89cab45d46fc20c80fc1b	0	0	2	9		0
+1467	claude/project-thread-9r15d6-lens-run-cmd	b6fcc4049708625570401511b69d4ec9c0e320d4	0	0	13	37		0
+1468	claude/project-thread-f6cl79-720	ddeb5c305ccfaa2f6294075a68c7d549d85c2282	0	0	1	1		0
+1469	claude/project-thread-x8v9vw	fb108680c2c4b9b220510bf3f0fdfa86070fed3b	0	0	0	0		0
+1470	claude/project-thread-h4rvos	7fc0fac8ca289d2d94d8e058b11ec28b0c1fa54b	0	0	0	0		0
+1471	claude/project-thread-hcpo4a	41016c914376ff65d358c06cb7ba7c401ba6c24e	2	0	24	110		0
+1472	claude/fervent-hamilton-ufg85s	575bc25af3e058abe6a1b95d735f8da9c1db628f	0	0	0	0		0
+1473	docs/rusty-term-gui-design	213c86f0d318c455f9e98f4999d5e30eb72f90cf	0	0	0	0	py:4	0
+1474	claude/project-thread-eiry3e-410-http	99cb002b867f1176c7731a6acf52b77b9131d49b	0	0	0	2		0
+1475	claude/project-thread-eiry3e-410-mcp	eb4dd355f1e1cce7c9aed0e9ad4c55f0f3720a49	0	0	-6	-6		0
+1476	claude/project-thread-eiry3e-410-tls	ce57aee96410f5791f2d33aef628626010e77bd4	0	0	0	0		0
+1477	claude/project-thread-hcpo4a	218a93add0822c93feaf44ec9bbd50844b77906a	0	0	0	0		0
+1478	claude/project-thread-vu4o21	cd3426a7ab99664f15b499ce5696525ac6809183	0	0	0	0		0
+1479	claude/project-thread-9r15d6-lens-claims	bc2e2c427db02b09cda22b6eff2d1d7b0c0bb2b1	0	0	-1	-4		0
+1480	claude/project-thread-6j7b7s	99ae3e541a67559cf93b2797ee7f16d244f74463	-2	-2	39	103		0
+1481	claude/project-thread-wnjg18	981fca514f0cd4b7c665645f37c9a24b152a919e	0	0	0	3		0
+1482	claude/project-thread-id7m7a	67f4bb3c5b679a6fe0582cad5c628a8a44368f88	0	0	2	3		0
+1483	claude/project-thread-nxcl1q	3f1ae700629ed2f682945a89b950e6441414ee18	0	0	9	40		0
+1485	claude/project-thread-5w4cgc	0b0f354cfd566a032d725c0343512e77280454ad	0	0	9	26		0
+1486	claude/project-thread-l8uvnl	93864e6a05870de626769ec1a436eb67c1d23823	0	0	1	4		0
+1487	claude/project-thread-l8uvnl-alien-core	1984826d5e69edb30835db9b49fd5838fc332421	0	0	14	40		0
+1488	claude/project-thread-azwyix	99b2e760111ee06fb4ee35e6883982a667252f28	-2	-3	55	139		0
+1489	claude/project-thread-pdnlmv	f2deed051cc3659caa06f6f7816b8c468e076734	0	0	15	55		0
+1490	claude/project-thread-wnjg18	6d41912f469a9477840c137e7cda67a8bc32f8a6	0	0	15	41	js:2	0
+1491	claude/project-thread-nxcl1q	645a33efa621508feddf26f4cb0d01cb669f79b5	-1	-1	43	116	py:1	0
+1492	claude/project-thread-9r15d6-lens-state	021565d77759095af85189186ba74d857d326a42	-1	1	28	46		0
+1493	claude/project-thread-azwyix-c70	83122331146ec77aefad26d96a11c44a3b0b6096	-1	-1	31	68		0
+1494	claude/project-thread-6j7b7s	db43dc04341dae57c112196683d82b0a2ee3095b	2	-2	25	121	py:1	0
+1495	claude/project-thread-l8uvnl-alien-store	a179aabd40757c76b916f56d42dada87eebbdf35	-1	2	31	80		0
+1497	claude/project-thread-eiry3e-731	22e0fc56b318b4737f49c88fbe85781e3b76be29	0	0	0	0		0
+1498	claude/project-thread-pdnlmv-598-baseline	18aadb5f014caa7dd3e49fafbdc9a21088474cf3	0	0	15	42		0
+1500	claude/project-thread-l8uvnl-alien-hunt	4a72c5cad421bfa9d5af5846049b924bd580dbe2	0	-1	9	43		0
+1501	claude/project-thread-vu4o21-mux-scrub	999a3b3420864abb0652729a31cd03c9fad41274	0	0	0	0		0
+1502	claude/project-thread-vu4o21-takeover-core	8d38400c06557131ab80813e000ba61a69859dd7	0	-1	16	56		0
+1503	claude/project-thread-6s614p	81de14c9f5f62cdd26fe86aa2c42dfe56158fd6b	0	0	0	0		0
+1504	claude/project-thread-vu4o21-takeover-cli	74c71393eaa80849c5a8fe3f4f943d74adc7ce6b	0	0	6	16		0
+1506	claude/project-thread-vu4o21-lel-jail	cf4a3666edebc2e7b961da0fd2ff657880dbd572	-1	-1	27	55		0
+1507	claude/project-thread-vu4o21-cgroup-holder	d551330bd065d5cd8c4131d5daf7aa43070e9660	-2	-1	38	120		0
+1508	claude/project-thread-6j7b7s	124658875a5f6c26da37ae27f3b928f21db3f20c	0	0	7	25		0
+1509	claude/project-thread-hcpo4a	73e96dfb060347f8d46f1263e18bef9ef951dfa9	0	0	0	0		0
+1512	claude/project-thread-6s614p	dca316c135e4c19a81f7d5cc9d334aa00657ce01	0	0	0	0		0
+1513	claude/project-thread-so0pq3	83122331146ec77aefad26d96a11c44a3b0b6096	-1	-1	31	68		0
+1514	claude/project-thread-azwyix	2b8d8edb7b238af1219d3539670b0597e54f8160	0	0	0	0		0
+1515	claude/project-thread-6s614p	85dcf1c80b6e8e853205e9b2be3b20e356852907	0	0	0	0		0
+1516	claude/project-thread-wnjg18	c1beff319ddf13b9f723fbe15a7b0253b88bd06c	0	0	9	29		0
+1517	claude/project-thread-2xqi61-741	21b2eab9a778c52308a0c34609336f3a8024e560	0	0	1	2		0
+1519	claude/project-thread-6j7b7s	df22ad8ce04c06a9fc012b85839798619a091ce5	0	0	5	15		0
+1521	claude/project-thread-nhynzl	0d64d87b66080083386dc8acc6faa74deffc01b4	0	0	5	8		0

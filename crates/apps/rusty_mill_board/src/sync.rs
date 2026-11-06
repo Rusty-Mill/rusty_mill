@@ -28,7 +28,7 @@ use std::fmt;
 use uuid::Uuid;
 
 use crate::api::Shared;
-use crate::domain::{Actor, BoardError, Card, Column, import_id, reserved_tag, text_hash};
+use crate::domain::{Actor, BoardError, Card, Column, Edit, import_id, reserved_tag, text_hash};
 
 /// Prefix of the label that mirrors a card's column.
 pub const BOARD_PREFIX: &str = "board:";
@@ -398,14 +398,12 @@ fn sync_pair(
             // A board edit that landed since must not be overwritten by a decision made
             // from the older snapshot; the next run sees both changes and merges them.
             Some(base) if base == card_hash => {
-                match board.edit_at(
-                    card.id,
-                    actor,
-                    Some(card.rev),
-                    Some(&issue.title),
-                    Some(&issue_body),
-                    None,
-                ) {
+                let edit = Edit {
+                    title: Some(&issue.title),
+                    body: Some(&issue_body),
+                    ..Edit::default()
+                };
+                match board.edit_at(card.id, actor, Some(card.rev), &edit) {
                     Ok(edited) => card = edited,
                     Err(BoardError::Conflict) => {
                         report.deferred += 1;

@@ -202,6 +202,139 @@ fn the_naming_hook_asks_only_while_the_name_is_generated() {
     );
 }
 
+#[test]
+fn an_event_hook_reports_status_silently_and_never_fails() {
+    let socket = start_server();
+    let block = block(&socket);
+    let hook = |socket: &Path, block: &str, args: &[&str]| {
+        let mut all = vec!["agent", "hook", "--event"];
+        all.extend(args);
+        let output = ctl_command(socket, &all)
+            .env("RUSTY_MUX_BLOCK", block)
+            .output()
+            .expect("run rusty-mux-ctl");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+    };
+    hook(
+        &socket,
+        &block,
+        &[
+            "blocked",
+            "--kind",
+            "permission",
+            "--app",
+            "pi",
+            "--msg",
+            "hi",
+        ],
+    );
+    assert_eq!(
+        ok(&socket, &["terminal.status", "--block", &block]),
+        "state=blocked:kind=permission:app=pi:msg=aGk="
+    );
+    // A bad report, an unknown block and a missing server change nothing.
+    hook(&socket, &block, &["busy"]);
+    hook(&socket, "00000000-0000-0000-0000-00000000000b", &["idle"]);
+    hook(Path::new("/nonexistent/rusty-mux.sock"), &block, &["idle"]);
+    assert_eq!(
+        ok(&socket, &["terminal.status", "--block", &block]),
+        "state=blocked:kind=permission:app=pi:msg=aGk="
+    );
+}
+
+/// O2 part 2 (D89): Claude Code's `PreToolUse` and `PermissionRequest`
+/// hooks name the tool from the event's JSON on stdin, and a hook whose
+/// stdin holds no usable name still reports its state.
+#[test]
+fn an_event_hook_takes_the_tool_name_from_stdin() {
+    let socket = start_server();
+    let block = block(&socket);
+    let hook = |stdin: &[u8], args: &[&str]| {
+        let mut all = vec!["agent", "hook", "--event"];
+        all.extend(args);
+        let mut child = ctl_command(&socket, &all)
+            .env("RUSTY_MUX_BLOCK", &block)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run rusty-mux-ctl");
+        let mut input = child.stdin.take().expect("stdin");
+        let _ = input.write_all(stdin);
+        drop(input);
+        let output = child.wait_with_output().expect("wait");
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "{output:?}"
+        );
+        ok(&socket, &["terminal.status", "--block", &block])
+    };
+    let event = br#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}"#;
+    let args = [
+        "blocked",
+        "--kind",
+        "permission",
+        "--app",
+        "claude",
+        "--tool-from-stdin",
+    ];
+    // "Bash", base64: the tool name only, never its input.
+    assert_eq!(
+        hook(event, &args),
+        "state=blocked:kind=permission:app=claude:msg=QmFzaA=="
+    );
+    let working = ["working", "--app", "claude", "--tool-from-stdin"];
+    assert_eq!(hook(b"not json", &working), "state=working:app=claude");
+    let control = br#"{"tool_name":"a\u0007b"}"#;
+    assert_eq!(hook(control, &working), "state=working:app=claude");
+    let huge = vec![b' '; (1 << 20) + 10];
+    assert_eq!(hook(&huge, &working), "state=working:app=claude");
+}
+
+#[test]
+fn an_event_hook_whose_stdin_never_ends_still_reports_in_time() {
+    let socket = start_server();
+    let block = block(&socket);
+    let args = [
+        "agent",
+        "hook",
+        "--event",
+        "working",
+        "--app",
+        "codex",
+        "--tool-from-stdin",
+    ];
+    let started = std::time::Instant::now();
+    let mut child = ctl_command(&socket, &args)
+        .env("RUSTY_MUX_BLOCK", &block)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rusty-mux-ctl");
+    // Written but never closed: the writer holds the pipe open throughout.
+    let mut input = child.stdin.take().expect("stdin");
+    input.write_all(br#"{"tool_name":"Bash""#).expect("write");
+    let output = child.wait_with_output().expect("wait");
+    let took = started.elapsed();
+    drop(input);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        output.stdout.is_empty() && output.stderr.is_empty(),
+        "{output:?}"
+    );
+    assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+    assert_eq!(
+        ok(&socket, &["terminal.status", "--block", &block]),
+        "state=working:app=codex"
+    );
+}
+
 fn rename(socket: &Path, session: &str, name: &str) {
     ok(
         socket,

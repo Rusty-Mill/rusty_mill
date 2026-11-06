@@ -1,7 +1,7 @@
 //! `erosion`: the erosion profile's command (card #704 slice 2, D41, D42).
 //!
 //! ```text
-//! erosion check --base COMMIT (--report-only | --max-concentration-bp N --max-duplication-bp N)
+//! erosion check --base COMMIT (--report-only | --cleanup | --max-concentration-bp N --max-duplication-bp N)
 //! ```
 //!
 //! Run in a git checkout. It measures the Rust code of the `--base` commit
@@ -15,13 +15,17 @@
 //! or the working tree; with `--report-only` that is printed and exits 0
 //! (unreadable Rust is listed as `unmeasured`), so a report-only profile
 //! never blocks a claim.
+//!
+//! `--cleanup` enforces D44's cleanup predicate instead of limits: neither
+//! share may rise and at least one must fall, so an unchanged candidate
+//! fails (exit 1). It fails closed on a measure error (exit 2), as limits do.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::process::{Command, ExitCode, Stdio};
 
 use rusty_erosion::adapter::rust::Parser;
-use rusty_erosion::{Affected, FileClass, FileMeasure, Report, classify};
+use rusty_erosion::{Affected, Delta, FileClass, FileMeasure, Report, classify};
 
 /// Functions listed in an escalation (D43).
 const WORST: usize = 3;
@@ -29,7 +33,35 @@ const WORST: usize = 3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Options {
     base: String,
-    limits: Option<Limits>,
+    mode: Mode,
+}
+
+/// What the check enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Measure and report; never fail (D42).
+    ReportOnly,
+    /// Fail when a delta exceeds its limit (D41).
+    Limits(Limits),
+    /// Fail unless neither share rises and at least one falls (D44).
+    Cleanup,
+}
+
+impl Mode {
+    /// Whether the deltas pass; always true while report-only.
+    fn passes(self, d: &Delta) -> bool {
+        match self {
+            Mode::ReportOnly => true,
+            Mode::Limits(l) => {
+                d.concentration_bp <= l.concentration_bp && d.duplication_bp <= l.duplication_bp
+            }
+            Mode::Cleanup => {
+                d.concentration_bp <= 0
+                    && d.duplication_bp <= 0
+                    && (d.concentration_bp < 0 || d.duplication_bp < 0)
+            }
+        }
+    }
 }
 
 /// Largest allowed rise of each share, in basis points.
@@ -51,23 +83,23 @@ fn main() -> ExitCode {
     match check(&opts) {
         Ok((line, within)) => {
             println!("{line}");
-            match within || opts.limits.is_none() {
+            match within {
                 true => ExitCode::SUCCESS,
                 false => ExitCode::from(1),
             }
         }
         Err(e) => {
             println!("{{\"erosion\":1,\"error\":{}}}", json_str(&e));
-            match opts.limits {
-                None => ExitCode::SUCCESS,
-                Some(_) => ExitCode::from(2),
+            match opts.mode {
+                Mode::ReportOnly => ExitCode::SUCCESS,
+                Mode::Limits(_) | Mode::Cleanup => ExitCode::from(2),
             }
         }
     }
 }
 
 fn parse_args(args: &[String]) -> Result<Options, String> {
-    let usage = "usage: erosion check --base COMMIT (--report-only | --max-concentration-bp N --max-duplication-bp N)";
+    let usage = "usage: erosion check --base COMMIT (--report-only | --cleanup | --max-concentration-bp N --max-duplication-bp N)";
     let Some((cmd, rest)) = args.split_first() else {
         return Err(usage.into());
     };
@@ -76,6 +108,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     }
     let mut base = None;
     let mut report_only = false;
+    let mut cleanup = false;
     let (mut conc, mut dup) = (None, None);
     let mut seen: Vec<&str> = Vec::new();
     let mut it = rest.iter();
@@ -90,6 +123,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         match flag.as_str() {
             "--base" => base = Some(value()?),
             "--report-only" => report_only = true,
+            "--cleanup" => cleanup = true,
             "--max-concentration-bp" => conc = Some(parse_bp(&value()?)?),
             "--max-duplication-bp" => dup = Some(parse_bp(&value()?)?),
             other => return Err(format!("unknown argument {other:?}; {usage}")),
@@ -99,16 +133,20 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     if !is_commit_id(&base) {
         return Err(format!("--base {base:?} is not a full commit id"));
     }
-    let limits = match (report_only, conc, dup) {
-        (true, None, None) => None,
-        (false, Some(c), Some(d)) => Some(Limits {
+    let mode = match (report_only, cleanup, conc, dup) {
+        (true, false, None, None) => Mode::ReportOnly,
+        (false, true, None, None) => Mode::Cleanup,
+        (false, false, Some(c), Some(d)) => Mode::Limits(Limits {
             concentration_bp: c,
             duplication_bp: d,
         }),
-        (true, _, _) => return Err("--report-only takes no limits".into()),
-        (false, _, _) => return Err(format!("give --report-only or both limits; {usage}")),
+        (true, true, _, _) => return Err("give --report-only or --cleanup, not both".into()),
+        (true, _, _, _) | (_, true, _, _) => {
+            return Err("--report-only and --cleanup take no limits".into());
+        }
+        _ => return Err(format!("give a mode; {usage}")),
     };
-    Ok(Options { base, limits })
+    Ok(Options { base, mode })
 }
 
 fn parse_bp(s: &str) -> Result<i32, String> {
@@ -121,8 +159,8 @@ fn is_commit_id(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Measures both trees; returns the JSON line and whether the deltas are
-/// within the limits (true when there are none).
+/// Measures both trees; returns the JSON line and whether the deltas pass
+/// the mode (always true while report-only).
 fn check(opts: &Options) -> Result<(String, bool), String> {
     // Every git and file path below is relative to the repository root, so
     // work from there wherever the profile was started.
@@ -161,7 +199,7 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
         .iter()
         .chain(&cand_snap.unreadable)
         .collect();
-    if opts.limits.is_some() && !bad_rust.is_empty() {
+    if opts.mode != Mode::ReportOnly && !bad_rust.is_empty() {
         // Supported code that cannot be read leaves a snapshot incomplete, a
         // measurement failure rather than `unmeasured` (D45 covers other
         // languages only): fail closed.
@@ -179,9 +217,7 @@ fn check(opts: &Options) -> Result<(String, bool), String> {
     let unmeasured_paths: BTreeSet<&String> = cand_snap.other.iter().chain(bad_rust).collect();
     let changed_unmeasured: Vec<&String> = unmeasured_paths.into_iter().collect();
     let delta = base.delta(&cand);
-    let within = opts.limits.is_none_or(|l| {
-        delta.concentration_bp <= l.concentration_bp && delta.duplication_bp <= l.duplication_bp
-    });
+    let within = opts.mode.passes(&delta);
     let line = render(opts, &base, &cand, within, &changed_unmeasured);
     Ok((line, within))
 }
@@ -549,9 +585,10 @@ fn render(
         )
     };
     let list = |items: Vec<String>| format!("[{}]", items.join(","));
-    let mode = match opts.limits {
-        None => "\"report-only\"".to_string(),
-        Some(l) => format!(
+    let mode = match opts.mode {
+        Mode::ReportOnly => "\"report-only\"".to_string(),
+        Mode::Cleanup => "\"cleanup\"".to_string(),
+        Mode::Limits(l) => format!(
             "{{\"max_concentration_bp\":{},\"max_duplication_bp\":{}}}",
             l.concentration_bp, l.duplication_bp
         ),
@@ -560,10 +597,11 @@ fn render(
         "\"erosion\":1".to_string(),
         format!("\"base\":{}", json_str(&opts.base)),
         format!("\"mode\":{mode}"),
-        // No limits to be within while report-only.
-        match opts.limits {
-            None => "\"within_limits\":null".to_string(),
-            Some(_) => format!("\"within_limits\":{within}"),
+        // Nothing to be within while report-only; under --cleanup it is
+        // whether D44's predicate holds.
+        match opts.mode {
+            Mode::ReportOnly => "\"within_limits\":null".to_string(),
+            Mode::Limits(_) | Mode::Cleanup => format!("\"within_limits\":{within}"),
         },
         share(
             "concentration_bp",
@@ -633,9 +671,11 @@ mod tests {
             ro,
             Ok(Options {
                 base: C.into(),
-                limits: None
+                mode: Mode::ReportOnly
             })
         );
+        let clean = parse_args(&args(&format!("check --base {C} --cleanup")));
+        assert_eq!(clean.map(|o| o.mode), Ok(Mode::Cleanup));
         let lim = parse_args(&args(&format!(
             "check --base {C} --max-concentration-bp 150 --max-duplication-bp 100"
         )));
@@ -643,7 +683,7 @@ mod tests {
             concentration_bp: 150,
             duplication_bp: 100,
         };
-        assert_eq!(lim.map(|o| o.limits), Ok(Some(want)));
+        assert_eq!(lim.map(|o| o.mode), Ok(Mode::Limits(want)));
     }
 
     #[test]
@@ -656,10 +696,36 @@ mod tests {
             format!("check --base {C} --report-only --oops"),
             format!("check --base {C} --base {} --report-only", "f".repeat(40)),
             format!("check --base {C} --report-only --report-only"),
+            format!("check --base {C} --cleanup --report-only"),
+            format!("check --base {C} --cleanup --max-concentration-bp 1 --max-duplication-bp 1"),
+            format!("check --base {C} --cleanup --cleanup"),
             "measure".to_string(),
         ] {
             assert!(parse_args(&args(&bad)).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn cleanup_needs_one_share_to_fall_and_neither_to_rise() {
+        let d = |c: i32, u: i32| Delta {
+            concentration_bp: c,
+            duplication_bp: u,
+            total_cc: 0,
+            loc: 0,
+            functions: 0,
+        };
+        // D44's worked examples, as deltas.
+        assert!(Mode::Cleanup.passes(&d(-20, 0)));
+        assert!(Mode::Cleanup.passes(&d(0, -20)));
+        assert!(Mode::Cleanup.passes(&d(-1, -1)));
+        assert!(!Mode::Cleanup.passes(&d(-20, 1)), "duplication worsens");
+        assert!(!Mode::Cleanup.passes(&d(0, 0)), "neither improves");
+        let lim = Mode::Limits(Limits {
+            concentration_bp: 0,
+            duplication_bp: 0,
+        });
+        assert!(lim.passes(&d(0, 0)), "0/0 limits pass what cleanup fails");
+        assert!(Mode::ReportOnly.passes(&d(500, 500)));
     }
 
     #[test]

@@ -73,9 +73,17 @@ pub enum Refusal {
 /// order.
 pub fn prefix(intent: &str, rules: &str, lens_prompt: &str) -> String {
     format!(
-        "# Intent\n{intent}\n\n# Board rules\n{rules}\n\n# Your lens\n{lens_prompt}\n\n# Reply\n{}",
+        "{}\n# Reply\n{}",
+        raw_prefix(intent, rules, lens_prompt),
         crate::post::protocol()
     )
+}
+
+/// The prefix of a lens whose replies are not board posts (the #708 alien
+/// lens): intent, rules and lens prompt, with no reply protocol, since
+/// each question body says what to reply.
+pub fn raw_prefix(intent: &str, rules: &str, lens_prompt: &str) -> String {
+    format!("# Intent\n{intent}\n\n# Board rules\n{rules}\n\n# Your lens\n{lens_prompt}\n")
 }
 
 /// Build `(prefix, body)` for one provider.

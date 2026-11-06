@@ -2,7 +2,7 @@
 //! trips, and the store refuses what it should.
 
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use orch_core::board::{Author, Board, Confidence, EntryKind, NewEntry, Verdict};
 use orch_core::task::{AgentId, Plan, Role, TaskSpec};
@@ -707,5 +707,319 @@ mod probes {
             &s.probes(Some("t")).expect("p"),
         );
         assert_eq!((t.hunts, t.probes, t.tokens), (2, 1, 1_000));
+    }
+}
+
+mod taints {
+    use orch_lens::taint::Taints;
+    use orch_lens::DataClass::{Internal, Sensitive};
+    use orch_store::Store;
+
+    use super::dir;
+
+    #[test]
+    fn a_taint_table_survives_reopening_per_task() {
+        let d = dir("taint_reopen");
+        let first = Taints::from_entries([(3, Internal), (9, Sensitive)]);
+        let t = Taints::from_entries([(3, Sensitive), (3, Internal), (9, Sensitive)]);
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert_eq!(s.load_taints("T").expect("load"), Taints::default());
+            s.save_taints("T", &first).expect("save");
+            s.save_taints("T", &t).expect("save again");
+        }
+        let s = Store::open(&d).expect("reopen");
+        assert_eq!(s.load_taints("T").expect("load"), t);
+        assert_eq!(s.load_taints("U").expect("load"), Taints::default());
+    }
+}
+
+mod watch {
+    use orch_store::{PendingPost, Store, WatchFinding, WatchSlot};
+
+    use super::dir;
+
+    fn row(key: &str, claim: u64, pending: Option<&str>) -> WatchSlot {
+        WatchSlot {
+            posted: Some(WatchFinding {
+                key: key.to_owned(),
+                claim,
+            }),
+            pending: pending.map(|k| PendingPost {
+                key: k.to_owned(),
+                post: format!("{{\"op\":\"{k}\"}}"),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_watch_slot_survives_reopening_and_is_per_app_and_slot() {
+        let d = dir("watch_reopen");
+        {
+            let mut s = Store::open(&d).expect("open");
+            let empty = s.watch_slot("demo", "updates").expect("load");
+            assert_eq!(empty, WatchSlot::default());
+            let pending = row("updates:aa", 3, Some("updates:bb"));
+            s.save_watch_slot("demo", "updates", &pending)
+                .expect("save");
+        }
+        let mut s = Store::open(&d).expect("reopen");
+        let got = s.watch_slot("demo", "updates").expect("load");
+        assert_eq!(got, row("updates:aa", 3, Some("updates:bb")));
+        assert_eq!(
+            s.watch_slot("other", "updates").expect("load"),
+            WatchSlot::default()
+        );
+        let tool = s.watch_slot("demo", "toolchain:rust").expect("load");
+        assert_eq!(tool, WatchSlot::default());
+        s.save_watch_slot("demo", "updates", &row("updates:bb", 7, None))
+            .expect("replace");
+        let got = s.watch_slot("demo", "updates").expect("load");
+        assert_eq!(got, row("updates:bb", 7, None), "a later save replaces it");
+    }
+}
+
+mod lens_records {
+    use super::*;
+    use orch_lens::record::{MsgId, Review};
+
+    fn review(lens: &str, claim: u64, look_harder: bool, items: &[u64]) -> Review {
+        Review {
+            lens: lens.to_owned(),
+            claim: MsgId(claim),
+            epoch: 0,
+            look_harder,
+            items: items.iter().copied().map(MsgId).collect(),
+            unsure: false,
+            pending: false,
+        }
+    }
+
+    fn ahead(lens: &str, claim: u64) -> Review {
+        Review {
+            pending: true,
+            ..review(lens, claim, false, &[])
+        }
+    }
+
+    #[test]
+    fn lens_reviews_survive_reopening_per_board_and_replace_the_same_job() {
+        let d = dir("lens_records_reopen");
+        {
+            let mut s = Store::open(&d).expect("open");
+            assert!(s.lens_reviews("b1").expect("load").is_empty());
+            s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                .expect("save");
+            s.save_lens_review("b1", &review("ops", 7, false, &[11]))
+                .expect("save");
+            s.save_lens_review("b1", &review("sec", 7, true, &[12]))
+                .expect("save");
+            s.save_lens_review("b2", &review("sec", 7, false, &[13]))
+                .expect("save");
+        }
+        let mut s = Store::open(&d).expect("reopen");
+        // Asked again after a refused reply: the job's row gains the post.
+        s.save_lens_review("b1", &review("sec", 7, false, &[14]))
+            .expect("replace");
+        assert_eq!(
+            s.lens_reviews("b1").expect("load"),
+            [
+                review("ops", 7, false, &[11]),
+                review("sec", 7, false, &[14]),
+                review("sec", 7, true, &[12]),
+            ]
+        );
+        assert_eq!(
+            s.lens_reviews("b2").expect("load"),
+            [review("sec", 7, false, &[13])]
+        );
+    }
+
+    /// The row was saved but the scheduler state wasn't, so after a restart
+    /// the job ran again and posted anew: the reopened store holds the job
+    /// once, with every item it posted.
+    #[test]
+    fn a_job_rerun_after_a_crash_keeps_every_item_once() {
+        let d = dir("lens_records_rerun");
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &review("sec", 7, false, &[11, 12]))
+                .expect("save");
+        }
+        {
+            let mut s = Store::open(&d).expect("reopen");
+            s.save_lens_review("b1", &review("sec", 7, false, &[12, 15]))
+                .expect("save again");
+            s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                .expect("save empty");
+        }
+        let s = Store::open(&d).expect("reopen");
+        assert_eq!(
+            s.lens_reviews("b1").expect("load"),
+            [review("sec", 7, false, &[11, 12, 15])]
+        );
+    }
+
+    /// A lost post may have landed: once a save says so, the job stays
+    /// unsure through every later save and reopen.
+    #[test]
+    fn a_lost_post_keeps_the_job_unsure() {
+        let d = dir("lens_records_unsure");
+        {
+            let mut s = Store::open(&d).expect("open");
+            let lost = Review {
+                unsure: true,
+                ..review("sec", 7, false, &[11])
+            };
+            s.save_lens_review("b1", &lost).expect("save");
+            s.save_lens_review("b1", &review("sec", 7, false, &[16]))
+                .expect("retry");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let want = Review {
+            unsure: true,
+            ..review("sec", 7, false, &[11, 16])
+        };
+        assert_eq!(s.lens_reviews("b1").expect("load"), [want]);
+    }
+
+    /// The read-only reader makes nothing: it refuses a directory with no
+    /// store or no lens record table, and reads one that has them.
+    #[test]
+    fn lens_reviews_are_read_without_making_a_store() {
+        let d = dir("lens_records_read_only");
+        let missing = |file: &str| format!("{} does not exist", d.join(file).display());
+        let err = Store::read_lens_reviews(&d, "b1").expect_err("no store");
+        assert_eq!(err.to_string(), missing("lock"));
+        assert_eq!(
+            std::fs::read_dir(&d).expect("ls").count(),
+            0,
+            "nothing made"
+        );
+        Store::open(&d)
+            .and_then(|mut s| s.save_lens_review("b1", &review("sec", 7, false, &[11])))
+            .expect("saved");
+        std::fs::remove_file(d.join("lens-records.mmap")).expect("rm");
+        let before = files(&d);
+        let err = Store::read_lens_reviews(&d, "b1").expect_err("no table");
+        assert_eq!(err.to_string(), missing("lens-records.mmap"));
+        assert_eq!(files(&d), before, "nothing made");
+    }
+
+    /// The read leaves every file byte for byte as it was, while still
+    /// recovering the rows only the insert log holds: an insert, and a
+    /// replacement that turned a pending row unsure.
+    #[test]
+    fn lens_reviews_read_recovers_the_insert_log_and_writes_nothing() {
+        let d = dir("lens_records_read_log");
+        Store::open(&d)
+            .expect("make")
+            .save_lens_review("b1", &ahead("ops", 7))
+            .expect("folded");
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &review("sec", 7, false, &[11]))
+                .expect("insert");
+            s.save_lens_review("b1", &ahead("ops", 7)).expect("replace");
+        }
+        let before = files(&d);
+        assert!(
+            before
+                .keys()
+                .any(|f| f.starts_with("lens-records") && f.ends_with("inserts")),
+            "the fixture has a pending insert log: {:?}",
+            before.keys()
+        );
+        let unsure = Review {
+            unsure: true,
+            pending: true,
+            ..review("ops", 7, false, &[])
+        };
+        let clean = review("sec", 7, false, &[11]);
+        assert_eq!(
+            Store::read_lens_reviews(&d, "b1").expect("read"),
+            [unsure.clone(), clean.clone()]
+        );
+        assert_eq!(files(&d), before, "the read changed nothing");
+        let s = Store::open(&d).expect("recover");
+        assert_eq!(s.lens_reviews("b1").expect("load"), [unsure, clean]);
+    }
+
+    /// Every file in `d` by name, with its bytes.
+    fn files(d: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+        std::fs::read_dir(d)
+            .expect("ls")
+            .map(|e| {
+                let e = e.expect("entry");
+                let bytes = std::fs::read(e.path()).expect("read");
+                (e.file_name().to_string_lossy().into_owned(), bytes)
+            })
+            .collect()
+    }
+
+    /// D92 write-ahead: the save after the posts clears `pending` and keeps
+    /// the items; a second write-ahead over a row still pending follows an
+    /// attempt that may have posted, so the job turns unsure for good.
+    #[test]
+    fn a_write_ahead_over_a_pending_row_makes_the_job_unsure() {
+        let d = dir("lens_records_ahead");
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead");
+            s.save_lens_review("b1", &review("sec", 7, false, &[11]))
+                .expect("posted");
+            s.save_lens_review("b1", &ahead("ops", 7)).expect("ahead");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let still = Review {
+            pending: true,
+            ..review("ops", 7, false, &[])
+        };
+        let clean = review("sec", 7, false, &[11]);
+        assert_eq!(s.lens_reviews("b1").expect("load"), [still, clean]);
+        drop(s);
+        {
+            let mut s = Store::open(&d).expect("open");
+            s.save_lens_review("b1", &ahead("ops", 7)).expect("rerun");
+            s.save_lens_review("b1", &review("ops", 7, false, &[12]))
+                .expect("posted");
+        }
+        let s = Store::open(&d).expect("reopen");
+        let unsure = Review {
+            unsure: true,
+            ..review("ops", 7, false, &[12])
+        };
+        let clean = review("sec", 7, false, &[11]);
+        assert_eq!(s.lens_reviews("b1").expect("load"), [unsure, clean]);
+    }
+
+    /// An interrupted attempt is recovered as unsure even when the retry
+    /// posts nothing, and the ids an earlier attempt saved are kept. Here:
+    /// attempt 1 saved 11; attempt 2 wrote ahead and posted, then crashed
+    /// before its row; attempt 3 writes ahead and ends with an empty row.
+    #[test]
+    fn a_retry_with_nothing_posted_keeps_an_interrupted_job_unsure() {
+        {
+            let d = dir("lens_records_recover");
+            {
+                let mut s = Store::open(&d).expect("open");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 1");
+                s.save_lens_review("b1", &review("sec", 7, false, &[11]))
+                    .expect("row 1");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 2");
+            }
+            {
+                let mut s = Store::open(&d).expect("restart");
+                s.save_lens_review("b1", &ahead("sec", 7)).expect("ahead 3");
+                s.save_lens_review("b1", &review("sec", 7, false, &[]))
+                    .expect("row 3");
+            }
+            let s = Store::open(&d).expect("reopen");
+            let want = Review {
+                unsure: true,
+                ..review("sec", 7, false, &[11])
+            };
+            assert_eq!(s.lens_reviews("b1").expect("load"), [want]);
+        }
     }
 }

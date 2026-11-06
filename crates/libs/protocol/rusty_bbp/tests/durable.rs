@@ -21,6 +21,16 @@ fn open(dir: &Path) -> FsStore {
     FsStore::open(dir).expect("open store")
 }
 
+/// The events of one chained log line.
+fn batch_of(line: &str) -> Vec<Event> {
+    #[derive(rusty_serde::Deserialize)]
+    struct Line {
+        events: Vec<Event>,
+    }
+    let line: Line = rusty_serde::json::from_str(line).expect("chained line json");
+    line.events
+}
+
 fn reopened_state(dir: &Path, task: &TaskId) -> TaskState {
     let mut d = Driver::new(open(dir), task.clone());
     d.reload().expect("reload");
@@ -203,7 +213,7 @@ fn open_waits_for_a_process_that_holds_the_lock() {
     let log_path = fs_store::log_path_for(&dir, &task);
     let text = std::fs::read_to_string(&log_path).expect("read log");
     let last_line = text.lines().last().expect("a batch");
-    let cut: Vec<Event> = rusty_serde::json::from_str(last_line).expect("batch json");
+    let cut = batch_of(last_line);
     let all = fx.d.store.events(&task, 0).expect("events");
     let expected: Vec<Event> = all[..all.len() - cut.len()].to_vec();
     let size = text.len() as u64;
@@ -308,6 +318,7 @@ fn open_task(dir: &Path, id: &str) -> Driver<FsStore> {
         human: PrincipalId("human".into()),
         policy: SchedulingPolicy::default(),
         holdout_digest: None,
+        baseline_digest: None,
     });
     assert!(matches!(
         d.dispatch(&cmd, Time(1)).expect("open"),

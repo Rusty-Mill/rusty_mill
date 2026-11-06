@@ -13,6 +13,8 @@
 //! - [`render`] — the `Renderer` trait + CPU (`softbuffer`) presenter.
 //! - [`pace`] — paces output-driven repaints to the display refresh.
 //! - [`settings`] — the in-app settings page model (values + persistence).
+//! - [`source`] — the session-source port: where a pane's terminal comes
+//!   from (a local shell, or a mux block from `rusty_mux_gui`).
 //! - [`gpu`] — wgpu glyph-atlas renderer (behind `gui-gpu`).
 //! - [`input`] — native key encoding (winit key → terminal bytes).
 //! - [`window`] — the `winit` event loop + window tying it together.
@@ -21,6 +23,7 @@ mod access;
 #[doc(hidden)]
 pub mod bench;
 mod boxdraw;
+mod chrome;
 pub mod control;
 mod cpu;
 mod damage;
@@ -30,11 +33,13 @@ mod gpu;
 mod hotkey;
 pub(crate) mod input;
 mod layout;
+mod motion;
 mod mouse;
 mod pace;
 mod render;
 mod settings;
 mod shape;
+pub mod source;
 mod taskbar;
 mod window;
 

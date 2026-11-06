@@ -21,10 +21,13 @@
 
 mod assignments;
 mod hunts;
+mod lens_records;
 mod lens_states;
 mod meters;
 mod probes;
 mod record;
+mod taints;
+mod watch;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -36,6 +39,7 @@ use orch_core::GoalId;
 use orch_dispatch::Ledger;
 use orch_lens::meter::Snapshot;
 use orch_lens::saved::Saved;
+use orch_lens::taint::Taints;
 use rusty_multimodal_db_engine::dir_lock::{DirLock, DirLockError};
 use rusty_multimodal_db_engine::durability::record_blob::Fnv1a64;
 use rusty_multimodal_db_engine::durability::DurabilityError;
@@ -44,11 +48,16 @@ use rusty_multimodal_db_engine::generic::GenericMmapStore;
 
 use assignments::{AssignmentRecord, LegacyAssignmentRecord};
 use hunts::HuntRecord;
+use lens_records::LensRecordRecord;
 use lens_states::LensStateRecord;
 use meters::MeterRecord;
 use orch_lens::alien::{HuntRow, ProbeRow};
+use orch_lens::record::Review;
 use probes::ProbeRecord;
 use record::{ById, GoalRecord, Revision};
+use taints::TaintRecord;
+use watch::WatchRecord;
+pub use watch::{PendingPost, WatchFinding, WatchSlot};
 
 /// The store's files inside its directory.
 const LOCK_FILE: &str = "lock";
@@ -58,12 +67,18 @@ const LEGACY_ASSIGNMENTS_FILE: &str = "assignments.mmap";
 const ASSIGNMENTS_FILE: &str = "assignments-v2.mmap";
 /// Lens experiment meters (#594).
 const METERS_FILE: &str = "meters.mmap";
+/// BBP tasks' taint tables (#598).
+const TAINTS_FILE: &str = "taints.mmap";
 /// Alien-lens probe rows (#708).
 const PROBES_FILE: &str = "probes.mmap";
 /// Completed alien-lens hunts, with or without probes (#708).
 const HUNTS_FILE: &str = "hunts.mmap";
 /// Lens scheduler memory, one record per BBP board (#594).
 const LENS_STATES_FILE: &str = "lens-states.mmap";
+/// Watched findings (#599, `watch_finding`).
+const WATCH_FILE: &str = "watch.mmap";
+/// Blind review jobs for lens track records (#599, `lens_record`).
+const LENS_RECORDS_FILE: &str = "lens-records.mmap";
 
 /// Everything a later process needs to continue a goal. The goal contract
 /// itself is not stored: `fingerprint` ties the snapshot to the goal file
@@ -97,6 +112,8 @@ pub enum StoreError {
     Corrupt(String),
     /// The plan and board handed to `save` belong to different goals.
     GoalMismatch { plan: GoalId, board: GoalId },
+    /// A read-only reader found no such store file; nothing was made.
+    Missing(PathBuf),
 }
 
 impl fmt::Display for StoreError {
@@ -109,6 +126,7 @@ impl fmt::Display for StoreError {
             Self::GoalMismatch { plan, board } => {
                 write!(f, "plan is for {plan} but board is for {board}")
             }
+            Self::Missing(path) => write!(f, "{} does not exist", path.display()),
         }
     }
 }
@@ -146,9 +164,12 @@ pub struct Store {
     assignments: GenericMmapStore<AssignmentRecord, ById, Revision>,
     legacy: Option<GenericMmapStore<LegacyAssignmentRecord, ById, Revision>>,
     meters: GenericMmapStore<MeterRecord, ById, Revision>,
+    taints: GenericMmapStore<TaintRecord, ById, Revision>,
     probes: GenericMmapStore<ProbeRecord, ById, Revision>,
     hunts: GenericMmapStore<HuntRecord, ById, Revision>,
     lens_states: GenericMmapStore<LensStateRecord, ById, Revision>,
+    watch: GenericMmapStore<WatchRecord, ById, Revision>,
+    lens_records: GenericMmapStore<LensRecordRecord, ById, Revision>,
     _lock: DirLock,
 }
 
@@ -181,6 +202,12 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(TAINTS_FILE);
+        let taints = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(PROBES_FILE);
         let probes = if path.exists() {
             GenericMmapStore::open_portable(&path)?
@@ -199,6 +226,18 @@ impl Store {
         } else {
             GenericMmapStore::create(Vec::new(), &path)?
         };
+        let path = dir.join(WATCH_FILE);
+        let watch = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
+        let path = dir.join(LENS_RECORDS_FILE);
+        let lens_records = if path.exists() {
+            GenericMmapStore::open_portable(&path)?
+        } else {
+            GenericMmapStore::create(Vec::new(), &path)?
+        };
         let path = dir.join(LEGACY_ASSIGNMENTS_FILE);
         let legacy = if path.exists() {
             Some(GenericMmapStore::open_portable(&path)?)
@@ -210,9 +249,12 @@ impl Store {
             assignments,
             legacy,
             meters,
+            taints,
             probes,
             hunts,
             lens_states,
+            watch,
+            lens_records,
             _lock: lock,
         })
     }
@@ -360,6 +402,45 @@ impl Store {
             self.meters.insert(record).map_err(engine_error)
         } else {
             self.meters.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// The slot `slot` of `app`; empty when nothing was saved for it.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record under its key names another
+    /// app or slot.
+    pub fn watch_slot(&self, app: &str, slot: &str) -> Result<WatchSlot, StoreError> {
+        self.watch
+            .get(watch::key(app, slot))
+            .map_or(Ok(WatchSlot::default()), |r| r.into_slot(app, slot))
+    }
+
+    /// Save `row` as the slot `slot` of `app`. A successful return means it
+    /// is durable.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key holds another app or slot;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_watch_slot(
+        &mut self,
+        app: &str,
+        slot: &str,
+        row: &WatchSlot,
+    ) -> Result<(), StoreError> {
+        let existing = self.watch.get(watch::key(app, slot));
+        if let Some(r) = &existing {
+            r.check(app, slot)?;
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = WatchRecord::new(app, slot, row, revision);
+        let written = if existing.is_none() {
+            self.watch.insert(record).map_err(engine_error)
+        } else {
+            self.watch.replace(record).map_err(engine_error)
         };
         written.map_err(StoreError::Engine)
     }
@@ -511,8 +592,156 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Save one blind review job of `board` for its lens's track record. A
+    /// job saved again (re-asked after a refusal, or rerun after a crash)
+    /// keeps the union of its items, so a restart never drops or doubles one.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another job;
+    /// [`StoreError::Engine`] when the write fails.
+    pub fn save_lens_review(&mut self, board: &str, row: &Review) -> Result<(), StoreError> {
+        let existing = self.lens_records.get(lens_records::key(board, row));
+        if existing.as_ref().is_some_and(|r| !r.is(board, row)) {
+            return Err(StoreError::Corrupt(
+                "lens record key holds another job".to_owned(),
+            ));
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let merged = match existing.clone() {
+            Some(r) => merge(r.into_row()?, row),
+            None => row.clone(),
+        };
+        let record = LensRecordRecord::new(board, &merged, revision);
+        let written = if existing.is_none() {
+            self.lens_records.insert(record).map_err(engine_error)
+        } else {
+            self.lens_records.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+
+    /// Every blind review job saved for `board`, sorted by lens, claim,
+    /// epoch and kind.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when a record does not check out.
+    pub fn lens_reviews(&self, board: &str) -> Result<Vec<Review>, StoreError> {
+        let ids = self.lens_records.all_ids();
+        reviews(
+            ids.into_iter().filter_map(|id| self.lens_records.get(id)),
+            board,
+        )
+    }
+
+    /// [`Store::lens_reviews`] for the store in `dir`, read without changing
+    /// anything: it takes the directory's existing lock, making no file, and
+    /// reads the lens record table's saved records and insert log as
+    /// [`Store::open`] would recover them, writing nothing back.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Missing`] when `dir` has no lock or lens record file;
+    /// [`StoreError::Locked`] when another process holds `dir`;
+    /// [`StoreError::Lock`] when the lock cannot be opened;
+    /// [`StoreError::Engine`] or [`StoreError::Corrupt`] when the table
+    /// cannot be read.
+    pub fn read_lens_reviews(dir: &Path, board: &str) -> Result<Vec<Review>, StoreError> {
+        let _lock = DirLock::acquire_existing(dir, LOCK_FILE).map_err(|e| match e {
+            DirLockError::Io(path, e) if e.kind() == std::io::ErrorKind::NotFound => {
+                StoreError::Missing(path)
+            }
+            e => e.into(),
+        })?;
+        let path = dir.join(LENS_RECORDS_FILE);
+        if !path.is_file() {
+            return Err(StoreError::Missing(path));
+        }
+        let records =
+            GenericMmapStore::<LensRecordRecord, ById, Revision>::read_portable_records(&path)?;
+        reviews(records, board)
+    }
+
+    /// BBP task `task`'s taint table; empty when none was saved.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the record under its key names another
+    /// task or an unknown class.
+    pub fn load_taints(&self, task: &str) -> Result<Taints, StoreError> {
+        self.taints
+            .get(taints::key(task))
+            .map_or(Ok(Taints::default()), |r| r.into_taints(task))
+    }
+
+    /// Save `taints` as task `task`'s table. Only ever grows: the caller
+    /// loads, raises and saves under the store's lock.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Corrupt`] when the key already holds another task's
+    /// table; [`StoreError::Engine`] when the write fails.
+    pub fn save_taints(&mut self, task: &str, taints: &Taints) -> Result<(), StoreError> {
+        let existing = self.taints.get(taints::key(task));
+        if let Some(r) = &existing {
+            if r.task != task {
+                return Err(StoreError::Corrupt(format!(
+                    "taint key for {task:?} holds {:?}",
+                    r.task
+                )));
+            }
+        }
+        let revision = existing.as_ref().map_or(0, |r| r.revision as u64) + 1;
+        let record = TaintRecord::new(task, taints, revision);
+        let written = if existing.is_none() {
+            self.taints.insert(record).map_err(engine_error)
+        } else {
+            self.taints.replace(record).map_err(engine_error)
+        };
+        written.map_err(StoreError::Engine)
+    }
+}
+
 /// Fold the engine's typed write errors into its one durability error;
 /// the id-shaped variants cannot happen after `revision` chose the path.
 fn engine_error<E: fmt::Display>(e: E) -> DurabilityError {
     DurabilityError::Engine(e.to_string())
+}
+
+/// `row` saved over the job's stored row `old` (D92 write-ahead):
+///
+/// - A job rerun after a crash posts again: every item it posted is kept.
+/// - A lost post stays unknown: `unsure` never clears.
+/// - A write-ahead over a row still `pending` follows an attempt that
+///   crashed or failed its save after it may have posted: unsure.
+/// - The save after the posts clears `pending`.
+fn merge(mut old: Review, row: &Review) -> Review {
+    for m in &row.items {
+        if !old.items.contains(m) {
+            old.items.push(*m);
+        }
+    }
+    old.unsure |= row.unsure || (row.pending && old.pending);
+    old.pending = row.pending;
+    old
+}
+
+/// Every blind review job in `records` saved for `board`, sorted by lens,
+/// claim, epoch and kind.
+fn reviews(
+    records: impl IntoIterator<Item = LensRecordRecord>,
+    board: &str,
+) -> Result<Vec<Review>, StoreError> {
+    let mut rows = Vec::new();
+    for record in records {
+        if record.board() == board {
+            rows.push(record.into_row()?);
+        }
+    }
+    rows.sort_by(|a, b| {
+        (&a.lens, a.claim, a.epoch, a.look_harder).cmp(&(&b.lens, b.claim, b.epoch, b.look_harder))
+    });
+    Ok(rows)
 }

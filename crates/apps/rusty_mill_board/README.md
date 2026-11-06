@@ -51,27 +51,52 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Order:** `card_take` looks in the queue and work columns nearest Done first (by default Review, QA, Building,
   then Ready); within one, the highest `priority` (0, 1, 3, 5)
   first, then the oldest. A card waits until every card in its `deps` is Done (a dependency no longer on the board
-  holds nothing up); naming it explicitly says why. `card_plan` sets both and needs Triage. The tags `agent`,
-  `board:…` and `claim:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
+  holds nothing up); naming it explicitly says why. It never takes a card with a `superseded_by` link (newer cards
+  that replace it): close that card, or re-scope it and clear the link. `related` links are informational.
+  `card_plan` sets priority, all three link lists and a target date (`target_ms`, `null` clears it), and needs Triage. The tags `agent`,
+  `board:…`, `claim:…`, `number:…`, `archived:…` and `restored:…` are the board's own ([ADR-0012](../../../docs/adr/0012-one-task-store.md)): a card cannot
   carry them, and the GitHub sync drops such labels when it imports an issue.
 - **Projects:** one board serves several applications of a monorepo, and several repositories.
   `--projects FILE` names the projects and the repository paths each may change
   (`{"rocket_league": ["crates/apps/rocket_league"]}`, or `{"repos": {"rusty_mill": {...}, "other": {...}}}`
   for several repositories; project names are unique across them). Every repository also has a project named
   like itself that owns the paths no other project of it does (a flat file is the repository `default`). A card belongs to one project (one that names none, and old cards, to
-  `default`, shown in the web UI as the Inbox, first in the side panel; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed; a Done card stays Done and needs Triage or `close`). A credential in
+  `default`, shown in the web UI as the Inbox, the first project chip; `card_add` takes `project`, `card_assign` moves one and needs Triage, or `project` for a card nobody else has claimed; a Done card stays Done and needs Triage or `close`). A credential in
   `--identities` may carry `"projects": [...]`: it then cannot see, take or change any other project's cards,
   checked inside every write's compare-and-swap, so a card re-assigned mid-call is still refused.
-  `board_list` and `card_take` take a `project` filter. The UI's side panel lists repositories and then every project
-  (a repository's only project is the repository itself), with card counts; both filter the board, and new cards go to the chosen project (else the repository's own). An
-  Agents list under the repositories (everyone holding a claim, with their count) filters by claimant. Each agent
-  has its own colour (twelve hues; two agents never share one), shown in the list and on every card it holds:
-  a coloured edge, a tint and a chip, whose dot pulses while the card is in building, qa or review. The runner
+  `board_list` and `card_take` take a `project` filter. The UI's scope bar has a repository picker and then every project
+  as a chip (a repository's only project is the repository itself), with card counts; both filter the board, and new cards go to the chosen project (else the repository's own). The
+  Agents chips after them (everyone holding a claim, with their count) filter by claimant. Each agent
+  has its own colour (twelve hues; two agents never share one), shown on its chip and on every card it holds,
+  as a dot that pulses while the card is in a work column. The runner
   enforces the paths too: see its README. GitHub sync is project-blind (imported issues land in `default`);
   `board_events` carries no card text but does not hide other projects' event metadata.
 - **Tools:** `board_whoami`, `board_list`, `board_roles`, `board_projects`, `board_owns`, `board_events`, `card_take`,
-  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_update`, `card_plan`, `card_comment`, `inbox_list`, `inbox_act`. The web API
+  `card_get`, `card_add`, `project_add`, `card_assign`, `card_move`, `card_claim`, `card_release`, `card_archive`,
+  `card_restore`, `card_archive_done`, `card_update`, `card_plan`, `card_comment`, `board_milestones`, `milestone_add`,
+  `milestone_update`, `inbox_list`, `inbox_act`. The web API
   exposes the same table, so the two cannot drift.
+- **Milestones.** A project's dated goals (`src/milestones.rs`): a title and a target date, closed when reached, never
+  deleted. `milestone_add` and `milestone_update` need Triage and the project in scope; `board_milestones` lists what the
+  caller may see. In rusty_tick a milestone is a task tagged `milestone` (never `agent`, so never a card) in the
+  project's list, its `dueMs` the target; without `--tick-url` they live in memory.
+- **Archive.** A Done card leaves the board's default views (`board_list`, the Done column) once it is archived, or
+  14 days after it was done or last restored (`board_list`'s `done_days`; 0 keeps every unarchived Done card). It is
+  still Done: `card_get`, the roadmap, metrics and dependencies see it as before. `card_restore` puts any such card
+  back, starting its 14 days again without changing its ship time. `card_archive` and `card_restore` need `close`;
+  `card_archive_done` archives every Done card at once (optionally one project's, done or restored at least
+  `older_than_days` ago), checks each card again as it commits, and needs `triage`. `board_list` with
+  `archived: "only"` lists the archive. The state is an `archived:<ms>` or `restored:<ms>` tag on the rusty_tick
+  task, beside `number:<n>`, so there is no migration.
+- **Prompt (#745).** A card's `prompt` holds instructions for whoever takes it, apart from the body: `card_update`
+  sets it (`""` clears it, at most 32 KiB), `card_get`/`board_list` return it, and the card dialog shows it in its own
+  box with a Copy prompt button. It lives in the card's rusty_tick `board` document, not on the task, so rusty_tick's
+  own UI doesn't show it and nothing migrates. A prompt edited with the title, body or tags is two writes to rusty_tick;
+  if only the first lands, the answer is `409` with `saved_rev` (what was saved, and the revision to finish on), and
+  the dialog keeps the unsaved prompt and says so.
+- **By date (#744).** `board_list` takes `created_from`/`created_to`, `updated_from`/`updated_to` and
+  `moved_from`/`moved_to` (Unix ms, `from` inclusive, `to` exclusive). Moves come from rusty_tick's durable move
+  history (`GET /moves`), so they survive restarts; entering the board counts as a move.
 - **Decision inbox (#595).** `inbox_list` and `inbox_act` (admin only, and only through a token or OAuth credential, never a caller-named actor) show and decide the open BBP escalations
   of the tasks linked from cards. Mill Board stores none of it: run with `--bbp-bin PATH --bbp-root DIR` on the
   orch host and it runs `bbp inbox` and fenced `bbp human` commands, so the host stays the only writer of the log.
@@ -99,11 +124,11 @@ rusty_mill_board --http 127.0.0.1:8787                         # in memory, gone
 - **Storage: rusty_tick** (`--tick-url`, token only from the `RUSTY_TICK_TOKEN` environment variable; [ADR-0012](../../../docs/adr/0012-one-task-store.md)):
   the board is the rusty_tick tasks tagged `agent`, so the owner reads and edits the same tasks on the phone or web.
   Column and claim are `board:`/`claim:` tags, the project is the task's list (the Inbox is `default`), comments are
-  rusty_tick comments with their author, and dependencies, the forge link and the execution link are one `board`
+  rusty_tick comments with their author, and dependencies and other links, the forge link and the execution link are one `board`
   document per task. Every write is one request fenced on the task version the board read, and every write moves
   it (rusty_tick moves it for a board document or comment written with `If-Task-Match`), so the version names the
   whole card. A comment is an explicit append, so one the owner adds meanwhile is kept. Only `card_plan` with both a
-  priority and dependencies takes two requests; if the second fails it reports an error, and the same plan again
+  priority and links takes two requests; if the second fails it reports an error, and the same plan again
   completes it.
   Tags come back lowercase, so actor names must be lowercase. Events are kept in memory only: the board's own
   writes plus an `edited` event (actor `tick`) when a task changes in rusty_tick. `/health` is 503 while rusty_tick
@@ -134,6 +159,12 @@ unsaved edit raises a conflict (keep mine / take theirs), and `card_update` take
 stale one. `tests/ui/drafts.mjs` checks this in a real browser (Playwright; see the file's header).
 Cards show their priority (High 5, Medium 3, Low 1; none shows nothing), sort highest first in each column, and
 the dialog sets it through `card_plan` (`tests/ui/priority.mjs`).
+The board reads like a press room's job board ([PRODUCT.md](PRODUCT.md); direction in `.impeccable/surfaces/board.md`):
+a colour strip across the top shows each column's open cards and jumps to it; empty columns fold to a spine; process
+inks carry state (cyan in work, yellow queued, vermilion blocked) and magenta is kept for what waits on you, a card at a
+gate (a work column whose next move is a human approval, with an Approve button) or with a decision open. The
+typefaces (Hanken Grotesk, Barlow Condensed; SIL OFL) are served from the binary at `/ui/fonts/`, so the page fetches
+nothing from elsewhere.
 
 Layout: `domain` (pure) / `store` + `tick` (port and adapters) / `board` (service) /
 `api` (operation table) / `mcp` + `web` (surfaces) / `sync` (forge port + reconcile) +

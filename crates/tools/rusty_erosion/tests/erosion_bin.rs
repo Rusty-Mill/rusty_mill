@@ -541,6 +541,28 @@ fn unchanged_tree_has_zero_deltas() {
 }
 
 #[test]
+fn cleanup_passes_a_removed_duplicate_and_fails_an_unchanged_tree() {
+    // D44: neither share may rise and one must fall, so an unchanged tree
+    // fails even though 0/0 limits would pass it.
+    let repo = Repo::new("cleanup");
+    repo.write("src/b.rs", PASTED);
+    commit(&repo);
+    let base = repo.head();
+    let cleanup = ["check", "--base", base.as_str(), "--cleanup"];
+
+    let unchanged = repo.erosion(&cleanup);
+    assert_eq!(unchanged.status.code(), Some(1), "{}", stdout(&unchanged));
+    let line = stdout(&unchanged);
+    assert!(line.contains("\"mode\":\"cleanup\""), "{line}");
+    assert!(line.contains("\"within_limits\":false"), "{line}");
+
+    repo.write("src/b.rs", "pub fn none() {}\n");
+    let removed = repo.erosion(&cleanup);
+    assert_eq!(removed.status.code(), Some(0), "{}", stdout(&removed));
+    assert!(stdout(&removed).contains("\"within_limits\":true"));
+}
+
+#[test]
 fn a_pasted_duplicate_is_reported_then_blocked_once_enforcing() {
     let repo = Repo::new("paste");
     let base = repo.head();
@@ -558,6 +580,28 @@ fn a_pasted_duplicate_is_reported_then_blocked_once_enforcing() {
     assert!(line.contains("\"within_limits\":null"), "{line}");
     assert!(line.contains("\"functions\":1"), "{line}");
     assert!(line.contains("\"unmeasured\":[\"tool.py\"]"), "{line}");
+    // The inbox parses these fields (`rusty_bbp_host` `erosion_detail`,
+    // D91): changing them changes that parser too.
+    let keys = [
+        "{\"erosion\":1,\"base\":",
+        ",\"mode\":",
+        ",\"within_limits\":",
+        ",\"concentration_bp\":{\"base\":",
+        ",\"duplication_bp\":{\"base\":",
+        ",\"total_cc\":",
+        ",\"loc\":",
+        ",\"functions\":",
+        ",\"worst_affected\":[{\"key\":",
+        ",\"base_cc\":",
+        ",\"cc\":",
+        ",\"unmeasured\":",
+        ",\"parse_errors\":",
+    ];
+    let mut at = 0;
+    for k in keys {
+        let found = line[at..].find(k).map(|i| at + i);
+        at = found.unwrap_or_else(|| panic!("{k} after byte {at}: {line}")) + k.len();
+    }
 
     let enforced = repo.erosion(&enforcing(&base));
     assert_eq!(enforced.status.code(), Some(1), "{}", stdout(&enforced));

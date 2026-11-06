@@ -4,8 +4,10 @@
 //!
 //! [`parse`] turns a report's body into a [`Report`], or nothing when the
 //! protocol says to ignore or discard it. [`Records`] applies reports and the
-//! terminal events that end records, and keeps at most [`MAX_RECORDS`]. No
-//! I/O; the server feeds it what the block's grid collected.
+//! terminal events that end records, and keeps at most [`MAX_RECORDS`].
+//! [`Status`] keeps the program's records beside those an agent's hooks
+//! report as [`Parts`], and shows the hooks' while they speak. No I/O; the
+//! server feeds it what the block's grid collected and what hooks sent.
 //!
 //! ```
 //! use rusty_mux_status::{Records, State, parse};
@@ -18,10 +20,12 @@
 //! assert!(records.iter().next().is_none());
 //! ```
 
+mod layers;
 mod parse;
 mod records;
 
-pub use parse::parse;
+pub use layers::{HOOK_HOLD, Status};
+pub use parse::{Parts, parse};
 pub use records::{MAX_RECORDS, Records};
 
 /// What a program says it is doing.

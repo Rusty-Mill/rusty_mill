@@ -36,3 +36,4 @@ pub mod maintenance;
 pub mod millboard;
 pub mod report;
 pub mod run;
+pub mod watch;

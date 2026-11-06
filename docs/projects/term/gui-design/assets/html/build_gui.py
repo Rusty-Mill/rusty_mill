@@ -361,7 +361,7 @@ def settings_page() -> str:
 
 
 # ══ lel.html ════════════════════════════════════════════════════════════════
-# Let Em Loose tab (D37-D41). Panels are drawn by the client inside one tab; the server still owns the
+# Let Em Loose tab (D53-D57). Panels are drawn by the client inside one tab; the server still owns the
 # block layout (D2). Sample data only: names and numbers show the shape of the real fields
 # (claim_card / claims_delta, inbox Escalation reasons). Scan is 92%, not the SVG's 88%, because
 # 88% is under the 90% accept point (LEL D3) and could not be "settled".
@@ -502,23 +502,23 @@ def lel_page() -> str:
 
     def sheet(theme: str) -> str:
         return f'<div class="sheet" data-theme="{theme}" style="width:700px"><h2>Claim row, {theme}</h2><div style="display:flex;flex-direction:column;gap:8px">{rows}</div></div>'
-    stage_sheet = ('<div class="sheet" data-theme="dark" style="width:1440px"><h2>Stage strip: derived from claim state, never animated (D39)</h2><div style="display:flex;flex-direction:column;gap:12px">'
+    stage_sheet = ('<div class="sheet" data-theme="dark" style="width:1440px"><h2>Stage strip: derived from claim state, never animated (D55)</h2><div style="display:flex;flex-direction:column;gap:12px">'
                    + stages()
                    + stages([("Intent", "done"), ("Skeletons", "done"), ("Under attack", "done"), ("Shadow run", "now"), ("Living app", "later")])
                    + stages([("Intent", "done"), ("Skeletons", "done"), ("Under attack", "done"), ("Shadow run", "done"), ("Living app", "now")]) + '</div></div>')
     chip_states = [("2 decisions waiting", ""), ("1 decision waiting", ""), ("No decisions waiting", ""), ("2 decisions waiting", " is-hover"), ("2 decisions waiting", " is-open")]
-    chips = ('<div class="sheet" data-theme="dark" style="width:1440px"><h2>Inbox chip in the top strip (D37)</h2><div style="display:flex;gap:28px;align-items:center">'
+    chips = ('<div class="sheet" data-theme="dark" style="width:1440px"><h2>Inbox chip in the top strip (D53)</h2><div style="display:flex;gap:28px;align-items:center">'
              + "".join(f'<span class="chip{c}">{ic("inbox")}{t}{ic("chevdown")}</span>' for t, c in chip_states) + '</div></div>')
     other = frame(strip(1, inbox=2, inbox_open=True) + blocks(shell_block() + f'<div class="col" style="flex:1">{agent_block()}{idle_block()}</div>') + ribbon(), "dark", pop_inbox())
-    note_l1 = ("The Let Em Loose tab (D37). Intent is read-only (D40). Stages are derived and show state as a glyph plus a word (D39). "
-               "Claim status is a glyph plus a word: settled is slate, open is dashed, yours is the accent with a solid outline, contested is the accent dashed (D38). "
+    note_l1 = ("The Let Em Loose tab (D53). Intent is read-only (D56). Stages are derived and show state as a glyph plus a word (D55). "
+               "Claim status is a glyph plus a word: settled is slate, open is dashed, yours is the accent with a solid outline, contested is the accent dashed (D54). "
                "The accent falls back to verdigris (D35). No amber. One primary button per screen, and only on the confirm. "
                "The irreversible card shows the claim, confidence, budget, reason, the top two supporting and contrary evidence items and the dry run, "
                "with Approve, Reject and Refine intent (Let Em Loose D35). Sample data.")
-    return page("Let Em Loose", "The tab that hosts Let Em Loose: full-app view, inbox, states. Decisions D37 to D41; no new colours.", [
+    return page("Let Em Loose", "The tab that hosts Let Em Loose: full-app view, inbox, states. Decisions D53 to D57; no new colours.", [
         item("L1 Full-app view, dark", lel_frame("dark"), note_l1),
         item("L1 Full-app view, light", lel_frame("light")),
-        item("L2a Inbox from any window", other, "The chip is in every window's top strip (D37), so a decision is one click away wherever you are. Enter opens it in the Let Em Loose tab."),
+        item("L2a Inbox from any window", other, "The chip is in every window's top strip (D53), so a decision is one click away wherever you are. Enter opens it in the Let Em Loose tab."),
         item("L2b Approve an irreversible action", lel_frame("dark", overlay=pop_approve()), "Reuses the confirm popover (D19, D28): title, one-line consequence, dry run attached, Cancel has focus first. "
              "Approving accepts the displayed claim snapshot and adds no budget; running the action stays a separate step (Let Em Loose D35). "
              "Reject drops the claim. Cancel only closes the popover and leaves the decision waiting. "

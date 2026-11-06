@@ -31,6 +31,9 @@ orch-store = { workspace = true }
 orch-lens = { workspace = true }
 orch-openai = { workspace = true }
 rusty_time = { workspace = true }
+# The alien lens runs its probes confined, in scratch worktrees (D89).
+rusty_sandbox = { workspace = true }
+rusty_worktree = { workspace = true }
 rusty_json = { path = "../../../../foundation/rusty_json", default-features = false, features = ["std"] }
 
 [dev-dependencies]

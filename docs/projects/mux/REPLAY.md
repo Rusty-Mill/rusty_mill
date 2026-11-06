@@ -28,7 +28,7 @@ at zero and must be contiguous; total is positive, constant, and at most 256 MiB
 Ready is valid only once exactly total bytes have arrived and RTCP decoding
 succeeds. The server queues Ready only after all checkpoint chunks. Encoding,
 queue, or writer failures close the connection without emitting an incomplete
-Ready. `server::checkpoint::Receiver` implements bounded assembly and validation.
+Ready. `rusty_mux_proto::checkpoint::Receiver` (feature `screen`) implements bounded assembly and validation.
 
 Capture and queue insertion run synchronously under the single-threaded state
 borrow, so the checkpoint precedes every later output/resize mutation. The

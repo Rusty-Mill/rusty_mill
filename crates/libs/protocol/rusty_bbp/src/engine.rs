@@ -274,7 +274,9 @@ fn dispatch(w: &mut Work, cmd: &Command, now: Time) -> R<Flow> {
             if let Some(r) = replay(&w.st, &p, op, &payload_hash(action)?)? {
                 return Ok(Flow::Replay(r));
             }
-            terminal(&w.st)?;
+            if !crate::claims_engine::closing_audit(&w.st, action) {
+                terminal(&w.st)?;
+            }
             crate::claims_engine::host(w, action, now).map(Flow::Done)
         }
     }
@@ -341,6 +343,11 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
             Code::BadClaimsConfig,
             "holdout_digest: a holdout suite needs claims mode",
         ));
+    } else if o.baseline_digest.is_some() {
+        return Err(rej(
+            Code::BadClaimsConfig,
+            "baseline_digest: a baseline needs claims mode",
+        ));
     }
     let roster = Roster::for_mode(o.roster.clone(), o.mode)
         .map_err(|e| rej(Code::BadRoster, e.to_string()))?;
@@ -383,6 +390,7 @@ fn open(w: &mut Work, o: &OpenTask, now: Time) -> R<Response> {
         mode: o.mode,
         claims: claims.then(|| o.claims.unwrap_or_default()),
         holdout_digest: o.holdout_digest,
+        baseline_digest: o.baseline_digest,
     });
     let id = w.st.next_art_id();
     w.emit(Event::ArtifactStored(ArtifactRecord {
@@ -1848,6 +1856,9 @@ pub(crate) fn transition(w: &mut Work, to: State, now: Time) {
     }
     for id in live_ids(&w.st) {
         end_turn_only(w, id, TurnEnd::Revoked);
+    }
+    if to.terminal() {
+        crate::claims_engine::close_live_takeovers(w, now);
     }
     w.emit(Event::StateChanged { from, to });
     entry(w, now);

@@ -63,6 +63,32 @@ impl Time {
     }
 }
 
+/// Raw bytes, serialized as standard base64 (D104: mux input exactly as
+/// delivered, which need not be UTF-8).
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct Base64Bytes(pub Vec<u8>);
+
+impl Serialize for Base64Bytes {
+    fn serialize<S: rusty_serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&rusty_base64::encode_standard(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Base64Bytes {
+    fn deserialize<D: rusty_serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        rusty_base64::decode_standard(&s).map(Self).map_err(|_| {
+            <D::Error as rusty_serde::error::Error>::custom("expected standard base64")
+        })
+    }
+}
+
+impl fmt::Debug for Base64Bytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} bytes", self.0.len())
+    }
+}
+
 /// SHA-256 digest. Serialized as 64 hex characters.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Sha256(pub [u8; 32]);
