@@ -32,7 +32,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::SyncSender;
 use std::time::{Duration, Instant};
 
 use crate::sync::Mutex;
@@ -49,6 +48,7 @@ use super::layout::{Dir, Layout, Rect};
 use super::pace::Pacer;
 use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors, blend};
 use super::settings::{Field, Settings, SetupBaseline, Widget};
+use super::source::{Feed, PaneIo};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -426,15 +426,6 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Most PTY output parsed under one grid lock: about 1 ms of parsing, so
-/// a flood still leaves the UI thread the lock between batches.
-const READ_BATCH: usize = 64 * 1024;
-
-/// Batches read ahead of the parser: at most 1 MiB queued. The kernel's PTY
-/// buffer holds only a few KiB, so without a separate read thread the child
-/// stalls on every batch the parser works through.
-const READ_AHEAD: usize = 16;
-
 /// A pane's one outstanding wakeup: the reader raises it when it sends a
 /// `Redraw`, the window lowers it when it handles one. Output parsed while
 /// it is raised needs no wakeup of its own, since the pending one repaints
@@ -481,51 +472,33 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
         .unwrap_or("the windowing library panicked")
 }
 
-/// PTY reader loop (own thread, one per tab): parse output into the tab's
-/// grid, send replies (DA/DSR/structured-channel) back to the child, and wake
-/// the window with the tab's id through `send` (`false` once the event loop
-/// is gone). A second thread ([`read_ahead`]) reads the PTY in batches, so
-/// the child keeps writing while this one parses. A wakeup is sent only when
-/// the window has handled the last one (`wake`), so a flood costs the UI
-/// thread one event per frame, not one per read. The loop ends on read EOF
-/// or error, or when a send fails, and then sends `Exit`.
+/// Pane reader loop (own thread, one per pane): apply the pane's feed to
+/// its grid, send the parser's replies (DA/DSR/structured-channel) back
+/// through `replies` when the window answers the program's queries, and
+/// wake the window with the pane's id through `send` (`false` once the
+/// event loop is gone). A wakeup is sent only when the window has handled
+/// the last one (`wake`), so a flood costs the UI thread one event per
+/// frame, not one per read. The loop ends when the feed does or a send
+/// fails, and then sends `Exit`.
 fn reader_loop(
     id: u64,
-    mut reader: Box<dyn BackendHandle>,
-    mut replies: Box<dyn BackendHandle>,
+    feed: impl Iterator<Item = Feed>,
+    mut replies: Option<Box<dyn BackendHandle>>,
     grid: Arc<Mutex<Grid>>,
     parser: Arc<Mutex<AnsiParser>>,
     wake: WakeFlag,
     mut send: impl FnMut(UserEvent) -> bool,
 ) {
-    let (batches, ready) = std::sync::mpsc::sync_channel(READ_AHEAD);
-    let spawned = std::thread::Builder::new()
-        .name(format!("pty-read-{id}"))
-        .spawn(move || read_ahead(reader.as_mut(), &batches));
-    if let Err(e) = spawned {
-        eprintln!("rusty_term: pane {id}: cannot start the PTY read thread: {e}");
-        send(UserEvent::Exit(id));
-        return;
-    }
-    // Ends when the read thread hangs up: PTY EOF or a read error.
-    for data in ready {
-        let response = {
-            // Bulk: step aside for the UI thread between chunks.
-            let mut g = grid.lock_bulk();
-            let mut parser = parser.lock();
-            parser.advance(&mut g, &data);
-            // host_out (clipboard/title relay) has no host here; dropped.
-            let _ = g.take_host_out();
-            parser.take_responses()
-        };
-        if !response.is_empty() {
+    for step in feed {
+        let response = apply(step, &grid, &parser);
+        if let Some(replies) = replies.as_mut().filter(|_| !response.is_empty()) {
             let _ = replies.write(&response);
         }
         // Signal even mid synchronized-output window: the `Redraw` handler
         // checks `sync_output_active` and skips painting. A wakeup still
         // unhandled already covers this output. Closing the pane leaves its
-        // flag raised, so the loop then only parses until read EOF or error,
-        // as it did when every send succeeded: dropping the pane hangs up the
+        // flag raised, so the loop then only parses until the feed ends, as
+        // it did when every send succeeded: dropping the pane hangs up the
         // direct child, but a descendant holding the PTY open keeps it
         // reading.
         if wake.raise() && !send(UserEvent::Redraw(id)) {
@@ -535,20 +508,27 @@ fn reader_loop(
     send(UserEvent::Exit(id));
 }
 
-/// Read the PTY in batches (see [`read_batch`](crate::backend::read_batch))
-/// and queue each for the parser, until EOF, a read error, or the parser
-/// hanging up. The queue is bounded, so a parser that falls behind still
-/// pushes back on the child.
-fn read_ahead(reader: &mut dyn BackendHandle, batches: &SyncSender<Vec<u8>>) {
-    let mut buf = vec![0u8; READ_BATCH];
-    loop {
-        match crate::backend::read_batch(reader, &mut buf) {
-            Ok(0) | Err(_) => return, // EOF (child exited) or a dead PTY
-            Ok(n) => {
-                if batches.send(buf[..n].to_vec()).is_err() {
-                    return; // parser gone
-                }
-            }
+/// Apply one feed step to a pane's terminal, returning the parser's
+/// replies to the program.
+fn apply(step: Feed, grid: &Mutex<Grid>, parser: &Mutex<AnsiParser>) -> Vec<u8> {
+    match step {
+        Feed::Bytes(data) => {
+            // Bulk: step aside for the UI thread between chunks.
+            let mut g = grid.lock_bulk();
+            let mut parser = parser.lock();
+            parser.advance(&mut g, &data);
+            // host_out (clipboard/title relay) has no host here; dropped.
+            let _ = g.take_host_out();
+            parser.take_responses()
+        }
+        Feed::Screen(new_grid, new_parser) => {
+            *grid.lock() = *new_grid;
+            *parser.lock() = *new_parser;
+            Vec::new()
+        }
+        Feed::Resized { cols, rows } => {
+            grid.lock().resize(cols.into(), rows.into());
+            Vec::new()
         }
     }
 }
@@ -767,10 +747,19 @@ impl WindowState<'_> {
         let grid = Arc::new(Mutex::new(g));
         let parser = Arc::new(Mutex::new(AnsiParser::with_theme(theme)));
 
-        // Reader thread: PTY -> parser -> grid, writing replies back and waking
-        // the loop. Independent handle clones so it shares no lock with us.
-        let read_handle = handle.try_clone()?;
-        let reply_handle = handle.try_clone()?;
+        // Child-exit watcher (Windows ConPTY: the output pipe only EOFs at
+        // teardown, so block on the child handle; `None` on Unix where read-EOF
+        // already signals exit).
+        let exit = handle.exit_token();
+        let io = PaneIo::local(handle, format!("pty-read-{id}"))?;
+
+        // Reader thread: feed -> parser -> grid, writing replies back and
+        // waking the loop. Its own reply handle, so it shares no lock with us.
+        let replies = match io.answers_queries {
+            true => Some(io.writer.try_clone()?),
+            false => None,
+        };
+        let feed = io.feed;
         let reader_grid = Arc::clone(&grid);
         let reader_parser = Arc::clone(&parser);
         let reader_proxy = self.proxy.clone();
@@ -779,8 +768,8 @@ impl WindowState<'_> {
         std::thread::spawn(move || {
             reader_loop(
                 id,
-                read_handle,
-                reply_handle,
+                feed,
+                replies,
                 reader_grid,
                 reader_parser,
                 reader_wake,
@@ -788,10 +777,7 @@ impl WindowState<'_> {
             )
         });
 
-        // Child-exit watcher (Windows ConPTY: the output pipe only EOFs at
-        // teardown, so block on the child handle; `None` on Unix where read-EOF
-        // already signals exit).
-        if let Some(wait) = handle.exit_token() {
+        if let Some(wait) = exit {
             let exit_proxy = self.proxy.clone();
             std::thread::spawn(move || {
                 wait();
@@ -802,7 +788,7 @@ impl WindowState<'_> {
             id,
             grid,
             parser,
-            writer: handle,
+            writer: io.writer,
             wake,
             shown: std::cell::RefCell::new(None),
             compactor: Compactor::default(),
@@ -8097,31 +8083,50 @@ mod tests {
     }
 
     mod reader {
-        use super::super::{AnsiParser, Grid, Mutex, UserEvent, WakeFlag, read_ahead, reader_loop};
+        use super::super::{AnsiParser, Feed, Grid, Mutex, UserEvent, WakeFlag, reader_loop};
         use crate::backend::BackendHandle;
-        use crate::backend::mock::apart;
         use std::io::Error;
         use std::sync::Arc;
 
-        /// What `reader_loop` sent for `parts` (each its own batch), with
-        /// `lower` standing in for the window handling each `Redraw` and
-        /// `deliver` for whether a send reaches the loop. Ends with the
-        /// grid's first line.
+        /// Each part as its own feed step.
+        fn bytes(parts: &[&[u8]]) -> Vec<Feed> {
+            parts.iter().map(|p| Feed::Bytes(p.to_vec())).collect()
+        }
+
+        /// What `reader_loop` sent for `steps`, with `lower` standing in
+        /// for the window handling each `Redraw` and `deliver` for whether
+        /// a send reaches the loop. Ends with the grid's first line.
         fn run(
-            parts: Vec<Result<&[u8], Error>>,
+            steps: Vec<Feed>,
             wake: &WakeFlag,
             lower: bool,
             deliver: bool,
         ) -> (Vec<String>, String) {
             let grid = Arc::new(Mutex::new(Grid::new(20, 2)));
+            let parser = Arc::new(Mutex::new(AnsiParser::new()));
+            let sent = feed(steps, None, &grid, &parser, wake, lower, deliver);
+            let line = grid.lock().line_text(0).unwrap_or_default();
+            (sent, line)
+        }
+
+        /// Runs `reader_loop` over `steps` into `grid` and `parser`.
+        fn feed(
+            steps: Vec<Feed>,
+            replies: Option<Box<dyn BackendHandle>>,
+            grid: &Arc<Mutex<Grid>>,
+            parser: &Arc<Mutex<AnsiParser>>,
+            wake: &WakeFlag,
+            lower: bool,
+            deliver: bool,
+        ) -> Vec<String> {
             let mut sent = Vec::new();
             let handled = wake.clone();
             reader_loop(
                 7,
-                Box::new(apart(parts)),
-                Box::new(apart(vec![])) as Box<dyn BackendHandle>,
-                Arc::clone(&grid),
-                Arc::new(Mutex::new(AnsiParser::new())),
+                steps.into_iter(),
+                replies,
+                Arc::clone(grid),
+                Arc::clone(parser),
                 wake.clone(),
                 |event| {
                     let name = match event {
@@ -8136,14 +8141,13 @@ mod tests {
                     deliver
                 },
             );
-            let line = grid.lock().line_text(0).unwrap_or_default();
-            (sent, line)
+            sent
         }
 
         #[test]
         fn output_while_a_wakeup_is_pending_sends_no_more() {
             let wake = WakeFlag::default();
-            let (sent, line) = run(vec![Ok(b"a"), Ok(b"b"), Ok(b"c")], &wake, false, true);
+            let (sent, line) = run(bytes(&[b"a", b"b", b"c"]), &wake, false, true);
             assert_eq!(sent, ["redraw", "exit"]);
             assert_eq!(line, "abc", "every batch is still parsed");
         }
@@ -8151,7 +8155,7 @@ mod tests {
         #[test]
         fn output_after_the_window_handles_a_wakeup_sends_another() {
             let wake = WakeFlag::default();
-            let (sent, _) = run(vec![Ok(b"a"), Ok(b"b")], &wake, true, true);
+            let (sent, _) = run(bytes(&[b"a", b"b"]), &wake, true, true);
             assert_eq!(sent, ["redraw", "redraw", "exit"]);
         }
 
@@ -8159,7 +8163,7 @@ mod tests {
         fn output_before_the_flag_is_lowered_rides_the_pending_wakeup() {
             let wake = WakeFlag::default();
             assert!(wake.raise(), "a wakeup is in flight");
-            let (sent, _) = run(vec![Ok(b"a")], &wake, false, true);
+            let (sent, _) = run(bytes(&[b"a"]), &wake, false, true);
             assert_eq!(sent, ["exit"]);
             wake.lower();
             assert!(wake.raise(), "once lowered, the next output wakes again");
@@ -8168,118 +8172,108 @@ mod tests {
         #[test]
         fn a_failed_delivery_stops_reading() {
             let wake = WakeFlag::default();
-            let (sent, line) = run(vec![Ok(b"a"), Ok(b"b")], &wake, false, false);
+            let (sent, line) = run(bytes(&[b"a", b"b"]), &wake, false, false);
             assert_eq!(sent, ["redraw", "exit"]);
             assert_eq!(line, "a", "nothing is parsed after the failed send");
         }
 
-        /// The batches `read_ahead` queues for `parts` with nobody parsing.
-        fn read_all(parts: Vec<Result<&[u8], Error>>) -> Vec<Vec<u8>> {
-            let (tx, rx) = std::sync::mpsc::sync_channel(super::super::READ_AHEAD);
-            read_ahead(&mut apart(parts), &tx);
-            drop(tx);
-            rx.into_iter().collect()
+        #[test]
+        fn a_closed_pane_with_a_pending_wakeup_reads_until_its_feed_ends() {
+            // A closed pane never lowers its flag: the loop sends nothing
+            // more and stops only when the feed ends (PTY EOF or error).
+            let wake = WakeFlag::default();
+            assert!(wake.raise());
+            let (sent, line) = run(bytes(&[b"a", b"b"]), &wake, false, true);
+            assert_eq!(sent, ["exit"]);
+            assert_eq!(line, "ab");
         }
 
         #[test]
-        fn reading_runs_ahead_of_the_parser() {
-            let got = read_all(vec![Ok(b"a"), Ok(b"b"), Ok(b"c")]);
-            assert_eq!(got, [b"a", b"b", b"c"], "all queued before any parse");
+        fn a_screen_replaces_the_terminal_and_output_continues_on_it() {
+            let mut shown = Grid::new(30, 3);
+            let mut its_parser = AnsiParser::new();
+            its_parser.advance(&mut shown, b"from the server ");
+            let steps = vec![
+                Feed::Bytes(b"local".to_vec()),
+                Feed::Screen(Box::new(shown), Box::new(its_parser)),
+                Feed::Bytes(b"live".to_vec()),
+            ];
+            let (sent, line) = run(steps, &WakeFlag::default(), true, true);
+            assert_eq!(sent, ["redraw", "redraw", "redraw", "exit"]);
+            assert_eq!(line.trim_end(), "from the server live");
         }
 
         #[test]
-        fn a_read_error_ends_reading() {
-            let got = read_all(vec![Ok(b"a"), Err(Error::other("gone")), Ok(b"b")]);
-            assert_eq!(got, [b"a"]);
+        fn a_resize_from_the_source_resizes_the_grid() {
+            let grid = Arc::new(Mutex::new(Grid::new(20, 2)));
+            let parser = Arc::new(Mutex::new(AnsiParser::new()));
+            let steps = vec![Feed::Resized { cols: 33, rows: 5 }];
+            feed(
+                steps,
+                None,
+                &grid,
+                &parser,
+                &WakeFlag::default(),
+                true,
+                true,
+            );
+            let g = grid.lock();
+            assert_eq!((g.cols, g.rows), (33, 5));
         }
 
-        /// A PTY handle that counts its reads.
-        struct Counted {
-            inner: crate::backend::mock::Chunks,
-            reads: Arc<std::sync::atomic::AtomicUsize>,
-        }
+        /// A writer that keeps what it is sent.
+        struct Recorded(Arc<std::sync::Mutex<Vec<u8>>>);
 
-        impl BackendHandle for Counted {
-            fn read_into(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
-                self.reads
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.inner.read_into(buf)
-            }
-            fn output_ready(&self) -> bool {
-                self.inner.output_ready()
+        impl BackendHandle for Recorded {
+            fn read_into(&mut self, _buf: &mut [u8]) -> Result<usize, Error> {
+                Ok(0)
             }
             fn write(&mut self, data: &[u8]) -> Result<(), Error> {
-                self.inner.write(data)
+                self.0.lock().expect("unpoisoned").extend_from_slice(data);
+                Ok(())
             }
             fn try_clone(&self) -> Result<Box<dyn BackendHandle>, Error> {
-                self.inner.try_clone()
+                Ok(Box::new(Recorded(Arc::clone(&self.0))))
             }
-            fn set_winsize(&mut self, cols: u16, rows: u16) -> Result<(), Error> {
-                self.inner.set_winsize(cols, rows)
+            fn set_winsize(&mut self, _cols: u16, _rows: u16) -> Result<(), Error> {
+                Ok(())
             }
             #[cfg(unix)]
             fn pty_fd(&self) -> std::os::unix::io::RawFd {
-                self.inner.pty_fd()
+                -1
             }
         }
 
-        /// Ten one-byte batches, and the counter of how many were read.
-        fn ten_parts() -> (Counted, Arc<std::sync::atomic::AtomicUsize>) {
-            let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            let parts = (0..10).map(|_| Ok(&b"x"[..])).collect();
-            let handle = Counted {
-                inner: apart(parts),
-                reads: Arc::clone(&reads),
-            };
-            (handle, reads)
-        }
-
         #[test]
-        fn a_gone_parser_ends_reading() {
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            drop(rx);
-            let (mut pty, reads) = ten_parts();
-            read_ahead(&mut pty, &tx);
-            assert_eq!(
-                reads.load(std::sync::atomic::Ordering::Relaxed),
-                1,
-                "the first failed send stops reading"
+        fn queries_are_answered_only_with_a_reply_writer() {
+            // DA1: the parser answers it, so a pane that answers writes back.
+            let query = || bytes(&[b"\x1b[c"]);
+            let grid = Arc::new(Mutex::new(Grid::new(20, 2)));
+            let parser = Arc::new(Mutex::new(AnsiParser::new()));
+            let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = Box::new(Recorded(Arc::clone(&kept)));
+            feed(
+                query(),
+                Some(writer),
+                &grid,
+                &parser,
+                &WakeFlag::default(),
+                true,
+                true,
             );
-        }
-
-        #[test]
-        fn a_parser_gone_while_the_queue_is_full_ends_reading() {
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            let (mut pty, reads) = ten_parts();
-            let counter = Arc::clone(&reads);
-            let (done_tx, done) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                read_ahead(&mut pty, &tx);
-                let _ = done_tx.send(());
-            });
-            // Wait until the reader is blocked on the full queue, then hang up.
-            while counter.load(std::sync::atomic::Ordering::Relaxed) < 2 {
-                std::thread::yield_now();
-            }
-            drop(rx);
-            done.recv_timeout(std::time::Duration::from_secs(5))
-                .expect("the blocked send is released and reading stops");
-            assert!(reads.load(std::sync::atomic::Ordering::Relaxed) < 10);
-        }
-
-        #[test]
-        fn a_closed_pane_with_a_pending_wakeup_reads_until_eof_or_error() {
-            // A closed pane never lowers its flag: the loop sends nothing
-            // more and stops only when the PTY reports EOF or an error.
-            for end in [None, Some(Error::other("gone"))] {
-                let wake = WakeFlag::default();
-                assert!(wake.raise());
-                let mut parts: Vec<Result<&[u8], Error>> = vec![Ok(b"a"), Ok(b"b")];
-                parts.extend(end.map(Err));
-                let (sent, line) = run(parts, &wake, false, true);
-                assert_eq!(sent, ["exit"]);
-                assert_eq!(line, "ab");
-            }
+            assert!(!kept.lock().expect("unpoisoned").is_empty(), "answered");
+            // Without one (a mux block: its server answers), nothing is sent
+            // and the parser's reply is still drained.
+            feed(
+                query(),
+                None,
+                &grid,
+                &parser,
+                &WakeFlag::default(),
+                true,
+                true,
+            );
+            assert!(parser.lock().take_responses().is_empty());
         }
     }
 }
