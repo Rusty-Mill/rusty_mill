@@ -1,4 +1,4 @@
-//! Nano's approved erosion limits (D115, D117).
+//! Nano's approved erosion limits (D115, D118).
 //!
 //! Only `bbp erosion approve` writes `<dir>/erosion/limits.log`: one JSON
 //! line per approval, appended under the file's lock, newest line wins.
@@ -149,9 +149,13 @@ fn open_locked(p: &Path) -> std::io::Result<File> {
 mod tests {
     use super::*;
 
+    /// A fresh directory per call: tests run in parallel in one process, so
+    /// the pid and clock alone can collide.
     fn dir() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let d = std::env::temp_dir().join(format!(
-            "erosion-limits-{}-{}",
+            "erosion-limits-{}-{}-{n}",
             std::process::id(),
             crate::now().0
         ));

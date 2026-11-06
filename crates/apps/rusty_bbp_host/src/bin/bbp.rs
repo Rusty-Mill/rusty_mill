@@ -725,7 +725,7 @@ fn cgroup_open(_: &std::path::Path, _: &TaskId, _: &std::path::Path) -> Result<S
 #[cfg(not(target_os = "linux"))]
 const CGROUPS_LINUX_ONLY: &str = "session cgroups are Linux only";
 
-/// `bbp erosion approve|limits` (D115, D117): record Nano's approved
+/// `bbp erosion approve|limits` (D115, D118): record Nano's approved
 /// erosion limits, or print the newest record (`null` if none).
 fn erosion(a: &Args, dir: &std::path::Path) -> Result<String, String> {
     use rusty_bbp_host::erosion_limits;
