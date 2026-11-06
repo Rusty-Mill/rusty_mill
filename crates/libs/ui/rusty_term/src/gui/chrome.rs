@@ -29,6 +29,9 @@ struct Pack {
     oxide: u32,
     /// Thumbnail cells on an unselected and the selected tab (gui-design D46).
     thumb: [u32; 2],
+    /// A raised control hovered and pressed (gui-design D26, D49).
+    hover: u32,
+    press: u32,
 }
 
 /// D5: the dark palette.
@@ -44,6 +47,8 @@ const DARK: Pack = Pack {
     verdigris: 0x5FB8A5,
     oxide: 0xD9773A,
     thumb: [0x2C363B, 0x3A464C],
+    hover: 0x2D383E,
+    press: 0x364249,
 };
 
 /// D25: the light palette (tinted ground, darker accents).
@@ -59,6 +64,8 @@ const LIGHT: Pack = Pack {
     verdigris: 0x176B5A,
     oxide: 0xA8460F,
     thumb: [0xB9C4C3, 0x9FACAB],
+    hover: 0xE4EAE9,
+    press: 0xD6DFDE,
 };
 
 /// Every colour the chrome draws with, resolved once per theme.
@@ -96,6 +103,10 @@ pub(crate) struct Chrome {
     pub control: u32,
     /// Thumbnail cells on an unselected and the selected tab (gui-design D46).
     pub thumb: [u32; 2],
+    /// A raised control (a block's zoom button) hovered and pressed
+    /// (gui-design D26, D49).
+    pub hover: u32,
+    pub press: u32,
 }
 
 impl Chrome {
@@ -123,6 +134,8 @@ impl Chrome {
                 pack.slate
             },
             thumb: pack.thumb,
+            hover: pack.hover,
+            press: pack.press,
         }
     }
 }

@@ -19,6 +19,8 @@ struct Win {
     name: String,
     layout: Option<Layout>,
     focused: Option<BlockId>,
+    /// The block shown alone, if any.
+    zoomed: Option<BlockId>,
 }
 
 /// A connected client.
@@ -150,6 +152,14 @@ impl Model {
         }
     }
 
+    /// The block the shown window shows alone, if any.
+    pub fn zoomed(&self) -> Option<BlockId> {
+        self.windows
+            .iter()
+            .find(|w| w.id == self.shown)
+            .and_then(|w| w.zoomed)
+    }
+
     /// The session the server said, for the strip; windows keyed by
     /// `windows`, blocks by `blocks`.
     pub fn session(&self, windows: &mut Keys<WindowId>, blocks: &mut Keys) -> Session {
@@ -195,6 +205,7 @@ impl Model {
                 name,
                 layout,
                 focused,
+                zoomed,
                 ..
             } if *session == self.session => {
                 let win = Win {
@@ -202,6 +213,7 @@ impl Model {
                     name: name.clone(),
                     layout: layout.clone(),
                     focused: *focused,
+                    zoomed: *zoomed,
                 };
                 match self.windows.iter_mut().find(|w| w.id == *window) {
                     Some(w) => *w = win,
@@ -241,6 +253,7 @@ impl Model {
                         name: String::new(),
                         layout: None,
                         focused: None,
+                        zoomed: None,
                     });
                 }
                 Change::Strip
@@ -283,10 +296,15 @@ impl Model {
                     }
                 }
             }
-            Event::LayoutChanged { window, layout, .. } => {
+            Event::LayoutChanged {
+                window,
+                layout,
+                zoomed,
+            } => {
                 let shown = *window == self.shown;
                 let change = self.with_window(*window, |w| {
                     w.layout.clone_from(layout);
+                    w.zoomed = *zoomed;
                     if shown { Change::Layout } else { Change::Strip }
                 });
                 if change != Change::Layout || layout.is_some() || !self.follows_active {
@@ -519,6 +537,28 @@ mod tests {
         };
         assert_eq!(m.apply(&focus(w[1], b[1])), Change::None);
         assert_eq!(m.apply(&focus(w[0], b[2])), Change::Focus(b[2]));
+    }
+
+    #[test]
+    fn the_shown_windows_zoom_is_kept() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let mut m = model(s, &w, &b);
+        assert_eq!(m.zoomed(), None);
+        let zoom = |window, zoomed| Event::LayoutChanged {
+            window,
+            layout: Some(Layout::Block(b[0])),
+            zoomed,
+        };
+        m.apply(&zoom(w[1], Some(b[1])));
+        assert_eq!(m.zoomed(), None, "another window's zoom");
+        assert_eq!(m.apply(&zoom(w[0], Some(b[0]))), Change::Layout);
+        assert_eq!(m.zoomed(), Some(b[0]));
+        m.apply(&zoom(w[0], None));
+        assert_eq!(m.zoomed(), None);
     }
 
     #[test]

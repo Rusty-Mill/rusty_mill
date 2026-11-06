@@ -41,13 +41,15 @@ pub(super) fn grid_top(chrome: &[Cell], strip: Option<&Pixmap>, pad: usize, bar_
 }
 
 /// What an attached window paints in pixels rather than cells: its top
-/// strip, flush with the window's top in place of the chrome bar, and the
-/// body of framed blocks (gui-design D47), from the bars' bottom edge down,
-/// behind the panes. Both `None` for local shells.
+/// strip, flush with the window's top in place of the chrome bar, the body
+/// of framed blocks (gui-design D47), from the bars' bottom edge down,
+/// behind the panes, and small pixmaps over the panes (F2 badges, D49), at
+/// px from the body's corner. All empty for local shells.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Scene<'a> {
     pub strip: Option<&'a Pixmap>,
     pub body: Option<&'a Pixmap>,
+    pub over: &'a [(Pixmap, (usize, usize))],
 }
 
 /// The theme-independent search highlight: amber for a match, orange for the
@@ -420,6 +422,7 @@ pub(super) fn composite(
                 buffer, w, h, p.grid, p.col0, p.row0, ox, oy, &p.trail, font, trail,
             );
         }
+        draw_over(buffer, w, h, &scene, oy - pad);
         return;
     }
     buffer.fill(bg); // the padding band (and any slack) is background
@@ -473,6 +476,14 @@ pub(super) fn composite(
             buffer, w, h, p.grid, p.col0, p.row0, ox, oy, &p.trail, font, None,
         );
         cpu::draw_marks(buffer, w, h, p.col0, p.row0, ox, oy, &p.marks, font);
+    }
+    draw_over(buffer, w, h, &scene, oy - pad);
+}
+
+/// Draw `scene`'s pixmaps over the panes, the body's corner at `top`.
+fn draw_over(buffer: &mut [u32], w: usize, h: usize, scene: &Scene, top: usize) {
+    for (pixmap, (x, y)) in scene.over {
+        cpu::draw_pixmap(buffer, w, h, pixmap, *x, top + y);
     }
 }
 

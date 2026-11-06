@@ -302,6 +302,8 @@ pub(crate) mod icons {
     pub(crate) const CHECK: &str = "M3.5 8.5l3 3 6-7";
     pub(crate) const CROSS: &str = "M4.5 4.5l7 7M11.5 4.5l-7 7";
     pub(crate) const PAUSE: &str = "M6 4v8M10 4v8";
+    /// A header's zoom button (gui-design D49).
+    pub(crate) const ZOOM: &str = "M3 6V3h3M13 6V3h-3M3 10v3h3M13 10v3h-3";
     /// The spinner (`gui_lib.py` `spinner`): a ring in `line`, and the
     /// quarter arc on it in the accent.
     pub(crate) const SPINNER_RING: &str = "M3 8a5 5 0 1 0 10 0a5 5 0 1 0-10 0";

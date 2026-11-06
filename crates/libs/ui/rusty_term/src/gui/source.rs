@@ -167,6 +167,24 @@ pub trait Source {
     fn select(&self, key: u64);
     /// The user asked for a new window in the session.
     fn new_window(&self);
+    /// The user asked to change the layout (gui-design F2, F7; handoff
+    /// D104). The source sends it on; the window shows the result when the
+    /// source lays it out.
+    fn act(&self, act: Act);
+}
+
+/// A layout change the user asked an attached window's source for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Act {
+    /// Start a block beside pane `key`; `Dir::Vertical` puts it on the
+    /// right, `Dir::Horizontal` below.
+    Split { key: u64, dir: Dir },
+    /// Show pane `key` alone.
+    Zoom(u64),
+    /// Show every pane again.
+    Unzoom,
+    /// Close pane `key`'s block.
+    Close(u64),
 }
 
 /// The source's way into a running window, from any thread. Each call is
@@ -183,6 +201,12 @@ impl Remote {
     /// Move the focus to pane `key`, as another client did.
     pub fn focus(&self, key: u64) -> bool {
         self.0.send_event(UserEvent::Focus(key)).is_ok()
+    }
+
+    /// Show pane `key` alone, or every pane with `None` (gui-design F7).
+    /// Comes after the [`Remote::layout`] it applies to.
+    pub fn zoom(&self, key: Option<u64>) -> bool {
+        self.0.send_event(UserEvent::Zoom(key)).is_ok()
     }
 
     /// Show `session` on the top strip.
