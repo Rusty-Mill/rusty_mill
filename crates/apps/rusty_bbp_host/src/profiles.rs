@@ -193,10 +193,11 @@ impl ProfileSet {
     /// The profile runs the `erosion` bin directly (D82): no shell, `env` or
     /// `cargo run`, so the argv checked here is the argv that runs. The args
     /// parse as the bin's own do: `check`, then `--base COMMIT` and either
-    /// `--report-only` or both limits, each once, nothing else. The base is a
+    /// one mode (`--report-only`, `--cleanup` or both limits), each once,
+    /// nothing else. The base is a
     /// full commit id, and the pinned `baseline` when one is set.
     fn check_erosion_base(&self, p: &Profile) -> Result<(), String> {
-        let direct = "run the erosion bin directly: erosion check --base COMMIT (--report-only | --max-concentration-bp N --max-duplication-bp N)";
+        let direct = "run the erosion bin directly: erosion check --base COMMIT (--report-only | --cleanup | --max-concentration-bp N --max-duplication-bp N)";
         let program = p.program.rsplit('/').next().unwrap_or_default();
         let Some(("check", rest)) = p.args.split_first().map(|(c, r)| (c.as_str(), r)) else {
             return Err(format!("the erosion profile must {direct}"));
@@ -339,7 +340,8 @@ pub fn is_commit_id(s: &str) -> bool {
 }
 
 /// The `erosion check` flags after `check`, as the bin parses them: each
-/// flag at most once, `--base` required, and `--report-only` or both limits.
+/// flag at most once, `--base` required, and one mode: `--report-only`,
+/// `--cleanup` (D44's cleanup predicate, D113) or both limits.
 /// Returns the base.
 fn erosion_flags<'a>(rest: &'a [String], direct: &str) -> Result<&'a str, String> {
     let mut seen: Vec<&str> = Vec::new();
@@ -352,7 +354,7 @@ fn erosion_flags<'a>(rest: &'a [String], direct: &str) -> Result<&'a str, String
         }
         seen.push(flag);
         let takes_value = match flag {
-            "--report-only" => false,
+            "--report-only" | "--cleanup" => false,
             "--base" | "--max-concentration-bp" | "--max-duplication-bp" => true,
             other => return Err(format!("erosion argument {other:?}: {direct}")),
         };
@@ -370,9 +372,15 @@ fn erosion_flags<'a>(rest: &'a [String], direct: &str) -> Result<&'a str, String
     }
     let has = |f: &str| seen.contains(&f);
     let limits = (has("--max-concentration-bp"), has("--max-duplication-bp"));
-    match (has("--report-only"), limits) {
-        (true, (false, false)) | (false, (true, true)) => {}
-        _ => return Err(format!("give --report-only or both limits: {direct}")),
+    match (has("--report-only"), has("--cleanup"), limits) {
+        (true, false, (false, false))
+        | (false, true, (false, false))
+        | (false, false, (true, true)) => {}
+        _ => {
+            return Err(format!(
+                "give one mode, --report-only, --cleanup or both limits: {direct}"
+            ))
+        }
     }
     base.ok_or_else(|| "the erosion profile names no --base commit".to_string())
 }
@@ -490,6 +498,12 @@ mod tests {
             "check --max-concentration-bp 100 --base {c} --max-duplication-bp 0"
         ));
         assert_eq!(enforcing.check_erosion(), Ok(()));
+        let cleanup = erosion_set(&format!("check --base {c} --cleanup"));
+        assert_eq!(cleanup.check_erosion(), Ok(()));
+        assert!(
+            !cleanup.erosion_report_only(),
+            "a cleanup is not counted as report-only"
+        );
         let mut pinned_ok = ok.clone();
         pinned_ok.baseline = Some(c.into());
         assert_eq!(pinned_ok.check_erosion(), Ok(()));
@@ -562,6 +576,16 @@ mod tests {
                 "basis points",
             ),
             (erosion_set("check --report-only --base"), "needs a value"),
+            (
+                erosion_set(&format!("check --base {c} --cleanup --report-only")),
+                "one mode",
+            ),
+            (
+                erosion_set(&format!(
+                    "check --base {c} --cleanup --max-concentration-bp 1 --max-duplication-bp 1"
+                )),
+                "one mode",
+            ),
             (
                 erosion_set(&format!(
                     "check --base {c} --base {} --report-only",

@@ -541,6 +541,28 @@ fn unchanged_tree_has_zero_deltas() {
 }
 
 #[test]
+fn cleanup_passes_a_removed_duplicate_and_fails_an_unchanged_tree() {
+    // D44: neither share may rise and one must fall, so an unchanged tree
+    // fails even though 0/0 limits would pass it.
+    let repo = Repo::new("cleanup");
+    repo.write("src/b.rs", PASTED);
+    commit(&repo);
+    let base = repo.head();
+    let cleanup = ["check", "--base", base.as_str(), "--cleanup"];
+
+    let unchanged = repo.erosion(&cleanup);
+    assert_eq!(unchanged.status.code(), Some(1), "{}", stdout(&unchanged));
+    let line = stdout(&unchanged);
+    assert!(line.contains("\"mode\":\"cleanup\""), "{line}");
+    assert!(line.contains("\"within_limits\":false"), "{line}");
+
+    repo.write("src/b.rs", "pub fn none() {}\n");
+    let removed = repo.erosion(&cleanup);
+    assert_eq!(removed.status.code(), Some(0), "{}", stdout(&removed));
+    assert!(stdout(&removed).contains("\"within_limits\":true"));
+}
+
+#[test]
 fn a_pasted_duplicate_is_reported_then_blocked_once_enforcing() {
     let repo = Repo::new("paste");
     let base = repo.head();
