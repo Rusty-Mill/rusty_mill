@@ -20,6 +20,7 @@ use crate::milestones::{MemMilestones, Milestone, MilestoneEdit, MilestoneStore}
 use crate::projects::Projects;
 use crate::roadmap::{Roadmap, roadmap};
 use crate::store::Store;
+use crate::trace::{self, MilestoneView, Trace};
 use crate::workflow::Workflow;
 
 /// Attempts per operation when another writer wins the revision race.
@@ -112,6 +113,34 @@ pub struct Board<S> {
 fn read<T: Clone>(lock: &RwLock<T>) -> T {
     lock.read()
         .map_or_else(|e| e.into_inner().clone(), |g| g.clone())
+}
+
+/// A card to create (see [`Board::add_card`]).
+#[derive(Debug, Clone, Default)]
+pub struct NewCard<'a> {
+    /// Short title.
+    pub title: &'a str,
+    /// Description (markdown).
+    pub body: &'a str,
+    /// Labels.
+    pub tags: Vec<String>,
+    /// Create it straight in Done, recording work that already merged.
+    pub done: bool,
+    /// The card it is split from.
+    pub parent: Option<Uuid>,
+}
+
+impl<'a> NewCard<'a> {
+    /// A Backlog card with no parent.
+    #[must_use]
+    pub fn new(title: &'a str, body: &'a str, tags: Vec<String>) -> Self {
+        Self {
+            title,
+            body,
+            tags,
+            ..Self::default()
+        }
+    }
 }
 
 /// Wall-clock Unix milliseconds.
@@ -679,6 +708,17 @@ impl<S: Store> Board<S> {
         Ok(all)
     }
 
+    /// Each of `milestones` with the progress of the cards linked to it.
+    ///
+    /// # Errors
+    /// If the store fails.
+    pub fn milestone_progress(
+        &self,
+        milestones: Vec<Milestone>,
+    ) -> Result<Vec<MilestoneView>, BoardError> {
+        Ok(trace::with_progress(&self.cards()?, milestones))
+    }
+
     /// Add a milestone to `project`. Needs `Triage`: dates are planning decisions.
     ///
     /// # Errors
@@ -881,8 +921,7 @@ impl<S: Store> Board<S> {
         body: &str,
         tags: Vec<String>,
     ) -> Result<Card, BoardError> {
-        let card = Card::new(title, body, tags, (self.clock)())?;
-        self.create(by, project, card)
+        self.add_card(by, project, NewCard::new(title, body, tags))
     }
 
     /// Create a card straight in Done in `project`, recording work that
@@ -898,19 +937,39 @@ impl<S: Store> Board<S> {
         body: &str,
         tags: Vec<String>,
     ) -> Result<Card, BoardError> {
-        if !by.caps.contains(&Capability::Close) {
+        let new = NewCard {
+            done: true,
+            ..NewCard::new(title, body, tags)
+        };
+        self.add_card(by, project, new)
+    }
+
+    /// Create a card in `project` as `new` describes: in Backlog, or in Done (needs `Close`),
+    /// optionally split from a `parent` card. Naming the parent needs no `Triage`: whoever splits
+    /// work records where each piece came from.
+    ///
+    /// # Errors
+    /// As [`Board::add_in`], a missing `Close` for a Done card, or a parent that is not a card.
+    pub fn add_card(
+        &self,
+        by: &Actor,
+        project: &str,
+        new: NewCard<'_>,
+    ) -> Result<Card, BoardError> {
+        if new.done && !by.caps.contains(&Capability::Close) {
             return Err(BoardError::Forbidden(Capability::Close));
         }
-        let card = Card::new(title, body, tags, (self.clock)())?;
-        self.create(
-            by,
-            project,
-            Card {
-                column: Column::DONE,
-                done_ms: Some(card.created_ms),
-                ..card
-            },
-        )
+        let mut card = Card::new(new.title, new.body, new.tags, (self.clock)())?;
+        if new.done {
+            card.column = Column::DONE;
+            card.done_ms = Some(card.created_ms);
+        }
+        if let Some(p) = new.parent {
+            // A new card has no children, so no parent can close a loop through it.
+            self.store.get(p)?.ok_or(BoardError::NotFound(p))?;
+            card.parent = Some(p);
+        }
+        self.create(by, project, card)
     }
 
     fn create(&self, by: &Actor, project: &str, mut card: Card) -> Result<Card, BoardError> {
@@ -1415,7 +1474,7 @@ impl<S: Store> Board<S> {
         }
         if plan.is_empty() {
             return Err(BoardError::Invalid(
-                "give a priority, deps, superseded_by, related or target_ms",
+                "give a priority, deps, superseded_by, related, parent, milestone or target_ms",
             ));
         }
         for linked in plan.linked() {
@@ -1423,8 +1482,50 @@ impl<S: Store> Board<S> {
                 return Err(BoardError::NotFound(*linked));
             }
         }
+        if let Some(Some(parent)) = plan.parent {
+            self.check_parent(id, parent)?;
+        }
+        if let Some(Some(m)) = plan.milestone {
+            let card = self.get(id)?;
+            self.check_milestone(m, &card.project)?;
+        }
         // One commit: `Card::plan` validates the whole request before anything changes.
         self.apply(id, by, EventKind::Edited, |c, now| c.plan(plan, now))
+    }
+
+    /// Refuse `parent` for card `id` when it would close a loop or the chain is too deep.
+    fn check_parent(&self, id: Uuid, parent: Uuid) -> Result<(), BoardError> {
+        trace::check_parent(id, parent, |c| {
+            Ok(self.store.get(c)?.and_then(|c| c.parent))
+        })
+    }
+
+    /// Refuse a milestone that does not exist or is in another project than the card's.
+    fn check_milestone(&self, id: Uuid, project: &str) -> Result<(), BoardError> {
+        let m = self
+            .milestones
+            .milestone(id)?
+            .ok_or(BoardError::NotFound(id))?;
+        if m.project != project {
+            return Err(BoardError::Invalid(
+                "a card links only to a milestone of its own project",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Where card `id` sits in its decomposition: its chain of parents and the tree below it,
+    /// leaving out cards `keep` refuses (see [`trace::trace`]).
+    ///
+    /// # Errors
+    /// A missing card, or if the store fails.
+    pub fn trace(&self, id: Uuid, keep: impl Fn(&Card) -> bool) -> Result<Trace, BoardError> {
+        let cards = self.cards()?;
+        let card = cards
+            .iter()
+            .find(|c| c.id == id)
+            .ok_or(BoardError::NotFound(id))?;
+        Ok(trace::trace(&cards, card, keep))
     }
 
     /// Comment on a card.

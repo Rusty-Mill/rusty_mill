@@ -265,6 +265,10 @@ dialog h2{margin:0;font-size:18px}
 #dlg input:first-of-type{font-size:16px;font-weight:600}
 #dlg .plan{display:flex;align-items:center;gap:8px}#dlg .plan input{width:auto;font-size:14px;font-weight:400}
 #dlg .row{display:flex;flex-wrap:wrap;gap:6px}
+#dlg .trace{font-size:13px;color:var(--mute);display:flex;flex-wrap:wrap;gap:4px 6px;align-items:baseline}#dlg .trace:empty{display:none}
+#dlg .trace button{border:0;background:none;padding:0;font:inherit;color:var(--ink);text-decoration:underline;text-underline-offset:2px;cursor:pointer}
+#dlg .plan select{width:auto}#dlg .plan .up{width:7em}
+.tag.ready{border-color:var(--ink);color:var(--ink)}
 .cm{border-top:1px solid var(--line)}
 .cm div{border-bottom:1px solid var(--line);padding:8px 0;font-size:13.5px}
 .cm div b{margin-right:6px}
@@ -444,6 +448,25 @@ const heading=k=>{const top=el("div",null,"top");if(k.number)top.append(el("span
 const PRIORITY={5:"High",3:"Medium",1:"Low",0:"None"};
 const priorityTag=k=>k.priority?[el("span",PRIORITY[k.priority],"tag p"+k.priority)]:[];
 
+/* Traceability (#766): a card names the card it was split from. Its chain up and its children's
+   progress are derived from the cards in view; a parent is flagged ready to close, never closed. */
+const byId=id=>id?cards.find(c=>c.id===id):undefined;
+let kidsMap=new Map(),kidsOf=null;
+function kids(k){
+  if(kidsOf!==cards){kidsOf=cards;kidsMap=new Map();for(const c of cards)if(c.parent){if(!kidsMap.has(c.parent))kidsMap.set(c.parent,[]);kidsMap.get(c.parent).push(c)}}
+  return kidsMap.get(k.id)??[];
+}
+function chain(k){const out=[],seen=new Set([k.id]);for(let p=byId(k.parent);p&&!seen.has(p.id)&&out.length<32;p=byId(p.parent)){seen.add(p.id);out.unshift(p)}return out}
+function rollup(list,closed){const done=list.filter(c=>c.column==="done").length,blocked=list.filter(c=>c.column==="blocked").length;
+  return {total:list.length,done,blocked,ready_to_close:list.length>0&&done===list.length&&!closed}}
+const rollText=r=>r.done+" of "+r.total+" done"+(r.blocked?" · "+r.blocked+" blocked":"")+(r.ready_to_close?" · ready to close":"");
+const cardName=k=>(k.number?"#"+k.number+" ":"")+k.title;
+function rollTag(k){
+  const list=kids(k);if(!list.length)return [];
+  const r=rollup(list,k.column==="done"),t=el("span",r.done+"/"+r.total+" pieces"+(r.ready_to_close?" · ready to close":""),"tag"+(r.ready_to_close?" ready":""));
+  t.title="Split into "+r.total+": "+rollText(r);return [t];
+}
+
 // Ages: "40m", "5h", "3d". A card in a work column untouched for a day reads as idle.
 const ago=ms=>{const m=(Date.now()-ms)/6e4;return m<60?Math.max(1,Math.round(m))+"m":m<1440?Math.round(m/60)+"h":Math.round(m/1440)+"d"};
 const kindOf=c=>FLOW.columns.find(x=>x.id===c)?.kind;
@@ -476,7 +499,7 @@ function ticket(k){
   const work=kindOf(k.column)==="work",age=Date.now()-k.updated_ms;
   if(work&&age>DAY)m.append(el("span","idle "+ago(k.updated_ms),"idle"));
   else if(work||k.claim)m.append(el("span",ago(k.updated_ms)));
-  m.append(...tagChips(k));
+  m.append(...rollTag(k),...tagChips(k));
   if(k.issue)m.append(el("span","issue #"+k.issue));
   if(k.comments.length)m.append(el("span",k.comments.length+(k.comments.length===1?" comment":" comments")));
   d.append(m);
@@ -580,8 +603,10 @@ function focusProject(){
 const planned=k=>["work","queue","blocked"].includes(kindOf(k.column));
 const overdue=k=>!isDone(k)&&k.target_ms!=null&&k.target_ms<dayStart(Date.now());
 // Milestones as one row: each a diamond at its target, filled once done, late ones in red.
-const stoneMarks=stones=>stones.map(m=>({at:m.done_ms??m.target_ms,label:m.title,cls:"stone"+(m.done_ms?" done":m.target_ms<dayStart(Date.now())?" late":""),
-  title:m.title+(m.done_ms?" · reached "+day(m.done_ms):" · due "+day(m.target_ms)),open:()=>editStone(m)}));
+// Linked cards (#771) add their progress, "2/3", and a flag once all are done.
+const stoneMarks=stones=>stones.map(m=>({at:m.done_ms??m.target_ms,label:m.title+(m.progress?.total?" "+m.progress.done+"/"+m.progress.total:""),
+  cls:"stone"+(m.done_ms?" done":m.target_ms<dayStart(Date.now())?" late":""),
+  title:m.title+(m.done_ms?" · reached "+day(m.done_ms):" · due "+day(m.target_ms))+(m.progress?.total?" · cards: "+rollText(m.progress):""),open:()=>editStone(m)}));
 function stoneRows(stones){
   if(!stones.length)return [];
   return [{label:"Milestones",sub:stones.filter(m=>!m.done_ms).length+" ahead · "+stones.filter(m=>m.done_ms).length+" reached",marks:stoneMarks(stones)}];
@@ -908,7 +933,7 @@ function setFields(s){dlg.f.t.value=s.title;dlg.f.b.value=s.body;dlg.f.q.value=s
 
 function show(id){
   const k=cards.find(c=>c.id===id);if(!k)return;
-  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input")};
+  const f={t:el("input"),b:el("textarea"),q:el("textarea"),g:el("input"),banner:el("div",null,"banner"),meta:el("div",null,"meta"),cm:el("div"),ci:el("input"),p:el("select"),pr:el("select"),due:el("input"),tr:el("div",null,"trace"),up:el("input","","up"),ms:el("select")};
   for(const r of Object.keys(repos)){const g=el("optgroup");g.label=r;repos[r].forEach(p=>g.append(new Option(label(p),p)));f.p.append(g)}
   f.p.setAttribute("aria-label","project");
   f.p.onchange=()=>act("card_assign",{id,project:f.p.value});
@@ -918,6 +943,12 @@ function show(id){
   // The target date, a local day; stored at its noon so a time zone shift keeps the day.
   f.due.type="date";f.due.setAttribute("aria-label","target date");f.due.title="Target date: when this should be done";
   f.due.onchange=()=>act("card_plan",{id,target_ms:f.due.value?new Date(f.due.value+"T12:00").getTime():null});
+  // The parent (#766), by number or id, and the milestone (#771), one of the project's.
+  f.up.placeholder="#parent";f.up.setAttribute("aria-label","parent card");f.up.title="The card this one was split from";
+  f.up.onchange=()=>act("card_plan",{id,parent:f.up.value.trim()||null});
+  f.ms.setAttribute("aria-label","milestone");f.ms.title="The milestone this card counts towards";
+  f.ms.onchange=()=>act("card_plan",{id,milestone:f.ms.value||null});
+  loadStones(f,k.project);
   f.b.rows=6;f.g.placeholder="tags, comma separated";f.ci.placeholder="Comment, then Enter";
   // The prompt: instructions for whoever takes the card, kept apart from the description.
   f.q.rows=4;f.q.placeholder="Prompt for whoever takes this card";f.q.setAttribute("aria-label","prompt");
@@ -934,9 +965,30 @@ function show(id){
   f.ci.onkeydown=async e=>{if(e.key==="Enter"&&f.ci.value.trim()){e.preventDefault();if(await act("card_comment",{id,text:f.ci.value}))f.ci.value=""}};
   const form=el("form");form.method="dialog";const head=el("div",null,"dhead");if(k.number)head.append(el("span","#"+k.number,"num"));head.append(f.meta);
   const plan=el("div",null,"plan");plan.append(f.pr,el("span","Target","meta"),f.due);
-  form.append(head,f.banner,f.t,f.b,promptRow,f.g,plan,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
+  const links=el("div",null,"plan");links.append(el("span","Parent","meta"),f.up,el("span","Milestone","meta"),f.ms);
+  form.append(head,f.tr,f.banner,f.t,f.b,promptRow,f.g,plan,links,...(projects().length>1?[f.p]:[]),row,f.cm,f.ci);
   $("dlg").replaceChildren(form);if(!$("dlg").open)$("dlg").showModal();
   syncDialog();
+}
+// The milestone picker: the project's open milestones, and the linked one even once reached.
+async function loadStones(f,project){
+  f.ms.dataset.project=project;let list=[];try{list=(await api("board_milestones",{project})).milestones}catch{}
+  if(dlg?.f!==f)return;
+  const k=byId(dlg.id);
+  f.ms.replaceChildren(new Option("None",""),...list.filter(m=>!m.done_ms||m.id===k?.milestone).map(m=>new Option(m.title+" · "+day(m.target_ms),m.id)));
+  syncDialog();
+}
+// The chain up to the root (each a link) and the children's progress, kept in step with the board.
+function traceLine(k){
+  const up=chain(k),list=kids(k),out=[];
+  const go=c=>{const b=el("button",cardName(c));b.type="button";b.onclick=()=>show(c.id);return b};
+  if(up.length)out.push(...up.flatMap(c=>[go(c),"›"]),el("span",k.number?"#"+k.number:"this card"));
+  if(list.length){
+    const r=rollup(list,k.column==="done");
+    if(out.length)out.push(el("span"," · "));
+    out.push(el("span","Split into "+rollText(r)+":"),...list.map(go));
+  }
+  return out;
 }
 async function save(){
   const d=dlg,t=typed();
@@ -958,6 +1010,10 @@ function syncDialog(){
   const theirs=snap(k);
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
+  f.tr.replaceChildren(...traceLine(k));
+  if(document.activeElement!==f.up){const p=k.parent&&byId(k.parent);f.up.value=p?.number?"#"+p.number:k.parent??""}
+  if(f.ms.dataset.project&&f.ms.dataset.project!==k.project)loadStones(f,k.project);
+  else if(document.activeElement!==f.ms)f.ms.value=k.milestone??"";
   if(theirs.rev===dlg.base.rev){if(!dlg.note)f.banner.replaceChildren();return}
   if(dlg.partial!=null){partlySaved(theirs);return}
   const dirty=!sameText(typed(),dlg.base);

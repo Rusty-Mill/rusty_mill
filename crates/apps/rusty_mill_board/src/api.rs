@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::board::Board;
+use crate::board::{Board, NewCard};
 use crate::domain::{
     Actor, BoardError, Card, Column, DEFAULT_PROJECT, DONE_WINDOW_DAYS, Dates, Edit, ExecutionLink,
     Plan, Shelf, Span,
@@ -328,6 +328,14 @@ struct PlanArgs {
     superseded_by: Option<Vec<String>>,
     /// Ids or numbers of cards worth reading alongside this one; replaces the list.
     related: Option<Vec<String>>,
+    /// Id or number of the card this one was split from; `null` clears it. One parent per card,
+    /// never a loop. Left out, it is unchanged.
+    #[serde(default, deserialize_with = "present")]
+    parent: Option<Option<String>>,
+    /// Id of the milestone (from `board_milestones`, same project) this card counts towards;
+    /// `null` clears it. Left out, it is unchanged.
+    #[serde(default, deserialize_with = "present")]
+    milestone: Option<Option<String>>,
     /// When the card should be done, Unix ms; `null` clears it. Left out, it is unchanged.
     #[serde(default, deserialize_with = "present")]
     target_ms: Option<Option<i64>>,
@@ -360,6 +368,9 @@ struct AddArgs {
     project: Option<String>,
     /// Create it straight in Done, to record work that already merged (needs `close`).
     done: Option<bool>,
+    /// Id or number of the card this one is split from. Set it whenever you split work into
+    /// pieces, so the decomposition is recorded rather than implied by titles.
+    parent: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -581,7 +592,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "board_milestones",
-            "Milestones the caller may see, optionally one project or one repository's projects, by target date: {milestones: [{id, project, title, target_ms, done_ms}]}. A milestone is a project's dated goal; the roadmap draws it ahead of today. `done_ms` is set once it is closed.",
+            "Milestones the caller may see, optionally one project or one repository's projects, by target date: {milestones: [{id, project, title, target_ms, done_ms, progress: {total, done, blocked, ready_to_close}}]}. A milestone is a project's dated goal; the roadmap draws it ahead of today. `done_ms` is set once it is closed. `progress` counts the cards linked to it (card_plan `milestone`); `ready_to_close` means all are Done and it is still open: close it with milestone_update.",
             |b, i, a: MetricsArgs| {
                 checked_project(b, scope(i), a.project.as_deref())?;
                 let projects = b.projects();
@@ -597,7 +608,7 @@ pub fn ops() -> Vec<Op> {
                             .as_deref()
                             .is_none_or(|r| projects.repo_of(&m.project) == Some(r))
                 })?;
-                to_json(json!({ "milestones": milestones }))
+                to_json(json!({ "milestones": b.milestone_progress(milestones)? }))
             },
         ),
         op(
@@ -697,23 +708,31 @@ pub fn ops() -> Vec<Op> {
             },
         ),
         op(
+            "card_trace",
+            "A card's place in its decomposition (parent links): `ancestors`, its chain of parents, root first, and `tree`, the card and every card split from it, each {id, number, title, column, project, rollup: {total, done, blocked, ready_to_close}, children}. A rollup counts direct children; `ready_to_close` means all are Done and the card is still open: close it, it never closes itself. Cards outside your scope are left out but still counted.",
+            |b, i, a: GetArgs| {
+                let c = b.get(card_ref(b, &a.id)?)?;
+                if !in_scope(scope(i), &c.project) {
+                    return Err(BoardError::OutOfScope(c.project));
+                }
+                to_json(b.trace(c.id, |k| in_scope(scope(i), &k.project))?)
+            },
+        ),
+        op(
             "card_add",
-            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; put the merged PR in the body).",
+            "Create a card in Backlog, or with `done: true` straight in Done to record work that already merged (needs `close`; put the merged PR in the body). When splitting work into pieces, pass `parent` (the card it is split from) on each piece.",
             |b, i, a: AddArgs| {
                 let who = acting(b, i, &a.who)?;
-                let add = if a.done == Some(true) {
-                    Board::add_done_in
-                } else {
-                    Board::add_in
+                let new = NewCard {
+                    done: a.done == Some(true),
+                    parent: a.parent.as_deref().map(|r| card_ref(b, r)).transpose()?,
+                    ..NewCard::new(
+                        &a.title,
+                        a.body.as_deref().unwrap_or(""),
+                        a.tags.unwrap_or_default(),
+                    )
                 };
-                card(add(
-                    b,
-                    &who,
-                    a.project.as_deref().unwrap_or(DEFAULT_PROJECT),
-                    &a.title,
-                    a.body.as_deref().unwrap_or(""),
-                    a.tags.unwrap_or_default(),
-                )?)
+                card(b.add_card(&who, a.project.as_deref().unwrap_or(DEFAULT_PROJECT), new)?)
             },
         ),
         op(
@@ -818,7 +837,7 @@ pub fn ops() -> Vec<Op> {
         ),
         op(
             "card_plan",
-            "Set a card's priority, links and target date (needs Triage): `deps` (waits on), `superseded_by` (newer cards that replace it), `related`, and `target_ms` (when it should be done; `null` clears it). Each list replaces the current one; `[]` clears it. `card_take` takes higher priority first, skips a card until its dependencies are Done, and never hands out a superseded card. After marking a card superseded, close it (move it to done) or re-scope it and clear `superseded_by`.",
+            "Set a card's priority, links and target date (needs Triage): `deps` (waits on), `superseded_by` (newer cards that replace it), `related`, `parent` (the card it was split from; `null` clears it), `milestone` (a milestone of its project; `null` clears it), and `target_ms` (when it should be done; `null` clears it). Each list replaces the current one; `[]` clears it. `card_take` takes higher priority first, skips a card until its dependencies are Done, and never hands out a superseded card. After marking a card superseded, close it (move it to done) or re-scope it and clear `superseded_by`.",
             |b, i, a: PlanArgs| {
                 let who = acting(b, i, &a.who)?;
                 let refs = |l: Option<Vec<String>>| {
@@ -834,6 +853,14 @@ pub fn ops() -> Vec<Op> {
                     deps: refs(a.deps)?,
                     superseded_by: refs(a.superseded_by)?,
                     related: refs(a.related)?,
+                    parent: a
+                        .parent
+                        .map(|p| p.map(|r| card_ref(b, &r)).transpose())
+                        .transpose()?,
+                    milestone: a
+                        .milestone
+                        .map(|m| m.map(|m| id(&m)).transpose())
+                        .transpose()?,
                     target_ms: a.target_ms,
                 };
                 card(b.plan(card_ref(b, &a.id)?, &who, &plan)?)
@@ -1593,6 +1620,129 @@ mod tests {
             plan(json!({"id": id, "target_ms": -1})),
             Err(CallError::Board(BoardError::Invalid(_)))
         ));
+    }
+
+    #[test]
+    fn a_split_card_names_its_parent_and_the_trace_rolls_it_up() {
+        let board: Shared = Board::new(Box::new(MemStore::default()), Roles::default());
+        let human = ident("nano", "human");
+        let builder = ident("claude", "builder");
+        let call = |who: &Identity, op: &str, args: Value| call_as(&board, Some(who), op, args);
+        let id = |v: &Value| v["card"]["id"].as_str().expect("id").to_owned();
+        let arc = call(&human, "card_add", json!({"title": "arc 2"})).expect("add");
+        // A builder has no Triage, but records the parent when it splits work.
+        let s2 =
+            call(&builder, "card_add", json!({"title": "S2", "parent": "#1"})).expect("add child");
+        assert_eq!(s2["card"]["parent"], arc["card"]["id"]);
+        let s2a = call(&human, "card_add", json!({"title": "S2a"})).expect("add");
+        call(&human, "card_plan", json!({"id": "#3", "parent": "#2"})).expect("set parent");
+        assert!(matches!(
+            call(&builder, "card_plan", json!({"id": "#3", "parent": null})),
+            Err(CallError::Board(BoardError::Forbidden(_)))
+        ));
+        assert!(
+            matches!(
+                call(&human, "card_plan", json!({"id": "#1", "parent": "#3"})),
+                Err(CallError::Board(BoardError::Invalid(m))) if m.contains("own parent")
+            ),
+            "a loop is refused"
+        );
+        assert!(matches!(
+            call(
+                &human,
+                "card_add",
+                json!({"title": "x", "parent": Uuid::new_v4()})
+            ),
+            Err(CallError::Board(BoardError::NotFound(_)))
+        ));
+
+        let t = call(&human, "card_trace", json!({"id": id(&s2a)})).expect("trace");
+        let titles: Vec<_> = t["ancestors"]
+            .as_array()
+            .expect("ancestors")
+            .iter()
+            .map(|c| c["title"].clone())
+            .collect();
+        assert_eq!(titles, [json!("arc 2"), json!("S2")]);
+        let t = call(&human, "card_trace", json!({"id": "#1"})).expect("trace");
+        assert_eq!(t["tree"]["rollup"]["total"], 1);
+        assert_eq!(t["tree"]["children"][0]["children"][0]["title"], "S2a");
+
+        call(
+            &human,
+            "card_add",
+            json!({"title": "S2b", "parent": "#2", "done": true}),
+        )
+        .expect("merged piece");
+        let t = call(&human, "card_trace", json!({"id": "#2"})).expect("trace");
+        assert_eq!(t["tree"]["rollup"]["done"], 1);
+        assert_eq!(t["tree"]["rollup"]["ready_to_close"], false);
+        call(&human, "card_plan", json!({"id": "#3", "parent": null})).expect("move S2a out");
+        let t = call(&human, "card_trace", json!({"id": "#2"})).expect("trace");
+        assert_eq!(t["tree"]["rollup"]["ready_to_close"], true);
+        let s2 = call(&human, "card_get", json!({"id": "#2"})).expect("get");
+        assert_ne!(s2["card"]["column"], "done", "a parent never closes itself");
+
+        let cleared = call(&human, "card_get", json!({"id": "#3"})).expect("get");
+        assert_eq!(cleared["card"]["parent"], Value::Null);
+    }
+
+    #[test]
+    fn a_card_links_to_a_milestone_of_its_project_and_the_milestone_rolls_it_up() {
+        use crate::projects::Projects;
+        let projects = Projects::parse(r#"{"rl": ["a"], "orch": ["b"]}"#).expect("projects");
+        let board: Shared = Board::new(
+            Box::new(MemStore::default()) as Box<dyn Store>,
+            Roles::default(),
+        )
+        .with_projects(projects);
+        let human = ident("nano", "human");
+        let call = |op: &str, args: Value| call_as(&board, Some(&human), op, args);
+        let stone = |project: &str| {
+            call(
+                "milestone_add",
+                json!({"project": project, "title": "Beta", "target_ms": 9}),
+            )
+            .expect("milestone")["milestone"]["id"]
+                .clone()
+        };
+        let (beta, other) = (stone("rl"), stone("orch"));
+        call(
+            "card_add",
+            json!({"title": "a", "project": "rl", "done": true}),
+        )
+        .expect("add");
+        call("card_add", json!({"title": "b", "project": "rl"})).expect("add");
+        let linked = call("card_plan", json!({"id": "#1", "milestone": beta})).expect("link");
+        assert_eq!(linked["card"]["milestone"], beta);
+        call("card_plan", json!({"id": "#2", "milestone": beta})).expect("link");
+        assert!(matches!(
+            call("card_plan", json!({"id": "#1", "milestone": other})),
+            Err(CallError::Board(BoardError::Invalid(_)))
+        ));
+        assert!(matches!(
+            call(
+                "card_plan",
+                json!({"id": "#1", "milestone": Uuid::new_v4()})
+            ),
+            Err(CallError::Board(BoardError::NotFound(_)))
+        ));
+        let progress = |n: usize| {
+            call("board_milestones", json!({"project": "rl"})).expect("list")["milestones"][n]
+                ["progress"]
+                .clone()
+        };
+        assert_eq!(
+            progress(0),
+            json!({"total": 2, "done": 1, "blocked": 0, "ready_to_close": false})
+        );
+        call("card_move", json!({"id": "#2", "to": "blocked"})).expect("blocked");
+        assert_eq!(
+            progress(0),
+            json!({"total": 2, "done": 1, "blocked": 1, "ready_to_close": false})
+        );
+        call("card_plan", json!({"id": "#2", "milestone": null})).expect("unlink");
+        assert_eq!(progress(0)["ready_to_close"], true);
     }
 
     #[test]

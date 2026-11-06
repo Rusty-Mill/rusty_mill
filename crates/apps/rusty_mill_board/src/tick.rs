@@ -256,6 +256,10 @@ struct BoardDoc {
     superseded_by: Vec<Uuid>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     related: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    milestone: Option<Uuid>,
     #[serde(default)]
     issue: Option<u64>,
     #[serde(default)]
@@ -274,6 +278,8 @@ impl BoardDoc {
             deps: card.deps.clone(),
             superseded_by: card.superseded_by.clone(),
             related: card.related.clone(),
+            parent: card.parent,
+            milestone: card.milestone,
             issue: card.issue,
             synced_text: card.synced_text,
             execution: card.execution.clone(),
@@ -408,6 +414,8 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         deps: doc.deps,
         superseded_by: doc.superseded_by,
         related: doc.related,
+        parent: doc.parent,
+        milestone: doc.milestone,
         sort_order: task.sort_order,
         issue: doc.issue,
         synced_text: doc.synced_text,

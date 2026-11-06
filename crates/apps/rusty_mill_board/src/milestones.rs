@@ -1,7 +1,8 @@
 //! Milestones: a project's dated goals, drawn on the roadmap ahead of today.
 //!
-//! A milestone is a title and a target date in one project, done once closed. Cards do not
-//! point at milestones; the roadmap shows both on one time line. Milestones are never deleted,
+//! A milestone is a title and a target date in one project, done once closed. A card may link to
+//! one milestone of its project (`Card::milestone`), and the milestone's progress is rolled up from
+//! those cards (see [`crate::trace`]); the roadmap shows both on one time line. Milestones are never deleted,
 //! only closed, so a milestone once shown keeps its place in the project's history.
 //!
 //! Storage is its own small port, [`MilestoneStore`], so the card [`Store`](crate::store::Store)

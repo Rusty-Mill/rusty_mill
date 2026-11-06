@@ -307,6 +307,10 @@ pub struct Plan {
     pub superseded_by: Option<Vec<Uuid>>,
     /// Cards worth reading alongside this one.
     pub related: Option<Vec<Uuid>>,
+    /// The card this one is a derived piece of: `Some(None)` clears it.
+    pub parent: Option<Option<Uuid>>,
+    /// The milestone this card counts towards: `Some(None)` clears it.
+    pub milestone: Option<Option<Uuid>>,
     /// When the card should be done, Unix ms: `Some(None)` clears it.
     pub target_ms: Option<Option<i64>>,
 }
@@ -318,12 +322,13 @@ impl Plan {
         *self == Self::default()
     }
 
-    /// Every card the plan links to.
+    /// Every card the plan links to, its new parent included.
     pub fn linked(&self) -> impl Iterator<Item = &Uuid> {
         [&self.deps, &self.superseded_by, &self.related]
             .into_iter()
             .flatten()
             .flatten()
+            .chain(self.parent.iter().flatten())
     }
 }
 
@@ -421,6 +426,14 @@ pub struct Card {
     /// Cards worth reading alongside this one. Informational: nothing waits on them.
     #[serde(default)]
     pub related: Vec<Uuid>,
+    /// The card this one was split from (a decomposition link, not a dependency): at most one,
+    /// and never a cycle. Its progress rolls up there; see [`crate::trace`].
+    #[serde(default)]
+    pub parent: Option<Uuid>,
+    /// The milestone this card counts towards (see [`crate::milestones`]), in the card's project
+    /// when linked. Separate from `parent`: a card may have both.
+    #[serde(default)]
+    pub milestone: Option<Uuid>,
     /// Manual order within a queue, lower first, after priority. Set by the store
     /// (rusty_tick's drag order); `0` elsewhere.
     #[serde(default)]
@@ -707,6 +720,8 @@ impl Card {
             deps: Vec::new(),
             superseded_by: Vec::new(),
             related: Vec::new(),
+            parent: None,
+            milestone: None,
             sort_order: 0,
             issue: None,
             synced_text: None,
@@ -991,6 +1006,15 @@ impl Card {
         }
         if let Some(r) = &plan.related {
             next.related = self.links(r)?;
+        }
+        if let Some(p) = plan.parent {
+            if p == Some(self.id) {
+                return Err(BoardError::Invalid("a card cannot be its own parent"));
+            }
+            next.parent = p;
+        }
+        if let Some(m) = plan.milestone {
+            next.milestone = m;
         }
         if let Some(t) = plan.target_ms {
             if t.is_some_and(|ms| ms <= 0) {
