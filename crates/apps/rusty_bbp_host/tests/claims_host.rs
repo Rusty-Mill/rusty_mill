@@ -2096,9 +2096,13 @@ fn why_replays_one_claim_and_names_the_rule() {
         other => panic!("no steps: {other:?}"),
     };
     assert_eq!(steps.len(), 4, "{out}");
+    assert!(
+        out.contains(r#""refs":[{"Art":{"id":1,"fragment":null}}]"#),
+        "{out}"
+    );
     assert_eq!(steps[0]["change"].as_str(), Some("Posted"), "{out}");
     assert!(
-        out.contains(r#""AcceptLine":{"accept_at":8,"support_authors":2}"#),
+        out.contains(r#""AcceptLine":{"accept_at":8,"support_authors":2,"min_authors":2}"#),
         "{out}"
     );
     assert_eq!(steps[3]["status"].as_str(), Some("Accepted"), "{out}");

@@ -310,7 +310,7 @@ fn check_holdout(st: &TaskState, role: &Role, rec: &ClaimRecord, k: &Candidate) 
     Ok(())
 }
 
-fn manifest(st: &TaskState, k: ArtId) -> Option<&Candidate> {
+pub(crate) fn manifest(st: &TaskState, k: ArtId) -> Option<&Candidate> {
     match &st.artifacts.get(&k)?.payload {
         ArtifactPayload::Candidate(c) => Some(c),
         _ => None,
@@ -320,7 +320,7 @@ fn manifest(st: &TaskState, k: ArtId) -> Option<&Candidate> {
 /// Does `k` build the code of `c`'s current candidate? True for the current
 /// candidate itself and for a holdout candidate of the same manifest naming
 /// `c`: another claim's candidate of equal code never speaks for `c`.
-fn builds_current(st: &TaskState, c: &ClaimRecord, k: ArtId) -> bool {
+pub(crate) fn builds_current(st: &TaskState, c: &ClaimRecord, k: ArtId) -> bool {
     let Some(cur) = c.current else {
         return false;
     };
@@ -362,6 +362,31 @@ pub(crate) fn holdout_passed(st: &TaskState, c: &ClaimRecord) -> bool {
         .filter(|(_, rep)| rep.profile_digest == digest)
         .max_by_key(|(id, _)| *id);
     latest.is_some_and(|(_, rep)| rep.status == RunStatus::Passed && rep.tree == Some(tested))
+}
+
+/// The latest final holdout report that speaks for `c`'s current code now,
+/// as ground truth reads it (#599, D112): under the task's current holdout
+/// digest, on the tree the current candidate's latest report tested, and
+/// not a runner error. `None` without a holdout suite, a current candidate,
+/// a tested tree or such a report.
+pub(crate) fn holdout_truth(st: &TaskState, c: &ClaimRecord) -> Option<ArtId> {
+    let digest = st.claims.holdout_digest?;
+    let cur = c.current?;
+    let tested = latest_report(st, cur).and_then(|r| r.tree)?;
+    st.claims
+        .runs
+        .values()
+        .filter(|r| r.candidate != cur && builds_current(st, c, r.candidate))
+        .filter_map(|r| r.report)
+        .filter(|id| *id > cur)
+        .filter(|id| {
+            report_of(st, *id).is_some_and(|rep| {
+                rep.profile_digest == digest
+                    && rep.status != RunStatus::Error
+                    && rep.tree == Some(tested)
+            })
+        })
+        .max()
 }
 
 /// A run may start on an open claim or re-check a settled one.
@@ -813,7 +838,7 @@ fn unlockable(st: &TaskState, c: MsgId, k: ArtId) -> Option<(ArtId, Vec<String>)
 /// candidate's own report always can; a holdout candidate's only on the tree
 /// (`Some`) that the current candidate's latest report tested, since equal
 /// manifests may resolve a moving base to another tree.
-fn on_tested_tree(st: &TaskState, c: MsgId, k: ArtId, rep: &Report) -> bool {
+pub(crate) fn on_tested_tree(st: &TaskState, c: MsgId, k: ArtId, rep: &Report) -> bool {
     let Some(cur) = st.claims.get(c).and_then(|r| r.current) else {
         return false;
     };
@@ -824,7 +849,7 @@ fn on_tested_tree(st: &TaskState, c: MsgId, k: ArtId, rep: &Report) -> bool {
     tested.is_some() && rep.tree == tested
 }
 
-fn report_of(st: &TaskState, id: ArtId) -> Option<&Report> {
+pub(crate) fn report_of(st: &TaskState, id: ArtId) -> Option<&Report> {
     match &st.artifacts.get(&id)?.payload {
         ArtifactPayload::TestReport(r) => Some(r),
         _ => None,

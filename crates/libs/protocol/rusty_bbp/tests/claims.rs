@@ -66,6 +66,8 @@ struct Cx {
     brief: ArtId,
     /// The tree the runner reports.
     tree: Option<Sha256>,
+    /// The runner's next reports are runner errors (a timeout, exit 124).
+    erring: bool,
 }
 
 fn pid(s: &str) -> PrincipalId {
@@ -81,6 +83,7 @@ impl Cx {
             ops: 0,
             brief: ArtId(0),
             tree: Some(Sha256::of(b"tree")),
+            erring: false,
         };
         let r = cx.run(Command::Open(open_task(Mode::Claims, Some(cfg), roster())));
         let Response::Stored(brief) = r else {
@@ -330,7 +333,9 @@ impl Cx {
             candidate: k,
             run,
             profile_digest: digest,
-            status: if failed {
+            status: if self.erring {
+                RunStatus::Error
+            } else if failed {
                 RunStatus::Failed
             } else {
                 RunStatus::Passed
@@ -3877,7 +3882,8 @@ mod replay {
             rules(&h),
             vec![Rule::AcceptLine {
                 accept_at: 8,
-                support_authors: 2
+                support_authors: 2,
+                min_authors: 2
             }]
         );
         let last = h.steps.last().expect("step");
@@ -3906,7 +3912,8 @@ mod replay {
             rules(&h),
             vec![Rule::DropLine {
                 drop_at: -8,
-                counter_authors: 2
+                counter_authors: 2,
+                min_authors: 2
             }]
         );
         let last = h.steps.last().expect("step");
@@ -3968,7 +3975,8 @@ mod replay {
                 Rule::Reopen(ReopenCause::Human),
                 Rule::AcceptLine {
                     accept_at: 8,
-                    support_authors: 2
+                    support_authors: 2,
+                    min_authors: 2
                 }
             ],
             "{got:?}"
@@ -3996,6 +4004,209 @@ mod replay {
         let chose = Rule::Choose { question: q };
         assert_eq!(rules(&history(&cx, b)), vec![chose.clone()]);
         assert_eq!(rules(&history(&cx, a)), vec![chose]);
+    }
+
+    /// The status step of each reopen, with what it woke.
+    fn reopens(h: &History) -> Vec<(ReopenCause, Vec<MsgId>)> {
+        h.steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Status {
+                    rule: Rule::Reopen(by),
+                    woke,
+                    ..
+                } => Some((*by, woke.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_evidence_reopen_names_the_item_it_woke() {
+        let mut cx = Cx::new();
+        let x = cx.low();
+        drop_claim(&mut cx, x);
+        let pass = cx.tested("c", x, true);
+        let m = posted(cx.executed("c", x, Support, pass));
+        let h = history(&cx, x);
+        assert_eq!(reopens(&h), vec![(ReopenCause::Evidence(m), vec![m])]);
+        let refs = h.steps.iter().find_map(|s| match &s.change {
+            Change::Evidence { msg, refs, .. } if *msg == m => Some(refs.clone()),
+            _ => None,
+        });
+        assert_eq!(refs, Some(vec![Ref::art(pass)]), "an item names its report");
+        let status_steps = h
+            .steps
+            .iter()
+            .filter(|s| matches!(&s.change, Change::Status { woke, .. } if woke.is_empty()));
+        assert_eq!(status_steps.count(), 1, "only the reopen wakes anything");
+    }
+
+    /// A human reopen wakes the dormant items: executed evidence posted
+    /// against the closed status while a dep was closed.
+    #[test]
+    fn a_human_reopen_names_the_dormant_items_it_woke() {
+        let mut cx = Cx::new();
+        let a = cx.low();
+        let b = cx.claim("b", dep_on("b", vec![a]));
+        let pass = cx.tested("c", b, true);
+        drop_claim(&mut cx, b);
+        drop_claim(&mut cx, a);
+        let m1 = posted(cx.executed("c", b, Support, pass));
+        let m2 = posted(cx.executed("a", b, Support, pass));
+        ok(cx.decide(a, ClaimOutcome::Reopen));
+        accept(&mut cx, a);
+        ok(cx.decide(b, ClaimOutcome::Reopen));
+        assert_eq!(
+            reopens(&history(&cx, b)),
+            vec![(ReopenCause::Human, vec![m1, m2])]
+        );
+    }
+
+    /// Candidate steps, the candidate a failing set is on, and each final
+    /// holdout report on the current code with its passed and failed profiles.
+    #[test]
+    fn candidates_and_holdout_reports_are_steps() {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let k = cx.candidate("a", x);
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        let fail = stored(cx.holdout_run(k, &[("golden:cases", 1), ("holdout:api", 0)]));
+        let k2 = cx.candidate("b", x);
+        stored(cx.report_profiles(k2, &[("unit", 0)], vec![]));
+        let pass = stored(cx.holdout_run(k2, &[("golden:cases", 0)]));
+        let names = |v: &[&str]| v.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        let got: Vec<Change> = history(&cx, x)
+            .steps
+            .into_iter()
+            .map(|s| s.change)
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::Candidate { .. } | Change::Report { .. } | Change::Failing { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                Change::Candidate { candidate: k },
+                Change::Report {
+                    report: fail,
+                    candidate: k,
+                    passed: names(&["holdout:api"]),
+                    failed: names(&["golden:cases"]),
+                },
+                Change::Failing {
+                    profiles: names(&["golden:cases"]),
+                    candidate: Some(k),
+                },
+                Change::Candidate { candidate: k2 },
+                Change::Report {
+                    report: pass,
+                    candidate: k2,
+                    passed: names(&["golden:cases"]),
+                    failed: vec![],
+                },
+                Change::Failing {
+                    profiles: vec![],
+                    candidate: Some(k2),
+                },
+            ]
+        );
+    }
+
+    /// The holdout report a status step names: the one still speaking for
+    /// the current code when the status changed, not one from a retired
+    /// suite.
+    fn holdouts(h: &History) -> Vec<Option<ArtId>> {
+        h.steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Status { holdout, .. } => Some(*holdout),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_settlement_names_the_holdout_report_still_valid_then() {
+        let mut cx = holdout_cx();
+        let x = cx.low();
+        let kx = cx.candidate("a", x);
+        let px = stored(cx.report_profiles(kx, &[("unit", 0)], vec![]));
+        let hx = stored(cx.holdout_run(kx, &[("golden:cases", 0)]));
+        ok(cx.executed("a", x, Support, px));
+        ok(cx.executed("b", x, Support, px));
+        assert_eq!(holdouts(&history(&cx, x)), vec![Some(hx)]);
+        // A report under a suite since replaced speaks for nothing.
+        let y = cx.low();
+        let ky = cx.candidate("a", y);
+        stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(ky, &[("golden:cases", 1)]));
+        ok(cx.host(HostAction::HoldoutExtended {
+            digest: Sha256::of(b"holdout suite v2"),
+        }));
+        drop_claim(&mut cx, y);
+        assert_eq!(holdouts(&history(&cx, y)), vec![None]);
+    }
+
+    /// The current candidate rerun on a moved base: a holdout report on the
+    /// old tree no longer speaks for it, and a fresh one on the new tree does.
+    #[test]
+    fn a_moved_tested_tree_needs_a_fresh_holdout_report() {
+        let mut cx = holdout_cx();
+        let rerun = |cx: &mut Cx, k: ArtId| {
+            cx.tree = Some(Sha256::of(b"moved tree"));
+            let rev = cx.rev();
+            ok(cx.human(HumanAction::Rerun {
+                candidate: k,
+                expected_rev: rev,
+            }));
+            stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        };
+        let y = cx.low();
+        let ky = cx.candidate("a", y);
+        stored(cx.report_profiles(ky, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(ky, &[("golden:cases", 1)]));
+        rerun(&mut cx, ky);
+        drop_claim(&mut cx, y);
+        assert_eq!(holdouts(&history(&cx, y)), vec![None], "stale tree");
+        cx.tree = Some(Sha256::of(b"tree"));
+        let z = cx.low();
+        let kz = cx.candidate("a", z);
+        stored(cx.report_profiles(kz, &[("unit", 0)], vec![]));
+        stored(cx.holdout_run(kz, &[("golden:cases", 1)]));
+        rerun(&mut cx, kz);
+        let fresh = stored(cx.holdout_run(kz, &[("golden:cases", 1)]));
+        drop_claim(&mut cx, z);
+        assert_eq!(holdouts(&history(&cx, z)), vec![Some(fresh)]);
+    }
+
+    /// A runner error (a timeout or an executor failure) is no report on
+    /// the code: no `Report` step, and it doesn't displace a genuine one.
+    #[test]
+    fn a_runner_error_is_never_a_holdout_report() {
+        let mut cx = holdout_cx();
+        let y = cx.low();
+        let k = cx.candidate("a", y);
+        stored(cx.report_profiles(k, &[("unit", 0)], vec![]));
+        let genuine = stored(cx.holdout_run(k, &[("golden:cases", 1)]));
+        cx.erring = true;
+        let error = stored(cx.holdout_run(k, &[("golden:cases", 1)]));
+        cx.erring = false;
+        drop_claim(&mut cx, y);
+        let h = history(&cx, y);
+        let reports: Vec<ArtId> = h
+            .steps
+            .iter()
+            .filter_map(|s| match &s.change {
+                Change::Report { report, .. } => Some(*report),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reports, vec![genuine], "not {error:?}");
+        assert_eq!(holdouts(&h), vec![Some(genuine)]);
     }
 
     #[test]
