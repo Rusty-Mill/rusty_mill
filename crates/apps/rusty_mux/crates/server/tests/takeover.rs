@@ -260,4 +260,16 @@ fn a_marker_in_the_window_title_is_not_its_output() {
     assert!(!split.feed(b"\x1b]0;MAR", b"MARK2"));
     assert!(!split.feed(b"K2\x1b\\MA", b"MARK2"), "ST ends the title");
     assert!(split.feed(b"RK2", b"MARK2"), "text across reads");
+
+    // An observer's reads can cut anywhere, even between ESC and `]`.
+    let mut observer = Text::default();
+    for piece in [
+        &b"echo MARK^2\r\n\x1b"[..],
+        b"]0;cmd.exe - echo  MA",
+        b"RK2",
+        b"\x07\r\nMA",
+    ] {
+        assert!(!observer.feed(piece, b"MARK2"), "done on {piece:?}");
+    }
+    assert!(observer.feed(b"RK2\r\n", b"MARK2"));
 }
