@@ -20,12 +20,12 @@ fn two_clients_converge_on_one_pty() {
     b.request(|req| Message::Attach { req, block });
 
     let marker = run_and_wait(&mut a, block, 21);
-    b.wait_for(block, &marker);
+    b.wait_for_text(block, &marker);
     // Settle: one more round trip so both have seen the prompt that follows.
     let marker = run_and_wait(&mut a, block, 22);
-    b.wait_for(block, &marker);
+    b.wait_for_text(block, &marker);
     let quiet = run_and_wait(&mut a, block, 23);
-    b.wait_for(block, &quiet);
+    b.wait_for_text(block, &quiet);
 
     assert_eq!(a.snapshot(block), b.snapshot(block));
 }
@@ -50,7 +50,7 @@ fn reattach_restores_the_grid_from_the_snapshot() {
         "output after reattach should be new only"
     );
     let after = run_and_wait(&mut a, block, 34);
-    b.wait_for(block, &after);
+    b.wait_for_text(block, &after);
     assert_eq!(a.snapshot(block), b.snapshot(block));
 }
 
@@ -164,8 +164,8 @@ fn reattach_after_more_than_four_mib_of_real_pty_output() {
     for n in 100..103 {
         b.request(|req| Message::Attach { req, block });
         let marker = run_and_wait(&mut a, block, n);
-        b.wait_for(block, &marker);
-        c.wait_for(block, &marker);
+        b.wait_for_text(block, &marker);
+        c.wait_for_text(block, &marker);
         assert_eq!(b.snapshot(block), c.snapshot(block));
         b.request(|req| Message::Detach { req });
     }
