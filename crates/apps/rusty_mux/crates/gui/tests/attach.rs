@@ -3,7 +3,8 @@
 //! window's layout changes are followed, the window's own split and zoom
 //! requests come back as layout and zoom, a session picked in the
 //! switcher is shown, a detached block is listed and put back, and a
-//! lost connection is taken over, or attached anew on Retry.
+//! lost connection is taken over, or attached anew on Retry, saying when
+//! the session shown is gone.
 
 #![cfg(target_os = "linux")]
 
@@ -513,6 +514,7 @@ fn a_detached_block_is_listed_and_reattach_puts_it_back() {
 struct Relay {
     path: PathBuf,
     open: std::sync::Arc<std::sync::Mutex<Vec<UnixStream>>>,
+    target: std::sync::Arc<std::sync::Mutex<PathBuf>>,
 }
 
 impl Relay {
@@ -520,10 +522,12 @@ impl Relay {
         let path = socket.with_extension("relay");
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind the relay");
         let open = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (target, kept) = (socket.to_owned(), std::sync::Arc::clone(&open));
+        let target = std::sync::Arc::new(std::sync::Mutex::new(socket.to_owned()));
+        let (to, kept) = (std::sync::Arc::clone(&target), std::sync::Arc::clone(&open));
         std::thread::spawn(move || {
             for near in listener.incoming() {
-                let (Ok(near), Ok(far)) = (near, UnixStream::connect(&target)) else {
+                let far = UnixStream::connect(&*to.lock().expect("relay"));
+                let (Ok(near), Ok(far)) = (near, far) else {
                     return;
                 };
                 let pipe = |mut from: UnixStream, mut to: UnixStream| {
@@ -540,7 +544,14 @@ impl Relay {
                 pipe(far, near);
             }
         });
-        Self { path, open }
+        Self { path, open, target }
+    }
+
+    /// Ends every connection and sends new ones to `socket`, as if
+    /// another server took the address.
+    fn retarget(&self, socket: &std::path::Path) {
+        *self.target.lock().expect("relay") = socket.to_owned();
+        self.cut();
     }
 
     /// Ends every connection made so far.
@@ -680,4 +691,55 @@ fn a_client_the_server_let_go_waits_for_retry_and_attaches_anew() {
     let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("reopened"));
     next_screen(&feed);
     type_until_echoed(writer.as_mut(), &feed, 3);
+}
+
+#[test]
+fn a_session_gone_after_a_reconnect_is_said_and_another_can_be_shown() {
+    let socket = start_server();
+    let relay = Relay::new(&socket);
+    let attached = attach(&relay.path, None).expect("attached");
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+
+    // Another server, with a session of its own, takes the address.
+    let other = start_server();
+    let mut conn = control(&other);
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    req.create(Size::new(80, 24).expect("a size"), "elsewhere")
+        .expect("a session");
+    relay.retarget(&other);
+
+    // It doesn't know this client: Retry attaches anew, and the session
+    // the window showed is gone.
+    let link = |o: &Out| matches!(o, Out::Link(Link::Down { trying: false }));
+    next_out(&outs, link);
+    attached.source.retry();
+    let ended = next_out(&outs, |o| matches!(o, Out::Ended(_) | Out::Layout(_)));
+    let Out::Ended(name) = ended else {
+        panic!("the session ended: {ended:?}");
+    };
+    assert!(!name.is_empty());
+    let Out::Session(strip) = next_out(&outs, |o| matches!(o, Out::Session(_))) else {
+        unreachable!("matched above");
+    };
+    assert_eq!(strip.name, name, "the strip keeps the ended session's name");
+    assert!(strip.windows.is_empty());
+    let pick = strip
+        .sessions
+        .iter()
+        .find(|c| c.name == "elsewhere" && c.can_show && !c.current)
+        .expect("the other server's session");
+
+    attached.source.switch(pick.key);
+    assert!(matches!(
+        next_out(&outs, |o| matches!(o, Out::Layout(_))),
+        Out::Layout(Some(Tree::Pane(_)))
+    ));
 }

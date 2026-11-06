@@ -165,6 +165,9 @@ pub(crate) enum UserEvent {
     Blocks(Vec<(u64, super::source::BlockInfo)>),
     /// How the source reaches its server ([`Remote::link`]).
     Link(super::source::Link),
+    /// The shown session ended while the source was away
+    /// ([`Remote::ended`]).
+    Ended(String),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -2643,7 +2646,8 @@ impl WindowState<'_> {
             hover: self.hover.and_then(Hit::spot),
             pressed: self.pressed.and_then(Hit::spot),
             detached_open: self.popover_kind() == Some(Kind::Detached),
-            offline: self.offline(),
+            // An ended session takes no new window either.
+            offline: self.offline() || self.body.as_ref().is_some_and(|b| b.ended().is_some()),
         };
         if let Some(strip) = &mut self.strip {
             strip.repaint(look, width);
@@ -2727,6 +2731,7 @@ impl WindowState<'_> {
             empty: None,
             banner: body.banner(),
             dim: body.offline(),
+            ended: None,
         };
         let height = (size.height as usize).saturating_sub(top);
         body.repaint(size.width as usize, height, scene, look);
@@ -2750,12 +2755,14 @@ impl WindowState<'_> {
         let Some(body) = &mut self.body else {
             return;
         };
-        if detached == 0 && body.banner().is_none() {
+        let ended = body.ended().map(str::to_owned);
+        if detached == 0 && body.banner().is_none() && ended.is_none() {
             return;
         }
         let scene = blocks::Scene {
             ribbon: body.ribbon(0, detached, None, armed),
-            empty: (detached > 0).then_some(detached),
+            empty: (detached > 0 && ended.is_none()).then_some(detached),
+            ended,
             banner: body.banner(),
             dim: body.offline(),
             ..blocks::Scene::default()
@@ -3090,6 +3097,7 @@ impl WindowState<'_> {
                 }
             }
             blocks::Spot::Banner(action) => self.on_banner(action),
+            blocks::Spot::OpenSwitcher => self.toggle_popover(Kind::Switcher),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -5935,6 +5943,9 @@ impl WindowState<'_> {
             self.closed = true;
             return;
         };
+        if let Some(body) = &mut self.body {
+            body.set_ended(None);
+        }
         let layout = Layout::from_tree(&tree);
         let first = layout.ids().first().copied().unwrap_or_default();
         let rects: Vec<(u64, Rect)> = self
@@ -5978,11 +5989,31 @@ impl WindowState<'_> {
         }
     }
 
+    /// Show that the shown session, `name`, ended while the source was
+    /// away (gui-design D62, handoff D114): no block, and a panel with
+    /// "Open switcher" until a layout comes again.
+    fn show_ended(&mut self, name: String) {
+        if self.source.is_none() {
+            return;
+        }
+        if let Some(body) = &mut self.body {
+            body.set_ended(Some(name));
+        }
+        self.tabs.clear();
+        self.active = 0;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Show no block: every block of the source's window is detached
     /// (gui-design D61). The body says so until a layout comes again.
     fn show_empty(&mut self) {
         if self.source.is_none() {
             return;
+        }
+        if let Some(body) = &mut self.body {
+            body.set_ended(None);
         }
         self.tabs.clear();
         self.active = 0;
@@ -7374,6 +7405,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Link(link) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
                     w.show_link(link);
+                }
+            }
+            UserEvent::Ended(name) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.show_ended(name);
                 }
             }
             UserEvent::ConfigChanged => {

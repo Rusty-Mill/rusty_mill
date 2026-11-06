@@ -210,11 +210,13 @@ impl Menu {
 }
 
 /// The row the keyboard starts on: the current session's, else the
-/// first.
+/// first that can be picked, else the first.
 pub(crate) fn start(menu: &Menu) -> usize {
+    let current = |r: &Row| matches!(r, Row::Session(s) if s.current);
     menu.rows
         .iter()
-        .position(|r| matches!(r, Row::Session(s) if s.current))
+        .position(current)
+        .or_else(|| menu.rows.iter().position(Row::enabled))
         .unwrap_or(0)
 }
 
@@ -791,6 +793,12 @@ mod tests {
         assert_eq!(pick(&m, 2), Some(Pick::Session(9)));
         assert_eq!(pick(&m, 3), Some(Pick::Item(0)));
         assert_eq!(pick(&m, 4), Some(Pick::Item(1)));
+        // No current session (it ended): the first that can be picked.
+        let none = Menu {
+            rows: vec![session(1, "a", false, false), session(2, "b", false, true)],
+            ..menu()
+        };
+        assert_eq!(start(&none), 1);
         assert_eq!(pick(&m, 5), None);
         assert_eq!(pick(&detached(), 0), Some(Pick::Reattach(4)));
         let none = Menu {

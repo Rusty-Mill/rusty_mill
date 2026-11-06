@@ -287,6 +287,13 @@ impl Remote {
         self.0.send_event(UserEvent::Link(link)).is_ok()
     }
 
+    /// Show that the shown session, `name`, ended while the source was
+    /// away from its server: no block, and a way to pick another session
+    /// (gui-design D62, handoff D114). A layout ends it.
+    pub fn ended(&self, name: String) -> bool {
+        self.0.send_event(UserEvent::Ended(name)).is_ok()
+    }
+
     /// Show `session` on the top strip.
     pub fn session(&self, session: Session) -> bool {
         self.0.send_event(UserEvent::Session(session)).is_ok()
