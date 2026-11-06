@@ -1,0 +1,59 @@
+//! `rusty-mux-gui <socket> [block]`: show a rusty_mux block's window in
+//! rusty_term's native window, starting with that block focused. Without a
+//! block id it creates a session, window and block first. The window
+//! follows the server's layout and shared focus; typing goes to the
+//! focused block, whose input lease this client holds. rusty_term's config
+//! file sets fonts and colours.
+
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.is_empty() || args.len() > 2 {
+        eprintln!("usage: rusty-mux-gui <socket> [block]");
+        return ExitCode::from(2);
+    }
+    match run(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("rusty-mux-gui: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn run(args: &[std::ffi::OsString]) -> Result<(), String> {
+    use rusty_mux_core::BlockId;
+    use rusty_mux_gui::source::attach;
+
+    let socket = std::path::PathBuf::from(&args[0]);
+    let block = match args.get(1) {
+        Some(id) => {
+            let id = id.to_str().ok_or("block id is not UTF-8")?;
+            Some(BlockId::from_uuid(
+                id.parse().map_err(|e| format!("block id: {e}"))?,
+            ))
+        }
+        None => None,
+    };
+    let (config, warnings) = rusty_term::config::Config::load(&[]);
+    for w in &warnings {
+        eprintln!("rusty-mux-gui: {w}");
+    }
+    let attached = attach(&socket, block)?;
+    let events = attached.events;
+    rusty_term::gui::run_attached(
+        &attached.source,
+        attached.first,
+        attached.focus,
+        &config,
+        |remote| events.follow(remote),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn run(_args: &[std::ffi::OsString]) -> Result<(), String> {
+    Err("the client runs on Linux and Windows only".into())
+}

@@ -49,7 +49,7 @@ use super::motion;
 use super::pace::Pacer;
 use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors, blend};
 use super::settings::{Field, Settings, SetupBaseline, Widget};
-use super::source::{Feed, PaneIo};
+use super::source::{Feed, PaneIo, Remote, Source, Tree};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -143,6 +143,11 @@ pub(crate) enum UserEvent {
     /// An AccessKit event (initial-tree request, AT action, deactivation)
     /// routed back through the winit loop (C20).
     Accessibility(accesskit_winit::Event),
+    /// The attached window's source laid its panes out anew; `None` when
+    /// its window is gone ([`Remote::layout`]).
+    Layout(Option<Tree>),
+    /// The source moved the attached window's focus ([`Remote::focus`]).
+    Focus(u64),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -317,6 +322,88 @@ impl Tab {
 /// Launch the windowed terminal. Blocks until the window closes or the last
 /// tab's child exits. Returns an error if the window/PTY/font can't be set up.
 pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    launch(backend, None, config, |first, args| {
+        // A session file builds the initial tab set; otherwise one default
+        // shell (more come from Ctrl+Shift+T / the + button either way).
+        let session = first.config.session.clone();
+        let mut opened = 0usize;
+        if let Some(path) = &session {
+            let (tabs, warns) = crate::config::load_session(path);
+            for w in &warns {
+                eprintln!("rusty_term: session: {w}");
+            }
+            for t in tabs {
+                if let Err(e) = first.spawn_session_tab(&t) {
+                    eprintln!("rusty_term: session tab: {e}");
+                } else {
+                    opened += 1;
+                }
+            }
+            if opened > 0 {
+                first.active = 0; // land on the session's first tab
+            }
+        }
+        if opened == 0 {
+            first.spawn_tab()?;
+        }
+        if crate::config::wants_setup(args) || crate::config::is_first_run(args) {
+            first.open_setup();
+        }
+        Ok(())
+    })
+}
+
+/// Launch a window that shows `source`'s panes, laid out as `first` with
+/// pane `focus` focused and then as the source says through the [`Remote`]
+/// handed to `on_start` before the window opens. It opens no local shells.
+/// Blocks until the window closes or the source's window is gone.
+pub fn run_attached(
+    source: &dyn Source,
+    first: Tree,
+    focus: u64,
+    config: &Config,
+    on_start: impl FnOnce(Remote),
+) -> Result<(), Box<dyn std::error::Error>> {
+    launch(&NoShells, Some(source), config, |window, _| {
+        on_start(Remote(window.proxy.clone()));
+        window.told = Some(focus);
+        window.show_tree(Some(first));
+        Ok(())
+    })
+}
+
+/// The backend of an attached window: its panes come from its source.
+struct NoShells;
+
+impl Backend for NoShells {
+    fn spawn_shell(
+        &self,
+        _cols: u16,
+        _rows: u16,
+        _shell: Option<&str>,
+        _args: &[String],
+        _cwd: Option<&std::path::Path>,
+    ) -> Result<Box<dyn BackendHandle>, std::io::Error> {
+        Err(std::io::Error::other(
+            "an attached window opens no local shells",
+        ))
+    }
+    fn set_raw_mode(&self, _enabled: bool) -> Result<(), std::io::Error> {
+        Ok(())
+    }
+    fn terminal_size(&self) -> Option<(u16, u16)> {
+        None
+    }
+}
+
+/// The event loop and first window shared by [`run`] and [`run_attached`];
+/// `seed` fills the first window, given the launch arguments.
+fn launch<'a>(
+    backend: &'a dyn Backend,
+    source: Option<&'a dyn Source>,
+    config: &Config,
+    seed: impl FnOnce(&mut WindowState<'a>, &[String]) -> Result<(), std::io::Error>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // The child renders through us now, so advertise a real terminal identity.
     unsafe {
         std::env::set_var("TERM", "xterm-256color");
@@ -379,6 +466,7 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
     let profile_override = crate::config::flag_value(&args, "--profile").map(str::to_string);
     let mut app = App {
         backend,
+        source,
         config: config.clone(),
         config_path,
         profile_override,
@@ -392,32 +480,7 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
     // The first window (its OS window comes with the loop's `resumed`).
     // Building it up front surfaces font/shell errors before the loop runs.
     let mut first = app.new_window_state(false)?;
-    // A session file builds the initial tab set; otherwise one default shell
-    // (more come from Ctrl+Shift+T / the + button either way).
-    let session = first.config.session.clone();
-    let mut opened = 0usize;
-    if let Some(path) = &session {
-        let (tabs, warns) = crate::config::load_session(path);
-        for w in &warns {
-            eprintln!("rusty_term: session: {w}");
-        }
-        for t in tabs {
-            if let Err(e) = first.spawn_session_tab(&t) {
-                eprintln!("rusty_term: session tab: {e}");
-            } else {
-                opened += 1;
-            }
-        }
-        if opened > 0 {
-            first.active = 0; // land on the session's first tab
-        }
-    }
-    if opened == 0 {
-        first.spawn_tab()?;
-    }
-    if crate::config::wants_setup(&args) || crate::config::is_first_run(&args) {
-        first.open_setup();
-    }
+    seed(&mut first, &args)?;
     app.windows.push(first);
     event_loop.run_app(&mut app)?;
     #[cfg(windows)]
@@ -523,8 +586,18 @@ fn apply(step: Feed, grid: &Mutex<Grid>, parser: &Mutex<AnsiParser>) -> Vec<u8> 
             parser.take_responses()
         }
         Feed::Screen(new_grid, new_parser) => {
-            *grid.lock() = *new_grid;
-            *parser.lock() = *new_parser;
+            let (mut g, mut p) = (grid.lock(), parser.lock());
+            let (mut new_g, mut new_p) = (*new_grid, *new_parser);
+            // The pane keeps its theme and display settings; the screen
+            // comes in its source's. Retheming the parser it replaces is
+            // how to read its theme back.
+            let ours = p.retheme(Theme::default());
+            let theirs = new_p.retheme(ours);
+            new_g.retheme(&theirs, &ours);
+            new_g.cell_px = g.cell_px;
+            new_g.min_contrast = g.min_contrast;
+            new_g.bidi = g.bidi;
+            (*g, *p) = (new_g, new_p);
             Vec::new()
         }
         Feed::Resized { cols, rows } => {
@@ -552,6 +625,11 @@ struct TabDrag {
 struct WindowState<'a> {
     /// Spawns the shell behind each new tab.
     backend: &'a dyn Backend,
+    /// An attached window's source of panes and layout; `None` for local
+    /// shells. With one, the window never edits its layout (pack D102).
+    source: Option<&'a dyn Source>,
+    /// The focus last told to `source` or told by it.
+    told: Option<u64>,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -731,7 +809,25 @@ impl WindowState<'_> {
         let handle = self.backend.spawn_shell(cols, rows, shell, args, cwd)?;
         let id = self.next_id.get();
         self.next_id.set(id + 1);
+        // Child-exit watcher (Windows ConPTY: the output pipe only EOFs at
+        // teardown, so block on the child handle; `None` on Unix where read-EOF
+        // already signals exit).
+        let exit = handle.exit_token();
+        let io = PaneIo::local(handle, format!("pty-read-{id}"))?;
+        self.pane_from(id, io, exit, cols, rows, theme)
+    }
 
+    /// The pane `id` drawn from `io`, sized `cols × rows`, with its reader
+    /// thread and, given `exit`, a thread that reports the child's exit.
+    fn pane_from(
+        &mut self,
+        id: u64,
+        io: PaneIo,
+        exit: Option<Box<dyn FnOnce() + Send>>,
+        cols: u16,
+        rows: u16,
+        theme: Option<Theme>,
+    ) -> Result<Pane, std::io::Error> {
         let theme = theme.unwrap_or(self.theme);
         let mut g = Grid::new(cols as usize, rows as usize);
         if let Some(max) = self.config.scrollback {
@@ -747,12 +843,6 @@ impl WindowState<'_> {
         g.bidi = self.config.bidi.unwrap_or(false);
         let grid = Arc::new(Mutex::new(g));
         let parser = Arc::new(Mutex::new(AnsiParser::with_theme(theme)));
-
-        // Child-exit watcher (Windows ConPTY: the output pipe only EOFs at
-        // teardown, so block on the child handle; `None` on Unix where read-EOF
-        // already signals exit).
-        let exit = handle.exit_token();
-        let io = PaneIo::local(handle, format!("pty-read-{id}"))?;
 
         // Reader thread: feed -> parser -> grid, writing replies back and
         // waking the loop. Its own reply handle, so it shares no lock with us.
@@ -1215,6 +1305,9 @@ impl WindowState<'_> {
     /// re-lay panes out to the moved boundary. Leaves a zoomed tab alone —
     /// there is no visible boundary to move.
     fn resize_pane(&mut self, dir: Dir, delta: f32) {
+        if self.source.is_some() {
+            return; // the source lays an attached window out
+        }
         let ti = self.active;
         let Some(tab) = self.tabs.get_mut(ti) else {
             return;
@@ -1248,6 +1341,9 @@ impl WindowState<'_> {
     /// Close pane `id`: collapse its split into the sibling, or close the whole
     /// tab when it was the last pane. Idempotent for stale exit events.
     fn close_pane(&mut self, id: u64) {
+        if self.source.is_some() {
+            return; // the source lays an attached window out
+        }
         let Some(ti) = self
             .tabs
             .iter()
@@ -1318,6 +1414,7 @@ impl WindowState<'_> {
 
     fn layout_panes(&mut self, ti: usize) {
         let area = self.pane_area();
+        let attached = self.source.is_some();
         let Some(tab) = self.tabs.get_mut(ti) else {
             return;
         };
@@ -1326,9 +1423,15 @@ impl WindowState<'_> {
                 let (c, rw) = (r.cols.max(1) as u16, r.rows.max(1) as u16);
                 {
                     let mut g = p.grid.lock();
-                    p.compactor
-                        .resize(&mut g, c as usize, rw as usize, Instant::now());
-                    g.selection = None; // viewport changed; old coords are stale
+                    // An attached pane's size is its source's: the writer
+                    // asks for this one, and the feed tells what it got.
+                    if attached {
+                        g.selection = None;
+                    } else {
+                        p.compactor
+                            .resize(&mut g, c as usize, rw as usize, Instant::now());
+                        g.selection = None; // viewport changed; old coords are stale
+                    }
                 }
                 let _ = p.writer.set_winsize(c, rw);
             }
@@ -1472,7 +1575,9 @@ impl WindowState<'_> {
         let mut shown = Vec::new();
         for (id, r) in tab.rects(area) {
             if let Some(p) = tab.pane(id) {
-                snaps.push((p.frame_view(), r, id == focus));
+                // A pane larger than its place (an attached block another
+                // client sized) shows its top-left.
+                snaps.push((p.frame_view().cropped(r.cols, r.rows), r, id == focus));
                 shown.push(p);
             }
         }
@@ -5330,6 +5435,82 @@ impl WindowState<'_> {
     }
 
     /// Whether pane `id` (a reader-thread wakeup tag) belongs to this window.
+    /// Show the source's `tree` in the attached window's one tab: open the
+    /// panes new to it, drop the ones it left out (which ends them at the
+    /// source), keep the focus if it is still shown. `None` closes the
+    /// window.
+    fn show_tree(&mut self, tree: Option<Tree>) {
+        let Some(source) = self.source else {
+            return;
+        };
+        let Some(tree) = tree else {
+            self.closed = true;
+            return;
+        };
+        let layout = Layout::from_tree(&tree);
+        let rects = layout.rects(self.pane_area());
+        let mut panes = match self.tabs.pop() {
+            Some(tab) => tab.panes,
+            None => Vec::new(),
+        };
+        panes.retain(|p| rects.iter().any(|(id, _)| *id == p.id));
+        for &(key, r) in &rects {
+            if panes.iter().any(|p| p.id == key) {
+                continue;
+            }
+            let (cols, rows) = (r.cols.max(1) as u16, r.rows.max(1) as u16);
+            let opened = source
+                .open(key, cols, rows)
+                .and_then(|io| self.pane_from(key, io, None, cols, rows, None));
+            match opened {
+                Ok(pane) => panes.push(pane),
+                Err(e) => eprintln!("rusty_term: pane {key}: {e}"),
+            }
+        }
+        let focus = self
+            .told
+            .filter(|f| rects.iter().any(|(id, _)| id == f))
+            .unwrap_or(rects[0].0);
+        self.tabs.push(Tab {
+            panes,
+            layout,
+            focus,
+            attention: false,
+            zoomed: false,
+        });
+        self.active = 0;
+        self.layout_panes(0);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The source moved the focus to `key`.
+    fn focus_from_source(&mut self, key: u64) {
+        self.told = Some(key);
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        if tab.layout.ids().contains(&key) {
+            tab.focus = key;
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Tell the source where the user moved the focus, once per move.
+    fn tell_focus(&mut self) {
+        let Some(source) = self.source else {
+            return;
+        };
+        let focus = self.tabs.get(self.active).map(|t| t.focus);
+        if let Some(key) = focus.filter(|f| self.told != Some(*f)) {
+            self.told = Some(key);
+            source.focus(key);
+        }
+    }
+
     fn has_pane(&self, id: u64) -> bool {
         self.tabs.iter().any(|t| t.panes.iter().any(|p| p.id == id))
     }
@@ -5961,6 +6142,7 @@ impl WindowState<'_> {
 /// (reader-thread wakeups); the loop exits when the last window closes.
 struct App<'a> {
     backend: &'a dyn Backend,
+    source: Option<&'a dyn Source>,
     /// The launch config, template for every new window.
     config: Config,
     config_path: Option<std::path::PathBuf>,
@@ -6003,6 +6185,8 @@ impl<'a> App<'a> {
         let (bar_w, bar_h) = ui_font.cell_size();
         Ok(WindowState {
             backend: self.backend,
+            source: self.source,
+            told: None,
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -6128,6 +6312,9 @@ impl<'a> App<'a> {
     /// Drop windows marked closed and open ones requested via
     /// `Action::NewWindow`; exits the loop when no window remains.
     fn reap_and_spawn(&mut self, event_loop: &ActiveEventLoop) {
+        for w in &mut self.windows {
+            w.tell_focus();
+        }
         let mut open = 0usize;
         for i in 0..self.windows.len() {
             if std::mem::take(&mut self.windows[i].wants_new_window) {
@@ -6195,6 +6382,16 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Exit(id) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
                     w.close_pane(id);
+                }
+            }
+            UserEvent::Layout(tree) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.show_tree(tree);
+                }
+            }
+            UserEvent::Focus(key) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.focus_from_source(key);
                 }
             }
             UserEvent::ConfigChanged => {
@@ -8219,6 +8416,42 @@ mod tests {
             let (sent, line) = run(steps, &WakeFlag::default(), true, true);
             assert_eq!(sent, ["redraw", "redraw", "redraw", "exit"]);
             assert_eq!(line.trim_end(), "from the server live");
+        }
+
+        #[test]
+        fn a_screen_keeps_the_panes_theme_and_display_settings() {
+            let ours = crate::core::Theme {
+                fg: 0x00aa_bbcc,
+                bg: 0x0011_2233,
+                ..Default::default()
+            };
+            let mut pane_grid = Grid::new(20, 2);
+            pane_grid.apply_theme(&ours);
+            pane_grid.min_contrast = 4.5;
+            pane_grid.cell_px = Some((9, 18));
+            let grid = Arc::new(Mutex::new(pane_grid));
+            let parser = Arc::new(Mutex::new(AnsiParser::with_theme(ours)));
+            let steps = vec![
+                Feed::Screen(Box::new(Grid::new(20, 2)), Box::new(AnsiParser::new())),
+                Feed::Bytes(b"x".to_vec()),
+            ];
+            feed(
+                steps,
+                None,
+                &grid,
+                &parser,
+                &WakeFlag::default(),
+                true,
+                true,
+            );
+            let g = grid.lock();
+            assert_eq!(
+                g.viewport_cell(0, 0).fg,
+                ours.fg,
+                "drawn in the pane's theme"
+            );
+            assert_eq!(g.viewport_cell(1, 0).bg, ours.bg);
+            assert_eq!((g.min_contrast, g.cell_px), (4.5, Some((9, 18))));
         }
 
         #[test]

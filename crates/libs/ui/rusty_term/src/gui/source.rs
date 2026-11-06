@@ -4,13 +4,20 @@
 //! The window draws a pane from a [`PaneIo`]: a [`Feed`] of what to show
 //! and a writer for input and size requests. A local shell is one adapter
 //! ([`PaneIo::local`]); a rusty_mux block, attached from `rusty_mux_gui`,
-//! is another, so the window keeps one draw path for both.
+//! is another, so the window keeps one draw path for both. An attached
+//! window ([`super::run_attached`]) takes its panes and their layout from
+//! a [`Source`].
 
 use std::io;
 use std::sync::mpsc::{Receiver, SyncSender};
 
+use winit::event_loop::EventLoopProxy;
+
+use super::window::UserEvent;
 use crate::backend::{BackendHandle, read_batch};
 use crate::core::{AnsiParser, Grid};
+
+pub use super::layout::Dir;
 
 /// Most PTY output parsed under one grid lock: about 1 ms of parsing, so
 /// a flood still leaves the UI thread the lock between batches.
@@ -59,6 +66,47 @@ impl PaneIo {
             feed: Box::new(Batches(ready)),
             answers_queries: true,
         })
+    }
+}
+
+/// A window's panes as a source lays them out: leaves are the source's pane
+/// keys.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Tree {
+    Pane(u64),
+    /// `ratio` of the area goes to `a`, the left or top child.
+    Split {
+        dir: Dir,
+        ratio: f32,
+        a: Box<Tree>,
+        b: Box<Tree>,
+    },
+}
+
+/// Where an attached window's panes come from, such as a rusty_mux window.
+/// The source owns the layout: the window shows the [`Tree`]s it is sent
+/// through [`Remote`] and never edits one itself (pack D28, D102).
+pub trait Source {
+    /// Opens pane `key`, placed `cols × rows`.
+    fn open(&self, key: u64, cols: u16, rows: u16) -> io::Result<PaneIo>;
+    /// The user moved the focus to pane `key`.
+    fn focus(&self, key: u64);
+}
+
+/// The source's way into a running window, from any thread. Each call is
+/// `false` once the window is gone.
+#[derive(Clone)]
+pub struct Remote(pub(crate) EventLoopProxy<UserEvent>);
+
+impl Remote {
+    /// Show `tree`; `None` closes the window (the source's window is gone).
+    pub fn layout(&self, tree: Option<Tree>) -> bool {
+        self.0.send_event(UserEvent::Layout(tree)).is_ok()
+    }
+
+    /// Move the focus to pane `key`, as another client did.
+    pub fn focus(&self, key: u64) -> bool {
+        self.0.send_event(UserEvent::Focus(key)).is_ok()
     }
 }
 

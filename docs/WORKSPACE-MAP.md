@@ -247,6 +247,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_mux | rusty_mux_client | rusty_mux's attach protocol for clients: connecting, the handshake, takeover and reading a window's layout. Shared by the terminal and GUI clients; links no server. |
 | apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. |
 | apps | rusty_mux | rusty_mux_ctl | rusty-mux-ctl: scriptable rusty_mux client generated from the request catalog, with --json output and stable exit codes. |
+| apps | rusty_mux | rusty_mux_gui | GUI client for rusty_mux: shows a server window's split layout of blocks in rusty_term's native window. |
 | apps | rusty_mux | rusty_mux_mcp | rusty-mux-mcp: the rusty_mux request catalog as MCP tools over stdio, each call run as rusty-mux-ctl would run it. |
 | apps | rusty_mux | rusty_mux_proto | rusty_mux's wire protocol: length-prefixed frames of tagged varint fields, with feature bits. No I/O. |
 | apps | rusty_mux | rusty_mux_script | rusty_mux actions and key bindings: named chains of catalog requests read from a JSON config, checked against the catalog. No I/O. |

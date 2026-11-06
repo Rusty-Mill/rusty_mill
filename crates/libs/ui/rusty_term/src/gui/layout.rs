@@ -7,6 +7,8 @@
 //! pane lifecycle (one shell per id) stays separate and this is unit-testable
 //! without a GUI.
 
+use super::source::Tree;
+
 /// Which way a split divides its area.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dir {
@@ -54,6 +56,18 @@ enum Node {
 }
 
 impl Node {
+    fn from_tree(tree: &Tree) -> Self {
+        match tree {
+            Tree::Pane(id) => Node::Leaf(*id),
+            Tree::Split { dir, ratio, a, b } => Node::Split {
+                dir: *dir,
+                ratio: ratio.clamp(0.1, 0.9),
+                a: Box::new(Node::from_tree(a)),
+                b: Box::new(Node::from_tree(b)),
+            },
+        }
+    }
+
     /// The first (top-left-most) leaf id in this subtree — a sensible focus
     /// target after a sibling closes.
     fn first(&self) -> u64 {
@@ -203,6 +217,13 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// The layout a session source states (see [`Tree`]).
+    pub(crate) fn from_tree(tree: &Tree) -> Self {
+        Self {
+            root: Node::from_tree(tree),
+        }
+    }
+
     /// A layout with a single full-area pane.
     pub fn single(id: u64) -> Self {
         Self {
@@ -389,5 +410,25 @@ mod tests {
         let rs = l.rects(area);
         // Both panes keep at least one row even after saturating growth.
         assert!(rs.iter().all(|(_, r)| r.rows >= 1));
+    }
+
+    #[test]
+    fn a_stated_tree_tiles_as_the_same_splits_would() {
+        let tree = Tree::Split {
+            dir: Dir::Vertical,
+            ratio: 0.5,
+            a: Box::new(Tree::Pane(1)),
+            b: Box::new(Tree::Split {
+                dir: Dir::Horizontal,
+                ratio: 0.5,
+                a: Box::new(Tree::Pane(2)),
+                b: Box::new(Tree::Pane(3)),
+            }),
+        };
+        let mut built = Layout::single(1);
+        built.split(1, 2, Dir::Vertical);
+        built.split(2, 3, Dir::Horizontal);
+        let area = Rect::new(0, 0, 81, 25);
+        assert_eq!(Layout::from_tree(&tree).rects(area), built.rects(area));
     }
 }
