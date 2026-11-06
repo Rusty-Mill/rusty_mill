@@ -128,6 +128,7 @@ Precise contracts used by this guide:
 | D118 | #704 D115/D114 build: the limits record, its command, the open check and orch's half-limit leg | [default] 2026-11-06 (#704) |
 | D119 | #704 `bbp erosion approve` and `bbp erosion limits`: both commands and their trust model approved as built in PR #1543 | [stated] 2026-11-06 (#704) |
 | D120 | #704 slice 4d: half-limit leg firing rule, measuring, `--bbp-bin` and pending base | [default] 2026-11-06 (#704) |
+| D121 | #704 slice 4d: `rusty_orch consolidate` half-limit leg changes approved as built in PR #1544 | [stated] 2026-11-06 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -1168,3 +1169,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_23a36220effe41ffbc6f50f5fe6f6cdc
 **Key.** lel:704:half-limit-leg-build-details
 **Source.** Builder questions 1–4 from the #704 slice 4d build, 2026-11-06; D44, D110, D114, D118; `rusty_orch` `src/consolidate.rs` (branch `slice4d`). Numbered D120 after D119.
+
+## D121. #704 slice 4d: `rusty_orch consolidate` half-limit leg changes approved as built in PR #1544
+
+**Decision.** Accept the changes PR #1544 (#704 slice 4d, D114, D118, D120; ADR 0024) makes to the public `rusty_orch consolidate` command, as built: `--bbp-bin` now works in plan mode as well as with `--execute`; the JSON report gains four fields, `trigger`, `half`, `limits` and `last_base`; and plan runs now call the read-only `bbp erosion limits --dir D`. The approval covers these changes to this one command only, as D117 and D119 did.
+**Why.** D117 approved `rusty_orch consolidate` as built in PR #1539. Changing a public command's flags and its JSON output is a public API change, on the ask-first list, and D120 set these details only as `[default]` build detail, so #1544 was held for Nano.
+**Rejected.** Holding #1544 until the leg was redesigned, or keeping `--bbp-bin` `--execute`-only, which D120 already rejected because plan mode could not report the leg.
+**Tag.** [stated] · remind-me: pending
+**Key.** lel:704:consolidate-half-limit-leg-approval
+**Source.** Nano, "Merge both", in the rusty-mill project chat, message `cmsg_01Y8j3ihrYW8jedySti37M9c5BJB8MJVcpTVXKHfp9P2zP`, 2026-11-06T15:47:26Z, replying to `cmsg_01Y8j3ihrYW8jedySti37M9cGcSaVAgBosLz316zUmS6k2` (15:14:33Z), which named these changes to `rusty_orch consolidate` and recommended merging #1544 (its other PR, rusty-remind-me #376, is not a Let Em Loose item). PR #1544 merged through the merge queue on 2026-11-06, merge commit `44cd63c7`. D114, D117, D118, D119, D120; `rusty_orch` `crates/rusty_orch/src/consolidate.rs`, `docs/adr/0024-consolidate-half-limit-leg.md`. Numbered D121 after D120.
