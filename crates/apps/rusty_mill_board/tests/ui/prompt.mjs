@@ -82,6 +82,43 @@ check(whole.prompt === "Partial prompt." && whole.title === "Prompt test, rename
 await page.waitForFunction(() => document.querySelector("#dlg .banner").textContent === "");
 check(true, "the note clears once everything is saved");
 
+// The same partial save, but another writer changes only the prompt between our two writes: the
+// dialog must not take their prompt as its base and overwrite it on the next Save.
+const interleaved = async (mine, theirs) => {
+  await page.route("**/api/card_update", async (route) => {
+    const sent = JSON.parse(route.request().postData());
+    delete sent.prompt;
+    const fetched = await route.fetch({ postData: JSON.stringify(sent) });
+    const stored = await fetched.json();
+    if (!fetched.ok()) throw new Error(`card_update: ${stored.error}`);
+    await api("card_update", { id: card.id, rev: stored.card.rev, prompt: theirs });
+    await route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: "only part of this change was saved", saved_rev: stored.card.rev }) });
+  });
+  await dialog.locator("input").nth(0).fill(`Renamed for ${mine}`);
+  await prompt.fill(mine);
+  const sent = page.waitForResponse("**/api/card_update");
+  await dialog.getByRole("button", { name: "Save" }).click();
+  await sent;
+  await page.unroute("**/api/card_update");
+  await banner.getByRole("button", { name: "Keep mine" }).waitFor({ timeout: 5000 });
+};
+
+await interleaved("Mine.", "Theirs.");
+check((await banner.textContent()).includes("Someone else changed"), "an interleaved prompt edit raises the conflict banner, not the partial note");
+check((await prompt.inputValue()) === "Mine.", "the unsaved prompt is kept");
+await page.waitForTimeout(2500);
+check((await api("card_get", { id: card.id })).card.prompt === "Theirs.", "their prompt stays until a choice is made");
+await banner.getByRole("button", { name: "Keep mine" }).click();
+const kept = page.waitForResponse("**/api/card_update");
+await dialog.getByRole("button", { name: "Save" }).click();
+check((await kept).ok(), "Keep mine, then Save, is accepted");
+check((await api("card_get", { id: card.id })).card.prompt === "Mine.", "and stores my prompt");
+
+await interleaved("Mine again.", "Theirs again.");
+await banner.getByRole("button", { name: "Take theirs" }).click();
+check((await prompt.inputValue()) === "Theirs again.", "Take theirs loads their prompt");
+check((await api("card_get", { id: card.id })).card.prompt === "Theirs again.", "and leaves it stored");
+
 check(errors.length === 0, `no page errors (${errors.join("; ")})`);
 await browser.close();
 if (failures.length) { console.error(`${failures.length} failed`); process.exit(1); }

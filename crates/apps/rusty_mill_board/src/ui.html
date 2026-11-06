@@ -940,10 +940,10 @@ function show(id){
 }
 async function save(){
   const d=dlg,t=typed();
-  d.partial=d.note=false;
+  d.partial=null;d.note=false;
   // Partly saved (the task's fields, not the prompt): the refresh below must not read that as someone else's edit.
   await act("card_update",{id:d.id,rev:d.base.rev,title:t.title,body:t.body,prompt:t.prompt,tags:t.tags.split(",").map(s=>s.trim()).filter(Boolean)},
-    e=>{if(e.savedRev!=null)d.partial=true},
+    e=>{if(e.savedRev!=null)d.partial=e.savedRev},
     r=>{if(dlg===d)d.base=snap(r.card)});   // before the refresh, so our own save is not read as theirs; the dialog may have moved on meanwhile
 }
 function syncDialog(){
@@ -959,18 +959,20 @@ function syncDialog(){
   if(+f.pr.value!==k.priority&&document.activeElement!==f.pr)f.pr.value=k.priority;
   if(document.activeElement!==f.due)f.due.value=k.target_ms?isoDay(k.target_ms):"";
   if(theirs.rev===dlg.base.rev){if(!dlg.note)f.banner.replaceChildren();return}
-  if(dlg.partial){partlySaved(theirs);return}
+  if(dlg.partial!=null){partlySaved(theirs);return}
   const dirty=!sameText(typed(),dlg.base);
   if(!dirty){dlg.base=theirs;setFields(theirs);f.banner.replaceChildren()}      // nothing typed: follow the board
   else if(sameText(theirs,dlg.base)){dlg.base={...dlg.base,rev:theirs.rev};f.banner.replaceChildren()} // only a comment or claim moved: keep the draft
   else conflict(theirs);                                                       // the text changed under an unsaved edit
 }
-// Our own save stored title, body and tags but not the prompt. If the board holds exactly what was typed
-// there, take it as the base and keep the unsaved prompt, saying so; anything else is a real conflict.
+// Our own save stored title, body and tags but not the prompt, at revision `saved`. If the card is still at
+// that revision, holding what was typed and the prompt we started from, take it as the base and keep the
+// unsaved prompt, saying so. Anything else means another writer came in between: a real conflict.
 function partlySaved(theirs){
-  const f=dlg.f,t=typed();
-  dlg.partial=false;
-  if(t.title!==theirs.title||t.body!==theirs.body||t.tags!==theirs.tags){conflict(theirs);return}
+  const f=dlg.f,t=typed(),saved=dlg.partial;
+  dlg.partial=null;
+  const ours=theirs.rev===saved&&theirs.prompt===dlg.base.prompt;
+  if(!ours||t.title!==theirs.title||t.body!==theirs.body||t.tags!==theirs.tags){conflict(theirs);return}
   dlg.base=theirs;dlg.note=true;
   f.banner.replaceChildren(el("div","Title, body and tags were saved, but the prompt was not. Save again to save it."));
 }
