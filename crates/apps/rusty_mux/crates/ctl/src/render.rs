@@ -3,7 +3,7 @@
 
 use rusty_json::{Map, Value};
 use rusty_mux_core::{BlockId, Event, ExitStatus, Layout, Principal, Progress, Size};
-use rusty_mux_proto::{Cursor, Entry};
+use rusty_mux_proto::{Cursor, Entry, Ownership};
 use rusty_uuid::Uuid;
 
 /// An event or entry field's value.
@@ -72,6 +72,15 @@ pub(crate) fn event_line(seq: u64, event: &Event, json: bool) -> String {
         );
     }
     with_fields(format!("{seq} {kind}"), fields)
+}
+
+/// An event as `own` prints it: `{"event":KIND,FIELD:VALUE…}`.
+pub(crate) fn owner_event_line(event: &Event) -> String {
+    let (kind, fields) = describe(event);
+    object(
+        std::iter::once(("event", Value::from(kind)))
+            .chain(fields.into_iter().map(|(k, f)| (k, f.json()))),
+    )
 }
 
 /// An event's kind and its fields' values, as a rule's placeholders take
@@ -210,12 +219,19 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             holder,
             title,
             name,
+            owner,
         } => {
             let mut fields = vec![("window", Id(window.uuid()))];
             fields.extend(size_fields(*size));
             fields.push(("holder", holder.map_or(Field::Absent, |c| Id(c.uuid()))));
             fields.push(("title", Text(title.clone())));
             fields.push(("name", Text(name.clone())));
+            let owner = match owner {
+                None => Field::Absent,
+                Some(Ownership::Client(c)) => Id(c.uuid()),
+                Some(Ownership::Orphaned) => Text("orphaned".to_owned()),
+            };
+            fields.push(("owner", owner));
             ("block", block.uuid(), fields)
         }
         Entry::Client {
@@ -673,11 +689,12 @@ mod tests {
             holder: None,
             title: "vim".into(),
             name: "edit".into(),
+            owner: None,
         };
         assert_eq!(
             entry_line(&block, false),
             format!(
-                "block {} window={} cols=80 rows=24 holder=- title=\"vim\" name=\"edit\"",
+                "block {} window={} cols=80 rows=24 holder=- title=\"vim\" name=\"edit\" owner=-",
                 id(1),
                 id(2)
             )

@@ -319,6 +319,16 @@ impl Process {
     }
 }
 
+impl Process {
+    /// Closes the console and leaves the program running: a stopping
+    /// server does this to an owned block, never terminating it (D87).
+    pub(crate) fn abandon(mut self) {
+        if self.child.take().is_some() {
+            hang_up(&self.master);
+        }
+    }
+}
+
 impl Drop for Process {
     /// The fallback when a block is dropped without [`Process::reap`], for
     /// instance when the server stops: terminate the program and close the

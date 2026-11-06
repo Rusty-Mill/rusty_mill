@@ -35,6 +35,6 @@ mod varint;
 pub use error::Error;
 pub use frame::{MAX_FRAME, decode, encode};
 pub use message::{
-    Code, Cursor, DatagramKey, ECHO_GRACE, Echo, Entry, Features, Launch, Message, Program,
-    Takeover,
+    Code, Cursor, DatagramKey, ECHO_GRACE, Echo, Entry, Features, Launch, Message, Ownership,
+    Program, Takeover,
 };

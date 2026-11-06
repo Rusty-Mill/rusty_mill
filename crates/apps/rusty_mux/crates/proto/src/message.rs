@@ -176,6 +176,13 @@ impl Features {
     /// [`Message::BlockCall`], so the bit only says the server knows it.
     pub const TERMINAL_HISTORY: Self = Self(1 << 34);
 
+    /// Block ownership (C46): [`Launch::own`] makes the launching client
+    /// the block's owner, the only client that may rename, close, split,
+    /// move or detach it, and a block entry names its [`Ownership`]. A
+    /// client without it can't launch an owned block, but is refused on
+    /// one all the same.
+    pub const OWNERSHIP: Self = Self(1 << 35);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -258,6 +265,20 @@ pub struct Launch {
     pub program: Option<Program>,
     /// An absolute path; the server refuses a relative one.
     pub cwd: Option<String>,
+    /// The launching client owns the block (C46). Negotiated with
+    /// [`Features::OWNERSHIP`].
+    pub own: bool,
+}
+
+/// Who controls an owned block, in its [`Entry::Block`] (C46).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ownership {
+    /// The client that launched it, connected or within its reconnect
+    /// grace.
+    Client(ClientId),
+    /// Its owner is gone for good: nobody may type into it or change it,
+    /// and only the owner's principal may close it.
+    Orphaned,
 }
 
 /// A program to run and its arguments, without the program's own name.
@@ -304,6 +325,9 @@ pub enum Entry {
         title: String,
         /// Empty until a client names the block.
         name: String,
+        /// `None` for a block nobody owns, or from a server without
+        /// [`Features::OWNERSHIP`].
+        owner: Option<Ownership>,
     },
     /// Sent only with [`Features::LABELS`].
     Client {
@@ -689,8 +713,14 @@ const TOWARD: u32 = 49;
 const FOCUSED: u32 = 50;
 /// A session entry's mark that the server made up its name: 1, or absent.
 const GENERATED: u32 = 51;
-// IDs 1..=GENERATED are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = GENERATED as usize;
+/// A launch's mark that its client owns the block: 1, or absent.
+const OWN: u32 = 52;
+/// An owned block's owning client.
+const OWNER: u32 = 53;
+/// An owned block's mark that its owner is gone: 1, or absent.
+const ORPHANED: u32 = 54;
+// IDs 1..=ORPHANED are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = ORPHANED as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -1235,6 +1265,9 @@ fn put_launch(out: &mut Out, launch: &Launch) {
     if let Some(cwd) = &launch.cwd {
         out.bytes(CWD, cwd.as_bytes());
     }
+    if launch.own {
+        out.varint(OWN, 1);
+    }
 }
 
 /// Arguments only with a command.
@@ -1252,6 +1285,7 @@ fn get_launch(f: &In<'_>) -> Result<Launch, Error> {
     Ok(Launch {
         program,
         cwd: f.opt(CWD, In::string)?,
+        own: f.opt(OWN, In::varint)? == Some(1),
     })
 }
 
@@ -1869,6 +1903,7 @@ fn put_entry(out: &mut Out, entry: &Entry) {
             holder,
             title,
             name,
+            owner,
         } => {
             let o = out
                 .varint(KIND, entry::BLOCK)
@@ -1878,6 +1913,15 @@ fn put_entry(out: &mut Out, entry: &Entry) {
                 .bytes(NAME, name.as_bytes());
             if let Some(holder) = holder {
                 o.uuid(HOLDER, holder.uuid());
+            }
+            match owner {
+                None => {}
+                Some(Ownership::Client(client)) => {
+                    o.uuid(OWNER, client.uuid());
+                }
+                Some(Ownership::Orphaned) => {
+                    o.varint(ORPHANED, 1);
+                }
             }
             put_size(o, *size);
         }
@@ -1930,6 +1974,7 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
             title: f.string(TITLE)?,
             // An older server sends no name.
             name: f.opt(NAME, In::string)?.unwrap_or_default(),
+            owner: get_ownership(f)?,
         },
         entry::CLIENT => Entry::Client {
             client: client(f, CLIENT)?,
@@ -1940,6 +1985,18 @@ fn get_entry(f: &In<'_>) -> Result<Entry, Error> {
         },
         _ => return Err(f.invalid(KIND)),
     })
+}
+
+/// An owner, or the orphaned mark; both at once is invalid.
+fn get_ownership(f: &In<'_>) -> Result<Option<Ownership>, Error> {
+    let owner = f.opt(OWNER, client)?;
+    let orphaned = f.opt(ORPHANED, In::varint)? == Some(1);
+    match (owner, orphaned) {
+        (Some(_), true) => Err(f.invalid(ORPHANED)),
+        (Some(owner), false) => Ok(Some(Ownership::Client(owner))),
+        (None, true) => Ok(Some(Ownership::Orphaned)),
+        (None, false) => Ok(None),
+    }
 }
 
 const fn transport_wire(transport: Transport) -> u64 {

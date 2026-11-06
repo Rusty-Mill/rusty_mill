@@ -812,6 +812,7 @@ mod tests {
                     holder: None,
                     title: String::new(),
                     name: String::new(),
+                    owner: None,
                 },
             });
         }
@@ -1119,6 +1120,7 @@ mod tests {
             holder: None,
             title: String::new(),
             name: String::new(),
+            owner: None,
         });
     }
 
@@ -1320,6 +1322,7 @@ mod tests {
                     holder: None,
                     title: title.into(),
                     name: String::new(),
+                    owner: None,
                 },
             });
         }

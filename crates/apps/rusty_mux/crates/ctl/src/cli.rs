@@ -48,6 +48,9 @@ pub enum Command {
     /// Joins stdin and stdout to the socket, for a client that runs this
     /// over SSH.
     Bridge,
+    /// Holds one connection that owns the blocks it launches, driven by
+    /// JSON lines on stdin (C46).
+    Own,
     /// Prints a completion script for a shell.
     Completion(Shell),
 }
@@ -320,6 +323,8 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "agent" => agent(rest).map(Command::Agent),
         "bridge" if rest.is_empty() => Ok(Command::Bridge),
         "bridge" => Err("bridge takes no arguments".into()),
+        "own" if rest.is_empty() => Ok(Command::Own),
+        "own" => Err("own takes no arguments".into()),
         "completion" => match rest {
             [shell] => shell.parse().map(Command::Completion),
             _ => Err("usage: completion bash|zsh|fish|nu|powershell".into()),
@@ -794,6 +799,12 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "bridge",
         "Join stdin and stdout to the socket, for a client that runs\n\
          \x20                  `ssh HOST rusty-mux-ctl bridge`",
+    ),
+    (
+        "own",
+        "Hold one connection that owns every block it launches: JSON\n\
+         \x20                  requests on stdin (launch, close), one JSON answer or\n\
+         \x20                  owner event per line on stdout; ends at the end of stdin",
     ),
     (
         "api",

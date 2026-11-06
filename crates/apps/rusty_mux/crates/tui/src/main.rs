@@ -3406,6 +3406,7 @@ mod client {
                         holder: None,
                         title: String::new(),
                         name: String::new(),
+                        owner: None,
                     },
                 });
             }

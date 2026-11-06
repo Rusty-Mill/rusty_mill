@@ -1,0 +1,109 @@
+use super::*;
+
+const WINDOW: &str = "00000000-0000-0000-0000-00000000000a";
+
+fn parsed(line: &str) -> Request {
+    parse(line).expect("parses").1
+}
+
+fn refusal(line: &str) -> (Value, String) {
+    parse(line).expect_err("refused")
+}
+
+#[test]
+fn a_bare_launch_owns_the_default_program_at_the_default_size() {
+    let line = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}"}}"#);
+    let Request::Launch {
+        window,
+        size,
+        launch,
+    } = parsed(&line)
+    else {
+        panic!("not a launch");
+    };
+    assert_eq!(window.uuid().to_string(), WINDOW);
+    assert_eq!((size.cols(), size.rows()), DEFAULT_SIZE);
+    assert_eq!(
+        launch,
+        Launch {
+            own: true,
+            ..Launch::default()
+        }
+    );
+}
+
+#[test]
+fn a_launch_carries_its_program_size_and_directory() {
+    let line = format!(
+        r#"{{"id":"a","op":"launch","window":"{WINDOW}","cols":100,"rows":30,
+            "program":"lel-jail","args":["--slot","3"],"cwd":"/srv"}}"#
+    )
+    .replace('\n', "");
+    let (id, request) = parse(&line).expect("parses");
+    assert_eq!(id, Value::from("a"));
+    let Request::Launch { size, launch, .. } = request else {
+        panic!("not a launch");
+    };
+    assert_eq!((size.cols(), size.rows()), (100, 30));
+    assert_eq!(
+        launch.program,
+        Some(Program {
+            command: "lel-jail".into(),
+            args: vec!["--slot".into(), "3".into()],
+        })
+    );
+    assert_eq!(launch.cwd.as_deref(), Some("/srv"));
+    assert!(launch.own);
+}
+
+#[test]
+fn a_close_names_its_block() {
+    let line = format!(r#"{{"id":2,"op":"close","block":"{WINDOW}"}}"#);
+    assert!(matches!(parsed(&line), Request::Close { .. }));
+}
+
+#[test]
+fn bad_requests_are_refused_with_their_id() {
+    let cases = [
+        (r#"{"id":3,"op":"fly"}"#, "unknown op"),
+        (r#"{"id":3}"#, "no `op`"),
+        (r#"{"id":3,"op":"close","block":"nope"}"#, "not an id"),
+        (r#"{"id":3,"op":"close"}"#, "must be an id"),
+    ];
+    for (line, why) in cases {
+        let (id, reason) = refusal(line);
+        assert_eq!(id, Value::from(3u64), "{line}");
+        assert!(reason.contains(why), "{line}: {reason}");
+    }
+    let launch = |extra: &str| format!(r#"{{"id":3,"op":"launch","window":"{WINDOW}"{extra}}}"#);
+    for (extra, why) in [
+        (r#","args":["x"]"#, "need a `program`"),
+        (r#","cols":0"#, "zero"),
+        (r#","rows":70000"#, "number of cells"),
+        (r#","program":7"#, "must be text"),
+        (r#","program":"sh","args":[1]"#, "list of text"),
+    ] {
+        let (_, reason) = refusal(&launch(extra));
+        assert!(reason.contains(why), "{extra}: {reason}");
+    }
+}
+
+#[test]
+fn a_line_that_is_not_json_is_refused_without_an_id() {
+    let (id, reason) = refusal("launch please");
+    assert_eq!(id, Value::Null);
+    assert!(reason.starts_with("not JSON"), "{reason}");
+}
+
+#[test]
+fn answers_and_events_are_single_json_lines() {
+    assert_eq!(
+        answered(Value::from(1u64), Some(("block", Value::from("b")))),
+        r#"{"block":"b","id":1,"ok":true}"#
+    );
+    assert_eq!(
+        failed(Value::Null, "no"),
+        r#"{"error":"no","id":null,"ok":false}"#
+    );
+    assert_eq!(event("lost", []), r#"{"event":"lost"}"#);
+}

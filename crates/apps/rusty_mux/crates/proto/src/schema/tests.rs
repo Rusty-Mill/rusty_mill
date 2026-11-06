@@ -374,6 +374,7 @@ fn create_block_launches_a_program_only_with_a_command() {
                 args: vec!["-j".into(), "4".into()],
             }),
             cwd: Some("/srv".into()),
+            own: false,
         })
     );
     assert!(matches!(
@@ -500,7 +501,8 @@ fn split_names_its_side_and_launch() {
                     command: "top".into(),
                     args: Vec::new()
                 }),
-                cwd: None
+                cwd: None,
+                own: false,
             },
         })
     );
