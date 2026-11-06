@@ -445,10 +445,22 @@ DRY = ("Dry run, nothing changed yet\n"
        "Last copies touched: 0")
 
 
+EVIDENCE = [("For", ["All 1,204 pairs match byte for byte", "Shadow run kept one copy of each"]),
+            ("Against", ["38 files sit in a synced folder", "Trash folder is on the same drive"])]
+
+
+def evidence() -> str:
+    """Top two supporting and contrary evidence items (Let Em Loose D35); the key shows once per side."""
+    rows = "".join(f'<div class="kv" style="font-size:12px;line-height:18px"><span class="k sl">{k if i == 0 else ""}</span><span class="b">{v}</span></div>'
+                   for k, items in EVIDENCE for i, v in enumerate(items))
+    return f'<div>{rows}</div>'
+
+
 def card_irrev() -> str:
     return (f'<div class="card"><div class="th"><b>First file action</b>{reason("lock", "Irreversible")}</div>'
-            f'<p>Actions is at 91% and needs your approval before it runs.</p><div class="dry">{DRY}</div>'
-            f'<div class="acts">{btn("Approve", "s", sm=True)}{btn("Refine intent", "g", sm=True)}</div></div>')
+            f'<p>Actions claim at 91% confidence, budget 6 of 16 used. Approving accepts the claim; it does not run the action.</p>'
+            f'{evidence()}<div class="dry">{DRY}</div>'
+            f'<div class="acts">{btn("Approve", "s", sm=True)}{btn("Reject", "s", sm=True)}{btn("Refine intent", "g", sm=True)}</div></div>')
 
 
 def inbox_panel(cards: str | None = None, count: int = 2) -> str:
@@ -476,9 +488,10 @@ def pop_inbox() -> str:
 
 
 def pop_approve() -> str:
-    return (f'<div class="pop pad" style="left:520px;top:240px;width:420px"><h4>Approve the first file action?</h4>'
-            f'<p>This moves 1,204 files from your real drive to the trash folder. You can restore them from the trash.</p><div class="dry" style="margin-top:10px">{DRY}</div>'
-            f'<div class="acts">{btn("Cancel", "s", "is-focus")}{btn("Move 1,204 files", "p")}</div></div>')
+    return (f'<div class="pop pad" style="left:520px;top:240px;width:420px"><h4>Approve the Actions claim?</h4>'
+            f'<p>This accepts the claim as shown, at 91% confidence, and adds no budget. No files move now: the dry run is what the action would do, and running it is a separate step.</p>'
+            f'<div class="dry" style="margin-top:10px">{DRY}</div>'
+            f'<div class="acts">{btn("Cancel", "s", "is-focus")}{btn("Reject", "s")}{btn("Accept claim", "p")}</div></div>')
 
 
 def lel_page() -> str:
@@ -499,12 +512,17 @@ def lel_page() -> str:
     other = frame(strip(1, inbox=2, inbox_open=True) + blocks(shell_block() + f'<div class="col" style="flex:1">{agent_block()}{idle_block()}</div>') + ribbon(), "dark", pop_inbox())
     note_l1 = ("The Let Em Loose tab (D37). Intent is read-only (D40). Stages are derived and show state as a glyph plus a word (D39). "
                "Claim status is a glyph plus a word: settled is slate, open is dashed, yours is the accent with a solid outline, contested is the accent dashed (D38). "
-               "The accent falls back to verdigris (D35). No amber. One primary button per screen, and only on the confirm. Sample data.")
+               "The accent falls back to verdigris (D35). No amber. One primary button per screen, and only on the confirm. "
+               "The irreversible card shows the claim, confidence, budget, reason, the top two supporting and contrary evidence items and the dry run, "
+               "with Approve, Reject and Refine intent (Let Em Loose D35). Sample data.")
     return page("Let Em Loose", "The tab that hosts Let Em Loose: full-app view, inbox, states. Decisions D37 to D41; no new colours.", [
         item("L1 Full-app view, dark", lel_frame("dark"), note_l1),
         item("L1 Full-app view, light", lel_frame("light")),
         item("L2a Inbox from any window", other, "The chip is in every window's top strip (D37), so a decision is one click away wherever you are. Enter opens it in the Let Em Loose tab."),
-        item("L2b Approve an irreversible action", lel_frame("dark", overlay=pop_approve()), "Reuses the confirm popover (D19, D28): title, one-line consequence, dry run attached, Cancel has focus first, and the primary button is named for its result (D28). It is the only primary button on the screen."),
+        item("L2b Approve an irreversible action", lel_frame("dark", overlay=pop_approve()), "Reuses the confirm popover (D19, D28): title, one-line consequence, dry run attached, Cancel has focus first. "
+             "Approving accepts the displayed claim snapshot and adds no budget; running the action stays a separate step (Let Em Loose D35). "
+             "Reject drops the claim. Cancel only closes the popover and leaves the decision waiting. "
+             "The primary button is named for its result (D28) and is the only primary button on the screen."),
         item("L2c Approve an irreversible action, light", lel_frame("light", overlay=pop_approve())),
         item("L3a Claim row states", f'<div style="display:flex;gap:40px">{sheet("dark")}{sheet("light")}</div>', "Every status has a word and a glyph (D26). Settled uses slate text, not dim (D17)."),
         item("L3b Stage strip states", stage_sheet),
