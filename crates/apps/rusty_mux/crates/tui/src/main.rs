@@ -82,8 +82,8 @@ mod client {
     #[cfg(windows)]
     use platform_windows::{WindowsTerminal as Term, WindowsUnixStream as UnixStream};
     use rusty_mux_client::attach::{
-        Back, CONTROL, HANDSHAKE, Missed, Opened, Plan, Requests, Shape, Welcomed, clone, connect,
-        first_session_name, reach, shape_of, take_over,
+        Back, CONTROL, HANDSHAKE, Missed, Opened, Plan, Requests, Shape, Welcomed, backoff, clone,
+        connect, first_session_name, reach, shape_of, take_over,
     };
     use rusty_mux_client::checkpoint::Receiver;
     use rusty_mux_core::{
@@ -121,9 +121,6 @@ mod client {
     const STEP: u8 = 5;
     /// At most this many bytes typed wait for a block's lease.
     const WAITING: usize = 64 * 1024;
-
-    /// The longest wait between attempts to bring the path back.
-    const BACKOFF: Duration = Duration::from_secs(30);
 
     /// How long a layout change that drops shown blocks waits for their own
     /// close, so their last output shows first.
@@ -513,10 +510,10 @@ mod client {
         }
 
         /// No move before a while from `now`, longer after each failed one,
-        /// at most [`BACKOFF`].
+        /// as [`backoff`] says.
         fn wait(&mut self, now: Instant) {
             self.tries += 1;
-            let wait = Duration::from_secs(1 << self.tries.min(5)).min(BACKOFF);
+            let wait = backoff(self.tries);
             self.next = now + wait;
         }
 
@@ -1798,8 +1795,8 @@ mod client {
             self.replay(held);
         }
 
-        /// No move for a while, longer after each failed one, at most
-        /// [`BACKOFF`].
+        /// No move for a while, longer after each failed one,
+        /// as [`backoff`] says.
         fn wait_to_move(&mut self) {
             self.standby.wait(Instant::now());
         }
@@ -1921,8 +1918,8 @@ mod client {
             rejoiner.ask(Ask::Fresh(plan, keep));
         }
 
-        /// An attempt to bring the path back failed: try again later, at
-        /// most [`BACKOFF`] apart. Ctrl-] d still detaches meanwhile. A
+        /// An attempt to bring the path back failed: try again later,
+        /// as [`backoff`] says. Ctrl-] d still detaches meanwhile. A
         /// detach held through a broken move gets one attempt, to detach
         /// the clients it moved; then the client stops, leaving them to
         /// the server's grace.
@@ -1935,7 +1932,7 @@ mod client {
             };
             lost.tries += 1;
             lost.keep = false;
-            let wait = Duration::from_secs(1 << lost.tries.min(5)).min(BACKOFF);
+            let wait = backoff(lost.tries);
             lost.retry = Some(Instant::now() + wait);
             // Told if the client stops before the path is back: the
             // terminal shows a block until then.

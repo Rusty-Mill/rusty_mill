@@ -42,7 +42,7 @@ protocol implementations).
 
 ## Slices
 
-Each slice is one PR (S2 is two, D103; S3 is three, D106; S4 is three, D108). Every F-item's look goes through `rusty-term-design-expert`; visual rows use
+Each slice is one PR (S2 is two, D103; S3 is three, D106; S4 is four, D108, D112). Every F-item's look goes through `rusty-term-design-expert`; visual rows use
 gui-design D45–D49.
 
 | # | Slice | Gate |
@@ -55,7 +55,8 @@ gui-design D45–D49.
 | S3c | F1 ribbon; F2 prefix keys, hints and badges (D104); F7 zoom with the header button, Exit zoom and the rail (gui-design D49) | arc GO covers C16 |
 | S4a | F4 session switcher under the session chip, switching on the one control connection (D109); running blocks lit in the strip's thumbnails (gui-design D60) | arc GO |
 | S4b | F6 detached chip, popover and Reattach (gui-design D61) | arc GO |
-| S4c | F5 reconnecting, error and reconnected banners (30 s grace, D44; leases survive a reconnect, D83; D110; gui-design D62) | arc GO |
+| S4c | F5 reconnecting, error and reconnected banners (30 s grace, D44; leases survive a reconnect, D83; D110, D111, D113; gui-design D62) | arc GO |
+| S4d | F5 "Session {name} ended" panel with Open switcher (D112; gui-design D62) | arc GO |
 | S5 | F3 take over: confirm first (gui-design D44); the client re-asks for the lease after (D46) | arc GO |
 | Later | C55 runs and prompt marks, C53 images, C54 clipboard, C61–C64 | each needs Nano's own go (D36); C54 and C63 are security-relevant |
 | End | Retire local mode | after C69 and C45 |

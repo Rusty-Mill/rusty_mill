@@ -208,6 +208,31 @@ pub trait Source {
     /// D104). The source sends it on; the window shows the result when the
     /// source lays it out.
     fn act(&self, act: Act);
+    /// The user asked to try reaching the server again now ("Retry now",
+    /// "Retry"; gui-design D62). The source answers with [`Remote::link`].
+    fn retry(&self);
+    /// The user asked to stop trying ("Stop trying"); the source says
+    /// [`Link::Down`].
+    fn stop(&self);
+}
+
+/// How an attached window's source reaches its server (gui-design D62,
+/// handoff D110).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Link {
+    /// Connected.
+    #[default]
+    Up,
+    /// The connection was lost: trying again for `left` more seconds of
+    /// the server's grace, an attempt running while `trying`.
+    Reconnecting { left: u32, trying: bool },
+    /// Back. `kept`: this client took its clients over, leases as they
+    /// were (handoff D83). Otherwise it attached anew, its leases from
+    /// before released, and the window opens its panes again.
+    Back { kept: bool },
+    /// Not trying: the grace ran out or the user stopped. A Retry runs
+    /// while `trying`.
+    Down { trying: bool },
 }
 
 /// A layout change the user asked an attached window's source for.
@@ -253,6 +278,13 @@ impl Remote {
     /// Comes after the [`Remote::layout`] it applies to.
     pub fn zoom(&self, key: Option<u64>) -> bool {
         self.0.send_event(UserEvent::Zoom(key)).is_ok()
+    }
+
+    /// Show how the source reaches its server now (gui-design D62). A
+    /// [`Link::Back`] with `kept: false` comes before the layout of the
+    /// panes to open again.
+    pub fn link(&self, link: Link) -> bool {
+        self.0.send_event(UserEvent::Link(link)).is_ok()
     }
 
     /// Show `session` on the top strip.

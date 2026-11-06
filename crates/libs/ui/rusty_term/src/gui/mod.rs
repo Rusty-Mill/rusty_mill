@@ -20,6 +20,7 @@
 //! - [`window`] — the `winit` event loop + window tying it together.
 
 mod access;
+mod banner;
 #[doc(hidden)]
 pub mod bench;
 mod blocks;

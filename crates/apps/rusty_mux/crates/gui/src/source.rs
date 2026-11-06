@@ -11,6 +11,12 @@
 //! Only the focused block's lease is held, so other clients can type into
 //! the rest, and only a leased block is resized (pack D102). The control
 //! connection also reads what the blocks' headers say ([`Headers`]).
+//!
+//! When the control connection ends, [`Events`] takes this client and its
+//! blocks' clients over on a fresh one, telling the window how it goes
+//! with [`Link`] (gui-design D62, handoff D110-D113): inside the server's
+//! grace it tries on the TUI's schedule; after, or when the server let the
+//! client go, it waits for the user's Retry, which attaches anew.
 
 use std::collections::HashMap;
 use std::net::Shutdown;
@@ -18,22 +24,23 @@ use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver as Inbox, SyncSender};
+use std::sync::mpsc::{Receiver as Inbox, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_mux_client::Conn;
 use rusty_mux_client::attach::{
-    CONTROL, HANDSHAKE, Missed, Requests, clone, connect, first_session_name, reach,
+    CONTROL, HANDSHAKE, Missed, Opened, Plan, Requests, Welcomed, backoff, clone, connect,
+    first_session_name, reach, take_over_with,
 };
 use rusty_mux_client::checkpoint::Receiver;
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
-use rusty_mux_proto::{Features, Launch, Message};
+use rusty_mux_proto::{Features, Launch, Message, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Detached, Dir, Feed, PaneIo, Remote, Session, Source, Tree,
+    Act, BlockInfo, Detached, Dir, Feed, Link, PaneIo, Remote, Session, Source, Tree,
 };
 
 use crate::headers::{Call, Effect, Headers};
@@ -61,6 +68,10 @@ static NEVER: AtomicBool = AtomicBool::new(false);
 /// Feed steps a block's reader keeps ahead of the window's parser.
 const FEED_AHEAD: usize = 16;
 
+/// How long the server keeps a client whose connection ended (handoff
+/// D44, the server's `ORPHAN_GRACE`): the reconnecting banner's countdown.
+const GRACE: Duration = Duration::from_secs(30);
+
 /// The size a new block gets when there is none to attach to.
 const FIRST_SIZE: (u16, u16) = (80, 24);
 
@@ -78,14 +89,7 @@ pub struct Attached {
 /// Connects to the server at `socket` and picks `block`'s window, or that
 /// of a new session's block without one; that block takes the focus.
 pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String> {
-    let stream = connect(socket)?;
-    let mut conn = Conn::new(clone(&stream)?);
-    conn.send(&Message::Hello {
-        features: GUI,
-        resume: None,
-        takeover: None,
-    })
-    .map_err(|e| e.to_string())?;
+    let (stream, mut conn) = hello(socket)?;
     let mut req = Requests {
         conn: &mut conn,
         next: 1,
@@ -112,6 +116,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
     let calls_blocks = welcomed.features.contains(Features::BLOCK_CALL);
     let next = req.next;
     let layout = model.view().0.cloned().unwrap_or(Layout::Block(block));
+    let (asks, inbox) = std::sync::mpsc::channel();
     let state = Arc::new(State {
         socket: socket.to_owned(),
         control: Mutex::new(Conn::new(clone(&stream)?)),
@@ -123,6 +128,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         session: Mutex::new(model.session_id()),
         switch: Mutex::new(None),
         shown: Mutex::new(Shown::default()),
+        asks: Mutex::new(asks),
     });
     let (first, focus) = {
         let mut shown = state.shown();
@@ -138,13 +144,11 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         conn,
         model,
         headers: Headers::default(),
+        me: welcomed.takeover,
+        asks: inbox,
     };
     events.follow_blocks();
-    for m in &entries {
-        if let Message::Entry { entry, .. } = m {
-            events.headers.take(entry);
-        }
-    }
+    events.take_headers(&entries);
     Ok(Attached {
         block,
         focus,
@@ -152,6 +156,28 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         first,
         events,
     })
+}
+
+/// Connects to `socket` and says the GUI's Hello, asking for no takeover.
+fn hello(socket: &Path) -> Result<(UnixStream, Conn<UnixStream>), String> {
+    let stream = connect(socket)?;
+    let mut conn = Conn::new(clone(&stream)?);
+    conn.send(&Message::Hello {
+        features: GUI,
+        resume: None,
+        takeover: None,
+    })
+    .map_err(|e| e.to_string())?;
+    Ok((stream, conn))
+}
+
+/// What the user asked of a lost connection (gui-design D62).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ask {
+    /// "Retry now" or "Retry".
+    Retry,
+    /// "Stop trying".
+    Stop,
 }
 
 /// What the client and the window share.
@@ -173,6 +199,8 @@ struct State {
     /// The session the user picked, for the events reader to show.
     switch: Mutex<Option<SessionId>>,
     shown: Mutex<Shown>,
+    /// Where the window's Retry and Stop go, for the events reader.
+    asks: Mutex<Sender<Ask>>,
 }
 
 /// The blocks shown and which has the focus.
@@ -204,13 +232,23 @@ impl State {
 
     /// The clients this window's block connections are.
     fn mine(&self) -> Vec<ClientId> {
+        self.open_blocks().iter().map(|b| b.client).collect()
+    }
+
+    /// The blocks the window has open.
+    fn open_blocks(&self) -> Vec<Arc<Block>> {
         let shown = self.shown();
         shown
             .blocks
             .values()
             .filter_map(std::sync::Weak::upgrade)
-            .map(|b| b.client)
             .collect()
+    }
+
+    /// Passes the user's `ask` to the events reader.
+    fn ask(&self, ask: Ask) {
+        // No reader: the window is closing anyway.
+        let _ = lock(&self.asks).send(ask);
     }
 
     /// Sends a request on the control connection, returning its number;
@@ -342,6 +380,14 @@ impl Source for MuxSource {
         self.0.send(|req| Message::List { req });
     }
 
+    fn retry(&self) {
+        self.0.ask(Ask::Retry);
+    }
+
+    fn stop(&self) {
+        self.0.ask(Ask::Stop);
+    }
+
     /// Creates a window with one block and selects it, on a connection of
     /// its own so the UI never waits for the server.
     fn new_window(&self) {
@@ -410,6 +456,19 @@ pub enum Out {
     Session(Session),
     /// What the shown blocks' headers say, by pane key.
     Blocks(Vec<(u64, BlockInfo)>),
+    /// How the connection to the server stands (gui-design D62).
+    Link(Link),
+}
+
+/// Why the events reader stopped following the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    /// The control connection ended.
+    Lost,
+    /// The session is gone: the window closes.
+    Gone,
+    /// The window is gone.
+    Closed,
 }
 
 /// The control connection's events for the window.
@@ -418,6 +477,10 @@ pub struct Events {
     conn: Conn<UnixStream>,
     model: Model,
     headers: Headers,
+    /// How to take the control connection's client over, while the
+    /// server keeps it.
+    me: Option<Takeover>,
+    asks: Inbox<Ask>,
 }
 
 impl Events {
@@ -432,27 +495,46 @@ impl Events {
                 Out::Empty => remote.empty(),
                 Out::Session(s) => remote.session(s),
                 Out::Blocks(b) => remote.blocks(b),
+                Out::Link(l) => remote.link(l),
             })
         });
     }
 
-    /// Follows the session until it or the connection ends, or `out` says
-    /// `false`. The session goes out first, then every change.
+    /// Follows the session until it ends or `out` says `false`, bringing
+    /// the connection back when it ends. The session goes out first, then
+    /// every change.
     pub fn run(mut self, mut out: impl FnMut(Out) -> bool) {
         if !(out(Out::Session(self.session())) && out(Out::Zoom(self.zoomed()))) {
             return;
         }
+        let stop = loop {
+            let stop = match self.follow_session(&mut out) {
+                Stop::Lost => self.reconnect(&mut out),
+                stop => Some(stop),
+            };
+            if let Some(stop) = stop {
+                break stop;
+            }
+        };
+        if stop == Stop::Gone {
+            out(Out::Layout(None));
+        }
+    }
+
+    /// Follows the session until the connection or the session ends, or
+    /// `out` says `false`.
+    fn follow_session(&mut self, out: &mut impl FnMut(Out) -> bool) -> Stop {
         while let Ok(message) = self.conn.recv() {
-            if !self.headed(&message, &mut out) {
-                return;
+            if !self.headed(&message, out) {
+                return Stop::Closed;
             }
             let change = match &message {
                 Message::Event { event, .. } => self.model.apply(event),
                 Message::Entry { entry, .. } => self.model.take(entry),
                 _ => Change::None,
             };
-            if !self.switched(&mut out) {
-                return;
+            if !self.switched(out) {
+                return Stop::Closed;
             }
             if let Message::Event {
                 event: Event::WindowCreated { .. } | Event::SessionCreated { .. },
@@ -473,28 +555,221 @@ impl Events {
                 Change::Strip => out(Out::Session(self.session())),
                 Change::Holders => out(Out::Blocks(self.blocks())),
                 // The strip follows: the thumbnail and detached blocks.
-                Change::Layout => self.layout(&mut out) && out(Out::Session(self.session())),
+                Change::Layout => self.layout(out) && out(Out::Session(self.session())),
                 Change::Focus(block) => {
                     let key = self.state.shown().keys.key(block);
                     self.state.focus(key);
                     out(Out::Focus(key))
                 }
                 Change::Shown => {
-                    self.layout(&mut out)
-                        && self.focus_shown(&mut out)
-                        && out(Out::Session(self.session()))
+                    self.layout(out) && self.focus_shown(out) && out(Out::Session(self.session()))
                 }
                 Change::Emptied(window) => {
                     self.state.send(|req| Message::SelectWindow { req, window });
                     out(Out::Session(self.session()))
                 }
-                Change::Gone => break,
+                Change::Gone => return Stop::Gone,
             };
             if !go_on {
-                return;
+                return Stop::Closed;
             }
         }
-        out(Out::Layout(None));
+        Stop::Lost
+    }
+
+    /// Brings the lost control connection back (handoff D110, D113):
+    /// inside the grace it takes the clients over on the TUI's schedule,
+    /// at once on "Retry now"; past it, after "Stop trying" or once the
+    /// server let the client go, it waits for "Retry". `None` once back.
+    fn reconnect(&mut self, out: &mut impl FnMut(Out) -> bool) -> Option<Stop> {
+        // Asks from before the loss were for another one.
+        while self.asks.try_recv().is_ok() {}
+        let lost = Instant::now();
+        let mut tries = 0;
+        let mut at = lost;
+        while self.me.is_some() {
+            let left = GRACE.saturating_sub(lost.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            let secs = left.as_secs() + u64::from(left.subsec_nanos() > 0);
+            let link = |trying| {
+                Out::Link(Link::Reconnecting {
+                    left: secs as u32,
+                    trying,
+                })
+            };
+            if !out(link(false)) {
+                return Some(Stop::Closed);
+            }
+            // Wake as the countdown ticks, or for the next try.
+            let tick = left.saturating_sub(Duration::from_secs(secs - 1));
+            let wait = at.saturating_duration_since(Instant::now()).min(tick);
+            match self.asks.recv_timeout(wait) {
+                Ok(Ask::Retry) => at = Instant::now(),
+                Ok(Ask::Stop) => break,
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Some(Stop::Closed),
+            }
+            if Instant::now() < at {
+                continue;
+            }
+            if !out(link(true)) {
+                return Some(Stop::Closed);
+            }
+            match self.take_over() {
+                Ok(stop) => return self.back(stop, true, out),
+                Err(Missed::Dropped) => self.me = None,
+                Err(Missed::Retry(_)) => {}
+                Err(Missed::Broken(_, me)) => self.me = Some(me),
+            }
+            tries += 1;
+            at = Instant::now() + backoff(tries);
+        }
+        self.down(out)
+    }
+
+    /// The error banner: waits for "Retry", which takes the clients over
+    /// while the server may keep them, else attaches anew (D113).
+    fn down(&mut self, out: &mut impl FnMut(Out) -> bool) -> Option<Stop> {
+        loop {
+            if !out(Out::Link(Link::Down { trying: false })) {
+                return Some(Stop::Closed);
+            }
+            match self.asks.recv() {
+                Ok(Ask::Retry) => {}
+                Ok(Ask::Stop) => continue,
+                Err(_) => return Some(Stop::Closed),
+            }
+            if !out(Out::Link(Link::Down { trying: true })) {
+                return Some(Stop::Closed);
+            }
+            if self.me.is_some() {
+                match self.take_over() {
+                    Ok(stop) => return self.back(stop, true, out),
+                    Err(Missed::Dropped) => self.me = None,
+                    Err(Missed::Retry(_)) => continue,
+                    Err(Missed::Broken(_, me)) => {
+                        self.me = Some(me);
+                        continue;
+                    }
+                }
+            }
+            match self.attach_anew() {
+                Ok(stop) => return self.back(stop, false, out),
+                Err(why) => eprintln!("rusty-mux-gui: reconnecting: {why}"),
+            }
+        }
+    }
+
+    /// Takes this client and its open blocks' clients over on a fresh
+    /// connection (handoff D111), hands each block its connection back
+    /// and reads the session again. `Some(Gone)` when the session ended
+    /// meanwhile.
+    fn take_over(&mut self) -> Result<Option<Stop>, Missed> {
+        let me = self.me.ok_or(Missed::Dropped)?;
+        let blocks: Vec<(Arc<Block>, Takeover)> = self
+            .state
+            .open_blocks()
+            .into_iter()
+            .filter_map(|b| {
+                let token = b.takeover()?;
+                Some((b, token))
+            })
+            .collect();
+        let plan = Plan {
+            me,
+            next: self.state.next.load(Ordering::Relaxed),
+            window: None,
+            resumes: blocks.iter().map(|(b, t)| (b.block, *t)).collect(),
+        };
+        let mut back = take_over_with(self.state.socket.clone(), plan, GUI, &NEVER)?;
+        let mut req = Requests {
+            conn: &mut back.conn,
+            next: back.next,
+            by: Some(Instant::now() + HANDSHAKE),
+            cancel: &NEVER,
+        };
+        let entries = req
+            .call(|req| Message::List { req })
+            .map_err(|why| Missed::Broken(why, back.me))?;
+        let next = req.next;
+        for ((block, _), opened) in blocks.iter().zip(back.panes) {
+            block.revive(opened);
+        }
+        Ok(self.install((back.conn, back.writer), Some(back.me), next, &entries))
+    }
+
+    /// Attaches anew, as a new client: the window opens its blocks again,
+    /// their leases from before released (D113).
+    fn attach_anew(&mut self) -> Result<Option<Stop>, String> {
+        let (stream, mut conn) = hello(&self.state.socket)?;
+        let mut req = Requests {
+            conn: &mut conn,
+            next: 1,
+            by: Some(Instant::now() + HANDSHAKE),
+            cancel: &NEVER,
+        };
+        let Welcomed { takeover, .. } = req.welcome()?;
+        let entries = req.call(|req| Message::List { req })?;
+        let next = req.next;
+        let writer = Conn::new(clone(&stream)?);
+        Ok(self.install((conn, writer), takeover, next, &entries))
+    }
+
+    /// Follows the session on the connection `(conn, writer)` from now,
+    /// as its List `entries` say. `Some(Gone)` when the session is not in
+    /// them (D112).
+    fn install(
+        &mut self,
+        (conn, writer): (Conn<UnixStream>, Conn<UnixStream>),
+        me: Option<Takeover>,
+        next: u64,
+        entries: &[Message],
+    ) -> Option<Stop> {
+        let Some(model) = self.model.relisted(entries) else {
+            return Some(Stop::Gone);
+        };
+        self.model = model;
+        self.conn = conn;
+        self.me = me;
+        *lock(&self.state.control) = writer;
+        self.state.next.store(next, Ordering::Relaxed);
+        *lock(&self.state.session) = self.model.session_id();
+        self.state.shown().window = Some(self.model.shown());
+        self.headers = Headers::default();
+        self.follow_blocks();
+        self.take_headers(entries);
+        None
+    }
+
+    /// Says the connection is back, `kept` when its clients were taken
+    /// over, then shows the session as it is now; `stop` if the session
+    /// ended meanwhile.
+    fn back(
+        &mut self,
+        stop: Option<Stop>,
+        kept: bool,
+        out: &mut impl FnMut(Out) -> bool,
+    ) -> Option<Stop> {
+        if stop.is_some() {
+            return stop;
+        }
+        let shown = out(Out::Link(Link::Back { kept }))
+            && self.layout(out)
+            && self.focus_shown(out)
+            && out(Out::Session(self.session()))
+            && out(Out::Blocks(self.blocks()));
+        (!shown).then_some(Stop::Closed)
+    }
+
+    /// Takes what a List's `entries` say of the blocks' headers.
+    fn take_headers(&mut self, entries: &[Message]) {
+        for m in entries {
+            if let Message::Entry { entry, .. } = m {
+                self.headers.take(entry);
+            }
+        }
     }
 
     /// Shows the session the user picked, if any: its window's layout,
@@ -647,14 +922,30 @@ impl Events {
 }
 
 /// One block's connection, shared by the pane's writer and its reader.
+/// A lost connection is handed back by [`Block::revive`], the client the
+/// same.
 struct Block {
     block: BlockId,
     /// The client the server made of this connection.
     client: ClientId,
-    stream: UnixStream,
+    stream: Mutex<UnixStream>,
     conn: Mutex<Conn<UnixStream>>,
+    /// How to take the client over, if the server allows it.
+    takeover: Mutex<Option<Takeover>>,
+    /// Where a revived connection goes to the reader; taken when the
+    /// pane is dropped, which ends the reader.
+    revive: Mutex<Option<Sender<Conn<UnixStream>>>>,
     next: AtomicU64,
     lease: Mutex<Lease>,
+}
+
+/// Why a block's reader stopped reading a connection.
+enum Read {
+    /// The connection ended: wait for it to be revived.
+    Lost,
+    /// The block closed, the window dropped the pane or a checkpoint was
+    /// bad: the pane ends.
+    Ended,
 }
 
 /// Where the block's input lease stands.
@@ -683,11 +974,14 @@ impl Block {
             Missed::Retry(why) | Missed::Broken(why, _) => why,
             Missed::Dropped => "the server let the client go".into(),
         })?;
+        let (revive, revived) = std::sync::mpsc::channel();
         let shared = Arc::new(Block {
             block,
             client: opened.client,
-            stream: opened.stream,
+            stream: Mutex::new(opened.stream),
             conn: Mutex::new(opened.writer),
+            takeover: Mutex::new(opened.takeover),
+            revive: Mutex::new(Some(revive)),
             next: AtomicU64::new(1),
             lease: Mutex::new(Lease {
                 place: Some(place),
@@ -700,13 +994,41 @@ impl Block {
         let conn = opened.conn;
         std::thread::Builder::new()
             .name(format!("mux-block-{block}"))
-            .spawn(move || reader.read(conn, &tx))
+            .spawn(move || reader.read(conn, &revived, &tx))
             .map_err(|e| e.to_string())?;
         Ok((PaneWriter(shared), feed))
     }
 
     fn lease(&self) -> MutexGuard<'_, Lease> {
         self.lease.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How to take the block's client over now.
+    fn takeover(&self) -> Option<Takeover> {
+        *lock(&self.takeover)
+    }
+
+    /// Hands the block the connection `opened` took its client over on
+    /// (handoff D110): the reader moves to it, where the server sends the
+    /// screen again (an attached client's takeover), and the lease is
+    /// asked for again if wanted, as silence may have lost it.
+    fn revive(&self, opened: Opened) {
+        *lock(&self.takeover) = opened.takeover;
+        *lock(&self.conn) = opened.writer;
+        let old = std::mem::replace(&mut *lock(&self.stream), opened.stream);
+        // The reader leaves the old connection once it ends.
+        let _ = old.shutdown(Shutdown::Both);
+        if let Some(revive) = &*lock(&self.revive) {
+            let _ = revive.send(opened.conn);
+        }
+        let wanted = {
+            let mut lease = self.lease();
+            lease.held = false;
+            lease.asking = None;
+            lease.sizing = None;
+            lease.wanted
+        };
+        self.want_lease(wanted);
     }
 
     fn send(&self, make: impl FnOnce(u64) -> Message) -> u64 {
@@ -775,9 +1097,26 @@ impl Block {
         }
     }
 
-    /// Reads the block's connection into feed steps until it ends, the
-    /// block closes or the window drops the pane.
-    fn read(&self, mut conn: Conn<UnixStream>, feed: &SyncSender<Feed>) {
+    /// Reads the block's connections into feed steps, each revived one
+    /// after the last ends, until the block closes or the window drops
+    /// the pane.
+    fn read(
+        &self,
+        mut conn: Conn<UnixStream>,
+        revived: &Inbox<Conn<UnixStream>>,
+        feed: &SyncSender<Feed>,
+    ) {
+        while let Read::Lost = self.read_one(&mut conn, feed) {
+            match revived.recv() {
+                Ok(next) => conn = next,
+                Err(_) => return,
+            }
+        }
+    }
+
+    /// Reads one connection into feed steps; the screen comes first, as
+    /// a checkpoint.
+    fn read_one(&self, conn: &mut Conn<UnixStream>, feed: &SyncSender<Feed>) -> Read {
         let block = self.block;
         let mut checkpoint = Some(Receiver::default());
         while let Ok(message) = conn.recv() {
@@ -791,7 +1130,7 @@ impl Block {
                     let pushed = checkpoint.as_mut().map(|c| c.push(offset, total, &data));
                     if !matches!(pushed, Some(Ok(()))) {
                         eprintln!("rusty-mux-gui: block {block}: a bad checkpoint");
-                        return;
+                        return Read::Ended;
                     }
                     continue;
                 }
@@ -800,7 +1139,7 @@ impl Block {
                         Some(Ok((grid, parser))) => Feed::Screen(Box::new(grid), Box::new(parser)),
                         _ => {
                             eprintln!("rusty-mux-gui: block {block}: a bad checkpoint");
-                            return;
+                            return Read::Ended;
                         }
                     }
                 }
@@ -818,7 +1157,7 @@ impl Block {
                 Message::Event {
                     event: Event::BlockClosed { block: b },
                     ..
-                } if b == block => return,
+                } if b == block => return Read::Ended,
                 Message::Done { req, .. } => {
                     self.answered(req, true);
                     continue;
@@ -830,9 +1169,10 @@ impl Block {
                 _ => continue,
             };
             if feed.send(step).is_err() {
-                return;
+                return Read::Ended;
             }
         }
+        Read::Lost
     }
 }
 
@@ -878,7 +1218,9 @@ impl Drop for PaneWriter {
     /// Detached first: a server keeps a client whose connection just
     /// ends, lease and all, for a reconnect.
     fn drop(&mut self) {
+        // No revive: the reader ends with the connection.
+        lock(&self.0.revive).take();
         self.0.send(|req| Message::Detach { req });
-        let _ = self.0.stream.shutdown(Shutdown::Both);
+        let _ = lock(&self.0.stream).shutdown(Shutdown::Both);
     }
 }

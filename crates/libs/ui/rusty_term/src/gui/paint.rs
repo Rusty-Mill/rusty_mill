@@ -24,6 +24,9 @@ pub(crate) struct Pixmap {
     /// Some pixels may be [`CLEAR`], drawn as nothing (a popover's
     /// rounded corners over whatever is under them).
     pub see_through: bool,
+    /// How much of it covers what is under it, 255 whole: a translucent
+    /// veil dims what it is drawn over (gui-design D62).
+    pub opacity: u8,
     /// The fingerprint's hash once taken; any change clears it, so a
     /// window-sized pixmap is hashed once per paint, not once per frame.
     print: Cell<Option<u64>>,
@@ -123,6 +126,7 @@ impl Pixmap {
             height,
             pixels: vec![color; width * height],
             see_through: false,
+            opacity: u8::MAX,
             print: Cell::new(None),
         }
     }
@@ -159,7 +163,39 @@ impl Pixmap {
             self.print.set(Some(hash));
             hash
         });
-        (self.width, self.height, hash)
+        // A veil and the same pixels whole are different images.
+        (
+            self.width,
+            self.height,
+            hash ^ u64::from(u8::MAX - self.opacity),
+        )
+    }
+
+    /// Keep `keep` (0..=1) of `r`'s pixels over `bg`: a disabled
+    /// control's 45% (gui-design D62).
+    pub(crate) fn fade(&mut self, r: Rect, bg: u32, keep: f32) {
+        let (w, h) = (self.width, self.height);
+        let x0 = (r.x.max(0.0) as usize).min(w);
+        let y0 = (r.y.max(0.0) as usize).min(h);
+        let x1 = ((r.x + r.w).ceil().max(0.0) as usize).min(w);
+        let y1 = ((r.y + r.h).ceil().max(0.0) as usize).min(h);
+        let pixels = self.pixels_mut();
+        for y in y0..y1 {
+            for px in &mut pixels[y * w + x0..y * w + x1] {
+                if *px != CLEAR {
+                    *px = mix(bg, *px, keep);
+                }
+            }
+        }
+    }
+
+    /// A `width × height` veil of `color` covering `opacity` of what is
+    /// under it.
+    pub(crate) fn veil(width: usize, height: usize, color: u32, opacity: u8) -> Self {
+        Self {
+            opacity,
+            ..Self::new(width, height, color)
+        }
     }
 
     /// Calls `cover` for every pixel centre in `r` (clipped to `clip` and
@@ -320,6 +356,7 @@ pub(crate) mod icons {
         "M5 3v10M5 13a1.8 1.8 0 1 0 0 .1M11 3a1.8 1.8 0 1 0 0 .1M11 4.8c0 4-6 3-6 6.2";
     pub(crate) const EYE: &str = "M1.8 8s2.3-4.2 6.2-4.2S14.2 8 14.2 8s-2.3 4.2-6.2 4.2S1.8 8 1.8 8zM8 6.3a1.7 1.7 0 1 0 0 3.4 1.7 1.7 0 0 0 0-3.4z";
     pub(crate) const CHECK: &str = "M3.5 8.5l3 3 6-7";
+    pub(crate) const ALERT: &str = "M8 2.5l6 10.5H2zM8 7v3M8 11.5h.1";
     pub(crate) const CROSS: &str = "M4.5 4.5l7 7M11.5 4.5l-7 7";
     pub(crate) const PAUSE: &str = "M6 4v8M10 4v8";
     /// A header's zoom button (gui-design D49).
@@ -781,5 +818,25 @@ mod tests {
         };
         assert!(r.contains(1.0, 2.9));
         assert!(!r.contains(3.0, 1.0));
+    }
+
+    #[test]
+    fn a_fade_keeps_part_of_a_box_and_a_veil_differs_from_its_colour_whole() {
+        let mut p = Pixmap::new(4, 1, FG);
+        p.fade(
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 2.0,
+                h: 1.0,
+            },
+            BG,
+            0.45,
+        );
+        assert_eq!((at(&p, 0, 0), at(&p, 3, 0)), (super::mix(BG, FG, 0.45), FG));
+        let whole = Pixmap::new(4, 1, BG);
+        let veil = Pixmap::veil(4, 1, BG, 77);
+        assert_eq!(veil.opacity, 77);
+        assert_ne!(veil.fingerprint(), whole.fingerprint());
     }
 }

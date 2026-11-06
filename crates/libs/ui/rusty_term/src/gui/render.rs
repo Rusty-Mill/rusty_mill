@@ -400,7 +400,10 @@ pub(super) fn composite(
     // strip band shows above it); the grid starts below the bar plus the
     // pad-sized gap — the bottom pad absorbs the difference.
     let oy = grid_top(chrome, scene.strip, pad, bh);
-    if let Some(rows) = repaint {
+    // A veil blends with what is under it, so drawn again over rows not
+    // repainted it would darken them twice: a veiled frame is painted whole.
+    let veiled = scene.over.iter().any(|(p, _)| p.opacity < u8::MAX);
+    if let Some(rows) = repaint.filter(|_| !veiled) {
         for (p, rows) in panes.iter().zip(rows) {
             let (ox, oy) = (pad + p.px.0, oy + p.px.1);
             cpu::draw_grid(
@@ -585,6 +588,58 @@ mod tests {
         assert_eq!(at(PAD, top - 1), page_bg);
         assert_eq!(at(0, h - 12), status_bg, "status is one UI cell tall");
         assert_eq!(at(0, h - 13), page_bg);
+    }
+
+    /// A veil over the blocks dims them once, however many frames draw it.
+    #[test]
+    fn a_veiled_frame_is_painted_whole_so_the_veil_never_stacks() {
+        let g = Grid::new(2, 2);
+        let view = g.frame_view();
+        let pane = PaneFrame {
+            grid: &view,
+            col0: 0,
+            row0: 0,
+            px: (0, 0),
+            focused: false,
+            cursor_on: false,
+            trail: Vec::new(),
+            hover_link: None,
+            marks: Vec::new(),
+            search: SearchColors::default(),
+        };
+        let (w, h) = (40, 60);
+        let over = [(
+            super::super::paint::Pixmap::veil(w, h, 0x000000, 128),
+            (0, 0),
+        )];
+        let scene = Scene {
+            over: &over,
+            ..Scene::default()
+        };
+        let mut buf = vec![0; w * h];
+        let mut frame = |repaint: Option<&[Vec<bool>]>| {
+            let (mut font, mut ui) = (Blank((10, 20)), Blank((6, 12)));
+            composite(
+                &mut buf,
+                std::slice::from_ref(&pane),
+                &[],
+                scene,
+                &[],
+                &mut font,
+                &mut ui,
+                w,
+                h,
+                0,
+                0xFFFFFF,
+                0,
+                4,
+                repaint,
+            );
+            buf.clone()
+        };
+        let first = frame(None);
+        let again = frame(Some(&[vec![false; 2]]));
+        assert_eq!(first, again);
     }
 
     /// The first cell of a 1×1 grid after `bytes`, as the window draws it.

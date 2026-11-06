@@ -21,6 +21,16 @@ use crate::Conn;
 /// cancel flag are checked between reads.
 const READ_SLICE: Duration = Duration::from_millis(100);
 
+/// The longest wait between attempts to bring a path back.
+pub const BACKOFF: Duration = Duration::from_secs(30);
+
+/// The wait before attempt `tries + 1` to bring a path back: `2^tries`
+/// seconds, at most [`BACKOFF`] (handoff D110; tries at about 0, 2, 6, 14
+/// and 30 s).
+pub fn backoff(tries: u32) -> Duration {
+    Duration::from_secs(1 << tries.min(5)).min(BACKOFF)
+}
+
 /// What the control connection asks for; a server without `LAYOUT`
 /// shows only the block asked for.
 pub const CONTROL: Features = Features::CHECKPOINT_V6
@@ -332,13 +342,25 @@ pub fn answer(
 /// control connection's first, with the layout asked for again, then
 /// each block's. Every answer is due within [`HANDSHAKE`].
 pub fn take_over(socket: PathBuf, plan: Plan, cancel: &AtomicBool) -> Result<Back, Missed> {
+    take_over_with(socket, plan, CONTROL, cancel)
+}
+
+/// [`take_over`], the control connection saying Hello with `features`:
+/// a client that asked for more than [`CONTROL`] keeps it on the path
+/// back.
+pub fn take_over_with(
+    socket: PathBuf,
+    plan: Plan,
+    features: Features,
+    cancel: &AtomicBool,
+) -> Result<Back, Missed> {
     let by = Instant::now() + HANDSHAKE;
     let retry = |e: String| Missed::Retry(format!("reconnecting: {e}"));
     let stream = connect(&socket).map_err(retry)?;
     let mut conn = Conn::new(clone(&stream).map_err(retry)?);
     let writer = Conn::new(clone(&stream).map_err(retry)?);
     conn.send(&Message::Hello {
-        features: CONTROL,
+        features,
         resume: None,
         takeover: Some(plan.me),
     })
@@ -465,5 +487,21 @@ pub fn welcomed(message: Message) -> Result<Welcomed, String> {
             takeover: token.map(|token| Takeover { client, token }),
         }),
         other => Err(format!("expected Welcome, got {other:?}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BACKOFF, backoff};
+    use std::time::Duration;
+
+    #[test]
+    fn backoff_doubles_up_to_thirty_seconds() {
+        let s = |n| Duration::from_secs(n);
+        assert_eq!(backoff(0), s(1));
+        assert_eq!(backoff(1), s(2));
+        assert_eq!(backoff(4), s(16));
+        assert_eq!(backoff(5), BACKOFF);
+        assert_eq!(backoff(40), BACKOFF, "no overflow");
     }
 }

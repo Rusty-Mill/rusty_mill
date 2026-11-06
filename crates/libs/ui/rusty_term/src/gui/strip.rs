@@ -48,6 +48,9 @@ const CLOSE_HOVER: (u32, u32) = (0xFFFFFF, 0xC42B1C);
 /// The detached chip's height and side padding (D61).
 const DETACHED_H: f32 = 28.0;
 const DETACHED_PAD: f32 = 12.0;
+/// What a control that needs the server keeps of its look while the link
+/// is down (D62: 45%).
+const DISABLED: f32 = 0.45;
 
 /// What a spot on the strip does when clicked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +77,9 @@ pub(crate) struct Look {
     pub pressed: Option<Spot>,
     /// Whether the detached popover is open (D61: raised, accent border).
     pub detached_open: bool,
+    /// The link to the server is down: tabs, "+" and the detached chip
+    /// show at 45% and take no clicks (D62).
+    pub offline: bool,
 }
 
 /// A painted strip: its pixels and the spots on them. A click anywhere
@@ -325,7 +331,21 @@ pub(crate) fn paint(
         );
         spots.push((r, Spot::NewWindow));
     }
+    if look.offline {
+        disable_server_spots(&mut p, &mut spots, c.frame);
+    }
     Strip { pixmap: p, spots }
+}
+
+/// Fade the spots that need the server to 45% and drop them (D62).
+fn disable_server_spots(p: &mut Pixmap, spots: &mut Vec<(Rect, Spot)>, bg: u32) {
+    spots.retain(|&(r, spot)| {
+        let server = matches!(spot, Spot::Tab(_) | Spot::NewWindow | Spot::Detached);
+        if server {
+            p.fade(r, bg, DISABLED);
+        }
+        !server
+    });
 }
 
 /// The "{n} detached" chip ending at `right` (D61): a zoom icon, the
@@ -558,6 +578,7 @@ mod tests {
             hover: None,
             pressed: None,
             detached_open: false,
+            offline: false,
         }
     }
 
@@ -773,5 +794,20 @@ mod tests {
         let open = paint(&with_detached(1), &[], &open, 1200, &mut f);
         assert_eq!(accent(&shut), 0);
         assert!(accent(&open) > 0);
+    }
+
+    #[test]
+    fn offline_only_the_session_chip_and_captions_take_clicks() {
+        let mut f = font();
+        let offline = Look {
+            offline: true,
+            ..look(1.0)
+        };
+        let strip = paint(&with_detached(1), &[], &offline, 1400, &mut f);
+        let spots: Vec<Spot> = strip.spots.iter().map(|&(_, s)| s).collect();
+        assert_eq!(
+            spots,
+            [Spot::Minimize, Spot::Maximize, Spot::Close, Spot::Session]
+        );
     }
 }

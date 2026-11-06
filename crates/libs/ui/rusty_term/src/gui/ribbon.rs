@@ -8,6 +8,7 @@
 
 use super::chrome::Chrome;
 use super::paint::{Pixmap, Rect};
+use super::source::Link;
 use super::text::{UiText, Weight};
 
 /// Ribbon height, its top rule included.
@@ -43,6 +44,9 @@ pub(crate) struct Ribbon {
     pub shell: Option<String>,
     /// The prefix is armed (F2).
     pub armed: bool,
+    /// How the window reaches its server: the dot and the first words
+    /// (gui-design D62).
+    pub link: Link,
 }
 
 /// One hint: its keys and what they do.
@@ -146,7 +150,12 @@ fn left_texts(ribbon: &Ribbon) -> Vec<String> {
     if ribbon.detached > 0 {
         count = format!("{count}, {} detached", ribbon.detached);
     }
-    let mut texts = vec![format!("Connected to {}", ribbon.target), count];
+    let state = match ribbon.link {
+        Link::Up | Link::Back { .. } => "Connected to",
+        Link::Reconnecting { .. } => "Reconnecting to",
+        Link::Down { .. } => "Not connected to",
+    };
+    let mut texts = vec![format!("{state} {}", ribbon.target), count];
     texts.extend(ribbon.shell.clone());
     texts.push("UTF-8".to_owned());
     texts
@@ -226,7 +235,12 @@ pub(crate) fn paint(
         w: DOT * s,
         h: DOT * s,
     };
-    out.fill(dot, DOT * s / 2.0, c.success);
+    let dot_ink = match ribbon.link {
+        Link::Up | Link::Back { .. } => c.success,
+        Link::Reconnecting { .. } => c.muted,
+        Link::Down { .. } => c.failure,
+    };
+    out.fill(dot, DOT * s / 2.0, dot_ink);
     x += lead;
     for t in &left {
         x += out.text(font, t, Weight::Regular, TEXT_PX * s, x, base, c.muted) + LEFT_GAP * s;
@@ -259,6 +273,7 @@ mod tests {
             detached: 0,
             shell: Some("zsh".into()),
             armed: false,
+            link: Link::Up,
         }
     }
 
@@ -277,6 +292,23 @@ mod tests {
             left_texts(&one),
             ["Connected to baileyai", "1 block", "UTF-8"]
         );
+    }
+
+    #[test]
+    fn the_link_leads_the_left_group() {
+        let at = |link| left_texts(&Ribbon { link, ..ribbon() })[0].clone();
+        assert_eq!(
+            at(Link::Reconnecting {
+                left: 3,
+                trying: false
+            }),
+            "Reconnecting to baileyai"
+        );
+        assert_eq!(
+            at(Link::Down { trying: false }),
+            "Not connected to baileyai"
+        );
+        assert_eq!(at(Link::Back { kept: true }), "Connected to baileyai");
     }
 
     #[test]

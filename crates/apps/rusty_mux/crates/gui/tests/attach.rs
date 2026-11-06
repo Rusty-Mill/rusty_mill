@@ -2,7 +2,8 @@
 //! output reach its pane, typing needs the lease the focus brings, the
 //! window's layout changes are followed, the window's own split and zoom
 //! requests come back as layout and zoom, a session picked in the
-//! switcher is shown, and a detached block is listed and put back.
+//! switcher is shown, a detached block is listed and put back, and a
+//! lost connection is taken over, or attached anew on Retry.
 
 #![cfg(target_os = "linux")]
 
@@ -15,9 +16,9 @@ use rusty_mux_client::Conn;
 use rusty_mux_client::attach::{CONTROL, Requests};
 use rusty_mux_core::{Side, Size};
 use rusty_mux_gui::source::{Out, attach};
-use rusty_mux_proto::{Launch, Message};
+use rusty_mux_proto::{Entry, Features, Launch, Message};
 use rusty_mux_server::{Config, ConsoleHost, serve};
-use rusty_term::gui::source::{Act, Dir, Feed, PaneIo, Source, Tree};
+use rusty_term::gui::source::{Act, Dir, Feed, Link, PaneIo, Source, Tree};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
 
@@ -505,4 +506,178 @@ fn a_detached_block_is_listed_and_reattach_puts_it_back() {
         Out::Layout(Some(Tree::Pane(new))),
         "it fills the empty window"
     );
+}
+
+/// A socket forwarding to the server's, whose connections can be cut as
+/// a broken link would, leaving the server's clients kept for a takeover.
+struct Relay {
+    path: PathBuf,
+    open: std::sync::Arc<std::sync::Mutex<Vec<UnixStream>>>,
+}
+
+impl Relay {
+    fn new(socket: &std::path::Path) -> Self {
+        let path = socket.with_extension("relay");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind the relay");
+        let open = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (target, kept) = (socket.to_owned(), std::sync::Arc::clone(&open));
+        std::thread::spawn(move || {
+            for near in listener.incoming() {
+                let (Ok(near), Ok(far)) = (near, UnixStream::connect(&target)) else {
+                    return;
+                };
+                let pipe = |mut from: UnixStream, mut to: UnixStream| {
+                    std::thread::spawn(move || {
+                        let _ = std::io::copy(&mut from, &mut to);
+                        let _ = to.shutdown(std::net::Shutdown::Both);
+                    });
+                };
+                let clone = |s: &UnixStream| s.try_clone().expect("clone");
+                kept.lock()
+                    .expect("relay")
+                    .extend([clone(&near), clone(&far)]);
+                pipe(clone(&near), clone(&far));
+                pipe(far, near);
+            }
+        });
+        Self { path, open }
+    }
+
+    /// Ends every connection made so far.
+    fn cut(&self) {
+        for s in self.open.lock().expect("relay").drain(..) {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+/// The next `out` that `want` takes, skipping the rest.
+fn next_out(outs: &Receiver<Out>, want: impl Fn(&Out) -> bool) -> Out {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let out = outs.recv_timeout(left).expect("an event");
+        if want(&out) {
+            return out;
+        }
+    }
+}
+
+/// Waits for the block's screen to be read again.
+fn next_screen(feed: &Receiver<Feed>) {
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if let Feed::Screen(..) = feed.recv_timeout(left).expect("a screen") {
+            return;
+        }
+    }
+}
+
+#[test]
+fn a_lost_link_is_taken_over_and_the_open_block_goes_on() {
+    let socket = start_server();
+    let relay = Relay::new(&socket);
+    let attached = attach(&relay.path, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    next_screen(&feed);
+    type_until_echoed(writer.as_mut(), &feed, 1);
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+
+    relay.cut();
+    let link = |o: &Out| matches!(o, Out::Link(_));
+    assert!(matches!(
+        next_out(&outs, link),
+        Out::Link(Link::Reconnecting { left: 30, .. })
+    ));
+    let back = next_out(&outs, |o| {
+        matches!(o, Out::Link(Link::Back { .. } | Link::Down { .. }))
+    });
+    assert_eq!(back, Out::Link(Link::Back { kept: true }));
+    assert_eq!(
+        next_out(&outs, |o| matches!(o, Out::Layout(_))),
+        Out::Layout(Some(Tree::Pane(key)))
+    );
+    // The same pane: its screen read again, its lease kept or taken back.
+    next_screen(&feed);
+    type_until_echoed(writer.as_mut(), &feed, 2);
+}
+
+#[test]
+fn a_client_the_server_let_go_waits_for_retry_and_attaches_anew() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("opened"));
+    next_screen(&feed);
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+
+    // Another client ends the GUI's control client: it is not kept.
+    let mut conn = Conn::new(UnixStream::connect(&socket).expect("connect"));
+    conn.send(&Message::Hello {
+        features: CONTROL.union(Features::LABELS),
+        resume: None,
+        takeover: None,
+    })
+    .expect("hello");
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    let me = req.welcome().expect("welcome").client;
+    let controls: Vec<_> = req
+        .call(|req| Message::List { req })
+        .expect("a list")
+        .into_iter()
+        .filter_map(|m| match m {
+            Message::Entry {
+                entry:
+                    Entry::Client {
+                        client,
+                        attached: None,
+                        ..
+                    },
+                ..
+            } if client != me => Some(client),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(controls.len(), 1, "the GUI's control client");
+    req.call(|req| Message::Disconnect {
+        req,
+        client: controls[0],
+    })
+    .expect("disconnected");
+
+    let link = |o: &Out| matches!(o, Out::Link(Link::Down { .. } | Link::Back { .. }));
+    assert_eq!(
+        next_out(&outs, link),
+        Out::Link(Link::Down { trying: false })
+    );
+    attached.source.retry();
+    assert_eq!(
+        next_out(&outs, link),
+        Out::Link(Link::Down { trying: true })
+    );
+    assert_eq!(next_out(&outs, link), Out::Link(Link::Back { kept: false }));
+    assert_eq!(
+        next_out(&outs, |o| matches!(o, Out::Layout(_))),
+        Out::Layout(Some(Tree::Pane(key)))
+    );
+    // The window opens its block again, as a new client.
+    drop((writer, feed));
+    let (mut writer, feed) = feed_of(attached.source.open(key, 80, 24).expect("reopened"));
+    next_screen(&feed);
+    type_until_echoed(writer.as_mut(), &feed, 3);
 }
