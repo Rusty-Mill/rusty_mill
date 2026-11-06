@@ -253,6 +253,12 @@ pub fn open_claims_task(
     if let Err(e) = set.check_erosion() {
         return refuse(format!("erosion: {e}"));
     }
+    // D115: enforced limits must be the ones Nano recorded.
+    if let Some(limits) = set.erosion_limits() {
+        if let Err(e) = crate::erosion_limits::check(dir, limits) {
+            return refuse(format!("erosion: {e}"));
+        }
+    }
     let repo_dir = Path::new(repo);
     let dirs: &[&Path] = match repo_dir.is_absolute() {
         true => &[repo_dir],

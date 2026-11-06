@@ -137,7 +137,7 @@ fn dry_run(argv: &[String]) -> Result<String, String> {
 fn run() -> Result<String, String> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let sub = argv.first().cloned().ok_or(
-        "usage: bbp <mcp|open|assign|card|tick|human|runner|metrics|tokens|pairs|agents-check|grade|why|verify|shadow|mod> ...",
+        "usage: bbp <mcp|open|assign|card|tick|human|erosion|runner|metrics|tokens|pairs|agents-check|grade|why|verify|shadow|mod> ...",
     )?;
     if sub == "__sandbox" {
         let rest: Vec<OsString> = std::env::args_os().skip(2).collect();
@@ -239,6 +239,9 @@ fn run() -> Result<String, String> {
     let dir = PathBuf::from(a.flag_or_env("dir", "BBP_DIR")?);
     if sub == "cgroup-scope" {
         return cgroup_scope(&dir);
+    }
+    if sub == "erosion" {
+        return erosion(&a, &dir);
     }
     // `bbp why TASK` names the task positionally too.
     let task = match (sub.as_str(), a.positional.first()) {
@@ -721,3 +724,33 @@ fn cgroup_open(_: &std::path::Path, _: &TaskId, _: &std::path::Path) -> Result<S
 
 #[cfg(not(target_os = "linux"))]
 const CGROUPS_LINUX_ONLY: &str = "session cgroups are Linux only";
+
+/// `bbp erosion approve|limits` (D115, D117): record Nano's approved
+/// erosion limits, or print the newest record (`null` if none).
+fn erosion(a: &Args, dir: &std::path::Path) -> Result<String, String> {
+    use rusty_bbp_host::erosion_limits;
+    let json = |r: &Option<erosion_limits::Record>| {
+        rusty_serde::json::to_string(r).map_err(|e| e.to_string())
+    };
+    match a.pos(0)? {
+        "limits" => json(&erosion_limits::newest(dir)?),
+        "approve" => {
+            let bp = |k: &str| -> Result<i32, String> {
+                a.flag(k)?
+                    .parse()
+                    .map_err(|_| format!("--{k} must be a whole number of basis points"))
+            };
+            let record = erosion_limits::record(
+                bp("concentration-bp")?,
+                bp("duplication-bp")?,
+                a.flags.get("as").map_or("human", String::as_str),
+                a.flag("source")?,
+                rusty_bbp_host::now(),
+            );
+            json(&Some(erosion_limits::approve(dir, record)?))
+        }
+        other => Err(format!(
+            "unknown erosion action {other} (approve --concentration-bp N --duplication-bp M --source REF [--as WHO] | limits)"
+        )),
+    }
+}
