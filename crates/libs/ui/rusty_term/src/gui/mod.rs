@@ -43,4 +43,4 @@ pub mod source;
 mod taskbar;
 mod window;
 
-pub use window::run;
+pub use window::{run, run_attached};

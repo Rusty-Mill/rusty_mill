@@ -193,6 +193,39 @@ impl FrameView {
         Some((cols, rows))
     }
 
+    /// This frame cut to at most `cols × rows` from its top-left: what a
+    /// pane shows of a terminal larger than its place, such as a mux block
+    /// another client sized. Cut rows lose their bidi view, the status line
+    /// goes with the last row, the cursor hides when cut off, and only
+    /// images wholly inside stay.
+    pub fn cropped(mut self, cols: usize, rows: usize) -> FrameView {
+        let (cols, rows) = (cols.min(self.cols), rows.min(self.rows));
+        if (cols, rows) == (self.cols, self.rows) {
+            return self;
+        }
+        let old = self.cols;
+        self.cells = top_left(&self.cells, old, cols, rows);
+        self.highlight = top_left(&self.highlight, old, cols, rows);
+        self.placeholders = self.placeholders.map(|p| top_left(&p, old, cols, rows));
+        self.keys.truncate(rows);
+        self.marks.truncate(rows);
+        self.line_attrs.truncate(rows);
+        self.bidi = match cols == old {
+            true => self.bidi.into_iter().take(rows).collect(),
+            false => vec![None; rows],
+        };
+        if rows < self.rows {
+            self.status = None;
+        }
+        let (c, r) = self.cursor;
+        self.cursor_visible &= c < cols && r < rows;
+        self.images.retain(|im| {
+            im.col + im.cols <= cols && im.top >= 0 && im.top as usize + im.rows <= rows
+        });
+        (self.cols, self.rows) = (cols, rows);
+        self
+    }
+
     fn kitty(&self, id: u32) -> Option<&FrameKitty> {
         self.kitty.iter().find(|k| k.id == id)
     }
@@ -325,6 +358,16 @@ impl Grid {
     }
 }
 
+/// The top-left `cols × rows` of the row-major `cells`, `old` to a row.
+fn top_left<T: Copy>(cells: &[T], old: usize, cols: usize, rows: usize) -> Vec<T> {
+    cells
+        .chunks(old)
+        .take(rows)
+        .flat_map(|r| &r[..cols])
+        .copied()
+        .collect()
+}
+
 fn highlight_bits(view: &View<'_>, col: usize, row: usize) -> u8 {
     let mut bits = 0;
     if view.is_selected(col, row) {
@@ -427,5 +470,43 @@ mod tests {
             g.bidi_active() && marks && selected && matched,
             "fixture covers each"
         );
+    }
+
+    #[test]
+    fn a_cropped_frame_is_the_top_left_of_the_whole() {
+        let mut g = busy_grid();
+        g.view_offset = 0;
+        let whole = g.frame_view();
+        let f = g.frame_view().cropped(10, 4);
+        assert_eq!((f.cols, f.rows), (10, 4));
+        for row in 0..4 {
+            assert_eq!(f.row_key(row), whole.row_key(row));
+            assert_eq!(f.line_attr(row), whole.line_attr(row));
+            assert!(f.bidi_row(row).is_none(), "cut rows lose their bidi view");
+            for col in 0..10 {
+                assert_eq!(f.cell(col, row), whole.cell(col, row), "({col},{row})");
+                assert_eq!(f.is_selected(col, row), whole.is_selected(col, row));
+            }
+        }
+        assert_eq!(f.block_marks(), &whole.block_marks()[..4]);
+        assert!(f.status_row().is_none());
+    }
+
+    #[test]
+    fn cropping_to_the_size_or_larger_changes_nothing() {
+        let g = busy_grid();
+        let f = g.frame_view().cropped(100, 100);
+        assert_eq!((f.cols, f.rows), (g.cols, g.rows));
+        assert_eq!(f.status_row(), g.status_row());
+    }
+
+    #[test]
+    fn a_cursor_cut_off_is_hidden() {
+        let mut g = Grid::new(20, 5);
+        AnsiParser::new().advance(&mut g, b"\x1b[4;15H");
+        assert!(g.frame_view().cropped(20, 5).cursor_visible);
+        assert!(!g.frame_view().cropped(10, 5).cursor_visible);
+        assert!(!g.frame_view().cropped(20, 3).cursor_visible);
+        assert!(g.frame_view().cropped(15, 4).cursor_visible);
     }
 }

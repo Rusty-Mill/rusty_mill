@@ -1,0 +1,33 @@
+[package]
+name = "rusty_mux_gui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT"
+description = "GUI client for rusty_mux: shows a server window's split layout of blocks in rusty_term's native window."
+repository = "https://github.com/Rusty-Mill/rusty_mill"
+publish = false
+
+[package.metadata.rusty_mill]
+layer = "apps"
+
+[[bin]]
+name = "rusty-mux-gui"
+path = "src/main.rs"
+
+[dependencies]
+# The one mux crate that links the rusty_term front end (pack D96).
+rusty_term = { workspace = true, features = ["gui"] }
+rusty_mux_client = { workspace = true }
+rusty_mux_core = { workspace = true }
+rusty_mux_proto = { workspace = true }
+rusty_uuid = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+platform-windows = { workspace = true }
+
+[dev-dependencies]
+# Runs a real server in-process, as rusty_mux_tui's tests do. The client
+# itself never links the server.
+rusty_mux_server = { workspace = true }
+rusty_tokio = { workspace = true }

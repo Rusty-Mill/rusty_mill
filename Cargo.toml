@@ -107,6 +107,7 @@ members = [
     "crates/libs/storage/rusty_multimodal_db_engine",
     "crates/apps/rusty_mux/crates/client",
     "crates/apps/rusty_mux/crates/core",
+    "crates/apps/rusty_mux/crates/gui",
     "crates/apps/rusty_mux/crates/ctl",
     "crates/apps/rusty_mux/crates/mcp",
     "crates/apps/rusty_mux/crates/proto",
