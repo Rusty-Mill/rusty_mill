@@ -121,6 +121,8 @@ Precise contracts used by this guide:
 | D111 | #599 `rusty_orch lens record`: read-only calibration report command | [stated] 2026-11-05 (#599) |
 | D112 | #599 `claim_history` gains `min_authors`, golden results, evidence refs, reopen wakes and candidate provenance | [stated] 2026-11-05 (#599) |
 | D113 | #704 slice 4: cleanup mode, consolidate inputs, split | [default] 2026-11-05 (#704) |
+| D114 | #704 D44 cleanup half-limit leg: repo head vs last cleanup | [stated] 2026-11-06 (#704) |
+| D115 | #704 approved erosion limits: a human-only host record | [stated] 2026-11-06 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -1080,3 +1082,21 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [default] · remind-me: mem_be0176f1b8094208ace97f73cbe425f0
 **Key.** lel:704:cleanup-slice4-build-defaults
 **Source.** Follow-up questions A–E from the #704 slice 4 build thread, 2026-11-05; D37, D44, D55, D82, D88, D110; `rusty_bbp_host` `src/profiles.rs` `check_erosion_base`, `src/bin/bbp.rs` `open`, `src/admin.rs` `open_claims_task`; `rusty_bbp` `src/event.rs` `TaskOpened`; `rusty_erosion` `src/main.rs`. Numbered D113 because main holds D110–D112. Its open question is Q37 because #1530 holds Q36.
+
+## D114. #704 D44 cleanup half-limit leg: repo head vs last cleanup
+
+**Decision.** D44's "cumulative erosion since the last cleanup reaches half the limit" is measured on the repo, not on claims. orch compares the current repo head with the base of the last cleanup, per metric. It writes the `consolidate` intent when either metric's change (concentration or duplication) reaches half that metric's approved limit. Human commits count too, not only accepted claims. The count leg (5 accepted claims, D44, D110) is unchanged. With no approved limits (report-only, D42) the half-limit leg still can't fire; it starts once limits are recorded (D115).
+**Why.** Comparing the head with the last cleanup's base catches all drift, including work done outside claims.
+**Rejected.** B: summing each accepted claim's erosion delta per metric, which misses work outside claims. C: leaving the leg undefined until Q20.
+**Tag.** [stated] · remind-me: mem_fa9c239378ce45ec8e915338f5b3803c
+**Key.** lel:704:cleanup-half-limit-measure
+**Source.** Nano tapped option A "Repo head vs last cleanup" ("Fire when either metric's change since the last cleanup's base reaches half that metric's approved limit. Human commits count too.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX54vFUN7KN9gHbTjLFBEB4an` ("How should erosion cleanups count “half the limit” across the two metrics?") in the #704 build thread, 2026-11-06T00:58:51Z. Settles the leg D110 left escalated (card #704 Open). Numbered D114 because this branch holds D113 and main holds D112.
+
+## D115. #704 approved erosion limits: a human-only host record
+
+**Decision.** Once report-only ends, approved erosion limits are only those recorded by a human command: a human-only host record of Nano's approved limits. A claims open whose erosion profile enforces limits must use exactly the recorded numbers, or it is refused; an enforcing open with no record is refused too. This resolves Q20 (option b) and replaces D88's interim "enforcing opens are unchanged".
+**Why.** D42's "don't invent limits" holds only if an agent opening a task can't pick the numbers, as with D37's calibrate-then-Nano-approves.
+**Rejected.** Treating any limits in the task's profile as approved: whoever opens the task writes the limits, and nothing checks them.
+**Tag.** [stated] · remind-me: mem_69f9310316bf4c9693a3ab8dc1235db9
+**Key.** lel:704:approved-erosion-limits-record
+**Source.** Nano tapped option A "Recorded approved limits" ("Only a human command records your approved limits. A task that enforces limits must use exactly those numbers, or it is refused.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX5UNTzdY4w4xdKPk1naZzrRp` ("Decide what counts as approved erosion limits once report-only ends") in the #704 build thread, 2026-11-06T00:58:58Z. OPEN_QUESTIONS Q20; D42, D88. Numbered D115 after D114.
