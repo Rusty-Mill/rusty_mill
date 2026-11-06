@@ -32,19 +32,31 @@ pub fn default_socket(env: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf>
     base.is_absolute().then(|| base.join(DIR).join(NAME))
 }
 
-/// `given`, else `$RUSTY_MUX_SOCKET` (if not empty), else the default; the
-/// error says what to set when there is none.
+/// Where a resolved socket came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// The command named it.
+    Named,
+    /// `$RUSTY_MUX_SOCKET`.
+    Variable,
+    /// [`default_socket`]: the only socket a client may start a server on.
+    Default,
+}
+
+/// `given`, else `$RUSTY_MUX_SOCKET` (if not empty), else the default, with
+/// where it came from; the error says what to set when there is none.
 pub fn resolve(
     given: Option<PathBuf>,
     env: impl Fn(&str) -> Option<OsString>,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Origin), String> {
     if let Some(socket) = given {
-        return Ok(socket);
+        return Ok((socket, Origin::Named));
     }
     if let Some(socket) = env(SOCKET_VAR).filter(|v| !v.is_empty()) {
-        return Ok(socket.into());
+        return Ok((socket.into(), Origin::Variable));
     }
-    default_socket(env).ok_or_else(|| {
+    let default = default_socket(env).map(|socket| (socket, Origin::Default));
+    default.ok_or_else(|| {
         format!("no socket: name one, set {SOCKET_VAR}, or set {BASE_VAR} for the default")
     })
 }
@@ -86,16 +98,14 @@ mod tests {
     fn a_named_socket_beats_the_variable_and_the_variable_beats_the_default() {
         let vars = [(SOCKET_VAR, "/tmp/var.sock"), (BASE_VAR, BASE)];
         let named = resolve(Some("/tmp/named.sock".into()), env(&vars));
-        assert_eq!(named, Ok(PathBuf::from("/tmp/named.sock")));
+        assert_eq!(named, Ok((PathBuf::from("/tmp/named.sock"), Origin::Named)));
         assert_eq!(
             resolve(None, env(&vars)),
-            Ok(PathBuf::from("/tmp/var.sock"))
+            Ok((PathBuf::from("/tmp/var.sock"), Origin::Variable))
         );
         let empty = [(SOCKET_VAR, ""), (BASE_VAR, BASE)];
-        assert_eq!(
-            resolve(None, env(&empty)),
-            default_socket(env(&empty)).ok_or(String::new())
-        );
+        let default = default_socket(env(&empty)).expect("a default");
+        assert_eq!(resolve(None, env(&empty)), Ok((default, Origin::Default)));
     }
 
     #[test]

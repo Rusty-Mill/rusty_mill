@@ -1,7 +1,8 @@
 //! `rusty-mux-gui [--gpu] [<socket> [block]]`: show a rusty_mux block's window in
 //! rusty_term's native window, starting with that block focused. Without a
 //! socket it uses `$RUSTY_MUX_SOCKET`, else the default socket (C69,
-//! `rusty_mux_proto::endpoint`). Without a
+//! `rusty_mux_proto::endpoint`), starting a server there if none answers
+//! (`rusty_mux_client::autostart`). Without a
 //! block id it creates a session, window and block first. The window
 //! follows the server's layout and shared focus; typing goes to the
 //! focused block, whose input lease this client holds. rusty_term's config
@@ -21,7 +22,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     if args.is_empty() {
-        match rusty_mux_proto::endpoint::resolve(None, |name| std::env::var_os(name)) {
+        match default_socket() {
             Ok(socket) => args.push(socket.into_os_string()),
             Err(err) => {
                 eprintln!("rusty-mux-gui: {err}");
@@ -36,6 +37,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The socket when none is named: `$RUSTY_MUX_SOCKET`, else the default,
+/// on which a server is started if nothing answers (C69).
+fn default_socket() -> Result<std::path::PathBuf, String> {
+    use rusty_mux_proto::endpoint::{Origin, resolve};
+    let (socket, origin) = resolve(None, |name| std::env::var_os(name))?;
+    #[cfg(any(target_os = "linux", windows))]
+    if origin == Origin::Default {
+        rusty_mux_client::autostart::ensure(&socket)?;
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let _ = (origin, Origin::Default);
+    Ok(socket)
 }
 
 #[cfg(any(target_os = "linux", windows))]

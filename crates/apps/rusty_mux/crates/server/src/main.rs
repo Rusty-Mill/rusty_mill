@@ -5,7 +5,10 @@
 //! the server makes private to the user (C69). A server never removes a
 //! name it didn't make: if a server already answers there it refuses to
 //! start, and anything there that is not a socket stays; a socket nothing
-//! answers on is replaced. Each new block runs
+//! answers on is replaced. With `--idle-exit SECS` the server stops
+//! cleanly once it has had no block and no client for SECS; it never stops
+//! while a block lives. `rusty-mux` and `rusty-mux-gui` start a server this
+//! way when nothing answers on the default socket. Each new block runs
 //! `$SHELL` (or `/bin/sh`) in `$HOME` (or `/`), unless the config file's
 //! `server` section names a command or directory. The file is `--config`,
 //! else `$RUSTY_MUX_CONFIG`, else `$XDG_CONFIG_HOME/rusty_mux/config.json`
@@ -55,12 +58,12 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use rusty_mux_proto::endpoint;
-use rusty_mux_server::{Config, ConsoleHost, Udp, serve_until};
+use rusty_mux_server::{Config, ConsoleHost, Udp, serve_until, serve_until_idle};
 use rusty_tokio::io::{UdpSocket, UnixListener};
 use rusty_tokio::{Builder, LocalOptions};
 
 const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
-                        [--state DIR | --no-state] [<socket>]
+                        [--state DIR | --no-state] [--idle-exit SECS] [<socket>]
        rusty-mux-server --login MAP [--runtime DIR] <socket>";
 /// Where login mode puts each account's server unless `--runtime` says.
 const RUNTIME: &str = "/run/rusty-mux";
@@ -80,6 +83,8 @@ struct Args {
     config: Option<PathBuf>,
     state: StateDir,
     mode: Mode,
+    /// `--idle-exit`, if given.
+    idle_exit: Option<Duration>,
 }
 
 /// Where sessions are saved across restarts.
@@ -132,6 +137,7 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
     let (mut socket, mut udp, mut idle, mut config) = (None, None, UDP_IDLE, None);
     let (mut login, mut runtime, mut forwarded_by) = (None, None, None);
     let mut state = StateDir::Default;
+    let mut idle_exit = None;
     while let Some(arg) = args.next() {
         let mut value = |flag: &str| {
             args.next()
@@ -155,14 +161,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
                     .map_err(|_| format!("--forwarded-by {uid}: not a uid"))?;
                 forwarded_by = Some(parsed);
             }
-            Some("--udp-idle") => {
-                let secs = value("--udp-idle")?;
-                let secs = secs
-                    .parse()
-                    .ok()
-                    .filter(|s| *s > 0)
-                    .ok_or(format!("--udp-idle {secs}: not a whole number of seconds"))?;
-                idle = Duration::from_secs(secs);
+            Some("--udp-idle") => idle = seconds("--udp-idle", &value("--udp-idle")?)?,
+            Some("--idle-exit") => {
+                idle_exit = Some(seconds("--idle-exit", &value("--idle-exit")?)?)
             }
             _ if socket.is_some() => return Err("one socket only".into()),
             _ => socket = Some(PathBuf::from(arg)),
@@ -184,6 +185,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             Mode::Login { map, runtime }
         }
     };
+    if mode != Mode::Personal && idle_exit.is_some() {
+        return Err("login mode takes no --idle-exit".into());
+    }
     if mode != Mode::Personal && socket.is_none() {
         return Err("login mode needs a socket".into());
     }
@@ -197,7 +201,17 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
         config,
         state,
         mode,
+        idle_exit,
     })
+}
+
+/// A whole, positive number of seconds for `flag`.
+fn seconds(flag: &str, secs: &str) -> Result<Duration, String> {
+    secs.parse()
+        .ok()
+        .filter(|s| *s > 0)
+        .map(Duration::from_secs)
+        .ok_or(format!("{flag} {secs}: not a whole number of seconds"))
 }
 
 /// `ADDR:PORT`, or `ADDR` alone for [`UDP_PORT`]; an IPv6 address with a
@@ -222,7 +236,8 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         return run_login(socket, map, runtime);
     }
     let env = |name: &str| std::env::var_os(name);
-    let socket = endpoint::resolve(args.socket, env).map_err(std::io::Error::other)?;
+    let (socket, _) = endpoint::resolve(args.socket, env).map_err(std::io::Error::other)?;
+    // A client starting a server names the default socket, so compare.
     if Some(&socket) == endpoint::default_socket(env).as_ref() {
         default_dir(&socket)?;
     }
@@ -263,7 +278,12 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
             Mode::Forwarded(uid) => {
                 rusty_mux_server::serve_forwarded(listener, config, uid, stop_requested()?).await
             }
-            _ => serve_until(listener, config, udp, stop_requested()?).await,
+            _ => match args.idle_exit {
+                Some(idle) => {
+                    serve_until_idle(listener, config, udp, idle, stop_requested()?).await
+                }
+                None => serve_until(listener, config, udp, stop_requested()?).await,
+            },
         }
     });
     // A clean stop takes the name away, if it is still this server's.
@@ -425,6 +445,9 @@ mod tests {
         let plain = parse_str(&[]).unwrap();
         assert_eq!(plain.socket, None);
         assert_eq!(plain.mode, Mode::Personal);
+        assert_eq!(plain.idle_exit, None);
+        let idle = parse_str(&["--idle-exit", "60"]).unwrap();
+        assert_eq!(idle.idle_exit, Some(Duration::from_secs(60)));
         assert!(parse_str(&["--login", "m"]).is_err());
         assert!(parse_str(&["--forwarded-by", "0"]).is_err());
     }
@@ -483,6 +506,10 @@ mod tests {
         for bad in [
             &["a", "b"][..],
             &["--forwarded-by", "0"],
+            &["--idle-exit", "0"],
+            &["--idle-exit", "1m"],
+            &["--idle-exit"],
+            &["--forwarded-by", "0", "--idle-exit", "5", "s"],
             &["--udp"],
             &["--udp", "nowhere", "s"],
             &["--udp-idle", "0", "s"],

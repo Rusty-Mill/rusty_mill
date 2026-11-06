@@ -1,8 +1,12 @@
 //! C69 slice (a): with no socket named, the server listens on the default
 //! socket under `$XDG_RUNTIME_DIR`, in a directory private to the user, and
-//! a second server refuses to take a live server's name.
+//! a second server refuses to take a live server's name; with
+//! `--idle-exit` it stops once it has no block and no client, never while a
+//! block lives.
 
 #![cfg(target_os = "linux")]
+
+mod common;
 
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
@@ -98,5 +102,50 @@ fn an_open_default_directory_is_refused() {
     let output = server(&runtime).output().expect("server");
     assert!(!output.status.success());
     assert!(!dir.join("default.sock").exists());
+    let _ = std::fs::remove_dir_all(&runtime);
+}
+
+/// Waits up to `limit` for `child` to exit, returning whether it did.
+fn exits_within(child: &mut Child, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    while Instant::now() < deadline {
+        if child.try_wait().expect("try_wait").is_some() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn idle_exit_waits_for_the_last_block_and_client_then_takes_its_name_away() {
+    let runtime = scratch("idle");
+    let socket = runtime.join("rusty_mux").join("default.sock");
+    let mut running = Running(
+        server(&runtime)
+            .args(["--idle-exit", "1"])
+            .spawn()
+            .expect("server"),
+    );
+    wait_for(&socket);
+
+    let mut client = common::Client::connect(&socket);
+    let block = common::block_for(&mut client);
+    drop(client);
+    assert!(
+        !exits_within(&mut running.0, Duration::from_secs(3)),
+        "a live block keeps the server"
+    );
+
+    let mut client = common::Client::connect(&socket);
+    client.request(|req| rusty_mux_proto::Message::CloseBlock { req, block });
+    drop(client);
+    assert!(
+        exits_within(&mut running.0, Duration::from_secs(10)),
+        "no block and no client: the server stops"
+    );
+    let status = running.0.wait().expect("status");
+    assert!(status.success(), "a clean stop: {status}");
+    assert!(!socket.exists(), "a clean stop takes its own name away");
     let _ = std::fs::remove_dir_all(&runtime);
 }

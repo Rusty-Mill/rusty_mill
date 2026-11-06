@@ -10,6 +10,8 @@
 
 #[cfg(any(target_os = "linux", windows))]
 pub mod attach;
+#[cfg(any(target_os = "linux", windows))]
+pub mod autostart;
 pub mod conn;
 
 pub use conn::Conn;

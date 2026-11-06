@@ -140,7 +140,15 @@ pub struct Udp {
 /// whatever the socket file's permissions are.
 #[cfg(any(target_os = "linux", windows))]
 pub async fn serve(listener: UnixListener, config: Config) -> io::Result<()> {
-    serve_for(listener, config, None, peer_check, std::future::pending()).await
+    serve_for(
+        listener,
+        config,
+        None,
+        peer_check,
+        None,
+        std::future::pending(),
+    )
+    .await
 }
 
 /// [`serve`], and offers clients `DATAGRAM`: each may then move its
@@ -153,6 +161,7 @@ pub async fn serve_udp(listener: UnixListener, config: Config, udp: Udp) -> io::
         config,
         Some(udp),
         peer_check,
+        None,
         std::future::pending(),
     )
     .await
@@ -175,7 +184,21 @@ pub async fn serve_until(
     udp: Option<Udp>,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
-    serve_for(listener, config, udp, peer_check, stop).await
+    serve_for(listener, config, udp, peer_check, None, stop).await
+}
+
+/// [`serve_until`], also ending cleanly once the server has had no block
+/// and no client for `idle` (C69 `--idle-exit`); it never ends while a
+/// block lives.
+#[cfg(any(target_os = "linux", windows))]
+pub async fn serve_until_idle(
+    listener: UnixListener,
+    config: Config,
+    udp: Option<Udp>,
+    idle: Duration,
+    stop: impl Future<Output = ()>,
+) -> io::Result<()> {
+    serve_for(listener, config, udp, peer_check, Some(idle), stop).await
 }
 
 /// [`serve_until`] for an account's server behind login mode's front
@@ -200,7 +223,7 @@ pub async fn serve_forwarded(
             Peer::Refused(format!("uid {uid}"))
         })
     };
-    serve_for(listener, config, None, allowed, stop).await
+    serve_for(listener, config, None, allowed, None, stop).await
 }
 
 /// The principal every client of this server has: its own user, the only
@@ -269,6 +292,7 @@ async fn serve_for(
     config: Config,
     udp: Option<Udp>,
     allowed: impl Fn(&UnixStream) -> io::Result<Peer>,
+    idle: Option<Duration>,
     stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     let socket = listener
@@ -288,6 +312,7 @@ async fn serve_for(
     let served = rusty_tokio::select! {
         result = serve_clients(listener, state.clone(), udp, allowed, owner) => result,
         () = stop => Ok(()),
+        () = idle_for(&state, idle) => Ok(()),
     };
     let hosts = state.borrow_mut().stop();
     if !hosts.shut_down(pty::SHUTDOWN).await {
@@ -297,6 +322,30 @@ async fn serve_for(
         );
     }
     served
+}
+
+/// How often [`idle_for`] looks.
+#[cfg(any(target_os = "linux", windows))]
+const IDLE_TICK: Duration = Duration::from_millis(250);
+
+/// Resolves once `state` has been idle for `after` without a break; never
+/// without `after`.
+#[cfg(any(target_os = "linux", windows))]
+async fn idle_for(state: &state::Shared, after: Option<Duration>) {
+    let Some(after) = after else {
+        return std::future::pending().await;
+    };
+    let mut since: Option<std::time::Instant> = None;
+    loop {
+        rusty_tokio::time::sleep(IDLE_TICK).await;
+        if !state.borrow().is_idle() {
+            since = None;
+            continue;
+        }
+        if since.get_or_insert_with(std::time::Instant::now).elapsed() >= after {
+            return;
+        }
+    }
 }
 
 /// Serves clients on `listener`, and on `udp` if given, until either fails.
@@ -395,6 +444,17 @@ pub async fn serve_until(
     _listener: UnixListener,
     _config: Config,
     _udp: Option<Udp>,
+    _stop: impl Future<Output = ()>,
+) -> io::Result<()> {
+    Err(unsupported())
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub async fn serve_until_idle(
+    _listener: UnixListener,
+    _config: Config,
+    _udp: Option<Udp>,
+    _idle: Duration,
     _stop: impl Future<Output = ()>,
 ) -> io::Result<()> {
     Err(unsupported())
