@@ -1,5 +1,11 @@
 //! `rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
-//! <socket>`: serves rusty_mux on a Unix socket. Each new block runs
+//! [<socket>]`: serves rusty_mux on a Unix socket: the one named, else
+//! `$RUSTY_MUX_SOCKET`, else the default, `$XDG_RUNTIME_DIR/rusty_mux/default.sock`
+//! (`%LOCALAPPDATA%\rusty_mux\default.sock` on Windows), whose directory
+//! the server makes private to the user (C69). A server never removes a
+//! name it didn't make: if a server already answers there it refuses to
+//! start, and anything there that is not a socket stays; a socket nothing
+//! answers on is replaced. Each new block runs
 //! `$SHELL` (or `/bin/sh`) in `$HOME` (or `/`), unless the config file's
 //! `server` section names a command or directory. The file is `--config`,
 //! else `$RUSTY_MUX_CONFIG`, else `$XDG_CONFIG_HOME/rusty_mux/config.json`
@@ -48,12 +54,13 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use rusty_mux_proto::endpoint;
 use rusty_mux_server::{Config, ConsoleHost, Udp, serve_until};
 use rusty_tokio::io::{UdpSocket, UnixListener};
 use rusty_tokio::{Builder, LocalOptions};
 
 const USAGE: &str = "usage: rusty-mux-server [--udp ADDR[:PORT]] [--udp-idle SECS] [--config FILE]
-                        [--state DIR | --no-state] <socket>
+                        [--state DIR | --no-state] [<socket>]
        rusty-mux-server --login MAP [--runtime DIR] <socket>";
 /// Where login mode puts each account's server unless `--runtime` says.
 const RUNTIME: &str = "/run/rusty-mux";
@@ -65,7 +72,8 @@ const UDP_IDLE: Duration = Duration::from_secs(24 * 60 * 60);
 /// The command line, checked.
 #[derive(Debug, PartialEq, Eq)]
 struct Args {
-    socket: PathBuf,
+    /// The socket named, if any (login mode requires one).
+    socket: Option<PathBuf>,
     udp: Option<SocketAddr>,
     idle: Duration,
     /// `--config`, if given.
@@ -160,7 +168,6 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             _ => socket = Some(PathBuf::from(arg)),
         }
     }
-    let socket = socket.ok_or("no socket given")?;
     let mode = match (login, runtime, forwarded_by) {
         (None, None, None) => Mode::Personal,
         (None, None, Some(_)) if udp.is_some() => {
@@ -177,6 +184,9 @@ fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Args, String> {
             Mode::Login { map, runtime }
         }
     };
+    if mode != Mode::Personal && socket.is_none() {
+        return Err("login mode needs a socket".into());
+    }
     if mode != Mode::Personal && !cfg!(target_os = "linux") {
         return Err("login mode runs on Linux only".into());
     }
@@ -206,27 +216,36 @@ fn udp_addr(value: &str) -> Result<SocketAddr, String> {
 fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
     #[cfg(target_os = "linux")]
     if let Mode::Login { map, runtime } = args.mode {
-        return run_login(args.socket, map, runtime);
+        let socket = args
+            .socket
+            .ok_or_else(|| std::io::Error::other("no socket"))?;
+        return run_login(socket, map, runtime);
+    }
+    let env = |name: &str| std::env::var_os(name);
+    let socket = endpoint::resolve(args.socket, env).map_err(std::io::Error::other)?;
+    if Some(&socket) == endpoint::default_socket(env).as_ref() {
+        default_dir(&socket)?;
     }
     let config_file = args
         .config
         .or_else(|| rusty_mux_script::default_path(|name| std::env::var_os(name)));
     let mut config = default_config(console_host, config_file);
-    let socket = args.socket;
     config.state_dir = match args.state {
         StateDir::Off => None,
         StateDir::At(dir) => Some(dir),
         StateDir::Default => default_state_dir(&socket, |name| std::env::var_os(name)),
     };
+    // Before the runtime starts a thread: binding sets the umask. No
+    // authentication in Phase 1: only this user may connect (0600).
+    #[cfg(target_os = "linux")]
+    let (listener, owned) = rusty_mux_server::endpoint::bind(&socket, 0o177)?;
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
-    runtime.block_on(async {
+    let served = runtime.block_on(async {
+        #[cfg(target_os = "linux")]
+        let listener = UnixListener::from_std(listener)?;
+        // Windows' bind replaces only a socket nothing answers on.
+        #[cfg(not(target_os = "linux"))]
         let listener = UnixListener::bind(&socket)?;
-        // No authentication in Phase 1: only this user may connect.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-        }
         // The Windows form of 0600: one entry, full control for this user.
         #[cfg(windows)]
         platform_windows::fs::restrict_to_owner(&socket).map_err(|e| {
@@ -246,7 +265,26 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
             }
             _ => serve_until(listener, config, udp, stop_requested()?).await,
         }
-    })
+    });
+    // A clean stop takes the name away, if it is still this server's.
+    #[cfg(target_os = "linux")]
+    let released = owned.release();
+    #[cfg(not(target_os = "linux"))]
+    let released = Ok(());
+    served.and(released)
+}
+
+/// Makes the default socket's directory: private to this user on Linux
+/// (checked like login mode's runtime directory), and under the user's own
+/// `%LOCALAPPDATA%` on Windows.
+fn default_dir(socket: &std::path::Path) -> std::io::Result<()> {
+    let Some(dir) = socket.parent() else {
+        return Ok(());
+    };
+    #[cfg(target_os = "linux")]
+    return rusty_mux_server::endpoint::private_dir(dir);
+    #[cfg(not(target_os = "linux"))]
+    return std::fs::create_dir_all(dir);
 }
 
 /// `<state home>/rusty_mux/<socket file name>`, where the state home is
@@ -368,7 +406,7 @@ mod tests {
         let v6 = parse_str(&["s.sock", "--udp", "[::1]:7000", "--udp-idle", "90"]).unwrap();
         assert_eq!(v6.udp, Some("[::1]:7000".parse().unwrap()));
         assert_eq!(v6.idle, Duration::from_secs(90));
-        assert_eq!(v6.socket, PathBuf::from("s.sock"));
+        assert_eq!(v6.socket, Some(PathBuf::from("s.sock")));
         assert_eq!(v6.config, None);
         let file = parse_str(&["--config", "c.json", "s.sock"]).unwrap();
         assert_eq!(file.config, Some(PathBuf::from("c.json")));
@@ -380,6 +418,15 @@ mod tests {
             parse_str(&["--no-state", "x"]).unwrap().state,
             StateDir::Off
         );
+    }
+
+    #[test]
+    fn the_socket_is_optional_except_in_login_mode() {
+        let plain = parse_str(&[]).unwrap();
+        assert_eq!(plain.socket, None);
+        assert_eq!(plain.mode, Mode::Personal);
+        assert!(parse_str(&["--login", "m"]).is_err());
+        assert!(parse_str(&["--forwarded-by", "0"]).is_err());
     }
 
     #[test]
@@ -434,8 +481,8 @@ mod tests {
     #[test]
     fn a_bad_command_line_is_refused() {
         for bad in [
-            &[][..],
-            &["a", "b"],
+            &["a", "b"][..],
+            &["--forwarded-by", "0"],
             &["--udp"],
             &["--udp", "nowhere", "s"],
             &["--udp-idle", "0", "s"],

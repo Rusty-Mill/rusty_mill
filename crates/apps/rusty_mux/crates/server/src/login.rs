@@ -64,6 +64,7 @@ use rusty_tokio::sync::mpsc::UnboundedReceiver;
 use rusty_tokio::sync::oneshot;
 use rusty_tokio::task::AbortHandle;
 
+use crate::endpoint::{self, check_parts, unsafe_dir};
 use map::{AccountMap, Route, admits};
 
 /// How long an account's new server has to start listening.
@@ -453,67 +454,9 @@ pub fn bind(socket: &Path) -> io::Result<std::os::unix::net::UnixListener> {
         .filter(|dir| !dir.as_os_str().is_empty())
         .ok_or_else(|| unsafe_dir(socket, "has no directory".into()))?;
     check_parts(dir, rusty_libc::process::geteuid(), false)?;
-    match bind_open(socket) {
-        Err(e) if e.kind() == io::ErrorKind::AddrInUse && stale(socket) => {
-            std::fs::remove_file(socket)?;
-            bind_open(socket)
-        }
-        bound => bound,
-    }
-}
-
-fn bind_open(socket: &Path) -> io::Result<std::os::unix::net::UnixListener> {
-    let old = rusty_libc::umask::umask(0o111);
-    let bound = std::os::unix::net::UnixListener::bind(socket);
-    rusty_libc::umask::umask(old);
-    bound
-}
-
-/// Whether `socket` is a socket nothing answers on.
-fn stale(socket: &Path) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    let is_socket = std::fs::symlink_metadata(socket).is_ok_and(|m| m.file_type().is_socket());
-    is_socket
-        && std::os::unix::net::UnixStream::connect(socket)
-            .is_err_and(|e| e.kind() == io::ErrorKind::ConnectionRefused)
-}
-
-/// Checks each part of `dir` as [`runtime_dir`] requires; a part that does
-/// not exist passes only when `allow_missing`.
-fn check_parts(dir: &Path, me: u32, allow_missing: bool) -> io::Result<()> {
-    if !dir.is_absolute() {
-        return Err(unsafe_dir(dir, "is not an absolute path".into()));
-    }
-    for part in dir.ancestors() {
-        let meta = match std::fs::symlink_metadata(part) {
-            Ok(meta) => meta,
-            Err(e) if allow_missing && e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        let shown = part.display();
-        if !meta.is_dir() {
-            return Err(unsafe_dir(
-                dir,
-                format!("goes through {shown}, not a directory"),
-            ));
-        }
-        let owner_ok = meta.uid() == 0 || meta.uid() == me;
-        let sticky = meta.mode() & 0o1000 != 0;
-        if !owner_ok || (meta.mode() & 0o022 != 0 && (part == dir || !sticky)) {
-            return Err(unsafe_dir(
-                dir,
-                format!("goes through {shown}, which another user could change"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn unsafe_dir(dir: &Path, why: String) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::PermissionDenied,
-        format!("{}: {why}", dir.display()),
-    )
+    // The name is left on exit; the next front door replaces it (O6).
+    let (listener, _owned) = endpoint::bind(socket, 0o111)?;
+    Ok(listener)
 }
 
 /// Makes `dir` the account's own: created 0700 and given to the account,

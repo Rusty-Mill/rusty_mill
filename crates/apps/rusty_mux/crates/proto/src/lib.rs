@@ -22,6 +22,7 @@
 pub mod args;
 #[cfg(feature = "screen")]
 pub mod checkpoint;
+pub mod endpoint;
 mod error;
 mod field;
 mod frame;
