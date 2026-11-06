@@ -46,6 +46,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 use super::chrome::{Chrome, Marks};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
+use super::motion;
 use super::pace::Pacer;
 use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors, blend};
 use super::settings::{Field, Settings, SetupBaseline, Widget};
@@ -1368,6 +1369,12 @@ impl WindowState<'_> {
         }
     }
 
+    /// Whether the chrome holds still (pack D27, D50): the config override,
+    /// else the OS accessibility setting.
+    fn reduce_motion(&self) -> bool {
+        motion::resolve(self.config.reduce_motion, motion::os_reduces_motion)
+    }
+
     /// The chrome colours for the current theme (pack D34-D36, D38).
     fn chrome_colors(&self) -> Chrome {
         Chrome::from_theme(&self.theme)
@@ -1488,7 +1495,9 @@ impl WindowState<'_> {
         // TRAIL_MS (the tick loop keeps frames coming while one is live).
         const TRAIL_MS: u64 = 150;
         let mut ghosts: Vec<(usize, usize, f32)> = Vec::new();
-        if self.config.cursor_trail.unwrap_or(false) {
+        if self.config.cursor_trail.unwrap_or(false)
+            && !motion::resolve(self.config.reduce_motion, motion::os_reduces_motion)
+        {
             let now = Instant::now();
             if let Some((g, _, _)) = snaps.iter().find(|(_, _, foc)| *foc) {
                 let cur = (g.cursor_visible && g.view_offset == 0).then_some(g.cursor);
@@ -4023,6 +4032,7 @@ impl WindowState<'_> {
         let blink = s.blink();
         let ligatures = s.ligatures();
         let cursor_trail = s.cursor_trail();
+        let reduce_motion = s.reduce_motion();
         let min_contrast = s.min_contrast();
         let scrollback = s.scrollback();
         let shell = s.shell_path();
@@ -4068,6 +4078,8 @@ impl WindowState<'_> {
             }
             // Read live at draw time; updating the config is the whole apply.
             Field::CursorTrail => self.config.cursor_trail = Some(cursor_trail),
+            // Read live by the draw and tick paths, like the trail.
+            Field::ReduceMotion => self.config.reduce_motion = reduce_motion,
             Field::MinContrast => {
                 self.config.minimum_contrast = min_contrast;
                 for tab in &self.tabs {
@@ -5147,10 +5159,16 @@ impl WindowState<'_> {
                 animating |= g.kitty_images.iter().any(|i| i.playing);
             }
         }
-        let blinking = self.pane().is_some_and(|p| {
-            let g = p.grid.lock();
-            g.cursor_blink && g.cursor_visible && g.view_offset == 0
-        });
+        // Reduced motion (D50): the cursor draws solid, whoever asked it to
+        // blink (config or a program's DECSCUSR).
+        let blinking = !self.reduce_motion()
+            && self.pane().is_some_and(|p| {
+                let g = p.grid.lock();
+                g.cursor_blink && g.cursor_visible && g.view_offset == 0
+            });
+        if !blinking {
+            self.cursor_blink_on = true;
+        }
         // A live cursor trail needs frames until it fades (~150ms).
         if self.trail.is_some() {
             if let Some(window) = &self.window {

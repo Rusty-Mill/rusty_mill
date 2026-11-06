@@ -10,7 +10,7 @@
 //! clamping/formatting/persistence logic stays unit-testable without a live
 //! window.
 
-use crate::config::{self, ClipboardPolicy, Config, LaunchMode, SettingEdit};
+use crate::config::{self, ClipboardPolicy, Config, LaunchMode, ReduceMotion, SettingEdit};
 use crate::core::{CursorShape, SCROLLBACK_MAX, Theme};
 use crate::shells::DetectedShell;
 
@@ -86,6 +86,7 @@ pub(crate) enum Field {
     Cursor,
     Blink,
     CursorTrail,
+    ReduceMotion,
     MinContrast,
     // Terminal
     Shell,
@@ -115,6 +116,7 @@ impl Field {
             Field::Cursor => "cursor_style",
             Field::Blink => "cursor_blink",
             Field::CursorTrail => "cursor_trail",
+            Field::ReduceMotion => "reduce_motion",
             Field::MinContrast => "minimum_contrast",
             Field::Shell => "shell",
             Field::Scrollback => "scrollback",
@@ -143,6 +145,7 @@ impl Field {
                 Field::Cursor,
                 Field::Blink,
                 Field::CursorTrail,
+                Field::ReduceMotion,
                 Field::MinContrast,
             ],
             Category::Terminal => &[
@@ -175,6 +178,7 @@ impl Field {
             Field::Cursor => "Cursor shape",
             Field::Blink => "Cursor blink",
             Field::CursorTrail => "Cursor trail",
+            Field::ReduceMotion => "Reduce motion",
             Field::MinContrast => "Minimum contrast",
             Field::Shell => "Default shell",
             Field::Scrollback => "Scrollback",
@@ -202,6 +206,7 @@ impl Field {
             Field::Cursor => "Default cursor shape; programs may override it",
             Field::Blink => "Blink the cursor",
             Field::CursorTrail => "Brief fading trail when the cursor jumps",
+            Field::ReduceMotion => "Solid cursor, no trail; system follows the OS setting",
             Field::MinContrast => "Recolor text that falls under this contrast ratio",
             Field::Shell => "Program spawned in new tabs",
             Field::Scrollback => "History lines kept per pane",
@@ -331,6 +336,8 @@ pub(crate) struct Settings {
     cursor: CursorShape,
     blink: bool,
     cursor_trail: bool,
+    /// `None` = follow the OS ("system").
+    reduce_motion: Option<ReduceMotion>,
     /// Index into [`CONTRAST_STEPS`].
     min_contrast: usize,
     /// Detected shells as `(name, launch-path)`. Index `0` of the row's choice
@@ -418,6 +425,7 @@ impl Settings {
             cursor: cfg.cursor_style.unwrap_or_default(),
             blink: cfg.cursor_blink.unwrap_or(false),
             cursor_trail: cfg.cursor_trail.unwrap_or(false),
+            reduce_motion: cfg.reduce_motion,
             min_contrast,
             shells,
             shell,
@@ -748,6 +756,7 @@ impl Settings {
             Field::Cursor => self.cursor != CursorShape::default(),
             Field::Blink => self.blink,
             Field::CursorTrail => self.cursor_trail,
+            Field::ReduceMotion => self.reduce_motion.is_some(),
             Field::MinContrast => self.min_contrast().is_some(),
             Field::Shell => self.shell != 0,
             Field::Scrollback => self.scrollback != SCROLLBACK_MAX,
@@ -839,6 +848,15 @@ impl Settings {
             }
             Field::Blink => self.blink = !self.blink,
             Field::CursorTrail => self.cursor_trail = !self.cursor_trail,
+            Field::ReduceMotion => {
+                const ORDER: [Option<ReduceMotion>; 3] =
+                    [None, Some(ReduceMotion::On), Some(ReduceMotion::Off)];
+                let i = ORDER
+                    .iter()
+                    .position(|&m| m == self.reduce_motion)
+                    .unwrap_or(0);
+                self.reduce_motion = ORDER[wrap(i, ORDER.len(), forward)];
+            }
             Field::MinContrast => {
                 self.min_contrast = wrap(self.min_contrast, CONTRAST_STEPS.len(), forward)
             }
@@ -978,6 +996,10 @@ impl Settings {
     pub(crate) fn opacity(&self) -> f32 {
         self.opacity
     }
+    /// The reduced-motion override, `None` to follow the OS.
+    pub(crate) fn reduce_motion(&self) -> Option<ReduceMotion> {
+        self.reduce_motion
+    }
     /// The chosen launch mode, `None` for a normal window.
     pub(crate) fn launch_mode_value(&self) -> Option<LaunchMode> {
         self.launch_mode
@@ -1035,6 +1057,9 @@ impl Settings {
             )),
             Field::Blink => Widget::Toggle(self.blink),
             Field::CursorTrail => Widget::Toggle(self.cursor_trail),
+            Field::ReduceMotion => {
+                Widget::Choice(reduce_motion_name(self.reduce_motion).to_string())
+            }
             Field::MinContrast => Widget::Choice(match self.min_contrast() {
                 None => "off".to_string(),
                 Some(r) => format!("{r}:1"),
@@ -1183,6 +1208,20 @@ impl Settings {
                 value: Some(format!("{:.2}", self.opacity)),
                 insert: self.opacity != 1.0,
             },
+            match self.reduce_motion {
+                Some(m) => SettingEdit {
+                    section: "window",
+                    key: "reduce_motion",
+                    value: Some(config::toml_string(reduce_motion_name(Some(m)))),
+                    insert: true,
+                },
+                None => SettingEdit {
+                    section: "window",
+                    key: "reduce_motion",
+                    value: None,
+                    insert: false,
+                },
+            },
             match self.launch_mode {
                 Some(m) => SettingEdit {
                     section: "window",
@@ -1273,6 +1312,16 @@ fn launch_mode_name(m: Option<LaunchMode>) -> &'static str {
         None => "normal",
         Some(LaunchMode::Maximized) => "maximized",
         Some(LaunchMode::Fullscreen) => "fullscreen",
+    }
+}
+
+/// The config-file spelling of a reduced-motion override (also the display
+/// text); `None` shows "system" and persists by removing the key.
+fn reduce_motion_name(m: Option<ReduceMotion>) -> &'static str {
+    match m {
+        None => "system",
+        Some(ReduceMotion::On) => "on",
+        Some(ReduceMotion::Off) => "off",
     }
 }
 
@@ -1538,7 +1587,7 @@ mod tests {
                 "{f:?} appears exactly once",
             );
         }
-        assert_eq!(all.len(), 21, "all fields are reachable from the sidebar");
+        assert_eq!(all.len(), 22, "all fields are reachable from the sidebar");
     }
 
     #[test]
@@ -1681,6 +1730,31 @@ mod tests {
     }
 
     #[test]
+    fn reduce_motion_cycles_system_on_off_and_system_removes_the_key() {
+        let mut s = seeded();
+        select_field(&mut s, Field::ReduceMotion);
+        let edit_for = |s: &Settings| {
+            s.edits()
+                .into_iter()
+                .find(|e| e.key == "reduce_motion")
+                .unwrap()
+        };
+        s.change(true); // system -> on
+        let edit = edit_for(&s);
+        assert!(edit.section == "window" && edit.insert);
+        assert_eq!(edit.value.as_deref(), Some("\"on\""));
+        s.change(true); // -> off
+        assert_eq!(edit_for(&s).value.as_deref(), Some("\"off\""));
+        s.change(true); // wraps -> system
+        let edit = edit_for(&s);
+        assert!(
+            edit.value.is_none() && !edit.insert,
+            "system removes the key"
+        );
+        assert!(s.reduce_motion().is_none());
+    }
+
+    #[test]
     fn launch_mode_normal_removes_the_key() {
         let mut s = seeded();
         select_field(&mut s, Field::LaunchMode);
@@ -1793,9 +1867,9 @@ mod tests {
 
     #[test]
     fn scroll_by_clamps_to_the_list() {
-        let mut s = seeded(); // 7 rows
+        let mut s = seeded(); // 8 rows
         s.scroll_by(100, 3);
-        assert_eq!(s.scroll, 4, "at most len - visible");
+        assert_eq!(s.scroll, 5, "at most len - visible");
         s.scroll_by(-100, 3);
         assert_eq!(s.scroll, 0);
     }
