@@ -20,11 +20,15 @@
 //! ```
 
 pub mod args;
+#[cfg(feature = "screen")]
+pub mod checkpoint;
 mod error;
 mod field;
 mod frame;
 mod message;
 pub mod schema;
+#[cfg(feature = "screen")]
+pub mod style;
 pub mod theme;
 mod varint;
 

@@ -23,8 +23,8 @@ pub fn validate_size(size: Size) -> Result<(), String> {
     }
     Ok(())
 }
-#[cfg(any(target_os = "linux", windows))]
-pub(crate) fn grid(size: Size) -> Grid {
+/// A blank grid of `size`.
+pub fn grid(size: Size) -> Grid {
     Grid::new(size.cols().into(), size.rows().into())
 }
 /// Decode one complete RTCP v6 headless checkpoint.

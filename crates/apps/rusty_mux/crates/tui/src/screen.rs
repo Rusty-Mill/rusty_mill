@@ -4,8 +4,8 @@
 
 use std::fmt::Write as _;
 
+use rusty_mux_client::style::Style;
 use rusty_mux_core::{BlockId, Rect, Size};
-use rusty_mux_server::style::Style;
 use rusty_term_core::{ATTR_UNDERLINE, AnsiParser, Cell, Grid, WIDE_TRAILER};
 
 use crate::keys::Dir;
