@@ -190,6 +190,21 @@ impl ProfileSet {
             .any(|p| p.name == EROSION_PROFILE && p.args.iter().any(|a| a == "--report-only"))
     }
 
+    /// The `(concentration, duplication)` limits the set's erosion profile
+    /// enforces, or `None` for report-only, `--cleanup` or `"off"` (D115).
+    /// Meaningful once [`ProfileSet::check_erosion`] has passed.
+    pub fn erosion_limits(&self) -> Option<(i32, i32)> {
+        let p = self.profiles.iter().find(|p| p.name == EROSION_PROFILE)?;
+        let value = |flag: &str| {
+            let at = p.args.iter().position(|a| a == flag)?;
+            p.args.get(at + 1)?.parse().ok()
+        };
+        Some((
+            value("--max-concentration-bp")?,
+            value("--max-duplication-bp")?,
+        ))
+    }
+
     /// The profile runs the `erosion` bin directly (D82): no shell, `env` or
     /// `cargo run`, so the argv checked here is the argv that runs. The args
     /// parse as the bin's own do: `check`, then `--base COMMIT` and either
@@ -504,6 +519,11 @@ mod tests {
             !cleanup.erosion_report_only(),
             "a cleanup is not counted as report-only"
         );
+        // D115: only an enforcing set has limits to check against the record.
+        assert_eq!(enforcing.erosion_limits(), Some((100, 0)));
+        assert_eq!(ok.erosion_limits(), None);
+        assert_eq!(cleanup.erosion_limits(), None);
+        assert_eq!(off.erosion_limits(), None);
         let mut pinned_ok = ok.clone();
         pinned_ok.baseline = Some(c.into());
         assert_eq!(pinned_ok.check_erosion(), Ok(()));

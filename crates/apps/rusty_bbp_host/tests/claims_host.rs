@@ -6,6 +6,7 @@
 #![cfg(unix)]
 
 use rusty_bbp::*;
+use rusty_bbp_host::erosion_limits;
 use rusty_bbp_host::mcp::{Binding, Server};
 use rusty_bbp_host::profiles::ProfileSet;
 use rusty_bbp_host::runner::{self, Confinement, Unconfined};
@@ -3008,6 +3009,11 @@ fn confined_erosion_profile_reports_then_blocks_a_pasted_duplicate() {
             program: bin.to_str().expect("utf-8").into(),
             args,
         });
+        if set.erosion_limits().is_some() {
+            // D115: enforced limits must be the recorded ones.
+            let r = erosion_limits::record(100, 100, "nano", "test", Time(1));
+            erosion_limits::approve(&dir, r).expect("record limits");
+        }
         claims_task_set(&dir, &task(), &set);
         let c = claim(&dir, "a", "flag", true);
         let (text, err) = put_candidate(&mut server(&dir, "a"), "k", &base, &paste_diff(), c);
@@ -3093,10 +3099,28 @@ fn report_only_erosion_pauses_after_ten_tasks() {
         open_as(&dir, &off, &profiles(), Ok(())),
         Response::Stored(_)
     ));
+    // D115: an enforcing open needs Nano's recorded limits, exactly.
     let enforcing = erosion_profiles("--max-concentration-bp 50 --max-duplication-bp 50");
     let e = TaskId("ENF".into());
+    let (code, detail) = rejected(open_as(&dir, &e, &enforcing, Ok(())));
+    assert_eq!(code, Code::BadClaimsConfig);
+    assert!(detail.contains("no approved limits"), "{detail}");
+    let r = erosion_limits::record(50, 40, "nano", "cmsg_test", Time(1));
+    erosion_limits::approve(&dir, r).expect("record limits");
+    let (_, detail) = rejected(open_as(&dir, &e, &enforcing, Ok(())));
+    assert!(
+        detail.contains("differ from the approved 50 / 40"),
+        "{detail}"
+    );
+    let r = erosion_limits::record(50, 50, "nano", "cmsg_test", Time(2));
+    erosion_limits::approve(&dir, r).expect("record limits");
     assert!(matches!(
         open_as(&dir, &e, &enforcing, Ok(())),
+        Response::Stored(_)
+    ));
+    let cleanup = erosion_profiles("--cleanup");
+    assert!(matches!(
+        open_as(&dir, &TaskId("CLEAN".into()), &cleanup, Ok(())),
         Response::Stored(_)
     ));
     let after = std::fs::read_to_string(erosion_window::path(&dir)).expect("ledger");
