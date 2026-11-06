@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use crate::core::{BidiRow, Cell, CursorShape, RowKey};
 
 use super::paint::Pixmap;
-use super::render::{PaneFrame, SearchColors};
+use super::render::{PaneFrame, Scene, SearchColors};
 
 /// Presented frames remembered. softbuffer reports a buffer age of 1 on
 /// X11 and Win32 and 2 on Wayland (double buffered), and 0 (unknown) on
@@ -30,8 +30,10 @@ struct Layout {
     fonts: [u64; 2],
     colors: [u32; 3],
     chrome: Vec<Cell>,
-    /// An attached window's top strip, by [`Pixmap::fingerprint`].
+    /// An attached window's top strip and body, by
+    /// [`Pixmap::fingerprint`].
     strip: Option<(usize, usize, u64)>,
+    body: Option<(usize, usize, u64)>,
     status: Vec<Cell>,
     panes: Vec<PaneLayout>,
 }
@@ -39,7 +41,8 @@ struct Layout {
 /// One pane's inputs that are not per row.
 #[derive(PartialEq)]
 struct PaneLayout {
-    origin: (usize, usize),
+    /// Cell offset, then pixels.
+    origin: (usize, usize, usize, usize),
     size: (usize, usize),
     scrollbar: Option<(usize, usize, u32)>,
     marks: Vec<(usize, u32)>,
@@ -91,7 +94,7 @@ impl Frame {
     pub(super) fn capture(
         panes: &[PaneFrame],
         chrome: &[Cell],
-        strip: Option<&Pixmap>,
+        scene: Scene,
         status: &[Cell],
         fonts: [u64; 2],
         size: (usize, usize),
@@ -104,7 +107,8 @@ impl Frame {
             fonts,
             colors,
             chrome: chrome.to_vec(),
-            strip: strip.map(Pixmap::fingerprint),
+            strip: scene.strip.map(Pixmap::fingerprint),
+            body: scene.body.map(Pixmap::fingerprint),
             status: status.to_vec(),
             panes: panes.iter().map(pane_layout).collect(),
         };
@@ -119,7 +123,7 @@ impl Frame {
 fn pane_layout(p: &PaneFrame) -> PaneLayout {
     let g = p.grid;
     PaneLayout {
-        origin: (p.col0, p.row0),
+        origin: (p.col0, p.row0, p.px.0, p.px.1),
         size: (g.cols, g.rows),
         scrollbar: g.scrollbar(),
         marks: p.marks.clone(),

@@ -210,3 +210,51 @@ fn the_strip_shows_the_session_and_a_new_window_is_shown_when_made() {
         }
     }
 }
+
+#[test]
+fn a_block_header_follows_its_folder() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| tx.send(out).is_ok()));
+    let key = attached.focus;
+    let header = |want: &dyn Fn(&rusty_term::gui::source::BlockInfo) -> bool| {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if let Out::Blocks(blocks) = outs.recv_timeout(left).expect("a header") {
+                let info = blocks.iter().find(|(k, _)| *k == key).map(|(_, i)| i);
+                if info.is_some_and(want) {
+                    return;
+                }
+            }
+        }
+    };
+    header(&|i| i.cwd.as_deref() == Some("/") && i.shell.is_some());
+
+    // Typing needs the lease, which the focused pane asks for.
+    let io = attached
+        .source
+        .open(key, 80, 24)
+        .expect("the focused block opens");
+    let (mut writer, _feed) = feed_of(io);
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        // A shell tells its folder with OSC 7, which the server announces.
+        writer
+            .write(b"cd /tmp; printf '\\033]7;file://localhost/tmp\\007'\n")
+            .expect("typed");
+        std::thread::sleep(Duration::from_millis(200));
+        let moved = outs.try_iter().any(|o| match o {
+            Out::Blocks(b) => b
+                .iter()
+                .any(|(k, i)| *k == key && i.cwd.as_deref() == Some("/tmp")),
+            _ => false,
+        });
+        if moved {
+            return;
+        }
+    }
+    panic!("the header never followed the move to /tmp");
+}

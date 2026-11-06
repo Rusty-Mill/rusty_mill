@@ -42,7 +42,7 @@ use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
 use super::paint::Pixmap;
 use super::render::{
-    PaneFrame, Renderer, SearchColors, concealed, drawn, glyph_char, is_overlay_mark,
+    PaneFrame, Renderer, Scene, SearchColors, concealed, drawn, glyph_char, is_overlay_mark,
 };
 
 /// The part of atlas tile `rect` (`x, y, w, h`) a row of size `attr` shows:
@@ -96,6 +96,7 @@ struct Inst {
     @location(9) deco: u32,
     @location(10) dcol: u32,
     @location(11) kind: u32,
+    @location(12) off: u32,
 };
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -133,11 +134,14 @@ fn vs(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     // Command gutter marks (kind 3) are a 3px stripe hugging the cell
     // column's left edge from outside (1px gap), one cell tall, padded by
     // the grid origin like any grid content.
+    // A pane placed in pixels (an attached window's block) adds `off`,
+    // `x << 16 | y`.
+    let off = vec2(f32(inst.off >> 16u), f32(inst.off & 0xffffu));
     var px = (vec2<f32>(f32(inst.col), f32(inst.row)) + corner * vec2(span, 1.0)) * u.cell
-        + u.origin;
+        + u.origin + off;
     if (inst.kind == 3u) {
         px = vec2(f32(inst.col) * u.cell.x - 4.0 + corner.x * 3.0,
-                  (f32(inst.row) + corner.y) * u.cell.y) + u.origin;
+                  (f32(inst.row) + corner.y) * u.cell.y) + u.origin + off;
     } else if ((inst.deco & 96u) != 0u) {
         px = (vec2<f32>(f32(inst.col), 0.0) + corner * vec2(span, 1.0)) * u.bar;
         if ((inst.deco & 64u) != 0u) {
@@ -236,6 +240,7 @@ struct Inst {
     @location(3) rows: u32,
     @location(4) uv: vec4<f32>,
     @location(5) screen: u32,
+    @location(6) off: u32,
 };
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -251,7 +256,8 @@ fn vs(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
     let size = vec2(f32(inst.cols), f32(inst.rows));
     // Grid images are placed in cells from the grid origin; a screen image
     // (an attached window's top strip) in pixels from the window's corner.
-    var px = (vec2(f32(inst.col), f32(inst.row)) + corner * size) * u.cell + u.origin;
+    let off = vec2(f32(inst.off >> 16u), f32(inst.off & 0xffffu));
+    var px = (vec2(f32(inst.col), f32(inst.row)) + corner * size) * u.cell + u.origin + off;
     if (inst.screen == 1u) {
         px = vec2(f32(inst.col), f32(inst.row)) + corner * size;
     }
@@ -291,6 +297,9 @@ struct Instance {
     dcol: u32,
     /// 0 = base cell (opaque), 1 = overlay glyph (alpha-blended).
     kind: u32,
+    /// Pixels added to a grid instance's place, `x << 16 | y`: an attached
+    /// window's block sits in pixels (see `PaneFrame::px`).
+    off: u32,
 }
 
 #[repr(C)]
@@ -306,6 +315,8 @@ struct ImgInstance {
     /// `1`: `col`, `row`, `cols` and `rows` are pixels from the window's
     /// top-left corner, not cells from the grid origin.
     screen: u32,
+    /// As [`Instance::off`], for a grid image.
+    off: u32,
 }
 
 #[repr(C)]
@@ -582,7 +593,7 @@ impl GpuCore {
         let instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Instance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32, 2 => Uint32, 3 => Uint32, 4 => Uint32, 5 => Uint32, 6 => Uint32, 7 => Uint32, 8 => Uint32, 9 => Uint32, 10 => Uint32, 11 => Uint32],
+            attributes: &wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32, 2 => Uint32, 3 => Uint32, 4 => Uint32, 5 => Uint32, 6 => Uint32, 7 => Uint32, 8 => Uint32, 9 => Uint32, 10 => Uint32, 11 => Uint32, 12 => Uint32],
         };
         // Straight-alpha "over" for glyph overlays and images; the target's
         // alpha channel (the window opacity) is preserved, not blended away.
@@ -630,7 +641,7 @@ impl GpuCore {
         let img_instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<ImgInstance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &wgpu::vertex_attr_array![0 => Sint32, 1 => Sint32, 2 => Uint32, 3 => Uint32, 4 => Float32x4, 5 => Uint32],
+            attributes: &wgpu::vertex_attr_array![0 => Sint32, 1 => Sint32, 2 => Uint32, 3 => Uint32, 4 => Float32x4, 5 => Uint32, 6 => Uint32],
         };
         let img_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("images pipeline"),
@@ -886,7 +897,7 @@ impl GpuCore {
         height: u32,
         pad: usize,
         chrome: &[Cell],
-        strip: Option<&Pixmap>,
+        scene: Scene,
         bar: (usize, usize),
     ) {
         // With a chrome bar, the bar sits `bar_inset` px below the top edge
@@ -897,7 +908,7 @@ impl GpuCore {
         } else {
             super::render::bar_inset(pad, bar.1)
         };
-        let top = super::render::grid_top(chrome, strip, pad, bar.1);
+        let top = super::render::grid_top(chrome, scene.strip, pad, bar.1);
         let uniforms = Uniforms {
             screen: [width.max(1) as f32, height.max(1) as f32],
             cell: [self.cell_w as f32, self.cell_h as f32],
@@ -938,6 +949,7 @@ impl GpuCore {
             deco,
             dcol,
             kind: 0,
+            off: 0,
         }
     }
 
@@ -956,7 +968,7 @@ impl GpuCore {
         font: &mut FontCache,
         cursor_on: bool,
     ) {
-        self.write_uniforms(width, height, 0, chrome, None, font.cell_size());
+        self.write_uniforms(width, height, 0, chrome, Scene::default(), font.cell_size());
         let mut frame = FrameLists::default();
         self.append_chrome(&mut frame, chrome, font);
         let view_grid = grid.frame_view();
@@ -964,6 +976,7 @@ impl GpuCore {
             grid: &view_grid,
             col0: 0,
             row0: 0,
+            px: (0, 0),
             focused: true,
             cursor_on,
             trail: Vec::new(),
@@ -1351,6 +1364,7 @@ impl GpuCore {
                         rows: im.rows as u32,
                         uv: [0.0, 0.0, 1.0, 1.0],
                         screen: 0,
+                        off: 0,
                     },
                 ));
             }
@@ -1394,6 +1408,7 @@ impl GpuCore {
                                 1.0 / prows as f32,
                             ],
                             screen: 0,
+                            off: 0,
                         },
                     ));
                 }
@@ -1510,7 +1525,7 @@ impl GpuCore {
         height: u32,
         panes: &[super::render::PaneFrame],
         chrome: &[Cell],
-        strip: Option<&Pixmap>,
+        scene: Scene,
         status: &[Cell],
         font: &mut FontCache,
         ui: &mut FontCache,
@@ -1519,41 +1534,58 @@ impl GpuCore {
         bar_bg: u32,
         pad: usize,
     ) {
-        self.write_uniforms(width, height, pad, chrome, strip, ui.cell_size());
-        let mut frame = self.frame_lists(panes, font, divider);
+        self.write_uniforms(width, height, pad, chrome, scene, ui.cell_size());
+        let mut frame = std::mem::take(&mut self.spare);
+        frame.clear();
+        // The body goes first, as the frame's first image, drawn under
+        // everything else.
+        if let Some(body) = scene.body {
+            let top = super::render::grid_top(chrome, scene.strip, pad, ui.cell_size().1) - pad;
+            frame.backdrop = self.append_pixmap(&mut frame, body, (0, top));
+        }
+        self.append_panes(&mut frame, panes, font, divider, scene.body.is_none());
         self.append_bars(&mut frame, width, chrome, status, ui, bar_bg);
-        if let Some(strip) = strip {
-            self.append_strip(&mut frame, strip);
+        if let Some(strip) = scene.strip.filter(|_| chrome.is_empty()) {
+            self.append_pixmap(&mut frame, strip, (0, 0));
         }
         self.draw_frame(view, &frame, bg);
         self.spare = frame;
     }
 
-    /// Append an attached window's top strip: its pixels as one image quad
-    /// at the window's top-left corner, uploaded only when they change.
-    fn append_strip(&mut self, frame: &mut FrameLists, strip: &Pixmap) {
+    /// Append an attached window's top strip or body: its pixels as one
+    /// image quad at window pixel `at`, uploaded only when they change.
+    /// Returns whether it was.
+    fn append_pixmap(
+        &mut self,
+        frame: &mut FrameLists,
+        strip: &Pixmap,
+        at: (usize, usize),
+    ) -> bool {
         let (w, h, hash) = strip.fingerprint();
         let key = (4u8, hash, ((w as u64) << 32) | h as u64);
         let bind = match self.img_cache.get(&key) {
             Some(bind) => Some(Rc::clone(bind)),
             None => {
-                let pixels: Vec<Option<u32>> = strip.pixels.iter().map(|&p| Some(p)).collect();
+                let pixels: Vec<Option<u32>> = strip.pixels().iter().map(|&p| Some(p)).collect();
                 self.image_texture(key, w, h, &pixels)
             }
         };
-        if let Some(bind) = bind {
-            frame.images.push((
-                bind,
-                ImgInstance {
-                    col: 0,
-                    row: 0,
-                    cols: w as u32,
-                    rows: h as u32,
-                    uv: [0.0, 0.0, 1.0, 1.0],
-                    screen: 1,
-                },
-            ));
-        }
+        let Some(bind) = bind else {
+            return false;
+        };
+        frame.images.push((
+            bind,
+            ImgInstance {
+                col: at.0 as i32,
+                row: at.1 as i32,
+                cols: w as u32,
+                rows: h as u32,
+                uv: [0.0, 0.0, 1.0, 1.0],
+                screen: 1,
+                off: 0,
+            },
+        ));
+        true
     }
 
     /// Append both bars, drawn in the UI font `ui`. They never overlap the
@@ -1591,8 +1623,9 @@ impl GpuCore {
         self.append_status(frame, status, ui);
     }
 
-    /// Every pane instance of one frame, as [`Self::render_panes`] draws it
-    /// (the bars come after, from [`Self::append_bars`]).
+    /// Every pane instance of one frame with divider gaps, as
+    /// [`Self::append_panes`] builds them.
+    #[cfg(test)]
     fn frame_lists(
         &mut self,
         panes: &[PaneFrame],
@@ -1601,11 +1634,27 @@ impl GpuCore {
     ) -> FrameLists {
         let mut frame = std::mem::take(&mut self.spare);
         frame.clear();
+        self.append_panes(&mut frame, panes, font, divider, true);
+        frame
+    }
+
+    /// Append every pane instance of one frame, as [`Self::render_panes`]
+    /// draws it (the bars come after, from [`Self::append_bars`]); with
+    /// `divider_gaps`, the gaps between panes show `divider`.
+    fn append_panes(
+        &mut self,
+        frame: &mut FrameLists,
+        panes: &[PaneFrame],
+        font: &mut FontCache,
+        divider: u32,
+        divider_gaps: bool,
+    ) {
         // The clear paints the padding band (and slack) in the terminal
         // background; gaps *between* panes still show the divider, via a
         // divider-colored fill under the panes' bounding box (the grids
         // overpaint everything except the gaps).
-        if let (Some(x1), Some(y0), Some(y1)) = (
+        if let (true, Some(x1), Some(y0), Some(y1)) = (
+            divider_gaps,
             panes.iter().map(|p| p.col0 + p.grid.cols).max(),
             panes.iter().map(|p| p.row0).min(),
             panes.iter().map(|p| p.row0 + p.grid.rows).max(),
@@ -1620,7 +1669,8 @@ impl GpuCore {
         let mut cache = std::mem::take(&mut self.row_cache);
         cache.resize_with(panes.len(), PaneRows::default);
         for (p, rows) in panes.iter().zip(&mut cache) {
-            self.append_grid(&mut frame, p, rows, font);
+            let start = (frame.base.len(), frame.overlay.len(), frame.images.len());
+            self.append_grid(frame, p, rows, font);
             // Cursor-trail ghosts (G36): solid cursor-colored fills on the
             // blended overlay layer, mirroring the CPU renderer's draw_trail.
             for &(col, row, alpha) in &p.trail {
@@ -1640,6 +1690,7 @@ impl GpuCore {
                     deco: 0,
                     dcol: 0,
                     kind: 2,
+                    off: 0,
                 });
             }
             // Command gutter marks: kind-3 overlay stripes, positioned by
@@ -1662,12 +1713,13 @@ impl GpuCore {
                     deco: 0,
                     dcol: 0,
                     kind: 3,
+                    off: 0,
                 });
             }
+            frame.offset(start, p.px);
         }
         cache.truncate(panes.len());
         self.row_cache = cache;
-        frame
     }
 
     /// Submit the frame: base cells (opaque), overlay glyphs (blended), then
@@ -1711,6 +1763,13 @@ impl GpuCore {
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
+            let under = usize::from(frame.backdrop);
+            if let (Some(images), true) = (&images, frame.backdrop) {
+                pass.set_pipeline(&self.img_pipeline);
+                pass.set_vertex_buffer(0, *images);
+                pass.set_bind_group(1, frame.images[0].0.as_ref(), &[]);
+                pass.draw(0..6, 0..1);
+            }
             if let Some(base) = base {
                 pass.set_pipeline(&self.base_pipeline);
                 pass.set_vertex_buffer(0, base);
@@ -1724,7 +1783,7 @@ impl GpuCore {
             if let Some(images) = images {
                 pass.set_pipeline(&self.img_pipeline);
                 pass.set_vertex_buffer(0, images);
-                for (i, (bind, _)) in frame.images.iter().enumerate() {
+                for (i, (bind, _)) in frame.images.iter().enumerate().skip(under) {
                     pass.set_bind_group(1, bind.as_ref(), &[]);
                     pass.draw(0..6, i as u32..i as u32 + 1);
                 }
@@ -1740,6 +1799,8 @@ struct FrameLists {
     base: Vec<Instance>,
     overlay: Vec<Instance>,
     images: Vec<(Rc<wgpu::BindGroup>, ImgInstance)>,
+    /// `images[0]` is an attached window's body, drawn under the cells.
+    backdrop: bool,
 }
 
 impl FrameLists {
@@ -1748,6 +1809,25 @@ impl FrameLists {
         self.base.clear();
         self.overlay.clear();
         self.images.clear();
+        self.backdrop = false;
+    }
+
+    /// Move what was appended since `start` (base, overlay and image
+    /// lengths) by `px` pixels.
+    fn offset(&mut self, start: (usize, usize, usize), px: (usize, usize)) {
+        if px == (0, 0) {
+            return;
+        }
+        let off = ((px.0.min(0xFFFF) as u32) << 16) | px.1.min(0xFFFF) as u32;
+        for i in self.base[start.0..]
+            .iter_mut()
+            .chain(&mut self.overlay[start.1..])
+        {
+            i.off = off;
+        }
+        for (_, i) in &mut self.images[start.2..] {
+            i.off = off;
+        }
     }
 }
 
@@ -1860,7 +1940,7 @@ impl Renderer for GpuRenderer {
         &mut self,
         panes: &[super::render::PaneFrame],
         chrome: &[Cell],
-        strip: Option<&Pixmap>,
+        scene: Scene,
         status: &[Cell],
         font: &mut FontCache,
         ui: &mut FontCache,
@@ -1906,7 +1986,7 @@ impl Renderer for GpuRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.core.render_panes(
-            &view, width, height, panes, chrome, strip, status, font, ui, divider, bg, bar_bg, pad,
+            &view, width, height, panes, chrome, scene, status, font, ui, divider, bg, bar_bg, pad,
         );
         frame.present();
     }
@@ -2326,6 +2406,7 @@ mod tests {
             grid: &v,
             col0: 0,
             row0: 0,
+            px: (0, 0),
             focused: false,
             cursor_on: false,
             trail: Vec::new(),
@@ -2399,6 +2480,7 @@ mod tests {
                 grid: &v,
                 col0: 0,
                 row0: 0,
+                px: (0, 0),
                 focused: false,
                 cursor_on: false,
                 trail: Vec::new(),
@@ -2477,6 +2559,7 @@ mod tests {
             grid: v,
             col0: 0,
             row0: 0,
+            px: (0, 0),
             focused: true,
             cursor_on: true,
             trail: Vec::new(),

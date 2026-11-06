@@ -465,6 +465,7 @@ mod tests {
                 })
                 .collect(),
             clients: 2,
+            local: true,
         }
     }
 
@@ -585,7 +586,7 @@ mod tests {
             .find(|(_, s)| *s == Spot::Tab(10))
             .expect("tab");
         let c = look(1.0).chrome;
-        let px = |x: f32, y: f32| strip.pixmap.pixels[y as usize * 1200 + x as usize];
+        let px = |x: f32, y: f32| strip.pixmap.pixels()[y as usize * 1200 + x as usize];
         assert_eq!(px(r.x + r.w - 4.0, r.y + 4.0), c.base);
         assert_eq!(px(r.x + r.w + 2.0, r.y + 4.0), c.frame);
     }

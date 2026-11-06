@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 use platform_windows::WindowsUnixStream as UnixStream;
-use rusty_mux_core::{BlockId, Layout, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Layout, SessionId, Size, WindowId};
 use rusty_mux_proto::{Entry, Features, Launch, Message, Takeover};
 use rusty_uuid::Uuid;
 
@@ -88,6 +88,8 @@ pub enum Missed {
 /// What the client knows of the server's answer to its Hello.
 pub struct Welcomed {
     pub features: Features,
+    /// The client the server made of this connection.
+    pub client: ClientId,
     /// How to take this connection's client over later, if the server
     /// allows it.
     pub takeover: Option<Takeover>,
@@ -404,6 +406,8 @@ pub struct Opened {
     pub stream: UnixStream,
     pub conn: Conn<UnixStream>,
     pub writer: Conn<UnixStream>,
+    /// The client the server made of this connection.
+    pub client: ClientId,
     pub takeover: Option<Takeover>,
     /// The client taken over, if this continues one.
     pub resumed: Option<Takeover>,
@@ -440,6 +444,7 @@ pub fn reach(
         stream,
         conn,
         writer,
+        client: welcomed.client,
         takeover: welcomed.takeover,
         resumed: resume,
         features: welcomed.features,
@@ -456,6 +461,7 @@ pub fn welcomed(message: Message) -> Result<Welcomed, String> {
             ..
         } => Ok(Welcomed {
             features,
+            client,
             takeover: token.map(|token| Takeover { client, token }),
         }),
         other => Err(format!("expected Welcome, got {other:?}")),

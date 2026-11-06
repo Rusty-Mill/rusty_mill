@@ -75,7 +75,7 @@ pub(crate) fn draw_pixmap(
 ) {
     let cols = image.width.min(w.saturating_sub(x));
     for row in 0..image.height.min(h.saturating_sub(y)) {
-        let src = &image.pixels[row * image.width..][..cols];
+        let src = &image.pixels()[row * image.width..][..cols];
         buffer[(y + row) * w + x..][..cols].copy_from_slice(src);
     }
 }

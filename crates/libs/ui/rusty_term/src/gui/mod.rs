@@ -22,6 +22,7 @@
 mod access;
 #[doc(hidden)]
 pub mod bench;
+mod blocks;
 mod boxdraw;
 mod chrome;
 pub mod control;

@@ -42,12 +42,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use winit::keyboard::{KeyCode, KeyLocation, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, Window, WindowId};
 
+use super::blocks::{self, BodyState};
 use super::chrome::{Chrome, Marks};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::motion;
 use super::pace::Pacer;
-use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors, blend};
+use super::render::{CpuRenderer, PaneFrame, Renderer, Scene, SearchColors, blend};
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{Feed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
@@ -151,6 +152,9 @@ pub(crate) enum UserEvent {
     Focus(u64),
     /// The source's session changed ([`Remote::session`]).
     Session(super::source::Session),
+    /// What the source says of the shown blocks, for their headers
+    /// ([`Remote::blocks`]).
+    Blocks(Vec<(u64, super::source::BlockInfo)>),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -334,19 +338,22 @@ fn sync_step(before: &[u64], open: &[(u64, Instant)]) -> (Vec<u64>, Option<Insta
     (held, open.iter().map(|&(_, t)| t).min(), released)
 }
 
+/// Where a pane sits: its cell rect, and the window pixel of its grid's
+/// top-left corner; for an attached window's block (gui-design D47), the
+/// block's box in window pixels too, and its cell rect's corner only orders
+/// it among the others.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Place {
+    cells: Rect,
+    x: usize,
+    y: usize,
+    block: Option<Rect>,
+}
+
 impl Tab {
     fn pane(&self, id: u64) -> Option<&Pane> {
         self.panes.iter().find(|p| p.id == id)
     }
-    /// The tab's pane rectangles within `area`, honoring pane zoom (a
-    /// zoomed tab shows only its focused pane, full-area).
-    fn rects(&self, area: Rect) -> Vec<(u64, Rect)> {
-        if self.zoomed {
-            return vec![(self.focus, area)];
-        }
-        self.layout.rects(area)
-    }
-
     fn focused(&self) -> Option<&Pane> {
         self.pane(self.focus)
     }
@@ -670,6 +677,9 @@ struct WindowState<'a> {
     /// An attached window's top strip, in place of the chrome bar
     /// (gui-design D45); `None` for local shells.
     strip: Option<StripState>,
+    /// An attached window's framed blocks under the strip (gui-design
+    /// D47); `None` for local shells.
+    body: Option<BodyState>,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -1304,11 +1314,14 @@ impl WindowState<'_> {
     /// time): the closest pane whose rect lies strictly beyond the focused
     /// pane's edge, by center distance. No wrap.
     fn focus_dir(&mut self, dx: isize, dy: isize) {
-        let area = Rect::new(0, 0, self.cols as usize, self.rows as usize);
+        let rects: Vec<(u64, Rect)> = self
+            .places(self.active)
+            .into_iter()
+            .map(|(id, p)| (id, p.cells))
+            .collect();
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
-        let rects = tab.rects(area);
         let Some(&(_, f)) = rects.iter().find(|(id, _)| *id == tab.focus) else {
             return;
         };
@@ -1452,13 +1465,89 @@ impl WindowState<'_> {
         )
     }
 
+    /// Where each pane of `layout` sits (only `focus`'s when `zoomed`).
+    /// A local window tiles cells; an attached one tiles pixels under the
+    /// strip and frames each block, its grid inside (gui-design D47).
+    fn places_of(&self, layout: &Layout, zoomed: bool, focus: u64) -> Vec<(u64, Place)> {
+        let (cw, ch) = (self.cell_w.max(1), self.cell_h.max(1));
+        let oy = self.grid_oy();
+        if self.body.is_none() {
+            let area = self.pane_area();
+            let rects = match zoomed {
+                true => vec![(focus, area)],
+                false => layout.rects(area),
+            };
+            return rects
+                .into_iter()
+                .map(|(id, r)| {
+                    let (x, y) = (self.pad + r.col * cw, oy + r.row * ch);
+                    (
+                        id,
+                        Place {
+                            cells: r,
+                            x,
+                            y,
+                            block: None,
+                        },
+                    )
+                })
+                .collect();
+        }
+        let size = self.window.as_ref().map(|w| w.inner_size());
+        let (width, height) = size.map_or((0, 0), |s| (s.width as usize, s.height as usize));
+        let scale = self.scale_factor as f32;
+        let bottom = usize::from(self.status_enabled()) * self.bar_h;
+        let area = blocks::area(width, height, self.chrome_h(), bottom, scale);
+        let boxes = match zoomed {
+            true => vec![(focus, area)],
+            false => layout.boxes(area, blocks::gap(scale)),
+        };
+        boxes
+            .into_iter()
+            .map(|(id, b)| {
+                let g = blocks::grid_area(b, scale);
+                // A block's cells count from the grid's corner only to
+                // order blocks by where they sit (focus moves by direction).
+                let cells = Rect::new(
+                    g.col.saturating_sub(self.pad) / cw,
+                    g.row.saturating_sub(oy) / ch,
+                    g.cols / cw,
+                    g.rows / ch,
+                );
+                let place = Place {
+                    cells,
+                    x: g.col,
+                    y: g.row,
+                    block: Some(b),
+                };
+                (id, place)
+            })
+            .collect()
+    }
+
+    /// Where each of tab `ti`'s panes sits.
+    fn places(&self, ti: usize) -> Vec<(u64, Place)> {
+        match self.tabs.get(ti) {
+            Some(t) => self.places_of(&t.layout, t.zoomed, t.focus),
+            None => Vec::new(),
+        }
+    }
+
+    /// Where pane `id` of the active tab sits.
+    fn place(&self, id: u64) -> Option<Place> {
+        self.places(self.active)
+            .into_iter()
+            .find(|(pid, _)| *pid == id)
+            .map(|(_, p)| p)
+    }
+
     fn layout_panes(&mut self, ti: usize) {
-        let area = self.pane_area();
         let attached = self.source.is_some();
+        let places = self.places(ti);
         let Some(tab) = self.tabs.get_mut(ti) else {
             return;
         };
-        for (id, r) in tab.rects(area) {
+        for (id, Place { cells: r, .. }) in places {
             if let Some(p) = tab.panes.iter_mut().find(|p| p.id == id) {
                 let (c, rw) = (r.cols.max(1) as u16, r.rows.max(1) as u16);
                 {
@@ -1489,7 +1578,9 @@ impl WindowState<'_> {
         // One bar row goes to the chrome bar; one more to the status ribbon
         // when it's on.
         let rows = ((inner_h.saturating_sub(self.bars_h()) / self.cell_h).max(1)) as u16;
-        if (cols, rows) != (self.cols, self.rows) {
+        // An attached window's blocks are laid out in pixels, so any
+        // change of size moves them.
+        if (cols, rows) != (self.cols, self.rows) || self.body.is_some() {
             self.cols = cols;
             self.rows = rows;
             for ti in 0..self.tabs.len() {
@@ -1530,6 +1621,7 @@ impl WindowState<'_> {
                 grid: &page,
                 col0: 0,
                 row0: 0,
+                px: (0, 0),
                 focused: false,
                 cursor_on: false,
                 trail: Vec::new(),
@@ -1538,10 +1630,14 @@ impl WindowState<'_> {
                 search: SearchColors::default(),
             };
             let strip = self.strip.as_ref().and_then(StripState::painted);
+            let scene = Scene {
+                strip: strip.map(|s| &s.pixmap),
+                body: None,
+            };
             renderer.render(
                 std::slice::from_ref(&frame),
                 &chrome,
-                strip.filter(|_| chrome.is_empty()).map(|s| &s.pixmap),
+                scene,
                 &status,
                 &mut self.font,
                 &mut self.ui_font,
@@ -1555,6 +1651,9 @@ impl WindowState<'_> {
             return;
         }
         let area = self.pane_area();
+        let places = self.places(self.active);
+        self.repaint_body(&places);
+        let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
         // right of the pane area. Built before the renderer is borrowed and
         // before the panes lock their grids — it locks the focused grid
@@ -1618,11 +1717,12 @@ impl WindowState<'_> {
         let focus = tab.focus;
         let mut snaps = Vec::new();
         let mut shown = Vec::new();
-        for (id, r) in tab.rects(area) {
+        for &(id, place) in &places {
             if let Some(p) = tab.pane(id) {
                 // A pane larger than its place (an attached block another
                 // client sized) shows its top-left.
-                snaps.push((p.frame_view().cropped(r.cols, r.rows), r, id == focus));
+                let r = place.cells;
+                snaps.push((p.frame_view().cropped(r.cols, r.rows), place, id == focus));
                 shown.push(p);
             }
         }
@@ -1676,10 +1776,23 @@ impl WindowState<'_> {
         let search = SearchColors::from_theme(&self.theme);
         let mut frames: Vec<PaneFrame> = snaps
             .iter()
-            .map(|(g, r, foc)| PaneFrame {
+            .map(|(g, place, foc)| PaneFrame {
                 grid: g,
-                col0: r.col,
-                row0: r.row,
+                // An attached block sits in pixels, a local pane in cells.
+                col0: if place.block.is_some() {
+                    0
+                } else {
+                    place.cells.col
+                },
+                row0: if place.block.is_some() {
+                    0
+                } else {
+                    place.cells.row
+                },
+                px: match place.block {
+                    Some(_) => (place.x.saturating_sub(self.pad), place.y.saturating_sub(oy)),
+                    None => (0, 0),
+                },
                 focused: *foc,
                 cursor_on: blink,
                 trail: if *foc {
@@ -1692,7 +1805,16 @@ impl WindowState<'_> {
                     g.block_marks()
                         .iter()
                         .enumerate()
-                        .filter_map(|(row, m)| m.map(|m| (row, mark_color(m, r.col))))
+                        .filter_map(|(row, m)| {
+                            // A block's marks sit in its padding, on the
+                            // terminal background, as a left-edge pane's do.
+                            let edge = if place.block.is_some() {
+                                0
+                            } else {
+                                place.cells.col
+                            };
+                            m.map(|m| (row, mark_color(m, edge)))
+                        })
                         .collect()
                 } else {
                     Vec::new()
@@ -1705,6 +1827,7 @@ impl WindowState<'_> {
                 grid: dg,
                 col0: area.cols + 1, // right of the pane area's divider column
                 row0: 0,
+                px: (0, 0),
                 focused: false,
                 cursor_on: false,
                 trail: Vec::new(),
@@ -1713,11 +1836,18 @@ impl WindowState<'_> {
                 search: SearchColors::default(),
             });
         }
-        let strip = self.strip.as_ref().and_then(StripState::painted);
+        let scene = Scene {
+            strip: self
+                .strip
+                .as_ref()
+                .and_then(StripState::painted)
+                .map(|s| &s.pixmap),
+            body: self.body.as_ref().and_then(BodyState::painted),
+        };
         renderer.render(
             &frames,
             &chrome,
-            strip.filter(|_| chrome.is_empty()).map(|s| &s.pixmap),
+            scene,
             &status,
             &mut self.font,
             &mut self.ui_font,
@@ -2437,6 +2567,38 @@ impl WindowState<'_> {
         }
     }
 
+    /// Paint the attached window's blocks at `places` for the current
+    /// state, focus and size.
+    fn repaint_body(&mut self, places: &[(u64, Place)]) {
+        let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else {
+            return;
+        };
+        let focus = self.tabs.get(self.active).map(|t| t.focus);
+        let top = self.chrome_h();
+        let bottom = usize::from(self.status_enabled()) * self.bar_h;
+        let look = blocks::Look {
+            chrome: self.chrome_colors(),
+            bg: self.theme.bg,
+            scale: self.scale_factor as f32,
+        };
+        let Some(body) = &mut self.body else {
+            return;
+        };
+        let shown = places
+            .iter()
+            .filter_map(|&(id, p)| {
+                let b = p.block?;
+                Some(blocks::Shown {
+                    rect: Rect::new(b.col, b.row - top, b.cols, b.rows),
+                    focused: Some(id) == focus,
+                    header: body.header(id, read_git_branch),
+                })
+            })
+            .collect();
+        let height = (size.height as usize).saturating_sub(top + bottom);
+        body.repaint(size.width as usize, height, shown, look);
+    }
+
     /// Pixel height both bars take from the pane area: the chrome bar (with
     /// its inset) plus the status ribbon when it's on.
     fn bars_h(&self) -> usize {
@@ -2619,13 +2781,15 @@ impl WindowState<'_> {
     /// The pane under pixel `(px, py)` in the active tab's grid area, if any.
     fn pane_under(&self, px: f64, py: f64) -> Option<u64> {
         let (col, row) = self.cell_at(px, py);
-        let area = Rect::new(0, 0, self.cols as usize, self.rows as usize);
-        self.tabs.get(self.active).and_then(|t| {
-            t.rects(area)
-                .into_iter()
-                .find(|(_, r)| r.contains(col, row))
-                .map(|(id, _)| id)
-        })
+        let (x, y) = (px.max(0.0) as usize, py.max(0.0) as usize);
+        self.places(self.active)
+            .into_iter()
+            .find(|(_, p)| match p.block {
+                // Anywhere on a block is that block (handoff D102).
+                Some(b) => b.contains(x, y),
+                None => p.cells.contains(col, row),
+            })
+            .map(|(id, _)| id)
     }
 
     /// Map pixel `(px, py)` to a cell within the *focused* pane, clamped to it.
@@ -2640,32 +2804,21 @@ impl WindowState<'_> {
     /// both for the focused pane (`cell_in_focused`) and for routing wheel
     /// events to whichever pane is under the pointer, regardless of focus.
     fn cell_in_pane(&self, id: u64, px: f64, py: f64) -> (usize, usize) {
-        let (col, row) = self.cell_at(px, py);
-        if let Some(r) = self.pane_rect(id) {
-            return (
-                col.saturating_sub(r.col).min(r.cols.saturating_sub(1)),
-                row.saturating_sub(r.row).min(r.rows.saturating_sub(1)),
-            );
-        }
-        (col, row)
+        let Some(p) = self.place(id) else {
+            return self.cell_at(px, py);
+        };
+        let col = (px - p.x as f64).max(0.0) as usize / self.cell_w.max(1);
+        let row = (py - p.y as f64).max(0.0) as usize / self.cell_h.max(1);
+        (
+            col.min(p.cells.cols.saturating_sub(1)),
+            row.min(p.cells.rows.saturating_sub(1)),
+        )
     }
 
-    /// The focused pane's cell rect within the window's grid area, `None`
-    /// before any tab exists.
-    fn focused_pane_rect(&self) -> Option<Rect> {
+    /// Where the focused pane sits, `None` before any tab exists.
+    fn focused_place(&self) -> Option<Place> {
         let tab = self.tabs.get(self.active)?;
-        self.pane_rect(tab.focus)
-    }
-
-    /// Pane `id`'s cell rect within the window's grid area, `None` if `id`
-    /// isn't a pane of the active tab.
-    fn pane_rect(&self, id: u64) -> Option<Rect> {
-        let area = Rect::new(0, 0, self.cols as usize, self.rows as usize);
-        let tab = self.tabs.get(self.active)?;
-        tab.rects(area)
-            .into_iter()
-            .find(|(pid, _)| *pid == id)
-            .map(|(_, r)| r)
+        self.place(tab.focus)
     }
 
     /// The focused pane's id, `None` before any tab exists.
@@ -2706,11 +2859,11 @@ impl WindowState<'_> {
         if !self.drag.is_live() {
             return false;
         }
-        let Some(r) = self.focused_pane_rect() else {
+        let Some(p) = self.focused_place() else {
             return false;
         };
-        let top_px = (self.grid_oy() + r.row * self.cell_h) as f64;
-        let bottom_px = (self.grid_oy() + (r.row + r.rows) * self.cell_h) as f64;
+        let top_px = p.y as f64;
+        let bottom_px = (p.y + p.cells.rows * self.cell_h) as f64;
         let Some(scroll_up) =
             drag_scroll_direction(self.mouse_pos.1, top_px, bottom_px, DRAG_SCROLL_MARGIN)
         else {
@@ -3314,15 +3467,10 @@ impl WindowState<'_> {
         // position within an unsplit *first* pane regardless of which split
         // pane is actually focused (e.g. a right/bottom split composing IME
         // would show the candidate window over the wrong pane entirely).
-        let (base_col, base_row) = self.focused_pane_rect().map_or((0, 0), |r| (r.col, r.row));
-        let (x, y) = ime_cursor_area_origin(
-            self.pad,
-            self.grid_oy(),
-            self.cell_w,
-            self.cell_h,
-            (base_col, base_row),
-            (col, row),
-        );
+        let (x0, y0) = self
+            .focused_place()
+            .map_or((self.pad, self.grid_oy()), |p| (p.x, p.y));
+        let (x, y) = ime_cursor_area_origin(x0, y0, self.cell_w, self.cell_h, (0, 0), (col, row));
         window.set_ime_cursor_area(
             winit::dpi::PhysicalPosition::new(x, y),
             winit::dpi::PhysicalSize::new(self.cell_w as u32, self.cell_h as u32),
@@ -3462,15 +3610,12 @@ impl WindowState<'_> {
         // (this pane is its own terminal, so pane-relative is the analogue of
         // xterm's text-area-relative pixels), below the chrome bar.
         if modes.extended & 8 != 0
-            && let Some(r) = self.pane_rect(id)
+            && let Some(p) = self.place(id)
         {
             e.point = pane_pixel_point(
                 self.mouse_pos,
-                (
-                    self.pad + r.col * self.cell_w,
-                    self.grid_oy() + r.row * self.cell_h,
-                ),
-                (r.cols * self.cell_w, r.rows * self.cell_h),
+                (p.x, p.y),
+                (p.cells.cols * self.cell_w, p.cells.rows * self.cell_h),
             );
         }
         let mut out = Vec::new();
@@ -5509,6 +5654,13 @@ impl WindowState<'_> {
             }
         }
         self.apply_opacity();
+        // An attached window's blocks are laid out in the window's pixels,
+        // which it has only now.
+        if self.body.is_some() {
+            for ti in 0..self.tabs.len() {
+                self.layout_panes(ti);
+            }
+        }
         // Must be created before the window is shown (see the `with_visible`
         // note above); `with_event_loop_proxy` routes AccessKit's own events
         // back through the ordinary winit event loop as `UserEvent::Accessibility`.
@@ -5555,7 +5707,12 @@ impl WindowState<'_> {
             return;
         };
         let layout = Layout::from_tree(&tree);
-        let rects = layout.rects(self.pane_area());
+        let first = layout.ids().first().copied().unwrap_or_default();
+        let rects: Vec<(u64, Rect)> = self
+            .places_of(&layout, false, first)
+            .into_iter()
+            .map(|(id, p)| (id, p.cells))
+            .collect();
         let mut panes = match self.tabs.pop() {
             Some(tab) => tab.panes,
             None => Vec::new(),
@@ -5594,8 +5751,21 @@ impl WindowState<'_> {
 
     /// Show the source's `session` on the top strip.
     fn show_session(&mut self, session: super::source::Session) {
+        if let Some(body) = &mut self.body {
+            body.set_local(session.local);
+        }
         if let Some(strip) = &mut self.strip {
             strip.show(session);
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Show what the source says of its blocks in their headers.
+    fn show_blocks(&mut self, blocks: Vec<(u64, super::source::BlockInfo)>) {
+        if let Some(body) = &mut self.body {
+            body.show(blocks);
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
@@ -6305,6 +6475,10 @@ impl<'a> App<'a> {
                 Some(_) => Some(StripState::new().ok_or("the interface font failed to parse")?),
                 None => None,
             },
+            body: match self.source {
+                Some(_) => Some(BodyState::new().ok_or("the interface font failed to parse")?),
+                None => None,
+            },
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -6515,6 +6689,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Session(session) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
                     w.show_session(session);
+                }
+            }
+            UserEvent::Blocks(blocks) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.show_blocks(blocks);
                 }
             }
             UserEvent::ConfigChanged => {

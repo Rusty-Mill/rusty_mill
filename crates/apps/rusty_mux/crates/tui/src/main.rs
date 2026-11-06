@@ -794,7 +794,9 @@ mod client {
             by: None,
             cancel: &NEVER,
         };
-        let Welcomed { features, takeover } = req.welcome()?;
+        let Welcomed {
+            features, takeover, ..
+        } = req.welcome()?;
         let block = match block {
             Some(id) => BlockId::from_uuid(parse_uuid(id)?),
             None => req.create(area, first_session_name(features))?,
@@ -3097,6 +3099,7 @@ mod client {
                 conn: Conn::new(near.try_clone().expect("clone")),
                 writer: Conn::new(near.try_clone().expect("clone")),
                 stream: near,
+                client: who.client,
                 takeover: Some(who),
                 resumed: Some(who),
                 features: PANE,
