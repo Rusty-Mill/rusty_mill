@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::{KeyCode, KeyLocation, ModifiersState, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, PhysicalKey};
 use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, Window, WindowId};
 
 use super::blocks::{self, BodyState};
@@ -48,9 +48,11 @@ use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::motion;
 use super::pace::Pacer;
+use super::prefix::{self, Command};
 use super::render::{CpuRenderer, PaneFrame, Renderer, Scene, SearchColors, blend};
+use super::ribbon;
 use super::settings::{Field, Settings, SetupBaseline, Widget};
-use super::source::{Feed, PaneIo, Remote, Source, Tree};
+use super::source::{Act, Feed, PaneIo, Remote, Source, Tree};
 use super::strip::{self, Spot, StripState};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
@@ -150,6 +152,8 @@ pub(crate) enum UserEvent {
     Layout(Option<Tree>),
     /// The source moved the attached window's focus ([`Remote::focus`]).
     Focus(u64),
+    /// The source zoomed a pane, or unzoomed with `None` ([`Remote::zoom`]).
+    Zoom(Option<u64>),
     /// The source's session changed ([`Remote::session`]).
     Session(super::source::Session),
     /// What the source says of the shown blocks, for their headers
@@ -205,6 +209,9 @@ enum Hit {
     Window(u64),
     /// Ask the source for a new window (the strip's "+").
     NewWindow,
+    /// A control on an attached window's blocks: a zoom button, "Exit
+    /// zoom" or a rail chip (gui-design D49).
+    Block(blocks::Spot),
 }
 
 impl Hit {
@@ -219,6 +226,14 @@ impl Hit {
             Hit::Close => Spot::Close,
             _ => return None,
         })
+    }
+
+    /// The body spot this hit is, for drawing its hover and press.
+    fn block(self) -> Option<blocks::Spot> {
+        match self {
+            Hit::Block(spot) => Some(spot),
+            _ => None,
+        }
     }
 }
 
@@ -674,6 +689,9 @@ struct WindowState<'a> {
     source: Option<&'a dyn Source>,
     /// The focus last told to `source` or told by it.
     told: Option<u64>,
+    /// An attached window's prefix (Ctrl-]) is armed: the next key is a
+    /// layout command (gui-design F2, D49).
+    armed: bool,
     /// An attached window's top strip, in place of the chrome bar
     /// (gui-design D45); `None` for local shells.
     strip: Option<StripState>,
@@ -1493,13 +1511,13 @@ impl WindowState<'_> {
                 })
                 .collect();
         }
-        let size = self.window.as_ref().map(|w| w.inner_size());
-        let (width, height) = size.map_or((0, 0), |s| (s.width as usize, s.height as usize));
         let scale = self.scale_factor as f32;
-        let bottom = usize::from(self.status_enabled()) * self.bar_h;
-        let area = blocks::area(width, height, self.chrome_h(), bottom, scale);
+        let area = self.body_area();
         let boxes = match zoomed {
-            true => vec![(focus, area)],
+            true => {
+                let others = layout.ids().len().saturating_sub(1);
+                vec![(focus, blocks::zoomed(area, others, scale).0)]
+            }
             false => layout.boxes(area, blocks::gap(scale)),
         };
         boxes
@@ -1632,7 +1650,7 @@ impl WindowState<'_> {
             let strip = self.strip.as_ref().and_then(StripState::painted);
             let scene = Scene {
                 strip: strip.map(|s| &s.pixmap),
-                body: None,
+                ..Scene::default()
             };
             renderer.render(
                 std::slice::from_ref(&frame),
@@ -1842,7 +1860,16 @@ impl WindowState<'_> {
                 .as_ref()
                 .and_then(StripState::painted)
                 .map(|s| &s.pixmap),
-            body: self.body.as_ref().and_then(BodyState::painted),
+            body: self
+                .body
+                .as_ref()
+                .and_then(BodyState::painted)
+                .map(|b| &b.pixmap),
+            over: self
+                .body
+                .as_ref()
+                .and_then(BodyState::painted)
+                .map_or(&[], |b| &b.over),
         };
         renderer.render(
             &frames,
@@ -1905,7 +1932,17 @@ impl WindowState<'_> {
     /// Whether the bottom status ribbon is on (`[window] status_bar`,
     /// default on).
     fn status_enabled(&self) -> bool {
-        self.config.status_bar.unwrap_or(true)
+        // An attached window has the ribbon instead (gui-design D49).
+        self.config.status_bar.unwrap_or(true) && self.body.is_none()
+    }
+
+    /// Pixel height the bottom bar takes: an attached window's ribbon, else
+    /// the status bar when it's on.
+    fn bottom_h(&self) -> usize {
+        match self.body {
+            Some(_) => ribbon::height(self.scale_factor as f32),
+            None => usize::from(self.status_enabled()) * self.bar_h,
+        }
     }
 
     /// Lay out the bottom status ribbon: the focused pane's cwd and git
@@ -2568,41 +2605,98 @@ impl WindowState<'_> {
     }
 
     /// Paint the attached window's blocks at `places` for the current
-    /// state, focus and size.
+    /// state, focus and size: each block's frame and header, its F2 badge
+    /// while the prefix is armed, the zoomed window's rail and the ribbon.
     fn repaint_body(&mut self, places: &[(u64, Place)]) {
         let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else {
             return;
         };
-        let focus = self.tabs.get(self.active).map(|t| t.focus);
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let (focus, zoomed, ids) = (tab.focus, tab.zoomed, tab.layout.ids());
+        let scale = self.scale_factor as f32;
         let top = self.chrome_h();
-        let bottom = usize::from(self.status_enabled()) * self.bar_h;
+        let area = self.body_area();
         let look = blocks::Look {
             chrome: self.chrome_colors(),
             bg: self.theme.bg,
-            scale: self.scale_factor as f32,
+            scale,
+            hover: self.hover.and_then(Hit::block),
+            pressed: self.pressed.and_then(Hit::block),
         };
+        let armed = self.armed;
         let Some(body) = &mut self.body else {
             return;
         };
+        // F2 numbers follow the layout's order, 1 to 9 (handoff D104).
+        let number = |id: u64| {
+            ids.iter()
+                .position(|&k| k == id)
+                .map(|i| i + 1)
+                .filter(|&n| n <= 9)
+        };
+        let up = |r: Rect| Rect::new(r.col, r.row.saturating_sub(top), r.cols, r.rows);
         let shown = places
             .iter()
             .filter_map(|&(id, p)| {
-                let b = p.block?;
                 Some(blocks::Shown {
-                    rect: Rect::new(b.col, b.row - top, b.cols, b.rows),
-                    focused: Some(id) == focus,
+                    key: id,
+                    rect: up(p.block?),
+                    focused: id == focus,
+                    zoomed,
                     header: body.header(id, read_git_branch),
+                    badge: number(id).filter(|_| armed),
                 })
             })
             .collect();
-        let height = (size.height as usize).saturating_sub(top + bottom);
-        body.repaint(size.width as usize, height, shown, look);
+        let hidden: Vec<u64> = ids
+            .iter()
+            .copied()
+            .filter(|&k| zoomed && k != focus)
+            .collect();
+        let rail = blocks::zoomed(area, hidden.len(), scale)
+            .1
+            .map(|rail| blocks::chips(rail, hidden.len(), scale))
+            .unwrap_or_default();
+        let rail = hidden
+            .iter()
+            .zip(rail)
+            .map(|(&key, rect)| blocks::Chip {
+                key,
+                rect: up(rect),
+                lead: body.lead(key),
+                number: number(key).unwrap_or_default(),
+            })
+            .collect();
+        let scene = blocks::Scene {
+            blocks: shown,
+            rail,
+            ribbon: body.ribbon(ids.len(), Some(focus), armed),
+        };
+        let height = (size.height as usize).saturating_sub(top);
+        body.repaint(size.width as usize, height, scene, look);
+    }
+
+    /// The pixel area an attached window's blocks tile: under the strip,
+    /// above the ribbon, inset (gui-design D47).
+    fn body_area(&self) -> Rect {
+        let size = self.window.as_ref().map(|w| w.inner_size());
+        let (width, height) = size.map_or((0, 0), |s| (s.width as usize, s.height as usize));
+        let scale = self.scale_factor as f32;
+        blocks::area(width, height, self.chrome_h(), self.bottom_h(), scale)
+    }
+
+    /// The body control under window pixel `(x, y)`, if any.
+    fn body_hit(&self, x: f64, y: f64) -> Option<blocks::Spot> {
+        let body = self.body.as_ref()?.painted()?;
+        body.spot(x as f32, (y as f32) - self.chrome_h() as f32)
     }
 
     /// Pixel height both bars take from the pane area: the chrome bar (with
     /// its inset) plus the status ribbon when it's on.
     fn bars_h(&self) -> usize {
-        self.chrome_h() + usize::from(self.status_enabled()) * self.bar_h
+        self.chrome_h() + self.bottom_h()
     }
 
     /// The grid content's vertical pixel offset: the padding band below the
@@ -2671,11 +2765,16 @@ impl WindowState<'_> {
             }
             return;
         }
+        // A click ends the prefix mode, then acts as usual (D49).
+        self.set_armed(false);
         if self.in_chrome(y) {
             return self.on_bar_click(x);
         }
         if self.overlay.is_some() {
             return self.overlay_click(x, y);
+        }
+        if let Some(spot) = self.body_hit(x, y) {
+            return self.on_body_click(spot);
         }
         // A click on the command dock jumps the focused pane's scrollback to
         // the clicked command block; dock clicks never reach the terminal.
@@ -2888,6 +2987,24 @@ impl WindowState<'_> {
         true
     }
 
+    /// A click on a block control (gui-design D49).
+    fn on_body_click(&mut self, spot: blocks::Spot) {
+        self.pressed = Some(Hit::Block(spot));
+        match spot {
+            blocks::Spot::Zoom(key) => self.act_on_source(|_, _| Act::Zoom(key)),
+            blocks::Spot::Unzoom => self.act_on_source(|_, _| Act::Unzoom),
+            // Focusing a hidden block unzooms, as on the server.
+            blocks::Spot::Chip(key) => {
+                if let Some(tab) = self.tabs.get_mut(self.active) {
+                    tab.focus = key;
+                }
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Dispatch a click on the chrome bar through the hit map.
     fn on_bar_click(&mut self, x: f64) {
         let Some(hit) = self.bar_hit(x, self.mouse_pos.1) else {
@@ -2954,6 +3071,8 @@ impl WindowState<'_> {
             // does anything (closing the page saves it).
             Hit::SettingsTab => {}
             Hit::CloseSettings => self.close_overlay(),
+            // Never on the bar: block controls sit under it.
+            Hit::Block(_) => {}
             Hit::MoreTabs => {
                 self.close_overlay();
                 self.cycle_tab(true);
@@ -3255,6 +3374,9 @@ impl WindowState<'_> {
                     window.request_redraw();
                 }
             }
+            Action::CloseTab if self.source.is_some() => {
+                self.act_on_source(|key, _| Act::Close(key))
+            }
             Action::CloseTab => {
                 if let Some(id) = self.tabs.get(self.active).map(|t| t.focus) {
                     self.close_pane(id);
@@ -3267,17 +3389,25 @@ impl WindowState<'_> {
             Action::OpenSetup => self.open_setup(),
             Action::Search => self.start_search(),
             Action::OpenLinks => self.open_links_menu(),
+            Action::SplitRight | Action::SplitDown if self.source.is_some() => {
+                let dir = match action {
+                    Action::SplitRight => Dir::Vertical,
+                    _ => Dir::Horizontal,
+                };
+                self.act_on_source(|key, _| Act::Split { key, dir });
+            }
             Action::SplitRight => self.split_pane(Dir::Vertical),
             Action::SplitDown => self.split_pane(Dir::Horizontal),
             Action::FocusNext => self.focus_pane(true),
-            Action::FocusLeft => self.focus_dir(-1, 0),
-            Action::FocusRight => self.focus_dir(1, 0),
-            Action::FocusUp => self.focus_dir(0, -1),
-            Action::FocusDown => self.focus_dir(0, 1),
+            Action::FocusLeft => self.focus_block_dir(-1, 0),
+            Action::FocusRight => self.focus_block_dir(1, 0),
+            Action::FocusUp => self.focus_block_dir(0, -1),
+            Action::FocusDown => self.focus_block_dir(0, 1),
             Action::ResizeLeft => self.resize_pane(Dir::Vertical, -RESIZE_STEP),
             Action::ResizeRight => self.resize_pane(Dir::Vertical, RESIZE_STEP),
             Action::ResizeUp => self.resize_pane(Dir::Horizontal, -RESIZE_STEP),
             Action::ResizeDown => self.resize_pane(Dir::Horizontal, RESIZE_STEP),
+            Action::ZoomPane if self.source.is_some() => self.toggle_source_zoom(),
             Action::ZoomPane => self.toggle_zoom(),
             Action::CopyMode => self.enter_copy_mode(),
             Action::Broadcast => {
@@ -5752,7 +5882,7 @@ impl WindowState<'_> {
     /// Show the source's `session` on the top strip.
     fn show_session(&mut self, session: super::source::Session) {
         if let Some(body) = &mut self.body {
-            body.set_local(session.local);
+            body.set_session(session.local, &session.host);
         }
         if let Some(strip) = &mut self.strip {
             strip.show(session);
@@ -5786,16 +5916,135 @@ impl WindowState<'_> {
         }
     }
 
-    /// Tell the source where the user moved the focus, once per move.
+    /// The source zoomed pane `key`, or unzoomed with `None`
+    /// (gui-design F7). A zoom moves the server's focus to the block too.
+    fn zoom_from_source(&mut self, key: Option<u64>) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let key = key.filter(|k| tab.layout.ids().contains(k));
+        if let Some(k) = key {
+            tab.focus = k;
+            self.told = Some(k);
+        }
+        if tab.zoomed == key.is_some() {
+            return;
+        }
+        tab.zoomed = key.is_some();
+        self.layout_panes(self.active);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Tell the source where the user moved the focus, once per move. As
+    /// on the server, moving it off a zoomed block unzooms the window.
     fn tell_focus(&mut self) {
         let Some(source) = self.source else {
             return;
         };
         let focus = self.tabs.get(self.active).map(|t| t.focus);
-        if let Some(key) = focus.filter(|f| self.told != Some(*f)) {
-            self.told = Some(key);
-            source.focus(key);
+        let Some(key) = focus.filter(|f| self.told != Some(*f)) else {
+            return;
+        };
+        self.told = Some(key);
+        source.focus(key);
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.zoomed
+        {
+            tab.zoomed = false;
+            self.layout_panes(self.active);
         }
+    }
+
+    /// Ask the source for `act` on the focused pane's window (handoff
+    /// D104); the layout changes when the source says so.
+    fn act_on_source(&self, act: impl FnOnce(u64, bool) -> Act) {
+        let (Some(source), Some(tab)) = (self.source, self.tabs.get(self.active)) else {
+            return;
+        };
+        source.act(act(tab.focus, tab.zoomed));
+    }
+
+    /// Zoom the focused block, or unzoom (gui-design F7).
+    fn toggle_source_zoom(&self) {
+        self.act_on_source(|focus, zoomed| match zoomed {
+            true => Act::Unzoom,
+            false => Act::Zoom(focus),
+        });
+    }
+
+    /// Carry out the key after the armed prefix (gui-design F2, handoff
+    /// D104). Returns whether the mode stays armed.
+    fn run_prefix(&mut self, command: Command) -> bool {
+        match command {
+            Command::Wait => return true,
+            Command::Cancel | Command::Unknown => {}
+            Command::Type => self.write_child(&[prefix::PREFIX]),
+            Command::Split(dir) => self.act_on_source(|key, _| Act::Split { key, dir }),
+            Command::Zoom => self.toggle_source_zoom(),
+            Command::Close => self.act_on_source(|key, _| Act::Close(key)),
+            Command::Focus(dx, dy) => self.focus_block_dir(dx, dy),
+            Command::Jump(n) => {
+                let key = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|t| t.layout.ids().get(n - 1).copied());
+                if let (Some(key), Some(tab)) = (key, self.tabs.get_mut(self.active)) {
+                    tab.focus = key;
+                }
+            }
+            // Dropping the panes detaches each block; the session runs on.
+            Command::Detach => self.closed = true,
+        }
+        false
+    }
+
+    /// Move an attached window's focus to the neighbour `(dx, dy)` of the
+    /// focused block in the unzoomed layout, as the TUI finds it.
+    fn focus_block_dir(&mut self, dx: isize, dy: isize) {
+        if self.source.is_none() {
+            return self.focus_dir(dx, dy);
+        }
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let zoomed = std::mem::take(&mut tab.zoomed);
+        let before = tab.focus;
+        self.focus_dir(dx, dy);
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            // Still zoomed when there was nowhere to go.
+            tab.zoomed = zoomed && tab.focus == before;
+        }
+    }
+
+    /// Arm or disarm the prefix, redrawing the ribbon and badges.
+    fn set_armed(&mut self, armed: bool) {
+        if self.armed == armed {
+            return;
+        }
+        self.armed = armed;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// An attached window's prefix keys (gui-design F2): Ctrl-] arms, and
+    /// the next key runs. Returns whether the key was taken.
+    fn prefix_key(&mut self, key: &Key, physical: PhysicalKey) -> bool {
+        if self.source.is_none() {
+            return false;
+        }
+        if !self.armed {
+            if !prefix::is_prefix(key, physical, self.mods) {
+                return false;
+            }
+            self.set_armed(true);
+            return true;
+        }
+        let stay = self.run_prefix(prefix::command(key, physical, self.mods));
+        self.set_armed(stay);
+        true
     }
 
     fn has_pane(&self, id: u64) -> bool {
@@ -5824,6 +6073,9 @@ impl WindowState<'_> {
                 // cursor renders only while focused, and regaining focus
                 // clears the active tab's attention badge (in `chrome_row`).
                 self.focused = focused;
+                if !focused {
+                    self.set_armed(false);
+                }
                 // A release that lands after focus moves away never reaches
                 // us, so drop the pressed look here rather than leave it stuck.
                 self.pressed = pressed_after_focus(self.pressed, focused);
@@ -5922,6 +6174,12 @@ impl WindowState<'_> {
                 }
                 // Copy mode owns the keyboard while active.
                 if self.copy_mode_key(&event) {
+                    return;
+                }
+                // An attached window's prefix and the key after it never
+                // reach the block or the keymap.
+                if self.prefix_key(&event.logical_key, event.physical_key) {
+                    self.consumed_keys.consume(event.physical_key);
                     return;
                 }
                 // Terminal-owned shortcuts (configurable via the `[keys]` config
@@ -6140,7 +6398,7 @@ impl WindowState<'_> {
                     self.bar_hit(position.x, position.y)
                         .filter(|&h| h != Hit::Drag)
                 } else {
-                    None
+                    self.body_hit(position.x, position.y).map(Hit::Block)
                 };
                 if hover != self.hover {
                     self.hover = hover;
@@ -6471,6 +6729,7 @@ impl<'a> App<'a> {
             backend: self.backend,
             source: self.source,
             told: None,
+            armed: false,
             strip: match self.source {
                 Some(_) => Some(StripState::new().ok_or("the interface font failed to parse")?),
                 None => None,
@@ -6684,6 +6943,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Focus(key) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
                     w.focus_from_source(key);
+                }
+            }
+            UserEvent::Zoom(key) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.zoom_from_source(key);
                 }
             }
             UserEvent::Session(session) => {

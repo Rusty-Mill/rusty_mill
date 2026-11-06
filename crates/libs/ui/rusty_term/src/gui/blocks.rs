@@ -1,11 +1,15 @@
 //! An attached window's blocks (gui-design F1; geometry D47, header D48):
 //! the server's split tree laid out in pixels with gaps of the frame colour,
 //! each block framed and headed by its folder and branch, or by its program
-//! and status, with who else has input on the right.
+//! and status, with who else has input and its zoom button on the right.
+//! A zoomed block fills the body beside a rail of the others (F7), the
+//! armed prefix numbers the blocks (F2), and the ribbon runs along the
+//! bottom (D49).
 //!
 //! Pure: [`grid_area`] says where a block's terminal sits, [`header`] what
-//! its header says, and [`paint`] draws every frame and header into one
-//! pixmap under the strip, which both renderers present behind the grids.
+//! its header says, and [`paint`] draws every frame, header, chip and the
+//! ribbon into one pixmap under the strip, which both renderers present
+//! behind the grids, with the spots a click can hit.
 //! Sizes are the pack's logical px times the DPI scale, never the terminal
 //! zoom.
 
@@ -17,6 +21,7 @@ use super::chrome::Chrome;
 use super::layout::Rect as Cells;
 use super::paint::{Pixmap, Rect, icons};
 use super::render::blend;
+use super::ribbon::{self, Cap, Ribbon, keycap, keycap_width};
 use super::source::{BlockInfo, State, Wait};
 use super::text::{UiText, Weight};
 use crate::core::contrast_ratio;
@@ -45,6 +50,23 @@ const TEXT_PX: f32 = 13.0;
 const SMALL_PX: f32 = 12.0;
 /// The least a cut text keeps before the next one is cut instead.
 const TEXT_MIN: f32 = 48.0;
+/// The zoom button (D47, D49): its box and radius.
+const ZOOM_BTN: (f32, f32) = (26.0, 24.0);
+const BTN_R: f32 = 5.0;
+/// The zoomed header's "Zoomed" tag and "Exit zoom" button: heights, side
+/// padding, radii and text sizes.
+const TAG: (f32, f32, f32) = (20.0, 8.0, 5.0);
+const TAG_PX: f32 = 11.0;
+const EXIT: (f32, f32, f32) = (24.0, 10.0, 6.0);
+/// F2 badges: side, radius and digit size.
+const BADGE: f32 = 32.0;
+const BADGE_R: f32 = 8.0;
+const BADGE_PX: f32 = 16.0;
+/// F7's rail: its width, a chip's height and the space between chips, and
+/// the space between a chip's glyph and its number.
+const RAIL: f32 = 36.0;
+const CHIP_H: f32 = 56.0;
+const CHIP_GAP: f32 = 3.0;
 
 /// The pixel area the blocks tile: the window under its top bars, inset
 /// [`GAP`] but at the top, above `bottom` px of other bars.
@@ -61,6 +83,36 @@ pub(crate) fn area(width: usize, height: usize, top: usize, bottom: usize, scale
 /// The gap between blocks, in px.
 pub(crate) fn gap(scale: f32) -> usize {
     px(GAP, scale)
+}
+
+/// A zoomed block's box in `area`, and the rail beside it when `others`
+/// blocks are hidden (F7, D49).
+pub(crate) fn zoomed(area: Cells, others: usize, scale: f32) -> (Cells, Option<Cells>) {
+    if others == 0 {
+        return (area, None);
+    }
+    let rail = px(RAIL, scale);
+    let side = rail + px(GAP, scale);
+    let block = Cells {
+        cols: area.cols.saturating_sub(side),
+        ..area
+    };
+    let rail = Cells::new(
+        area.col + area.cols.saturating_sub(rail),
+        area.row,
+        rail,
+        area.rows,
+    );
+    (block, Some(rail))
+}
+
+/// The first `n` chip boxes down `rail`, as many as fit.
+pub(crate) fn chips(rail: Cells, n: usize, scale: f32) -> Vec<Cells> {
+    let (h, step) = (px(CHIP_H, scale), px(CHIP_H + GAP, scale));
+    (0..n)
+        .map(|i| Cells::new(rail.col, rail.row + i * step, rail.cols, h))
+        .take_while(|c| c.row + c.rows <= rail.row + rail.rows)
+        .collect()
 }
 
 /// Where a block's terminal sits inside `block`, both in px: under the
@@ -171,6 +223,19 @@ fn shell_parts(info: &BlockInfo, branch: Option<&str>, home: Option<&str>) -> Ve
     parts
 }
 
+/// A block's lead glyph (D48): its status, else a spinner while a program
+/// other than the shell runs, else none. Rail chips show it too (D49).
+pub(crate) fn lead(info: &BlockInfo) -> Option<(Glyph, Ink)> {
+    match info.status.as_ref().map(|s| s.state) {
+        None if info.foreground.is_some() => Some((Glyph::Spinner, Ink::Accent)),
+        None | Some(State::Idle) => None,
+        Some(State::Working) => Some((Glyph::Spinner, Ink::Accent)),
+        Some(State::Blocked(_)) => Some((Glyph::Pause, Ink::Muted)),
+        Some(State::Done) => Some((Glyph::Check, Ink::Success)),
+        Some(State::Error) => Some((Glyph::Cross, Ink::Failure)),
+    }
+}
+
 /// The program's status glyph, its name and its status text.
 fn program_parts(info: &BlockInfo) -> Vec<Part> {
     let name = info
@@ -179,27 +244,20 @@ fn program_parts(info: &BlockInfo) -> Vec<Part> {
         .or(info.shell.as_deref())
         .unwrap_or("program");
     let msg = info.status.as_ref().and_then(|s| s.msg.clone());
-    let (lead, said) = match info.status.as_ref().map(|s| s.state) {
-        None => (Some((Glyph::Spinner, Ink::Accent)), None),
-        Some(State::Working) => (
-            Some((Glyph::Spinner, Ink::Accent)),
-            Some((msg.unwrap_or_else(|| "Working".into()), Ink::Muted)),
-        ),
-        Some(State::Blocked(wait)) => (
-            Some((Glyph::Pause, Ink::Muted)),
-            Some((msg.unwrap_or_else(|| waiting(wait).into()), Ink::Text)),
-        ),
-        Some(State::Done) => (
-            Some((Glyph::Check, Ink::Success)),
-            Some((msg.unwrap_or_else(|| "Done".into()), Ink::Muted)),
-        ),
-        Some(State::Idle) => (None, Some(("Idle".into(), Ink::Muted))),
-        Some(State::Error) => (
-            Some((Glyph::Cross, Ink::Failure)),
-            Some((msg.unwrap_or_else(|| "Stopped: error".into()), Ink::Failure)),
-        ),
+    let said = match info.status.as_ref().map(|s| s.state) {
+        None => None,
+        Some(State::Working) => Some((msg.unwrap_or_else(|| "Working".into()), Ink::Muted)),
+        Some(State::Blocked(wait)) => {
+            Some((msg.unwrap_or_else(|| waiting(wait).into()), Ink::Text))
+        }
+        Some(State::Done) => Some((msg.unwrap_or_else(|| "Done".into()), Ink::Muted)),
+        Some(State::Idle) => Some(("Idle".into(), Ink::Muted)),
+        Some(State::Error) => Some((msg.unwrap_or_else(|| "Stopped: error".into()), Ink::Failure)),
     };
-    let mut parts: Vec<Part> = lead.map(|(g, i)| Part::Icon(g, i)).into_iter().collect();
+    let mut parts: Vec<Part> = lead(info)
+        .map(|(g, i)| Part::Icon(g, i))
+        .into_iter()
+        .collect();
     parts.push(text(name, Weight::Medium, Ink::Text, Keep::Start));
     if let Some((said, ink)) = said {
         parts.push(text(said, Weight::Regular, ink, Keep::Start));
@@ -228,48 +286,126 @@ fn tilde(cwd: &str, home: Option<&str>) -> String {
     }
 }
 
-/// How to draw the blocks: colours and DPI scale.
+/// How to draw the blocks: colours, DPI scale and pointer state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Look {
     pub chrome: Chrome,
     /// The terminal background, which the grids sit on (D47).
     pub bg: u32,
     pub scale: f32,
+    pub hover: Option<Spot>,
+    pub pressed: Option<Spot>,
 }
 
-/// A block to draw: its box in the body's px, whether it has the focus,
-/// and its header.
+/// What a spot on the body does when clicked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spot {
+    /// Zoom block `key` (its header's zoom button).
+    Zoom(u64),
+    /// Show every block again (the zoomed header's "Exit zoom").
+    Unzoom,
+    /// Focus block `key` (its chip on the zoomed window's rail).
+    Chip(u64),
+}
+
+/// A block to draw: its box in the body's px, whether it has the focus or
+/// is zoomed, its header, and its F2 number while the prefix is armed.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Shown {
+    pub key: u64,
     pub rect: Cells,
     pub focused: bool,
+    pub zoomed: bool,
     pub header: Header,
+    pub badge: Option<usize>,
 }
 
-/// The body under the strip, `width × height` px: the frame colour, and
-/// each of `blocks` framed and headed.
+/// A hidden block's chip on the zoomed window's rail (F7, D49).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Chip {
+    pub key: u64,
+    pub rect: Cells,
+    pub lead: Option<(Glyph, Ink)>,
+    pub number: usize,
+}
+
+/// Everything the body shows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Scene {
+    pub blocks: Vec<Shown>,
+    pub rail: Vec<Chip>,
+    pub ribbon: Ribbon,
+}
+
+/// A painted body: its pixels, what is drawn over the grids (F2 badges),
+/// and the spots, all in the body's px.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Body {
+    pub pixmap: Pixmap,
+    pub over: Vec<(Pixmap, (usize, usize))>,
+    pub spots: Vec<(Rect, Spot)>,
+}
+
+impl Body {
+    /// The spot under `(x, y)`, if any.
+    pub(crate) fn spot(&self, x: f32, y: f32) -> Option<Spot> {
+        self.spots
+            .iter()
+            .find(|(r, _)| r.contains(x, y))
+            .map(|&(_, s)| s)
+    }
+}
+
+/// The body under the strip, `width × height` px: the frame colour, each
+/// block framed and headed, the rail's chips, and the ribbon at the bottom.
 pub(crate) fn paint(
     width: usize,
     height: usize,
-    blocks: &[Shown],
+    scene: &Scene,
     look: &Look,
     font: &mut UiText,
-) -> Pixmap {
+) -> Body {
     let mut out = Pixmap::new(width, height, look.chrome.frame);
-    for block in blocks {
-        paint_block(&mut out, block, look, font);
+    let mut spots = Vec::new();
+    for block in &scene.blocks {
+        paint_block(&mut out, &mut spots, block, look, font);
     }
-    out
+    for chip in &scene.rail {
+        paint_chip(&mut out, chip, look, font);
+        spots.push((rect(chip.rect), Spot::Chip(chip.key)));
+    }
+    let y = height.saturating_sub(ribbon::height(look.scale)) as f32;
+    ribbon::paint(&mut out, y, &scene.ribbon, (&look.chrome, look.scale), font);
+    let over = scene
+        .blocks
+        .iter()
+        .filter_map(|b| badge(b, look, font))
+        .collect();
+    Body {
+        pixmap: out,
+        over,
+        spots,
+    }
 }
 
-fn paint_block(out: &mut Pixmap, block: &Shown, look: &Look, font: &mut UiText) {
+fn rect(c: Cells) -> Rect {
+    Rect {
+        x: c.col as f32,
+        y: c.row as f32,
+        w: c.cols as f32,
+        h: c.rows as f32,
+    }
+}
+
+fn paint_block(
+    out: &mut Pixmap,
+    spots: &mut Vec<(Rect, Spot)>,
+    block: &Shown,
+    look: &Look,
+    font: &mut UiText,
+) {
     let (s, c) = (look.scale, &look.chrome);
-    let r = Rect {
-        x: block.rect.col as f32,
-        y: block.rect.row as f32,
-        w: block.rect.cols as f32,
-        h: block.rect.rows as f32,
-    };
+    let r = rect(block.rect);
     let radius = RADIUS * s;
     let border = BORDER * s;
     let head = Rect {
@@ -293,7 +429,7 @@ fn paint_block(out: &mut Pixmap, block: &Shown, look: &Look, font: &mut UiText) 
         false => (c.line, border),
     };
     out.border(r, radius, width, edge);
-    paint_header(out, head, &block.header, look, font);
+    paint_header(out, spots, head, block, look, font);
 }
 
 /// The focused border: the accent at 70% over the frame, or whole when that
@@ -317,8 +453,27 @@ fn ink(c: &Chrome, ink: Ink) -> u32 {
     }
 }
 
-fn paint_header(out: &mut Pixmap, head: Rect, header: &Header, look: &Look, font: &mut UiText) {
+/// A raised control's fill: pressed, hovered or at rest (D26).
+fn control_fill(c: &Chrome, look: &Look, spot: Spot) -> u32 {
+    if look.pressed == Some(spot) {
+        c.press
+    } else if look.hover == Some(spot) {
+        c.hover
+    } else {
+        c.raised
+    }
+}
+
+fn paint_header(
+    out: &mut Pixmap,
+    spots: &mut Vec<(Rect, Spot)>,
+    head: Rect,
+    block: &Shown,
+    look: &Look,
+    font: &mut UiText,
+) {
     let (s, c) = (look.scale, &look.chrome);
+    let header = &block.header;
     let border = BORDER * s;
     let mid = head.y + border + HEADER * s / 2.0;
     let icon_y = mid - ICON * s / 2.0;
@@ -326,7 +481,25 @@ fn paint_header(out: &mut Pixmap, head: Rect, header: &Header, look: &Look, font
     let small_base = mid + font.centre_drop(SMALL_PX * s);
     let left = head.x + border + HEADER_PAD.0 * s;
     let mut right = head.x + head.w - border - HEADER_PAD.1 * s;
-    // The right group never shrinks: the lease text, the eye before it.
+    // The right group never shrinks: the zoom controls, then the lease
+    // text with the eye before it.
+    right = match block.zoomed {
+        true => paint_zoomed_group(out, spots, right, mid, look, font),
+        false => {
+            let r = Rect {
+                x: right - ZOOM_BTN.0 * s,
+                y: mid - ZOOM_BTN.1 * s / 2.0,
+                w: ZOOM_BTN.0 * s,
+                h: ZOOM_BTN.1 * s,
+            };
+            let spot = Spot::Zoom(block.key);
+            out.fill(r, BTN_R * s, control_fill(c, look, spot));
+            let at = (r.x + (r.w - ICON * s) / 2.0, mid - ICON * s / 2.0);
+            out.icon(icons::ZOOM, at.0, at.1, ICON * s, ICON_STROKE * s, c.muted);
+            spots.push((r, spot));
+            r.x
+        }
+    } - ITEM_GAP * s;
     if let Some(lease) = &header.lease {
         let w = font.width(lease, Weight::Regular, SMALL_PX * s);
         right -= w;
@@ -364,6 +537,135 @@ fn paint_header(out: &mut Pixmap, head: Rect, header: &Header, look: &Look, font
         }
         x += ITEM_GAP * s;
     }
+}
+
+/// The zoomed header's right group, ending at `right` (D49): the "Zoomed"
+/// tag, the keys that unzoom, and "Exit zoom". Returns where it starts.
+fn paint_zoomed_group(
+    out: &mut Pixmap,
+    spots: &mut Vec<(Rect, Spot)>,
+    right: f32,
+    mid: f32,
+    look: &Look,
+    font: &mut UiText,
+) -> f32 {
+    let (s, c) = (look.scale, &look.chrome);
+    let gap = ITEM_GAP * s;
+    let (exit_h, exit_pad, exit_r) = EXIT;
+    let exit_w = font.width("Exit zoom", Weight::Medium, SMALL_PX * s) + 2.0 * exit_pad * s;
+    let exit = Rect {
+        x: right - exit_w,
+        y: mid - exit_h * s / 2.0,
+        w: exit_w,
+        h: exit_h * s,
+    };
+    out.fill(exit, exit_r * s, control_fill(c, look, Spot::Unzoom));
+    out.border(exit, exit_r * s, BORDER * s, c.line);
+    let base = mid + font.centre_drop(SMALL_PX * s);
+    out.text(
+        font,
+        "Exit zoom",
+        Weight::Medium,
+        SMALL_PX * s,
+        exit.x + exit_pad * s,
+        base,
+        c.text,
+    );
+    spots.push((exit, Spot::Unzoom));
+    let mut x = exit.x;
+    for key in ["z", "Ctrl-]"] {
+        x -= gap + keycap_width(key, s, font);
+        keycap(out, font, key, (x, mid), Cap::Plain, (c, s));
+    }
+    let (tag_h, tag_pad, tag_r) = TAG;
+    let tag_w = font.width("Zoomed", Weight::Regular, TAG_PX * s) + 2.0 * tag_pad * s;
+    x -= gap + tag_w;
+    let tag = Rect {
+        x,
+        y: mid - tag_h * s / 2.0,
+        w: tag_w,
+        h: tag_h * s,
+    };
+    out.fill(tag, tag_r * s, c.raised);
+    out.border(tag, tag_r * s, BORDER * s, c.line);
+    let tag_base = mid + font.centre_drop(TAG_PX * s);
+    out.text(
+        font,
+        "Zoomed",
+        Weight::Regular,
+        TAG_PX * s,
+        x + tag_pad * s,
+        tag_base,
+        c.muted,
+    );
+    x
+}
+
+/// A block's F2 badge (D49), centred under its header: its own pixmap,
+/// since it sits over the grid, on the grid's background, and where it
+/// goes in the body.
+fn badge(block: &Shown, look: &Look, font: &mut UiText) -> Option<(Pixmap, (usize, usize))> {
+    let n = block.badge?;
+    let (s, c) = (look.scale, &look.chrome);
+    let side = px(BADGE, s);
+    let r = rect(block.rect);
+    let below = r.y + (BORDER + HEADER + HAIRLINE) * s;
+    let x = (r.x + (r.w - side as f32) / 2.0).max(0.0) as usize;
+    let y = (below + (r.y + r.h - below - side as f32) / 2.0).max(0.0) as usize;
+    let mut out = Pixmap::new(side, side, look.bg);
+    let r = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: side as f32,
+        h: side as f32,
+    };
+    let fg = if block.focused {
+        out.fill(r, BADGE_R * s, c.accent);
+        c.on_accent
+    } else {
+        out.fill(r, BADGE_R * s, c.raised);
+        out.border(r, BADGE_R * s, BORDER * s, c.line);
+        c.text
+    };
+    let digit = n.to_string();
+    let w = font.width(&digit, Weight::Medium, BADGE_PX * s);
+    let base = r.h / 2.0 + font.centre_drop(BADGE_PX * s);
+    out.text(
+        font,
+        &digit,
+        Weight::Medium,
+        BADGE_PX * s,
+        (r.w - w) / 2.0,
+        base,
+        fg,
+    );
+    Some((out, (x, y)))
+}
+
+/// A hidden block's rail chip: its lead glyph over its number (D49).
+fn paint_chip(out: &mut Pixmap, chip: &Chip, look: &Look, font: &mut UiText) {
+    let (s, c) = (look.scale, &look.chrome);
+    let r = rect(chip.rect);
+    out.fill(r, RADIUS * s, c.base);
+    out.border(r, RADIUS * s, BORDER * s, c.line);
+    let digit = chip.number.to_string();
+    let cap = font.centre_drop(TEXT_PX * s) * 2.0;
+    let glyph_h = chip.lead.map_or(0.0, |_| (ICON + CHIP_GAP) * s);
+    let top = r.y + (r.h - glyph_h - cap) / 2.0;
+    if let Some((glyph, i)) = chip.lead {
+        let x = r.x + (r.w - ICON * s) / 2.0;
+        paint_glyph(out, glyph, x, top, s, ink(c, i), c.line);
+    }
+    let w = font.width(&digit, Weight::Medium, TEXT_PX * s);
+    out.text(
+        font,
+        &digit,
+        Weight::Medium,
+        TEXT_PX * s,
+        r.x + (r.w - w) / 2.0,
+        top + glyph_h + cap,
+        c.text,
+    );
 }
 
 /// The text each part shows in `room` px: whole when it fits, else the
@@ -433,10 +735,12 @@ pub(crate) struct BodyState {
     /// The session runs on this machine, so its folders' branches can be
     /// read here.
     local: bool,
+    /// What the window is connected to, for the ribbon.
+    target: String,
     home: Option<String>,
     branches: HashMap<String, (Option<String>, Instant)>,
     text: UiText,
-    painted: Option<(Look, Vec<Shown>, Pixmap)>,
+    painted: Option<(Look, Scene, Body)>,
 }
 
 impl BodyState {
@@ -446,6 +750,7 @@ impl BodyState {
         Some(Self {
             infos: HashMap::new(),
             local: false,
+            target: String::new(),
             home,
             branches: HashMap::new(),
             text: UiText::embedded()?,
@@ -458,9 +763,28 @@ impl BodyState {
         self.infos = blocks.into_iter().collect();
     }
 
-    /// Whether the session runs on this machine.
-    pub(crate) fn set_local(&mut self, local: bool) {
+    /// Whether the session runs on this machine, and what the window is
+    /// connected to.
+    pub(crate) fn set_session(&mut self, local: bool, target: &str) {
         self.local = local;
+        target.clone_into(&mut self.target);
+    }
+
+    /// The ribbon for a window of `blocks` blocks focused on `focus`.
+    pub(crate) fn ribbon(&self, blocks: usize, focus: Option<u64>, armed: bool) -> Ribbon {
+        Ribbon {
+            target: self.target.clone(),
+            blocks,
+            shell: focus
+                .and_then(|k| self.infos.get(&k))
+                .and_then(|i| i.shell.clone()),
+            armed,
+        }
+    }
+
+    /// Block `key`'s lead glyph, for its rail chip.
+    pub(crate) fn lead(&self, key: u64) -> Option<(Glyph, Ink)> {
+        self.infos.get(&key).and_then(lead)
     }
 
     /// Block `key`'s header, its branch read by `read` while it is fresh.
@@ -485,20 +809,20 @@ impl BodyState {
         branch
     }
 
-    /// Paint `blocks` on a `width × height` body for `look`, unless the
+    /// Paint `scene` on a `width × height` body for `look`, unless the
     /// last painting already is that.
-    pub(crate) fn repaint(&mut self, width: usize, height: usize, blocks: Vec<Shown>, look: Look) {
-        let fresh = matches!(&self.painted, Some((l, b, p))
-            if *l == look && *b == blocks && (p.width, p.height) == (width, height));
+    pub(crate) fn repaint(&mut self, width: usize, height: usize, scene: Scene, look: Look) {
+        let fresh = matches!(&self.painted, Some((l, sc, b))
+            if *l == look && *sc == scene && (b.pixmap.width, b.pixmap.height) == (width, height));
         if !fresh {
-            let pixmap = paint(width, height, &blocks, &look, &mut self.text);
-            self.painted = Some((look, blocks, pixmap));
+            let body = paint(width, height, &scene, &look, &mut self.text);
+            self.painted = Some((look, scene, body));
         }
     }
 
     /// The last painting, if any.
-    pub(crate) fn painted(&self) -> Option<&Pixmap> {
-        self.painted.as_ref().map(|(_, _, p)| p)
+    pub(crate) fn painted(&self) -> Option<&Body> {
+        self.painted.as_ref().map(|(_, _, b)| b)
     }
 }
 
@@ -644,6 +968,26 @@ mod tests {
             chrome,
             bg: 0x000000,
             scale: 1.0,
+            hover: None,
+            pressed: None,
+        }
+    }
+
+    fn block(key: u64, rect: Cells) -> Shown {
+        Shown {
+            key,
+            rect,
+            focused: false,
+            zoomed: false,
+            header: header(&shell(), Some("main"), None),
+            badge: None,
+        }
+    }
+
+    fn scene(blocks: Vec<Shown>) -> Scene {
+        Scene {
+            blocks,
+            ..Scene::default()
         }
     }
 
@@ -652,19 +996,149 @@ mod tests {
         let look = look();
         let c = look.chrome;
         let mut font = UiText::embedded().expect("the embedded faces parse");
-        let block = Shown {
-            rect: Cells::new(8, 0, 300, 200),
-            focused: false,
-            header: header(&shell(), Some("main"), None),
-        };
-        let p = paint(320, 210, &[block], &look, &mut font);
+        let body = paint(
+            320,
+            250,
+            &scene(vec![block(1, Cells::new(8, 0, 300, 200))]),
+            &look,
+            &mut font,
+        );
+        let p = &body.pixmap;
         let at = |x: usize, y: usize| p.pixels()[y * p.width + x];
         assert_eq!(at(2, 100), c.frame, "the gap");
         assert_eq!(at(8, 100), c.line, "the border");
-        assert_eq!(at(200, 5), c.base, "the header");
-        assert_eq!(at(200, 39), c.line, "the hairline");
-        assert_eq!(at(200, 120), look.bg, "the grid's place");
+        assert_eq!(at(150, 5), c.base, "the header");
+        assert_eq!(at(150, 39), c.line, "the hairline");
+        assert_eq!(at(150, 120), look.bg, "the grid's place");
         assert_eq!(at(8, 0), c.frame, "a rounded corner");
+        assert_eq!(at(150, 249), c.sunk, "the ribbon along the bottom");
+    }
+
+    #[test]
+    fn a_header_has_a_zoom_button_and_a_zoomed_one_exit_zoom() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let r = Cells::new(8, 0, 600, 200);
+        let rest = paint(620, 250, &scene(vec![block(7, r)]), &look, &mut font);
+        let zoom = rest.spots.iter().find(|(_, s)| *s == Spot::Zoom(7));
+        let (button, _) = zoom.expect("the zoom button is a spot");
+        assert_eq!((button.w, button.h), ZOOM_BTN);
+        assert_eq!(button.x + button.w, 8.0 + 600.0 - BORDER - HEADER_PAD.1);
+        let zoomed = Shown {
+            zoomed: true,
+            ..block(7, r)
+        };
+        let z = paint(620, 250, &scene(vec![zoomed]), &look, &mut font);
+        assert_eq!(z.spots.len(), 1);
+        assert_eq!(z.spots[0].1, Spot::Unzoom);
+        let (x, y) = (z.spots[0].0.x + 2.0, z.spots[0].0.y + 2.0);
+        assert_eq!(z.spot(x, y), Some(Spot::Unzoom));
+    }
+
+    #[test]
+    fn hovering_the_zoom_button_changes_only_its_pixels() {
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let s = scene(vec![block(7, Cells::new(8, 0, 600, 200))]);
+        let rest = paint(620, 250, &s, &look(), &mut font);
+        let hovered = Look {
+            hover: Some(Spot::Zoom(7)),
+            ..look()
+        };
+        let hover = paint(620, 250, &s, &hovered, &mut font);
+        assert_eq!(rest.spots, hover.spots);
+        let (r, _) = rest.spots[0];
+        let (px, py) = ((r.x + 2.0) as usize, (r.y + 2.0) as usize);
+        let at = |b: &Body| b.pixmap.pixels()[py * 620 + px];
+        assert_eq!(at(&rest), look().chrome.raised);
+        assert_eq!(at(&hover), look().chrome.hover);
+    }
+
+    #[test]
+    fn an_armed_prefix_badges_the_focused_block_in_the_accent() {
+        let look = look();
+        let c = look.chrome;
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let focused = Shown {
+            focused: true,
+            badge: Some(1),
+            ..block(1, Cells::new(8, 0, 300, 239))
+        };
+        let other = Shown {
+            badge: Some(2),
+            ..block(2, Cells::new(316, 0, 300, 239))
+        };
+        let body = paint(624, 290, &scene(vec![focused, other]), &look, &mut font);
+        // Each badge sits over its grid, centred under the header: 40..239.
+        let places: Vec<_> = body.over.iter().map(|(_, at)| *at).collect();
+        assert_eq!(
+            places,
+            [(8 + 150 - 16, 139 - 16), (316 + 150 - 16, 139 - 16)]
+        );
+        let left_of_digit = |p: &Pixmap| p.pixels()[16 * p.width + 4];
+        assert_eq!(left_of_digit(&body.over[0].0), c.accent);
+        assert_eq!(left_of_digit(&body.over[1].0), c.raised);
+        assert_eq!(
+            body.over[0].0.pixels()[0],
+            look.bg,
+            "a corner shows the grid's ground"
+        );
+    }
+
+    #[test]
+    fn a_zoomed_window_leaves_a_rail_for_the_others() {
+        let area = Cells::new(8, 52, 1000, 600);
+        assert_eq!(zoomed(area, 0, 1.0), (area, None));
+        let (block, rail) = zoomed(area, 2, 1.0);
+        assert_eq!(block, Cells::new(8, 52, 1000 - 44, 600));
+        let rail = rail.expect("a rail beside the block");
+        assert_eq!(rail, Cells::new(8 + 1000 - 36, 52, 36, 600));
+        let chips = chips(rail, 2, 1.0);
+        assert_eq!(chips[1], Cells::new(rail.col, 52 + 64, 36, 56));
+        assert_eq!(
+            super::chips(Cells::new(0, 0, 36, 100), 5, 1.0).len(),
+            1,
+            "as many as fit"
+        );
+    }
+
+    #[test]
+    fn a_chip_is_a_spot_that_focuses_its_block() {
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let s = Scene {
+            rail: vec![Chip {
+                key: 4,
+                rect: Cells::new(500, 0, 36, 56),
+                lead: Some((Glyph::Check, Ink::Success)),
+                number: 2,
+            }],
+            ..Scene::default()
+        };
+        let body = paint(560, 120, &s, &look(), &mut font);
+        assert_eq!(body.spot(510.0, 20.0), Some(Spot::Chip(4)));
+        let check = body
+            .pixmap
+            .pixels()
+            .iter()
+            .filter(|&&p| p == look().chrome.success);
+        assert!(check.count() > 0, "the chip shows its block's glyph");
+    }
+
+    #[test]
+    fn the_lead_glyph_follows_the_status() {
+        assert_eq!(lead(&shell()), None, "a shell at its prompt");
+        let running = BlockInfo {
+            foreground: Some("cargo".into()),
+            ..shell()
+        };
+        assert_eq!(lead(&running), Some((Glyph::Spinner, Ink::Accent)));
+        let failed = BlockInfo {
+            status: Some(Status {
+                state: State::Error,
+                msg: None,
+            }),
+            ..shell()
+        };
+        assert_eq!(lead(&failed), Some((Glyph::Cross, Ink::Failure)));
     }
 
     #[test]

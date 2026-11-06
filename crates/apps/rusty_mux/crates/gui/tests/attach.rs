@@ -1,6 +1,7 @@
 //! The GUI client's source against a real server: a block's screen and
-//! output reach its pane, typing needs the lease the focus brings, and the
-//! window's layout changes are followed.
+//! output reach its pane, typing needs the lease the focus brings, the
+//! window's layout changes are followed, and the window's own split and
+//! zoom requests come back as layout and zoom.
 
 #![cfg(target_os = "linux")]
 
@@ -15,7 +16,7 @@ use rusty_mux_core::Side;
 use rusty_mux_gui::source::{Out, attach};
 use rusty_mux_proto::{Launch, Message};
 use rusty_mux_server::{Config, ConsoleHost, serve};
-use rusty_term::gui::source::{Feed, PaneIo, Source, Tree};
+use rusty_term::gui::source::{Act, Dir, Feed, PaneIo, Source, Tree};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
 
@@ -257,4 +258,50 @@ fn a_block_header_follows_its_folder() {
         }
     }
     panic!("the header never followed the move to /tmp");
+}
+
+#[test]
+fn a_split_and_a_zoom_asked_by_the_window_come_back() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let Tree::Pane(key) = attached.first else {
+        panic!("one block first: {:?}", attached.first);
+    };
+    let (outs_tx, outs) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || events.run(|out| outs_tx.send(out).is_ok()));
+    let next = |want: &dyn Fn(&Out) -> bool| loop {
+        let out = outs.recv_timeout(PATIENCE).expect("an event");
+        if want(&out) {
+            return out;
+        }
+    };
+    assert_eq!(
+        next(&|o| matches!(o, Out::Zoom(_))),
+        Out::Zoom(None),
+        "nothing zoomed at first"
+    );
+
+    attached.source.act(Act::Split {
+        key,
+        dir: Dir::Vertical,
+    });
+    let Out::Layout(Some(Tree::Split { dir, a, .. })) =
+        next(&|o| matches!(o, Out::Layout(Some(Tree::Split { .. }))))
+    else {
+        unreachable!("matched above");
+    };
+    assert_eq!(
+        (dir, *a),
+        (Dir::Vertical, Tree::Pane(key)),
+        "the new block is on the right"
+    );
+
+    attached.source.act(Act::Zoom(key));
+    assert_eq!(
+        next(&|o| matches!(o, Out::Zoom(Some(_)))),
+        Out::Zoom(Some(key))
+    );
+    attached.source.act(Act::Unzoom);
+    assert_eq!(next(&|o| matches!(o, Out::Zoom(_))), Out::Zoom(None));
 }

@@ -1539,14 +1539,18 @@ impl GpuCore {
         frame.clear();
         // The body goes first, as the frame's first image, drawn under
         // everything else.
+        let top = super::render::grid_top(chrome, scene.strip, pad, ui.cell_size().1) - pad;
         if let Some(body) = scene.body {
-            let top = super::render::grid_top(chrome, scene.strip, pad, ui.cell_size().1) - pad;
             frame.backdrop = self.append_pixmap(&mut frame, body, (0, top));
         }
         self.append_panes(&mut frame, panes, font, divider, scene.body.is_none());
         self.append_bars(&mut frame, width, chrome, status, ui, bar_bg);
         if let Some(strip) = scene.strip.filter(|_| chrome.is_empty()) {
             self.append_pixmap(&mut frame, strip, (0, 0));
+        }
+        // Images after the panes' draw over their text.
+        for (pixmap, (x, y)) in scene.over {
+            self.append_pixmap(&mut frame, pixmap, (*x, top + y));
         }
         self.draw_frame(view, &frame, bg);
         self.spare = frame;

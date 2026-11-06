@@ -29,10 +29,10 @@ use rusty_mux_client::attach::{
     CONTROL, HANDSHAKE, Missed, Requests, clone, connect, first_session_name, reach,
 };
 use rusty_mux_client::checkpoint::Receiver;
-use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
 use rusty_mux_proto::{Features, Launch, Message};
 use rusty_term::backend::BackendHandle;
-use rusty_term::gui::source::{BlockInfo, Feed, PaneIo, Remote, Session, Source, Tree};
+use rusty_term::gui::source::{Act, BlockInfo, Dir, Feed, PaneIo, Remote, Session, Source, Tree};
 
 use crate::headers::{Call, Effect, Headers};
 use crate::keys::Keys;
@@ -125,6 +125,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         let first = tree(&layout, &mut shown.keys);
         let focus = shown.keys.key(block);
         shown.focus = Some(focus);
+        shown.window = Some(model.shown());
         (first, focus)
     };
     state.tell_focus(block);
@@ -173,6 +174,8 @@ struct Shown {
     /// Each open pane's block connection, kept weakly: the window owns it.
     blocks: HashMap<u64, std::sync::Weak<Block>>,
     focus: Option<u64>,
+    /// The server window shown.
+    window: Option<WindowId>,
 }
 
 impl State {
@@ -207,6 +210,16 @@ impl State {
         // the window.
         let _ = control.send(&make(req));
         req
+    }
+
+    /// Sends the request `make` builds, if it builds one.
+    fn try_send(&self, make: impl FnOnce(u64) -> Option<Message>) {
+        let req = self.next.fetch_add(1, Ordering::Relaxed);
+        if let Some(message) = make(req) {
+            let control = &mut self.control.lock().unwrap_or_else(PoisonError::into_inner);
+            // A dead control connection ends the events reader.
+            let _ = control.send(&message);
+        }
     }
 
     /// Moves the focus to `key`, its block's lease with it.
@@ -261,6 +274,33 @@ impl Source for MuxSource {
         if let (Some(window), true) = (window, self.0.selects) {
             self.0.send(|req| Message::SelectWindow { req, window });
         }
+    }
+
+    /// Sends a layout change (handoff D104); the window follows the
+    /// `LayoutChanged` it causes. A pane not shown is left alone.
+    fn act(&self, act: Act) {
+        let (block, window) = {
+            let shown = self.0.shown();
+            let key = match act {
+                Act::Split { key, .. } | Act::Zoom(key) | Act::Close(key) => Some(key),
+                Act::Unzoom => None,
+            };
+            (key.and_then(|k| shown.keys.id(k)), shown.window)
+        };
+        self.0.try_send(|req| match act {
+            Act::Split { dir, .. } => block.map(|block| Message::Split {
+                req,
+                block,
+                side: match dir {
+                    Dir::Vertical => Side::Right,
+                    Dir::Horizontal => Side::Down,
+                },
+                launch: Launch::default(),
+            }),
+            Act::Zoom(_) => block.map(|block| Message::Zoom { req, block }),
+            Act::Close(_) => block.map(|block| Message::CloseBlock { req, block }),
+            Act::Unzoom => window.map(|window| Message::Unzoom { req, window }),
+        });
     }
 
     /// Creates a window with one block and selects it, on a connection of
@@ -322,6 +362,9 @@ pub enum Out {
     Layout(Option<Tree>),
     /// Another client moved the focus to this pane.
     Focus(u64),
+    /// Show this pane alone, or every pane with `None`; follows the
+    /// layout it applies to.
+    Zoom(Option<u64>),
     /// The session changed, for the top strip.
     Session(Session),
     /// What the shown blocks' headers say, by pane key.
@@ -344,6 +387,7 @@ impl Events {
             self.run(|out| match out {
                 Out::Layout(t) => remote.layout(t),
                 Out::Focus(k) => remote.focus(k),
+                Out::Zoom(k) => remote.zoom(k),
                 Out::Session(s) => remote.session(s),
                 Out::Blocks(b) => remote.blocks(b),
             })
@@ -353,7 +397,7 @@ impl Events {
     /// Follows the session until it or the connection ends, or `out` says
     /// `false`. The session goes out first, then every change.
     pub fn run(mut self, mut out: impl FnMut(Out) -> bool) {
-        if !out(Out::Session(self.session())) {
+        if !(out(Out::Session(self.session())) && out(Out::Zoom(self.zoomed()))) {
             return;
         }
         while let Ok(message) = self.conn.recv() {
@@ -374,6 +418,7 @@ impl Events {
                 self.state.send(|req| Message::List { req });
             }
             if matches!(change, Change::Layout | Change::Shown) {
+                self.state.shown().window = Some(self.model.shown());
                 self.follow_blocks();
             }
             let go_on = match change {
@@ -468,8 +513,8 @@ impl Events {
         self.model.session(&mut shown.windows, &mut shown.keys)
     }
 
-    /// Sends the shown window's layout; a window with no blocks ends the
-    /// GUI window.
+    /// Sends the shown window's layout and zoom; a window with no blocks
+    /// ends the GUI window.
     fn layout(&self, out: &mut impl FnMut(Out) -> bool) -> bool {
         let shown = self
             .model
@@ -477,7 +522,13 @@ impl Events {
             .0
             .map(|l| tree(l, &mut self.state.shown().keys));
         let ended = shown.is_none();
-        out(Out::Layout(shown)) && !ended
+        out(Out::Layout(shown)) && !ended && out(Out::Zoom(self.zoomed()))
+    }
+
+    /// The pane the shown window shows alone, if any.
+    fn zoomed(&self) -> Option<u64> {
+        let block = self.model.zoomed()?;
+        Some(self.state.shown().keys.key(block))
     }
 
     /// Moves the focus to the shown window's focused block.
