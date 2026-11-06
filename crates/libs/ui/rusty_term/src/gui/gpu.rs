@@ -1354,7 +1354,7 @@ impl GpuCore {
                 Some((id, cur)) => (3u8, id as u64, cur as u64),
                 None => (1u8, im.serial as u64, ((im.pw as u64) << 32) | im.ph as u64),
             };
-            if let Some(bind) = self.image_texture(key, im.pw, im.ph, &im.pixels) {
+            if let Some(bind) = self.image_texture(key, im.pw, im.ph, &im.pixels, u8::MAX) {
                 frame.images.push((
                     bind,
                     ImgInstance {
@@ -1392,7 +1392,7 @@ impl GpuCore {
                 let frame_idx = grid.kitty_current(id).unwrap_or(0) as u64;
                 let key = (2u8, id as u64, frame_idx);
                 let pixels = pixels.to_vec();
-                if let Some(bind) = self.image_texture(key, iw, ih, &pixels) {
+                if let Some(bind) = self.image_texture(key, iw, ih, &pixels, u8::MAX) {
                     let (col, row) = (i % grid.cols, i / grid.cols);
                     frame.images.push((
                         bind,
@@ -1451,6 +1451,7 @@ impl GpuCore {
         w: usize,
         h: usize,
         pixels: &[Option<u32>],
+        opacity: u8,
     ) -> Option<Rc<wgpu::BindGroup>> {
         if pixels.len() < w * h {
             return None;
@@ -1467,7 +1468,7 @@ impl GpuCore {
                 rgba[i * 4] = ((c >> 16) & 0xFF) as u8;
                 rgba[i * 4 + 1] = ((c >> 8) & 0xFF) as u8;
                 rgba[i * 4 + 2] = (c & 0xFF) as u8;
-                rgba[i * 4 + 3] = 255;
+                rgba[i * 4 + 3] = opacity;
             }
         }
         let tex = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1578,7 +1579,7 @@ impl GpuCore {
                     .iter()
                     .map(|&p| (p != super::paint::CLEAR).then_some(p))
                     .collect();
-                self.image_texture(key, w, h, &pixels)
+                self.image_texture(key, w, h, &pixels, strip.opacity)
             }
         };
         let Some(bind) = bind else {

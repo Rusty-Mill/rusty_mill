@@ -163,6 +163,8 @@ pub(crate) enum UserEvent {
     /// What the source says of the shown blocks, for their headers
     /// ([`Remote::blocks`]).
     Blocks(Vec<(u64, super::source::BlockInfo)>),
+    /// How the source reaches its server ([`Remote::link`]).
+    Link(super::source::Link),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -2641,6 +2643,7 @@ impl WindowState<'_> {
             hover: self.hover.and_then(Hit::spot),
             pressed: self.pressed.and_then(Hit::spot),
             detached_open: self.popover_kind() == Some(Kind::Detached),
+            offline: self.offline(),
         };
         if let Some(strip) = &mut self.strip {
             strip.repaint(look, width);
@@ -2722,6 +2725,8 @@ impl WindowState<'_> {
             rail,
             ribbon: body.ribbon(ids.len(), detached, Some(focus), armed),
             empty: None,
+            banner: body.banner(),
+            dim: body.offline(),
         };
         let height = (size.height as usize).saturating_sub(top);
         body.repaint(size.width as usize, height, scene, look);
@@ -2733,9 +2738,6 @@ impl WindowState<'_> {
         let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else {
             return;
         };
-        if detached == 0 {
-            return;
-        }
         let top = self.chrome_h();
         let look = blocks::Look {
             chrome: self.chrome_colors(),
@@ -2748,9 +2750,14 @@ impl WindowState<'_> {
         let Some(body) = &mut self.body else {
             return;
         };
+        if detached == 0 && body.banner().is_none() {
+            return;
+        }
         let scene = blocks::Scene {
             ribbon: body.ribbon(0, detached, None, armed),
-            empty: Some(detached),
+            empty: (detached > 0).then_some(detached),
+            banner: body.banner(),
+            dim: body.offline(),
             ..blocks::Scene::default()
         };
         let height = (size.height as usize).saturating_sub(top);
@@ -2854,6 +2861,10 @@ impl WindowState<'_> {
         }
         if let Some(spot) = self.body_hit(x, y) {
             return self.on_body_click(spot);
+        }
+        // Dimmed blocks take no clicks (D62).
+        if self.offline() {
+            return;
         }
         // A click on the command dock jumps the focused pane's scrollback to
         // the clicked command block; dock clicks never reach the terminal.
@@ -3078,6 +3089,7 @@ impl WindowState<'_> {
                     tab.focus = key;
                 }
             }
+            blocks::Spot::Banner(action) => self.on_banner(action),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -5979,6 +5991,49 @@ impl WindowState<'_> {
         }
     }
 
+    /// Show how the source reaches its server (gui-design D62): the
+    /// banner, the dimmed blocks and the ribbon's dot. Attached anew, the
+    /// window drops its tabs; the layout that follows opens them again.
+    fn show_link(&mut self, link: super::source::Link) {
+        let Some(body) = &mut self.body else {
+            return;
+        };
+        body.set_link(link);
+        let offline = body.offline();
+        if link == (super::source::Link::Back { kept: false }) {
+            self.tabs.clear();
+            self.active = 0;
+        }
+        if offline
+            && self.popover_kind() == Some(Kind::Detached)
+            && let Some(popover) = &mut self.popover
+        {
+            popover.close();
+        }
+        if let Some(session) = self.strip.as_ref().map(|s| s.session().clone()) {
+            self.refresh_popover(&session);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The link is down: the server-bound controls take no input (D62).
+    fn offline(&self) -> bool {
+        self.body.as_ref().is_some_and(BodyState::offline)
+    }
+
+    /// A banner button: ask the source to retry or stop, or hide F5b.
+    fn on_banner(&mut self, action: super::banner::Action) {
+        use super::banner::Action;
+        match (action, self.source) {
+            (Action::Retry, Some(source)) => source.retry(),
+            (Action::Stop, Some(source)) => source.stop(),
+            (Action::Dismiss, _) => self.show_link(super::source::Link::Up),
+            (_, None) => {}
+        }
+    }
+
     /// Show the source's `session` on the top strip.
     fn show_session(&mut self, session: super::source::Session) {
         if let Some(body) = &mut self.body {
@@ -6217,7 +6272,12 @@ impl WindowState<'_> {
 
     /// The switcher's rows: the server's sessions, then the menu's items.
     fn switcher_rows(&self, session: &super::source::Session) -> Vec<Row> {
-        let sessions = session.sessions.iter().cloned().map(Row::Session);
+        // With the link down no session can be shown (D62).
+        let offline = self.offline();
+        let sessions = session.sessions.iter().cloned().map(|mut s| {
+            s.can_show &= !offline;
+            Row::Session(s)
+        });
         let items = self
             .switcher_items()
             .into_iter()
@@ -6492,6 +6552,15 @@ impl WindowState<'_> {
                     } else {
                         self.overlay_key(&event);
                     }
+                    return;
+                }
+                // With the link down, keys reach no block and run no
+                // prefix; only the settings chord still works (D62).
+                if self.offline() {
+                    if overlay_passes_through(self.chord_action(event.physical_key)) {
+                        self.exec_action(Action::OpenSettings);
+                    }
+                    self.consumed_keys.consume(event.physical_key);
                     return;
                 }
                 // In search mode, keys edit the query / step matches; nothing
@@ -7300,6 +7369,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Blocks(blocks) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
                     w.show_blocks(blocks);
+                }
+            }
+            UserEvent::Link(link) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.show_link(link);
                 }
             }
             UserEvent::ConfigChanged => {

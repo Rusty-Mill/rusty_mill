@@ -77,13 +77,14 @@ pub(crate) fn draw_pixmap(
     for row in 0..image.height.min(h.saturating_sub(y)) {
         let src = &image.pixels()[row * image.width..][..cols];
         let dst = &mut buffer[(y + row) * w + x..][..cols];
-        if !image.see_through {
+        if !image.see_through && image.opacity == u8::MAX {
             dst.copy_from_slice(src);
             continue;
         }
+        let a = f32::from(image.opacity) / 255.0;
         for (d, &s) in dst.iter_mut().zip(src) {
             if s != super::paint::CLEAR {
-                *d = s;
+                *d = super::paint::mix(*d, s, a);
             }
         }
     }
@@ -985,6 +986,15 @@ mod tests {
     use super::*;
     use crate::core::AnsiParser;
     use std::rc::Rc;
+
+    #[test]
+    fn a_veil_blends_over_what_is_drawn() {
+        let mut buf = vec![0xFFFFFF; 4];
+        let veil = super::super::paint::Pixmap::veil(2, 1, 0x000000, 77);
+        draw_pixmap(&mut buf, 4, 1, &veil, 0, 0);
+        let dimmed = super::super::paint::mix(0xFFFFFF, 0x000000, 77.0 / 255.0);
+        assert_eq!(buf, [dimmed, dimmed, 0xFFFFFF, 0xFFFFFF]);
+    }
 
     /// Ghost math: samples run old->new, brighten toward the head, fade with
     /// time, never include the live cursor cell, and expire at t >= 1.

@@ -154,6 +154,37 @@ impl Model {
         Ok(model)
     }
 
+    /// The same session from a fresh List's `entries`, after a reconnect
+    /// (handoff D111): its active window when the server tells it, else
+    /// the window shown before, else its first with blocks. Blocks keep
+    /// when they were detached. `None` when the session is gone (D112).
+    pub fn relisted(&self, entries: &[Message]) -> Option<Self> {
+        let mut model = Self {
+            session: self.session,
+            host: self.host.clone(),
+            sessions: Vec::new(),
+            windows: Vec::new(),
+            blocks: HashMap::new(),
+            shown: self.shown,
+            clients: HashMap::new(),
+            follows_active: self.follows_active,
+        };
+        for e in entries.iter().filter_map(entry) {
+            model.take(e);
+        }
+        for (id, b) in &mut model.blocks {
+            b.detached = self.blocks.get(id).and_then(|old| old.detached);
+        }
+        model.sess(model.session)?;
+        let kept = model.window(self.shown).map(|w| w.id);
+        let first = model.window_to_show(model.session);
+        model.shown = match self.follows_active {
+            true => first.or(kept),
+            false => kept.or(first),
+        }?;
+        Some(model)
+    }
+
     /// What a block header calls `client` (gui-design D48): its name, else
     /// who it is, else "Another client".
     pub fn client_name(&self, client: ClientId) -> String {
@@ -735,12 +766,18 @@ mod tests {
 
     /// A session "work" with windows `w` (blocks `b`), the first shown.
     fn model(s: SessionId, w: &[WindowId; 3], b: &[BlockId; 3]) -> Model {
+        Model::from_list(&list(s, w, b, w[0]), b[0], "box".into(), true).expect("a model")
+    }
+
+    /// A List of session "work" with windows `w` (blocks `b`), `active`
+    /// its active one.
+    fn list(s: SessionId, w: &[WindowId], b: &[BlockId], active: WindowId) -> Vec<Message> {
         let mut list = vec![Message::Entry {
             req: 1,
             entry: Entry::Session {
                 session: s,
                 name: "work".into(),
-                active: Some(w[0]),
+                active: Some(active),
                 generated: false,
             },
         }];
@@ -758,7 +795,30 @@ mod tests {
                 },
             });
         }
-        Model::from_list(&list, b[0], "box".into(), true).expect("a model")
+        list
+    }
+
+    #[test]
+    fn a_list_after_a_reconnect_shows_the_active_window_or_the_session_is_gone() {
+        let (s, w, b) = (
+            SessionId::from_uuid(Uuid::new_v4()),
+            ids(WindowId::from_uuid),
+            ids(BlockId::from_uuid),
+        );
+        let m = model(s, &w, &b);
+        let same = m.relisted(&list(s, &w, &b, w[0])).expect("the session");
+        assert_eq!((same.shown(), same.view().1), (w[0], Some(b[0])));
+        // The active window moved while away; the shown one closed.
+        let moved = m
+            .relisted(&list(s, &w[1..], &b[1..], w[2]))
+            .expect("the session");
+        assert_eq!(moved.shown(), w[2]);
+        let mut old = model(s, &w, &b);
+        old.follows_active = false;
+        let kept = old.relisted(&list(s, &w, &b, w[2])).expect("the session");
+        assert_eq!(kept.shown(), w[0], "without active windows it stays");
+        let other = SessionId::from_uuid(Uuid::new_v4());
+        assert!(m.relisted(&list(other, &w, &b, w[0])).is_none());
     }
 
     fn strip(m: &Model) -> rusty_term::gui::source::Session {

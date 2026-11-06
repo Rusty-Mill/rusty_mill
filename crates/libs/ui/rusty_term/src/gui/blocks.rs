@@ -17,12 +17,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use super::banner::{self, Action, Banner};
 use super::chrome::Chrome;
 use super::layout::Rect as Cells;
 use super::paint::{Pixmap, Rect, icons};
 use super::render::blend;
 use super::ribbon::{self, Cap, Ribbon, keycap, keycap_width};
-use super::source::{BlockInfo, State, Wait};
+use super::source::{BlockInfo, Link, State, Wait};
 use super::text::{UiText, Weight};
 use crate::core::contrast_ratio;
 
@@ -67,6 +68,9 @@ const BADGE_PX: f32 = 16.0;
 const RAIL: f32 = 36.0;
 const CHIP_H: f32 = 56.0;
 const CHIP_GAP: f32 = 3.0;
+/// How much of what is under it a down link's veil covers: the blocks
+/// show at 70% (D62).
+const DIM_VEIL: u8 = 77;
 /// The empty state's title and line sizes and the gap between (D28).
 const EMPTY_TITLE_PX: f32 = 14.0;
 const EMPTY_LINE_PX: f32 = 12.0;
@@ -324,6 +328,8 @@ pub(crate) enum Spot {
     Unzoom,
     /// Focus block `key` (its chip on the zoomed window's rail).
     Chip(u64),
+    /// A connection banner's button (gui-design D62).
+    Banner(Action),
 }
 
 /// A block to draw: its box in the body's px, whether it has the focus or
@@ -355,6 +361,10 @@ pub(crate) struct Scene {
     pub ribbon: Ribbon,
     /// Every block is detached: this many, said in the middle (D61).
     pub empty: Option<usize>,
+    /// The connection banner under the strip (D62).
+    pub banner: Option<Banner>,
+    /// The blocks show at 70% and take no clicks: the link is down (D62).
+    pub dim: bool,
 }
 
 /// A painted body: its pixels, what is drawn over the grids (F2 badges),
@@ -399,11 +409,35 @@ pub(crate) fn paint(
         paint_empty(&mut out, n, y, look, font);
     }
     ribbon::paint(&mut out, y, &scene.ribbon, (&look.chrome, look.scale), font);
-    let over = scene
+    let mut over: Vec<(Pixmap, (usize, usize))> = scene
         .blocks
         .iter()
         .filter_map(|b| badge(b, look, font))
         .collect();
+    if scene.dim {
+        // The frame at 30% over the blocks shows them at 70%.
+        spots.clear();
+        over.push((
+            Pixmap::veil(width, y as usize, look.chrome.frame, DIM_VEIL),
+            (0, 0),
+        ));
+    }
+    if let Some(b) = scene.banner {
+        let painted = banner::paint(
+            b,
+            &scene.ribbon.target,
+            width,
+            (&look.chrome, look.scale),
+            font,
+        );
+        spots.extend(
+            painted
+                .buttons
+                .into_iter()
+                .map(|(r, a)| (r, Spot::Banner(a))),
+        );
+        over.push((painted.pixmap, (0, 0)));
+    }
     Body {
         pixmap: out,
         over,
@@ -806,6 +840,8 @@ pub(crate) struct BodyState {
     local: bool,
     /// What the window is connected to, for the ribbon.
     target: String,
+    /// How it reaches its server (D62).
+    link: Link,
     home: Option<String>,
     branches: HashMap<String, (Option<String>, Instant)>,
     text: UiText,
@@ -820,6 +856,7 @@ impl BodyState {
             infos: HashMap::new(),
             local: false,
             target: String::new(),
+            link: Link::Up,
             home,
             branches: HashMap::new(),
             text: UiText::embedded()?,
@@ -856,7 +893,28 @@ impl BodyState {
                 .and_then(|k| self.infos.get(&k))
                 .and_then(|i| i.shell.clone()),
             armed,
+            link: self.link,
         }
+    }
+
+    /// How the window reaches its server now, for the ribbon.
+    pub(crate) fn set_link(&mut self, link: Link) {
+        self.link = link;
+    }
+
+    /// The banner the link shows, if any (D62).
+    pub(crate) fn banner(&self) -> Option<Banner> {
+        match self.link {
+            Link::Up => None,
+            Link::Reconnecting { left, trying } => Some(Banner::Reconnecting { left, trying }),
+            Link::Back { kept } => Some(Banner::Back { kept }),
+            Link::Down { trying } => Some(Banner::Down { trying }),
+        }
+    }
+
+    /// The link is down: blocks dim and take no input (D62).
+    pub(crate) fn offline(&self) -> bool {
+        matches!(self.link, Link::Reconnecting { .. } | Link::Down { .. })
     }
 
     /// The blocks whose program runs (D48's running rule), lit in the
@@ -1300,5 +1358,27 @@ mod tests {
             }
         }
         assert!(left.abs_diff(right) * 4 < left + right, "{left} vs {right}");
+    }
+
+    #[test]
+    fn a_down_link_dims_the_blocks_and_only_the_banner_takes_clicks() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let mut b = block(1, Cells::new(8, 0, 1000, 300));
+        b.zoomed = true;
+        let up = paint(1100, 350, &scene(vec![b.clone()]), &look, &mut font);
+        assert!(!up.spots.is_empty(), "the zoom button");
+        let down = Scene {
+            banner: Some(Banner::Down { trying: false }),
+            dim: true,
+            ..scene(vec![b])
+        };
+        let down = paint(1100, 350, &down, &look, &mut font);
+        let spots: Vec<Spot> = down.spots.iter().map(|&(_, s)| s).collect();
+        assert_eq!(spots, [Spot::Banner(Action::Retry)]);
+        let (veil, banner) = (&down.over[0].0, &down.over[1].0);
+        assert_eq!((veil.opacity, veil.width), (DIM_VEIL, 1100));
+        assert!(veil.height < 350, "the ribbon stays bright");
+        assert_eq!(banner.height, banner::height(1.0));
     }
 }
