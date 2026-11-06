@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{Client, block_for, run_and_wait, start_server};
+use common::{Client, Text, block_for, run_and_wait, start_server};
 use rusty_mux_core::EntityId;
 use rusty_mux_proto::{Entry, Features, Message, Takeover};
 use rusty_uuid::Uuid;
@@ -245,4 +245,19 @@ fn a_lost_welcome_after_an_idle_takeover_can_be_retried_with_its_token() {
         assert_ne!(replay.id(), oldest.client, "{used:?} still works");
     }
     run_and_wait(&mut retry, block, 2);
+}
+
+#[test]
+fn a_marker_in_the_window_title_is_not_its_output() {
+    // What a Windows runner's `cmd.exe` sent for `echo MARK^2` before
+    // printing MARK2: the command, caret dropped, in the title.
+    let title = b"Temp>echo MARK^2\r\n\x1b]0;Administrator: cmd.exe - echo  MARK2\x07";
+    let mut text = Text::default();
+    assert!(!text.feed(title, b"MARK2"), "the title is not output");
+    assert!(text.feed(b"MARK2\r\n", b"MARK2"));
+
+    let mut split = Text::default();
+    assert!(!split.feed(b"\x1b]0;MAR", b"MARK2"));
+    assert!(!split.feed(b"K2\x1b\\MA", b"MARK2"), "ST ends the title");
+    assert!(split.feed(b"RK2", b"MARK2"), "text across reads");
 }
