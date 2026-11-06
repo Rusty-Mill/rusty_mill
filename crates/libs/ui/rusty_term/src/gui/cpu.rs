@@ -14,6 +14,7 @@ use crate::core::{
 };
 
 use super::font::{Glyph, GlyphSource, Style};
+use super::paint::Pixmap;
 use super::render::{SearchColors, blend, concealed, drawn, glyph_char, is_overlay_mark};
 
 /// Composite the grid's visible cells into `buf` (`width × height` pixels,
@@ -60,6 +61,23 @@ pub(crate) fn render(
         font,
         None,
     );
+}
+
+/// Copy `image` into `buffer` (`w × h`) with its top-left at `(x, y)`,
+/// clipped to the buffer.
+pub(crate) fn draw_pixmap(
+    buffer: &mut [u32],
+    w: usize,
+    h: usize,
+    image: &Pixmap,
+    x: usize,
+    y: usize,
+) {
+    let cols = image.width.min(w.saturating_sub(x));
+    for row in 0..image.height.min(h.saturating_sub(y)) {
+        let src = &image.pixels[row * image.width..][..cols];
+        buffer[(y + row) * w + x..][..cols].copy_from_slice(src);
+    }
 }
 
 /// Paint the window's chrome bar (tabs + caption buttons): a thin

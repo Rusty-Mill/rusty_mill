@@ -50,6 +50,7 @@ use super::pace::Pacer;
 use super::render::{CpuRenderer, PaneFrame, Renderer, SearchColors, blend};
 use super::settings::{Field, Settings, SetupBaseline, Widget};
 use super::source::{Feed, PaneIo, Remote, Source, Tree};
+use super::strip::{self, Spot, StripState};
 use crate::backend::{Backend, BackendHandle};
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
@@ -148,6 +149,8 @@ pub(crate) enum UserEvent {
     Layout(Option<Tree>),
     /// The source moved the attached window's focus ([`Remote::focus`]).
     Focus(u64),
+    /// The source's session changed ([`Remote::session`]).
+    Session(super::source::Session),
 }
 
 impl From<accesskit_winit::Event> for UserEvent {
@@ -192,6 +195,40 @@ enum Hit {
     SettingsTab,
     /// Close the settings page (the settings tab's × button).
     CloseSettings,
+    /// An attached window's session chip: its menu (gui-design D45 b).
+    Session,
+    /// Show the source's window `key` (an attached window's strip tab).
+    Window(u64),
+    /// Ask the source for a new window (the strip's "+").
+    NewWindow,
+}
+
+impl Hit {
+    /// The strip spot this hit is, for drawing its hover and press.
+    fn spot(self) -> Option<Spot> {
+        Some(match self {
+            Hit::Session => Spot::Session,
+            Hit::Window(key) => Spot::Tab(key),
+            Hit::NewWindow => Spot::NewWindow,
+            Hit::Minimize => Spot::Minimize,
+            Hit::Maximize => Spot::Maximize,
+            Hit::Close => Spot::Close,
+            _ => return None,
+        })
+    }
+}
+
+impl From<Spot> for Hit {
+    fn from(spot: Spot) -> Self {
+        match spot {
+            Spot::Session => Hit::Session,
+            Spot::Tab(key) => Hit::Window(key),
+            Spot::NewWindow => Hit::NewWindow,
+            Spot::Minimize => Hit::Minimize,
+            Spot::Maximize => Hit::Maximize,
+            Spot::Close => Hit::Close,
+        }
+    }
 }
 
 /// A transient full-window page drawn over the active tab while open: the shell
@@ -630,6 +667,9 @@ struct WindowState<'a> {
     source: Option<&'a dyn Source>,
     /// The focus last told to `source` or told by it.
     told: Option<u64>,
+    /// An attached window's top strip, in place of the chrome bar
+    /// (gui-design D45); `None` for local shells.
+    strip: Option<StripState>,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -1473,6 +1513,9 @@ impl WindowState<'_> {
     fn redraw(&mut self) {
         self.pacer.painted(Instant::now());
         let chrome = self.chrome_row();
+        if self.strip_shown() {
+            self.repaint_strip();
+        }
         let status = self.status_row();
         let tokens = self.chrome_colors();
         let divider = tokens.line;
@@ -1494,9 +1537,11 @@ impl WindowState<'_> {
                 marks: Vec::new(),
                 search: SearchColors::default(),
             };
+            let strip = self.strip.as_ref().and_then(StripState::painted);
             renderer.render(
                 std::slice::from_ref(&frame),
                 &chrome,
+                strip.filter(|_| chrome.is_empty()).map(|s| &s.pixmap),
                 &status,
                 &mut self.font,
                 &mut self.ui_font,
@@ -1668,9 +1713,11 @@ impl WindowState<'_> {
                 search: SearchColors::default(),
             });
         }
+        let strip = self.strip.as_ref().and_then(StripState::painted);
         renderer.render(
             &frames,
             &chrome,
+            strip.filter(|_| chrome.is_empty()).map(|s| &s.pixmap),
             &status,
             &mut self.font,
             &mut self.ui_font,
@@ -1850,6 +1897,10 @@ impl WindowState<'_> {
     }
 
     fn chrome_row(&mut self) -> Vec<Cell> {
+        if self.strip_shown() {
+            self.hits.clear();
+            return Vec::new();
+        }
         let (paint_cols, cols) = self.bar_cells();
         let tokens = self.chrome_colors();
         if let Some(query) = self.searching.clone() {
@@ -2347,7 +2398,43 @@ impl WindowState<'_> {
     /// Pixel height of the chrome bar plus its downward inset (the strip
     /// band above the tabs; see `render::bar_inset`): the bar's hit area.
     fn chrome_h(&self) -> usize {
+        if self.strip_shown() {
+            return strip::height(self.scale_factor as f32);
+        }
         super::render::bar_inset(self.pad, self.bar_h) + self.bar_h
+    }
+
+    /// Whether the top strip stands in for the chrome bar: in an attached
+    /// window, unless the search bar has the top row.
+    fn strip_shown(&self) -> bool {
+        self.strip.is_some() && self.searching.is_none()
+    }
+
+    /// The chrome control under window pixel `(x, y)`, which the caller
+    /// knows is on the bar; `None` before a bar is laid out.
+    fn bar_hit(&self, x: f64, y: f64) -> Option<Hit> {
+        if self.strip_shown() {
+            let strip = self.strip.as_ref()?.painted()?;
+            return Some(strip.spot(x as f32, y as f32).map_or(Hit::Drag, Hit::from));
+        }
+        (!self.hits.is_empty()).then(|| self.hits[self.bar_col(x)])
+    }
+
+    /// Paint the attached window's strip for the current state and size.
+    fn repaint_strip(&mut self) {
+        let width = self
+            .window
+            .as_ref()
+            .map_or(0, |w| w.inner_size().width as usize);
+        let look = strip::Look {
+            chrome: self.chrome_colors(),
+            scale: self.scale_factor as f32,
+            hover: self.hover.and_then(Hit::spot),
+            pressed: self.pressed.and_then(Hit::spot),
+        };
+        if let Some(strip) = &mut self.strip {
+            strip.repaint(look, width);
+        }
     }
 
     /// Pixel height both bars take from the pane area: the chrome bar (with
@@ -2650,18 +2737,17 @@ impl WindowState<'_> {
 
     /// Dispatch a click on the chrome bar through the hit map.
     fn on_bar_click(&mut self, x: f64) {
-        if self.hits.is_empty() {
+        let Some(hit) = self.bar_hit(x, self.mouse_pos.1) else {
             return; // no frame laid out yet
-        }
-        let col = self.bar_col(x);
+        };
         let Some(window) = self.window.clone() else {
             return;
         };
-        if self.hits[col] != Hit::Drag {
-            self.pressed = Some(self.hits[col]);
+        if hit != Hit::Drag {
+            self.pressed = Some(hit);
             window.request_redraw();
         }
-        match self.hits[col] {
+        match hit {
             Hit::Tab(i) => {
                 self.close_overlay();
                 if i < self.tabs.len() && i != self.active {
@@ -2688,7 +2774,19 @@ impl WindowState<'_> {
                     eprintln!("rusty_term: new tab: {e}");
                 }
             }
-            Hit::ShellMenu => {
+            Hit::Window(key) => {
+                self.close_overlay();
+                if let Some(source) = self.source {
+                    source.select(key);
+                }
+            }
+            Hit::NewWindow => {
+                self.close_overlay();
+                if let Some(source) = self.source {
+                    source.new_window();
+                }
+            }
+            Hit::ShellMenu | Hit::Session => {
                 let was_menu = matches!(self.overlay, Some(Overlay::Menu { .. }));
                 self.close_overlay(); // persists a dirty settings page first
                 if !was_menu {
@@ -3750,7 +3848,16 @@ impl WindowState<'_> {
     /// Open the shell-launcher dropdown (the `▾` button): the detected shells
     /// plus *Settings* and *Open config file* entries.
     fn open_menu(&mut self) {
-        let items = shell_menu_items(&self.config.profiles, &self.shells);
+        let mut items = shell_menu_items(&self.config.profiles, &self.shells);
+        if self.source.is_some() {
+            // The server spawns an attached window's blocks (gui-design D45 b).
+            items.retain(|i| {
+                !matches!(
+                    i.kind,
+                    MenuKind::LaunchProfile(_) | MenuKind::LaunchShell(_)
+                )
+            });
+        }
         self.overlay = Some(Overlay::Menu { items, sel: 0 });
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -5485,6 +5592,16 @@ impl WindowState<'_> {
         }
     }
 
+    /// Show the source's `session` on the top strip.
+    fn show_session(&mut self, session: super::source::Session) {
+        if let Some(strip) = &mut self.strip {
+            strip.show(session);
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// The source moved the focus to `key`.
     fn focus_from_source(&mut self, key: u64) {
         self.told = Some(key);
@@ -5849,12 +5966,9 @@ impl WindowState<'_> {
                 // Chrome-bar hover feedback: track the element under the
                 // pointer and repaint when it changes (drag-strip cells and
                 // anything below the bar count as no hover).
-                let hover = if self.in_chrome(position.y) && !self.hits.is_empty() {
-                    let col = self.bar_col(position.x);
-                    match self.hits[col] {
-                        Hit::Drag => None,
-                        h => Some(h),
-                    }
+                let hover = if self.in_chrome(position.y) {
+                    self.bar_hit(position.x, position.y)
+                        .filter(|&h| h != Hit::Drag)
                 } else {
                     None
                 };
@@ -6187,6 +6301,10 @@ impl<'a> App<'a> {
             backend: self.backend,
             source: self.source,
             told: None,
+            strip: match self.source {
+                Some(_) => Some(StripState::new().ok_or("the interface font failed to parse")?),
+                None => None,
+            },
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -6392,6 +6510,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Focus(key) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
                     w.focus_from_source(key);
+                }
+            }
+            UserEvent::Session(session) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.show_session(session);
                 }
             }
             UserEvent::ConfigChanged => {

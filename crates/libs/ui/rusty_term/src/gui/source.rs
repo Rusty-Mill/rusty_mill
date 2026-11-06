@@ -83,6 +83,31 @@ pub enum Tree {
     },
 }
 
+/// What an attached window's top strip shows of its source's session
+/// (gui-design F1, D46).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Session {
+    pub name: String,
+    /// Where the session runs, as this client reached it: "on {host}".
+    pub host: String,
+    /// The session's windows, in order; one is shown.
+    pub windows: Vec<WindowTab>,
+    /// Clients attached to the session, this one included.
+    pub clients: usize,
+}
+
+/// One of a session's windows, as its strip tab shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowTab {
+    /// The source's key for the window.
+    pub key: u64,
+    pub name: String,
+    /// Its blocks' layout, for the tab's thumbnail; `None` while unknown.
+    pub tree: Option<Tree>,
+    /// Whether this is the window shown.
+    pub shown: bool,
+}
+
 /// Where an attached window's panes come from, such as a rusty_mux window.
 /// The source owns the layout: the window shows the [`Tree`]s it is sent
 /// through [`Remote`] and never edits one itself (pack D28, D102).
@@ -91,6 +116,10 @@ pub trait Source {
     fn open(&self, key: u64, cols: u16, rows: u16) -> io::Result<PaneIo>;
     /// The user moved the focus to pane `key`.
     fn focus(&self, key: u64);
+    /// The user picked window `key` on the strip: show it instead.
+    fn select(&self, key: u64);
+    /// The user asked for a new window in the session.
+    fn new_window(&self);
 }
 
 /// The source's way into a running window, from any thread. Each call is
@@ -107,6 +136,11 @@ impl Remote {
     /// Move the focus to pane `key`, as another client did.
     pub fn focus(&self, key: u64) -> bool {
         self.0.send_event(UserEvent::Focus(key)).is_ok()
+    }
+
+    /// Show `session` on the top strip.
+    pub fn session(&self, session: Session) -> bool {
+        self.0.send_event(UserEvent::Session(session)).is_ok()
     }
 }
 

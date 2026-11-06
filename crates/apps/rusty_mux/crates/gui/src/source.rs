@@ -1,7 +1,10 @@
-//! One server window as the GUI window's session source.
+//! One server session as the GUI window's source.
 //!
 //! [`attach`] says Hello on a control connection, picks the window and
-//! reads its layout. [`MuxSource`] opens a connection per shown block and
+//! reads the session: its windows, their layouts and the clients. The
+//! window shows one server window at a time, the session's active one, and
+//! the top strip shows the rest (handoff D105). [`MuxSource`] opens a
+//! connection per shown block and
 //! attaches it; the window drops a pane to detach its block. The focus is
 //! the window's on the server (C41): a move here is told with
 //! `FocusBlock`, a move by another client comes back as `FocusChanged`.
@@ -25,13 +28,19 @@ use rusty_mux_client::attach::{
     CONTROL, HANDSHAKE, Missed, Requests, clone, connect, first_session_name, reach,
 };
 use rusty_mux_client::checkpoint::Receiver;
-use rusty_mux_core::{BlockId, Event, Size, WindowId};
-use rusty_mux_proto::{Features, Message};
+use rusty_mux_core::{BlockId, Event, Layout, SessionId, Size, WindowId};
+use rusty_mux_proto::{Features, Launch, Message};
 use rusty_term::backend::BackendHandle;
-use rusty_term::gui::source::{Feed, PaneIo, Remote, Source, Tree};
+use rusty_term::gui::source::{Feed, PaneIo, Remote, Session, Source, Tree};
 
 use crate::keys::Keys;
+use crate::session::{Change, Model, local_host};
 use crate::tree::tree;
+
+/// What the GUI's control connection asks for: the TUI's set, plus names
+/// for the strip and who each client is, to count them (handoff D105).
+/// A server without some grants the rest, and the strip shows less.
+pub const GUI: Features = CONTROL.union(Features::LABELS).union(Features::IDENTITY);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -59,7 +68,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
     let stream = connect(socket)?;
     let mut conn = Conn::new(clone(&stream)?);
     conn.send(&Message::Hello {
-        features: CONTROL,
+        features: GUI,
         resume: None,
         takeover: None,
     })
@@ -84,15 +93,18 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
             req.create(size, first_session_name(welcomed.features))?
         }
     };
-    let (window, shape) = req.place(block)?;
-    let window = window.ok_or("the block is in no window")?;
+    let entries = req.call(|req| Message::List { req })?;
+    let follows_active = welcomed.features.contains(Features::ACTIVE_WINDOW);
+    let model = Model::from_list(&entries, block, local_host(), follows_active)?;
     let next = req.next;
-    let layout = shape.layout.ok_or("the window shows no blocks")?;
+    let layout = model.view().0.cloned().unwrap_or(Layout::Block(block));
     let state = Arc::new(State {
         socket: socket.to_owned(),
         control: Mutex::new(Conn::new(clone(&stream)?)),
         next: AtomicU64::new(next),
         tells_focus: welcomed.features.contains(Features::FOCUS),
+        selects: follows_active,
+        session: model.session_id(),
         shown: Mutex::new(Shown::default()),
     });
     let (first, focus) = {
@@ -108,11 +120,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         focus,
         source: MuxSource(Arc::clone(&state)),
         first,
-        events: Events {
-            state,
-            conn,
-            window,
-        },
+        events: Events { state, conn, model },
     })
 }
 
@@ -123,6 +131,9 @@ struct State {
     next: AtomicU64,
     /// The server takes `FocusBlock` (C41).
     tells_focus: bool,
+    /// The server takes `SelectWindow` and tells the active window.
+    selects: bool,
+    session: SessionId,
     shown: Mutex<Shown>,
 }
 
@@ -130,6 +141,8 @@ struct State {
 #[derive(Default)]
 struct Shown {
     keys: Keys,
+    /// The strip's tab keys for the session's windows.
+    windows: Keys<WindowId>,
     /// Each open pane's block connection, kept weakly: the window owns it.
     blocks: HashMap<u64, std::sync::Weak<Block>>,
     focus: Option<u64>,
@@ -142,14 +155,18 @@ impl State {
 
     /// Tells the server the window's focus moved to `block`.
     fn tell_focus(&self, block: BlockId) {
-        if !self.tells_focus {
-            return;
+        if self.tells_focus {
+            self.send(|req| Message::FocusBlock { req, block });
         }
+    }
+
+    /// Sends a request on the control connection; its answer is skipped.
+    fn send(&self, make: impl FnOnce(u64) -> Message) {
         let req = self.next.fetch_add(1, Ordering::Relaxed);
         let control = &mut self.control.lock().unwrap_or_else(PoisonError::into_inner);
         // A dead control connection ends the events reader, which closes
         // the window.
-        let _ = control.send(&Message::FocusBlock { req, block });
+        let _ = control.send(&make(req));
     }
 
     /// Moves the focus to `key`, its block's lease with it.
@@ -173,7 +190,7 @@ impl Source for MuxSource {
             .0
             .shown()
             .keys
-            .block(key)
+            .id(key)
             .ok_or_else(|| std::io::Error::other(format!("no block has key {key}")))?;
         let (pane, feed) =
             Block::open(&self.0.socket, block, (cols, rows)).map_err(std::io::Error::other)?;
@@ -190,67 +207,178 @@ impl Source for MuxSource {
     }
 
     fn focus(&self, key: u64) {
-        let block = self.0.shown().keys.block(key);
+        let block = self.0.shown().keys.id(key);
         if let Some(block) = block {
             self.0.tell_focus(block);
             self.0.focus(key);
         }
     }
+
+    /// Makes window `key` the session's active one; the window follows
+    /// when the server says so, as it does for another client's pick.
+    fn select(&self, key: u64) {
+        let window = self.0.shown().windows.id(key);
+        if let (Some(window), true) = (window, self.0.selects) {
+            self.0.send(|req| Message::SelectWindow { req, window });
+        }
+    }
+
+    /// Creates a window with one block and selects it, on a connection of
+    /// its own so the UI never waits for the server.
+    fn new_window(&self) {
+        let (socket, session) = (self.0.socket.clone(), self.0.session);
+        let spawned = std::thread::Builder::new()
+            .name("mux-new-window".into())
+            .spawn(move || {
+                if let Err(e) = create_window(&socket, session) {
+                    eprintln!("rusty-mux-gui: new window: {e}");
+                }
+            });
+        if let Err(e) = spawned {
+            eprintln!("rusty-mux-gui: new window: {e}");
+        }
+    }
+}
+
+/// Creates a window in `session` with one block, and makes it active.
+/// The connection asks for no takeover, so the server forgets it at once;
+/// the handshake needs checkpoints.
+fn create_window(socket: &Path, session: SessionId) -> Result<(), String> {
+    let stream = connect(socket)?;
+    let mut conn = Conn::new(stream);
+    conn.send(&Message::Hello {
+        features: Features::CHECKPOINT_V6.union(Features::ACTIVE_WINDOW),
+        resume: None,
+        takeover: None,
+    })
+    .map_err(|e| e.to_string())?;
+    let mut req = Requests {
+        conn: &mut conn,
+        next: 1,
+        by: Some(Instant::now() + HANDSHAKE),
+        cancel: &NEVER,
+    };
+    req.welcome()?;
+    let window = WindowId::from_uuid(req.create_id(|req| Message::CreateWindow {
+        req,
+        session,
+        name: String::new(),
+    })?);
+    let size = Size::new(FIRST_SIZE.0, FIRST_SIZE.1).map_err(|e| e.to_string())?;
+    req.create_id(|req| Message::CreateBlock {
+        req,
+        window,
+        size,
+        launch: Launch::default(),
+    })?;
+    req.call(|req| Message::SelectWindow { req, window })?;
+    Ok(())
+}
+
+/// What the control connection tells the window.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Out {
+    /// Show this layout; `None` closes the window, and comes last.
+    Layout(Option<Tree>),
+    /// Another client moved the focus to this pane.
+    Focus(u64),
+    /// The session changed, for the top strip.
+    Session(Session),
 }
 
 /// The control connection's events for the window.
 pub struct Events {
     state: Arc<State>,
     conn: Conn<UnixStream>,
-    window: WindowId,
+    model: Model,
 }
 
 impl Events {
-    /// Follows the window on a thread of its own: its layout and focus go
-    /// to `remote`, and its end, or the connection's, closes the window.
+    /// Follows the session on a thread of its own, telling `remote`; the
+    /// session's end, or the connection's, closes the window.
     pub fn follow(self, remote: Remote) {
-        std::thread::spawn(move || self.run(|t| remote.layout(t), |k| remote.focus(k)));
+        std::thread::spawn(move || {
+            self.run(|out| match out {
+                Out::Layout(t) => remote.layout(t),
+                Out::Focus(k) => remote.focus(k),
+                Out::Session(s) => remote.session(s),
+            })
+        });
     }
 
-    /// Follows the window until it or the connection ends, or a call is
-    /// `false`: each layout goes to `layout`, `None` last, and each focus
-    /// another client moves to `focus`.
-    pub fn run(
-        mut self,
-        mut layout: impl FnMut(Option<Tree>) -> bool,
-        mut focus: impl FnMut(u64) -> bool,
-    ) {
+    /// Follows the session until it or the connection ends, or `out` says
+    /// `false`. The session goes out first, then every change.
+    pub fn run(mut self, mut out: impl FnMut(Out) -> bool) {
+        if !out(Out::Session(self.session())) {
+            return;
+        }
         while let Ok(message) = self.conn.recv() {
-            let Message::Event { event, .. } = message else {
-                continue;
+            let change = match &message {
+                Message::Event { event, .. } => self.model.apply(event),
+                Message::Entry { entry, .. } => self.model.take(entry),
+                _ => Change::None,
             };
-            match event {
-                Event::LayoutChanged {
-                    window,
-                    layout: layout_of,
-                    ..
-                } if window == self.window => {
-                    let shown = layout_of.map(|l| tree(&l, &mut self.state.shown().keys));
-                    let ended = shown.is_none();
-                    if !layout(shown) || ended {
-                        return;
-                    }
-                }
-                Event::WindowClosed { window } if window == self.window => break,
-                Event::FocusChanged {
-                    window,
-                    block: Some(block),
-                } if window == self.window => {
+            if let Message::Event {
+                event: Event::WindowCreated { .. },
+                ..
+            } = message
+            {
+                // Its name comes with the window's entry.
+                self.state.send(|req| Message::List { req });
+            }
+            let go_on = match change {
+                Change::None => true,
+                Change::Strip => out(Out::Session(self.session())),
+                Change::Layout => self.layout(&mut out),
+                Change::Focus(block) => {
                     let key = self.state.shown().keys.key(block);
                     self.state.focus(key);
-                    if !focus(key) {
-                        return;
-                    }
+                    out(Out::Focus(key))
                 }
-                _ => {}
+                Change::Shown => {
+                    self.layout(&mut out)
+                        && self.focus_shown(&mut out)
+                        && out(Out::Session(self.session()))
+                }
+                Change::Emptied(window) => {
+                    self.state.send(|req| Message::SelectWindow { req, window });
+                    out(Out::Session(self.session()))
+                }
+                Change::Gone => break,
+            };
+            if !go_on {
+                return;
             }
         }
-        layout(None);
+        out(Out::Layout(None));
+    }
+
+    /// The session as the strip shows it.
+    fn session(&self) -> Session {
+        let shown = &mut *self.state.shown();
+        self.model.session(&mut shown.windows, &mut shown.keys)
+    }
+
+    /// Sends the shown window's layout; a window with no blocks ends the
+    /// GUI window.
+    fn layout(&self, out: &mut impl FnMut(Out) -> bool) -> bool {
+        let shown = self
+            .model
+            .view()
+            .0
+            .map(|l| tree(l, &mut self.state.shown().keys));
+        let ended = shown.is_none();
+        out(Out::Layout(shown)) && !ended
+    }
+
+    /// Moves the focus to the shown window's focused block.
+    fn focus_shown(&self, out: &mut impl FnMut(Out) -> bool) -> bool {
+        let Some(block) = self.model.view().1 else {
+            return true;
+        };
+        let key = self.state.shown().keys.key(block);
+        self.state.focus(key);
+        out(Out::Focus(key))
     }
 }
 

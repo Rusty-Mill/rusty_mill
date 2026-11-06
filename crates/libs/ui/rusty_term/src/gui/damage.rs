@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 
 use crate::core::{BidiRow, Cell, CursorShape, RowKey};
 
+use super::paint::Pixmap;
 use super::render::{PaneFrame, SearchColors};
 
 /// Presented frames remembered. softbuffer reports a buffer age of 1 on
@@ -29,6 +30,8 @@ struct Layout {
     fonts: [u64; 2],
     colors: [u32; 3],
     chrome: Vec<Cell>,
+    /// An attached window's top strip, by [`Pixmap::fingerprint`].
+    strip: Option<(usize, usize, u64)>,
     status: Vec<Cell>,
     panes: Vec<PaneLayout>,
 }
@@ -88,6 +91,7 @@ impl Frame {
     pub(super) fn capture(
         panes: &[PaneFrame],
         chrome: &[Cell],
+        strip: Option<&Pixmap>,
         status: &[Cell],
         fonts: [u64; 2],
         size: (usize, usize),
@@ -100,6 +104,7 @@ impl Frame {
             fonts,
             colors,
             chrome: chrome.to_vec(),
+            strip: strip.map(Pixmap::fingerprint),
             status: status.to_vec(),
             panes: panes.iter().map(pane_layout).collect(),
         };

@@ -27,6 +27,8 @@ struct Pack {
     dim: u32,
     verdigris: u32,
     oxide: u32,
+    /// Thumbnail cells on an unselected and the selected tab (gui-design D46).
+    thumb: [u32; 2],
 }
 
 /// D5: the dark palette.
@@ -41,6 +43,7 @@ const DARK: Pack = Pack {
     dim: 0x6E7B80,
     verdigris: 0x5FB8A5,
     oxide: 0xD9773A,
+    thumb: [0x2C363B, 0x3A464C],
 };
 
 /// D25: the light palette (tinted ground, darker accents).
@@ -55,6 +58,7 @@ const LIGHT: Pack = Pack {
     dim: 0x76848A,
     verdigris: 0x176B5A,
     oxide: 0xA8460F,
+    thumb: [0xB9C4C3, 0x9FACAB],
 };
 
 /// Every colour the chrome draws with, resolved once per theme.
@@ -87,6 +91,11 @@ pub(crate) struct Chrome {
     pub success: u32,
     /// Failure (D36). Never as text on `raised` (D17).
     pub failure: u32,
+    /// A bare icon control on `frame`, such as the strip's "+": `dim` where
+    /// it holds the 3:1 control floor there, else `muted` (gui-design D46).
+    pub control: u32,
+    /// Thumbnail cells on an unselected and the selected tab (gui-design D46).
+    pub thumb: [u32; 2],
 }
 
 impl Chrome {
@@ -108,6 +117,12 @@ impl Chrome {
             on_accent,
             success: pack.verdigris,
             failure: pack.oxide,
+            control: if contrast_ratio(pack.dim, pack.frame) >= ACCENT_MIN {
+                pack.dim
+            } else {
+                pack.slate
+            },
+            thumb: pack.thumb,
         }
     }
 }
@@ -318,6 +333,19 @@ mod tests {
             let r = contrast_ratio(pack.bone, pack.line);
             assert!(r >= TEXT_MIN, "text on line {:06x} = {r:.2}", pack.line);
         }
+    }
+
+    #[test]
+    fn a_bare_control_holds_three_to_one_on_the_strip() {
+        for bg in [0x101010, 0xF0F0F0] {
+            let c = Chrome::from_theme(&Theme {
+                bg,
+                ..Theme::default()
+            });
+            let r = contrast_ratio(c.control, c.frame);
+            assert!(r >= ACCENT_MIN, "control on frame = {r:.2}");
+        }
+        assert_eq!(Chrome::from_theme(&Theme::default()).control, DARK.dim);
     }
 
     #[test]

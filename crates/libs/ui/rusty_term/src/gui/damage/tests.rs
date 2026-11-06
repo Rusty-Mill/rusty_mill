@@ -230,19 +230,20 @@ fn assert_partial_matches_full(
         let panes = panes(&views, x);
         let mut full = vec![0xDEAD_BEEF; w * h];
         composite(
-            &mut full, &panes, &chrome, &status, &mut font, &mut ui, w, h, COLORS[0], COLORS[1],
-            COLORS[2], PAD, None,
+            &mut full, &panes, &chrome, None, &status, &mut font, &mut ui, w, h, COLORS[0],
+            COLORS[1], COLORS[2], PAD, None,
         );
 
         let slot = n % chain;
         let age = painted_at[slot].map_or(0, |f| (n - f) as u8);
-        let frame = Frame::capture(&panes, &chrome, &status, [7, 7], (w, h), COLORS, PAD);
+        let frame = Frame::capture(&panes, &chrome, None, &status, [7, 7], (w, h), COLORS, PAD);
         let plan = damage.plan(&frame, age);
         let buf = &mut bufs[slot];
         composite(
             buf,
             &panes,
             &chrome,
+            None,
             &status,
             &mut font,
             &mut ui,
@@ -319,7 +320,7 @@ fn repaint_after(bytes: &[u8]) -> Vec<bool> {
             marks: Vec::new(),
             search: SearchColors::default(),
         };
-        Frame::capture(&[pane], &[], &[], [1, 1], (120, 80), COLORS, 0)
+        Frame::capture(&[pane], &[], None, &[], [1, 1], (120, 80), COLORS, 0)
     };
     let mut damage = Damage::default();
     damage.presented(capture(&g));
@@ -355,7 +356,18 @@ fn unknown_or_stale_buffers_repaint_fully() {
         marks: Vec::new(),
         search: SearchColors::default(),
     };
-    let frame = |v, font| Frame::capture(&[pane(v)], &[], &[], [font, font], (24, 20), COLORS, 0);
+    let frame = |v, font| {
+        Frame::capture(
+            &[pane(v)],
+            &[],
+            None,
+            &[],
+            [font, font],
+            (24, 20),
+            COLORS,
+            0,
+        )
+    };
     let mut damage = Damage::default();
     assert_eq!(damage.plan(&frame(&v, 1), 1), Plan::Full, "no history");
     damage.presented(frame(&v, 1));
@@ -409,12 +421,13 @@ fn ime_overhang_survives_a_neighbor_repaint() {
                 marks: Vec::new(),
                 search: SearchColors::default(),
             }];
-            let frame = Frame::capture(&pane, &[], &[], [7, 7], (w, h), COLORS, 0);
+            let frame = Frame::capture(&pane, &[], None, &[], [7, 7], (w, h), COLORS, 0);
             let plan = damage.as_ref().map_or(Plan::Full, |d| d.plan(&frame, 1));
             composite(
                 buf,
                 &pane,
                 &[],
+                None,
                 &[],
                 font,
                 &mut OverhangFont,

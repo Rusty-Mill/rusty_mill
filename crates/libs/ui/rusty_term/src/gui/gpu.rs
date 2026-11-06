@@ -40,6 +40,7 @@ use crate::core::{
 
 use super::damage::{self, RowState};
 use super::font::{FontCache, Glyph, GlyphSource, Style};
+use super::paint::Pixmap;
 use super::render::{
     PaneFrame, Renderer, SearchColors, concealed, drawn, glyph_char, is_overlay_mark,
 };
@@ -234,6 +235,7 @@ struct Inst {
     @location(2) cols: u32,
     @location(3) rows: u32,
     @location(4) uv: vec4<f32>,
+    @location(5) screen: u32,
 };
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -247,8 +249,12 @@ fn vs(@builtin(vertex_index) vi: u32, inst: Inst) -> VsOut {
         vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0));
     let corner = corners[vi];
     let size = vec2(f32(inst.cols), f32(inst.rows));
-    // Images live in grid content, never the chrome row: always inset.
-    let px = (vec2(f32(inst.col), f32(inst.row)) + corner * size) * u.cell + u.origin;
+    // Grid images are placed in cells from the grid origin; a screen image
+    // (an attached window's top strip) in pixels from the window's corner.
+    var px = (vec2(f32(inst.col), f32(inst.row)) + corner * size) * u.cell + u.origin;
+    if (inst.screen == 1u) {
+        px = vec2(f32(inst.col), f32(inst.row)) + corner * size;
+    }
     let ndc = vec2(px.x / u.screen.x * 2.0 - 1.0, 1.0 - px.y / u.screen.y * 2.0);
     var out: VsOut;
     out.pos = vec4(ndc, 0.0, 1.0);
@@ -297,6 +303,9 @@ struct ImgInstance {
     rows: u32,
     /// Normalized source rect `(x, y, w, h)` within the image texture.
     uv: [f32; 4],
+    /// `1`: `col`, `row`, `cols` and `rows` are pixels from the window's
+    /// top-left corner, not cells from the grid origin.
+    screen: u32,
 }
 
 #[repr(C)]
@@ -621,7 +630,7 @@ impl GpuCore {
         let img_instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<ImgInstance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &wgpu::vertex_attr_array![0 => Sint32, 1 => Sint32, 2 => Uint32, 3 => Uint32, 4 => Float32x4],
+            attributes: &wgpu::vertex_attr_array![0 => Sint32, 1 => Sint32, 2 => Uint32, 3 => Uint32, 4 => Float32x4, 5 => Uint32],
         };
         let img_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("images pipeline"),
@@ -877,6 +886,7 @@ impl GpuCore {
         height: u32,
         pad: usize,
         chrome: &[Cell],
+        strip: Option<&Pixmap>,
         bar: (usize, usize),
     ) {
         // With a chrome bar, the bar sits `bar_inset` px below the top edge
@@ -887,7 +897,7 @@ impl GpuCore {
         } else {
             super::render::bar_inset(pad, bar.1)
         };
-        let top = super::render::grid_top(chrome, pad, bar.1);
+        let top = super::render::grid_top(chrome, strip, pad, bar.1);
         let uniforms = Uniforms {
             screen: [width.max(1) as f32, height.max(1) as f32],
             cell: [self.cell_w as f32, self.cell_h as f32],
@@ -946,7 +956,7 @@ impl GpuCore {
         font: &mut FontCache,
         cursor_on: bool,
     ) {
-        self.write_uniforms(width, height, 0, chrome, font.cell_size());
+        self.write_uniforms(width, height, 0, chrome, None, font.cell_size());
         let mut frame = FrameLists::default();
         self.append_chrome(&mut frame, chrome, font);
         let view_grid = grid.frame_view();
@@ -1340,6 +1350,7 @@ impl GpuCore {
                         cols: im.cols as u32,
                         rows: im.rows as u32,
                         uv: [0.0, 0.0, 1.0, 1.0],
+                        screen: 0,
                     },
                 ));
             }
@@ -1382,6 +1393,7 @@ impl GpuCore {
                                 1.0 / pcols as f32,
                                 1.0 / prows as f32,
                             ],
+                            screen: 0,
                         },
                     ));
                 }
@@ -1498,6 +1510,7 @@ impl GpuCore {
         height: u32,
         panes: &[super::render::PaneFrame],
         chrome: &[Cell],
+        strip: Option<&Pixmap>,
         status: &[Cell],
         font: &mut FontCache,
         ui: &mut FontCache,
@@ -1506,11 +1519,41 @@ impl GpuCore {
         bar_bg: u32,
         pad: usize,
     ) {
-        self.write_uniforms(width, height, pad, chrome, ui.cell_size());
+        self.write_uniforms(width, height, pad, chrome, strip, ui.cell_size());
         let mut frame = self.frame_lists(panes, font, divider);
         self.append_bars(&mut frame, width, chrome, status, ui, bar_bg);
+        if let Some(strip) = strip {
+            self.append_strip(&mut frame, strip);
+        }
         self.draw_frame(view, &frame, bg);
         self.spare = frame;
+    }
+
+    /// Append an attached window's top strip: its pixels as one image quad
+    /// at the window's top-left corner, uploaded only when they change.
+    fn append_strip(&mut self, frame: &mut FrameLists, strip: &Pixmap) {
+        let (w, h, hash) = strip.fingerprint();
+        let key = (4u8, hash, ((w as u64) << 32) | h as u64);
+        let bind = match self.img_cache.get(&key) {
+            Some(bind) => Some(Rc::clone(bind)),
+            None => {
+                let pixels: Vec<Option<u32>> = strip.pixels.iter().map(|&p| Some(p)).collect();
+                self.image_texture(key, w, h, &pixels)
+            }
+        };
+        if let Some(bind) = bind {
+            frame.images.push((
+                bind,
+                ImgInstance {
+                    col: 0,
+                    row: 0,
+                    cols: w as u32,
+                    rows: h as u32,
+                    uv: [0.0, 0.0, 1.0, 1.0],
+                    screen: 1,
+                },
+            ));
+        }
     }
 
     /// Append both bars, drawn in the UI font `ui`. They never overlap the
@@ -1817,6 +1860,7 @@ impl Renderer for GpuRenderer {
         &mut self,
         panes: &[super::render::PaneFrame],
         chrome: &[Cell],
+        strip: Option<&Pixmap>,
         status: &[Cell],
         font: &mut FontCache,
         ui: &mut FontCache,
@@ -1862,7 +1906,7 @@ impl Renderer for GpuRenderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         self.core.render_panes(
-            &view, width, height, panes, chrome, status, font, ui, divider, bg, bar_bg, pad,
+            &view, width, height, panes, chrome, strip, status, font, ui, divider, bg, bar_bg, pad,
         );
         frame.present();
     }
