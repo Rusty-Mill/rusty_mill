@@ -23,6 +23,14 @@ fn main() -> ExitCode {
         Some("maintain") => return maintain(argv),
         Some("lens") => return lens(argv),
         Some("watch") => return watch(argv),
+        Some("consolidate") => {
+            use rusty_orch::consolidate;
+            return lens_command(
+                consolidate::USAGE,
+                consolidate::options(argv),
+                consolidate::run,
+            );
+        }
         _ => {}
     }
     let cwd = std::env::current_dir().unwrap_or_default();
