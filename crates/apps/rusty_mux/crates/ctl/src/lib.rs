@@ -112,6 +112,10 @@ impl Exit {
 pub struct Env {
     /// `$RUSTY_MUX_SOCKET`.
     pub socket: Option<PathBuf>,
+    /// The default socket (C69, `rusty_mux_proto::endpoint`), used when
+    /// neither `--socket` nor `$RUSTY_MUX_SOCKET` names one. Agent hook
+    /// reports never use it: outside a block they do nothing.
+    pub default_socket: Option<PathBuf>,
     /// `$RUSTY_MUX_SESSION`, `$RUSTY_MUX_WINDOW`, `$RUSTY_MUX_BLOCK` and
     /// the current directory.
     pub here: Defaults,
@@ -130,6 +134,9 @@ impl Env {
     pub fn from_process() -> Self {
         Self {
             socket: std::env::var_os("RUSTY_MUX_SOCKET").map(Into::into),
+            default_socket: rusty_mux_proto::endpoint::default_socket(|name| {
+                std::env::var_os(name)
+            }),
             here: Defaults {
                 session: id_var("RUSTY_MUX_SESSION"),
                 window: id_var("RUSTY_MUX_WINDOW"),
@@ -334,13 +341,15 @@ pub fn hook_tool_name(input: &[u8]) -> Option<String> {
     fits.then(|| name.to_owned())
 }
 
-/// The socket `invocation` names, else `$RUSTY_MUX_SOCKET`.
+/// The socket `invocation` names, else `$RUSTY_MUX_SOCKET`, else the
+/// default socket.
 fn socket(invocation: &Invocation, env: &Env) -> Result<PathBuf, &'static str> {
     invocation
         .socket
         .clone()
         .or_else(|| env.socket.clone())
-        .ok_or("no socket: pass --socket or set RUSTY_MUX_SOCKET")
+        .or_else(|| env.default_socket.clone())
+        .ok_or("no socket: pass --socket, set RUSTY_MUX_SOCKET, or set XDG_RUNTIME_DIR (LOCALAPPDATA on Windows) for the default")
 }
 
 /// [`run`], giving up on the server once `stop` says so (past its deadline,
@@ -1136,6 +1145,7 @@ mod tests {
         listener.set_nonblocking(true).unwrap();
         let env = Env {
             socket: Some(socket.clone()),
+            default_socket: None,
             here: Defaults::default(),
             config: None,
             agent_homes: AgentHomes::default(),

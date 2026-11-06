@@ -1,5 +1,7 @@
-//! `rusty-mux-gui [--gpu] <socket> [block]`: show a rusty_mux block's window in
+//! `rusty-mux-gui [--gpu] [<socket> [block]]`: show a rusty_mux block's window in
 //! rusty_term's native window, starting with that block focused. Without a
+//! socket it uses `$RUSTY_MUX_SOCKET`, else the default socket (C69,
+//! `rusty_mux_proto::endpoint`). Without a
 //! block id it creates a session, window and block first. The window
 //! follows the server's layout and shared focus; typing goes to the
 //! focused block, whose input lease this client holds. rusty_term's config
@@ -10,13 +12,22 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     // rusty_term reads `--gpu` itself.
-    let args: Vec<_> = std::env::args_os()
+    let mut args: Vec<_> = std::env::args_os()
         .skip(1)
         .filter(|a| a != "--gpu")
         .collect();
-    if args.is_empty() || args.len() > 2 {
-        eprintln!("usage: rusty-mux-gui [--gpu] <socket> [block]");
+    if args.len() > 2 {
+        eprintln!("usage: rusty-mux-gui [--gpu] [<socket> [block]]");
         return ExitCode::from(2);
+    }
+    if args.is_empty() {
+        match rusty_mux_proto::endpoint::resolve(None, |name| std::env::var_os(name)) {
+            Ok(socket) => args.push(socket.into_os_string()),
+            Err(err) => {
+                eprintln!("rusty-mux-gui: {err}");
+                return ExitCode::from(2);
+            }
+        }
     }
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,

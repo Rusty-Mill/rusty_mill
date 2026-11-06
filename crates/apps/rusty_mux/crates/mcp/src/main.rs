@@ -1,6 +1,6 @@
 //! `rusty-mux-mcp [--socket PATH] [--timeout SECS]`: serves the rusty_mux
-//! tools over stdio. The socket defaults to `$RUSTY_MUX_SOCKET` and the
-//! timeout to [`rusty_mux_mcp::DEFAULT_TIMEOUT`]; see the library docs.
+//! tools over stdio. The socket defaults to `$RUSTY_MUX_SOCKET`, else the
+//! default socket (C69), and the timeout to [`rusty_mux_mcp::DEFAULT_TIMEOUT`]; see the library docs.
 
 use std::process::ExitCode;
 use std::sync::Arc;

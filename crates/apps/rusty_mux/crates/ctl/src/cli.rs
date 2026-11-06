@@ -813,7 +813,8 @@ pub fn usage(method: Option<&Method>) -> String {
     let Some(m) = method else {
         let mut text = String::from(
             "usage: rusty-mux-ctl [--socket PATH] [--json] COMMAND [--FLAG VALUE]... [+ COMMAND ...]\n\
-             The socket defaults to $RUSTY_MUX_SOCKET. An id flag also takes a name, a\n\
+             The socket defaults to $RUSTY_MUX_SOCKET, else the default socket\n\
+             ($XDG_RUNTIME_DIR/rusty_mux/default.sock). An id flag also takes a name, a\n\
              position or an id suffix, optionally as a path SESSION/WINDOW/BLOCK, and\n\
              defaults to $RUSTY_MUX_SESSION, $RUSTY_MUX_WINDOW or $RUSTY_MUX_BLOCK.\n\
              Actions come from $RUSTY_MUX_CONFIG, or rusty_mux/config.json in the\n\
