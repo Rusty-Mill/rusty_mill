@@ -328,6 +328,49 @@ fn links_live_in_the_board_document_and_are_left_out_while_empty() {
 }
 
 #[test]
+fn parent_and_milestone_live_in_the_board_document_and_are_left_out_while_unset() {
+    let (board, tick) = board();
+    let board = board.with_milestones(Box::new(TickStore::new(tick.clone())));
+    let human = board.roles().actor("nano", "human").expect("role");
+    let arc = board.add(&human, "arc 2", "", vec![]).expect("add");
+    let slice = board.add(&human, "S2", "", vec![]).expect("add");
+    let doc = tick.doc("board", slice.id).unwrap_or_default();
+    assert!(doc.get("parent").is_none() && doc.get("milestone").is_none());
+
+    let beta = board
+        .add_milestone(&human, "default", "Beta", 1_800_000_000_000)
+        .expect("milestone");
+    let links = Plan {
+        parent: Some(Some(arc.id)),
+        milestone: Some(Some(beta.id)),
+        ..Plan::default()
+    };
+    board.plan(slice.id, &human, &links).expect("link");
+    let doc = tick.doc("board", slice.id).expect("board doc");
+    assert_eq!(
+        (&doc["parent"], &doc["milestone"]),
+        (&json!(arc.id), &json!(beta.id))
+    );
+    let read = board.get(slice.id).expect("get");
+    assert_eq!((read.parent, read.milestone), (Some(arc.id), Some(beta.id)));
+    let progress = board
+        .milestone_progress(vec![beta])
+        .expect("progress")
+        .remove(0)
+        .progress;
+    assert_eq!(progress.total, 1);
+
+    let clear = Plan {
+        parent: Some(None),
+        milestone: Some(None),
+        ..Plan::default()
+    };
+    board.plan(slice.id, &human, &clear).expect("clear");
+    let doc = tick.doc("board", slice.id).expect("board doc");
+    assert!(doc.get("parent").is_none() && doc.get("milestone").is_none());
+}
+
+#[test]
 fn a_target_date_lives_in_the_board_document_and_is_left_out_while_unset() {
     let (board, tick) = board();
     let human = board.roles().actor("nano", "human").expect("role");

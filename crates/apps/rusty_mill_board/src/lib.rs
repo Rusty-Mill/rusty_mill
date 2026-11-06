@@ -7,6 +7,7 @@
 //! - [`domain`]: pure cards, column ids and capabilities.
 //! - [`workflow`]: the admin-edited columns and the moves between them.
 //! - [`roadmap`]: a project's roadmap lanes, derived from its cards.
+//! - [`trace`]: parent/child decomposition and milestone links, rolled up from cards.
 //! - [`metrics`]: work in progress, flow and lead time, derived from cards.
 //! - [`retag`]: re-filing cards when the workflow's columns change, with a rollback record.
 //! - [`store`]: the storage port and an in-memory adapter.
@@ -38,5 +39,6 @@ pub mod store;
 pub mod sync;
 pub mod syncer;
 pub mod tick;
+pub mod trace;
 pub mod web;
 pub mod workflow;
