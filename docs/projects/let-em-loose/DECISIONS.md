@@ -124,6 +124,7 @@ Precise contracts used by this guide:
 | D114 | #704 D44 cleanup half-limit leg: repo head vs last cleanup | [stated] 2026-11-06 (#704) |
 | D115 | #704 approved erosion limits: a human-only host record | [stated] 2026-11-06 (#704) |
 | D116 | A GUI shows the LEL stage strip as a derived read-only display and the product intent as a read-only brief | [stated] 2026-11-04 (general) |
+| D117 | #704 `rusty_orch consolidate`: public subcommand approved as built in PR #1539 | [stated] 2026-11-06 (#704) |
 
 ## D1. Lenses, not stages
 
@@ -1110,6 +1111,7 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_69f9310316bf4c9693a3ab8dc1235db9
 **Key.** lel:704:approved-erosion-limits-record
 **Source.** Nano tapped option A "Recorded approved limits" ("Only a human command records your approved limits. A task that enforces limits must use exactly those numbers, or it is refused.") on decision card `cmsg_014AqbZs58L565hMV2pFkCX5UNTzdY4w4xdKPk1naZzrRp` ("Decide what counts as approved erosion limits once report-only ends") in the #704 build thread, 2026-11-06T00:58:58Z. OPEN_QUESTIONS Q20; D42, D88. Numbered D115 after D114.
+
 ## D116. A GUI shows the LEL stage strip as a derived read-only display and the product intent as a read-only brief
 
 **Decision.** (1) A GUI's 5-stage strip (Intent, Skeletons, Under attack, Shadow run, Living app) is a derived, read-only display the GUI computes from claim and evidence facts. BBP and orch gain no stage field. (2) The shared product-intent layer is out of scope: the GUI shows the task brief read-only, and intent versioning stays on #598.
@@ -1118,3 +1120,12 @@ The first three were approved first. The last three were added to Q35 after that
 **Tag.** [stated] · remind-me: mem_28731854176542ec9a596164bb9ef8a9 (written by the rusty_term design expert; records Nano's AskUserQuestion answers, 2026-11-04; it is not LEL-tagged)
 **Key.** lel:general:gui-stage-strip-derived-intent-readonly
 **Source.** Nano via AskUserQuestion, 2026-11-04, relayed by the coordinator and verified in mem_28731854176542ec9a596164bb9ef8a9. Asked in the LEL full-app SVG review (README § Full-application interface, D1, D9, D27, D35, #598). Numbered D116 (first written as D83 on PR #1510) because main assigned D83 to #599 and holds D84–D115; its questions are Q38–Q43 for the same reason.
+
+## D117. #704 `rusty_orch consolidate`: public subcommand approved as built in PR #1539
+
+**Decision.** Add the public subcommand `rusty_orch consolidate --dir BBP --repo NAME --repo-path DIR [--erosion-bin BIN] [--execute ...]` as built in PR #1539 (#704 slice 4b). It prints a read-only JSON plan by default; `--execute` opens the D44 cleanup task through `bbp open --mode claims` with the explicit inputs D113 lists. The approval covers this one command only, as D111 did for `lens record`.
+**Why.** A new public CLI command is on the ask-first list. D110 and D113 sketched it only as `[default]` build detail, and D58 doesn't list it, so #1539 was held until Nano approved it.
+**Rejected.** Keeping #1539 unmerged until the command was redesigned or folded into an existing approved command.
+**Tag.** [stated] · remind-me: mem_8f133032fecd47309bfe12f509c99e1f
+**Key.** lel:704:consolidate-command
+**Source.** Nano, "Merge #1539", in the rusty-mill project chat, message `cmsg_01Y8j3ihrYW8jedySti37M9c5Rt2WYjUHub7YUaW8eVWzN`, 2026-11-06T11:17:42Z, replying to `cmsg_01Y8j3ihrYW8jedySti37M9cGghHU2QCamzntkSrJXcLYB` ("Should I merge #1539 as built?", which named the new public command `rusty_orch consolidate`). That is option a of the expert's escalation (approve this one command as built). D58, D110, D111, D113.
