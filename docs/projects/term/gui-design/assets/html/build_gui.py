@@ -360,9 +360,180 @@ def settings_page() -> str:
     return page("Settings and options", "A full-window overlay: 200 px nav, content up to 640 px, Esc closes, changes apply live, Reset to default per section (D30). Speculative items carry a Proposed tag.", items)
 
 
+# ══ lel.html ════════════════════════════════════════════════════════════════
+# Let Em Loose tab (D53-D57). Panels are drawn by the client inside one tab; the server still owns the
+# block layout (D2). Sample data only: names and numbers show the shape of the real fields
+# (claim_card / claims_delta, inbox Escalation reasons). Scan is 92%, not the SVG's 88%, because
+# 88% is under the 90% accept point (LEL D3) and could not be "settled".
+STAGES = [("Intent", "done"), ("Skeletons", "done"), ("Under attack", "now"), ("Shadow run", "later"), ("Living app", "later")]
+STAGE_WORD = {"done": "Done", "now": "Now", "later": "Later"}
+STAGE_ICON = {"done": ("check", 1.8), "now": ("now", 1.5), "later": ("later", 1.5)}
+
+
+def stages(items=STAGES) -> str:
+    out = []
+    for i, (name, st) in enumerate(items, 1):
+        icn, sw = STAGE_ICON[st]
+        out.append(f'<div class="stg {st}">{ic(icn, None, sw)}<span class="num">{i}</span><b>{name}</b><span class="w">{STAGE_WORD[st]}</span></div>')
+    return f'<div class="stages">{"".join(out)}</div>'
+
+
+CLAIM_STATE = {"settled": ("check", "Settled"), "open": ("later", "Open"), "yours": ("you", "Yours"),
+               "contested": ("branch", "Contested"), "gather": ("later", "Gathering")}
+
+
+def claim(name: str, sub: str, pct: int | None, st: str, extra: str = "") -> str:
+    icn, word = CLAIM_STATE[st]
+    pc = f"{pct}%" if pct is not None else "new"
+    width = pct if pct is not None else 8
+    glyph = ic(icn, "verd" if st == "settled" else None, 1.8 if icn == "check" else 1.5)
+    return (f'<div class="cl {st} {extra}"><div class="nm"><b>{name}</b><span>{sub}</span></div>'
+            f'<div class="bar"><i style="width:{width}%"></i></div><span class="pc">{pc}</span>'
+            f'<span class="st">{glyph}{word}</span></div>')
+
+
+def intent_panel() -> str:
+    def kv(k: str, v: str) -> str:
+        return f'<div class="kv"><span class="k sl">{k}</span><span class="b">{v}</span></div>'
+
+    def rule(k: str, v: str) -> str:
+        return f'<div class="kv"><span class="k sl">{k}</span><span class="b">{v}</span></div>'
+    rules = [("Always", "full content match"), ("Always", "dry run first"), ("Never", "lose the last copy"), ("Never", "lose scan work")]
+    feats = "".join(f'<div class="feat">{ic("chev", None, 1.4)}{f}</div>' for f in ["Scan", "Hash", "Store and resume", "Actions", "GUI"])
+    return (f'<div class="lp" style="width:300px;flex:none"><div class="ph"><b>Product intent</b><span class="g sl" style="font-size:12px">{ic("lock", "slate", 1.3)}Read-only</span></div>'
+            f'<div class="pb">{kv("Goal", "Tame a 20 TB drive")}{kv("Target", "Fast scan, live GUI")}'
+            + "".join(rule(k, v) for k, v in rules) +
+            f'<div class="grp">Features inherit all of this</div>{feats}</div>'
+            f'<div class="pf">This is the task brief. It is edited outside this view.</div></div>')
+
+
+CLAIMS = [("App level", [("Single Rust binary", "App claim, accepted", 94, "settled"), ("One shared scanner and index", "App claim, accepted", 90, "settled")]),
+          ("Features", [("Scan", "Accepted", 92, "settled"), ("Hash", "Accepted", 93, "settled"),
+                        ("Store and resume", "Below the accept point", 71, "open"),
+                        ("Actions", "Waiting on you: first file action", 91, "yours"),
+                        ("GUI", "Waiting on you: 2 near-equal candidates", 64, "contested"),
+                        ("Undo log", "New intent", None, "gather")])]
+
+
+def claims_summary() -> str:
+    kinds = [row[3] for _, rows in CLAIMS for row in rows]
+    n = lambda *ks: sum(k in ks for k in kinds)
+    return f"{n('settled')} settled, {n('yours', 'contested')} need you, {n('open')} open, {n('gather')} gathering"
+
+
+def claims_panel(rows: str | None = None) -> str:
+    lens = "Adversary, Operator, UX, Security, Architecture, Coherence"
+    rows = rows or "".join(f'<div class="grp">{g}</div>' + "".join(claim(*r) for r in rs) for g, rs in CLAIMS)
+    return (f'<div class="lp" style="flex:1"><div class="ph"><b>Claims</b><span class="sl" style="font-size:12px">{claims_summary()}</span></div>'
+            f'<div class="pb">{rows}</div><div class="pf">Reviewed by {lens}</div></div>')
+
+
+def reason(glyph: str, word: str) -> str:
+    return f'<span class="rsn">{ic(glyph, None, 1.5)}{word}</span>'
+
+
+def card_taste() -> str:
+    return (f'<div class="card"><div class="th"><b>GUI direction</b>{reason("branch", "Taste call")}</div>'
+            f'<p>Two candidates are about equally good. Pick one, or refine the intent.</p>'
+            f'<div class="cand">{kc("A")}Table view with live totals</div><div class="cand">{kc("B")}Treemap view with live totals</div>'
+            f'<div class="acts">{btn("Choose A", "s", sm=True)}{btn("Choose B", "s", sm=True)}{btn("Refine intent", "g", sm=True)}</div></div>')
+
+
+DRY = ("Dry run, nothing changed yet\n"
+       "Move 1,204 duplicate files to the trash folder\n"
+       "Frees 38.2 GB, keeps one copy of each\n"
+       "Last copies touched: 0")
+
+
+EVIDENCE = [("For", ["All 1,204 pairs match byte for byte", "Shadow run kept one copy of each"]),
+            ("Against", ["38 files sit in a synced folder", "Trash folder is on the same drive"])]
+
+
+def evidence() -> str:
+    """Top two supporting and contrary evidence items (Let Em Loose D35); the key shows once per side."""
+    rows = "".join(f'<div class="kv" style="font-size:12px;line-height:18px"><span class="k sl">{k if i == 0 else ""}</span><span class="b">{v}</span></div>'
+                   for k, items in EVIDENCE for i, v in enumerate(items))
+    return f'<div>{rows}</div>'
+
+
+def card_irrev() -> str:
+    return (f'<div class="card"><div class="th"><b>First file action</b>{reason("lock", "Irreversible")}</div>'
+            f'<p>Actions claim at 91% confidence, budget 6 of 16 used. Approving accepts the claim; it does not run the action.</p>'
+            f'{evidence()}<div class="dry">{DRY}</div>'
+            f'<div class="acts">{btn("Approve", "s", sm=True)}{btn("Reject", "s", sm=True)}{btn("Refine intent", "g", sm=True)}</div></div>')
+
+
+def inbox_panel(cards: str | None = None, count: int = 2) -> str:
+    empty = '<div class="empty"><b>Nothing needs you</b><span>Decisions appear here when a claim needs your call.</span></div>'
+    body = cards if cards is not None else card_taste() + card_irrev()
+    return (f'<div class="lp{" act" if count else ""}" style="width:360px;flex:none"><div class="ph"><b>Inbox</b><span class="sl">{count} waiting</span></div>'
+            f'<div class="pb">{body if count else empty}</div></div>')
+
+
+def lel_body(stage_items=STAGES, claims: str | None = None, count: int = 2) -> str:
+    return f'<div class="lel">{stages(stage_items)}<div class="lrow">{intent_panel()}{claims_panel(claims)}{inbox_panel(None, count)}</div></div>'
+
+
+def lel_frame(theme: str = "dark", body: str | None = None, overlay: str = "", inbox_n: int = 2) -> str:
+    hints = f'<span>{kc("Ctrl-]")}then</span><span>{kc("1-9")}Jump</span>'
+    return frame(strip(4, lel=True, inbox=inbox_n) + (body or lel_body()) + ribbon(blocks="Let Em Loose", hints=hints), theme, overlay)
+
+
+def pop_inbox() -> str:
+    def row(title: str, reason_html: str, sub: str) -> str:
+        return f'<div class="prow" style="min-height:56px"><div class="n"><b>{title}</b><span>{sub}</span></div>{reason_html}</div>'
+    return (f'<div class="pop" style="right:176px;top:46px;width:400px"><div class="sw-h">Decisions waiting</div>'
+            f'{row("GUI direction", reason("branch", "Taste call"), "Two candidates, about equal")}{row("First file action", reason("lock", "Irreversible"), "Dry run attached")}'
+            f'<div class="pfoot"><span>{kc("Up")}{kc("Down")}Move</span><span>{kc("Enter")}Open in the tab</span><span>{kc("Esc")}Close</span></div></div>')
+
+
+def pop_approve() -> str:
+    return (f'<div class="pop pad" style="left:520px;top:240px;width:420px"><h4>Approve the Actions claim?</h4>'
+            f'<p>This accepts the claim as shown, at 91% confidence, and adds no budget. No files move now: the dry run is what the action would do, and running it is a separate step.</p>'
+            f'<div class="dry" style="margin-top:10px">{DRY}</div>'
+            f'<div class="acts">{btn("Cancel", "s", "is-focus")}{btn("Reject", "s")}{btn("Accept claim", "p")}</div></div>')
+
+
+def lel_page() -> str:
+    states = [("Scan", "Settled: accepted, faded", 92, "settled"), ("Store and resume", "Open: dashed outline", 71, "open"),
+              ("Actions", "Yours: waiting on you", 91, "yours"), ("GUI", "Contested: near-equal", 64, "contested"),
+              ("Undo log", "Gathering: new intent", None, "gather")]
+    rows = "".join(claim(n, s, p, k) for n, s, p, k in states) + claim("Store and resume", "Keyboard focus", 71, "open", "is-focus")
+
+    def sheet(theme: str) -> str:
+        return f'<div class="sheet" data-theme="{theme}" style="width:700px"><h2>Claim row, {theme}</h2><div style="display:flex;flex-direction:column;gap:8px">{rows}</div></div>'
+    stage_sheet = ('<div class="sheet" data-theme="dark" style="width:1440px"><h2>Stage strip: derived from claim state, never animated (D55)</h2><div style="display:flex;flex-direction:column;gap:12px">'
+                   + stages()
+                   + stages([("Intent", "done"), ("Skeletons", "done"), ("Under attack", "done"), ("Shadow run", "now"), ("Living app", "later")])
+                   + stages([("Intent", "done"), ("Skeletons", "done"), ("Under attack", "done"), ("Shadow run", "done"), ("Living app", "now")]) + '</div></div>')
+    chip_states = [("2 decisions waiting", ""), ("1 decision waiting", ""), ("No decisions waiting", ""), ("2 decisions waiting", " is-hover"), ("2 decisions waiting", " is-open")]
+    chips = ('<div class="sheet" data-theme="dark" style="width:1440px"><h2>Inbox chip in the top strip (D53)</h2><div style="display:flex;gap:28px;align-items:center">'
+             + "".join(f'<span class="chip{c}">{ic("inbox")}{t}{ic("chevdown")}</span>' for t, c in chip_states) + '</div></div>')
+    other = frame(strip(1, inbox=2, inbox_open=True) + blocks(shell_block() + f'<div class="col" style="flex:1">{agent_block()}{idle_block()}</div>') + ribbon(), "dark", pop_inbox())
+    note_l1 = ("The Let Em Loose tab (D53). Intent is read-only (D56). Stages are derived and show state as a glyph plus a word (D55). "
+               "Claim status is a glyph plus a word: settled is slate, open is dashed, yours is the accent with a solid outline, contested is the accent dashed (D54). "
+               "The accent falls back to verdigris (D35). No amber. One primary button per screen, and only on the confirm. "
+               "The irreversible card shows the claim, confidence, budget, reason, the top two supporting and contrary evidence items and the dry run, "
+               "with Approve, Reject and Refine intent (Let Em Loose D35). Sample data.")
+    return page("Let Em Loose", "The tab that hosts Let Em Loose: full-app view, inbox, states. Decisions D53 to D57; no new colours.", [
+        item("L1 Full-app view, dark", lel_frame("dark"), note_l1),
+        item("L1 Full-app view, light", lel_frame("light")),
+        item("L2a Inbox from any window", other, "The chip is in every window's top strip (D53), so a decision is one click away wherever you are. Enter opens it in the Let Em Loose tab."),
+        item("L2b Approve an irreversible action", lel_frame("dark", overlay=pop_approve()), "Reuses the confirm popover (D19, D28): title, one-line consequence, dry run attached, Cancel has focus first. "
+             "Approving accepts the displayed claim snapshot and adds no budget; running the action stays a separate step (Let Em Loose D35). "
+             "Reject drops the claim. Cancel only closes the popover and leaves the decision waiting. "
+             "The primary button is named for its result (D28) and is the only primary button on the screen."),
+        item("L2c Approve an irreversible action, light", lel_frame("light", overlay=pop_approve())),
+        item("L3a Claim row states", f'<div style="display:flex;gap:40px">{sheet("dark")}{sheet("light")}</div>', "Every status has a word and a glyph (D26). Settled uses slate text, not dim (D17)."),
+        item("L3b Stage strip states", stage_sheet),
+        item("L3c Inbox chip states", chips),
+        item("L3d Empty inbox", lel_frame(body=lel_body(count=0), inbox_n=0), "No decisions waiting: the chip says so and the panel explains when decisions appear."),
+    ])
+
+
 def index_page() -> str:
     links = [("states.html", "States and variants (dark)"), ("light.html", "Light theme"), ("alt-layouts.html", "Alternative layouts"), ("settings.html", "Settings and options"),
-             ("terminal-mux.svg", "v2 concept (original)")]
+             ("lel.html", "Let Em Loose tab"), ("terminal-mux.svg", "v2 concept (original)")]
     li = "".join(f'<li style="margin:8px 0"><a href="{h}" style="font-size:16px">{t}</a></li>' for h, t in links)
     return ('<!doctype html><meta charset="utf-8"><title>rusty_term GUI design</title><body style="font-family:Instrument Sans,system-ui;padding:40px">'
             f'<h1>rusty_term GUI design</h1><p>Standalone pages (Paper hit its weekly MCP limit). F1 to F8 are in the Paper file.</p><ul>{li}</ul></body>')
@@ -370,7 +541,7 @@ def index_page() -> str:
 
 def main() -> None:
     for name, html in [("states.html", states_page()), ("light.html", light_page()), ("alt-layouts.html", alt_page()),
-                       ("settings.html", settings_page()), ("index.html", index_page())]:
+                       ("settings.html", settings_page()), ("lel.html", lel_page()), ("index.html", index_page())]:
         (OUT / name).write_text(html, encoding="utf-8")
         print(name, len(html) // 1024, "KB")
 

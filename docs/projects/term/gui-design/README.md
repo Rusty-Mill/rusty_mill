@@ -22,6 +22,7 @@ confirm first) is waiting for the owner.
 | `states.html` | control, input, run, header, tab and banner states; reduced motion; windows 2 and 3; split and close flows; empty window; four error states |
 | `light.html` | light tokens and components; light F1, F2, F3a, F3b, F4, F5a, F5b, F6, F7 |
 | `alt-layouts.html` | sidebar tree (open and collapsed), bottom dock (with switcher), comparison |
+| `lel.html` (D53 to D57) | Let Em Loose tab: L1 full-app view dark and light, L2 inbox, L3 states |
 | `settings.html` | settings overlay for each section, plus every control in its states |
 
 Open `assets/html/index.html`. The pages were checked structurally (every tag closes), but no
