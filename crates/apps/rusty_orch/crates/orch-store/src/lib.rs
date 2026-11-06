@@ -112,6 +112,8 @@ pub enum StoreError {
     Corrupt(String),
     /// The plan and board handed to `save` belong to different goals.
     GoalMismatch { plan: GoalId, board: GoalId },
+    /// A read-only reader found no such store file; nothing was made.
+    Missing(PathBuf),
 }
 
 impl fmt::Display for StoreError {
@@ -124,6 +126,7 @@ impl fmt::Display for StoreError {
             Self::GoalMismatch { plan, board } => {
                 write!(f, "plan is for {plan} but board is for {board}")
             }
+            Self::Missing(path) => write!(f, "{} does not exist", path.display()),
         }
     }
 }
@@ -626,24 +629,39 @@ impl Store {
     ///
     /// [`StoreError::Corrupt`] when a record does not check out.
     pub fn lens_reviews(&self, board: &str) -> Result<Vec<Review>, StoreError> {
-        let mut rows = Vec::new();
-        for id in self.lens_records.all_ids() {
-            let Some(record) = self.lens_records.get(id) else {
-                continue;
-            };
-            if record.board() == board {
-                rows.push(record.into_row()?);
+        let ids = self.lens_records.all_ids();
+        reviews(
+            ids.into_iter().filter_map(|id| self.lens_records.get(id)),
+            board,
+        )
+    }
+
+    /// [`Store::lens_reviews`] for the store in `dir`, read without changing
+    /// anything: it takes the directory's existing lock, making no file, and
+    /// reads the lens record table's saved records and insert log as
+    /// [`Store::open`] would recover them, writing nothing back.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Missing`] when `dir` has no lock or lens record file;
+    /// [`StoreError::Locked`] when another process holds `dir`;
+    /// [`StoreError::Lock`] when the lock cannot be opened;
+    /// [`StoreError::Engine`] or [`StoreError::Corrupt`] when the table
+    /// cannot be read.
+    pub fn read_lens_reviews(dir: &Path, board: &str) -> Result<Vec<Review>, StoreError> {
+        let _lock = DirLock::acquire_existing(dir, LOCK_FILE).map_err(|e| match e {
+            DirLockError::Io(path, e) if e.kind() == std::io::ErrorKind::NotFound => {
+                StoreError::Missing(path)
             }
+            e => e.into(),
+        })?;
+        let path = dir.join(LENS_RECORDS_FILE);
+        if !path.is_file() {
+            return Err(StoreError::Missing(path));
         }
-        rows.sort_by(|a, b| {
-            (&a.lens, a.claim, a.epoch, a.look_harder).cmp(&(
-                &b.lens,
-                b.claim,
-                b.epoch,
-                b.look_harder,
-            ))
-        });
-        Ok(rows)
+        let records =
+            GenericMmapStore::<LensRecordRecord, ById, Revision>::read_portable_records(&path)?;
+        reviews(records, board)
     }
 
     /// BBP task `task`'s taint table; empty when none was saved.
@@ -708,4 +726,22 @@ fn merge(mut old: Review, row: &Review) -> Review {
     old.unsure |= row.unsure || (row.pending && old.pending);
     old.pending = row.pending;
     old
+}
+
+/// Every blind review job in `records` saved for `board`, sorted by lens,
+/// claim, epoch and kind.
+fn reviews(
+    records: impl IntoIterator<Item = LensRecordRecord>,
+    board: &str,
+) -> Result<Vec<Review>, StoreError> {
+    let mut rows = Vec::new();
+    for record in records {
+        if record.board() == board {
+            rows.push(record.into_row()?);
+        }
+    }
+    rows.sort_by(|a, b| {
+        (&a.lens, a.claim, a.epoch, a.look_harder).cmp(&(&b.lens, b.claim, b.epoch, b.look_harder))
+    });
+    Ok(rows)
 }

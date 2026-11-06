@@ -30,7 +30,7 @@
 //! `Created`) by actor `tick` for a task changed or tagged in rusty_tick,
 //! noticed when events are read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::domain::{
-    BoardError, Card, Column, Comment, DEFAULT_PROJECT, Event, EventKind, ExecutionLink,
+    BoardError, Card, Column, Comment, DEFAULT_PROJECT, Event, EventKind, ExecutionLink, Span,
     next_event_id, reserved_tag,
 };
 use crate::http::Http;
@@ -66,6 +66,11 @@ const NUMBER_KIND: &str = "board_number";
 /// Numbers tried past the highest reservation seen before giving up; each miss is another
 /// board reserving at the same moment.
 const RESERVE_ATTEMPTS: u64 = 64;
+/// rusty_tick's limit on one document's serialized body.
+const MAX_DOC_BYTES: usize = 64 * 1024;
+
+/// Moves asked for per `GET /moves` page: rusty_tick's largest.
+const MOVES_PAGE: usize = 1000;
 
 /// The id of number `n`'s reservation: the same on every board, so `If-None-Match: *` lets
 /// exactly one reserve it.
@@ -219,6 +224,14 @@ impl Task {
     }
 }
 
+/// One entry of rusty_tick's move history: which task changed column, and when.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveRecord {
+    task_id: Uuid,
+    at_ms: i64,
+}
+
 #[derive(Deserialize)]
 struct List {
     id: Uuid,
@@ -249,6 +262,8 @@ struct BoardDoc {
     synced_text: Option<u64>,
     #[serde(default)]
     execution: Option<ExecutionLink>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    prompt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_ms: Option<i64>,
 }
@@ -262,6 +277,7 @@ impl BoardDoc {
             issue: card.issue,
             synced_text: card.synced_text,
             execution: card.execution.clone(),
+            prompt: card.prompt.clone(),
             target_ms: card.target_ms,
         }
     }
@@ -272,6 +288,20 @@ impl BoardDoc {
             map.insert("v".into(), json!(1));
         }
         body
+    }
+
+    /// The body to write for `card`, refused before any request when rusty_tick would
+    /// refuse it, so an edit never half-lands on a document that cannot be stored.
+    fn checked(card: &Card) -> Result<Value, BoardError> {
+        let body = Self::of(card).body();
+        let bytes = serde_json::to_vec(&body)
+            .map_err(|e| BoardError::Storage(format!("board document: {e}")))?;
+        if bytes.len() > MAX_DOC_BYTES {
+            return Err(BoardError::Invalid(
+                "the card's prompt and links are larger than 64 KiB once stored",
+            ));
+        }
+        Ok(body)
     }
 }
 
@@ -368,6 +398,7 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
         rev,
         title: task.title,
         body: task.notes,
+        prompt: doc.prompt,
         column,
         claim,
         tags,
@@ -610,9 +641,8 @@ impl<T: TickApi> TickStore<T> {
 
     /// Write the card's board document if its task is still at `version`.
     /// rusty_tick moves the task's version in the same locked step; returns it.
-    fn put_doc(&self, card: &Card, version: u64) -> Result<u64, BoardError> {
-        let mut request = TickRequest::new("PUT", format!("/docs/board/{}", card.id))
-            .body(BoardDoc::of(card).body());
+    fn put_doc(&self, card: &Card, body: Value, version: u64) -> Result<u64, BoardError> {
+        let mut request = TickRequest::new("PUT", format!("/docs/board/{}", card.id)).body(body);
         request.if_task_match = Some(version.to_string());
         self.call(request, 200)?;
         Ok(version + 1)
@@ -771,6 +801,10 @@ impl<T: TickApi> Store for TickStore<T> {
         if card.column == Column::DONE {
             body["status"] = json!("done");
         }
+        let doc = match BoardDoc::of(card) == BoardDoc::default() {
+            true => None,
+            false => Some(BoardDoc::checked(card)?),
+        };
         self.start_write(card.id)?;
         let result = (|| {
             let (status, _) = self
@@ -787,9 +821,9 @@ impl<T: TickApi> Store for TickStore<T> {
             }
             // A second request: a crash before it leaves the task without its document. Only
             // an import has one at insert, and its id names its issue, so the sync relinks it.
-            match BoardDoc::of(card) == BoardDoc::default() {
-                true => Ok(1),
-                false => self.put_doc(card, 1),
+            match doc {
+                None => Ok(1),
+                Some(doc) => self.put_doc(card, doc, 1),
             }
         })();
         self.finish_write(event, result)
@@ -810,6 +844,10 @@ impl<T: TickApi> Store for TickStore<T> {
         if current.rev + 1 != read {
             return Err(BoardError::Conflict);
         }
+        let doc = match BoardDoc::of(card) != BoardDoc::of(&current) {
+            true => Some(BoardDoc::checked(card)?),
+            false => None,
+        };
         self.start_write(card.id)?;
         let result = (|| {
             if event.kind == EventKind::Commented {
@@ -822,17 +860,27 @@ impl<T: TickApi> Store for TickStore<T> {
             } else {
                 let patch = self.task_patch(&current, card)?;
                 let task_changed = patch.as_object().is_some_and(|p| !p.is_empty());
-                let doc_changed = BoardDoc::of(card) != BoardDoc::of(&current);
                 let mut version = read;
                 // An empty patch still moves the version, so every write is a compare-and-swap.
-                if task_changed || !doc_changed {
+                if task_changed || doc.is_none() {
                     version = self.patch_task(card.id, patch, version)?;
                 }
-                // Both change only for `card_plan` with priority and dependencies: two fenced
-                // requests. A failure between them reports an error with the priority applied;
-                // the same plan again completes it.
-                if doc_changed {
-                    version = self.put_doc(card, version)?;
+                // Both change for `card_plan` with priority and links, and for an edit of the
+                // prompt with title, body or tags: two fenced requests. The document is checked
+                // above, so only a lost connection or a writer between them can split the
+                // write. That is reported as `PartlySaved` with the revision the task write
+                // left, never as a refused change; the same change on that revision finishes it.
+                if let Some(doc) = doc {
+                    let task_written = version != read;
+                    version = self
+                        .put_doc(card, doc, version)
+                        .map_err(|e| match task_written {
+                            true => BoardError::PartlySaved {
+                                rev: version - 1,
+                                why: e.to_string(),
+                            },
+                            false => e,
+                        })?;
                 }
                 Ok(version)
             }
@@ -856,6 +904,34 @@ impl<T: TickApi> Store for TickStore<T> {
             .log
             .last()
             .map(|e| e.id))
+    }
+
+    /// From rusty_tick's move history (`GET /moves`), which outlives restarts and purges,
+    /// paged from `span.from`.
+    fn moved_in(&self, span: Span) -> Result<BTreeSet<Uuid>, BoardError> {
+        let since = span.from.unwrap_or(0);
+        let mut after = 0u64;
+        let mut moved = BTreeSet::new();
+        loop {
+            let page = self.call(
+                TickRequest::new(
+                    "GET",
+                    format!("/moves?since={since}&after={after}&limit={MOVES_PAGE}"),
+                ),
+                200,
+            )?;
+            let moves: Vec<MoveRecord> = Self::decode(page.clone(), "moves")?;
+            moved.extend(
+                moves
+                    .iter()
+                    .filter(|m| span.contains(m.at_ms))
+                    .map(|m| m.task_id),
+            );
+            match page["next"].as_u64() {
+                Some(next) if next > after => after = next,
+                _ => return Ok(moved),
+            }
+        }
     }
 
     /// Reservations are `board_number` documents, created with `If-None-Match: *` and kept

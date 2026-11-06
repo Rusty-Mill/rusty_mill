@@ -175,6 +175,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      # The erosion calibration summary (#704 slice 5): row format, percentiles, and the
+      # committed run reproducing the published tables.
+      - run: python3 -I -m unittest discover -s crates/tools/rusty_erosion/calibrate -p 'test_*.py' -v
 
   claude-hooks:
     # The remind-me cloud capture hook (.claude/hooks) is stdlib-only Python and its
