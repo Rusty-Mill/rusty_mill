@@ -35,3 +35,7 @@ Source: `crates/apps/rusty_mux/crates/proto/src/message.rs:133-139,297-308,481-4
 ## On an orphaned block (C46), what happens to its input lease, and may a non-owner take the lease of an owned block before C77?
 Asked 2026-11-06 (C46/C77 build thread). **Orphaned:** nobody may type, so the lease is cleared when the block orphans and `AcquireLease`/`Input` are refused; every grant ends and no new grant is possible. **Owned, before C77:** C46 alone does not gate the lease; C77's `Launch.input` defaults to `open` (today's behaviour), so only an `owner-only` block refuses a lease without a grant. Tag: answered.
 Source: D85; AGENT-HOSTING.md C46 "Owner gone past the grace", C77 "Shape".
+
+## Is FreeBSD in C69's scope?
+Asked 2026-11-06 (C69 thread). **No**: Nano answered "Q8 not now" to FreeBSD as a server target; C69 covers Linux and Windows. Tag: answered (recorded as D130, ticks Q10).
+Source: `docs/projects/term/ROADMAP.md:104` (Nano, project thread, 2026-11-04 12:22Z); CAPABILITIES.md:94.

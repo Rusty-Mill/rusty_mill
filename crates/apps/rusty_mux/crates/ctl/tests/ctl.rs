@@ -993,6 +993,8 @@ fn a_bad_command_line_exits_2() {
     }
     let output = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
         .env_remove("RUSTY_MUX_SOCKET")
+        .env_remove("XDG_RUNTIME_DIR")
+        .env_remove("LOCALAPPDATA")
         .args(["create-session", "--name", "x"])
         .output()
         .expect("run");

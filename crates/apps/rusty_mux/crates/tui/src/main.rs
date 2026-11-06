@@ -1,5 +1,7 @@
-//! `rusty-mux [--ssh HOST] <socket> [block]`: show a rusty_mux block's
-//! window on this terminal, starting with that block focused. With `--ssh`
+//! `rusty-mux [--ssh HOST] [<socket> [block]]`: show a rusty_mux block's
+//! window on this terminal, starting with that block focused. Without a
+//! socket it uses `$RUSTY_MUX_SOCKET`, else the default socket (C69,
+//! `rusty_mux_proto::endpoint`); `--ssh` needs one. With `--ssh`
 //! the socket is the server's absolute path on HOST, reached through one
 //! OpenSSH (8.7 or later) forward (Unix only; `RUSTY_MUX_SSH` names another
 //! `ssh` program); the client asks for nothing until the forward is up, so
@@ -37,9 +39,21 @@ fn main() -> ExitCode {
             _ => break,
         }
     }
-    if rest.is_empty() || rest.len() > 2 || (udp_host.is_some() && ssh.is_none()) {
-        eprintln!("usage: rusty-mux [--ssh HOST [--udp-host HOST]] <socket> [block]");
+    let bad = (rest.is_empty() && ssh.is_some()) || rest.len() > 2;
+    if bad || (udp_host.is_some() && ssh.is_none()) {
+        eprintln!("usage: rusty-mux [--ssh HOST [--udp-host HOST]] [<socket> [block]]");
         return ExitCode::from(2);
+    }
+    let local;
+    if rest.is_empty() {
+        match rusty_mux_proto::endpoint::resolve(None, |name| std::env::var_os(name)) {
+            Ok(socket) => local = [socket.into_os_string()],
+            Err(err) => {
+                eprintln!("rusty-mux: {err}");
+                return ExitCode::from(2);
+            }
+        }
+        rest = &local;
     }
     match client::run(ssh, udp_host, rest) {
         Ok(()) => ExitCode::SUCCESS,
