@@ -13,9 +13,9 @@ not part of C69, and it needs Nano's go ([term ROADMAP](../term/ROADMAP.md) ques
 
 | Slice | What | State |
 |---|---|---|
-| (a) | Own the socket's name (Orca O6) and a default socket, so the socket argument is optional | this PR |
-| (b) | Auto-start from `rusty-mux` and `rusty-mux-gui`, and `--idle-exit SECS` | next |
-| (c) | systemd user units, socket activation (`LISTEN_FDS`) | after (b) |
+| (a) | Own the socket's name (Orca O6) and a default socket, so the socket argument is optional | done (#1555) |
+| (b) | Auto-start from `rusty-mux` and `rusty-mux-gui`, and `--idle-exit SECS` | this PR |
+| (c) | systemd user units, socket activation (`LISTEN_FDS`) | next |
 | (d) | utmp entries | deferred: needs setgid `utmp` or `libutempter`, both owner gates (pack Q29) |
 
 FreeBSD is not a server target (pack D130, Nano "Q8 not now").
@@ -58,17 +58,34 @@ on (`platform-windows` `unix_listen`), and the server leaves the name on stop fo
 reason.
 
 Two servers racing for a stale name can both reach step 5; the later rename wins and the earlier
-server serves a name no one can reach until it exits. Slice (b)'s idle exit ends such a server.
+server serves a name no one can reach until it exits. With `--idle-exit` (slice (b)) such a
+server ends on its own, since no client can reach it.
 
-## (b) Auto-start and idle exit (next)
+## (b) Auto-start and idle exit
 
-Only `rusty-mux` and `rusty-mux-gui` auto-start, and only for the default socket (no argument,
-no `$RUSTY_MUX_SOCKET`): they start `rusty-mux-server --idle-exit 60` detached, then retry the
-connect for a few seconds. ctl, MCP and `--ssh` never do. `--idle-exit SECS` exits once the
-server has had no clients and no blocks for SECS, never while a block lives. A server started
-by hand or by systemd keeps running unless given the flag (pack D133).
+**Idle exit.** `rusty-mux-server --idle-exit SECS` (personal server only) stops cleanly once it
+has had no block, no client and no orphaned client a takeover could still claim for SECS
+without a break (`State::is_idle`, looked at every 250 ms). It never stops while a block lives,
+so no program is ended and nothing needs restoring. The stop is the clean one: state is saved
+(C45) and the socket's name is removed while it is still the server's. A server started by hand
+or by systemd keeps running unless given the flag (pack D133).
 
-## (c) systemd (after (b))
+**Auto-start** (`rusty_mux_client::autostart`). Only `rusty-mux` and `rusty-mux-gui` start a
+server, and only when the socket is the default one: no socket named and no
+`$RUSTY_MUX_SOCKET`. ctl, MCP and `--ssh` never do. If nothing answers there, the client runs
+`rusty-mux-server --idle-exit 60 <socket>`. It uses the copy beside its own program if there is
+one, else the one on `PATH`. The server is detached: its own process group on Unix, no window
+on Windows, no stdio. The client then tries to connect every 25 ms for up to 5 s.
+
+If two clients each start a server, the servers' own bind settles it: the second refuses the
+first's live name and exits, and both clients connect to the first. A started server that exits
+while nothing answers is an error that tells the user to run the server by hand to see why.
+
+A started server is the client's child until the client exits. If it idle-exits first, it
+stays a zombie until then. The client has already disconnected by that point, so this is
+short-lived.
+
+## (c) systemd (next)
 
 User units `rusty-mux.service` and `rusty-mux.socket` ship in the repo under
 `crates/apps/rusty_mux/crates/server/dist/systemd/`, installed by hand; the server takes the

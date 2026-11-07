@@ -470,6 +470,12 @@ impl State {
         self.flush();
     }
 
+    /// Whether nothing would notice the server go: no block, no client and
+    /// no orphaned client a takeover could still claim (C69 idle exit).
+    pub(crate) fn is_idle(&self) -> bool {
+        self.blocks.is_empty() && self.clients.is_empty() && self.orphans.is_empty()
+    }
+
     /// The server is stopping: starts no more blocks, and ends every
     /// block's program now, as dropping the block would, except that an
     /// owned block's program is only hung up (D87). The consoles to

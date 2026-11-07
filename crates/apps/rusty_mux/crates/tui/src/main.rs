@@ -1,7 +1,8 @@
 //! `rusty-mux [--ssh HOST] [<socket> [block]]`: show a rusty_mux block's
 //! window on this terminal, starting with that block focused. Without a
 //! socket it uses `$RUSTY_MUX_SOCKET`, else the default socket (C69,
-//! `rusty_mux_proto::endpoint`); `--ssh` needs one. With `--ssh`
+//! `rusty_mux_proto::endpoint`), starting a server there if none answers
+//! (`rusty_mux_client::autostart`); `--ssh` needs one. With `--ssh`
 //! the socket is the server's absolute path on HOST, reached through one
 //! OpenSSH (8.7 or later) forward (Unix only; `RUSTY_MUX_SSH` names another
 //! `ssh` program); the client asks for nothing until the forward is up, so
@@ -46,7 +47,7 @@ fn main() -> ExitCode {
     }
     let local;
     if rest.is_empty() {
-        match rusty_mux_proto::endpoint::resolve(None, |name| std::env::var_os(name)) {
+        match default_socket() {
             Ok(socket) => local = [socket.into_os_string()],
             Err(err) => {
                 eprintln!("rusty-mux: {err}");
@@ -62,6 +63,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The socket when none is named: `$RUSTY_MUX_SOCKET`, else the default,
+/// on which a server is started if nothing answers (C69).
+fn default_socket() -> Result<std::path::PathBuf, String> {
+    use rusty_mux_proto::endpoint::{Origin, resolve};
+    let (socket, origin) = resolve(None, |name| std::env::var_os(name))?;
+    #[cfg(any(target_os = "linux", windows))]
+    if origin == Origin::Default {
+        rusty_mux_client::autostart::ensure(&socket)?;
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    let _ = (origin, Origin::Default);
+    Ok(socket)
 }
 
 #[cfg(not(any(target_os = "linux", windows)))]
