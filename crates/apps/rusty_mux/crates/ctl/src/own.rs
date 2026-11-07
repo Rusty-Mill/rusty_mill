@@ -15,7 +15,10 @@
 //! Owner events are `{"event":KIND,…}` for `program-exited`,
 //! `lease-changed`, `grant-changed` and `block-closed` on the blocks it
 //! owns, `input` (`block`, `client`, `seq` and the bytes as `hex`) for
-//! what another client typed into an owner-only one, `reconnected`
+//! what another client typed into an owner-only one, `lease-requested`
+//! (`block`, `client`, and the asker's verified `principal` and `user`)
+//! when a viewer asks for a grant, which `own` leaves to its caller to
+//! answer with `grant` or not at all, `reconnected`
 //! after a reconnect inside the server's grace, and `lost` when the
 //! connection, and with it the ownership, is gone; `own` then exits with
 //! [`Exit::Unreachable`]. A `launch` in flight when the connection drops
@@ -282,6 +285,19 @@ impl Owner<'_> {
                     ("hex", Value::from(hex(&data))),
                 ],
             )),
+            Message::LeaseRequested {
+                block,
+                client,
+                principal,
+            } => self.print(&event(
+                "lease-requested",
+                [
+                    ("block", Value::from(block.to_string())),
+                    ("client", Value::from(client.to_string())),
+                    ("principal", Value::from(principal.id())),
+                    ("user", Value::from(principal.user())),
+                ],
+            )),
             _ => Ok(()),
         }
     }
@@ -365,7 +381,7 @@ fn open(
     let stream = connect(socket, &Stop::default())?;
     let mut conn = Conn::new(stream.try_clone()?, Stop::default());
     conn.send(&Message::Hello {
-        features: NEEDED.union(GATE),
+        features: NEEDED.union(GATE).union(Features::LEASE_REQUESTS),
         resume,
         takeover,
     })?;
