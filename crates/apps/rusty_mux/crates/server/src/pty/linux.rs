@@ -88,6 +88,20 @@ impl Process {
     }
 }
 
+impl Process {
+    /// Hangs up the program's group and leaves it running, unreaped: a
+    /// stopping server does this to an owned block, never killing it
+    /// (D87). Whoever owns the block cleans up.
+    pub(crate) fn abandon(mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if matches!(child.try_wait(), Ok(None)) {
+            signal(&child, Signal::Hup);
+        }
+    }
+}
+
 fn signal(child: &LinuxChild, sig: Signal) {
     if let Err(err) = child.kill_tree(sig) {
         eprintln!("rusty-mux-server: signalling pid {}: {err:?}", child.id());

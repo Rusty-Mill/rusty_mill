@@ -543,6 +543,7 @@ mod tests {
             holder: None,
             title: String::new(),
             name: String::new(),
+            owner: None,
         };
         vec![
             Entry::Session {

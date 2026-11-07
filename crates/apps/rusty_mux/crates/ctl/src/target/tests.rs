@@ -41,6 +41,7 @@ fn listing() -> Vec<Entry> {
         holder: None,
         title: String::new(),
         name: name.into(),
+        owner: None,
     };
     let client = |c: &str, name: &str| Entry::Client {
         client: ClientId::from_uuid(id(c)),

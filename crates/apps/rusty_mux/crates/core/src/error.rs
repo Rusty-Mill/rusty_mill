@@ -74,6 +74,16 @@ pub enum Error {
     /// The session's name was chosen, not generated, so
     /// [`Mux::name_session`](crate::Mux::name_session) leaves it.
     NameChosen(SessionId),
+    /// Another client owns the block (C46), so only it may change it.
+    NotOwner {
+        client: ClientId,
+        block: BlockId,
+    },
+    /// The block's owner is gone for good (C46): nobody may type into it
+    /// or change it, and only the owner's principal may close it.
+    Orphaned(BlockId),
+    /// The block already has an owner.
+    Owned(BlockId),
 }
 
 impl fmt::Display for Error {
@@ -132,6 +142,11 @@ impl fmt::Display for Error {
             Self::NoPlace { window, index } => {
                 write!(f, "no place {index} for window {window} in its session")
             }
+            Self::NotOwner { client, block } => {
+                write!(f, "block {block} is owned by a client other than {client}")
+            }
+            Self::Orphaned(block) => write!(f, "block {block} is orphaned: its owner is gone"),
+            Self::Owned(block) => write!(f, "block {block} already has an owner"),
         }
     }
 }

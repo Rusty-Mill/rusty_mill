@@ -438,6 +438,8 @@ impl Args<'_> {
         Ok(Launch {
             program,
             cwd: self.opt_text("cwd")?,
+            // A one-shot call keeps no connection to own the block with.
+            own: false,
         })
     }
 

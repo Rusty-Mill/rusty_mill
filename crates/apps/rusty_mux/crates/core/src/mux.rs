@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::names;
 use crate::{
     Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Layout, MAX_DEPTH,
-    Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Toward, Transport,
-    Window, WindowId,
+    Owner, Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Toward,
+    Transport, Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
@@ -283,6 +283,7 @@ impl Mux {
                 name: String::new(),
                 size,
                 lease: None,
+                owner: None,
             },
         );
         self.events.push(Event::BlockCreated {
@@ -857,8 +858,10 @@ impl Mux {
     }
 
     /// Detaches the client, releasing any lease it holds, and forgets it.
+    /// Blocks it owns are orphaned: whoever holds their lease loses it.
     pub fn disconnect(&mut self, client: ClientId) -> Result<(), Error> {
         self.detach(client)?;
+        self.orphan_blocks_of(client);
         self.clients.remove(&client);
         self.events.push(Event::ClientDisconnected { client });
         Ok(())
@@ -894,10 +897,80 @@ impl Mux {
         Ok(())
     }
 
+    /// Makes `client` the owner of `block`, which has none (C46). The
+    /// server calls it only as the client's launch creates the block.
+    pub fn own(&mut self, client: ClientId, block: BlockId) -> Result<(), Error> {
+        let principal = self
+            .clients
+            .get(&client)
+            .ok_or(Error::UnknownClient(client))?
+            .principal
+            .clone();
+        let target = self
+            .blocks
+            .get_mut(&block)
+            .ok_or(Error::UnknownBlock(block))?;
+        if target.owner.is_some() {
+            return Err(Error::Owned(block));
+        }
+        target.owner = Some(Owner {
+            principal,
+            client: Some(client),
+        });
+        Ok(())
+    }
+
+    /// Succeeds when `client` may change `block`: it has no owner, or
+    /// `client` owns it (C46).
+    pub fn authorize_owner(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
+        let target = self.blocks.get(&block).ok_or(Error::UnknownBlock(block))?;
+        match target.owner.as_ref().map(|o| o.client) {
+            None => Ok(()),
+            Some(Some(owner)) if owner == client => Ok(()),
+            Some(Some(_)) => Err(Error::NotOwner { client, block }),
+            Some(None) => Err(Error::Orphaned(block)),
+        }
+    }
+
+    /// Succeeds when `client` may close `block`: as [`Self::authorize_owner`],
+    /// and also, once the block is orphaned, for a client of its owner's
+    /// principal, to clean it up.
+    pub fn authorize_close(&self, client: ClientId, block: BlockId) -> Result<(), Error> {
+        let refused = match self.authorize_owner(client, block) {
+            Err(Error::Orphaned(b)) => Error::Orphaned(b),
+            other => return other,
+        };
+        let caller = self
+            .clients
+            .get(&client)
+            .ok_or(Error::UnknownClient(client))?;
+        let theirs = self
+            .blocks
+            .get(&block)
+            .and_then(|b| b.owner.as_ref())
+            .is_some_and(|o| o.principal.id() == caller.principal.id());
+        if theirs {
+            return Ok(());
+        }
+        Err(refused)
+    }
+
+    /// Whether `client` owns any block.
+    pub fn owns_any(&self, client: ClientId) -> bool {
+        self.blocks
+            .values()
+            .any(|b| b.owner.as_ref().and_then(|o| o.client) == Some(client))
+    }
+
     /// Gives the client the block's input lease. The client must be attached
-    /// to the block, and the lease must be free or already the client's.
+    /// to the block, and the lease must be free or already the client's. An
+    /// orphaned block's lease is never given.
     pub fn acquire_lease(&mut self, client: ClientId, block: BlockId) -> Result<(), Error> {
-        let holder = self.attached_block(client, block)?.lease;
+        let target = self.attached_block(client, block)?;
+        if target.owner.as_ref().is_some_and(Owner::is_orphaned) {
+            return Err(Error::Orphaned(block));
+        }
+        let holder = target.lease;
         match holder {
             Some(h) if h == client => return Ok(()),
             Some(h) => return Err(Error::LeaseHeld { block, holder: h }),
@@ -938,6 +1011,30 @@ impl Mux {
             return Err(Error::NotAttached { client, block });
         }
         Ok(target)
+    }
+
+    /// Orphans every block `client` owns, ending the lease on each.
+    fn orphan_blocks_of(&mut self, client: ClientId) {
+        let owned: Vec<BlockId> = self
+            .blocks
+            .values()
+            .filter(|b| b.owner.as_ref().and_then(|o| o.client) == Some(client))
+            .map(|b| b.id)
+            .collect();
+        for block in owned {
+            let Some(target) = self.blocks.get_mut(&block) else {
+                continue;
+            };
+            if let Some(owner) = target.owner.as_mut() {
+                owner.client = None;
+            }
+            if target.lease.take().is_some() {
+                self.events.push(Event::LeaseChanged {
+                    block,
+                    holder: None,
+                });
+            }
+        }
     }
 
     fn unattach(&mut self, client: ClientId) {

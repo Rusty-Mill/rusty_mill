@@ -89,6 +89,7 @@ fn list_gives_each_parent_before_its_children() {
             size,
             title,
             name: bname,
+            owner: None,
         },
         Entry::Block {
             block: b2,

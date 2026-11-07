@@ -23,6 +23,9 @@
 //! on another machine reaches the server with `ssh host rusty-mux-ctl
 //! bridge`.
 //!
+//! `own` holds one connection that owns every block it launches (C46),
+//! driven by JSON lines on stdin; see the `own` module.
+//!
 //! `wait --block B` blocks until the block's program exits and exits with
 //! its status; `wait --event KIND --FIELD VALUE` until a matching event.
 //! `run -- COMMAND ARG...` starts a program in a new block, in ctl's
@@ -45,6 +48,8 @@ pub mod cli;
 mod completion;
 mod config;
 mod conn;
+#[cfg(any(unix, windows))]
+mod own;
 mod render;
 mod stop;
 pub mod target;
@@ -240,6 +245,10 @@ impl From<Miss> for Failure {
 const BRIDGE_ONLY: &str =
     "bridge runs only as the rusty-mux-ctl program: it takes over the process's stdin and stdout";
 
+/// Why [`run`] refuses `own`.
+const OWN_ONLY: &str =
+    "own runs only as the rusty-mux-ctl program: it takes over the process's stdin and stdout";
+
 /// Runs a command line (without the program name) in `env`; output goes to
 /// `out`, diagnostics to `err`. `bridge` is refused: see [`run_process`].
 pub fn run(args: &[String], env: &Env, out: &mut dyn Write, err: &mut dyn Write) -> Exit {
@@ -254,6 +263,12 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
     let mut err = io::stderr();
     let bridged = match cli::parse(args, &env.here) {
         Ok(invocation) if matches!(invocation.command, Command::Bridge) => invocation,
+        Ok(invocation) if matches!(invocation.command, Command::Own) => {
+            return match socket(&invocation, env) {
+                Ok(socket) => finish(own(&socket), &socket, &mut err),
+                Err(reason) => report(&mut err, Exit::Usage, reason),
+            };
+        }
         Ok(Invocation {
             command: Command::Agent(AgentCommand::Report(mut hook)),
             ref socket,
@@ -398,6 +413,7 @@ pub fn run_until(
         // Unbounded, and on the process's own stdin and stdout, so never
         // through `stop` and `out`.
         Command::Bridge => return report(err, Exit::Usage, BRIDGE_ONLY),
+        Command::Own => return report(err, Exit::Usage, OWN_ONLY),
         Command::Calls(_)
         | Command::Events { .. }
         | Command::Watch { .. }
@@ -594,6 +610,7 @@ fn execute(
         | Command::Agent(_)
         | Command::Watch { .. }
         | Command::Bridge
+        | Command::Own
         | Command::Completion(_) => Ok(Exit::Ok),
     }
 }
@@ -608,6 +625,18 @@ fn bridge(socket: &Path) -> Result<Exit, Failure> {
 
 #[cfg(not(any(unix, windows)))]
 fn bridge(_: &Path) -> Result<Exit, Failure> {
+    Err(unsupported())
+}
+
+/// `own`, for [`run_process`] only: until stdin ends or the ownership is
+/// lost.
+#[cfg(any(unix, windows))]
+fn own(socket: &Path) -> Result<Exit, Failure> {
+    own::run(socket, io::BufReader::new(io::stdin()), &mut io::stdout())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn own(_: &Path) -> Result<Exit, Failure> {
     Err(unsupported())
 }
 

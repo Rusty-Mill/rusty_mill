@@ -9,12 +9,12 @@ use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use rusty_mux_core::{
-    BlockId, ClientId, Event, ExitStatus, Mux, Principal, Side, Size, Transport, WindowId,
+    BlockId, ClientId, EntityId, Event, ExitStatus, Mux, Principal, Side, Size, Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
 use rusty_mux_proto::theme::ThemeChange;
 use rusty_mux_proto::{
-    Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Takeover, encode,
+    Code, Cursor, DatagramKey, Echo, Entry, Features, Launch, Message, Ownership, Takeover, encode,
 };
 use rusty_mux_status::{Parts, Status};
 use rusty_term_core::{AnsiParser, Grid};
@@ -91,7 +91,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_MORE)
     .union(Features::TERMINAL_SHELL)
     .union(Features::AGENT_STATUS)
-    .union(Features::TERMINAL_HISTORY);
+    .union(Features::TERMINAL_HISTORY)
+    .union(Features::OWNERSHIP);
 
 /// Fresh randomness to pick a generated session name with.
 fn name_seed() -> u64 {
@@ -470,13 +471,18 @@ impl State {
     }
 
     /// The server is stopping: starts no more blocks, and ends every
-    /// block's program now, as dropping the block would. The consoles to
+    /// block's program now, as dropping the block would, except that an
+    /// owned block's program is only hung up (D87). The consoles to
     /// wait for, which still hold the ones closing when this was called.
     pub(crate) fn stop(&mut self) -> pty::Hosts {
         self.save_now();
         self.stopping = true;
-        for (_, rt) in self.blocks.drain() {
-            drop(rt.release(true));
+        for (block, rt) in self.blocks.drain() {
+            let owned = self.mux.block(block).is_some_and(|b| b.owner().is_some());
+            match rt.release(true) {
+                Some(process) if owned => process.abandon(),
+                other => drop(other),
+            }
         }
         std::mem::take(&mut self.hosts)
     }
@@ -925,30 +931,26 @@ impl State {
             } => {
                 // As the catalog's contract: a launch only on a connection
                 // that negotiated it.
-                if launch != Launch::default()
-                    && let Err(refusal) = self.require(client, Features::LAUNCH, "a launch")
-                {
+                if let Err(refusal) = self.check_launch(client, &launch) {
                     return (req, Err(refusal));
                 }
-                (req, self.create_block(shared, window, size, &launch, None))
+                (
+                    req,
+                    self.create_block(shared, client, window, size, &launch, None),
+                )
             }
             M::Split {
                 req,
                 block,
                 side,
                 launch,
-            } => {
-                let launched = match launch == Launch::default() {
-                    true => Ok(()),
-                    false => self.require(client, Features::LAUNCH, "a launch"),
-                };
-                (
-                    req,
-                    self.require(client, Features::LAYOUT, "split")
-                        .and(launched)
-                        .and_then(|()| self.split(shared, block, side, &launch)),
-                )
-            }
+            } => (
+                req,
+                self.require(client, Features::LAYOUT, "split")
+                    .and_then(|()| self.check_launch(client, &launch))
+                    .and_then(|()| self.owns(client, [block]))
+                    .and_then(|()| self.split(shared, client, block, side, &launch)),
+            ),
             M::Zoom { req, block } => (
                 req,
                 self.require(client, Features::LAYOUT, "zoom")
@@ -971,13 +973,17 @@ impl State {
                 share,
             } => (
                 req,
-                self.edit(client, "resize-split", |mux| {
-                    mux.resize_split(block, axis, share)
+                self.owns(client, [block]).and_then(|()| {
+                    self.edit(client, "resize-split", |mux| {
+                        mux.resize_split(block, axis, share)
+                    })
                 }),
             ),
             M::SwapBlocks { req, block, other } => (
                 req,
-                self.edit(client, "swap-blocks", |mux| mux.swap_blocks(block, other)),
+                self.owns(client, [block, other]).and_then(|()| {
+                    self.edit(client, "swap-blocks", |mux| mux.swap_blocks(block, other))
+                }),
             ),
             M::MoveBlock {
                 req,
@@ -986,13 +992,18 @@ impl State {
                 side,
             } => (
                 req,
-                self.edit(client, "move-block", |mux| {
-                    mux.move_block(block, beside, side)
-                }),
+                self.owns(client, [Some(block), beside].into_iter().flatten())
+                    .and_then(|()| {
+                        self.edit(client, "move-block", |mux| {
+                            mux.move_block(block, beside, side)
+                        })
+                    }),
             ),
             M::DetachBlock { req, block } => (
                 req,
-                self.edit(client, "detach-block", |mux| mux.detach_block(block)),
+                self.owns(client, [block]).and_then(|()| {
+                    self.edit(client, "detach-block", |mux| mux.detach_block(block))
+                }),
             ),
             M::MoveWindow { req, window, index } => (
                 req,
@@ -1042,7 +1053,14 @@ impl State {
             M::ReleaseLease { req, block } => (req, done(self.mux.release_lease(client, block))),
             M::Input { req, block, data } => (req, self.input(client, req, block, data)),
             M::Resize { req, block, size } => (req, self.resize(client, block, size)),
-            M::CloseBlock { req, block } => (req, done(self.mux.close_block(block))),
+            M::CloseBlock { req, block } => (
+                req,
+                done(
+                    self.mux
+                        .authorize_close(client, block)
+                        .and_then(|()| self.mux.close_block(block)),
+                ),
+            ),
             M::Sync { req } => (req, Ok(Outcome::Done(None))),
             M::BlockCall {
                 req,
@@ -1067,6 +1085,10 @@ impl State {
             M::Rename { req, target, name } => (
                 req,
                 self.require(client, Features::LABELS, "rename")
+                    .and_then(|()| match target {
+                        EntityId::Block(block) => self.owns(client, [block]),
+                        _ => Ok(()),
+                    })
                     .and_then(|()| done(self.mux.rename(target, name))),
             ),
             M::NameSession { req, session, name } => (
@@ -1128,6 +1150,35 @@ impl State {
                     .map(|()| Outcome::Done(None))
                     .map_err(Refusal::from)
             })
+    }
+
+    /// Refuses unless `client` may change each of `blocks`: nobody else
+    /// owns it and it is not orphaned (C46). An unknown block is left for
+    /// the request itself to report.
+    fn owns(
+        &self,
+        client: ClientId,
+        blocks: impl IntoIterator<Item = BlockId>,
+    ) -> Result<(), Refusal> {
+        blocks
+            .into_iter()
+            .try_for_each(|block| match self.mux.authorize_owner(client, block) {
+                Err(rusty_mux_core::Error::UnknownBlock(_)) => Ok(()),
+                result => result,
+            })
+            .map_err(Refusal::from)
+    }
+
+    /// Refuses a launch `client` did not negotiate: any at all without
+    /// `LAUNCH`, an owned one without `OWNERSHIP`.
+    fn check_launch(&self, client: ClientId, launch: &Launch) -> Result<(), Refusal> {
+        if *launch != Launch::default() {
+            self.require(client, Features::LAUNCH, "a launch")?;
+        }
+        if launch.own {
+            self.require(client, Features::OWNERSHIP, "an owned launch")?;
+        }
+        Ok(())
     }
 
     /// Whether `client` negotiated `feature`.
@@ -1278,6 +1329,12 @@ impl State {
         if !self.clients.contains_key(&target) && !self.orphans.contains_key(&target) {
             return Err(rusty_mux_core::Error::UnknownClient(target).into());
         }
+        // An owner's connection is its owner's to end (C46).
+        if self.mux.owns_any(target) {
+            return Err(
+                format!("client {target} owns blocks; only it may end its connection").into(),
+            );
+        }
         self.drop_client(target);
         Ok(Outcome::Done(None))
     }
@@ -1315,6 +1372,10 @@ impl State {
                             .map(|rt| rt.grid.title.clone())
                             .unwrap_or_default(),
                         name: block.name().to_owned(),
+                        owner: block.owner().map(|o| match o.client() {
+                            Some(client) => Ownership::Client(client),
+                            None => Ownership::Orphaned,
+                        }),
                     });
                 }
             }
@@ -1354,6 +1415,7 @@ impl State {
     fn split(
         &mut self,
         shared: &Shared,
+        client: ClientId,
         target: BlockId,
         side: Side,
         launch: &Launch,
@@ -1364,14 +1426,15 @@ impl State {
             .block(target)
             .ok_or(rusty_mux_core::Error::UnknownBlock(target))?
             .window();
-        self.create_block(shared, window, size, launch, Some((target, side)))
+        self.create_block(shared, client, window, size, launch, Some((target, side)))
     }
 
     /// Starts a block in `window`, placed by the model, or beside the
-    /// block `beside` names.
+    /// block `beside` names; owned by `client` if `launch` says so.
     fn create_block(
         &mut self,
         shared: &Shared,
+        client: ClientId,
         window: WindowId,
         size: Size,
         launch: &Launch,
@@ -1411,6 +1474,9 @@ impl State {
         match beside {
             None => self.mux.add_block(block, window, size)?,
             Some((target, side)) => self.mux.split_block(block, target, side, size)?,
+        }
+        if launch.own {
+            in_step("own", self.mux.own(client, block));
         }
         let rt = rt.screened(shared, crate::checkpoint::grid(size), AnsiParser::new());
         self.adopt(block, rt);
@@ -2300,6 +2366,7 @@ mod regression {
         let Outcome::Done(Some(id)) = state
             .create_block(
                 &shared,
+                client,
                 window,
                 Size::new(80, 24).unwrap(),
                 &Launch::default(),
@@ -2818,7 +2885,7 @@ mod regression {
                 let mut state = shared.borrow_mut();
                 assert!(
                     state
-                        .create_block(&shared, window, size, &Launch::default(), None)
+                        .create_block(&shared, client, window, size, &Launch::default(), None)
                         .is_err()
                 );
                 assert!(state.resize(client, block, size).is_err());

@@ -136,6 +136,7 @@ pub struct Block {
     pub(crate) name: String,
     pub(crate) size: Size,
     pub(crate) lease: Option<ClientId>,
+    pub(crate) owner: Option<Owner>,
 }
 
 impl Block {
@@ -160,6 +161,37 @@ impl Block {
     /// The client allowed to write input, if any.
     pub fn lease(&self) -> Option<ClientId> {
         self.lease
+    }
+
+    /// Who controls the block, if it was launched owned (C46).
+    pub fn owner(&self) -> Option<&Owner> {
+        self.owner.as_ref()
+    }
+}
+
+/// An owned block's owner (C46): the client that launched it, and that
+/// client's principal. Once the client is gone for good the block is
+/// orphaned: it keeps the principal, which alone may close it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    pub(crate) principal: Principal,
+    pub(crate) client: Option<ClientId>,
+}
+
+impl Owner {
+    /// The owning client; `None` once the block is orphaned.
+    pub fn client(&self) -> Option<ClientId> {
+        self.client
+    }
+
+    /// Who the owning client was verified to be.
+    pub fn principal(&self) -> &Principal {
+        &self.principal
+    }
+
+    /// The owning client is gone for good.
+    pub fn is_orphaned(&self) -> bool {
+        self.client.is_none()
     }
 }
 

@@ -1323,3 +1323,83 @@ fn name_session_to_the_current_name_still_claims_it() {
     assert_eq!(mux.session(made).unwrap().name(), name);
     assert_eq!(mux.take_events(), [], "the name never changed");
 }
+
+/// A client of another account than [`connect`]'s.
+fn connect_other(mux: &mut Mux) -> ClientId {
+    let them = Principal::unix(1001, Some("them".into())).expect("principal");
+    mux.connect(them, Transport::Socket)
+}
+
+#[test]
+fn only_the_owner_may_change_an_owned_block() {
+    let (mut mux, _, _, block) = fixture();
+    let owner = connect(&mut mux);
+    let peer = connect(&mut mux);
+    assert_eq!(mux.authorize_owner(peer, block), Ok(()), "unowned is open");
+    mux.own(owner, block).expect("own");
+    assert_eq!(mux.authorize_owner(owner, block), Ok(()));
+    assert_eq!(
+        mux.authorize_owner(peer, block),
+        Err(Error::NotOwner {
+            client: peer,
+            block
+        }),
+        "the same principal gains nothing"
+    );
+    assert_eq!(
+        mux.authorize_close(peer, block),
+        Err(Error::NotOwner {
+            client: peer,
+            block
+        })
+    );
+    assert_eq!(mux.own(peer, block), Err(Error::Owned(block)));
+    assert!(mux.owns_any(owner));
+    assert!(!mux.owns_any(peer));
+}
+
+#[test]
+fn a_gone_owner_orphans_its_block_and_ends_its_lease() {
+    let (mut mux, _, _, block) = fixture();
+    let owner = connect(&mut mux);
+    mux.own(owner, block).expect("own");
+    let typist = leased_client(&mut mux, block);
+    mux.disconnect(owner).expect("disconnect");
+    let owned = mux
+        .block(block)
+        .and_then(|b| b.owner())
+        .expect("owner kept");
+    assert!(owned.is_orphaned());
+    assert_eq!(mux.block(block).and_then(|b| b.lease()), None);
+    assert!(mux.take_events().contains(&Event::LeaseChanged {
+        block,
+        holder: None
+    }));
+    assert_eq!(
+        mux.acquire_lease(typist, block),
+        Err(Error::Orphaned(block))
+    );
+    assert_eq!(
+        mux.authorize_owner(typist, block),
+        Err(Error::Orphaned(block))
+    );
+}
+
+#[test]
+fn only_the_owners_principal_may_close_an_orphaned_block() {
+    let (mut mux, _, _, block) = fixture();
+    let owner = connect(&mut mux);
+    mux.own(owner, block).expect("own");
+    mux.disconnect(owner).expect("disconnect");
+    let same = connect(&mut mux);
+    let other = connect_other(&mut mux);
+    assert_eq!(
+        mux.authorize_close(other, block),
+        Err(Error::Orphaned(block))
+    );
+    assert_eq!(
+        mux.authorize_owner(same, block),
+        Err(Error::Orphaned(block))
+    );
+    assert_eq!(mux.authorize_close(same, block), Ok(()));
+}

@@ -87,6 +87,7 @@ fn every_message_round_trips() {
                     args: vec!["-c".into(), String::new(), "exit 3".into()],
                 }),
                 cwd: Some("/tmp/wörk".into()),
+                own: false,
             },
         },
         Message::CreateBlock {
@@ -99,6 +100,7 @@ fn every_message_round_trips() {
                     args: Vec::new(),
                 }),
                 cwd: None,
+                own: false,
             },
         },
         Message::Attach { req: 4, block },
@@ -196,6 +198,7 @@ fn every_message_round_trips() {
                 holder: Some(client),
                 title: "vim".into(),
                 name: "editor".into(),
+                owner: None,
             },
         },
         Message::Entry {
@@ -207,6 +210,7 @@ fn every_message_round_trips() {
                 holder: None,
                 title: String::new(),
                 name: String::new(),
+                owner: None,
             },
         },
         Message::Entry {
@@ -274,6 +278,7 @@ fn every_message_round_trips() {
             launch: Launch {
                 program: None,
                 cwd: Some("/tmp".into()),
+                own: false,
             },
         },
         Message::Zoom { req: 22, block },

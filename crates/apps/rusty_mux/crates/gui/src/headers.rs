@@ -361,6 +361,7 @@ mod tests {
             holder: None,
             title: String::new(),
             name: String::new(),
+            owner: None,
         };
         assert!(h.take(&entry), "a List entry says nobody holds it");
     }

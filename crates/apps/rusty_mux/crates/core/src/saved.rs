@@ -135,6 +135,7 @@ impl Mux {
                 name: b.name,
                 size: b.size,
                 lease: None,
+                owner: None,
             };
             self.blocks.insert(b.id, block);
         }

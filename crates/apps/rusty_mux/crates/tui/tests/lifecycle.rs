@@ -544,6 +544,7 @@ fn serve_control(stream: Stream, shared: &Shared) {
                         holder: None,
                         title: String::new(),
                         name: String::new(),
+                        owner: None,
                     });
                 }
                 for entry in entries {
