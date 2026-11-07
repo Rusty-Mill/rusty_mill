@@ -28,7 +28,7 @@
 use std::fmt;
 
 use rusty_mux_core::{
-    Axis, BlockId, ClientId, EntityId, SessionId, Share, Side, Size, Toward, WindowId,
+    Axis, BlockId, ClientId, EntityId, InputMode, SessionId, Share, Side, Size, Toward, WindowId,
 };
 use rusty_uuid::Uuid;
 
@@ -440,6 +440,7 @@ impl Args<'_> {
             cwd: self.opt_text("cwd")?,
             // A one-shot call keeps no connection to own the block with.
             own: false,
+            input: InputMode::Open,
         })
     }
 

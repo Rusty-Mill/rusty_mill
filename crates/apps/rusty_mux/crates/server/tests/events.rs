@@ -412,7 +412,7 @@ fn a_launched_program_reports_its_exit_code() {
             args: vec!["-c".into(), r#"[ "$(pwd)" = /tmp ] && exit 3"#.into()],
         }),
         cwd: Some("/tmp".into()),
-        own: false,
+        ..Launch::default()
     };
     let size = Size::new(80, 24).expect("size");
     let block = BlockId::from_uuid(
@@ -469,12 +469,12 @@ fn a_launch_needs_the_negotiated_feature() {
                 args: Vec::new(),
             }),
             cwd: None,
-            own: false,
+            ..Launch::default()
         },
         Launch {
             program: None,
             cwd: Some("/tmp".into()),
-            own: false,
+            ..Launch::default()
         },
     ];
     for launch in launches {

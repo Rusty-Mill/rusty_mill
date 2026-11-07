@@ -4,15 +4,18 @@ use std::collections::BTreeMap;
 
 use crate::names;
 use crate::{
-    Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, Layout, MAX_DEPTH,
-    Owner, Principal, Progress, Selection, Session, SessionId, Share, Side, Size, Toward,
-    Transport, Window, WindowId,
+    Axis, Block, BlockId, Client, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Layout,
+    MAX_DEPTH, Owner, Principal, Progress, Selection, Session, SessionId, Share, Side, Size,
+    Toward, Transport, Window, WindowId,
 };
 
 /// The longest name any entity may have, in UTF-8 bytes. Names travel in
 /// every event and listing, so a bound keeps one name from filling a
 /// client's queue or a listing's reply.
 pub const MAX_NAME: usize = 256;
+
+/// The longest a grant may run, in ms: 24 hours (C77).
+pub const MAX_GRANT_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// Refuses a name longer than [`MAX_NAME`].
 fn check_name(name: &str) -> Result<(), Error> {
@@ -284,6 +287,8 @@ impl Mux {
                 size,
                 lease: None,
                 owner: None,
+                input: InputMode::Open,
+                grants: BTreeMap::new(),
             },
         );
         self.events.push(Event::BlockCreated {
@@ -862,6 +867,7 @@ impl Mux {
     pub fn disconnect(&mut self, client: ClientId) -> Result<(), Error> {
         self.detach(client)?;
         self.orphan_blocks_of(client);
+        self.end_grants_of(client);
         self.clients.remove(&client);
         self.events.push(Event::ClientDisconnected { client });
         Ok(())
@@ -897,9 +903,10 @@ impl Mux {
         Ok(())
     }
 
-    /// Makes `client` the owner of `block`, which has none (C46). The
-    /// server calls it only as the client's launch creates the block.
-    pub fn own(&mut self, client: ClientId, block: BlockId) -> Result<(), Error> {
+    /// Makes `client` the owner of `block`, which has none (C46), with
+    /// `input` saying who may type (C77). The server calls it only as the
+    /// client's launch creates the block.
+    pub fn own(&mut self, client: ClientId, block: BlockId, input: InputMode) -> Result<(), Error> {
         let principal = self
             .clients
             .get(&client)
@@ -917,7 +924,96 @@ impl Mux {
             principal,
             client: Some(client),
         });
+        target.input = input;
         Ok(())
+    }
+
+    /// Lets `client` take `block`'s lease until `until` (unix ms), for the
+    /// block's owner `owner` (C77). `now` is the server's clock; a grant
+    /// ends after it and at most [`MAX_GRANT_MS`] later. A new grant
+    /// replaces the client's old one.
+    pub fn grant(
+        &mut self,
+        owner: ClientId,
+        block: BlockId,
+        client: ClientId,
+        until: u64,
+        now: u64,
+    ) -> Result<(), Error> {
+        self.authorize_granter(owner, block)?;
+        if !self.clients.contains_key(&client) {
+            return Err(Error::UnknownClient(client));
+        }
+        if until <= now || until - now > MAX_GRANT_MS {
+            return Err(Error::BadGrant { block, until });
+        }
+        if let Some(target) = self.blocks.get_mut(&block) {
+            target.grants.insert(client, until);
+        }
+        self.events.push(Event::GrantChanged {
+            block,
+            client,
+            until: Some(until),
+        });
+        Ok(())
+    }
+
+    /// Ends `client`'s grant on `block`, for its owner `owner`, and takes
+    /// the lease back if `client` holds it (C77). Ending no grant changes
+    /// nothing.
+    pub fn revoke(
+        &mut self,
+        owner: ClientId,
+        block: BlockId,
+        client: ClientId,
+    ) -> Result<(), Error> {
+        self.authorize_granter(owner, block)?;
+        self.end_grant(block, client);
+        Ok(())
+    }
+
+    /// Ends every grant whose time is up at `now` (unix ms), taking back
+    /// the lease each one's client holds.
+    pub fn expire_grants(&mut self, now: u64) {
+        let due: Vec<(BlockId, ClientId)> = self
+            .blocks
+            .values()
+            .flat_map(|b| {
+                b.grants
+                    .iter()
+                    .filter(|&(_, &until)| until <= now)
+                    .map(|(&client, _)| (b.id, client))
+            })
+            .collect();
+        for (block, client) in due {
+            self.end_grant(block, client);
+        }
+    }
+
+    /// Succeeds when `owner` owns `block` and may grant its lease.
+    fn authorize_granter(&self, owner: ClientId, block: BlockId) -> Result<(), Error> {
+        let target = self.blocks.get(&block).ok_or(Error::UnknownBlock(block))?;
+        if target.owner.is_none() {
+            return Err(Error::Unowned(block));
+        }
+        self.authorize_owner(owner, block)
+    }
+
+    /// Removes `client`'s grant on `block`, if any, and the lease it holds
+    /// there.
+    fn end_grant(&mut self, block: BlockId, client: ClientId) {
+        let Some(target) = self.blocks.get_mut(&block) else {
+            return;
+        };
+        if target.grants.remove(&client).is_none() {
+            return;
+        }
+        self.events.push(Event::GrantChanged {
+            block,
+            client,
+            until: None,
+        });
+        self.drop_lease_if_held(client, block);
     }
 
     /// Succeeds when `client` may change `block`: it has no owner, or
@@ -969,6 +1065,13 @@ impl Mux {
         let target = self.attached_block(client, block)?;
         if target.owner.as_ref().is_some_and(Owner::is_orphaned) {
             return Err(Error::Orphaned(block));
+        }
+        let owner = target.owner.as_ref().and_then(|o| o.client);
+        let gated = target.input == InputMode::OwnerOnly
+            && owner != Some(client)
+            && !target.grants.contains_key(&client);
+        if gated {
+            return Err(Error::InputGated(block));
         }
         let holder = target.lease;
         match holder {
@@ -1034,6 +1137,23 @@ impl Mux {
                     holder: None,
                 });
             }
+            let granted: Vec<ClientId> = target.grants.keys().copied().collect();
+            for client in granted {
+                self.end_grant(block, client);
+            }
+        }
+    }
+
+    /// Ends every grant `client` holds: it is gone.
+    fn end_grants_of(&mut self, client: ClientId) {
+        let granted: Vec<BlockId> = self
+            .blocks
+            .values()
+            .filter(|b| b.grants.contains_key(&client))
+            .map(|b| b.id)
+            .collect();
+        for block in granted {
+            self.end_grant(block, client);
         }
     }
 

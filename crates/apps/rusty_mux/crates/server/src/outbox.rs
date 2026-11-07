@@ -58,6 +58,11 @@ pub(crate) fn outbox() -> (Outbox, Inbox, Rc<Notify>) {
 impl Outbox {
     /// Queues a frame. Returns false when the client is over budget or gone;
     /// the caller then disconnects it.
+    /// Bytes queued and not yet written.
+    pub(crate) fn queued(&self) -> usize {
+        self.queued.get()
+    }
+
     pub(crate) fn push(&self, frame: Vec<u8>) -> bool {
         let queued = self.queued.get() + frame.len();
         if queued > BUDGET {

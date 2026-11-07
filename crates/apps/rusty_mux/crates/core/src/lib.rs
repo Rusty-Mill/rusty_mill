@@ -35,12 +35,12 @@ mod mux;
 mod names;
 mod saved;
 
-pub use entity::{Block, Client, Owner, Session, Size, Window};
+pub use entity::{Block, Client, InputMode, Owner, Session, Size, Window};
 pub use error::Error;
 pub use event::{Event, ExitStatus, Progress, Selection};
 pub use id::{BlockId, ClientId, EntityId, SessionId, WindowId};
 pub use identity::{Principal, Transport};
 pub use layout::{Axis, Layout, MAX_DEPTH, ParseError, Rect, Share, Side, Toward};
-pub use mux::{MAX_NAME, Mux};
+pub use mux::{MAX_GRANT_MS, MAX_NAME, Mux};
 pub use names::is_generated;
 pub use saved::{RestoreError, Saved, SavedBlock, SavedSession, SavedWindow};

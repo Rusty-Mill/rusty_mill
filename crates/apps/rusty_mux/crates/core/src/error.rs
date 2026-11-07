@@ -84,6 +84,17 @@ pub enum Error {
     Orphaned(BlockId),
     /// The block already has an owner.
     Owned(BlockId),
+    /// The block has no owner, so nobody grants its lease.
+    Unowned(BlockId),
+    /// The block's input is the owner's: its lease needs the owner's
+    /// grant (C77).
+    InputGated(BlockId),
+    /// A grant must end after now and at most [`MAX_GRANT_MS`](crate::MAX_GRANT_MS)
+    /// from now.
+    BadGrant {
+        block: BlockId,
+        until: u64,
+    },
 }
 
 impl fmt::Display for Error {
@@ -147,6 +158,17 @@ impl fmt::Display for Error {
             }
             Self::Orphaned(block) => write!(f, "block {block} is orphaned: its owner is gone"),
             Self::Owned(block) => write!(f, "block {block} already has an owner"),
+            Self::Unowned(block) => write!(f, "block {block} has no owner to grant its lease"),
+            Self::InputGated(block) => {
+                write!(
+                    f,
+                    "input_gated: block {block} takes input only with its owner's grant"
+                )
+            }
+            Self::BadGrant { block, until } => write!(
+                f,
+                "a grant on block {block} must end after now and within 24 h, not at {until}"
+            ),
         }
     }
 }

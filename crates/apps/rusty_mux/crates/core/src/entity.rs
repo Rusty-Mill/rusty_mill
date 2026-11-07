@@ -1,6 +1,8 @@
 //! The model's entities. Only [`Mux`](crate::Mux) builds or changes them, so
 //! their cross-references stay consistent.
 
+use std::collections::BTreeMap;
+
 use crate::{BlockId, ClientId, Error, Layout, Principal, SessionId, Transport, WindowId};
 
 /// A terminal size in cells. Both dimensions are at least 1.
@@ -137,6 +139,10 @@ pub struct Block {
     pub(crate) size: Size,
     pub(crate) lease: Option<ClientId>,
     pub(crate) owner: Option<Owner>,
+    pub(crate) input: InputMode,
+    /// Owner-granted leases (C77): each client and when its grant ends,
+    /// in unix ms on the server's clock.
+    pub(crate) grants: BTreeMap<ClientId, u64>,
 }
 
 impl Block {
@@ -167,6 +173,27 @@ impl Block {
     pub fn owner(&self) -> Option<&Owner> {
         self.owner.as_ref()
     }
+
+    /// Who may take its input lease (C77).
+    pub fn input(&self) -> InputMode {
+        self.input
+    }
+
+    /// The live grants: each client and when its grant ends (unix ms).
+    pub fn grants(&self) -> &BTreeMap<ClientId, u64> {
+        &self.grants
+    }
+}
+
+/// Who may take a block's input lease (C77).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InputMode {
+    /// Any attached client, as before C77.
+    #[default]
+    Open,
+    /// Only the owner, and clients it granted the lease to; every byte
+    /// typed is reported to the owner.
+    OwnerOnly,
 }
 
 /// An owned block's owner (C46): the client that launched it, and that

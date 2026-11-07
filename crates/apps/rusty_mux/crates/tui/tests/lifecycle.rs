@@ -545,6 +545,7 @@ fn serve_control(stream: Stream, shared: &Shared) {
                         title: String::new(),
                         name: String::new(),
                         owner: None,
+                        input: rusty_mux_core::InputMode::Open,
                     });
                 }
                 for entry in entries {

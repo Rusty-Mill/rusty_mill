@@ -82,10 +82,52 @@ fn bad_requests_are_refused_with_their_id() {
         (r#","rows":70000"#, "number of cells"),
         (r#","program":7"#, "must be text"),
         (r#","program":"sh","args":[1]"#, "list of text"),
+        (r#","input":"shut""#, "`open` or `owner-only`"),
     ] {
         let (_, reason) = refusal(&launch(extra));
         assert!(reason.contains(why), "{extra}: {reason}");
     }
+}
+
+#[test]
+fn an_owner_only_launch_needs_the_input_gate() {
+    let line = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}","input":"owner-only"}}"#);
+    let request = parsed(&line);
+    let Request::Launch { launch, .. } = &request else {
+        panic!("not a launch");
+    };
+    assert_eq!(launch.input, InputMode::OwnerOnly);
+    assert!(request.gated());
+    let open = format!(r#"{{"id":1,"op":"launch","window":"{WINDOW}","input":"open"}}"#);
+    assert!(!parsed(&open).gated());
+}
+
+#[test]
+fn grants_and_revokes_name_a_block_a_client_and_a_time() {
+    let line = format!(
+        r#"{{"id":4,"op":"grant","block":"{WINDOW}","client":"{WINDOW}","until":1700000000000}}"#
+    );
+    let request = parsed(&line);
+    assert!(matches!(
+        request,
+        Request::Grant {
+            until: 1_700_000_000_000,
+            ..
+        }
+    ));
+    assert!(request.gated());
+    let line = format!(r#"{{"id":5,"op":"revoke","block":"{WINDOW}","client":"{WINDOW}"}}"#);
+    assert!(matches!(parsed(&line), Request::Revoke { .. }));
+    let line = format!(r#"{{"id":6,"op":"grant","block":"{WINDOW}","client":"{WINDOW}"}}"#);
+    assert!(refusal(&line).1.contains("unix ms"));
+    let line = format!(r#"{{"id":7,"op":"revoke","block":"{WINDOW}"}}"#);
+    assert!(refusal(&line).1.contains("`client`"));
+}
+
+#[test]
+fn input_is_printed_as_hex() {
+    assert_eq!(hex(b"ls\r\x00\xff"), "6c730d00ff");
+    assert_eq!(hex(&[]), "");
 }
 
 #[test]

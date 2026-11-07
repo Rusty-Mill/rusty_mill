@@ -5,11 +5,12 @@
 //! The tree nests, so a window can only be in one session and a block in
 //! one window; [`Mux::restore`] checks the rest.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::{
-    Block, BlockId, Layout, MAX_DEPTH, MAX_NAME, Mux, Session, SessionId, Size, Window, WindowId,
+    Block, BlockId, InputMode, Layout, MAX_DEPTH, MAX_NAME, Mux, Session, SessionId, Size, Window,
+    WindowId,
 };
 
 /// Every session, in creation order.
@@ -136,6 +137,8 @@ impl Mux {
                 size: b.size,
                 lease: None,
                 owner: None,
+                input: InputMode::Open,
+                grants: BTreeMap::new(),
             };
             self.blocks.insert(b.id, block);
         }

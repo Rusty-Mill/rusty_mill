@@ -2,7 +2,7 @@
 //! `--json`.
 
 use rusty_json::{Map, Value};
-use rusty_mux_core::{BlockId, Event, ExitStatus, Layout, Principal, Progress, Size};
+use rusty_mux_core::{BlockId, Event, ExitStatus, InputMode, Layout, Principal, Progress, Size};
 use rusty_mux_proto::{Cursor, Entry, Ownership};
 use rusty_uuid::Uuid;
 
@@ -220,6 +220,7 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
             title,
             name,
             owner,
+            input,
         } => {
             let mut fields = vec![("window", Id(window.uuid()))];
             fields.extend(size_fields(*size));
@@ -232,6 +233,11 @@ fn describe_entry(entry: &Entry) -> (&'static str, Uuid, Vec<(&'static str, Fiel
                 Some(Ownership::Orphaned) => Text("orphaned".to_owned()),
             };
             fields.push(("owner", owner));
+            let input = match input {
+                InputMode::Open => "open",
+                InputMode::OwnerOnly => "owner-only",
+            };
+            fields.push(("input", Field::Word(input)));
             ("block", block.uuid(), fields)
         }
         Entry::Client {
@@ -341,6 +347,23 @@ fn describe(event: &Event) -> (&'static str, Vec<(&'static str, Field)>) {
             vec![
                 ("block", Id(block.uuid())),
                 ("holder", holder.map_or(Field::Absent, |c| Id(c.uuid()))),
+            ],
+        ),
+        E::GrantChanged {
+            block,
+            client,
+            until,
+        } => (
+            "grant-changed",
+            vec![
+                ("block", Id(block.uuid())),
+                ("client", Id(client.uuid())),
+                (
+                    "until",
+                    until.map_or(Field::Absent, |u| {
+                        Field::Num(i64::try_from(u).unwrap_or(i64::MAX))
+                    }),
+                ),
             ],
         ),
         E::BlockStatus { block } => ("block-status", vec![("block", Id(block.uuid()))]),
@@ -592,6 +615,11 @@ mod tests {
                 block,
                 holder: Some(client),
             },
+            Event::GrantChanged {
+                block,
+                client,
+                until: Some(9),
+            },
             Event::BlockStatus { block },
             Event::PwdChanged { block },
             Event::TitleChanged { block },
@@ -690,11 +718,12 @@ mod tests {
             title: "vim".into(),
             name: "edit".into(),
             owner: None,
+            input: InputMode::Open,
         };
         assert_eq!(
             entry_line(&block, false),
             format!(
-                "block {} window={} cols=80 rows=24 holder=- title=\"vim\" name=\"edit\" owner=-",
+                "block {} window={} cols=80 rows=24 holder=- title=\"vim\" name=\"edit\" owner=- input=open",
                 id(1),
                 id(2)
             )

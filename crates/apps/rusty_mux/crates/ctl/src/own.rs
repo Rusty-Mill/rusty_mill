@@ -6,10 +6,16 @@
 //! - `{"id":ID,"op":"launch","window":UUID,"cols":N,"rows":N,"program":P,"args":[..],"cwd":DIR}`,
 //!   where only `window` is required; the answer carries the new `block`.
 //! - `{"id":ID,"op":"close","block":UUID}`.
+//! - With C77: `"input":"owner-only"` on a launch gates its input, and
+//!   `{"id":ID,"op":"grant","block":UUID,"client":UUID,"until":MS}` and
+//!   `{"id":ID,"op":"revoke","block":UUID,"client":UUID}` let another client
+//!   type into it until `until` (unix ms, the server's clock), or stop it.
 //!
 //! Answers are `{"id":ID,"ok":true,…}` or `{"id":ID,"ok":false,"error":…}`.
 //! Owner events are `{"event":KIND,…}` for `program-exited`,
-//! `lease-changed` and `block-closed` on the blocks it owns, `reconnected`
+//! `lease-changed`, `grant-changed` and `block-closed` on the blocks it
+//! owns, `input` (`block`, `client`, `seq` and the bytes as `hex`) for
+//! what another client typed into an owner-only one, `reconnected`
 //! after a reconnect inside the server's grace, and `lost` when the
 //! connection, and with it the ownership, is gone; `own` then exits with
 //! [`Exit::Unreachable`]. A `launch` in flight when the connection drops
@@ -31,7 +37,7 @@ use std::time::{Duration, Instant};
 #[cfg(windows)]
 use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_json::{Map, Value};
-use rusty_mux_core::{BlockId, ClientId, Event, Size, WindowId};
+use rusty_mux_core::{BlockId, ClientId, Event, InputMode, Size, WindowId};
 use rusty_mux_proto::{Cursor, Features, Launch, Message, Program, Takeover, encode};
 use rusty_uuid::Uuid;
 
@@ -45,6 +51,10 @@ const NEEDED: Features = Features::LAUNCH
     .union(Features::TAKEOVER)
     .union(Features::EVENT_SEQ)
     .union(Features::PROGRAM_EVENTS);
+
+/// Asked for too, but only owner-only launches, grants and revokes need it:
+/// an older server refuses those here rather than launching an open block.
+const GATE: Features = Features::INPUT_GATE;
 
 /// How long a dropped connection is retried: inside the server's 30 s
 /// grace (D44), leaving room for the last try.
@@ -78,6 +88,26 @@ enum Request {
     Close {
         block: BlockId,
     },
+    Grant {
+        block: BlockId,
+        client: ClientId,
+        until: u64,
+    },
+    Revoke {
+        block: BlockId,
+        client: ClientId,
+    },
+}
+
+impl Request {
+    /// Whether it needs [`Features::INPUT_GATE`].
+    fn gated(&self) -> bool {
+        match self {
+            Self::Launch { launch, .. } => launch.input == InputMode::OwnerOnly,
+            Self::Grant { .. } | Self::Revoke { .. } => true,
+            Self::Close { .. } => false,
+        }
+    }
 }
 
 /// A request sent and not yet answered, with the caller's id.
@@ -92,6 +122,8 @@ struct Link {
     client: ClientId,
     token: Uuid,
     generation: u64,
+    /// The server offered [`Features::INPUT_GATE`].
+    gate: bool,
 }
 
 /// Runs `own` against the server at `socket`, reading requests from
@@ -168,6 +200,9 @@ impl Owner<'_> {
             Ok(parsed) => parsed,
             Err((id, why)) => return self.print(&failed(id, &why)),
         };
+        if request.gated() && !self.link.gate {
+            return self.print(&failed(id, "the server cannot gate input"));
+        }
         let req = self.next_req;
         self.next_req += 1;
         let (message, launch) = match request {
@@ -185,6 +220,22 @@ impl Owner<'_> {
                 true,
             ),
             Request::Close { block } => (Message::CloseBlock { req, block }, false),
+            Request::Grant {
+                block,
+                client,
+                until,
+            } => (
+                Message::GrantLease {
+                    req,
+                    block,
+                    client,
+                    until,
+                },
+                false,
+            ),
+            Request::Revoke { block, client } => {
+                (Message::RevokeLease { req, block, client }, false)
+            }
         };
         self.pending.insert(req, Pending { id, launch });
         // A failed write shows as the connection dropping, which the
@@ -217,6 +268,20 @@ impl Owner<'_> {
                 }
                 self.owner_event(&event)
             }
+            Message::InputBatch {
+                block,
+                client,
+                seq,
+                data,
+            } => self.print(&event(
+                "input",
+                [
+                    ("block", Value::from(block.to_string())),
+                    ("client", Value::from(client.to_string())),
+                    ("seq", Value::from(seq)),
+                    ("hex", Value::from(hex(&data))),
+                ],
+            )),
             _ => Ok(()),
         }
     }
@@ -224,9 +289,9 @@ impl Owner<'_> {
     /// Prints `event` if it concerns a block this connection owns.
     fn owner_event(&mut self, event: &Event) -> Result<(), Failure> {
         let (block, closed) = match *event {
-            Event::ProgramExited { block, .. } | Event::LeaseChanged { block, .. } => {
-                (block, false)
-            }
+            Event::ProgramExited { block, .. }
+            | Event::LeaseChanged { block, .. }
+            | Event::GrantChanged { block, .. } => (block, false),
             Event::BlockClosed { block } => (block, true),
             _ => return Ok(()),
         };
@@ -300,7 +365,7 @@ fn open(
     let stream = connect(socket, &Stop::default())?;
     let mut conn = Conn::new(stream.try_clone()?, Stop::default());
     conn.send(&Message::Hello {
-        features: NEEDED,
+        features: NEEDED.union(GATE),
         resume,
         takeover,
     })?;
@@ -341,6 +406,7 @@ fn open(
         client,
         token,
         generation,
+        gate: features.contains(GATE),
     };
     Ok((link, cursor))
 }
@@ -383,6 +449,18 @@ fn request(value: &Value) -> Result<Request, String> {
         }),
         Some("close") => Ok(Request::Close {
             block: BlockId::from_uuid(uuid(value, "block")?),
+        }),
+        Some("grant") => Ok(Request::Grant {
+            block: BlockId::from_uuid(uuid(value, "block")?),
+            client: ClientId::from_uuid(uuid(value, "client")?),
+            until: value
+                .get("until")
+                .and_then(Value::as_u64)
+                .ok_or("`until` must be unix ms")?,
+        }),
+        Some("revoke") => Ok(Request::Revoke {
+            block: BlockId::from_uuid(uuid(value, "block")?),
+            client: ClientId::from_uuid(uuid(value, "client")?),
         }),
         Some(op) => Err(format!("unknown op `{op}`")),
         None => Err("no `op`".into()),
@@ -434,11 +512,22 @@ fn launch(value: &Value) -> Result<Launch, String> {
         None if args.is_empty() => None,
         None => return Err("`args` need a `program`".into()),
     };
+    let input = match text("input")?.as_deref() {
+        None | Some("open") => InputMode::Open,
+        Some("owner-only") => InputMode::OwnerOnly,
+        Some(_) => return Err("`input` must be `open` or `owner-only`".into()),
+    };
     Ok(Launch {
         program,
         cwd: text("cwd")?,
         own: true,
+        input,
     })
+}
+
+/// `data` as lowercase hex, two digits a byte.
+fn hex(data: &[u8]) -> String {
+    data.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn answered(id: Value, field: Option<(&str, Value)>) -> String {

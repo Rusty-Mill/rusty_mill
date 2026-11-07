@@ -223,7 +223,7 @@ fn command_block(client: &mut Client, script: &str) -> rusty_mux_core::BlockId {
             args: vec!["-c".into(), script.into()],
         }),
         cwd: None,
-        own: false,
+        ..Launch::default()
     };
     let block = rusty_mux_core::BlockId::from_uuid(
         client

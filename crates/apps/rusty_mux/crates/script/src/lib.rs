@@ -168,6 +168,7 @@ pub const EVENTS: &[(&str, &[&str])] = &[
     ("attached", &["client", "block"]),
     ("detached", &["client", "block"]),
     ("lease-changed", &["block", "holder"]),
+    ("grant-changed", &["block", "client", "until"]),
     ("block-status", &["block"]),
     ("pwd-changed", &["block", "pwd"]),
     ("title-changed", &["block", "title"]),

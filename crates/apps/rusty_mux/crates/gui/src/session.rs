@@ -813,6 +813,7 @@ mod tests {
                     title: String::new(),
                     name: String::new(),
                     owner: None,
+                    input: rusty_mux_core::InputMode::Open,
                 },
             });
         }
@@ -1121,6 +1122,7 @@ mod tests {
             title: String::new(),
             name: String::new(),
             owner: None,
+            input: rusty_mux_core::InputMode::Open,
         });
     }
 
@@ -1323,6 +1325,7 @@ mod tests {
                     title: title.into(),
                     name: String::new(),
                     owner: None,
+                    input: rusty_mux_core::InputMode::Open,
                 },
             });
         }
