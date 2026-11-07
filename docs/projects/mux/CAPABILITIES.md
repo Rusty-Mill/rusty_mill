@@ -23,7 +23,7 @@ Crate names below follow the brief §8 components with the `rusty_mux_*` prefix,
 
 | Id | Capability | Phase | Owning crate | Status | Evidence |
 |---|---|---|---|---|---|
-| C01 | Persistent sessions (outlive clients) | 1 | `rusty_mux_server` | done | blocks and their PTYs outlive client connections; the server starts on first use, detached, and stops when idle (C69, #1558); rusty_term D140 |
+| C01 | Persistent sessions (outlive clients) | 1 | `rusty_mux_server` | done | blocks and their PTYs outlive client connections; the server starts on first use, detached, and stops when idle (C69, #1558); rusty_term D142 |
 | C02 | Multi-client attach, independent viewports | 1 | `rusty_mux_server` | in-progress | `server/tests/phase1.rs`: two clients converge on one PTY; viewports are client-side |
 | C03 | Snapshot + ready + background history | 1 | `rusty_mux_server`, `rusty_term_core` | in-progress | negotiated RTCP v6 (run-encoded, 0.64 MB at 200x50 + 10k history) checkpoint chunks then ready then raw output; normal 10,000-row history, no lifetime-output cutoff (see [REPLAY.md](REPLAY.md)); reattach test in `server/tests/phase1.rs`; newest-first history streaming not started |
 | C04 | CLI automation (`--json`, stable exit codes) | 2 | `rusty_mux_ctl` | done | #1060, #1089; `rusty-mux-ctl`, `ctl/tests/ctl.rs`; exit codes as Rex (0/1/2/3 target/4 unreachable/130); targets by id, name, position, id suffix or path (`ctl/src/target.rs`); ids default from `$RUSTY_MUX_SESSION`/`WINDOW`/`BLOCK`. Waits and run-and-wait continue in C30 |
