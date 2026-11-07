@@ -333,18 +333,45 @@ fn kill_own_group() {
 /// oversubscription.
 #[cfg(target_os = "linux")]
 fn others_in_group() -> bool {
-    let me = std::process::id();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    others_in_group_at(Path::new("/proc"), std::process::id())
+}
+
+#[cfg(target_os = "linux")]
+fn others_in_group_at(proc: &Path, me: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc) else {
         return true;
     };
-    entries.flatten().any(|entry| {
-        let pid = entry
+    entries.into_iter().any(|entry| {
+        let Ok(entry) = entry else { return true };
+        let Some(pid) = entry
             .file_name()
             .to_str()
-            .and_then(|n| n.parse::<u32>().ok());
-        pid.is_some_and(|pid| pid != me)
-            && std::fs::read_to_string(entry.path().join("stat"))
-                .is_ok_and(|stat| stat_pgrp(&stat) == Some(me))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        if pid == me {
+            return false;
+        }
+        match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => match stat_pgrp(&stat) {
+                Some(group) if group != me => false,
+                // An unreaped zombie cannot run or retain the slot. Otherwise
+                // keep holding, including on malformed or unreadable state.
+                Some(_) => !stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+                    let mut fields = rest.split_whitespace();
+                    fields.next() == Some("Z")
+                        && fields
+                            .next()
+                            .is_some_and(|parent| parent.parse::<u32>().is_ok())
+                }),
+                None => true,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3) => {
+                false
+            }
+            Err(_) => true,
+        }
     })
 }
 
@@ -456,6 +483,35 @@ mod tests {
         assert_eq!(stat_pgrp("42 (a) b) (c) R 1 9 9 0"), Some(9));
         assert_eq!(stat_pgrp("42 (sh"), None);
         assert_eq!(stat_pgrp("42 (sh) S 1"), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn group_scan_ignores_only_confirmed_zombies_and_exited_processes() -> Result<(), std::io::Error>
+    {
+        let root = dir("proc");
+        std::fs::create_dir_all(root.join("42"))?;
+        let stat = root.join("42/stat");
+        std::fs::write(&stat, "42 (a) b) Z 1 77 77 0")?;
+        assert!(!others_in_group_at(&root, 77));
+        for state in ["S", "R", "?", "ZZ"] {
+            std::fs::write(&stat, format!("42 (sh) {state} 1 77 77 0"))?;
+            assert!(others_in_group_at(&root, 77), "state {state}");
+        }
+        for malformed in ["", "42 (sh", "42 (sh) Z", "42 (sh) Z ? 77", "42 (sh) Z 1 ?"] {
+            std::fs::write(&stat, malformed)?;
+            assert!(others_in_group_at(&root, 77), "{malformed}");
+        }
+        std::fs::write(&stat, "42 (sh) S 1 88 88 0")?;
+        assert!(!others_in_group_at(&root, 77));
+        std::fs::remove_file(&stat)?;
+        assert!(!others_in_group_at(&root, 77));
+        // A directory in place of stat is unreadable as text even as root.
+        std::fs::create_dir(&stat)?;
+        assert!(others_in_group_at(&root, 77));
+        assert!(others_in_group_at(&root.join("missing"), 77));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     // Inheriting a lock with a duplicated descriptor is Unix semantics; the
