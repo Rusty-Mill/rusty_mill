@@ -356,15 +356,7 @@ fn others_in_group_at(proc: &Path, me: u32) -> bool {
         match std::fs::read_to_string(entry.path().join("stat")) {
             Ok(stat) => match stat_pgrp(&stat) {
                 Some(group) if group != me => false,
-                // An unreaped zombie cannot run or retain the slot. Otherwise
-                // keep holding, including on malformed or unreadable state.
-                Some(_) => !stat.rsplit_once(") ").is_some_and(|(_, rest)| {
-                    let mut fields = rest.split_whitespace();
-                    fields.next() == Some("Z")
-                        && fields
-                            .next()
-                            .is_some_and(|parent| parent.parse::<u32>().is_ok())
-                }),
+                Some(_) => !single_threaded_zombie(&stat),
                 None => true,
             },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3) => {
@@ -372,6 +364,22 @@ fn others_in_group_at(proc: &Path, me: u32) -> bool {
             }
             Err(_) => true,
         }
+    })
+}
+
+/// A zombie leader alone is insufficient: main can call pthread_exit while
+/// workers still run. Linux's num_threads (field 20) includes that leader;
+/// only exactly one proves there is no other thread left to execute or fork.
+/// Missing or malformed evidence must keep the slot held.
+#[cfg(target_os = "linux")]
+fn single_threaded_zombie(stat: &str) -> bool {
+    stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+        let mut fields = rest.split_whitespace();
+        fields.next() == Some("Z")
+            && fields
+                .next()
+                .is_some_and(|parent| parent.parse::<u32>().is_ok())
+            && fields.nth(15).and_then(|n| n.parse::<u32>().ok()) == Some(1)
     })
 }
 
@@ -492,11 +500,23 @@ mod tests {
         let root = dir("proc");
         std::fs::create_dir_all(root.join("42"))?;
         let stat = root.join("42/stat");
-        std::fs::write(&stat, "42 (a) b) Z 1 77 77 0")?;
+        let snapshot = |state: &str, threads: &str| {
+            let mut fields = vec!["0"; 18];
+            fields[0] = state;
+            fields[1] = "1";
+            fields[2] = "77";
+            fields[17] = threads;
+            format!("42 (a) b) {}", fields.join(" "))
+        };
+        std::fs::write(&stat, snapshot("Z", "1"))?;
         assert!(!others_in_group_at(&root, 77));
         for state in ["S", "R", "?", "ZZ"] {
-            std::fs::write(&stat, format!("42 (sh) {state} 1 77 77 0"))?;
+            std::fs::write(&stat, snapshot(state, "1"))?;
             assert!(others_in_group_at(&root, 77), "state {state}");
+        }
+        for threads in ["2", "0", "?", ""] {
+            std::fs::write(&stat, snapshot("Z", threads))?;
+            assert!(others_in_group_at(&root, 77), "threads {threads}");
         }
         for malformed in ["", "42 (sh", "42 (sh) Z", "42 (sh) Z ? 77", "42 (sh) Z 1 ?"] {
             std::fs::write(&stat, malformed)?;
