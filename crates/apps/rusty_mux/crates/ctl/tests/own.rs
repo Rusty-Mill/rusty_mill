@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rusty_json::Value;
+use rusty_mux_core::BlockId;
+use rusty_mux_proto::{Features, Message, decode, encode};
 use rusty_mux_server::{Config, ConsoleHost, serve};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
@@ -279,4 +281,69 @@ fn the_end_of_stdin_leaves_the_block_to_orphan() {
     // Kept for the server's grace: still owned, so still refused.
     let other = ctl(&socket, &["close-block", "--block", &block]);
     assert_eq!(other.status.code(), Some(1), "{other:?}");
+}
+
+/// The next message on `stream`, kept whole across reads in `buf`.
+fn next(stream: &mut UnixStream, buf: &mut Vec<u8>) -> Message {
+    loop {
+        if let Some((message, used)) = decode(buf).expect("decode") {
+            buf.drain(..used);
+            return message;
+        }
+        let mut chunk = [0u8; 4096];
+        let n = std::io::Read::read(stream, &mut chunk).expect("read");
+        assert!(n > 0, "server closed the connection");
+        buf.extend_from_slice(&chunk[..n]);
+    }
+}
+
+fn send(stream: &mut UnixStream, message: &Message) {
+    stream
+        .write_all(&encode(message).expect("encode"))
+        .expect("write");
+}
+
+/// A bare client that asks for `block`'s lease, as a viewer would; the
+/// connection, kept open, and the request's answer.
+fn ask_for_lease(socket: &Path, block: &str) -> (UnixStream, Message) {
+    let mut stream = UnixStream::connect(socket).expect("connect");
+    let mut buf = Vec::new();
+    let hello = Message::Hello {
+        features: Features::LEASE_REQUESTS,
+        resume: None,
+        takeover: None,
+    };
+    send(&mut stream, &hello);
+    assert!(matches!(
+        next(&mut stream, &mut buf),
+        Message::Welcome { .. }
+    ));
+    let block = BlockId::from_uuid(block.parse().expect("a block id"));
+    send(&mut stream, &Message::RequestLease { req: 1, block });
+    loop {
+        // Events may come before the answer.
+        let message = next(&mut stream, &mut buf);
+        if matches!(message, Message::Done { .. } | Message::Failed { .. }) {
+            return (stream, message);
+        }
+    }
+}
+
+#[test]
+fn own_hears_a_viewer_ask_for_the_lease() {
+    let socket = start_server();
+    let window = window(&socket);
+    let mut own = Own::start(&socket);
+    own.send(&format!(
+        r#"{{"id":1,"op":"launch","window":"{window}","input":"owner-only"}}"#
+    ));
+    let answer = own.answer(1);
+    assert_eq!(answer.get("ok"), Some(&Value::Bool(true)), "{answer:?}");
+    let block = answer["block"].as_str().expect("a block id").to_owned();
+
+    let (_viewer, answer) = ask_for_lease(&socket, &block);
+    assert!(matches!(answer, Message::Done { req: 1, .. }), "{answer:?}");
+    let asked = own.until("event", "lease-requested");
+    assert_eq!(asked["block"].as_str(), Some(block.as_str()));
+    assert!(asked["principal"].as_str().is_some(), "{asked:?}");
 }

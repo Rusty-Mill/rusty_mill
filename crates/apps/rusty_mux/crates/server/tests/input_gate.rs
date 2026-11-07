@@ -1,6 +1,7 @@
 //! The input gate (C77): an owner-only block takes input from its owner
 //! and from clients the owner granted, and every byte typed into it is
-//! reported to the owner, or refused when the owner can't be told.
+//! reported to the owner, or refused when the owner can't be told. A
+//! viewer may ask the owner for a grant (Q26); the owner decides.
 
 #![cfg(any(target_os = "linux", windows))]
 
@@ -21,6 +22,7 @@ const OWNER: Features = BASE
     .union(Features::OWNERSHIP)
     .union(Features::INPUT_GATE)
     .union(Features::TAKEOVER);
+const ASKING: Features = OWNER.union(Features::LEASE_REQUESTS);
 
 fn now_ms() -> u64 {
     let since = SystemTime::now().duration_since(UNIX_EPOCH).expect("clock");
@@ -254,4 +256,98 @@ fn input_waits_for_an_owner_in_its_grace_and_its_grants_survive() {
     };
     assert_eq!(from, peer.id());
     assert!(seq >= 2, "numbered after the first: {seq}");
+}
+
+/// The next lease request `owner` is told of: who asks, for which block.
+fn next_ask(owner: &mut Client) -> (BlockId, ClientId, String) {
+    loop {
+        if let Message::LeaseRequested {
+            block,
+            client,
+            principal,
+        } = owner.recv()
+        {
+            return (block, client, principal.id().to_owned());
+        }
+    }
+}
+
+#[test]
+fn a_viewer_asks_the_owner_and_the_owner_grants() {
+    let path = start_server();
+    let mut owner = Client::connect_with(&path, ASKING, None);
+    let mut viewer = Client::connect_with(&path, ASKING, None);
+    let window = window_for(&mut owner);
+    let block = launch_in(&mut owner, window, gated());
+    attach(&mut viewer, block);
+
+    viewer.request(|req| Message::RequestLease { req, block });
+    let (asked, who, principal) = next_ask(&mut owner);
+    assert_eq!((asked, who), (block, viewer.id()));
+    assert!(!principal.is_empty(), "the verified principal comes along");
+
+    grant(&mut owner, block, viewer.id());
+    viewer.request(|req| Message::AcquireLease { req, block });
+    write(&mut viewer, block, b"true\r").expect("granted input");
+    // Giving back is the viewer's release; the grant stays until revoked.
+    viewer.request(|req| Message::ReleaseLease { req, block });
+    viewer.request(|req| Message::AcquireLease { req, block });
+}
+
+#[test]
+fn a_request_is_refused_when_it_cannot_reach_an_owner_or_needs_none() {
+    let path = start_server();
+    let mut owner = Client::connect_with(&path, ASKING, None);
+    let mut viewer = Client::connect_with(&path, ASKING, None);
+    let window = window_for(&mut owner);
+    let block = launch_in(&mut owner, window, gated());
+    let open = launch_in(
+        &mut owner,
+        window,
+        Launch {
+            own: true,
+            ..Launch::default()
+        },
+    );
+    let reason = refused(&mut owner, |req| Message::RequestLease { req, block });
+    assert!(reason.contains("yours"), "{reason}");
+    let reason = refused(&mut viewer, |req| Message::RequestLease {
+        req,
+        block: open,
+    });
+    assert!(reason.contains("anyone"), "{reason}");
+
+    // An owner that can't hear requests is never asked.
+    let mut deaf = Client::connect_with(&path, OWNER, None);
+    let quiet = launch_in(&mut deaf, window, gated());
+    let reason = refused(&mut viewer, |req| Message::RequestLease {
+        req,
+        block: quiet,
+    });
+    assert!(reason.contains("owner_unreachable"), "{reason}");
+
+    // Nor is an owner in its grace.
+    drop(owner);
+    let deadline = Instant::now() + common::PATIENCE;
+    loop {
+        let reason = match viewer
+            .answer(|req| Message::RequestLease { req, block })
+            .as_slice()
+        {
+            [Message::Failed { reason, .. }] => reason.clone(),
+            _ => String::new(),
+        };
+        if reason.contains("owner_unreachable") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the request was never refused");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut plain = Client::connect_with(&path, OWNER, None);
+    let reason = refused(&mut plain, |req| Message::RequestLease {
+        req,
+        block: quiet,
+    });
+    assert!(reason.contains("feature bits"), "{reason}");
 }
