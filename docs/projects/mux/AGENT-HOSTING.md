@@ -321,6 +321,12 @@ that need the lease are `Input` (paste included), `Resize`, `terminal.send-keys`
 - **Reconnects** (D104 item 5). A grant survives a reconnect inside D44's 30 s grace, until
   `until`. After a revoke or expiry, asking again is refused (D46). D44 and D46 stand.
 
+**Lease requests** (rusty_term Q26, Nano 2026-11-07). Behind `LEASE_REQUESTS`, a viewer asks
+for a grant with `RequestLease{block}`. The server forwards it to the owner only, as
+`LeaseRequested{block, client, principal}`, and orch decides: for example, it grants Nano's
+principal at once. A GUI "Take over" sends the request, waits for `grant-changed`, then takes the
+lease; "Give back" releases it, and orch revokes the grant when the agent resumes.
+
 The owner itself may always take the lease. orch has no reason to type, but refusing it would add
 a rule with no use.
 

@@ -9,7 +9,7 @@ use std::rc::{Rc, Weak};
 use std::time::{Duration, Instant};
 
 use rusty_mux_core::{
-    BlockId, ClientId, EntityId, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
+    BlockId, ClientId, EntityId, Error, Event, ExitStatus, InputMode, Mux, Principal, Side, Size,
     Transport, WindowId,
 };
 use rusty_mux_proto::schema::{self, CallError, Value};
@@ -94,7 +94,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::AGENT_STATUS)
     .union(Features::TERMINAL_HISTORY)
     .union(Features::OWNERSHIP)
-    .union(Features::INPUT_GATE);
+    .union(Features::INPUT_GATE)
+    .union(Features::LEASE_REQUESTS);
 
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
@@ -1151,6 +1152,11 @@ impl State {
                 self.require(client, Features::INPUT_GATE, "revoke-lease")
                     .and_then(|()| done(self.mux.revoke(client, block, grantee))),
             ),
+            M::RequestLease { req, block } => (
+                req,
+                self.require(client, Features::LEASE_REQUESTS, "request-lease")
+                    .and_then(|()| self.request_lease(client, block)),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
@@ -1660,6 +1666,47 @@ impl State {
             .into());
         }
         Ok(Some((block, client)))
+    }
+
+    /// Tells `block`'s owner that `client` asks for its lease (Q26): one
+    /// [`Message::LeaseRequested`], to the owner only. The owner decides.
+    fn request_lease(&mut self, client: ClientId, block: BlockId) -> Result<Outcome, Refusal> {
+        let target = self.mux.block(block).ok_or(Error::UnknownBlock(block))?;
+        if target.input() != InputMode::OwnerOnly {
+            return Err(format!("block {block} takes input from anyone: acquire its lease").into());
+        }
+        let owner = target
+            .owner()
+            .and_then(|o| o.client())
+            .ok_or(Error::Orphaned(block))?;
+        if owner == client {
+            return Err(format!("block {block} is yours: acquire its lease").into());
+        }
+        // As C77's input reports: an owner behind on its output isn't sent
+        // more, so a flood of asks can't push it over its budget.
+        let reachable = self
+            .clients
+            .get(&owner)
+            .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
+        if !reachable || !self.has(owner, Features::LEASE_REQUESTS) {
+            return Err(
+                format!("owner_unreachable: block {block}'s owner can't be asked now").into(),
+            );
+        }
+        let principal = self
+            .mux
+            .client(client)
+            .ok_or(Error::UnknownClient(client))?
+            .principal()
+            .clone();
+        let ask = Message::LeaseRequested {
+            block,
+            client,
+            principal,
+        };
+        self.send(owner, &ask);
+        self.flush();
+        Ok(Outcome::Done(None))
     }
 
     /// Tells `block`'s owner of `data`, which `from` just wrote to its

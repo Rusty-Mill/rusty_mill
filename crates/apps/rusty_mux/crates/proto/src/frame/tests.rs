@@ -397,6 +397,29 @@ fn every_message_round_trips() {
             block,
             mode: Echo::Unknown,
         },
+        Message::GrantLease {
+            req: 20,
+            block,
+            client: ClientId::from_uuid(Uuid::new_v4()),
+            until: 1_700_000_000_000,
+        },
+        Message::RevokeLease {
+            req: 21,
+            block,
+            client: ClientId::from_uuid(Uuid::new_v4()),
+        },
+        Message::RequestLease { req: 22, block },
+        Message::InputBatch {
+            block,
+            client: ClientId::from_uuid(Uuid::new_v4()),
+            seq: 3,
+            data: b"ls\r".to_vec(),
+        },
+        Message::LeaseRequested {
+            block,
+            client: ClientId::from_uuid(Uuid::new_v4()),
+            principal: Principal::unix(1000, Some("alice".into())).expect("valid"),
+        },
     ];
     for message in messages {
         round_trip(message);

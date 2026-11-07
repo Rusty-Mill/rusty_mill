@@ -191,6 +191,13 @@ impl Features {
     /// carries its input mode regardless, since older decoders skip it.
     pub const INPUT_GATE: Self = Self(1 << 36);
 
+    /// Lease requests (Q26): a client asks an owner-only block's owner for
+    /// a grant with [`Message::RequestLease`], and the owner, which must
+    /// have negotiated it too, hears it as [`Message::LeaseRequested`]. The
+    /// owner alone decides, answering with [`Message::GrantLease`] or not
+    /// at all.
+    pub const LEASE_REQUESTS: Self = Self(1 << 37);
+
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
@@ -578,6 +585,15 @@ pub enum Message {
         block: BlockId,
         client: ClientId,
     },
+    /// Asks the owner of owner-only `block` to grant this client its lease.
+    /// Done once the owner has been told, which grants nothing: a grant
+    /// shows as [`Event::GrantChanged`]. Refused for the owner itself, for
+    /// a block that isn't owner-only, and while the owner can't be told.
+    /// Negotiated with [`Features::LEASE_REQUESTS`].
+    RequestLease {
+        req: u64,
+        block: BlockId,
+    },
     // Server to client.
     /// With [`Features::EVENT_SEQ`], `cursor` is where this client's event
     /// stream starts: events after it follow, the replayed ones first. It
@@ -666,6 +682,14 @@ pub enum Message {
         client: ClientId,
         seq: u64,
         data: Vec<u8>,
+    },
+    /// `client`, verified as `principal`, asks for a grant on `block`; sent
+    /// to the block's owner only, and never an event. Negotiated with
+    /// [`Features::LEASE_REQUESTS`].
+    LeaseRequested {
+        block: BlockId,
+        client: ClientId,
+        principal: Principal,
     },
     /// The block's [`Echo`] changed, or the client just attached; it
     /// precedes the Output read after the change. Negotiated with
@@ -803,6 +827,7 @@ mod ty {
     pub const NAME_SESSION: u8 = 0x20;
     pub const GRANT_LEASE: u8 = 0x21;
     pub const REVOKE_LEASE: u8 = 0x22;
+    pub const REQUEST_LEASE: u8 = 0x23;
     pub const WELCOME: u8 = 0x81;
     pub const DONE: u8 = 0x82;
     pub const FAILED: u8 = 0x83;
@@ -817,6 +842,7 @@ mod ty {
     pub const ECHO_MODE: u8 = 0x8c;
     pub const DATAGRAM: u8 = 0x8d;
     pub const INPUT_BATCH: u8 = 0x8e;
+    pub const LEASE_REQUESTED: u8 = 0x8f;
 }
 
 impl Message {
@@ -1016,6 +1042,7 @@ impl Message {
                     .uuid(CLIENT, client.uuid());
                 ty::REVOKE_LEASE
             }
+            M::RequestLease { req, block } => req_block(out, *req, *block, ty::REQUEST_LEASE),
             M::InputBatch {
                 block,
                 client,
@@ -1027,6 +1054,15 @@ impl Message {
                     .varint(SEQ, *seq)
                     .bytes(DATA, data);
                 ty::INPUT_BATCH
+            }
+            M::LeaseRequested {
+                block,
+                client,
+                principal,
+            } => {
+                out.uuid(BLOCK, block.uuid()).uuid(CLIENT, client.uuid());
+                put_principal(out, principal);
+                ty::LEASE_REQUESTED
             }
             M::Welcome {
                 features,
@@ -1276,6 +1312,15 @@ impl Message {
                 client: client(&f, CLIENT)?,
                 seq: f.varint(SEQ)?,
                 data: f.bytes(DATA)?.to_vec(),
+            },
+            ty::REQUEST_LEASE => M::RequestLease {
+                req: f.varint(REQ)?,
+                block: block(&f, BLOCK)?,
+            },
+            ty::LEASE_REQUESTED => M::LeaseRequested {
+                block: block(&f, BLOCK)?,
+                client: client(&f, CLIENT)?,
+                principal: principal(&f, PRINCIPAL)?,
             },
             ty::WELCOME => M::Welcome {
                 features: Features(f.varint(FEATURES)?),
