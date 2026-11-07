@@ -19,7 +19,7 @@ Resolved items are checked and point to the D# that answers them.
 
 - [x] Q10 (2026-10-31, n; answered: D130): FreeBSD as a server target. (mux handoff §5; mem_3ad9e90e2e784da98297a7b0f974d3d4)
 - [x] Q11 (2026-10-31, y for C70; answered: D75): Scrollback budget beyond 10k rows (mux D14). `SCROLLBACK_MAX = 10_000` today (NOTES §2). Partly answered: keep 10k in memory, older rows spill to disk with C70 (ROADMAP.md Q3, Nano 2026-11-04 12:07Z "Q3 concur", mem_037b99d20da14b7a955cb2c09e3ea24f); the disk limit is still open and is set in C70's plan.
-- [ ] Q12 (2026-10-31, n): Version-mismatch errors, with C36.
+- [x] Q12 (2026-10-31, n; answered: D144): Version-mismatch errors, with C36. Behaviour from term ROADMAP question 9 (Nano, 2026-11-04 12:23Z); the wire fields still need Nano on the C36 (a) PR.
 - [ ] Q13 (2026-10-28, y before shared mode): Restrict C33 force-disconnect (card 507, D35).
 - [ ] Q14 (2026-10-23, n): Is snapshot encode speed against libghostty a hard target? (NOTES §3 Q2; ROADMAP Phase 0 "Open: reliable ≤ 11.2 ms encode")
 - [ ] Q15 (2026-10-23, n): A config key to make mode 2027 clustering the default? (NOTES §3 Q7, D13)

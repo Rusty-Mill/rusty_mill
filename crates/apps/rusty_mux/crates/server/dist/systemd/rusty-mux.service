@@ -1,0 +1,23 @@
+# rusty_mux personal server (C69 slice (c)), started by rusty-mux.socket on
+# the first connection. The server takes the socket from systemd and leaves
+# its name to systemd. Without --idle-exit it keeps running while the
+# socket unit is enabled; add `--idle-exit SECS` to ExecStart to have it
+# stop when it has had no block and no client for SECS (the socket stays,
+# and the next connection starts it again).
+# ExecStart finds rusty-mux-server on systemd's executable search path;
+# give its full path (for example %h/.cargo/bin/rusty-mux-server) if it is
+# installed elsewhere.
+
+[Unit]
+Description=rusty_mux server
+Requires=rusty-mux.socket
+After=rusty-mux.socket
+
+[Service]
+# Stopping the unit ends the server and its blocks' programs; the sessions
+# it saved (C45, every few seconds) come back, with fresh shells, on the
+# next start.
+ExecStart=rusty-mux-server
+
+[Install]
+Also=rusty-mux.socket

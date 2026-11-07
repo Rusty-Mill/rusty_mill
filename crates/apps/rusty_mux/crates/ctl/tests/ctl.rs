@@ -1012,6 +1012,8 @@ fn a_bad_command_line_exits_2() {
 fn no_server_exits_4() {
     let output = ctl(&socket_path("none"), &["create-session", "--name", "x"]);
     assert_eq!(output.status.code(), Some(4));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("no server is running"), "{said}");
 }
 
 #[test]

@@ -14,8 +14,8 @@ not part of C69, and it needs Nano's go ([term ROADMAP](../term/ROADMAP.md) ques
 | Slice | What | State |
 |---|---|---|
 | (a) | Own the socket's name (Orca O6) and a default socket, so the socket argument is optional | done (#1555) |
-| (b) | Auto-start from `rusty-mux` and `rusty-mux-gui`, and `--idle-exit SECS` | this PR |
-| (c) | systemd user units, socket activation (`LISTEN_FDS`) | next |
+| (b) | Auto-start from `rusty-mux` and `rusty-mux-gui`, and `--idle-exit SECS` | done (#1558) |
+| (c) | systemd user units, socket activation (`LISTEN_FDS`) | this PR |
 | (d) | utmp entries | deferred: needs setgid `utmp` or `libutempter`, both owner gates (pack Q29) |
 
 FreeBSD is not a server target (pack D130, Nano "Q8 not now").
@@ -85,9 +85,29 @@ A started server is the client's child until the client exits. If it idle-exits 
 stays a zombie until then. The client has already disconnected by that point, so this is
 short-lived.
 
-## (c) systemd (next)
+## (c) systemd
 
-User units `rusty-mux.service` and `rusty-mux.socket` ship in the repo under
-`crates/apps/rusty_mux/crates/server/dist/systemd/`, installed by hand; the server takes the
-listener from `LISTEN_FDS`/`LISTEN_PID` and never removes the name systemd owns. No installer
-command (a write outside the repo, pack Q28) and no Windows service (pack D134).
+User units ship in the repo, at `crates/apps/rusty_mux/crates/server/dist/systemd/`, and are
+installed by hand (instructions in the files). There is no installer command, because that would
+write outside the repo (pack Q28), and there is no Windows service (pack D134).
+
+- `rusty-mux.socket` listens on `%t/rusty_mux/default.sock`, which is the default socket. Its
+  settings are `SocketMode=0600`, `DirectoryMode=0700` and `RemoveOnStop=yes`.
+- `rusty-mux.service` runs `rusty-mux-server` and gets the listener from systemd.
+- The server takes the listener (`rusty_mux_server::endpoint::inherited`) only when `LISTEN_PID`
+  is its own pid and `LISTEN_FDS` is 1. It refuses more than one socket, and refuses an fd 3 that
+  is not an open Unix socket.
+- The server removes the `LISTEN_*` variables before anything starts, so blocks' programs don't
+  inherit them.
+- When it has the listener from systemd, the server binds nothing and never removes the name.
+  `--idle-exit` still works: the server stops, systemd keeps the socket, and the next connection
+  starts the server again.
+
+Checked with `systemd-socket-activate` and covered by `server/tests/endpoint.rs`.
+
+The Windows test on Beast (2026-11-07, main b8ae0b9b) passed. `rusty-mux-gui` with no arguments
+started a server with no window, a second GUI shared it, and the server outlived both GUIs while
+its blocks lived. After the blocks closed, it stopped about 60 s later; when the GUI had been
+killed rather than closed, it took about 30 s longer (`ORPHAN_GRACE`).
+
+C69 is done except (d), utmp entries, which is deferred (pack Q29).
