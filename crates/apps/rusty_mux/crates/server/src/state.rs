@@ -1682,7 +1682,13 @@ impl State {
         if owner == client {
             return Err(format!("block {block} is yours: acquire its lease").into());
         }
-        if !self.clients.contains_key(&owner) || !self.has(owner, Features::LEASE_REQUESTS) {
+        // As C77's input reports: an owner behind on its output isn't sent
+        // more, so a flood of asks can't push it over its budget.
+        let reachable = self
+            .clients
+            .get(&owner)
+            .is_some_and(|out| out.queued() <= INPUT_REPORT_LIMIT);
+        if !reachable || !self.has(owner, Features::LEASE_REQUESTS) {
             return Err(
                 format!("owner_unreachable: block {block}'s owner can't be asked now").into(),
             );
