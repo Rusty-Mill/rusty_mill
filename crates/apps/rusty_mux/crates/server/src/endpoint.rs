@@ -93,6 +93,49 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+/// The first descriptor systemd passes (`SD_LISTEN_FDS_START`).
+const LISTEN_FD: std::os::fd::RawFd = 3;
+
+/// The listening socket systemd passed by socket activation (C69 slice
+/// (c)), if `LISTEN_PID` names this process and `LISTEN_FDS` counts one:
+/// the server then binds nothing and never removes the name, which
+/// systemd owns. More than one descriptor, or one that is not a listening
+/// Unix socket, is an error. `env` is the process's environment, read
+/// before any thread starts; the caller removes the variables so blocks'
+/// programs don't see them.
+pub fn inherited(env: impl Fn(&str) -> Option<String>) -> io::Result<Option<UnixListener>> {
+    let ours = env("LISTEN_PID").is_some_and(|pid| pid == std::process::id().to_string());
+    if !ours {
+        return Ok(None);
+    }
+    match env("LISTEN_FDS").as_deref() {
+        Some("1") => {}
+        Some(n) => {
+            return Err(io::Error::other(format!(
+                "socket activation passed {n} sockets; the server takes one"
+            )));
+        }
+        None => return Ok(None),
+    }
+    use std::os::fd::FromRawFd;
+    /// `F_GETFD`: fails with `EBADF` when the descriptor isn't open.
+    const F_GETFD: i32 = 1;
+    if rusty_libc::fd::fcntl(LISTEN_FD, F_GETFD, 0).is_err() {
+        return Err(io::Error::other("socket activation: fd 3 is not open"));
+    }
+    // SAFETY: systemd hands this process fd 3 for its own use (sd_listen_fds);
+    // LISTEN_PID names this process, so nothing else here owns it, and it is
+    // taken once.
+    let listener = unsafe { UnixListener::from_raw_fd(LISTEN_FD) };
+    listener.local_addr().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("socket activation: fd 3 is not a Unix socket: {e}"),
+        )
+    })?;
+    Ok(Some(listener))
+}
+
 /// Makes `dir` this user's private directory (0700) if it is missing, and
 /// checks it either way: each part as [`check_parts`] requires, the last
 /// this user's and open to no one else. Its parent must exist.
@@ -233,6 +276,29 @@ mod tests {
         owned.release().expect("release");
         UnixStream::connect(&socket).expect("the successor's name stays");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn vars(pairs: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    #[test]
+    fn socket_activation_is_ignored_unless_it_names_this_process() {
+        assert!(inherited(vars(Vec::new())).expect("none").is_none());
+        let another = vec![("LISTEN_PID", "1".into()), ("LISTEN_FDS", "1".into())];
+        assert!(inherited(vars(another)).expect("another's").is_none());
+    }
+
+    #[test]
+    fn socket_activation_with_several_sockets_is_refused() {
+        let pid = std::process::id().to_string();
+        let several = vec![("LISTEN_PID", pid), ("LISTEN_FDS", "2".into())];
+        assert!(inherited(vars(several)).is_err());
     }
 
     #[test]

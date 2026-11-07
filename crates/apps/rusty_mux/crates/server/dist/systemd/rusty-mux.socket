@@ -1,0 +1,19 @@
+# rusty_mux personal server socket (C69 slice (c)): a systemd *user* unit.
+# Install by hand (nothing writes these for you):
+#   cp rusty-mux.socket rusty-mux.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now rusty-mux.socket
+# The socket is the default one clients use, so `rusty-mux` and
+# `rusty-mux-gui` find the server without starting their own.
+
+[Unit]
+Description=rusty_mux server socket
+
+[Socket]
+ListenStream=%t/rusty_mux/default.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

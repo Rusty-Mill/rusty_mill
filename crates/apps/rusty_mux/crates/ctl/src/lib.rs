@@ -510,11 +510,18 @@ fn finish(result: Result<Exit, Failure>, socket: &Path, err: &mut dyn Write) -> 
         Err(Failure::Failed(reason)) => report(err, Exit::Failed, &reason),
         Err(Failure::TimedOut) => report(err, Exit::TimedOut, "timed out"),
         Err(Failure::Missing(reason)) => report(err, Exit::Target, &reason),
-        Err(Failure::Unreachable(e)) => report(
-            err,
-            Exit::Unreachable,
-            &format!("{}: {e}", socket.display()),
-        ),
+        Err(Failure::Unreachable(e)) => report(err, Exit::Unreachable, &unreachable(socket, &e)),
+    }
+}
+
+/// Why `socket` could not be reached: plainly "no server" when nothing is
+/// there at all (the raw error says little, and on Windows it is
+/// `WSAENETDOWN`), else the error.
+fn unreachable(socket: &Path, e: &io::Error) -> String {
+    let shown = socket.display();
+    match std::fs::symlink_metadata(socket) {
+        Err(_) => format!("no server is running: nothing at {shown}"),
+        Ok(_) => format!("{shown}: {e}"),
     }
 }
 
