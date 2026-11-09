@@ -510,11 +510,26 @@ fn finish(result: Result<Exit, Failure>, socket: &Path, err: &mut dyn Write) -> 
         Err(Failure::Failed(reason)) => report(err, Exit::Failed, &reason),
         Err(Failure::TimedOut) => report(err, Exit::TimedOut, "timed out"),
         Err(Failure::Missing(reason)) => report(err, Exit::Target, &reason),
-        Err(Failure::Unreachable(e)) => report(
-            err,
-            Exit::Unreachable,
-            &format!("{}: {e}", socket.display()),
-        ),
+        Err(Failure::Unreachable(e)) => report(err, Exit::Unreachable, &unreachable(socket, &e)),
+    }
+}
+
+/// Why `socket` could not be reached: plainly "no server" when nothing is
+/// there at all (the raw error says little, and on Windows it is
+/// `WSAENETDOWN`), else the error.
+fn unreachable(socket: &Path, e: &io::Error) -> String {
+    let lookup = std::fs::symlink_metadata(socket).err().map(|e| e.kind());
+    describe(socket, e, lookup)
+}
+
+/// [`unreachable`]'s message, given how looking `socket` up failed: only
+/// a lookup that found nothing says no server is running; any other
+/// failure (no permission, a loop) keeps the connect error.
+fn describe(socket: &Path, e: &io::Error, lookup: Option<io::ErrorKind>) -> String {
+    let shown = socket.display();
+    match lookup {
+        Some(io::ErrorKind::NotFound) => format!("no server is running: nothing at {shown}"),
+        _ => format!("{shown}: {e}"),
     }
 }
 
@@ -1095,6 +1110,24 @@ fn require_sync(features: Features) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_missing_socket_reads_as_no_server() {
+        let socket = Path::new("/run/x/default.sock");
+        let refused = io::Error::from(io::ErrorKind::ConnectionRefused);
+        let missing = describe(socket, &refused, Some(io::ErrorKind::NotFound));
+        assert_eq!(
+            missing,
+            "no server is running: nothing at /run/x/default.sock"
+        );
+        for lookup in [Some(io::ErrorKind::PermissionDenied), None] {
+            let said = describe(socket, &refused, lookup);
+            assert!(
+                said.starts_with("/run/x/default.sock: "),
+                "{lookup:?}: {said}"
+            );
+        }
+    }
 
     #[test]
     fn a_hook_tool_name_is_kept_only_when_a_report_can_carry_it() {
