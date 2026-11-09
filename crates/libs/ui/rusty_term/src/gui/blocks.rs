@@ -445,7 +445,7 @@ pub(crate) fn paint(
             (0, 0),
         ));
     }
-    if let Some(b) = scene.banner {
+    if let Some(b) = &scene.banner {
         let painted = banner::paint(
             b,
             &scene.ribbon.target,
@@ -959,6 +959,8 @@ pub(crate) struct BodyState {
     link: Link,
     /// The shown session's name, once it ended while the link was down.
     ended: Option<String>,
+    /// The info notice the banner shows while the link is up (D63).
+    notice: Option<super::source::Notice>,
     home: Option<String>,
     branches: HashMap<String, (Option<String>, Instant)>,
     text: UiText,
@@ -975,6 +977,7 @@ impl BodyState {
             target: String::new(),
             link: Link::Up,
             ended: None,
+            notice: None,
             home,
             branches: HashMap::new(),
             text: UiText::embedded()?,
@@ -1030,10 +1033,16 @@ impl BodyState {
         self.ended.as_deref()
     }
 
-    /// The banner the link shows, if any (D62).
+    /// Show `notice` while the link is up, or stop with `None` (D63).
+    pub(crate) fn set_notice(&mut self, notice: Option<super::source::Notice>) {
+        self.notice = notice;
+    }
+
+    /// The banner the link shows, if any (D62); while it is up, the
+    /// notice, which comes back after a link banner it waited behind (D63).
     pub(crate) fn banner(&self) -> Option<Banner> {
         match self.link {
-            Link::Up => None,
+            Link::Up => self.notice.clone().map(Banner::Info),
             Link::Reconnecting { left, trying } => Some(Banner::Reconnecting { left, trying }),
             Link::Back { kept } => Some(Banner::Back { kept }),
             Link::Down { trying } => Some(Banner::Down { trying }),
@@ -1486,6 +1495,25 @@ mod tests {
             }
         }
         assert!(left.abs_diff(right) * 4 < left + right, "{left} vs {right}");
+    }
+
+    #[test]
+    fn a_notice_shows_while_the_link_is_up_and_waits_behind_a_link_banner() {
+        let Some(mut state) = BodyState::new() else {
+            return;
+        };
+        let notice = crate::gui::source::Notice {
+            title: "vm runs an older rusty_mux".into(),
+            detail: "It lacks shared focus.".into(),
+        };
+        state.set_notice(Some(notice.clone()));
+        assert_eq!(state.banner(), Some(Banner::Info(notice.clone())));
+        state.set_link(Link::Down { trying: false });
+        assert_eq!(state.banner(), Some(Banner::Down { trying: false }));
+        state.set_link(Link::Up);
+        assert_eq!(state.banner(), Some(Banner::Info(notice)));
+        state.set_notice(None);
+        assert_eq!(state.banner(), None);
     }
 
     #[test]

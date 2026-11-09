@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_json::{Map, Value};
 use rusty_mux_core::{BlockId, ClientId, Event, InputMode, Size, WindowId};
+use rusty_mux_proto::older::Older;
 use rusty_mux_proto::{Cursor, Features, Launch, Message, Program, Takeover, encode};
 use rusty_uuid::Uuid;
 
@@ -380,12 +381,15 @@ fn open(
 ) -> Result<(Link, Option<Cursor>), Failure> {
     let stream = connect(socket, &Stop::default())?;
     let mut conn = Conn::new(stream.try_clone()?, Stop::default());
+    let asked = NEEDED.union(GATE).union(Features::LEASE_REQUESTS);
     conn.send(&Message::Hello {
-        features: NEEDED.union(GATE).union(Features::LEASE_REQUESTS),
+        version: Some(rusty_mux_proto::VERSION.into()),
+        features: asked,
         resume,
         takeover,
     })?;
     let Message::Welcome {
+        version,
         features,
         client,
         cursor,
@@ -394,6 +398,10 @@ fn open(
     else {
         return Err(Failure::Failed("expected Welcome".into()));
     };
+    // Once per connection: a reconnect may reach an upgraded server.
+    if let Some(older) = Older::check(asked, features, version.as_deref()) {
+        eprintln!("rusty-mux-ctl: {}", older.line("the server"));
+    }
     if !features.contains(NEEDED) {
         return Err(Failure::Failed(format!(
             "the server cannot own blocks: needs feature bits {:#x}",

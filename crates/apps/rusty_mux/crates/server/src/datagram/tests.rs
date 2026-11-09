@@ -179,6 +179,7 @@ impl Peer {
     ) -> (StreamId, rusty_mux_proto::Takeover) {
         let stream = self.assoc.open().expect("a stream");
         let hello = Message::Hello {
+            version: None,
             features,
             resume: None,
             takeover,
@@ -198,6 +199,7 @@ impl Peer {
     async fn connect(&mut self, features: Features) -> (StreamId, ClientId) {
         let stream = self.assoc.open().expect("a stream");
         let hello = Message::Hello {
+            version: None,
             features,
             resume: None,
             takeover: None,

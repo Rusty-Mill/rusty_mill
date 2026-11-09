@@ -111,6 +111,9 @@ fn ok(socket: &Path, args: &[&str]) -> String {
         "{args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // A current server grants what ctl asks for: no older-server notice.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("It lacks"), "{args:?}: {stderr}");
     stdout(&output).trim().to_owned()
 }
 
@@ -1076,6 +1079,7 @@ fn legacy_server_with(
                 buf.drain(..used);
                 if let Message::Hello { .. } = message {
                     let welcome = Message::Welcome {
+                        version: None,
                         features,
                         client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
                         cursor: None,
@@ -1506,10 +1510,11 @@ fn watch_needs_rules_and_takes_only_a_cursor() {
 
 /// A server that numbers events but offers only `features`: it welcomes
 /// the client with a cursor, then stays silent until it hangs up.
-fn events_server(features: rusty_mux_proto::Features) -> PathBuf {
+fn events_server(features: rusty_mux_proto::Features, version: Option<&str>) -> PathBuf {
     use rusty_mux_core::ClientId;
     use rusty_mux_proto::{Cursor, Message, decode, encode};
 
+    let version = version.map(str::to_owned);
     let path = socket_path("old-events");
     let listener = StdListener::bind(&path).expect("bind");
     std::thread::spawn(move || {
@@ -1523,6 +1528,7 @@ fn events_server(features: rusty_mux_proto::Features) -> PathBuf {
             }
         }
         let welcome = Message::Welcome {
+            version,
             features,
             client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
             cursor: Some(Cursor {
@@ -1540,6 +1546,29 @@ fn events_server(features: rusty_mux_proto::Features) -> PathBuf {
 }
 
 #[test]
+fn an_older_server_is_named_on_stderr() {
+    use rusty_mux_proto::Features;
+
+    let old = Features::EVENT_SEQ.union(Features::SYNC);
+    let pwd = config_file("older-notice", RULES);
+    let refused = with_config(&events_server(old, None), &pwd, &["watch"]);
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("the server runs an unknown rusty_mux version"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("It lacks "), "{stderr}");
+
+    let refused = with_config(&events_server(old, Some("0.0.1")), &pwd, &["watch"]);
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    let named = format!(
+        "the server runs an older rusty_mux (0.0.1; this is {})",
+        rusty_mux_proto::VERSION
+    );
+    assert!(stderr.contains(&named), "{stderr}");
+}
+
+#[test]
 fn watch_refuses_rules_for_events_the_server_never_sends() {
     use rusty_mux_proto::Features;
 
@@ -1547,7 +1576,7 @@ fn watch_refuses_rules_for_events_the_server_never_sends() {
         .union(Features::SYNC)
         .union(Features::STATUS);
     let pwd = config_file("needs-pwd", RULES);
-    let refused = with_config(&events_server(old), &pwd, &["watch"]);
+    let refused = with_config(&events_server(old, None), &pwd, &["watch"]);
     assert_eq!(refused.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
     assert!(
@@ -1560,7 +1589,7 @@ fn watch_refuses_rules_for_events_the_server_never_sends() {
         r#"{"on": [{"event": "bell", "action": "list"}]}"#,
     );
     let pwd_only = old.union(Features::TERMINAL_EVENTS);
-    let refused = with_config(&events_server(pwd_only), &bell, &["watch"]);
+    let refused = with_config(&events_server(pwd_only, None), &bell, &["watch"]);
     assert_eq!(refused.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
     assert!(stderr.contains("does not send `bell` events"), "{stderr}");
@@ -1571,7 +1600,7 @@ fn watch_refuses_rules_for_events_the_server_never_sends() {
         "generic",
         r#"{"on": [{"event": "session-created", "action": "list"}]}"#,
     );
-    let mut child = ctl_command(&events_server(old), &["watch"])
+    let mut child = ctl_command(&events_server(old, None), &["watch"])
         .env("RUSTY_MUX_CONFIG", &generic)
         .stdout(Stdio::piped())
         .spawn()
@@ -2263,6 +2292,7 @@ fn bridge_carries_the_protocol_over_stdin_and_stdout() {
         .expect("run rusty-mux-ctl bridge");
     let mut input = bridge.stdin.take().expect("stdin");
     let hello = Message::Hello {
+        version: None,
         features: Features::SYNC,
         resume: None,
         takeover: None,

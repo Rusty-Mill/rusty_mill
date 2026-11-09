@@ -809,6 +809,7 @@ mod client {
         let classic = Size::new(80, 24).map_err(|e| e.to_string())?;
         let area = window_size(&term, classic);
         conn.send(&Message::Hello {
+            version: Some(rusty_mux_proto::VERSION.into()),
             features: CONTROL,
             resume: None,
             takeover: None,
@@ -821,8 +822,13 @@ mod client {
             cancel: &NEVER,
         };
         let Welcomed {
-            features, takeover, ..
+            features,
+            takeover,
+            version,
+            ..
         } = req.welcome()?;
+        // Said once the screen is restored, where it can be read (C36).
+        let older = rusty_mux_client::older::Older::check(CONTROL, features, version.as_deref());
         let block = match block {
             Some(id) => BlockId::from_uuid(parse_uuid(id)?),
             None => req.create(area, first_session_name(features))?,
@@ -972,6 +978,9 @@ mod client {
         drop(kept);
         let _ = (reader.map(JoinHandle::join), keyboard.join());
         restore(&mut term);
+        if let Some(older) = &older {
+            eprintln!("\r\nrusty-mux: {}", older.line("the server"));
+        }
         match down {
             Some(Some(why)) => eprintln!("\r\nrusty-mux: the path to the server was down: {why}"),
             Some(None) => eprintln!("\r\nrusty-mux: the path to the server was down"),
@@ -3041,6 +3050,7 @@ mod client {
             let mut conn = Conn::new(stream);
             assert!(matches!(conn.recv().expect("hello"), Message::Hello { .. }));
             conn.send(&Message::Welcome {
+                version: None,
                 features: CONTROL.union(PANE),
                 client: taken.client,
                 cursor: None,

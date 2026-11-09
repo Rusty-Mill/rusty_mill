@@ -70,6 +70,7 @@ fn handshake(stream: Stream, features: Features) -> Conn<Stream> {
     let mut conn = Conn::new(stream);
     assert!(matches!(conn.recv().expect("hello"), Message::Hello { .. }));
     conn.send(&Message::Welcome {
+        version: None,
         features,
         client: ClientId::from_uuid(Uuid::nil()),
         cursor: None,
@@ -1394,6 +1395,7 @@ fn a_client_the_server_let_go_is_not_brought_back() {
 fn disconnect_everyone(socket: &Path) {
     let mut conn = Conn::new(Stream::connect(socket).expect("connect"));
     conn.send(&Message::Hello {
+        version: None,
         features: Features::CHECKPOINT_V6
             .union(Features::INSPECT)
             .union(Features::LABELS),
@@ -1657,6 +1659,7 @@ fn a_block_zoomed_away_and_back_is_leased_again_at_once() {
 fn control(socket: &Path) -> Conn<Stream> {
     let mut conn = Conn::new(Stream::connect(socket).expect("connect"));
     conn.send(&Message::Hello {
+        version: None,
         features: Features::CHECKPOINT_V6
             .union(Features::INSPECT)
             .union(Features::LAYOUT)

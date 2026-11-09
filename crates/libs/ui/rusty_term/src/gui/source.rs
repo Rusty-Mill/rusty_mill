@@ -257,6 +257,14 @@ pub enum Act {
 #[derive(Clone)]
 pub struct Remote(pub(crate) EventLoopProxy<UserEvent>);
 
+/// An info notice for an attached window's banner (gui-design D26, D63),
+/// such as a server older than its client.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub title: String,
+    pub detail: String,
+}
+
 impl Remote {
     /// Show `tree`; `None` closes the window (the source's window is gone).
     pub fn layout(&self, tree: Option<Tree>) -> bool {
@@ -292,6 +300,13 @@ impl Remote {
     /// (gui-design D62, handoff D114). A layout ends it.
     pub fn ended(&self, name: String) -> bool {
         self.0.send_event(UserEvent::Ended(name)).is_ok()
+    }
+
+    /// Show `notice` in the banner while the link is up, until the user
+    /// dismisses it or a later notice replaces it; `None` takes it away
+    /// (gui-design D63).
+    pub fn notice(&self, notice: Option<Notice>) -> bool {
+        self.0.send_event(UserEvent::Notice(notice)).is_ok()
     }
 
     /// Show `session` on the top strip.

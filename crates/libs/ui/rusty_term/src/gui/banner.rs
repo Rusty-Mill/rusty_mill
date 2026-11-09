@@ -1,6 +1,8 @@
 //! An attached window's connection banner (gui-design F5, D62): under the
 //! strip, over the top of the blocks, saying the window is reconnecting,
 //! is back, or can't reach its server, with the buttons that act on it.
+//! The same box carries an info notice while the link is up (D26, D63),
+//! such as a server older than this client.
 //!
 //! Pure: [`paint`] draws a [`Banner`] into a [`Painted`] with its buttons'
 //! boxes. Sizes are the pack's logical px times the DPI scale.
@@ -8,6 +10,7 @@
 use super::blocks::{Glyph, paint_glyph};
 use super::chrome::Chrome;
 use super::paint::{Pixmap, Rect, icons};
+use super::source::Notice;
 use super::text::{UiText, Weight};
 
 /// Banner height, its rules included.
@@ -37,7 +40,7 @@ const BUTTON_PX: f32 = 12.0;
 const DISABLED: f32 = 0.45;
 
 /// Which banner shows (D62).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Banner {
     /// F5a: the link is lost; `left` seconds of grace remain, and an
     /// attempt runs while `trying`.
@@ -48,6 +51,8 @@ pub(crate) enum Banner {
     /// The grace ran out or the user stopped trying; a Retry runs while
     /// `trying`.
     Down { trying: bool },
+    /// An info notice (D63), shown until dismissed.
+    Info(Notice),
 }
 
 /// What a banner button does.
@@ -59,6 +64,8 @@ pub(crate) enum Action {
     Stop,
     /// "Dismiss": hide F5b.
     Dismiss,
+    /// "Dismiss" on an info notice: hide it for this connection.
+    DismissInfo,
 }
 
 /// A painted banner: its pixels and the buttons that can be clicked.
@@ -83,8 +90,8 @@ pub(crate) fn height(scale: f32) -> usize {
 }
 
 /// "Reconnecting to {target}, {n} s left" and the rest of `banner`'s words.
-fn words(banner: Banner, target: &str) -> (String, &'static str) {
-    match banner {
+fn words(banner: &Banner, target: &str) -> (String, String) {
+    let (title, detail) = match banner {
         Banner::Reconnecting { left, .. } => (
             format!("Reconnecting to {target}, {left} s left"),
             "Your blocks keep running on the server.",
@@ -101,10 +108,12 @@ fn words(banner: Banner, target: &str) -> (String, &'static str) {
             format!("Can't reach {target}"),
             "Check the network and that rusty_mux is running there.",
         ),
-    }
+        Banner::Info(notice) => return (notice.title.clone(), notice.detail.clone()),
+    };
+    (title, detail.to_owned())
 }
 
-fn buttons(banner: Banner) -> Vec<Button> {
+fn buttons(banner: &Banner) -> Vec<Button> {
     let button = |label, secondary, action, enabled| Button {
         label,
         secondary,
@@ -113,18 +122,19 @@ fn buttons(banner: Banner) -> Vec<Button> {
     };
     match banner {
         // Retry now tries at once; the countdown goes on (D62).
-        Banner::Reconnecting { trying, .. } => vec![
+        &Banner::Reconnecting { trying, .. } => vec![
             button("Retry now", true, Action::Retry, !trying),
             button("Stop trying", false, Action::Stop, true),
         ],
         Banner::Back { .. } => vec![button("Dismiss", true, Action::Dismiss, true)],
-        Banner::Down { trying } => vec![button("Retry", true, Action::Retry, !trying)],
+        &Banner::Down { trying } => vec![button("Retry", true, Action::Retry, !trying)],
+        Banner::Info(_) => vec![button("Dismiss", true, Action::DismissInfo, true)],
     }
 }
 
 /// Paint `banner` for `target` across `width` px.
 pub(crate) fn paint(
-    banner: Banner,
+    banner: &Banner,
     target: &str,
     width: usize,
     (c, s): (&Chrome, f32),
@@ -173,6 +183,8 @@ pub(crate) fn paint(
             ICON_STROKE * s,
             c.failure,
         ),
+        // Slate, not oxide: nothing failed (D63).
+        Banner::Info(_) => p.icon(icons::ALERT, x, icon_y, ICON * s, ICON_STROKE * s, c.muted),
     }
     x += (ICON + GAP) * s;
 
@@ -195,6 +207,8 @@ pub(crate) fn paint(
     placed.reverse();
 
     let (title, detail) = words(banner, target);
+    // A notice's title comes from the server, so it may be long.
+    let title = font.fit(&title, Weight::Medium, TITLE_PX * s, (right - x).max(0.0));
     let title_base = mid + font.centre_drop(TITLE_PX * s);
     x += p.text(
         font,
@@ -205,7 +219,7 @@ pub(crate) fn paint(
         title_base,
         c.text,
     ) + GAP * s;
-    if let Banner::Reconnecting { left, .. } = banner {
+    if let &Banner::Reconnecting { left, .. } = banner {
         let track = Rect {
             x,
             y: mid - BAR.1 * s / 2.0,
@@ -227,7 +241,7 @@ pub(crate) fn paint(
         x += track.w + GAP * s;
     }
     let room = (right - x).max(0.0);
-    let detail = font.fit(detail, Weight::Regular, DETAIL_PX * s, room);
+    let detail = font.fit(&detail, Weight::Regular, DETAIL_PX * s, room);
     let detail_base = mid + font.centre_drop(DETAIL_PX * s);
     p.text(
         font,
@@ -289,7 +303,7 @@ mod tests {
     #[test]
     fn the_banner_is_44_px_and_full_width() {
         let p = paint(
-            Banner::Down { trying: false },
+            &Banner::Down { trying: false },
             "vm",
             900,
             (&chrome(), 2.0),
@@ -302,7 +316,7 @@ mod tests {
     fn each_banner_has_its_buttons() {
         let c = chrome();
         let mut f = font();
-        let mut at = |b| actions(&paint(b, "vm", 1100, (&c, 1.0), &mut f));
+        let mut at = |b: Banner| actions(&paint(&b, "vm", 1100, (&c, 1.0), &mut f));
         let reconnecting = Banner::Reconnecting {
             left: 22,
             trying: false,
@@ -310,6 +324,16 @@ mod tests {
         assert_eq!(at(reconnecting), [Action::Retry, Action::Stop]);
         assert_eq!(at(Banner::Back { kept: true }), [Action::Dismiss]);
         assert_eq!(at(Banner::Down { trying: false }), [Action::Retry]);
+    }
+
+    #[test]
+    fn an_info_notice_has_dismiss_alone() {
+        let info = Banner::Info(Notice {
+            title: "vm runs an older rusty_mux".into(),
+            detail: "It lacks shared focus.".into(),
+        });
+        let p = paint(&info, "vm", 1100, (&chrome(), 1.0), &mut font());
+        assert_eq!(actions(&p), [Action::DismissInfo]);
     }
 
     #[test]
@@ -321,12 +345,12 @@ mod tests {
             trying: true,
         };
         assert_eq!(
-            actions(&paint(trying, "vm", 1100, (&c, 1.0), &mut f)),
+            actions(&paint(&trying, "vm", 1100, (&c, 1.0), &mut f)),
             [Action::Stop]
         );
         let down = Banner::Down { trying: true };
         assert!(
-            paint(down, "vm", 1100, (&c, 1.0), &mut f)
+            paint(&down, "vm", 1100, (&c, 1.0), &mut f)
                 .buttons
                 .is_empty()
         );
@@ -336,8 +360,14 @@ mod tests {
     fn the_error_banner_has_an_oxide_top_border() {
         let c = chrome();
         let mut f = font();
-        let down = paint(Banner::Down { trying: false }, "vm", 600, (&c, 1.0), &mut f);
-        let back = paint(Banner::Back { kept: true }, "vm", 600, (&c, 1.0), &mut f);
+        let down = paint(
+            &Banner::Down { trying: false },
+            "vm",
+            600,
+            (&c, 1.0),
+            &mut f,
+        );
+        let back = paint(&Banner::Back { kept: true }, "vm", 600, (&c, 1.0), &mut f);
         let px = |p: &Painted, y: usize| p.pixmap.pixels()[y * p.pixmap.width + 300];
         assert_eq!((px(&down, 0), px(&down, 1)), (c.failure, c.failure));
         assert_eq!((px(&back, 0), px(&back, 1)), (c.line, c.raised));
@@ -352,7 +382,7 @@ mod tests {
                 left,
                 trying: false,
             };
-            let p = paint(b, "vm", 1200, (&c, 1.0), &mut f);
+            let p = paint(&b, "vm", 1200, (&c, 1.0), &mut f);
             let row = p.pixmap.height / 2;
             p.pixmap.pixels()[row * p.pixmap.width..][..p.pixmap.width]
                 .iter()
@@ -366,12 +396,12 @@ mod tests {
     #[test]
     fn words_say_what_happened() {
         assert_eq!(
-            words(Banner::Back { kept: false }, "vm").1,
+            words(&Banner::Back { kept: false }, "vm").1,
             "Connected again. Input leases from before were released."
         );
         assert_eq!(
             words(
-                Banner::Reconnecting {
+                &Banner::Reconnecting {
                     left: 7,
                     trying: false
                 },

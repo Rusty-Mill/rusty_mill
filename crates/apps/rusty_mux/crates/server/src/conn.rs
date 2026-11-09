@@ -38,6 +38,9 @@ pub(crate) async fn run<R, W>(
             features,
             resume,
             takeover,
+            // No client is refused for its version: the floor is none until
+            // a breaking change needs one (C36, handoff D144).
+            version: _,
         })) => (features, resume, takeover),
         Ok(Some(other)) => return eprintln!("rusty-mux-server: expected Hello, got {other:?}"),
         Ok(None) => return,
@@ -248,6 +251,7 @@ mod regression {
             let (peer, server) = UnixStream::pair().unwrap();
             peer.write_all(
                 &encode(&Message::Hello {
+                    version: None,
                     features: Features::CHECKPOINT_V6,
                     resume: None,
                     takeover: None,
@@ -355,6 +359,7 @@ mod tests {
             ));
             let features = Features::CHECKPOINT_V6.union(Features::TAKEOVER);
             let hello = Message::Hello {
+                version: None,
                 features,
                 resume: None,
                 takeover: None,
@@ -448,6 +453,7 @@ mod tests {
                 |_, _| {},
             ));
             let hello = Message::Hello {
+                version: None,
                 features: Features::CONFIG_RELOAD,
                 resume: None,
                 takeover: None,

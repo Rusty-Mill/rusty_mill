@@ -48,11 +48,13 @@ fn every_message_round_trips() {
             data: vec![1, 2, 3],
         },
         Message::Hello {
+            version: None,
             features: Features::from_bits(0b101),
             resume: None,
             takeover: None,
         },
         Message::Hello {
+            version: Some("0.2.0".into()),
             features: Features::EVENT_SEQ,
             resume: Some(Cursor {
                 epoch: block.uuid(),
@@ -334,12 +336,14 @@ fn every_message_round_trips() {
             name: "fix-login".into(),
         },
         Message::Welcome {
+            version: None,
             features: Features::NONE,
             client,
             cursor: None,
             token: None,
         },
         Message::Welcome {
+            version: Some("0.1.0".into()),
             features: Features::EVENT_SEQ,
             client,
             cursor: Some(Cursor {
@@ -651,6 +655,7 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
     assert_eq!(
         decode(&unknown).unwrap().unwrap().0,
         Message::Hello {
+            version: None,
             features: Features::NONE,
             resume: None,
             takeover: None,
@@ -665,6 +670,7 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
     assert_eq!(
         decode(&repeated).unwrap().unwrap().0,
         Message::Hello {
+            version: None,
             features: Features::from_bits(REPEATS),
             resume: None,
             takeover: None,
@@ -913,6 +919,7 @@ fn near_limit_unknown_and_duplicate_fields_decode_last_value() {
             decode(&frame),
             Ok(Some((
                 Message::Hello {
+                    version: None,
                     features: Features::from_bits(42),
                     resume: None,
                     takeover: None,
@@ -1369,4 +1376,31 @@ fn a_datagram_key_never_shows_in_debug_and_a_short_one_is_refused() {
             .bytes(40, &[0xab; 31]);
     });
     assert!(decode(&short).is_err());
+}
+
+#[test]
+fn a_version_that_is_not_short_printable_ascii_is_dropped() {
+    let long = "1".repeat(65);
+    for bad in ["0.1.0\x1b[2J", "", long.as_str()] {
+        let frame = encode(&Message::Hello {
+            version: Some(bad.into()),
+            features: Features::NONE,
+            resume: None,
+            takeover: None,
+        })
+        .expect("encode");
+        let (decoded, _) = decode(&frame).expect("decode").expect("whole frame");
+        let Message::Hello { version, .. } = decoded else {
+            panic!("expected Hello");
+        };
+        assert_eq!(version, None, "{bad:?}");
+    }
+    let frame = raw_frame(0x01, |out| {
+        out.varint(10, 0);
+        out.bytes(57, &[0xff, 0xfe]);
+    });
+    let (decoded, _) = decode(&frame)
+        .expect("bad UTF-8 decodes")
+        .expect("whole frame");
+    assert!(matches!(decoded, Message::Hello { version: None, .. }));
 }

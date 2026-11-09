@@ -309,6 +309,7 @@ fn ask_for_lease(socket: &Path, block: &str) -> (UnixStream, Message) {
     let mut stream = UnixStream::connect(socket).expect("connect");
     let mut buf = Vec::new();
     let hello = Message::Hello {
+        version: None,
         features: Features::LEASE_REQUESTS,
         resume: None,
         takeover: None,

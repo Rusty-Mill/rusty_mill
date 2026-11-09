@@ -12,9 +12,9 @@
 //! ```
 //! use rusty_mux_proto::{Features, Message, decode, encode};
 //!
-//! let frame = encode(&Message::Hello { features: Features::NONE, resume: None, takeover: None })?;
+//! let frame = encode(&Message::Hello { features: Features::NONE, resume: None, takeover: None, version: None })?;
 //! let (message, used) = decode(&frame)?.expect("a whole frame");
-//! assert_eq!(message, Message::Hello { features: Features::NONE, resume: None, takeover: None });
+//! assert_eq!(message, Message::Hello { features: Features::NONE, resume: None, takeover: None, version: None });
 //! assert_eq!(used, frame.len());
 //! # Ok::<(), rusty_mux_proto::Error>(())
 //! ```
@@ -27,11 +27,15 @@ mod error;
 mod field;
 mod frame;
 mod message;
+pub mod older;
 pub mod schema;
 #[cfg(feature = "screen")]
 pub mod style;
 pub mod theme;
 mod varint;
+
+/// This build's protocol package version, sent in Hello and Welcome (C36).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub use error::Error;
 pub use frame::{MAX_FRAME, decode, encode};

@@ -180,12 +180,14 @@ impl Client {
             echoes: Vec::new(),
         };
         client.send(&Message::Hello {
+            version: None,
             features,
             resume,
             takeover,
         });
         match client.recv() {
             Message::Welcome {
+                version: _,
                 client: id,
                 cursor,
                 features: granted,
