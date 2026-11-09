@@ -311,7 +311,9 @@ fn linux_listener(
     Option<rusty_mux_server::endpoint::Owned>,
 )> {
     use rusty_mux_server::endpoint;
-    let inherited = endpoint::inherited(|name| std::env::var(name).ok());
+    // SAFETY: called once, at start, before the runtime or any block
+    // opens a descriptor, so fd 3 is still systemd's when it names us.
+    let inherited = unsafe { endpoint::inherited(|name| std::env::var(name).ok()) };
     for name in ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"] {
         // SAFETY: called before the runtime starts, so no other thread
         // reads the environment.

@@ -190,6 +190,10 @@ fn a_socket_from_systemd_is_served_and_its_name_left_alone() {
     let _block = common::block_for(&mut client);
     drop(client);
     assert!(
+        close_on_exec(running.0.id(), 3),
+        "the listener is close-on-exec, so blocks' programs don't inherit it"
+    );
+    assert!(
         !runtime.join("rusty_mux").join("default.sock").exists(),
         "an activated server binds nothing of its own"
     );
@@ -198,4 +202,17 @@ fn a_socket_from_systemd_is_served_and_its_name_left_alone() {
     drop(running);
     assert!(socket.exists(), "the name stays systemd's");
     let _ = std::fs::remove_dir_all(&runtime);
+}
+
+/// Whether `pid`'s descriptor `fd` is close-on-exec (`O_CLOEXEC` in the
+/// octal `flags:` line of its fdinfo).
+fn close_on_exec(pid: u32, fd: u32) -> bool {
+    const O_CLOEXEC: u32 = 0o2_000_000;
+    let info = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")).expect("fdinfo");
+    let flags = info
+        .lines()
+        .find_map(|line| line.strip_prefix("flags:"))
+        .and_then(|octal| u32::from_str_radix(octal.trim(), 8).ok())
+        .expect("flags");
+    flags & O_CLOEXEC != 0
 }

@@ -101,7 +101,8 @@ write outside the repo (pack Q28), and there is no Windows service (pack D134).
 - `rusty-mux.service` runs `rusty-mux-server` and gets the listener from systemd.
 - The server takes the listener (`rusty_mux_server::endpoint::inherited`) only when `LISTEN_PID`
   is its own pid and `LISTEN_FDS` is 1. It refuses more than one socket, and refuses an fd 3 that
-  is not an open Unix socket.
+  is not an open Unix socket. It makes the listener close-on-exec, which systemd leaves clear, so
+  no block's program inherits it.
 - The server removes the `LISTEN_*` variables before anything starts, so blocks' programs don't
   inherit them.
 - When it has the listener from systemd, the server binds nothing and never removes the name.
