@@ -144,7 +144,17 @@ SQLite through Cargo's `links = "sqlite3"` uniqueness constraint. Switching
 to system SQLite would leave the installed version outside this remediation.
 The root lock selects libsqlite3-sys 0.39.1 / SQLite 3.54.1 for both wrappers;
 SQLCipher is not enabled. The patched package stays at upstream 0.9.0 and
-retains its MIT/Apache licenses. No security-policy exception is added.
+retains its MIT/Apache licenses. The published archive contains executable
+regular files with only `../LICENSE-MIT` and `../LICENSE-APACHE` placeholders,
+so this import replaces those two placeholders with the canonical license texts
+from the archive's recorded upstream revision
+`003b698e99e024f3621b8043a2426fde5b741171`. Their immutable URLs and SHA-256
+hashes are recorded in `sources.json` and independently checked by the verifier.
+All imported regular files are intentionally normalized to non-executable Git
+mode 100644 (local umask may restrict read permissions); Rust
+source bytes remain identical to the published archive. These packaging deltas
+are included in the reproducible patch, together with the manifest and standalone
+lock changes. No security-policy exception is added.
 
 The monorepo maintainer owns this temporary manifest patch. Remove its root
 patch, workspace exclusion, vendor directory, source record and patch file

@@ -10,6 +10,7 @@ import io
 import json
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -56,6 +57,29 @@ def verify_manifest_alignment(root: Path) -> None:
         raise SystemExit(f"{name}: rust_crypto must enable the same global signature-v3 alias")
 
 
+def verify_packaging(root: Path, source: dict) -> None:
+    """Check pinned license texts and intentional non-executable Git modes."""
+    for name, license_source in source.get("license_sources", {}).items():
+        with urllib.request.urlopen(license_source["url"], timeout=60) as response:
+            data = response.read()
+        if hashlib.sha256(data).hexdigest() != license_source["sha256"]:
+            raise SystemExit(f"{root.name}: {name} upstream license checksum mismatch")
+        if (root / name).read_bytes() != data:
+            raise SystemExit(f"{root.name}: {name} must contain the canonical upstream license text")
+    if "git_file_mode" in source:
+        if source["git_file_mode"] != "100644":
+            raise SystemExit(f"{root.name}: unsupported Git file mode")
+        for path in root.rglob("*"):
+            # Git preserves only the executable bit; local umask may restrict
+            # group/other read bits in both the reproduction and checkout.
+            mode = path.lstat().st_mode
+            if path.is_symlink() or (
+                not path.is_dir()
+                and (not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o111)
+            ):
+                raise SystemExit(f"{root.name}: {path.relative_to(root)} must be a regular non-executable file")
+
+
 def main() -> None:
     sources = json.loads((ROOT / "sources.json").read_text())
     with tempfile.TemporaryDirectory(prefix="rusty-crypto-provenance-") as temporary:
@@ -76,7 +100,9 @@ def main() -> None:
             if changed:
                 raise SystemExit(f"{name}: unreproducible files: {changed}")
             verify_manifest_alignment(ROOT / name)
-            print(f"{name} {source['version']}: verified archive + patch + manifest alignment, {len(actual)} files")
+            verify_packaging(stage / name, source)
+            verify_packaging(ROOT / name, source)
+            print(f"{name} {source['version']}: verified archive + patch + manifest alignment + packaging, {len(actual)} files")
 
 
 if __name__ == "__main__":
