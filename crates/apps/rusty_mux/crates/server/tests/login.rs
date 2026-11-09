@@ -201,6 +201,7 @@ fn closed_unheard(socket: &Path) -> bool {
     let mut stream = UnixStream::connect(socket).expect("connect");
     stream.set_read_timeout(Some(PATIENCE)).expect("timeout");
     let hello = Message::Hello {
+        version: None,
         features: IDENTITY,
         resume: None,
         takeover: None,

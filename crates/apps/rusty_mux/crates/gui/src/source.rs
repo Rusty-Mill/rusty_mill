@@ -36,11 +36,12 @@ use rusty_mux_client::attach::{
     first_session_name, reach, take_over_with,
 };
 use rusty_mux_client::checkpoint::Receiver;
+use rusty_mux_client::older::Older;
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
 use rusty_mux_proto::{Features, Launch, Message, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Detached, Dir, Feed, Link, PaneIo, Remote, Session, Source, Tree,
+    Act, BlockInfo, Detached, Dir, Feed, Link, Notice, PaneIo, Remote, Session, Source, Tree,
 };
 
 use crate::headers::{Call, Effect, Headers};
@@ -146,6 +147,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         headers: Headers::default(),
         me: welcomed.takeover,
         asks: inbox,
+        older: Older::check(GUI, welcomed.features, welcomed.version.as_deref()),
     };
     events.follow_blocks();
     events.take_headers(&entries);
@@ -163,6 +165,7 @@ fn hello(socket: &Path) -> Result<(UnixStream, Conn<UnixStream>), String> {
     let stream = connect(socket)?;
     let mut conn = Conn::new(clone(&stream)?);
     conn.send(&Message::Hello {
+        version: Some(rusty_mux_proto::VERSION.into()),
         features: GUI,
         resume: None,
         takeover: None,
@@ -412,6 +415,7 @@ fn create_window(socket: &Path, session: SessionId) -> Result<(), String> {
     let stream = connect(socket)?;
     let mut conn = Conn::new(stream);
     conn.send(&Message::Hello {
+        version: Some(rusty_mux_proto::VERSION.into()),
         features: Features::CHECKPOINT_V6.union(Features::ACTIVE_WINDOW),
         resume: None,
         takeover: None,
@@ -458,6 +462,8 @@ pub enum Out {
     Blocks(Vec<(u64, BlockInfo)>),
     /// How the connection to the server stands (gui-design D62).
     Link(Link),
+    /// The info notice for the banner, `None` for none (gui-design D63).
+    Notice(Option<Notice>),
     /// The shown session, named, ended while the connection was away:
     /// show no block until another is picked (handoff D114).
     Ended(String),
@@ -484,6 +490,9 @@ pub struct Events {
     /// server keeps it.
     me: Option<Takeover>,
     asks: Inbox<Ask>,
+    /// What the server lacks of what this client asked for, said once per
+    /// connection (C36).
+    older: Option<Older>,
 }
 
 impl Events {
@@ -499,6 +508,7 @@ impl Events {
                 Out::Session(s) => remote.session(s),
                 Out::Blocks(b) => remote.blocks(b),
                 Out::Link(l) => remote.link(l),
+                Out::Notice(n) => remote.notice(n),
                 Out::Ended(name) => remote.ended(name),
             })
         });
@@ -508,7 +518,10 @@ impl Events {
     /// the connection back when it ends. The session goes out first, then
     /// every change.
     pub fn run(mut self, mut out: impl FnMut(Out) -> bool) {
-        if !(out(Out::Session(self.session())) && out(Out::Zoom(self.zoomed()))) {
+        if !(out(Out::Session(self.session()))
+            && out(Out::Zoom(self.zoomed()))
+            && out(Out::Notice(self.notice())))
+        {
             return;
         }
         let stop = loop {
@@ -715,7 +728,14 @@ impl Events {
             by: Some(Instant::now() + HANDSHAKE),
             cancel: &NEVER,
         };
-        let Welcomed { takeover, .. } = req.welcome()?;
+        let Welcomed {
+            takeover,
+            features,
+            version,
+            ..
+        } = req.welcome()?;
+        // A new connection, perhaps to an upgraded server: told afresh.
+        self.older = Older::check(GUI, features, version.as_deref());
         let entries = req.call(|req| Message::List { req })?;
         let next = req.next;
         let writer = Conn::new(clone(&stream)?);
@@ -756,6 +776,7 @@ impl Events {
             return (!told).then_some(Stop::Closed);
         }
         let shown = out(Out::Link(Link::Back { kept }))
+            && (kept || out(Out::Notice(self.notice())))
             && self.layout(out)
             && self.focus_shown(out)
             && out(Out::Session(self.session()))
@@ -848,6 +869,16 @@ impl Events {
     }
 
     /// The session as the strip shows it.
+    /// The banner's notice for a server older than this client.
+    fn notice(&self) -> Option<Notice> {
+        let older = self.older.as_ref()?;
+        let host = self.session().host;
+        Some(Notice {
+            title: older.title(&host),
+            detail: older.detail(),
+        })
+    }
+
     fn session(&self) -> Session {
         let shown = &mut *self.state.shown();
         let mut session = self.model.session(&mut StripKeys {

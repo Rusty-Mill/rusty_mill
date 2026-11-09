@@ -168,6 +168,8 @@ pub(crate) enum UserEvent {
     /// The shown session ended while the source was away
     /// ([`Remote::ended`]).
     Ended(String),
+    /// An info notice for the banner ([`Remote::notice`]).
+    Notice(Option<super::source::Notice>),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -6049,6 +6051,17 @@ impl WindowState<'_> {
         }
     }
 
+    /// Show `notice` in the banner's place while the link is up (D63).
+    fn show_notice(&mut self, notice: Option<super::source::Notice>) {
+        let Some(body) = &mut self.body else {
+            return;
+        };
+        body.set_notice(notice);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// The link is down: the server-bound controls take no input (D62).
     fn offline(&self) -> bool {
         self.body.as_ref().is_some_and(BodyState::offline)
@@ -6061,6 +6074,7 @@ impl WindowState<'_> {
             (Action::Retry, Some(source)) => source.retry(),
             (Action::Stop, Some(source)) => source.stop(),
             (Action::Dismiss, _) => self.show_link(super::source::Link::Up),
+            (Action::DismissInfo, _) => self.show_notice(None),
             (_, None) => {}
         }
     }
@@ -7410,6 +7424,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Ended(name) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
                     w.show_ended(name);
+                }
+            }
+            UserEvent::Notice(notice) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                    w.show_notice(notice);
                 }
             }
             UserEvent::ConfigChanged => {

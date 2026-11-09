@@ -820,14 +820,26 @@ impl<S: io::Read + Write> Session<'_, S> {
         resume: Option<Cursor>,
     ) -> Result<(Features, Option<Cursor>), Failure> {
         self.conn.send(&Message::Hello {
+            version: Some(rusty_mux_proto::VERSION.into()),
             features,
             resume,
             takeover: None,
         })?;
         match self.conn.recv()? {
             Message::Welcome {
-                features, cursor, ..
-            } => Ok((features, cursor)),
+                features: granted,
+                cursor,
+                version,
+                ..
+            } => {
+                // Said on stderr, so scripts reading stdout are not upset (C36).
+                let older =
+                    rusty_mux_proto::older::Older::check(features, granted, version.as_deref());
+                if let Some(older) = older {
+                    eprintln!("rusty-mux-ctl: {}", older.line("the server"));
+                }
+                Ok((granted, cursor))
+            }
             other => Err(Failure::Failed(format!("expected Welcome, got {other:?}"))),
         }
     }

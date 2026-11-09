@@ -218,7 +218,59 @@ impl Features {
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
+
+    /// The features in `self` that are not in `other`.
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
+
+    /// What each feature in `self` lets a user do, in a few words, for a
+    /// client that names what a server lacks (C36). Reserved bits and bits
+    /// no name is known for are left out.
+    pub fn names(self) -> Vec<&'static str> {
+        NAMES
+            .iter()
+            .filter(|(feature, _)| self.contains(*feature))
+            .map(|(_, name)| *name)
+            .collect()
+    }
 }
+
+/// [`Features::names`]' words, in bit order.
+const NAMES: &[(Features, &str)] = &[
+    (Features::EVENT_SEQ, "resuming after a reconnect"),
+    (Features::SYNC, "sync"),
+    (Features::INSPECT, "inspecting sessions"),
+    (Features::BLOCK_CALL, "block calls"),
+    (Features::STATUS, "block status"),
+    (Features::TERMINAL_EVENTS, "terminal events"),
+    (Features::PROGRAM_EVENTS, "program events"),
+    (Features::LAUNCH, "choosing a block's program and folder"),
+    (Features::PROCESS, "foreground programs"),
+    (Features::CAPTURE, "capture options"),
+    (Features::LABELS, "names"),
+    (Features::LAYOUT, "layouts"),
+    (Features::CHECKPOINT_V6, "screen checkpoints"),
+    (Features::TAKEOVER, "keeping a client across reconnects"),
+    (Features::ECHO_ACK, "predictive echo"),
+    (Features::DATAGRAM, "UDP transport"),
+    (Features::IDENTITY, "client identities"),
+    (Features::MORE_PROGRAM_EVENTS, "clipboard events"),
+    (Features::ACTIVE_WINDOW, "active windows"),
+    (Features::CONFIG_RELOAD, "config reload"),
+    (Features::TERMINAL_CONTROL, "terminal reset and resize"),
+    (Features::LAYOUT_EDIT, "layout editing"),
+    (Features::FOCUS, "shared focus"),
+    (Features::SESSION_NAMES, "generated session names"),
+    (Features::NAME_SESSION, "naming sessions"),
+    (Features::TERMINAL_MORE, "terminal modes and clear"),
+    (Features::TERMINAL_SHELL, "shell integration"),
+    (Features::AGENT_STATUS, "agent status"),
+    (Features::TERMINAL_HISTORY, "history on disk"),
+    (Features::OWNERSHIP, "block ownership"),
+    (Features::INPUT_GATE, "the input gate"),
+    (Features::LEASE_REQUESTS, "lease requests"),
+];
 
 /// A position in one server run's event stream: the run's `epoch` and the
 /// `seq` of the last event delivered. Sequence numbers start at 1 in each
@@ -378,6 +430,9 @@ pub enum Message {
         resume: Option<Cursor>,
         /// With [`Features::TAKEOVER`]: the client this connection continues.
         takeover: Option<Takeover>,
+        /// The client's package version, for the server's log and floor
+        /// (C36); `None` from an older client.
+        version: Option<String>,
     },
     CreateSession {
         req: u64,
@@ -606,6 +661,10 @@ pub enum Message {
         /// With [`Features::TAKEOVER`]: the secret a later connection
         /// presents to take this client over. Each Welcome replaces it.
         token: Option<Uuid>,
+        /// The server's package version, which a client names when the
+        /// server lacks features it asked for (C36); `None` from an older
+        /// server.
+        version: Option<String>,
     },
     /// The request succeeded; `created` is the new entity's id, if it made one.
     Done {
@@ -789,8 +848,11 @@ const ORPHANED: u32 = 54;
 const INPUT: u32 = 55;
 /// When a grant ends, unix ms on the server's clock.
 const UNTIL: u32 = 56;
-// IDs 1..=UNTIL are recognized. Extend this bound when adding field IDs.
-pub(crate) const FIELD_COUNT: usize = UNTIL as usize;
+/// A peer's package version, in Hello and Welcome (C36): text, or absent
+/// from a peer older than the field.
+const VERSION: u32 = 57;
+// IDs 1..=VERSION are recognized. Extend this bound when adding field IDs.
+pub(crate) const FIELD_COUNT: usize = VERSION as usize;
 
 mod ty {
     pub const HELLO: u8 = 0x01;
@@ -853,10 +915,14 @@ impl Message {
                 features,
                 resume,
                 takeover,
+                version,
             } => {
                 put_cursor(out.varint(FEATURES, features.bits()), *resume);
                 if let Some(Takeover { client, token }) = takeover {
                     out.uuid(CLIENT, client.uuid()).uuid(TOKEN, *token);
+                }
+                if let Some(version) = version {
+                    out.bytes(VERSION, version.as_bytes());
                 }
                 ty::HELLO
             }
@@ -1069,12 +1135,16 @@ impl Message {
                 client,
                 cursor,
                 token,
+                version,
             } => {
                 let out = out
                     .varint(FEATURES, features.bits())
                     .uuid(CLIENT, client.uuid());
                 if let Some(token) = token {
                     out.uuid(TOKEN, *token);
+                }
+                if let Some(version) = version {
+                    out.bytes(VERSION, version.as_bytes());
                 }
                 put_cursor(out, *cursor);
                 ty::WELCOME
@@ -1151,6 +1221,7 @@ impl Message {
                 features: Features(f.varint(FEATURES)?),
                 resume: get_cursor(&f)?,
                 takeover: get_takeover(&f)?,
+                version: f.opt(VERSION, In::string)?,
             },
             ty::CREATE_SESSION => M::CreateSession {
                 req: f.varint(REQ)?,
@@ -1327,6 +1398,7 @@ impl Message {
                 client: client(&f, CLIENT)?,
                 cursor: get_cursor(&f)?,
                 token: f.opt(TOKEN, In::uuid)?,
+                version: f.opt(VERSION, In::string)?,
             },
             ty::DONE => M::Done {
                 req: f.varint(REQ)?,

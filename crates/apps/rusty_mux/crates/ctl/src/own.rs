@@ -381,11 +381,13 @@ fn open(
     let stream = connect(socket, &Stop::default())?;
     let mut conn = Conn::new(stream.try_clone()?, Stop::default());
     conn.send(&Message::Hello {
+        version: Some(rusty_mux_proto::VERSION.into()),
         features: NEEDED.union(GATE).union(Features::LEASE_REQUESTS),
         resume,
         takeover,
     })?;
     let Message::Welcome {
+        version: _,
         features,
         client,
         cursor,

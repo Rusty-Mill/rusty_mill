@@ -111,6 +111,9 @@ fn ok(socket: &Path, args: &[&str]) -> String {
         "{args:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // A current server grants what ctl asks for: no older-server notice.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("rusty_mux"), "{args:?}: {stderr}");
     stdout(&output).trim().to_owned()
 }
 
@@ -1057,6 +1060,7 @@ fn legacy_server_with(
                 buf.drain(..used);
                 if let Message::Hello { .. } = message {
                     let welcome = Message::Welcome {
+                        version: None,
                         features,
                         client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
                         cursor: None,
@@ -1504,6 +1508,7 @@ fn events_server(features: rusty_mux_proto::Features) -> PathBuf {
             }
         }
         let welcome = Message::Welcome {
+            version: None,
             features,
             client: ClientId::from_uuid(rusty_uuid::Uuid::nil()),
             cursor: Some(Cursor {
@@ -1518,6 +1523,21 @@ fn events_server(features: rusty_mux_proto::Features) -> PathBuf {
         std::thread::sleep(PATIENCE);
     });
     path
+}
+
+#[test]
+fn an_older_server_is_named_on_stderr() {
+    use rusty_mux_proto::Features;
+
+    let old = Features::EVENT_SEQ.union(Features::SYNC);
+    let pwd = config_file("older-notice", RULES);
+    let refused = with_config(&events_server(old), &pwd, &["watch"]);
+    let stderr = String::from_utf8_lossy(&refused.stderr).into_owned();
+    assert!(
+        stderr.contains("the server runs an unknown rusty_mux version"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("It lacks "), "{stderr}");
 }
 
 #[test]
@@ -2244,6 +2264,7 @@ fn bridge_carries_the_protocol_over_stdin_and_stdout() {
         .expect("run rusty-mux-ctl bridge");
     let mut input = bridge.stdin.take().expect("stdin");
     let hello = Message::Hello {
+        version: None,
         features: Features::SYNC,
         resume: None,
         takeover: None,

@@ -124,6 +124,7 @@ fn a_block_shows_its_screen_takes_typing_and_follows_the_layout() {
     let other = UnixStream::connect(&socket).expect("connect");
     let mut conn = Conn::new(other);
     conn.send(&Message::Hello {
+        version: None,
         features: CONTROL,
         resume: None,
         takeover: None,
@@ -366,6 +367,7 @@ fn a_session_picked_in_the_switcher_is_shown_on_the_same_connection() {
     let other = UnixStream::connect(&socket).expect("connect");
     let mut conn = Conn::new(other);
     conn.send(&Message::Hello {
+        version: None,
         features: CONTROL,
         resume: None,
         takeover: None,
@@ -414,6 +416,7 @@ fn a_session_picked_in_the_switcher_is_shown_on_the_same_connection() {
 fn control(socket: &std::path::Path) -> Conn<UnixStream> {
     let mut conn = Conn::new(UnixStream::connect(socket).expect("connect"));
     conn.send(&Message::Hello {
+        version: None,
         features: CONTROL,
         resume: None,
         takeover: None,
@@ -677,6 +680,7 @@ fn a_client_the_server_let_go_waits_for_retry_and_attaches_anew() {
     // Another client ends the GUI's control client: it is not kept.
     let mut conn = Conn::new(UnixStream::connect(&socket).expect("connect"));
     conn.send(&Message::Hello {
+        version: None,
         features: CONTROL.union(Features::LABELS),
         resume: None,
         takeover: None,

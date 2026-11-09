@@ -645,6 +645,7 @@ impl State {
                 client,
                 cursor,
                 token,
+                version: Some(rusty_mux_proto::VERSION.into()),
             },
         );
         missed.iter().for_each(|m| self.send(client, m));

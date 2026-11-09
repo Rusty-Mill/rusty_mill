@@ -103,6 +103,8 @@ pub struct Welcomed {
     /// How to take this connection's client over later, if the server
     /// allows it.
     pub takeover: Option<Takeover>,
+    /// The server's version, if it sent one (C36).
+    pub version: Option<String>,
 }
 
 #[cfg(unix)]
@@ -360,6 +362,7 @@ pub fn take_over_with(
     let mut conn = Conn::new(clone(&stream).map_err(retry)?);
     let writer = Conn::new(clone(&stream).map_err(retry)?);
     conn.send(&Message::Hello {
+        version: Some(rusty_mux_proto::VERSION.into()),
         features,
         resume: None,
         takeover: Some(plan.me),
@@ -450,6 +453,7 @@ pub fn reach(
     let mut conn = Conn::new(clone(&stream).map_err(retry)?);
     let writer = Conn::new(clone(&stream).map_err(retry)?);
     conn.send(&Message::Hello {
+        version: Some(rusty_mux_proto::VERSION.into()),
         features: PANE,
         resume: None,
         takeover: resume,
@@ -480,11 +484,13 @@ pub fn welcomed(message: Message) -> Result<Welcomed, String> {
             features,
             client,
             token,
+            version,
             ..
         } => Ok(Welcomed {
             features,
             client,
             takeover: token.map(|token| Takeover { client, token }),
+            version,
         }),
         other => Err(format!("expected Welcome, got {other:?}")),
     }

@@ -48,11 +48,13 @@ fn every_message_round_trips() {
             data: vec![1, 2, 3],
         },
         Message::Hello {
+            version: None,
             features: Features::from_bits(0b101),
             resume: None,
             takeover: None,
         },
         Message::Hello {
+            version: Some("0.2.0".into()),
             features: Features::EVENT_SEQ,
             resume: Some(Cursor {
                 epoch: block.uuid(),
@@ -334,12 +336,14 @@ fn every_message_round_trips() {
             name: "fix-login".into(),
         },
         Message::Welcome {
+            version: None,
             features: Features::NONE,
             client,
             cursor: None,
             token: None,
         },
         Message::Welcome {
+            version: Some("0.1.0".into()),
             features: Features::EVENT_SEQ,
             client,
             cursor: Some(Cursor {
@@ -651,6 +655,7 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
     assert_eq!(
         decode(&unknown).unwrap().unwrap().0,
         Message::Hello {
+            version: None,
             features: Features::NONE,
             resume: None,
             takeover: None,
@@ -665,6 +670,7 @@ fn decode_state_is_bounded_by_ids_not_by_field_count() {
     assert_eq!(
         decode(&repeated).unwrap().unwrap().0,
         Message::Hello {
+            version: None,
             features: Features::from_bits(REPEATS),
             resume: None,
             takeover: None,
@@ -913,6 +919,7 @@ fn near_limit_unknown_and_duplicate_fields_decode_last_value() {
             decode(&frame),
             Ok(Some((
                 Message::Hello {
+                    version: None,
                     features: Features::from_bits(42),
                     resume: None,
                     takeover: None,

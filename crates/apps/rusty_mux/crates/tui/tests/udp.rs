@@ -72,6 +72,7 @@ fn connect(path: &std::path::Path, takeover: Option<Takeover>) -> (Conn<UnixStre
     stream.set_read_timeout(Some(PATIENCE)).expect("timeout");
     let mut conn = Conn::new(stream);
     let hello = Message::Hello {
+        version: None,
         features: FEATURES,
         resume: None,
         takeover,
