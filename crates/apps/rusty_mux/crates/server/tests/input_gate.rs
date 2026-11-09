@@ -309,13 +309,18 @@ fn a_request_is_refused_when_it_cannot_reach_an_owner_or_needs_none() {
             ..Launch::default()
         },
     );
+    // rusty_mux_gui's lease matches these two by their ": acquire its
+    // lease" ending, and leases the block instead of asking.
     let reason = refused(&mut owner, |req| Message::RequestLease { req, block });
-    assert!(reason.contains("yours"), "{reason}");
+    assert_eq!(reason, format!("block {block} is yours: acquire its lease"));
     let reason = refused(&mut viewer, |req| Message::RequestLease {
         req,
         block: open,
     });
-    assert!(reason.contains("anyone"), "{reason}");
+    assert_eq!(
+        reason,
+        format!("block {open} takes input from anyone: acquire its lease")
+    );
 
     // An owner that can't hear requests is never asked.
     let mut deaf = Client::connect_with(&path, OWNER, None);

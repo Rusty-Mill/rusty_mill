@@ -58,7 +58,7 @@ gui-design D45–D49.
 | S4c | F5 reconnecting, error and reconnected banners (30 s grace, D44; leases survive a reconnect, D83; D110, D111, D113; gui-design D62) | arc GO |
 | S4d | F5 "Session {name} ended" panel with Open switcher (D112; gui-design D62) | arc GO |
 | S5 | Lease re-ask only: the GUI asks again for the focused block's lease after a reconnect or when `LeaseChanged` frees it (handoff D115). F3 take over (confirm first, gui-design D44) waits for C46/C77: it comes once agent blocks are known and taking over means asking for a grant (handoff D116) | arc GO |
-| S6 | F3 take over (C46/C77 and lease requests merged, handoff D120): on an owner-only block, "Take over" confirms first (gui-design D44), asks the owner (`RequestLease`), takes the lease once granted, and "Give back" releases it; header and confirm per gui-design D64, behaviour per handoff D151 | Nano's go, 2026-11-09 |
+| S6 | F3 take over (C46/C77 and lease requests merged, handoff D120): on an owner-only block, "Take over" confirms first (gui-design D44), asks the owner (`RequestLease`), takes the lease once granted, and "Give back" releases it; header and confirm per gui-design D64, behaviour per handoff D153 | Nano's go, 2026-11-09 |
 | Later | C55 runs and prompt marks, C53 images, C54 clipboard, C61–C64 | each needs Nano's own go (D36); C54 and C63 are security-relevant |
 | End | Retire local mode | after C69 and C45 |
 
