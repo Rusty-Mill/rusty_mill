@@ -1,5 +1,5 @@
 //! Unicode tables for the `unicode61` tokenizer, generated from SQLite
-//! 3.51.3's amalgamation (`fts5_unicode2.c`, itself generated from the
+//! 3.54.1's amalgamation (`fts5_unicode2.c`, itself generated from the
 //! Unicode Character Database). SQLite is in the public domain.
 //!
 //! Do not edit by hand: regenerate with the script described in
@@ -9,7 +9,7 @@
 #![allow(clippy::unreadable_literal)]
 
 /// `SQLITE_VERSION` of the amalgamation these tables came from.
-pub(super) const SQLITE_VERSION: &str = "3.51.3";
+pub(super) const SQLITE_VERSION: &str = "3.54.1";
 
 pub(super) const DIACRITIC_KEYS: [u16; 126] = [
     0, 1797, 1848, 1859, 1891, 1928, 1940, 1995, 2024, 2040, 2060, 2110, 2168, 2206, 2264, 2286,

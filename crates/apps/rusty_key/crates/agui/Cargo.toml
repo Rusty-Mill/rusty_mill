@@ -2,7 +2,7 @@
 name = "rk-agui"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT"
 publish = false
 description = "Serve a Rusty Keys session over AG-UI: a Session per thread behind rusty_agui's Agent trait, with the approval gate and plan exits as frontend tool calls (ADR-0007 follow-ons step 10)"

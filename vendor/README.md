@@ -126,3 +126,34 @@ additional compile check; no committed feature or provider configuration changes
 A direct `cargo check -p hyper-util -p quinn` invocation hit Cargo 1.98.1's
 feature-resolver panic when selecting the non-workspace optional dependency.
 The normal consumer check above succeeds and compiles the actual HTTP/3 closure.
+
+## SQLite compatibility for RUSTSEC-2026-0459
+
+`sqlx-sqlite` 0.9.0 is patched only in its two manifests: widen
+`libsqlite3-sys` from `>=0.30.1, <0.38.0` to `>=0.30.1, <0.40.0`.
+This backports the range on [upstream main ae659a0ca4e5e6708e589abc216f734deddb8e29](https://github.com/launchbadge/sqlx/blob/ae659a0ca4e5e6708e589abc216f734deddb8e29/sqlx-sqlite/Cargo.toml#L57).
+The standalone lock is regenerated for libsqlite3-sys 0.39.1 as well; Cargo
+selects its required bindgen/shlex updates. No SQLx Rust source or runtime
+behavior is patched. The original archive,
+registry checksum and VCS revision are in `sources.json`; the complete delta
+is `patches/sqlx-sqlite.patch`. `python3 vendor/verify.py` verifies all bytes.
+Upstream SQLx's own `src/lib.rs` documents widening this range as compatible.
+
+The published driver otherwise blocks rusqlite 0.41 and its patched bundled
+SQLite through Cargo's `links = "sqlite3"` uniqueness constraint. Switching
+to system SQLite would leave the installed version outside this remediation.
+The root lock selects libsqlite3-sys 0.39.1 / SQLite 3.54.1 for both wrappers;
+SQLCipher is not enabled. The patched package stays at upstream 0.9.0 and
+retains its MIT/Apache licenses. No security-policy exception is added.
+
+The monorepo maintainer owns this temporary manifest patch. Remove its root
+patch, workspace exclusion, vendor directory, source record and patch file
+once a published sqlx-sqlite release admits libsqlite3-sys 0.39. Rerun the
+shared rusqlite/SQLx WAL integration test and the affected SQLite consumers,
+locked all-features metadata and cargo-deny before removing it.
+
+```sh
+cargo test --locked -p rusty_sqlite --test sqlite_compat
+cargo test --locked -p rusty_sqlite -p rusty-db-sqlite -p rusty_multimodal_db_engine
+python3 vendor/verify.py
+```

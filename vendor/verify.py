@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reproduce the pinned crypto source patch from authenticated crate archives.
+"""Reproduce the pinned dependency source patches from authenticated crate archives.
 
 Run from any directory: python3 vendor/verify.py. Requires network and git.
 Downloads only the URLs/checksums in sources.json and writes only to a temporary
@@ -32,6 +32,12 @@ def verify_manifest_alignment(root: Path) -> None:
     original = tomllib.loads((root / "Cargo.toml.orig").read_text())
     normalized = tomllib.loads((root / "Cargo.toml").read_text())
     name = normalized["package"]["name"]
+    if name == "sqlx-sqlite":
+        expected = ">=0.30.1, <0.40.0"
+        for manifest in (original, normalized):
+            if manifest["dependencies"]["libsqlite3-sys"]["version"] != expected:
+                raise SystemExit("sqlx-sqlite: SQLite compatibility range must match in both manifests")
+        return
     for dependency in ["p256", "p384", "signature-v3"]:
         source = original.get("dependencies", {}).get(dependency)
         resolved = normalized.get("dependencies", {}).get(dependency)

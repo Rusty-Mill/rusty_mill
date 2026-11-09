@@ -9,5 +9,16 @@
       },
       "path_in_vcs": ""
     }
+  },
+  "sqlx-sqlite": {
+    "version": "0.9.0",
+    "archive": "https://static.crates.io/crates/sqlx-sqlite/sqlx-sqlite-0.9.0.crate",
+    "sha256": "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c",
+    "vcs": {
+      "git": {
+        "sha1": "003b698e99e024f3621b8043a2426fde5b741171"
+      },
+      "path_in_vcs": "sqlx-sqlite"
+    }
   }
 }
