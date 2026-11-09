@@ -395,8 +395,10 @@ impl IvfIndex {
         let float_bytes = k * dim * 4;
         let centroids: Vec<f32> = bytes
             .get(at..at + float_bytes)?
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         at += float_bytes;
 
