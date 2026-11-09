@@ -16,11 +16,11 @@ use std::time::{Duration, Instant};
 
 use rusty_mux_client::Conn;
 use rusty_mux_client::attach::{CONTROL, Requests};
-use rusty_mux_core::{Side, Size};
+use rusty_mux_core::{BlockId, InputMode, Side, Size};
 use rusty_mux_gui::source::{Out, attach};
 use rusty_mux_proto::{Entry, Features, Launch, Message};
 use rusty_mux_server::{Config, ConsoleHost, serve};
-use rusty_term::gui::source::{Act, Dir, Feed, Link, PaneIo, Source, Tree};
+use rusty_term::gui::source::{Act, Dir, Feed, Link, PaneIo, Source, Take, Tree};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
 
@@ -56,18 +56,36 @@ fn start_server() -> PathBuf {
     path
 }
 
-/// The feed of `io` on a thread, so a test can wait on it with a deadline.
+/// The feed of `io` on a thread, so a test can wait on it with a deadline;
+/// where taking the block over stands is left out.
 fn feed_of(io: PaneIo) -> (Box<dyn rusty_term::backend::BackendHandle>, Receiver<Feed>) {
+    let (writer, feed, _) = feed_and_takes(io);
+    (writer, feed)
+}
+
+/// [`feed_of`], with where taking the block over stands on its own.
+fn feed_and_takes(
+    io: PaneIo,
+) -> (
+    Box<dyn rusty_term::backend::BackendHandle>,
+    Receiver<Feed>,
+    Receiver<Take>,
+) {
     let (tx, rx) = channel();
+    let (takes_tx, takes) = channel();
     let mut feed = io.feed;
     std::thread::spawn(move || {
         for step in feed.by_ref() {
+            if let Feed::Take(take) = step {
+                let _ = takes_tx.send(take);
+                continue;
+            }
             if tx.send(step).is_err() {
                 return;
             }
         }
     });
-    (io.writer, rx)
+    (io.writer, rx, takes)
 }
 
 /// Types `echo MARK$((n*2))` until the feed shows `MARKn*2`: typing is
@@ -202,6 +220,142 @@ fn a_lease_another_client_holds_is_asked_for_again_once_it_is_free() {
     req.call(|req| Message::ReleaseLease { req, block })
         .expect("release");
     type_until_echoed(writer.as_mut(), &feed, 8);
+}
+
+/// The next take-over state the pane told.
+fn next_take(takes: &Receiver<Take>) -> Take {
+    takes.recv_timeout(PATIENCE).expect("a take-over state")
+}
+
+/// Whether typing `echo MARKn*2` shows nothing for a second: the pane
+/// holds no lease.
+fn typing_is_dropped(
+    writer: &mut dyn rusty_term::backend::BackendHandle,
+    feed: &Receiver<Feed>,
+    n: u32,
+) -> bool {
+    writer
+        .write(format!("echo MARK$(({n}*2))\r").as_bytes())
+        .expect("write");
+    let want = format!("MARK{}", n * 2);
+    let quiet = Instant::now() + Duration::from_secs(1);
+    while let Some(left) = quiet.checked_duration_since(Instant::now()) {
+        if let Ok(Feed::Bytes(b)) = feed.recv_timeout(left)
+            && String::from_utf8_lossy(&b).contains(&want)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[test]
+fn an_owner_only_block_is_taken_over_once_its_owner_grants_and_given_back() {
+    let socket = start_server();
+    let attached = attach(&socket, None).expect("attached");
+    let (layouts_tx, layouts) = channel();
+    let events = attached.events;
+    std::thread::spawn(move || {
+        events.run(|out| match out {
+            Out::Layout(t) => layouts_tx.send(t).is_ok(),
+            _ => true,
+        })
+    });
+
+    // An owner, as orch would be, starts an owner-only block beside the first.
+    let mut owner = Conn::new(UnixStream::connect(&socket).expect("connect"));
+    owner
+        .send(&Message::Hello {
+            version: None,
+            features: CONTROL
+                .union(Features::LAUNCH)
+                .union(Features::OWNERSHIP)
+                .union(Features::INPUT_GATE)
+                .union(Features::LEASE_REQUESTS),
+            resume: None,
+            takeover: None,
+        })
+        .expect("hello");
+    let mut req = Requests {
+        conn: &mut owner,
+        next: 1,
+        by: Some(Instant::now() + PATIENCE),
+        cancel: &std::sync::atomic::AtomicBool::new(false),
+    };
+    req.welcome().expect("welcome");
+    let gated = Launch {
+        own: true,
+        input: InputMode::OwnerOnly,
+        ..Launch::default()
+    };
+    let block = req
+        .create_id(|req| Message::Split {
+            req,
+            block: attached.block,
+            side: Side::Right,
+            launch: gated,
+        })
+        .map(BlockId::from_uuid)
+        .expect("an owned block");
+    let split = layouts.recv_timeout(PATIENCE).expect("a layout");
+    let Some(Tree::Split { b, .. }) = split else {
+        panic!("a split: {split:?}");
+    };
+    let Tree::Pane(key) = *b else {
+        panic!("the owned block: {b:?}");
+    };
+
+    // Focused, it is not taken: its input is its owner's.
+    let (mut writer, feed, takes) =
+        feed_and_takes(attached.source.open(key, 40, 24).expect("opened"));
+    assert_eq!(next_take(&takes), Take::Rest);
+    attached.source.focus(key);
+    next_screen(&feed);
+    assert!(typing_is_dropped(writer.as_mut(), &feed, 5));
+
+    // Take over asks the owner; its grant gives this pane the input.
+    attached.source.act(Act::TakeOver(key));
+    assert_eq!(next_take(&takes), Take::Asking);
+    let asker = loop {
+        match req.recv().expect("the ask") {
+            Message::LeaseRequested {
+                block: b, client, ..
+            } if b == block => break client,
+            _ => {}
+        }
+    };
+    let until = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as u64
+        + 60_000;
+    req.call(|req| Message::GrantLease {
+        req,
+        block,
+        client: asker,
+        until,
+    })
+    .expect("granted");
+    assert_eq!(next_take(&takes), Take::Held);
+    type_until_echoed(writer.as_mut(), &feed, 6);
+
+    // Given back, typing is dropped again, focus or not.
+    attached.source.act(Act::GiveBack(key));
+    assert_eq!(next_take(&takes), Take::Rest);
+    assert!(typing_is_dropped(writer.as_mut(), &feed, 7));
+
+    // Taken over again on the live grant, no new ask of the owner, then
+    // the owner revokes it.
+    attached.source.act(Act::TakeOver(key));
+    assert_eq!(next_take(&takes), Take::Asking, "the lease on its way");
+    assert_eq!(next_take(&takes), Take::Held);
+    req.call(|req| Message::RevokeLease {
+        req,
+        block,
+        client: asker,
+    })
+    .expect("revoked");
+    assert_eq!(next_take(&takes), Take::Ended);
 }
 
 /// The next session the run told, skipping layouts and focus moves.

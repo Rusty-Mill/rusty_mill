@@ -23,7 +23,7 @@ use super::layout::Rect as Cells;
 use super::paint::{Pixmap, Rect, icons};
 use super::render::blend;
 use super::ribbon::{self, Cap, Ribbon, keycap, keycap_width};
-use super::source::{BlockInfo, Link, State, Wait};
+use super::source::{BlockInfo, Gate, Link, Refusal, State, Take, Wait};
 use super::text::{UiText, Weight};
 use crate::core::contrast_ratio;
 
@@ -37,6 +37,8 @@ const FOCUS_BORDER: f32 = 1.5;
 const FOCUS_ALPHA: u8 = 179;
 const FOCUS_MIN: f32 = 3.0;
 const HEADER: f32 = 38.0;
+/// Half the header, from a header control's middle to its bottom.
+pub(crate) const HEADER_HALF: f32 = HEADER / 2.0;
 const HAIRLINE: f32 = 1.0;
 /// Header padding (left, right), space between its items, and the eye's
 /// space before the lease text.
@@ -59,6 +61,8 @@ const BTN_R: f32 = 5.0;
 const TAG: (f32, f32, f32) = (20.0, 8.0, 5.0);
 const TAG_PX: f32 = 11.0;
 const EXIT: (f32, f32, f32) = (24.0, 10.0, 6.0);
+/// The take-over button's space before the lease line (gui-design D64).
+const TAKE_GAP: f32 = 10.0;
 /// F2 badges: side, radius and digit size.
 const BADGE: f32 = 32.0;
 const BADGE_R: f32 = 8.0;
@@ -195,12 +199,59 @@ pub(crate) enum Part {
     },
 }
 
-/// What a block's header says (D48): its left group, and the lease text on
-/// the right when another client has input.
+/// What a block's header says (D48): its left group, the lease line on
+/// the right when another client has input or the block is its owner's,
+/// and the take-over button on an owner-only block (gui-design D64).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Header {
     pub parts: Vec<Part>,
-    pub lease: Option<String>,
+    pub lease: Option<Lease>,
+    pub take: Option<TakeButton>,
+}
+
+/// The header's lease line: who has input, or why taking over failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Lease {
+    pub text: String,
+    /// A failure: an oxide alert and text instead of the slate eye (D64 4).
+    pub alert: bool,
+}
+
+impl Lease {
+    fn said(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            alert: false,
+        }
+    }
+
+    fn alert(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            alert: true,
+        }
+    }
+}
+
+/// An owner-only block's header button (gui-design D64).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TakeButton {
+    /// Opens the confirm.
+    TakeOver,
+    /// Stops waiting for the owner.
+    CancelAsk,
+    /// Gives the input back.
+    GiveBack,
+}
+
+impl TakeButton {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            TakeButton::TakeOver => "Take over",
+            TakeButton::CancelAsk => "Cancel ask",
+            TakeButton::GiveBack => "Give back",
+        }
+    }
 }
 
 fn text(text: impl Into<String>, weight: Weight, ink: Ink, keep: Keep) -> Part {
@@ -212,16 +263,74 @@ fn text(text: impl Into<String>, weight: Weight, ink: Ink, keep: Keep) -> Part {
     }
 }
 
-/// The header for `info` (D48). `branch` is the git branch of its folder,
-/// when known; `home` shortens the folder to "~".
-pub(crate) fn header(info: &BlockInfo, branch: Option<&str>, home: Option<&str>) -> Header {
-    let lease = info.holder.as_ref().map(|h| format!("{h} has input"));
+/// The header for `info` (D48). `take` is where this window's taking it
+/// over stands, once its source can ask (D64); `branch` is the git branch
+/// of its folder, when known; `home` shortens the folder to "~".
+pub(crate) fn header(
+    info: &BlockInfo,
+    take: Option<Take>,
+    branch: Option<&str>,
+    home: Option<&str>,
+) -> Header {
     let parts = if info.foreground.is_none() && info.status.is_none() {
         shell_parts(info, branch, home)
     } else {
         program_parts(info)
     };
-    Header { parts, lease }
+    let (lease, take) = lease_line(info, take);
+    Header { parts, lease, take }
+}
+
+/// The lease line and button (D48, D64): who has input on an open block;
+/// on an owner-only one, where taking it over stands.
+fn lease_line(info: &BlockInfo, take: Option<Take>) -> (Option<Lease>, Option<TakeButton>) {
+    let holder = info.holder.as_ref().map(|h| format!("{h} has input"));
+    let (owner, take) = match (&info.gate, take) {
+        (Some(Gate::Orphaned), _) => {
+            let text = format!("{} has no owner now", program(info));
+            return (Some(Lease::alert(text)), None);
+        }
+        (Some(Gate::Owned(owner)), Some(take)) => (owner, take),
+        _ => return (holder.map(Lease::said), None),
+    };
+    match take {
+        Take::Rest => {
+            let other = info.holder.as_ref().filter(|h| *h != owner);
+            let text = match other {
+                Some(h) => format!("{h} has input"),
+                None => "Agent has input".to_owned(),
+            };
+            (Some(Lease::said(text)), Some(TakeButton::TakeOver))
+        }
+        Take::Asking => (
+            Some(Lease::said(format!("Asking {owner}\u{2026}"))),
+            Some(TakeButton::CancelAsk),
+        ),
+        Take::Held => (
+            Some(Lease::said("You have input")),
+            Some(TakeButton::GiveBack),
+        ),
+        Take::Refused(Refusal::Unreachable) => (
+            Some(Lease::alert(format!("Can't reach {owner} right now"))),
+            Some(TakeButton::TakeOver),
+        ),
+        Take::Refused(Refusal::Other) => (
+            Some(Lease::alert(format!("Couldn't ask {owner}"))),
+            Some(TakeButton::TakeOver),
+        ),
+        Take::Ended => (
+            Some(Lease::said(format!("Your input from {owner} ended"))),
+            Some(TakeButton::TakeOver),
+        ),
+    }
+}
+
+/// The block's program as its header names it (D48).
+pub(crate) fn program(info: &BlockInfo) -> &str {
+    info.foreground
+        .as_deref()
+        .or(info.shell.as_deref())
+        .unwrap_or("program")
 }
 
 /// The folder and its branch; the shell's name with no folder.
@@ -274,11 +383,7 @@ pub(crate) fn state_word(info: &BlockInfo) -> &'static str {
 
 /// The program's status glyph, its name and its status text.
 fn program_parts(info: &BlockInfo) -> Vec<Part> {
-    let name = info
-        .foreground
-        .as_deref()
-        .or(info.shell.as_deref())
-        .unwrap_or("program");
+    let name = program(info);
     let msg = info.status.as_ref().and_then(|s| s.msg.clone());
     let said = match info.status.as_ref().map(|s| s.state) {
         None => None,
@@ -346,6 +451,8 @@ pub(crate) enum Spot {
     Banner(Action),
     /// The ended session panel's "Open switcher" (D62, D60).
     OpenSwitcher,
+    /// Block `key`'s take-over button (gui-design D64).
+    Take(u64, TakeButton),
 }
 
 /// A block to draw: its box in the body's px, whether it has the focus or
@@ -582,7 +689,7 @@ fn paint_ended(out: &mut Pixmap, name: &str, bottom: f32, look: &Look, font: &mu
 
 /// `text` broken at spaces into lines at most `room` px wide at `px`; a
 /// word wider than that keeps a line of its own.
-fn wrap(font: &UiText, text: &str, px: f32, room: f32) -> Vec<String> {
+pub(crate) fn wrap(font: &UiText, text: &str, px: f32, room: f32) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for word in text.split_whitespace() {
         let joined = lines.last().map(|l| format!("{l} {word}"));
@@ -710,27 +817,29 @@ fn paint_header(
             r.x
         }
     } - ITEM_GAP * s;
+    if let Some(button) = header.take {
+        let spot = Spot::Take(block.key, button);
+        right = small_button(out, spots, (right, mid), button.label(), spot, look, font);
+        right -= TAKE_GAP * s;
+    }
     if let Some(lease) = &header.lease {
-        let w = font.width(lease, Weight::Regular, SMALL_PX * s);
+        let (glyph, tint) = match lease.alert {
+            true => (icons::ALERT, c.failure),
+            false => (icons::EYE, c.muted),
+        };
+        let w = font.width(&lease.text, Weight::Regular, SMALL_PX * s);
         right -= w;
         out.text(
             font,
-            lease,
+            &lease.text,
             Weight::Regular,
             SMALL_PX * s,
             right,
             small_base,
-            c.muted,
+            tint,
         );
         right -= (EYE_GAP + ICON) * s;
-        out.icon(
-            icons::EYE,
-            right,
-            icon_y,
-            ICON * s,
-            ICON_STROKE * s,
-            c.muted,
-        );
+        out.icon(glyph, right, icon_y, ICON * s, ICON_STROKE * s, tint);
         right -= ITEM_GAP * s;
     }
     let texts = fit(&header.parts, right - left, s, font);
@@ -747,6 +856,42 @@ fn paint_header(
         }
         x += ITEM_GAP * s;
     }
+}
+
+/// A secondary small button (D62) labelled `label`, ending at `right` and
+/// centred on `mid`, that does `spot`. Returns where it starts.
+fn small_button(
+    out: &mut Pixmap,
+    spots: &mut Vec<(Rect, Spot)>,
+    (right, mid): (f32, f32),
+    label: &str,
+    spot: Spot,
+    look: &Look,
+    font: &mut UiText,
+) -> f32 {
+    let (s, c) = (look.scale, &look.chrome);
+    let (h, pad, radius) = EXIT;
+    let w = font.width(label, Weight::Medium, SMALL_PX * s) + 2.0 * pad * s;
+    let r = Rect {
+        x: right - w,
+        y: mid - h * s / 2.0,
+        w,
+        h: h * s,
+    };
+    out.fill(r, radius * s, control_fill(c, look, spot));
+    out.border(r, radius * s, BORDER * s, c.line);
+    let base = mid + font.centre_drop(SMALL_PX * s);
+    out.text(
+        font,
+        label,
+        Weight::Medium,
+        SMALL_PX * s,
+        r.x + pad * s,
+        base,
+        c.text,
+    );
+    spots.push((r, spot));
+    r.x
 }
 
 /// The zoomed header's right group, ending at `right` (D49): the "Zoomed"
@@ -950,6 +1095,9 @@ const BRANCH_TTL: Duration = Duration::from_secs(2);
 /// painting, kept until the blocks, their headers or the look change.
 pub(crate) struct BodyState {
     infos: HashMap<u64, BlockInfo>,
+    /// Where taking each owner-only block over stands, by pane key, once
+    /// its source can ask (gui-design D64).
+    takes: HashMap<u64, Take>,
     /// The session runs on this machine, so its folders' branches can be
     /// read here.
     local: bool,
@@ -973,6 +1121,7 @@ impl BodyState {
         let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok();
         Some(Self {
             infos: HashMap::new(),
+            takes: HashMap::new(),
             local: false,
             target: String::new(),
             link: Link::Up,
@@ -1081,7 +1230,23 @@ impl BodyState {
             (Some(cwd), true) => self.branch(cwd, read),
             _ => None,
         };
-        header(&info, branch.as_deref(), self.home.as_deref())
+        let take = self.takes.get(&key).copied();
+        header(&info, take, branch.as_deref(), self.home.as_deref())
+    }
+
+    /// Note where taking block `key` over stands (gui-design D64).
+    pub(crate) fn set_take(&mut self, key: u64, take: Take) {
+        self.takes.insert(key, take);
+    }
+
+    /// Block `key`'s program and its owner's name, for the take-over
+    /// confirm (D64 2); `None` unless its owner decides who types.
+    pub(crate) fn owned(&self, key: u64) -> Option<(String, String)> {
+        let info = self.infos.get(&key)?;
+        match &info.gate {
+            Some(Gate::Owned(owner)) => Some((program(info).to_owned(), owner.clone())),
+            _ => None,
+        }
     }
 
     fn branch(&mut self, cwd: &str, read: fn(&Path) -> Option<String>) -> Option<String> {
@@ -1138,7 +1303,7 @@ mod tests {
 
     #[test]
     fn a_shell_shows_its_folder_and_branch() {
-        let h = header(&shell(), Some("main"), Some("/home/nano"));
+        let h = header(&shell(), None, Some("main"), Some("/home/nano"));
         assert_eq!(
             text_of(&h),
             ["Folder", "~/src/rusty_mill", "Branch", "main"]
@@ -1152,7 +1317,7 @@ mod tests {
             cwd: None,
             ..shell()
         };
-        assert_eq!(text_of(&header(&info, None, None)), ["bash"]);
+        assert_eq!(text_of(&header(&info, None, None, None)), ["bash"]);
     }
 
     #[test]
@@ -1162,7 +1327,7 @@ mod tests {
             ..shell()
         };
         assert_eq!(
-            text_of(&header(&info, Some("main"), None)),
+            text_of(&header(&info, None, Some("main"), None)),
             ["Spinner", "cargo"]
         );
     }
@@ -1178,7 +1343,7 @@ mod tests {
                 }),
                 ..shell()
             };
-            text_of(&header(&info, None, None))
+            text_of(&header(&info, None, None, None))
         };
         assert_eq!(
             with(State::Working, Some("Editing zoom.rs")),
@@ -1211,7 +1376,7 @@ mod tests {
             ..shell()
         };
         assert_eq!(
-            text_of(&header(&info, None, None)),
+            text_of(&header(&info, None, None, None)),
             ["Check", "bash", "Done"]
         );
     }
@@ -1223,8 +1388,78 @@ mod tests {
             ..shell()
         };
         assert_eq!(
-            header(&info, None, None).lease.as_deref(),
+            header(&info, None, None, None)
+                .lease
+                .map(|l| l.text)
+                .as_deref(),
             Some("laptop has input")
+        );
+    }
+
+    fn agent(gate: Gate) -> BlockInfo {
+        BlockInfo {
+            foreground: Some("claude".into()),
+            gate: Some(gate),
+            ..shell()
+        }
+    }
+
+    fn line(info: &BlockInfo, take: Option<Take>) -> (Option<(String, bool)>, Option<TakeButton>) {
+        let h = header(info, take, None, None);
+        (h.lease.map(|l| (l.text, l.alert)), h.take)
+    }
+
+    #[test]
+    fn an_owner_only_header_says_where_taking_it_over_stands() {
+        let info = agent(Gate::Owned("orch".into()));
+        let said = |t: &str| Some((t.to_owned(), false));
+        let alert = |t: &str| Some((t.to_owned(), true));
+        use TakeButton::*;
+        assert_eq!(
+            line(&info, None),
+            (None, None),
+            "no button until the source can ask"
+        );
+        assert_eq!(
+            line(&info, Some(Take::Rest)),
+            (said("Agent has input"), Some(TakeOver))
+        );
+        let owner_types = BlockInfo {
+            holder: Some("orch".into()),
+            ..info.clone()
+        };
+        assert_eq!(
+            line(&owner_types, Some(Take::Rest)).0,
+            said("Agent has input")
+        );
+        let other = BlockInfo {
+            holder: Some("laptop".into()),
+            ..info.clone()
+        };
+        assert_eq!(line(&other, Some(Take::Rest)).0, said("laptop has input"));
+        assert_eq!(
+            line(&info, Some(Take::Asking)),
+            (said("Asking orch\u{2026}"), Some(CancelAsk))
+        );
+        assert_eq!(
+            line(&info, Some(Take::Held)),
+            (said("You have input"), Some(GiveBack))
+        );
+        assert_eq!(
+            line(&info, Some(Take::Refused(Refusal::Unreachable))),
+            (alert("Can't reach orch right now"), Some(TakeOver))
+        );
+        assert_eq!(
+            line(&info, Some(Take::Refused(Refusal::Other))),
+            (alert("Couldn't ask orch"), Some(TakeOver))
+        );
+        assert_eq!(
+            line(&info, Some(Take::Ended)),
+            (said("Your input from orch ended"), Some(TakeOver))
+        );
+        assert_eq!(
+            line(&agent(Gate::Orphaned), Some(Take::Rest)),
+            (alert("claude has no owner now"), None)
         );
     }
 
@@ -1266,7 +1501,7 @@ mod tests {
             rect,
             focused: false,
             zoomed: false,
-            header: header(&shell(), Some("main"), None),
+            header: header(&shell(), None, Some("main"), None),
             badge: None,
         }
     }
@@ -1320,6 +1555,30 @@ mod tests {
         assert_eq!(z.spots[0].1, Spot::Unzoom);
         let (x, y) = (z.spots[0].0.x + 2.0, z.spots[0].0.y + 2.0);
         assert_eq!(z.spot(x, y), Some(Spot::Unzoom));
+    }
+
+    #[test]
+    fn a_take_over_button_sits_before_the_zoom_button() {
+        let look = look();
+        let mut font = UiText::embedded().expect("the embedded faces parse");
+        let shown = Shown {
+            header: header(
+                &agent(Gate::Owned("orch".into())),
+                Some(Take::Rest),
+                None,
+                None,
+            ),
+            ..block(7, Cells::new(8, 0, 600, 200))
+        };
+        let body = paint(620, 250, &scene(vec![shown]), &look, &mut font);
+        let at = |spot: Spot| body.spots.iter().find(|(_, s)| *s == spot).map(|(r, _)| *r);
+        let zoom = at(Spot::Zoom(7)).expect("the zoom button");
+        let take = at(Spot::Take(7, TakeButton::TakeOver)).expect("Take over");
+        assert_eq!(take.h, EXIT.0, "a small button");
+        assert!(
+            (zoom.x - ITEM_GAP - (take.x + take.w)).abs() < 0.01,
+            "8 px before zoom"
+        );
     }
 
     #[test]
@@ -1442,6 +1701,7 @@ mod tests {
                 cwd: Some("/a/rather/long/path/to/a/project/folder".into()),
                 ..shell()
             },
+            None,
             Some("feature/a-very-long-branch-name"),
             None,
         )

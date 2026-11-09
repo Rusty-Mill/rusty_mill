@@ -38,6 +38,35 @@ pub enum Feed {
     Screen(Box<Grid>, Box<AnsiParser>),
     /// The source resized the pane: a mux block's size is the server's.
     Resized { cols: u16, rows: u16 },
+    /// Where this window's taking over of an owner-only block stands
+    /// (gui-design D64, handoff D151); first sent once the source can ask.
+    Take(Take),
+}
+
+/// Where this window stands on typing into an owner-only block, whose
+/// owner grants who may (gui-design D64, handoff D151).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Take {
+    /// Not taking it over: "Take over".
+    #[default]
+    Rest,
+    /// Asked the owner, waiting for a grant: "Cancel ask".
+    Asking,
+    /// Granted and holding the lease: "You have input", "Give back".
+    Held,
+    /// The ask was refused.
+    Refused(Refusal),
+    /// The grant ended, by a revoke or its time running out.
+    Ended,
+}
+
+/// Why an ask to take a block over was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Its owner is reconnecting or can't hear asks.
+    Unreachable,
+    /// Anything else.
+    Other,
 }
 
 /// A pane's two ends. Dropping it ends the pane: its feed stops and its
@@ -160,6 +189,18 @@ pub struct BlockInfo {
     /// Who else has input: the client holding the block's input lease,
     /// when that isn't this window.
     pub holder: Option<String>,
+    /// Whose grant typing needs, for a block whose input is its owner's
+    /// (C77); `None` for an open block.
+    pub gate: Option<Gate>,
+}
+
+/// An owner-only block's owner (gui-design D64).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// Its owner's name, which decides who types.
+    Owned(String),
+    /// Its owner is gone for good: nobody may type.
+    Orphaned,
 }
 
 /// A program's status report (OSC 7501).
@@ -250,6 +291,13 @@ pub enum Act {
     /// Put detached block `key` back, beside the focused pane (gui-design
     /// D61); the source places it.
     Reattach(u64),
+    /// The user confirmed taking owner-only pane `key` over: ask its owner,
+    /// and type once granted (gui-design D64, handoff D151).
+    TakeOver(u64),
+    /// Stop waiting for pane `key`'s owner; a later grant is not used.
+    CancelAsk(u64),
+    /// Give pane `key`'s input back; the grant stays the owner's to end.
+    GiveBack(u64),
 }
 
 /// The source's way into a running window, from any thread. Each call is
