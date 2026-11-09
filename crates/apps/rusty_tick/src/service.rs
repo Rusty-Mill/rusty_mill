@@ -733,6 +733,11 @@ impl Service {
             .collect()
     }
 
+    /// Matching task identifiers without materializing their notes or checklists.
+    pub fn task_ids_with_tag(&self, tag: &str) -> Vec<Uuid> {
+        self.tasks.with_tag(&tag_name(tag))
+    }
+
     /// Open, live tasks due in `[from, to)` across every non-archived list,
     /// soonest first. One range query per list.
     fn due_window(&self, from: i64, to: i64) -> Vec<Task> {
@@ -943,6 +948,12 @@ impl Service {
     pub fn docs(&self, kind: &str) -> Result<Vec<Doc>> {
         check_kind(kind)?;
         Ok(self.docs.of_kind(kind))
+    }
+
+    /// Matching document identifiers without materializing document bodies.
+    pub fn doc_ids(&self, kind: &str) -> Result<Vec<Uuid>> {
+        check_kind(kind)?;
+        Ok(self.docs.ids_of_kind(kind))
     }
 
     /// One document of `kind`.

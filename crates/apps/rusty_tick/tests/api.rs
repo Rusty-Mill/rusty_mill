@@ -1746,3 +1746,151 @@ fn tag_renames_carry_the_actor_and_columns_match_the_board() {
         ]
     );
 }
+
+#[test]
+fn storage_pages_are_bounded_stable_and_opt_in() {
+    let (dir, mut h) = harness();
+    let list = h.list("page-test");
+    let mut ids = Vec::new();
+    // Each page must stop by bytes even when its record limit is much larger.
+    for n in 0..40 {
+        let task = h.task(
+            &list,
+            &format!(
+                r#""title":"card {n}","notes":"{}","tags":["agent"]"#,
+                "x".repeat(30_000)
+            ),
+        );
+        let id = task["id"].as_str().unwrap().to_owned();
+        let body = format!(r#"{{"prompt":"{}"}}"#, "p".repeat(60_000));
+        let (status, _) = h.send_conditional(
+            Method::Put,
+            &format!("/api/v1/docs/board/{id}"),
+            &body,
+            Some(TOKEN),
+            Conditions {
+                if_task_match: Some("1"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(status, 200);
+        ids.push(id);
+    }
+    ids.sort();
+    for (path, key) in [
+        ("/api/v1/docs/board", "docs"),
+        ("/api/v1/tags/agent/tasks", "tasks"),
+    ] {
+        let (_, legacy) = h.call(Method::Get, path, "");
+        assert!(legacy.get("next").is_none());
+        assert_eq!(legacy[key].as_array().unwrap().len(), 40);
+        let mut seen = Vec::new();
+        let mut after = String::new();
+        let mut pages = 0;
+        loop {
+            let (status, page) = h.call(Method::Get, &format!("{path}?limit=1000{after}"), "");
+            assert_eq!(status, 200);
+            assert!(rusty_json::to_string(&page).unwrap().len() < 790_000);
+            seen.extend(
+                page[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v["id"].as_str().unwrap().to_owned()),
+            );
+            pages += 1;
+            let Some(next) = page["next"].as_str() else {
+                break;
+            };
+            assert!(after.is_empty() || after != format!("&after={next}"));
+            // Editing a previously read record must not move its key into another page.
+            if pages == 1 {
+                assert_eq!(
+                    h.call(
+                        Method::Patch,
+                        &format!("/api/v1/tasks/{}", seen[0]),
+                        r#"{"title":"edited"}"#
+                    )
+                    .0,
+                    200
+                );
+            }
+            after = format!("&after={next}");
+        }
+        assert!(pages > 1);
+        assert_eq!(seen, ids, "no lost or duplicate records");
+        for query in [
+            "limit=0",
+            "limit=1001",
+            "limit=no",
+            "limit=1&after=no",
+            "after=bad",
+        ] {
+            assert_eq!(h.call(Method::Get, &format!("{path}?{query}"), "").0, 400);
+        }
+        assert_eq!(
+            h.send(Method::Get, &format!("{path}?limit=1"), "", None).0,
+            401
+        );
+    }
+    // Verify byte-heavy task/document payloads against the real engine after reopen.
+    let paths = ["/api/v1/docs/board", "/api/v1/tags/agent/tasks"];
+    let before: Vec<_> = paths
+        .iter()
+        .map(|path| h.call(Method::Get, path, "").1)
+        .collect();
+    drop(h);
+    let mut h = Harness::open(dir.path());
+    for (path, expected) in paths.iter().zip(before) {
+        assert_eq!(h.call(Method::Get, path, "").1, expected);
+    }
+}
+
+#[test]
+fn comment_pages_filter_before_limiting_and_survive_restart() {
+    let (dir, mut h) = harness();
+    let list = h.list("comments");
+    let task = h.task(&list, r#""title":"one""#)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let other = h.task(&list, r#""title":"two""#)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for n in 0..20 {
+        let id = uuid::Uuid::from_u128(n + 1);
+        let body = format!(
+            r#"{{"taskId":"{}","text":"comment {n}"}}"#,
+            if n % 2 == 0 { &task } else { &other }
+        );
+        assert_eq!(
+            h.call(Method::Put, &format!("/api/v1/docs/comment/{id}"), &body)
+                .0,
+            200
+        );
+    }
+    drop(h);
+    let mut h = Harness::open(dir.path());
+    let (_, page) = h.call(
+        Method::Get,
+        &format!("/api/v1/docs/comment?limit=100&taskId={task}"),
+        "",
+    );
+    assert_eq!(page["docs"].as_array().unwrap().len(), 10);
+    assert!(page["docs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|d| d["body"]["taskId"] == task));
+    assert!(page["next"].is_null());
+    assert_eq!(
+        h.call(
+            Method::Get,
+            "/api/v1/docs/board?limit=10&taskId=invalid",
+            ""
+        )
+        .0,
+        400
+    );
+}

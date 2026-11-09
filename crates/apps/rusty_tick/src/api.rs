@@ -32,6 +32,13 @@
 //! the current entity in `current`. Writes that can move a task's board column
 //! (task writes, tag rename and delete) accept `X-Actor: <name>`, who the move is
 //! recorded as ([`crate::moves`]).
+//!
+//! `GET /docs/{kind}` and `/tags/{name}/tasks` accept opt-in `limit=1..1000`
+//! and `after=<UUID>`. Pages use ascending immutable UUID order, stop at a
+//! serialized byte budget, and add `next` (UUID or null). Continue until null;
+//! a short page can still have a continuation. Without `limit`, legacy shapes
+//! and ordering are unchanged. Comment pages also accept `taskId=<UUID>`.
+//! Pages are live reads, not a cross-request snapshot; edits do not move keys.
 
 use crate::auth::{Authenticator, Denied};
 use crate::docs::{comment_owner, BOARD_KIND};
@@ -716,10 +723,17 @@ fn route_tags(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
             service.delete_tag(name, cx.actor())?;
             Ok(Response::empty(StatusCode::NO_CONTENT))
         }
-        (Method::Get, [name, "tasks"]) => Ok(Response::json(
-            StatusCode::OK,
-            &Tasks::new(service.with_tag(name)),
-        )),
+        (Method::Get, [name, "tasks"]) => {
+            if let Some(page) = ReadPage::parse(cx.query)? {
+                return page.response("tasks", service.task_ids_with_tag(name), |id| {
+                    Ok(Some(TaskDto::from(service.task(id)?)))
+                });
+            }
+            Ok(Response::json(
+                StatusCode::OK,
+                &Tasks::new(service.with_tag(name)),
+            ))
+        }
         _ => Err(not_found()),
     }
 }
@@ -727,6 +741,19 @@ fn route_tags(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Respo
 fn route_docs(service: &mut Service, cx: &Cx<'_>, path: &[&str]) -> Result<Response> {
     match (cx.method, path) {
         (Method::Get, [kind]) => {
+            if let Some(page) = ReadPage::parse(cx.query)? {
+                let task = cx.query.get("taskId").map(parse_id).transpose()?;
+                if task.is_some() && *kind != "comment" {
+                    return Err(ApiError::BadRequest("taskId applies to comments".into()));
+                }
+                return page.response("docs", service.doc_ids(kind)?, |id| {
+                    let doc = service.doc(kind, id)?;
+                    if task.is_some() && comment_owner(&doc.body) != task {
+                        return Ok(None);
+                    }
+                    DocDto::from_doc(doc).map(Some).ok_or(ApiError::Internal)
+                });
+            }
             let docs = service
                 .docs(kind)?
                 .into_iter()
@@ -826,6 +853,85 @@ fn parse_id(text: &str) -> Result<Uuid> {
     Uuid::parse_str(text).map_err(|_| ApiError::BadRequest("malformed id".into()))
 }
 
+/// Opt-in collection reads: UUID order stays stable when records are edited.
+/// Only identifiers are collected up front; at most one page of payloads is retained.
+struct ReadPage {
+    after: Option<Uuid>,
+    limit: usize,
+}
+
+impl ReadPage {
+    fn parse(query: &Query) -> Result<Option<Self>> {
+        let Some(limit) = query_number::<usize>(query, "limit")? else {
+            if query.get("after").is_some() || query.get("taskId").is_some() {
+                return Err(ApiError::BadRequest(
+                    "after and taskId require limit".into(),
+                ));
+            }
+            return Ok(None);
+        };
+        if !(1..=1000).contains(&limit) {
+            return Err(ApiError::BadRequest("limit must be 1 to 1000".into()));
+        }
+        Ok(Some(Self {
+            after: query.get("after").map(parse_id).transpose()?,
+            limit,
+        }))
+    }
+
+    fn response<T: Serialize>(
+        &self,
+        key: &str,
+        mut ids: Vec<Uuid>,
+        mut read: impl FnMut(Uuid) -> Result<Option<T>>,
+    ) -> Result<Response> {
+        // Leave envelope headroom below the HTTP client's unchanged 1 MiB limit.
+        const PAGE_BYTES: usize = 768 * 1024;
+        ids.sort_unstable();
+        let mut items = Vec::new();
+        let mut bytes = 0;
+        let mut last = None;
+        let mut next = None;
+        for id in ids
+            .into_iter()
+            .filter(|id| self.after.is_none_or(|a| *id > a))
+        {
+            let Some(item) = read(id)? else { continue };
+            let size = rusty_json::to_string(&item)
+                .map_err(|_| ApiError::Internal)?
+                .len()
+                + 1;
+            // A large individual record may use the envelope headroom too. Never
+            // impose the smaller multi-record target on a previously readable task.
+            if size > (1 << 20) - 128 {
+                return Err(ApiError::Invalid(format!(
+                    "record {id} exceeds the storage page byte budget"
+                )));
+            }
+            if items.len() == self.limit || (!items.is_empty() && bytes + size > PAGE_BYTES) {
+                next = last;
+                break;
+            }
+            bytes += size;
+            items.push(item);
+            last = Some(id);
+        }
+        #[derive(Serialize)]
+        struct Page<T> {
+            #[serde(flatten)]
+            records: std::collections::BTreeMap<String, Vec<T>>,
+            next: Option<Uuid>,
+        }
+        Ok(Response::json(
+            StatusCode::OK,
+            &Page {
+                records: [(key.to_owned(), items)].into(),
+                next,
+            },
+        ))
+    }
+}
+
 /// An optional numeric query parameter.
 fn query_number<T: std::str::FromStr>(query: &Query, key: &str) -> Result<Option<T>> {
     query
@@ -871,7 +977,27 @@ fn utc_offset(query: &Query) -> Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_segment;
+    use super::{decode_segment, ReadPage};
+
+    #[test]
+    fn page_byte_budget_preserves_large_single_records_and_refuses_oversize() {
+        let id = uuid::Uuid::from_u128(1);
+        let page = ReadPage {
+            after: None,
+            limit: 1,
+        };
+        let record = "x".repeat(900_000);
+        let response = page
+            .response("tasks", vec![id], |_| Ok(Some(&record)))
+            .unwrap();
+        assert!(response.body.len() < 1 << 20);
+        let body: rusty_json::Value = rusty_json::from_slice(&response.body).unwrap();
+        assert_eq!(body["tasks"][0].as_str().unwrap().len(), record.len());
+        let oversize = "x".repeat(1 << 20);
+        assert!(page
+            .response("tasks", vec![id], |_| Ok(Some(&oversize)))
+            .is_err());
+    }
 
     #[test]
     fn path_segments_decode_percent_escapes_but_keep_plus() {

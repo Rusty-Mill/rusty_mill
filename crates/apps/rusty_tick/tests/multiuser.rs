@@ -331,3 +331,55 @@ fn an_adopted_single_user_store_is_served_under_the_new_users_token() {
     .unwrap();
     assert_eq!(list_names(&mut multi, &token), [INBOX, "Kept"]);
 }
+
+#[test]
+fn storage_pages_remain_scoped_to_the_authenticated_user() {
+    let f = Fixture::new();
+    let mut backend = f.backend(2);
+    for (token, title) in [(&f.alice, "alice-private"), (&f.bob, "bob-private")] {
+        let (status, _) = send(
+            &mut backend,
+            Method::Post,
+            "/api/v1/tasks",
+            &format!(
+                r#"{{"listId":"00000000-0000-7000-8000-000000000001","title":"{title}","tags":["agent"]}}"#
+            ),
+            Some(token),
+        );
+        assert_eq!(status, 201);
+        let id = uuid::Uuid::now_v7();
+        let (status, _) = send(
+            &mut backend,
+            Method::Put,
+            &format!("/api/v1/docs/prefs/{id}"),
+            &format!(r#"{{"owner":"{title}"}}"#),
+            Some(token),
+        );
+        assert_eq!(status, 200);
+    }
+    for (token, title) in [(&f.alice, "alice-private"), (&f.bob, "bob-private")] {
+        let (status, body) = send(
+            &mut backend,
+            Method::Get,
+            "/api/v1/tags/agent/tasks?limit=1",
+            "",
+            Some(token),
+        );
+        assert_eq!(status, 200);
+        let page = json(&body);
+        assert_eq!(page["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(page["tasks"][0]["title"], title);
+        assert!(page["next"].is_null());
+        let (status, body) = send(
+            &mut backend,
+            Method::Get,
+            "/api/v1/docs/prefs?limit=1",
+            "",
+            Some(token),
+        );
+        assert_eq!(status, 200);
+        let page = json(&body);
+        assert_eq!(page["docs"].as_array().unwrap().len(), 1);
+        assert_eq!(page["docs"][0]["body"]["owner"], title);
+    }
+}

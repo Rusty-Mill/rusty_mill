@@ -153,6 +153,11 @@ impl DocStore {
         self.delete_comments_where(|owner| owner.is_some_and(|id| tasks.contains(&id)))
     }
 
+    /// Identifiers of documents of `kind`, without loading bodies (unsorted).
+    pub fn ids_of_kind(&self, kind: &str) -> Vec<Uuid> {
+        self.table.ids_with_index(&kind.to_owned())
+    }
+
     /// Documents of `kind`, oldest first.
     pub fn of_kind(&self, kind: &str) -> Vec<Doc> {
         let mut docs = self.table.with_index(&kind.to_string());
