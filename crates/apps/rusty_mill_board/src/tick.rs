@@ -486,9 +486,53 @@ impl<T: TickApi> TickStore<T> {
         }
     }
 
-    fn decode<D: for<'de> Deserialize<'de>>(value: Value, key: &str) -> Result<D, BoardError> {
-        serde_json::from_value(value[key].clone())
+    fn decode<D: for<'de> Deserialize<'de>>(mut value: Value, key: &str) -> Result<D, BoardError> {
+        serde_json::from_value(value[key].take())
             .map_err(|e| BoardError::Storage(format!("rusty_tick sent an unexpected {key}: {e}")))
+    }
+
+    /// Read every bounded storage page, retaining complete records for the Store contract.
+    fn collection<D: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        key: &str,
+    ) -> Result<Vec<D>, BoardError> {
+        let separator = if path.contains('?') { '&' } else { '?' };
+        let mut after: Option<Uuid> = None;
+        let mut records = Vec::new();
+        loop {
+            let mut target = format!("{path}{separator}limit=1000");
+            if let Some(cursor) = after {
+                target.push_str(&format!("&after={cursor}"));
+            }
+            let mut page = self.call(TickRequest::new("GET", target), 200)?;
+            let next = match page.get("next") {
+                None | Some(Value::Null) => None,
+                Some(value) => {
+                    Some(serde_json::from_value::<Uuid>(value.clone()).map_err(|_| {
+                        BoardError::Storage("rusty_tick sent a bad page cursor".into())
+                    })?)
+                }
+            };
+            if next.is_some_and(|next| after.is_some_and(|after| next <= after)) {
+                return Err(BoardError::Storage(
+                    "rusty_tick page cursor did not advance".into(),
+                ));
+            }
+            let batch: Vec<D> = serde_json::from_value(page[key].take()).map_err(|e| {
+                BoardError::Storage(format!("rusty_tick sent an unexpected {key}: {e}"))
+            })?;
+            if next.is_some() && batch.is_empty() {
+                return Err(BoardError::Storage(
+                    "rusty_tick sent an empty continuing page".into(),
+                ));
+            }
+            records.extend(batch);
+            match next {
+                Some(next) => after = Some(next),
+                None => return Ok(records),
+            }
+        }
     }
 
     fn lists(&self) -> Result<Vec<List>, BoardError> {
@@ -538,10 +582,7 @@ impl<T: TickApi> TickStore<T> {
     }
 
     fn board_docs(&self) -> Result<BTreeMap<Uuid, BoardDoc>, BoardError> {
-        let docs: Vec<Doc> = Self::decode(
-            self.call(TickRequest::new("GET", "/docs/board"), 200)?,
-            "docs",
-        )?;
+        let docs: Vec<Doc> = self.collection("/docs/board", "docs")?;
         Ok(docs
             .into_iter()
             .filter_map(|d| {
@@ -551,11 +592,12 @@ impl<T: TickApi> TickStore<T> {
             .collect())
     }
 
-    fn comments(&self) -> Result<BTreeMap<Uuid, Vec<Comment>>, BoardError> {
-        let docs: Vec<Doc> = Self::decode(
-            self.call(TickRequest::new("GET", "/docs/comment"), 200)?,
-            "docs",
-        )?;
+    fn comments(&self, task: Option<Uuid>) -> Result<BTreeMap<Uuid, Vec<Comment>>, BoardError> {
+        let path = task.map_or_else(
+            || "/docs/comment".to_owned(),
+            |id| format!("/docs/comment?taskId={id}"),
+        );
+        let docs: Vec<Doc> = self.collection(&path, "docs")?;
         let mut by_task: BTreeMap<Uuid, Vec<Comment>> = BTreeMap::new();
         for doc in docs {
             let Ok(body) = serde_json::from_value::<CommentBody>(doc.body) else {
@@ -577,13 +619,7 @@ impl<T: TickApi> TickStore<T> {
     }
 
     fn tagged(&self) -> Result<Vec<Task>, BoardError> {
-        let tasks: Vec<Task> = Self::decode(
-            self.call(
-                TickRequest::new("GET", format!("/tags/{AGENT_TAG}/tasks")),
-                200,
-            )?,
-            "tasks",
-        )?;
+        let tasks: Vec<Task> = self.collection(&format!("/tags/{AGENT_TAG}/tasks"), "tasks")?;
         Ok(tasks.into_iter().filter(Task::on_board).collect())
     }
 
@@ -597,8 +633,26 @@ impl<T: TickApi> TickStore<T> {
                 return Ok(None);
             };
             let project = self.projects()?.of(&task);
-            let doc = self.board_docs()?.remove(&id);
-            let comments = self.comments()?.remove(&id).unwrap_or_default();
+            let (status, body) = self
+                .tick
+                .send(&TickRequest::new("GET", format!("/docs/board/{id}")))?;
+            let doc = match status {
+                200 => {
+                    let doc: Doc = serde_json::from_value(body).map_err(|e| {
+                        BoardError::Storage(format!("rusty_tick sent a bad document: {e}"))
+                    })?;
+                    Some(serde_json::from_value(doc.body).map_err(|e| {
+                        BoardError::Storage(format!("rusty_tick sent a bad board document: {e}"))
+                    })?)
+                }
+                404 => None,
+                _ => {
+                    return Err(BoardError::Storage(format!(
+                        "rusty_tick answered {status} reading a board document"
+                    )));
+                }
+            };
+            let comments = self.comments(Some(id))?.remove(&id).unwrap_or_default();
             let after = self.task(id)?.map(|t| t.version()).transpose()?;
             if after != Some(task.version()?) {
                 continue;
@@ -775,7 +829,7 @@ impl<T: TickApi> Store for TickStore<T> {
         let tasks = self.tagged()?;
         let projects = self.projects()?;
         let mut docs = self.board_docs()?;
-        let mut comments = self.comments()?;
+        let mut comments = self.comments(None)?;
         let mut cards = tasks
             .into_iter()
             .map(|task| {
@@ -945,10 +999,7 @@ impl<T: TickApi> Store for TickStore<T> {
     /// Reservations are `board_number` documents, created with `If-None-Match: *` and kept
     /// whatever happens to the task, so a number never comes back.
     fn reserve_number(&self, card: Uuid, floor: u64) -> Result<u64, BoardError> {
-        let docs: Vec<Doc> = Self::decode(
-            self.call(TickRequest::new("GET", format!("/docs/{NUMBER_KIND}")), 200)?,
-            "docs",
-        )?;
+        let docs: Vec<Doc> = self.collection(&format!("/docs/{NUMBER_KIND}"), "docs")?;
         let reserved = docs
             .iter()
             .filter_map(|d| d.body["number"].as_u64())
@@ -1004,13 +1055,7 @@ impl<T: TickApi> TickStore<T> {
 
 impl<T: TickApi> MilestoneStore for TickStore<T> {
     fn milestones(&self) -> Result<Vec<Milestone>, BoardError> {
-        let tasks: Vec<Task> = Self::decode(
-            self.call(
-                TickRequest::new("GET", format!("/tags/{MILESTONE_TAG}/tasks")),
-                200,
-            )?,
-            "tasks",
-        )?;
+        let tasks: Vec<Task> = self.collection(&format!("/tags/{MILESTONE_TAG}/tasks"), "tasks")?;
         let projects = self.projects()?;
         Ok(tasks
             .into_iter()

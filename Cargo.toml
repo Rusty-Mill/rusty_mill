@@ -309,8 +309,9 @@ members = [
 # comparing rusty_libc against the `libc` crate, deliberately outside the
 # library's own zero-dependency build.
 exclude = [
-    # Temporary, pinned upstream crypto patch; not a first-party member.
+    # Temporary, pinned upstream dependency patches; not first-party members.
     "vendor/jsonwebtoken",
+    "vendor/sqlx-sqlite",
     "crates/libs/ui/rusty_term/fuzz",
     "crates/libs/ui/rusty_conhost/fuzz",
     "crates/apps/rush/fuzz",
@@ -589,18 +590,10 @@ futures-core = "0.3"
 # default set does not include it.
 futures-util = { version = "0.3", features = ["sink"] }
 async-stream = "0.3"
-# Bumped 0.8 -> 0.9 by the nexus merge: sqlx-sqlite 0.8.x hard-pins
-# `libsqlite3-sys ^0.30.1`, which collides (Cargo's `links = "sqlite3"`
-# uniqueness rule) with the `libsqlite3-sys ^0.37` that nexus's `rusqlite`
-# 0.39 needs; sqlx-sqlite 0.9.0 widens its own range to
-# `>=0.30.1, <0.38.0`, which admits both. Feature names used across this
-# workspace (`runtime-tokio`, `tls-rustls`, `tls-rustls-ring`, `sqlite`,
-# `postgres`, `uuid`, `chrono`, `json`) are all unchanged in 0.9 (some are
-# now backwards-compat aliases for renamed internals, per sqlx's own
-# CHANGELOG). MSRV for 0.9 is 1.94.0; this workspace's toolchain is pinned
-# above that. Verified with `cargo check` on every direct sqlx consumer
-# (rp-core/rusty-db-sqlite/rusty-ibm-acp's postgres-store feature) plus the
-# nexus rusqlite consumers, not just `cargo metadata`.
+# SQLx 0.9 retains the existing API/features. Its published sqlite driver
+# caps libsqlite3-sys below 0.38; the manifest-only vendor patch below
+# backports upstream's <0.40 ceiling so all SQLite consumers share patched
+# libsqlite3-sys 0.39 (RUSTSEC-2026-0459). See vendor/README.md.
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls"] }
 syn = { version = "2", features = ["full"] }
 quote = "1"
@@ -655,13 +648,10 @@ anyhow = "1.0"
 inventory-core = { path = "crates/apps/rusty_inventory/crates/inventory-core" }
 time = { version = "0.3", features = ["formatting", "parsing", "macros"] }
 tracing = "0.1"
-# nexus asks for "0.39" + `backup` (bundled sqlite3 links natively, so only
-# one rusqlite version may exist in the whole graph -- Cargo's `links`
-# uniqueness rule, stricter than ordinary duplicate-version tolerance);
-# widened to the higher version rather than kept literal like the other
-# six nexus collisions. `backup` is a no-op for inventory-core, whose own
-# feature list only asks for `bundled`.
-rusqlite = { version = "0.39", features = ["bundled", "backup"] }
+# Bundled SQLite 3.54+ fixes RUSTSEC-2026-0459. One libsqlite3-sys
+# version must satisfy every rusqlite and SQLx consumer (links = sqlite3).
+# Preserve backup for the frozen Nexus consumers when they are restored.
+rusqlite = { version = "0.41", features = ["bundled", "backup"] }
 
 # Hoisted from rusty_skillopt's own former `[workspace.dependencies]`. Its
 # `[workspace.package]` collided on `license` ("MIT" vs. this root's
@@ -825,7 +815,7 @@ rp-router = { path = "crates/apps/rusty_provider/crates/router" }
 rusty_hyper = { path = "crates/libs/net/rusty_hyper" }
 rusty_mcp_middleware = { path = "crates/libs/protocol/rusty_mcp_middleware", default-features = false }
 rusty-mcp-client = { path = "crates/libs/protocol/rusty_mcp/crates/rusty-mcp-client" }
-rmcp = { version = "3.1", default-features = false }
+rmcp = { version = "3.9", default-features = false }
 axum = { version = "0.8", features = ["json"] }
 tower = "0.5"
 prometheus = { version = "0.13", default-features = false }
@@ -1043,3 +1033,5 @@ undocumented_unsafe_blocks = "deny"
 # RUSTSEC-2026-0387: pinned source patch, provenance/removal in vendor/README.md.
 [patch.crates-io]
 jsonwebtoken = { path = "vendor/jsonwebtoken" }
+# Temporary manifest-only compatibility patch for RUSTSEC-2026-0459.
+sqlx-sqlite = { path = "vendor/sqlx-sqlite" }

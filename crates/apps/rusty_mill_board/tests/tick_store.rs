@@ -1085,3 +1085,49 @@ fn a_restarted_boxed_board_lists_moves_from_tick_history_not_its_fresh_event_log
         "the recorded move counts; a comment after the restart is not a move"
     );
 }
+
+#[test]
+fn bad_storage_pages_fail_instead_of_returning_partial_cards() {
+    struct BadPages {
+        tick: FakeTick,
+        mode: u8,
+    }
+    impl TickApi for BadPages {
+        fn send(&self, r: &TickRequest<'_>) -> Result<(u16, serde_json::Value), BoardError> {
+            if r.path.starts_with("/tags/agent/tasks?") {
+                // Ignore after here to model a broken server repeating the first page.
+                let (status, mut body) = self.tick.send(&TickRequest {
+                    method: "GET",
+                    path: "/tags/agent/tasks".into(),
+                    ..Default::default()
+                })?;
+                body["next"] = match self.mode {
+                    0 => json!("bad-cursor"),
+                    _ => body["tasks"][0]["id"].clone(),
+                };
+                if self.mode == 2 {
+                    body["tasks"] = json!([]);
+                }
+                return Ok((status, body));
+            }
+            self.tick.send(r)
+        }
+    }
+    let (board, tick) = board();
+    let actor = board.roles().actor("human", "human").expect("role");
+    let card = board
+        .add(&actor, "complete record", "", vec![])
+        .expect("add");
+    for mode in 0..3 {
+        let store = TickStore::new(BadPages {
+            tick: tick.clone(),
+            mode,
+        });
+        assert!(matches!(store.list(), Err(BoardError::Storage(_))));
+        assert_eq!(
+            store.get(card.id).expect("get").expect("card").title,
+            card.title
+        );
+    }
+    assert_eq!(board.list(None).expect("recovery").len(), 1);
+}

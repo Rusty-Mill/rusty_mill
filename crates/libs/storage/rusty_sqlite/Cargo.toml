@@ -2,7 +2,7 @@
 name = "rusty_sqlite"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "A thin, ergonomic wrapper over rusqlite: cross-platform bundled SQLite, typed FTS5 schema building, and connection/migration lifecycle management."
 repository = "https://github.com/baileyrd/rusty_sqlite"
@@ -13,21 +13,17 @@ readme = "README.md"
 layer = "libs"
 
 [dependencies]
-# Bumped from 0.31 (-> libsqlite3-sys ^0.28.0), then again from 0.32.1
-# (-> libsqlite3-sys ^0.30.1): same `links = "sqlite3"` uniqueness
-# constraint as before (Cargo.lock's `links` check considers every
-# declared optional dependency reachable in the graph, not just the ones
-# actually activated for a given build -- see the prior note this comment
-# replaces), now driven by the nexus merge, which needs rusqlite 0.39 for
-# a feature nexus's own storage layer requires. 0.39 (-> libsqlite3-sys
-# ^0.37.0) still resolves to one shared libsqlite3-sys version across
-# rusty_ibm_acp's `sqlx`-sqlite path, inventory-core, and nexus's own
-# consumers -- verified via `cargo metadata --all-features`.
-rusqlite = { version = "0.39", features = ["bundled"] }
+# Bundled SQLite 3.54+ fixes RUSTSEC-2026-0459. Keep the same rusqlite
+# major as the workspace and multimodal engine so links=sqlite3 stays unique.
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 [features]
 default = []
 pool = []
 
 [dev-dependencies]
+# Exercise the manifest-only SQLx compatibility patch against the same WAL
+# database as rusqlite, including the actual linked SQLite version.
+sqlx = { workspace = true, features = ["sqlite"] }
+tokio = { workspace = true, features = ["macros", "rt"] }
 tempfile = { workspace = true }

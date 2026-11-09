@@ -2,10 +2,10 @@
 """Regenerate src/fulltext/unicode_tables.rs from the SQLite amalgamation
 libsqlite3-sys bundles, so the engine's unicode61 tokenizer matches FTS5.
 
-Usage: python3 scripts/gen_unicode61_tables.py src/fulltext/unicode_tables.rs
+Usage: python3 scripts/gen_unicode61_tables.py src/fulltext/unicode_tables.rs /path/to/locked/libsqlite3-sys/sqlite3/sqlite3.c
 """
-import re, glob, sys
-src = open(glob.glob('/root/.cargo/registry/src/*/libsqlite3-sys-0.37.0/sqlite3/sqlite3.c')[0]).read()
+import re, sys
+src = open(sys.argv[2]).read()
 version = re.search(r'#define SQLITE_VERSION\s+"([^"]+)"', src).group(1)
 
 def body(pattern):

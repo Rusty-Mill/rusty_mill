@@ -333,18 +333,53 @@ fn kill_own_group() {
 /// oversubscription.
 #[cfg(target_os = "linux")]
 fn others_in_group() -> bool {
-    let me = std::process::id();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+    others_in_group_at(Path::new("/proc"), std::process::id())
+}
+
+#[cfg(target_os = "linux")]
+fn others_in_group_at(proc: &Path, me: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc) else {
         return true;
     };
-    entries.flatten().any(|entry| {
-        let pid = entry
+    entries.into_iter().any(|entry| {
+        let Ok(entry) = entry else { return true };
+        let Some(pid) = entry
             .file_name()
             .to_str()
-            .and_then(|n| n.parse::<u32>().ok());
-        pid.is_some_and(|pid| pid != me)
-            && std::fs::read_to_string(entry.path().join("stat"))
-                .is_ok_and(|stat| stat_pgrp(&stat) == Some(me))
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            return false;
+        };
+        if pid == me {
+            return false;
+        }
+        match std::fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => match stat_pgrp(&stat) {
+                Some(group) if group != me => false,
+                Some(_) => !single_threaded_zombie(&stat),
+                None => true,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(3) => {
+                false
+            }
+            Err(_) => true,
+        }
+    })
+}
+
+/// A zombie leader alone is insufficient: main can call pthread_exit while
+/// workers still run. Linux's num_threads (field 20) includes that leader;
+/// only exactly one proves there is no other thread left to execute or fork.
+/// Missing or malformed evidence must keep the slot held.
+#[cfg(target_os = "linux")]
+fn single_threaded_zombie(stat: &str) -> bool {
+    stat.rsplit_once(") ").is_some_and(|(_, rest)| {
+        let mut fields = rest.split_whitespace();
+        fields.next() == Some("Z")
+            && fields
+                .next()
+                .is_some_and(|parent| parent.parse::<u32>().is_ok())
+            && fields.nth(15).and_then(|n| n.parse::<u32>().ok()) == Some(1)
     })
 }
 
@@ -456,6 +491,47 @@ mod tests {
         assert_eq!(stat_pgrp("42 (a) b) (c) R 1 9 9 0"), Some(9));
         assert_eq!(stat_pgrp("42 (sh"), None);
         assert_eq!(stat_pgrp("42 (sh) S 1"), None);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn group_scan_ignores_only_confirmed_zombies_and_exited_processes() -> Result<(), std::io::Error>
+    {
+        let root = dir("proc");
+        std::fs::create_dir_all(root.join("42"))?;
+        let stat = root.join("42/stat");
+        let snapshot = |state: &str, threads: &str| {
+            let mut fields = vec!["0"; 18];
+            fields[0] = state;
+            fields[1] = "1";
+            fields[2] = "77";
+            fields[17] = threads;
+            format!("42 (a) b) {}", fields.join(" "))
+        };
+        std::fs::write(&stat, snapshot("Z", "1"))?;
+        assert!(!others_in_group_at(&root, 77));
+        for state in ["S", "R", "?", "ZZ"] {
+            std::fs::write(&stat, snapshot(state, "1"))?;
+            assert!(others_in_group_at(&root, 77), "state {state}");
+        }
+        for threads in ["2", "0", "?", ""] {
+            std::fs::write(&stat, snapshot("Z", threads))?;
+            assert!(others_in_group_at(&root, 77), "threads {threads}");
+        }
+        for malformed in ["", "42 (sh", "42 (sh) Z", "42 (sh) Z ? 77", "42 (sh) Z 1 ?"] {
+            std::fs::write(&stat, malformed)?;
+            assert!(others_in_group_at(&root, 77), "{malformed}");
+        }
+        std::fs::write(&stat, "42 (sh) S 1 88 88 0")?;
+        assert!(!others_in_group_at(&root, 77));
+        std::fs::remove_file(&stat)?;
+        assert!(!others_in_group_at(&root, 77));
+        // A directory in place of stat is unreadable as text even as root.
+        std::fs::create_dir(&stat)?;
+        assert!(others_in_group_at(&root, 77));
+        assert!(others_in_group_at(&root.join("missing"), 77));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     // Inheriting a lock with a duplicated descriptor is Unix semantics; the
