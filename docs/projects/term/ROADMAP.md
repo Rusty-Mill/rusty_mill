@@ -48,7 +48,7 @@ Each arc needs the owner's go before it starts, and its own plan.
    remote hosts and `~/.ssh/config`; TLS (card 506) touches `rusty_tls`.
 2. **One GUI for terminal and mux.** The terminal-mux design (session switcher, split-tree
    thumbnails, server-owned layout, per-block status) is a requirement. The GUI becomes a mux
-   client only, keeping its local mode until C69 and C45 land (question 1). This is where mux Phase 4's native client (C16) and C21,
+   client only, keeping its local mode until C69 and C45 land (question 1). Both have landed: `rusty_term --gui` now runs `rusty-mux-gui` (retirement step R1, handoff D146), and deleting the local-mode code (R2) waits for its own go. This is where mux Phase 4's native client (C16) and C21,
    C42, C53–C55, C61–C64 land. Visual design goes to the design pack once it is on main.
 3. **Sessions that survive restarts.** C45 (state survives a server restart) plus C70
    (scrollback spooled to disk), pulled forward from Phase 5 (question 2); it gates arc 2.

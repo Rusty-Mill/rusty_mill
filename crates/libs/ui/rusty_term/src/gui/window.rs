@@ -444,6 +444,7 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
 /// Launch a window that shows `source`'s panes, laid out as `first` with
 /// pane `focus` focused and then as the source says through the [`Remote`]
 /// handed to `on_start` before the window opens. It opens no local shells.
+/// Setup opens as it does for [`run`]: on `--setup`, or on a first run.
 /// Blocks until the window closes or the source's window is gone.
 pub fn run_attached(
     source: &dyn Source,
@@ -452,10 +453,13 @@ pub fn run_attached(
     config: &Config,
     on_start: impl FnOnce(Remote),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    launch(&NoShells, Some(source), config, |window, _| {
+    launch(&NoShells, Some(source), config, |window, args| {
         on_start(Remote(window.proxy.clone()));
         window.told = Some(focus);
         window.show_tree(Some(first));
+        if crate::config::wants_setup(args) || crate::config::is_first_run(args) {
+            window.open_setup();
+        }
         Ok(())
     })
 }
