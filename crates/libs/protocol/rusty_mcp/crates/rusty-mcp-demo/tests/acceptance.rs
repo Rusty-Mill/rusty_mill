@@ -9,7 +9,7 @@ mod demo;
 use rmcp::{
     ClientHandler, ClientServiceExt, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientInfo, ProtocolVersion,
+        CallToolRequestParams, CallToolResponse, ClientCapabilities, ClientConfig, ProtocolVersion,
     },
     service::RunningService,
     transport::StreamableHttpClientTransport,
@@ -34,8 +34,8 @@ struct Pinned {
 }
 
 impl ClientHandler for Pinned {
-    fn get_info(&self) -> ClientInfo {
-        let mut info = ClientInfo::default();
+    fn get_info(&self) -> ClientConfig {
+        let mut info = ClientConfig::default();
         info.protocol_version = self.version.clone();
         let mut caps = serde_json::json!({});
         if self.tasks {
@@ -856,8 +856,8 @@ mod subscriptions {
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 
-    async fn connect_listening(demo: &Demo) -> RunningService<rmcp::RoleClient, ClientInfo> {
-        ClientInfo::default()
+    async fn connect_listening(demo: &Demo) -> RunningService<rmcp::RoleClient, ClientConfig> {
+        ClientConfig::default()
             .serve_with_lifecycle(
                 transport!(demo),
                 ClientLifecycleMode::Discover {

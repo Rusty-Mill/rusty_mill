@@ -2,7 +2,7 @@
 name = "rusty-keys-desktop"
 version = "0.0.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Rusty Keys desktop frontend (Tauri 2)"
 publish = false
 

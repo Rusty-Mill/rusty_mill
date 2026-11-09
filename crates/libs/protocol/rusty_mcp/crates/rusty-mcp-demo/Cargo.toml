@@ -30,7 +30,7 @@ rusty_serve = { workspace = true }
 [dev-dependencies]
 # The acceptance suite drives the server with the `rmcp` client, the oracle
 # the MCP crates are being moved off; never shipped.
-rmcp = { version = "3.1", default-features = false, features = [
+rmcp = { version = "3.9", default-features = false, features = [
     "client",
     "transport-streamable-http-client",
     "transport-streamable-http-client-reqwest",
