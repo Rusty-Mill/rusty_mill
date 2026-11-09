@@ -21,7 +21,9 @@ question 9.
 `rusty_mux_proto` package version as text (`rusty_mux_proto::VERSION`). Older
 decoders skip the field, and an older peer sends none, so the field changes
 nothing for either side. No Features bit is added, because nothing new is
-asked for.
+asked for. A received version that is empty, longer than 64 bytes or not
+printable ASCII decodes as none, so a peer can't put escape sequences on a
+user's terminal and a bad version never fails the handshake.
 
 **The notice.** A client compares the features it asked for with those the
 Welcome granted. If any are missing, it tells the user once per connection.
@@ -40,7 +42,8 @@ version.
 - `rusty-mux` prints it on stderr when it leaves the screen, because the
   terminal client has no place to show a message while it runs.
 - `rusty-mux-ctl` prints it on stderr, so scripts reading stdout are not
-  affected. A command that needs a missing feature still fails with its own
+  affected; `rusty-mux-ctl own` prints it on each connection, since a
+  reconnect may reach an upgraded server. A command that needs a missing feature still fails with its own
   error.
 
 Example: `the server runs an older rusty_mux (0.1.0; this is 0.2.0). It lacks
@@ -52,5 +55,8 @@ no one. The check is added with the first break that needs it, because a check
 that can never fire would only be code to maintain.
 
 **Known limit.** Every crate is still at 0.1.0, so the two versions can match
-while the features differ. The feature names are what tell the user what is
-missing. Raising the version is a release question, not a C36 question.
+while the features differ. The notice then says the server runs "another build
+of rusty_mux 0.1.0", and the feature names tell the user what is missing.
+Raising the version is a release question, not a C36 question. A server test
+checks that every feature it offers has a name, so a new bit can't drop out of
+the notice.

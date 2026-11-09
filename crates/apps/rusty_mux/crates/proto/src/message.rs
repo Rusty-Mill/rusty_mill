@@ -236,6 +236,19 @@ impl Features {
     }
 }
 
+/// The most bytes of a peer's version kept (C36a).
+const MAX_VERSION: usize = 64;
+
+/// A peer's version as sent, if it is at most [`MAX_VERSION`] printable
+/// ASCII bytes; anything else is dropped rather than shown, since clients
+/// print it to a terminal, and rather than refused, since it is only
+/// informational.
+fn version_text(raw: &[u8]) -> Option<String> {
+    let printable = raw.iter().all(|b| (b' '..=b'~').contains(b));
+    (printable && !raw.is_empty() && raw.len() <= MAX_VERSION)
+        .then(|| String::from_utf8_lossy(raw).into_owned())
+}
+
 /// [`Features::names`]' words, in bit order.
 const NAMES: &[(Features, &str)] = &[
     (Features::EVENT_SEQ, "resuming after a reconnect"),
@@ -1221,7 +1234,7 @@ impl Message {
                 features: Features(f.varint(FEATURES)?),
                 resume: get_cursor(&f)?,
                 takeover: get_takeover(&f)?,
-                version: f.opt(VERSION, In::string)?,
+                version: f.opt(VERSION, In::bytes)?.and_then(version_text),
             },
             ty::CREATE_SESSION => M::CreateSession {
                 req: f.varint(REQ)?,
@@ -1398,7 +1411,7 @@ impl Message {
                 client: client(&f, CLIENT)?,
                 cursor: get_cursor(&f)?,
                 token: f.opt(TOKEN, In::uuid)?,
-                version: f.opt(VERSION, In::string)?,
+                version: f.opt(VERSION, In::bytes)?.and_then(version_text),
             },
             ty::DONE => M::Done {
                 req: f.varint(REQ)?,

@@ -34,10 +34,14 @@ impl Older {
     }
 
     /// One line: "{target} runs an older rusty_mux (0.1.0; this is 0.2.0)",
-    /// or an unknown version when the server sent none.
+    /// another build when the version numbers match, or an unknown version
+    /// when the server sent none.
     pub fn title(&self, target: &str) -> String {
         let client = crate::VERSION;
         match &self.server {
+            Some(server) if server == client => {
+                format!("{target} runs another build of rusty_mux {client}")
+            }
             Some(server) => {
                 format!("{target} runs an older rusty_mux ({server}; this is {client})")
             }
@@ -87,6 +91,16 @@ mod tests {
         assert!(line.starts_with("the server runs an older rusty_mux (0.0.9; this is "));
         assert!(
             line.ends_with("It lacks layout editing, shared focus. Some actions are unavailable.")
+        );
+    }
+
+    #[test]
+    fn the_same_version_number_is_another_build() {
+        let older =
+            Older::check(Features::FOCUS, Features::NONE, Some(crate::VERSION)).expect("older");
+        assert_eq!(
+            older.title("s"),
+            format!("s runs another build of rusty_mux {}", crate::VERSION)
         );
     }
 

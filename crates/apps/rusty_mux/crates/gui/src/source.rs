@@ -771,6 +771,7 @@ impl Events {
     fn back(&mut self, kept: bool, out: &mut impl FnMut(Out) -> bool) -> Option<Stop> {
         if let Some(name) = self.model.ended() {
             let told = out(Out::Link(Link::Up))
+                && (kept || out(Out::Notice(self.notice())))
                 && out(Out::Ended(name.to_owned()))
                 && out(Out::Session(self.session()));
             return (!told).then_some(Stop::Closed);
@@ -868,7 +869,6 @@ impl Events {
             .infos(keys, &mine, |c| self.model.client_name(c))
     }
 
-    /// The session as the strip shows it.
     /// The banner's notice for a server older than this client.
     fn notice(&self) -> Option<Notice> {
         let older = self.older.as_ref()?;
@@ -879,6 +879,7 @@ impl Events {
         })
     }
 
+    /// The session as the strip shows it.
     fn session(&self) -> Session {
         let shown = &mut *self.state.shown();
         let mut session = self.model.session(&mut StripKeys {

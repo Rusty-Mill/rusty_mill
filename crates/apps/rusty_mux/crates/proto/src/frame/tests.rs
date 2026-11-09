@@ -1377,3 +1377,30 @@ fn a_datagram_key_never_shows_in_debug_and_a_short_one_is_refused() {
     });
     assert!(decode(&short).is_err());
 }
+
+#[test]
+fn a_version_that_is_not_short_printable_ascii_is_dropped() {
+    let long = "1".repeat(65);
+    for bad in ["0.1.0\x1b[2J", "", long.as_str()] {
+        let frame = encode(&Message::Hello {
+            version: Some(bad.into()),
+            features: Features::NONE,
+            resume: None,
+            takeover: None,
+        })
+        .expect("encode");
+        let (decoded, _) = decode(&frame).expect("decode").expect("whole frame");
+        let Message::Hello { version, .. } = decoded else {
+            panic!("expected Hello");
+        };
+        assert_eq!(version, None, "{bad:?}");
+    }
+    let frame = raw_frame(0x01, |out| {
+        out.varint(10, 0);
+        out.bytes(57, &[0xff, 0xfe]);
+    });
+    let (decoded, _) = decode(&frame)
+        .expect("bad UTF-8 decodes")
+        .expect("whole frame");
+    assert!(matches!(decoded, Message::Hello { version: None, .. }));
+}

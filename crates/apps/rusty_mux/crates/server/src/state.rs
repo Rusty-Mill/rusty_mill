@@ -3348,3 +3348,20 @@ mod regression {
         assert_eq!(plain.lines().last(), Some("ab"));
     }
 }
+
+#[cfg(test)]
+mod offered {
+    use super::*;
+
+    /// Every feature offered has words for the older-server notice (C36a),
+    /// so a new bit can't drop out of it.
+    #[test]
+    fn every_offered_feature_is_named() {
+        for bit in 0..64 {
+            let feature = Features::from_bits(1 << bit);
+            if OFFERED.contains(feature) {
+                assert_eq!(feature.names().len(), 1, "bit {bit} has no name");
+            }
+        }
+    }
+}

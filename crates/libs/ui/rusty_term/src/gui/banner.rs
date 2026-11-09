@@ -207,6 +207,8 @@ pub(crate) fn paint(
     placed.reverse();
 
     let (title, detail) = words(banner, target);
+    // A notice's title comes from the server, so it may be long.
+    let title = font.fit(&title, Weight::Medium, TITLE_PX * s, (right - x).max(0.0));
     let title_base = mid + font.centre_drop(TITLE_PX * s);
     x += p.text(
         font,
