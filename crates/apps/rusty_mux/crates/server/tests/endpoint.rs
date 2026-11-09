@@ -149,3 +149,116 @@ fn idle_exit_waits_for_the_last_block_and_client_then_takes_its_name_away() {
     assert!(!socket.exists(), "a clean stop takes its own name away");
     let _ = std::fs::remove_dir_all(&runtime);
 }
+
+/// Starts a server as systemd's socket activation does: `listener` as its
+/// fd 3, `LISTEN_PID` its own pid and `LISTEN_FDS` 1.
+fn activated(listener: &std::os::unix::net::UnixListener, runtime: &Path) -> Running {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let fd = listener.as_raw_fd();
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        // `exec` keeps the shell's pid, so `$$` is the server's.
+        .arg(r#"LISTEN_PID=$$ LISTEN_FDS=1 exec "$0" --no-state --idle-exit 1"#)
+        .arg(env!("CARGO_BIN_EXE_rusty-mux-server"))
+        .env_remove("RUSTY_MUX_SOCKET")
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env("SHELL", "/bin/sh")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: `dup2` and `fcntl` are async-signal-safe and allocate
+    // nothing; they give the child the listener as fd 3, as systemd does.
+    unsafe {
+        command.pre_exec(move || {
+            // `dup2` onto itself keeps close-on-exec, so clear it too.
+            let errno = |e: rusty_libc::Errno| std::io::Error::from_raw_os_error(e.0);
+            rusty_libc::fd::dup2(fd, 3).map_err(errno)?;
+            rusty_libc::fd::fcntl(3, rusty_libc::fd::F_SETFD, 0)
+                .map(|_| ())
+                .map_err(errno)
+        });
+    }
+    Running(command.spawn().expect("server"))
+}
+
+#[test]
+fn a_socket_from_systemd_is_served_and_its_name_left_alone() {
+    let runtime = scratch("activated");
+    let socket = runtime.join("activated.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+    let mut running = activated(&listener, &runtime);
+    drop(listener);
+
+    let mut client = common::Client::connect(&socket);
+    let _block = common::block_for(&mut client);
+    drop(client);
+    let server = running.0.id();
+    let listening = std::fs::read_link(format!("/proc/{server}/fd/3")).expect("fd 3");
+    let programs = descendants(server);
+    assert!(!programs.is_empty(), "the block's program runs");
+    for pid in programs {
+        assert!(
+            !holds(pid, &listening),
+            "block program {pid} must not inherit the listener"
+        );
+    }
+    assert!(
+        !runtime.join("rusty_mux").join("default.sock").exists(),
+        "an activated server binds nothing of its own"
+    );
+    // Its blocks still live, so it keeps running; then stop it.
+    assert!(!exits_within(&mut running.0, Duration::from_millis(1500)));
+    drop(running);
+    assert!(socket.exists(), "the name stays systemd's");
+    let _ = std::fs::remove_dir_all(&runtime);
+}
+
+#[test]
+fn an_activated_server_idles_out_cleanly_and_the_next_connection_restarts_it() {
+    let runtime = scratch("reactivated");
+    let socket = runtime.join("activated.sock");
+    // systemd keeps the listener across the server's runs; so does this test.
+    let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+    for run in ["first", "restarted"] {
+        let mut running = activated(&listener, &runtime);
+        drop(common::Client::connect(&socket));
+        assert!(
+            exits_within(&mut running.0, PATIENCE),
+            "{run}: no block and no client, so it idles out"
+        );
+        let status = running.0.wait().expect("status");
+        assert!(status.success(), "{run}: a clean stop: {status}");
+        assert!(socket.exists(), "{run}: a clean stop leaves systemd's name");
+    }
+    let _ = std::fs::remove_dir_all(&runtime);
+}
+
+/// Every process below `pid`, read from `/proc/*/task/*/children`.
+fn descendants(pid: u32) -> Vec<u32> {
+    let children = |pid: u32| -> Vec<u32> {
+        let path = format!("/proc/{pid}/task/{pid}/children");
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|child| child.parse().ok())
+            .collect()
+    };
+    let mut found = Vec::new();
+    let mut next = children(pid);
+    while let Some(child) = next.pop() {
+        next.extend(children(child));
+        found.push(child);
+    }
+    found
+}
+
+/// Whether any of `pid`'s descriptors is `target` (a `socket:[inode]` link).
+fn holds(pid: u32, target: &Path) -> bool {
+    let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return false;
+    };
+    fds.filter_map(Result::ok)
+        .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|link| link == target))
+}

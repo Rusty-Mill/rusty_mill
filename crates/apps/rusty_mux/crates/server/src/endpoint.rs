@@ -93,6 +93,62 @@ fn remove_if_present(path: &Path) -> io::Result<()> {
     }
 }
 
+/// The first descriptor systemd passes (`SD_LISTEN_FDS_START`).
+const LISTEN_FD: std::os::fd::RawFd = 3;
+
+/// Whether socket activation (C69 slice (c)) passed this process its
+/// listener: `LISTEN_PID` names this process and `LISTEN_FDS` counts one.
+/// More than one descriptor is an error; anything else is no activation.
+fn activated(env: impl Fn(&str) -> Option<String>) -> io::Result<bool> {
+    let ours = env("LISTEN_PID").is_some_and(|pid| pid == std::process::id().to_string());
+    if !ours {
+        return Ok(false);
+    }
+    match env("LISTEN_FDS").as_deref() {
+        Some("1") => Ok(true),
+        Some(n) => Err(io::Error::other(format!(
+            "socket activation passed {n} sockets; the server takes one"
+        ))),
+        None => Ok(false),
+    }
+}
+
+/// The listening socket systemd passed by socket activation, if
+/// [`activated`]: the server then binds nothing and never removes the name,
+/// which systemd owns. fd 3 must be open and a Unix socket. It is made
+/// close-on-exec, which systemd leaves clear, so no block's program
+/// inherits the listener. `env` is the process's environment; the caller
+/// removes the variables so blocks' programs don't see them.
+///
+/// # Safety
+///
+/// Call at most once, at process start, before anything else opens, closes
+/// or takes ownership of descriptors: when `env` names this process, fd 3
+/// must be the descriptor systemd passed and owned by nothing else, since
+/// the returned listener takes ownership of it.
+pub unsafe fn inherited(env: impl Fn(&str) -> Option<String>) -> io::Result<Option<UnixListener>> {
+    use rusty_libc::fd::{F_GETFD, F_SETFD, FD_CLOEXEC, fcntl};
+    use std::os::fd::FromRawFd;
+    if !activated(env)? {
+        return Ok(None);
+    }
+    let errno = |e: rusty_libc::Errno| io::Error::from_raw_os_error(e.0);
+    let flags = fcntl(LISTEN_FD, F_GETFD, 0).map_err(|e| {
+        io::Error::other(format!("socket activation: fd 3 is not open: {}", errno(e)))
+    })?;
+    fcntl(LISTEN_FD, F_SETFD, flags | FD_CLOEXEC).map_err(errno)?;
+    // SAFETY: the caller guarantees fd 3 is systemd's, owned by nothing
+    // else and taken once; it was just checked to be open.
+    let listener = unsafe { UnixListener::from_raw_fd(LISTEN_FD) };
+    listener.local_addr().map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("socket activation: fd 3 is not a Unix socket: {e}"),
+        )
+    })?;
+    Ok(Some(listener))
+}
+
 /// Makes `dir` this user's private directory (0700) if it is missing, and
 /// checks it either way: each part as [`check_parts`] requires, the last
 /// this user's and open to no one else. Its parent must exist.
@@ -233,6 +289,34 @@ mod tests {
         owned.release().expect("release");
         UnixStream::connect(&socket).expect("the successor's name stays");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn vars(pairs: Vec<(&'static str, String)>) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.clone())
+        }
+    }
+
+    #[test]
+    fn socket_activation_is_ignored_unless_it_names_this_process() {
+        assert!(!activated(vars(Vec::new())).expect("none"));
+        let another = vec![("LISTEN_PID", "1".into()), ("LISTEN_FDS", "1".into())];
+        assert!(!activated(vars(another)).expect("another's"));
+        let ours = vec![
+            ("LISTEN_PID", std::process::id().to_string()),
+            ("LISTEN_FDS", "1".into()),
+        ];
+        assert!(activated(vars(ours)).expect("ours"));
+    }
+
+    #[test]
+    fn socket_activation_with_several_sockets_is_refused() {
+        let pid = std::process::id().to_string();
+        let several = vec![("LISTEN_PID", pid), ("LISTEN_FDS", "2".into())];
+        assert!(activated(vars(several)).is_err());
     }
 
     #[test]

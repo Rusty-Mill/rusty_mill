@@ -1012,6 +1012,25 @@ fn a_bad_command_line_exits_2() {
 fn no_server_exits_4() {
     let output = ctl(&socket_path("none"), &["create-session", "--name", "x"]);
     assert_eq!(output.status.code(), Some(4));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("no server is running"), "{said}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_socket_path_that_cannot_be_looked_up_keeps_its_error() {
+    // A directory that is a symlink to itself: looking the socket up fails
+    // with a loop, not "not found", whatever the user's permissions.
+    let dir = socket_path("loop");
+    std::fs::create_dir(&dir).expect("dir");
+    std::os::unix::fs::symlink("loop", dir.join("loop")).expect("symlink");
+    let socket = dir.join("loop").join("s.sock");
+    let output = ctl(&socket, &["create-session", "--name", "x"]);
+    assert_eq!(output.status.code(), Some(4));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(!said.contains("no server is running"), "{said}");
+    assert!(said.contains(&socket.display().to_string()), "{said}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -8,7 +8,12 @@
 //! answers on is replaced. With `--idle-exit SECS` the server stops
 //! cleanly once it has had no block and no client for SECS; it never stops
 //! while a block lives. `rusty-mux` and `rusty-mux-gui` start a server this
-//! way when nothing answers on the default socket. Each new block runs
+//! way when nothing answers on the default socket.
+//!
+//! On Linux the server also takes its socket from systemd (socket
+//! activation, `LISTEN_PID`/`LISTEN_FDS`), as the user units in
+//! `dist/systemd/` set up; it then binds nothing and leaves the name to
+//! systemd. The socket argument, if any, only names the state directory. Each new block runs
 //! `$SHELL` (or `/bin/sh`) in `$HOME` (or `/`), unless the config file's
 //! `server` section names a command or directory. The file is `--config`,
 //! else `$RUSTY_MUX_CONFIG`, else `$XDG_CONFIG_HOME/rusty_mux/config.json`
@@ -250,10 +255,11 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
         StateDir::At(dir) => Some(dir),
         StateDir::Default => default_state_dir(&socket, |name| std::env::var_os(name)),
     };
-    // Before the runtime starts a thread: binding sets the umask. No
-    // authentication in Phase 1: only this user may connect (0600).
+    // Before the runtime starts a thread: binding sets the umask, and the
+    // activation variables are read and removed. No authentication in
+    // Phase 1: only this user may connect (0600).
     #[cfg(target_os = "linux")]
-    let (listener, owned) = rusty_mux_server::endpoint::bind(&socket, 0o177)?;
+    let (listener, owned) = linux_listener(&socket)?;
     let runtime = Builder::new_current_thread().build_local(&LocalOptions::default())?;
     let served = runtime.block_on(async {
         #[cfg(target_os = "linux")]
@@ -288,10 +294,36 @@ fn run(args: Args, console_host: ConsoleHost) -> std::io::Result<()> {
     });
     // A clean stop takes the name away, if it is still this server's.
     #[cfg(target_os = "linux")]
-    let released = owned.release();
+    let released = owned.map_or(Ok(()), rusty_mux_server::endpoint::Owned::release);
     #[cfg(not(target_os = "linux"))]
     let released = Ok(());
     served.and(released)
+}
+
+/// The listener systemd passed, else `socket` bound under O6's rules with
+/// the name this server owns. The activation variables are removed either
+/// way, so no block's program inherits them.
+#[cfg(target_os = "linux")]
+fn linux_listener(
+    socket: &std::path::Path,
+) -> std::io::Result<(
+    std::os::unix::net::UnixListener,
+    Option<rusty_mux_server::endpoint::Owned>,
+)> {
+    use rusty_mux_server::endpoint;
+    // SAFETY: called once, at start, before the runtime or any block
+    // opens a descriptor, so fd 3 is still systemd's when it names us.
+    let inherited = unsafe { endpoint::inherited(|name| std::env::var(name).ok()) };
+    for name in ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"] {
+        // SAFETY: called before the runtime starts, so no other thread
+        // reads the environment.
+        unsafe { std::env::remove_var(name) };
+    }
+    if let Some(listener) = inherited? {
+        return Ok((listener, None));
+    }
+    let (listener, owned) = endpoint::bind(socket, 0o177)?;
+    Ok((listener, Some(owned)))
 }
 
 /// Makes the default socket's directory: private to this user on Linux
