@@ -1,11 +1,11 @@
 //! Where one block connection's input lease stands, and its taking over
-//! of an owner-only block (handoff D102, D115, D151; gui-design D64).
+//! of an owner-only block (handoff D102, D115, D153; gui-design D64).
 //!
 //! No I/O: [`Lease`] takes what the window and the server say and answers
 //! with the requests to send, through a `send` that sends one and returns
 //! its request id. A lease follows the focus (D102); on a block whose
 //! input is its owner's (C77) it is asked for only after the user
-//! confirmed taking it over and the owner granted it (D151).
+//! confirmed taking it over and the owner granted it (D153).
 
 use rusty_term::gui::source::{Refusal, Take};
 
@@ -129,9 +129,10 @@ impl Lease {
 
     fn acquired(&mut self, refused: Option<&str>, send: &mut dyn FnMut(Ask) -> u64) {
         let Some(reason) = refused else {
-            match self.wanted {
+            match self.wanted && self.may_ask() {
                 true => self.held = true,
-                // Granted after the focus moved on: given back.
+                // Granted after the focus moved on, or after the take-over
+                // was cancelled: given back.
                 false => {
                     send(Ask::Release);
                 }
@@ -147,7 +148,7 @@ impl Lease {
         }
         self.gated = true;
         self.grant = false;
-        // Taking over on a grant that had ended: ask the owner (D151 3).
+        // Taking over on a grant that had ended: ask the owner (D153 3).
         if self.consent == Consent::Taking {
             self.consent = Consent::Asking;
             self.request(send);
@@ -189,7 +190,7 @@ impl Lease {
     }
 
     /// This client's grant on the block began (`true`) or ended. A grant
-    /// is used only while the user asked for it (D151 3).
+    /// is used only while the user asked for it (D153 3).
     pub fn granted(&mut self, live: bool, send: &mut dyn FnMut(Ask) -> u64) {
         self.gated = true;
         self.grant = live;
@@ -209,7 +210,7 @@ impl Lease {
     }
 
     /// The user confirmed taking the block over: take it on a live grant,
-    /// else ask its owner (D151 3).
+    /// else ask its owner (D153 3).
     pub fn take_over(&mut self, send: &mut dyn FnMut(Ask) -> u64) {
         self.refused = None;
         self.ended = false;
@@ -225,9 +226,15 @@ impl Lease {
         }
     }
 
-    /// The user stopped waiting for the owner; a later grant is not used.
+    /// The user stopped waiting, for the owner or for the lease the grant
+    /// asked for; a later grant or lease is not used.
     pub fn cancel_ask(&mut self) {
-        if self.consent == Consent::Asking {
+        let waiting = match self.consent {
+            Consent::Asking => true,
+            Consent::Taking => !self.held,
+            Consent::None | Consent::GivenBack => false,
+        };
+        if waiting {
             self.consent = Consent::None;
         }
     }
@@ -242,13 +249,18 @@ impl Lease {
     }
 
     /// The connection was taken over (handoff D110): what was asked is
-    /// lost, the lease asked for again if wanted; an ask of the owner
-    /// stands, as grants survive a reconnect (D119 4).
+    /// lost, the lease asked for again if wanted. An ask of the owner
+    /// stands, as grants survive a reconnect (D119 4), and is sent again:
+    /// the request, or the grant answering it, may have been lost in the
+    /// gap, and a block connection's events aren't replayed.
     pub fn revived(&mut self, send: &mut dyn FnMut(Ask) -> u64) {
         self.held = false;
         self.asking = None;
         self.requesting = None;
         self.sizing = None;
+        if self.consent == Consent::Asking {
+            self.request(send);
+        }
         self.settle(send);
     }
 }
@@ -428,8 +440,37 @@ mod tests {
         let mut l = gated(&mut sent);
         l.take_over(&mut sent.send());
         l.revived(&mut sent.send());
+        assert_eq!(sent.last().1, Ask::Request, "asked again");
         assert_eq!(l.take(), Take::Asking);
         l.granted(true, &mut sent.send());
         assert_eq!(sent.last().1, Ask::Acquire);
+    }
+
+    #[test]
+    fn a_cancel_while_the_lease_is_on_its_way_gives_it_back() {
+        let mut sent = Sent::default();
+        let mut l = gated(&mut sent);
+        l.take_over(&mut sent.send());
+        l.granted(true, &mut sent.send());
+        let (req, ask) = sent.last();
+        assert_eq!(ask, Ask::Acquire);
+        assert_eq!(l.take(), Take::Asking);
+        l.cancel_ask();
+        assert_eq!(l.take(), Take::Rest);
+        l.answered(req, None, &mut sent.send());
+        assert_eq!(sent.last().1, Ask::Release);
+        assert!(!l.held);
+        assert_eq!(l.take(), Take::Rest);
+    }
+
+    #[test]
+    fn cancel_does_not_undo_a_held_take_over() {
+        let mut sent = Sent::default();
+        let mut l = gated(&mut sent);
+        l.take_over(&mut sent.send());
+        l.granted(true, &mut sent.send());
+        l.answered(sent.last().0, None, &mut sent.send());
+        l.cancel_ask();
+        assert_eq!(l.take(), Take::Held, "Give back ends a held take-over");
     }
 }
