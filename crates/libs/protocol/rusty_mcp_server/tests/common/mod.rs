@@ -3,7 +3,7 @@
 //! the transport.
 
 use rmcp::model::{
-    CallToolRequest, CallToolRequestParams, ClientInfo, ClientRequest, GetPromptRequestParams,
+    CallToolRequest, CallToolRequestParams, ClientConfig, ClientRequest, GetPromptRequestParams,
     ProgressNotificationParam, ReadResourceRequestParams, ResourceUpdatedNotificationParam,
     ServerNotification, SubscribeRequestParams, SubscriptionFilter, UnsubscribeRequestParams,
 };
@@ -23,8 +23,10 @@ pub struct Recorder {
 }
 
 impl ClientHandler for Recorder {
-    fn get_info(&self) -> ClientInfo {
-        ClientInfo::default()
+    fn get_info(&self) -> ClientConfig {
+        // This recorder exercises the legacy initialize/session lifecycle. The
+        // discovery test selects the stateless revision explicitly.
+        ClientConfig::default().with_protocol_version(rmcp::model::ProtocolVersion::V_2025_11_25)
     }
 
     async fn on_progress(

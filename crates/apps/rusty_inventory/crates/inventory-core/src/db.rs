@@ -110,7 +110,7 @@ fn parse_key(hex: &str) -> Result<[u8; 32]> {
         ));
     }
     let mut bytes = [0u8; 32];
-    for (byte, chunk) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+    for (byte, chunk) in bytes.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
         // `chunk` is two ASCII hex digits; `hex` was just validated above.
         *byte = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
     }
