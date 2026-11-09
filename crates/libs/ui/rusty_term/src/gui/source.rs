@@ -39,12 +39,12 @@ pub enum Feed {
     /// The source resized the pane: a mux block's size is the server's.
     Resized { cols: u16, rows: u16 },
     /// Where this window's taking over of an owner-only block stands
-    /// (gui-design D64, handoff D151); first sent once the source can ask.
+    /// (gui-design D64, handoff D153); first sent once the source can ask.
     Take(Take),
 }
 
 /// Where this window stands on typing into an owner-only block, whose
-/// owner grants who may (gui-design D64, handoff D151).
+/// owner grants who may (gui-design D64, handoff D153).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Take {
     /// Not taking it over: "Take over".
@@ -292,7 +292,7 @@ pub enum Act {
     /// D61); the source places it.
     Reattach(u64),
     /// The user confirmed taking owner-only pane `key` over: ask its owner,
-    /// and type once granted (gui-design D64, handoff D151).
+    /// and type once granted (gui-design D64, handoff D153).
     TakeOver(u64),
     /// Stop waiting for pane `key`'s owner; a later grant is not used.
     CancelAsk(u64),

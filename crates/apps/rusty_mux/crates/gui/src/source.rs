@@ -68,7 +68,7 @@ pub const GUI: Features = CONTROL
 
 /// What a block's connection asks for: the panes' features, and the input
 /// gate's grants and lease requests, so an owner-only block can be taken
-/// over (handoff D151). The TUI's [`PANE`] stays as it is.
+/// over (handoff D153). The TUI's [`PANE`] stays as it is.
 pub const BLOCK: Features = PANE
     .union(Features::INPUT_GATE)
     .union(Features::LEASE_REQUESTS);
@@ -355,7 +355,7 @@ pub struct MuxSource(Arc<State>);
 
 impl MuxSource {
     /// Carries out the user's take-over `act` on pane `key`'s block
-    /// (gui-design D64, handoff D151).
+    /// (gui-design D64, handoff D153).
     fn take(&self, key: u64, act: Act) {
         let block = self
             .0
@@ -1063,7 +1063,7 @@ struct Block {
     next: AtomicU64,
     lease: Mutex<Lease>,
     /// The server takes lease requests on this connection, so the window
-    /// is told where taking the block over stands (D151).
+    /// is told where taking the block over stands (D153).
     requests: bool,
     /// Where the window hears of it, while the reader runs, and what it
     /// heard last.
