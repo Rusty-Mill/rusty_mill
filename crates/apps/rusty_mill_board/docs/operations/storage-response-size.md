@@ -86,28 +86,36 @@ storage clients still need to opt into paging as their own collections grow.
 
 ## Regression and measurements
 
-`tests/large_tick.rs` runs a real tick server over loopback on a temporary
-store, using the default production HTTP client. It contains 240 cards in two
-projects, 4,128,000 prompt bytes, large notes/comments, parent/dependency links,
+`tests/large_tick.rs` runs the Tick API test fixture over a real loopback
+socket, using the default production HTTP client. The production tick router
+and engine are tested separately in `rusty_tick/tests/api.rs`, respecting
+ADR-0003's prohibition on Cargo dependencies between application families.
+The HTTP fixture contains 240 cards in two projects, 4,128,000 prompt bytes, large notes/comments, parent/dependency links,
 a milestone, concurrent fenced updates and collection reads. It checks all
 cards/prompts, numbered lookup, roadmap, trace, milestone progress and events,
-then restarts tick and compares the complete card collection for equality.
+then restarts the HTTP fixture and compares the complete card collection for
+equality. The engine-backed API regression separately reopens its temporary
+store and compares large task/document collections for equality.
 Unpaged task, board-document and comment reads reproduce the original error.
-Before the adapter fix, the single-card assertion failed with the same error.
+Before the adapter fix, a real tick-server version of this fixture failed
+the single-card assertion with the same error. The committed loopback fixture
+also exercises the unchanged HTTP limit without a cross-application dependency.
 
-One debug-build run on this host (not a performance guarantee):
+One debug-build HTTP-fixture run on this host (not production latency or a
+performance guarantee):
 
 | Measurement | Original | Fixed |
 |---|---|---|
-| UUID card read | BodyTooLarge | 83 ms, complete prompt/comment |
-| Complete board read | BodyTooLarge | 699 ms, all 240 cards |
+| UUID card read | BodyTooLarge | 57 ms, complete prompt/comment |
+| Complete board read | BodyTooLarge | 517 ms, all 240 cards |
 | Unpaged oversized fixture request | rejected | still rejected (limit preserved) |
-| Process peak RSS | not measured for failed baseline | 99,028 KiB |
+| Process peak RSS | not measured for failed baseline | 59,760 KiB |
 
-First-page response sizes were 781,139 bytes for tasks, 768,996 for board
-documents and 783,388 for comments (all below the unchanged 1 MiB cap).
+First-page response sizes were 780,303 bytes for tasks, 784,602 for board
+documents and 784,360 for comments (all below the unchanged 1 MiB cap).
 
-RSS includes the fixture, real server, and several retained whole-board copies;
+RSS includes the in-memory fixture, loopback HTTP server, and several retained
+whole-board copies;
 it is not a per-request allocation measurement. API tests assert the serialized
 multi-record page bound, unchanged legacy shapes, malformed-cursor/limit errors,
 filtering before limiting, restart persistence, UUID stability after edits and

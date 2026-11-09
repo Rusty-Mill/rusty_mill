@@ -1749,7 +1749,7 @@ fn tag_renames_carry_the_actor_and_columns_match_the_board() {
 
 #[test]
 fn storage_pages_are_bounded_stable_and_opt_in() {
-    let (_dir, mut h) = harness();
+    let (dir, mut h) = harness();
     let list = h.list("page-test");
     let mut ids = Vec::new();
     // Each page must stop by bytes even when its record limit is much larger.
@@ -1832,6 +1832,17 @@ fn storage_pages_are_bounded_stable_and_opt_in() {
             h.send(Method::Get, &format!("{path}?limit=1"), "", None).0,
             401
         );
+    }
+    // Verify byte-heavy task/document payloads against the real engine after reopen.
+    let paths = ["/api/v1/docs/board", "/api/v1/tags/agent/tasks"];
+    let before: Vec<_> = paths
+        .iter()
+        .map(|path| h.call(Method::Get, path, "").1)
+        .collect();
+    drop(h);
+    let mut h = Harness::open(dir.path());
+    for (path, expected) in paths.iter().zip(before) {
+        assert_eq!(h.call(Method::Get, path, "").1, expected);
     }
 }
 

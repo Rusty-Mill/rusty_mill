@@ -383,8 +383,17 @@ impl TickApi for FakeTick {
                             after.is_none_or(|a| parse(v["id"].as_str().expect("test fixture")) > a)
                                 && task.is_none_or(|t| v["body"]["taskId"] == json!(t))
                         });
-                        let next = (items.len() > limit).then(|| items[limit - 1]["id"].clone());
-                        items.truncate(limit);
+                        let mut bytes = 0;
+                        let count = items
+                            .iter()
+                            .take(limit)
+                            .take_while(|item| {
+                                bytes += item.to_string().len() + 1;
+                                bytes <= 768 * 1024
+                            })
+                            .count();
+                        let next = (items.len() > count).then(|| items[count - 1]["id"].clone());
+                        items.truncate(count);
                         served.1["next"] = next.unwrap_or(Value::Null);
                         break;
                     }
