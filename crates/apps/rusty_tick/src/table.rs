@@ -90,6 +90,11 @@ where
             .collect()
     }
 
+    /// Identifiers whose indexed field equals `value`, without loading records.
+    pub fn ids_with_index(&self, value: &R::IndexValue) -> Vec<Uuid> {
+        FilterEq::<R, Index>::filter_eq(&self.core, value)
+    }
+
     /// Records whose indexed field equals `value`.
     pub fn with_index(&self, value: &R::IndexValue) -> Vec<R> {
         FilterEq::<R, Index>::filter_eq(&self.core, value)

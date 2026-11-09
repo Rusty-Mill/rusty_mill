@@ -191,12 +191,13 @@ impl FakeTick {
     fn route(state: &mut State, r: &TickRequest<'_>) -> (u16, Value) {
         state.clock += 1;
         let now = state.clock;
-        let segments: Vec<&str> = r.path.trim_start_matches('/').split('/').collect();
+        let path = r.path.split('?').next().unwrap_or(&r.path);
+        let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
         let body = r.body.clone().unwrap_or(Value::Null);
         match (r.method, segments.as_slice()) {
             ("GET", ["health"]) => (200, json!({ "ok": true })),
-            ("GET", [moves]) if moves.starts_with("moves?") => {
-                Self::moves_page(state, &moves["moves?".len()..])
+            ("GET", ["moves"]) if r.path.starts_with("/moves?") => {
+                Self::moves_page(state, r.path.split_once('?').expect("test fixture").1)
             }
             ("GET", ["lists"]) => {
                 let lists: Vec<Value> = state
@@ -281,6 +282,13 @@ impl FakeTick {
                     .collect();
                 (200, json!({ "docs": docs }))
             }
+            ("GET", ["docs", kind, id]) => match state.docs.get(&(kind.to_string(), parse(id))) {
+                Some((body, etag)) => (
+                    200,
+                    json!({"id":parse(id), "body":body, "etag":etag.to_string()}),
+                ),
+                None => (404, Value::Null),
+            },
             ("PUT", ["docs", kind, id]) => {
                 let id = parse(id);
                 // The task the write is fenced to; rusty_tick moves its version with the write.
@@ -358,7 +366,31 @@ impl TickApi for FakeTick {
             state.fail_next = None;
             return Ok((500, json!({ "error": { "message": "injected" } })));
         }
-        let served = Self::route(&mut state, request);
+        let mut served = Self::route(&mut state, request);
+        if let Some((_, query)) = request.path.split_once('?') {
+            let param = |key: &str| {
+                query
+                    .split('&')
+                    .find_map(|p| p.strip_prefix(&format!("{key}=")))
+            };
+            if let Some(limit) = param("limit").and_then(|v| v.parse::<usize>().ok()) {
+                let after = param("after").map(parse);
+                let task = param("taskId").map(parse);
+                for key in ["docs", "tasks"] {
+                    if let Some(items) = served.1[key].as_array_mut() {
+                        items.sort_by_key(|v| parse(v["id"].as_str().expect("test fixture")));
+                        items.retain(|v| {
+                            after.is_none_or(|a| parse(v["id"].as_str().expect("test fixture")) > a)
+                                && task.is_none_or(|t| v["body"]["taskId"] == json!(t))
+                        });
+                        let next = (items.len() > limit).then(|| items[limit - 1]["id"].clone());
+                        items.truncate(limit);
+                        served.1["next"] = next.unwrap_or(Value::Null);
+                        break;
+                    }
+                }
+            }
+        }
         Self::run_race(&mut state, request);
         Ok(served)
     }
