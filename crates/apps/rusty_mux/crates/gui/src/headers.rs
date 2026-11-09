@@ -1,17 +1,18 @@
 //! What each shown block's header says (gui-design D48), as the server
 //! tells it (handoff D105): its folder, its status report and its process
 //! chain by `BlockCall`, read again when an event says one changed, and who
-//! holds its input lease from List entries and `LeaseChanged`.
+//! holds its input lease from List entries and `LeaseChanged`, and whose
+//! grant typing into an owner-only block needs from its entry (C77).
 //!
 //! No I/O: [`Headers`] says which calls to send, takes their answers and
 //! the events, and gives the window each block's [`BlockInfo`].
 
 use std::collections::HashMap;
 
-use rusty_mux_core::{BlockId, ClientId, Event};
-use rusty_mux_proto::Entry;
+use rusty_mux_core::{BlockId, ClientId, Event, InputMode};
+use rusty_mux_proto::{Entry, Ownership};
 use rusty_mux_status::{Kind, Report, State as Said, parse};
-use rusty_term::gui::source::{BlockInfo, State, Status, Wait};
+use rusty_term::gui::source::{BlockInfo, Gate, State, Status, Wait};
 
 use crate::keys::Keys;
 
@@ -50,6 +51,8 @@ struct Known {
     foreground: Option<Proc>,
     status: Option<Status>,
     holder: Option<ClientId>,
+    /// Its owner, when its input is the owner's (C77); `None` when open.
+    gate: Option<Ownership>,
 }
 
 /// The shown blocks' headers, and the calls asked for them.
@@ -80,13 +83,24 @@ impl Headers {
         self.pending.insert(req, (block, call));
     }
 
-    /// Note a List entry: a followed block's lease holder. Whether it
-    /// changed a header.
+    /// Note a List entry: a followed block's lease holder, and its owner
+    /// when its input is the owner's. Whether it changed a header.
     pub fn take(&mut self, entry: &Entry) -> bool {
         match entry {
-            Entry::Block { block, holder, .. } => self.with(*block, |k| {
-                let changed = k.holder != *holder;
+            Entry::Block {
+                block,
+                holder,
+                owner,
+                input,
+                ..
+            } => self.with(*block, |k| {
+                let gate = match input {
+                    InputMode::OwnerOnly => *owner,
+                    InputMode::Open => None,
+                };
+                let changed = k.holder != *holder || k.gate != gate;
                 k.holder = *holder;
+                k.gate = gate;
                 changed
             }),
             _ => false,
@@ -195,6 +209,10 @@ impl Headers {
                     foreground,
                     status: k.status.clone(),
                     holder: k.holder.filter(|h| !mine.contains(h)).map(&name),
+                    gate: k.gate.map(|o| match o {
+                        Ownership::Client(owner) => Gate::Owned(name(owner)),
+                        Ownership::Orphaned => Gate::Orphaned,
+                    }),
                 };
                 (keys.key(block), info)
             })

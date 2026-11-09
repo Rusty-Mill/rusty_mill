@@ -44,6 +44,7 @@ use winit::window::{CursorIcon, Fullscreen, ResizeDirection, UserAttentionType, 
 
 use super::blocks::{self, BodyState};
 use super::chrome::{Chrome, Marks};
+use super::confirm::{self, Answer, Confirm, ConfirmKey};
 use super::font::{self, FontCache, GlyphSource};
 use super::layout::{Dir, Layout, Rect};
 use super::motion;
@@ -170,6 +171,9 @@ pub(crate) enum UserEvent {
     Ended(String),
     /// An info notice for the banner ([`Remote::notice`]).
     Notice(Option<super::source::Notice>),
+    /// Where taking pane `id`'s owner-only block over stands
+    /// ([`super::source::Feed::Take`]).
+    Take(u64, super::source::Take),
 }
 
 /// What an attached window draws besides its panes: the strip, the
@@ -178,13 +182,16 @@ fn attached_scene<'a>(
     strip: Option<&'a StripState>,
     body: Option<&'a BodyState>,
     popover: Option<&'a Popover>,
+    confirm: Option<&'a Confirm>,
 ) -> Scene<'a> {
     let body = body.and_then(BodyState::painted);
     Scene {
         strip: strip.and_then(StripState::painted).map(|s| &s.pixmap),
         body: body.map(|b| &b.pixmap),
         over: body.map_or(&[], |b| &b.over),
-        pop: popover.and_then(Popover::painted),
+        pop: popover
+            .and_then(Popover::painted)
+            .or_else(|| confirm.and_then(Confirm::painted)),
     }
 }
 
@@ -656,6 +663,12 @@ fn reader_loop(
     mut send: impl FnMut(UserEvent) -> bool,
 ) {
     for step in feed {
+        if let Feed::Take(take) = step {
+            if !send(UserEvent::Take(id, take)) {
+                break; // loop gone
+            }
+            continue;
+        }
         let response = apply(step, &grid, &parser);
         if let Some(replies) = replies.as_mut().filter(|_| !response.is_empty()) {
             let _ = replies.write(&response);
@@ -706,6 +719,8 @@ fn apply(step: Feed, grid: &Mutex<Grid>, parser: &Mutex<AnsiParser>) -> Vec<u8> 
             grid.lock().resize(cols.into(), rows.into());
             Vec::new()
         }
+        // The reader loop tells the window instead.
+        Feed::Take(_) => Vec::new(),
     }
 }
 
@@ -744,6 +759,8 @@ struct WindowState<'a> {
     /// An attached window's popover: the session switcher (gui-design F4,
     /// D60) or the detached blocks (D61); `None` for local shells.
     popover: Option<Popover>,
+    /// An attached window's open take-over confirm (gui-design F3, D64).
+    confirm: Option<Confirm>,
     /// The effective config; refreshed on live reload so new tabs follow it.
     config: Config,
     /// The config file in effect, for the open shortcut + reload re-reads.
@@ -1721,6 +1738,9 @@ impl WindowState<'_> {
         if let Some(popover) = &mut self.popover {
             popover.repaint(tokens, scale);
         }
+        if let Some(confirm) = &mut self.confirm {
+            confirm.repaint(tokens, scale);
+        }
         let oy = self.grid_oy();
         // The command dock renders as one more (synthetic, unfocused) pane
         // right of the pane area. Built before the renderer is borrowed and
@@ -1751,6 +1771,7 @@ impl WindowState<'_> {
                     self.strip.as_ref(),
                     self.body.as_ref(),
                     self.popover.as_ref(),
+                    self.confirm.as_ref(),
                 );
                 renderer.render(
                     &[],
@@ -1931,6 +1952,7 @@ impl WindowState<'_> {
             self.strip.as_ref(),
             self.body.as_ref(),
             self.popover.as_ref(),
+            self.confirm.as_ref(),
         );
         renderer.render(
             &frames,
@@ -3112,6 +3134,7 @@ impl WindowState<'_> {
             }
             blocks::Spot::Banner(action) => self.on_banner(action),
             blocks::Spot::OpenSwitcher => self.toggle_popover(Kind::Switcher),
+            blocks::Spot::Take(key, button) => self.on_take(key, button),
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -6380,6 +6403,10 @@ impl WindowState<'_> {
     /// closes; the rest are dropped.
     fn popover_key(&mut self, key: &Key) {
         use winit::keyboard::NamedKey;
+        if self.confirm.is_some() {
+            self.confirm_key(key);
+            return;
+        }
         let Some(popover) = &mut self.popover else {
             return;
         };
@@ -6434,14 +6461,103 @@ impl WindowState<'_> {
         }
     }
 
+    /// A click on an owner-only block's take-over button (gui-design
+    /// D64): "Take over" focuses the block and opens the confirm under
+    /// the button; the others go to the source at once.
+    fn on_take(&mut self, key: u64, button: blocks::TakeButton) {
+        match button {
+            blocks::TakeButton::TakeOver => self.open_confirm(key),
+            blocks::TakeButton::CancelAsk => self.act_on_source(|_, _| Act::CancelAsk(key)),
+            blocks::TakeButton::GiveBack => self.act_on_source(|_, _| Act::GiveBack(key)),
+        }
+    }
+
+    /// Focus block `key` and open its take-over confirm, right-aligned
+    /// with its button and 8 px under its header (D64 2).
+    fn open_confirm(&mut self, key: u64) {
+        let spot = blocks::Spot::Take(key, blocks::TakeButton::TakeOver);
+        let found = self.body.as_ref().and_then(|b| {
+            let copy = b.owned(key)?;
+            let button = b.painted()?.spots.iter().find(|(_, s)| *s == spot)?.0;
+            Some((copy, button))
+        });
+        let Some(((program, owner), button)) = found else {
+            return;
+        };
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.focus = key;
+        }
+        self.tell_focus();
+        if let Some(popover) = &mut self.popover {
+            popover.close();
+        }
+        let s = self.scale_factor as f32;
+        let header_bottom = button.y + button.h / 2.0 + blocks::HEADER_HALF * s;
+        let top = self.chrome_h() as f32 + header_bottom + confirm::DROP * s;
+        self.confirm = Confirm::new(
+            key,
+            confirm::copy(&program, &owner),
+            button.x + button.w,
+            top,
+            s,
+        );
+    }
+
+    /// A key while the confirm is open: Tab and Shift-Tab move between
+    /// its buttons, Enter presses one, Esc cancels; the rest are dropped.
+    fn confirm_key(&mut self, key: &Key) {
+        use winit::keyboard::NamedKey;
+        let key = match key {
+            Key::Named(NamedKey::Tab) if self.mods.shift_key() => ConfirmKey::BackTab,
+            Key::Named(NamedKey::Tab) => ConfirmKey::Tab,
+            Key::Named(NamedKey::Enter) => ConfirmKey::Enter,
+            Key::Named(NamedKey::Escape) => ConfirmKey::Escape,
+            _ => return,
+        };
+        let answer = match &mut self.confirm {
+            Some(confirm) => confirm.key(key),
+            None => return,
+        };
+        self.confirm_answer(answer);
+    }
+
+    /// Carry out the confirm's `answer`: take its block over, or close.
+    fn confirm_answer(&mut self, answer: Answer) {
+        let key = match answer {
+            Answer::Stay => None,
+            Answer::Cancel => {
+                self.confirm = None;
+                None
+            }
+            Answer::TakeOver => self.confirm.take().map(|c| c.key),
+        };
+        if let (Some(key), Some(source)) = (key, self.source) {
+            source.act(Act::TakeOver(key));
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Note where taking pane `key`'s block over stands (D64).
+    fn show_take(&mut self, key: u64, take: super::source::Take) {
+        if let Some(body) = &mut self.body {
+            body.set_take(key, take);
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
     /// Whether a popover is open.
     fn popover_open(&self) -> bool {
-        self.popover_kind().is_some()
+        self.popover_kind().is_some() || self.confirm.is_some()
     }
 
     /// The pointer moved to `(x, y)`: light the row under it.
     fn popover_hover(&mut self, x: f64, y: f64) {
-        let changed = self.popover.as_mut().is_some_and(|p| p.hover(x, y));
+        let changed = self.popover.as_mut().is_some_and(|p| p.hover(x, y))
+            || self.confirm.as_mut().is_some_and(|c| c.hover(x, y));
         if let (true, Some(window)) = (changed, &self.window) {
             window.request_redraw();
         }
@@ -6451,6 +6567,11 @@ impl WindowState<'_> {
     /// the panel does nothing, and one off it closes it. A click on the
     /// open popover's own chip closes it too, through the chip.
     fn popover_click(&mut self, x: f64, y: f64) {
+        if let Some(confirm) = &self.confirm {
+            let answer = confirm.click(x, y);
+            self.confirm_answer(answer);
+            return;
+        }
         let hit = self.popover.as_ref().map(|p| p.hit(x, y));
         match hit {
             None | Some((None, true)) => {}
@@ -7201,6 +7322,7 @@ impl<'a> App<'a> {
                 Some(_) => Some(Popover::new().ok_or("the interface font failed to parse")?),
                 None => None,
             },
+            confirm: None,
             config: self.config.clone(),
             config_path: self.config_path.clone(),
             profile_override: self.profile_override.clone(),
@@ -7431,6 +7553,11 @@ impl ApplicationHandler<UserEvent> for App<'_> {
             UserEvent::Link(link) => {
                 if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
                     w.show_link(link);
+                }
+            }
+            UserEvent::Take(id, take) => {
+                if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
+                    w.show_take(id, take);
                 }
             }
             UserEvent::Ended(name) => {

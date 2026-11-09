@@ -354,16 +354,17 @@ pub fn answer(
 /// control connection's first, with the layout asked for again, then
 /// each block's. Every answer is due within [`HANDSHAKE`].
 pub fn take_over(socket: PathBuf, plan: Plan, cancel: &AtomicBool) -> Result<Back, Missed> {
-    take_over_with(socket, plan, CONTROL, cancel)
+    take_over_with(socket, plan, CONTROL, PANE, cancel)
 }
 
-/// [`take_over`], the control connection saying Hello with `features`:
-/// a client that asked for more than [`CONTROL`] keeps it on the path
-/// back.
+/// [`take_over`], the control connection saying Hello with `features`
+/// and each block's with `pane`: a client that asked for more than
+/// [`CONTROL`] or [`PANE`] keeps it on the path back.
 pub fn take_over_with(
     socket: PathBuf,
     plan: Plan,
     features: Features,
+    pane: Features,
     cancel: &AtomicBool,
 ) -> Result<Back, Missed> {
     let by = Instant::now() + HANDSHAKE;
@@ -404,10 +405,12 @@ pub fn take_over_with(
         .resumes
         .into_iter()
         .map(|(block, resume)| {
-            reach(&socket, block, Some(resume), by, cancel).map_err(|missed| match missed {
-                Missed::Retry(why) | Missed::Broken(why, _) => Missed::Broken(why, me),
-                Missed::Dropped => Missed::Dropped,
-            })
+            reach_with(&socket, block, Some(resume), pane, by, cancel).map_err(
+                |missed| match missed {
+                    Missed::Retry(why) | Missed::Broken(why, _) => Missed::Broken(why, me),
+                    Missed::Dropped => Missed::Dropped,
+                },
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Back {
@@ -458,13 +461,26 @@ pub fn reach(
     by: Instant,
     cancel: &AtomicBool,
 ) -> Result<Opened, Missed> {
+    reach_with(socket, block, resume, PANE, by, cancel)
+}
+
+/// [`reach`], saying Hello with `features`: a client taken over must ask
+/// for exactly the features it was made with.
+pub fn reach_with(
+    socket: &Path,
+    block: BlockId,
+    resume: Option<Takeover>,
+    features: Features,
+    by: Instant,
+    cancel: &AtomicBool,
+) -> Result<Opened, Missed> {
     let retry = Missed::Retry;
     let stream = connect(socket).map_err(retry)?;
     let mut conn = Conn::new(clone(&stream).map_err(retry)?);
     let writer = Conn::new(clone(&stream).map_err(retry)?);
     conn.send(&Message::Hello {
         version: Some(rusty_mux_proto::VERSION.into()),
-        features: PANE,
+        features,
         resume: None,
         takeover: resume,
     })

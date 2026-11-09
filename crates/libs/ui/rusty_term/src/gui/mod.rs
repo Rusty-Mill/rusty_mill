@@ -26,6 +26,7 @@ pub mod bench;
 mod blocks;
 mod boxdraw;
 mod chrome;
+mod confirm;
 pub mod control;
 mod cpu;
 mod damage;

@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 use platform_windows::WindowsUnixStream as UnixStream;
 use rusty_mux_client::Conn;
 use rusty_mux_client::attach::{
-    CONTROL, HANDSHAKE, Missed, Opened, Plan, Requests, Welcomed, backoff, clone, connect,
-    first_session_name, reach, take_over_with,
+    CONTROL, HANDSHAKE, Missed, Opened, PANE, Plan, Requests, Welcomed, backoff, clone, connect,
+    first_session_name, reach_with, take_over_with,
 };
 use rusty_mux_client::checkpoint::Receiver;
 use rusty_mux_client::older::Older;
@@ -41,11 +41,12 @@ use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, Wi
 use rusty_mux_proto::{Features, Launch, Message, Program, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
-    Act, BlockInfo, Detached, Dir, Feed, Link, Notice, PaneIo, Remote, Session, Source, Tree,
+    Act, BlockInfo, Detached, Dir, Feed, Link, Notice, PaneIo, Remote, Session, Source, Take, Tree,
 };
 
 use crate::headers::{Call, Effect, Headers};
 use crate::keys::Keys;
+use crate::lease::{Ask as LeaseAsk, Lease};
 use crate::session::{Change, Model, StripKeys, local_host};
 use crate::tree::tree;
 
@@ -64,6 +65,13 @@ pub const GUI: Features = CONTROL
     .union(Features::PROCESS)
     .union(Features::MORE_PROGRAM_EVENTS)
     .union(Features::LAUNCH);
+
+/// What a block's connection asks for: the panes' features, and the input
+/// gate's grants and lease requests, so an owner-only block can be taken
+/// over (handoff D153). The TUI's [`PANE`] stays as it is.
+pub const BLOCK: Features = PANE
+    .union(Features::INPUT_GATE)
+    .union(Features::LEASE_REQUESTS);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -345,6 +353,28 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The server window's blocks, opened on demand by the GUI window.
 pub struct MuxSource(Arc<State>);
 
+impl MuxSource {
+    /// Carries out the user's take-over `act` on pane `key`'s block
+    /// (gui-design D64, handoff D153).
+    fn take(&self, key: u64, act: Act) {
+        let block = self
+            .0
+            .shown()
+            .blocks
+            .get(&key)
+            .and_then(std::sync::Weak::upgrade);
+        let Some(block) = block else {
+            return;
+        };
+        block.update(|lease, send| match act {
+            Act::TakeOver(_) => lease.take_over(send),
+            Act::CancelAsk(_) => lease.cancel_ask(),
+            Act::GiveBack(_) => lease.give_back(send),
+            _ => {}
+        });
+    }
+}
+
 impl Source for MuxSource {
     fn open(&self, key: u64, cols: u16, rows: u16) -> std::io::Result<PaneIo> {
         let block = self
@@ -387,13 +417,16 @@ impl Source for MuxSource {
     /// Sends a layout change (handoff D104); the window follows the
     /// `LayoutChanged` it causes. A pane not shown is left alone.
     fn act(&self, act: Act) {
+        if let Act::TakeOver(key) | Act::CancelAsk(key) | Act::GiveBack(key) = act {
+            return self.take(key, act);
+        }
         let (block, window, focused) = {
             let shown = self.0.shown();
             let key = match act {
                 Act::Split { key, .. } | Act::Zoom(key) | Act::Close(key) | Act::Reattach(key) => {
                     Some(key)
                 }
-                Act::Unzoom => None,
+                Act::Unzoom | Act::TakeOver(_) | Act::CancelAsk(_) | Act::GiveBack(_) => None,
             };
             let focused = shown.focus.and_then(|k| shown.keys.id(k));
             (key.and_then(|k| shown.keys.id(k)), shown.window, focused)
@@ -418,6 +451,7 @@ impl Source for MuxSource {
                 beside: focused,
                 side: Side::Right,
             }),
+            Act::TakeOver(_) | Act::CancelAsk(_) | Act::GiveBack(_) => None,
         });
     }
 
@@ -756,7 +790,7 @@ impl Events {
             window: None,
             resumes: blocks.iter().map(|(b, t)| (b.block, *t)).collect(),
         };
-        let mut back = take_over_with(self.state.socket.clone(), plan, GUI, &NEVER)?;
+        let mut back = take_over_with(self.state.socket.clone(), plan, GUI, BLOCK, &NEVER)?;
         let mut req = Requests {
             conn: &mut back.conn,
             next: back.next,
@@ -1028,6 +1062,13 @@ struct Block {
     revive: Mutex<Option<Sender<Conn<UnixStream>>>>,
     next: AtomicU64,
     lease: Mutex<Lease>,
+    /// The server takes lease requests on this connection, so the window
+    /// is told where taking the block over stands (D153).
+    requests: bool,
+    /// Where the window hears of it, while the reader runs, and what it
+    /// heard last.
+    to_window: Mutex<Option<SyncSender<Feed>>>,
+    told: Mutex<Option<Take>>,
 }
 
 /// Why a block's reader stopped reading a connection.
@@ -1039,20 +1080,6 @@ enum Read {
     Ended,
 }
 
-/// Where the block's input lease stands.
-#[derive(Default)]
-struct Lease {
-    /// The block has the focus, so its lease is wanted.
-    wanted: bool,
-    held: bool,
-    /// The pending `AcquireLease`.
-    asking: Option<u64>,
-    /// The place the window last gave the block.
-    place: Option<(u16, u16)>,
-    /// The size last asked for.
-    sizing: Option<(u16, u16)>,
-}
-
 impl Block {
     /// Connects to `block`, attaches and starts its reader.
     fn open(
@@ -1061,7 +1088,7 @@ impl Block {
         place: (u16, u16),
     ) -> Result<(PaneWriter, Inbox<Feed>), String> {
         let by = Instant::now() + HANDSHAKE;
-        let opened = reach(socket, block, None, by, &NEVER).map_err(|m| match m {
+        let opened = reach_with(socket, block, None, BLOCK, by, &NEVER).map_err(|m| match m {
             Missed::Retry(why) | Missed::Broken(why, _) => why,
             Missed::Dropped => "the server let the client go".into(),
         })?;
@@ -1074,13 +1101,15 @@ impl Block {
             takeover: Mutex::new(opened.takeover),
             revive: Mutex::new(Some(revive)),
             next: AtomicU64::new(1),
-            lease: Mutex::new(Lease {
-                place: Some(place),
-                ..Lease::default()
-            }),
+            lease: Mutex::new(Lease::at(place)),
+            requests: opened.features.contains(Features::LEASE_REQUESTS),
+            to_window: Mutex::new(None),
+            told: Mutex::new(None),
         });
         shared.send(|req| Message::Attach { req, block });
         let (tx, feed) = std::sync::mpsc::sync_channel(FEED_AHEAD);
+        *lock(&shared.to_window) = Some(tx.clone());
+        shared.tell(Take::Rest);
         let reader = Arc::clone(&shared);
         let conn = opened.conn;
         std::thread::Builder::new()
@@ -1112,14 +1141,7 @@ impl Block {
         if let Some(revive) = &*lock(&self.revive) {
             let _ = revive.send(opened.conn);
         }
-        let wanted = {
-            let mut lease = self.lease();
-            lease.held = false;
-            lease.asking = None;
-            lease.sizing = None;
-            lease.wanted
-        };
-        self.want_lease(wanted);
+        self.update(|lease, send| lease.revived(send));
     }
 
     fn send(&self, make: impl FnOnce(u64) -> Message) -> u64 {
@@ -1130,40 +1152,47 @@ impl Block {
         req
     }
 
-    /// Asks for the lease when `wanted` and not held or asked for; gives
-    /// it back when not.
+    /// Asks for the lease when `wanted`, or gives it back when not.
     fn want_lease(&self, wanted: bool) {
-        let block = self.block;
-        let mut lease = self.lease();
-        lease.wanted = wanted;
-        match wanted {
-            true if !lease.held && lease.asking.is_none() => {
-                lease.asking = Some(self.send(|req| Message::AcquireLease { req, block }));
-            }
-            false if lease.held => {
-                self.send(|req| Message::ReleaseLease { req, block });
-                lease.held = false;
-            }
-            _ => {}
-        }
+        self.update(|lease, send| lease.want(wanted, send));
     }
 
-    /// Follows the block's lease to `holder` (handoff D115): lost when
-    /// another client holds it, and asked for again once it is free while
-    /// still wanted. Never taken from a holder.
-    fn lease_changed(&self, holder: Option<ClientId>) {
-        let wanted = {
-            if holder == Some(self.client) {
-                return;
-            }
-            let mut lease = self.lease();
-            lease.held = false;
-            if holder.is_some() {
-                return;
-            }
-            lease.wanted
+    /// Runs `f` on the lease with a way to send its requests, then fits
+    /// the block to its place and tells the window where taking it over
+    /// stands.
+    fn update(&self, f: impl FnOnce(&mut Lease, &mut dyn FnMut(LeaseAsk) -> u64)) {
+        let block = self.block;
+        let mut lease = self.lease();
+        let mut send = |ask: LeaseAsk| {
+            self.send(|req| match ask {
+                LeaseAsk::Acquire => Message::AcquireLease { req, block },
+                LeaseAsk::Release => Message::ReleaseLease { req, block },
+                LeaseAsk::Request => Message::RequestLease { req, block },
+            })
         };
-        self.want_lease(wanted);
+        f(&mut lease, &mut send);
+        self.fit(&mut lease);
+        let take = lease.take();
+        // Not under the lease: the feed may block while it is full.
+        drop(lease);
+        self.tell(take);
+    }
+
+    /// Tells the window `take`, when it changed and the server takes
+    /// lease requests (gui-design D64).
+    fn tell(&self, take: Take) {
+        if !self.requests {
+            return;
+        }
+        let mut told = lock(&self.told);
+        if *told == Some(take) {
+            return;
+        }
+        *told = Some(take);
+        if let Some(tell) = &*lock(&self.to_window) {
+            // A window gone ends the reader too.
+            let _ = tell.send(Feed::Take(take));
+        }
     }
 
     /// Resizes the block to its place when the lease allows and it is not
@@ -1183,29 +1212,6 @@ impl Block {
         self.send(|req| Message::Resize { req, block, size });
     }
 
-    /// A lease answer for request `req`: `granted`, or refused (which,
-    /// for any other request, means input after the lease was lost).
-    fn answered(&self, req: u64, granted: bool) {
-        let block = self.block;
-        let mut lease = self.lease();
-        if lease.asking == Some(req) {
-            lease.asking = None;
-            match (granted, lease.wanted) {
-                (true, true) => {
-                    lease.held = true;
-                    self.fit(&mut lease);
-                }
-                // Granted after the focus moved on: given back.
-                (true, false) => {
-                    self.send(|req| Message::ReleaseLease { req, block });
-                }
-                (false, _) => {}
-            }
-        } else if !granted {
-            lease.held = false;
-        }
-    }
-
     /// Reads the block's connections into feed steps, each revived one
     /// after the last ends, until the block closes or the window drops
     /// the pane.
@@ -1218,9 +1224,11 @@ impl Block {
         while let Read::Lost = self.read_one(&mut conn, feed) {
             match revived.recv() {
                 Ok(next) => conn = next,
-                Err(_) => return,
+                Err(_) => break,
             }
         }
+        // The feed ends with the reader, which ends the pane.
+        *lock(&self.to_window) = None;
     }
 
     /// Reads one connection into feed steps; the screen comes first, as
@@ -1271,15 +1279,31 @@ impl Block {
                     event: Event::LeaseChanged { block: b, holder },
                     ..
                 } if b == block => {
-                    self.lease_changed(holder);
+                    // Asked for again once free while wanted (D115); never
+                    // taken from a holder.
+                    if holder != Some(self.client) {
+                        self.update(|lease, send| lease.moved(holder.is_none(), send));
+                    }
+                    continue;
+                }
+                Message::Event {
+                    event:
+                        Event::GrantChanged {
+                            block: b,
+                            client,
+                            until,
+                        },
+                    ..
+                } if b == block && client == self.client => {
+                    self.update(|lease, send| lease.granted(until.is_some(), send));
                     continue;
                 }
                 Message::Done { req, .. } => {
-                    self.answered(req, true);
+                    self.update(|lease, send| lease.answered(req, None, send));
                     continue;
                 }
-                Message::Failed { req, .. } => {
-                    self.answered(req, false);
+                Message::Failed { req, reason, .. } => {
+                    self.update(|lease, send| lease.answered(req, Some(&reason), send));
                     continue;
                 }
                 _ => continue,
