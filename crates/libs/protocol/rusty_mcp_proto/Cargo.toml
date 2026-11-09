@@ -23,7 +23,7 @@ rusty_json = { path = "../../../foundation/rusty_json", version = "0.1.0", defau
 
 [dev-dependencies]
 # Wire-format oracle only (never shipped): every type is round-tripped
-# against `rmcp` 3.1's model, which the MCP crates use today.
+# against `rmcp` 3.9's model, which the MCP crates use today.
 rmcp = { workspace = true }
 serde = "1"
 serde_json = "1"

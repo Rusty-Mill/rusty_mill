@@ -9,5 +9,27 @@
       },
       "path_in_vcs": ""
     }
+  },
+  "sqlx-sqlite": {
+    "version": "0.9.0",
+    "archive": "https://static.crates.io/crates/sqlx-sqlite/sqlx-sqlite-0.9.0.crate",
+    "sha256": "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c",
+    "vcs": {
+      "git": {
+        "sha1": "003b698e99e024f3621b8043a2426fde5b741171"
+      },
+      "path_in_vcs": "sqlx-sqlite"
+    },
+    "license_sources": {
+      "LICENSE-MIT": {
+        "url": "https://raw.githubusercontent.com/launchbadge/sqlx/003b698e99e024f3621b8043a2426fde5b741171/LICENSE-MIT",
+        "sha256": "5abbdd842310c8f1650fcde3a5a51a3e09412b9e5a6eea87519e0db9e32b339d"
+      },
+      "LICENSE-APACHE": {
+        "url": "https://raw.githubusercontent.com/launchbadge/sqlx/003b698e99e024f3621b8043a2426fde5b741171/LICENSE-APACHE",
+        "sha256": "c8f5453612253e8ea8bad241617fe74c4a6d5d592ba64ff881668c211b50ac99"
+      }
+    },
+    "git_file_mode": "100644"
   }
 }

@@ -43,7 +43,7 @@ harness = false
 # (tests/fulltext_vs_fts5.rs): the same bundled SQLite, with FTS5, that
 # rusty_remind_me's node runs and whose unicode61 tables src/fulltext ports.
 # Tests and the vs_sqlite bench only; the engine itself never links SQLite.
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 
 [features]
 # The `Order`/`Customer` fixture domain the engine's own tests exercise it

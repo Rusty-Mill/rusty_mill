@@ -6,7 +6,8 @@
 //! exactly the tokens FTS5 would make, with the same byte offsets. The tables
 //! in `unicode_tables.rs` are generated from the SQLite amalgamation the
 //! workspace builds (`libsqlite3-sys`'s bundled `sqlite3.c`) by
-//! `scripts/gen_unicode61_tables.py` in this crate; regenerate them when that
+//! `scripts/gen_unicode61_tables.py` in this crate, passing the output path
+//! and the locked `libsqlite3-sys` amalgamation path; regenerate them when that
 //! SQLite moves, and the differential tests say whether anything changed.
 
 use super::unicode_tables::{
