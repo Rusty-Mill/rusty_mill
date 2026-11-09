@@ -91,7 +91,9 @@ pub struct Attached {
 /// What the blocks this client makes run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Start {
-    /// The program and folder of a new session's first block.
+    /// The program and folder of a new session's first block. Its folder
+    /// is also where a split or a new window starts when the folder of
+    /// the block it goes beside isn't known.
     pub first: Launch,
     /// The program of the blocks made later, by a split or a new window;
     /// `None` is the server's default shell.
@@ -111,6 +113,7 @@ pub fn attach_with(
     block: Option<BlockId>,
     start: Start,
 ) -> Result<Attached, String> {
+    let start_cwd = start.first.cwd.clone();
     let (stream, mut conn) = hello(socket)?;
     let mut req = Requests {
         conn: &mut conn,
@@ -151,6 +154,8 @@ pub fn attach_with(
         switch: Mutex::new(None),
         shown: Mutex::new(Shown::default()),
         asks: Mutex::new(asks),
+        cwd: start_cwd,
+        folders: Mutex::new(HashMap::new()),
         shell: start.shell,
     });
     let (first, focus) = {
@@ -224,6 +229,11 @@ struct State {
     shown: Mutex<Shown>,
     /// Where the window's Retry and Stop go, for the events reader.
     asks: Mutex<Sender<Ask>>,
+    /// Where a split or a new window starts when its neighbour's folder
+    /// isn't known.
+    cwd: Option<String>,
+    /// Each block's folder, as its header last read it.
+    folders: Mutex<HashMap<BlockId, String>>,
     /// What a split or a new window runs.
     shell: Option<Program>,
 }
@@ -248,10 +258,16 @@ impl State {
         lock(&self.shown)
     }
 
-    /// What a split or a new window runs.
-    fn launch(&self) -> Launch {
+    /// What a split or a new window beside `block` runs, and where: in
+    /// `block`'s folder when it is known and is one here (the server
+    /// refuses any other), else in the start folder.
+    fn launch(&self, block: Option<BlockId>) -> Launch {
+        let folder = block
+            .and_then(|b| lock(&self.folders).get(&b).cloned())
+            .filter(|dir| Path::new(dir).is_dir());
         Launch {
             program: self.shell.clone(),
+            cwd: folder.or_else(|| self.cwd.clone()),
             ..Launch::default()
         }
     }
@@ -387,7 +403,7 @@ impl Source for MuxSource {
                     Dir::Vertical => Side::Right,
                     Dir::Horizontal => Side::Down,
                 },
-                launch: self.0.launch(),
+                launch: self.0.launch(Some(block)),
             }),
             Act::Zoom(_) => block.map(|block| Message::Zoom { req, block }),
             Act::Close(_) => block.map(|block| Message::CloseBlock { req, block }),
@@ -425,7 +441,11 @@ impl Source for MuxSource {
     /// its own so the UI never waits for the server.
     fn new_window(&self) {
         let (socket, session) = (self.0.socket.clone(), *lock(&self.0.session));
-        let launch = self.0.launch();
+        let focused = {
+            let shown = self.0.shown();
+            shown.focus.and_then(|k| shown.keys.id(k))
+        };
+        let launch = self.0.launch(focused);
         let spawned = std::thread::Builder::new()
             .name("mux-new-window".into())
             .spawn(move || {
@@ -872,6 +892,9 @@ impl Events {
             },
             _ => false,
         };
+        if changed {
+            *lock(&self.state.folders) = self.headers.folders();
+        }
         !changed || out(Out::Blocks(self.blocks()))
     }
 

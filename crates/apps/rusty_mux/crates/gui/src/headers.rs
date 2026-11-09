@@ -145,6 +145,14 @@ impl Headers {
         })
     }
 
+    /// Each block's folder, where it is known.
+    pub fn folders(&self) -> HashMap<BlockId, String> {
+        self.known
+            .iter()
+            .filter_map(|(block, k)| Some((*block, k.cwd.clone()?)))
+            .collect()
+    }
+
     /// `block`'s program: the one in the foreground, else its shell.
     pub fn program(&self, block: BlockId) -> Option<String> {
         let k = self.known.get(&block)?;

@@ -216,6 +216,71 @@ pub(crate) fn split_program(line: &str, is_program: impl Fn(&str) -> bool) -> Op
     Some((program, rest.trim_start_matches(is_blank)))
 }
 
+/// `line` as `CreateProcessW` and the CRT read it: the program, as
+/// [`split_program`] finds it, then [`crt_args`] of the rest.
+#[cfg(windows)]
+pub(crate) fn program_words(line: &str) -> Vec<String> {
+    let Some((program, rest)) = split_program(line, |p| locate(p).is_some()) else {
+        return Vec::new();
+    };
+    std::iter::once(program.to_owned())
+        .chain(crt_args(rest))
+        .collect()
+}
+
+/// `line`'s arguments by the CRT's rules (since 2008): spaces and tabs
+/// separate them outside quotes; `2n` backslashes before a quote are `n`
+/// and the quote opens or closes quoting, `2n+1` are `n` and a literal
+/// quote; `""` inside quotes is a literal quote; other backslashes are
+/// literal.
+pub(crate) fn crt_args(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut arg = String::new();
+    let mut started = false;
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let mut n = 1;
+                while chars.next_if_eq(&'\\').is_some() {
+                    n += 1;
+                }
+                let before_quote = chars.peek() == Some(&'"');
+                let kept = if before_quote { n / 2 } else { n };
+                arg.extend(std::iter::repeat_n('\\', kept));
+                if before_quote && n % 2 == 1 {
+                    chars.next();
+                    arg.push('"');
+                }
+                started = true;
+            }
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                arg.push('"');
+            }
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            ' ' | '\t' if !quoted => {
+                if started {
+                    args.push(std::mem::take(&mut arg));
+                    started = false;
+                }
+            }
+            c => {
+                arg.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        args.push(arg);
+    }
+    args
+}
+
 fn is_blank(c: char) -> bool {
     c == ' ' || c == '\t'
 }
@@ -285,8 +350,8 @@ fn search_dirs() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CmdRules, Reader, cmd_rules, has_command_switch, is_command_switch, keep_command_quotes,
-        plain_for_cmd, quotes_closed, reader, split_program,
+        CmdRules, Reader, cmd_rules, crt_args, has_command_switch, is_command_switch,
+        keep_command_quotes, plain_for_cmd, quotes_closed, reader, split_program,
     };
 
     /// Split with no program on disk: the program is the first word.
@@ -504,6 +569,23 @@ mod tests {
             ("cmd /c echo", false),
         ] {
             assert_eq!(rules(line, 3, Reader::Cmd).delayed, on, "{line}");
+        }
+    }
+
+    #[test]
+    fn crt_args_read_quotes_and_backslashes_as_the_crt_does() {
+        let cases: [(&str, &[&str]); 8] = [
+            ("", &[]),
+            ("-d Ubuntu", &["-d", "Ubuntu"]),
+            ("  -NoLogo\t-NoExit  ", &["-NoLogo", "-NoExit"]),
+            (r#""a b" c"#, &["a b", "c"]),
+            (r#"a\\\"b"#, &[r#"a\"b"#]),
+            (r#""a\\" b"#, &[r"a\", "b"]),
+            (r"C:\dir\ x", &[r"C:\dir\", "x"]),
+            (r#""say ""hi""" """#, &[r#"say "hi""#, ""]),
+        ];
+        for (line, want) in cases {
+            assert_eq!(crt_args(line), want, "{line}");
         }
     }
 }

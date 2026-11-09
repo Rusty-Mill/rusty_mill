@@ -69,18 +69,22 @@ impl Args {
                 positional.push(arg);
                 continue;
             };
-            match text {
-                "--" => {
+            let (flag, inline) = match text.split_once('=') {
+                Some((flag, v)) if flag.starts_with("--") => (flag, Some(OsString::from(v))),
+                _ => (text, None),
+            };
+            match flag {
+                "--" if inline.is_none() => {
                     args.command = Some(command(raw.by_ref())?);
                     break;
                 }
-                "--gpu" | "--setup" => {}
+                "--gpu" | "--setup" if inline.is_none() => {}
                 "--config" => {
-                    value(&mut raw, "--config")?;
+                    value(inline, &mut raw, "--config")?;
                 }
-                "--profile" => args.profile = Some(utf8(value(&mut raw, "--profile")?)?),
-                "--cwd" => args.cwd = Some(PathBuf::from(value(&mut raw, "--cwd")?)),
-                flag if flag.starts_with('-') => return Err(format!("unknown option `{flag}`")),
+                "--profile" => args.profile = Some(utf8(value(inline, &mut raw, "--profile")?)?),
+                "--cwd" => args.cwd = Some(PathBuf::from(value(inline, &mut raw, "--cwd")?)),
+                _ if text.starts_with('-') => return Err(format!("unknown option `{text}`")),
                 _ => positional.push(arg),
             }
         }
@@ -90,13 +94,24 @@ impl Args {
         if positional.next().is_some() {
             return Err("too many arguments".into());
         }
+        if args.block.is_some() && args.command.is_some() {
+            return Err(
+                "a program after `--` runs only in a new session, not in a given block".into(),
+            );
+        }
         Ok(args)
     }
 }
 
-/// The value after `flag`.
-fn value(raw: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<OsString, String> {
-    raw.next().ok_or_else(|| format!("`{flag}` needs a value"))
+/// `flag`'s value: the one after its `=`, else the next argument.
+fn value(
+    inline: Option<OsString>,
+    raw: &mut impl Iterator<Item = OsString>,
+    flag: &str,
+) -> Result<OsString, String> {
+    inline
+        .or_else(|| raw.next())
+        .ok_or_else(|| format!("`{flag}` needs a value"))
 }
 
 fn utf8(arg: OsString) -> Result<String, String> {
@@ -133,10 +148,11 @@ fn start(
     config: &rusty_term::config::Config,
 ) -> Result<rusty_mux_gui::source::Start, String> {
     use rusty_mux_proto::{Launch, Program};
-    let shell = config.shell.clone().map(|command| Program {
-        command,
-        args: Vec::new(),
-    });
+    let shell = config
+        .shell
+        .as_deref()
+        .and_then(rusty_term::backend::shell_program)
+        .map(|(command, args)| Program { command, args });
     let program = match &args.command {
         Some((command, args)) => Some(Program {
             command: command.clone(),
@@ -178,12 +194,14 @@ fn run(socket: PathBuf, args: &Args) -> Result<(), String> {
         }
         None => None,
     };
-    // rusty_term reads `--config` from these, as its window does.
+    // rusty_term reads `--config` from these, before `--`, as its window
+    // does.
     let process: Vec<String> = std::env::args_os()
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let (mut config, warnings) = rusty_term::config::Config::load(&process);
+    let own = rusty_term::config::own_args(&process);
+    let (mut config, warnings) = rusty_term::config::Config::load(own);
     for w in &warnings {
         eprintln!("rusty-mux-gui: {w}");
     }
@@ -226,14 +244,13 @@ mod tests {
     }
 
     #[test]
-    fn a_socket_block_and_command_are_read() {
+    fn a_socket_block_or_command_are_read() {
         let args = parse(&[
             "--cwd",
             "/tmp",
             "--profile",
             "work",
             "s.sock",
-            "b",
             "--",
             "htop",
             "-d",
@@ -241,13 +258,15 @@ mod tests {
         ])
         .expect("parsed");
         assert_eq!(args.socket.as_deref(), Some("s.sock".as_ref()));
-        assert_eq!(args.block.as_deref(), Some("b".as_ref()));
+        assert_eq!(args.block, None);
         assert_eq!(args.cwd, Some(PathBuf::from("/tmp")));
         assert_eq!(args.profile.as_deref(), Some("work"));
         assert_eq!(
             args.command,
             Some(("htop".into(), vec!["-d".into(), "5".into()]))
         );
+        let args = parse(&["--cwd", "/tmp", "s.sock", "b"]).expect("parsed");
+        assert_eq!(args.block.as_deref(), Some("b".as_ref()));
     }
 
     #[test]
@@ -263,6 +282,28 @@ mod tests {
         assert!(parse(&["--cwd"]).is_err());
         assert!(parse(&["--"]).is_err());
         assert!(parse(&["--fullscreen"]).is_err());
+        assert!(parse(&["s.sock", "b", "--", "htop"]).is_err());
+    }
+
+    #[test]
+    fn values_may_follow_an_equals_sign() {
+        let args = parse(&["--cwd=/tmp", "--profile=work", "--config=c.toml"]).expect("parsed");
+        assert_eq!(args.cwd, Some(PathBuf::from("/tmp")));
+        assert_eq!(args.profile.as_deref(), Some("work"));
+        assert!(parse(&["--gpu=yes"]).is_err());
+    }
+
+    #[test]
+    fn a_shell_with_arguments_is_split_into_words() {
+        let config = rusty_term::config::Config {
+            shell: Some("bash --login -i".into()),
+            ..Default::default()
+        };
+        let made = start(&Args::default(), &config).expect("start");
+        let shell = made.shell.expect("shell");
+        assert_eq!(shell.command, "bash");
+        assert_eq!(shell.args, ["--login", "-i"]);
+        assert_eq!(made.first.program, Some(shell));
     }
 
     #[test]
