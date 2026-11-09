@@ -37,7 +37,7 @@ use rusty_mux_client::attach::{
 };
 use rusty_mux_client::checkpoint::Receiver;
 use rusty_mux_core::{BlockId, ClientId, Event, Layout, SessionId, Side, Size, WindowId};
-use rusty_mux_proto::{Features, Launch, Message, Takeover};
+use rusty_mux_proto::{Features, Launch, Message, Program, Takeover};
 use rusty_term::backend::BackendHandle;
 use rusty_term::gui::source::{
     Act, BlockInfo, Detached, Dir, Feed, Link, PaneIo, Remote, Session, Source, Tree,
@@ -51,8 +51,9 @@ use crate::tree::tree;
 /// What the GUI's control connection asks for: the TUI's set, plus names
 /// for the strip and who each client is, to count them, and block calls
 /// and the events that say a block's folder, status or foreground program
-/// changed, for its header (handoff D105). A server without some grants
-/// the rest, and the chrome shows less.
+/// changed, for its header (handoff D105), and launches, for a block that
+/// runs a chosen program or starts in a chosen folder. A server without
+/// some grants the rest, and the chrome shows less.
 pub const GUI: Features = CONTROL
     .union(Features::LABELS)
     .union(Features::IDENTITY)
@@ -60,7 +61,8 @@ pub const GUI: Features = CONTROL
     .union(Features::STATUS)
     .union(Features::TERMINAL_EVENTS)
     .union(Features::PROCESS)
-    .union(Features::MORE_PROGRAM_EVENTS);
+    .union(Features::MORE_PROGRAM_EVENTS)
+    .union(Features::LAUNCH);
 
 /// Never set: the handshakes here are not cancelled.
 static NEVER: AtomicBool = AtomicBool::new(false);
@@ -86,9 +88,32 @@ pub struct Attached {
     pub events: Events,
 }
 
+/// What the blocks this client makes run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Start {
+    /// The program and folder of a new session's first block. Its folder
+    /// is also where a split or a new window starts when the folder of
+    /// the block it goes beside isn't known.
+    pub first: Launch,
+    /// The program of the blocks made later, by a split or a new window;
+    /// `None` is the server's default shell.
+    pub shell: Option<Program>,
+}
+
 /// Connects to the server at `socket` and picks `block`'s window, or that
 /// of a new session's block without one; that block takes the focus.
 pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String> {
+    attach_with(socket, block, Start::default())
+}
+
+/// [`attach`], with new blocks running what `start` says. `start.first`
+/// is used only when there is no `block` to show.
+pub fn attach_with(
+    socket: &Path,
+    block: Option<BlockId>,
+    start: Start,
+) -> Result<Attached, String> {
+    let start_cwd = start.first.cwd.clone();
     let (stream, mut conn) = hello(socket)?;
     let mut req = Requests {
         conn: &mut conn,
@@ -107,7 +132,7 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         Some(block) => block,
         None => {
             let size = Size::new(FIRST_SIZE.0, FIRST_SIZE.1).map_err(|e| e.to_string())?;
-            req.create(size, first_session_name(welcomed.features))?
+            req.create_with(size, first_session_name(welcomed.features), start.first)?
         }
     };
     let entries = req.call(|req| Message::List { req })?;
@@ -129,6 +154,9 @@ pub fn attach(socket: &Path, block: Option<BlockId>) -> Result<Attached, String>
         switch: Mutex::new(None),
         shown: Mutex::new(Shown::default()),
         asks: Mutex::new(asks),
+        cwd: start_cwd,
+        folders: Mutex::new(HashMap::new()),
+        shell: start.shell,
     });
     let (first, focus) = {
         let mut shown = state.shown();
@@ -201,6 +229,13 @@ struct State {
     shown: Mutex<Shown>,
     /// Where the window's Retry and Stop go, for the events reader.
     asks: Mutex<Sender<Ask>>,
+    /// Where a split or a new window starts when its neighbour's folder
+    /// isn't known.
+    cwd: Option<String>,
+    /// Each block's folder, as its header last read it.
+    folders: Mutex<HashMap<BlockId, String>>,
+    /// What a split or a new window runs.
+    shell: Option<Program>,
 }
 
 /// The blocks shown and which has the focus.
@@ -221,6 +256,20 @@ struct Shown {
 impl State {
     fn shown(&self) -> MutexGuard<'_, Shown> {
         lock(&self.shown)
+    }
+
+    /// What a split or a new window beside `block` runs, and where: in
+    /// `block`'s folder when it is known and is one here (the server
+    /// refuses any other), else in the start folder.
+    fn launch(&self, block: Option<BlockId>) -> Launch {
+        let folder = block
+            .and_then(|b| lock(&self.folders).get(&b).cloned())
+            .filter(|dir| Path::new(dir).is_dir());
+        Launch {
+            program: self.shell.clone(),
+            cwd: folder.or_else(|| self.cwd.clone()),
+            ..Launch::default()
+        }
     }
 
     /// Tells the server the window's focus moved to `block`.
@@ -354,7 +403,7 @@ impl Source for MuxSource {
                     Dir::Vertical => Side::Right,
                     Dir::Horizontal => Side::Down,
                 },
-                launch: Launch::default(),
+                launch: self.0.launch(Some(block)),
             }),
             Act::Zoom(_) => block.map(|block| Message::Zoom { req, block }),
             Act::Close(_) => block.map(|block| Message::CloseBlock { req, block }),
@@ -392,10 +441,15 @@ impl Source for MuxSource {
     /// its own so the UI never waits for the server.
     fn new_window(&self) {
         let (socket, session) = (self.0.socket.clone(), *lock(&self.0.session));
+        let focused = {
+            let shown = self.0.shown();
+            shown.focus.and_then(|k| shown.keys.id(k))
+        };
+        let launch = self.0.launch(focused);
         let spawned = std::thread::Builder::new()
             .name("mux-new-window".into())
             .spawn(move || {
-                if let Err(e) = create_window(&socket, session) {
+                if let Err(e) = create_window(&socket, session, launch) {
                     eprintln!("rusty-mux-gui: new window: {e}");
                 }
             });
@@ -408,11 +462,13 @@ impl Source for MuxSource {
 /// Creates a window in `session` with one block, and makes it active.
 /// The connection asks for no takeover, so the server forgets it at once;
 /// the handshake needs checkpoints.
-fn create_window(socket: &Path, session: SessionId) -> Result<(), String> {
+fn create_window(socket: &Path, session: SessionId, launch: Launch) -> Result<(), String> {
     let stream = connect(socket)?;
     let mut conn = Conn::new(stream);
     conn.send(&Message::Hello {
-        features: Features::CHECKPOINT_V6.union(Features::ACTIVE_WINDOW),
+        features: Features::CHECKPOINT_V6
+            .union(Features::ACTIVE_WINDOW)
+            .union(Features::LAUNCH),
         resume: None,
         takeover: None,
     })
@@ -434,7 +490,7 @@ fn create_window(socket: &Path, session: SessionId) -> Result<(), String> {
         req,
         window,
         size,
-        launch: Launch::default(),
+        launch,
     })?;
     req.call(|req| Message::SelectWindow { req, window })?;
     Ok(())
@@ -836,6 +892,9 @@ impl Events {
             },
             _ => false,
         };
+        if changed {
+            *lock(&self.state.folders) = self.headers.folders();
+        }
         !changed || out(Out::Blocks(self.blocks()))
     }
 

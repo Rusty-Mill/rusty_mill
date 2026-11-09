@@ -77,9 +77,18 @@ reactor (`rusty_tokio::io::AsyncFd`) and takes
 pollable, blocking reader/writer/stdin threads bridge into async channels and a
 timer polls the console size for resizes.
 
+The window is a rusty_mux client: `rusty_term --gui` runs `rusty-mux-gui`
+(the copy beside `rusty_term`, else the one on `PATH`), which starts a server
+on the default socket when none answers and shows a new session there. It
+passes on `--gpu`, `--setup`, `--config`, `--profile`, `--cwd` and the command
+after `--`; other window flags (`--title`, `--maximized`, `--fullscreen`,
+`--opacity`, `--session`, `--single-instance`) are ignored with a note. The
+local mode that ran shells inside the window is retired (term ROADMAP
+question 1).
+
 ```sh
-# Native window, CPU renderer.
-cargo run --features gui -- --gui
+# Native window, CPU renderer (builds rusty-mux-gui and the server too).
+cargo build -p rusty_mux_gui -p rusty_mux_server && cargo run -- --gui
 
 # Native window, GPU renderer (falls back to CPU if no adapter).
 cargo run --features gui-gpu -- --gui --gpu
@@ -101,7 +110,7 @@ the TUI mode never loads them. If one is missing, `--gui` exits with
 
 | Flag    | Requires    | Effect |
 |---------|-------------|--------|
-| `--gui` | `gui`       | Launch the native window backend instead of TUI/passthrough mode. |
+| `--gui` | —           | Open the window: runs `rusty-mux-gui` (see above) instead of TUI/passthrough mode. |
 | `--gpu` | `gui-gpu`   | Use the `wgpu` GPU renderer in the window (CPU fallback on failure). |
 | `--config <path>` | — | Read the configuration file from `<path>` (see below). |
 | `--list-shells` | — | Print the shells detected on this machine and exit. |

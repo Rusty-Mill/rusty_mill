@@ -75,17 +75,17 @@ fn print_help() {
     println!("        --cwd <dir>                Starting directory for the shell");
     println!("        --starting-directory <dir> Alias for --cwd");
     println!("        --title <title>           Window/tab title override");
-    println!("        --fullscreen              Launch fullscreen (--gui only)");
-    println!("        --maximized               Launch maximized (--gui only)");
-    println!("        --opacity <0.0-1.0>       Window background opacity (--gui only)");
+    println!("        --fullscreen              Ignored since local mode retired");
+    println!("        --maximized               Ignored since local mode retired");
+    println!("        --opacity <0.0-1.0>       Ignored since local mode retired");
     println!("        --profile <name>          Apply a named [profile.<name>] bundle");
-    println!("        --session <path>          Restore a session file (--gui only)");
-    println!("        --gui                     Launch the windowed front-end");
-    println!(
-        "        --gpu                     Use the wgpu GPU renderer (--gui only, gui-gpu build)"
-    );
-    println!("        --single-instance         Hand off to a running --gui instance");
-    println!("        --setup                   Open first-run setup (--gui only)");
+    println!("        --session <path>          Ignored since local mode retired");
+    println!("        --gui                     Open the window: runs rusty-mux-gui, passing");
+    println!("                                  --gpu, --setup, --config, --profile, --cwd");
+    println!("                                  and the command");
+    println!("        --gpu                     Use the wgpu GPU renderer (with --gui)");
+    println!("        --single-instance         Ignored since local mode retired");
+    println!("        --setup                   Open first-run setup (with --gui)");
     println!();
     println!("Anything after `--`, `-e`, or `--command` is run as the child command,");
     println!("replacing the configured shell, e.g. `rusty_term -- htop`.");
@@ -146,9 +146,7 @@ fn apply_cli_overrides(
     command: Option<(String, Vec<String>)>,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
-    if let Some(dir) =
-        flag_value(args, "--cwd").or_else(|| flag_value(args, "--starting-directory"))
-    {
+    if let Some(dir) = cwd(args) {
         config.cwd = Some(PathBuf::from(dir));
     }
     if let Some(title) = flag_value(args, "--title") {
@@ -186,6 +184,123 @@ fn apply_cli_overrides(
         config.command_args = cmd_args;
     }
     warnings
+}
+
+/// The window's flags that `rusty-mux-gui` takes as rusty_term did.
+const MUX_GUI_FLAGS: &[&str] = &["--gpu", "--setup", "--config", "--profile", "--cwd"];
+
+/// `rusty-mux-gui`'s arguments for a `rusty_term --gui` launch, and a
+/// warning for each flag it has no use for or that lacks its value.
+/// `--cwd` or else `--starting-directory` becomes one `--cwd`, and of a
+/// repeated flag the first counts, as for rusty_term's own window. Unknown
+/// flags were warned about already, and words that aren't flags aren't
+/// rusty_term's. The child command follows `--`.
+fn mux_gui_args(
+    args: &[String],
+    command: Option<&(String, Vec<String>)>,
+) -> (Vec<String>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut warnings = Vec::new();
+    let mut given: Vec<&str> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let (name, inline) = match a.split_once('=') {
+            Some((name, value)) if name.starts_with("--") => (name, Some(value)),
+            _ => (a.as_str(), None),
+        };
+        let Some(&(name, takes_value)) = KNOWN_FLAGS.iter().find(|(f, _)| *f == name) else {
+            continue;
+        };
+        let value = match (takes_value, inline) {
+            (false, _) => None,
+            (true, Some(value)) => Some(value.to_string()),
+            (true, None) => match it.next() {
+                Some(value) => Some(value.clone()),
+                None => {
+                    warnings.push(format!("`{name}` needs a value; ignored"));
+                    continue;
+                }
+            },
+        };
+        let (flag, value) = match name {
+            "--gui" => continue,
+            "--cwd" | "--starting-directory" => ("--cwd", cwd(args).map(str::to_string)),
+            _ => (name, value),
+        };
+        if !MUX_GUI_FLAGS.contains(&flag) {
+            warnings.push(format!("`{a}` does not apply to the mux window; ignored"));
+            continue;
+        }
+        if given.contains(&flag) {
+            continue;
+        }
+        given.push(flag);
+        out.push(flag.to_string());
+        out.extend(value);
+    }
+    if let Some((program, rest)) = command {
+        out.push("--".into());
+        out.push(program.clone());
+        out.extend(rest.iter().cloned());
+    }
+    (out, warnings)
+}
+
+/// The folder `--cwd` or else `--starting-directory` names (G1).
+fn cwd(args: &[String]) -> Option<&str> {
+    flag_value(args, "--cwd").or_else(|| flag_value(args, "--starting-directory"))
+}
+
+/// Whether `path` is a file this user may run: on Unix one with an execute
+/// bit, so a copy that isn't falls back to `PATH`.
+fn runnable(path: &std::path::Path) -> bool {
+    let Ok(meta) = path.metadata() else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
+/// Runs `rusty-mux-gui` for a `--gui` launch: the copy beside this program
+/// if there is one, else the one on `PATH`. On Unix it replaces this
+/// process; on Windows this waits for it and exits as it does.
+fn mux_gui(args: &[String], command: Option<(String, Vec<String>)>) -> std::io::Result<()> {
+    let (forward, warnings) = mux_gui_args(args, command.as_ref());
+    for warning in warnings {
+        eprintln!("rusty_term: {warning}");
+    }
+    let name = if cfg!(windows) {
+        "rusty-mux-gui.exe"
+    } else {
+        "rusty-mux-gui"
+    };
+    let program = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join(name)))
+        .filter(|path| runnable(path))
+        .unwrap_or_else(|| PathBuf::from(name));
+    let mut child = std::process::Command::new(&program);
+    child.args(&forward);
+    let failed = |e: std::io::Error| {
+        std::io::Error::new(e.kind(), format!("starting {}: {e}", program.display()))
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(failed(child.exec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = child.status().map_err(failed)?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 fn main() -> Result<(), std::io::Error> {
@@ -226,6 +341,13 @@ fn main() -> Result<(), std::io::Error> {
     // be silently swallowed as no-ops; flag them so the user notices before
     // wondering why the option "didn't work".
     warn_unrecognized_flags(args);
+
+    // `--gui`: the window is a rusty_mux client now (term ROADMAP question
+    // 1; handoff D146), so hand the launch to `rusty-mux-gui`, which starts
+    // a server when none runs.
+    if args.iter().any(|a| a == "--gui") {
+        return mux_gui(args, command);
+    }
 
     let (mut config, warnings) = Config::load(args);
     for w in &warnings {
@@ -268,34 +390,6 @@ fn main() -> Result<(), std::io::Error> {
         config::ConsoleHost::ConPty => Box::new(WindowsBackend),
         config::ConsoleHost::Own => Box::new(OwnBackend::new()),
     };
-
-    // `--gui` launches the native window backend (the tcore-app fork) instead of
-    // rendering into the host terminal. Requires the `gui` feature.
-    #[cfg(feature = "gui")]
-    if args.iter().any(|a| a == "--gui") {
-        // Single-instance: if a control socket/pipe answers, hand this
-        // launch to the running instance as a new tab and exit instead of
-        // opening a second window.
-        if config.single_instance.unwrap_or(false) || args.iter().any(|a| a == "--single-instance")
-        {
-            let mut req = String::from("new-tab");
-            if let Some(cwd) = &config.cwd {
-                req.push_str(&format!(" cwd=\"{}\"", cwd.display()));
-            }
-            if let Some(name) = flag_value(args, "--profile") {
-                req.push_str(&format!(" profile=\"{name}\""));
-            }
-            if let Ok(reply) = gui::control::request(&req) {
-                if reply.trim_end().ends_with("ok") {
-                    return Ok(());
-                }
-                eprintln!("rusty_term: running instance refused: {}", reply.trim_end());
-            }
-            // No (or dead) instance: fall through and become it.
-        }
-        return gui::run(backend.as_ref(), &config)
-            .map_err(|e| std::io::Error::other(e.to_string()));
-    }
 
     // A session file describes tabs, which only the windowed front-end has.
     if config.session.is_some() {
@@ -379,6 +473,99 @@ fn run_ctl(args: &[String]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn gui_launch_passes_the_mux_windows_flags() {
+        let args = strings(&[
+            "--gui",
+            "--gpu",
+            "--config=/c.toml",
+            "--profile",
+            "work",
+            "--starting-directory",
+            "/tmp",
+            "--setup",
+        ]);
+        let command = ("htop".to_string(), vec!["-d".to_string()]);
+        let (out, warnings) = mux_gui_args(&args, Some(&command));
+        assert_eq!(
+            out,
+            strings(&[
+                "--gpu",
+                "--config",
+                "/c.toml",
+                "--profile",
+                "work",
+                "--cwd",
+                "/tmp",
+                "--setup",
+                "--",
+                "htop",
+                "-d",
+            ])
+        );
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn gui_launch_names_the_flags_it_drops() {
+        let args = strings(&[
+            "--gui",
+            "--title",
+            "x",
+            "--fullscreen",
+            "--opacity=0.5",
+            "--fullscren",
+            "word",
+        ]);
+        let (out, warnings) = mux_gui_args(&args, None);
+        assert!(out.is_empty(), "{out:?}");
+        assert_eq!(
+            warnings,
+            [
+                "`--title` does not apply to the mux window; ignored",
+                "`--fullscreen` does not apply to the mux window; ignored",
+                "`--opacity=0.5` does not apply to the mux window; ignored",
+            ]
+        );
+    }
+
+    #[test]
+    fn gui_launch_reads_repeats_and_missing_values_as_rusty_term_does() {
+        let args = strings(&[
+            "--starting-directory",
+            "/b",
+            "--cwd",
+            "/a",
+            "--profile=one",
+            "--profile",
+            "two",
+            "--config",
+        ]);
+        let (out, warnings) = mux_gui_args(&args, None);
+        assert_eq!(out, strings(&["--cwd", "/a", "--profile", "one"]));
+        assert_eq!(warnings, ["`--config` needs a value; ignored"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_file_with_an_execute_bit_is_runnable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rt-runnable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("rusty-mux-gui");
+        std::fs::write(&file, b"").expect("write");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(!runnable(&file));
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(runnable(&file));
+        assert!(!runnable(&dir));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()

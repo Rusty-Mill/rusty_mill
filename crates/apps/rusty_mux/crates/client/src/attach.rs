@@ -205,6 +205,16 @@ impl Requests<'_> {
 
     /// Creates a session named `name`, a window and a block of `size`.
     pub fn create(&mut self, size: Size, name: &str) -> Result<BlockId, String> {
+        self.create_with(size, name, Launch::default())
+    }
+
+    /// [`Requests::create`], the block running what `launch` says.
+    pub fn create_with(
+        &mut self,
+        size: Size,
+        name: &str,
+        launch: Launch,
+    ) -> Result<BlockId, String> {
         let session = SessionId::from_uuid(self.create_id(|req| Message::CreateSession {
             req,
             name: name.into(),
@@ -218,7 +228,7 @@ impl Requests<'_> {
             req,
             window,
             size,
-            launch: Launch::default(),
+            launch,
         })?;
         Ok(BlockId::from_uuid(block))
     }

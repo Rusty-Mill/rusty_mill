@@ -226,7 +226,7 @@ impl crate::backend::Backend for UnixBackend {
 /// (not a full shell grammar) sufficient for a config `shell = "bash --login
 /// -i"` style value. Windows needs no equivalent: `CreateProcessW` already
 /// parses the whole command-line string itself.
-fn split_shell_words(s: &str) -> Vec<String> {
+pub(crate) fn split_shell_words(s: &str) -> Vec<String> {
     #[derive(Clone, Copy, PartialEq)]
     enum Quote {
         None,
