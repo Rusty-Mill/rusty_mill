@@ -229,8 +229,11 @@ impl Lease {
     /// The user stopped waiting: a later grant is not used, and a lease
     /// still on its way is given back when it comes.
     pub fn cancel_ask(&mut self) {
-        let waiting =
-            self.consent == Consent::Asking || (self.consent == Consent::Taking && !self.held);
+        let waiting = match self.consent {
+            Consent::Asking => true,
+            Consent::Taking => !self.held,
+            Consent::None | Consent::GivenBack => false,
+        };
         if waiting {
             self.consent = Consent::None;
         }
@@ -470,6 +473,7 @@ mod tests {
         assert_eq!(ask, Ask::Acquire);
         assert_eq!(l.take(), Take::Asking);
         l.cancel_ask();
+        assert_eq!(l.take(), Take::Rest);
         l.answered(req, None, &mut sent.send());
         assert_eq!(sent.last().1, Ask::Release);
         assert!(!l.held);
@@ -488,5 +492,16 @@ mod tests {
         l.want(true, &mut sent.send());
         l.answered(sent.last().0, None, &mut sent.send());
         assert_eq!(l.take(), Take::Held);
+    }
+
+    #[test]
+    fn cancel_does_not_undo_a_held_take_over() {
+        let mut sent = Sent::default();
+        let mut l = gated(&mut sent);
+        l.take_over(&mut sent.send());
+        l.granted(true, &mut sent.send());
+        l.answered(sent.last().0, None, &mut sent.send());
+        l.cancel_ask();
+        assert_eq!(l.take(), Take::Held, "Give back ends a held take-over");
     }
 }
