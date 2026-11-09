@@ -77,6 +77,11 @@ server, and only when the socket is the default one: no socket named and no
 one, else the one on `PATH`. The server is detached: its own process group on Unix, no window
 on Windows, no stdio. The client then tries to connect every 25 ms for up to 5 s.
 
+Its own process group is enough to outlive the client's terminal (pack D142's check): a hangup
+sends SIGHUP to the terminal's foreground group, which the server is not in, so the spawn needs no
+`setsid`. Checked by hand on 2026-11-09 under `script`: closing the terminal killed a background
+process left in the shell's group, while one in its own group, as the server is, kept running.
+
 If two clients each start a server, the servers' own bind settles it: the second refuses the
 first's live name and exits, and both clients connect to the first. A started server that exits
 while nothing answers is an error that tells the user to run the server by hand to see why.
