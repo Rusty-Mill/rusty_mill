@@ -446,6 +446,7 @@ pub fn run(backend: &dyn Backend, config: &Config) -> Result<(), Box<dyn std::er
 /// Launch a window that shows `source`'s panes, laid out as `first` with
 /// pane `focus` focused and then as the source says through the [`Remote`]
 /// handed to `on_start` before the window opens. It opens no local shells.
+/// Setup opens as it does for [`run`]: on `--setup`, or on a first run.
 /// Blocks until the window closes or the source's window is gone.
 pub fn run_attached(
     source: &dyn Source,
@@ -454,10 +455,13 @@ pub fn run_attached(
     config: &Config,
     on_start: impl FnOnce(Remote),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    launch(&NoShells, Some(source), config, |window, _| {
+    launch(&NoShells, Some(source), config, |window, args| {
         on_start(Remote(window.proxy.clone()));
         window.told = Some(focus);
         window.show_tree(Some(first));
+        if crate::config::wants_setup(args) || crate::config::is_first_run(args) {
+            window.open_setup();
+        }
         Ok(())
     })
 }
@@ -534,8 +538,9 @@ fn launch<'a>(
     let proxy = event_loop.create_proxy();
 
     // Config live reload: watch the file and wake the loop on changes.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let config_path = crate::config::Config::file_path(&args);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    let args = crate::config::own_args(&all);
+    let config_path = crate::config::Config::file_path(args);
     if let Some(path) = config_path.clone() {
         let watch_proxy = proxy.clone();
         crate::config::watch(path, move || {
@@ -553,7 +558,7 @@ fn launch<'a>(
         }
     }
 
-    let profile_override = crate::config::flag_value(&args, "--profile").map(str::to_string);
+    let profile_override = crate::config::flag_value(args, "--profile").map(str::to_string);
     let mut app = App {
         backend,
         source,
@@ -570,7 +575,7 @@ fn launch<'a>(
     // The first window (its OS window comes with the loop's `resumed`).
     // Building it up front surfaces font/shell errors before the loop runs.
     let mut first = app.new_window_state(false)?;
-    seed(&mut first, &args)?;
+    seed(&mut first, &all)?;
     app.windows.push(first);
     event_loop.run_app(&mut app)?;
     #[cfg(windows)]
@@ -602,6 +607,13 @@ impl WakeFlag {
 /// `builder.build()`, with a panic inside it turned into an error: on Linux
 /// winit panics when a system library it loads at runtime (libxkbcommon,
 /// libxkbcommon-x11) is missing, which used to abort with a backtrace.
+/// Whether rusty_term's own options ask for the GPU renderer.
+#[cfg(feature = "gui-gpu")]
+fn gpu_asked() -> bool {
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    crate::config::own_args(&all).iter().any(|a| a == "--gpu")
+}
+
 fn build_event_loop(
     builder: &mut winit::event_loop::EventLoopBuilder<UserEvent>,
 ) -> Result<EventLoop<UserEvent>, Box<dyn std::error::Error>> {
@@ -2596,7 +2608,7 @@ impl WindowState<'_> {
 
     fn build_renderer(&mut self, window: Arc<Window>) -> Option<Box<dyn Renderer>> {
         #[cfg(feature = "gui-gpu")]
-        if std::env::args().any(|a| a == "--gpu") {
+        if gpu_asked() {
             match super::gpu::GpuRenderer::new(window.clone(), &mut self.font) {
                 Ok(r) => return Some(Box::new(r)),
                 Err(e) => eprintln!("GPU renderer unavailable ({e}); falling back to CPU"),

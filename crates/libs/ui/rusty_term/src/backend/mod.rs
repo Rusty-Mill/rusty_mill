@@ -140,6 +140,20 @@ pub fn read_batch(handle: &mut dyn BackendHandle, buf: &mut [u8]) -> Result<usiz
     Ok(n)
 }
 
+/// A `shell` config value as a program and its arguments, read as this
+/// platform's backend reads it: POSIX-style words on Unix; on Windows the
+/// program `CreateProcessW` would find, then the CRT's argument rules.
+/// For a caller that hands the program to another process to start, such
+/// as a rusty_mux server. `None` when `shell` is blank.
+pub fn shell_program(shell: &str) -> Option<(String, Vec<String>)> {
+    #[cfg(unix)]
+    let mut words = unix::split_shell_words(shell).into_iter();
+    #[cfg(windows)]
+    let mut words = cmdline::program_words(shell).into_iter();
+    let program = words.next()?;
+    Some((program, words.collect()))
+}
+
 // Each backend only compiles on its own platform — the Unix one leans on
 // platform-specific libc (openpty, termios, …), the Windows one on ConPTY.
 #[cfg(any(windows, test))]

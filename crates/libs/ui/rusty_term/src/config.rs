@@ -335,9 +335,17 @@ pub fn is_first_run(args: &[String]) -> bool {
 /// Whether `--setup` asks for setup. Only rusty_term's own options count:
 /// a `--setup` after `--`, `-e` or `--command` belongs to the child command.
 pub fn wants_setup(args: &[String]) -> bool {
-    args.iter()
-        .take_while(|a| !matches!(a.as_str(), "--" | "-e" | "--command"))
-        .any(|a| a == "--setup")
+    own_args(args).iter().any(|a| a == "--setup")
+}
+
+/// rusty_term's own options in `args`: the words before `--`, `-e` or
+/// `--command`, after which they are the child command's.
+pub fn own_args(args: &[String]) -> &[String] {
+    let end = args
+        .iter()
+        .position(|a| matches!(a.as_str(), "--" | "-e" | "--command"))
+        .unwrap_or(args.len());
+    &args[..end]
 }
 
 /// Whether `args` hold none of the flags that rule out a first-run setup:
@@ -387,7 +395,7 @@ pub fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 /// Instead it warns and falls through to the normal discovery chain.
 fn resolve_path(args: &[String]) -> (Option<(PathBuf, bool)>, Vec<String>) {
     let mut warnings = Vec::new();
-    let mut it = args.iter();
+    let mut it = own_args(args).iter();
     while let Some(a) = it.next() {
         if a == "--config" {
             match it.next() {
@@ -1431,6 +1439,7 @@ color15 = "ffffff"
         }
         assert!(wants_setup(&args(&["--gui", "--setup"])));
         assert!(wants_setup(&args(&["--setup", "--", "htop"])));
+        assert!(!wants_setup(&args(&["--", "htop", "--setup"])));
         assert!(!wants_setup(&args(&["--gui"])));
         for sep in ["--", "-e", "--command"] {
             let child = args(&["--gui", sep, "program", "--setup"]);
