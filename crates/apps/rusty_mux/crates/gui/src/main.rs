@@ -317,11 +317,18 @@ mod tests {
         let made = start(&args, &config).expect("start");
         let first = made.first.program.expect("program");
         assert_eq!(first.command, "htop");
-        assert_eq!(made.first.cwd.as_deref(), Some("/tmp"));
+        assert_eq!(made.first.cwd, absolute("/tmp"));
         assert_eq!(made.shell.map(|p| p.command), Some("fish".into()));
 
         let made = start(&Args::default(), &config).expect("start");
         assert_eq!(made.first.program.map(|p| p.command), Some("fish".into()));
-        assert_eq!(made.first.cwd.as_deref(), Some("/srv"));
+        assert_eq!(made.first.cwd, absolute("/srv"));
+    }
+
+    /// `path` as `start` makes it absolute: on Windows `/tmp` gains the
+    /// current drive.
+    fn absolute(path: &str) -> Option<String> {
+        let made = std::path::absolute(path).expect("absolute");
+        Some(made.to_str().expect("UTF-8").to_owned())
     }
 }
