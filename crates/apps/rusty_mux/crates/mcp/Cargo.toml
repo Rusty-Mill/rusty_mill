@@ -25,3 +25,6 @@ rusty_libc = { workspace = true }
 rusty_mux_server = { workspace = true }
 rusty_tokio = { workspace = true }
 rusty_uuid = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+platform-windows = { workspace = true }
