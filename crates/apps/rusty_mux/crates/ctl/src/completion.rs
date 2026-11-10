@@ -26,6 +26,7 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
     ("events", &["--after", "--follow"]),
     ("do", &[]),
     ("config", &["check", "list"]),
+    ("terminfo", &["check", "setup", "remove", "--dry-run"]),
     ("watch", &["--after"]),
     (
         "wait",

@@ -53,9 +53,11 @@ mod own;
 mod render;
 mod stop;
 pub mod target;
+mod terminfo;
 mod wait;
 mod watch;
 
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::num::NonZeroU8;
 use std::path::{Path, PathBuf};
@@ -131,6 +133,8 @@ pub struct Env {
     pub agent_homes: AgentHomes,
     /// This program, which the agent's session-start hook runs.
     pub ctl: Option<PathBuf>,
+    /// `$RUSTY_MUX_SSH`: the `ssh` that `terminfo` runs; `ssh` when unset.
+    pub ssh: Option<OsString>,
 }
 
 impl Env {
@@ -151,6 +155,7 @@ impl Env {
             config: config::default_path(),
             agent_homes: AgentHomes::from_process(),
             ctl: std::env::current_exe().ok(),
+            ssh: std::env::var_os("RUSTY_MUX_SSH"),
         }
     }
 }
@@ -395,6 +400,11 @@ pub fn run_until(
             return write_line(out, completion::script(shell).trim_end());
         }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
+        Command::Terminfo(command) => {
+            let ssh = env.ssh.clone().unwrap_or_else(|| "ssh".into());
+            return terminfo::run(&command, &ssh, out)
+                .unwrap_or_else(|(exit, reason)| report(err, exit, &reason));
+        }
         Command::Agent(AgentCommand::Report(hook)) => {
             return send_hook_report(hook_socket.as_deref(), env, &hook, stop);
         }
@@ -636,6 +646,7 @@ fn execute(
         | Command::Api(_)
         | Command::Do { .. }
         | Command::Config(_)
+        | Command::Terminfo(_)
         | Command::Agent(_)
         | Command::Watch { .. }
         | Command::Bridge
@@ -1261,6 +1272,7 @@ mod tests {
             config: None,
             agent_homes: AgentHomes::default(),
             ctl: None,
+            ssh: None,
         };
         let stop = Stop::after(std::time::Duration::ZERO);
         let (mut out, mut err) = (Vec::new(), Vec::new());

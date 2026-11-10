@@ -2348,3 +2348,110 @@ fn server_stop_waits_for_the_stop_and_then_finds_no_server() {
     let usage = ctl(&socket, &["server", "start"]);
     assert_eq!(usage.status.code(), Some(2));
 }
+
+/// A stand-in `ssh` that runs the remote command here, with `HOME` as the
+/// remote home, and records its arguments; or that fails as ssh does when
+/// it cannot log in.
+#[cfg(unix)]
+fn fake_ssh(dir: &Path, reachable: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("ssh");
+    let body = match reachable {
+        true => {
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"\nshift 2\nexec sh -c \"$1\"\n"
+        }
+        false => "#!/bin/sh\necho 'ssh: connect to host box: refused' >&2\nexit 255\n",
+    };
+    std::fs::write(&path, body).expect("write fake ssh");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn terminfo_installs_checks_and_removes_the_entry_over_ssh() {
+    if Command::new("tic").arg("-V").output().is_err() {
+        eprintln!("skipped: no tic");
+        return;
+    }
+    let dir = ssh_scratch("terminfo");
+    let home = dir.join("remote-home");
+    std::fs::create_dir_all(&home).expect("home");
+    let ssh = fake_ssh(&dir, true);
+    let terminfo = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+            .env("RUSTY_MUX_SSH", &ssh)
+            .env("HOME", &home)
+            .env_remove("TERMINFO")
+            .env_remove("TERMINFO_DIRS")
+            .args(args)
+            .output()
+            .expect("run rusty-mux-ctl")
+    };
+    let entry = home.join(".terminfo").join("r").join("rusty_term");
+
+    let missing = terminfo(&["terminfo", "check", "me@box"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        stdout(&missing).contains("rusty_term: "),
+        "{}",
+        stdout(&missing)
+    );
+    let argv = std::fs::read_to_string(dir.join("argv")).expect("argv");
+    assert!(argv.starts_with("--\nme@box\nsh -c '"), "{argv}");
+
+    let dry = terminfo(&["terminfo", "setup", "me@box", "--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0));
+    assert!(stdout(&dry).contains("tic -x -o"), "{}", stdout(&dry));
+    assert!(!entry.exists(), "a dry run writes nothing");
+
+    assert_eq!(
+        terminfo(&["terminfo", "setup", "me@box"]).status.code(),
+        Some(0)
+    );
+    assert!(entry.exists());
+    let found = terminfo(&["terminfo", "check", "me@box"]);
+    assert_eq!(found.status.code(), Some(0), "{}", stdout(&found));
+    assert!(stdout(&found).contains("installed in ~/.terminfo"));
+
+    assert_eq!(
+        terminfo(&["terminfo", "remove", "me@box"]).status.code(),
+        Some(0)
+    );
+    assert!(!entry.exists());
+    let _gone = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn terminfo_exits_4_when_ssh_cannot_log_in() {
+    let dir = ssh_scratch("terminfo-down");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let ssh = fake_ssh(&dir, false);
+    let output = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("RUSTY_MUX_SSH", &ssh)
+        .args(["terminfo", "check", "box"])
+        .output()
+        .expect("run rusty-mux-ctl");
+    assert_eq!(output.status.code(), Some(4));
+    for bad in [
+        &["terminfo", "check", "-oProxyCommand=x"][..],
+        &["terminfo", "check", "box", "--dry-run"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+            .env("RUSTY_MUX_SSH", &ssh)
+            .args(bad)
+            .output()
+            .expect("run rusty-mux-ctl");
+        assert_eq!(output.status.code(), Some(2), "{bad:?}");
+    }
+    let _gone = std::fs::remove_dir_all(dir);
+}
+
+/// A directory of its own for one test.
+#[cfg(unix)]
+fn ssh_scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rusty-mux-ctl-ssh-{}-{tag}", std::process::id()));
+    let _fresh = std::fs::remove_dir_all(&dir);
+    dir
+}
