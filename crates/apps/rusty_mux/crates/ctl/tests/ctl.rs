@@ -2452,6 +2452,231 @@ fn server_stop_waits_for_the_stop_and_then_finds_no_server() {
     assert_eq!(usage.status.code(), Some(2));
 }
 
+/// A config directory of its own for one test.
+fn config_home(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rusty-mux-ctl-home-{}-{tag}", std::process::id()));
+    let _fresh = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// `rusty-mux-ctl ARGS` with no socket, its hosts file under `home`.
+fn hosts_ctl(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env_remove("RUSTY_MUX_SOCKET")
+        .env_remove("RUSTY_MUX_SESSION")
+        .env_remove("RUSTY_MUX_WINDOW")
+        .env_remove("RUSTY_MUX_BLOCK")
+        .env_remove("RUSTY_MUX_CONFIG")
+        .env("XDG_CONFIG_HOME", home)
+        .args(args)
+        .output()
+        .expect("run rusty-mux-ctl")
+}
+
+fn hosts_ok(home: &Path, args: &[&str]) -> String {
+    let output = hosts_ctl(home, args);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout(&output).trim().to_owned()
+}
+
+fn path_text(path: &Path) -> &str {
+    path.to_str().expect("a UTF-8 path")
+}
+
+#[test]
+fn hosts_are_added_listed_and_removed_without_a_server() {
+    let home = config_home("verbs");
+    assert_eq!(hosts_ok(&home, &["hosts", "list"]), "");
+    let local = socket_path("saved");
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&local)],
+    );
+    hosts_ok(
+        &home,
+        &[
+            "hosts",
+            "add",
+            "box",
+            "--ssh",
+            "me@box",
+            "--socket",
+            "/run/r.sock",
+            "--udp-host",
+            "box.example",
+        ],
+    );
+    hosts_ok(
+        &home,
+        &["hosts", "add", "other", "--socket", path_text(&local)],
+    );
+    let listed = hosts_ok(&home, &["hosts", "list"]);
+    let want = format!(
+        "box  socket {}  ssh me@box /run/r.sock udp box.example\nother  socket {}",
+        local.display(),
+        local.display()
+    );
+    assert_eq!(listed, want);
+    let json = hosts_ok(&home, &["--json", "hosts", "list"]);
+    assert!(
+        json.starts_with('[') && json.contains("\"udp_host\":\"box.example\""),
+        "{json}"
+    );
+
+    // A duplicate address, a bad name and an unknown host are usage errors.
+    for args in [
+        &["hosts", "add", "box", "--socket", path_text(&local)][..],
+        &["hosts", "add", "-x", "--socket", path_text(&local)],
+        &["hosts", "add", "box", "--socket", "relative.sock"],
+        &["hosts", "add", "box", "--udp-host", "h", "--socket", "/a"],
+        &["hosts", "remove", "nope"],
+    ] {
+        assert_eq!(hosts_ctl(&home, args).status.code(), Some(2), "{args:?}");
+    }
+    hosts_ok(&home, &["hosts", "remove", "box"]);
+    assert_eq!(
+        hosts_ok(&home, &["hosts", "list"]),
+        format!("other  socket {}", local.display())
+    );
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn a_host_reaches_its_first_address_that_answers() {
+    let socket = start_server();
+    let home = config_home("fallback");
+    let dead = socket_path("dead");
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&dead)],
+    );
+    hosts_ok(
+        &home,
+        &[
+            "hosts",
+            "add",
+            "box",
+            "--ssh",
+            "me@box",
+            "--socket",
+            "/run/r.sock",
+        ],
+    );
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&socket)],
+    );
+    let created = hosts_ok(
+        &home,
+        &["--host", "box", "create-session", "--name", "via-host"],
+    );
+    assert!(!created.is_empty());
+    assert!(ok(&socket, &["list"]).contains("via-host"));
+    hosts_ok(&home, &["--host=box", "list"]);
+
+    // Every address failing names each one, and exits 4.
+    hosts_ok(
+        &home,
+        &["hosts", "add", "gone", "--socket", path_text(&dead)],
+    );
+    hosts_ok(
+        &home,
+        &[
+            "hosts",
+            "add",
+            "gone",
+            "--ssh",
+            "me@box",
+            "--socket",
+            "/run/r.sock",
+        ],
+    );
+    let output = hosts_ctl(&home, &["--host", "gone", "list"]);
+    assert_eq!(output.status.code(), Some(4));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("no server is running"), "{said}");
+    assert!(said.contains("not supported yet"), "{said}");
+
+    // An unknown host, or a host and a socket together, are usage errors.
+    assert_eq!(
+        hosts_ctl(&home, &["--host", "nope", "list"]).status.code(),
+        Some(2)
+    );
+    let both = hosts_ctl(
+        &home,
+        &["--host", "box", "--socket", path_text(&socket), "list"],
+    );
+    assert_eq!(both.status.code(), Some(2));
+
+    // A hosts file that does not parse fails the call.
+    std::fs::write(home.join("rusty_mux").join("hosts.json"), "{").expect("write");
+    assert_eq!(
+        hosts_ctl(&home, &["--host", "box", "list"]).status.code(),
+        Some(1)
+    );
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn following_events_reports_and_watch_runs_rules_for_changed_hosts() {
+    let socket = start_server();
+    let home = config_home("changed");
+    let config = config_file(
+        "hosts-changed",
+        r#"{"on": [{"event": "hosts-changed", "action": "create-session", "args": {"name": "hosts-moved"}}]}"#,
+    );
+    let spawn = |args: &[&str]| {
+        ctl_command(&socket, args)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("RUSTY_MUX_CONFIG", &config)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn")
+    };
+    let mut events = spawn(&["events", "--follow"]);
+    let mut watch = spawn(&["watch"]);
+    let mut followed = BufReader::new(events.stdout.take().expect("stdout")).lines();
+    let mut watched = BufReader::new(watch.stdout.take().expect("stdout")).lines();
+    for lines in [&mut followed, &mut watched] {
+        let first = lines.next().expect("a line").expect("read");
+        assert!(first.starts_with("cursor "), "{first}");
+    }
+
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&socket)],
+    );
+    // Server events come too, such as the watch connecting.
+    for lines in [&mut followed, &mut watched] {
+        let seen = lines.map_while(Result::ok).find(|l| l == "hosts-changed");
+        assert!(seen.is_some(), "no hosts-changed line");
+    }
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &["list"]).contains("hosts-moved") {
+        assert!(std::time::Instant::now() < deadline, "the rule never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    for mut child in [events, watch] {
+        child.kill().expect("kill");
+        child.wait().expect("wait");
+    }
+    std::fs::remove_file(&config).expect("cleanup");
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn wait_refuses_ctls_own_event() {
+    let output = hosts_ctl(&config_home("wait"), &["wait", "--event", "hosts-changed"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
 /// A stand-in `ssh` that runs the remote command here, with `HOME` as the
 /// remote home, and records its arguments; or that fails as ssh does when
 /// it cannot log in.

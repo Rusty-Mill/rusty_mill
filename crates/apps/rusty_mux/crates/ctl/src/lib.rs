@@ -48,6 +48,7 @@ pub mod cli;
 mod completion;
 mod config;
 mod conn;
+mod hosts;
 #[cfg(any(unix, windows))]
 mod own;
 mod render;
@@ -130,6 +131,9 @@ pub struct Env {
     /// The config file `do` and `config` read: `$RUSTY_MUX_CONFIG`, else
     /// `rusty_mux/config.json` in the config directory.
     pub config: Option<PathBuf>,
+    /// The saved hosts `--host` and `hosts` read (C35):
+    /// `rusty_mux/hosts.json` in the config directory.
+    pub hosts: Option<PathBuf>,
     /// Where `agent` finds each agent's config directory.
     pub agent_homes: AgentHomes,
     /// This program, which the agent's session-start hook runs.
@@ -154,6 +158,7 @@ impl Env {
                 dir: std::env::current_dir().ok(),
             },
             config: config::default_path(),
+            hosts: hosts::default_path(),
             agent_homes: AgentHomes::from_process(),
             ctl: std::env::current_exe().ok(),
             ssh: std::env::var_os("RUSTY_MUX_SSH"),
@@ -270,9 +275,9 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
     let bridged = match cli::parse(args, &env.here) {
         Ok(invocation) if matches!(invocation.command, Command::Bridge) => invocation,
         Ok(invocation) if matches!(invocation.command, Command::Own) => {
-            return match socket(&invocation, env) {
+            return match socket(&invocation, env, &Stop::default()) {
                 Ok(socket) => finish(own(&socket), &socket, &mut err),
-                Err(reason) => report(&mut err, Exit::Usage, reason),
+                Err((exit, reason)) => report(&mut err, exit, &reason),
             };
         }
         Ok(Invocation {
@@ -290,9 +295,9 @@ pub fn run_process(args: &[String], env: &Env) -> Exit {
         }
         _ => return run(args, env, &mut io::stdout(), &mut err),
     };
-    match socket(&bridged, env) {
+    match socket(&bridged, env, &Stop::default()) {
         Ok(socket) => finish(bridge(&socket), &socket, &mut err),
-        Err(reason) => report(&mut err, Exit::Usage, reason),
+        Err((exit, reason)) => report(&mut err, exit, &reason),
     }
 }
 
@@ -362,15 +367,32 @@ pub fn hook_tool_name(input: &[u8]) -> Option<String> {
     fits.then(|| name.to_owned())
 }
 
-/// The socket `invocation` names, else `$RUSTY_MUX_SOCKET`, else the
-/// default socket.
-fn socket(invocation: &Invocation, env: &Env) -> Result<PathBuf, &'static str> {
+/// The socket of the host `invocation` names (see [`hosts::resolve`]),
+/// else the socket it names, else `$RUSTY_MUX_SOCKET`, else the default
+/// socket; the error carries its exit code.
+fn socket(invocation: &Invocation, env: &Env, stop: &Stop) -> Result<PathBuf, (Exit, String)> {
+    if let Some(name) = &invocation.host {
+        return hosts::resolve(name, env, stop);
+    }
     invocation
         .socket
         .clone()
         .or_else(|| env.socket.clone())
         .or_else(|| env.default_socket.clone())
-        .ok_or("no socket: pass --socket, set RUSTY_MUX_SOCKET, or set XDG_RUNTIME_DIR (LOCALAPPDATA on Windows) for the default")
+        .ok_or((Exit::Usage, "no socket: pass --socket or --host, set RUSTY_MUX_SOCKET, or set XDG_RUNTIME_DIR (LOCALAPPDATA on Windows) for the default".to_owned()))
+}
+
+/// The socket an agent hook reports to: only one named outright, since a
+/// hook must not wait on a host's addresses.
+fn hook_socket(invocation: &Invocation, env: &Env) -> Option<PathBuf> {
+    if invocation.host.is_some() {
+        return None;
+    }
+    invocation
+        .socket
+        .clone()
+        .or_else(|| env.socket.clone())
+        .or_else(|| env.default_socket.clone())
 }
 
 /// [`run`], giving up on the server once `stop` says so (past its deadline,
@@ -391,7 +413,7 @@ pub fn run_until(
         Err(reason) => return report(err, Exit::Usage, &reason),
     };
     // Where the agent hook asks for its session's name.
-    let hook_socket = socket(&invocation, env).ok();
+    let hook_socket = hook_socket(&invocation, env);
     match invocation.command {
         Command::Help(method) => return write_line(out, cli::usage(method).trim_end()),
         Command::Api(Api::List) => return write_line(out, &api::list(invocation.json)),
@@ -401,6 +423,12 @@ pub fn run_until(
             return write_line(out, completion::script(shell).trim_end());
         }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
+        Command::Hosts(command) => {
+            return match hosts::run(&command, env, invocation.json, out) {
+                Ok(()) => Exit::Ok,
+                Err((exit, reason)) => report(err, exit, &reason),
+            };
+        }
         Command::Ssh(command) => {
             let program = env.ssh.clone().unwrap_or_else(|| "ssh".into());
             let home = env.agent_homes.home.as_deref();
@@ -439,16 +467,47 @@ pub fn run_until(
         | Command::Run(_)
         | Command::ServerStop => {}
     }
-    let socket = match socket(&invocation, env) {
+    let socket = match socket(&invocation, env, stop) {
         Ok(socket) => socket,
-        Err(reason) => return report(err, Exit::Usage, reason),
+        Err((exit, reason)) => return report(err, exit, &reason),
+    };
+    // A follower also looks at the hosts file between reads.
+    let follows = matches!(
+        invocation.command,
+        Command::Watch { .. } | Command::Events { follow: true, .. }
+    );
+    let tracker = env
+        .hosts
+        .clone()
+        .filter(|_| follows)
+        .map(hosts::Tracker::new);
+    let stop = match tracker {
+        Some(_) => stop.polling(),
+        None => stop.clone(),
     };
     if let Command::Watch { after } = invocation.command {
-        return run_watch(after, &socket, env, invocation.json, stop, out, err);
+        return run_watch(
+            after,
+            &socket,
+            env,
+            invocation.json,
+            &stop,
+            tracker,
+            out,
+            err,
+        );
     }
     let deadline = timeout(&invocation.command).and_then(|t| Instant::now().checked_add(t));
     let stop = deadline.map_or_else(|| stop.clone(), |d| stop.sooner(d));
-    let result = execute(&invocation, &socket, env.here.session, &stop, out);
+    let result = execute(
+        &invocation,
+        &socket,
+        env.here.session,
+        &stop,
+        tracker,
+        out,
+        err,
+    );
     finish(timed_out(result, deadline), &socket, err)
 }
 
@@ -489,12 +548,14 @@ fn timed_out(result: Result<Exit, Failure>, deadline: Option<Instant>) -> Result
 
 /// `watch`: follows events and runs the config's rules for each, until
 /// the server goes away.
+#[allow(clippy::too_many_arguments)] // Each is one part of the command.
 fn run_watch(
     after: Option<Cursor>,
     socket: &Path,
     env: &Env,
     json: bool,
     stop: &Stop,
+    tracker: Option<hosts::Tracker>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Exit {
@@ -526,10 +587,13 @@ fn run_watch(
         json,
         here: env.here.session,
     };
-    let result = follow(socket, &how, stop, out, &mut |seq, event, out| {
-        watcher
-            .event(seq, event, out, &mut *err)
-            .map_err(Failure::from)
+    let result = follow(socket, &how, stop, tracker, out, &mut |seen, out| {
+        let done = match seen {
+            Seen::Event(seq, event) => watcher.event(seq, event, out, &mut *err),
+            Seen::HostsChanged => watcher.local(hosts::CHANGED, out, &mut *err),
+            Seen::HostsBroken(reason) => writeln!(err, "rusty-mux-ctl: {reason}"),
+        };
+        done.map_err(Failure::from)
     });
     finish(result.map(|()| Exit::Ok), socket, err)
 }
@@ -630,7 +694,9 @@ fn execute(
     socket: &Path,
     here: Option<Uuid>,
     stop: &Stop,
+    tracker: Option<hosts::Tracker>,
     out: &mut dyn Write,
+    err: &mut dyn Write,
 ) -> Result<Exit, Failure> {
     let mut conn = Conn::new(conn::connect(socket, stop)?, stop.clone());
     let mut session = Session {
@@ -643,8 +709,15 @@ fn execute(
     match &invocation.command {
         Command::Calls(calls) => session.calls(calls).map(|()| Exit::Ok),
         Command::Events { after, follow } => session
-            .events(*after, *follow, &[], &mut |seq, event, out| {
-                writeln!(out, "{}", render::event_line(seq, event, json)).map_err(Failure::from)
+            .events(*after, *follow, &[], tracker, &mut |seen, out| {
+                match seen {
+                    Seen::Event(seq, event) => {
+                        writeln!(out, "{}", render::event_line(seq, event, json))
+                    }
+                    Seen::HostsChanged => writeln!(out, "{}", hosts::changed_line(json)),
+                    Seen::HostsBroken(reason) => writeln!(err, "rusty-mux-ctl: {reason}"),
+                }
+                .map_err(Failure::from)
             })
             .map(|()| Exit::Ok),
         Command::Wait(wait) => session.wait(&wait.until),
@@ -654,6 +727,7 @@ fn execute(
         | Command::Api(_)
         | Command::Do { .. }
         | Command::Config(_)
+        | Command::Hosts(_)
         | Command::Ssh(_)
         | Command::Terminfo(_)
         | Command::Agent(_)
@@ -706,6 +780,7 @@ fn follow(
     socket: &Path,
     how: &Follow<'_>,
     stop: &Stop,
+    tracker: Option<hosts::Tracker>,
     out: &mut dyn Write,
     on_event: &mut OnEvent<'_>,
 ) -> Result<(), Failure> {
@@ -716,7 +791,7 @@ fn follow(
         json: how.json,
         here: how.here,
     };
-    session.events(how.after, true, how.needs, on_event)
+    session.events(how.after, true, how.needs, tracker, on_event)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -724,6 +799,7 @@ fn follow(
     _: &Path,
     _: &Follow<'_>,
     _: &Stop,
+    _: Option<hosts::Tracker>,
     _: &mut dyn Write,
     _: &mut OnEvent<'_>,
 ) -> Result<(), Failure> {
@@ -828,8 +904,18 @@ fn hook_generated_name(_: &Path, _: Uuid, _: &Stop) -> Result<Option<String>, Fa
     Err(unsupported())
 }
 
-/// What happens to each numbered event that is followed.
-type OnEvent<'a> = dyn FnMut(u64, &Event, &mut dyn Write) -> Result<(), Failure> + 'a;
+/// What a follower sees.
+enum Seen<'e> {
+    /// A numbered server event.
+    Event(u64, &'e Event),
+    /// ctl's own `hosts-changed`: the saved hosts changed.
+    HostsChanged,
+    /// The hosts file no longer parses: why, once until it does again.
+    HostsBroken(String),
+}
+
+/// What happens to each thing a follower sees.
+type OnEvent<'a> = dyn FnMut(Seen<'_>, &mut dyn Write) -> Result<(), Failure> + 'a;
 
 #[cfg(not(any(unix, windows)))]
 fn execute(
@@ -837,6 +923,8 @@ fn execute(
     _: &Path,
     _: Option<Uuid>,
     _: &Stop,
+    _: Option<hosts::Tracker>,
+    _: &mut dyn Write,
     _: &mut dyn Write,
 ) -> Result<Exit, Failure> {
     Err(unsupported())
@@ -1061,6 +1149,7 @@ impl<S: io::Read + Write> Session<'_, S> {
         after: Option<Cursor>,
         follow: bool,
         needs: &[(&str, Features)],
+        mut tracker: Option<hosts::Tracker>,
         on_event: &mut OnEvent<'_>,
     ) -> Result<(), Failure> {
         let wanted = Features::EVENT_SEQ
@@ -1100,12 +1189,26 @@ impl<S: io::Read + Write> Session<'_, S> {
         }
         let mut last = start;
         loop {
-            match self.conn.recv()? {
+            let message = self.conn.poll()?;
+            // Looked at on every turn, so a steady event stream can't
+            // starve it; it reads the file at most once a CHECK_EVERY.
+            let hosts = match tracker.as_mut().map(hosts::Tracker::check) {
+                Some(hosts::Change::Changed) => Some(Seen::HostsChanged),
+                Some(hosts::Change::Broken(reason)) => Some(Seen::HostsBroken(reason)),
+                Some(hosts::Change::None) | None => None,
+            };
+            if let Some(seen) = hosts {
+                on_event(seen, &mut *self.out)?;
+            }
+            let Some(message) = message else {
+                continue;
+            };
+            match message {
                 Message::Event {
                     seq: Some(seq),
                     event,
                 } => {
-                    on_event(seq, &event, &mut *self.out)?;
+                    on_event(Seen::Event(seq, &event), &mut *self.out)?;
                     last.seq = seq;
                 }
                 Message::Event { seq: None, .. } => {
@@ -1279,6 +1382,7 @@ mod tests {
             default_socket: None,
             here: Defaults::default(),
             config: None,
+            hosts: None,
             agent_homes: AgentHomes::default(),
             ctl: None,
             ssh: None,

@@ -135,19 +135,29 @@ impl<S: Read + Write> Conn<S> {
     /// `InvalidData` for a frame that does not decode, and the
     /// [`Stop::check`] error once stopped.
     pub(crate) fn recv(&mut self) -> io::Result<Message> {
+        loop {
+            if let Some(message) = self.poll()? {
+                return Ok(message);
+            }
+        }
+    }
+
+    /// As [`Conn::recv`], but `None` once a read times out with no whole
+    /// message, so a caller can do other work between reads.
+    pub(crate) fn poll(&mut self) -> io::Result<Option<Message>> {
         let mut chunk = [0u8; 65536];
         loop {
             let decoded =
                 decode(&self.buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
             if let Some((message, used)) = decoded {
                 self.buf.drain(..used);
-                return Ok(message);
+                return Ok(Some(message));
             }
             self.stop.check()?;
             let n = match self.stream.read(&mut chunk) {
                 Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(n) => n,
-                Err(e) if is_wait(&e) => continue,
+                Err(e) if is_wait(&e) => return Ok(None),
                 Err(e) => return Err(e),
             };
             self.buf.extend_from_slice(&chunk[..n]);
