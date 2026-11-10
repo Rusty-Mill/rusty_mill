@@ -367,16 +367,9 @@ pub(crate) struct State {
     /// The server's own account, set by [`State::serve_as`]: unrestricted
     /// on a server other principals share (D164).
     account: Option<Principal>,
-    /// Set by [`State::stop_on_request`]: who may stop the server with
-    /// `shutdown`, and the stop to start. Taken by the first request.
-    shutdown: Option<Shutdown>,
-}
-
-/// A stop by request (C36b): only `owner`, the server's own account, may
-/// ask; asking sends on `stop`.
-struct Shutdown {
-    owner: Principal,
-    stop: oneshot::Sender<()>,
+    /// Set by [`State::stop_on_request`]: the stop the server's own
+    /// account may start with `shutdown`. Taken by the first request.
+    shutdown: Option<oneshot::Sender<()>>,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -519,11 +512,11 @@ impl State {
         self.account = Some(account);
     }
 
-    /// Lets clients of `owner` stop the server with `shutdown`; the
-    /// receiver resolves on the first such request.
-    pub(crate) fn stop_on_request(&mut self, owner: Principal) -> oneshot::Receiver<()> {
+    /// Lets clients of the server's own account ([`State::serve_as`]) stop
+    /// it with `shutdown`; the receiver resolves on the first such request.
+    pub(crate) fn stop_on_request(&mut self) -> oneshot::Receiver<()> {
         let (stop, requested) = oneshot::channel();
-        self.shutdown = Some(Shutdown { owner, stop });
+        self.shutdown = Some(stop);
         requested
     }
 
@@ -1752,19 +1745,19 @@ impl State {
     /// own account. A stop ends every session, so no lesser owner may ask.
     fn shutdown(&mut self, client: ClientId) -> Result<Outcome, Refusal> {
         let asker = self.mux.client(client).ok_or("unknown client")?.principal();
-        let Some(shutdown) = &self.shutdown else {
+        let Some(account) = self.account.as_ref().filter(|_| self.shutdown.is_some()) else {
             return Err(
                 "this server is not stopped by request; it is stopping already, or \
                         its owner stops it"
                     .into(),
             );
         };
-        if asker.id() != shutdown.owner.id() {
-            return Err(format!("only {} may stop this server", shutdown.owner.id()).into());
+        if asker.id() != account.id() {
+            return Err(format!("only {} may stop this server", account.id()).into());
         }
-        if let Some(shutdown) = self.shutdown.take() {
+        if let Some(stop) = self.shutdown.take() {
             // The receiver is serve_for's; gone only once it has stopped.
-            let _ = shutdown.stop.send(());
+            let _ = stop.send(());
         }
         Ok(Outcome::Done(None))
     }
@@ -3196,7 +3189,8 @@ mod regression {
     fn only_the_servers_own_account_stops_it_and_only_once() {
         runtime().block_on(async {
             let (shared, ..) = stalled_reloads();
-            let requested = shared.borrow_mut().stop_on_request(test_owner());
+            shared.borrow_mut().serve_as(test_owner());
+            let requested = shared.borrow_mut().stop_on_request();
             let stranger = Principal::unix(1001, Some("other".into())).expect("valid");
             let (other, mut others) = shutdown_client(&shared, stranger);
             let (owner, mut owners) = shutdown_client(&shared, test_owner());
