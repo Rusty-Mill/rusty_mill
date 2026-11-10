@@ -18,19 +18,30 @@ use crate::cli::{Terminfo, TerminfoVerb};
 /// (ctl must not link rusty_term).
 pub(crate) const SOURCE: &str = include_str!("terminfo/rusty_term.terminfo");
 
-/// Prints where `rusty_term` is found, then whether `tic` exists.
-const CHECK: &str = "if infocmp -A \"$HOME/.terminfo\" -x rusty_term >/dev/null 2>&1; \
-then echo home; elif infocmp -x rusty_term >/dev/null 2>&1; then echo elsewhere; \
-else echo missing; fi; if command -v tic >/dev/null 2>&1; then echo tic; else echo no-tic; fi";
+/// Marks the check's own output lines, so rc-file noise around them on the
+/// remote is skipped.
+const MARK: &str = "rusty-mux-terminfo:";
+
+/// Prints where `rusty_term` is found, then whether `tic` exists, each line
+/// after [`MARK`].
+const CHECK: &str = "m=rusty-mux-terminfo:; if infocmp -A \"$HOME/.terminfo\" -x rusty_term >/dev/null 2>&1; \
+then echo ${m}home; elif infocmp -x rusty_term >/dev/null 2>&1; then echo ${m}elsewhere; \
+else echo ${m}missing; fi; if command -v tic >/dev/null 2>&1; then echo ${m}tic; else echo ${m}no-tic; fi";
 
 /// Compiles the source on stdin into `~/.terminfo`, through a temporary
 /// file, since not every `tic` reads stdin.
-const SETUP: &str = "t=$(mktemp) || exit 1; cat >\"$t\" && mkdir -p \"$HOME/.terminfo\" \
-&& tic -x -o \"$HOME/.terminfo\" \"$t\"; s=$?; rm -f \"$t\"; exit $s";
+const SETUP: &str = concat!(
+    "[ -n \"$HOME\" ] || { echo \"HOME is not set\" >&2; exit 1; }; ",
+    "t=$(mktemp) || exit 1; cat >\"$t\" && mkdir -p \"$HOME/.terminfo\" \
+&& tic -x -o \"$HOME/.terminfo\" \"$t\"; s=$?; rm -f \"$t\"; exit $s"
+);
 
 /// Removes our two entries, in Linux's and macOS's directory layouts.
-const REMOVE: &str = "rm -f \"$HOME/.terminfo/r/rusty_term\" \"$HOME/.terminfo/r/rusty_term-256color\" \
-\"$HOME/.terminfo/72/rusty_term\" \"$HOME/.terminfo/72/rusty_term-256color\"";
+const REMOVE: &str = concat!(
+    "[ -n \"$HOME\" ] || { echo \"HOME is not set\" >&2; exit 1; }; ",
+    "rm -f \"$HOME/.terminfo/r/rusty_term\" \"$HOME/.terminfo/r/rusty_term-256color\" \
+\"$HOME/.terminfo/72/rusty_term\" \"$HOME/.terminfo/72/rusty_term-256color\""
+);
 
 /// The exit code ssh gives when it cannot connect or log in.
 const SSH_FAILED: i32 = 255;
@@ -76,11 +87,15 @@ pub(crate) fn run(
         .stdin(input)
         .spawn()
         .map_err(|e| started(ssh, e))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(SOURCE.as_bytes()).map_err(fail)?;
-    }
+    // A failed write (the remote end gone) is judged after ssh exits, so
+    // an unreachable host still exits 4.
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(SOURCE.as_bytes()));
     let status = child.wait().map_err(fail)?;
-    ended(status.code(), &command.dest).map(|()| Exit::Ok)
+    ended(status.code(), &command.dest)?;
+    written.map_err(fail).map(|()| Exit::Ok)
 }
 
 fn check(ssh: &OsString, args: &[String], out: &mut dyn Write) -> Result<Exit, (Exit, String)> {
@@ -104,7 +119,7 @@ fn check(ssh: &OsString, args: &[String], out: &mut dyn Write) -> Result<Exit, (
 
 /// What `check` prints for the remote script's two lines, and its exit.
 fn report(text: &str) -> Option<(String, Exit)> {
-    let mut lines = text.lines().map(str::trim);
+    let mut lines = text.lines().filter_map(|l| l.trim().strip_prefix(MARK));
     let (place, exit) = match lines.next()? {
         "home" => ("installed in ~/.terminfo", Exit::Ok),
         "elsewhere" => ("not in ~/.terminfo, but found elsewhere", Exit::Failed),
@@ -183,13 +198,26 @@ mod tests {
 
     #[test]
     fn check_reads_both_lines() {
-        let (text, exit) = report("home\ntic\n").expect("read");
+        let marked = |a: &str, b: &str| format!("{MARK}{a}\n{MARK}{b}\n");
+        let (text, exit) = report(&marked("home", "tic")).expect("read");
         assert_eq!(exit, Exit::Ok);
         assert!(text.contains("installed in ~/.terminfo"), "{text}");
-        assert_eq!(report("missing\nno-tic\n").map(|r| r.1), Some(Exit::Failed));
-        assert_eq!(report("elsewhere\ntic").map(|r| r.1), Some(Exit::Failed));
-        assert!(report("motd banner\nhome\ntic").is_none());
-        assert!(report("home").is_none());
+        assert_eq!(
+            report(&marked("missing", "no-tic")).map(|r| r.1),
+            Some(Exit::Failed)
+        );
+        assert_eq!(
+            report(&marked("elsewhere", "tic")).map(|r| r.1),
+            Some(Exit::Failed)
+        );
+        let noisy = format!("motd banner\n{}", marked("home", "tic"));
+        assert_eq!(
+            report(&noisy).map(|r| r.1),
+            Some(Exit::Ok),
+            "rc noise skipped"
+        );
+        assert!(report("home\ntic").is_none(), "unmarked");
+        assert!(report(&format!("{MARK}home")).is_none());
     }
 
     #[cfg(unix)]
@@ -197,7 +225,7 @@ mod tests {
     fn the_shown_command_expands_nothing_locally() {
         let args = ssh_args(TerminfoVerb::Remove, "me@box");
         let line = shown(&args);
-        assert!(line.starts_with("-- me@box 'sh -c '\\''rm -f"), "{line}");
+        assert!(line.starts_with("-- me@box 'sh -c '\\''[ -n "), "{line}");
         // Every `$` sits inside single quotes, which a shell never expands.
         let out = std::process::Command::new("sh")
             .args(["-c", &format!("HOME=/local; printf '%s\\n' {line}")])
