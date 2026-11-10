@@ -31,7 +31,7 @@ Each item is small and needs no new crate or dependency. Order avoids file confl
 |---|---|---|---|
 | 1 | Finish O11 PR 1 (in flight) | Owner said yes; touches `gui/settings.rs` | none beyond review |
 | 2 | Decouple terminal `font_size` from the chrome `ui_font` | Last step of the fixed chrome scale ([STYLEGUIDE.md](STYLEGUIDE.md) §Size); after O11 to avoid settings conflicts | none |
-| 3 | Docs hygiene: HANDOFF §4 queueing rule and §3.1 floors are stale (pack Q1, Q2) | One PR, no code; stops agents reading old rules | none |
+| 3 | ~~Docs hygiene: HANDOFF §4 queueing rule and §3.1 floors are stale (pack Q1, Q2)~~ **Done** (card #784, 2026-11-10; pack D16; who merges is D157) | One PR, no code; stops agents reading old rules | none |
 | 4 | Conhost next ceiling: profile `Screen::client`/forward (~53%) and the mirror-grid parse (~32%) on Beast, measurements first | Host is now the Windows path; numbers decide whether a fix is worth it | none for the profile; the fix is a separate go |
 | 5 | Skill text read from the installed binary (Orca O3, Rex D1); new row C73 | XS; both peers do it; installed skill stays matched to the binary | Nano's go on the row; reconfirm the agent paths (K4) |
 | 6 | Agent hook plus OSC 7501 status precedence (Orca O2) | Richer agent status, OSC as the fallback on hosts without hooks | Nano's go; a new `Features` bit if peers see new events |

@@ -9,7 +9,7 @@ This picks up from `docs/research/RUSTY-TERM-PERF-BACKLOG.md` (row numbers below
 | Top-5 item | Backlog rows | Status | PR |
 |---|---|---|---|
 | 1. Fidelity gate | 14 | Done (18 recordings, 80x24) | #857 |
-| 2. Ring-buffer screen + recycled rows | 1, 2 | Done, but the speed floors are **not** met (§3.1) | #930 |
+| 2. Ring-buffer screen + recycled rows | 1, 2 | Done; the speed floors are met on the 4 MB workloads (§3.1, #1019) | #930 |
 | 4. Printable fast path | 3, 4 (ASCII only) | Done for ASCII. Non-ASCII runs and batched `put_str` for other text are not done. | #936 |
 | 5. Snapshot serializer | 16 (full only) | Full snapshot done. Incremental is not done. | #939 |
 | 3. GUI frame path | 8, 9, 7 | Benchmark built. Rows 9 (view map) and 8 (short lock) done. **Row 7 not started.** | #940 (bench), #952 (row 9), #974 (row 8) |
@@ -47,9 +47,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 3. **Row 7: the GUI consumes dirty rows.**
    - The core already tracks `Grid::dirty`, and the TUI uses it. Since #974, `frame_view` still copies every row each frame, so dirty rows can also shrink that copy. The CPU path does a full `buffer.fill`, and the GPU path rebuilds all instances.
    - Design the per-row change seqno here, because the same mechanism serves incremental snapshots (step 5). Agree its shape with the mux protocol owner first.
-4. **Close the throughput floors (§3.1).** Measure first; there are possibly two separate problems:
-   - a benchmark artifact (a fresh grid per iteration, page-faulting new scrollback);
-   - the real per-line heap allocation in scrollback (row 6).
+4. **Close the throughput floors (§3.1).** Done: met on the 4 MB workloads (#1019, #889 closed 2026-10-25).
 5. **Incremental snapshot.**
    - A per-row seqno plus stable row numbers.
    - Add parser state and modes, or define how a client receives them on attach.
@@ -71,14 +69,9 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 
 ## 3. Open problems and unknowns
 
-1. **The #2 floors are not met in wall-clock.**
-   - The owner's floors are scroll_heavy ≥ 16 MB/s and ascii_throughput ≥ 58 MB/s. Local results: scroll_heavy about 10.5 MB/s, ascii_throughput about 36 MB/s.
-   - The memmove share on scroll_heavy is under 5%; that floor (under 10%) is met.
-   - Instructions per byte fell a lot: ascii 376 → 48, scroll 1001 → 137.
-   - About half the remaining wall-clock time is the kernel faulting in fresh scrollback, because `bench_vt_throughput` builds a new grid per iteration.
-   - With glibc keeping freed memory, ascii runs at over 100 MB/s and scroll at about 40 MB/s.
-   - `bench_frame_time`, which keeps one grid alive, reports 49-160 MB/s parser-only on the scrolling, ASCII, cursor, SGR and Unicode workloads (alt_screen_flicker: 7.5 MB/s).
-   - Whether the floors should be judged on a long-lived grid is **for the owner to decide**.
+1. **Throughput floors: met.** The owner's floors (ascii_throughput ≥ 58 MB/s, scroll_heavy ≥ 16 MB/s) are judged on the 4 MB fresh-grid workloads, and they pass (#1019; #889 closed 2026-10-25; pack D16).
+   - The floors and how to run them live in [`bench/floors.py`](../../../crates/libs/ui/rusty_term/bench/floors.py). Wall-clock depends on the host, so CI does not run it.
+   - What CI enforces is the instruction-count gate: per-workload ceilings in [`bench/ir_ceilings.txt`](../../../crates/libs/ui/rusty_term/bench/ir_ceilings.txt), checked by `bench/ir_gate.py` in the `rusty-term-bench` job. Read the numbers there; they ratchet down and a copy here would drift.
 2. **Snapshot encode is not reliably faster than libghostty:** 11.5-14.3 ms against 9.3-11.0 ms on the later host, 9.3 against 9.6 ms on the first. It is 3.7x smaller (2.09 MB against 7.81 MB). Whether encode time is a hard target is unconfirmed.
 3. **Unicode is the slowest workload:** about 24 MB/s against libghostty's 44.5. The fast path covers ASCII only.
 4. **Fidelity coverage gaps:**
@@ -98,10 +91,7 @@ Each step needs the owner's sign-off before it starts, because the owner gates e
 - **Every change goes through a PR on its own branch. Never push to `main`.**
   - Merge through the merge queue ("Merge when ready"), with a **merge commit**.
   - Never force-push or rebase shared history. To update a branch, merge `main` into it.
-- **Queueing.** A PR is ready once the reviewer has cleared its exact head and CI is green on it. Record the review and a self-review in the PR body, then queue it ("Merge when ready"). The merge queue's own validation (`required-gate` on the queued entry) still applies.
-  - Basis: the owner's latest instruction, as reported by the reviewer on #950: "Whenever a pr is ready and not queued, you should queue it." If in doubt, confirm with the owner.
-  - *Historical:* in the 2026-10-21 to 2026-10-23 session the owner queued every PR, and the agent only reported readiness. That is not a rule for successors.
-  - A queued branch cannot be pushed (GH006). Dequeue it, or have it dequeued, first.
+- **Reviews and merges follow [AGENTS.md](../../../AGENTS.md) and [CONTRIBUTING.md](../../../CONTRIBUTING.md).** Those files win over anything restated here. That includes who queues and merges (rusty_term pack D157).
 - **Code:**
   - No `unwrap`/`expect` in production code.
   - Tests for non-trivial logic, including boundary cases: scroll regions, resize, wide glyphs at row edges, scrollback eviction.
@@ -141,18 +131,7 @@ cargo run --release --features gui --bin bench_frame_time            # needs a m
 sh ../../../../docs/research/rusty-term-perf/oracle_diff.sh --diff
 ```
 
-**Ceilings** (`bench/ir_ceilings.txt`, instructions per byte):
-
-| Workload | Ceiling |
-|---|---:|
-| alt_screen_flicker | 809 |
-| ascii_throughput | 53 |
-| cursor_thrash | 93 |
-| scroll_heavy | 150 |
-| sgr_churn | 128 |
-| unicode_heavy | 184 |
-
-The ratchet rule: a PR that lowers a count lowers that ceiling to about measured + 10% in the same PR.
+**Ceilings:** per-workload instructions per byte in [`bench/ir_ceilings.txt`](../../../crates/libs/ui/rusty_term/bench/ir_ceilings.txt), with the measured history in its comments. The ratchet rule: a PR that lowers a count lowers that ceiling to about measured + 10% in the same PR.
 
 **Other repo checks:**
 - `cargo deny --workspace check advisories` reproduces the cargo-deny CI check locally, if job logs won't download.

@@ -47,7 +47,9 @@ How the repo is organised, validated and released:
 - Agents, including the super-board robot, never queue or merge PRs. DottiusMaximus
   manages reviews and merges (owner decision, 2026-10-27, superseding the robot's
   self-merge in [`docs/super-board/autonomy-policy.md`](docs/super-board/autonomy-policy.md)).
-  Robot PRs follow the rules above like any other PR.
+  Robot PRs follow the rules above like any other PR. The one exception is the PR queue
+  watcher, which also queues and merges (owner, 2026-11-06, confirmed 2026-11-10; see
+  [AGENTS.md](AGENTS.md)).
 - Reviewers, independent or self: check for scope creep, missing tests, and
   unexplained non-obvious decisions.
 - Merge with a **merge commit** ("Create a merge commit" — merge and sync). Do **not**
