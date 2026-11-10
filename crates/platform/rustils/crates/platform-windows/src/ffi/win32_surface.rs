@@ -129,6 +129,12 @@ pub use windows_sys::Win32::System::Threading::{
 // than `adopt`'s `PROCESS_SET_QUOTA | PROCESS_TERMINATE` above, which
 // this query has no need of.
 pub use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+// `process_image_path` (rusty_mux C31, term pack D188): the program a
+// console client runs, for a terminal's foreground process name. Reads
+// the image path through a `PROCESS_QUERY_LIMITED_INFORMATION` handle
+// (admitted above), the least access the call accepts; `PROCESS_NAME_WIN32`
+// asks for a Win32 path rather than an NT device path.
+pub use windows_sys::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
 // `Command::detach` (`docs/decision-request-detach-liveness.md`):
 // `CREATE_NEW_PROCESS_GROUP` takes the child out of this process's
 // Ctrl-C group (so a console close/Ctrl-C here doesn't propagate);

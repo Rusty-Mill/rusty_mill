@@ -24,6 +24,7 @@ use platform_windows::condrv::{
 };
 use platform_windows::sys::handle::OwnedWinHandle;
 
+use crate::attached::Clients;
 use crate::codepage::Codec;
 use crate::console::{
     CURSOR_WAIT, Console, Effect, Event, OutputQueue, POSTAMBLE, PREAMBLE, Packet, Reply,
@@ -100,6 +101,8 @@ pub(crate) struct Shared {
     /// at its close have been ended (#1259).
     shut_down: Mutex<bool>,
     shut_down_seen: Condvar,
+    /// The client processes attached now, newest first (C31).
+    attached: Mutex<Clients>,
     waker: Waker,
 }
 
@@ -162,6 +165,7 @@ impl Shared {
             exit_seen: Condvar::new(),
             shut_down: Mutex::new(false),
             shut_down_seen: Condvar::new(),
+            attached: Mutex::new(Clients::default()),
             waker,
         }
     }
@@ -275,6 +279,12 @@ impl Shared {
     /// Whether the master is gone and output is discarded.
     fn detached(&self) -> bool {
         lock(&self.output).detached
+    }
+
+    /// The client processes attached now, newest first, as
+    /// `GetConsoleProcessList` lists them.
+    pub(crate) fn attached(&self) -> Vec<u32> {
+        lock(&self.attached).newest_first().to_vec()
     }
 
     /// Whether a `read` would return without blocking.
@@ -982,8 +992,12 @@ impl Engine {
                 self.after_reply.push((pid, event));
             }
             Effect::Ctrl { pid, event } => self.ctrl.push(pid, event),
-            Effect::Joined { pid, tid } => self.track(pid, tid),
+            Effect::Joined { pid, tid } => {
+                lock(&self.shared.attached).join(pid);
+                self.track(pid, tid);
+            }
             Effect::Left { pid } => {
+                lock(&self.shared.attached).leave(pid);
                 self.after_reply.retain(|&(p, _)| p != pid);
                 self.ctrl.forget(pid);
                 self.clients.remove(&pid);
@@ -1080,6 +1094,7 @@ impl Engine {
     /// the in-flight read, then close.
     fn teardown(&mut self) {
         self.fetch = None;
+        lock(&self.shared.attached).clear();
         if let Some(r) = self.reply.take() {
             match (self.joining.take(), self.server.as_mut()) {
                 (Some(joining), Some(server)) => {

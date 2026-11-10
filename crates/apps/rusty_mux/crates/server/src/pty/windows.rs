@@ -489,9 +489,27 @@ impl Pty {
         Echo::Unknown
     }
 
-    /// Unknown: a Windows console has no foreground process group.
+    /// The processes attached to the console, newest first, on our host,
+    /// which keeps that list (term pack D186); none on ConPTY, which tells
+    /// nothing.
+    fn attached(&self) -> Vec<u32> {
+        match &*self.master {
+            Master::Own(m) => m.attached(),
+            Master::ConPty(_) => Vec::new(),
+        }
+    }
+
+    /// The newest process attached to the console: a Windows console has
+    /// no foreground process group, and a shell's job is the process that
+    /// attached last. `None` on ConPTY, or before anything attached.
     pub(crate) fn foreground(&self) -> Option<u32> {
-        None
+        self.attached().first().copied()
+    }
+
+    /// The block's processes for `terminal.process`: those attached to its
+    /// console, newest first, then its program `child` (D187).
+    pub(crate) fn processes(&self, child: u32) -> Vec<crate::process::Proc> {
+        crate::process::attached(child, &self.attached(), crate::process::lookup)
     }
 
     /// Stops forwarding output at once, whatever other handles to this

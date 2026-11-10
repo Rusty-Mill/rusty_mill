@@ -92,6 +92,14 @@ impl OwnPtyMaster {
         self.shared.wait_shut_down(timeout)
     }
 
+    /// The processes attached to the console now, newest first, as
+    /// `GetConsoleProcessList` would list them; empty once it has closed.
+    /// The newest is the one a shell's job runs as, so a terminal takes it
+    /// for the foreground process.
+    pub fn attached(&self) -> Vec<u32> {
+        self.shared.attached()
+    }
+
     /// A handle that waits for the direct child to exit or the console to
     /// be torn down.
     pub fn exit_waiter(&self) -> ExitWaiter {

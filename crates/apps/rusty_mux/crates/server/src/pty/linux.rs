@@ -190,6 +190,12 @@ impl Pty {
         u32::try_from(pgrp).ok().filter(|&p| p > 0)
     }
 
+    /// The block's processes for `terminal.process`: the foreground
+    /// process and its ancestors, then its program `child`.
+    pub(crate) fn processes(&self, child: u32) -> Vec<crate::process::Proc> {
+        crate::process::chain(child, self.foreground(), crate::process::lookup)
+    }
+
     /// Who echoes typing, from the program side's termios, which the master
     /// reports.
     pub(crate) fn echo(&self) -> Echo {

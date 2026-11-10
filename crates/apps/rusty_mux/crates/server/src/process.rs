@@ -40,6 +40,7 @@ impl Proc {
 /// process `lookup` cannot find or that belongs elsewhere, such as the
 /// subreaper or init a process was reparented to, or a pid reused by
 /// another program meanwhile.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn chain(
     child: u32,
     foreground: Option<u32>,
@@ -61,10 +62,45 @@ pub(crate) fn chain(
     found
 }
 
+/// The processes attached to a block's console `attached`, newest first,
+/// then the block's program `child`, which is always last: how a Windows
+/// console lists them, with no parents to walk (term pack D187).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn attached(
+    child: u32,
+    attached: &[u32],
+    lookup: impl Fn(u32) -> Option<Proc>,
+) -> Vec<Proc> {
+    let others = attached.iter().filter(|&&pid| pid != child).take(DEPTH);
+    let mut found: Vec<Proc> = others
+        .map(|&pid| lookup(pid).unwrap_or_else(|| Proc::unknown(pid)))
+        .collect();
+    found.push(lookup(child).unwrap_or_else(|| Proc::unknown(child)));
+    found
+}
+
+/// The name a block's program `child` starts with, so the block does not
+/// announce its own program. On Linux it is named after `program` as
+/// started, since it may not have exec'd yet; on Windows, where it runs at
+/// once, after its image, which may add `.exe`.
+pub(crate) fn started_name(child: u32, program: &std::ffi::OsStr) -> String {
+    let given = || {
+        std::path::Path::new(program)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    let image = cfg!(windows).then(|| lookup(child)).flatten();
+    image
+        .map(|p| p.name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(given)
+}
+
 /// Whether a block's program `child` waits for input, by who has the
 /// terminal: `idle` while its own process group does, `busy` while another
 /// does (a job it started), and `unknown` where the platform tells no
-/// foreground group, as on Windows. A program that exits closes its block,
+/// foreground, as on Windows under ConPTY. A program that exits closes its block,
 /// so there is no state for that.
 pub(crate) fn activity(child: u32, foreground: Option<u32>) -> &'static str {
     match foreground {
@@ -145,8 +181,21 @@ pub(crate) fn lookup(pid: u32) -> Option<Proc> {
     parse(pid, &stat, &cmdline)
 }
 
-/// Nothing: only Linux's process table is read.
-#[cfg(not(target_os = "linux"))]
+/// Process `pid` by its image (term pack D188): the name is the image's
+/// file name, `.exe` kept; parent, session and command are not read
+/// (Q42). `None` if it has gone or may not be queried.
+#[cfg(windows)]
+pub(crate) fn lookup(pid: u32) -> Option<Proc> {
+    let path = platform_windows::process_image_path(pid).ok()?;
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    Some(Proc {
+        name,
+        ..Proc::unknown(pid)
+    })
+}
+
+/// Nothing: no process table is read here.
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn lookup(_pid: u32) -> Option<Proc> {
     None
 }
@@ -293,6 +342,22 @@ mod tests {
         assert!(!fg.observe(30, true, |_| None), "still unknown");
         assert!(fg.observe(30, true, named("vim")));
         assert_eq!(fg.name, "vim");
+    }
+
+    #[test]
+    fn a_console_lists_its_attached_processes_newest_first_then_the_program() {
+        let procs = [proc(CHILD, 1, "cmd.exe"), proc(30, 0, "ping.exe")];
+        let listed = attached(CHILD, &[30, 40, CHILD], table(&procs));
+        assert_eq!(pids(&listed), [30, 40, CHILD]);
+        assert_eq!(
+            listed[1].name, "",
+            "one that can't be queried is listed unnamed"
+        );
+        assert_eq!(
+            pids(&attached(CHILD, &[], table(&procs))),
+            [CHILD],
+            "ConPTY"
+        );
     }
 
     #[test]

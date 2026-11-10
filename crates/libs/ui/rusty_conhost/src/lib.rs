@@ -15,6 +15,8 @@
 
 // Off Windows nothing drives the core but its tests.
 #[cfg_attr(not(windows), allow(dead_code))]
+mod attached;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod codepage;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod console;
