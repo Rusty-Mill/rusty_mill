@@ -30,7 +30,7 @@ use crate::backend::{Backend, BackendHandle};
 /// How long the child gets to exit after a hang-up, or to report its exit
 /// status, before it is killed or given up on. The ConPTY handle's bound,
 /// and the console's own close grace.
-const GRACE: Duration = Duration::from_secs(2);
+pub(super) const GRACE: Duration = Duration::from_secs(2);
 
 /// How long Drop waits for the console to shut down: it closes 2 s after
 /// the hang-up at the latest, and ends the clients still attached 5 s
@@ -41,7 +41,7 @@ const SHUTDOWN: Duration = Duration::from_secs(6);
 const SETTLE: Duration = Duration::from_millis(250);
 
 /// How often [`exited_within`] looks at the child.
-const POLL: Duration = Duration::from_millis(10);
+pub(super) const POLL: Duration = Duration::from_millis(10);
 
 /// [`Backend`] on our own console host. Dropping it waits for the
 /// consoles its handles hung up to shut down (#1259), so drop it last,
@@ -210,7 +210,7 @@ fn end_survivor(child: &mut WindowsChild, done: bool) {
 /// The child's exit status once it exits, or `None` if it is still running
 /// after `grace` or its status can't be read. `WindowsChild` has no timed
 /// wait, so this polls.
-fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus> {
+pub(super) fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus> {
     let deadline = Instant::now() + grace;
     loop {
         match child.try_wait() {
@@ -224,8 +224,8 @@ fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option<ExitStatus
 /// The `Command` that runs `shell` and then `args` as `CreateProcessW`
 /// would. The shell's own arguments go on verbatim, as ConPTY's would;
 /// only the trailing `args` are quoted, for whoever reads them.
-fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Command> {
-    let Some((word, rest)) = split_program(shell, |p| locate(p).is_some()) else {
+pub(super) fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Command> {
+    let Some((word, rest)) = program_and_rest(shell) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("rusty_term: no program in the shell `{shell}`"),
@@ -244,6 +244,13 @@ fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Comm
     }
     let rest: Vec<u16> = rest.encode_utf16().collect();
     Ok(with_raw(cmd.args(args), &rest))
+}
+
+/// `shell` as (program, the rest): [`split_program`]'s longest prefix that
+/// [`locate`] finds, so an unquoted `C:\Program Files\x` (with or without
+/// `.exe` and arguments) can't run a planted `C:\Program.exe`.
+fn program_and_rest(shell: &str) -> Option<(&str, &str)> {
+    split_program(shell, |p| locate(p).is_some())
 }
 
 /// `cmd` with `raw` as its raw arguments, unless `raw` is empty.
@@ -297,7 +304,7 @@ fn batch_line(shell: &str, args: &[String]) -> io::Result<OsString> {
 
 /// A platform error as an `io::Error`, keeping its message and the kinds
 /// the runtime tells apart.
-fn to_io(e: PlatformError) -> io::Error {
+pub(super) fn to_io(e: PlatformError) -> io::Error {
     let kind = match e.kind {
         ErrorKind::NotFound => io::ErrorKind::NotFound,
         ErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,
@@ -624,6 +631,39 @@ mod tests {
         assert_eq!(argv, 0, "cmd's arguments go in the raw text");
         let err = own_command("cmd", &["/v:on", "/c", "echo", "!SECRET!"]).expect_err("refused");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// Reviews of 66a8fb5f and e80dc55e: an unquoted shell path with spaces
+    /// runs its file, with or without `.exe` and arguments, not a planted
+    /// shorter prefix.
+    #[test]
+    fn a_whole_unquoted_shell_path_beats_a_planted_prefix() {
+        let dir = std::env::temp_dir().join(format!("rt-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cmd_exe = super::locate("cmd").expect("cmd is in System32");
+        let real = dir.join("x y.exe");
+        std::fs::copy(&cmd_exe, &real).expect("copy cmd");
+        std::fs::copy(&cmd_exe, dir.join("x.exe")).expect("plant the prefix");
+        let path = real.to_str().expect("utf-8").to_owned();
+        let bare = path.trim_end_matches(".exe").to_owned();
+        let shells = [
+            path.clone(),
+            bare.clone(),
+            format!("{path} /d"),
+            format!("{bare} /d"),
+        ];
+        let programs: Vec<_> = shells
+            .iter()
+            .map(|shell| {
+                super::shell_command(shell, &[], std::env::temp_dir().into_os_string())
+                    .expect("command")
+                    .program
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        for (shell, program) in shells.iter().zip(programs) {
+            assert_eq!(program, real.clone().into_os_string(), "{shell}");
+        }
     }
 
     #[test]
