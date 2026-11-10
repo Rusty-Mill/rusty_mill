@@ -869,6 +869,19 @@ impl<S: Store> Board<S> {
         self.number_strays(&mut numbering)
     }
 
+    /// [`Board::number_cards`] on demand, for an admin: numbers cards made in rusty_tick
+    /// since the board started without waiting for a restart. Reads the whole board.
+    ///
+    /// # Errors
+    /// [`BoardError::Forbidden`] without admin; else as [`Board::number_cards`].
+    pub fn number_cards_as(&self, by: &Actor) -> Result<usize, BoardError> {
+        // It writes cards of every project, so a credential limited to some may not.
+        if !by.caps.contains(&Capability::Admin) || by.projects.is_some() {
+            return Err(BoardError::Forbidden(Capability::Admin));
+        }
+        self.number_cards()
+    }
+
     /// Number the cards that have none, each with a number the store reserves, and start
     /// `numbering` from the highest number on the board or reserved. Reads the whole board:
     /// it runs at startup, and on the first new card if that failed, never on every add.
