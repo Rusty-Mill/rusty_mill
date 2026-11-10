@@ -47,6 +47,16 @@ fn shell() -> Config {
     }
 }
 
+/// Input that makes the block's shell print `OSC 7` naming `/tmp`. On
+/// Windows `cmd.exe` has no `printf`: it takes ESC from a `prompt $E` a
+/// child shell prints, then echoes the sequence ended by ST.
+const REPORT_TMP: &str = if cfg!(windows) {
+    "for /F %a in ('echo prompt $E ^| cmd') do @set \"ESC=%a\"\r\
+     echo %ESC%]7;file://host/tmp%ESC%\\\r"
+} else {
+    "printf '\\033]7;file://host/tmp\\007'\r"
+};
+
 /// A command that does nothing and prints nothing.
 const NOTHING: &str = if cfg!(windows) { "rem" } else { "true" };
 
@@ -541,7 +551,7 @@ fn format_prints_the_screen_and_list_the_tree() {
 }
 
 /// Unix only: on Windows `pwd` is known only from OSC 7, which `cmd.exe`
-/// does not send, and `cmd.exe` sets a title.
+/// does not send, and `cmd.exe` sets a title. Its Windows twin follows.
 #[cfg(unix)]
 #[test]
 fn terminal_methods_read_the_block() {
@@ -551,6 +561,73 @@ fn terminal_methods_read_the_block() {
     assert_eq!(ok(&socket, &["terminal.title", "--block", &block]), "");
     let json = ok(&socket, &["--json", "terminal.pwd", "--block", &block]);
     assert!(json.contains("\"text\":\"/\""), "{json}");
+}
+
+/// Types `data` into `block` under a lease.
+fn type_into(socket: &Path, block: &str, data: &str) {
+    ok(
+        socket,
+        &[
+            "attach",
+            "--block",
+            block,
+            "+",
+            "acquire-lease",
+            "--block",
+            block,
+            "+",
+            "input",
+            "--block",
+            block,
+            "--data",
+            data,
+        ],
+    );
+}
+
+/// Polls `args` until it succeeds with output that passes `want`, named
+/// `what`. A failure counts as "not yet": until the shell's report lands,
+/// `terminal.pwd` exits 1 with "the program's working directory is
+/// unknown".
+#[cfg(windows)]
+fn eventually(socket: &Path, args: &[&str], what: &str, want: impl Fn(&str) -> bool) {
+    let deadline = std::time::Instant::now() + PATIENCE;
+    loop {
+        let output = ctl(socket, args);
+        let got = if output.status.success() {
+            stdout(&output).trim().to_owned()
+        } else {
+            String::from_utf8_lossy(&output.stderr).trim().to_owned()
+        };
+        if output.status.success() && want(&got) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{args:?}: {got:?}, never {what}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// On Windows `pwd` comes only from an OSC 7 the shell prints, and the
+/// title from `title`, which the console host mirrors as OSC 0.
+#[cfg(windows)]
+#[test]
+fn terminal_methods_read_the_block() {
+    let socket = start_server();
+    let block = block(&socket);
+    type_into(&socket, &block, REPORT_TMP);
+    let pwd = ["terminal.pwd", "--block", &block];
+    eventually(&socket, &pwd, "/tmp", |got| got == "/tmp");
+    type_into(&socket, &block, "title rusty-mux-title\r");
+    // An elevated cmd.exe puts "Administrator: " before every title.
+    let title = ["terminal.title", "--block", &block];
+    eventually(&socket, &title, "rusty-mux-title", |got| {
+        got.ends_with("rusty-mux-title")
+    });
+    let json = ok(&socket, &["--json", "terminal.pwd", "--block", &block]);
+    assert!(json.contains("\"text\":\"/tmp\""), "{json}");
 }
 
 #[test]
@@ -1285,6 +1362,52 @@ fn an_interrupted_follow_ends_with_sigint() {
     assert_eq!(status.signal(), Some(2));
 }
 
+/// Windows' twin: Ctrl+Break, aimed at a follow in a process group of
+/// its own, ends it as the default handler does, with
+/// `STATUS_CONTROL_C_EXIT`.
+#[cfg(windows)]
+#[test]
+fn a_ctrl_break_ends_a_follow() {
+    use std::os::windows::process::CommandExt;
+
+    /// `CREATE_NEW_PROCESS_GROUP` (winbase.h): the child leads a group of
+    /// its own, whose id is its pid.
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+
+    let socket = start_server();
+    let mut child = ctl_command(&socket, &["events", "--follow"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(child.stdout.take().expect("stdout")).lines();
+    let first = lines.next().expect("a line").expect("read");
+    assert!(first.starts_with("cursor "), "{first}");
+
+    // GenerateConsoleCtrlEvent through PowerShell, which shares this
+    // console, so the test needs no Win32 binding of its own.
+    let group = child.id();
+    let script = format!(
+        "$k = Add-Type -Name K -Namespace RustyMuxCtlTest -PassThru -MemberDefinition \
+         '[DllImport(\"kernel32.dll\")] public static extern bool GenerateConsoleCtrlEvent(uint e, uint g);'; \
+         if (-not $k::GenerateConsoleCtrlEvent(1, {group})) {{ exit 1 }}"
+    );
+    let sent = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .status()
+        .expect("run powershell");
+    assert!(sent.success(), "Ctrl+Break to group {group}: {sent:?}");
+    let status = child.wait().expect("wait");
+    assert_eq!(
+        status.code().map(|c| c as u32),
+        Some(STATUS_CONTROL_C_EXIT),
+        "{status:?}"
+    );
+}
+
 /// Writes `text` as a config file for one test; returns its path.
 fn config_file(tag: &str, text: &str) -> PathBuf {
     let path =
@@ -1391,9 +1514,7 @@ const RULES: &str = r#"{
   ]
 }"#;
 
-/// Unix only: it reports the directory with `printf` and OSC 7, which
-/// `cmd.exe` cannot print and ConPTY may not pass through.
-#[cfg(unix)]
+/// The shell reports the directory with OSC 7 ([`REPORT_TMP`]).
 #[test]
 fn watch_runs_rules_for_events_and_survives_a_failing_one() {
     let socket = start_server();
@@ -1410,25 +1531,7 @@ fn watch_runs_rules_for_events_and_survives_a_failing_one() {
 
     // Creating the block's session fails rule 0; the watch goes on.
     let block = block(&socket);
-    let report = "printf '\\033]7;file://host/tmp\\007'\r";
-    ok(
-        &socket,
-        &[
-            "attach",
-            "--block",
-            &block,
-            "+",
-            "acquire-lease",
-            "--block",
-            &block,
-            "+",
-            "input",
-            "--block",
-            &block,
-            "--data",
-            report,
-        ],
-    );
+    type_into(&socket, &block, REPORT_TMP);
     let deadline = std::time::Instant::now() + PATIENCE;
     while !ok(&socket, &["list"]).contains("at /tmp") {
         assert!(std::time::Instant::now() < deadline, "rule 1 never ran");
@@ -2347,4 +2450,463 @@ fn server_stop_waits_for_the_stop_and_then_finds_no_server() {
     );
     let usage = ctl(&socket, &["server", "start"]);
     assert_eq!(usage.status.code(), Some(2));
+}
+
+/// A config directory of its own for one test.
+fn config_home(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rusty-mux-ctl-home-{}-{tag}", std::process::id()));
+    let _fresh = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// `rusty-mux-ctl ARGS` with no socket, its hosts file under `home`.
+fn hosts_ctl(home: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env_remove("RUSTY_MUX_SOCKET")
+        .env_remove("RUSTY_MUX_SESSION")
+        .env_remove("RUSTY_MUX_WINDOW")
+        .env_remove("RUSTY_MUX_BLOCK")
+        .env_remove("RUSTY_MUX_CONFIG")
+        .env("XDG_CONFIG_HOME", home)
+        .args(args)
+        .output()
+        .expect("run rusty-mux-ctl")
+}
+
+fn hosts_ok(home: &Path, args: &[&str]) -> String {
+    let output = hosts_ctl(home, args);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout(&output).trim().to_owned()
+}
+
+fn path_text(path: &Path) -> &str {
+    path.to_str().expect("a UTF-8 path")
+}
+
+#[test]
+fn hosts_are_added_listed_and_removed_without_a_server() {
+    let home = config_home("verbs");
+    assert_eq!(hosts_ok(&home, &["hosts", "list"]), "");
+    let local = socket_path("saved");
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&local)],
+    );
+    hosts_ok(
+        &home,
+        &[
+            "hosts",
+            "add",
+            "box",
+            "--ssh",
+            "me@box",
+            "--socket",
+            "/run/r.sock",
+            "--udp-host",
+            "box.example",
+        ],
+    );
+    hosts_ok(
+        &home,
+        &["hosts", "add", "other", "--socket", path_text(&local)],
+    );
+    let listed = hosts_ok(&home, &["hosts", "list"]);
+    let want = format!(
+        "box  socket {}  ssh me@box /run/r.sock udp box.example\nother  socket {}",
+        local.display(),
+        local.display()
+    );
+    assert_eq!(listed, want);
+    let json = hosts_ok(&home, &["--json", "hosts", "list"]);
+    assert!(
+        json.starts_with('[') && json.contains("\"udp_host\":\"box.example\""),
+        "{json}"
+    );
+
+    // A duplicate address, a bad name and an unknown host are usage errors.
+    for args in [
+        &["hosts", "add", "box", "--socket", path_text(&local)][..],
+        &["hosts", "add", "-x", "--socket", path_text(&local)],
+        &["hosts", "add", "box", "--socket", "relative.sock"],
+        &["hosts", "add", "box", "--udp-host", "h", "--socket", "/a"],
+        &["hosts", "remove", "nope"],
+    ] {
+        assert_eq!(hosts_ctl(&home, args).status.code(), Some(2), "{args:?}");
+    }
+    hosts_ok(&home, &["hosts", "remove", "box"]);
+    assert_eq!(
+        hosts_ok(&home, &["hosts", "list"]),
+        format!("other  socket {}", local.display())
+    );
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn a_host_reaches_its_first_address_that_answers() {
+    let socket = start_server();
+    let home = config_home("fallback");
+    let dead = socket_path("dead");
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&dead)],
+    );
+    hosts_ok(
+        &home,
+        &[
+            "hosts",
+            "add",
+            "box",
+            "--ssh",
+            "me@box",
+            "--socket",
+            "/run/r.sock",
+        ],
+    );
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&socket)],
+    );
+    let created = hosts_ok(
+        &home,
+        &["--host", "box", "create-session", "--name", "via-host"],
+    );
+    assert!(!created.is_empty());
+    assert!(ok(&socket, &["list"]).contains("via-host"));
+    hosts_ok(&home, &["--host=box", "list"]);
+
+    // Every address failing names each one, and exits 4.
+    hosts_ok(
+        &home,
+        &["hosts", "add", "gone", "--socket", path_text(&dead)],
+    );
+    hosts_ok(
+        &home,
+        &[
+            "hosts",
+            "add",
+            "gone",
+            "--ssh",
+            "me@box",
+            "--socket",
+            "/run/r.sock",
+        ],
+    );
+    let output = hosts_ctl(&home, &["--host", "gone", "list"]);
+    assert_eq!(output.status.code(), Some(4));
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("no server is running"), "{said}");
+    assert!(said.contains("not supported yet"), "{said}");
+
+    // An unknown host, or a host and a socket together, are usage errors.
+    assert_eq!(
+        hosts_ctl(&home, &["--host", "nope", "list"]).status.code(),
+        Some(2)
+    );
+    let both = hosts_ctl(
+        &home,
+        &["--host", "box", "--socket", path_text(&socket), "list"],
+    );
+    assert_eq!(both.status.code(), Some(2));
+
+    // A hosts file that does not parse fails the call.
+    std::fs::write(home.join("rusty_mux").join("hosts.json"), "{").expect("write");
+    assert_eq!(
+        hosts_ctl(&home, &["--host", "box", "list"]).status.code(),
+        Some(1)
+    );
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn following_events_reports_and_watch_runs_rules_for_changed_hosts() {
+    let socket = start_server();
+    let home = config_home("changed");
+    let config = config_file(
+        "hosts-changed",
+        r#"{"on": [{"event": "hosts-changed", "action": "create-session", "args": {"name": "hosts-moved"}}]}"#,
+    );
+    let spawn = |args: &[&str]| {
+        ctl_command(&socket, args)
+            .env("XDG_CONFIG_HOME", &home)
+            .env("RUSTY_MUX_CONFIG", &config)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn")
+    };
+    let mut events = spawn(&["events", "--follow"]);
+    let mut watch = spawn(&["watch"]);
+    let mut followed = BufReader::new(events.stdout.take().expect("stdout")).lines();
+    let mut watched = BufReader::new(watch.stdout.take().expect("stdout")).lines();
+    for lines in [&mut followed, &mut watched] {
+        let first = lines.next().expect("a line").expect("read");
+        assert!(first.starts_with("cursor "), "{first}");
+    }
+
+    hosts_ok(
+        &home,
+        &["hosts", "add", "box", "--socket", path_text(&socket)],
+    );
+    // Server events come too, such as the watch connecting.
+    for lines in [&mut followed, &mut watched] {
+        let seen = lines.map_while(Result::ok).find(|l| l == "hosts-changed");
+        assert!(seen.is_some(), "no hosts-changed line");
+    }
+    let deadline = std::time::Instant::now() + PATIENCE;
+    while !ok(&socket, &["list"]).contains("hosts-moved") {
+        assert!(std::time::Instant::now() < deadline, "the rule never ran");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    for mut child in [events, watch] {
+        child.kill().expect("kill");
+        child.wait().expect("wait");
+    }
+    std::fs::remove_file(&config).expect("cleanup");
+    let _gone = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn wait_refuses_ctls_own_event() {
+    let output = hosts_ctl(&config_home("wait"), &["wait", "--event", "hosts-changed"]);
+    assert_eq!(output.status.code(), Some(2));
+}
+
+/// A stand-in `ssh` that runs the remote command here, with `HOME` as the
+/// remote home, and records its arguments; or that fails as ssh does when
+/// it cannot log in.
+#[cfg(unix)]
+fn fake_ssh(dir: &Path, reachable: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("ssh");
+    let body = match reachable {
+        true => {
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/argv\"\nshift 2\nexec sh -c \"$1\"\n"
+        }
+        false => "#!/bin/sh\necho 'ssh: connect to host box: refused' >&2\nexit 255\n",
+    };
+    std::fs::write(&path, body).expect("write fake ssh");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn terminfo_installs_checks_and_removes_the_entry_over_ssh() {
+    if Command::new("tic").arg("-V").output().is_err() {
+        eprintln!("skipped: no tic");
+        return;
+    }
+    let dir = ssh_scratch("terminfo");
+    let home = dir.join("remote-home");
+    std::fs::create_dir_all(&home).expect("home");
+    let ssh = fake_ssh(&dir, true);
+    let terminfo = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+            .env("RUSTY_MUX_SSH", &ssh)
+            .env("HOME", &home)
+            .env_remove("TERMINFO")
+            .env_remove("TERMINFO_DIRS")
+            .args(args)
+            .output()
+            .expect("run rusty-mux-ctl")
+    };
+    let entry = home.join(".terminfo").join("r").join("rusty_term");
+
+    let missing = terminfo(&["terminfo", "check", "me@box"]);
+    assert_eq!(missing.status.code(), Some(1));
+    assert!(
+        stdout(&missing).contains("rusty_term: "),
+        "{}",
+        stdout(&missing)
+    );
+    let argv = std::fs::read_to_string(dir.join("argv")).expect("argv");
+    assert!(argv.starts_with("--\nme@box\nsh -c '"), "{argv}");
+
+    let dry = terminfo(&["terminfo", "setup", "me@box", "--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0));
+    assert!(stdout(&dry).contains("tic -x -o"), "{}", stdout(&dry));
+    assert!(!entry.exists(), "a dry run writes nothing");
+
+    assert_eq!(
+        terminfo(&["terminfo", "setup", "me@box"]).status.code(),
+        Some(0)
+    );
+    assert!(entry.exists());
+    let found = terminfo(&["terminfo", "check", "me@box"]);
+    assert_eq!(found.status.code(), Some(0), "{}", stdout(&found));
+    assert!(stdout(&found).contains("installed in ~/.terminfo"));
+
+    assert_eq!(
+        terminfo(&["terminfo", "remove", "me@box"]).status.code(),
+        Some(0)
+    );
+    assert!(!entry.exists());
+    let _gone = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn terminfo_exits_4_when_ssh_cannot_log_in() {
+    let dir = ssh_scratch("terminfo-down");
+    std::fs::create_dir_all(&dir).expect("dir");
+    let ssh = fake_ssh(&dir, false);
+    let output = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("RUSTY_MUX_SSH", &ssh)
+        .args(["terminfo", "check", "box"])
+        .output()
+        .expect("run rusty-mux-ctl");
+    assert_eq!(output.status.code(), Some(4));
+    for bad in [
+        &["terminfo", "check", "-oProxyCommand=x"][..],
+        &["terminfo", "check", "box", "--dry-run"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+            .env("RUSTY_MUX_SSH", &ssh)
+            .args(bad)
+            .output()
+            .expect("run rusty-mux-ctl");
+        assert_eq!(output.status.code(), Some(2), "{bad:?}");
+    }
+    let _gone = std::fs::remove_dir_all(dir);
+}
+
+/// A directory of its own for one test.
+#[cfg(unix)]
+fn ssh_scratch(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("rusty-mux-ctl-ssh-{}-{tag}", std::process::id()));
+    let _fresh = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+/// A directory of its own for one ssh test.
+#[cfg(unix)]
+fn ssh_config_dir(tag: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("rusty-mux-ctl-sshcfg-{}-{tag}", std::process::id()));
+    let _fresh = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    dir
+}
+
+#[cfg(unix)]
+fn executable(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).expect("write script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// `rusty-mux-ctl ARGS` with a stand-in `ssh` whose `-G` prints `resolved`
+/// and an `ssh-keygen` that knows only `known`, under `home`.
+#[cfg(unix)]
+fn ssh_ctl(dir: &Path, resolved: &str, known: &str, args: &[&str]) -> Output {
+    let ssh = dir.join("ssh");
+    std::fs::write(dir.join("resolved"), resolved).expect("write");
+    executable(
+        &ssh,
+        "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$d/argv\"\n\
+         case \"$1\" in -V) echo 'OpenSSH_9.6p1' >&2 ;; -G) cat \"$d/resolved\" ;; *) exit 255 ;; esac\n",
+    );
+    executable(
+        &dir.join("ssh-keygen"),
+        &format!("#!/bin/sh\n[ \"$2\" = '{known}' ]\n"),
+    );
+    Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("RUSTY_MUX_SSH", &ssh)
+        .env("HOME", dir)
+        .env_remove("SSH_AUTH_SOCK")
+        .args(args)
+        .output()
+        .expect("run rusty-mux-ctl")
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_check_reads_what_ssh_resolves_and_never_connects() {
+    let dir = ssh_config_dir("check");
+    std::fs::create_dir_all(dir.join(".ssh")).expect("dir");
+    std::fs::write(dir.join(".ssh/id_ed25519"), "key").expect("key");
+    std::fs::write(dir.join(".ssh/known_hosts"), "box.example ssh-ed25519 AAAA").expect("known");
+    let resolved = "hostname box.example\nport 22\nidentityfile ~/.ssh/id_ed25519\n\
+        clearallforwardings no\nuserknownhostsfile ~/.ssh/known_hosts\n";
+
+    let fine = ssh_ctl(&dir, resolved, "box.example", &["ssh", "check", "box"]);
+    assert_eq!(fine.status.code(), Some(0), "{}", stdout(&fine));
+    assert!(stdout(&fine).starts_with("ok: "), "{}", stdout(&fine));
+    let argv = std::fs::read_to_string(dir.join("argv")).expect("argv");
+    assert!(
+        argv.starts_with("-G\n") && argv.ends_with("--\nbox\n"),
+        "{argv}"
+    );
+    assert!(argv.contains("ForkAfterAuthentication=no\n") && argv.contains("BatchMode=yes\n"));
+
+    let unknown = ssh_ctl(&dir, resolved, "other", &["ssh", "diagnose", "box"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    let said = stdout(&unknown);
+    assert!(said.contains("hostname: box.example"), "{said}");
+    assert!(
+        said.contains("problem: no known-hosts file has box.example's key"),
+        "{said}"
+    );
+    assert!(said.contains("  fix: "), "{said}");
+
+    std::fs::write(dir.join("resolved"), "").expect("write");
+    executable(
+        &dir.join("ssh"),
+        "#!/bin/sh\necho 'Bad configuration option: forkafterauthentication' >&2\nexit 255\n",
+    );
+    let old = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("RUSTY_MUX_SSH", dir.join("ssh"))
+        .env("HOME", &dir)
+        .args(["ssh", "check", "box"])
+        .output()
+        .expect("run rusty-mux-ctl");
+    assert_eq!(old.status.code(), Some(1));
+    assert!(stdout(&old).contains("OpenSSH 8.7"), "{}", stdout(&old));
+    let _gone = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_setup_prints_a_block_once() {
+    let dir = ssh_config_dir("setup");
+    let args = [
+        "ssh",
+        "setup",
+        "box",
+        "--hostname",
+        "box.example",
+        "--port",
+        "2222",
+    ];
+    let printed = ssh_ctl(&dir, "", "", &args);
+    assert_eq!(printed.status.code(), Some(0));
+    let block = stdout(&printed);
+    assert!(
+        block.starts_with("# BEGIN rusty-mux-ctl ssh setup box\nHost box\n"),
+        "{block}"
+    );
+    assert!(block.contains("    Port 2222\n"), "{block}");
+    assert!(!dir.join(".ssh").exists(), "setup writes nothing");
+
+    std::fs::create_dir_all(dir.join(".ssh")).expect("dir");
+    std::fs::write(dir.join(".ssh/config"), block).expect("write");
+    let again = ssh_ctl(&dir, "", "", &args);
+    assert!(
+        stdout(&again).contains("already has a Host entry for box"),
+        "{}",
+        stdout(&again)
+    );
+    for bad in [
+        &["ssh", "setup", "box", "--port", "0"][..],
+        &["ssh", "check", "-oProxyCommand=x"],
+    ] {
+        assert_eq!(ssh_ctl(&dir, "", "", bad).status.code(), Some(2), "{bad:?}");
+    }
+    let _gone = std::fs::remove_dir_all(dir);
 }

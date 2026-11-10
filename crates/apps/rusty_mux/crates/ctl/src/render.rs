@@ -678,8 +678,11 @@ mod tests {
             },
             Event::ConfigReloaded,
         ];
-        assert_eq!(events.len(), rusty_mux_script::EVENTS.len());
-        for (event, (kind, declared)) in events.iter().zip(rusty_mux_script::EVENTS) {
+        // The server's kinds, then ctl's own `hosts-changed`, which no
+        // server sends.
+        let (server, local) = rusty_mux_script::EVENTS.split_at(events.len());
+        assert_eq!(local, [(crate::hosts::CHANGED, &[] as &[&str])]);
+        for (event, (kind, declared)) in events.iter().zip(server) {
             let (found, values) = event_fields(event);
             assert_eq!(found, *kind);
             let names: Vec<&str> = values.iter().map(|(n, _)| n.as_str()).collect();

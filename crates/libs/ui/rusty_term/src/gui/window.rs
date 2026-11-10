@@ -57,10 +57,7 @@ use super::strip::{self, Spot, StripState};
 use crate::backend::BackendHandle;
 use crate::compact::Compactor;
 use crate::config::{ClipboardPolicy, Config, LaunchMode};
-use crate::core::{
-    ATTR_BOLD, ATTR_UNDERLINE, ATTR_UNDERLINE_COLOR, AnsiParser, Cell, Grid, Selection, Theme,
-    WIDE_TRAILER, char_width,
-};
+use crate::core::{AnsiParser, Cell, Grid, Selection, Theme, WIDE_TRAILER, char_width};
 use crate::gui::mouse::{MouseButtonKind, MouseEvent, MousePoint, SgrEncoder};
 use crate::keymap::{Action, Chord};
 
@@ -78,13 +75,6 @@ const INIT_ROWS: u16 = 24;
 /// Pixel band at the window edges acting as a resize handle (the native frame
 /// is gone with decorations off).
 const RESIZE_BORDER: f64 = 6.0;
-/// Widest a chrome-bar tab grows (label plus its × button); tabs size to
-/// their titles between [`TAB_MIN`] and this.
-const TAB_CELLS: usize = 26;
-/// Narrowest a tab shrinks when the strip crowds before falling back to the
-/// scrolled uniform-width strip: room for the ×, padding, and a few label
-/// characters.
-const TAB_MIN: usize = 12;
 /// Grid row where overlay (menu / settings) list rows begin (header sits above).
 const OVERLAY_ITEMS_TOP: usize = 2;
 /// Settings-page layout (cells): the category sidebar's width, the rows one
@@ -119,8 +109,6 @@ const DOUBLE_CLICK_MS: u128 = 400;
 /// Default inner margin around the pane area (`[window] padding` overrides).
 const DEFAULT_PAD: u32 = 8;
 
-/// One pane-resize keypress moves the split boundary by this ratio fraction.
-const RESIZE_STEP: f32 = 0.05;
 /// Scrollback lines moved per mouse-wheel notch.
 const WHEEL_LINES: isize = 3;
 /// Dragging a selection past a pane's top/bottom edge by more than this many
@@ -135,8 +123,6 @@ const DRAG_SCROLL_INTERVAL: Duration = Duration::from_millis(50);
 pub(crate) enum UserEvent {
     /// New output was parsed into the tab's grid; repaint if it's the active one.
     Redraw(u64),
-    /// The tab's child exited; close that tab (the last one closes the window).
-    Exit(u64),
     /// The config file changed on disk; reload and apply what can change live.
     ConfigChanged,
     /// An AccessKit event (initial-tree request, AT action, deactivation)
@@ -172,18 +158,18 @@ pub(crate) enum UserEvent {
 /// What an attached window draws besides its panes: the strip, the
 /// body and its overlays, and an open popover.
 fn attached_scene<'a>(
-    strip: Option<&'a StripState>,
-    body: Option<&'a BodyState>,
-    popover: Option<&'a Popover>,
+    strip: &'a StripState,
+    body: &'a BodyState,
+    popover: &'a Popover,
     confirm: Option<&'a Confirm>,
 ) -> Scene<'a> {
-    let body = body.and_then(BodyState::painted);
+    let body = body.painted();
     Scene {
-        strip: strip.and_then(StripState::painted).map(|s| &s.pixmap),
+        strip: strip.painted().map(|s| &s.pixmap),
         body: body.map(|b| &b.pixmap),
         over: body.map_or(&[], |b| &b.over),
         pop: popover
-            .and_then(Popover::painted)
+            .painted()
             .or_else(|| confirm.and_then(Confirm::painted)),
     }
 }
@@ -209,27 +195,11 @@ const DISABLED_ALPHA: u8 = 115;
 /// What a click on a given chrome-bar cell does.
 #[derive(Clone, Copy, PartialEq)]
 enum Hit {
-    /// Activate tab `i`.
-    Tab(usize),
-    /// Close tab `i` (its × button).
-    CloseTab(usize),
-    /// Spawn a new tab (the `+` button).
-    NewTab,
-    /// Open the shell-launcher / settings dropdown (the `▾` button).
-    ShellMenu,
     Minimize,
     Maximize,
     Close,
     /// Empty bar: drag moves the window, double-click toggles maximize.
     Drag,
-    /// Overflow indicator: more tabs exist than fit in the strip. Clicking
-    /// cycles to the next tab, scrolling the strip to reveal it.
-    MoreTabs,
-    /// The settings page's own strip tab, shown while the page is open
-    /// (already active; clicking it is a no-op).
-    SettingsTab,
-    /// Close the settings page (the settings tab's × button).
-    CloseSettings,
     /// An attached window's session chip: its menu (gui-design D45 b).
     Session,
     /// Show the source's window `key` (an attached window's strip tab).
@@ -380,16 +350,15 @@ fn sync_step(before: &[u64], open: &[(u64, Instant)]) -> (Vec<u64>, Option<Insta
     (held, open.iter().map(|&(_, t)| t).min(), released)
 }
 
-/// Where a pane sits: its cell rect, and the window pixel of its grid's
-/// top-left corner; for an attached window's block (gui-design D47), the
-/// block's box in window pixels too, and its cell rect's corner only orders
-/// it among the others.
+/// Where a block sits (gui-design D47): its cell rect, whose corner only
+/// orders it among the others; the window pixel of its grid's top-left
+/// corner; and its box in window pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Place {
     cells: Rect,
     x: usize,
     y: usize,
-    block: Option<Rect>,
+    block: Rect,
 }
 
 impl Tab {
@@ -430,7 +399,7 @@ pub fn run_attached(
     })
 }
 
-/// The event loop and first window shared by [`run`] and [`run_attached`];
+/// The event loop and first window behind [`run_attached`];
 /// `seed` fills the first window, given the launch arguments.
 fn launch<'a>(
     source: &'a dyn Source,
@@ -460,7 +429,7 @@ fn launch<'a>(
 
     let profile_override = crate::config::flag_value(args, "--profile").map(str::to_string);
     let mut app = App {
-        source: Some(source),
+        source,
         config: config.clone(),
         config_path,
         profile_override,
@@ -537,7 +506,7 @@ fn panic_text(panic: &(dyn std::any::Any + Send)) -> &str {
 /// event loop is gone). A wakeup is sent only when the window has handled
 /// the last one (`wake`), so a flood costs the UI thread one event per
 /// frame, not one per read. The loop ends when the feed does or a send
-/// fails, and then sends `Exit`.
+/// fails; the source's next layout drops the pane.
 fn reader_loop(
     id: u64,
     feed: impl Iterator<Item = Feed>,
@@ -569,7 +538,6 @@ fn reader_loop(
             break; // loop gone
         }
     }
-    send(UserEvent::Exit(id));
 }
 
 /// Apply one feed step to a pane's terminal, returning the parser's
@@ -609,40 +577,26 @@ fn apply(step: Feed, grid: &Mutex<Grid>, parser: &Mutex<AnsiParser>) -> Vec<u8> 
     }
 }
 
-/// An in-progress drag-to-reorder of chrome-bar tabs: pressing a tab arms
-/// it, and once the pointer travels past a small slop (so a plain click
-/// never reorders) the tab follows the pointer, trading places as it
-/// crosses its neighbors' midpoints. `idx` tracks the dragged tab's current
-/// position across those moves; releasing the button clears the state.
-struct TabDrag {
-    idx: usize,
-    press_x: f64,
-    moving: bool,
-}
-
 /// One top-level OS window: its tabs/panes, renderer, chrome, and every bit
 /// of per-window UI state (selection, overlays, search, copy mode, …). The
 /// [`App`] router owns one of these per open window and dispatches winit
 /// events to the right one by `WindowId`.
 struct WindowState<'a> {
-    /// The window's source of panes and layout; always `Some` since local
-    /// mode retired (D159; R3 makes it plain). The window never edits its
+    /// The window's source of panes and layout. The window never edits its
     /// layout (pack D102).
-    source: Option<&'a dyn Source>,
+    source: &'a dyn Source,
     /// The focus last told to `source` or told by it.
     told: Option<u64>,
     /// An attached window's prefix (Ctrl-]) is armed: the next key is a
     /// layout command (gui-design F2, D49).
     armed: bool,
-    /// An attached window's top strip, in place of the chrome bar
-    /// (gui-design D45); `None` for local shells.
-    strip: Option<StripState>,
-    /// An attached window's framed blocks under the strip (gui-design
-    /// D47); `None` for local shells.
-    body: Option<BodyState>,
-    /// An attached window's popover: the session switcher (gui-design F4,
-    /// D60) or the detached blocks (D61); `None` for local shells.
-    popover: Option<Popover>,
+    /// The window's top strip (gui-design D45).
+    strip: StripState,
+    /// The window's framed blocks under the strip (gui-design D47).
+    body: BodyState,
+    /// The window's popover: the session switcher (gui-design F4, D60) or
+    /// the detached blocks (D61).
+    popover: Popover,
     /// An attached window's open take-over confirm (gui-design F3, D64).
     confirm: Option<Confirm>,
     /// The effective config; refreshed on live reload so new tabs follow it.
@@ -701,8 +655,6 @@ struct WindowState<'a> {
     consumed_keys: ConsumedKeys,
     /// Per-cell click actions for the chrome bar, rebuilt with each layout.
     hits: Vec<Hit>,
-    /// An in-progress tab drag (press on a tab arms it; releasing clears).
-    tab_drag: Option<TabDrag>,
     /// The chrome control the left button went down on, drawn pressed until
     /// the button is released (D26, D43).
     pressed: Option<Hit>,
@@ -782,10 +734,6 @@ struct WindowState<'a> {
     /// for its focused pane only.
     cursor_prev: Option<(u64, (usize, usize))>,
     trail: Option<Trail>,
-    /// Cached git branch for the status ribbon: `(cwd it was resolved for,
-    /// branch or None, when)`. `.git/HEAD` is re-read at most every
-    /// [`GIT_BRANCH_TTL`] instead of on every frame.
-    git_branch: Option<(std::path::PathBuf, Option<String>, Instant)>,
     /// Whether the right-hand command dock is open (`toggle_dock`,
     /// Ctrl+Shift+K). It auto-hides — without flipping this — when the
     /// window is too narrow to fit it beside a usable pane area.
@@ -801,12 +749,11 @@ struct WindowState<'a> {
 
 impl WindowState<'_> {
     /// The pane `id` drawn from `io`, sized `cols × rows`, with its reader
-    /// thread and, given `exit`, a thread that reports the child's exit.
+    /// thread.
     fn pane_from(
         &mut self,
         id: u64,
         io: PaneIo,
-        exit: Option<Box<dyn FnOnce() + Send>>,
         cols: u16,
         rows: u16,
         theme: Option<Theme>,
@@ -850,14 +797,6 @@ impl WindowState<'_> {
                 |event| reader_proxy.send_event(event).is_ok(),
             )
         });
-
-        if let Some(wait) = exit {
-            let exit_proxy = self.proxy.clone();
-            std::thread::spawn(move || {
-                wait();
-                let _ = exit_proxy.send_event(UserEvent::Exit(id));
-            });
-        }
         Ok(Pane {
             id,
             grid,
@@ -1053,94 +992,6 @@ impl WindowState<'_> {
         }
     }
 
-    /// Grow (`delta > 0`) or shrink the focused pane along `dir`, then
-    /// re-lay panes out to the moved boundary. Leaves a zoomed tab alone —
-    /// there is no visible boundary to move.
-    fn resize_pane(&mut self, dir: Dir, delta: f32) {
-        if self.source.is_some() {
-            return; // the source lays an attached window out
-        }
-        let ti = self.active;
-        let Some(tab) = self.tabs.get_mut(ti) else {
-            return;
-        };
-        if tab.zoomed || !tab.layout.resize(tab.focus, dir, delta) {
-            return;
-        }
-        self.layout_panes(ti);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-    }
-
-    /// Toggle pane zoom: the focused pane takes the whole tab area until
-    /// toggled back (or the pane set changes).
-    fn toggle_zoom(&mut self) {
-        let ti = self.active;
-        let Some(tab) = self.tabs.get_mut(ti) else {
-            return;
-        };
-        if tab.panes.len() < 2 {
-            return; // a single pane already has the whole area
-        }
-        tab.zoomed = !tab.zoomed;
-        self.layout_panes(ti);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-    }
-
-    /// Close pane `id`: collapse its split into the sibling, or close the whole
-    /// tab when it was the last pane. Idempotent for stale exit events.
-    fn close_pane(&mut self, id: u64) {
-        if self.source.is_some() {
-            return; // the source lays an attached window out
-        }
-        let Some(ti) = self
-            .tabs
-            .iter()
-            .position(|t| t.panes.iter().any(|p| p.id == id))
-        else {
-            return;
-        };
-        let tab = &mut self.tabs[ti];
-        match tab.layout.close(id) {
-            None => {
-                self.close_tab_at(ti);
-                return;
-            }
-            Some(next) => {
-                tab.panes.retain(|p| p.id != id); // drops the PTY handle
-                tab.zoomed = false; // the pane set changed
-                if tab.focus == id {
-                    tab.focus = next;
-                }
-            }
-        }
-        self.layout_panes(ti);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-    }
-
-    /// Remove the tab at `ti` (dropping all its panes). The last tab closes the
-    /// window.
-    fn close_tab_at(&mut self, ti: usize) {
-        self.tabs.remove(ti);
-        if self.tabs.is_empty() {
-            self.closed = true;
-            return;
-        }
-        if ti < self.active {
-            self.active -= 1;
-        } else if self.active >= self.tabs.len() {
-            self.active = self.tabs.len() - 1;
-        }
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-    }
-
     /// Resize tab `ti`'s panes (grids + PTYs) to their layout rectangles.
     /// Cells the command dock currently occupies (its width plus the divider
     /// column), `0` when closed or when opening it would squeeze the pane
@@ -1165,33 +1016,11 @@ impl WindowState<'_> {
     }
 
     /// Where each pane of `layout` sits (only `focus`'s when `zoomed`).
-    /// A local window tiles cells; an attached one tiles pixels under the
-    /// strip and frames each block, its grid inside (gui-design D47).
+    /// Blocks tile pixels under the strip, each framed with its grid inside
+    /// (gui-design D47).
     fn places_of(&self, layout: &Layout, zoomed: bool, focus: u64) -> Vec<(u64, Place)> {
         let (cw, ch) = (self.cell_w.max(1), self.cell_h.max(1));
         let oy = self.grid_oy();
-        if self.body.is_none() {
-            let area = self.pane_area();
-            let rects = match zoomed {
-                true => vec![(focus, area)],
-                false => layout.rects(area),
-            };
-            return rects
-                .into_iter()
-                .map(|(id, r)| {
-                    let (x, y) = (self.pad + r.col * cw, oy + r.row * ch);
-                    (
-                        id,
-                        Place {
-                            cells: r,
-                            x,
-                            y,
-                            block: None,
-                        },
-                    )
-                })
-                .collect();
-        }
         let scale = self.scale_factor as f32;
         let area = self.body_area();
         let boxes = match zoomed {
@@ -1217,7 +1046,7 @@ impl WindowState<'_> {
                     cells,
                     x: g.col,
                     y: g.row,
-                    block: Some(b),
+                    block: b,
                 };
                 (id, place)
             })
@@ -1241,7 +1070,6 @@ impl WindowState<'_> {
     }
 
     fn layout_panes(&mut self, ti: usize) {
-        let attached = self.source.is_some();
         let places = self.places(ti);
         let Some(tab) = self.tabs.get_mut(ti) else {
             return;
@@ -1249,18 +1077,9 @@ impl WindowState<'_> {
         for (id, Place { cells: r, .. }) in places {
             if let Some(p) = tab.panes.iter_mut().find(|p| p.id == id) {
                 let (c, rw) = (r.cols.max(1) as u16, r.rows.max(1) as u16);
-                {
-                    let mut g = p.grid.lock();
-                    // An attached pane's size is its source's: the writer
-                    // asks for this one, and the feed tells what it got.
-                    if attached {
-                        g.selection = None;
-                    } else {
-                        p.compactor
-                            .resize(&mut g, c as usize, rw as usize, Instant::now());
-                        g.selection = None; // viewport changed; old coords are stale
-                    }
-                }
+                // A pane's size is its source's: the writer asks for this
+                // one, and the feed tells what it got.
+                p.grid.lock().selection = None;
                 let _ = p.writer.set_winsize(c, rw);
             }
         }
@@ -1274,17 +1093,13 @@ impl WindowState<'_> {
         let inner_w = (px_w as usize).saturating_sub(2 * self.pad);
         let inner_h = (px_h as usize).saturating_sub(2 * self.pad);
         let cols = ((inner_w / self.cell_w).max(1)) as u16;
-        // One bar row goes to the chrome bar; one more to the status ribbon
-        // when it's on.
+        // The top bar and the bottom ribbon take their rows.
         let rows = ((inner_h.saturating_sub(self.bars_h()) / self.cell_h).max(1)) as u16;
-        // An attached window's blocks are laid out in pixels, so any
-        // change of size moves them.
-        if (cols, rows) != (self.cols, self.rows) || self.body.is_some() {
-            self.cols = cols;
-            self.rows = rows;
-            for ti in 0..self.tabs.len() {
-                self.layout_panes(ti);
-            }
+        // Blocks are laid out in pixels, so any change of size moves them.
+        self.cols = cols;
+        self.rows = rows;
+        for ti in 0..self.tabs.len() {
+            self.layout_panes(ti);
         }
     }
 
@@ -1306,7 +1121,7 @@ impl WindowState<'_> {
         if self.strip_shown() {
             self.repaint_strip();
         }
-        let status = self.status_row();
+        let status: Vec<Cell> = Vec::new();
         let tokens = self.chrome_colors();
         let divider = tokens.line;
         if self.overlay.is_some() {
@@ -1328,7 +1143,7 @@ impl WindowState<'_> {
                 marks: Vec::new(),
                 search: SearchColors::default(),
             };
-            let strip = self.strip.as_ref().and_then(StripState::painted);
+            let strip = self.strip.painted();
             let scene = Scene {
                 strip: strip.map(|s| &s.pixmap),
                 ..Scene::default()
@@ -1353,9 +1168,8 @@ impl WindowState<'_> {
         let places = self.places(self.active);
         self.repaint_body(&places);
         let scale = self.scale_factor as f32;
-        if let Some(popover) = &mut self.popover {
-            popover.repaint(tokens, scale);
-        }
+        let popover = &mut self.popover;
+        popover.repaint(tokens, scale);
         if let Some(confirm) = &mut self.confirm {
             confirm.repaint(tokens, scale);
         }
@@ -1384,28 +1198,26 @@ impl WindowState<'_> {
         let Some(tab) = self.tabs.get(self.active) else {
             // An attached window showing no block (gui-design D61): its
             // strip, body and popover alone.
-            if self.source.is_some() {
-                let scene = attached_scene(
-                    self.strip.as_ref(),
-                    self.body.as_ref(),
-                    self.popover.as_ref(),
-                    self.confirm.as_ref(),
-                );
-                renderer.render(
-                    &[],
-                    &chrome,
-                    scene,
-                    &status,
-                    &mut self.font,
-                    &mut self.ui_font,
-                    size.width,
-                    size.height,
-                    divider,
-                    self.theme.bg,
-                    tokens.frame,
-                    self.pad,
-                );
-            }
+            let scene = attached_scene(
+                &self.strip,
+                &self.body,
+                &self.popover,
+                self.confirm.as_ref(),
+            );
+            renderer.render(
+                &[],
+                &chrome,
+                scene,
+                &status,
+                &mut self.font,
+                &mut self.ui_font,
+                size.width,
+                size.height,
+                divider,
+                self.theme.bg,
+                tokens.frame,
+                self.pad,
+            );
             return;
         };
         // Taskbar progress (G01 stretch, Windows only): resolved once per
@@ -1489,40 +1301,24 @@ impl WindowState<'_> {
         } else {
             self.trail = None;
         }
-        // Command gutter marks (per pane): resolve each row's BlockMark against
-        // what backs the stripe (D41, D42): the padding band (theme bg) for a pane
-        // at the left edge, the divider for a pane right of a split.
+        // Command gutter marks (per block): each row's BlockMark against the
+        // terminal background its padding shows (D41, D42).
         let marks_on = self.config.command_marks.unwrap_or(true);
-        let edge_marks = Marks::on(self.theme.bg, self.theme.cursor, &tokens);
-        let split_marks = Marks::on(tokens.line, self.theme.cursor, &tokens);
-        let mark_color = |m: crate::core::BlockMark, col: usize| {
-            let marks = if col == 0 { &edge_marks } else { &split_marks };
-            match m {
-                crate::core::BlockMark::Success => marks.success,
-                crate::core::BlockMark::Error => marks.failure,
-                crate::core::BlockMark::Running => marks.running,
-            }
+        let marks = Marks::on(self.theme.bg, self.theme.cursor, &tokens);
+        let mark_color = |m: crate::core::BlockMark| match m {
+            crate::core::BlockMark::Success => marks.success,
+            crate::core::BlockMark::Error => marks.failure,
+            crate::core::BlockMark::Running => marks.running,
         };
         let search = SearchColors::from_theme(&self.theme);
         let mut frames: Vec<PaneFrame> = snaps
             .iter()
             .map(|(g, place, foc)| PaneFrame {
                 grid: g,
-                // An attached block sits in pixels, a local pane in cells.
-                col0: if place.block.is_some() {
-                    0
-                } else {
-                    place.cells.col
-                },
-                row0: if place.block.is_some() {
-                    0
-                } else {
-                    place.cells.row
-                },
-                px: match place.block {
-                    Some(_) => (place.x.saturating_sub(self.pad), place.y.saturating_sub(oy)),
-                    None => (0, 0),
-                },
+                // A block sits in pixels.
+                col0: 0,
+                row0: 0,
+                px: (place.x.saturating_sub(self.pad), place.y.saturating_sub(oy)),
                 focused: *foc,
                 cursor_on: blink,
                 trail: if *foc {
@@ -1537,13 +1333,8 @@ impl WindowState<'_> {
                         .enumerate()
                         .filter_map(|(row, m)| {
                             // A block's marks sit in its padding, on the
-                            // terminal background, as a left-edge pane's do.
-                            let edge = if place.block.is_some() {
-                                0
-                            } else {
-                                place.cells.col
-                            };
-                            m.map(|m| (row, mark_color(m, edge)))
+                            // terminal background.
+                            m.map(|m| (row, mark_color(m)))
                         })
                         .collect()
                 } else {
@@ -1567,9 +1358,9 @@ impl WindowState<'_> {
             });
         }
         let scene = attached_scene(
-            self.strip.as_ref(),
-            self.body.as_ref(),
-            self.popover.as_ref(),
+            &self.strip,
+            &self.body,
+            &self.popover,
             self.confirm.as_ref(),
         );
         renderer.render(
@@ -1630,602 +1421,60 @@ impl WindowState<'_> {
         (px.div_ceil(self.bar_w), px / self.bar_w)
     }
 
-    /// Whether the bottom status ribbon is on (`[window] status_bar`,
-    /// default on).
-    fn status_enabled(&self) -> bool {
-        // An attached window has the ribbon instead (gui-design D49).
-        self.config.status_bar.unwrap_or(true) && self.body.is_none()
-    }
-
-    /// Pixel height the bottom bar takes: an attached window's ribbon, else
-    /// the status bar when it's on.
+    /// Pixel height the bottom ribbon takes (gui-design D49).
     fn bottom_h(&self) -> usize {
-        match self.body {
-            Some(_) => ribbon::height(self.scale_factor as f32),
-            None => usize::from(self.status_enabled()) * self.bar_h,
-        }
+        ribbon::height(self.scale_factor as f32)
     }
 
-    /// Lay out the bottom status ribbon: the focused pane's cwd and git
-    /// branch on the left; the last command's exit pill, the scrollback
-    /// position, and the grid size on the right. Empty when disabled — the
-    /// renderers skip an empty row and the grid keeps the space.
-    fn status_row(&mut self) -> Vec<Cell> {
-        if !self.status_enabled() {
-            return Vec::new();
-        }
-        let (paint_cols, cols) = self.bar_cells();
-        let tokens = self.chrome_colors();
-        let bar_bg = tokens.sunk;
-        let dim_fg = tokens.muted;
-        let mut row = vec![Cell::blank(); paint_cols];
-        for c in &mut row {
-            c.fg = dim_fg;
-            c.bg = bar_bg;
-        }
-        // Everything below reads the focused pane's grid; a window with no
-        // panes (mid-teardown) shows a bare bar.
-        let Some(pane) = self.pane() else { return row };
-        let (cwd, last_exit, view_offset, gcols, grows) = {
-            let g = pane.grid.lock();
-            (
-                g.cwd.clone(),
-                g.last_command_exit(),
-                g.view_offset,
-                g.cols,
-                g.rows,
-            )
-        };
-        let cwd = path_from_file_uri(&cwd);
-        let branch = cwd.as_deref().and_then(|d| self.git_branch_for(d));
-
-        // Right side, innermost first: grid size, scrollback position, exit
-        // pill. Each segment carries its own color.
-        // Scrolled back is a mode, not a status: full text plus the arrow.
-        let (ok, err, warn) = (tokens.success, tokens.failure, tokens.text);
-        let mut right: Vec<(String, u32)> = Vec::new();
-        right.push((format!("{gcols}\u{00d7}{grows} "), dim_fg));
-        if view_offset > 0 {
-            right.push((format!("\u{2191}{view_offset}  "), warn));
-        }
-        match last_exit {
-            Some(0) => right.push(("\u{2713} 0  ".into(), ok)),
-            Some(code) => right.push((format!("\u{2717} {code}  "), err)),
-            None => {}
-        }
-        let right_len: usize = right.iter().map(|(s, _)| s.chars().count()).sum();
-
-        // Left side: cwd (home shortened to ~, long paths trimmed from the
-        // left so the leaf stays visible), then the git branch in the accent.
-        let mut hits = vec![Hit::Drag; paint_cols]; // discarded: the ribbon is inert
-        let limit = cols.saturating_sub(right_len);
-        let mut col = 0;
-        if let Some(dir) = &cwd {
-            let mut text = display_path(dir);
-            let branch_len = branch.as_ref().map(|b| b.chars().count() + 3).unwrap_or(0);
-            let avail = limit.saturating_sub(2 + branch_len);
-            let count = text.chars().count();
-            if count > avail && avail > 1 {
-                let tail: String = text.chars().skip(count - (avail - 1)).collect();
-                text = format!("\u{2026}{tail}");
-            }
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut col,
-                limit,
-                &format!(" {text}"),
-                tokens.text,
-                bar_bg,
-                Hit::Drag,
-            );
-            if let Some(b) = &branch {
-                let accent = tokens.accent;
-                put_text(
-                    &mut row,
-                    &mut hits,
-                    &mut col,
-                    limit,
-                    &format!("  \u{2387} {b}"),
-                    accent,
-                    bar_bg,
-                    Hit::Drag,
-                );
-            }
-        }
-        let mut rcol = cols.saturating_sub(right_len);
-        for (text, color) in &right {
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut rcol,
-                cols,
-                text,
-                *color,
-                bar_bg,
-                Hit::Drag,
-            );
-        }
-        row
-    }
-
-    /// The git branch for `cwd` (walking up to the repository root), cached
-    /// for [`GIT_BRANCH_TTL`] so the per-frame status ribbon doesn't hit the
-    /// filesystem on every redraw. `None` outside a repository.
-    fn git_branch_for(&mut self, cwd: &std::path::Path) -> Option<String> {
-        if let Some((dir, branch, at)) = &self.git_branch
-            && dir == cwd
-            && at.elapsed() < GIT_BRANCH_TTL
-        {
-            return branch.clone();
-        }
-        let branch = read_git_branch(cwd);
-        self.git_branch = Some((cwd.to_path_buf(), branch.clone(), Instant::now()));
-        branch
-    }
-
+    /// The top row while the search bar has it (else the strip does).
     fn chrome_row(&mut self) -> Vec<Cell> {
-        if self.strip_shown() {
+        let Some(query) = self.searching.clone() else {
             self.hits.clear();
             return Vec::new();
-        }
+        };
         let (paint_cols, cols) = self.bar_cells();
         let tokens = self.chrome_colors();
-        if let Some(query) = self.searching.clone() {
-            let mut row = vec![Cell::blank(); paint_cols];
-            let bar_bg = tokens.raised;
-            for c in &mut row {
-                c.fg = tokens.text;
-                c.bg = bar_bg;
-            }
-            let status = self.pane().and_then(|p| p.grid.lock().search_status());
-            let count = match status {
-                Some((cur, total)) => format!(" {cur}/{total} "),
-                None if query.is_empty() => String::new(),
-                None => " no matches ".to_string(),
-            };
-            let limit = cols.saturating_sub(count.chars().count());
-            let mut hits = vec![Hit::Drag; paint_cols];
-            let mut col = 0;
-            let mode = if self.search_regex {
-                " Find(re): "
-            } else {
-                " Find: "
-            };
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut col,
-                limit,
-                &format!("{mode}{query}"),
-                tokens.text,
-                bar_bg,
-                Hit::Drag,
-            );
-            let mut ccol = limit;
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut ccol,
-                cols,
-                &count,
-                tokens.text,
-                bar_bg,
-                Hit::Drag,
-            );
-            self.hits = hits;
-            return row;
-        }
-        if self.copy_mode.is_some() {
-            let mut row = vec![Cell::blank(); paint_cols];
-            let bar_bg = tokens.raised;
-            for c in &mut row {
-                c.fg = tokens.text;
-                c.bg = bar_bg;
-            }
-            let mut hits = vec![Hit::Drag; paint_cols];
-            let mut col = 0;
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut col,
-                cols,
-                " COPY   move: hjkl/arrows   v: select   y: copy   Esc: exit",
-                tokens.text,
-                bar_bg,
-                Hit::Drag,
-            );
-            self.hits = hits;
-            return row;
-        }
-        // Pack surfaces (D38): the strip is `frame`; inactive tabs are slate
-        // text with no chip, hover raises them, and the active tab is a
-        // `base` chip with the theme accent underline (D34).
-        let bar_bg = tokens.frame;
-        let tab_bg = tokens.frame;
-        let dim_fg = tokens.muted;
-        let hover = self.hover;
-        let hover_bg = tokens.raised;
-        let btn_hover_bg = tokens.raised;
-        let accent = tokens.accent;
-        // Pressed is one more surface step, `line`, with full text on it
-        // (slate fails there): D26, D43.
-        let pressed = self.pressed;
-        // A chip's × already hovers at `line` (one step above the chip), so
-        // its pressed look is the same step.
-        let is_pressed = |hit: Hit| pressed == Some(hit);
-        let mut row: Vec<Cell> = vec![Cell::blank(); paint_cols];
+        let mut row = vec![Cell::blank(); paint_cols];
+        let bar_bg = tokens.raised;
         for c in &mut row {
             c.fg = tokens.text;
             c.bg = bar_bg;
         }
+        let status = self.pane().and_then(|p| p.grid.lock().search_status());
+        let count = match status {
+            Some((cur, total)) => format!(" {cur}/{total} "),
+            None if query.is_empty() => String::new(),
+            None => " no matches ".to_string(),
+        };
+        let limit = cols.saturating_sub(count.chars().count());
         let mut hits = vec![Hit::Drag; paint_cols];
-
-        // Caption buttons get the last 12 cells (4 each); the `+` / `▾` buttons
-        // sit just left of them, and the tabs fill the rest without overrunning.
-        let btn0 = cols.saturating_sub(12);
-        // The open settings page is a peer of the shells, not a veil over
-        // one: it gets its own (active) strip tab, and the shell tabs render
-        // inactive behind it. The chip's room comes off the tab budget.
-        let settings_open = matches!(self.overlay, Some(Overlay::Settings(_)));
-        const SETTINGS_TAB_W: usize = 12; // " Settings" + " × "
-        let tab_limit = btn0.saturating_sub(8).saturating_sub(if settings_open {
-            SETTINGS_TAB_W + 1
+        let mut col = 0;
+        let mode = if self.search_regex {
+            " Find(re): "
         } else {
-            0
-        });
-
-        // The active tab of a focused window is being watched; its badge is
-        // stale by definition. (Cleared before labels are gathered below.)
-        if self.focused
-            && let Some(tab) = self.tabs.get_mut(self.active)
-        {
-            tab.attention = false;
-        }
-
-        // First pass: every tab's label, so widths can adapt to the titles.
-        // OSC 9;4 progress rides the label: ` 42%`, `!42%` on error/paused,
-        // `…` while indeterminate; an attention badge prepends `•` in the
-        // alert color (painted separately, but its width counts here).
-        let close_w = 3; // " × " on a tab that shows its close button
-        let infos: Vec<(String, bool)> = self
-            .tabs
-            .iter()
-            .enumerate()
-            .map(|(i, tab)| {
-                let state = tab.focused().map(|p| {
-                    let g = p.grid.lock();
-                    (g.title.clone(), g.progress)
-                });
-                let (label, progress) = state.unwrap_or_default();
-                let title = if label.is_empty() {
-                    format!("shell {}", i + 1)
-                } else {
-                    label
-                };
-                let suffix = match progress {
-                    Some((2 | 4, pct)) => format!(" !{pct}%"),
-                    Some((3, _)) => " …".to_string(),
-                    Some((_, pct)) => format!(" {pct}%"),
-                    None => String::new(),
-                };
-                let cast = if i == self.active && self.broadcast {
-                    "⇉ "
-                } else {
-                    ""
-                };
-                (format!(" {cast}{title}{suffix}"), tab.attention)
-            })
-            .collect();
-        let desired: Vec<usize> = infos
-            .iter()
-            .map(|(label, attention)| {
-                label.chars().count() + if *attention { 2 } else { 0 } + close_w
-            })
-            .collect();
-
-        // Tabs size to their titles (clamped, shrinking together as the
-        // strip crowds); once even minimum-width tabs can't fit, fall back
-        // to the uniform-width strip scrolled to keep the active tab
-        // visible, with a `»N` overflow badge for the hidden rest.
-        const OVERFLOW_INDICATOR_W: usize = 4; // " »N"-ish
-        let (tab_start, widths, hidden) = match tab_widths(&desired, tab_limit) {
-            Some(widths) => (0, widths, 0),
-            None => {
-                let strip = tab_limit.saturating_sub(OVERFLOW_INDICATOR_W);
-                let (start, end) = visible_tab_range(self.active, self.tabs.len(), strip);
-                (
-                    start,
-                    vec![TAB_CELLS; end - start],
-                    self.tabs.len() - (end - start),
-                )
-            }
-        };
-        let strip_limit = if hidden > 0 {
-            tab_limit.saturating_sub(OVERFLOW_INDICATOR_W)
-        } else {
-            tab_limit
-        };
-
-        let mut col = 0usize;
-        for (vi, &w) in widths.iter().enumerate() {
-            let i = tab_start + vi;
-            if col >= strip_limit {
-                break; // out of room; the rest stay reachable by keyboard
-            }
-            // While the settings page is open its own chip is the active
-            // one; every shell tab renders inactive behind it.
-            let is_active = i == self.active && !settings_open;
-            let tab_hovered = hover == Some(Hit::Tab(i)) || hover == Some(Hit::CloseTab(i));
-            // The active tab is a `base` chip; inactive ones are muted text on
-            // the strip and rise one surface step under the pointer.
-            let (fg, bg) = if is_pressed(Hit::Tab(i)) {
-                (tokens.text, tokens.line)
-            } else if is_active {
-                (tokens.text, tokens.base)
-            } else if tab_hovered {
-                (tokens.text, hover_bg)
-            } else {
-                (dim_fg, tab_bg)
-            };
-            let (label, attention) = (&infos[i].0, infos[i].1);
-            let tab_end = (col + w).min(strip_limit);
-            // Paint the whole tab span in its color and make it activate on click.
-            for c in col..tab_end {
-                row[c] = Cell::blank();
-                row[c].fg = fg;
-                row[c].bg = bg;
-                hits[c] = Hit::Tab(i);
-            }
-            // The close button shows on the active and hovered tabs only — a
-            // full strip of × is a row of misclicks right where tabs are
-            // clicked to switch. Width still reserves its cells, so the label
-            // doesn't reflow when the × appears.
-            let has_close = (is_active || tab_hovered) && tab_end - col > close_w + 1;
-            let label_end = if has_close {
-                tab_end - close_w
-            } else {
-                tab_end - close_w.min(tab_end - col)
-            };
-            // A title that doesn't fit ends in an ellipsis, not a hard cut.
-            let badge_w = if attention { 2 } else { 0 };
-            let space = label_end.saturating_sub(col + badge_w);
-            let shown: String = if label.chars().count() > space {
-                let mut t: String = label.chars().take(space.saturating_sub(1)).collect();
-                t.push('…');
-                t
-            } else {
-                label.clone()
-            };
-            // Center the label in the chip: the reserved (hidden) close cells
-            // then read as padding rather than a hole after the title. The
-            // cap keeps the label out of the close slot, and the lead doesn't
-            // depend on `has_close`, so hovering (which reveals the ×) never
-            // reflows the title.
-            let content = badge_w + shown.chars().count();
-            let lead = (tab_end.saturating_sub(col).saturating_sub(content) / 2)
-                .min(label_end.saturating_sub(col).saturating_sub(content));
-            let mut tcol = col + lead;
-            if attention {
-                // Attention is a state, not a failure: the accent dot.
-                let alert = accent;
-                put_text(
-                    &mut row,
-                    &mut hits,
-                    &mut tcol,
-                    label_end,
-                    " •",
-                    alert,
-                    bg,
-                    Hit::Tab(i),
-                );
-            }
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut tcol,
-                label_end,
-                &shown,
-                fg,
-                bg,
-                Hit::Tab(i),
-            );
-            if has_close {
-                let mut ccol = tab_end - close_w;
-                let (cfg, cbg) = if is_pressed(Hit::CloseTab(i)) || hover == Some(Hit::CloseTab(i))
-                {
-                    (tokens.text, tokens.line)
-                } else {
-                    (fg, bg)
-                };
-                put_text(
-                    &mut row,
-                    &mut hits,
-                    &mut ccol,
-                    tab_end,
-                    " × ",
-                    cfg,
-                    cbg,
-                    Hit::CloseTab(i),
-                );
-            }
-            // Active tab: bold label plus an accent underline under the label
-            // area — stopping before the ×, so it reads as the tab's title
-            // marker rather than underlining the close control.
-            if is_active {
-                for c in &mut row[col..label_end.max(col)] {
-                    c.flags |= ATTR_BOLD | ATTR_UNDERLINE | ATTR_UNDERLINE_COLOR;
-                    c.underline_color = accent;
-                }
-            }
-            col = tab_end;
-            if col < strip_limit {
-                col += 1; // strip-colored gap; the darker band edges each chip
-            }
-        }
-        if hidden > 0 {
-            let (ifg, ibg) = if is_pressed(Hit::MoreTabs) {
-                (tokens.text, tokens.line)
-            } else if hover == Some(Hit::MoreTabs) {
-                (tokens.text, btn_hover_bg)
-            } else {
-                (dim_fg, bar_bg)
-            };
-            let indicator_end = (col + OVERFLOW_INDICATOR_W).min(btn0);
-            for c in col..indicator_end {
-                row[c] = Cell::blank();
-                row[c].fg = ifg;
-                row[c].bg = ibg;
-                hits[c] = Hit::MoreTabs;
-            }
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut col,
-                indicator_end,
-                &format!(" »{hidden}"),
-                ifg,
-                ibg,
-                Hit::MoreTabs,
-            );
-            col = indicator_end;
-        }
-        // The settings page's own chip: rendered exactly like an active tab
-        // (`base` chip, bold, accent underline) with its × closing the page.
-        if settings_open {
-            let chip_label = match &self.overlay {
-                Some(Overlay::Settings(s)) if s.is_setup() => " Setup",
-                _ => " Settings",
-            };
-            let start = col;
-            let end = (col + SETTINGS_TAB_W).min(btn0);
-            let bg = tokens.base;
-            for c in start..end {
-                row[c] = Cell::blank();
-                row[c].fg = tokens.text;
-                row[c].bg = bg;
-                hits[c] = Hit::SettingsTab;
-            }
-            let label_end = end.saturating_sub(close_w);
-            let mut tcol = start;
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut tcol,
-                label_end,
-                chip_label,
-                tokens.text,
-                bg,
-                Hit::SettingsTab,
-            );
-            let (cfg, cbg) = if is_pressed(Hit::CloseSettings) || hover == Some(Hit::CloseSettings)
-            {
-                (tokens.text, tokens.line)
-            } else {
-                (tokens.text, bg)
-            };
-            let mut ccol = label_end;
-            put_text(
-                &mut row,
-                &mut hits,
-                &mut ccol,
-                end,
-                " × ",
-                cfg,
-                cbg,
-                Hit::CloseSettings,
-            );
-            for c in &mut row[start..label_end.max(start)] {
-                c.flags |= ATTR_BOLD | ATTR_UNDERLINE | ATTR_UNDERLINE_COLOR;
-                c.underline_color = accent;
-            }
-            col = end;
-            if col < btn0 {
-                col += 1;
-            }
-        }
-        let btn_fg = |hit: Hit| {
-            if hover == Some(hit) || is_pressed(hit) {
-                tokens.text
-            } else {
-                dim_fg
-            }
-        };
-        let btn_bg = |hit: Hit| {
-            if is_pressed(hit) {
-                tokens.line
-            } else if hover == Some(hit) {
-                btn_hover_bg
-            } else {
-                bar_bg
-            }
+            " Find: "
         };
         put_text(
             &mut row,
             &mut hits,
             &mut col,
-            btn0,
-            " + ",
-            btn_fg(Hit::NewTab),
-            btn_bg(Hit::NewTab),
-            Hit::NewTab,
+            limit,
+            &format!("{mode}{query}"),
+            tokens.text,
+            bar_bg,
+            Hit::Drag,
         );
+        let mut ccol = limit;
         put_text(
             &mut row,
             &mut hits,
-            &mut col,
-            btn0,
-            " ▾ ",
-            btn_fg(Hit::ShellMenu),
-            btn_bg(Hit::ShellMenu),
-            Hit::ShellMenu,
-        );
-
-        let mut bcol = btn0;
-        put_text(
-            &mut row,
-            &mut hits,
-            &mut bcol,
-            btn0 + 4,
-            "  ─ ",
-            btn_fg(Hit::Minimize),
-            btn_bg(Hit::Minimize),
-            Hit::Minimize,
-        );
-        put_text(
-            &mut row,
-            &mut hits,
-            &mut bcol,
-            btn0 + 8,
-            "  □ ",
-            btn_fg(Hit::Maximize),
-            btn_bg(Hit::Maximize),
-            Hit::Maximize,
-        );
-        // The caption close button hovers native-red, matching Windows 11.
-        let (close_fg, close_bg) = if hover == Some(Hit::Close) {
-            (0xFFFFFF, 0xC42B1C)
-        } else {
-            (dim_fg, bar_bg)
-        };
-        put_text(
-            &mut row,
-            &mut hits,
-            &mut bcol,
+            &mut ccol,
             cols,
-            "  × ",
-            close_fg,
-            close_bg,
-            Hit::Close,
+            &count,
+            tokens.text,
+            bar_bg,
+            Hit::Drag,
         );
-        // Any partial cell past the last whole one still belongs to the ×:
-        // the window's top-right corner should always close (Fitts's law),
-        // never fall through to the drag strip.
-        for c in bcol..paint_cols {
-            row[c].bg = close_bg;
-            hits[c] = Hit::Close;
-        }
-
         self.hits = hits;
         row
     }
@@ -2275,14 +1524,14 @@ impl WindowState<'_> {
     /// Whether the top strip stands in for the chrome bar: in an attached
     /// window, unless the search bar has the top row.
     fn strip_shown(&self) -> bool {
-        self.strip.is_some() && self.searching.is_none()
+        self.searching.is_none()
     }
 
     /// The chrome control under window pixel `(x, y)`, which the caller
     /// knows is on the bar; `None` before a bar is laid out.
     fn bar_hit(&self, x: f64, y: f64) -> Option<Hit> {
         if self.strip_shown() {
-            let strip = self.strip.as_ref()?.painted()?;
+            let strip = self.strip.painted()?;
             return Some(strip.spot(x as f32, y as f32).map_or(Hit::Drag, Hit::from));
         }
         (!self.hits.is_empty()).then(|| self.hits[self.bar_col(x)])
@@ -2301,11 +1550,9 @@ impl WindowState<'_> {
             pressed: self.pressed.and_then(Hit::spot),
             detached_open: self.popover_kind() == Some(Kind::Detached),
             // An ended session takes no new window either.
-            offline: self.offline() || self.body.as_ref().is_some_and(|b| b.ended().is_some()),
+            offline: self.offline() || self.body.ended().is_some(),
         };
-        if let Some(strip) = &mut self.strip {
-            strip.repaint(look, width);
-        }
+        self.strip.repaint(look, width);
     }
 
     /// Paint the attached window's blocks at `places` for the current
@@ -2315,10 +1562,7 @@ impl WindowState<'_> {
         let Some(size) = self.window.as_ref().map(|w| w.inner_size()) else {
             return;
         };
-        let detached = self
-            .strip
-            .as_ref()
-            .map_or(0, |s| s.session().detached.len());
+        let detached = self.strip.session().detached.len();
         let Some(tab) = self.tabs.get(self.active) else {
             self.repaint_empty(detached);
             return;
@@ -2335,9 +1579,7 @@ impl WindowState<'_> {
             pressed: self.pressed.and_then(Hit::block),
         };
         let armed = self.armed;
-        let Some(body) = &mut self.body else {
-            return;
-        };
+        let body = &mut self.body;
         // F2 numbers follow the layout's order, 1 to 9 (handoff D104).
         let number = |id: u64| {
             ids.iter()
@@ -2348,15 +1590,13 @@ impl WindowState<'_> {
         let up = |r: Rect| Rect::new(r.col, r.row.saturating_sub(top), r.cols, r.rows);
         let shown = places
             .iter()
-            .filter_map(|&(id, p)| {
-                Some(blocks::Shown {
-                    key: id,
-                    rect: up(p.block?),
-                    focused: id == focus,
-                    zoomed,
-                    header: body.header(id, read_git_branch),
-                    badge: number(id).filter(|_| armed),
-                })
+            .map(|&(id, p)| blocks::Shown {
+                key: id,
+                rect: up(p.block),
+                focused: id == focus,
+                zoomed,
+                header: body.header(id, read_git_branch),
+                badge: number(id).filter(|_| armed),
             })
             .collect();
         let hidden: Vec<u64> = ids
@@ -2406,9 +1646,7 @@ impl WindowState<'_> {
             pressed: None,
         };
         let armed = self.armed;
-        let Some(body) = &mut self.body else {
-            return;
-        };
+        let body = &mut self.body;
         let ended = body.ended().map(str::to_owned);
         if detached == 0 && body.banner().is_none() && ended.is_none() {
             return;
@@ -2436,12 +1674,12 @@ impl WindowState<'_> {
 
     /// The body control under window pixel `(x, y)`, if any.
     fn body_hit(&self, x: f64, y: f64) -> Option<blocks::Spot> {
-        let body = self.body.as_ref()?.painted()?;
+        let body = self.body.painted()?;
         body.spot(x as f32, (y as f32) - self.chrome_h() as f32)
     }
 
-    /// Pixel height both bars take from the pane area: the chrome bar (with
-    /// its inset) plus the status ribbon when it's on.
+    /// Pixel height both bars take from the pane area: the top bar (with
+    /// its inset) plus the bottom ribbon.
     fn bars_h(&self) -> usize {
         self.chrome_h() + self.bottom_h()
     }
@@ -2630,15 +1868,11 @@ impl WindowState<'_> {
 
     /// The pane under pixel `(px, py)` in the active tab's grid area, if any.
     fn pane_under(&self, px: f64, py: f64) -> Option<u64> {
-        let (col, row) = self.cell_at(px, py);
         let (x, y) = (px.max(0.0) as usize, py.max(0.0) as usize);
+        // Anywhere on a block is that block (handoff D102).
         self.places(self.active)
             .into_iter()
-            .find(|(_, p)| match p.block {
-                // Anywhere on a block is that block (handoff D102).
-                Some(b) => b.contains(x, y),
-                None => p.cells.contains(col, row),
-            })
+            .find(|(_, p)| p.block.contains(x, y))
             .map(|(id, _)| id)
     }
 
@@ -2772,42 +2006,15 @@ impl WindowState<'_> {
             window.request_redraw();
         }
         match hit {
-            Hit::Tab(i) => {
-                self.close_overlay();
-                if i < self.tabs.len() && i != self.active {
-                    self.active = i;
-                }
-                // Arm drag-to-reorder; it only engages past the slop, so a
-                // plain click stays a plain click.
-                self.tab_drag = Some(TabDrag {
-                    idx: i,
-                    press_x: x,
-                    moving: false,
-                });
-                window.request_redraw();
-            }
-            Hit::CloseTab(i) => {
-                self.close_overlay();
-                if i < self.tabs.len() {
-                    self.close_tab_at(i);
-                }
-            }
-            // The local chrome bar's `+`: a window's blocks come from its
-            // source now (D159); R3 removes the bar.
-            Hit::NewTab => self.close_overlay(),
             Hit::Window(key) => {
                 self.close_overlay();
-                if let Some(source) = self.source {
-                    source.select(key);
-                }
+                self.source.select(key);
             }
             Hit::NewWindow => {
                 self.close_overlay();
-                if let Some(source) = self.source {
-                    source.new_window();
-                }
+                self.source.new_window();
             }
-            Hit::Session if self.popover.is_some() => {
+            Hit::Session => {
                 self.close_overlay();
                 self.toggle_popover(Kind::Switcher);
             }
@@ -2815,27 +2022,11 @@ impl WindowState<'_> {
                 self.close_overlay();
                 self.toggle_popover(Kind::Detached);
             }
-            Hit::ShellMenu | Hit::Session => {
-                let was_menu = matches!(self.overlay, Some(Overlay::Menu { .. }));
-                self.close_overlay(); // persists a dirty settings page first
-                if !was_menu {
-                    self.open_menu();
-                }
-                window.request_redraw();
-            }
             Hit::Minimize => window.set_minimized(true),
             Hit::Maximize => window.set_maximized(!window.is_maximized()),
             Hit::Close => self.closed = true,
-            // The settings chip is already the active "tab"; only its ×
-            // does anything (closing the page saves it).
-            Hit::SettingsTab => {}
-            Hit::CloseSettings => self.close_overlay(),
             // Never on the bar: block controls sit under it.
             Hit::Block(_) => {}
-            Hit::MoreTabs => {
-                self.close_overlay();
-                self.cycle_tab(true);
-            }
             Hit::Drag => {
                 let now = Instant::now();
                 if self
@@ -2849,23 +2040,6 @@ impl WindowState<'_> {
                     let _ = window.drag_window();
                 }
             }
-        }
-    }
-
-    /// Middle-click on the chrome bar closes the tab under the pointer
-    /// (browser tab-strip convention), or does nothing over a non-tab
-    /// element (new-tab/menu/caption buttons/drag strip) — those don't have
-    /// a meaningful middle-click action.
-    fn on_bar_middle_click(&mut self, x: f64) {
-        if self.hits.is_empty() {
-            return;
-        }
-        let col = self.bar_col(x);
-        if let Hit::Tab(i) | Hit::CloseTab(i) = self.hits[col]
-            && i < self.tabs.len()
-        {
-            self.close_overlay();
-            self.close_tab_at(i);
         }
     }
 
@@ -3128,14 +2302,7 @@ impl WindowState<'_> {
                     window.request_redraw();
                 }
             }
-            Action::CloseTab if self.source.is_some() => {
-                self.act_on_source(|key, _| Act::Close(key))
-            }
-            Action::CloseTab => {
-                if let Some(id) = self.tabs.get(self.active).map(|t| t.focus) {
-                    self.close_pane(id);
-                }
-            }
+            Action::CloseTab => self.act_on_source(|key, _| Act::Close(key)),
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
             Action::OpenConfig => self.open_config(),
@@ -3155,12 +2322,9 @@ impl WindowState<'_> {
             Action::FocusRight => self.focus_block_dir(1, 0),
             Action::FocusUp => self.focus_block_dir(0, -1),
             Action::FocusDown => self.focus_block_dir(0, 1),
-            Action::ResizeLeft => self.resize_pane(Dir::Vertical, -RESIZE_STEP),
-            Action::ResizeRight => self.resize_pane(Dir::Vertical, RESIZE_STEP),
-            Action::ResizeUp => self.resize_pane(Dir::Horizontal, -RESIZE_STEP),
-            Action::ResizeDown => self.resize_pane(Dir::Horizontal, RESIZE_STEP),
-            Action::ZoomPane if self.source.is_some() => self.toggle_source_zoom(),
-            Action::ZoomPane => self.toggle_zoom(),
+            // The source lays the window out (pack D102).
+            Action::ResizeLeft | Action::ResizeRight | Action::ResizeUp | Action::ResizeDown => {}
+            Action::ZoomPane => self.toggle_source_zoom(),
             Action::CopyMode => self.enter_copy_mode(),
             Action::Broadcast => {
                 self.broadcast = !self.broadcast;
@@ -3316,20 +2480,6 @@ impl WindowState<'_> {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
-        }
-    }
-
-    /// Move tab `from` to position `to` (one drag-reorder step). The dragged
-    /// tab is the active one (pressing it activated it), so activity follows.
-    fn reorder_tab(&mut self, from: usize, to: usize) {
-        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
-            return;
-        }
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
-        self.active = to;
-        if let Some(window) = &self.window {
-            window.request_redraw();
         }
     }
 
@@ -3865,16 +3015,6 @@ impl WindowState<'_> {
             && let Err(e) = crate::config::save_settings(path, &[])
         {
             eprintln!("rusty_term: create config: {e}");
-        }
-    }
-
-    /// Open the `▾` dropdown: *Settings* and *Open config file*. The server
-    /// spawns a window's blocks (gui-design D45 b), so it launches nothing.
-    fn open_menu(&mut self) {
-        let items = menu_items();
-        self.overlay = Some(Overlay::Menu { items, sel: 0 });
-        if let Some(window) = &self.window {
-            window.request_redraw();
         }
     }
 
@@ -5158,29 +4298,6 @@ fn fmt_runtime(d: std::time::Duration) -> String {
     }
 }
 
-/// How long a resolved git branch is trusted before `.git/HEAD` is re-read
-/// (the status ribbon repaints far more often than branches change).
-const GIT_BRANCH_TTL: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// A path for the status ribbon: the home directory shortened to `~`.
-fn display_path(p: &std::path::Path) -> String {
-    let text = p.display().to_string();
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from);
-    if let Some(home) = home
-        && let Ok(rest) = p.strip_prefix(&home)
-    {
-        let rest = rest.display().to_string();
-        return if rest.is_empty() {
-            "~".to_string()
-        } else {
-            format!("~{}{rest}", std::path::MAIN_SEPARATOR)
-        };
-    }
-    text
-}
-
 /// The current git branch for `dir`: walk up to the nearest `.git`, follow a
 /// worktree/submodule `gitdir:` file if that's what it is, and parse `HEAD` —
 /// `ref: refs/heads/<name>` yields the name, a detached head yields the
@@ -5415,8 +4532,7 @@ impl WindowState<'_> {
             self.rescale_font_cache(px, ligatures, target_scale);
         }
         let width = (self.cols as usize * self.cell_w + 2 * self.pad) as u32;
-        // The chrome bar on top (plus the status ribbon at the bottom when
-        // it's on), plus the padding band.
+        // The top bar and the bottom ribbon, plus the padding band.
         let height = (self.rows as usize * self.cell_h + self.bars_h() + 2 * self.pad) as u32;
         // `--title` (or a config `title` key) seeds the initial title; the
         // child's own OSC 0/2 still wins once it emits one (see the per-frame
@@ -5470,10 +4586,8 @@ impl WindowState<'_> {
         self.apply_opacity();
         // An attached window's blocks are laid out in the window's pixels,
         // which it has only now.
-        if self.body.is_some() {
-            for ti in 0..self.tabs.len() {
-                self.layout_panes(ti);
-            }
+        for ti in 0..self.tabs.len() {
+            self.layout_panes(ti);
         }
         // Must be created before the window is shown (see the `with_visible`
         // note above); `with_event_loop_proxy` routes AccessKit's own events
@@ -5512,16 +4626,12 @@ impl WindowState<'_> {
     /// source), keep the focus if it is still shown. `None` closes the
     /// window.
     fn show_tree(&mut self, tree: Option<Tree>) {
-        let Some(source) = self.source else {
-            return;
-        };
+        let source = self.source;
         let Some(tree) = tree else {
             self.closed = true;
             return;
         };
-        if let Some(body) = &mut self.body {
-            body.set_ended(None);
-        }
+        self.body.set_ended(None);
         let layout = Layout::from_tree(&tree);
         let first = layout.ids().first().copied().unwrap_or_default();
         let rects: Vec<(u64, Rect)> = self
@@ -5541,7 +4651,7 @@ impl WindowState<'_> {
             let (cols, rows) = (r.cols.max(1) as u16, r.rows.max(1) as u16);
             let opened = source
                 .open(key, cols, rows)
-                .and_then(|io| self.pane_from(key, io, None, cols, rows, None));
+                .and_then(|io| self.pane_from(key, io, cols, rows, None));
             match opened {
                 Ok(pane) => panes.push(pane),
                 Err(e) => eprintln!("rusty_term: pane {key}: {e}"),
@@ -5569,12 +4679,7 @@ impl WindowState<'_> {
     /// away (gui-design D62, handoff D114): no block, and a panel with
     /// "Open switcher" until a layout comes again.
     fn show_ended(&mut self, name: String) {
-        if self.source.is_none() {
-            return;
-        }
-        if let Some(body) = &mut self.body {
-            body.set_ended(Some(name));
-        }
+        self.body.set_ended(Some(name));
         self.tabs.clear();
         self.active = 0;
         if let Some(window) = &self.window {
@@ -5585,12 +4690,7 @@ impl WindowState<'_> {
     /// Show no block: every block of the source's window is detached
     /// (gui-design D61). The body says so until a layout comes again.
     fn show_empty(&mut self) {
-        if self.source.is_none() {
-            return;
-        }
-        if let Some(body) = &mut self.body {
-            body.set_ended(None);
-        }
+        self.body.set_ended(None);
         self.tabs.clear();
         self.active = 0;
         if let Some(window) = &self.window {
@@ -5602,24 +4702,18 @@ impl WindowState<'_> {
     /// banner, the dimmed blocks and the ribbon's dot. Attached anew, the
     /// window drops its tabs; the layout that follows opens them again.
     fn show_link(&mut self, link: super::source::Link) {
-        let Some(body) = &mut self.body else {
-            return;
-        };
+        let body = &mut self.body;
         body.set_link(link);
         let offline = body.offline();
         if link == (super::source::Link::Back { kept: false }) {
             self.tabs.clear();
             self.active = 0;
         }
-        if offline
-            && self.popover_kind() == Some(Kind::Detached)
-            && let Some(popover) = &mut self.popover
-        {
-            popover.close();
+        if offline && self.popover_kind() == Some(Kind::Detached) {
+            self.popover.close();
         }
-        if let Some(session) = self.strip.as_ref().map(|s| s.session().clone()) {
-            self.refresh_popover(&session);
-        }
+        let session = self.strip.session().clone();
+        self.refresh_popover(&session);
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5627,10 +4721,7 @@ impl WindowState<'_> {
 
     /// Show `notice` in the banner's place while the link is up (D63).
     fn show_notice(&mut self, notice: Option<super::source::Notice>) {
-        let Some(body) = &mut self.body else {
-            return;
-        };
-        body.set_notice(notice);
+        self.body.set_notice(notice);
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -5638,50 +4729,42 @@ impl WindowState<'_> {
 
     /// The link is down: the server-bound controls take no input (D62).
     fn offline(&self) -> bool {
-        self.body.as_ref().is_some_and(BodyState::offline)
+        self.body.offline()
     }
 
     /// A banner button: ask the source to retry or stop, or hide F5b.
     fn on_banner(&mut self, action: super::banner::Action) {
         use super::banner::Action;
-        match (action, self.source) {
-            (Action::Retry, Some(source)) => source.retry(),
-            (Action::Stop, Some(source)) => source.stop(),
-            (Action::Dismiss, _) => self.show_link(super::source::Link::Up),
-            (Action::DismissInfo, _) => self.show_notice(None),
-            (_, None) => {}
+        match action {
+            Action::Retry => self.source.retry(),
+            Action::Stop => self.source.stop(),
+            Action::Dismiss => self.show_link(super::source::Link::Up),
+            Action::DismissInfo => self.show_notice(None),
         }
     }
 
     /// Show the source's `session` on the top strip.
     fn show_session(&mut self, session: super::source::Session) {
-        if let Some(body) = &mut self.body {
-            body.set_session(session.local, &session.host);
-        }
+        self.body.set_session(session.local, &session.host);
         self.refresh_popover(&session);
-        if let Some(strip) = &mut self.strip {
-            strip.show(session);
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
+        self.strip.show(session);
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 
     /// Show what the source says of its blocks in their headers.
     fn show_blocks(&mut self, blocks: Vec<(u64, super::source::BlockInfo)>) {
-        if let Some(body) = &mut self.body {
-            body.show(blocks);
-            if let Some(strip) = &mut self.strip {
-                strip.set_running(body.running());
-            }
-            if let Some(window) = &self.window {
-                window.request_redraw();
-            }
+        let body = &mut self.body;
+        body.show(blocks);
+        let strip = &mut self.strip;
+        strip.set_running(body.running());
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
         // Detached rows say their blocks' states.
-        if self.popover_kind() == Some(Kind::Detached)
-            && let Some(session) = self.strip.as_ref().map(|s| s.session().clone())
-        {
+        if self.popover_kind() == Some(Kind::Detached) {
+            let session = self.strip.session().clone();
             self.refresh_popover(&session);
         }
     }
@@ -5694,9 +4777,7 @@ impl WindowState<'_> {
             Some(Kind::Detached) => self.detached_rows(session),
             None => return,
         };
-        if let Some(popover) = &mut self.popover {
-            popover.update(rows);
-        }
+        self.popover.update(rows);
     }
 
     /// The source moved the focus to `key`.
@@ -5737,9 +4818,7 @@ impl WindowState<'_> {
     /// Tell the source where the user moved the focus, once per move. As
     /// on the server, moving it off a zoomed block unzooms the window.
     fn tell_focus(&mut self) {
-        let Some(source) = self.source else {
-            return;
-        };
+        let source = self.source;
         let focus = self.tabs.get(self.active).map(|t| t.focus);
         let Some(key) = focus.filter(|f| self.told != Some(*f)) else {
             return;
@@ -5757,10 +4836,10 @@ impl WindowState<'_> {
     /// Ask the source for `act` on the focused pane's window (handoff
     /// D104); the layout changes when the source says so.
     fn act_on_source(&self, act: impl FnOnce(u64, bool) -> Act) {
-        let (Some(source), Some(tab)) = (self.source, self.tabs.get(self.active)) else {
+        let Some(tab) = self.tabs.get(self.active) else {
             return;
         };
-        source.act(act(tab.focus, tab.zoomed));
+        self.source.act(act(tab.focus, tab.zoomed));
     }
 
     /// Zoom the focused block, or unzoom (gui-design F7).
@@ -5800,9 +4879,6 @@ impl WindowState<'_> {
     /// Move an attached window's focus to the neighbour `(dx, dy)` of the
     /// focused block in the unzoomed layout, as the TUI finds it.
     fn focus_block_dir(&mut self, dx: isize, dy: isize) {
-        if self.source.is_none() {
-            return self.focus_dir(dx, dy);
-        }
         let Some(tab) = self.tabs.get_mut(self.active) else {
             return;
         };
@@ -5828,7 +4904,7 @@ impl WindowState<'_> {
 
     /// Which popover is open, if any.
     fn popover_kind(&self) -> Option<Kind> {
-        self.popover.as_ref().and_then(Popover::kind)
+        self.popover.kind()
     }
 
     /// Open the `kind` popover, or close it if it is the one open: the
@@ -5837,9 +4913,7 @@ impl WindowState<'_> {
     fn toggle_popover(&mut self, kind: Kind) {
         self.set_armed(false);
         let open = self.popover_kind();
-        if let Some(popover) = &mut self.popover {
-            popover.close();
-        }
+        self.popover.close();
         if open != Some(kind) {
             self.open_popover(kind);
         }
@@ -5850,10 +4924,7 @@ impl WindowState<'_> {
 
     /// Open the `kind` popover on the session shown now.
     fn open_popover(&mut self, kind: Kind) {
-        let Some(strip) = &self.strip else {
-            return;
-        };
-        let session = strip.session();
+        let session = self.strip.session();
         let s = self.scale_factor as f32;
         let top = (popover::TOP * s).round() as usize;
         let (header, rows, x) = match kind {
@@ -5864,7 +4935,7 @@ impl WindowState<'_> {
             ),
             Kind::Detached => {
                 // Right edge on the chip's right edge (D61).
-                let Some(chip) = strip.painted().and_then(|p| {
+                let Some(chip) = self.strip.painted().and_then(|p| {
                     p.spots
                         .iter()
                         .find(|(_, spot)| *spot == Spot::Detached)
@@ -5884,9 +4955,7 @@ impl WindowState<'_> {
             return;
         }
         let menu = Menu { kind, header, rows };
-        if let Some(popover) = &mut self.popover {
-            popover.open(menu, (x, top));
-        }
+        self.popover.open(menu, (x, top));
     }
 
     /// The switcher's rows: the server's sessions, then the menu's items.
@@ -5912,14 +4981,13 @@ impl WindowState<'_> {
             .detached
             .iter()
             .map(|d| {
-                let body = self.body.as_ref();
-                let state = body.map_or("Idle", |b| b.state(d.key));
+                let state = self.body.state(d.key);
                 let age = d.since.map(|t| now.saturating_duration_since(t));
                 Row::Detached(DetachedRow {
                     key: d.key,
                     name: d.name.clone(),
                     detail: popover::detached_detail(state, age),
-                    lead: body.and_then(|b| b.lead(d.key)),
+                    lead: self.body.lead(d.key),
                 })
             })
             .collect()
@@ -5939,9 +5007,7 @@ impl WindowState<'_> {
             self.confirm_key(key);
             return;
         }
-        let Some(popover) = &mut self.popover else {
-            return;
-        };
+        let popover = &mut self.popover;
         match key {
             Key::Named(NamedKey::ArrowUp) => popover.step(false),
             Key::Named(NamedKey::ArrowDown) => popover.step(true),
@@ -5961,9 +5027,7 @@ impl WindowState<'_> {
     /// run a menu item or reattach a block; the current session only
     /// closes.
     fn popover_pick(&mut self, picked: Option<Pick>) {
-        let Some(popover) = &mut self.popover else {
-            return;
-        };
+        let popover = &mut self.popover;
         let Some(picked) = picked else {
             return; // a disabled row stays open
         };
@@ -5972,9 +5036,7 @@ impl WindowState<'_> {
         match picked {
             Pick::Session(_) if current => {}
             Pick::Session(key) => {
-                if let Some(source) = self.source {
-                    source.switch(key);
-                }
+                self.source.switch(key);
             }
             Pick::Item(i) => {
                 if let Some(item) = self.switcher_items().into_iter().nth(i) {
@@ -5983,9 +5045,7 @@ impl WindowState<'_> {
             }
             // Needs no shown block: it may fill an empty window (D61).
             Pick::Reattach(key) => {
-                if let Some(source) = self.source {
-                    source.act(Act::Reattach(key));
-                }
+                self.source.act(Act::Reattach(key));
             }
         }
         if let Some(window) = &self.window {
@@ -6008,21 +5068,21 @@ impl WindowState<'_> {
     /// with its button and 8 px under its header (D64 2).
     fn open_confirm(&mut self, key: u64) {
         let spot = blocks::Spot::Take(key, blocks::TakeButton::TakeOver);
-        let found = self.body.as_ref().and_then(|b| {
-            let copy = b.owned(key)?;
-            let button = b.painted()?.spots.iter().find(|(_, s)| *s == spot)?.0;
-            Some((copy, button))
-        });
-        let Some(((program, owner), button)) = found else {
+        let Some((program, owner)) = self.body.owned(key) else {
+            return;
+        };
+        let Some(button) = self
+            .body
+            .painted()
+            .and_then(|b| b.spots.iter().find(|(_, s)| *s == spot).map(|(r, _)| *r))
+        else {
             return;
         };
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.focus = key;
         }
         self.tell_focus();
-        if let Some(popover) = &mut self.popover {
-            popover.close();
-        }
+        self.popover.close();
         let s = self.scale_factor as f32;
         let header_bottom = button.y + button.h / 2.0 + blocks::HEADER_HALF * s;
         let top = self.chrome_h() as f32 + header_bottom + confirm::DROP * s;
@@ -6063,8 +5123,8 @@ impl WindowState<'_> {
             }
             Answer::TakeOver => self.confirm.take().map(|c| c.key),
         };
-        if let (Some(key), Some(source)) = (key, self.source) {
-            source.act(Act::TakeOver(key));
+        if let Some(key) = key {
+            self.source.act(Act::TakeOver(key));
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -6073,9 +5133,7 @@ impl WindowState<'_> {
 
     /// Note where taking pane `key`'s block over stands (D64).
     fn show_take(&mut self, key: u64, take: super::source::Take) {
-        if let Some(body) = &mut self.body {
-            body.set_take(key, take);
-        }
+        self.body.set_take(key, take);
         if let Some(window) = &self.window {
             window.request_redraw();
         }
@@ -6088,8 +5146,8 @@ impl WindowState<'_> {
 
     /// The pointer moved to `(x, y)`: light the row under it.
     fn popover_hover(&mut self, x: f64, y: f64) {
-        let changed = self.popover.as_mut().is_some_and(|p| p.hover(x, y))
-            || self.confirm.as_mut().is_some_and(|c| c.hover(x, y));
+        let changed =
+            self.popover.hover(x, y) || self.confirm.as_mut().is_some_and(|c| c.hover(x, y));
         if let (true, Some(window)) = (changed, &self.window) {
             window.request_redraw();
         }
@@ -6104,14 +5162,11 @@ impl WindowState<'_> {
             self.confirm_answer(answer);
             return;
         }
-        let hit = self.popover.as_ref().map(|p| p.hit(x, y));
-        match hit {
-            None | Some((None, true)) => {}
-            Some((Some(picked), _)) => self.popover_pick(Some(picked)),
-            Some((None, false)) => {
-                if let Some(popover) = &mut self.popover {
-                    popover.close();
-                }
+        match self.popover.hit(x, y) {
+            (None, true) => {}
+            (Some(picked), _) => self.popover_pick(Some(picked)),
+            (None, false) => {
+                self.popover.close();
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
@@ -6122,9 +5177,6 @@ impl WindowState<'_> {
     /// An attached window's prefix keys (gui-design F2): Ctrl-] arms, and
     /// the next key runs. Returns whether the key was taken.
     fn prefix_key(&mut self, key: &Key, physical: PhysicalKey) -> bool {
-        if self.source.is_none() {
-            return false;
-        }
         if !self.armed {
             if !prefix::is_prefix(key, physical, self.mods) {
                 return false;
@@ -6469,35 +5521,6 @@ impl WindowState<'_> {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = (position.x, position.y);
-                // Tab drag-to-reorder: past the slop, the pressed tab trades
-                // places as the pointer crosses its neighbors' midpoints. The
-                // spans come from the painted hit map, so the drop math can't
-                // disagree with what's on screen.
-                if self.mouse_button_down == Some(MouseButtonKind::Left)
-                    && self.tab_drag.is_some()
-                    && !self.hits.is_empty()
-                {
-                    let (mut moving, press_x, from) = {
-                        let d = self.tab_drag.as_ref().unwrap();
-                        (d.moving, d.press_x, d.idx)
-                    };
-                    if !moving && (position.x - press_x).abs() > self.bar_w as f64 {
-                        moving = true;
-                    }
-                    let mut to = from;
-                    if moving {
-                        let col = self.bar_col(position.x);
-                        to = tab_drag_target(col, &tab_spans(&self.hits), from);
-                    }
-                    if let Some(d) = &mut self.tab_drag {
-                        d.moving = moving;
-                        d.idx = to;
-                    }
-                    if to != from {
-                        self.reorder_tab(from, to);
-                        self.pressed = pressed_after_reorder(self.pressed, from, to);
-                    }
-                }
                 // Chrome-bar hover feedback: track the element under the
                 // pointer and repaint when it changes (drag-strip cells and
                 // anything below the bar count as no hover).
@@ -6633,15 +5656,6 @@ impl WindowState<'_> {
                             self.on_left_press();
                         }
                         if kind == MouseButtonKind::Middle {
-                            // Middle-click on the chrome bar closes the tab
-                            // under the pointer (browser convention) instead
-                            // of falling through to PRIMARY-paste, which
-                            // previously happened regardless of y-position —
-                            // the chrome bar was never even consulted.
-                            if self.in_chrome(self.mouse_pos.1) {
-                                self.on_bar_middle_click(self.mouse_pos.0);
-                                return;
-                            }
                             if self.searching.is_some() {
                                 let text = self.primary_text();
                                 self.paste_into_search(text);
@@ -6674,7 +5688,6 @@ impl WindowState<'_> {
                             if self.drag.release() {
                                 self.copy_selection_primary(); // copy-on-select
                             }
-                            self.tab_drag = None; // a reorder drag ends with the button
                             if self.pressed.take().is_some()
                                 && let Some(window) = &self.window
                             {
@@ -6796,7 +5809,7 @@ impl WindowState<'_> {
 /// route to the owning window by `WindowId` (window events) or pane id
 /// (reader-thread wakeups); the loop exits when the last window closes.
 struct App<'a> {
-    source: Option<&'a dyn Source>,
+    source: &'a dyn Source,
     /// The launch config, template for every new window.
     config: Config,
     config_path: Option<std::path::PathBuf>,
@@ -6832,18 +5845,9 @@ impl<'a> App<'a> {
             source: self.source,
             told: None,
             armed: false,
-            strip: match self.source {
-                Some(_) => Some(StripState::new().ok_or("the interface font failed to parse")?),
-                None => None,
-            },
-            body: match self.source {
-                Some(_) => Some(BodyState::new().ok_or("the interface font failed to parse")?),
-                None => None,
-            },
-            popover: match self.source {
-                Some(_) => Some(Popover::new().ok_or("the interface font failed to parse")?),
-                None => None,
-            },
+            strip: StripState::new().ok_or("the interface font failed to parse")?,
+            body: BodyState::new().ok_or("the interface font failed to parse")?,
+            popover: Popover::new().ok_or("the interface font failed to parse")?,
             confirm: None,
             config: self.config.clone(),
             config_path: self.config_path.clone(),
@@ -6880,7 +5884,6 @@ impl<'a> App<'a> {
             mouse_button_down: None,
             consumed_keys: ConsumedKeys::default(),
             hits: Vec::new(),
-            tab_drag: None,
             pressed: None,
             last_strip_click: None,
             cursor_blink_on: true,
@@ -6899,7 +5902,6 @@ impl<'a> App<'a> {
             closed: false,
             cursor_prev: None,
             trail: None,
-            git_branch: None,
             dock_open: false,
             dock_items: Vec::new(),
             access: None,
@@ -6951,43 +5953,38 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                     w.on_pane_output(id);
                 }
             }
-            UserEvent::Exit(id) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.has_pane(id)) {
-                    w.close_pane(id);
-                }
-            }
             UserEvent::Layout(tree) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.show_tree(tree);
                 }
             }
             UserEvent::Focus(key) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.focus_from_source(key);
                 }
             }
             UserEvent::Zoom(key) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.zoom_from_source(key);
                 }
             }
             UserEvent::Empty => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.show_empty();
                 }
             }
             UserEvent::Session(session) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.show_session(session);
                 }
             }
             UserEvent::Blocks(blocks) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.show_blocks(blocks);
                 }
             }
             UserEvent::Link(link) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.show_link(link);
                 }
             }
@@ -6997,12 +5994,12 @@ impl ApplicationHandler<UserEvent> for App<'_> {
                 }
             }
             UserEvent::Ended(name) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.show_ended(name);
                 }
             }
             UserEvent::Notice(notice) => {
-                if let Some(w) = self.windows.iter_mut().find(|w| w.source.is_some()) {
+                if let Some(w) = self.windows.first_mut() {
                     w.show_notice(notice);
                 }
             }
@@ -7373,33 +6370,6 @@ fn ime_cursor_area_origin(
     (x, y)
 }
 
-/// Which of `total` tabs are shown in the chrome bar right now: `[start,
-/// end)` indices, sized to fit within `available_cells` (the tab strip's
-/// pixel-cell budget, before the overflow indicator / `+`/`▾`/caption
-/// buttons) and always including `active` — recomputed fresh each frame from
-/// the current active tab (no persisted scroll state needed), so clicking
-/// or cycling to an off-screen tab scrolls the minimal amount to reveal it,
-/// instead of the strip always starting at tab 0 and silently truncating
-/// the rest with no way to reach or even see the truncated ones.
-/// The visible tabs' strip spans, recovered from a laid-out chrome hit map:
-/// each entry is `(tab index, start col, end col)` (end exclusive), a tab's
-/// label and close-button cells merged. Drag-to-reorder consumes these, so
-/// the drop math always agrees with what was actually painted.
-fn tab_spans(hits: &[Hit]) -> Vec<(usize, usize, usize)> {
-    let mut spans: Vec<(usize, usize, usize)> = Vec::new();
-    for (c, h) in hits.iter().enumerate() {
-        let i = match h {
-            Hit::Tab(i) | Hit::CloseTab(i) => *i,
-            _ => continue,
-        };
-        match spans.last_mut() {
-            Some((li, _, end)) if *li == i && *end == c => *end = c + 1,
-            _ => spans.push((i, c, c + 1)),
-        }
-    }
-    spans
-}
-
 /// Where a dragged tab should sit for pointer column `col`: the position of
 /// the nearest span (moving out from the dragged tab's own) whose *midpoint*
 /// the pointer has crossed, returned as the tab index currently holding that
@@ -7410,84 +6380,6 @@ fn tab_spans(hits: &[Hit]) -> Vec<(usize, usize, usize)> {
 /// land in another window and never reach this one.
 fn pressed_after_focus(pressed: Option<Hit>, focused: bool) -> Option<Hit> {
     if focused { pressed } else { None }
-}
-
-/// The pressed look follows the dragged tab when it moves from `from` to `to`
-/// (D43); any other pressed control is untouched.
-fn pressed_after_reorder(pressed: Option<Hit>, from: usize, to: usize) -> Option<Hit> {
-    match pressed {
-        Some(Hit::Tab(i)) if i == from => Some(Hit::Tab(to)),
-        other => other,
-    }
-}
-
-fn tab_drag_target(col: usize, spans: &[(usize, usize, usize)], from: usize) -> usize {
-    let Some(pos) = spans.iter().position(|&(i, _, _)| i == from) else {
-        return from;
-    };
-    let mid = |s: &(usize, usize, usize)| (s.1 + s.2) / 2;
-    // Leftmost span left of the drag whose midpoint the pointer sits left of…
-    for s in spans.iter().take(pos) {
-        if col < mid(s) {
-            return s.0;
-        }
-    }
-    // …else the rightmost span right of it whose midpoint the pointer passed.
-    for s in spans.iter().skip(pos + 1).rev() {
-        if col > mid(s) {
-            return s.0;
-        }
-    }
-    from
-}
-
-/// Adaptive tab widths: each tab wants `desired` cells (its label plus the
-/// close button), clamped to `[TAB_MIN, TAB_CELLS]`. When the clamped sum
-/// (plus the 1-cell gaps) overflows `strip`, every tab shares the largest
-/// uniform cap that fits, down to `TAB_MIN`; wanting less than the cap keeps
-/// costing less (short titles don't pad out to the cap). Returns `None` when
-/// even `TAB_MIN`-wide tabs overflow — the caller falls back to the scrolled
-/// uniform strip.
-fn tab_widths(desired: &[usize], strip: usize) -> Option<Vec<usize>> {
-    if desired.is_empty() {
-        return Some(Vec::new());
-    }
-    let gaps = desired.len() - 1;
-    let fits = |cap: usize| {
-        desired
-            .iter()
-            .map(|&d| d.clamp(TAB_MIN, cap))
-            .sum::<usize>()
-            + gaps
-            <= strip
-    };
-    if !fits(TAB_MIN) {
-        return None;
-    }
-    // Largest cap that still fits; the range is small, so a scan reads
-    // clearer than a binary search.
-    let cap = (TAB_MIN..=TAB_CELLS)
-        .rev()
-        .find(|&c| fits(c))
-        .unwrap_or(TAB_MIN);
-    Some(desired.iter().map(|&d| d.clamp(TAB_MIN, cap)).collect())
-}
-
-fn visible_tab_range(active: usize, total: usize, available_cells: usize) -> (usize, usize) {
-    if total == 0 {
-        return (0, 0);
-    }
-    let per_tab = TAB_CELLS + 1; // the tab's own width plus its separator
-    let capacity = (available_cells / per_tab).max(1).min(total);
-    if total <= capacity {
-        return (0, total);
-    }
-    let max_start = total - capacity;
-    let start = active
-        .saturating_sub(capacity - 1)
-        .min(active)
-        .min(max_start);
-    (start, start + capacity)
 }
 
 /// Whether a drag-selection past a pane's `[top_px, bottom_px]` edge should
@@ -7560,48 +6452,6 @@ fn is_openable_url(url: &str) -> bool {
     ALLOWED
         .iter()
         .any(|p| b.len() > p.len() && b[..p.len()].eq_ignore_ascii_case(p.as_bytes()))
-}
-
-/// The filesystem path out of an OSC 7 `file://[host]/path` URI, percent-
-/// decoded to raw bytes (so non-UTF8 path components round-trip on Unix).
-/// The host component (if any) is ignored — OSC 7 only ever reports the
-/// *local* shell's cwd, so a remote hostname there is not actionable. `None`
-/// for anything that isn't a `file://` URI with a path.
-fn path_from_file_uri(uri: &str) -> Option<std::path::PathBuf> {
-    let rest = uri.strip_prefix("file://")?;
-    let path = &rest[rest.find('/')?..];
-    let mut decoded: Vec<u8> = Vec::with_capacity(path.len());
-    let bytes = path.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%'
-            && let Some(hex) = bytes.get(i + 1..i + 3)
-            && let Ok(hex) = std::str::from_utf8(hex)
-            && let Ok(byte) = u8::from_str_radix(hex, 16)
-        {
-            decoded.push(byte);
-            i += 3;
-        } else {
-            decoded.push(bytes[i]);
-            i += 1;
-        }
-    }
-    if decoded.is_empty() {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt;
-        Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
-            &decoded,
-        )))
-    }
-    #[cfg(not(unix))]
-    {
-        Some(std::path::PathBuf::from(
-            String::from_utf8_lossy(&decoded).into_owned(),
-        ))
-    }
 }
 
 /// Map an OSC 22-requested pointer shape — a CSS `cursor` keyword, the
@@ -7770,12 +6620,10 @@ mod tests {
         ConsumedKeys, Copied, Hit, ImeCommitTarget, KeyRelease, MenuKind, SETTINGS_CARDS_TOP,
         SETTINGS_FOOTER_H, SETTINGS_ROW_H, SETTINGS_SEARCH_W, SETTINGS_SIDEBAR_W, SelectionDrag,
         SettingsHit, UI_FONT_PX, Widget, Zoom, accumulate_scroll_lines, arrow_presses, copy_text,
-        display_path, drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
+        drag_scroll_direction, encode_paste, fmt_runtime, ime_commit_target,
         ime_cursor_area_origin, is_openable_url, menu_items, osc52_reply, pane_pixel_point,
-        path_from_file_uri, physical_px, pressed_after_focus, pressed_after_reorder, put_text,
-        read_git_branch, release_input, route_key_down, settings_hit, settings_value_end,
-        settings_visible, tab_drag_target, tab_spans, tab_widths, visible_tab_range, widget_text,
-        zoom_px,
+        physical_px, pressed_after_focus, put_text, read_git_branch, release_input, route_key_down,
+        settings_hit, settings_value_end, settings_visible, widget_text, zoom_px,
     };
     use crate::core::Cell;
 
@@ -8389,33 +7237,6 @@ mod tests {
     }
 
     #[test]
-    fn path_from_file_uri_strips_scheme_and_host() {
-        assert_eq!(
-            path_from_file_uri("file:///home/user/project"),
-            Some(std::path::PathBuf::from("/home/user/project"))
-        );
-        assert_eq!(
-            path_from_file_uri("file://myhost/home/user/project"),
-            Some(std::path::PathBuf::from("/home/user/project"))
-        );
-    }
-
-    #[test]
-    fn path_from_file_uri_percent_decodes() {
-        assert_eq!(
-            path_from_file_uri("file:///home/user/my%20project"),
-            Some(std::path::PathBuf::from("/home/user/my project"))
-        );
-    }
-
-    #[test]
-    fn path_from_file_uri_rejects_non_file_or_empty() {
-        assert_eq!(path_from_file_uri("https://example.com/path"), None);
-        assert_eq!(path_from_file_uri(""), None);
-        assert_eq!(path_from_file_uri("file://"), None);
-    }
-
-    #[test]
     fn osc52_reply_wraps_base64() {
         // "hi" -> base64 "aGk=", framed as an OSC 52 clipboard reply (BEL).
         assert_eq!(osc52_reply('c', "hi"), b"\x1b]52;c;aGk=\x07");
@@ -8435,14 +7256,14 @@ mod tests {
             "abcdef",
             0x111111,
             0x222222,
-            Hit::NewTab,
+            Hit::Close,
         );
         assert_eq!(col, 4, "stops at the limit");
         assert_eq!(row[1].ch, 'a');
         assert_eq!(row[3].ch, 'c');
         assert_eq!(row[4].ch, ' ', "cell past the limit untouched");
         assert_eq!(row[1].fg, 0x111111);
-        assert!(hits[1] == Hit::NewTab && hits[3] == Hit::NewTab);
+        assert!(hits[1] == Hit::Close && hits[3] == Hit::Close);
         assert!(hits[4] == Hit::Drag);
     }
 
@@ -8600,112 +7421,14 @@ mod tests {
     }
 
     #[test]
-    fn tab_spans_merge_label_and_close_cells_and_split_on_gaps() {
-        // [Tab0 Tab0 Close0 Close0] gap [Tab1 Tab1] then chrome buttons.
-        let hits = vec![
-            Hit::Tab(0),
-            Hit::Tab(0),
-            Hit::CloseTab(0),
-            Hit::CloseTab(0),
-            Hit::Drag,
-            Hit::Tab(1),
-            Hit::Tab(1),
-            Hit::NewTab,
-        ];
-        assert_eq!(tab_spans(&hits), vec![(0, 0, 4), (1, 5, 7)]);
-    }
-
-    #[test]
     fn focus_loss_without_release_clears_pressed() {
         // press -> focus lost -> focus back, with no release in between
-        let pressed = Some(Hit::Tab(0));
+        let pressed = Some(Hit::Close);
         let lost = pressed_after_focus(pressed, false);
         assert!(lost.is_none());
         assert!(pressed_after_focus(lost, true).is_none());
         // gaining focus alone never cancels a live press
         assert!(pressed_after_focus(pressed, true) == pressed);
-    }
-
-    #[test]
-    fn pressed_tab_follows_a_reorder() {
-        let after = |p: Option<Hit>| pressed_after_reorder(p, 1, 3);
-        assert!(after(Some(Hit::Tab(1))) == Some(Hit::Tab(3)));
-        assert!(after(Some(Hit::Tab(2))) == Some(Hit::Tab(2)));
-        assert!(after(Some(Hit::MoreTabs)) == Some(Hit::MoreTabs));
-        assert!(after(None).is_none());
-    }
-
-    #[test]
-    fn tab_drag_target_fires_on_midpoint_crossings_only() {
-        // Three 10-cell tabs with 1-cell gaps: spans at 0..10, 11..21, 22..32
-        // (midpoints 5, 16, 27).
-        let spans = vec![(0, 0, 10), (1, 11, 21), (2, 22, 32)];
-        // Dragging tab 0 right: nothing until past tab 1's midpoint…
-        assert_eq!(tab_drag_target(15, &spans, 0), 0);
-        assert_eq!(tab_drag_target(17, &spans, 0), 1);
-        // …and crossing tab 2's midpoint targets the far slot directly.
-        assert_eq!(tab_drag_target(28, &spans, 0), 2);
-        // Dragging tab 1 left: fires only left of tab 0's midpoint.
-        assert_eq!(tab_drag_target(5, &spans, 1), 1);
-        assert_eq!(tab_drag_target(4, &spans, 1), 0);
-        // Pointer inside the dragged tab's own span: stay put.
-        assert_eq!(tab_drag_target(13, &spans, 1), 1);
-        // A dragged tab that isn't in the spans (scrolled out): no move.
-        assert_eq!(tab_drag_target(4, &spans, 7), 7);
-    }
-
-    #[test]
-    fn tab_widths_size_to_titles_within_the_clamp() {
-        // Plenty of room: a short title floors at TAB_MIN, a long one caps
-        // at TAB_CELLS, one in between keeps its exact desired width.
-        let w = tab_widths(&[5, 18, 60], 200).unwrap();
-        assert_eq!(w, vec![super::TAB_MIN, 18, super::TAB_CELLS]);
-    }
-
-    #[test]
-    fn tab_widths_shrink_together_when_the_strip_crowds() {
-        // Four tabs wanting the max: 4*26 + 3 gaps = 107 > 80, so all share
-        // the largest uniform cap that fits (4*cap + 3 <= 80 -> cap = 19).
-        let w = tab_widths(&[60, 60, 60, 60], 80).unwrap();
-        assert_eq!(w, vec![19, 19, 19, 19]);
-        // A short tab keeps costing less than the cap.
-        let w = tab_widths(&[60, 5, 60, 60], 80).unwrap();
-        assert_eq!(w[1], super::TAB_MIN);
-        assert!(w[0] > 19, "the freed cells go back to the wide tabs: {w:?}");
-        // The chosen widths actually fit.
-        assert!(w.iter().sum::<usize>() + 3 <= 80);
-    }
-
-    #[test]
-    fn tab_widths_give_up_when_even_minimum_tabs_overflow() {
-        // 10 tabs at TAB_MIN=12 need 129 cells; 100 can't hold them.
-        assert!(tab_widths(&[20; 10], 100).is_none());
-        // The empty strip trivially fits.
-        assert_eq!(tab_widths(&[], 10), Some(vec![]));
-    }
-
-    #[test]
-    fn visible_tab_range_shows_everything_when_it_all_fits() {
-        // TAB_CELLS=26, so +1 separator = 27 cells/tab; 4 tabs need 4*27-1=107.
-        assert_eq!(visible_tab_range(0, 4, 200), (0, 4));
-        assert_eq!(visible_tab_range(3, 4, 200), (0, 4));
-    }
-
-    #[test]
-    fn visible_tab_range_scrolls_minimally_to_keep_active_in_view() {
-        // Room for 3 tabs (3*27-1=80 fits in 90), 10 tabs total.
-        assert_eq!(visible_tab_range(0, 10, 90), (0, 3)); // active at the start
-        assert_eq!(visible_tab_range(2, 10, 90), (0, 3)); // still within the first window
-        assert_eq!(visible_tab_range(5, 10, 90), (3, 6)); // scrolled to bring 5 into view
-        assert_eq!(visible_tab_range(9, 10, 90), (7, 10)); // last tab: pinned to the end
-    }
-
-    #[test]
-    fn visible_tab_range_never_leaves_dead_space_past_the_last_tab() {
-        // 5 tabs, room for 3: clicking back to an early tab shouldn't scroll
-        // past what's needed, but the window also never runs past total.
-        assert_eq!(visible_tab_range(4, 5, 90), (2, 5));
-        assert_eq!(visible_tab_range(0, 5, 90), (0, 3));
     }
 
     #[test]
@@ -8833,23 +7556,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&bare);
     }
 
-    #[test]
-    fn display_path_shortens_home_to_tilde() {
-        // Only meaningful where a home directory is defined (CI always has one).
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
-        let Some(home) = home.map(std::path::PathBuf::from) else {
-            return;
-        };
-        assert_eq!(display_path(&home), "~");
-        assert_eq!(
-            display_path(&home.join("projects")),
-            format!("~{}projects", std::path::MAIN_SEPARATOR)
-        );
-        // A path outside home passes through unchanged.
-        let other = std::path::Path::new("/definitely/not/home");
-        assert_eq!(display_path(other), other.display().to_string());
-    }
-
     mod reader {
         use super::super::{AnsiParser, Feed, Grid, Mutex, UserEvent, WakeFlag, reader_loop};
         use crate::backend::BackendHandle;
@@ -8899,7 +7605,6 @@ mod tests {
                 |event| {
                     let name = match event {
                         UserEvent::Redraw(7) => "redraw",
-                        UserEvent::Exit(7) => "exit",
                         _ => "other",
                     };
                     sent.push(name.to_string());
@@ -8916,7 +7621,7 @@ mod tests {
         fn output_while_a_wakeup_is_pending_sends_no_more() {
             let wake = WakeFlag::default();
             let (sent, line) = run(bytes(&[b"a", b"b", b"c"]), &wake, false, true);
-            assert_eq!(sent, ["redraw", "exit"]);
+            assert_eq!(sent, ["redraw"]);
             assert_eq!(line, "abc", "every batch is still parsed");
         }
 
@@ -8924,7 +7629,7 @@ mod tests {
         fn output_after_the_window_handles_a_wakeup_sends_another() {
             let wake = WakeFlag::default();
             let (sent, _) = run(bytes(&[b"a", b"b"]), &wake, true, true);
-            assert_eq!(sent, ["redraw", "redraw", "exit"]);
+            assert_eq!(sent, ["redraw", "redraw"]);
         }
 
         #[test]
@@ -8932,7 +7637,7 @@ mod tests {
             let wake = WakeFlag::default();
             assert!(wake.raise(), "a wakeup is in flight");
             let (sent, _) = run(bytes(&[b"a"]), &wake, false, true);
-            assert_eq!(sent, ["exit"]);
+            assert!(sent.is_empty());
             wake.lower();
             assert!(wake.raise(), "once lowered, the next output wakes again");
         }
@@ -8941,7 +7646,7 @@ mod tests {
         fn a_failed_delivery_stops_reading() {
             let wake = WakeFlag::default();
             let (sent, line) = run(bytes(&[b"a", b"b"]), &wake, false, false);
-            assert_eq!(sent, ["redraw", "exit"]);
+            assert_eq!(sent, ["redraw"]);
             assert_eq!(line, "a", "nothing is parsed after the failed send");
         }
 
@@ -8952,7 +7657,7 @@ mod tests {
             let wake = WakeFlag::default();
             assert!(wake.raise());
             let (sent, line) = run(bytes(&[b"a", b"b"]), &wake, false, true);
-            assert_eq!(sent, ["exit"]);
+            assert!(sent.is_empty());
             assert_eq!(line, "ab");
         }
 
@@ -8967,7 +7672,7 @@ mod tests {
                 Feed::Bytes(b"live".to_vec()),
             ];
             let (sent, line) = run(steps, &WakeFlag::default(), true, true);
-            assert_eq!(sent, ["redraw", "redraw", "redraw", "exit"]);
+            assert_eq!(sent, ["redraw", "redraw", "redraw"]);
             assert_eq!(line.trim_end(), "from the server live");
         }
 

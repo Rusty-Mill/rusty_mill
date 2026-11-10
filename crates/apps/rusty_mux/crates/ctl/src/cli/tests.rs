@@ -30,6 +30,52 @@ fn global_flags_come_first() {
 }
 
 #[test]
+fn a_host_is_named_once_and_never_with_a_socket() {
+    for line in ["--host box list", "--json --host=box list"] {
+        let invocation = parse(&args(line)).expect(line);
+        assert_eq!(invocation.host.as_deref(), Some("box"), "{line}");
+        assert_eq!(invocation.socket, None);
+    }
+    assert!(parse(&args("--host box --socket /tmp/s list")).is_err());
+    assert!(parse(&args("--socket /tmp/s --host=box list")).is_err());
+}
+
+#[test]
+fn hosts_verbs() {
+    let hosts = |line: &str| match parse(&args(line)).map(|i| i.command) {
+        Ok(Command::Hosts(command)) => Ok(command),
+        Ok(other) => panic!("expected hosts, got {other:?}"),
+        Err(reason) => Err(reason),
+    };
+    assert_eq!(hosts("hosts list"), Ok(HostsCommand::List));
+    assert_eq!(
+        hosts("hosts remove box"),
+        Ok(HostsCommand::Remove("box".into()))
+    );
+    assert_eq!(
+        hosts("hosts add box --ssh me@box --socket=/r.sock --udp-host u"),
+        Ok(HostsCommand::Add {
+            name: "box".into(),
+            address: Address::Ssh {
+                dest: "me@box".into(),
+                socket: "/r.sock".into(),
+                udp_host: Some("u".into()),
+            },
+        })
+    );
+    for bad in [
+        "hosts",
+        "hosts add box",
+        "hosts add box --ssh me@box",
+        "hosts add box --socket /a --socket /b",
+        "hosts add box --socket /a --port 2",
+        "hosts remove",
+    ] {
+        assert!(hosts(bad).is_err(), "{bad}");
+    }
+}
+
+#[test]
 fn flags_take_a_separate_or_attached_value() {
     let line = format!("resize --block {ID} --cols=80 --rows 24");
     let [call] = calls(&line).try_into().expect("one call");

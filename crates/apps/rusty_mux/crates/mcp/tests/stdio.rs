@@ -1,8 +1,11 @@
 //! `rusty-mux-mcp`'s tools over MCP stdio against a real server (C07).
+//! Linux and Windows; a full accept backlog only on Linux, the one place
+//! ctl bounds connecting.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", windows))]
 
 use std::io::{Cursor, Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::net::{UnixListener as StdListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -19,6 +22,9 @@ use rusty_mux_proto::schema::CATALOG;
 use rusty_mux_server::{Config, ConsoleHost, serve};
 use rusty_tokio::io::UnixListener;
 use rusty_tokio::{Builder, LocalOptions};
+
+#[cfg(windows)]
+use platform_windows::WindowsUnixListener as StdListener;
 
 const PATIENCE: Duration = Duration::from_secs(20);
 const INIT: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
@@ -40,21 +46,42 @@ fn start_server() -> PathBuf {
         runtime.block_on(async move {
             let listener = UnixListener::bind(&bind_path).expect("bind");
             ready_tx.send(()).expect("signal ready");
-            let config = Config {
-                program: "/bin/sh".into(),
-                args: Vec::new(),
-                cwd: "/".into(),
-                console_host: ConsoleHost::default(),
-                state_dir: None,
-                grapheme_clustering: false,
-                config_file: None,
-            };
-            serve(listener, config).await.expect("serve");
+            serve(listener, shell()).await.expect("serve");
         });
     });
     ready_rx.recv_timeout(PATIENCE).expect("server bound");
     path
 }
+
+/// Each block's shell: `/bin/sh` in `/`, or `cmd.exe /Q` (no prompt or
+/// command echo) in the temp directory on the host `RUSTY_CONSOLE_HOST`
+/// names.
+fn shell() -> Config {
+    let (program, args, cwd, console_host) = if cfg!(windows) {
+        let host = ConsoleHost::from_env().expect("RUSTY_CONSOLE_HOST");
+        let cwd = std::env::temp_dir().into_os_string();
+        ("cmd.exe", vec!["/Q".into()], cwd, host)
+    } else {
+        ("/bin/sh", Vec::new(), "/".into(), ConsoleHost::default())
+    };
+    Config {
+        program: program.into(),
+        args,
+        cwd,
+        console_host,
+        state_dir: None,
+        grapheme_clustering: false,
+        config_file: None,
+    }
+}
+
+/// Input whose output, `HI2`, differs from its echo: `cmd.exe` drops the
+/// `^` escape, the echoed line keeps it.
+const TYPED: &str = if cfg!(windows) {
+    r#"echo HI^2\r"#
+} else {
+    r#"echo HI$((1+1))\r"#
+};
 
 /// Collects what the MCP server writes.
 #[derive(Clone, Default)]
@@ -125,17 +152,20 @@ fn start_server_without_launch() -> (PathBuf, Receiver<usize>) {
 
 /// A listening socket nobody accepts on, its one-slot backlog already
 /// taken, so the next connect waits for room. Dropping it closes both.
+#[cfg(target_os = "linux")]
 struct FullBacklog {
     listener: i32,
     _queued: UnixStream,
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for FullBacklog {
     fn drop(&mut self) {
         let _ = rusty_libc::fd::close(self.listener);
     }
 }
 
+#[cfg(target_os = "linux")]
 fn start_full_server() -> (PathBuf, FullBacklog) {
     use rusty_libc::socket::{
         AF_UNIX, SOCK_CLOEXEC, SOCK_STREAM, SockAddrUn, bind_un, listen, socket,
@@ -285,7 +315,7 @@ fn an_agent_builds_a_block_types_into_it_and_reads_it_back_by_name() {
     let typed = ok(
         &socket,
         "input",
-        r#"{"block": "agents/work/1", "data": "echo HI$((1+1))\r"}"#,
+        &format!(r#"{{"block": "agents/work/1", "data": "{TYPED}"}}"#),
     );
     assert_eq!(typed, "ok");
     let deadline = Instant::now() + PATIENCE;
@@ -406,6 +436,7 @@ fn cancelling_a_call_to_a_silent_server_releases_its_connection() {
     ended.expect("serve");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_full_backlog_fails_the_call_at_its_deadline() {
     let (socket, _full) = start_full_server();
@@ -415,6 +446,7 @@ fn a_full_backlog_fails_the_call_at_its_deadline() {
     assert!(started.elapsed() < PATIENCE, "{:?}", started.elapsed());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn cancelling_a_call_stuck_connecting_ends_it() {
     let (socket, _full) = start_full_server();
@@ -434,8 +466,11 @@ fn cancelling_a_call_stuck_connecting_ends_it() {
 fn whoami_names_the_caller() {
     let socket = start_server();
     let me = ok(&socket, "whoami", "{}");
-    let uid = rusty_libc::process::geteuid();
-    assert!(me.contains(&format!("uid:{uid}")), "{me}");
+    #[cfg(target_os = "linux")]
+    let principal = format!("uid:{}", rusty_libc::process::geteuid());
+    #[cfg(windows)]
+    let principal = "sid:S-".to_owned();
+    assert!(me.contains(&principal), "{me}");
     assert!(me.contains("socket"), "{me}");
 }
 

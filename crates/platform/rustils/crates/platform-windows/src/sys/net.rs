@@ -583,7 +583,7 @@ pub fn set_nonblocking(sock: &OwnedSocket, nonblocking: bool) -> Result<()> {
     Ok(())
 }
 
-/// The three socket options this backend sets. A closed enum rather
+/// The four socket options this backend sets. A closed enum rather
 /// than a `(level, name, value)` triple because that is the shape the
 /// donor's own `set_sockopt` takes, and mirroring it keeps the track-w
 /// arm a one-line map instead of a translation table.
@@ -591,6 +591,7 @@ enum SockOpt {
     ReuseAddr,
     NoDelay(bool),
     RecvTimeoutMillis(u32),
+    SendTimeoutMillis(u32),
 }
 
 /// `setsockopt` — Track W (D-15): `rusty_win32::net::set_sockopt`.
@@ -601,6 +602,7 @@ fn set_sockopt(sock: &OwnedSocket, opt: SockOpt) -> Result<()> {
         SockOpt::ReuseAddr => (D::ReuseAddr(true), "setsockopt(SO_REUSEADDR)"),
         SockOpt::NoDelay(on) => (D::TcpNoDelay(on), "setsockopt(TCP_NODELAY)"),
         SockOpt::RecvTimeoutMillis(ms) => (D::RecvTimeout(ms), "setsockopt(SO_RCVTIMEO)"),
+        SockOpt::SendTimeoutMillis(ms) => (D::SendTimeout(ms), "setsockopt(SO_SNDTIMEO)"),
     };
     // SAFETY: `sock` is caller-owned and valid for the life of the `&`
     // borrow; the option carries a plain value, not a pointer.
@@ -625,10 +627,13 @@ fn set_sockopt(sock: &OwnedSocket, opt: SockOpt) -> Result<()> {
         SockOpt::RecvTimeoutMillis(ms) => {
             (w::SOL_SOCKET, w::SO_RCVTIMEO, ms, "setsockopt(SO_RCVTIMEO)")
         }
+        SockOpt::SendTimeoutMillis(ms) => {
+            (w::SOL_SOCKET, w::SO_SNDTIMEO, ms, "setsockopt(SO_SNDTIMEO)")
+        }
     };
     // SAFETY: `&value` is a valid 4-byte buffer outliving the call — the
-    // width every one of these three options takes (`SO_REUSEADDR` and
-    // `TCP_NODELAY` as a boolean-valued `int`, `SO_RCVTIMEO` as a
+    // width every one of these four options takes (`SO_REUSEADDR` and
+    // `TCP_NODELAY` as a boolean-valued `int`, `SO_RCVTIMEO`/`SO_SNDTIMEO` as a
     // millisecond `DWORD` on Winsock, not a `timeval`); `sock` is
     // caller-owned.
     let r = unsafe {
@@ -661,6 +666,15 @@ pub fn set_read_timeout(sock: &OwnedSocket, timeout: Option<Duration>) -> Result
         .map(|d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX))
         .unwrap_or(0);
     set_sockopt(sock, SockOpt::RecvTimeoutMillis(millis))
+}
+
+/// `setsockopt(SOL_SOCKET, SO_SNDTIMEO, ...)`, the send-side twin of
+/// [`set_read_timeout`]: a millisecond count, `None` is `0` (no timeout).
+pub fn set_write_timeout(sock: &OwnedSocket, timeout: Option<Duration>) -> Result<()> {
+    let millis: u32 = timeout
+        .map(|d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX))
+        .unwrap_or(0);
+    set_sockopt(sock, SockOpt::SendTimeoutMillis(millis))
 }
 
 /// `getpeername`.

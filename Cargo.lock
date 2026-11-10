@@ -10964,6 +10964,7 @@ dependencies = [
 name = "rusty_mux_mcp"
 version = "0.1.0"
 dependencies = [
+ "platform-windows",
  "rusty_libc",
  "rusty_mcp_server",
  "rusty_mux_ctl",

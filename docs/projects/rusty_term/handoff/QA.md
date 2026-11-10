@@ -39,3 +39,7 @@ Source: D85; AGENT-HOSTING.md C46 "Owner gone past the grace", C77 "Shape".
 ## Is FreeBSD in C69's scope?
 Asked 2026-11-06 (C69 thread). **No**: Nano answered "Q8 not now" to FreeBSD as a server target; C69 covers Linux and Windows. Tag: answered (recorded as D130, ticks Q10).
 Source: `docs/projects/term/ROADMAP.md:104` (Nano, project thread, 2026-11-04 12:22Z); CAPABILITIES.md:94.
+
+## Is UDP its own address kind in a C35 saved host?
+Asked 2026-11-10 (card #280). **No**: every UDP association starts over the SSH control connection (`OpenDatagram` through the forward; the key travels only inside SSH), so UDP is an upgrade of an `ssh` address. The address carries an optional `udp_host` (the `--udp-host` override), and long-lived clients use UDP as `--ssh` does. ctl calls never use UDP. Tag: answered from sources (recorded as D176).
+Source: `docs/projects/mux/UDP-TRANSPORT.md` "Bootstrap" 1-5, decision 3; `crates/apps/rusty_mux/crates/tui/src/main.rs:31-47`.

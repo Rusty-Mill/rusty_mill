@@ -280,14 +280,15 @@ template on first use — edit, save, watch it apply.
 
 #### Window backend controls (`--gui`)
 
-The window is borderless and draws its own chrome: a one-row bar across the
-top with the session **tabs** (sized to their titles, shrinking together as
-the strip fills; truncated titles end in `…`, and the `×` close button shows
-on the active and hovered tab), a `+` new-tab button, a `▾` shell-launcher /
-settings dropdown, and minimize/maximize/close. Each tab holds one or more
-shell sessions arranged as split panes. Drag the empty bar to move the
-window (double-click it to toggle maximize), and drag the thin band at the
-window edges to resize.
+`--gui` runs `rusty-mux-gui`, so the window is a rusty_mux client: its
+blocks and their layout come from a mux server, which it starts when none
+runs. The window is borderless and draws its own chrome: a strip across the
+top with the session chip (the session switcher), the session's windows as
+tabs, a `+` new-window button, the detached-blocks chip when blocks are
+detached, and minimize/maximize/close. The blocks sit framed below it, with
+a ribbon at the bottom. `Ctrl+]` then a key runs a layout command on the
+server. Drag the empty strip to move the window (double-click it to toggle
+maximize), and drag the thin band at the window edges to resize.
 
 | Input | Action |
 |-------|--------|
@@ -297,26 +298,23 @@ window edges to resize.
 | Ctrl+Shift+V (and Ctrl+V on Windows) | Paste the clipboard into the shell (bracketed-paste aware). Plain Ctrl+V pastes on Windows only, as in Windows Terminal; to send a raw ^V there instead, set `paste = "Ctrl+Shift+V"` under `[keys]`. |
 | Ctrl+Shift+F | Open the in-window search bar (incremental match highlighting; Ctrl+R toggles regex, Alt+C toggles case sensitivity, Ctrl+V/middle-click pastes into the query). |
 | Ctrl+Shift+, | Open the config file in your editor (created from a template on first use). |
-| first launch / `--setup` | **First-run setup**: a plain `--gui` launch with no config file at the default location (no `--config`, `$RUSTY_TERM_CONFIG`, command, session or profile) opens four steps of the settings page: shell, theme (previewed live), clipboard, and alerts (`t` sends a test notification). `Enter` goes to the next step and finishes on the last, saving only what you changed; `Esc`, the tab's `×` or `Ctrl+,` skips: the values it opened with come back and no file is written, so after a skip on a first run, setup opens again on the next plain launch. Finishing writes the commented config template plus your changes, so setup doesn't return. Reopen it with `--setup` or the `open_setup` action. |
-| Ctrl+, / `▾` menu | Toggle the in-app **settings page** (it opens as its own tab in the strip): an Appearance / Terminal / Window sidebar covering theme, font, cursor, contrast, shell, scrollback, clipboard, padding, opacity, launch size, and more, each with a one-line description. `Tab` switches category, `↑`/`↓` pick a row, `←`/`→` (or a click on the value) change it — `Shift` steps numbers ×10, `Home`/`End` jump to the bound, `Enter` (or a typed digit) edits a number directly — type (or `/` / `Ctrl+F`) to search across every category, the wheel scrolls, `Esc` saves & closes; changes apply live. |
-| Ctrl+Shift+T / `+` | Open a new tab with the configured shell; the `▾` dropdown launches any detected shell (PowerShell, cmd, WSL, bash, …) in a new tab instead. |
-| Ctrl+Shift+W / tab `×` / tab middle-click | Close the focused pane, or the whole tab via its `×` button or a middle-click on the tab (the last pane / tab closes the window). |
-| Ctrl+Tab / Ctrl+Shift+Tab | Cycle through tabs; when there are more tabs than fit, the strip scrolls to keep the active one visible and a `»N` indicator (click to advance) shows how many are hidden. |
-| Ctrl+Alt+1…9 | Jump straight to that tab (9 = the last tab, browser-style). |
-| Tab drag | Drag a tab along the strip to reorder it (it trades places as you cross a neighbor's midpoint); a plain click never reorders. |
-| Ctrl+Shift+D / Ctrl+Shift+E | Split the focused pane right / down. |
-| Ctrl+Shift+J | Move focus to the next pane. |
+| first launch / `--setup` | **First-run setup**: a plain `--gui` launch with no config file at the default location (no `--config`, `$RUSTY_TERM_CONFIG`, command, session or profile) opens four steps of the settings page: shell, theme (previewed live), clipboard, and alerts (`t` sends a test notification). `Enter` goes to the next step and finishes on the last, saving only what you changed; `Esc` or `Ctrl+,` skips: the values it opened with come back and no file is written, so after a skip on a first run, setup opens again on the next plain launch. Finishing writes the commented config template plus your changes, so setup doesn't return. Reopen it with `--setup` or the `open_setup` action. |
+| Ctrl+, | Toggle the in-app **settings page**: an Appearance / Terminal / Window sidebar covering theme, font, cursor, contrast, shell, scrollback, clipboard, padding, opacity, launch size, and more, each with a one-line description. `Tab` switches category, `↑`/`↓` pick a row, `←`/`→` (or a click on the value) change it — `Shift` steps numbers ×10, `Home`/`End` jump to the bound, `Enter` (or a typed digit) edits a number directly — type (or `/` / `Ctrl+F`) to search across every category, the wheel scrolls, `Esc` saves & closes; changes apply live. |
+| `+` on the strip | Ask the server for a new window. |
+| Ctrl+Shift+W | Close the focused block on the server. |
+| Ctrl+Shift+D / Ctrl+Shift+E | Split the focused block right / down on the server. |
+| Ctrl+Shift+J | Move focus to the next block. |
 | Shift+PageUp / PageDown | Scroll the scrollback by a page. |
 | Ctrl+Shift+PageUp / PageDown | Jump to the previous / next shell prompt (OSC 133). |
-| F11 | Toggle fullscreen (not for the quake window, which docks to the monitor edge instead). |
+| F11 | Toggle fullscreen. |
 | Ctrl+= / Ctrl+- / Ctrl+0 | Zoom the font size up / down / reset (matches Chrome/VS Code/iTerm2/Windows Terminal). |
 
 Every shortcut above is rebindable in the `[keys]` config section (below).
 
 The cursor shape (block / bar / underline) and blink follow the `cursor_style`
 and `cursor_blink` config keys, and the child can change them at runtime via
-DECSCUSR (`CSI Sp q`); a tab closes when its shell exits, and the window closes
-with the last tab. The window is a full participant in the input and graphics
+DECSCUSR (`CSI Sp q`); a block closes when its program exits, as the server
+lays the window out again. The window is a full participant in the input and graphics
 protocols: when a TUI app enables mouse tracking (`?1000`/`?1002`/`?1003`,
 SGR/1006) clicks and the wheel are reported to it as SGR-encoded events.
 Holding **Shift** during a click, drag, or scroll always bypasses app mouse
