@@ -2,7 +2,8 @@
 
 Design chat: Nano's saved record in remind-me, capture `cap_58e514f9f3d94b3da5d26c0b8a118dd3` ("Let Em Loose: full design discussion, 2026-11-01 to 11-04"; paraphrased, every exchange in order; pointed to in thread message `cmsg_01WgyiM31RsSnZTgNuPX2VE4E2HeirtwhX9Qh6porRyDds`). The share link https://claude.ai/share/a3210fa6-8f48-4b63-bb9f-0f07c4e3771b renders without the conversation; don't cite it.
 remind-me tag: let-em-loose (entity "Let Em Loose"; also project-handoff, project-expert)
-Tags: [stated] [agreed] [default] [open]. Pack built with project-handoff v1.2.0.
+Tags: [stated] [agreed] [default] [open]. Pack built with project-handoff v1.2.0; refreshed with project-expert v2.0.0 on 2026-11-10 @ d91956c.
+Owner: Nano (GitHub `baileyrd`): the person whose words count as `[stated]`.
 
 This pack is an index for the `let-em-loose-expert` subagent and for implementers. It does not restate the design. Full spec: [../SPEC.md](../SPEC.md). Decisions: [DECISIONS.md](DECISIONS.md) points to [../DECISIONS.md](../DECISIONS.md) (D1–D45, D46+). Concept: [../README.md](../README.md). Pre-answered questions: [../QUESTIONS.md](../QUESTIONS.md) (Q1–Q31) and [QA.md](QA.md) (build-time questions). Open: [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md).
 
@@ -32,14 +33,18 @@ Nano writes intent; critic lenses on different models post claims and evidence t
 | BBP docs | `docs/bbp` | — |
 | Erosion metric (to build) | new crate `rusty_erosion` | #704 |
 
-## Current state (2026-11-03)
-- #593, #597: done. #595: all slices merged; follow-ups #703 (decision ids), Remediate diffstat deferred.
-- #594: building. Merged through #1442 (lens call step); next is the `rusty_orch lens` subcommand. Paid providers disabled; v0 is flat-rate and local only.
-- #704 erosion gate: approved, not built. D42's expiry and D44's zero-floor gaps were settled on 2026-11-03 (QA.md § Erosion gate); the corrected rows landed in #1449. #596, #598, #599, #600: not built. Their designs are approved except the #598 §6 and #599 §6 schema/API items (approval not recorded for #599) and the #600 builder-session design, which still need Nano's approval (OPEN_QUESTIONS Q3, Q5, Q7).
+## Current state (2026-11-10 @ d91956c; verify live with `card_get` before relying)
+Mill Board column per card, read 2026-11-10; decision numbers from ../DECISIONS.md (D121 is the latest row).
+- Done: #592, #593, #594 (all slices merged; a live paid run needs Nano's approval), #595 (follow-up #703; Remediate diffstat deferred), #597, #598, #704 (all slices merged through #1544; erosion is report-only and the limits are Nano's to set, D115), #706, #708 (no live run yet; paid calls need Nano's approval).
+- Building: #599 (track records merged; lessons, lens why and the canary re-run not built).
+- Blocked: #703 (waits on Nano's approval of the bbp CLI and log change).
+- Backlog: #596 (parked by Nano 2026-11-04), #600 (M2 epic, waits on M1 #1077), #705 (waits on #1320), #707 (waits on #1165).
+- Unticked questions that still need Nano or an unreachable source are in OPEN_QUESTIONS.md (14 at this refresh).
 
 ## Acceptance for this pack
-- [ ] The expert answers erosion-gate questions from D41–D45 with a cited source.
-- [ ] Implementation detail gets a logged `[default]`, not an escalation.
-- [ ] Anything reversing a `[stated]`/`[agreed]` row escalates to Nano.
-- [ ] Each settled answer lands once in ../DECISIONS.md and once in remind-me, best effort: a stable key reconciles duplicates from concurrent sessions or a crash between the two writes.
-- [ ] A conflict between sources is settled by date and provenance (newest attributable Nano decision; merged contract for behaviour), or escalated.
+Run 2026-11-10 @ d91956c by a separate agent acting as the expert on a copy (no real writes). All passed.
+- [x] The expert answers erosion-gate questions from D41–D45 with a cited source (QA.md § Erosion gate; D41, D43, D45, D30; addendum C-R8).
+- [x] Implementation detail gets a logged `[default]`, not an escalation (when merged code already names it, it cites that and logs nothing).
+- [x] Anything reversing a `[stated]`/`[agreed]` row escalates to Nano (an `--override` on `bbp erosion` escalated with `REVERSES: D43`).
+- [x] Each settled answer lands once in ../DECISIONS.md and once in remind-me, best effort: a stable key reconciles duplicates (a repeated answer added no second row; a `[stated]` answer with no reference was refused).
+- [x] A conflict between sources is settled by date and provenance (D115 over QA's "report-only" for what "approved" means).
