@@ -41,7 +41,7 @@ Each item is small and needs no new crate or dependency. Order avoids file confl
 | 4 | Conhost next ceiling: profile `Screen::client`/forward (~53%) and the mirror-grid parse (~32%) on Beast, measurements first (card #785) | Host is now the Windows path; numbers decide whether a fix is worth it | none for the profile; the fix is a separate go |
 | 5 | ~~Skill text read from the installed binary (Orca O3, Rex D1); new row C73~~ **Done** (#1481) | XS; both peers do it; installed skill stays matched to the binary | Nano's go on the row; reconfirm the agent paths (K4) |
 | 6 | ~~Agent hook plus OSC 7501 status precedence (Orca O2)~~ **Done** (C74: #1490, #1516) | Richer agent status, OSC as the fallback on hosts without hooks | Nano's go; a new `Features` bit if peers see new events |
-| 7 | Snapshot encode reliably at or below libghostty (ROADMAP Phase 0's open ≤ 11.2 ms target, #939): profile, then fix (card #786) | Owner wants it tried, not waved off (question 13) | none; measured on a fixed host |
+| 7 | ~~Snapshot encode reliably at or below libghostty (ROADMAP Phase 0's open ≤ 11.2 ms target, #939): profile, then fix~~ **Done** (card #786, #1586: 1.51 ms best, 3.6 ms worst on Beast; no fix needed) | Owner wants it tried, not waved off (question 13) | none; measured on a fixed host |
 | 8 | Config key for mode 2027 grapheme clustering, off by default (question 13 B; card #787) | Owner said yes | none |
 | 9 | Move rusty_term's ConPTY rollback backend onto platform-windows's wrapper (question 13 C; card #788) | Owner said yes | none |
 
