@@ -1045,8 +1045,9 @@ $("dlg").onclose=()=>{dlg=null};
 /* Read the cursor first, then the cards: anything committed in between is in the list
    AND comes back from the next poll (a harmless extra refresh); nothing can be skipped.
    Both reads must succeed before either is kept. */
-// Highest priority first in each column, as card_take takes them; stable, so the store's order follows.
-const byPriority=list=>list.sort((a,b)=>b.priority-a.priority);
+// Highest priority first in each column, as card_take takes them, then the store's own order
+// (created_ms, id): a total order, so a card refreshed alone lands where a full read puts it.
+const byPriority=list=>list.sort((a,b)=>b.priority-a.priority||a.created_ms-b.created_ms||(a.id<b.id?-1:a.id>b.id?1:0));
 async function snapshot(){
   const at=(await api("board_events",{tail:true})).cursor;
   const list=(await api("board_list",{archived:"include"})).cards;
@@ -1055,7 +1056,9 @@ async function snapshot(){
 /* Bring `cards` up to the newest event: read again only the cards the new events name, one
    card_get each, so an edit costs one card and not the board. A resync (the board restarted since
    our cursor) or more than FEW changed cards re-reads the board instead. Returns whether anything
-   changed. A card that is gone (untagged in rusty_tick) or out of our scope leaves the page. */
+   changed. A card whose card_get answers 404 or 403 (gone, or out of our scope) leaves the page.
+   A task untagged or deleted by hand in rusty_tick emits no event, so its card stays until the
+   next full read (page load, resync, or more than FEW changes). */
 const FEW=50;
 async function catchUp(){
   if(!loaded){await snapshot();return true}
