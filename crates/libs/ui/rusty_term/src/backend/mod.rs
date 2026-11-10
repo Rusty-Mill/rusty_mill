@@ -43,7 +43,7 @@ pub trait BackendHandle: Send {
 
     /// Whether a [`read_into`](Self::read_into) would return without
     /// blocking. `false` when the platform can't tell cheaply, which only
-    /// costs batching (see [`read_batch`]).
+    /// costs batching (see `read_batch`).
     #[cfg_attr(unix, allow(dead_code))]
     fn output_ready(&self) -> bool {
         false
@@ -127,9 +127,13 @@ pub trait BackendHandle: Send {
 /// end-of-file. An EOF or error after some bytes ends the batch with those
 /// bytes, and that error is dropped, not kept. A closed PTY repeats its EOF
 /// or error, so there the next call meets it again; a handle that does not
-/// repeat errors loses that one.
-#[cfg_attr(not(feature = "gui"), allow(dead_code))]
-pub fn read_batch(handle: &mut dyn BackendHandle, buf: &mut [u8]) -> Result<usize, std::io::Error> {
+/// repeat errors loses that one. Only the batching tests read this way
+/// now: the GUI's panes come from a mux server (D159).
+#[cfg(test)]
+pub(crate) fn read_batch(
+    handle: &mut dyn BackendHandle,
+    buf: &mut [u8],
+) -> Result<usize, std::io::Error> {
     let mut n = handle.read_into(buf)?;
     while n > 0 && n < buf.len() && handle.output_ready() {
         match handle.read_into(&mut buf[n..]) {

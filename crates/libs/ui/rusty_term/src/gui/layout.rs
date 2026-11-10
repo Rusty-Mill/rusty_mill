@@ -68,15 +68,6 @@ impl Node {
         }
     }
 
-    /// The first (top-left-most) leaf id in this subtree — a sensible focus
-    /// target after a sibling closes.
-    fn first(&self) -> u64 {
-        match self {
-            Node::Leaf(id) => *id,
-            Node::Split { a, .. } => a.first(),
-        }
-    }
-
     fn collect(&self, out: &mut Vec<u64>) {
         match self {
             Node::Leaf(id) => out.push(*id),
@@ -103,69 +94,6 @@ impl Node {
             Node::Leaf(_) => false,
             Node::Split { a, b, .. } => a.split(target, new, dir) || b.split(target, new, dir),
         }
-    }
-
-    /// If either child is `Leaf(id)`, collapse this split into the *other*
-    /// child (the sibling absorbs the closed pane's area). Returns whether a
-    /// collapse happened here.
-    fn close_child(&mut self, id: u64) -> bool {
-        let Node::Split { a, b, .. } = self else {
-            return false;
-        };
-        if matches!(**a, Node::Leaf(x) if x == id) {
-            *self = *std::mem::replace(b, Box::new(Node::Leaf(0)));
-            return true;
-        }
-        if matches!(**b, Node::Leaf(x) if x == id) {
-            *self = *std::mem::replace(a, Box::new(Node::Leaf(0)));
-            return true;
-        }
-        // Recurse; either side may contain the target deeper down.
-        let (a, b) = match self {
-            Node::Split { a, b, .. } => (a, b),
-            _ => unreachable!(),
-        };
-        a.close_child(id) || b.close_child(id)
-    }
-
-    /// Whether pane `id` is anywhere in this subtree.
-    fn contains(&self, id: u64) -> bool {
-        match self {
-            Node::Leaf(x) => *x == id,
-            Node::Split { a, b, .. } => a.contains(id) || b.contains(id),
-        }
-    }
-
-    /// Grow (`delta > 0`) or shrink pane `id` along `dir` by adjusting the
-    /// ratio of the nearest enclosing split of that axis — deepest first, so
-    /// the boundary closest to the pane moves. Returns whether any split
-    /// changed. The pane's side decides the sign: growing a first (`a`)
-    /// child raises the ratio, growing a second (`b`) child lowers it.
-    fn resize(&mut self, id: u64, dir: Dir, delta: f32) -> bool {
-        let Node::Split {
-            dir: d,
-            ratio,
-            a,
-            b,
-        } = self
-        else {
-            return false;
-        };
-        let (child, sign): (&mut Node, f32) = if a.contains(id) {
-            (a, 1.0)
-        } else if b.contains(id) {
-            (b, -1.0)
-        } else {
-            return false;
-        };
-        if child.resize(id, dir, delta) {
-            return true;
-        }
-        if *d == dir {
-            *ratio = (*ratio + sign * delta).clamp(0.1, 0.9);
-            return true;
-        }
-        false
     }
 
     fn rects(&self, area: Rect, gap: usize, out: &mut Vec<(u64, Rect)>) {
@@ -243,18 +171,9 @@ impl Layout {
         self.root.split(target, new, dir)
     }
 
-    /// Remove pane `id`, collapsing its split into the sibling. Returns the pane
-    /// to focus next (a neighbor), or `None` if `id` was the only pane.
-    pub fn close(&mut self, id: u64) -> Option<u64> {
-        if matches!(self.root, Node::Leaf(x) if x == id) {
-            return None;
-        }
-        self.root.close_child(id);
-        Some(self.root.first())
-    }
-
     /// Every pane and its rectangle within `area`, in tree (left-to-right,
     /// top-to-bottom) order.
+    #[cfg(test)]
     pub fn rects(&self, area: Rect) -> Vec<(u64, Rect)> {
         self.boxes(area, 1)
     }
@@ -272,12 +191,6 @@ impl Layout {
         let mut out = Vec::new();
         self.root.collect(&mut out);
         out
-    }
-
-    /// Grow (`delta > 0`) or shrink pane `id` along `dir` (see
-    /// [`Node::resize`]). Returns whether a split boundary moved.
-    pub fn resize(&mut self, id: u64, dir: Dir, delta: f32) -> bool {
-        self.root.resize(id, dir, delta)
     }
 
     /// The pane after (`forward`) or before `current` in tree order, wrapping.
@@ -346,29 +259,6 @@ mod tests {
     }
 
     #[test]
-    fn closing_collapses_into_the_sibling() {
-        let mut l = Layout::single(1);
-        l.split(1, 2, Dir::Vertical);
-        l.split(2, 3, Dir::Horizontal);
-        // Close 3: its split collapses, 2 reclaims the right half.
-        assert_eq!(l.close(3), Some(1));
-        assert_eq!(l.ids(), vec![1, 2]);
-        let rects = l.rects(Rect::new(0, 0, 81, 24));
-        assert_eq!(
-            rects,
-            vec![(1, Rect::new(0, 0, 40, 24)), (2, Rect::new(41, 0, 40, 24))]
-        );
-        // Close 1: pane 2 takes the whole area.
-        assert_eq!(l.close(1), Some(2));
-        assert_eq!(
-            l.rects(Rect::new(0, 0, 80, 24)),
-            vec![(2, Rect::new(0, 0, 80, 24))]
-        );
-        // Close the last pane: nothing left.
-        assert_eq!(l.close(2), None);
-    }
-
-    #[test]
     fn pane_at_and_cycle() {
         let mut l = Layout::single(1);
         l.split(1, 2, Dir::Vertical);
@@ -387,41 +277,6 @@ mod tests {
         assert_eq!(l.cycle(1, true), 2);
         assert_eq!(l.cycle(2, true), 1); // wraps
         assert_eq!(l.cycle(1, false), 2); // wraps backward
-    }
-
-    #[test]
-    fn resize_adjusts_nearest_matching_split() {
-        // [1 | 2] with 2 split into 2/3 vertically again: resizing 1 moves
-        // the outer boundary; resizing 3 moves the inner one.
-        let mut l = Layout::single(1);
-        l.split(1, 2, Dir::Vertical);
-        l.split(2, 3, Dir::Vertical);
-        let area = Rect::new(0, 0, 41, 20);
-        let before = l.rects(area);
-        assert!(l.resize(1, Dir::Vertical, 0.2)); // grow pane 1 rightward
-        let after = l.rects(area);
-        let w = |rs: &Vec<(u64, Rect)>, id: u64| rs.iter().find(|(i, _)| *i == id).unwrap().1.cols;
-        assert!(w(&after, 1) > w(&before, 1));
-        // Growing pane 3 (a `b` child) lowers its split's ratio -> wider 3.
-        let before = after;
-        assert!(l.resize(3, Dir::Vertical, 0.2));
-        let after = l.rects(area);
-        assert!(w(&after, 3) > w(&before, 3));
-        // No split of the other axis exists: resize reports false.
-        assert!(!l.resize(1, Dir::Horizontal, 0.1));
-    }
-
-    #[test]
-    fn resize_clamps_ratio() {
-        let mut l = Layout::single(1);
-        l.split(1, 2, Dir::Horizontal);
-        for _ in 0..20 {
-            l.resize(1, Dir::Horizontal, 0.2);
-        }
-        let area = Rect::new(0, 0, 20, 21);
-        let rs = l.rects(area);
-        // Both panes keep at least one row even after saturating growth.
-        assert!(rs.iter().all(|(_, r)| r.rows >= 1));
     }
 
     #[test]
