@@ -59,6 +59,7 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
     ),
     ("bridge", &[]),
     ("own", &[]),
+    ("server", &["stop"]),
     ("api", &["list", "describe", "llms"]),
     ("help", &[]),
     ("completion", &["bash", "zsh", "fish", "nu", "powershell"]),

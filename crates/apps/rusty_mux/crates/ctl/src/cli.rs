@@ -53,6 +53,8 @@ pub enum Command {
     Own,
     /// Prints a completion script for a shell.
     Completion(Shell),
+    /// Stops the server cleanly and waits until it has (C36b).
+    ServerStop,
 }
 
 /// `agent`: each verb but `hook` and `skill` acts on the chosen agents in
@@ -325,6 +327,10 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "bridge" => Err("bridge takes no arguments".into()),
         "own" if rest.is_empty() => Ok(Command::Own),
         "own" => Err("own takes no arguments".into()),
+        "server" => match rest {
+            [verb] if verb == "stop" => Ok(Command::ServerStop),
+            _ => Err("usage: server stop".into()),
+        },
         "completion" => match rest {
             [shell] => shell.parse().map(Command::Completion),
             _ => Err("usage: completion bash|zsh|fish|nu|powershell".into()),
@@ -805,6 +811,11 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
         "Hold one connection that owns every block it launches: JSON\n\
          \x20                  requests on stdin (launch, close), one JSON answer or\n\
          \x20                  owner event per line on stdout; ends at the end of stdin",
+    ),
+    (
+        "server",
+        "Stop the server cleanly, as SIGTERM or Ctrl+C does, and wait until\n\
+         \x20                  it has: server stop; exits 4 when no server answers",
     ),
     (
         "api",

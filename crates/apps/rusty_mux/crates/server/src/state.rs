@@ -95,7 +95,8 @@ const OFFERED: Features = Features::CHECKPOINT_V6
     .union(Features::TERMINAL_HISTORY)
     .union(Features::OWNERSHIP)
     .union(Features::INPUT_GATE)
-    .union(Features::LEASE_REQUESTS);
+    .union(Features::LEASE_REQUESTS)
+    .union(Features::SHUTDOWN);
 
 /// An owner whose outbox holds more than this can't be told of more
 /// input, so an owner-only block refuses it (C77): half the budget, so a
@@ -363,6 +364,16 @@ pub(crate) struct State {
     saved_at: Option<u64>,
     /// Numbers each save, newest highest.
     generation: u64,
+    /// Set by [`State::stop_on_request`]: who may stop the server with
+    /// `shutdown`, and the stop to start. Taken by the first request.
+    shutdown: Option<Shutdown>,
+}
+
+/// A stop by request (C36b): only `owner`, the server's own account, may
+/// ask; asking sends on `stop`.
+struct Shutdown {
+    owner: Principal,
+    stop: oneshot::Sender<()>,
 }
 
 /// How long a UDP client outlives silence or an overflow: its lease for
@@ -411,6 +422,7 @@ impl State {
             store: None,
             saved_at: None,
             generation: 0,
+            shutdown: None,
         }))
     }
 
@@ -501,6 +513,14 @@ impl State {
     /// block's program now, as dropping the block would, except that an
     /// owned block's program is only hung up (D87). The consoles to
     /// wait for, which still hold the ones closing when this was called.
+    /// Lets clients of `owner` stop the server with `shutdown`; the
+    /// receiver resolves on the first such request.
+    pub(crate) fn stop_on_request(&mut self, owner: Principal) -> oneshot::Receiver<()> {
+        let (stop, requested) = oneshot::channel();
+        self.shutdown = Some(Shutdown { owner, stop });
+        requested
+    }
+
     pub(crate) fn stop(&mut self) -> pty::Hosts {
         self.save_now();
         self.stopping = true;
@@ -1158,6 +1178,11 @@ impl State {
                 self.require(client, Features::LEASE_REQUESTS, "request-lease")
                     .and_then(|()| self.request_lease(client, block)),
             ),
+            M::Shutdown { req } => (
+                req,
+                self.require(client, Features::SHUTDOWN, "shutdown")
+                    .and_then(|()| self.shutdown(client)),
+            ),
             M::OpenDatagram { req } => (
                 req,
                 self.require(client, Features::DATAGRAM, "a datagram association")
@@ -1667,6 +1692,27 @@ impl State {
             .into());
         }
         Ok(Some((block, client)))
+    }
+
+    /// `shutdown` (C36b): starts the clean stop for a client of the server's
+    /// own account. A stop ends every session, so no lesser owner may ask.
+    fn shutdown(&mut self, client: ClientId) -> Result<Outcome, Refusal> {
+        let asker = self.mux.client(client).ok_or("unknown client")?.principal();
+        let Some(shutdown) = &self.shutdown else {
+            return Err(
+                "this server is not stopped by request; it is stopping already, or \
+                        its owner stops it"
+                    .into(),
+            );
+        };
+        if asker.id() != shutdown.owner.id() {
+            return Err(format!("only {} may stop this server", shutdown.owner.id()).into());
+        }
+        if let Some(shutdown) = self.shutdown.take() {
+            // The receiver is serve_for's; gone only once it has stopped.
+            let _ = shutdown.stop.send(());
+        }
+        Ok(Outcome::Done(None))
     }
 
     /// Tells `block`'s owner that `client` asks for its lease (Q26): one
@@ -2892,6 +2938,55 @@ mod regression {
             None,
         );
         (client, inbox)
+    }
+
+    /// A `SHUTDOWN` client of `principal`.
+    fn shutdown_client(shared: &Shared, principal: Principal) -> (ClientId, Inbox) {
+        let (out, inbox, _) = outbox();
+        let client = shared.borrow_mut().connect(
+            out,
+            principal,
+            Transport::Socket,
+            Features::SHUTDOWN,
+            None,
+            None,
+        );
+        (client, inbox)
+    }
+
+    /// C36b: only the server's own account may stop it, once; anyone else
+    /// is refused and the stop does not start.
+    #[test]
+    fn only_the_servers_own_account_stops_it_and_only_once() {
+        runtime().block_on(async {
+            let (shared, ..) = stalled_reloads();
+            let requested = shared.borrow_mut().stop_on_request(test_owner());
+            let stranger = Principal::unix(1001, Some("other".into())).expect("valid");
+            let (other, mut others) = shutdown_client(&shared, stranger);
+            let (owner, mut owners) = shutdown_client(&shared, test_owner());
+
+            State::request(&shared, other, Message::Shutdown { req: 1 });
+            let refused = reply_to(&mut others, 1).await;
+            assert!(
+                matches!(&refused, Message::Failed { reason, .. } if reason.contains("only")),
+                "{refused:?}"
+            );
+            assert!(
+                shared.borrow().shutdown.is_some(),
+                "a refusal starts no stop"
+            );
+
+            State::request(&shared, owner, Message::Shutdown { req: 2 });
+            assert!(matches!(
+                reply_to(&mut owners, 2).await,
+                Message::Done { .. }
+            ));
+            assert_eq!(requested.await, Ok(()), "the owner's request starts it");
+
+            State::request(&shared, owner, Message::Shutdown { req: 3 });
+            let again = reply_to(&mut owners, 3).await;
+            assert!(matches!(again, Message::Failed { .. }), "{again:?}");
+        });
     }
 
     /// A reload reads off the server's thread: while the file stalls,

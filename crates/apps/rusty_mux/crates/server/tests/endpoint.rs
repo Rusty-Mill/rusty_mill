@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use rusty_mux_proto::{Features, Message};
+
 const PATIENCE: Duration = Duration::from_secs(10);
 
 fn scratch(tag: &str) -> PathBuf {
@@ -150,11 +152,13 @@ fn idle_exit_waits_for_the_last_block_and_client_then_takes_its_name_away() {
     let _ = std::fs::remove_dir_all(&runtime);
 }
 
-/// C36b: SIGTERM and SIGINT are clean stops on Linux. The server saves its
-/// store, exits 0 and takes its name away, so a new server binds at once.
+/// C36b: SIGTERM, SIGINT and a `Shutdown` request are clean stops on
+/// Linux. The server saves its store, exits 0 and takes its name away, so
+/// a new server binds at once; a requester's connection closes only after
+/// the name is gone.
 #[test]
-fn sigterm_and_sigint_stop_cleanly_saving_state_and_freeing_the_name() {
-    for signal in ["TERM", "INT"] {
+fn signals_and_a_request_stop_cleanly_saving_state_and_freeing_the_name() {
+    for signal in ["TERM", "INT", "request"] {
         let runtime = scratch(&format!("signal-{signal}"));
         let socket = runtime.join("rusty_mux").join("default.sock");
         let state = runtime.join("state");
@@ -173,12 +177,22 @@ fn sigterm_and_sigint_stop_cleanly_saving_state_and_freeing_the_name() {
         let _block = common::block_for(&mut client);
         drop(client);
 
-        let pid = running.0.id().to_string();
-        let sent = Command::new("kill")
-            .args([format!("-{signal}"), pid])
-            .status()
-            .expect("kill");
-        assert!(sent.success());
+        if signal == "request" {
+            let mut asker = common::Client::connect_with(&socket, Features::SHUTDOWN, None);
+            asker.request(|req| Message::Shutdown { req });
+            asker.wait_closed();
+            assert!(
+                !socket.exists(),
+                "the name is gone before the requester hears"
+            );
+        } else {
+            let pid = running.0.id().to_string();
+            let sent = Command::new("kill")
+                .args([format!("-{signal}"), pid])
+                .status()
+                .expect("kill");
+            assert!(sent.success());
+        }
         assert!(
             exits_within(&mut running.0, PATIENCE),
             "SIG{signal} stops the server"
