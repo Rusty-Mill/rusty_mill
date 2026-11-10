@@ -225,7 +225,7 @@ pub(super) fn exited_within(child: &mut WindowsChild, grace: Duration) -> Option
 /// would. The shell's own arguments go on verbatim, as ConPTY's would;
 /// only the trailing `args` are quoted, for whoever reads them.
 pub(super) fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::Result<Command> {
-    let Some((word, rest)) = split_program(shell, |p| locate(p).is_some()) else {
+    let Some((word, rest)) = program_and_rest(shell) else {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("rusty_term: no program in the shell `{shell}`"),
@@ -244,6 +244,19 @@ pub(super) fn shell_command(shell: &str, args: &[String], cwd: OsString) -> io::
     }
     let rest: Vec<u16> = rest.encode_utf16().collect();
     Ok(with_raw(cmd.args(args), &rest))
+}
+
+/// `shell` as (program, the rest). A shell that names an existing file
+/// as a whole is that program, so an unquoted `C:\Program Files\x.exe`
+/// can't run a planted `C:\Program.exe` (review of 66a8fb5f); otherwise
+/// [`split_program`] finds the shortest existing prefix, as
+/// `CreateProcessW` does.
+fn program_and_rest(shell: &str) -> Option<(&str, &str)> {
+    let whole = shell.trim_matches([' ', '\t']);
+    if whole.contains([' ', '\t']) && !whole.starts_with('"') && Path::new(whole).is_file() {
+        return Some((whole, ""));
+    }
+    split_program(shell, |p| locate(p).is_some())
 }
 
 /// `cmd` with `raw` as its raw arguments, unless `raw` is empty.
@@ -624,6 +637,23 @@ mod tests {
         assert_eq!(argv, 0, "cmd's arguments go in the raw text");
         let err = own_command("cmd", &["/v:on", "/c", "echo", "!SECRET!"]).expect_err("refused");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    /// Review of 66a8fb5f: an unquoted shell path with spaces that names a
+    /// file runs that file, not a planted shorter prefix.
+    #[test]
+    fn a_whole_unquoted_shell_path_beats_a_planted_prefix() {
+        let dir = std::env::temp_dir().join(format!("rt-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cmd_exe = super::locate("cmd").expect("cmd is in System32");
+        let real = dir.join("x y.exe");
+        std::fs::copy(&cmd_exe, &real).expect("copy cmd");
+        std::fs::copy(&cmd_exe, dir.join("x.exe")).expect("plant the prefix");
+        let shell = real.to_str().expect("utf-8").to_owned();
+        let cmd = super::shell_command(&shell, &[], std::env::temp_dir().into_os_string())
+            .expect("command");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(cmd.program, real.into_os_string());
     }
 
     #[test]

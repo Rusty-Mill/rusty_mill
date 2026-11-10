@@ -300,8 +300,18 @@ impl BackendHandle for ConptyHandle {
         // blocking wait that leaves it usable, so the watcher polls.
         let child = Arc::clone(self.child.as_ref()?);
         Some(Box::new(move || {
-            while let Ok(None) = child.lock().try_wait() {
-                std::thread::sleep(POLL);
+            loop {
+                // The guard drops before the sleep, so Drop and
+                // `reap_exit_status` can take the lock between polls.
+                let status = child.lock().try_wait();
+                match status {
+                    Ok(None) => std::thread::sleep(POLL),
+                    Ok(Some(_)) => return,
+                    Err(e) => {
+                        eprintln!("rusty_term: can't read the shell's exit status: {e}");
+                        return;
+                    }
+                }
             }
         }))
     }
@@ -317,19 +327,38 @@ impl BackendHandle for ConptyHandle {
 
 impl Drop for ConptyHandle {
     /// The original hangs up, which asks the child to exit, gives it
-    /// [`GRACE`], then kills it if it is still running. A clone only drops
-    /// its reference.
+    /// [`GRACE`], then kills it if it is still running. Both run on
+    /// threads of their own, so Drop returns at once: `hang_up` blocks
+    /// while conhost is stuck writing into a full, unread output pipe.
+    /// A clone only drops its reference; the last one closes the console
+    /// (`WindowsPtyMaster`'s draining Drop).
     fn drop(&mut self) {
         let Some(child) = self.child.take() else {
             return;
         };
-        self.master.hang_up();
-        let mut child = child.lock();
-        if exited_within(&mut child, GRACE).is_none()
-            && let Err(e) = child.kill_single(Signal::Kill)
+        let master = Arc::clone(&self.master);
+        // If no thread can be had, the last reference's Drop still closes
+        // the console, which tells the child to exit.
+        let _ = std::thread::Builder::new()
+            .name("conpty-hang-up".into())
+            .spawn(move || master.hang_up());
+        let end = move || end_survivor(&child);
+        if let Err(e) = std::thread::Builder::new()
+            .name("conpty-reap".into())
+            .spawn(end)
         {
-            eprintln!("rusty_term: the shell outlived its pseudoconsole and can't be killed: {e}");
+            eprintln!("rusty_term: can't start the shell's reaper: {e}");
         }
+    }
+}
+
+/// Kill `child` unless it exits within [`GRACE`] of the hang-up.
+fn end_survivor(child: &Mutex<WindowsChild>) {
+    let mut child = child.lock();
+    if exited_within(&mut child, GRACE).is_none()
+        && let Err(e) = child.kill_single(Signal::Kill)
+    {
+        eprintln!("rusty_term: the shell outlived its pseudoconsole and can't be killed: {e}");
     }
 }
 
@@ -489,6 +518,32 @@ mod tests {
     /// `STARTF_USESTDHANDLES` in platform-windows' `spawn_concrete` whenever
     /// the test runner's own std handles are redirected
     /// (docs/research/conpty-attach-2026-07.md).
+    /// Review of 66a8fb5f: Drop returns at once, and the hang-up or the
+    /// kill ends a running child; the exit watcher must not hold the
+    /// child's lock while it sleeps, or the reaper never gets it.
+    #[test]
+    fn dropping_the_original_conpty_handle_ends_a_running_child() {
+        use crate::backend::Backend as _;
+        use std::time::{Duration, Instant};
+        let h = super::WindowsBackend
+            .spawn_shell(80, 24, Some("ping.exe -n 60 127.0.0.1"), &[], None)
+            .expect("spawn");
+        let exited = h.exit_token().expect("exit token");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            exited();
+            let _ = tx.send(());
+        });
+        let start = Instant::now();
+        drop(h);
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "Drop hands the shutdown off"
+        );
+        rx.recv_timeout(super::GRACE + Duration::from_secs(5))
+            .expect("the child ended after the hang-up");
+    }
+
     #[test]
     fn conpty_child_output_reaches_the_reader() {
         use crate::backend::Backend as _;
