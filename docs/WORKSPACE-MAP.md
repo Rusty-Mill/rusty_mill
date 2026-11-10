@@ -244,7 +244,7 @@ committed; print them with `generate_workspace_map.py /tmp/metadata.json --count
 | apps | rusty_mill_board | rusty_mill_board | Mill Board: a capability-gated kanban board for humans and agents, served over MCP and a live web UI. |
 | apps | rusty_mill_board | rusty_mill_runner | Optional runner for Mill Board: works cards through stages by running a configured agent command per column, sandboxed in a git worktree. |
 | apps | rusty_multimodal_db | rusty_multimodal_db | The multimodal_db server, clients and domain adapters over rusty_multimodal_db_engine |
-| apps | rusty_mux | rusty_mux_client | rusty_mux's attach protocol for clients: connecting, the handshake, takeover and reading a window's layout. Shared by the terminal and GUI clients; links no server. |
+| apps | rusty_mux | rusty_mux_client | rusty_mux's attach protocol for clients: connecting, the handshake, takeover and reading a window's layout, and the SSH forward. Shared by the terminal and GUI clients and rusty-mux-ctl; links no server. |
 | apps | rusty_mux | rusty_mux_core | rusty_mux's pure domain model: sessions, windows, blocks, clients, input leases and events. No I/O. |
 | apps | rusty_mux | rusty_mux_ctl | rusty-mux-ctl: scriptable rusty_mux client generated from the request catalog, with --json output and stable exit codes. |
 | apps | rusty_mux | rusty_mux_gui | GUI client for rusty_mux: shows a server window's split layout of blocks in rusty_term's native window. |

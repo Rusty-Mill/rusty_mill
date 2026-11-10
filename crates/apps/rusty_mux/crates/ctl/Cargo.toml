@@ -2,7 +2,7 @@
 name = "rusty_mux_ctl"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.98.1"
 license = "MIT"
 description = "rusty-mux-ctl: scriptable rusty_mux client generated from the request catalog, with --json output and stable exit codes."
 repository = "https://github.com/Rusty-Mill/rusty_mill"
@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 rusty_json = { workspace = true }
+rusty_mux_client = { workspace = true }
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
 rusty_mux_script = { workspace = true }

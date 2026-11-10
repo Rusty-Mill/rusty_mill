@@ -3,8 +3,9 @@
 //!
 //! `--host` tries a host's addresses in file order and uses the first that
 //! connects. Only a failure to connect moves on, so no request is ever
-//! sent twice. An `ssh` address is not reached yet: it counts as
-//! unreachable and the next one is tried.
+//! sent twice. An `ssh` address is reached through the client library's
+//! OpenSSH forward (term pack D194), logging in without asking; on Windows
+//! it counts as unreachable and the next one is tried.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -24,8 +25,34 @@ pub(crate) const CHECK_EVERY: Duration = Duration::from_secs(1);
 /// The kind `events --follow` and `watch` print when the hosts change.
 pub(crate) const CHANGED: &str = "hosts-changed";
 
-/// Why an `ssh` address is skipped, until ctl can reach one.
-const NO_SSH: &str = "ssh addresses are not supported yet";
+/// How long `--host` waits for one ssh address's forward to come up: a
+/// login with a key or an agent, never a prompt (term pack D178).
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) const SSH_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Why an `ssh` address is skipped where ctl cannot reach one.
+#[cfg_attr(unix, allow(dead_code))]
+const NO_SSH: &str = "ssh addresses need Unix";
+
+/// The address of a host that answered: the socket to use and, for an ssh
+/// address, the forward that reaches it, which must live while the socket
+/// is used. Dropping it stops the forward.
+pub(crate) struct Reached {
+    pub(crate) socket: PathBuf,
+    #[cfg(unix)]
+    _forward: Option<rusty_mux_client::ssh::Forward>,
+}
+
+impl Reached {
+    /// A socket on this machine.
+    pub(crate) fn local(socket: PathBuf) -> Self {
+        Self {
+            socket,
+            #[cfg(unix)]
+            _forward: None,
+        }
+    }
+}
 
 /// The hosts file, as [`hosts::hosts_path`] finds it.
 pub(crate) fn default_path() -> Option<PathBuf> {
@@ -140,7 +167,7 @@ fn listing(list: &[Host], json: bool) -> String {
 /// error, a bad hosts file a failure, and no address connecting leaves the
 /// host unreachable, with each address's reason.
 #[cfg(any(unix, windows))]
-pub(crate) fn resolve(name: &str, env: &Env, stop: &Stop) -> Result<PathBuf, (Exit, String)> {
+pub(crate) fn resolve(name: &str, env: &Env, stop: &Stop) -> Result<Reached, (Exit, String)> {
     let path = env.hosts.as_deref().ok_or((
         Exit::Usage,
         "--host needs a hosts file: set XDG_CONFIG_HOME or HOME".to_owned(),
@@ -154,8 +181,8 @@ pub(crate) fn resolve(name: &str, env: &Env, stop: &Stop) -> Result<PathBuf, (Ex
     })?;
     let mut reasons = Vec::new();
     for address in &host.addresses {
-        match reach(address, stop) {
-            Ok(socket) => return Ok(socket),
+        match reach(address, env, stop) {
+            Ok(reached) => return Ok(reached),
             Err(reason) => reasons.push(format!("  {}: {reason}", address.describe())),
         }
     }
@@ -166,26 +193,57 @@ pub(crate) fn resolve(name: &str, env: &Env, stop: &Stop) -> Result<PathBuf, (Ex
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn resolve(_: &str, _: &Env, _: &Stop) -> Result<PathBuf, (Exit, String)> {
+pub(crate) fn resolve(_: &str, _: &Env, _: &Stop) -> Result<Reached, (Exit, String)> {
     Err((
         Exit::Unreachable,
         "rusty-mux-ctl needs Unix sockets".to_owned(),
     ))
 }
 
-/// The socket `address` reaches, once a connection to it succeeds.
+/// The socket `address` reaches: a local one once a connection to it
+/// succeeds, an ssh one once its forward is up.
 #[cfg(any(unix, windows))]
-fn reach(address: &Address, stop: &Stop) -> Result<PathBuf, String> {
-    let Address::Socket { socket } = address else {
-        return Err(NO_SSH.to_owned());
-    };
-    let socket = PathBuf::from(socket);
+fn reach(address: &Address, env: &Env, stop: &Stop) -> Result<Reached, String> {
+    match address {
+        Address::Socket { socket } => probe(PathBuf::from(socket), stop).map(Reached::local),
+        Address::Ssh { dest, socket, .. } => forward(dest, Path::new(socket), env, stop),
+    }
+}
+
+/// `socket`, once a connection to it succeeds within [`SOCKET_PATIENCE`].
+#[cfg(any(unix, windows))]
+fn probe(socket: PathBuf, stop: &Stop) -> Result<PathBuf, String> {
     let within = stop.sooner(Instant::now() + SOCKET_PATIENCE);
     match crate::conn::connect(&socket, &within) {
         Ok(_probe) => Ok(socket),
         Err(e) if e.kind() == io::ErrorKind::TimedOut => Err("no answer within 2 s".into()),
         Err(e) => Err(crate::unreachable(&socket, &e)),
     }
+}
+
+/// `remote` on `dest`, through an OpenSSH forward (`$RUSTY_MUX_SSH`, else
+/// `ssh`) that logs in without asking, once it is up within
+/// [`SSH_PATIENCE`] and `stop`'s deadline. The connection itself is not
+/// probed: the first one through the forward is the call's.
+#[cfg(unix)]
+fn forward(dest: &str, remote: &Path, env: &Env, stop: &Stop) -> Result<Reached, String> {
+    use rusty_mux_client::ssh::{Forward, Login};
+
+    let program = env.ssh.clone().unwrap_or_else(|| "ssh".into());
+    let mut forward = Forward::start(&program, dest, remote, Login::Batch)?;
+    let patience = stop
+        .left()
+        .map_or(SSH_PATIENCE, |left| left.min(SSH_PATIENCE));
+    forward.wait_ready(patience, || stop.is_cancelled())?;
+    Ok(Reached {
+        socket: forward.socket().to_path_buf(),
+        _forward: Some(forward),
+    })
+}
+
+#[cfg(windows)]
+fn forward(_: &str, _: &Path, _: &Env, _: &Stop) -> Result<Reached, String> {
+    Err(NO_SSH.to_owned())
 }
 
 /// Watches the hosts file for `events --follow` and `watch`: the list is
