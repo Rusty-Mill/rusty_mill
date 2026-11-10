@@ -22,9 +22,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use platform::error::Result as PlatformResult;
-use platform::process::{Child, Signal};
+use platform::process::{Child, GroupSpec, Signal};
 use platform::pty::PtyMaster;
 use platform::term::WinSize;
+use platform_windows::sys::handle::OwnedWinHandle;
 use platform_windows::{WindowsChild, WindowsPty, WindowsPtyMaster};
 use rusty_conhost::{OwnPty, OwnPtyMaster};
 use rusty_mux_core::{ExitStatus, Size};
@@ -114,12 +115,23 @@ pub(crate) struct Process {
 /// `config` names, with this process's environment plus `env`. Our host
 /// failing (`Unsupported` on a Windows without a usable ConDrv) is an
 /// error, never a fall back to ConPTY.
+///
+/// A block without an owner runs in a kill-on-close Job Object, so
+/// whatever it starts, detached or in a window of its own, ends with the
+/// block (R11, pack D182, D185). An `owned` block gets none: the mux never
+/// ends an agent's programs on its own (D87).
 pub(crate) fn spawn(
     config: &Config,
     size: Size,
     env: &[(&str, OsString)],
+    owned: bool,
 ) -> io::Result<(Pty, Process)> {
-    let cmd = command(config, env);
+    let group = if owned {
+        GroupSpec::Inherit
+    } else {
+        GroupSpec::NewGroup
+    };
+    let cmd = command(config, env).group(group);
     let size = win_size(size);
     let (master, child) = match config.console_host {
         ConsoleHost::ConPty => {
@@ -200,18 +212,45 @@ fn write_all(master: &Master, mut data: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// How long a closing block's Job Object outlives the hang-up on our
+/// host, at most: the console's 5 s CTRL_CLOSE handling and a margin.
+const JOB_LINGER: Duration = Duration::from_secs(6);
+
 /// Closes the console. ConPTY's close runs on a thread of its own, since it
 /// can block until the reader has drained conhost's last output; ours
 /// returns at once, and the host closes by its own grace deadline.
-fn hang_up(master: &Arc<Master>) {
+///
+/// `job`, the block's kill-on-close Job Object, is closed once the console
+/// has shut down, ending whatever the block started that is still
+/// running, so programs still on the console first get their CTRL_CLOSE
+/// handling (pack D183): after ConPTY's close returns, or once our host
+/// has shut down, [`JOB_LINGER`] at most. If no thread can start, it is
+/// closed at once.
+fn hang_up(master: &Arc<Master>, job: Option<OwnedWinHandle>) {
     match &**master {
-        Master::Own(own) => own.hang_up(),
+        Master::Own(own) => {
+            own.hang_up();
+            let Some(job) = job else {
+                return;
+            };
+            let master = Arc::clone(master);
+            let linger = move || {
+                if let Master::Own(own) = &*master {
+                    own.wait_shut_down(JOB_LINGER);
+                }
+                drop(job);
+            };
+            if let Err(err) = start("rusty-mux-pty-job", linger) {
+                eprintln!("rusty-mux-server: starting a job thread: {err}");
+            }
+        }
         Master::ConPty(_) => {
             let master = Arc::clone(master);
             let close = move || {
                 if let Master::ConPty(conpty) = &*master {
                     conpty.hang_up();
                 }
+                drop(job);
             };
             if let Err(err) = start("rusty-mux-pty-close", close) {
                 eprintln!("rusty-mux-server: starting a hang-up thread: {err}");
@@ -297,7 +336,8 @@ impl Process {
     /// How it ended, or `None` if that can't be known.
     pub(crate) async fn reap(mut self) -> Option<ExitStatus> {
         let child = self.child.as_mut()?;
-        hang_up(&self.master);
+        // The job outlives the program until the console has shut down.
+        hang_up(&self.master, child.disown());
         let deadline = Instant::now() + GRACE;
         let mut killed = false;
         loop {
@@ -323,8 +363,10 @@ impl Process {
     /// Closes the console and leaves the program running: a stopping
     /// server does this to an owned block, never terminating it (D87).
     pub(crate) fn abandon(mut self) {
-        if self.child.take().is_some() {
-            hang_up(&self.master);
+        if let Some(mut child) = self.child.take() {
+            // Only an owned block is abandoned, and it never has a job.
+            debug_assert!(child.disown().is_none(), "an owned block has a job");
+            hang_up(&self.master, None);
         }
     }
 }
@@ -341,7 +383,8 @@ impl Drop for Process {
             return;
         }
         kill(&child);
-        hang_up(&self.master);
+        // Dropping `child` closes its job at once, ending what it started.
+        hang_up(&self.master, None);
     }
 }
 

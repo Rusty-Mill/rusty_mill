@@ -174,8 +174,9 @@ pub fn spawn_attached(cmd: &Command) -> Result<Attached> {
         &cleanup::global()?,
         || {
             let server = sys::Server::create()?;
-            let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env)?;
-            Ok((server, process, pid))
+            let new_group = cmd.group == GroupSpec::NewGroup;
+            let (process, job, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env, new_group)?;
+            Ok((server, process, job, pid))
         },
         |p| handle::duplicate(p, false),
         |p| terminate_and_reap(p, crate::sys::proc::terminate_process, REAP_GRACE),
@@ -190,12 +191,12 @@ pub fn spawn_attached(cmd: &Command) -> Result<Attached> {
 /// handle and console until the child exits.
 fn attach(
     pool: &cleanup::Pool,
-    create: impl FnOnce() -> Result<(sys::Server, OwnedWinHandle, u32)>,
+    create: impl FnOnce() -> Result<(sys::Server, OwnedWinHandle, Option<OwnedWinHandle>, u32)>,
     duplicate: impl FnOnce(&OwnedWinHandle) -> Result<OwnedWinHandle>,
     rollback: impl FnOnce(&OwnedWinHandle) -> Result<()>,
 ) -> Result<Attached> {
     let slot = pool.reserve()?;
-    let (server, process, pid) = create()?;
+    let (server, process, job, pid) = create()?;
     let wait = match duplicate(&process) {
         Ok(wait) => wait,
         Err(setup) => {
@@ -208,7 +209,7 @@ fn attach(
     };
     Ok(Attached {
         server: ConsoleServer { inner: server },
-        child: WindowsChild::from_parts(process, None, pid),
+        child: WindowsChild::from_parts(process, job, pid),
         wait,
     })
 }
@@ -499,7 +500,8 @@ mod tests {
         cmd.argv = ["-n", "30", "127.0.0.1"].iter().map(Into::into).collect();
         let line = crate::cmdline::command_line(&cmd).expect("command line");
         let server = sys::Server::create().expect("Server::create");
-        let (process, pid) = sys::spawn(&server, &line, &cmd.cwd, &cmd.env).expect("spawn");
+        let (process, _, pid) =
+            sys::spawn(&server, &line, &cmd.cwd, &cmd.env, false).expect("spawn");
         let probe = handle::duplicate(&process, false).expect("probe handle");
         assert_eq!(proc::try_wait(&probe).expect("try_wait"), None);
         (server, process, pid, probe)
@@ -559,7 +561,7 @@ mod tests {
         .expect("cleanup pool")
     }
 
-    type Child = Result<(sys::Server, OwnedWinHandle, u32)>;
+    type Child = Result<(sys::Server, OwnedWinHandle, Option<OwnedWinHandle>, u32)>;
 
     /// A `create` that records whether it ran, and must not.
     fn must_not_create(ran: &std::cell::Cell<bool>) -> impl FnOnce() -> Child + '_ {
@@ -617,7 +619,7 @@ mod tests {
         let (server, process, pid, probe) = running_child();
         let attached = attach(
             &slots,
-            move || Ok((server, process, pid)),
+            move || Ok((server, process, None, pid)),
             |p| handle::duplicate(p, false),
             |_| panic!("rolled back a successful spawn"),
         );
@@ -635,7 +637,7 @@ mod tests {
         let (server, process, pid, probe) = running_child();
         let Err(e) = attach(
             &slots,
-            move || Ok((server, process, pid)),
+            move || Ok((server, process, None, pid)),
             setup_fails,
             production_rollback,
         ) else {
@@ -661,7 +663,7 @@ mod tests {
         let (server, process, pid, probe) = running_child();
         let Err(e) = attach(
             &slots,
-            move || Ok((server, process, pid)),
+            move || Ok((server, process, None, pid)),
             setup_fails,
             unconfirmed,
         ) else {
@@ -707,7 +709,7 @@ mod tests {
         let (server, process, pid, probe) = running_child();
         let e = attach(
             &slots,
-            move || Ok((server, process, pid)),
+            move || Ok((server, process, None, pid)),
             setup_fails,
             unconfirmed,
         )

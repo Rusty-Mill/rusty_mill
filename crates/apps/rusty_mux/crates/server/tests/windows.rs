@@ -14,14 +14,17 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{Client, PATIENCE, block_for, connect, run_and_wait, start_server_on};
-use rusty_mux_core::{BlockId, Event, ExitStatus};
+use common::{Client, PATIENCE, block_for, connect, run_and_wait, start_server_on, window_for};
+use rusty_mux_core::{BlockId, Event, ExitStatus, Size};
 use rusty_mux_proto::schema::Value;
-use rusty_mux_proto::{Features, Message};
+use rusty_mux_proto::{Features, Launch, Message};
 use rusty_mux_server::ConsoleHost;
 
 /// Prints the block's shell pid as `SHELL=<n>`: powershell's parent.
 const SHELL_PID: &[u8] = b"powershell -NoProfile -c \"'SHELL=' + (Get-CimInstance Win32_Process -Filter ('ProcessId=' + $PID)).ParentProcessId\"\r";
+/// Starts a ping on a console of its own, detached from the block's, and
+/// prints its pid: what `start ping -t` does (RISKS R11).
+const DETACHED: &[u8] = b"powershell -NoProfile -c \"$p = Start-Process ping -ArgumentList '-t','127.0.0.1' -WindowStyle Hidden -PassThru; 'DETACHED=' + $p.Id\"\r";
 /// Starts a ping attached to the block's console and prints its pid.
 const PING: &[u8] = b"powershell -NoProfile -c \"$p = Start-Process ping -ArgumentList '-n','1000','127.0.0.1' -NoNewWindow -PassThru; 'PING=' + $p.Id\"\r";
 
@@ -50,7 +53,9 @@ on_both_hosts!(
     a_killed_server_takes_its_blocks_with_it,
     a_stopped_server_ends_every_program_before_it_exits,
     a_program_that_exits_reports_its_code,
-    terminal_process_names_the_programs_pid
+    terminal_process_names_the_programs_pid,
+    closing_a_block_ends_what_it_started_outside_its_console,
+    closing_an_owned_block_leaves_what_it_started_running
 );
 
 /// The `RUSTY_CONSOLE_HOST` value that names `host`.
@@ -102,6 +107,60 @@ fn closing_a_block_ends_every_program_on_its_console(host: ConsoleHost) {
     assert_gone_within(shell, "the shell", Duration::from_secs(2));
     // GRACE, Windows' 5 s console-close timeout, and a margin.
     assert_gone_within(ping, "the ping", Duration::from_secs(7));
+}
+
+/// A block without an owner runs in a kill-on-close Job Object, so a
+/// program it started on a console of its own ends with it (R11, pack
+/// D185).
+fn closing_a_block_ends_what_it_started_outside_its_console(host: ConsoleHost) {
+    let path = start_server_on(host);
+    let mut a = Client::connect(&path);
+    let block = block_for(&mut a);
+    a.input(block, DETACHED);
+    let mut programs = Ends(Vec::new());
+    let ping = a.wait_for_number(block, "DETACHED=");
+    programs.hold("the detached ping", ping);
+
+    a.request(|req| Message::CloseBlock { req, block });
+    // GRACE, the console's 5 s close, the job's linger, and a margin.
+    assert_gone_within(ping, "the detached ping", Duration::from_secs(15));
+}
+
+/// An agent-owned block gets no job: the mux never ends what an agent
+/// started (D87, pack D182).
+fn closing_an_owned_block_leaves_what_it_started_running(host: ConsoleHost) {
+    let path = start_server_on(host);
+    let features = Features::CHECKPOINT_V6
+        .union(Features::LAUNCH)
+        .union(Features::OWNERSHIP);
+    let mut a = Client::connect_with(&path, features, None);
+    let window = window_for(&mut a);
+    let size = Size::new(80, 24).expect("size");
+    let launch = Launch {
+        own: true,
+        ..Launch::default()
+    };
+    let block = BlockId::from_uuid(
+        a.request(|req| Message::CreateBlock {
+            req,
+            window,
+            size,
+            launch,
+        })
+        .expect("a block id"),
+    );
+    a.request(|req| Message::Attach { req, block });
+    a.request(|req| Message::AcquireLease { req, block });
+    a.input(block, DETACHED);
+    let mut programs = Ends(Vec::new());
+    let ping = a.wait_for_number(block, "DETACHED=");
+    // Held in the test's own job, so it still ends when the test does.
+    programs.hold("the detached ping", ping);
+
+    a.request(|req| Message::CloseBlock { req, block });
+    // As long as the unowned case's budget.
+    std::thread::sleep(Duration::from_secs(15));
+    assert!(alive(ping), "the owned block's detached ping was ended");
 }
 
 fn closing_a_flooding_block_leaves_the_server_responsive(host: ConsoleHost) {
