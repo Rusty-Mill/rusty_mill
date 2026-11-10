@@ -36,6 +36,8 @@ pub enum Command {
     },
     /// Works with the config file.
     Config(ConfigCommand),
+    /// Checks a host for `rusty-mux --ssh`, or prints its config (C48).
+    Ssh(SshCommand),
     /// Follows events from `after` (or from now) and runs the config's
     /// rules for each, until the server goes away.
     Watch { after: Option<Cursor> },
@@ -191,6 +193,27 @@ pub enum ConfigCommand {
     List,
 }
 
+/// `ssh`: none of its verbs connects or writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SshCommand {
+    /// Problems and warnings for `rusty-mux --ssh DEST`.
+    Check(String),
+    /// As `check`, with every value it used and a fix for each finding.
+    Diagnose(String),
+    /// Prints a `Host` block for the ssh config.
+    Setup(SshSetup),
+}
+
+/// What `ssh setup` puts in its block; only what is given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshSetup {
+    pub dest: String,
+    pub hostname: Option<String>,
+    pub user: Option<String>,
+    pub port: Option<String>,
+    pub identity: Option<String>,
+}
+
 /// What `api` prints.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Api {
@@ -319,6 +342,7 @@ fn command(args: &[String], defaults: &Defaults) -> Result<Command, String> {
         "events" => events(rest),
         "do" => run_action(rest),
         "config" => config(rest),
+        "ssh" => ssh(rest).map(Command::Ssh),
         "watch" => watch(rest),
         "wait" => wait(rest).map(Command::Wait),
         "run" => run(rest, defaults).map(Command::Run),
@@ -383,6 +407,57 @@ fn config(args: &[String]) -> Result<Command, String> {
         [verb] if verb == "list" => Ok(Command::Config(ConfigCommand::List)),
         _ => Err("usage: config check [PATH] | config list".into()),
     }
+}
+
+const SSH_USAGE: &str = "usage: ssh check DEST | ssh diagnose DEST | \
+     ssh setup DEST [--hostname H] [--user U] [--port N] [--identity FILE]";
+
+fn ssh(args: &[String]) -> Result<SshCommand, String> {
+    let [verb, dest, rest @ ..] = args else {
+        return Err(SSH_USAGE.into());
+    };
+    if dest.is_empty() || dest.starts_with('-') || dest.contains(char::is_whitespace) {
+        return Err(format!("ssh: `{dest}` is not an ssh destination"));
+    }
+    match (verb.as_str(), rest) {
+        ("check", []) => Ok(SshCommand::Check(dest.clone())),
+        ("diagnose", []) => Ok(SshCommand::Diagnose(dest.clone())),
+        ("setup", rest) => ssh_setup(dest, rest).map(SshCommand::Setup),
+        _ => Err(SSH_USAGE.into()),
+    }
+}
+
+fn ssh_setup(dest: &str, rest: &[String]) -> Result<SshSetup, String> {
+    let mut setup = SshSetup {
+        dest: dest.to_owned(),
+        hostname: None,
+        user: None,
+        port: None,
+        identity: None,
+    };
+    for (flag, value) in flags("ssh setup", rest, |_| false)? {
+        let slot = match flag {
+            "hostname" => &mut setup.hostname,
+            "user" => &mut setup.user,
+            "port" => &mut setup.port,
+            "identity" => &mut setup.identity,
+            _ => return Err(format!("ssh setup: unknown flag --{flag}")),
+        };
+        if value.is_empty() || value.contains(char::is_whitespace) {
+            return Err(format!("ssh setup: --{flag} needs one word"));
+        }
+        if slot.replace(value.to_owned()).is_some() {
+            return Err(format!("ssh setup: --{flag} given twice"));
+        }
+    }
+    if setup
+        .port
+        .as_deref()
+        .is_some_and(|p| p.parse::<u16>().map_or(true, |p| p == 0))
+    {
+        return Err("ssh setup: --port needs a port from 1 to 65535".into());
+    }
+    Ok(setup)
 }
 
 fn watch(args: &[String]) -> Result<Command, String> {
@@ -767,6 +842,13 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     (
         "config",
         "Check or list the config: config check [PATH] | config list",
+    ),
+    (
+        "ssh",
+        "Check a host for rusty-mux --ssh, read-only, or print a Host block\n\
+         \x20                  for ~/.ssh/config: ssh check DEST | ssh diagnose DEST |\n\
+         \x20                  ssh setup DEST [--hostname H] [--user U] [--port N]\n\
+         \x20                  [--identity FILE]; check exits 1 on a problem",
     ),
     (
         "watch",

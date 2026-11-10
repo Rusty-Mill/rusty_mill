@@ -26,6 +26,18 @@ const COMMAND_WORDS: &[(&str, &[&str])] = &[
     ("events", &["--after", "--follow"]),
     ("do", &[]),
     ("config", &["check", "list"]),
+    (
+        "ssh",
+        &[
+            "check",
+            "diagnose",
+            "setup",
+            "--hostname",
+            "--user",
+            "--port",
+            "--identity",
+        ],
+    ),
     ("watch", &["--after"]),
     (
         "wait",
