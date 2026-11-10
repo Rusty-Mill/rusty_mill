@@ -121,6 +121,7 @@ impl Mux {
                 windows,
                 active: s.active,
                 generated: s.generated,
+                creator: None,
             };
             mux.sessions.insert(s.id, session);
         }

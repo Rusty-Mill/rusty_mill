@@ -49,9 +49,9 @@ Each item is small and needs no new crate or dependency. Order avoids file confl
 
 Each arc needs the owner's go before it starts, and its own plan.
 
-1. **Mux Phase 3 remainder: sharing and identity.** *Not started; needs Nano's go (first card 507).* C14 live sharing,
+1. **Mux Phase 3 remainder: sharing and identity.** *Started (Nano's go, rusty_term D161): card 507 restricts C33's force-disconnect.* C14 live sharing,
    C35 several servers, C25/C26 rest, C27 Tailscale identity, C47–C49 remote setup.
-   Gates: C33's force-disconnect must be restricted first (card 507); C27 needs the
+   Gates: C33's force-disconnect restricted first (card 507, this arc's first PR); C27 needs the
    `rusty_tail` move (ADR-0003); PAM links libpam (native dependency); C47/C48 write to
    remote hosts and `~/.ssh/config`; TLS (card 506) touches `rusty_tls`.
 2. **One GUI for terminal and mux.** *Under way: S1-S5 and Take over merged; R1 merged (#1569), R2 waits for its go.* The terminal-mux design (session switcher, split-tree

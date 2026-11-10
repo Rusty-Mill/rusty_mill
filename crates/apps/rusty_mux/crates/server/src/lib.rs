@@ -302,6 +302,7 @@ async fn serve_for(
         .and_then(Result::ok);
     let owner = owner()?;
     let state = state::State::shared(config, socket);
+    state.borrow_mut().serve_as(owner.clone());
     state
         .borrow_mut()
         .load_config()
