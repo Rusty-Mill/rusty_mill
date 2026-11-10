@@ -7,7 +7,6 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use super::{BATCH, Login, OWNED};
@@ -113,14 +112,18 @@ impl Forward {
     /// after logging in, failing if it exits first or `patience` runs out.
     /// A login can take a while: the user may be typing a password. The
     /// socket is not probed, since each connection to it reaches the server.
-    /// Gives up as soon as `cancel` is set.
-    pub fn wait_ready(&mut self, patience: Duration, cancel: &AtomicBool) -> Result<(), String> {
+    /// Gives up as soon as `cancelled` returns true.
+    pub fn wait_ready(
+        &mut self,
+        patience: Duration,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<(), String> {
         let deadline = Instant::now() + patience;
         loop {
             if self.socket.exists() {
                 return Ok(());
             }
-            if cancel.load(Ordering::Acquire) {
+            if cancelled() {
                 return Err("cancelled".into());
             }
             if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
@@ -326,7 +329,7 @@ mod tests {
         let mut forward =
             Forward::start(OsStr::new("false"), "box", Path::new("/r"), Login::Batch).unwrap();
         let err = forward
-            .wait_ready(Duration::from_secs(10), &AtomicBool::new(false))
+            .wait_ready(Duration::from_secs(10), || false)
             .unwrap_err();
         assert!(err.contains("ssh exited"), "{err}");
         let dir = forward.dir.clone();
@@ -342,7 +345,7 @@ mod tests {
             Forward::start(OsStr::new("sleep"), "box", Path::new("/r"), Login::Batch).unwrap();
         let started = Instant::now();
         let err = forward
-            .wait_ready(Duration::from_secs(10), &AtomicBool::new(true))
+            .wait_ready(Duration::from_secs(10), || true)
             .unwrap_err();
         assert_eq!(err, "cancelled");
         assert!(started.elapsed() < Duration::from_secs(1));

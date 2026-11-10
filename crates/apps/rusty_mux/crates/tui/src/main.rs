@@ -640,7 +640,7 @@ mod client {
         let remote = socket.to_owned();
         let program = std::env::var_os("RUSTY_MUX_SSH").unwrap_or_else(|| "ssh".into());
         let mut first = Forward::start(&program, &host, &remote, Login::Interactive)?;
-        first.wait_ready(LOGIN, &NEVER)?;
+        first.wait_ready(LOGIN, || false)?;
         let local = first.socket().to_owned();
         let path = SshPath {
             program,
@@ -706,7 +706,7 @@ mod client {
                 _ => {}
             }
             let mut next = Forward::start(&self.program, &self.host, &self.remote, Login::Batch)?;
-            next.wait_ready(RELOGIN, cancel)?;
+            next.wait_ready(RELOGIN, || cancel.load(Ordering::Acquire))?;
             let local = next.socket().to_owned();
             self.fresh = Some(Route::Ssh(next));
             Ok(local)

@@ -228,14 +228,13 @@ fn probe(socket: PathBuf, stop: &Stop) -> Result<PathBuf, String> {
 #[cfg(unix)]
 fn forward(dest: &str, remote: &Path, env: &Env, stop: &Stop) -> Result<Reached, String> {
     use rusty_mux_client::ssh::{Forward, Login};
-    use std::sync::atomic::AtomicBool;
 
     let program = env.ssh.clone().unwrap_or_else(|| "ssh".into());
     let mut forward = Forward::start(&program, dest, remote, Login::Batch)?;
     let patience = stop
         .left()
         .map_or(SSH_PATIENCE, |left| left.min(SSH_PATIENCE));
-    forward.wait_ready(patience, &AtomicBool::new(false))?;
+    forward.wait_ready(patience, || stop.is_cancelled())?;
     Ok(Reached {
         socket: forward.socket().to_path_buf(),
         _forward: Some(forward),
