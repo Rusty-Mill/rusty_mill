@@ -155,23 +155,26 @@ fn idle_exit_waits_for_the_last_block_and_client_then_takes_its_name_away() {
 /// C36b: SIGTERM, SIGINT and a `Shutdown` request are clean stops on
 /// Linux. The server saves its store, exits 0 and takes its name away, so
 /// a new server binds at once; a requester's connection closes only after
-/// the name is gone.
+/// the name is gone. A restart on the same store restores the sessions.
 #[test]
 fn signals_and_a_request_stop_cleanly_saving_state_and_freeing_the_name() {
     for signal in ["TERM", "INT", "request"] {
         let runtime = scratch(&format!("signal-{signal}"));
         let socket = runtime.join("rusty_mux").join("default.sock");
         let state = runtime.join("state");
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"));
-        command
-            .arg("--state")
-            .arg(&state)
-            .env("XDG_RUNTIME_DIR", &runtime)
-            .env_remove("RUSTY_MUX_SOCKET")
-            .env("SHELL", "/bin/sh")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let mut running = Running(command.spawn().expect("server"));
+        let stateful = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"));
+            command
+                .arg("--state")
+                .arg(&state)
+                .env("XDG_RUNTIME_DIR", &runtime)
+                .env_remove("RUSTY_MUX_SOCKET")
+                .env("SHELL", "/bin/sh")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            Running(command.spawn().expect("server"))
+        };
+        let mut running = stateful();
         wait_for(&socket);
         let mut client = common::Client::connect(&socket);
         let _block = common::block_for(&mut client);
@@ -203,8 +206,26 @@ fn signals_and_a_request_stop_cleanly_saving_state_and_freeing_the_name() {
         let saved = std::fs::read_dir(&state).map_or(0, |dir| dir.count());
         assert!(saved > 0, "SIG{signal} saves the store first");
 
-        let _next = Running(server(&runtime).spawn().expect("next"));
+        let _next = stateful();
         wait_for(&socket);
+        let mut client = common::Client::connect_with(&socket, Features::INSPECT, None);
+        let restored = client
+            .answer(|req| Message::List { req })
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m,
+                    Message::Entry {
+                        entry: rusty_mux_proto::Entry::Block { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            restored, 1,
+            "after SIG{signal} a restart restores the block"
+        );
         let _ = std::fs::remove_dir_all(&runtime);
     }
 }
