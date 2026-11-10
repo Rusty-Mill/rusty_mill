@@ -585,18 +585,18 @@ fn type_into(socket: &Path, block: &str, data: &str) {
     );
 }
 
-/// Polls `args` until its output is `want`.
+/// Polls `args` until its output passes `want`, named `what`.
 #[cfg(windows)]
-fn eventually(socket: &Path, args: &[&str], want: &str) {
+fn eventually(socket: &Path, args: &[&str], what: &str, want: impl Fn(&str) -> bool) {
     let deadline = std::time::Instant::now() + PATIENCE;
     loop {
         let got = ok(socket, args);
-        if got == want {
+        if want(&got) {
             return;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "{args:?}: {got:?}, never {want:?}"
+            "{args:?}: {got:?}, never {what}"
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -610,13 +610,14 @@ fn terminal_methods_read_the_block() {
     let socket = start_server();
     let block = block(&socket);
     type_into(&socket, &block, REPORT_TMP);
-    eventually(&socket, &["terminal.pwd", "--block", &block], "/tmp");
+    let pwd = ["terminal.pwd", "--block", &block];
+    eventually(&socket, &pwd, "/tmp", |got| got == "/tmp");
     type_into(&socket, &block, "title rusty-mux-title\r");
-    eventually(
-        &socket,
-        &["terminal.title", "--block", &block],
-        "rusty-mux-title",
-    );
+    // An elevated cmd.exe puts "Administrator: " before every title.
+    let title = ["terminal.title", "--block", &block];
+    eventually(&socket, &title, "rusty-mux-title", |got| {
+        got.ends_with("rusty-mux-title")
+    });
     let json = ok(&socket, &["--json", "terminal.pwd", "--block", &block]);
     assert!(json.contains("\"text\":\"/tmp\""), "{json}");
 }
