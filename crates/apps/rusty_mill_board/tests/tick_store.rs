@@ -1400,3 +1400,245 @@ fn take_over_rusty_tick_keeps_its_order_and_reads_only_the_queues() {
     tick.inner.owner_edit(a, |t| t["status"] = json!("done"));
     assert_eq!(board.take(&dev, None).expect("take").map(|c| c.id), Some(e));
 }
+
+/// Hides every task from `/search`, as a delta read that lost its answer would.
+#[derive(Clone)]
+struct BlindSearch(FakeTick);
+
+impl TickApi for BlindSearch {
+    fn send(&self, request: &TickRequest<'_>) -> Result<(u16, serde_json::Value), BoardError> {
+        if request.path.starts_with("/search") {
+            return Ok((200, json!({ "tasks": [] })));
+        }
+        self.0.send(request)
+    }
+}
+
+fn kinds(events: &[Event]) -> Vec<(EventKind, String)> {
+    events.iter().map(|e| (e.kind, e.actor.clone())).collect()
+}
+
+#[test]
+fn a_comment_added_in_rusty_tick_shows_as_an_event_once() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    board
+        .comment(card.id, &human, "from the board")
+        .expect("comment");
+    let cursor = board.cursor().expect("cursor");
+
+    tick.owner_comment(card.id, "from the phone");
+    let events = board.events(cursor, 10).expect("events");
+    assert_eq!(kinds(&events), [(EventKind::Commented, "tick".to_owned())]);
+    assert_eq!(events[0].card, card.id);
+    let after = events.last().map(|e| e.id);
+    assert!(
+        board.events(after, 10).expect("events").is_empty(),
+        "seen once"
+    );
+}
+
+#[test]
+fn comments_over_more_than_one_page_are_all_logged() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
+
+    for n in 0..1001 {
+        tick.owner_comment(card.id, &format!("note {n}"));
+    }
+    let events = board.events(cursor, 2000).expect("events");
+    let commented = events
+        .iter()
+        .filter(|e| e.kind == EventKind::Commented)
+        .count();
+    assert_eq!(commented, 1001, "every page of comments is read");
+    let after = events.last().map(|e| e.id);
+    assert!(
+        board.events(after, 10).expect("next poll").is_empty(),
+        "the window moves on"
+    );
+}
+
+#[test]
+fn an_edit_in_a_millisecond_already_read_is_not_missed() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let a = board.add(&human, "a", "", vec![]).expect("add");
+    let b = board.add(&human, "b", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
+    tick.owner_edit(a.id, |t| t["title"] = json!("a2"));
+    let first = board.events(cursor, 10).expect("events");
+    assert_eq!(first.len(), 1);
+
+    // b changes in the very millisecond the last read already covered.
+    let at = tick.task(a.id)["updatedMs"].as_i64().expect("ms");
+    tick.owner_edit_at(b.id, at, |t| t["title"] = json!("b2"));
+    let next = board
+        .events(first.last().map(|e| e.id), 10)
+        .expect("events");
+    assert_eq!(next.len(), 1);
+    assert_eq!((next[0].card, next[0].kind), (b.id, EventKind::Edited));
+}
+
+#[test]
+fn a_change_a_delta_read_missed_is_caught_by_the_next_full_read() {
+    let tick = FakeTick::default();
+    let store = TickStore::new(BlindSearch(tick.clone()))
+        .with_reconcile_every(std::time::Duration::from_millis(200));
+    let board = Board::with_clock(store, Roles::default(), clock);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
+
+    tick.owner_edit(card.id, |t| t["title"] = json!("renamed"));
+    assert!(
+        board.events(cursor, 10).expect("events").is_empty(),
+        "the delta lost it"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let events = board.events(cursor, 10).expect("events");
+    assert_eq!(kinds(&events), [(EventKind::Edited, "tick".to_owned())]);
+}
+
+/// Fails every task read while `down` is set, as an outage between two reads would.
+#[derive(Clone)]
+struct FlakyTaskRead(FakeTick, Arc<std::sync::atomic::AtomicBool>);
+
+impl TickApi for FlakyTaskRead {
+    fn send(&self, request: &TickRequest<'_>) -> Result<(u16, serde_json::Value), BoardError> {
+        let down = self.1.load(std::sync::atomic::Ordering::SeqCst);
+        if down && request.method == "GET" && request.path.starts_with("/tasks/") {
+            return Err(BoardError::Storage("tick unreachable".into()));
+        }
+        self.0.send(request)
+    }
+}
+
+#[test]
+fn a_comment_whose_card_read_failed_is_logged_by_the_next_poll() {
+    let tick = FakeTick::default();
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let store = TickStore::new(FlakyTaskRead(tick.clone(), down.clone()));
+    let board = Board::with_clock(store, Roles::default(), clock);
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
+
+    tick.owner_comment(card.id, "from the phone");
+    down.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(board.events(cursor, 10).is_err(), "the outage is reported");
+    down.store(false, std::sync::atomic::Ordering::SeqCst);
+    let events = board.events(cursor, 10).expect("events");
+    assert_eq!(kinds(&events), [(EventKind::Commented, "tick".to_owned())]);
+}
+
+#[test]
+fn a_comment_from_a_fast_clock_does_not_hide_later_ones() {
+    let (board, tick) = board();
+    let human = board.roles().actor("nano", "human").expect("role");
+    let card = board.add(&human, "a", "", vec![]).expect("add");
+    let cursor = board.cursor().expect("cursor");
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis(),
+    )
+    .expect("ms");
+
+    tick.owner_comment_at(card.id, "from a phone ten minutes fast", now + 600_000);
+    assert_eq!(board.events(cursor, 10).expect("events").len(), 1);
+    let cursor = board.cursor().expect("cursor");
+    tick.owner_comment_at(card.id, "from a correct clock", now + 1);
+    let events = board.events(cursor, 10).expect("events");
+    assert_eq!(kinds(&events), [(EventKind::Commented, "tick".to_owned())]);
+}
+
+#[test]
+fn an_outside_edit_racing_a_board_write_is_read_next_poll() {
+    let tick = FakeTick::default();
+    let gated = ReverseFinishTick::new(tick.clone());
+    let store = Arc::new(TickStore::new(gated.clone()));
+    let raced = Card::new("raced", "", vec![], 0).expect("card");
+    let other = Card::new("other", "", vec![], 0).expect("card");
+    for card in [&raced, &other] {
+        store
+            .insert(card, Event::of(card, EventKind::Created, "insert"))
+            .expect("insert");
+    }
+    store.last_event_id().expect("prime observations");
+
+    let edit = raced.edit(Some("board"), None, None, 1).expect("edit");
+    let writer = Arc::clone(&store);
+    let write = std::thread::spawn(move || {
+        writer
+            .replace(&edit, Event::of(&edit, EventKind::Edited, "board"))
+            .expect("board write")
+    });
+    gated.mutated.wait();
+    // While the board's write to `raced` is in flight, the owner edits it, and later `other`.
+    tick.owner_edit_at(raced.id, 2_000_000_000_000, |t| {
+        t["title"] = json!("outside")
+    });
+    tick.owner_edit_at(other.id, 2_000_000_100_000, |t| t["title"] = json!("later"));
+    let cursor = store.last_event_id().expect("observe mid-write");
+    gated.release.wait();
+    write.join().expect("writer");
+
+    let events = store.events_since(cursor, 10).expect("events");
+    assert!(
+        events
+            .iter()
+            .any(|e| e.card == raced.id && e.actor == "tick"),
+        "the outside edit shows on the next poll, not the next full read: {events:?}"
+    );
+}
+
+/// After the first read, an idle poll asks only what changed: no whole collection.
+#[test]
+fn an_idle_poll_reads_only_what_changed() {
+    let tick = Recording::default();
+    let board = Board::with_clock(TickStore::new(tick.clone()), Roles::default(), clock);
+    let human = board.roles().actor("nano", "human").expect("role");
+    for i in 0..20 {
+        board
+            .add(&human, &format!("card {i}"), "", vec![])
+            .expect("add");
+    }
+    let cursor = board.cursor().expect("cursor");
+    tick.take();
+    assert!(board.events(cursor, 10).expect("events").is_empty());
+    let paths = tick.take();
+    assert!(
+        paths
+            .iter()
+            .all(|p| p.starts_with("GET /search?updatedFrom=")
+                || (p.starts_with("GET /docs/comment?") && p.contains("after="))),
+        "{paths:?}"
+    );
+}
+
+/// A cursor from before a restart is answered with an explicit resync, never silence.
+#[test]
+fn a_cursor_from_before_a_restart_gets_a_resync() {
+    let tick = FakeTick::default();
+    let before = tick_shared(tick.clone());
+    op(&before, "card_add", json!({"title": "a"}));
+    let old = op(&before, "board_events", json!({}));
+    assert_eq!(old["resync"], false);
+    let cursor = old["cursor"].clone();
+    drop(before);
+
+    let after = tick_shared(tick.clone());
+    let a = op(&after, "card_add", json!({"title": "b"}))["card"]["id"].clone();
+    let polled = op(&after, "board_events", json!({ "after": cursor }));
+    assert_eq!(polled["resync"], true);
+    // The new log is read from its start, so the change after the restart is there too.
+    let events = polled["events"].as_array().expect("events");
+    assert!(events.iter().any(|e| e["card"] == a), "{events:?}");
+    let next = op(&after, "board_events", json!({ "after": polled["cursor"] }));
+    assert_eq!(next["resync"], false);
+}

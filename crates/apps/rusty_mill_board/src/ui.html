@@ -1147,7 +1147,7 @@ async function poll(){
     redraw||=await stonesChanged();
     if(Date.now()-pendingAt>30000){const n=JSON.stringify([pending,pendingErr]);await loadPending();redraw||=n!==JSON.stringify([pending,pendingErr])}
     const r=await api("board_events",{after:cursor,limit:1000});
-    if(r.events.length){
+    if(r.events.length||r.resync){   // resync: the board restarted since our cursor, so re-read it all
       const list=(await api("board_list",{archived:"include"})).cards;   // if this throws, the cursor stays put and the events are retried
       cursor=r.cursor;cards=byPriority(list);redraw=true;
     }

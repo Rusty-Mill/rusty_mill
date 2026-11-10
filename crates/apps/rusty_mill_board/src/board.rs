@@ -944,6 +944,16 @@ impl<S: Store> Board<S> {
         self.store.events_since(after, limit)
     }
 
+    /// Whether `after` is a cursor into this board's event log. When it is not (the board
+    /// restarted since, or it came from elsewhere), the events after it cannot be listed
+    /// and the reader must re-read the board.
+    ///
+    /// # Errors
+    /// On storage failure.
+    pub fn knows_cursor(&self, after: Uuid) -> Result<bool, BoardError> {
+        self.store.holds_event(after)
+    }
+
     /// The newest event id: a cursor that has seen everything committed so far.
     ///
     /// # Errors

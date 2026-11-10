@@ -32,7 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -71,6 +71,12 @@ const MAX_DOC_BYTES: usize = 64 * 1024;
 
 /// Moves asked for per `GET /moves` page: rusty_tick's largest.
 const MOVES_PAGE: usize = 1000;
+/// How often `observe` reads every card instead of only those changed since the last read,
+/// to catch anything a delta read missed (a clock step in rusty_tick, a lost response).
+const RECONCILE_EVERY: Duration = Duration::from_secs(5 * 60);
+/// How far before the newest comment seen each comment read starts again: comment ids are
+/// UUIDv7 from each writer's clock, so a writer a little behind still sorts into the window.
+const COMMENT_OVERLAP_MS: u64 = 60_000;
 
 /// The id of number `n`'s reservation: the same on every board, so `If-None-Match: *` lets
 /// exactly one reserve it.
@@ -439,6 +445,17 @@ fn card_of(parts: Parts) -> Result<Card, BoardError> {
 struct Events {
     log: Vec<Event>,
     seen: BTreeMap<Uuid, u64>,
+    /// The newest `updatedMs` observed: the next delta read asks for tasks changed at or
+    /// after it, so writes in the same millisecond are read again rather than missed.
+    high_water: i64,
+    /// When `observe` last read every card; `None` before the first read.
+    reconciled: Option<Instant>,
+    /// When (Unix ms, this board's clock) the last comment read began; the next starts
+    /// [`COMMENT_OVERLAP_MS`] before it. Not the newest comment id: a writer whose clock
+    /// runs fast would push that ahead and hide comments from correct clocks.
+    comments_read_ms: Option<u64>,
+    /// Comments already accounted for: written by this board, or observed.
+    comments_seen: BTreeSet<Uuid>,
     /// Cards whose rusty_tick write has started but is not yet in `log`.
     /// Observation shares this lock, so it cannot mistake that intermediate
     /// state for an outside write.
@@ -454,6 +471,20 @@ impl Events {
     }
 }
 
+/// Where a comment read starts: [`COMMENT_OVERLAP_MS`] before `since`, the start of the
+/// last comment read (or now, for the first).
+fn comment_window(since: u64) -> Uuid {
+    let from = since.saturating_sub(COMMENT_OVERLAP_MS);
+    // A UUIDv7 holds its millisecond in the top 48 bits; all else zero sorts first.
+    Uuid::from_u128(u128::from(from) << 80)
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
 fn poisoned<T>(_: T) -> BoardError {
     BoardError::Storage("lock poisoned".into())
 }
@@ -462,6 +493,7 @@ fn poisoned<T>(_: T) -> BoardError {
 pub struct TickStore<T: TickApi> {
     tick: T,
     events: Mutex<Events>,
+    reconcile_every: Duration,
 }
 
 impl<T: TickApi> TickStore<T> {
@@ -470,7 +502,15 @@ impl<T: TickApi> TickStore<T> {
         Self {
             tick,
             events: Mutex::default(),
+            reconcile_every: RECONCILE_EVERY,
         }
+    }
+
+    /// Read every card at least this often when observing, instead of every five minutes.
+    #[must_use]
+    pub fn with_reconcile_every(mut self, every: Duration) -> Self {
+        self.reconcile_every = every;
+        self
     }
 
     /// Send, and refuse any status but `ok`: 412 is a conflict, 404 a missing record.
@@ -501,8 +541,19 @@ impl<T: TickApi> TickStore<T> {
         path: &str,
         key: &str,
     ) -> Result<Vec<D>, BoardError> {
+        self.collection_after(path, key, None)
+    }
+
+    /// As [`Self::collection`], but only records whose id sorts after `start`. The start
+    /// rides the page cursor, because rusty_tick reads only the first `after` in a query.
+    fn collection_after<D: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        key: &str,
+        start: Option<Uuid>,
+    ) -> Result<Vec<D>, BoardError> {
         let separator = if path.contains('?') { '&' } else { '?' };
-        let mut after: Option<Uuid> = None;
+        let mut after = start;
         let mut records = Vec::new();
         loop {
             let mut target = format!("{path}{separator}limit=1000");
@@ -765,14 +816,20 @@ impl<T: TickApi> TickStore<T> {
 
     /// Append `comment` if the task is still at `version`, moving it as `put_doc` does.
     fn put_comment(&self, card: &Card, comment: &Comment, version: u64) -> Result<u64, BoardError> {
-        let mut request = TickRequest::new("PUT", format!("/docs/comment/{}", Uuid::now_v7()))
-            .body(json!({
-                "v": 1,
-                "taskId": card.id,
-                "text": comment.text,
-                "createdMs": comment.at_ms,
-                "by": comment.by,
-            }));
+        let id = Uuid::now_v7();
+        // This write is logged as the card's own event, so observing must not log it again.
+        self.events
+            .lock()
+            .map_err(poisoned)?
+            .comments_seen
+            .insert(id);
+        let mut request = TickRequest::new("PUT", format!("/docs/comment/{id}")).body(json!({
+            "v": 1,
+            "taskId": card.id,
+            "text": comment.text,
+            "createdMs": comment.at_ms,
+            "by": comment.by,
+        }));
         request.if_absent = true;
         request.if_task_match = Some(version.to_string());
         self.call(request, 200)?;
@@ -819,23 +876,57 @@ impl<T: TickApi> TickStore<T> {
         Ok(())
     }
 
-    /// Note tasks changed or newly tagged in rusty_tick since they were last seen.
+    /// Note tasks changed or newly tagged in rusty_tick since they were last seen, and
+    /// comments added there. Reads only what changed since the last observation (tasks by
+    /// `updatedMs`, comments by id), and every card each `reconcile_every` to catch anything
+    /// a delta read missed.
     fn observe(&self) -> Result<(), BoardError> {
         // If a write starts or finishes while the task snapshot is fetched,
         // fetch it again. Holding this lock across I/O would let a busy
         // observer starve writers that need it to commit their event.
-        let (tasks, mut events) = loop {
-            let epoch = self.events.lock().map_err(poisoned)?.write_epoch;
-            let tasks = self.tagged()?;
-            let events = self.events.lock().map_err(poisoned)?;
+        let (tasks, comments, full, mut events) = loop {
+            let now = now_unix_ms();
+            let (epoch, full, high_water, comments_from) = {
+                let e = self.events.lock().map_err(poisoned)?;
+                let full = e
+                    .reconciled
+                    .is_none_or(|at| at.elapsed() >= self.reconcile_every);
+                (
+                    e.write_epoch,
+                    full,
+                    e.high_water,
+                    comment_window(e.comments_read_ms.unwrap_or(now)),
+                )
+            };
+            let tasks = if full {
+                self.tagged()?
+            } else {
+                self.changed_since(high_water)?
+            };
+            let comments: Vec<Doc> =
+                self.collection_after("/docs/comment", "docs", Some(comments_from))?;
+            let mut events = self.events.lock().map_err(poisoned)?;
             if events.write_epoch == epoch {
-                break (tasks, events);
+                events.comments_read_ms = Some(now);
+                break (tasks, comments, full, events);
             }
         };
+        if full {
+            events.reconciled = Some(Instant::now());
+        }
         let primed = std::mem::replace(&mut events.primed, true);
+        let mut high_water = events.high_water;
+        // A task skipped because a board write to it is in flight is read again next poll:
+        // an outside edit racing that write must not wait for the next full read.
+        let mut in_flight = i64::MAX;
         for task in tasks {
+            high_water = high_water.max(task.updated_ms);
             let version = task.version()?;
             if events.writing.contains_key(&task.id) {
+                in_flight = in_flight.min(task.updated_ms);
+                continue;
+            }
+            if !task.on_board() {
                 continue;
             }
             let before = events.seen.insert(task.id, version);
@@ -855,7 +946,62 @@ impl<T: TickApi> TickStore<T> {
             })?;
             events.push(Event::of(&card, kind, TICK_ACTOR));
         }
+        events.high_water = high_water.min(in_flight);
+        let mut commented = Vec::new();
+        for doc in comments {
+            if !events.comments_seen.insert(doc.id) || !primed {
+                continue;
+            }
+            let task = doc.body["taskId"]
+                .as_str()
+                .and_then(|t| Uuid::parse_str(t).ok());
+            commented.extend(task.map(|t| (doc.id, t)));
+        }
+        drop(events);
+        self.log_outside_comments(&commented)
+    }
+
+    /// Log a `Commented` event for each `(comment, task)` added in rusty_tick, reading the
+    /// task as it is now. A comment on a task that is not on the board logs nothing. If a
+    /// read fails, the comments not yet logged are unmarked, so the next poll logs them.
+    fn log_outside_comments(&self, comments: &[(Uuid, Uuid)]) -> Result<(), BoardError> {
+        for (i, (_, id)) in comments.iter().enumerate() {
+            let task = match self.task(*id) {
+                Ok(task) => task,
+                Err(e) => {
+                    let mut events = self.events.lock().map_err(poisoned)?;
+                    for (comment, _) in &comments[i..] {
+                        events.comments_seen.remove(comment);
+                    }
+                    return Err(e);
+                }
+            };
+            let Some(task) = task.filter(Task::on_board) else {
+                continue;
+            };
+            let card = card_of(Parts {
+                task,
+                project: String::new(),
+                doc: None,
+                comments: Vec::new(),
+            })?;
+            self.events.lock().map_err(poisoned)?.push(Event::of(
+                &card,
+                EventKind::Commented,
+                TICK_ACTOR,
+            ));
+        }
         Ok(())
+    }
+
+    /// Every task changed at or after `from` (Unix ms), on the board or not: one search
+    /// whose answer is the size of the change, not of the board.
+    fn changed_since(&self, from: i64) -> Result<Vec<Task>, BoardError> {
+        let body = self.call(
+            TickRequest::new("GET", format!("/search?updatedFrom={from}")),
+            200,
+        )?;
+        Self::decode(body, "tasks")
     }
 }
 
@@ -1009,6 +1155,11 @@ impl<T: TickApi> Store for TickStore<T> {
         let events = self.events.lock().map_err(poisoned)?;
         let start = after.map_or(0, |a| events.log.partition_point(|e| e.id <= a));
         Ok(events.log[start..].iter().take(limit).cloned().collect())
+    }
+
+    fn holds_event(&self, id: Uuid) -> Result<bool, BoardError> {
+        let events = self.events.lock().map_err(poisoned)?;
+        Ok(events.log.binary_search_by_key(&id, |e| e.id).is_ok())
     }
 
     fn last_event_id(&self) -> Result<Option<Uuid>, BoardError> {
