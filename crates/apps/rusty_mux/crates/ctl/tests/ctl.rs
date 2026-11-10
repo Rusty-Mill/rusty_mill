@@ -2455,3 +2455,130 @@ fn ssh_scratch(tag: &str) -> PathBuf {
     let _fresh = std::fs::remove_dir_all(&dir);
     dir
 }
+
+/// A directory of its own for one ssh test.
+#[cfg(unix)]
+fn ssh_config_dir(tag: &str) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("rusty-mux-ctl-sshcfg-{}-{tag}", std::process::id()));
+    let _fresh = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("dir");
+    dir
+}
+
+#[cfg(unix)]
+fn executable(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, body).expect("write script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// `rusty-mux-ctl ARGS` with a stand-in `ssh` whose `-G` prints `resolved`
+/// and an `ssh-keygen` that knows only `known`, under `home`.
+#[cfg(unix)]
+fn ssh_ctl(dir: &Path, resolved: &str, known: &str, args: &[&str]) -> Output {
+    let ssh = dir.join("ssh");
+    std::fs::write(dir.join("resolved"), resolved).expect("write");
+    executable(
+        &ssh,
+        "#!/bin/sh\nd=$(dirname \"$0\")\nprintf '%s\\n' \"$@\" > \"$d/argv\"\n\
+         case \"$1\" in -V) echo 'OpenSSH_9.6p1' >&2 ;; -G) cat \"$d/resolved\" ;; *) exit 255 ;; esac\n",
+    );
+    executable(
+        &dir.join("ssh-keygen"),
+        &format!("#!/bin/sh\n[ \"$2\" = '{known}' ]\n"),
+    );
+    Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("RUSTY_MUX_SSH", &ssh)
+        .env("HOME", dir)
+        .env_remove("SSH_AUTH_SOCK")
+        .args(args)
+        .output()
+        .expect("run rusty-mux-ctl")
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_check_reads_what_ssh_resolves_and_never_connects() {
+    let dir = ssh_config_dir("check");
+    std::fs::create_dir_all(dir.join(".ssh")).expect("dir");
+    std::fs::write(dir.join(".ssh/id_ed25519"), "key").expect("key");
+    std::fs::write(dir.join(".ssh/known_hosts"), "box.example ssh-ed25519 AAAA").expect("known");
+    let resolved = "hostname box.example\nport 22\nidentityfile ~/.ssh/id_ed25519\n\
+        clearallforwardings no\nuserknownhostsfile ~/.ssh/known_hosts\n";
+
+    let fine = ssh_ctl(&dir, resolved, "box.example", &["ssh", "check", "box"]);
+    assert_eq!(fine.status.code(), Some(0), "{}", stdout(&fine));
+    assert!(stdout(&fine).starts_with("ok: "), "{}", stdout(&fine));
+    let argv = std::fs::read_to_string(dir.join("argv")).expect("argv");
+    assert!(
+        argv.starts_with("-G\n") && argv.ends_with("--\nbox\n"),
+        "{argv}"
+    );
+    assert!(argv.contains("ForkAfterAuthentication=no\n") && argv.contains("BatchMode=yes\n"));
+
+    let unknown = ssh_ctl(&dir, resolved, "other", &["ssh", "diagnose", "box"]);
+    assert_eq!(unknown.status.code(), Some(1));
+    let said = stdout(&unknown);
+    assert!(said.contains("hostname: box.example"), "{said}");
+    assert!(
+        said.contains("problem: no known-hosts file has box.example's key"),
+        "{said}"
+    );
+    assert!(said.contains("  fix: "), "{said}");
+
+    std::fs::write(dir.join("resolved"), "").expect("write");
+    executable(
+        &dir.join("ssh"),
+        "#!/bin/sh\necho 'Bad configuration option: forkafterauthentication' >&2\nexit 255\n",
+    );
+    let old = Command::new(env!("CARGO_BIN_EXE_rusty-mux-ctl"))
+        .env("RUSTY_MUX_SSH", dir.join("ssh"))
+        .env("HOME", &dir)
+        .args(["ssh", "check", "box"])
+        .output()
+        .expect("run rusty-mux-ctl");
+    assert_eq!(old.status.code(), Some(1));
+    assert!(stdout(&old).contains("OpenSSH 8.7"), "{}", stdout(&old));
+    let _gone = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssh_setup_prints_a_block_once() {
+    let dir = ssh_config_dir("setup");
+    let args = [
+        "ssh",
+        "setup",
+        "box",
+        "--hostname",
+        "box.example",
+        "--port",
+        "2222",
+    ];
+    let printed = ssh_ctl(&dir, "", "", &args);
+    assert_eq!(printed.status.code(), Some(0));
+    let block = stdout(&printed);
+    assert!(
+        block.starts_with("# BEGIN rusty-mux-ctl ssh setup box\nHost box\n"),
+        "{block}"
+    );
+    assert!(block.contains("    Port 2222\n"), "{block}");
+    assert!(!dir.join(".ssh").exists(), "setup writes nothing");
+
+    std::fs::create_dir_all(dir.join(".ssh")).expect("dir");
+    std::fs::write(dir.join(".ssh/config"), block).expect("write");
+    let again = ssh_ctl(&dir, "", "", &args);
+    assert!(
+        stdout(&again).contains("already has a Host entry for box"),
+        "{}",
+        stdout(&again)
+    );
+    for bad in [
+        &["ssh", "setup", "box", "--port", "0"][..],
+        &["ssh", "check", "-oProxyCommand=x"],
+    ] {
+        assert_eq!(ssh_ctl(&dir, "", "", bad).status.code(), Some(2), "{bad:?}");
+    }
+    let _gone = std::fs::remove_dir_all(dir);
+}

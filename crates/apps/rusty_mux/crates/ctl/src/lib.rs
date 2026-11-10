@@ -51,6 +51,7 @@ mod conn;
 #[cfg(any(unix, windows))]
 mod own;
 mod render;
+mod ssh;
 mod stop;
 pub mod target;
 mod terminfo;
@@ -400,6 +401,13 @@ pub fn run_until(
             return write_line(out, completion::script(shell).trim_end());
         }
         Command::Config(command) => return run_config(&command, env, invocation.json, out, err),
+        Command::Ssh(command) => {
+            let program = env.ssh.clone().unwrap_or_else(|| "ssh".into());
+            let home = env.agent_homes.home.as_deref();
+            let config = home.map(|h| h.join(".ssh").join("config"));
+            return ssh::run(&command, &program, config.as_deref(), home, out)
+                .unwrap_or_else(|(exit, reason)| report(err, exit, &reason));
+        }
         Command::Terminfo(command) => {
             let ssh = env.ssh.clone().unwrap_or_else(|| "ssh".into());
             return terminfo::run(&command, &ssh, out)
@@ -646,6 +654,7 @@ fn execute(
         | Command::Api(_)
         | Command::Do { .. }
         | Command::Config(_)
+        | Command::Ssh(_)
         | Command::Terminfo(_)
         | Command::Agent(_)
         | Command::Watch { .. }
