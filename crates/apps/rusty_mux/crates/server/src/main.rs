@@ -409,11 +409,22 @@ fn stop_requested() -> std::io::Result<impl Future<Output = ()>> {
     })
 }
 
-/// Never: on Linux a signal ends the server as before, and the kernel
-/// hangs up every block's PTY with it.
+/// Resolves on SIGTERM or SIGINT, the server's clean stops on Unix (C36b):
+/// state is saved, owned blocks are hung up and the name is released, as
+/// on Windows. Both handlers are installed now, so a failure stops the
+/// server from starting.
 #[cfg(not(windows))]
 fn stop_requested() -> std::io::Result<impl Future<Output = ()>> {
-    Ok(std::future::pending())
+    use rusty_tokio::signal::unix::{SignalKind, signal};
+
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
+    Ok(async move {
+        rusty_tokio::select! {
+            _ = terminate.recv() => {}
+            _ = interrupt.recv() => {}
+        }
+    })
 }
 
 #[cfg(not(windows))]

@@ -2,7 +2,7 @@
 //! socket under `$XDG_RUNTIME_DIR`, in a directory private to the user, and
 //! a second server refuses to take a live server's name; with
 //! `--idle-exit` it stops once it has no block and no client, never while a
-//! block lives.
+//! block lives. SIGTERM and SIGINT are clean stops (C36b).
 
 #![cfg(target_os = "linux")]
 
@@ -148,6 +148,51 @@ fn idle_exit_waits_for_the_last_block_and_client_then_takes_its_name_away() {
     assert!(status.success(), "a clean stop: {status}");
     assert!(!socket.exists(), "a clean stop takes its own name away");
     let _ = std::fs::remove_dir_all(&runtime);
+}
+
+/// C36b: SIGTERM and SIGINT are clean stops on Linux. The server saves its
+/// store, exits 0 and takes its name away, so a new server binds at once.
+#[test]
+fn sigterm_and_sigint_stop_cleanly_saving_state_and_freeing_the_name() {
+    for signal in ["TERM", "INT"] {
+        let runtime = scratch(&format!("signal-{signal}"));
+        let socket = runtime.join("rusty_mux").join("default.sock");
+        let state = runtime.join("state");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rusty-mux-server"));
+        command
+            .arg("--state")
+            .arg(&state)
+            .env("XDG_RUNTIME_DIR", &runtime)
+            .env_remove("RUSTY_MUX_SOCKET")
+            .env("SHELL", "/bin/sh")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut running = Running(command.spawn().expect("server"));
+        wait_for(&socket);
+        let mut client = common::Client::connect(&socket);
+        let _block = common::block_for(&mut client);
+        drop(client);
+
+        let pid = running.0.id().to_string();
+        let sent = Command::new("kill")
+            .args([format!("-{signal}"), pid])
+            .status()
+            .expect("kill");
+        assert!(sent.success());
+        assert!(
+            exits_within(&mut running.0, PATIENCE),
+            "SIG{signal} stops the server"
+        );
+        let status = running.0.wait().expect("status");
+        assert!(status.success(), "SIG{signal} is a clean stop: {status}");
+        assert!(!socket.exists(), "SIG{signal} takes the name away");
+        let saved = std::fs::read_dir(&state).map_or(0, |dir| dir.count());
+        assert!(saved > 0, "SIG{signal} saves the store first");
+
+        let _next = Running(server(&runtime).spawn().expect("next"));
+        wait_for(&socket);
+        let _ = std::fs::remove_dir_all(&runtime);
+    }
 }
 
 /// Starts a server as systemd's socket activation does: `listener` as its
