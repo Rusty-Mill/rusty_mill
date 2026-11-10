@@ -78,7 +78,7 @@ impl Relay {
         let udp = UdpSocket::bind(bind).map_err(|e| format!("binding UDP to {bind}: {e}"))?;
         let assoc = Association::new(Side::Client, id, key, Instant::now(), Some(server));
         let dir =
-            crate::ssh::private_dir().map_err(|e| format!("making the relay's directory: {e}"))?;
+            rusty_mux_client::ssh::private_dir().map_err(|e| format!("making the relay's directory: {e}"))?;
         let socket = dir.join("s");
         let listener = match UnixListener::bind(&socket) {
             Ok(listener) => listener,

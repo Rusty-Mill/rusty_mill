@@ -5,7 +5,7 @@
 //! program sets; one showing several is composed into one screen
 //! ([`screen`]) and redrawn where it changed. [`keys`] turns the keyboard
 //! into input and prefix commands. [`predict`] guesses typed keys' echo
-//! ahead of a slow server. [`ssh`] reaches a server on another
+//! ahead of a slow server. `rusty_mux_client::ssh` reaches a server on another
 //! machine through an OpenSSH socket forward, and [`udp`] moves it onto a
 //! UDP association when the server offers one.
 
@@ -13,8 +13,6 @@ pub mod follow;
 pub mod keys;
 pub mod predict;
 pub mod screen;
-#[cfg(unix)]
-pub mod ssh;
 #[cfg(unix)]
 pub mod udp;
 

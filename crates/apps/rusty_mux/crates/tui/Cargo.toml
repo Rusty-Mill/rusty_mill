@@ -16,7 +16,7 @@ name = "rusty-mux"
 path = "src/main.rs"
 
 [dependencies]
-rusty_mux_client = { workspace = true }
+rusty_mux_client = { workspace = true, features = ["screen"] }
 rusty_mux_core = { workspace = true }
 rusty_mux_proto = { workspace = true }
 rusty_mux_transport = { workspace = true }

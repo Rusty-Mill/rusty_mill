@@ -627,7 +627,7 @@ mod client {
         socket: &Path,
         block: Option<&OsString>,
     ) -> Result<(), String> {
-        use rusty_mux_tui::ssh::{Forward, Login};
+        use rusty_mux_client::ssh::{Forward, Login};
 
         let host = host
             .to_str()
@@ -665,7 +665,7 @@ mod client {
     #[cfg(unix)]
     enum Route {
         /// Dropping it stops the forward.
-        Ssh(rusty_mux_tui::ssh::Forward),
+        Ssh(rusty_mux_client::ssh::Forward),
         Udp(rusty_mux_tui::udp::Relay),
     }
 
@@ -693,7 +693,7 @@ mod client {
         /// SSH forward in use, if still running; otherwise a new SSH
         /// forward.
         fn fresh(&mut self, keep: bool, cancel: &AtomicBool) -> Result<PathBuf, String> {
-            use rusty_mux_tui::ssh::{Forward, Login};
+            use rusty_mux_client::ssh::{Forward, Login};
 
             self.discard();
             match &mut self.current {
@@ -770,7 +770,7 @@ mod client {
             self.fresh = None;
             let host = match &self.udp_host {
                 Some(host) => host.clone(),
-                None => rusty_mux_tui::ssh::hostname(&self.program, &self.host)?,
+                None => rusty_mux_client::ssh::hostname(&self.program, &self.host)?,
             };
             let mut servers: Vec<_> = (host.as_str(), port)
                 .to_socket_addrs()

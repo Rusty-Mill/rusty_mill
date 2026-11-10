@@ -57,7 +57,6 @@ impl Stop {
     }
 
     /// Time left until the deadline, if there is one: zero once it passed.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn left(&self) -> Option<Duration> {
         self.deadline
             .map(|d| d.saturating_duration_since(Instant::now()))
