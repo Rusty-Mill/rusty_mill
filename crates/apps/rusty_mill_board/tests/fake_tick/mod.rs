@@ -12,6 +12,8 @@ use rusty_mill_board::tick::{TickApi, TickRequest};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+pub mod http;
+
 const INBOX: Uuid = Uuid::from_u128(0x0000_0000_0000_7000_8000_0000_0000_0001);
 
 #[derive(Default)]
